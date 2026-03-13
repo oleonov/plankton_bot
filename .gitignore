@@ -1,0 +1,22 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.turbo/
+coverage/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+
+# Runtime data (never committed)
+apps/runtime/data/
+!apps/runtime/data/.gitkeep
+
+# Research data (too large, regenerate from scripts)
+research/data/*.db
+research/data/*.db-wal
+research/data/*.db-shm
+
+# WAL artifacts anywhere
+*.db-wal
+*.db-shm

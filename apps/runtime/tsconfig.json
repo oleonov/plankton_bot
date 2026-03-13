@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/domain" },
+    { "path": "../../packages/config" },
+    { "path": "../../packages/event-bus" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/exchange" },
+    { "path": "../../packages/family-rules" }
+  ]
+}
