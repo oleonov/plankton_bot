@@ -10,27 +10,27 @@ References: arch_tmp.md, v1_development_plan.md, Phase 1 bootstrap spec
 
 ### Shared Packages (under `packages/`)
 
-| Package | Responsibility |
-|---|---|
-| `@plankton/domain` | Pure types, enums, event definitions, command definitions, and repository/gateway interfaces. Zero runtime dependencies. The single source of truth for every cross-boundary contract. |
-| `@plankton/config` | YAML/env config loading and zod validation. Exposes typed, validated config objects. Knows nothing about what consumes the config. |
-| `@plankton/event-bus` | Typed in-process pub/sub bus. Accepts `@plankton/domain` event types. Replaceable later with Redis/NATS without changing consumers. |
-| `@plankton/db` | Repository interface implementations (SQLite in v1). Owns connection management, migrations, WAL setup. Exposes only repository interfaces defined in `@plankton/domain`. |
-| `@plankton/exchange` | Exchange gateway implementations (`LiveExchangeGateway`, `SimulationExchangeGateway`). Wraps Polymarket CLOB SDK. Exposes only the `ExchangeGateway` interface defined in `@plankton/domain`. |
+| Package                  | Responsibility                                                                                                                                                                                             |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@plankton/domain`       | Pure types, enums, event definitions, command definitions, and repository/gateway interfaces. Zero runtime dependencies. The single source of truth for every cross-boundary contract.                     |
+| `@plankton/config`       | YAML/env config loading and zod validation. Exposes typed, validated config objects. Knows nothing about what consumes the config.                                                                         |
+| `@plankton/event-bus`    | Typed in-process pub/sub bus. Accepts `@plankton/domain` event types. Replaceable later with Redis/NATS without changing consumers.                                                                        |
+| `@plankton/db`           | Repository interface implementations (SQLite in v1). Owns connection management, migrations, WAL setup. Exposes only repository interfaces defined in `@plankton/domain`.                                  |
+| `@plankton/exchange`     | Exchange gateway implementations (`LiveExchangeGateway`, `SimulationExchangeGateway`). Wraps Polymarket CLOB SDK. Exposes only the `ExchangeGateway` interface defined in `@plankton/domain`.              |
 | `@plankton/family-rules` | Family rule loading, validation, resolution (`family_key:regime:horizon` -> `FamilyRule`). Owns the family config file format. Depends on `@plankton/domain` for types and `@plankton/config` for loading. |
 
 ### Applications (under `apps/`)
 
-| App | Responsibility |
-|---|---|
+| App            | Responsibility                                                                                                                                                 |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `apps/runtime` | The trading bot process. Composes all packages and internal modules into a running system. Owns the supervisor, startup/shutdown sequences, and the main loop. |
-| `apps/api` | REST + SSE server for operator dashboard. Reads from DB repositories. Accepts operator commands. Contains no trading logic. |
-| `apps/web` | Operator dashboard UI. Talks only to `apps/api`. Contains no domain logic beyond display. |
+| `apps/api`     | REST + SSE server for operator dashboard. Reads from DB repositories. Accepts operator commands. Contains no trading logic.                                    |
+| `apps/web`     | Operator dashboard UI. Talks only to `apps/api`. Contains no domain logic beyond display.                                                                      |
 
 ### Not a Package (stays separate)
 
-| Directory | Note |
-|---|---|
+| Directory   | Note                                                                                                                                                                     |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `research/` | Python scripts for offline analysis. Not part of the TypeScript build graph. Communicates with the runtime only through file artifacts (YAML configs, SQLite snapshots). |
 
 ---
@@ -106,29 +106,29 @@ The architecture defines ~10 runtime "modules." Some are packages, some are inte
 
 These are packages because they are either (a) needed by multiple apps, or (b) have a clear independent responsibility worth isolating:
 
-| Module from arch_tmp.md | Package |
-|---|---|
-| Event bus | `@plankton/event-bus` |
-| Persistence | `@plankton/db` |
-| Exchange gateway | `@plankton/exchange` |
-| Family rules engine | `@plankton/family-rules` |
-| Config loading | `@plankton/config` |
-| Shared domain model | `@plankton/domain` |
+| Module from arch_tmp.md | Package                  |
+| ----------------------- | ------------------------ |
+| Event bus               | `@plankton/event-bus`    |
+| Persistence             | `@plankton/db`           |
+| Exchange gateway        | `@plankton/exchange`     |
+| Family rules engine     | `@plankton/family-rules` |
+| Config loading          | `@plankton/config`       |
+| Shared domain model     | `@plankton/domain`       |
 
 ### Internal to `apps/runtime`
 
 These live as modules inside `apps/runtime/src/modules/` (or similar). They are NOT separate packages because they are only used by the runtime process and have tight coupling to the runtime lifecycle:
 
-| Module | Location | Why internal |
-|---|---|---|
-| Market data | `apps/runtime/src/modules/market-data/` | Runtime-only concern. Lifecycle tied to supervisor. |
-| Normalization | `apps/runtime/src/modules/normalization/` | Tightly coupled to market data ingest. Could merge with market-data. |
-| Strategy / Scanner | `apps/runtime/src/modules/strategy/` | Runtime-only. Consumes events, produces signals. |
-| Risk + Inventory | `apps/runtime/src/modules/risk-inventory/` | Runtime-only. Central bounded context. |
-| Execution engine | `apps/runtime/src/modules/execution/` | Runtime-only. Sole order actor. |
-| Reconciliation | `apps/runtime/src/modules/reconciliation/` | Runtime-only. Periodic + startup job. |
-| Supervisor / Lifecycle | `apps/runtime/src/modules/supervisor/` | Runtime-only. Owns startup/shutdown sequences. |
-| Rate limiter | `apps/runtime/src/modules/rate-limiter/` | Runtime-only utility. Could move to a package later if api needs it. |
+| Module                 | Location                                   | Why internal                                                         |
+| ---------------------- | ------------------------------------------ | -------------------------------------------------------------------- |
+| Market data            | `apps/runtime/src/modules/market-data/`    | Runtime-only concern. Lifecycle tied to supervisor.                  |
+| Normalization          | `apps/runtime/src/modules/normalization/`  | Tightly coupled to market data ingest. Could merge with market-data. |
+| Strategy / Scanner     | `apps/runtime/src/modules/strategy/`       | Runtime-only. Consumes events, produces signals.                     |
+| Risk + Inventory       | `apps/runtime/src/modules/risk-inventory/` | Runtime-only. Central bounded context.                               |
+| Execution engine       | `apps/runtime/src/modules/execution/`      | Runtime-only. Sole order actor.                                      |
+| Reconciliation         | `apps/runtime/src/modules/reconciliation/` | Runtime-only. Periodic + startup job.                                |
+| Supervisor / Lifecycle | `apps/runtime/src/modules/supervisor/`     | Runtime-only. Owns startup/shutdown sequences.                       |
+| Rate limiter           | `apps/runtime/src/modules/rate-limiter/`   | Runtime-only utility. Could move to a package later if api needs it. |
 
 ### Why this split
 
@@ -169,28 +169,28 @@ These are the contracts that gate all downstream implementation. They live in `@
 
 ### Tier 1: Gate everything
 
-| # | Interface | Package | Why it gates |
-|---|---|---|---|
-| 1 | `ExchangeGateway` | `@plankton/domain` | Execution, reconciliation, market data, and simulation all depend on this. Defines `placeOrder`, `cancelOrder`, `getOpenOrders`, `getFills`, `getBalances`. |
-| 2 | `EventBus` | `@plankton/domain` | Every module communicates through this. Defines `publish<T>`, `subscribe<T>`, event type registry. |
-| 3 | `OrderRepository` | `@plankton/domain` | Execution and reconciliation persist through this. Defines `save`, `findById`, `findOpen`, `updateStatus`. |
-| 4 | `PositionRepository` | `@plankton/domain` | Risk/inventory and reconciliation depend on this. Defines `save`, `findByFamily`, `findOpen`, `findDust`. |
-| 5 | `FamilyStateRepository` | `@plankton/domain` | Risk/inventory reads and writes runtime family state. Defines `get`, `save`, `findQuarantined`, `findByMode`. |
+| #   | Interface               | Package            | Why it gates                                                                                                                                                |
+| --- | ----------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `ExchangeGateway`       | `@plankton/domain` | Execution, reconciliation, market data, and simulation all depend on this. Defines `placeOrder`, `cancelOrder`, `getOpenOrders`, `getFills`, `getBalances`. |
+| 2   | `EventBus`              | `@plankton/domain` | Every module communicates through this. Defines `publish<T>`, `subscribe<T>`, event type registry.                                                          |
+| 3   | `OrderRepository`       | `@plankton/domain` | Execution and reconciliation persist through this. Defines `save`, `findById`, `findOpen`, `updateStatus`.                                                  |
+| 4   | `PositionRepository`    | `@plankton/domain` | Risk/inventory and reconciliation depend on this. Defines `save`, `findByFamily`, `findOpen`, `findDust`.                                                   |
+| 5   | `FamilyStateRepository` | `@plankton/domain` | Risk/inventory reads and writes runtime family state. Defines `get`, `save`, `findQuarantined`, `findByMode`.                                               |
 
 ### Tier 2: Gate domain modules
 
-| # | Interface | Package | Why it gates |
-|---|---|---|---|
-| 6 | `FamilyRulesProvider` | `@plankton/domain` | Strategy, risk, and execution all need family rules. Defines `getRule(familyId)`, `isEnabled(familyId)`, `getLimits(familyId)`. Implemented by `@plankton/family-rules`. |
-| 7 | `RiskGate` | `@plankton/domain` | Strategy produces signals; risk approves or rejects. Defines `evaluate(signal): RiskDecision`. |
-| 8 | `MarketRepository` | `@plankton/domain` | Normalization writes, strategy reads. Defines `save`, `findActive`, `findByFamily`. |
+| #   | Interface             | Package            | Why it gates                                                                                                                                                             |
+| --- | --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 6   | `FamilyRulesProvider` | `@plankton/domain` | Strategy, risk, and execution all need family rules. Defines `getRule(familyId)`, `isEnabled(familyId)`, `getLimits(familyId)`. Implemented by `@plankton/family-rules`. |
+| 7   | `RiskGate`            | `@plankton/domain` | Strategy produces signals; risk approves or rejects. Defines `evaluate(signal): RiskDecision`.                                                                           |
+| 8   | `MarketRepository`    | `@plankton/domain` | Normalization writes, strategy reads. Defines `save`, `findActive`, `findByFamily`.                                                                                      |
 
 ### Tier 3: Gate runtime lifecycle
 
-| # | Interface | Package | Why it gates |
-|---|---|---|---|
-| 9 | `RuntimeModule` | `@plankton/domain` | Supervisor needs a uniform lifecycle contract. Defines `start()`, `stop()`, `healthCheck()`. Every internal module implements this. |
-| 10 | `FillRepository` | `@plankton/domain` | Reconciliation and P&L depend on this. Defines `save`, `findByOrder`, `findRecent`, `findUnreconciled`. |
+| #   | Interface        | Package            | Why it gates                                                                                                                        |
+| --- | ---------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+| 9   | `RuntimeModule`  | `@plankton/domain` | Supervisor needs a uniform lifecycle contract. Defines `start()`, `stop()`, `healthCheck()`. Every internal module implements this. |
+| 10  | `FillRepository` | `@plankton/domain` | Reconciliation and P&L depend on this. Defines `save`, `findByOrder`, `findRecent`, `findUnreconciled`.                             |
 
 ### Design order recommendation
 

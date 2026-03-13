@@ -12,135 +12,135 @@ This document defines the complete domain type catalog, repository interfaces, S
 // packages/domain/src/enums.ts
 
 export const Regime = {
-  Threshold: 'threshold',
-  PriceRange: 'price-range',
-  DirectionalUpdown: 'directional-updown',
-  SocialActivity: 'social-activity',
-  Geopolitics: 'geopolitics',
-  Generic: 'generic',
-  Tournament: 'tournament',
-  WeatherRange: 'weather-range',
+  Threshold: "threshold",
+  PriceRange: "price-range",
+  DirectionalUpdown: "directional-updown",
+  SocialActivity: "social-activity",
+  Geopolitics: "geopolitics",
+  Generic: "generic",
+  Tournament: "tournament",
+  WeatherRange: "weather-range",
 } as const;
 export type Regime = (typeof Regime)[keyof typeof Regime];
 
 export const StrategyProfile = {
-  Scalp: 'scalp',
-  EventDriven: 'event-driven',
-  InventoryRecycle: 'inventory-recycle',
-  OptionalProbe: 'optional-probe',
-  Restricted: 'restricted',
+  Scalp: "scalp",
+  EventDriven: "event-driven",
+  InventoryRecycle: "inventory-recycle",
+  OptionalProbe: "optional-probe",
+  Restricted: "restricted",
 } as const;
 export type StrategyProfile = (typeof StrategyProfile)[keyof typeof StrategyProfile];
 
 export const EvidenceStatus = {
-  Confirmed: 'confirmed',
-  Partial: 'partial',
-  Weak: 'weak',
-  Unknown: 'unknown',
+  Confirmed: "confirmed",
+  Partial: "partial",
+  Weak: "weak",
+  Unknown: "unknown",
 } as const;
 export type EvidenceStatus = (typeof EvidenceStatus)[keyof typeof EvidenceStatus];
 
 export const PromotionState = {
-  ProbeOnly: 'probe-only',
-  Scaled: 'scaled',
-  Restricted: 'restricted',
-  ReduceOnly: 'reduce-only',
-  Quarantine: 'quarantine',
+  ProbeOnly: "probe-only",
+  Scaled: "scaled",
+  Restricted: "restricted",
+  ReduceOnly: "reduce-only",
+  Quarantine: "quarantine",
 } as const;
 export type PromotionState = (typeof PromotionState)[keyof typeof PromotionState];
 
 export const Action = {
-  Trade: 'trade',
-  Monitor: 'monitor',
-  ReduceOnly: 'reduce-only',
-  Blocked: 'blocked',
+  Trade: "trade",
+  Monitor: "monitor",
+  ReduceOnly: "reduce-only",
+  Blocked: "blocked",
 } as const;
 export type Action = (typeof Action)[keyof typeof Action];
 
 export const RuntimeMode = {
-  Active: 'active',
-  ProbeOnly: 'probe-only',
-  Restricted: 'restricted',
-  Quarantine: 'quarantine',
-  ReduceOnly: 'reduce-only',
+  Active: "active",
+  ProbeOnly: "probe-only",
+  Restricted: "restricted",
+  Quarantine: "quarantine",
+  ReduceOnly: "reduce-only",
 } as const;
 export type RuntimeMode = (typeof RuntimeMode)[keyof typeof RuntimeMode];
 
 export const EntryMode = {
-  ProbeFirst: 'probe-first',
-  ConvictionOnly: 'conviction-only',
-  Disabled: 'disabled',
+  ProbeFirst: "probe-first",
+  ConvictionOnly: "conviction-only",
+  Disabled: "disabled",
 } as const;
 export type EntryMode = (typeof EntryMode)[keyof typeof EntryMode];
 
 export const ExitMode = {
-  RepricingSell: 'repricing-sell',
-  ReduceOnly: 'reduce-only',
-  Disabled: 'disabled',
+  RepricingSell: "repricing-sell",
+  ReduceOnly: "reduce-only",
+  Disabled: "disabled",
 } as const;
 export type ExitMode = (typeof ExitMode)[keyof typeof ExitMode];
 
 export const ScaleMode = {
-  ConfirmOnly: 'confirm-only',
-  Disabled: 'disabled',
-  AggressiveConfirm: 'aggressive-confirm',
+  ConfirmOnly: "confirm-only",
+  Disabled: "disabled",
+  AggressiveConfirm: "aggressive-confirm",
 } as const;
 export type ScaleMode = (typeof ScaleMode)[keyof typeof ScaleMode];
 
 export const SessionMode = {
-  ActiveWindow: 'active-window',
-  Reduced: 'reduced',
-  AlwaysReduced: 'always-reduced',
+  ActiveWindow: "active-window",
+  Reduced: "reduced",
+  AlwaysReduced: "always-reduced",
 } as const;
 export type SessionMode = (typeof SessionMode)[keyof typeof SessionMode];
 
 export const TwoSidedMode = {
-  Disabled: 'disabled',
-  Selective: 'selective',
-  Active: 'active',
+  Disabled: "disabled",
+  Selective: "selective",
+  Active: "active",
 } as const;
 export type TwoSidedMode = (typeof TwoSidedMode)[keyof typeof TwoSidedMode];
 
 export const WeekendMode = {
-  Normal: 'normal',
-  Reduced: 'reduced',
-  Disabled: 'disabled',
+  Normal: "normal",
+  Reduced: "reduced",
+  Disabled: "disabled",
 } as const;
 export type WeekendMode = (typeof WeekendMode)[keyof typeof WeekendMode];
 
 export const WeekdayBias = {
-  Normal: 'normal',
-  Preferred: 'preferred',
-  Required: 'required',
+  Normal: "normal",
+  Preferred: "preferred",
+  Required: "required",
 } as const;
 export type WeekdayBias = (typeof WeekdayBias)[keyof typeof WeekdayBias];
 
 export const ProfitModel = {
-  SellIntoStrength: 'sell-into-strength',
+  SellIntoStrength: "sell-into-strength",
 } as const;
 export type ProfitModel = (typeof ProfitModel)[keyof typeof ProfitModel];
 
 export const OrderSide = {
-  Buy: 'buy',
-  Sell: 'sell',
+  Buy: "buy",
+  Sell: "sell",
 } as const;
 export type OrderSide = (typeof OrderSide)[keyof typeof OrderSide];
 
 export const OrderStatus = {
-  Pending: 'pending',
-  Open: 'open',
-  PartiallyFilled: 'partially-filled',
-  Filled: 'filled',
-  Cancelled: 'cancelled',
-  Rejected: 'rejected',
-  Expired: 'expired',
+  Pending: "pending",
+  Open: "open",
+  PartiallyFilled: "partially-filled",
+  Filled: "filled",
+  Cancelled: "cancelled",
+  Rejected: "rejected",
+  Expired: "expired",
 } as const;
 export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
 
 export const PositionStatus = {
-  Open: 'open',
-  Closed: 'closed',
-  Dust: 'dust',
+  Open: "open",
+  Closed: "closed",
+  Dust: "dust",
 } as const;
 export type PositionStatus = (typeof PositionStatus)[keyof typeof PositionStatus];
 ```
@@ -154,14 +154,14 @@ export type PositionStatus = (typeof PositionStatus)[keyof typeof PositionStatus
 
 // ─── Branded ID types ───
 
-export type FamilyId = string & { readonly __brand: 'FamilyId' };
+export type FamilyId = string & { readonly __brand: "FamilyId" };
 // Format: "<family_key>:<regime>:<horizon>"
 
-export type MarketId = string & { readonly __brand: 'MarketId' };
-export type OrderId = string & { readonly __brand: 'OrderId' };
-export type FillId = string & { readonly __brand: 'FillId' };
-export type PositionId = string & { readonly __brand: 'PositionId' };
-export type BotRunId = string & { readonly __brand: 'BotRunId' };
+export type MarketId = string & { readonly __brand: "MarketId" };
+export type OrderId = string & { readonly __brand: "OrderId" };
+export type FillId = string & { readonly __brand: "FillId" };
+export type PositionId = string & { readonly __brand: "PositionId" };
+export type BotRunId = string & { readonly __brand: "BotRunId" };
 
 // ─── Market ───
 
@@ -173,8 +173,8 @@ export interface Market {
   family_id: FamilyId | null;
   family_key: string | null;
   regime: Regime | null;
-  outcome: string;          // "Yes" | "No"
-  end_date: string | null;  // ISO timestamp
+  outcome: string; // "Yes" | "No"
+  end_date: string | null; // ISO timestamp
   active: boolean;
   created_at: string;
   updated_at: string;
@@ -187,14 +187,14 @@ export interface MarketSnapshot {
   last_price: number | null;
   volume_24h: number | null;
   liquidity: number | null;
-  captured_at: string;       // ISO timestamp
+  captured_at: string; // ISO timestamp
 }
 
 // ─── Time Window ───
 
 export interface TimeWindow {
-  start: string;  // "HH:MM" UTC
-  end: string;    // "HH:MM" UTC
+  start: string; // "HH:MM" UTC
+  end: string; // "HH:MM" UTC
 }
 
 // ─── Family Identity ───
@@ -432,8 +432,14 @@ export interface InventoryLot {
 
 export interface OperatorAction {
   action_id: string;
-  action_type: 'pause' | 'resume' | 'set-reduce-only' | 'set-quarantine' | 'clear-quarantine' | 'force-cancel';
-  target_type: 'bot' | 'family' | 'market' | 'order';
+  action_type:
+    | "pause"
+    | "resume"
+    | "set-reduce-only"
+    | "set-quarantine"
+    | "clear-quarantine"
+    | "force-cancel";
+  target_type: "bot" | "family" | "market" | "order";
   target_id: string;
   reason: string | null;
   performed_at: string;
@@ -456,7 +462,7 @@ interface BaseEvent {
 // ─── Market Events ───
 
 export interface MarketUpdated extends BaseEvent {
-  type: 'MarketUpdated';
+  type: "MarketUpdated";
   market_id: MarketId;
   snapshot: MarketSnapshot;
 }
@@ -464,37 +470,37 @@ export interface MarketUpdated extends BaseEvent {
 // ─── Signal Events ───
 
 export interface SignalGenerated extends BaseEvent {
-  type: 'SignalGenerated';
+  type: "SignalGenerated";
   signal: Signal;
 }
 
 // ─── Risk Events ───
 
 export interface RiskApproved extends BaseEvent {
-  type: 'RiskApproved';
+  type: "RiskApproved";
   decision: RiskDecision;
 }
 
 export interface RiskRejected extends BaseEvent {
-  type: 'RiskRejected';
+  type: "RiskRejected";
   decision: RiskDecision;
 }
 
 // ─── Order Events ───
 
 export interface OrderPlaced extends BaseEvent {
-  type: 'OrderPlaced';
+  type: "OrderPlaced";
   order: Order;
 }
 
 export interface OrderFilled extends BaseEvent {
-  type: 'OrderFilled';
+  type: "OrderFilled";
   order_id: OrderId;
   fill: Fill;
 }
 
 export interface OrderCancelled extends BaseEvent {
-  type: 'OrderCancelled';
+  type: "OrderCancelled";
   order_id: OrderId;
   reason: string;
 }
@@ -502,15 +508,15 @@ export interface OrderCancelled extends BaseEvent {
 // ─── Reconciliation Events ───
 
 export interface ReconciliationDetected extends BaseEvent {
-  type: 'ReconciliationDetected';
-  mismatch_type: 'missing_fill' | 'phantom_order' | 'position_drift' | 'balance_drift';
+  type: "ReconciliationDetected";
+  mismatch_type: "missing_fill" | "phantom_order" | "position_drift" | "balance_drift";
   details: Record<string, unknown>;
 }
 
 // ─── Family State Events ───
 
 export interface FamilyStateChanged extends BaseEvent {
-  type: 'FamilyStateChanged';
+  type: "FamilyStateChanged";
   family_id: FamilyId;
   prev_mode: RuntimeMode;
   new_mode: RuntimeMode;
@@ -520,7 +526,7 @@ export interface FamilyStateChanged extends BaseEvent {
 // ─── Operator Events ───
 
 export interface OperatorActionApplied extends BaseEvent {
-  type: 'OperatorActionApplied';
+  type: "OperatorActionApplied";
   action: OperatorAction;
 }
 
@@ -541,7 +547,7 @@ export type DomainEvent =
 // ─── Commands ───
 
 export interface PlaceOrderCommand {
-  type: 'PlaceOrderCommand';
+  type: "PlaceOrderCommand";
   client_order_id: string;
   market_id: MarketId;
   family_id: FamilyId;
@@ -552,14 +558,12 @@ export interface PlaceOrderCommand {
 }
 
 export interface CancelOrderCommand {
-  type: 'CancelOrderCommand';
+  type: "CancelOrderCommand";
   order_id: OrderId;
   reason: string;
 }
 
-export type DomainCommand =
-  | PlaceOrderCommand
-  | CancelOrderCommand;
+export type DomainCommand = PlaceOrderCommand | CancelOrderCommand;
 ```
 
 ---
@@ -1002,7 +1006,7 @@ YAML files on disk
 ```typescript
 // packages/family-rules/src/schema.ts
 
-import { z } from 'zod';
+import { z } from "zod";
 
 const timeWindowSchema = z.object({
   start: z.string().regex(/^\d{2}:\d{2}$/),
@@ -1012,21 +1016,34 @@ const timeWindowSchema = z.object({
 const identitySchema = z.object({
   family_key: z.string().min(1),
   primary_category: z.string().min(1),
-  regime: z.enum(['threshold', 'price-range', 'directional-updown', 'social-activity',
-                   'geopolitics', 'generic', 'tournament', 'weather-range']),
+  regime: z.enum([
+    "threshold",
+    "price-range",
+    "directional-updown",
+    "social-activity",
+    "geopolitics",
+    "generic",
+    "tournament",
+    "weather-range",
+  ]),
   horizon: z.string().min(1),
   cadence: z.string().min(1),
-  strategy_profile: z.enum(['scalp', 'event-driven', 'inventory-recycle',
-                             'optional-probe', 'restricted']),
+  strategy_profile: z.enum([
+    "scalp",
+    "event-driven",
+    "inventory-recycle",
+    "optional-probe",
+    "restricted",
+  ]),
   topic_key: z.string().nullish(),
   slug_pattern: z.string().nullish(),
   notes: z.string().nullish(),
 });
 
 const evidenceSchema = z.object({
-  evidence_status: z.enum(['confirmed', 'partial', 'weak', 'unknown']),
+  evidence_status: z.enum(["confirmed", "partial", "weak", "unknown"]),
   evidence_score: z.number(),
-  promotion_state: z.enum(['probe-only', 'scaled', 'restricted', 'reduce-only', 'quarantine']),
+  promotion_state: z.enum(["probe-only", "scaled", "restricted", "reduce-only", "quarantine"]),
   local_trade_count: z.number().int().min(0),
   local_market_count: z.number().int().min(0),
   local_realized_pnl_fifo: z.number(),
@@ -1043,14 +1060,14 @@ const evidenceSchema = z.object({
 
 const universeSchema = z.object({
   enabled: z.boolean(),
-  action: z.enum(['trade', 'monitor', 'reduce-only', 'blocked']),
+  action: z.enum(["trade", "monitor", "reduce-only", "blocked"]),
   priority_rank: z.number().int().min(1),
   allow_weekends: z.boolean(),
-  session_mode: z.enum(['active-window', 'reduced', 'always-reduced']),
+  session_mode: z.enum(["active-window", "reduced", "always-reduced"]),
 });
 
 const entrySchema = z.object({
-  entry_mode: z.enum(['probe-first', 'conviction-only', 'disabled']),
+  entry_mode: z.enum(["probe-first", "conviction-only", "disabled"]),
   min_entry_price: z.number().min(0).max(1),
   max_entry_price: z.number().min(0).max(1),
   max_initial_notional_usdc: z.number().positive(),
@@ -1064,7 +1081,7 @@ const entrySchema = z.object({
 });
 
 const scaleInSchema = z.object({
-  scale_mode: z.enum(['confirm-only', 'disabled', 'aggressive-confirm']),
+  scale_mode: z.enum(["confirm-only", "disabled", "aggressive-confirm"]),
   default_max_buys_per_leg: z.number().int().min(1),
   heavy_max_buys_per_leg: z.number().int().min(1),
   allow_heavy_campaigns: z.boolean(),
@@ -1072,8 +1089,8 @@ const scaleInSchema = z.object({
 });
 
 const exitSchema = z.object({
-  exit_mode: z.enum(['repricing-sell', 'reduce-only', 'disabled']),
-  primary_profit_model: z.enum(['sell-into-strength']),
+  exit_mode: z.enum(["repricing-sell", "reduce-only", "disabled"]),
+  primary_profit_model: z.enum(["sell-into-strength"]),
   allow_runner_extension: z.boolean(),
   prefer_fast_recycle: z.boolean(),
   resolution_holding_allowed: z.boolean(),
@@ -1085,7 +1102,7 @@ const exitSchema = z.object({
 
 const twoSidedSchema = z.object({
   allow_two_sided: z.boolean(),
-  two_sided_mode: z.enum(['disabled', 'selective', 'active']),
+  two_sided_mode: z.enum(["disabled", "selective", "active"]),
   min_activity_for_two_sided: z.number().int().positive().nullish(),
 });
 
@@ -1102,8 +1119,8 @@ const tailSuppressionSchema = z.object({
 const sessionSchema = z.object({
   active_windows_utc: z.array(timeWindowSchema).min(1),
   reduced_windows_utc: z.array(timeWindowSchema),
-  weekday_bias: z.enum(['normal', 'preferred', 'required']),
-  weekend_mode: z.enum(['normal', 'reduced', 'disabled']),
+  weekday_bias: z.enum(["normal", "preferred", "required"]),
+  weekend_mode: z.enum(["normal", "reduced", "disabled"]),
 });
 
 const rulesSchema = z.object({
@@ -1123,7 +1140,7 @@ export const familyRuleFileSchema = z.object({
   evidence: evidenceSchema,
   rules: rulesSchema,
   runtime_state: z.object({
-    runtime_mode: z.enum(['active', 'probe-only', 'restricted', 'quarantine', 'reduce-only']),
+    runtime_mode: z.enum(["active", "probe-only", "restricted", "quarantine", "reduce-only"]),
     open_value_usdc: z.number().min(0),
     open_position_count: z.number().int().min(0),
     open_dust_count: z.number().int().min(0),
@@ -1144,11 +1161,11 @@ export type FamilyRuleFile = z.infer<typeof familyRuleFileSchema>;
 ```typescript
 // packages/family-rules/src/loader.ts
 
-import fs from 'node:fs';
-import path from 'node:path';
-import YAML from 'yaml';
-import { familyRuleFileSchema, type FamilyRuleFile } from './schema.js';
-import type { FamilyRule, FamilyState, FamilyId } from '@plankton/domain';
+import fs from "node:fs";
+import path from "node:path";
+import YAML from "yaml";
+import { familyRuleFileSchema, type FamilyRuleFile } from "./schema.js";
+import type { FamilyRule, FamilyState, FamilyId } from "@plankton/domain";
 
 export interface LoadResult {
   rules: FamilyRule[];
@@ -1162,14 +1179,14 @@ export interface LoadResult {
  * prevent valid files from loading (fail-open per file, fail-closed if zero valid).
  */
 export function loadFamilyRulesFromDir(dirPath: string): LoadResult {
-  const files = fs.readdirSync(dirPath).filter(f => f.endsWith('.yaml') || f.endsWith('.yml'));
+  const files = fs.readdirSync(dirPath).filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"));
   const rules: FamilyRule[] = [];
   const states: FamilyState[] = [];
-  const errors: LoadResult['errors'] = [];
+  const errors: LoadResult["errors"] = [];
 
   for (const file of files) {
     try {
-      const raw = fs.readFileSync(path.join(dirPath, file), 'utf-8');
+      const raw = fs.readFileSync(path.join(dirPath, file), "utf-8");
       const parsed = YAML.parse(raw);
       const validated = familyRuleFileSchema.parse(parsed);
       const { rule, state } = toTyped(validated);
@@ -1220,19 +1237,19 @@ function toTyped(raw: FamilyRuleFile): { rule: FamilyRule; state: FamilyState } 
 ```typescript
 // Pseudocode for apps/runtime startup
 
-import { loadFamilyRulesFromDir } from '@plankton/family-rules';
-import { SqliteFamilyRulesRepository, SqliteFamilyStateRepository } from '@plankton/db';
+import { loadFamilyRulesFromDir } from "@plankton/family-rules";
+import { SqliteFamilyRulesRepository, SqliteFamilyStateRepository } from "@plankton/db";
 
 // 1. Load YAML files
 const { rules, states, errors } = loadFamilyRulesFromDir(config.familyRulesDir);
 if (errors.length > 0) {
-  logger.warn('Some family rule files failed validation', { errors });
+  logger.warn("Some family rule files failed validation", { errors });
 }
 
 // 2. Persist to SQLite
 for (const rule of rules) {
   familyRulesRepo.upsert(rule);
-  familyRulesRepo.saveSnapshot(rule, 'startup-load');
+  familyRulesRepo.saveSnapshot(rule, "startup-load");
 }
 
 // 3. Seed runtime state (only if no existing state in DB)
@@ -1248,23 +1265,23 @@ for (const state of states) {
 
 ## 7. Storage Model Summary
 
-| Table | Layer | What it stores | Mutability |
-|---|---|---|---|
-| `family_catalog` | Identity | family_key, regime, horizon, strategy_profile | Rarely changes |
-| `family_evidence` | Evidence | scores, trade counts, tail-adjusted PnL, eligibility flags | Recomputed from analysis |
-| `family_rules` | Rules | All deployed parameters (entry, exit, scale, tail, session) | Updated by operator or YAML reload |
-| `family_rules_snapshot` | Audit | Point-in-time JSON snapshot of rules | Append-only |
-| `family_runtime_state` | Runtime | Live mode, open counts, tail cost, timestamps | Updated every tick/cycle |
-| `markets` | Reference | Polymarket market catalog with family mapping | Updated from exchange |
-| `market_snapshots` | Time-series | Price, volume, liquidity snapshots | Append-only |
-| `orders` | Execution | Full order lifecycle | Updated on state transitions |
-| `fills` | Execution | Individual fill records | Append-only |
-| `positions` | Inventory | Aggregated position per market+side | Updated on fills |
-| `inventory_lots` | Inventory | FIFO lot tracking for PnL | Updated on consumption |
-| `risk_events` | Audit | Serialized domain events for debugging | Append-only |
-| `runtime_metrics` | Ops | Numeric metric time-series | Append-only |
-| `bot_runs` | Ops | Run lifecycle tracking | One active at a time |
-| `operator_actions` | Audit | Manual interventions | Append-only |
+| Table                   | Layer       | What it stores                                              | Mutability                         |
+| ----------------------- | ----------- | ----------------------------------------------------------- | ---------------------------------- |
+| `family_catalog`        | Identity    | family_key, regime, horizon, strategy_profile               | Rarely changes                     |
+| `family_evidence`       | Evidence    | scores, trade counts, tail-adjusted PnL, eligibility flags  | Recomputed from analysis           |
+| `family_rules`          | Rules       | All deployed parameters (entry, exit, scale, tail, session) | Updated by operator or YAML reload |
+| `family_rules_snapshot` | Audit       | Point-in-time JSON snapshot of rules                        | Append-only                        |
+| `family_runtime_state`  | Runtime     | Live mode, open counts, tail cost, timestamps               | Updated every tick/cycle           |
+| `markets`               | Reference   | Polymarket market catalog with family mapping               | Updated from exchange              |
+| `market_snapshots`      | Time-series | Price, volume, liquidity snapshots                          | Append-only                        |
+| `orders`                | Execution   | Full order lifecycle                                        | Updated on state transitions       |
+| `fills`                 | Execution   | Individual fill records                                     | Append-only                        |
+| `positions`             | Inventory   | Aggregated position per market+side                         | Updated on fills                   |
+| `inventory_lots`        | Inventory   | FIFO lot tracking for PnL                                   | Updated on consumption             |
+| `risk_events`           | Audit       | Serialized domain events for debugging                      | Append-only                        |
+| `runtime_metrics`       | Ops         | Numeric metric time-series                                  | Append-only                        |
+| `bot_runs`              | Ops         | Run lifecycle tracking                                      | One active at a time               |
+| `operator_actions`      | Audit       | Manual interventions                                        | Append-only                        |
 
 ### Relationship Diagram (text)
 
@@ -1296,11 +1313,11 @@ packages/db/src/migrations/
 ```typescript
 // packages/db/src/migrate.ts
 
-import Database from 'better-sqlite3';
-import fs from 'node:fs';
-import path from 'node:path';
+import Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
 
-const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
+const MIGRATIONS_DIR = path.join(__dirname, "migrations");
 
 export function runMigrations(db: Database.Database): void {
   // Create tracking table
@@ -1313,21 +1330,24 @@ export function runMigrations(db: Database.Database): void {
   `);
 
   const applied = new Set(
-    db.prepare('SELECT filename FROM _migrations').all()
-      .map((r: any) => r.filename)
+    db
+      .prepare("SELECT filename FROM _migrations")
+      .all()
+      .map((r: any) => r.filename),
   );
 
-  const files = fs.readdirSync(MIGRATIONS_DIR)
-    .filter(f => f.endsWith('.sql'))
+  const files = fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".sql"))
     .sort();
 
   for (const file of files) {
     if (applied.has(file)) continue;
 
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf-8');
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf-8");
     db.transaction(() => {
       db.exec(sql);
-      db.prepare('INSERT INTO _migrations (filename) VALUES (?)').run(file);
+      db.prepare("INSERT INTO _migrations (filename) VALUES (?)").run(file);
     })();
   }
 }
@@ -1338,17 +1358,17 @@ export function runMigrations(db: Database.Database): void {
 ```typescript
 // packages/db/src/connection.ts
 
-import Database from 'better-sqlite3';
-import { runMigrations } from './migrate.js';
+import Database from "better-sqlite3";
+import { runMigrations } from "./migrate.js";
 
 export function createDatabase(dbPath: string): Database.Database {
   const db = new Database(dbPath);
 
   // WAL mode for concurrent reads during writes
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.pragma('busy_timeout = 5000');
-  db.pragma('synchronous = NORMAL');  // safe with WAL
+  db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
+  db.pragma("busy_timeout = 5000");
+  db.pragma("synchronous = NORMAL"); // safe with WAL
 
   runMigrations(db);
 
@@ -1387,8 +1407,15 @@ Repository implementations in `packages/db/src/sqlite/` follow a consistent patt
 ```typescript
 // packages/db/src/sqlite/SqliteOrderRepository.ts
 
-import type Database from 'better-sqlite3';
-import type { Order, OrderId, OrderRepository, MarketId, FamilyId, BotRunId } from '@plankton/domain';
+import type Database from "better-sqlite3";
+import type {
+  Order,
+  OrderId,
+  OrderRepository,
+  MarketId,
+  FamilyId,
+  BotRunId,
+} from "@plankton/domain";
 
 export class SqliteOrderRepository implements OrderRepository {
   private stmts: ReturnType<typeof this.prepare>;
@@ -1412,29 +1439,45 @@ export class SqliteOrderRepository implements OrderRepository {
           updated_at = @updated_at
         WHERE order_id = @order_id
       `),
-      getById: this.db.prepare('SELECT * FROM orders WHERE order_id = ?'),
-      getByClientOrderId: this.db.prepare('SELECT * FROM orders WHERE client_order_id = ?'),
+      getById: this.db.prepare("SELECT * FROM orders WHERE order_id = ?"),
+      getByClientOrderId: this.db.prepare("SELECT * FROM orders WHERE client_order_id = ?"),
       getOpen: this.db.prepare(
-        `SELECT * FROM orders WHERE status IN ('pending', 'open', 'partially-filled')`
+        `SELECT * FROM orders WHERE status IN ('pending', 'open', 'partially-filled')`,
       ),
       getOpenByFamily: this.db.prepare(
-        `SELECT * FROM orders WHERE family_id = ? AND status IN ('pending', 'open', 'partially-filled')`
+        `SELECT * FROM orders WHERE family_id = ? AND status IN ('pending', 'open', 'partially-filled')`,
       ),
       getOpenByMarket: this.db.prepare(
-        `SELECT * FROM orders WHERE market_id = ? AND status IN ('pending', 'open', 'partially-filled')`
+        `SELECT * FROM orders WHERE market_id = ? AND status IN ('pending', 'open', 'partially-filled')`,
       ),
-      getByBotRun: this.db.prepare('SELECT * FROM orders WHERE bot_run_id = ?'),
+      getByBotRun: this.db.prepare("SELECT * FROM orders WHERE bot_run_id = ?"),
     };
   }
 
-  insert(order: Order): void { this.stmts.insert.run(order); }
-  update(order: Order): void { this.stmts.update.run(order); }
-  getById(id: OrderId): Order | null { return this.stmts.getById.get(id) as Order | null; }
-  getByClientOrderId(cid: string): Order | null { return this.stmts.getByClientOrderId.get(cid) as Order | null; }
-  getOpen(): Order[] { return this.stmts.getOpen.all() as Order[]; }
-  getOpenByFamily(fid: FamilyId): Order[] { return this.stmts.getOpenByFamily.all(fid) as Order[]; }
-  getOpenByMarket(mid: MarketId): Order[] { return this.stmts.getOpenByMarket.all(mid) as Order[]; }
-  getByBotRun(rid: BotRunId): Order[] { return this.stmts.getByBotRun.all(rid) as Order[]; }
+  insert(order: Order): void {
+    this.stmts.insert.run(order);
+  }
+  update(order: Order): void {
+    this.stmts.update.run(order);
+  }
+  getById(id: OrderId): Order | null {
+    return this.stmts.getById.get(id) as Order | null;
+  }
+  getByClientOrderId(cid: string): Order | null {
+    return this.stmts.getByClientOrderId.get(cid) as Order | null;
+  }
+  getOpen(): Order[] {
+    return this.stmts.getOpen.all() as Order[];
+  }
+  getOpenByFamily(fid: FamilyId): Order[] {
+    return this.stmts.getOpenByFamily.all(fid) as Order[];
+  }
+  getOpenByMarket(mid: MarketId): Order[] {
+    return this.stmts.getOpenByMarket.all(mid) as Order[];
+  }
+  getByBotRun(rid: BotRunId): Order[] {
+    return this.stmts.getByBotRun.all(rid) as Order[];
+  }
 }
 ```
 

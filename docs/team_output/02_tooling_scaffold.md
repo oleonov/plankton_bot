@@ -11,19 +11,19 @@ The Phase 1 design spec is solid and covers the core scaffold well. Below are ga
 
 ### Gaps Found
 
-| # | Gap | Severity | Resolution |
-|---|-----|----------|------------|
-| 1 | **No `.env` loading strategy** -- the v1 dev plan lists "env loading" as a must-have for Phase 1, but the spec only has `.env.example` with no library choice or loading pattern | Medium | Use `dotenv` (see Section 8) |
-| 2 | **No logging library chosen** -- Phase 5 requires structured logging, but nothing is installed in Phase 1. The base should be available early for debugging | Medium | Install `pino` at root (see Section 8) |
-| 3 | **No YAML parsing library specified** -- `@plankton/config` lists `yaml` as a dep but does not specify which npm package | Low | Use `yaml` (the `yaml` npm package, YAML 1.2 compliant) |
-| 4 | **`typecheck` task in turbo.json has no `dependsOn: ["^build"]`** -- type-checking a downstream package requires upstream `.d.ts` files to exist first | High | Add `dependsOn: ["^build"]` to `typecheck` task |
-| 5 | **`test` task should also depend on `^build`** -- vitest resolving workspace imports works, but `tsc -b` outputs are needed for packages that import compiled siblings | Medium | Add `dependsOn: ["^build"]` to `test` task |
-| 6 | **Missing `@types/better-sqlite3`** -- `better-sqlite3` is a native addon with no built-in types | Low | Add to `@plankton/db` devDependencies |
-| 7 | **`outDir` and `rootDir` in `tsconfig.base.json`** -- these should not be in the base config because each package overrides them anyway, and leaving them in the base causes confusing errors when tsc is run at root | Low | Remove from base, set per-package only |
-| 8 | **No `composite: true`** in base tsconfig -- required for `tsc -b` (project references) to work | High | Add `composite: true` to `tsconfig.base.json` |
-| 9 | **`apps/web` framework not specified** -- spec says "placeholder" but does not state whether this will be a Next.js app, Vite+React, or plain TS. Matters for package.json shape | Low | Defer to Phase 13. For now, plain TS placeholder with no framework deps |
-| 10 | **No `turbo.json` `pipeline` for `dev` script** -- during development, `turbo run dev` is useful for apps | Low | Add `dev` task (persistent, no cache) |
-| 11 | **Missing `engines` field in root package.json** -- should enforce Node 24 | Low | Add `engines: { "node": ">=24.0.0" }` |
+| #   | Gap                                                                                                                                                                                                                   | Severity | Resolution                                                              |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------------- |
+| 1   | **No `.env` loading strategy** -- the v1 dev plan lists "env loading" as a must-have for Phase 1, but the spec only has `.env.example` with no library choice or loading pattern                                      | Medium   | Use `dotenv` (see Section 8)                                            |
+| 2   | **No logging library chosen** -- Phase 5 requires structured logging, but nothing is installed in Phase 1. The base should be available early for debugging                                                           | Medium   | Install `pino` at root (see Section 8)                                  |
+| 3   | **No YAML parsing library specified** -- `@plankton/config` lists `yaml` as a dep but does not specify which npm package                                                                                              | Low      | Use `yaml` (the `yaml` npm package, YAML 1.2 compliant)                 |
+| 4   | **`typecheck` task in turbo.json has no `dependsOn: ["^build"]`** -- type-checking a downstream package requires upstream `.d.ts` files to exist first                                                                | High     | Add `dependsOn: ["^build"]` to `typecheck` task                         |
+| 5   | **`test` task should also depend on `^build`** -- vitest resolving workspace imports works, but `tsc -b` outputs are needed for packages that import compiled siblings                                                | Medium   | Add `dependsOn: ["^build"]` to `test` task                              |
+| 6   | **Missing `@types/better-sqlite3`** -- `better-sqlite3` is a native addon with no built-in types                                                                                                                      | Low      | Add to `@plankton/db` devDependencies                                   |
+| 7   | **`outDir` and `rootDir` in `tsconfig.base.json`** -- these should not be in the base config because each package overrides them anyway, and leaving them in the base causes confusing errors when tsc is run at root | Low      | Remove from base, set per-package only                                  |
+| 8   | **No `composite: true`** in base tsconfig -- required for `tsc -b` (project references) to work                                                                                                                       | High     | Add `composite: true` to `tsconfig.base.json`                           |
+| 9   | **`apps/web` framework not specified** -- spec says "placeholder" but does not state whether this will be a Next.js app, Vite+React, or plain TS. Matters for package.json shape                                      | Low      | Defer to Phase 13. For now, plain TS placeholder with no framework deps |
+| 10  | **No `turbo.json` `pipeline` for `dev` script** -- during development, `turbo run dev` is useful for apps                                                                                                             | Low      | Add `dev` task (persistent, no cache)                                   |
+| 11  | **Missing `engines` field in root package.json** -- should enforce Node 24                                                                                                                                            | Low      | Add `engines: { "node": ">=24.0.0" }`                                   |
 
 ### Corrections
 
@@ -133,6 +133,7 @@ Key change vs spec: `typecheck` and `test` now depend on `^build` so that upstre
 ```
 
 Changes vs spec:
+
 - **Removed** `outDir` and `rootDir` -- set per-package only.
 - **Added** `composite: true` -- required for `tsc -b` project references.
 - **Added** `isolatedModules: true` -- ensures compatibility with esbuild/swc transpilers and vitest.
@@ -145,10 +146,7 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
-    projects: [
-      "packages/*/vitest.config.ts",
-      "apps/*/vitest.config.ts",
-    ],
+    projects: ["packages/*/vitest.config.ts", "apps/*/vitest.config.ts"],
   },
 });
 ```
@@ -309,9 +307,7 @@ For packages with workspace dependencies (e.g., `@plankton/event-bus`):
     "rootDir": "src"
   },
   "include": ["src"],
-  "references": [
-    { "path": "../domain" }
-  ]
+  "references": [{ "path": "../domain" }]
 }
 ```
 
@@ -369,17 +365,17 @@ Apps do NOT use `exports` -- they are entry points, not consumed by other packag
 
 ### 3.3 Package reference map
 
-| Package | `tsconfig.json` references |
-|---------|---------------------------|
-| `@plankton/domain` | (none) |
-| `@plankton/config` | (none -- uses `zod` and `yaml`, no workspace deps) |
-| `@plankton/event-bus` | `../domain` |
-| `@plankton/db` | `../domain` |
-| `@plankton/exchange` | `../domain` |
-| `@plankton/family-rules` | `../domain`, `../config` |
-| `apps/runtime` | all six packages |
-| `apps/api` | `../../packages/domain`, `../../packages/db` |
-| `apps/web` | `../../packages/domain` |
+| Package                  | `tsconfig.json` references                         |
+| ------------------------ | -------------------------------------------------- |
+| `@plankton/domain`       | (none)                                             |
+| `@plankton/config`       | (none -- uses `zod` and `yaml`, no workspace deps) |
+| `@plankton/event-bus`    | `../domain`                                        |
+| `@plankton/db`           | `../domain`                                        |
+| `@plankton/exchange`     | `../domain`                                        |
+| `@plankton/family-rules` | `../domain`, `../config`                           |
+| `apps/runtime`           | all six packages                                   |
+| `apps/api`               | `../../packages/domain`, `../../packages/db`       |
+| `apps/web`               | `../../packages/domain`                            |
 
 ---
 
@@ -404,6 +400,7 @@ Layers 0 and 1 items within the same layer build in parallel.
 ### 4.2 What each `build` script does
 
 Every package uses `tsc -b` which:
+
 - Reads `tsconfig.json`
 - Builds referenced projects first (via `references`)
 - Emits `.js`, `.d.ts`, `.d.ts.map`, `.js.map` into `dist/`
@@ -433,15 +430,15 @@ pnpm build
 
 ### 5.2 Daily development commands
 
-| Command | What it does |
-|---------|-------------|
-| `pnpm build` | Build all packages via turbo (incremental) |
-| `pnpm test` | Run all tests via turbo |
-| `pnpm lint` | Lint all packages via turbo |
-| `pnpm typecheck` | Type-check all packages via turbo |
-| `pnpm format` | Format all files with prettier |
-| `pnpm format:check` | Check formatting (CI) |
-| `pnpm dev` | Start `apps/runtime` in watch mode via turbo |
+| Command             | What it does                                 |
+| ------------------- | -------------------------------------------- |
+| `pnpm build`        | Build all packages via turbo (incremental)   |
+| `pnpm test`         | Run all tests via turbo                      |
+| `pnpm lint`         | Lint all packages via turbo                  |
+| `pnpm typecheck`    | Type-check all packages via turbo            |
+| `pnpm format`       | Format all files with prettier               |
+| `pnpm format:check` | Check formatting (CI)                        |
+| `pnpm dev`          | Start `apps/runtime` in watch mode via turbo |
 
 ### 5.3 Single-package development
 
@@ -473,52 +470,52 @@ This adds `"@plankton/domain": "workspace:*"` to the consumer's `package.json`.
 
 ### 6.1 Root devDependencies
 
-| Package | Version Range | Purpose |
-|---------|--------------|---------|
-| `typescript` | `^5.8.0` | TypeScript compiler |
-| `@types/node` | `^22.13.0` | Node.js type definitions |
-| `turbo` | `^2.4.0` | Build orchestration |
-| `vitest` | `^3.0.0` | Test runner |
-| `@vitest/coverage-v8` | `^3.0.0` | Coverage provider |
-| `eslint` | `^9.22.0` | Linter |
-| `@eslint/js` | `^9.22.0` | ESLint recommended rules |
-| `typescript-eslint` | `^8.28.0` | TS-aware ESLint rules |
-| `eslint-config-prettier` | `^10.1.0` | Disables formatting rules |
-| `prettier` | `^3.5.0` | Code formatter |
-| `tsx` | `^4.19.0` | TS execution for dev/scripts |
+| Package                  | Version Range | Purpose                      |
+| ------------------------ | ------------- | ---------------------------- |
+| `typescript`             | `^5.8.0`      | TypeScript compiler          |
+| `@types/node`            | `^22.13.0`    | Node.js type definitions     |
+| `turbo`                  | `^2.4.0`      | Build orchestration          |
+| `vitest`                 | `^3.0.0`      | Test runner                  |
+| `@vitest/coverage-v8`    | `^3.0.0`      | Coverage provider            |
+| `eslint`                 | `^9.22.0`     | Linter                       |
+| `@eslint/js`             | `^9.22.0`     | ESLint recommended rules     |
+| `typescript-eslint`      | `^8.28.0`     | TS-aware ESLint rules        |
+| `eslint-config-prettier` | `^10.1.0`     | Disables formatting rules    |
+| `prettier`               | `^3.5.0`      | Code formatter               |
+| `tsx`                    | `^4.19.0`     | TS execution for dev/scripts |
 
 ### 6.2 Per-package runtime dependencies
 
-| Package | Dependency | Version Range | Purpose |
-|---------|-----------|--------------|---------|
-| `@plankton/domain` | (none) | -- | Pure types, zero deps |
-| `@plankton/config` | `zod` | `^3.24.0` | Schema validation |
-| `@plankton/config` | `yaml` | `^2.7.0` | YAML parsing (family rules) |
-| `@plankton/config` | `dotenv` | `^16.4.0` | `.env` file loading |
-| `@plankton/db` | `better-sqlite3` | `^11.8.0` | SQLite driver |
-| `@plankton/exchange` | `@polymarket/clob-client` | `^4.x` | Polymarket CLOB API client |
-| `@plankton/family-rules` | (none) | -- | Uses workspace deps only |
-| `apps/runtime` | `pino` | `^9.6.0` | Structured logging |
+| Package                  | Dependency                | Version Range | Purpose                     |
+| ------------------------ | ------------------------- | ------------- | --------------------------- |
+| `@plankton/domain`       | (none)                    | --            | Pure types, zero deps       |
+| `@plankton/config`       | `zod`                     | `^3.24.0`     | Schema validation           |
+| `@plankton/config`       | `yaml`                    | `^2.7.0`      | YAML parsing (family rules) |
+| `@plankton/config`       | `dotenv`                  | `^16.4.0`     | `.env` file loading         |
+| `@plankton/db`           | `better-sqlite3`          | `^11.8.0`     | SQLite driver               |
+| `@plankton/exchange`     | `@polymarket/clob-client` | `^4.x`        | Polymarket CLOB API client  |
+| `@plankton/family-rules` | (none)                    | --            | Uses workspace deps only    |
+| `apps/runtime`           | `pino`                    | `^9.6.0`      | Structured logging          |
 
 ### 6.3 Per-package devDependencies
 
-| Package | Dependency | Version Range | Purpose |
-|---------|-----------|--------------|---------|
-| `@plankton/db` | `@types/better-sqlite3` | `^7.6.0` | Type definitions |
+| Package        | Dependency              | Version Range | Purpose          |
+| -------------- | ----------------------- | ------------- | ---------------- |
+| `@plankton/db` | `@types/better-sqlite3` | `^7.6.0`      | Type definitions |
 
 ### 6.4 Workspace dependency map
 
-| Consumer | Workspace Dependencies |
-|----------|----------------------|
-| `@plankton/domain` | (none) |
-| `@plankton/config` | (none) |
-| `@plankton/event-bus` | `@plankton/domain` |
-| `@plankton/db` | `@plankton/domain` |
-| `@plankton/exchange` | `@plankton/domain` |
+| Consumer                 | Workspace Dependencies                 |
+| ------------------------ | -------------------------------------- |
+| `@plankton/domain`       | (none)                                 |
+| `@plankton/config`       | (none)                                 |
+| `@plankton/event-bus`    | `@plankton/domain`                     |
+| `@plankton/db`           | `@plankton/domain`                     |
+| `@plankton/exchange`     | `@plankton/domain`                     |
 | `@plankton/family-rules` | `@plankton/domain`, `@plankton/config` |
-| `@plankton/runtime` | all six `@plankton/*` packages |
-| `@plankton/api` | `@plankton/domain`, `@plankton/db` |
-| `@plankton/web` | `@plankton/domain` |
+| `@plankton/runtime`      | all six `@plankton/*` packages         |
+| `@plankton/api`          | `@plankton/domain`, `@plankton/db`     |
+| `@plankton/web`          | `@plankton/domain`                     |
 
 ### 6.5 Version pinning strategy
 
@@ -532,31 +529,31 @@ This adds `"@plankton/domain": "workspace:*"` to the consumer's `package.json`.
 
 ### 7.1 Files to move
 
-| Current path | New path | Notes |
-|-------------|----------|-------|
-| `fetch_plankton_trades.py` | `research/fetch_plankton_trades.py` | |
-| `analyze.py` | `research/analyze.py` | |
-| `analyze_deep.py` | `research/analyze_deep.py` | |
-| `enrich_analysis.py` | `research/enrich_analysis.py` | |
-| `generate_replication_spec.py` | `research/generate_replication_spec.py` | |
-| `generate_remote_snapshot_report.py` | `research/generate_remote_snapshot_report.py` | |
-| `generate_family_parameter_sheet.py` | `research/generate_family_parameter_sheet.py` | |
-| `run_hypothesis_tests.py` | `research/run_hypothesis_tests.py` | |
-| `plankton_trades.db` | `research/data/plankton_trades.db` | ~158 MB, consider `.gitignore` or Git LFS |
-| `plankton_trades.db-shm` | delete | WAL artifact, .gitignore'd |
-| `plankton_trades.db-wal` | delete | WAL artifact, .gitignore'd |
-| `analysis_report.txt` | `research/reports/analysis_report.txt` | |
-| `analysis_deep_report.txt` | `research/reports/analysis_deep_report.txt` | |
-| `__pycache__/` | delete | Add to `.gitignore` |
+| Current path                         | New path                                      | Notes                                     |
+| ------------------------------------ | --------------------------------------------- | ----------------------------------------- |
+| `fetch_plankton_trades.py`           | `research/fetch_plankton_trades.py`           |                                           |
+| `analyze.py`                         | `research/analyze.py`                         |                                           |
+| `analyze_deep.py`                    | `research/analyze_deep.py`                    |                                           |
+| `enrich_analysis.py`                 | `research/enrich_analysis.py`                 |                                           |
+| `generate_replication_spec.py`       | `research/generate_replication_spec.py`       |                                           |
+| `generate_remote_snapshot_report.py` | `research/generate_remote_snapshot_report.py` |                                           |
+| `generate_family_parameter_sheet.py` | `research/generate_family_parameter_sheet.py` |                                           |
+| `run_hypothesis_tests.py`            | `research/run_hypothesis_tests.py`            |                                           |
+| `plankton_trades.db`                 | `research/data/plankton_trades.db`            | ~158 MB, consider `.gitignore` or Git LFS |
+| `plankton_trades.db-shm`             | delete                                        | WAL artifact, .gitignore'd                |
+| `plankton_trades.db-wal`             | delete                                        | WAL artifact, .gitignore'd                |
+| `analysis_report.txt`                | `research/reports/analysis_report.txt`        |                                           |
+| `analysis_deep_report.txt`           | `research/reports/analysis_deep_report.txt`   |                                           |
+| `__pycache__/`                       | delete                                        | Add to `.gitignore`                       |
 
 ### 7.2 Files that stay
 
-| Path | Notes |
-|------|-------|
-| `docs/*` | All docs stay. No changes |
-| `arch_tmp.md` | Move to `docs/arch_tmp.md` for cleanliness |
-| `discussion.md` | Keep at root (working notes) |
-| `.claude/` | Keep at root (Claude config) |
+| Path            | Notes                                      |
+| --------------- | ------------------------------------------ |
+| `docs/*`        | All docs stay. No changes                  |
+| `arch_tmp.md`   | Move to `docs/arch_tmp.md` for cleanliness |
+| `discussion.md` | Keep at root (working notes)               |
+| `.claude/`      | Keep at root (Claude config)               |
 
 ### 7.3 New directories to create
 
@@ -613,6 +610,7 @@ Recommendation: **Option A**. Add to `.gitignore`, document how to regenerate.
 **Decision:** Use `dotenv` (`^16.4.0`) in `@plankton/config`.
 
 **Rationale:**
+
 - The most widely used `.env` loader in the Node.js ecosystem.
 - Zero-config, well-understood behavior.
 - Node.js 24 has experimental built-in `.env` support via `--env-file` flag, but it is not yet stable and does not support programmatic loading from arbitrary paths. Stick with `dotenv` for now and revisit when the built-in API stabilizes.
@@ -634,6 +632,7 @@ export function loadEnv(envPath?: string): void {
 - Never spread `process.env` into config objects -- always go through the validated config layer.
 
 **`.env` file locations:**
+
 - Root `.env` for local development (gitignored).
 - Root `.env.example` committed with placeholder values.
 - No per-package `.env` files. All env is loaded by the app entry point and passed down.
@@ -643,6 +642,7 @@ export function loadEnv(envPath?: string): void {
 **Decision:** Use `pino` (`^9.6.0`) as the structured logging library. Install `pino-pretty` (`^13.0.0`) as a root devDependency for human-readable dev output.
 
 **Rationale:**
+
 - Pino is the fastest structured JSON logger for Node.js.
 - JSON output is production-ready (pipe to any log aggregator).
 - `pino-pretty` provides readable dev output without code changes (use via `| pnpm exec pino-pretty` or `transport` in dev mode).
@@ -650,6 +650,7 @@ export function loadEnv(envPath?: string): void {
 - Pino supports child loggers with context binding, which maps well to per-family or per-module logging.
 
 **Installation location:**
+
 - `pino` as a runtime dependency in `apps/runtime` (and later `apps/api`).
 - `pino-pretty` as a root devDependency.
 
@@ -661,10 +662,7 @@ import pino from "pino";
 
 export const logger = pino({
   level: process.env["LOG_LEVEL"] ?? "info",
-  transport:
-    process.env["NODE_ENV"] !== "production"
-      ? { target: "pino-pretty" }
-      : undefined,
+  transport: process.env["NODE_ENV"] !== "production" ? { target: "pino-pretty" } : undefined,
 });
 ```
 
@@ -680,6 +678,7 @@ familyLogger.info({ market: marketId }, "processing market");
 **Decision:** Use `yaml` (`^2.7.0`) -- the npm package named `yaml`.
 
 **Rationale:**
+
 - Full YAML 1.2 spec compliance.
 - Pure JavaScript, no native bindings.
 - TypeScript types included.

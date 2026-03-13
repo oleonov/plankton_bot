@@ -30,10 +30,10 @@ Error responses:
 
 ### 1.1 Health and Status
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/health` | Liveness probe. Returns `{ "status": "ok" }`. No auth required. |
-| GET | `/status` | Bot runtime status: mode, uptime, last reconciliation, market data freshness, open order count, active family count, current runtime mode (simulation/paper/live-lite). |
+| Method | Path      | Description                                                                                                                                                             |
+| ------ | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/health` | Liveness probe. Returns `{ "status": "ok" }`. No auth required.                                                                                                         |
+| GET    | `/status` | Bot runtime status: mode, uptime, last reconciliation, market data freshness, open order count, active family count, current runtime mode (simulation/paper/live-lite). |
 
 `GET /status` response shape:
 
@@ -48,19 +48,19 @@ Error responses:
   "active_family_count": 28,
   "open_order_count": 12,
   "open_position_count": 41,
-  "total_open_value_usdc": 1284.50,
-  "total_tail_cost_usdc": 87.30
+  "total_open_value_usdc": 1284.5,
+  "total_tail_cost_usdc": 87.3
 }
 ```
 
 ### 1.2 Families
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/families` | List all families with runtime state. Supports `?state=probe,scaled,quarantine` filter. |
-| GET | `/families/:familyId` | Single family detail: identity, evidence, rules, runtime state. |
-| GET | `/families/:familyId/positions` | Positions belonging to a specific family. |
-| GET | `/families/:familyId/orders` | Orders belonging to a specific family. |
+| Method | Path                            | Description                                                                             |
+| ------ | ------------------------------- | --------------------------------------------------------------------------------------- |
+| GET    | `/families`                     | List all families with runtime state. Supports `?state=probe,scaled,quarantine` filter. |
+| GET    | `/families/:familyId`           | Single family detail: identity, evidence, rules, runtime state.                         |
+| GET    | `/families/:familyId/positions` | Positions belonging to a specific family.                                               |
+| GET    | `/families/:familyId/orders`    | Orders belonging to a specific family.                                                  |
 
 `GET /families` response shape (array):
 
@@ -75,13 +75,13 @@ Error responses:
   "runtime_mode": "active",
   "enabled": true,
   "action": "trade",
-  "open_value_usdc": 42.50,
+  "open_value_usdc": 42.5,
   "open_position_count": 3,
   "open_dust_count": 1,
-  "current_tail_cost_usdc": 8.20,
+  "current_tail_cost_usdc": 8.2,
   "tail_adjusted_pnl_live": 690.31,
   "active_market_count": 4,
-  "max_open_value_usdc": 75.00,
+  "max_open_value_usdc": 75.0,
   "max_active_markets": 10,
   "max_dust_positions": 3,
   "quarantine_reason": null
@@ -92,10 +92,10 @@ Error responses:
 
 ### 1.3 Positions
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/positions` | All open positions. Supports `?family_id=`, `?dust=true`, `?sort=tail_cost`. |
-| GET | `/positions/:positionId` | Single position detail with lot-level inventory. |
+| Method | Path                     | Description                                                                  |
+| ------ | ------------------------ | ---------------------------------------------------------------------------- |
+| GET    | `/positions`             | All open positions. Supports `?family_id=`, `?dust=true`, `?sort=tail_cost`. |
+| GET    | `/positions/:positionId` | Single position detail with lot-level inventory.                             |
 
 Position shape:
 
@@ -109,8 +109,8 @@ Position shape:
   "size": 150,
   "avg_entry_price": 0.08,
   "current_price": 0.12,
-  "notional_usdc": 12.00,
-  "unrealized_pnl_usdc": 6.00,
+  "notional_usdc": 12.0,
+  "unrealized_pnl_usdc": 6.0,
   "is_dust": false,
   "buy_count": 2,
   "opened_at": "2026-03-12T16:30:00Z",
@@ -120,10 +120,10 @@ Position shape:
 
 ### 1.4 Orders
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/orders` | Orders list. Supports `?status=open,filled,cancelled`, `?family_id=`, `?limit=`, `?cursor=`. |
-| GET | `/orders/:orderId` | Single order detail. |
+| Method | Path               | Description                                                                                  |
+| ------ | ------------------ | -------------------------------------------------------------------------------------------- |
+| GET    | `/orders`          | Orders list. Supports `?status=open,filled,cancelled`, `?family_id=`, `?limit=`, `?cursor=`. |
+| GET    | `/orders/:orderId` | Single order detail.                                                                         |
 
 Order shape:
 
@@ -145,9 +145,9 @@ Order shape:
 
 ### 1.5 Fills
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/fills` | Recent fills. Supports `?family_id=`, `?limit=`, `?cursor=`, `?since=`. |
+| Method | Path     | Description                                                             |
+| ------ | -------- | ----------------------------------------------------------------------- |
+| GET    | `/fills` | Recent fills. Supports `?family_id=`, `?limit=`, `?cursor=`, `?since=`. |
 
 Fill shape:
 
@@ -167,19 +167,19 @@ Fill shape:
 
 ### 1.6 Metrics
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/metrics` | Aggregate runtime metrics: total realized PnL, total tail cost, family health distribution, fill count today, order count today. |
-| GET | `/metrics/families` | Per-family metric summary: realized PnL, tail cost, position count, dust count. |
+| Method | Path                | Description                                                                                                                      |
+| ------ | ------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/metrics`          | Aggregate runtime metrics: total realized PnL, total tail cost, family health distribution, fill count today, order count today. |
+| GET    | `/metrics/families` | Per-family metric summary: realized PnL, tail cost, position count, dust count.                                                  |
 
 `GET /metrics` response shape:
 
 ```json
 {
-  "total_realized_pnl_usdc": 4280.50,
-  "total_open_tail_cost_usdc": 312.40,
-  "total_tail_adjusted_pnl_usdc": 3968.10,
-  "total_open_value_usdc": 1284.50,
+  "total_realized_pnl_usdc": 4280.5,
+  "total_open_tail_cost_usdc": 312.4,
+  "total_tail_adjusted_pnl_usdc": 3968.1,
+  "total_open_value_usdc": 1284.5,
   "fills_today": 34,
   "orders_today": 52,
   "families_active": 28,
@@ -190,9 +190,9 @@ Fill shape:
 
 ### 1.7 Risk Events
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/risk-events` | Recent risk events: rejections, quarantine triggers, threshold breaches. Supports `?family_id=`, `?limit=`, `?cursor=`. |
+| Method | Path           | Description                                                                                                             |
+| ------ | -------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/risk-events` | Recent risk events: rejections, quarantine triggers, threshold breaches. Supports `?family_id=`, `?limit=`, `?cursor=`. |
 
 Risk event shape:
 
@@ -209,9 +209,9 @@ Risk event shape:
 
 ### 1.8 Reconciliation
 
-| Method | Path | Description |
-| --- | --- | --- |
-| GET | `/reconciliation` | Last reconciliation result: timestamp, mismatches found, repairs applied. |
+| Method | Path              | Description                                                               |
+| ------ | ----------------- | ------------------------------------------------------------------------- |
+| GET    | `/reconciliation` | Last reconciliation result: timestamp, mismatches found, repairs applied. |
 
 ---
 
@@ -219,13 +219,13 @@ Risk event shape:
 
 All operator actions are POST requests. They mutate runtime state.
 
-| Method | Path | Description |
-| --- | --- | --- |
-| POST | `/actions/pause` | Pause the bot. Stops new scanning and signal generation. Open orders remain unless explicitly cancelled. |
-| POST | `/actions/resume` | Resume the bot from paused state. |
-| POST | `/actions/family/:familyId/reduce-only` | Set a family to `reduce-only` mode. No new entries; exits allowed. |
-| POST | `/actions/family/:familyId/quarantine` | Quarantine a family. No entries, no exits. All open orders in family are cancelled. |
-| POST | `/actions/family/:familyId/activate` | Remove `reduce-only` or `quarantine` override, return family to its configured runtime mode. |
+| Method | Path                                    | Description                                                                                              |
+| ------ | --------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| POST   | `/actions/pause`                        | Pause the bot. Stops new scanning and signal generation. Open orders remain unless explicitly cancelled. |
+| POST   | `/actions/resume`                       | Resume the bot from paused state.                                                                        |
+| POST   | `/actions/family/:familyId/reduce-only` | Set a family to `reduce-only` mode. No new entries; exits allowed.                                       |
+| POST   | `/actions/family/:familyId/quarantine`  | Quarantine a family. No entries, no exits. All open orders in family are cancelled.                      |
+| POST   | `/actions/family/:familyId/activate`    | Remove `reduce-only` or `quarantine` override, return family to its configured runtime mode.             |
 
 ### Request/response shapes
 
@@ -324,17 +324,17 @@ Supports query parameter `?types=status,position,order,fill,family,risk` to filt
 
 ### Event types
 
-| Event type | Trigger | Payload |
-| --- | --- | --- |
-| `status` | Bot pause/resume, mode change, reconciliation complete | Same shape as `GET /status` |
-| `position:updated` | Position opened, closed, size changed, dust status changed | Position object |
-| `order:created` | New order placed | Order object |
-| `order:filled` | Order fully or partially filled | Order object with updated filled_size |
-| `order:cancelled` | Order cancelled | Order object with status=cancelled |
-| `fill:new` | New fill recorded | Fill object |
-| `family:state_changed` | Family runtime mode changed (quarantine, reduce-only, activated) | Family summary object |
-| `risk:event` | Risk rejection, quarantine trigger, threshold breach | Risk event object |
-| `metrics:snapshot` | Periodic (every 30s) aggregate metrics push | Same shape as `GET /metrics` |
+| Event type             | Trigger                                                          | Payload                               |
+| ---------------------- | ---------------------------------------------------------------- | ------------------------------------- |
+| `status`               | Bot pause/resume, mode change, reconciliation complete           | Same shape as `GET /status`           |
+| `position:updated`     | Position opened, closed, size changed, dust status changed       | Position object                       |
+| `order:created`        | New order placed                                                 | Order object                          |
+| `order:filled`         | Order fully or partially filled                                  | Order object with updated filled_size |
+| `order:cancelled`      | Order cancelled                                                  | Order object with status=cancelled    |
+| `fill:new`             | New fill recorded                                                | Fill object                           |
+| `family:state_changed` | Family runtime mode changed (quarantine, reduce-only, activated) | Family summary object                 |
+| `risk:event`           | Risk rejection, quarantine trigger, threshold breach             | Risk event object                     |
+| `metrics:snapshot`     | Periodic (every 30s) aggregate metrics push                      | Same shape as `GET /metrics`          |
 
 ### SSE message format
 
@@ -375,11 +375,12 @@ Middleware pseudocode:
 
 ```typescript
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
-  if (req.path === '/health') return next();
-  const token = req.headers.authorization?.replace('Bearer ', '')
-    || req.query.token;
+  if (req.path === "/health") return next();
+  const token = req.headers.authorization?.replace("Bearer ", "") || req.query.token;
   if (token !== process.env.PLANKTON_API_KEY) {
-    return res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'Invalid API key' } });
+    return res
+      .status(401)
+      .json({ ok: false, error: { code: "UNAUTHORIZED", message: "Invalid API key" } });
   }
   next();
 }
@@ -405,6 +406,7 @@ If multi-operator access or remote access over the internet becomes necessary, u
 **Purpose**: At-a-glance bot health and aggregate metrics. The page an operator sees first.
 
 **Shows**:
+
 - Bot status: running/paused, runtime mode (simulation/paper/live-lite)
 - Uptime, last reconciliation timestamp
 - Market data freshness indicator
@@ -414,6 +416,7 @@ If multi-operator access or remote access over the internet becomes necessary, u
 - Pause/resume button
 
 **API endpoints used**:
+
 - `GET /status`
 - `GET /metrics`
 - `POST /actions/pause`
@@ -425,12 +428,14 @@ If multi-operator access or remote access over the internet becomes necessary, u
 **Purpose**: All open positions with family context and tail visibility.
 
 **Shows**:
+
 - Table of open positions sortable by family, notional value, unrealized PnL, tail cost, age
 - Dust positions highlighted
 - Filter by family, dust status
 - Clicking a position shows lot-level detail
 
 **API endpoints used**:
+
 - `GET /positions` with filters
 - `GET /positions/:positionId`
 - SSE: `position:updated`
@@ -440,12 +445,14 @@ If multi-operator access or remote access over the internet becomes necessary, u
 **Purpose**: Order flow visibility. What the bot is doing right now and what it did recently.
 
 **Shows**:
+
 - Open orders table with family, market, side, price, size, age
 - Recent fills table (last 100) with family, market, side, price, size, fee, timestamp
 - Filter by family, side, status
 - Cursor-based pagination for history
 
 **API endpoints used**:
+
 - `GET /orders?status=open`
 - `GET /orders?status=filled,cancelled&limit=50`
 - `GET /fills?limit=100`
@@ -456,12 +463,14 @@ If multi-operator access or remote access over the internet becomes necessary, u
 **Purpose**: Family-level operational view. The core control surface.
 
 **Shows**:
+
 - Table of all families with: state, promotion state, enabled, action, open value, tail cost, tail-adjusted PnL, dust count, active markets
 - Color-coded runtime mode (green=active, yellow=reduce-only, red=quarantined, gray=probe)
 - Click to expand: full rules, evidence layer, positions in family, orders in family
 - Operator action buttons per family: set reduce-only, quarantine, activate
 
 **API endpoints used**:
+
 - `GET /families`
 - `GET /families/:familyId`
 - `GET /families/:familyId/positions`
@@ -476,6 +485,7 @@ If multi-operator access or remote access over the internet becomes necessary, u
 **Purpose**: Risk event log and quarantine management.
 
 **Shows**:
+
 - List of quarantined families with reason and timestamp
 - List of reduce-only families with reason
 - Recent risk events: rejections, threshold breaches, auto-quarantine triggers
@@ -483,6 +493,7 @@ If multi-operator access or remote access over the internet becomes necessary, u
 - Filter by event type, family
 
 **API endpoints used**:
+
 - `GET /families?state=quarantine,reduce-only`
 - `GET /risk-events`
 - `GET /reconciliation`
@@ -513,19 +524,19 @@ The API reads directly from SQLite operational tables and views. No dedicated re
 
 Key tables the API reads from:
 
-| Table | Used by |
-| --- | --- |
-| `orders` | `/orders`, `/families/:id/orders` |
-| `fills` | `/fills` |
-| `positions` | `/positions`, `/families/:id/positions` |
-| `family_state` | `/families` (runtime layer) |
-| `family_rules_snapshot` | `/families/:id` (rules layer) |
-| `family_catalog` | `/families` (identity layer) |
-| `family_evidence` | `/families/:id` (evidence layer) |
-| `risk_events` | `/risk-events` |
-| `runtime_metrics` | `/metrics` |
-| `bot_runs` | `/status` |
-| `operator_commands` | `/actions/*` (write path) |
+| Table                   | Used by                                 |
+| ----------------------- | --------------------------------------- |
+| `orders`                | `/orders`, `/families/:id/orders`       |
+| `fills`                 | `/fills`                                |
+| `positions`             | `/positions`, `/families/:id/positions` |
+| `family_state`          | `/families` (runtime layer)             |
+| `family_rules_snapshot` | `/families/:id` (rules layer)           |
+| `family_catalog`        | `/families` (identity layer)            |
+| `family_evidence`       | `/families/:id` (evidence layer)        |
+| `risk_events`           | `/risk-events`                          |
+| `runtime_metrics`       | `/metrics`                              |
+| `bot_runs`              | `/status`                               |
+| `operator_commands`     | `/actions/*` (write path)               |
 
 SQLite WAL mode allows concurrent reads from the API process while the runtime writes. This is safe as long as:
 
@@ -572,38 +583,38 @@ LEFT JOIN family_rules fr ON fc.family_id = fr.family_id;
 
 ### In v1
 
-| Capability | Notes |
-| --- | --- |
-| REST API with full read access | All endpoints in section 1 |
-| Operator actions: pause, resume, family reduce-only, family quarantine, family activate | Section 2 |
-| SSE live updates | Section 3 |
-| Static API key auth | Section 4 |
-| Five dashboard pages: Overview, Positions, Orders/Fills, Families, Risk/Quarantine | Section 5 |
-| Direct SQLite reads for API | Section 6 |
-| Command table for operator actions | Section 6 |
-| Cursor-based pagination for orders and fills | Using `?cursor=` and `?limit=` |
-| Basic filtering on all list endpoints | By family_id, status, dust flag |
-| Uniform error envelope | Section 1 |
+| Capability                                                                              | Notes                           |
+| --------------------------------------------------------------------------------------- | ------------------------------- |
+| REST API with full read access                                                          | All endpoints in section 1      |
+| Operator actions: pause, resume, family reduce-only, family quarantine, family activate | Section 2                       |
+| SSE live updates                                                                        | Section 3                       |
+| Static API key auth                                                                     | Section 4                       |
+| Five dashboard pages: Overview, Positions, Orders/Fills, Families, Risk/Quarantine      | Section 5                       |
+| Direct SQLite reads for API                                                             | Section 6                       |
+| Command table for operator actions                                                      | Section 6                       |
+| Cursor-based pagination for orders and fills                                            | Using `?cursor=` and `?limit=`  |
+| Basic filtering on all list endpoints                                                   | By family_id, status, dust flag |
+| Uniform error envelope                                                                  | Section 1                       |
 
 ### NOT in v1 (deferred)
 
-| Capability | Why deferred |
-| --- | --- |
-| WebSocket support | SSE is sufficient for single-operator dashboard |
-| JWT / session-based auth | Static API key is adequate for single operator |
-| RBAC / multi-user | Single operator system |
-| Dedicated read model / CQRS | Direct SQLite reads are fast enough |
-| Advanced charting / time-series visualization | Not needed for operational control |
-| Family rules editor in UI | Family rules are YAML files loaded at startup |
-| Backtesting UI | Research stays in Python |
-| Alerting / notifications (email, Telegram) | Operator watches dashboard directly in v1 |
-| Public API / rate limiting | Internal tool, single consumer |
-| OpenAPI spec generation | Can add when API stabilizes |
-| Mobile-responsive design | Operator uses a desktop monitor |
-| Dark mode / theming | Operational, not cosmetic |
-| Audit log UI | `operator_commands` table serves as audit log; no dedicated UI yet |
-| Per-market detail page | Family is the unit of control, not individual markets |
-| Signal / rejection log page | Risk events cover the critical subset |
+| Capability                                    | Why deferred                                                       |
+| --------------------------------------------- | ------------------------------------------------------------------ |
+| WebSocket support                             | SSE is sufficient for single-operator dashboard                    |
+| JWT / session-based auth                      | Static API key is adequate for single operator                     |
+| RBAC / multi-user                             | Single operator system                                             |
+| Dedicated read model / CQRS                   | Direct SQLite reads are fast enough                                |
+| Advanced charting / time-series visualization | Not needed for operational control                                 |
+| Family rules editor in UI                     | Family rules are YAML files loaded at startup                      |
+| Backtesting UI                                | Research stays in Python                                           |
+| Alerting / notifications (email, Telegram)    | Operator watches dashboard directly in v1                          |
+| Public API / rate limiting                    | Internal tool, single consumer                                     |
+| OpenAPI spec generation                       | Can add when API stabilizes                                        |
+| Mobile-responsive design                      | Operator uses a desktop monitor                                    |
+| Dark mode / theming                           | Operational, not cosmetic                                          |
+| Audit log UI                                  | `operator_commands` table serves as audit log; no dedicated UI yet |
+| Per-market detail page                        | Family is the unit of control, not individual markets              |
+| Signal / rejection log page                   | Risk events cover the critical subset                              |
 
 ---
 
@@ -637,13 +648,13 @@ Rationale:
 
 Recommended libraries:
 
-| Concern | Library |
-| --- | --- |
-| Routing | React Router (5 routes, flat) |
-| State / data fetching | TanStack Query (React Query) |
-| SSE consumption | Native EventSource API + React Query invalidation |
-| UI components | Minimal: plain HTML tables + a small utility CSS approach (Tailwind or similar) |
-| Forms (action dialogs) | Native form elements. No form library needed for 3 action forms. |
+| Concern                | Library                                                                         |
+| ---------------------- | ------------------------------------------------------------------------------- |
+| Routing                | React Router (5 routes, flat)                                                   |
+| State / data fetching  | TanStack Query (React Query)                                                    |
+| SSE consumption        | Native EventSource API + React Query invalidation                               |
+| UI components          | Minimal: plain HTML tables + a small utility CSS approach (Tailwind or similar) |
+| Forms (action dialogs) | Native form elements. No form library needed for 3 action forms.                |
 
 ### Shared types: `packages/domain`
 

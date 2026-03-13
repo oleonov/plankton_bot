@@ -11,6 +11,7 @@ Input: Review findings on 00-06 team outputs
 ### Problem
 
 Runtime document (03) models entities through `tokenId` (Polymarket CLOB token ID) and `size` (share quantity):
+
 ```typescript
 // 03_runtime_flows.md
 interface NormalizedMarket { tokenId: TokenId; ... }
@@ -19,6 +20,7 @@ interface Position { tokenId: TokenId; size: number; ... }
 ```
 
 Persistence document (04) models through `market_id` (opaque string) and `size_usdc` (dollar value):
+
 ```typescript
 // 04_domain_persistence.md
 interface Market { market_id: MarketId; /* no token_id */ }
@@ -31,6 +33,7 @@ The `markets` table has no `token_id` column at all. These cannot implement agai
 ### Root cause
 
 Polymarket's CLOB uses two different identifiers:
+
 - **condition_id** — identifies the market/question
 - **token_id** — identifies a specific outcome token (YES or NO side); this is what the order API requires
 
@@ -42,19 +45,19 @@ The persistence doc used `market_id` as an opaque alias for one of these but did
 
 ```typescript
 export interface Market {
-  conditionId: string;         // Polymarket condition ID (identifies the question)
-  tokenId: string;             // Polymarket CLOB token ID (identifies YES/NO outcome)
+  conditionId: string; // Polymarket condition ID (identifies the question)
+  tokenId: string; // Polymarket CLOB token ID (identifies YES/NO outcome)
   slug: string;
   question: string;
-  outcome: 'YES' | 'NO';
+  outcome: "YES" | "NO";
   familyId: FamilyId | null;
   familyKey: string | null;
   regime: Regime | null;
   horizon: string | null;
-  endDate: string | null;      // ISO timestamp
+  endDate: string | null; // ISO timestamp
   active: boolean;
-  tickSize: number;            // minimum price increment (from CLOB)
-  negRisk: boolean;            // neg-risk flag (required for order signing)
+  tickSize: number; // minimum price increment (from CLOB)
+  negRisk: boolean; // neg-risk flag (required for order signing)
   createdAt: string;
   updatedAt: string;
 }
@@ -65,6 +68,7 @@ export interface Market {
 **Naming convention:** Use `tokenId` consistently everywhere. Drop `MarketId` branded type — use `TokenId` instead. The `conditionId` field exists on the Market entity for grouping but is never used as a foreign key.
 
 **Size fields:** Use two fields explicitly:
+
 - `size` — share quantity (what the exchange deals in)
 - `sizeUsdc` — USDC notional (= size × price, for risk/inventory)
 
@@ -111,6 +115,7 @@ CREATE INDEX IF NOT EXISTS idx_markets_active ON markets(active);
 ### Problem
 
 ExchangeGateway only covers order lifecycle (place/cancel/getOrders/getFills/getBalances). It doesn't expose:
+
 - Market catalog (list active markets, get market details including tokenId/conditionId)
 - Top-of-book / order book data for pricing
 - `tickSize` and `negRisk` per market (required by CLOB order signing)
@@ -147,14 +152,14 @@ export interface ClobMarket {
   conditionId: string;
   tokens: Array<{
     tokenId: string;
-    outcome: string;       // "Yes" | "No"
+    outcome: string; // "Yes" | "No"
   }>;
   question: string;
   slug: string;
   endDate: string;
   active: boolean;
   negRisk: boolean;
-  tickSize: number;        // minimum price increment
+  tickSize: number; // minimum price increment
 }
 
 export interface OrderBookSnapshot {
@@ -187,12 +192,12 @@ export interface ExchangeGateway {
 export interface PlaceOrderParams {
   clientOrderId: string;
   tokenId: string;
-  side: 'BUY' | 'SELL';
-  size: number;            // share quantity
-  price: number;           // limit price (0-1 for binary)
-  orderType: 'GTC' | 'GTD' | 'FOK';
-  tickSize: number;        // MUST be passed; comes from market catalog
-  negRisk: boolean;        // MUST be passed; comes from market catalog
+  side: "BUY" | "SELL";
+  size: number; // share quantity
+  price: number; // limit price (0-1 for binary)
+  orderType: "GTC" | "GTD" | "FOK";
+  tickSize: number; // MUST be passed; comes from market catalog
+  negRisk: boolean; // MUST be passed; comes from market catalog
   expiration?: number;
 }
 ```
@@ -227,9 +232,9 @@ If the strategy scanner emits two BUY signals for the same token in the same tic
 export function buildClientOrderId(parts: {
   familyId: string;
   tokenId: string;
-  side: 'BUY' | 'SELL';
+  side: "BUY" | "SELL";
   intentEpochMs: number;
-  sequenceInTick: number;    // 0-based index within this tick for same family+token+side
+  sequenceInTick: number; // 0-based index within this tick for same family+token+side
 }): string {
   const raw = [
     parts.familyId,
@@ -237,8 +242,8 @@ export function buildClientOrderId(parts: {
     parts.side,
     parts.intentEpochMs,
     parts.sequenceInTick,
-  ].join('|');
-  const hash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+  ].join("|");
+  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 16);
   return `plk_${hash}`;
 }
 ```
@@ -268,13 +273,13 @@ export interface Signal {
   signalId: string;
   familyId: FamilyId;
   tokenId: string;
-  side: 'BUY' | 'SELL';
+  side: "BUY" | "SELL";
   suggestedPrice: number;
   suggestedSize: number;
   suggestedSizeUsdc: number;
   reason: string;
-  strategyTick: number;        // epoch ms of the scanner tick
-  sequenceInTick: number;      // 0-based within this tick for same family+token+side
+  strategyTick: number; // epoch ms of the scanner tick
+  sequenceInTick: number; // 0-based within this tick for same family+token+side
   generatedAt: string;
 }
 ```
@@ -325,23 +330,23 @@ CREATE INDEX IF NOT EXISTS idx_operator_commands_status
 ```typescript
 export interface OperatorCommand {
   id: number;
-  action: 'pause' | 'resume' | 'family_reduce_only' | 'family_quarantine' | 'family_activate';
+  action: "pause" | "resume" | "family_reduce_only" | "family_quarantine" | "family_activate";
   targetId: string | null;
   reason: string | null;
-  status: 'pending' | 'applied' | 'rejected';
+  status: "pending" | "applied" | "rejected";
   createdAt: string;
   appliedAt: string | null;
 }
 
 export interface OperatorCommandRepository {
   /** Insert a new pending command (called by API). */
-  insert(cmd: Omit<OperatorCommand, 'id' | 'status' | 'appliedAt'>): number;
+  insert(cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt">): number;
 
   /** Get all pending commands (called by runtime poller). */
   getPending(): OperatorCommand[];
 
   /** Mark a command as applied or rejected (called by runtime after processing). */
-  updateStatus(id: number, status: 'applied' | 'rejected', appliedAt: string): void;
+  updateStatus(id: number, status: "applied" | "rejected", appliedAt: string): void;
 }
 ```
 
@@ -351,7 +356,7 @@ export interface OperatorCommandRepository {
 // apps/runtime/src/modules/supervisor/command-poller.ts
 async function pollOperatorCommands(
   repo: OperatorCommandRepository,
-  handler: (cmd: OperatorCommand) => Promise<'applied' | 'rejected'>,
+  handler: (cmd: OperatorCommand) => Promise<"applied" | "rejected">,
   intervalMs = 2000,
 ): Promise<() => void> {
   const timer = setInterval(async () => {
@@ -380,11 +385,13 @@ async function pollOperatorCommands(
 ### Problem
 
 Three conflicting statements:
+
 1. `00_synthesis` says `plankton_trades.db` is gitignored in `research/data/`
 2. `02_tooling` `.gitignore` explicitly does NOT ignore `*.db` ("because the research SQLite DB is tracked")
 3. `.env.example` sets `DB_PATH=./data/plankton.db` (relative to apps/runtime)
 
 Risks:
+
 - If `*.db` is not gitignored, the live runtime DB (which will be at `apps/runtime/data/plankton.db`) gets committed
 - Relative path `./data/plankton.db` resolves differently depending on which process's cwd — runtime and API may use different DB files
 
@@ -408,8 +415,8 @@ Do NOT use a blanket `*.db` rule. The `.gitignore` should name specific paths.
 
 ```typescript
 // packages/config/src/schema.ts
-import { z } from 'zod';
-import { resolve } from 'node:path';
+import { z } from "zod";
+import { resolve } from "node:path";
 
 export const runtimeConfigSchema = z.object({
   dbPath: z.string().transform((p) => resolve(p)),
@@ -432,7 +439,7 @@ This way both runtime and API resolve to the same file regardless of their own p
 
 ```typescript
 // apps/api/src/db.ts
-import Database from 'better-sqlite3';
+import Database from "better-sqlite3";
 
 export function openReadonlyDb(dbPath: string): Database.Database {
   return new Database(dbPath, { readonly: true, fileMustExist: true });
@@ -457,13 +464,13 @@ The data directory is gitignored (rule A), but `.gitkeep` ensures the directory 
 
 ## Summary of all changes
 
-| Finding | Resolution | Impact |
-|---|---|---|
-| 1. tokenId vs market_id | Canonical Market type with both conditionId and tokenId; tokenId is PK; drop MarketId branded type | Domain types, SQL schema, all repos |
-| 2. ExchangeGateway incomplete | Split into MarketDataGateway + ExchangeGateway; add tickSize/negRisk to PlaceOrderParams | Gateway interfaces, market-data module, exchange package |
-| 3. client_order_id collision | Add sequenceInTick to hash input and Signal type | buildClientOrderId, Signal type, scanner |
-| 4. operator_commands missing | Add operator_commands table + OperatorCommandRepository; keep operator_actions as audit | SQL schema, repository interfaces, supervisor |
-| 5. DB path conflicts | Explicit .gitignore paths; absolute DB_PATH resolved at startup; monorepo-root-relative .env | .gitignore, config schema, .env.example |
+| Finding                       | Resolution                                                                                         | Impact                                                   |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 1. tokenId vs market_id       | Canonical Market type with both conditionId and tokenId; tokenId is PK; drop MarketId branded type | Domain types, SQL schema, all repos                      |
+| 2. ExchangeGateway incomplete | Split into MarketDataGateway + ExchangeGateway; add tickSize/negRisk to PlaceOrderParams           | Gateway interfaces, market-data module, exchange package |
+| 3. client_order_id collision  | Add sequenceInTick to hash input and Signal type                                                   | buildClientOrderId, Signal type, scanner                 |
+| 4. operator_commands missing  | Add operator_commands table + OperatorCommandRepository; keep operator_actions as audit            | SQL schema, repository interfaces, supervisor            |
+| 5. DB path conflicts          | Explicit .gitignore paths; absolute DB_PATH resolved at startup; monorepo-root-relative .env       | .gitignore, config schema, .env.example                  |
 
 ### Order of resolution
 

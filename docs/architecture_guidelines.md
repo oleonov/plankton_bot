@@ -15,11 +15,11 @@ Asyncio-based trading bot that is easy to extend, debug, and operate 24/7 withou
 
 Every piece of state has exactly one owner. Tasks do not modify state directly — they publish events, and state managers apply them.
 
-| State Manager | Owns | Consumers |
-|---|---|---|
-| MarketStateManager | Market metadata, orderbook snapshots, staleness flags | SignalEngine, Scanner |
-| PositionStateManager | Open/closed positions, entry/exit prices, P&L | RiskEngine, ExitEvaluator |
-| OrderStateManager | Open/pending/filled orders | Executor, Reconciliation |
+| State Manager        | Owns                                                  | Consumers                 |
+| -------------------- | ----------------------------------------------------- | ------------------------- |
+| MarketStateManager   | Market metadata, orderbook snapshots, staleness flags | SignalEngine, Scanner     |
+| PositionStateManager | Open/closed positions, entry/exit prices, P&L         | RiskEngine, ExitEvaluator |
+| OrderStateManager    | Open/pending/filled orders                            | Executor, Reconciliation  |
 
 RiskEngine is read-only — it queries state managers but never modifies positions or orders.
 
@@ -74,11 +74,13 @@ Future: replaceable with Redis Streams or Kafka without changing component code.
 **ExecutionEngine is the ONLY component that interacts with the exchange API for orders.**
 
 Components emit commands:
+
 - SignalEngine → PlaceOrderCommand
 - ExitEvaluator → ClosePositionCommand
 - Reconciliation → CancelOrderCommand
 
 ExecutionEngine:
+
 - Receives commands from event bus
 - Checks idempotency (dedup by command_id)
 - Applies rate limiting
@@ -93,23 +95,23 @@ Sits between SignalEngine and ExecutionEngine. Every TradingSignal passes throug
 
 ### Risk checks (all configurable)
 
-| Check | Config Key | Default |
-|---|---|---|
-| Max USDC per single order | `risk.max_order_size` | $10 |
-| Max total exposure | `risk.max_total_exposure` | $500 |
-| Max exposure per market | `risk.max_market_exposure` | $50 |
-| Max exposure per category | `risk.max_category_exposure` | $200 |
-| Max open orders | `risk.max_open_orders` | 100 |
-| Max open positions | `risk.max_open_positions` | 200 |
-| Daily loss limit (stop trading) | `risk.daily_loss_limit` | $100 |
-| Cooldown after N consecutive losses | `risk.loss_cooldown_trades` | 10 |
-| Cooldown duration | `risk.loss_cooldown_minutes` | 30 |
-| Min edge threshold | `risk.min_edge` | 0.02 |
-| Max order size vs liquidity | `risk.max_liquidity_fraction` | 0.25 |
-| Stale data rejection | `risk.max_data_age_seconds` | 60 |
-| Duplicate signal prevention | `risk.signal_dedup_window_seconds` | 300 |
-| Circuit breaker (API errors) | `risk.circuit_breaker_errors` | 5 |
-| Circuit breaker pause | `risk.circuit_breaker_pause_minutes` | 5 |
+| Check                               | Config Key                           | Default |
+| ----------------------------------- | ------------------------------------ | ------- |
+| Max USDC per single order           | `risk.max_order_size`                | $10     |
+| Max total exposure                  | `risk.max_total_exposure`            | $500    |
+| Max exposure per market             | `risk.max_market_exposure`           | $50     |
+| Max exposure per category           | `risk.max_category_exposure`         | $200    |
+| Max open orders                     | `risk.max_open_orders`               | 100     |
+| Max open positions                  | `risk.max_open_positions`            | 200     |
+| Daily loss limit (stop trading)     | `risk.daily_loss_limit`              | $100    |
+| Cooldown after N consecutive losses | `risk.loss_cooldown_trades`          | 10      |
+| Cooldown duration                   | `risk.loss_cooldown_minutes`         | 30      |
+| Min edge threshold                  | `risk.min_edge`                      | 0.02    |
+| Max order size vs liquidity         | `risk.max_liquidity_fraction`        | 0.25    |
+| Stale data rejection                | `risk.max_data_age_seconds`          | 60      |
+| Duplicate signal prevention         | `risk.signal_dedup_window_seconds`   | 300     |
+| Circuit breaker (API errors)        | `risk.circuit_breaker_errors`        | 5       |
+| Circuit breaker pause               | `risk.circuit_breaker_pause_minutes` | 5       |
 
 ### Output
 
@@ -158,12 +160,12 @@ class Strategy(Protocol):
 
 ### Strategy implementations (based on planktonXD data)
 
-| Strategy | Description | Priority |
-|---|---|---|
-| CheapContractScalper | Buy 1-20¢ contracts, sell at 20-50% rise | Primary |
-| IntraMarketArb | YES+NO < $1 → buy both sides | Secondary |
-| SpreadCapture | Post limit orders on both sides of thin markets | Secondary |
-| EventFamilyTrader | Track recurring markets (daily BTC, weather) | Tertiary |
+| Strategy             | Description                                     | Priority  |
+| -------------------- | ----------------------------------------------- | --------- |
+| CheapContractScalper | Buy 1-20¢ contracts, sell at 20-50% rise        | Primary   |
+| IntraMarketArb       | YES+NO < $1 → buy both sides                    | Secondary |
+| SpreadCapture        | Post limit orders on both sides of thin markets | Secondary |
+| EventFamilyTrader    | Track recurring markets (daily BTC, weather)    | Tertiary  |
 
 Strategy selection is configurable per category.
 
@@ -185,11 +187,11 @@ Each transition = event. PositionStateManager tracks current state of every posi
 
 ### Exit conditions (based on planktonXD analysis)
 
-| Condition | Config Key | Default |
-|---|---|---|
-| Target profit % | `exit.target_profit_pct` | 0.30 (30%) |
-| Stop loss % | `exit.stop_loss_pct` | 0.15 (15%) |
-| Max hold time (minutes) | `exit.max_hold_minutes` | 1440 (24h) |
+| Condition                    | Config Key                    | Default               |
+| ---------------------------- | ----------------------------- | --------------------- |
+| Target profit %              | `exit.target_profit_pct`      | 0.30 (30%)            |
+| Stop loss %                  | `exit.stop_loss_pct`          | 0.15 (15%)            |
+| Max hold time (minutes)      | `exit.max_hold_minutes`       | 1440 (24h)            |
 | Hold-to-resolution threshold | `exit.hold_to_resolution_pct` | 0.80 (80% confidence) |
 
 ExitEvaluator is a separate periodic task that checks open positions against exit conditions and emits ClosePositionCommand when triggered.
@@ -200,20 +202,20 @@ ExitEvaluator is a separate periodic task that checks open positions against exi
 
 ### Required tables
 
-| Table | Purpose |
-|---|---|
-| `bot_runs` | Start/stop timestamps, config snapshot hash, mode |
-| `config_snapshots` | Full config YAML per bot_run (for comparing results across configs) |
-| `markets` | Discovered markets, metadata, category, token_ids |
-| `market_evaluations` | Every evaluation: accepted AND rejected, with reasons |
-| `signals` | Generated trading signals with confidence and reason |
-| `risk_decisions` | APPROVED/REJECTED/ADJUSTED with reasons |
-| `orders` | All orders: command_id, client_order_id, status, timestamps |
-| `fills` | Execution fills: price, size, fee |
-| `positions` | Position lifecycle: state, entry/exit, P&L |
-| `risk_events` | Limit hits, circuit breakers, cooldowns |
-| `reconciliation_log` | Mismatches found and resolutions applied |
-| `metrics` | Periodic snapshots: exposure, P&L, open positions |
+| Table                | Purpose                                                             |
+| -------------------- | ------------------------------------------------------------------- |
+| `bot_runs`           | Start/stop timestamps, config snapshot hash, mode                   |
+| `config_snapshots`   | Full config YAML per bot_run (for comparing results across configs) |
+| `markets`            | Discovered markets, metadata, category, token_ids                   |
+| `market_evaluations` | Every evaluation: accepted AND rejected, with reasons               |
+| `signals`            | Generated trading signals with confidence and reason                |
+| `risk_decisions`     | APPROVED/REJECTED/ADJUSTED with reasons                             |
+| `orders`             | All orders: command_id, client_order_id, status, timestamps         |
+| `fills`              | Execution fills: price, size, fee                                   |
+| `positions`          | Position lifecycle: state, entry/exit, P&L                          |
+| `risk_events`        | Limit hits, circuit breakers, cooldowns                             |
+| `reconciliation_log` | Mismatches found and resolutions applied                            |
+| `metrics`            | Periodic snapshots: exposure, P&L, open positions                   |
 
 ### Restart recovery
 
@@ -231,14 +233,14 @@ Periodic task (every 30 seconds).
 
 ### Checks
 
-| Check | Resolution |
-|---|---|
-| Local order OPEN, exchange says FILLED | Update local state, create fill record |
-| Local order OPEN, exchange says CANCELLED | Update local state, log reason |
-| Local order OPEN, exchange says NOT FOUND | Mark as lost, alert |
-| Local position OPEN, no matching exchange position | Investigate, mark as stale |
-| Exchange has order not in local state | Cancel it (orphaned order from crash) |
-| Balance mismatch | Log warning, do not auto-fix |
+| Check                                              | Resolution                             |
+| -------------------------------------------------- | -------------------------------------- |
+| Local order OPEN, exchange says FILLED             | Update local state, create fill record |
+| Local order OPEN, exchange says CANCELLED          | Update local state, log reason         |
+| Local order OPEN, exchange says NOT FOUND          | Mark as lost, alert                    |
+| Local position OPEN, no matching exchange position | Investigate, mark as stale             |
+| Exchange has order not in local state              | Cancel it (orphaned order from crash)  |
+| Balance mismatch                                   | Log warning, do not auto-fix           |
 
 ---
 
@@ -259,15 +261,15 @@ If command_id new → execute, cache result
 
 ### Periodic tasks
 
-| Task | Interval | Critical | Notes |
-|---|---|---|---|
-| market_scanner | 3 min | Yes | Discovers new markets via Gamma API |
-| orderbook_feed | 30s | Yes | Fetches prices for tracked markets |
-| exit_evaluator | 30s | Yes | Checks exit conditions for open positions |
-| reconciliation | 60s | Yes | Syncs local state with exchange |
-| risk_state_update | 15s | No | Updates daily P&L, exposure counters |
-| metrics_flush | 60s | No | Writes metrics snapshot to DB |
-| stale_market_cleanup | 5 min | No | Removes resolved/expired markets from tracking |
+| Task                 | Interval | Critical | Notes                                          |
+| -------------------- | -------- | -------- | ---------------------------------------------- |
+| market_scanner       | 3 min    | Yes      | Discovers new markets via Gamma API            |
+| orderbook_feed       | 30s      | Yes      | Fetches prices for tracked markets             |
+| exit_evaluator       | 30s      | Yes      | Checks exit conditions for open positions      |
+| reconciliation       | 60s      | Yes      | Syncs local state with exchange                |
+| risk_state_update    | 15s      | No       | Updates daily P&L, exposure counters           |
+| metrics_flush        | 60s      | No       | Writes metrics snapshot to DB                  |
+| stale_market_cleanup | 5 min    | No       | Removes resolved/expired markets from tracking |
 
 ### Rules
 
@@ -294,10 +296,10 @@ Scanner may find many markets at once. Signal processing queue has a configurabl
 ### Task classification
 
 | Critical (bot stops) | Non-critical (auto-restart) |
-|---|---|
-| orderbook_feed | metrics_flush |
-| execution_engine | stale_market_cleanup |
-| reconciliation | risk_state_update |
+| -------------------- | --------------------------- |
+| orderbook_feed       | metrics_flush               |
+| execution_engine     | stale_market_cleanup        |
+| reconciliation       | risk_state_update           |
 
 market_scanner and exit_evaluator: restart up to 3 times, then stop bot.
 
@@ -358,11 +360,11 @@ RateLimiter
 
 ### Endpoint groups
 
-| Group | Limit | Shared by |
-|---|---|---|
-| market_data_read | 10 req/s (initial, adjust empirically) | orderbook_feed, scanner |
-| order_write | 5 req/s (initial) | executor |
-| order_read | 10 req/s | reconciliation, executor |
+| Group            | Limit                                  | Shared by                |
+| ---------------- | -------------------------------------- | ------------------------ |
+| market_data_read | 10 req/s (initial, adjust empirically) | orderbook_feed, scanner  |
+| order_write      | 5 req/s (initial)                      | executor                 |
+| order_read       | 10 req/s                               | reconciliation, executor |
 
 Limits are configurable. Actual Polymarket limits are undocumented — start conservative, increase based on 429/rate-limit responses.
 
@@ -384,11 +386,11 @@ class ExchangeGateway(Protocol):
 
 ### Implementations
 
-| Class | Mode | Behavior |
-|---|---|---|
-| PolymarketLiveGateway | live | Real CLOB API via py-clob-client |
-| SimulationGateway | simulation | Simulates fills based on orderbook snapshot, tracks virtual balance |
-| ReplayGateway | replay | Replays historical data, simulates fills at historical prices |
+| Class                 | Mode       | Behavior                                                            |
+| --------------------- | ---------- | ------------------------------------------------------------------- |
+| PolymarketLiveGateway | live       | Real CLOB API via py-clob-client                                    |
+| SimulationGateway     | simulation | Simulates fills based on orderbook snapshot, tracks virtual balance |
+| ReplayGateway         | replay     | Replays historical data, simulates fills at historical prices       |
 
 Strategy, RiskEngine, and all other components are mode-agnostic. Only the gateway changes.
 
@@ -396,11 +398,11 @@ Strategy, RiskEngine, and all other components are mode-agnostic. Only the gatew
 
 ## 17. Execution Modes
 
-| Mode | Orders | Data | P&L | Use case |
-|---|---|---|---|---|
+| Mode       | Orders            | Data               | P&L                    | Use case            |
+| ---------- | ----------------- | ------------------ | ---------------------- | ------------------- |
 | simulation | Virtual (DB only) | Real-time from API | Virtual, tracked in DB | Strategy validation |
-| live | Real (CLOB API) | Real-time from API | Real | Production trading |
-| replay | Virtual | Historical from DB | Virtual | Backtesting |
+| live       | Real (CLOB API)   | Real-time from API | Real                   | Production trading  |
+| replay     | Virtual           | Historical from DB | Virtual                | Backtesting         |
 
 Mode is set in config (`bot.mode`, default: `simulation`). Switching to `live` requires explicit config change + API credentials.
 
@@ -442,22 +444,22 @@ All linked by signal_id → command_id → client_order_id → position_id.
 
 ### Collected metrics (written to DB periodically)
 
-| Metric | Type |
-|---|---|
-| bot_uptime_seconds | Counter |
-| tracked_markets_count | Gauge |
-| signals_generated_total | Counter |
-| risk_approved_total | Counter |
-| risk_rejected_total | Counter |
-| orders_placed_total | Counter |
-| orders_filled_total | Counter |
-| api_errors_total | Counter |
-| api_retries_total | Counter |
-| reconciliation_mismatches_total | Counter |
-| unrealized_pnl_usdc | Gauge |
-| realized_pnl_usdc | Gauge |
-| total_exposure_usdc | Gauge |
-| stale_data_count | Gauge |
+| Metric                          | Type      |
+| ------------------------------- | --------- |
+| bot_uptime_seconds              | Counter   |
+| tracked_markets_count           | Gauge     |
+| signals_generated_total         | Counter   |
+| risk_approved_total             | Counter   |
+| risk_rejected_total             | Counter   |
+| orders_placed_total             | Counter   |
+| orders_filled_total             | Counter   |
+| api_errors_total                | Counter   |
+| api_retries_total               | Counter   |
+| reconciliation_mismatches_total | Counter   |
+| unrealized_pnl_usdc             | Gauge     |
+| realized_pnl_usdc               | Gauge     |
+| total_exposure_usdc             | Gauge     |
+| stale_data_count                | Gauge     |
 | task_execution_duration_seconds | Histogram |
 
 ---
@@ -508,76 +510,76 @@ Layer 5 – Operations (observability + control)
 
 ```yaml
 bot:
-    mode: simulation          # simulation | live | replay
-    name: plankton_bot
+  mode: simulation # simulation | live | replay
+  name: plankton_bot
 
 exchange:
-    host: https://clob.polymarket.com
-    chain_id: 137
-    private_key: ${POLYMARKET_PRIVATE_KEY}     # env override
-    funder_address: ${POLYMARKET_FUNDER_ADDRESS}
-    signature_type: 0
+  host: https://clob.polymarket.com
+  chain_id: 137
+  private_key: ${POLYMARKET_PRIVATE_KEY} # env override
+  funder_address: ${POLYMARKET_FUNDER_ADDRESS}
+  signature_type: 0
 
 strategy:
-    enabled:
-        - cheap_contract_scalper
-        - intra_market_arb
-    categories:
-        - politics
-        - crypto-btc
-        - sports
-        - combat-sports
-        - entertainment
-        - price-binary
-    price_range:
-        min: 0.01
-        max: 0.20
-    min_liquidity_usdc: 50
+  enabled:
+    - cheap_contract_scalper
+    - intra_market_arb
+  categories:
+    - politics
+    - crypto-btc
+    - sports
+    - combat-sports
+    - entertainment
+    - price-binary
+  price_range:
+    min: 0.01
+    max: 0.20
+  min_liquidity_usdc: 50
 
 risk:
-    max_order_size: 10
-    max_total_exposure: 500
-    max_market_exposure: 50
-    max_category_exposure: 200
-    max_open_orders: 100
-    max_open_positions: 200
-    daily_loss_limit: 100
-    loss_cooldown_trades: 10
-    loss_cooldown_minutes: 30
-    min_edge: 0.02
-    max_liquidity_fraction: 0.25
-    max_data_age_seconds: 60
-    signal_dedup_window_seconds: 300
-    circuit_breaker_errors: 5
-    circuit_breaker_pause_minutes: 5
+  max_order_size: 10
+  max_total_exposure: 500
+  max_market_exposure: 50
+  max_category_exposure: 200
+  max_open_orders: 100
+  max_open_positions: 200
+  daily_loss_limit: 100
+  loss_cooldown_trades: 10
+  loss_cooldown_minutes: 30
+  min_edge: 0.02
+  max_liquidity_fraction: 0.25
+  max_data_age_seconds: 60
+  signal_dedup_window_seconds: 300
+  circuit_breaker_errors: 5
+  circuit_breaker_pause_minutes: 5
 
 exit:
-    target_profit_pct: 0.30
-    stop_loss_pct: 0.15
-    max_hold_minutes: 1440
-    hold_to_resolution_pct: 0.80
+  target_profit_pct: 0.30
+  stop_loss_pct: 0.15
+  max_hold_minutes: 1440
+  hold_to_resolution_pct: 0.80
 
 scheduler:
-    scanner_interval_seconds: 180
-    orderbook_interval_seconds: 30
-    exit_eval_interval_seconds: 30
-    reconciliation_interval_seconds: 60
-    metrics_interval_seconds: 60
-    max_signal_queue: 50
+  scanner_interval_seconds: 180
+  orderbook_interval_seconds: 30
+  exit_eval_interval_seconds: 30
+  reconciliation_interval_seconds: 60
+  metrics_interval_seconds: 60
+  max_signal_queue: 50
 
 rate_limit:
-    market_data_read_per_second: 10
-    order_write_per_second: 5
-    order_read_per_second: 10
+  market_data_read_per_second: 10
+  order_write_per_second: 5
+  order_read_per_second: 10
 
 data:
-    orderbook_ttl_seconds: 60
-    db_path: plankton_bot.db
+  orderbook_ttl_seconds: 60
+  db_path: plankton_bot.db
 
 logging:
-    level: INFO
-    format: json
-    file: logs/bot.jsonl
+  level: INFO
+  format: json
+  file: logs/bot.jsonl
 ```
 
 Environment variables override any config value with prefix `PLANKTON_BOT_`.
@@ -587,6 +589,7 @@ Environment variables override any config value with prefix `PLANKTON_BOT_`.
 ## 22. Development Roadmap
 
 ### v1.0 — Foundation
+
 - Single asyncio process
 - REST polling data feed
 - CheapContractScalper strategy (primary)
@@ -599,12 +602,14 @@ Environment variables override any config value with prefix `PLANKTON_BOT_`.
 - YAML config
 
 ### v1.1 — Live Trading
+
 - PolymarketLiveGateway (real CLOB API)
 - Token allowance management
 - Balance monitoring
 - Enhanced error handling for API failures
 
 ### v2.0 — Enhanced Strategies
+
 - IntraMarketArb strategy
 - SpreadCapture strategy
 - EventFamilyTrader strategy
@@ -612,6 +617,7 @@ Environment variables override any config value with prefix `PLANKTON_BOT_`.
 - Replay mode for backtesting
 
 ### v3.0 — Scale
+
 - Multi-process if needed (CPU-bound analysis)
 - Redis for event bus (if multi-process)
 - External data feeds (news, sentiment)
@@ -621,17 +627,17 @@ Environment variables override any config value with prefix `PLANKTON_BOT_`.
 
 ## 23. Anti-Patterns to Avoid
 
-| Anti-Pattern | Why | Instead |
-|---|---|---|
-| Strategy calling exchange API | Breaks audit trail, bypasses risk | Emit TradingSignal → RiskEngine → Executor |
-| Monitor closing positions directly | Bypasses risk checks | Emit ClosePositionCommand |
-| Global mutable state | Race conditions in async | State managers with event-driven updates |
-| Risk logic spread across code | Impossible to audit | Centralized RiskEngine |
-| Missing reconciliation | Drift between local and exchange state | Periodic reconciliation loop |
-| Missing persistence | State lost on restart | SQLite for all state |
-| Retries without idempotency | Double orders | command_id + dedup cache |
-| Blocking I/O in async tasks | Blocks entire event loop | Use aiohttp, aiosqlite, asyncio.to_thread |
-| Mixing paper and live logic | Bugs, accidental real trades | ExchangeGateway abstraction |
-| Starting strategy before data | Trades on empty state | Startup sequence enforces order |
-| sleep() loops | Inaccurate timing, no overlap protection | Proper async scheduler |
-| Hardcoded limits | Can't tune without code change | Everything in YAML config |
+| Anti-Pattern                       | Why                                      | Instead                                    |
+| ---------------------------------- | ---------------------------------------- | ------------------------------------------ |
+| Strategy calling exchange API      | Breaks audit trail, bypasses risk        | Emit TradingSignal → RiskEngine → Executor |
+| Monitor closing positions directly | Bypasses risk checks                     | Emit ClosePositionCommand                  |
+| Global mutable state               | Race conditions in async                 | State managers with event-driven updates   |
+| Risk logic spread across code      | Impossible to audit                      | Centralized RiskEngine                     |
+| Missing reconciliation             | Drift between local and exchange state   | Periodic reconciliation loop               |
+| Missing persistence                | State lost on restart                    | SQLite for all state                       |
+| Retries without idempotency        | Double orders                            | command_id + dedup cache                   |
+| Blocking I/O in async tasks        | Blocks entire event loop                 | Use aiohttp, aiosqlite, asyncio.to_thread  |
+| Mixing paper and live logic        | Bugs, accidental real trades             | ExchangeGateway abstraction                |
+| Starting strategy before data      | Trades on empty state                    | Startup sequence enforces order            |
+| sleep() loops                      | Inaccurate timing, no overlap protection | Proper async scheduler                     |
+| Hardcoded limits                   | Can't tune without code change           | Everything in YAML config                  |

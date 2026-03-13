@@ -12,115 +12,115 @@ For each hard rule, the responsible runtime module and the enforcement mechanism
 
 ### HR1. Selection unit is family + regime + horizon, not category
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Market Catalog / Normalization + Family Rules Engine |
-| Enforcement | Market Catalog must produce a `family_id = family_key:regime:horizon` for every market. Family Rules Engine must reject any signal referencing a market that has not been mapped to a family_id. Strategy/Scanner must never select by raw category. |
-| Schema fields | `family_id`, `family_key`, `regime`, `horizon` (Identity layer) |
+| Attribute      | Value                                                                                                                                                                                                                                                |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Market Catalog / Normalization + Family Rules Engine                                                                                                                                                                                                 |
+| Enforcement    | Market Catalog must produce a `family_id = family_key:regime:horizon` for every market. Family Rules Engine must reject any signal referencing a market that has not been mapped to a family_id. Strategy/Scanner must never select by raw category. |
+| Schema fields  | `family_id`, `family_key`, `regime`, `horizon` (Identity layer)                                                                                                                                                                                      |
 
 ### HR2. New family starts in probe-only mode
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Family Rules Engine + Risk/Inventory |
-| Enforcement | Family Rules Engine must initialize every new family with `promotion_state = probe-only` and `entry_mode = probe-first`. Risk/Inventory must reject scale-in attempts for any family still in probe-only state. Promotion to `scaled` requires recycle evidence (computed in Evidence layer, gated by `require_positive_recycle_history_for_scale`). |
-| Schema fields | `promotion_state`, `entry_mode`, `max_initial_notional_usdc`, `require_positive_recycle_history_for_scale` |
+| Attribute      | Value                                                                                                                                                                                                                                                                                                                                                |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Family Rules Engine + Risk/Inventory                                                                                                                                                                                                                                                                                                                 |
+| Enforcement    | Family Rules Engine must initialize every new family with `promotion_state = probe-only` and `entry_mode = probe-first`. Risk/Inventory must reject scale-in attempts for any family still in probe-only state. Promotion to `scaled` requires recycle evidence (computed in Evidence layer, gated by `require_positive_recycle_history_for_scale`). |
+| Schema fields  | `promotion_state`, `entry_mode`, `max_initial_notional_usdc`, `require_positive_recycle_history_for_scale`                                                                                                                                                                                                                                           |
 
 ### HR3. Active trading window 14:00-21:00 UTC
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Strategy/Scanner + Risk/Inventory |
-| Enforcement | Strategy module must check current UTC time before generating entry signals. During the active window, normal entry logic applies. Outside the window, only reduced-mode entries are allowed (SH2 -- reduced, not hard off). Risk/Inventory must enforce `session_mode` from family rules. |
-| Schema fields | `active_windows_utc`, `reduced_windows_utc`, `session_mode`, `weekend_mode` |
+| Attribute      | Value                                                                                                                                                                                                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Runtime module | Strategy/Scanner + Risk/Inventory                                                                                                                                                                                                                                                          |
+| Enforcement    | Strategy module must check current UTC time before generating entry signals. During the active window, normal entry logic applies. Outside the window, only reduced-mode entries are allowed (SH2 -- reduced, not hard off). Risk/Inventory must enforce `session_mode` from family rules. |
+| Schema fields  | `active_windows_utc`, `reduced_windows_utc`, `session_mode`, `weekend_mode`                                                                                                                                                                                                                |
 
 ### HR4. Default entry model is probe-first
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Strategy/Scanner + Risk/Inventory |
-| Enforcement | Strategy must generate initial entry signals sized according to `max_initial_notional_usdc`. Risk/Inventory must reject any first-entry that exceeds probe sizing. Broad cheap spraying is blocked by `max_probe_count_per_market` and `max_new_markets_per_session` caps. |
-| Schema fields | `entry_mode`, `max_initial_notional_usdc`, `max_probe_count_per_market` |
+| Attribute      | Value                                                                                                                                                                                                                                                                      |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Strategy/Scanner + Risk/Inventory                                                                                                                                                                                                                                          |
+| Enforcement    | Strategy must generate initial entry signals sized according to `max_initial_notional_usdc`. Risk/Inventory must reject any first-entry that exceeds probe sizing. Broad cheap spraying is blocked by `max_probe_count_per_market` and `max_new_markets_per_session` caps. |
+| Schema fields  | `entry_mode`, `max_initial_notional_usdc`, `max_probe_count_per_market`                                                                                                                                                                                                    |
 
 ### HR5. No one-shot high-price entries in unproven families
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Risk/Inventory |
-| Enforcement | Risk module must check: if `promotion_state` is not `scaled` and entry price >= `high_price_threshold` (default 0.20), reject unless the entry is part of an existing confirmed campaign. The field `allow_high_price_one_shot` must default to `false`. |
-| Schema fields | `allow_high_price_one_shot`, `high_price_threshold`, `require_proven_family_above_price`, `promotion_state` |
+| Attribute      | Value                                                                                                                                                                                                                                                    |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Risk/Inventory                                                                                                                                                                                                                                           |
+| Enforcement    | Risk module must check: if `promotion_state` is not `scaled` and entry price >= `high_price_threshold` (default 0.20), reject unless the entry is part of an existing confirmed campaign. The field `allow_high_price_one_shot` must default to `false`. |
+| Schema fields  | `allow_high_price_one_shot`, `high_price_threshold`, `require_proven_family_above_price`, `promotion_state`                                                                                                                                              |
 
 ### HR6. Standard scale-in: 2-3 buys
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Risk/Inventory |
-| Enforcement | Risk module must track buy count per leg. When buy count reaches `default_max_buys_per_leg` (default 3), further buys for that leg must be rejected unless `allow_heavy_campaigns` is true for the family. |
-| Schema fields | `default_max_buys_per_leg`, `scale_mode` |
+| Attribute      | Value                                                                                                                                                                                                      |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Risk/Inventory                                                                                                                                                                                             |
+| Enforcement    | Risk module must track buy count per leg. When buy count reaches `default_max_buys_per_leg` (default 3), further buys for that leg must be rejected unless `allow_heavy_campaigns` is true for the family. |
+| Schema fields  | `default_max_buys_per_leg`, `scale_mode`                                                                                                                                                                   |
 
 ### HR7. Heavy campaigns (4+ buys) only in proven families
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Risk/Inventory + Family Rules Engine |
-| Enforcement | Risk module must check `allow_heavy_campaigns` flag before permitting buy count > `default_max_buys_per_leg`. Family Rules Engine must only set `allow_heavy_campaigns = true` for families where `evidence_status = confirmed` and `heavy_campaign_eligible = true`. |
-| Schema fields | `allow_heavy_campaigns`, `heavy_max_buys_per_leg`, `heavy_campaign_eligible` |
+| Attribute      | Value                                                                                                                                                                                                                                                                 |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Risk/Inventory + Family Rules Engine                                                                                                                                                                                                                                  |
+| Enforcement    | Risk module must check `allow_heavy_campaigns` flag before permitting buy count > `default_max_buys_per_leg`. Family Rules Engine must only set `allow_heavy_campaigns = true` for families where `evidence_status = confirmed` and `heavy_campaign_eligible = true`. |
+| Schema fields  | `allow_heavy_campaigns`, `heavy_max_buys_per_leg`, `heavy_campaign_eligible`                                                                                                                                                                                          |
 
 ### HR8. Primary exit via repricing (SELL), not resolution
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Strategy/Scanner (exit logic) |
-| Enforcement | Strategy must generate SELL signals as the primary exit path. The `primary_profit_model` must be `sell-into-strength`. Resolution holding is permitted only when `resolution_holding_allowed = true` for the family. Exit logic must not default to hold-to-resolution. |
-| Schema fields | `exit_mode`, `primary_profit_model`, `resolution_holding_allowed` |
+| Attribute      | Value                                                                                                                                                                                                                                                                   |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Strategy/Scanner (exit logic)                                                                                                                                                                                                                                           |
+| Enforcement    | Strategy must generate SELL signals as the primary exit path. The `primary_profit_model` must be `sell-into-strength`. Resolution holding is permitted only when `resolution_holding_allowed = true` for the family. Exit logic must not default to hold-to-resolution. |
+| Schema fields  | `exit_mode`, `primary_profit_model`, `resolution_holding_allowed`                                                                                                                                                                                                       |
 
 ### HR9. Exit targets meaningful repricing, not micro-scalp
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Strategy/Scanner (exit logic) |
-| Enforcement | Exit logic should target the 20-50% ROI band as the central case. The `target_roi_band_low` and `target_roi_band_high` fields guide this. `allow_runner_extension` permits rare large winners to run beyond the normal band. The system must not be hardcoded to exit on the first minimal tick. |
-| Schema fields | `target_roi_band_low`, `target_roi_band_high`, `allow_runner_extension`, `prefer_fast_recycle` |
+| Attribute      | Value                                                                                                                                                                                                                                                                                            |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Runtime module | Strategy/Scanner (exit logic)                                                                                                                                                                                                                                                                    |
+| Enforcement    | Exit logic should target the 20-50% ROI band as the central case. The `target_roi_band_low` and `target_roi_band_high` fields guide this. `allow_runner_extension` permits rare large winners to run beyond the normal band. The system must not be hardcoded to exit on the first minimal tick. |
+| Schema fields  | `target_roi_band_low`, `target_roi_band_high`, `allow_runner_extension`, `prefer_fast_recycle`                                                                                                                                                                                                   |
 
 ### HR10. Two-sided trading is selective, not global
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Risk/Inventory + Family Rules Engine |
-| Enforcement | Risk module must check `allow_two_sided` before permitting any opposite-side entry. Family Rules Engine must default `allow_two_sided = false`. Only families with `both_sided_eligible = true` in Evidence layer and explicit operator or automated approval can have this enabled. |
-| Schema fields | `allow_two_sided`, `two_sided_mode`, `both_sided_eligible` |
+| Attribute      | Value                                                                                                                                                                                                                                                                                |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Runtime module | Risk/Inventory + Family Rules Engine                                                                                                                                                                                                                                                 |
+| Enforcement    | Risk module must check `allow_two_sided` before permitting any opposite-side entry. Family Rules Engine must default `allow_two_sided = false`. Only families with `both_sided_eligible = true` in Evidence layer and explicit operator or automated approval can have this enabled. |
+| Schema fields  | `allow_two_sided`, `two_sided_mode`, `both_sided_eligible`                                                                                                                                                                                                                           |
 
 ### HR11. Primary risk metric is tail-adjusted: realized_pnl_fifo - open_tail_cost
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Risk/Inventory |
-| Enforcement | Risk module must continuously compute `tail_adjusted_pnl_live = realized_pnl_fifo - current_tail_cost_usdc` per family. This metric must be the primary family health score. It must feed into quarantine decisions and promotion/demotion logic. It must not be analytics-only. |
-| Schema fields | `tail_adjusted_pnl_live`, `current_tail_cost_usdc`, `local_realized_pnl_fifo` |
+| Attribute      | Value                                                                                                                                                                                                                                                                            |
+| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Risk/Inventory                                                                                                                                                                                                                                                                   |
+| Enforcement    | Risk module must continuously compute `tail_adjusted_pnl_live = realized_pnl_fifo - current_tail_cost_usdc` per family. This metric must be the primary family health score. It must feed into quarantine decisions and promotion/demotion logic. It must not be analytics-only. |
+| Schema fields  | `tail_adjusted_pnl_live`, `current_tail_cost_usdc`, `local_realized_pnl_fifo`                                                                                                                                                                                                    |
 
 ### HR12. Threshold families require tail-control
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Risk/Inventory + Family Rules Engine |
-| Enforcement | For any family with `regime = threshold`, the field `threshold_cleanup_required` must be `true`. Risk module must quarantine threshold families when `tail_adjusted_pnl_live < 0`. New entries must be blocked once quarantine triggers. |
-| Schema fields | `threshold_cleanup_required`, `tail_quarantine_threshold_usdc`, `tail_quarantine_threshold_ratio` |
+| Attribute      | Value                                                                                                                                                                                                                                    |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Risk/Inventory + Family Rules Engine                                                                                                                                                                                                     |
+| Enforcement    | For any family with `regime = threshold`, the field `threshold_cleanup_required` must be `true`. Risk module must quarantine threshold families when `tail_adjusted_pnl_live < 0`. New entries must be blocked once quarantine triggers. |
+| Schema fields  | `threshold_cleanup_required`, `tail_quarantine_threshold_usdc`, `tail_quarantine_threshold_ratio`                                                                                                                                        |
 
 ### HR13. Long-dated sports outrights / awards / leaderboards excluded from default universe
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Family Rules Engine (universe management) |
-| Enforcement | Family Rules Engine must set `enabled = false` and `action = blocked` for families matching long-dated sports outright, award, and leaderboard patterns. Market Catalog normalization must tag these families with appropriate `regime` (e.g., `tournament`) and `horizon` (e.g., `season-long`) to enable automated filtering. |
-| Schema fields | `enabled`, `action`, `strategy_profile = restricted` |
+| Attribute      | Value                                                                                                                                                                                                                                                                                                                           |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime module | Family Rules Engine (universe management)                                                                                                                                                                                                                                                                                       |
+| Enforcement    | Family Rules Engine must set `enabled = false` and `action = blocked` for families matching long-dated sports outright, award, and leaderboard patterns. Market Catalog normalization must tag these families with appropriate `regime` (e.g., `tournament`) and `horizon` (e.g., `season-long`) to enable automated filtering. |
+| Schema fields  | `enabled`, `action`, `strategy_profile = restricted`                                                                                                                                                                                                                                                                            |
 
 ### HR14. Remote closed snapshot is not source of truth
 
-| Attribute | Value |
-| --- | --- |
-| Runtime module | Persistence + Reconciliation |
-| Enforcement | Primary P&L computation must use local FIFO analysis. Remote closed data may be ingested as auxiliary/helper data but must not override local tail-adjusted calculations. Reconciliation module must flag divergences between local and remote state but local FIFO + tail cost is authoritative for strategy decisions. |
-| Schema fields | `remote_closed_realized_pnl` (recommended, not required) |
+| Attribute      | Value                                                                                                                                                                                                                                                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Runtime module | Persistence + Reconciliation                                                                                                                                                                                                                                                                                             |
+| Enforcement    | Primary P&L computation must use local FIFO analysis. Remote closed data may be ingested as auxiliary/helper data but must not override local tail-adjusted calculations. Reconciliation module must flag divergences between local and remote state but local FIFO + tail cost is authoritative for strategy decisions. |
+| Schema fields  | `remote_closed_realized_pnl` (recommended, not required)                                                                                                                                                                                                                                                                 |
 
 ---
 
@@ -130,15 +130,15 @@ The Risk/Inventory module is the central enforcement point. It must compute and 
 
 ### Must Compute (per family, continuously)
 
-| Metric | Formula / Source | Update trigger |
-| --- | --- | --- |
+| Metric                   | Formula / Source                                   | Update trigger                    |
+| ------------------------ | -------------------------------------------------- | --------------------------------- |
 | `tail_adjusted_pnl_live` | `local_realized_pnl_fifo - current_tail_cost_usdc` | Every fill, every position change |
-| `current_tail_cost_usdc` | Sum of cost basis of all open positions in family | Every fill, reconciliation |
-| `open_value_usdc` | Current market value of open family inventory | Market data update |
-| `open_position_count` | Count of open positions | Every fill |
-| `open_dust_count` | Count of positions below dust threshold | Every fill |
-| `active_market_count` | Count of distinct markets with open positions | Every fill |
-| `buy_count_per_leg` | Number of buys in current active leg | Every buy fill |
+| `current_tail_cost_usdc` | Sum of cost basis of all open positions in family  | Every fill, reconciliation        |
+| `open_value_usdc`        | Current market value of open family inventory      | Market data update                |
+| `open_position_count`    | Count of open positions                            | Every fill                        |
+| `open_dust_count`        | Count of positions below dust threshold            | Every fill                        |
+| `active_market_count`    | Count of distinct markets with open positions      | Every fill                        |
+| `buy_count_per_leg`      | Number of buys in current active leg               | Every buy fill                    |
 
 ### Must Check (pre-trade gates)
 
@@ -207,33 +207,33 @@ Every entry signal from Strategy must pass through these gates in order:
 
 ### State Definitions
 
-| State | Meaning | Allowed actions |
-| --- | --- | --- |
-| `probe-only` | New or unproven family. Limited trust. | Small probe entries only. No scale-in. No high-price. No heavy campaigns. No two-sided. |
-| `scaled` | Proven family with recycle evidence. | Normal entries. Scale-in up to `default_max_buys_per_leg`. Heavy campaigns if `allow_heavy_campaigns = true`. Two-sided if `allow_two_sided = true`. |
-| `reduce-only` | Family losing edge or operator-restricted. | Exit existing positions only. No new entries. |
-| `quarantine` | Family tail has consumed edge or operator-blocked. | No trading activity. Positions may be force-pruned. |
+| State         | Meaning                                            | Allowed actions                                                                                                                                      |
+| ------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `probe-only`  | New or unproven family. Limited trust.             | Small probe entries only. No scale-in. No high-price. No heavy campaigns. No two-sided.                                                              |
+| `scaled`      | Proven family with recycle evidence.               | Normal entries. Scale-in up to `default_max_buys_per_leg`. Heavy campaigns if `allow_heavy_campaigns = true`. Two-sided if `allow_two_sided = true`. |
+| `reduce-only` | Family losing edge or operator-restricted.         | Exit existing positions only. No new entries.                                                                                                        |
+| `quarantine`  | Family tail has consumed edge or operator-blocked. | No trading activity. Positions may be force-pruned.                                                                                                  |
 
 ### Transition Conditions
 
-| From | To | Condition |
-| --- | --- | --- |
-| `probe-only` | `scaled` | `require_positive_recycle_history_for_scale = true` AND family shows positive recycle evidence: `tail_adjusted_pnl > 0` AND `local_trade_count >= threshold` AND repeated successful repricing exits observed |
-| `scaled` | `reduce-only` | `tail_adjusted_pnl_live` declining toward zero OR operator override |
-| `scaled` | `quarantine` | `tail_adjusted_pnl_live < 0` (automatic for threshold families per HR12) OR `tail_quarantine_threshold_usdc` breached OR `tail_quarantine_threshold_ratio` breached |
-| `reduce-only` | `quarantine` | `tail_adjusted_pnl_live` continues to deteriorate past quarantine threshold |
-| `quarantine` | `probe-only` | Operator manual re-promotion after evidence review AND tail positions pruned/resolved |
-| `reduce-only` | `probe-only` | Operator manual re-promotion after positions closed and evidence revalidated |
+| From          | To            | Condition                                                                                                                                                                                                     |
+| ------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `probe-only`  | `scaled`      | `require_positive_recycle_history_for_scale = true` AND family shows positive recycle evidence: `tail_adjusted_pnl > 0` AND `local_trade_count >= threshold` AND repeated successful repricing exits observed |
+| `scaled`      | `reduce-only` | `tail_adjusted_pnl_live` declining toward zero OR operator override                                                                                                                                           |
+| `scaled`      | `quarantine`  | `tail_adjusted_pnl_live < 0` (automatic for threshold families per HR12) OR `tail_quarantine_threshold_usdc` breached OR `tail_quarantine_threshold_ratio` breached                                           |
+| `reduce-only` | `quarantine`  | `tail_adjusted_pnl_live` continues to deteriorate past quarantine threshold                                                                                                                                   |
+| `quarantine`  | `probe-only`  | Operator manual re-promotion after evidence review AND tail positions pruned/resolved                                                                                                                         |
+| `reduce-only` | `probe-only`  | Operator manual re-promotion after positions closed and evidence revalidated                                                                                                                                  |
 
 ### v1 Automation vs. Operator Control
 
-| Transition | v1 automation level |
-| --- | --- |
-| `probe-only` -> `scaled` | Semi-automatic: system flags eligible families, operator approves |
-| `scaled` -> `quarantine` | Automatic for threshold families (HR12). Rule-driven for others when `tail_adjusted_pnl_live < threshold` |
-| `scaled` -> `reduce-only` | Operator-driven or simple rule-driven |
-| `quarantine` -> `probe-only` | Operator-only |
-| `reduce-only` -> `probe-only` | Operator-only |
+| Transition                    | v1 automation level                                                                                       |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `probe-only` -> `scaled`      | Semi-automatic: system flags eligible families, operator approves                                         |
+| `scaled` -> `quarantine`      | Automatic for threshold families (HR12). Rule-driven for others when `tail_adjusted_pnl_live < threshold` |
+| `scaled` -> `reduce-only`     | Operator-driven or simple rule-driven                                                                     |
+| `quarantine` -> `probe-only`  | Operator-only                                                                                             |
+| `reduce-only` -> `probe-only` | Operator-only                                                                                             |
 
 ---
 

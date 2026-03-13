@@ -40,12 +40,12 @@ apps/runtime/src/
 
 Packages consumed by these modules:
 
-| Package | Purpose |
-|---|---|
-| `@plankton/domain` | Shared value objects, enums, entity types |
-| `@plankton/event-bus` | Typed in-process bus with async handlers |
-| `@plankton/db` | Repository interfaces + SQLite v1 implementations |
-| `@plankton/exchange` | ExchangeGateway interface + Live/Sim implementations |
+| Package               | Purpose                                              |
+| --------------------- | ---------------------------------------------------- |
+| `@plankton/domain`    | Shared value objects, enums, entity types            |
+| `@plankton/event-bus` | Typed in-process bus with async handlers             |
+| `@plankton/db`        | Repository interfaces + SQLite v1 implementations    |
+| `@plankton/exchange`  | ExchangeGateway interface + Live/Sim implementations |
 
 ---
 
@@ -97,23 +97,23 @@ Packages consumed by these modules:
 
 ### Complete Event Catalog
 
-| Event | Producer | Consumers |
-|---|---|---|
-| `MarketSnapshotReceived` | market-data | normalization |
-| `NormalizedMarketUpdated` | normalization | strategy |
-| `SignalProduced` | strategy | risk-inventory |
-| `SignalApproved` | risk-inventory | execution |
-| `SignalRejected` | risk-inventory | persistence (logging) |
-| `PlaceOrderRequested` | execution (internal) | exchange gateway (via direct call) |
-| `OrderAccepted` | execution | risk-inventory, persistence |
-| `OrderRejected` | execution | risk-inventory, persistence |
-| `OrderCancelled` | execution | risk-inventory, persistence |
-| `FillReceived` | execution | risk-inventory, persistence |
-| `PositionUpdated` | risk-inventory | persistence |
-| `FamilyExposureChanged` | risk-inventory | strategy (for re-eval) |
-| `ReconciliationDriftDetected` | reconciliation | risk-inventory, execution |
-| `ReconciliationComplete` | reconciliation | supervisor |
-| `RuntimePhaseChanged` | supervisor | all modules |
+| Event                         | Producer             | Consumers                          |
+| ----------------------------- | -------------------- | ---------------------------------- |
+| `MarketSnapshotReceived`      | market-data          | normalization                      |
+| `NormalizedMarketUpdated`     | normalization        | strategy                           |
+| `SignalProduced`              | strategy             | risk-inventory                     |
+| `SignalApproved`              | risk-inventory       | execution                          |
+| `SignalRejected`              | risk-inventory       | persistence (logging)              |
+| `PlaceOrderRequested`         | execution (internal) | exchange gateway (via direct call) |
+| `OrderAccepted`               | execution            | risk-inventory, persistence        |
+| `OrderRejected`               | execution            | risk-inventory, persistence        |
+| `OrderCancelled`              | execution            | risk-inventory, persistence        |
+| `FillReceived`                | execution            | risk-inventory, persistence        |
+| `PositionUpdated`             | risk-inventory       | persistence                        |
+| `FamilyExposureChanged`       | risk-inventory       | strategy (for re-eval)             |
+| `ReconciliationDriftDetected` | reconciliation       | risk-inventory, execution          |
+| `ReconciliationComplete`      | reconciliation       | supervisor                         |
+| `RuntimePhaseChanged`         | supervisor           | all modules                        |
 
 ---
 
@@ -160,7 +160,7 @@ Step 4: Fill tracking
 ```typescript
 // packages/exchange/src/client-order-id.ts
 
-import { createHash } from 'node:crypto';
+import { createHash } from "node:crypto";
 
 /**
  * Deterministic client order ID from signal identity.
@@ -168,13 +168,13 @@ import { createHash } from 'node:crypto';
  * making retries safe against duplicate placement.
  */
 export function buildClientOrderId(parts: {
-  familyId: string;       // "us_election:binary:short"
-  marketTokenId: string;  // CLOB token ID
-  side: 'BUY' | 'SELL';
-  intentEpochMs: number;  // rounded to nearest strategy tick
+  familyId: string; // "us_election:binary:short"
+  marketTokenId: string; // CLOB token ID
+  side: "BUY" | "SELL";
+  intentEpochMs: number; // rounded to nearest strategy tick
 }): string {
   const raw = `${parts.familyId}|${parts.marketTokenId}|${parts.side}|${parts.intentEpochMs}`;
-  const hash = createHash('sha256').update(raw).digest('hex').slice(0, 16);
+  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 16);
   return `plk_${hash}`;
 }
 ```
@@ -188,29 +188,29 @@ export function buildClientOrderId(parts: {
 
 export interface PlaceOrderParams {
   clientOrderId: string;
-  tokenId: string;          // Polymarket CLOB token ID
-  side: 'BUY' | 'SELL';
-  size: number;             // in token units
-  price: number;            // limit price (0-1 range for binary)
-  orderType: 'GTC' | 'GTD' | 'FOK';
-  expiration?: number;      // unix seconds, for GTD
+  tokenId: string; // Polymarket CLOB token ID
+  side: "BUY" | "SELL";
+  size: number; // in token units
+  price: number; // limit price (0-1 range for binary)
+  orderType: "GTC" | "GTD" | "FOK";
+  expiration?: number; // unix seconds, for GTD
 }
 
 export interface CancelOrderParams {
-  orderId: string;          // exchange-assigned order ID
+  orderId: string; // exchange-assigned order ID
 }
 
 export interface ExchangeOrder {
   orderId: string;
   clientOrderId: string;
   tokenId: string;
-  side: 'BUY' | 'SELL';
+  side: "BUY" | "SELL";
   price: number;
   sizeTotal: number;
   sizeFilled: number;
   sizeRemaining: number;
-  status: 'OPEN' | 'FILLED' | 'PARTIALLY_FILLED' | 'CANCELLED' | 'EXPIRED';
-  createdAt: number;        // unix ms
+  status: "OPEN" | "FILLED" | "PARTIALLY_FILLED" | "CANCELLED" | "EXPIRED";
+  createdAt: number; // unix ms
 }
 
 export interface ExchangeFill {
@@ -218,15 +218,15 @@ export interface ExchangeFill {
   orderId: string;
   clientOrderId: string;
   tokenId: string;
-  side: 'BUY' | 'SELL';
+  side: "BUY" | "SELL";
   price: number;
   size: number;
   fee: number;
-  timestamp: number;        // unix ms
+  timestamp: number; // unix ms
 }
 
 export interface ExchangeBalance {
-  asset: string;            // "USDC" or token ID
+  asset: string; // "USDC" or token ID
   available: number;
   locked: number;
 }
@@ -245,15 +245,15 @@ export interface CancelOrderResult {
 }
 
 export type ExchangeErrorCode =
-  | 'INSUFFICIENT_BALANCE'
-  | 'INVALID_PRICE'
-  | 'INVALID_SIZE'
-  | 'MARKET_NOT_FOUND'
-  | 'ORDER_NOT_FOUND'
-  | 'RATE_LIMITED'
-  | 'NONCE_ERROR'
-  | 'NETWORK_ERROR'
-  | 'UNKNOWN';
+  | "INSUFFICIENT_BALANCE"
+  | "INVALID_PRICE"
+  | "INVALID_SIZE"
+  | "MARKET_NOT_FOUND"
+  | "ORDER_NOT_FOUND"
+  | "RATE_LIMITED"
+  | "NONCE_ERROR"
+  | "NETWORK_ERROR"
+  | "UNKNOWN";
 
 export interface ExchangeGateway {
   /** Place a limit order. Never throws -- returns result object. */
@@ -284,10 +284,10 @@ export interface ExchangeGateway {
 
 ### Implementations
 
-| Class | Module | Purpose |
-|---|---|---|
-| `LiveExchangeGateway` | `packages/exchange/src/live-gateway.ts` | Wraps `@polymarket/clob-client`, signs orders, hits real endpoints |
-| `SimulationExchangeGateway` | `packages/exchange/src/sim-gateway.ts` | In-memory order book, instant fills at stated price, zero fees by default |
+| Class                       | Module                                  | Purpose                                                                   |
+| --------------------------- | --------------------------------------- | ------------------------------------------------------------------------- |
+| `LiveExchangeGateway`       | `packages/exchange/src/live-gateway.ts` | Wraps `@polymarket/clob-client`, signs orders, hits real endpoints        |
+| `SimulationExchangeGateway` | `packages/exchange/src/sim-gateway.ts`  | In-memory order book, instant fills at stated price, zero fees by default |
 
 Both implement `ExchangeGateway`. The runtime receives the gateway via constructor injection; it never imports a concrete class.
 
@@ -301,14 +301,14 @@ Both implement `ExchangeGateway`. The runtime receives the gateway via construct
 // packages/domain/src/commands.ts
 
 export interface PlaceOrderCommand {
-  commandId: string;              // uuid v4, unique per attempt
-  clientOrderId: string;          // deterministic from signal identity
-  source: 'strategy' | 'operator' | 'reconciliation';
+  commandId: string; // uuid v4, unique per attempt
+  clientOrderId: string; // deterministic from signal identity
+  source: "strategy" | "operator" | "reconciliation";
   tokenId: string;
-  side: 'BUY' | 'SELL';
+  side: "BUY" | "SELL";
   size: number;
   price: number;
-  orderType: 'GTC' | 'GTD' | 'FOK';
+  orderType: "GTC" | "GTD" | "FOK";
   expiration?: number;
   familyId: string;
   metadata?: Record<string, unknown>;
@@ -317,13 +317,13 @@ export interface PlaceOrderCommand {
 export interface CancelOrderCommand {
   commandId: string;
   orderId: string;
-  reason: 'strategy_exit' | 'risk_breach' | 'operator' | 'shutdown' | 'reconciliation';
+  reason: "strategy_exit" | "risk_breach" | "operator" | "shutdown" | "reconciliation";
   familyId: string;
 }
 
 export interface CancelAllOrdersCommand {
   commandId: string;
-  reason: 'shutdown' | 'operator' | 'reconciliation';
+  reason: "shutdown" | "operator" | "reconciliation";
 }
 ```
 
@@ -333,12 +333,12 @@ export interface CancelAllOrdersCommand {
 // packages/domain/src/events.ts
 
 export interface OrderAccepted {
-  type: 'OrderAccepted';
+  type: "OrderAccepted";
   commandId: string;
   clientOrderId: string;
-  orderId: string;            // exchange-assigned
+  orderId: string; // exchange-assigned
   tokenId: string;
-  side: 'BUY' | 'SELL';
+  side: "BUY" | "SELL";
   price: number;
   size: number;
   familyId: string;
@@ -346,7 +346,7 @@ export interface OrderAccepted {
 }
 
 export interface OrderRejected {
-  type: 'OrderRejected';
+  type: "OrderRejected";
   commandId: string;
   clientOrderId: string;
   reason: string;
@@ -356,7 +356,7 @@ export interface OrderRejected {
 }
 
 export interface OrderCancelled {
-  type: 'OrderCancelled';
+  type: "OrderCancelled";
   commandId: string;
   orderId: string;
   reason: string;
@@ -365,12 +365,12 @@ export interface OrderCancelled {
 }
 
 export interface FillReceived {
-  type: 'FillReceived';
+  type: "FillReceived";
   fillId: string;
   orderId: string;
   clientOrderId: string;
   tokenId: string;
-  side: 'BUY' | 'SELL';
+  side: "BUY" | "SELL";
   price: number;
   size: number;
   fee: number;
@@ -457,14 +457,14 @@ Same steps as startup reconciliation, but:
 export interface ReconciliationResult {
   startedAt: number;
   completedAt: number;
-  type: 'startup' | 'periodic';
+  type: "startup" | "periodic";
   ordersOnExchange: number;
   ordersLocal: number;
-  orphanedLocalOrders: number;     // local open but not on exchange
-  unknownExchangeOrders: number;   // on exchange but not local
-  missedFills: number;             // exchange fills not in local DB
-  balanceDriftUsdc: number;        // absolute diff
-  repairsApplied: string[];        // description of auto-repairs
+  orphanedLocalOrders: number; // local open but not on exchange
+  unknownExchangeOrders: number; // on exchange but not local
+  missedFills: number; // exchange fills not in local DB
+  balanceDriftUsdc: number; // absolute diff
+  repairsApplied: string[]; // description of auto-repairs
   requiresOperatorReview: boolean;
 }
 ```
@@ -542,14 +542,14 @@ Phase 5: CLOSING
 
 ```typescript
 export type RuntimePhase =
-  | 'INITIALIZING'
-  | 'CONNECTING'
-  | 'RECONCILING'
-  | 'STREAMING'
-  | 'READY'
-  | 'SHUTTING_DOWN'
-  | 'STOPPED'
-  | 'ERROR';
+  | "INITIALIZING"
+  | "CONNECTING"
+  | "RECONCILING"
+  | "STREAMING"
+  | "READY"
+  | "SHUTTING_DOWN"
+  | "STOPPED"
+  | "ERROR";
 ```
 
 ---
@@ -561,6 +561,7 @@ export type RuntimePhase =
 `packages/shared/src/rate-limiter.ts` (or inline in `apps/runtime/src/shared/rate-limiter.ts` for v1).
 
 Consumed by:
+
 - **Execution engine** -- before every `placeOrder` / `cancelOrder` call
 - **Market data source** -- before every REST poll
 - **Reconciliation** -- before every `getOpenOrders` / `getFills` / `getBalances` call
@@ -573,8 +574,8 @@ Token bucket with per-second refill. Simple, no Redis needed for v1 single-proce
 
 ```typescript
 export interface RateLimiterConfig {
-  maxTokens: number;         // bucket capacity (e.g., 10)
-  refillPerSecond: number;   // tokens added per second (e.g., 5)
+  maxTokens: number; // bucket capacity (e.g., 10)
+  refillPerSecond: number; // tokens added per second (e.g., 5)
 }
 
 export interface RateLimiter {
@@ -630,11 +631,14 @@ export function createRateLimiter(config: RateLimiterConfig): RateLimiter {
           const idx = waiters.indexOf(entry);
           if (idx !== -1) {
             waiters.splice(idx, 1);
-            reject(new Error('Rate limiter timeout'));
+            reject(new Error("Rate limiter timeout"));
           }
         }, maxWaitMs);
         const origResolve = entry.resolve;
-        entry.resolve = () => { clearTimeout(timer); origResolve(); };
+        entry.resolve = () => {
+          clearTimeout(timer);
+          origResolve();
+        };
       });
     },
     available() {
@@ -647,11 +651,11 @@ export function createRateLimiter(config: RateLimiterConfig): RateLimiter {
 
 ### v1 defaults
 
-| Consumer | Budget | Notes |
-|---|---|---|
+| Consumer                 | Budget                | Notes                                                       |
+| ------------------------ | --------------------- | ----------------------------------------------------------- |
 | Execution (place/cancel) | 10 tokens, 5/s refill | Polymarket CLOB is not high-frequency; conservative is fine |
-| Market data polling | Same bucket | Shares the budget; polling interval naturally paces this |
-| Reconciliation | Same bucket | Recon should be infrequent enough to not starve execution |
+| Market data polling      | Same bucket           | Shares the budget; polling interval naturally paces this    |
+| Reconciliation           | Same bucket           | Recon should be infrequent enough to not starve execution   |
 
 Single bucket is acceptable for v1 because there is one process and one exchange. If different endpoints get different rate limits in the future, split into per-endpoint buckets.
 
@@ -665,16 +669,16 @@ Every interface below must exist for the runtime to compile and function. Groupe
 
 ```typescript
 /** Core identity types */
-export type FamilyId = string;          // "family_key:regime:horizon"
-export type TokenId = string;           // Polymarket CLOB token ID
-export type CommandId = string;         // uuid v4
-export type ClientOrderId = string;     // deterministic "plk_..." hash
-export type OrderId = string;           // exchange-assigned
+export type FamilyId = string; // "family_key:regime:horizon"
+export type TokenId = string; // Polymarket CLOB token ID
+export type CommandId = string; // uuid v4
+export type ClientOrderId = string; // deterministic "plk_..." hash
+export type OrderId = string; // exchange-assigned
 
-export type Side = 'BUY' | 'SELL';
-export type OrderType = 'GTC' | 'GTD' | 'FOK';
+export type Side = "BUY" | "SELL";
+export type OrderType = "GTC" | "GTD" | "FOK";
 
-export type FamilyState = 'probe' | 'scaled' | 'reduce_only' | 'quarantine';
+export type FamilyState = "probe" | "scaled" | "reduce_only" | "quarantine";
 
 export interface NormalizedMarket {
   tokenId: TokenId;
@@ -690,9 +694,9 @@ export interface NormalizedMarket {
   spread: number;
   volume24h: number;
   lastTradePrice: number;
-  endDate: number;                   // unix ms
+  endDate: number; // unix ms
   active: boolean;
-  updatedAt: number;                 // unix ms
+  updatedAt: number; // unix ms
 }
 
 export interface Signal {
@@ -702,8 +706,8 @@ export interface Signal {
   side: Side;
   suggestedPrice: number;
   suggestedSize: number;
-  reason: string;                    // human-readable
-  strategyTick: number;             // epoch ms of the scanner tick
+  reason: string; // human-readable
+  strategyTick: number; // epoch ms of the scanner tick
 }
 
 export interface Position {
@@ -734,22 +738,19 @@ export interface RuntimeEventMap {
   FillReceived: FillReceived;
   PositionUpdated: Position;
   FamilyExposureChanged: { familyId: FamilyId; totalExposure: number; state: FamilyState };
-  ReconciliationDriftDetected: { details: string; severity: 'warn' | 'critical' };
+  ReconciliationDriftDetected: { details: string; severity: "warn" | "critical" };
   ReconciliationComplete: ReconciliationResult;
   RuntimePhaseChanged: { phase: RuntimePhase; timestamp: number };
 }
 
 /** The bus itself */
 export interface EventBus {
-  publish<K extends keyof RuntimeEventMap>(
-    event: K,
-    payload: RuntimeEventMap[K],
-  ): Promise<void>;
+  publish<K extends keyof RuntimeEventMap>(event: K, payload: RuntimeEventMap[K]): Promise<void>;
 
   subscribe<K extends keyof RuntimeEventMap>(
     event: K,
     handler: (payload: RuntimeEventMap[K]) => Promise<void>,
-  ): () => void;   // returns unsubscribe function
+  ): () => void; // returns unsubscribe function
 
   /** Drain: wait for all in-flight handlers to complete */
   drain(timeoutMs?: number): Promise<void>;
@@ -760,9 +761,15 @@ export interface EventBus {
 
 ```typescript
 // ExchangeGateway -- see full definition in section 4 above
-export { ExchangeGateway } from './exchange-gateway';
-export { PlaceOrderParams, CancelOrderParams, ExchangeOrder, ExchangeFill, ExchangeBalance } from './exchange-gateway';
-export { buildClientOrderId } from './client-order-id';
+export { ExchangeGateway } from "./exchange-gateway";
+export {
+  PlaceOrderParams,
+  CancelOrderParams,
+  ExchangeOrder,
+  ExchangeFill,
+  ExchangeBalance,
+} from "./exchange-gateway";
+export { buildClientOrderId } from "./client-order-id";
 ```
 
 ### @plankton/db
@@ -778,7 +785,7 @@ export interface OrderRepository {
 
 export interface FillRepository {
   insert(fill: DbFill): Promise<void>;
-  getLatestTimestamp(): Promise<number>;   // for reconciliation cursor
+  getLatestTimestamp(): Promise<number>; // for reconciliation cursor
   getByOrderId(orderId: OrderId): Promise<DbFill[]>;
 }
 
@@ -796,9 +803,16 @@ export interface FamilyStateRepository {
 }
 
 export interface CommandLogRepository {
-  insert(entry: { commandId: CommandId; clientOrderId: ClientOrderId; status: string; timestamp: number }): Promise<void>;
+  insert(entry: {
+    commandId: CommandId;
+    clientOrderId: ClientOrderId;
+    status: string;
+    timestamp: number;
+  }): Promise<void>;
   getByCommandId(commandId: CommandId): Promise<{ status: string } | null>;
-  getByClientOrderId(clientOrderId: ClientOrderId): Promise<{ commandId: CommandId; status: string } | null>;
+  getByClientOrderId(
+    clientOrderId: ClientOrderId,
+  ): Promise<{ commandId: CommandId; status: string } | null>;
 }
 ```
 
@@ -816,10 +830,9 @@ export interface ExecutionEngine {
 
 /** Risk gate -- internal module interface */
 export interface RiskGate {
-  checkEligibility(signal: Signal): Promise<
-    | { eligible: true }
-    | { eligible: false; reason: string }
-  >;
+  checkEligibility(
+    signal: Signal,
+  ): Promise<{ eligible: true } | { eligible: false; reason: string }>;
 }
 
 /** Market data source -- internal module interface */
