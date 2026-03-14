@@ -22,7 +22,25 @@ const ALL_KEYS = [
   "POLY_API_SECRET",
   "POLY_PASSPHRASE",
   "LIVE_LITE_CONFIRM",
+  "LIVE_LITE_FAMILY_ALLOWLIST",
+  "LIVE_LITE_MAX_FAMILIES",
+  "LIVE_LITE_MAX_OPEN_VALUE_USDC",
+  "LIVE_LITE_MAX_ORDER_USDC",
+  "LIVE_LITE_MAX_ACTIVE_MARKETS",
 ];
+
+const BASE_LIVE_LITE_VARS = {
+  RUNTIME_MODE: "live-lite",
+  LIVE_LITE_CONFIRM: "true",
+  POLY_API_KEY: "key",
+  POLY_API_SECRET: "secret",
+  POLY_PASSPHRASE: "pass",
+  LIVE_LITE_FAMILY_ALLOWLIST: "familyA,familyB",
+  LIVE_LITE_MAX_FAMILIES: "5",
+  LIVE_LITE_MAX_OPEN_VALUE_USDC: "10000",
+  LIVE_LITE_MAX_ORDER_USDC: "500",
+  LIVE_LITE_MAX_ACTIVE_MARKETS: "20",
+};
 
 describe("loadEnv", () => {
   const saved: Record<string, string | undefined> = {};
@@ -116,5 +134,42 @@ describe("loadEnv", () => {
   it("rejects invalid LOG_LEVEL", () => {
     setEnvVars({ LOG_LEVEL: "verbose" });
     expect(() => loadEnv()).toThrow("Invalid environment configuration");
+  });
+
+  it("requires live-lite envelope vars when RUNTIME_MODE=live-lite", () => {
+    setEnvVars({
+      RUNTIME_MODE: "live-lite",
+      LIVE_LITE_CONFIRM: "true",
+      POLY_API_KEY: "key",
+      POLY_API_SECRET: "secret",
+      POLY_PASSPHRASE: "pass",
+    });
+    expect(() => loadEnv()).toThrow("LIVE_LITE_FAMILY_ALLOWLIST");
+  });
+
+  it("parses live-lite envelope vars correctly when all are present", () => {
+    setEnvVars(BASE_LIVE_LITE_VARS);
+    const config = loadEnv();
+    expect(config.liveLite).toBeDefined();
+    expect(config.liveLite?.familyAllowlist).toEqual(["familyA", "familyB"]);
+    expect(config.liveLite?.maxFamilies).toBe(5);
+    expect(config.liveLite?.maxOpenValueUsdc).toBe(10000);
+    expect(config.liveLite?.maxOrderUsdc).toBe(500);
+    expect(config.liveLite?.maxActiveMarkets).toBe(20);
+  });
+
+  it("rejects allowlist longer than maxFamilies", () => {
+    setEnvVars({
+      ...BASE_LIVE_LITE_VARS,
+      LIVE_LITE_FAMILY_ALLOWLIST: "a,b,c,d",
+      LIVE_LITE_MAX_FAMILIES: "2",
+    });
+    expect(() => loadEnv()).toThrow("allowlist length 4 exceeds maxFamilies 2");
+  });
+
+  it("returns undefined liveLite in simulation mode", () => {
+    setEnvVars({ RUNTIME_MODE: "simulation" });
+    const config = loadEnv();
+    expect(config.liveLite).toBeUndefined();
   });
 });
