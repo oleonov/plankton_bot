@@ -37,8 +37,8 @@ export interface ExecutionModuleDeps {
   fillRepo: FillRepository;
   log: Logger;
   botRunId: BotRunId;
-  runtimeControl?: RuntimeControl;
-  liveLiteGuard?: LiveLiteGuard;
+  runtimeControl?: RuntimeControl | undefined;
+  liveLiteGuard?: LiveLiteGuard | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {

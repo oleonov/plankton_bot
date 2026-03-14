@@ -39,8 +39,8 @@ export interface StrategyModuleDeps {
   familyStateRepo: FamilyStateRepository;
   log: Logger;
   scanIntervalMs: number;
-  runtimeControl?: RuntimeControl;
-  liveLiteGuard?: LiveLiteGuard;
+  runtimeControl?: RuntimeControl | undefined;
+  liveLiteGuard?: LiveLiteGuard | undefined;
 }
 
 export class StrategyModule implements RuntimeModule {

@@ -1,0 +1,223 @@
+// ─── Market / Family classification ───────────────────────────────────────────
+
+export const Regime = {
+  Threshold: "threshold",
+  PriceRange: "price-range",
+  DirectionalUpdown: "directional-updown",
+  SocialActivity: "social-activity",
+  Geopolitics: "geopolitics",
+  Generic: "generic",
+  Tournament: "tournament",
+  WeatherRange: "weather-range",
+} as const;
+export type Regime = (typeof Regime)[keyof typeof Regime];
+
+export const StrategyProfile = {
+  Scalp: "scalp",
+  EventDriven: "event-driven",
+  InventoryRecycle: "inventory-recycle",
+  OptionalProbe: "optional-probe",
+  Restricted: "restricted",
+} as const;
+export type StrategyProfile = (typeof StrategyProfile)[keyof typeof StrategyProfile];
+
+// ─── Evidence / Promotion ─────────────────────────────────────────────────────
+
+export const EvidenceStatus = {
+  Confirmed: "confirmed",
+  Partial: "partial",
+  Weak: "weak",
+  Unknown: "unknown",
+} as const;
+export type EvidenceStatus = (typeof EvidenceStatus)[keyof typeof EvidenceStatus];
+
+export const PromotionState = {
+  ProbeOnly: "probe-only",
+  Scaled: "scaled",
+  Restricted: "restricted",
+  ReduceOnly: "reduce-only",
+  Quarantine: "quarantine",
+} as const;
+export type PromotionState = (typeof PromotionState)[keyof typeof PromotionState];
+
+// ─── Family runtime / rules ───────────────────────────────────────────────────
+
+export const Action = {
+  Trade: "trade",
+  Monitor: "monitor",
+  ReduceOnly: "reduce-only",
+  Blocked: "blocked",
+} as const;
+export type Action = (typeof Action)[keyof typeof Action];
+
+export const RuntimeMode = {
+  Active: "active",
+  ProbeOnly: "probe-only",
+  ReduceOnly: "reduce-only",
+  Quarantine: "quarantine",
+} as const;
+export type RuntimeMode = (typeof RuntimeMode)[keyof typeof RuntimeMode];
+
+// ─── Entry / exit / scale / session policy enums ─────────────────────────────
+
+export const EntryMode = {
+  ProbeFirst: "probe-first",
+  ConvictionOnly: "conviction-only",
+  Disabled: "disabled",
+} as const;
+export type EntryMode = (typeof EntryMode)[keyof typeof EntryMode];
+
+export const ExitMode = {
+  RepricingSell: "repricing-sell",
+  ReduceOnly: "reduce-only",
+  Disabled: "disabled",
+} as const;
+export type ExitMode = (typeof ExitMode)[keyof typeof ExitMode];
+
+export const ScaleMode = {
+  ConfirmOnly: "confirm-only",
+  Disabled: "disabled",
+  AggressiveConfirm: "aggressive-confirm",
+} as const;
+export type ScaleMode = (typeof ScaleMode)[keyof typeof ScaleMode];
+
+export const SessionMode = {
+  ActiveWindow: "active-window",
+  Reduced: "reduced",
+  AlwaysReduced: "always-reduced",
+} as const;
+export type SessionMode = (typeof SessionMode)[keyof typeof SessionMode];
+
+export const TwoSidedMode = {
+  Disabled: "disabled",
+  Selective: "selective",
+  Active: "active",
+} as const;
+export type TwoSidedMode = (typeof TwoSidedMode)[keyof typeof TwoSidedMode];
+
+export const WeekendMode = {
+  Normal: "normal",
+  Reduced: "reduced",
+  Disabled: "disabled",
+} as const;
+export type WeekendMode = (typeof WeekendMode)[keyof typeof WeekendMode];
+
+export const WeekdayBias = {
+  Normal: "normal",
+  Preferred: "preferred",
+  Required: "required",
+} as const;
+export type WeekdayBias = (typeof WeekdayBias)[keyof typeof WeekdayBias];
+
+export const ProfitModel = {
+  SellIntoStrength: "sell-into-strength",
+} as const;
+export type ProfitModel = (typeof ProfitModel)[keyof typeof ProfitModel];
+
+// ─── Order ────────────────────────────────────────────────────────────────────
+
+export const OrderSide = {
+  Buy: "buy",
+  Sell: "sell",
+} as const;
+export type OrderSide = (typeof OrderSide)[keyof typeof OrderSide];
+
+export const OrderType = {
+  Gtc: "GTC",
+  Gtd: "GTD",
+  Fok: "FOK",
+} as const;
+export type OrderType = (typeof OrderType)[keyof typeof OrderType];
+
+export const TimeInForce = {
+  Gtc: "GTC",
+  Gtd: "GTD",
+  Fok: "FOK",
+} as const;
+export type TimeInForce = (typeof TimeInForce)[keyof typeof TimeInForce];
+
+export const OrderStatus = {
+  Pending: "pending",
+  Open: "open",
+  PartiallyFilled: "partially-filled",
+  Filled: "filled",
+  Cancelled: "cancelled",
+  Rejected: "rejected",
+  Expired: "expired",
+} as const;
+export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
+
+// ─── Position ─────────────────────────────────────────────────────────────────
+
+export const PositionStatus = {
+  Open: "open",
+  Closed: "closed",
+  Dust: "dust",
+} as const;
+export type PositionStatus = (typeof PositionStatus)[keyof typeof PositionStatus];
+
+// ─── Signal ───────────────────────────────────────────────────────────────────
+
+export const SignalReason = {
+  ProbeEntry: "probe-entry",
+  ScaleIn: "scale-in",
+  RepricingExit: "repricing-exit",
+  TailPrune: "tail-prune",
+  ReduceOnly: "reduce-only",
+  Operator: "operator",
+} as const;
+export type SignalReason = (typeof SignalReason)[keyof typeof SignalReason];
+
+// ─── Operator ─────────────────────────────────────────────────────────────────
+
+export const OperatorActionType = {
+  Pause: "pause",
+  Resume: "resume",
+  FamilyReduceOnly: "family_reduce_only",
+  FamilyQuarantine: "family_quarantine",
+  FamilyActivate: "family_activate",
+} as const;
+export type OperatorActionType = (typeof OperatorActionType)[keyof typeof OperatorActionType];
+
+export const CommandStatus = {
+  Pending: "pending",
+  Applied: "applied",
+  Rejected: "rejected",
+} as const;
+export type CommandStatus = (typeof CommandStatus)[keyof typeof CommandStatus];
+
+// ─── Runtime lifecycle ────────────────────────────────────────────────────────
+
+export const RuntimePhase = {
+  Initializing: "INITIALIZING",
+  Connecting: "CONNECTING",
+  Reconciling: "RECONCILING",
+  Streaming: "STREAMING",
+  Ready: "READY",
+  ShuttingDown: "SHUTTING_DOWN",
+  Stopped: "STOPPED",
+  Error: "ERROR",
+} as const;
+export type RuntimePhase = (typeof RuntimePhase)[keyof typeof RuntimePhase];
+
+// ─── Exchange error codes ─────────────────────────────────────────────────────
+
+export const ExchangeErrorCode = {
+  InsufficientBalance: "INSUFFICIENT_BALANCE",
+  InvalidPrice: "INVALID_PRICE",
+  InvalidSize: "INVALID_SIZE",
+  DuplicateClientOrderId: "DUPLICATE_CLIENT_ORDER_ID",
+  OrderNotFound: "ORDER_NOT_FOUND",
+  MarketNotFound: "MARKET_NOT_FOUND",
+  MarketClosed: "MARKET_CLOSED",
+  RateLimited: "RATE_LIMITED",
+  NonceError: "NONCE_ERROR",
+  NetworkError: "NETWORK_ERROR",
+  AuthenticationFailed: "AUTHENTICATION_FAILED",
+  RuntimePaused: "RUNTIME_PAUSED",
+  LiveLiteAllowlist: "LIVE_LITE_ALLOWLIST",
+  LiveLiteOrderCap: "LIVE_LITE_ORDER_CAP",
+  Unknown: "UNKNOWN",
+} as const;
+export type ExchangeErrorCode = (typeof ExchangeErrorCode)[keyof typeof ExchangeErrorCode];
+

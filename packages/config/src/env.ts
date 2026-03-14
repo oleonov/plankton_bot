@@ -99,7 +99,7 @@ export interface AppConfig {
     maxOpenValueUsdc: number;
     maxOrderUsdc: number;
     maxActiveMarkets: number;
-  };
+  } | undefined;
 }
 
 function findMonorepoRoot(): string {

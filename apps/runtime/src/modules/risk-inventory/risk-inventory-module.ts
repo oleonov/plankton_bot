@@ -35,7 +35,7 @@ export interface RiskInventoryModuleDeps {
   inventoryLotRepo: InventoryLotRepository;
   log: Logger;
   db: Database.Database;
-  liveLiteGuard?: LiveLiteGuard;
+  liveLiteGuard?: LiveLiteGuard | undefined;
 }
 
 export class RiskInventoryModule implements RuntimeModule {
