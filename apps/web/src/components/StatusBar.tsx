@@ -33,6 +33,19 @@ export function StatusBar() {
       <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: 4 }}>
         data:{status.marketDataSource} exec:{status.executionMode}
       </span>
+      {status.runtimeMode === "live-lite" && (
+        <span style={{
+          background: "var(--red)",
+          color: "white",
+          padding: "2px 8px",
+          borderRadius: 3,
+          fontWeight: 700,
+          fontSize: 10,
+          letterSpacing: 0.5,
+        }}>
+          ⚠ LIVE-LITE — real orders on exchange
+        </span>
+      )}
       <Badge value={status.paused ? "PAUSED" : "RUNNING"} type="mode" />
       <span>uptime: {formatUptime(status.uptimeSeconds)}</span>
       <span>recon: {formatAgo(status.lastReconciliationAt)}</span>
@@ -40,6 +53,9 @@ export function StatusBar() {
         ? <span className="badge badge-red">STALE</span>
         : <span className="badge badge-green">FRESH</span>}
       </span>
+      {status.reconciliationDriftDetected && (
+        <span className="badge badge-red" style={{ fontWeight: 700 }}>RECON DRIFT</span>
+      )}
       {sseIndicator}
       <span style={{ marginLeft: "auto" }}>
         {status.paused ? (
