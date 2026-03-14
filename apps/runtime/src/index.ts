@@ -25,6 +25,8 @@ import type { DbConnection } from "@plankton/db";
 import type { FamilyIdentity, FamilyState } from "@plankton/domain";
 import { createFamilyId, createBotRunId } from "@plankton/domain";
 import { createGateways } from "./gateway-factory.js";
+import { LiveLiteGuard } from "./live-lite-guard.js";
+import { liveLitePreflight } from "./live-lite-preflight.js";
 
 import { createLogger } from "./logger.js";
 import { Supervisor } from "./supervisor/supervisor.js";
@@ -139,6 +141,8 @@ async function main(): Promise<void> {
   });
   log.info({ mode: modeLabel }, "gateways created");
 
+  const liveLiteGuard = new LiveLiteGuard(config.liveLite);
+
   // 7c. Real modules for market-data and normalization
   const marketDataModule = new MarketDataModule({
     gateway: marketDataGateway,
@@ -191,6 +195,7 @@ async function main(): Promise<void> {
     inventoryLotRepo: repos.inventoryLot,
     log,
     db: conn.db,
+    liveLiteGuard,
   });
 
   // 7g. Strategy module
@@ -202,6 +207,7 @@ async function main(): Promise<void> {
     log,
     scanIntervalMs: 30_000,
     runtimeControl,
+    liveLiteGuard,
   });
 
   // 7h. Reconciliation module
@@ -266,7 +272,28 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  // 10. Start
+  // 10. Live-lite preflight: reconcile first, then check DB state
+  if (config.liveLite) {
+    log.info("running pre-supervisor reconciliation for live-lite preflight");
+    await reconciliationModule.runReconciliation();
+
+    const preflight = liveLitePreflight(conn.db, config.liveLite);
+    if (preflight.shouldPause) {
+      for (const v of preflight.violations) {
+        log.warn({ violation: v }, "live-lite preflight violation — starting paused");
+      }
+      supervisor.setPaused(true);
+    } else {
+      log.info("live-lite preflight passed — no violations");
+    }
+
+    // Persist envelope for API consumption, tied to this bot_run_id
+    conn.db.prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
+    ).run("live_lite_envelope", JSON.stringify(config.liveLite), new Date().toISOString());
+  }
+
+  // 11. Start
   try {
     await supervisor.start();
     log.info({ phase: supervisor.getPhase() }, "runtime ready");
