@@ -63,10 +63,12 @@ export function buildStatusSnapshot(
     ? (Date.now() - new Date(marketDataLastUpdateAt).getTime()) > staleThresholdMs
     : true; // no data yet = stale
 
-  // Live-lite envelope from current bot run
-  const envelopeRow = db
-    .prepare("SELECT labels FROM runtime_metrics WHERE metric_name = 'live_lite_envelope' ORDER BY captured_at DESC LIMIT 1")
-    .get() as { labels: string } | undefined;
+  // Live-lite envelope — only show when current run is live-lite
+  const envelopeRow = botRun?.mode === "live-lite"
+    ? db
+        .prepare("SELECT labels FROM runtime_metrics WHERE metric_name = 'live_lite_envelope' ORDER BY captured_at DESC LIMIT 1")
+        .get() as { labels: string } | undefined
+    : undefined;
 
   // Reconciliation drift: current-state (set on drift, reset on clean)
   const lastDrift = db

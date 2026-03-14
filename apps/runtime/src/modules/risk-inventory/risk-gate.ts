@@ -95,8 +95,13 @@ export class RiskGateImpl implements RiskGate {
     }
 
     // Live-lite global caps (Layer 3) — entry signals only
-    if (this.liveLiteGuard?.isActive && familyState) {
-      if (this.liveLiteGuard.wouldExceedOpenValueCap(familyState.openValueUsdc, signal.suggestedSizeUsdc)) {
+    // These caps are session-wide (across ALL families), not per-family.
+    if (this.liveLiteGuard?.isActive) {
+      const allStates = this.familyStateRepo.findAll();
+      const globalOpenValue = allStates.reduce((sum, s) => sum + s.openValueUsdc, 0);
+      const globalActiveMarkets = allStates.reduce((sum, s) => sum + s.activeMarketCount, 0);
+
+      if (this.liveLiteGuard.wouldExceedOpenValueCap(globalOpenValue, signal.suggestedSizeUsdc)) {
         rejected.push("live-lite-open-value-cap-exceeded");
         return this.decision(signal, false, rejected, passed);
       }
@@ -104,7 +109,7 @@ export class RiskGateImpl implements RiskGate {
 
       const existingPos = this.positionRepo.findByTokenId(signal.tokenId);
       const isNewMkt = !existingPos;
-      if (isNewMkt && this.liveLiteGuard.wouldExceedActiveMarketsCap(familyState.activeMarketCount, 1)) {
+      if (isNewMkt && this.liveLiteGuard.wouldExceedActiveMarketsCap(globalActiveMarkets, 1)) {
         rejected.push("live-lite-active-markets-cap-exceeded");
         return this.decision(signal, false, rejected, passed);
       }
