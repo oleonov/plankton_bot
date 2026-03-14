@@ -14,7 +14,7 @@ export function Overview() {
   if (!status || !metrics) return <div className="page">Loading...</div>;
 
   const dustCount = metrics.positions.dust ?? 0;
-  const quarantinedCount = familyMetrics?.filter((f) => f.runtimeMode === "quarantined").length ?? 0;
+  const quarantinedCount = familyMetrics?.filter((f) => f.runtimeMode === "quarantine").length ?? 0;
   const reduceOnlyCount = familyMetrics?.filter((f) => f.runtimeMode === "reduce-only").length ?? 0;
   const activeCount = familyMetrics?.filter((f) => f.runtimeMode === "active").length ?? 0;
   const tailAdjPnl = metrics.totalRealizedPnl - status.totalTailCostUsdc;
@@ -49,6 +49,25 @@ export function Overview() {
           </div>
         </Link>
       </div>
+
+      {status.liveLite && (
+        <div className="card" style={{
+          marginBottom: 16,
+          border: "1px solid var(--red)",
+          borderLeft: "3px solid var(--red)",
+          padding: "10px 16px",
+          fontSize: 12,
+        }}>
+          <div className="label" style={{ color: "var(--red)", fontWeight: 700, marginBottom: 6 }}>
+            Live-Lite Envelope
+          </div>
+          <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+            <span>Allowlist: {status.liveLite.familyAllowlist.join(", ")} ({status.liveLite.familyAllowlist.length} family)</span>
+            <span>Max: {status.liveLite.maxFamilies} family</span>
+            <span>Caps: ${status.liveLite.maxOpenValueUsdc} total / ${status.liveLite.maxOrderUsdc} per order / {status.liveLite.maxActiveMarkets} markets</span>
+          </div>
+        </div>
+      )}
 
       {/* Tail Risk + Financial */}
       <div className="grid-3" style={{ marginBottom: 16 }}>
