@@ -184,6 +184,7 @@ async function main(): Promise<void> {
     log,
     botRunId,
     runtimeControl,
+    liveLiteGuard,
   });
 
   // 7f. Risk + Inventory module

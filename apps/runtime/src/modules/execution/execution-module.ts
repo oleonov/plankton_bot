@@ -28,6 +28,7 @@ import type {
 } from "@plankton/domain";
 import { createOrderId, createFillId, createBotRunId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import type { LiveLiteGuard } from "../../live-lite-guard.js";
 
 export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
@@ -37,6 +38,7 @@ export interface ExecutionModuleDeps {
   log: Logger;
   botRunId: BotRunId;
   runtimeControl?: RuntimeControl;
+  liveLiteGuard?: LiveLiteGuard;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -96,6 +98,37 @@ export class ExecutionModule implements RuntimeModule {
         timestamp: Date.now(),
       });
       return;
+    }
+
+    // Live-lite allowlist check (Layer 4)
+    if (this.deps.liveLiteGuard?.isActive && !this.deps.liveLiteGuard.isFamilyAllowed(String(cmd.familyId))) {
+      this.log.warn({ commandId: cmd.commandId, familyId: cmd.familyId }, "order rejected — family not in live-lite allowlist");
+      await this.deps.bus.publish("OrderRejected", {
+        commandId: cmd.commandId,
+        clientOrderId: cmd.clientOrderId,
+        reason: "live-lite-allowlist-rejected",
+        errorCode: "LIVE_LITE_ALLOWLIST",
+        familyId: cmd.familyId,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    // Live-lite order cap check (Layer 5)
+    if (this.deps.liveLiteGuard?.isActive) {
+      const notional = cmd.price * cmd.size;
+      if (!this.deps.liveLiteGuard.isOrderWithinCap(notional)) {
+        this.log.warn({ commandId: cmd.commandId, notional }, "order rejected — exceeds live-lite order cap");
+        await this.deps.bus.publish("OrderRejected", {
+          commandId: cmd.commandId,
+          clientOrderId: cmd.clientOrderId,
+          reason: "live-lite-order-cap-exceeded",
+          errorCode: "LIVE_LITE_ORDER_CAP",
+          familyId: cmd.familyId,
+          timestamp: Date.now(),
+        });
+        return;
+      }
     }
 
     // Idempotency: skip already-processed commandId

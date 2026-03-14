@@ -6,6 +6,7 @@ import {
   createCommandId,
   createBotRunId,
 } from "@plankton/domain";
+import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
   ExchangeGateway,
   PlaceOrderParams,
@@ -516,6 +517,81 @@ describe("ExecutionModule", () => {
     expect(orderRepo.updateStatus).not.toHaveBeenCalled();
 
     await mod.stop();
+  });
+
+  // ─── Live-lite allowlist ──────────────────────────────────────────
+
+  it("rejects order for non-allowlisted family (live-lite allowlist)", async () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-allowed"],
+      maxFamilies: 10,
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ familyId: createFamilyId("fam-bad") }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("live-lite-allowlist-rejected");
+
+    await guardedMod.stop();
+  });
+
+  it("rejects order exceeding max order cap (live-lite order cap)", async () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-1"],
+      maxFamilies: 10,
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 10,
+      maxActiveMarkets: 10,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => { rejected.push(p); });
+
+    // price=0.5, size=21 → notional=10.5 > 10
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 0.5, size: 21 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("live-lite-order-cap-exceeded");
+
+    await guardedMod.stop();
   });
 
   // ─── Unsubscribe on stop ──────────────────────────────────────────
