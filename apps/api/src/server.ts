@@ -4,6 +4,10 @@
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { existsSync } from "node:fs";
 import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { createAuthHook } from "./auth.js";
@@ -58,6 +62,25 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(eventsRoutes, { prefix: "/api/v1", db, apiKey: deps.config.planktonApiKey, marketDataStaleThresholdMs: staleMs });
   await app.register(riskEventsRoutes, { prefix: "/api/v1", db });
   await app.register(pnlSeriesRoutes, { prefix: "/api/v1", db });
+
+  // Serve web UI static files in production
+  const webDistPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");
+  if (existsSync(webDistPath)) {
+    await app.register(fastifyStatic, {
+      root: webDistPath,
+      prefix: "/",
+      wildcard: false,
+    });
+
+    // SPA fallback — serve index.html for non-API routes
+    app.setNotFoundHandler((request, reply) => {
+      if (request.url.startsWith("/api/")) {
+        reply.status(404).send(fail("NOT_FOUND", `route ${request.url} not found`));
+      } else {
+        reply.sendFile("index.html");
+      }
+    });
+  }
 
   return app;
 }

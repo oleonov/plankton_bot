@@ -12,8 +12,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@plankton/domain": "workspace:*",
+    "@fastify/cors": "^11.2.0",
+    "@fastify/static": "^9.0.0",
+    "@plankton/config": "workspace:*",
     "@plankton/db": "workspace:*",
-    "@plankton/config": "workspace:*"
+    "@plankton/domain": "workspace:*",
+    "better-sqlite3": "^11.8.0",
+    "fastify": "^5.8.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0"
   }
 }
