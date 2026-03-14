@@ -21,6 +21,14 @@ export interface StatusData {
   totalTailCostUsdc: number;
   marketDataSource: "live" | "simulation";
   executionMode: "simulation" | "live";
+  liveLite?: {
+    familyAllowlist: string[];
+    maxFamilies: number;
+    maxOpenValueUsdc: number;
+    maxOrderUsdc: number;
+    maxActiveMarkets: number;
+  };
+  reconciliationDriftDetected: boolean;
 }
 
 /** GET /metrics */
