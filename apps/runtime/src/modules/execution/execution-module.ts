@@ -262,6 +262,13 @@ export class ExecutionModule implements RuntimeModule {
 
     for (const ef of orderFills) {
       const fillId = createFillId(ef.fillId);
+
+      // Skip fills already persisted (idempotent on restart)
+      if (this.deps.fillRepo.exists(fillId)) {
+        cumulativeFilled += ef.size;
+        continue;
+      }
+
       const sizeUsdc = ef.size * ef.price;
 
       const fill: Fill = {

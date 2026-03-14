@@ -14,7 +14,7 @@ export class SqliteFillRepository implements FillRepository {
   save(fill: Fill): void {
     this.db
       .prepare(
-        `INSERT OR IGNORE INTO fills
+        `INSERT INTO fills
          (fill_id, order_id, token_id, family_id, side, price, size,
           size_usdc, fee, filled_at, reconciled)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
@@ -31,6 +31,13 @@ export class SqliteFillRepository implements FillRepository {
         fill.fee,
         fill.filledAt,
       );
+  }
+
+  exists(fillId: FillId): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM fills WHERE fill_id = ? LIMIT 1")
+      .get(fillId);
+    return row !== undefined;
   }
 
   findByOrderId(orderId: OrderId): Fill[] {

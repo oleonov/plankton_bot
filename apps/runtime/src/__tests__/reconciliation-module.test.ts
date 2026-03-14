@@ -72,6 +72,7 @@ function createMockOrderRepo(): OrderRepository {
 function createMockFillRepo(): FillRepository {
   return {
     save: vi.fn(),
+    exists: vi.fn().mockReturnValue(false),
     findByOrderId: vi.fn().mockReturnValue([]),
     findByTokenId: vi.fn().mockReturnValue([]),
     findRecent: vi.fn().mockReturnValue([]),
