@@ -22,6 +22,7 @@ import type {
   RuntimeEventMap,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { RiskGateImpl } from "./risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
 import { FamilyExposureCalculator } from "./family-exposure.js";
@@ -34,6 +35,7 @@ export interface RiskInventoryModuleDeps {
   inventoryLotRepo: InventoryLotRepository;
   log: Logger;
   db: Database.Database;
+  liveLiteGuard?: LiveLiteGuard;
 }
 
 export class RiskInventoryModule implements RuntimeModule {
@@ -53,6 +55,7 @@ export class RiskInventoryModule implements RuntimeModule {
       deps.familyStateRepo,
       deps.positionRepo,
       this.log,
+      deps.liveLiteGuard,
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,

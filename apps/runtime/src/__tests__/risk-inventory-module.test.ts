@@ -7,6 +7,7 @@ import {
   createPositionId,
   createLotId,
 } from "@plankton/domain";
+import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
   FamilyRulesProvider,
   FamilyRuleBundle,
@@ -234,7 +235,7 @@ describe("RiskInventoryModule", () => {
   let lotRepo: ReturnType<typeof createMockLotRepo>;
   let mod: RiskInventoryModule;
 
-  function createModule() {
+  function createModule(liveLiteGuard?: LiveLiteGuard) {
     return new RiskInventoryModule({
       bus,
       rulesProvider,
@@ -243,6 +244,7 @@ describe("RiskInventoryModule", () => {
       inventoryLotRepo: lotRepo,
       log: silentLog,
       db: mockDb,
+      liveLiteGuard,
     });
   }
 
@@ -831,6 +833,131 @@ describe("RiskInventoryModule", () => {
 
     await mod.stop();
   });
+
+  // ─── Live-lite allowlist check ────────────────────────────
+
+  it("rejects signal for non-allowlisted family in live-lite mode", async () => {
+    const liveLiteGuard = new LiveLiteGuard({
+      familyAllowlist: ["fam-other"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 500,
+      maxOrderUsdc: 50,
+      maxActiveMarkets: 3,
+    });
+    mod = createModule(liveLiteGuard);
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() }); // familyId = FAM_ID = "fam-btc"
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("live-lite-allowlist-rejected");
+
+    await mod.stop();
+  });
+
+  it("approves signal for allowlisted family in live-lite mode", async () => {
+    const liveLiteGuard = new LiveLiteGuard({
+      familyAllowlist: ["fam-btc"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 500,
+      maxOrderUsdc: 50,
+      maxActiveMarkets: 3,
+    });
+    mod = createModule(liveLiteGuard);
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() }); // familyId = fam-btc
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("rejects entry signal when live-lite open value cap would be exceeded", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ openValueUsdc: 490 }),
+    );
+    const liveLiteGuard = new LiveLiteGuard({
+      familyAllowlist: ["fam-btc"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 490,  // current + signal (5) = 495 > 490
+      maxOrderUsdc: 50,
+      maxActiveMarkets: 3,
+    });
+    mod = createModule(liveLiteGuard);
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("live-lite-open-value-cap-exceeded");
+
+    await mod.stop();
+  });
+
+  it("rejects entry for new market when live-lite active markets cap would be exceeded", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ activeMarketCount: 3 }),
+    );
+    positionRepo = createMockPositionRepo(null); // no existing position → new market
+    const liveLiteGuard = new LiveLiteGuard({
+      familyAllowlist: ["fam-btc"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 10_000,
+      maxOrderUsdc: 50,
+      maxActiveMarkets: 3,  // current 3 + 1 would exceed 3
+    });
+    mod = createModule(liveLiteGuard);
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("live-lite-active-markets-cap-exceeded");
+
+    await mod.stop();
+  });
+
+  it("allows exit signal through live-lite caps without rejection", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ openValueUsdc: 999, activeMarketCount: 99 }),
+    );
+    const liveLiteGuard = new LiveLiteGuard({
+      familyAllowlist: ["fam-btc"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 1,  // would reject any entry
+      maxOrderUsdc: 50,
+      maxActiveMarkets: 1,  // would reject new markets
+    });
+    mod = createModule(liveLiteGuard);
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+    // Exit signal — must never be blocked by live-lite caps
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  // ─── Error resilience ─────────────────────────────────────
 
   it("logs error on orphan sell fill without fabricating PnL", async () => {
     // No existing position for the token
