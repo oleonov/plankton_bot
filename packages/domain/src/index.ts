@@ -1,4 +1,10 @@
-// @plankton/domain — pure types, enums, events, commands, interfaces
-// Phase 2 will populate this with domain contracts.
-
-export type PlaceholderType = { readonly _brand: "PlanktonDomain" };
+// @plankton/domain — pure types, enums, and branded IDs. Zero runtime deps.
+export * from "./enums.js";
+export * from "./ids.js";
+export * from "./types.js";
+export * from "./events.js";
+export * from "./commands.js";
+export * from "./gateway.js";
+export * from "./repositories.js";
+export * from "./bus.js";
+export * from "./runtime-control.js";
