@@ -40,6 +40,7 @@ import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-mo
 import { StrategyModule } from "../modules/strategy/strategy-module.js";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
 import { Supervisor } from "../supervisor/supervisor.js";
+import { CommandPoller } from "../supervisor/command-poller.js";
 
 import type { ScenarioFixture, ScenarioResult, ScheduledCommand } from "./types.js";
 
@@ -49,6 +50,11 @@ export async function runScenario(
   fixture: ScenarioFixture,
   familyConfigs: FamilyConfig[],
 ): Promise<ScenarioResult> {
+  if (fixture.dbPath) {
+    // Shared-DB mode: caller manages DB lifecycle
+    return await executeScenario(fixture, familyConfigs, fixture.dbPath);
+  }
+
   const tmpDir = mkdtempSync(join(tmpdir(), "plankton-scenario-"));
   const dbPath = join(tmpDir, "scenario.db");
 
@@ -86,21 +92,24 @@ async function executeScenario(
   repos.familyCatalog.upsertAll(families);
 
   for (const identity of families) {
-    const baseline: FamilyState = {
-      familyId: identity.familyId,
-      runtimeMode: "active",
-      openValueUsdc: 0,
-      openPositionCount: 0,
-      openDustCount: 0,
-      activeMarketCount: 0,
-      currentTailCostUsdc: 0,
-      tailAdjustedPnlLive: 0,
-      lastEntryTs: null,
-      lastExitTs: null,
-      quarantineReason: null,
-      updatedAt: new Date().toISOString(),
-    };
-    repos.familyState.save(baseline);
+    const existing = repos.familyState.get(identity.familyId);
+    if (!existing) {
+      const baseline: FamilyState = {
+        familyId: identity.familyId,
+        runtimeMode: "active",
+        openValueUsdc: 0,
+        openPositionCount: 0,
+        openDustCount: 0,
+        activeMarketCount: 0,
+        currentTailCostUsdc: 0,
+        tailAdjustedPnlLive: 0,
+        lastEntryTs: null,
+        lastExitTs: null,
+        quarantineReason: null,
+        updatedAt: new Date().toISOString(),
+      };
+      repos.familyState.save(baseline);
+    }
   }
 
   // 3. Apply family state overrides
@@ -124,6 +133,11 @@ async function executeScenario(
   // 4. Create gateways
   const marketDataGateway = new SimulationMarketDataGateway();
   const exchangeGateway = new SimulationExchangeGateway();
+
+  // 4a. Run optional setup callback (after seeding, before modules)
+  if (fixture.setup) {
+    await fixture.setup({ db: conn.db, exchangeGateway, repos });
+  }
 
   // 5. Create event bus and subscribe for counting
   const bus = new InProcessEventBus();
@@ -154,6 +168,17 @@ async function executeScenario(
   // 7. Create modules (long intervals — we bypass timers)
   let supervisor: Supervisor;
   const runtimeControl = { isPaused: () => supervisor.isPaused() };
+
+  const commandPoller = new CommandPoller({
+    commandRepo: repos.operatorCommand,
+    actionRepo: repos.operatorAction,
+    familyStateRepo: repos.familyState,
+    bus,
+    log,
+    getPaused: () => supervisor.isPaused(),
+    setPaused: (p) => supervisor.setPaused(p),
+    pollIntervalMs: 60_000, // Long — we poll manually
+  });
 
   const marketDataModule = new MarketDataModule({
     gateway: marketDataGateway,
@@ -215,6 +240,7 @@ async function executeScenario(
   // 8. Create supervisor and start
   supervisor = new Supervisor({
     modules: [
+      ["command-poller", commandPoller],
       ["market-data", marketDataModule],
       ["normalization", normalizationModule],
       ["reconciliation", reconciliationModule],
@@ -244,6 +270,10 @@ async function executeScenario(
         });
       }
     }
+
+    // Process commands
+    await commandPoller.poll();
+    await bus.drain(DRAIN_TIMEOUT_MS);
 
     // Load market snapshot into simulation gateway
     const snapshot = fixture.marketSnapshots[tick % fixture.marketSnapshots.length]!;
