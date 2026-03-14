@@ -22,6 +22,7 @@ import type {
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { StrategyModule } from "../modules/strategy/strategy-module.js";
+import { LiveLiteGuard } from "../live-lite-guard.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
@@ -1309,6 +1310,75 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       expect(orderRequests).toHaveLength(0);
+    });
+  });
+
+  // ─── Live-lite allowlist filter ───────────────────────────
+
+  describe("live-lite allowlist filter", () => {
+    it("skips signals for non-allowlisted families in live-lite mode", async () => {
+      // "fam-other" is in allowlist, but market belongs to FAM_ID ("fam-btc")
+      const liveLiteGuard = new LiveLiteGuard({
+        familyAllowlist: ["fam-other"],
+        maxFamilies: 2,
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 50,
+        maxActiveMarkets: 3,
+      });
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        liveLiteGuard,
+      });
+      await mod.start();
+
+      const signals: unknown[] = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      // fam-btc is not in allowlist ["fam-other"] — all signals must be filtered
+      expect(signals).toHaveLength(0);
+    });
+
+    it("passes signals for allowlisted families in live-lite mode", async () => {
+      const liveLiteGuard = new LiveLiteGuard({
+        familyAllowlist: ["fam-btc"],
+        maxFamilies: 2,
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 50,
+        maxActiveMarkets: 3,
+      });
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        liveLiteGuard,
+      });
+      await mod.start();
+
+      const signals: unknown[] = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      // fam-btc IS in the allowlist — signal should pass through
+      expect(signals).toHaveLength(1);
     });
   });
 

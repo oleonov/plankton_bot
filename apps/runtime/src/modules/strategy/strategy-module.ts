@@ -28,6 +28,7 @@ import type {
   RuntimeControl,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { scan, createBuyTracker, type BuyTracker } from "./scanner.js";
 import { SignalToOrderBridge } from "./signal-to-order.js";
 
@@ -39,6 +40,7 @@ export interface StrategyModuleDeps {
   log: Logger;
   scanIntervalMs: number;
   runtimeControl?: RuntimeControl;
+  liveLiteGuard?: LiveLiteGuard;
 }
 
 export class StrategyModule implements RuntimeModule {
@@ -133,14 +135,18 @@ export class StrategyModule implements RuntimeModule {
         tickTs,
       );
 
-      for (const signal of signals) {
+      const filteredSignals = this.deps.liveLiteGuard
+        ? signals.filter(s => this.deps.liveLiteGuard!.isFamilyAllowed(String(s.familyId)))
+        : signals;
+
+      for (const signal of filteredSignals) {
         this.signalCount++;
         await this.deps.bus.publish("SignalProduced", { signal });
       }
 
-      if (signals.length > 0) {
+      if (filteredSignals.length > 0) {
         this.log.info(
-          { tick: this.tickCount, signals: signals.length },
+          { tick: this.tickCount, signals: filteredSignals.length },
           "scan tick produced signals",
         );
       } else {
