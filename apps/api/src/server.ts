@@ -18,6 +18,7 @@ import { metricsRoutes } from "./routes/metrics.js";
 import { actionRoutes } from "./routes/actions.js";
 import { eventsRoutes } from "./routes/events.js";
 import { riskEventsRoutes } from "./routes/risk-events.js";
+import { pnlSeriesRoutes } from "./routes/pnl-series.js";
 
 export interface ServerDeps {
   config: AppConfig;
@@ -56,6 +57,7 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(actionRoutes, { prefix: "/api/v1", db });
   await app.register(eventsRoutes, { prefix: "/api/v1", db, apiKey: deps.config.planktonApiKey, marketDataStaleThresholdMs: staleMs });
   await app.register(riskEventsRoutes, { prefix: "/api/v1", db });
+  await app.register(pnlSeriesRoutes, { prefix: "/api/v1", db });
 
   return app;
 }

@@ -665,3 +665,58 @@ describe("GET /risk-events", () => {
     }
   });
 });
+
+// ─── PnL Series ─────────────────────────────────────────────────────
+
+describe("GET /metrics/pnl-series", () => {
+  it("returns empty series when no pnl_ledger rows exist", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/pnl-series",
+      headers: authHeaders(),
+    });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.items).toEqual([]);
+  });
+
+  it("returns cumulative realized PnL by day", async () => {
+    conn.db.exec(`
+      INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at, reconciled)
+      VALUES
+        ('f-1', 'ord-1', 'tok-1', 'fam-1', 'sell', 0.6, 10, 6, 0.01, '2026-03-12T10:00:00Z', 0),
+        ('f-2', 'ord-1', 'tok-1', 'fam-1', 'sell', 0.6, 10, 6, 0.01, '2026-03-12T14:00:00Z', 0),
+        ('f-3', 'ord-1', 'tok-1', 'fam-1', 'sell', 0.6, 10, 6, 0.01, '2026-03-13T09:00:00Z', 0);
+
+      INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at)
+      VALUES
+        ('f-1', 'pos-1', 'fam-1', 10.5, '2026-03-12T10:00:00Z'),
+        ('f-2', 'pos-1', 'fam-1', -3.2, '2026-03-12T14:00:00Z'),
+        ('f-3', 'pos-1', 'fam-1', 5.0,  '2026-03-13T09:00:00Z')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/pnl-series?days=14",
+      headers: authHeaders(),
+    });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+
+    const items = body.data.items;
+    expect(items.length).toBe(2);
+    expect(items[0].date).toBe("2026-03-12");
+    expect(items[0].realizedPnl).toBeCloseTo(7.3);   // 10.5 + (-3.2) cumulative
+    expect(items[1].date).toBe("2026-03-13");
+    expect(items[1].realizedPnl).toBeCloseTo(12.3);  // 7.3 + 5.0 cumulative
+  });
+
+  it("respects days parameter", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/pnl-series?days=1",
+      headers: authHeaders(),
+    });
+    expect(res.json().ok).toBe(true);
+  });
+});
