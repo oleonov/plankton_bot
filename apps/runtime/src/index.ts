@@ -240,8 +240,15 @@ async function main(): Promise<void> {
     VALUES (?, 1, ?)
   `);
 
+  bus.subscribe("ReconciliationDriftDetected", async () => {
+    upsertMetric.run("reconciliation_drift", new Date().toISOString());
+  });
+
   bus.subscribe("ReconciliationComplete", async ({ result }) => {
     upsertMetric.run("last_reconciliation", new Date(result.ranAt).toISOString());
+    if (result.clean) {
+      upsertMetric.run("reconciliation_clean", new Date(result.ranAt).toISOString());
+    }
   });
 
   bus.subscribe("MarketSnapshotReceived", async ({ timestamp }) => {

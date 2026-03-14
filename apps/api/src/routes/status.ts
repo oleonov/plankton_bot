@@ -63,6 +63,23 @@ export function buildStatusSnapshot(
     ? (Date.now() - new Date(marketDataLastUpdateAt).getTime()) > staleThresholdMs
     : true; // no data yet = stale
 
+  // Live-lite envelope from current bot run
+  const envelopeRow = db
+    .prepare("SELECT labels FROM runtime_metrics WHERE metric_name = 'live_lite_envelope' ORDER BY captured_at DESC LIMIT 1")
+    .get() as { labels: string } | undefined;
+
+  // Reconciliation drift: current-state (set on drift, reset on clean)
+  const lastDrift = db
+    .prepare("SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_drift' ORDER BY captured_at DESC LIMIT 1")
+    .get() as { captured_at: string } | undefined;
+  const lastCleanRecon = db
+    .prepare("SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_clean' ORDER BY captured_at DESC LIMIT 1")
+    .get() as { captured_at: string } | undefined;
+
+  const reconciliationDriftDetected = lastDrift
+    ? (!lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at))
+    : false;
+
   return {
     runtimeMode: botRun?.mode ?? "simulation",
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
@@ -77,6 +94,8 @@ export function buildStatusSnapshot(
     totalTailCostUsdc: totalExposure.tail,
     marketDataSource: mdSource ? JSON.parse(mdSource.labels).value : "simulation",
     executionMode: execMode ? JSON.parse(execMode.labels).value : "simulation",
+    liveLite: envelopeRow ? JSON.parse(envelopeRow.labels) : undefined,
+    reconciliationDriftDetected,
   };
 }
 
