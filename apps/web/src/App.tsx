@@ -2,6 +2,11 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { SSEProvider } from "./api/sse.tsx";
 import { Layout } from "./components/Layout.tsx";
+import { Overview } from "./pages/Overview.tsx";
+import { Positions } from "./pages/Positions.tsx";
+import { OrdersFills } from "./pages/OrdersFills.tsx";
+import { Families } from "./pages/Families.tsx";
+import { RiskQuarantine } from "./pages/RiskQuarantine.tsx";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 10_000, retry: 1 } },
@@ -15,11 +20,11 @@ export function App() {
           <Routes>
             <Route element={<Layout />}>
               <Route path="/" element={<Navigate to="/overview" replace />} />
-              <Route path="/overview" element={<div className="page">Overview — coming next</div>} />
-              <Route path="/positions" element={<div className="page">Positions — coming next</div>} />
-              <Route path="/orders" element={<div className="page">Orders — coming next</div>} />
-              <Route path="/families" element={<div className="page">Families — coming next</div>} />
-              <Route path="/risk" element={<div className="page">Risk — coming next</div>} />
+              <Route path="/overview" element={<Overview />} />
+              <Route path="/positions" element={<Positions />} />
+              <Route path="/orders" element={<OrdersFills />} />
+              <Route path="/families" element={<Families />} />
+              <Route path="/risk" element={<RiskQuarantine />} />
             </Route>
           </Routes>
         </BrowserRouter>
