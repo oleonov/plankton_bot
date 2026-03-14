@@ -23,11 +23,8 @@ import {
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { FamilyIdentity, FamilyState } from "@plankton/domain";
-import { createFamilyId } from "@plankton/domain";
-
-import { SimulationMarketDataGateway, SimulationExchangeGateway } from "@plankton/exchange";
-import type { MarketDataGateway, ExchangeGateway } from "@plankton/domain";
-import { createBotRunId } from "@plankton/domain";
+import { createFamilyId, createBotRunId } from "@plankton/domain";
+import { createGateways } from "./gateway-factory.js";
 
 import { createLogger } from "./logger.js";
 import { Supervisor } from "./supervisor/supervisor.js";
@@ -44,7 +41,7 @@ import { ReconciliationModule } from "./modules/reconciliation/reconciliation-mo
 async function main(): Promise<void> {
   // 1. Load config
   const config = loadEnv();
-  const log = createLogger(config.logLevel);
+  const log = createLogger(config.logLevel, config.runtimeMode);
   log.info({ mode: config.runtimeMode }, "plankton runtime starting");
 
   // 2. Bootstrap DB
@@ -125,16 +122,19 @@ async function main(): Promise<void> {
     pollIntervalMs: 5_000,
   });
 
-  // 7b. Create market-data gateway (simulation or live)
-  let marketDataGateway: MarketDataGateway;
-  if (config.runtimeMode === "simulation") {
-    marketDataGateway = new SimulationMarketDataGateway();
-    log.info("using simulation market-data gateway");
-  } else {
-    // Live/paper mode — deferred to Phase 8+; for now fall back to simulation
-    marketDataGateway = new SimulationMarketDataGateway();
-    log.warn("live market-data gateway not yet wired — using simulation fallback");
+  // 7b. Create gateways via factory
+  let polyClient: unknown | undefined;
+  if (config.runtimeMode === "paper" || config.runtimeMode === "live-lite") {
+    // @ts-expect-error — optional SDK, only required for paper/live-lite modes
+    const { ClobClient } = await import("@polymarket/clob-client");
+    polyClient = new ClobClient(config.polyApiKey!, config.polyApiSecret!, config.polyPassphrase!);
   }
+
+  const { marketDataGateway, exchangeGateway, modeLabel, marketDataSource, executionMode } = createGateways({
+    runtimeMode: config.runtimeMode,
+    polyClient,
+  });
+  log.info({ mode: modeLabel }, "gateways created");
 
   // 7c. Real modules for market-data and normalization
   const marketDataModule = new MarketDataModule({
@@ -152,18 +152,23 @@ async function main(): Promise<void> {
     log,
   });
 
-  // 7d. Create exchange gateway (simulation or live)
-  let exchangeGateway: ExchangeGateway;
-  if (config.runtimeMode === "simulation") {
-    exchangeGateway = new SimulationExchangeGateway();
-    log.info("using simulation exchange gateway");
-  } else {
-    exchangeGateway = new SimulationExchangeGateway();
-    log.warn("live exchange gateway not yet wired — using simulation fallback");
-  }
-
   // 7e. Execution module
   const botRunId = createBotRunId(`run-${Date.now()}`);
+
+  // Record this run in bot_runs for API consumption
+  conn.db.prepare(
+    "INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)",
+  ).run(botRunId, config.runtimeMode, new Date().toISOString());
+  log.info({ botRunId, mode: config.runtimeMode }, "bot run recorded");
+
+  // Persist two-part mode for API/web consumption
+  const upsertModeMetric = conn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
+  );
+  const modeNow = new Date().toISOString();
+  upsertModeMetric.run("market_data_source", JSON.stringify({ value: marketDataSource }), modeNow);
+  upsertModeMetric.run("execution_mode", JSON.stringify({ value: executionMode }), modeNow);
+
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
