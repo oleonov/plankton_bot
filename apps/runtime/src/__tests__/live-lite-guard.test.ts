@@ -1,0 +1,76 @@
+import { describe, it, expect } from "vitest";
+import { LiveLiteGuard } from "../live-lite-guard.js";
+
+const LIVE_LITE_CONFIG = {
+  familyAllowlist: ["fam-a", "fam-b"],
+  maxFamilies: 2,
+  maxOpenValueUsdc: 50,
+  maxOrderUsdc: 10,
+  maxActiveMarkets: 2,
+};
+
+describe("LiveLiteGuard", () => {
+  describe("when config is undefined (non-live-lite mode)", () => {
+    const guard = new LiveLiteGuard(undefined);
+
+    it("allows any family", () => {
+      expect(guard.isFamilyAllowed("fam-anything")).toBe(true);
+    });
+
+    it("allows any order size", () => {
+      expect(guard.isOrderWithinCap(9999)).toBe(true);
+    });
+
+    it("never exceeds open value cap", () => {
+      expect(guard.wouldExceedOpenValueCap(9999, 9999)).toBe(false);
+    });
+
+    it("never exceeds active markets cap", () => {
+      expect(guard.wouldExceedActiveMarketsCap(9999, 1)).toBe(false);
+    });
+
+    it("isActive returns false", () => {
+      expect(guard.isActive).toBe(false);
+    });
+  });
+
+  describe("when config is present (live-lite mode)", () => {
+    const guard = new LiveLiteGuard(LIVE_LITE_CONFIG);
+
+    it("isActive returns true", () => {
+      expect(guard.isActive).toBe(true);
+    });
+
+    it("allows allowlisted family", () => {
+      expect(guard.isFamilyAllowed("fam-a")).toBe(true);
+    });
+
+    it("rejects non-allowlisted family", () => {
+      expect(guard.isFamilyAllowed("fam-c")).toBe(false);
+    });
+
+    it("allows order within cap", () => {
+      expect(guard.isOrderWithinCap(10)).toBe(true); // exactly at cap is allowed
+    });
+
+    it("rejects order above cap (strict inequality)", () => {
+      expect(guard.isOrderWithinCap(10.01)).toBe(false);
+    });
+
+    it("detects open value cap exceeded", () => {
+      expect(guard.wouldExceedOpenValueCap(45, 6)).toBe(true); // 45+6=51 > 50
+    });
+
+    it("allows open value within cap", () => {
+      expect(guard.wouldExceedOpenValueCap(40, 10)).toBe(false); // 40+10=50, exactly at cap
+    });
+
+    it("detects active markets cap exceeded", () => {
+      expect(guard.wouldExceedActiveMarketsCap(2, 1)).toBe(true); // 2+1=3 > 2
+    });
+
+    it("allows active markets within cap", () => {
+      expect(guard.wouldExceedActiveMarketsCap(1, 1)).toBe(false); // 1+1=2, at cap
+    });
+  });
+});
