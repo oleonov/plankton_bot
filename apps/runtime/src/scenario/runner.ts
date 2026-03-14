@@ -152,6 +152,9 @@ async function executeScenario(
   ).run(botRunId, "simulation", new Date().toISOString());
 
   // 7. Create modules (long intervals — we bypass timers)
+  let supervisor: Supervisor;
+  const runtimeControl = { isPaused: () => supervisor.isPaused() };
+
   const marketDataModule = new MarketDataModule({
     gateway: marketDataGateway,
     bus,
@@ -174,6 +177,7 @@ async function executeScenario(
     fillRepo: repos.fill,
     log,
     botRunId,
+    runtimeControl,
   });
 
   const riskInventoryModule = new RiskInventoryModule({
@@ -193,6 +197,7 @@ async function executeScenario(
     familyStateRepo: repos.familyState,
     log,
     scanIntervalMs: 60_000,
+    runtimeControl,
   });
 
   const reconciliationModule = new ReconciliationModule({
@@ -208,7 +213,7 @@ async function executeScenario(
   });
 
   // 8. Create supervisor and start
-  const supervisor = new Supervisor({
+  supervisor = new Supervisor({
     modules: [
       ["market-data", marketDataModule],
       ["normalization", normalizationModule],

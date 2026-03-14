@@ -111,6 +111,9 @@ async function main(): Promise<void> {
   const bus = new InProcessEventBus();
 
   // 7. Build modules
+  let supervisor: Supervisor;
+  const runtimeControl = { isPaused: () => supervisor.isPaused() };
+
   const commandPoller = new CommandPoller({
     commandRepo: repos.operatorCommand,
     actionRepo: repos.operatorAction,
@@ -176,6 +179,7 @@ async function main(): Promise<void> {
     fillRepo: repos.fill,
     log,
     botRunId,
+    runtimeControl,
   });
 
   // 7f. Risk + Inventory module
@@ -197,6 +201,7 @@ async function main(): Promise<void> {
     familyStateRepo: repos.familyState,
     log,
     scanIntervalMs: 30_000,
+    runtimeControl,
   });
 
   // 7h. Reconciliation module
@@ -237,7 +242,7 @@ async function main(): Promise<void> {
   });
 
   // 8. Create supervisor
-  const supervisor = new Supervisor({ modules, bus, log });
+  supervisor = new Supervisor({ modules, bus, log });
 
   // 9. Signal handling
   let shuttingDown = false;
