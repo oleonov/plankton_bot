@@ -250,6 +250,10 @@ async function executeScenario(
     // Publish MarketSnapshotReceived (bypass MarketDataModule timer)
     await marketDataModule.poll();
     await bus.drain(DRAIN_TIMEOUT_MS);
+
+    // Manually trigger strategy scan (bypass StrategyModule timer)
+    await strategyModule.tick();
+    await bus.drain(DRAIN_TIMEOUT_MS);
   }
 
   // 10. Stop supervisor
