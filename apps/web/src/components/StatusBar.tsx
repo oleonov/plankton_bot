@@ -30,6 +30,9 @@ export function StatusBar() {
       borderBottom: "1px solid var(--border)",
     }}>
       <Badge value={status.runtimeMode} type="mode" />
+      <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: 4 }}>
+        data:{status.marketDataSource} exec:{status.executionMode}
+      </span>
       <Badge value={status.paused ? "PAUSED" : "RUNNING"} type="mode" />
       <span>uptime: {formatUptime(status.uptimeSeconds)}</span>
       <span>recon: {formatAgo(status.lastReconciliationAt)}</span>

@@ -19,6 +19,8 @@ export interface StatusData {
   openPositionCount: number;
   totalOpenValueUsdc: number;
   totalTailCostUsdc: number;
+  marketDataSource: "live" | "simulation";
+  executionMode: "simulation" | "live";
 }
 
 /** GET /metrics */
@@ -103,7 +105,7 @@ export interface FamilyDTO {
     runtimeMode: string;
     openValueUsdc: number;
     openPositionCount: number;
-    dustPositionCount: number;
+    openDustCount: number;
     currentTailCostUsdc: number;
     tailAdjustedPnlLive: number;
     quarantineReason: string | null;

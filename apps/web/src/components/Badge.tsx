@@ -1,8 +1,9 @@
 const MODE_STYLES: Record<string, string> = {
   active: "badge-green",
   "reduce-only": "badge-orange",
-  quarantined: "badge-red",
+  quarantine: "badge-red",
   simulation: "badge-green",
+  paper: "badge-orange",
   "paper-trade": "badge-orange",
   "live-lite": "badge-red",
 };

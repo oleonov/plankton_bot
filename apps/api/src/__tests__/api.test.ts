@@ -63,6 +63,11 @@ beforeAll(async () => {
 
     INSERT INTO bot_runs (run_id, mode, started_at)
     VALUES ('run-1', 'simulation', '2026-03-14T00:00:00Z');
+
+    INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+    VALUES ('market_data_source', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
+    INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+    VALUES ('execution_mode', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
   `);
 
   app = await buildServer({ config: testConfig(), conn });
@@ -161,6 +166,8 @@ describe("GET /status", () => {
     // Market data freshness fields
     expect(typeof body.data.marketDataStale).toBe("boolean");
     expect(body.data).toHaveProperty("marketDataLastUpdateAt");
+    expect(body.data.marketDataSource).toBe("simulation");
+    expect(body.data.executionMode).toBe("simulation");
   });
 
   it("runtimeMode comes from bot_runs, not family_runtime_state", async () => {
