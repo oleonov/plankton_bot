@@ -81,6 +81,7 @@ function makeTailRules(overrides?: Record<string, unknown>) {
     tailQuarantineThresholdRatio: 0.5,
     staleTailPruneEnabled: false,
     thresholdCleanupRequired: false,
+    autoSettleResolvedMarkets: true,
     ...overrides,
   };
 }
@@ -96,7 +97,7 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
       cadence: "daily",
       strategyProfile: "scalp" as any,
       topicKey: "btc",
-      slugPattern: "btc.*",
+      slugPattern: "btc*",
       notes: null,
     },
     evidence: {
@@ -138,6 +139,8 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
         maxProbeCountPerMarket: null,
         entryCooldownSeconds: null,
         maxNewMarketsPerSession: null,
+        probeSizeUsdc: 5,
+        addSizeUsdc: 4,
       },
       scaleIn: {
         scaleMode: "confirm-only",
@@ -152,6 +155,7 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
         allowRunnerExtension: false,
         preferFastRecycle: true,
         resolutionHoldingAllowed: false,
+        resolutionBufferMinutes: 60,
         targetRoiBandLow: null,
         targetRoiBandHigh: null,
         maxUnmovedHoldHours: null,
@@ -209,6 +213,7 @@ function createMockLotRepo(): InventoryLotRepository {
     findByTokenId: vi.fn().mockReturnValue([]),
     findOpen: vi.fn().mockReturnValue([]),
     consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
   };
 }
 
@@ -988,5 +993,426 @@ describe("RiskInventoryModule", () => {
     expect(positionRepo.save).not.toHaveBeenCalled();
 
     await mod.stop();
+  });
+
+  // ─── Tail-adjusted PnL gating ─────────────────────────────────
+
+  it("rejects scale-in when tailAdjustedPnlLive <= 0 and requirePositiveRecycleHistoryForScale", async () => {
+    const bundle = makeRuleBundle();
+    bundle.rules.scaleIn.requirePositiveRecycleHistoryForScale = true;
+    rulesProvider = createMockRulesProvider(bundle);
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 0 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "scale-in" }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("requirePositiveRecycleHistoryForScale");
+
+    await mod.stop();
+  });
+
+  it("allows scale-in when tailAdjustedPnlLive <= 0 but requirePositiveRecycleHistoryForScale is false", async () => {
+    // Default bundle has requirePositiveRecycleHistoryForScale: false
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 0 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "scale-in" }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("rejects heavy-scale when tailAdjustedPnlLive <= 0", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: -5 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "heavy-scale" }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("tailAdjustedPnlLive");
+
+    await mod.stop();
+  });
+
+  it("approves heavy-scale when family is healthy (tailAdjustedPnlLive > 0)", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 10 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "heavy-scale" }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("approves probe-entry when tailAdjustedPnlLive is zero (cold start)", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 0 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "probe-entry" }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("rejects probe-entry when tailAdjustedPnlLive < 0", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: -1 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "probe-entry" }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("tailAdjustedPnlLive");
+
+    await mod.stop();
+  });
+
+  it("rejects two-sided-entry when tailAdjustedPnlLive < 0", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: -1 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "two-sided-entry" }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("tailAdjustedPnlLive");
+
+    await mod.stop();
+  });
+
+  it("approves two-sided-entry when tailAdjustedPnlLive is zero (cold start)", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 0 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "two-sided-entry" }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("exit signal approved under degraded tail state", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: -50 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("rejects confirm-scale in probe-only mode", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ runtimeMode: "probe-only", tailAdjustedPnlLive: 10 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "confirm-scale" }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("probe-only");
+
+    await mod.stop();
+  });
+
+  // ─── Wave 5: mark-to-market (P2-1) ─────────────────────────────────
+
+  describe("mark-to-market (P2-1)", () => {
+    it("revalues open positions on NormalizedMarketUpdated", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-1"),
+        tokenId: TOK_ID,
+        familyId: FAM_ID,
+        side: "buy",
+        size: 100,
+        avgEntryPrice: 0.05,
+        costBasisUsdc: 5,
+        currentValueUsdc: 5,
+        realizedPnl: 0,
+        status: "open",
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule();
+      await mod.start();
+
+      // Market moves from 0.05 to 0.08 → new value = 100 * 0.08 = 8.0
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [{
+          tokenId: TOK_ID,
+          conditionId: "c1",
+          slug: "test",
+          question: "test?",
+          outcome: "YES" as const,
+          familyId: FAM_ID,
+          familyKey: "btc",
+          regime: "threshold" as Regime,
+          horizon: "daily",
+          endDate: null,
+          active: true,
+          tickSize: 0.01,
+          negRisk: false,
+          bestBid: 0.07,
+          bestAsk: 0.09,
+          midPrice: 0.08,
+          spread: 0.02,
+          snapshotTs: Date.now(),
+        }],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      // positionRepo.save should have been called with updated currentValueUsdc
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls.length).toBeGreaterThanOrEqual(1);
+      const savedPos = saveCalls[saveCalls.length - 1][0];
+      expect(savedPos.currentValueUsdc).toBeCloseTo(8.0, 2);
+
+      await mod.stop();
+    });
+
+    it("skips positions without live price data", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-1"),
+        tokenId: TOK_ID,
+        familyId: FAM_ID,
+        side: "buy",
+        size: 100,
+        avgEntryPrice: 0.05,
+        costBasisUsdc: 5,
+        currentValueUsdc: 5,
+        realizedPnl: 0,
+        status: "open",
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule();
+      await mod.start();
+
+      // Market update with null midPrice → no revaluation
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [{
+          tokenId: createTokenId("tok-other"),
+          conditionId: "c1",
+          slug: "test",
+          question: "test?",
+          outcome: "YES" as const,
+          familyId: FAM_ID,
+          familyKey: "btc",
+          regime: "threshold" as Regime,
+          horizon: "daily",
+          endDate: null,
+          active: true,
+          tickSize: 0.01,
+          negRisk: false,
+          bestBid: null,
+          bestAsk: null,
+          midPrice: null,
+          spread: null,
+          snapshotTs: Date.now(),
+        }],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      // No save call for position (no price data matched)
+      expect(positionRepo.save).not.toHaveBeenCalled();
+
+      await mod.stop();
+    });
+  });
+
+  // ─── Wave 5: operator diagnostics (P2-2) ───────────────────────────
+
+  describe("operator diagnostics (P2-2)", () => {
+    it("tracks approved and rejected signal counts per family", async () => {
+      await mod.start();
+
+      // Approve a probe-entry
+      await bus.publish("SignalProduced", { signal: makeSignal() });
+      await bus.drain();
+
+      // Reject by disabling family
+      rulesProvider.isEnabled = vi.fn().mockReturnValue(false);
+      await bus.publish("SignalProduced", {
+        signal: makeSignal({ signalId: "sig-2" }),
+      });
+      await bus.drain();
+
+      const diag = mod.getDiagnostics();
+      expect(diag.signalsProcessed).toBe(2);
+      expect(diag.signalsApproved).toBe(1);
+      expect(diag.signalsRejected).toBe(1);
+      expect(diag.families[String(FAM_ID)]).toBeDefined();
+      expect(diag.families[String(FAM_ID)]!.signalsApproved).toBe(1);
+      expect(diag.families[String(FAM_ID)]!.signalsRejected).toBe(1);
+      expect(diag.families[String(FAM_ID)]!.lastRejectionReason).toContain("disabled");
+
+      await mod.stop();
+    });
+
+    it("tracks last signal reason per family", async () => {
+      await mod.start();
+
+      await bus.publish("SignalProduced", {
+        signal: makeSignal({ reason: "probe-entry" }),
+      });
+      await bus.drain();
+
+      const diag = mod.getDiagnostics();
+      expect(diag.families[String(FAM_ID)]!.lastSignalReason).toBe("probe-entry");
+
+      await mod.stop();
+    });
+
+    it("reports mark-to-market update count", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-1"),
+        tokenId: TOK_ID,
+        familyId: FAM_ID,
+        side: "buy",
+        size: 100,
+        avgEntryPrice: 0.05,
+        costBasisUsdc: 5,
+        currentValueUsdc: 5,
+        realizedPnl: 0,
+        status: "open",
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule();
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [{
+          tokenId: TOK_ID,
+          conditionId: "c1",
+          slug: "test",
+          question: "test?",
+          outcome: "YES" as const,
+          familyId: FAM_ID,
+          familyKey: "btc",
+          regime: "threshold" as Regime,
+          horizon: "daily",
+          endDate: null,
+          active: true,
+          tickSize: 0.01,
+          negRisk: false,
+          bestBid: 0.07,
+          bestAsk: 0.09,
+          midPrice: 0.08,
+          spread: 0.02,
+          snapshotTs: Date.now(),
+        }],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const diag = mod.getDiagnostics();
+      expect(diag.markToMarketUpdates).toBe(1);
+
+      await mod.stop();
+    });
+
+    it("healthCheck includes approved/rejected/mtm counts", async () => {
+      await mod.start();
+
+      await bus.publish("SignalProduced", { signal: makeSignal() });
+      await bus.drain();
+
+      const h = await mod.healthCheck();
+      expect(h.detail).toContain("approved=1");
+      expect(h.detail).toContain("rejected=0");
+      expect(h.detail).toContain("mtm=0");
+
+      await mod.stop();
+    });
   });
 });

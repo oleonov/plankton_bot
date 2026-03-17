@@ -18,6 +18,7 @@ import type {
   Fill,
   InventoryLot,
   Market,
+  MarketResolution,
   OperatorAction,
   OperatorCommand,
   Order,
@@ -33,6 +34,9 @@ export interface MarketRepository {
   /** Find a market by its CLOB token ID (primary key). */
   findByTokenId(tokenId: TokenId): Market | null;
 
+  /** Find markets by multiple token IDs (bulk lookup). */
+  findByTokenIds(tokenIds: TokenId[]): Market[];
+
   /** Find all markets belonging to a condition (YES + NO outcome rows). */
   findByConditionId(conditionId: string): Market[];
 
@@ -44,6 +48,9 @@ export interface MarketRepository {
 
   /** Return every market row, active or inactive. */
   findAll(): Market[];
+
+  /** Mark a market as inactive (active = 0). Used when a market resolves. */
+  deactivate(tokenId: TokenId): void;
 }
 
 // ─── OrderRepository ─────────────────────────────────────────────────────
@@ -139,6 +146,9 @@ export interface InventoryLotRepository {
     positionId: PositionId,
     size: number,
   ): { lot: InventoryLot; consumed: number }[];
+
+  /** Zero out all remaining lots for a position (market resolution settlement). */
+  settleAll(positionId: PositionId): void;
 }
 
 // ─── FamilyStateRepository ───────────────────────────────────────────────
@@ -188,6 +198,19 @@ export interface FamilyRuleBundle {
   identity: FamilyIdentity;
   evidence: FamilyEvidence;
   rules: FamilyRules;
+}
+
+// ─── MarketResolutionRepository ──────────────────────────────────────────
+
+export interface MarketResolutionRepository {
+  /** Persist a market resolution record. */
+  save(resolution: MarketResolution): void;
+
+  /** Find a resolution by condition ID, or null if not yet resolved. */
+  findByConditionId(conditionId: string): MarketResolution | null;
+
+  /** Return all recorded resolutions. */
+  findAll(): MarketResolution[];
 }
 
 // ─── OperatorCommandRepository ───────────────────────────────────────────

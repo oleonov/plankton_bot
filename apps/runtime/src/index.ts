@@ -5,6 +5,21 @@
  * Does NOT implement exchange, strategy, risk, or market-data logic.
  */
 
+// Force IPv4 globally — some ISPs (e.g. FPT Vietnam) reset IPv6 connections to Polymarket.
+// dns.setDefaultResultOrder is insufficient because axios reuses connections via its pool.
+// Patching dns.lookup ensures every new socket resolves to IPv4.
+import dns from "node:dns";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const _origLookup: any = dns.lookup;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(dns as any).lookup = function (hostname: string, optsOrCb: any, maybeCb?: any) {
+  if (typeof optsOrCb === "function") {
+    return _origLookup(hostname, { family: 4 }, optsOrCb);
+  }
+  const opts = typeof optsOrCb === "object" ? { ...optsOrCb, family: 4 } : { family: 4 };
+  return _origLookup(hostname, opts, maybeCb);
+};
+
 import process from "node:process";
 import { loadEnv, loadFamilyRulesYaml } from "@plankton/config";
 import { createFamilyRulesProvider } from "@plankton/family-rules";
@@ -23,7 +38,9 @@ import {
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { FamilyIdentity, FamilyState } from "@plankton/domain";
-import { createFamilyId, createBotRunId } from "@plankton/domain";
+import { createFamilyId, createBotRunId, slugPatternToRegex } from "@plankton/domain";
+import { migrateOrphanedPositions } from "./universe-migration.js";
+import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
 import { liveLitePreflight } from "./live-lite-preflight.js";
@@ -32,11 +49,18 @@ import { createLogger } from "./logger.js";
 import { Supervisor } from "./supervisor/supervisor.js";
 import { CommandPoller } from "./supervisor/command-poller.js";
 import { MarketDataModule } from "./modules/market-data/market-data-module.js";
+import { MarketScannerModule } from "./modules/market-scanner/index.js";
 import { NormalizationModule } from "./modules/normalization/normalization-module.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
 import { StrategyModule } from "./modules/strategy/strategy-module.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
+import { ResolutionModule } from "./modules/resolution/resolution-module.js";
+import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
+import { PositionSettler } from "./modules/resolution/position-settler.js";
+import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
+import { GammaResolutionClient } from "@plankton/exchange";
+import { SqliteMarketResolutionRepository } from "@plankton/db";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -109,6 +133,24 @@ async function main(): Promise<void> {
   }
   log.info("family runtime state baseline ensured");
 
+  // 5.5. Migrate orphaned positions — close positions whose market no longer
+  // matches the family's current slug pattern or horizon filter. Without this,
+  // stale positions from a previous universe (e.g. will-bitcoin-reach-*) would
+  // permanently consume family caps and block new entries.
+  const migration = migrateOrphanedPositions({
+    positionRepo: repos.position,
+    marketRepo: repos.market,
+    familyStateRepo: repos.familyState,
+    families,
+    log,
+  });
+  if (migration.closedCount > 0) {
+    log.info(
+      { closedCount: migration.closedCount },
+      "universe migration closed orphaned positions",
+    );
+  }
+
   // 6. Create event bus
   const bus = new InProcessEventBus();
 
@@ -130,26 +172,83 @@ async function main(): Promise<void> {
   // 7b. Create gateways via factory
   let polyClient: unknown | undefined;
   if (config.runtimeMode === "paper" || config.runtimeMode === "live-lite") {
-    // @ts-expect-error — optional SDK, only required for paper/live-lite modes
     const { ClobClient } = await import("@polymarket/clob-client");
-    polyClient = new ClobClient(config.polyApiKey!, config.polyApiSecret!, config.polyPassphrase!);
+    const CLOB_HOST = "https://clob.polymarket.com";
+    const POLYGON_CHAIN_ID = 137;
+
+    if (config.runtimeMode === "paper") {
+      polyClient = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID);
+    } else {
+      polyClient = new ClobClient(
+        CLOB_HOST,
+        POLYGON_CHAIN_ID,
+        undefined,
+        {
+          key: config.polyApiKey!,
+          secret: config.polyApiSecret!,
+          passphrase: config.polyPassphrase!,
+        },
+      );
+    }
   }
+
+  // Build slug filter from family rules so we only keep relevant markets during pagination
+  const slugPatterns: RegExp[] = [];
+  for (const f of families) {
+    if (!f.slugPattern) continue;
+    try {
+      slugPatterns.push(slugPatternToRegex(f.slugPattern));
+    } catch {
+      log.warn(
+        { familyId: String(f.familyId), pattern: f.slugPattern },
+        "invalid slug pattern — skipping for market-data filter",
+      );
+    }
+  }
+  const slugFilter = slugPatterns.length > 0
+    ? (slug: string) => slugPatterns.some((re) => re.test(slug))
+    : undefined;
 
   const { marketDataGateway, exchangeGateway, modeLabel, marketDataSource, executionMode } = createGateways({
     runtimeMode: config.runtimeMode,
     polyClient,
+    slugFilter,
   });
   log.info({ mode: modeLabel }, "gateways created");
 
   const liveLiteGuard = new LiveLiteGuard(config.liveLite);
 
-  // 7c. Real modules for market-data and normalization
+  // 7c. Create bot run ID (needed by market-data and execution modules)
+  const botRunId = createBotRunId(`run-${Date.now()}`);
+
+  // Record this run in bot_runs for API consumption
+  conn.db.prepare(
+    "INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)",
+  ).run(botRunId, config.runtimeMode, new Date().toISOString());
+  log.info({ botRunId, mode: config.runtimeMode }, "bot run recorded");
+
+  // 7d. Market scanner (discovery via Gamma API)
+  // TODO: pass tagId for server-side narrowing once we have a category→tagId mapping.
+  // Without it, discovery broad-crawls all active Gamma markets then filters locally.
+  const discoveryGateway = new GammaMarketDiscoveryGateway();
+  const marketScannerModule = new MarketScannerModule({
+    discoveryGateway,
+    familyRules: rulesProvider,
+    marketRepo: repos.market,
+    bus,
+    log,
+    scanIntervalMs: 5 * 60 * 1000,
+  });
+
+  // 7e. Real modules for market-data and normalization
   const marketDataModule = new MarketDataModule({
     gateway: marketDataGateway,
+    marketRepo: repos.market,
     bus,
     log,
     pollIntervalMs: config.marketDataPollIntervalMs,
     staleThresholdMs: config.marketDataStaleThresholdMs,
+    botRunId: String(botRunId),
   });
 
   const normalizationModule = new NormalizationModule({
@@ -159,14 +258,7 @@ async function main(): Promise<void> {
     log,
   });
 
-  // 7e. Execution module
-  const botRunId = createBotRunId(`run-${Date.now()}`);
-
-  // Record this run in bot_runs for API consumption
-  conn.db.prepare(
-    "INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)",
-  ).run(botRunId, config.runtimeMode, new Date().toISOString());
-  log.info({ botRunId, mode: config.runtimeMode }, "bot run recorded");
+  // 7f. Execution module
 
   // Persist two-part mode for API/web consumption
   const upsertModeMetric = conn.db.prepare(
@@ -187,7 +279,7 @@ async function main(): Promise<void> {
     liveLiteGuard,
   });
 
-  // 7f. Risk + Inventory module
+  // 7g. Risk + Inventory module
   const riskInventoryModule = new RiskInventoryModule({
     bus,
     rulesProvider,
@@ -199,7 +291,7 @@ async function main(): Promise<void> {
     liveLiteGuard,
   });
 
-  // 7g. Strategy module
+  // 7h. Strategy module
   const strategyModule = new StrategyModule({
     bus,
     rulesProvider,
@@ -211,7 +303,7 @@ async function main(): Promise<void> {
     liveLiteGuard,
   });
 
-  // 7h. Reconciliation module
+  // 7i. Reconciliation module
   const reconciliationModule = new ReconciliationModule({
     gateway: exchangeGateway,
     bus,
@@ -224,17 +316,53 @@ async function main(): Promise<void> {
     db: conn.db,
   });
 
+  // 7j. Resolution module — detect resolved markets, settle positions
+  const marketResolutionRepo = new SqliteMarketResolutionRepository(conn.db);
+  const gammaResolutionClient = new GammaResolutionClient();
+  const exposureCalculator = new FamilyExposureCalculator(
+    repos.familyState,
+    repos.position,
+    repos.inventoryLot,
+    log,
+  );
+  const resolutionDetector = new ResolutionDetector(
+    repos.position,
+    repos.market,
+    marketResolutionRepo,
+    gammaResolutionClient,
+    log,
+  );
+  const positionSettler = new PositionSettler(
+    repos.position,
+    repos.inventoryLot,
+    conn.db,
+  );
+  const resolutionModule = new ResolutionModule({
+    detector: resolutionDetector,
+    settler: positionSettler,
+    marketRepo: repos.market,
+    resolutionRepo: marketResolutionRepo,
+    rulesProvider,
+    exposureCalculator,
+    bus,
+    log,
+    checkIntervalMs: 5 * 60_000, // 5 minutes
+    graceMinutes: 30,
+  });
+
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
+    ["market-scanner", marketScannerModule],
     ["market-data", marketDataModule],
     ["normalization", normalizationModule],
     ["reconciliation", reconciliationModule],
     ["strategy", strategyModule],
     ["risk-inventory", riskInventoryModule],
+    ["resolution", resolutionModule],
     ["execution", executionModule],
   ];
 
-  // 7i. Persist key timestamps to runtime_metrics for API consumption
+  // 7k. Persist key timestamps to runtime_metrics for API consumption
   const upsertMetric = conn.db.prepare(`
     INSERT INTO runtime_metrics (metric_name, value, captured_at)
     VALUES (?, 1, ?)
@@ -253,6 +381,30 @@ async function main(): Promise<void> {
 
   bus.subscribe("MarketSnapshotReceived", async ({ timestamp }) => {
     upsertMetric.run("market_data_last_update", new Date(timestamp).toISOString());
+  });
+
+  const deletePollProgress = conn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'",
+  );
+  const insertPollProgress = conn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('market_data_poll_progress', 1, ?, ?)",
+  );
+  const upsertPollProgress = conn.db.transaction(
+    (labels: string, capturedAt: string) => {
+      deletePollProgress.run();
+      insertPollProgress.run(labels, capturedAt);
+    },
+  );
+
+  bus.subscribe("MarketDataPollProgress", async ({ active, page, botRunId: runId }) => {
+    if (active) {
+      upsertPollProgress(
+        JSON.stringify({ active: true, page, botRunId: runId }),
+        new Date().toISOString(),
+      );
+    } else {
+      deletePollProgress.run();
+    }
   });
 
   // 8. Create supervisor

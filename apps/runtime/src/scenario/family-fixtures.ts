@@ -82,6 +82,8 @@ export function makeFamilyConfig(overrides: {
         maxProbeCountPerMarket: null,
         entryCooldownSeconds: null,
         maxNewMarketsPerSession: null,
+        probeSizeUsdc: 5,
+        addSizeUsdc: 4,
       },
       scaleIn: {
         scaleMode: "confirm-only",
@@ -96,6 +98,7 @@ export function makeFamilyConfig(overrides: {
         allowRunnerExtension: false,
         preferFastRecycle: true,
         resolutionHoldingAllowed: false,
+        resolutionBufferMinutes: 60,
         targetRoiBandLow: null,
         targetRoiBandHigh: null,
         maxUnmovedHoldHours: null,
@@ -114,6 +117,7 @@ export function makeFamilyConfig(overrides: {
         tailQuarantineThresholdRatio: 0.5,
         staleTailPruneEnabled: true,
         thresholdCleanupRequired: false,
+        autoSettleResolvedMarkets: true,
       },
       session: {
         activeWindowsUtc: [{ start: "00:00", end: "23:59" }],

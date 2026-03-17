@@ -98,6 +98,7 @@ function createMockLotRepo(): InventoryLotRepository {
     findByTokenId: vi.fn().mockReturnValue([]),
     findOpen: vi.fn().mockReturnValue([]),
     consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
   };
 }
 

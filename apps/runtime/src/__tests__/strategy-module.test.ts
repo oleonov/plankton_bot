@@ -113,6 +113,8 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       maxProbeCountPerMarket: null,
       entryCooldownSeconds: null,
       maxNewMarketsPerSession: null,
+      probeSizeUsdc: 5,
+      addSizeUsdc: 4,
     },
     scaleIn: {
       scaleMode: "confirm-only",
@@ -127,6 +129,7 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       allowRunnerExtension: false,
       preferFastRecycle: true,
       resolutionHoldingAllowed: false,
+      resolutionBufferMinutes: 60,
       targetRoiBandLow: 20,
       targetRoiBandHigh: 50,
       maxUnmovedHoldHours: null,
@@ -145,6 +148,7 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       tailQuarantineThresholdRatio: 0.5,
       staleTailPruneEnabled: false,
       thresholdCleanupRequired: false,
+      autoSettleResolvedMarkets: true,
     },
     session: {
       activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
@@ -669,6 +673,183 @@ describe("StrategyModule", () => {
         .filter((s) => s.signal.reason === "scale-in");
       expect(scaleIns).toHaveLength(0);
     });
+
+    it("emits confirm-scale on second buy (buyCount=1)", async () => {
+      const pos = makePosition();
+      positionRepo._setPosition(TOK_ID, pos);
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // Simulate 1 buy via PositionUpdated
+      await bus.publish("PositionUpdated", { position: pos });
+      await bus.drain();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      const confirms = signals.filter((s) => s.signal.reason === "confirm-scale");
+      expect(confirms).toHaveLength(1);
+      expect(confirms[0]!.signal.side).toBe("buy");
+    });
+
+    it("emits scale-in on third buy (buyCount=2)", async () => {
+      const pos = makePosition();
+      positionRepo._setPosition(TOK_ID, pos);
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // Simulate 2 buys via PositionUpdated
+      await bus.publish("PositionUpdated", { position: pos });
+      await bus.publish("PositionUpdated", {
+        position: { ...pos, size: pos.size + 10 },
+      });
+      await bus.drain();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in");
+      expect(scaleIns).toHaveLength(1);
+      expect(scaleIns[0]!.signal.side).toBe("buy");
+    });
+
+    it("blocks heavy-scale when allowHeavyCampaigns=false", async () => {
+      const pos = makePosition();
+      positionRepo._setPosition(TOK_ID, pos);
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // Simulate 3 buys (= defaultMaxBuysPerLeg)
+      for (let i = 0; i < 3; i++) {
+        await bus.publish("PositionUpdated", {
+          position: { ...pos, size: pos.size + (i + 1) * 10 },
+        });
+      }
+      await bus.drain();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      // No entry signals at all — stages exhausted with allowHeavyCampaigns=false
+      const entrySignals = signals.filter((s) =>
+        ["scale-in", "confirm-scale", "heavy-scale"].includes(s.signal.reason),
+      );
+      expect(entrySignals).toHaveLength(0);
+    });
+
+    it("emits heavy-scale when allowHeavyCampaigns=true and buyCount >= defaultMax", async () => {
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          scaleIn: {
+            ...makeRules().scaleIn,
+            allowHeavyCampaigns: true,
+          },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+
+      const pos = makePosition();
+      positionRepo._setPosition(TOK_ID, pos);
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // Simulate 3 buys (= defaultMaxBuysPerLeg)
+      for (let i = 0; i < 3; i++) {
+        await bus.publish("PositionUpdated", {
+          position: { ...pos, size: pos.size + (i + 1) * 10 },
+        });
+      }
+      await bus.drain();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      const heavyScales = signals.filter((s) => s.signal.reason === "heavy-scale");
+      expect(heavyScales).toHaveLength(1);
+      expect(heavyScales[0]!.signal.side).toBe("buy");
+    });
+
+    it("exhausts all stages when buyCount >= heavyMaxBuysPerLeg", async () => {
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          scaleIn: {
+            ...makeRules().scaleIn,
+            allowHeavyCampaigns: true,
+          },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+
+      const pos = makePosition();
+      positionRepo._setPosition(TOK_ID, pos);
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // Simulate 5 buys (= heavyMaxBuysPerLeg)
+      for (let i = 0; i < 5; i++) {
+        await bus.publish("PositionUpdated", {
+          position: { ...pos, size: pos.size + (i + 1) * 10 },
+        });
+      }
+      await bus.drain();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      // No entry signals — all stages exhausted even with heavy campaigns
+      const entrySignals = signals.filter((s) =>
+        ["scale-in", "confirm-scale", "heavy-scale"].includes(s.signal.reason),
+      );
+      expect(entrySignals).toHaveLength(0);
+    });
   });
 
   // ─── Repricing exit ───────────────────────────────────────
@@ -718,9 +899,18 @@ describe("StrategyModule", () => {
       expect(exits).toHaveLength(0);
     });
 
-    it("skips exit when ROI above target band", async () => {
+    it("skips exit when ROI above target band and runner extension enabled", async () => {
       // Position at 0.03, market at 0.06 → ROI = 100% (above 50%)
+      // allowRunnerExtension: true → above-band positions are held as runners
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { exit: { ...makeRules().exit, allowRunnerExtension: true } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
@@ -1081,8 +1271,8 @@ describe("StrategyModule", () => {
     });
 
     it("emits scale-in when ROI is below exit band", async () => {
-      // Position at 0.03, market at 0.032 → ROI = 6.7% (below 20% band)
-      // Price 0.032 is in entry band → scale-in is eligible, no exit.
+      // Position at 0.03, market at 0.031 → ROI = 3.3% (below medium-hold band)
+      // Price 0.031 is in entry band → scale-in is eligible, no exit.
       positionRepo._setPosition(TOK_ID, makePosition({
         avgEntryPrice: 0.03,
         size: 100,
@@ -1093,7 +1283,7 @@ describe("StrategyModule", () => {
       bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ midPrice: 0.032 })],
+        markets: [makeNormalizedMarket({ midPrice: 0.031 })],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -1104,6 +1294,7 @@ describe("StrategyModule", () => {
       const reasons = signals.map((s) => s.signal.reason);
       expect(reasons).toContain("scale-in");
       expect(reasons).not.toContain("repricing-exit");
+      expect(reasons).not.toContain("medium-hold-exit");
     });
   });
 
@@ -1165,7 +1356,7 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       // Buy count should still be 1, not 2
-      // So scale-in should still be allowed (defaultMaxBuysPerLeg = 3)
+      // So confirm-scale should still be allowed (buyCount=1 → confirm stage)
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
       bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
 
@@ -1178,8 +1369,8 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in");
-      expect(scaleIns).toHaveLength(1);
+      const confirms = signals.filter((s) => s.signal.reason === "confirm-scale");
+      expect(confirms).toHaveLength(1);
     });
 
     it("cleans up tracker when position is closed", async () => {
@@ -1411,6 +1602,1468 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       expect(signals).toHaveLength(0);
+    });
+  });
+
+  // ─── Evidence-based variable sizing ──────────────────────────
+
+  describe("evidence-based variable sizing", () => {
+    it("probe entry uses probeSizeUsdc not hard-coded $5", async () => {
+      const bundle = makeBundle({
+        rules: {
+          entry: {
+            ...makeRules().entry,
+            probeSizeUsdc: 6,
+            addSizeUsdc: 4,
+            maxInitialNotionalUsdc: 10,
+          },
+        },
+      });
+      rulesProvider = createMockRulesProvider(bundle);
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(6);
+    });
+
+    it("scale-in uses addSizeUsdc not hard-coded $5", async () => {
+      const bundle = makeBundle({
+        rules: {
+          entry: {
+            ...makeRules().entry,
+            probeSizeUsdc: 6,
+            addSizeUsdc: 3,
+            maxInitialNotionalUsdc: 10,
+          },
+          // Disable fast recycle so medium-hold band doesn't interfere
+          exit: { ...makeRules().exit, preferFastRecycle: false },
+        },
+      });
+      rulesProvider = createMockRulesProvider(bundle);
+      positionRepo._setPosition(TOK_ID, makePosition({
+        avgEntryPrice: 0.03,
+        size: 100,
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.031 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in");
+      expect(scaleIns).toHaveLength(1);
+      expect(scaleIns[0]!.signal.suggestedSizeUsdc).toBe(3);
+    });
+
+    it("probe and scale-in sizes are capped by maxInitialNotionalUsdc", async () => {
+      const bundle = makeBundle({
+        rules: {
+          entry: {
+            ...makeRules().entry,
+            probeSizeUsdc: 10,
+            addSizeUsdc: 8,
+            maxInitialNotionalUsdc: 4,
+          },
+        },
+      });
+      rulesProvider = createMockRulesProvider(bundle);
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals).toHaveLength(1);
+      // Capped at maxInitialNotionalUsdc (4), not probeSizeUsdc (10)
+      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(4);
+    });
+  });
+
+  // ─── Wave 3: active session / reduced mode ──────────────────────────────
+
+  describe("active session window (P1-2)", () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("allows probe entry outside active window", async () => {
+      // Window: 14:00-21:00 UTC. Tick at 10:00 UTC → outside window.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-16T10:00:00Z"));
+
+      const outsideWindowRules = makeBundle({
+        rules: { session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] } },
+      });
+      rulesProvider = createMockRulesProvider(outsideWindowRules);
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+
+      vi.useRealTimers();
+    });
+
+    it("blocks scale-in outside active window", async () => {
+      // Window: 14:00-21:00 UTC. Tick at 10:00 UTC → outside window.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-16T10:00:00Z"));
+
+      const outsideWindowRules = makeBundle({
+        rules: { session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] } },
+      });
+      rulesProvider = createMockRulesProvider(outsideWindowRules);
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const entries = signals.filter((s) => s.signal.side === "buy" && s.signal.reason !== "probe-entry");
+      expect(entries).toHaveLength(0);
+
+      vi.useRealTimers();
+    });
+
+    it("allows exit outside active window", async () => {
+      // Window: 14:00-21:00 UTC. Tick at 10:00 UTC → exit should still fire.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-16T10:00:00Z"));
+
+      const outsideWindowRules = makeBundle({
+        rules: { session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] } },
+      });
+      rulesProvider = createMockRulesProvider(outsideWindowRules);
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // midPrice 0.04 → ROI = (0.04-0.03)/0.03 = 33%, in [20%, 50%] band
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.04 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const exits = signals.filter((s) => s.signal.reason === "repricing-exit");
+      expect(exits).toHaveLength(1);
+
+      vi.useRealTimers();
+    });
+  });
+
+  // ─── Wave 3: fast recycle exit (P1-4) ───────────────────────────────────
+
+  describe("fast recycle exit (P1-4)", () => {
+    it("triggers exit at lower ROI for young positions", async () => {
+      // Position opened 30 min ago. lowBand = 20%, effectiveLow = 10%.
+      // ROI = (0.033 - 0.03) / 0.03 = 10% — should exit with fast recycle.
+      const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+      positionRepo._setPosition(TOK_ID, makePosition({
+        avgEntryPrice: 0.03,
+        openedAt: thirtyMinAgo,
+      }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { exit: { ...makeRules().exit, preferFastRecycle: true } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      const now = Date.now();
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.033 })],
+        timestamp: now,
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const exits = signals.filter((s) => s.signal.reason === "repricing-exit");
+      expect(exits).toHaveLength(1);
+    });
+
+    it("does not apply fast recycle to old positions", async () => {
+      // Position opened 2 hours ago. lowBand = 20%, no reduction.
+      // ROI = (0.033 - 0.03) / 0.03 = 10% — below 20%, should NOT exit.
+      const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      positionRepo._setPosition(TOK_ID, makePosition({
+        avgEntryPrice: 0.03,
+        openedAt: twoHoursAgo,
+      }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { exit: { ...makeRules().exit, preferFastRecycle: true } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      const now = Date.now();
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.033 })],
+        timestamp: now,
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const exits = signals.filter((s) => s.signal.reason === "repricing-exit");
+      expect(exits).toHaveLength(0);
+    });
+  });
+
+  // ─── Wave 3: runner extension (P1-4) ────────────────────────────────────
+
+  describe("runner extension (P1-4)", () => {
+    it("prevents exit when ROI exceeds highBand and runner extension enabled", async () => {
+      // ROI = (0.06 - 0.03) / 0.03 = 100% — above 50% highBand.
+      // allowRunnerExtension: true → hold as runner.
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { exit: { ...makeRules().exit, allowRunnerExtension: true } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.06 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const exits = signals.filter((s) => s.signal.reason === "repricing-exit");
+      expect(exits).toHaveLength(0);
+    });
+
+    it("sells when ROI exceeds highBand and runner extension disabled", async () => {
+      // ROI = (0.06 - 0.03) / 0.03 = 100% — above 50% highBand.
+      // allowRunnerExtension: false → sell.
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      // Default: allowRunnerExtension: false
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.06 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const exits = signals.filter((s) => s.signal.reason === "repricing-exit");
+      expect(exits).toHaveLength(1);
+    });
+  });
+
+  // ─── Wave 3: entry cooldown (P1-6) ─────────────────────────────────────
+
+  describe("entry cooldown (P1-6)", () => {
+    it("blocks entry when cooldown not elapsed", async () => {
+      // entryCooldownSeconds: 300 (5 min), lastEntryTs: 2 min ago → blocked.
+      const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      familyStateRepo.save(makeFamilyState({ lastEntryTs: twoMinAgo }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals).toHaveLength(0);
+    });
+
+    it("allows entry when cooldown elapsed", async () => {
+      // entryCooldownSeconds: 300 (5 min), lastEntryTs: 10 min ago → allowed.
+      const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      familyStateRepo.save(makeFamilyState({ lastEntryTs: tenMinAgo }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+    });
+
+    it("does not block exits by cooldown", async () => {
+      // entryCooldownSeconds: 300, lastEntryTs: 2 min ago → cooldown active.
+      // But exits should still fire.
+      const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+      familyStateRepo.save(makeFamilyState({ lastEntryTs: twoMinAgo }));
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // ROI = (0.04 - 0.03) / 0.03 = 33% → in exit band
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.04 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const exits = signals.filter((s) => s.signal.reason === "repricing-exit");
+      expect(exits).toHaveLength(1);
+    });
+
+    it("limits to one entry per family per scan cycle when cooldown configured", async () => {
+      // Two markets in the same family, cooldown elapsed → only one probe emitted.
+      const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      familyStateRepo.save(makeFamilyState({ lastEntryTs: tenMinAgo }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // Two distinct markets in the same family, both in entry band
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          makeNormalizedMarket({ tokenId: TOK_ID, midPrice: 0.03 }),
+          makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.03 }),
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+    });
+  });
+
+  // ─── Wave 4: weekend policy (P1-3) ─────────────────────────────────────
+
+  describe("weekend policy (P1-3)", () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("blocks all entries on weekend when allowWeekends is false", async () => {
+      // Saturday 2026-03-21 at 16:00 UTC (inside active window)
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
+
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          universe: { ...makeRules().universe, allowWeekends: false },
+          session: { ...makeRules().session, weekendMode: "normal" },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const entries = signals.filter((s) => s.signal.side === "buy");
+      expect(entries).toHaveLength(0);
+    });
+
+    it("blocks scale-in on weekend when weekendMode is reduced", async () => {
+      // Saturday at 16:00 UTC, weekendMode=reduced → probes allowed, scale-in blocked.
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
+
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          universe: { ...makeRules().universe, allowWeekends: true },
+          session: { ...makeRules().session, weekendMode: "reduced" },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const scaleIns = signals.filter((s) =>
+        s.signal.side === "buy" && s.signal.reason !== "probe-entry",
+      );
+      expect(scaleIns).toHaveLength(0);
+    });
+
+    it("allows probes on weekend when weekendMode is reduced", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
+
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          universe: { ...makeRules().universe, allowWeekends: true },
+          session: { ...makeRules().session, weekendMode: "reduced" },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+    });
+
+    it("allows exits on weekend regardless of policy", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
+
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          universe: { ...makeRules().universe, allowWeekends: false },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // ROI = (0.04 - 0.03) / 0.03 = 33% → in exit band
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.04 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const exits = signals.filter((s) => s.signal.reason === "repricing-exit");
+      expect(exits).toHaveLength(1);
+    });
+  });
+
+  // ─── Wave 4: family priority ranking (P1-1) ────────────────────────────
+
+  describe("family priority ranking (P1-1)", () => {
+    it("processes higher-priority families first in intra-tick dedup", async () => {
+      // Two families: fam-btc (rank 1) and fam-eth (rank 2).
+      // With cooldown + intra-tick dedup, only rank 1 gets the entry.
+      const FAM_ETH = createFamilyId("fam-eth");
+      const TOK_ETH = createTokenId("tok-eth-yes");
+
+      const btcBundle = makeBundle({
+        rules: {
+          universe: { ...makeRules().universe, priorityRank: 1 },
+          entry: { ...makeRules().entry, entryCooldownSeconds: 300 },
+        },
+      });
+      const ethBundle = makeBundle({
+        identity: { ...btcBundle.identity, familyId: FAM_ETH },
+        rules: {
+          ...makeRules(),
+          familyId: FAM_ETH,
+          universe: { ...makeRules().universe, priorityRank: 2 },
+          entry: { ...makeRules().entry, entryCooldownSeconds: 300 },
+        },
+      });
+
+      // Custom rules provider returning different bundles per family
+      const customRulesProvider = {
+        getRule: vi.fn((id: FamilyId) => {
+          if (String(id) === "fam-btc") return btcBundle;
+          if (String(id) === "fam-eth") return ethBundle;
+          return null;
+        }),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => [btcBundle.identity, ethBundle.identity]),
+        getRulesForRegime: vi.fn(() => [btcBundle, ethBundle]),
+      } satisfies FamilyRulesProvider;
+
+      mod = new StrategyModule({
+        bus, rulesProvider: customRulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // ETH market appears first in array, but BTC has higher priority (lower rank)
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          makeNormalizedMarket({ tokenId: TOK_ETH, familyId: FAM_ETH, midPrice: 0.03 }),
+          makeNormalizedMarket({ tokenId: TOK_ID, familyId: FAM_ID, midPrice: 0.03 }),
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      // Both families get entries since cooldown dedup is per-family, not global.
+      // But BTC should be processed first due to priority sorting.
+      expect(probes).toHaveLength(2);
+      expect(String(probes[0]!.signal.familyId)).toBe("fam-btc");
+    });
+  });
+
+  // ─── P1-6 completion: max_probe_count_per_market ────────────────────
+
+  describe("max probe count per market (P1-6)", () => {
+    it("blocks probe after filled entry reaches maxProbeCountPerMarket", async () => {
+      // maxProbeCountPerMarket: 1 → after first filled probe, re-probe is blocked.
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { entry: { ...makeRules().entry, maxProbeCountPerMarket: 1 } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // First tick: probe signal fires
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+      expect(signals.filter((s) => s.signal.reason === "probe-entry")).toHaveLength(1);
+
+      // Simulate fill → PositionUpdated (new position, prevSize 0 → size 100)
+      await bus.publish("PositionUpdated", {
+        position: makePosition({ tokenId: TOK_ID, size: 100 }),
+      });
+      await bus.drain();
+
+      // Simulate position closed (sell fill)
+      await bus.publish("PositionUpdated", {
+        position: makePosition({ tokenId: TOK_ID, size: 0, status: "closed" }),
+      });
+      await bus.drain();
+
+      // Second tick: same tokenId, no open position → blocked by session probe count
+      signals.length = 0;
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals.filter((s) => s.signal.reason === "probe-entry")).toHaveLength(0);
+    });
+
+    it("does not consume probe count on rejected signal", async () => {
+      // maxProbeCountPerMarket: 1. Signal fires but risk rejects it.
+      // The probe count should NOT be incremented — a rejected probe
+      // doesn't count against the limit.
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { entry: { ...makeRules().entry, maxProbeCountPerMarket: 1 } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // First tick: probe signal fires
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+      expect(signals.filter((s) => s.signal.reason === "probe-entry")).toHaveLength(1);
+
+      // No PositionUpdated — signal was rejected by risk gate.
+      // Session tracker should NOT have incremented.
+
+      // Second tick: same tokenId → should fire again (rejected probe didn't consume limit)
+      signals.length = 0;
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals.filter((s) => s.signal.reason === "probe-entry")).toHaveLength(1);
+    });
+  });
+
+  // ─── P1-6 completion: max_new_markets_per_session ───────────────────
+
+  describe("max new markets per session (P1-6)", () => {
+    it("blocks new market entry after filled entries reach session limit", async () => {
+      // maxNewMarketsPerSession: 1 → after one filled new market, block new ones.
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { entry: { ...makeRules().entry, maxNewMarketsPerSession: 1 } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // First tick: probe fires for TOK_ID
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID, midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+      expect(signals.filter((s) => s.signal.reason === "probe-entry")).toHaveLength(1);
+
+      // Simulate fill → PositionUpdated (new position)
+      await bus.publish("PositionUpdated", {
+        position: makePosition({ tokenId: TOK_ID, size: 100 }),
+      });
+      await bus.drain();
+
+      // Second tick: different market TOK_ID_2 → blocked by session limit
+      signals.length = 0;
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals.filter((s) => s.signal.reason === "probe-entry")).toHaveLength(0);
+    });
+
+    it("does not count rejected signal as a new market entry", async () => {
+      // maxNewMarketsPerSession: 1. First probe signal is rejected (no fill).
+      // A second attempt to a different market should still be allowed.
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: { entry: { ...makeRules().entry, maxNewMarketsPerSession: 1 } },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // First tick: probe signal fires for TOK_ID
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID, midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+      expect(signals).toHaveLength(1);
+
+      // No PositionUpdated — signal was rejected. Session limit not consumed.
+
+      // Second tick: different market TOK_ID_2 → should still be allowed
+      signals.length = 0;
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals.filter((s) => s.signal.reason === "probe-entry")).toHaveLength(1);
+    });
+  });
+
+  // ─── P1-2 completion: config-driven reduced mode ─────────────────────
+
+  describe("config-driven reduced mode (P1-2)", () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it("always-reduced sessionMode blocks scale-in even inside active window", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-18T17:00:00Z")); // Wednesday 17:00 UTC (inside 14-21 window)
+
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          universe: { ...makeRules().universe, sessionMode: "always-reduced" },
+          session: {
+            activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
+            reducedWindowsUtc: [],
+            weekdayBias: "normal",
+            weekendMode: "normal",
+          },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale");
+      expect(scaleIns).toHaveLength(0);
+    });
+
+    it("reducedWindowsUtc forces reduced mode even inside active window", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-18T17:00:00Z")); // Wednesday 17:00 UTC
+
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          session: {
+            activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
+            reducedWindowsUtc: [{ start: "16:00", end: "18:00" }], // 17:00 is inside
+            weekdayBias: "normal",
+            weekendMode: "normal",
+          },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale");
+      expect(scaleIns).toHaveLength(0);
+    });
+
+    it("allows scale-in when inside active window and outside reduced window", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-18T19:00:00Z")); // Wednesday 19:00 UTC
+
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          exit: { ...makeRules().exit, preferFastRecycle: false },
+          session: {
+            activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
+            reducedWindowsUtc: [{ start: "16:00", end: "18:00" }], // 19:00 is outside
+            weekdayBias: "normal",
+            weekendMode: "normal",
+          },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.031 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale");
+      expect(scaleIns).toHaveLength(1);
+    });
+  });
+
+  // ─── P0-3 completion: evidence-aware sizing ─────────────────────────
+
+  describe("evidence-aware sizing (P0-3)", () => {
+    it("reduces probe size for probe-only promotion state", async () => {
+      const bundle = makeBundle({
+        evidence: { promotionState: "probe-only" },
+        rules: {
+          entry: { ...makeRules().entry, probeSizeUsdc: 10, maxInitialNotionalUsdc: 20 },
+        },
+      });
+      rulesProvider = createMockRulesProvider(bundle);
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+      // probe-only → 0.6x multiplier: 10 * 0.6 = 6
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(6);
+    });
+
+    it("increases size for heavy campaign eligible with high evidence", async () => {
+      const bundle = makeBundle({
+        evidence: { heavyCampaignEligible: true, evidenceScore: 125 },
+        rules: {
+          entry: { ...makeRules().entry, probeSizeUsdc: 10, maxInitialNotionalUsdc: 20 },
+        },
+      });
+      rulesProvider = createMockRulesProvider(bundle);
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+      // heavy eligible + score>100 → 1.25x: 10 * 1.25 = 12.5
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(12.5);
+    });
+
+    it("reduces size when tail-adjusted PnL is negative", async () => {
+      familyStateRepo.save(makeFamilyState({ tailAdjustedPnlLive: -10 }));
+      const bundle = makeBundle({
+        rules: {
+          entry: { ...makeRules().entry, probeSizeUsdc: 10, maxInitialNotionalUsdc: 20 },
+        },
+      });
+      rulesProvider = createMockRulesProvider(bundle);
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+      // negative tailPnl → 0.75x: 10 * 0.75 = 7.5
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(7.5);
+    });
+  });
+
+  // ─── P1-4 completion: medium-hold partial exit ──────────────────────
+
+  describe("medium-hold partial exit (P1-4)", () => {
+    it("emits medium-hold-exit with partial size when ROI is in medium band", async () => {
+      // avgEntryPrice: 0.03, midPrice: 0.032 → ROI = 6.7%
+      // With fast recycle on young position: effectiveLowBand = 10%, mediumHoldBand = 5%
+      // 6.7% is between 5% and 10% → medium-hold-exit
+      positionRepo._setPosition(TOK_ID, makePosition({
+        avgEntryPrice: 0.03,
+        size: 100,
+        openedAt: new Date().toISOString(), // young position
+      }));
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.032 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const medHolds = signals.filter((s) => s.signal.reason === "medium-hold-exit");
+      expect(medHolds).toHaveLength(1);
+      // Partial sell: floor(100 * 0.5) = 50 shares
+      expect(medHolds[0]!.signal.suggestedSize).toBe(50);
+      expect(medHolds[0]!.signal.side).toBe("sell");
+    });
+
+    it("emits full repricing-exit when ROI is in target band", async () => {
+      // avgEntryPrice: 0.03, midPrice: 0.04 → ROI = 33% (in 20-50% band)
+      positionRepo._setPosition(TOK_ID, makePosition({
+        avgEntryPrice: 0.03,
+        size: 100,
+      }));
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.04 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const exits = signals.filter((s) => s.signal.reason === "repricing-exit");
+      expect(exits).toHaveLength(1);
+      expect(exits[0]!.signal.suggestedSize).toBe(100); // full position
+    });
+
+    it("skips medium-hold when position too small to split", async () => {
+      // Size 0.001 → 0.001 * 0.5 = 0.0005 → below 0.001 threshold
+      positionRepo._setPosition(TOK_ID, makePosition({
+        avgEntryPrice: 0.03,
+        size: 0.001,
+        openedAt: new Date().toISOString(),
+      }));
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.032 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const medHolds = signals.filter((s) => s.signal.reason === "medium-hold-exit");
+      expect(medHolds).toHaveLength(0);
+    });
+  });
+
+  // ─── P1-5: selective two-sided overlay ──────────────────────────────
+
+  describe("two-sided overlay (P1-5)", () => {
+    it("emits two-sided-entry for NO-outcome market when allowTwoSided is true", async () => {
+      rulesProvider = createMockRulesProvider(makeBundle({
+        evidence: { bothSidedEligible: true, localTradeCount: 50 },
+        rules: {
+          twoSided: { allowTwoSided: true, twoSidedMode: "selective", minActivityForTwoSided: 10 },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      // NO-outcome with two-sided enabled: should get two-sided-entry (not probe-entry)
+      const twoSided = signals.filter((s) => s.signal.reason === "two-sided-entry");
+      expect(twoSided).toHaveLength(1);
+      expect(twoSided[0]!.signal.side).toBe("buy");
+    });
+
+    it("blocks two-sided entry when twoSidedMode is disabled", async () => {
+      rulesProvider = createMockRulesProvider(makeBundle({
+        rules: {
+          twoSided: { allowTwoSided: false, twoSidedMode: "disabled", minActivityForTwoSided: null },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const twoSided = signals.filter((s) => s.signal.reason === "two-sided-entry");
+      expect(twoSided).toHaveLength(0);
+    });
+
+    it("blocks two-sided in selective mode when bothSidedEligible is false", async () => {
+      rulesProvider = createMockRulesProvider(makeBundle({
+        evidence: { bothSidedEligible: false },
+        rules: {
+          twoSided: { allowTwoSided: true, twoSidedMode: "selective", minActivityForTwoSided: null },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const twoSided = signals.filter((s) => s.signal.reason === "two-sided-entry");
+      expect(twoSided).toHaveLength(0);
+    });
+
+    it("blocks two-sided in reduced mode", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-03-18T05:00:00Z")); // 05:00 UTC (outside 14-21)
+
+      rulesProvider = createMockRulesProvider(makeBundle({
+        evidence: { bothSidedEligible: true },
+        rules: {
+          twoSided: { allowTwoSided: true, twoSidedMode: "selective", minActivityForTwoSided: null },
+          session: {
+            activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
+            reducedWindowsUtc: [],
+            weekdayBias: "normal",
+            weekendMode: "normal",
+          },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const twoSided = signals.filter((s) => s.signal.reason === "two-sided-entry");
+      expect(twoSided).toHaveLength(0);
+
+      vi.useRealTimers();
+    });
+
+    it("blocks two-sided when activity below minActivityForTwoSided", async () => {
+      rulesProvider = createMockRulesProvider(makeBundle({
+        evidence: { bothSidedEligible: true, localTradeCount: 5 },
+        rules: {
+          twoSided: { allowTwoSided: true, twoSidedMode: "active", minActivityForTwoSided: 20 },
+        },
+      }));
+      mod = new StrategyModule({
+        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const twoSided = signals.filter((s) => s.signal.reason === "two-sided-entry");
+      expect(twoSided).toHaveLength(0);
+    });
+  });
+
+  // ─── P1-1 completion: multi-factor family ranking ──────────────────
+
+  describe("multi-factor family ranking (P1-1)", () => {
+    it("ranks family with better evidence higher than equal priorityRank", async () => {
+      const FAM_WEAK = createFamilyId("fam-weak");
+      const TOK_WEAK = createTokenId("tok-weak");
+
+      // Both families have priorityRank: 1, but fam-btc has higher evidence score
+      const strongBundle = makeBundle({
+        evidence: { evidenceScore: 200 },
+        rules: {
+          universe: { ...makeRules().universe, priorityRank: 1 },
+          entry: { ...makeRules().entry, entryCooldownSeconds: 300 },
+        },
+      });
+      const weakBundle = makeBundle({
+        identity: { ...makeIdentity(), familyId: FAM_WEAK },
+        evidence: { evidenceScore: 10 },
+        rules: {
+          ...makeRules(),
+          familyId: FAM_WEAK,
+          universe: { ...makeRules().universe, priorityRank: 1 },
+          entry: { ...makeRules().entry, entryCooldownSeconds: 300 },
+        },
+      });
+
+      const customRulesProvider = {
+        getRule: vi.fn((id: FamilyId) => {
+          if (String(id) === "fam-btc") return strongBundle;
+          if (String(id) === "fam-weak") return weakBundle;
+          return null;
+        }),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => [strongBundle.identity, weakBundle.identity]),
+        getRulesForRegime: vi.fn(() => [strongBundle, weakBundle]),
+      } satisfies FamilyRulesProvider;
+
+      mod = new StrategyModule({
+        bus, rulesProvider: customRulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      // Weak family market first in array, strong second
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          makeNormalizedMarket({ tokenId: TOK_WEAK, familyId: FAM_WEAK, midPrice: 0.03 }),
+          makeNormalizedMarket({ tokenId: TOK_ID, familyId: FAM_ID, midPrice: 0.03 }),
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(2);
+      // Strong evidence family should be processed first
+      expect(String(probes[0]!.signal.familyId)).toBe("fam-btc");
+    });
+
+    it("priorityRank always dominates even with maximal evidence difference", async () => {
+      // fam-btc: rank 2 with perfect evidence (score 999, positive tail PnL)
+      // fam-low: rank 1 with terrible evidence (score 0, negative tail PnL)
+      // rank-1 family should still win despite far worse evidence.
+      const FAM_LOW = createFamilyId("fam-low");
+      const TOK_LOW = createTokenId("tok-low");
+
+      const highEvidenceBundle = makeBundle({
+        evidence: { evidenceScore: 999, heavyCampaignEligible: true },
+        rules: {
+          universe: { ...makeRules().universe, priorityRank: 2 },
+          entry: { ...makeRules().entry, entryCooldownSeconds: 300 },
+        },
+      });
+      familyStateRepo.save(makeFamilyState({
+        familyId: FAM_ID,
+        tailAdjustedPnlLive: 500,
+        currentTailCostUsdc: 0,
+      }));
+
+      const lowEvidenceBundle = makeBundle({
+        identity: { ...makeIdentity(), familyId: FAM_LOW },
+        evidence: { evidenceScore: 0 },
+        rules: {
+          ...makeRules(),
+          familyId: FAM_LOW,
+          universe: { ...makeRules().universe, priorityRank: 1 },
+          entry: { ...makeRules().entry, entryCooldownSeconds: 300 },
+        },
+      });
+      familyStateRepo.save(makeFamilyState({
+        familyId: FAM_LOW,
+        tailAdjustedPnlLive: -100,
+        currentTailCostUsdc: 500,
+      }));
+
+      const customRulesProvider = {
+        getRule: vi.fn((id: FamilyId) => {
+          if (String(id) === "fam-btc") return highEvidenceBundle;
+          if (String(id) === "fam-low") return lowEvidenceBundle;
+          return null;
+        }),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => [highEvidenceBundle.identity, lowEvidenceBundle.identity]),
+        getRulesForRegime: vi.fn(() => [highEvidenceBundle, lowEvidenceBundle]),
+      } satisfies FamilyRulesProvider;
+
+      mod = new StrategyModule({
+        bus, rulesProvider: customRulesProvider, positionRepo, familyStateRepo, log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          makeNormalizedMarket({ tokenId: TOK_ID, familyId: FAM_ID, midPrice: 0.03 }),
+          makeNormalizedMarket({ tokenId: TOK_LOW, familyId: FAM_LOW, midPrice: 0.03 }),
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(2);
+      // Rank 1 (fam-low) must beat rank 2 (fam-btc) despite worse evidence
+      expect(String(probes[0]!.signal.familyId)).toBe("fam-low");
     });
   });
 });

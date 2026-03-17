@@ -1,4 +1,13 @@
-// @plankton/db — repository implementations (SQLite v1)
-// Phase 4+ will implement repositories, migrations, connection management.
-
-export const DB_PLACEHOLDER = true;
+export { openDatabase, type DbConnection } from "./connection.js";
+export { runMigrations } from "./migrations/runner.js";
+export { bootstrapDatabase } from "./bootstrap.js";
+export { SqliteMarketRepository } from "./repositories/market-repository.js";
+export { SqliteOrderRepository } from "./repositories/order-repository.js";
+export { SqliteFillRepository } from "./repositories/fill-repository.js";
+export { SqlitePositionRepository } from "./repositories/position-repository.js";
+export { SqliteInventoryLotRepository } from "./repositories/inventory-lot-repository.js";
+export { SqliteFamilyStateRepository } from "./repositories/family-state-repository.js";
+export { SqliteFamilyCatalogRepository } from "./repositories/family-catalog-repository.js";
+export { SqliteOperatorCommandRepository } from "./repositories/operator-command-repository.js";
+export { SqliteOperatorActionRepository } from "./repositories/operator-action-repository.js";
+export { SqliteMarketResolutionRepository } from "./repositories/market-resolution-repository.js";
