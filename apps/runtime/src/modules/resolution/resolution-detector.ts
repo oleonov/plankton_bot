@@ -83,7 +83,8 @@ export class ResolutionDetector {
     // 4. Group by conditionId and skip already-resolved
     const byCondition = new Map<string, ResolutionCandidate[]>();
     for (const c of candidates) {
-      if (this.resolutionRepo.findByConditionId(c.conditionId)) continue;
+      const existing = this.resolutionRepo.findByConditionId(c.conditionId);
+      if (existing && existing.status === "settled") continue;
       const group = byCondition.get(c.conditionId) ?? [];
       group.push(c);
       byCondition.set(c.conditionId, group);

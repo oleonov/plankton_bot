@@ -18,6 +18,10 @@
     "@plankton/db": "workspace:*",
     "@plankton/exchange": "workspace:*",
     "@plankton/family-rules": "workspace:*",
+    "@polymarket/clob-client": "^4.0.0",
     "pino": "^9.6.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0"
   }
 }

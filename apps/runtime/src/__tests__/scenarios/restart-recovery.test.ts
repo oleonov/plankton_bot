@@ -20,7 +20,7 @@ describe("Scenario: restart/recovery on existing DB", () => {
       const familyConfig = makeFamilyConfig({
         familyId: "fam-restart",
         familyKey: "restart",
-        slugPattern: "^will-.*-happen$",
+        slugPattern: "will-*-happen",
       });
 
       const market = makeMarket({ slug: "will-test-happen" });

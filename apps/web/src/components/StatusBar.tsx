@@ -53,6 +53,11 @@ export function StatusBar() {
         ? <span className="badge badge-red">STALE</span>
         : <span className="badge badge-green">FRESH</span>}
       </span>
+      {status.marketDataPoll?.active && (
+        <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
+          refreshing prices
+        </span>
+      )}
       {status.reconciliationDriftDetected && (
         <span className="badge badge-red" style={{ fontWeight: 700 }}>RECON DRIFT</span>
       )}
@@ -60,6 +65,7 @@ export function StatusBar() {
       <span style={{ marginLeft: "auto" }}>
         {status.paused ? (
           <ConfirmAction
+            key="resume-action"
             label="&#9654; RESUME"
             confirmText="Resume trading?"
             variant="success"
@@ -68,6 +74,7 @@ export function StatusBar() {
           />
         ) : (
           <ConfirmAction
+            key="pause-action"
             label="&#9646;&#9646; PAUSE"
             confirmText="Pause all trading?"
             variant="danger"

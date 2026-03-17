@@ -114,10 +114,12 @@ function findMonorepoRoot(): string {
 }
 
 export function loadEnv(envPath?: string): AppConfig {
+  const root = findMonorepoRoot();
+
   if (envPath !== undefined) {
     loadDotenv({ path: envPath });
   } else {
-    loadDotenv();
+    loadDotenv({ path: path.join(root, ".env") });
   }
 
   const result = envSchema.safeParse(process.env);
@@ -130,7 +132,6 @@ export function loadEnv(envPath?: string): AppConfig {
   }
 
   const env = result.data;
-  const root = findMonorepoRoot();
 
   const liveLite = env.RUNTIME_MODE === "live-lite" && env.LIVE_LITE_FAMILY_ALLOWLIST
     ? {

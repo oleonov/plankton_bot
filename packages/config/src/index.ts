@@ -1,4 +1,12 @@
-// @plankton/config — YAML/env loading + zod validation
-// Phase 3 will populate with schema, loader, and env modules.
-
-export const CONFIG_PLACEHOLDER = true;
+export { loadEnv, type AppConfig } from "./env.js";
+export { loadFamilyRulesYaml } from "./loader.js";
+export {
+  familyYamlSchema,
+  familyRulesFileSchema,
+  identityYamlSchema,
+  evidenceYamlSchema,
+  rulesYamlSchema,
+  runtimeStateYamlSchema,
+  type FamilyConfig,
+  type TimeWindow,
+} from "./schemas.js";

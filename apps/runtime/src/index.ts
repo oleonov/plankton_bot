@@ -271,6 +271,7 @@ async function main(): Promise<void> {
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
+    marketRepo: repos.market,
     orderRepo: repos.order,
     fillRepo: repos.fill,
     log,
@@ -342,12 +343,17 @@ async function main(): Promise<void> {
     settler: positionSettler,
     marketRepo: repos.market,
     resolutionRepo: marketResolutionRepo,
+    orderRepo: repos.order,
     rulesProvider,
     exposureCalculator,
     bus,
     log,
     checkIntervalMs: 5 * 60_000, // 5 minutes
     graceMinutes: 30,
+    // In live-lite mode, provide the exchange gateway so the resolution module
+    // verifies on-chain token balance is 0 before settling in the ledger.
+    // In simulation/paper modes, no gateway is needed (no on-chain state).
+    ...(config.runtimeMode === "live-lite" && exchangeGateway ? { gateway: exchangeGateway } : {}),
   });
 
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [

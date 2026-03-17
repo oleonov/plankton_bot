@@ -26,7 +26,8 @@ import {
   SqliteOperatorActionRepository,
 } from "@plankton/db";
 import type { FamilyState } from "@plankton/domain";
-import { createFamilyId, createBotRunId, createTokenId } from "@plankton/domain";
+import { createFamilyId, createBotRunId, createTokenId, slugPatternToRegex } from "@plankton/domain";
+import type { Market, ClobMarket } from "@plankton/domain";
 import type { FamilyConfig } from "@plankton/config";
 import {
   SimulationMarketDataGateway,
@@ -182,10 +183,12 @@ async function executeScenario(
 
   const marketDataModule = new MarketDataModule({
     gateway: marketDataGateway,
+    marketRepo: repos.market,
     bus,
     log,
     pollIntervalMs: 60_000,
     staleThresholdMs: 120_000,
+    botRunId: String(botRunId),
   });
 
   const normalizationModule = new NormalizationModule({
@@ -198,6 +201,7 @@ async function executeScenario(
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
+    marketRepo: repos.market,
     orderRepo: repos.order,
     fillRepo: repos.fill,
     log,
@@ -253,6 +257,47 @@ async function executeScenario(
   });
 
   await supervisor.start();
+
+  // 8a. Pre-seed tracked markets into the market repo so the pricing loop finds them.
+  // In production, MarketScannerModule does this; in scenarios we do it from fixtures.
+  const compiledFamilies = families.map((f) => ({
+    identity: f,
+    regex: f.slugPattern ? slugPatternToRegex(f.slugPattern) : null,
+  }));
+
+  function seedTrackedMarket(clobMarket: ClobMarket): void {
+    const matched = compiledFamilies.find((f) => f.regex?.test(clobMarket.slug));
+    const now = new Date().toISOString();
+    for (const token of clobMarket.tokens) {
+      const market: Market = {
+        tokenId: createTokenId(token.tokenId),
+        conditionId: clobMarket.conditionId,
+        slug: clobMarket.slug,
+        question: clobMarket.question,
+        outcome: token.outcome.toUpperCase() === "YES" ? "YES" : "NO",
+        familyId: matched?.identity.familyId ?? null,
+        familyKey: matched?.identity.familyKey ?? null,
+        regime: matched?.identity.regime ?? null,
+        horizon: matched?.identity.horizon ?? null,
+        endDate: clobMarket.endDate,
+        active: clobMarket.active,
+        tickSize: clobMarket.tickSize,
+        negRisk: clobMarket.negRisk,
+        createdAt: now,
+        updatedAt: now,
+      };
+      repos.market.save(market);
+    }
+  }
+
+  // Pre-seed from all unique markets in fixtures
+  const seeded = new Set<string>();
+  for (const snap of fixture.marketSnapshots) {
+    if (!seeded.has(snap.market.conditionId)) {
+      seedTrackedMarket(snap.market);
+      seeded.add(snap.market.conditionId);
+    }
+  }
 
   // 9. Tick loop
   const scheduledByTick = groupCommandsByTick(fixture.scheduledCommands ?? []);

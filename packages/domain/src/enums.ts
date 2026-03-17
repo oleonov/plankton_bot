@@ -160,8 +160,12 @@ export type PositionStatus = (typeof PositionStatus)[keyof typeof PositionStatus
 
 export const SignalReason = {
   ProbeEntry: "probe-entry",
+  ConfirmScale: "confirm-scale",
   ScaleIn: "scale-in",
+  HeavyScale: "heavy-scale",
   RepricingExit: "repricing-exit",
+  MediumHoldExit: "medium-hold-exit",
+  TwoSidedEntry: "two-sided-entry",
   TailPrune: "tail-prune",
   ReduceOnly: "reduce-only",
   Operator: "operator",
@@ -217,6 +221,7 @@ export const ExchangeErrorCode = {
   RuntimePaused: "RUNTIME_PAUSED",
   LiveLiteAllowlist: "LIVE_LITE_ALLOWLIST",
   LiveLiteOrderCap: "LIVE_LITE_ORDER_CAP",
+  MarketInactive: "MARKET_INACTIVE",
   Unknown: "UNKNOWN",
 } as const;
 export type ExchangeErrorCode = (typeof ExchangeErrorCode)[keyof typeof ExchangeErrorCode];

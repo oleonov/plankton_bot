@@ -64,6 +64,9 @@ beforeAll(async () => {
     INSERT INTO bot_runs (run_id, mode, started_at)
     VALUES ('run-1', 'simulation', '2026-03-14T00:00:00Z');
 
+    INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, created_at, updated_at)
+    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 1, 0.01, 0, '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
+
     INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
     VALUES ('market_data_source', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
     INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
@@ -266,6 +269,68 @@ describe("GET /status", () => {
     expect(res.json().data.marketDataStale).toBe(false);
     expect(res.json().data.marketDataLastUpdateAt).toBeTruthy();
   });
+
+  it("marketDataPoll is included when active progress exists for current bot run", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('market_data_poll_progress', 1, '{"active":true,"page":5,"botRunId":"run-1"}', '${new Date().toISOString()}')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/status",
+      headers: authHeaders(),
+    });
+    const d = res.json().data;
+    expect(d.marketDataPoll).toEqual({ active: true, page: 5 });
+
+    // Clean up
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'`);
+  });
+
+  it("marketDataPoll is omitted when progress is inactive", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('market_data_poll_progress', 1, '{"active":false,"page":0,"botRunId":"run-1"}', '${new Date().toISOString()}')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/status",
+      headers: authHeaders(),
+    });
+    expect(res.json().data.marketDataPoll).toBeUndefined();
+
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'`);
+  });
+
+  it("marketDataPoll is omitted when botRunId does not match current run", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('market_data_poll_progress', 1, '{"active":true,"page":3,"botRunId":"stale-run-999"}', '${new Date().toISOString()}')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/status",
+      headers: authHeaders(),
+    });
+    expect(res.json().data.marketDataPoll).toBeUndefined();
+
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'`);
+  });
+
+  it("marketDataPoll is omitted when no progress row exists", async () => {
+    // Ensure no progress row
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'`);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/status",
+      headers: authHeaders(),
+    });
+    expect(res.json().data.marketDataPoll).toBeUndefined();
+  });
 });
 
 // ─── Families ───────────────────────────────────────────────────────
@@ -467,6 +532,85 @@ describe("fills", () => {
       headers: authHeaders(),
     });
     expect(res.json().data.items.length).toBe(0);
+  });
+});
+
+// ─── Market metadata enrichment ─────────────────────────────────────
+
+describe("market metadata enrichment", () => {
+  it("GET /orders enriches items with market metadata when market exists", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/orders?status=open",
+      headers: authHeaders(),
+    });
+    const item = res.json().data.items[0];
+    // tok-1 has a market row
+    expect(item.slug).toBe("will-btc-hit-100k");
+    expect(item.question).toBe("Will BTC hit 100k?");
+    expect(item.outcome).toBe("Yes");
+    expect(item.conditionId).toBe("cond-1");
+  });
+
+  it("GET /orders/:id enriches single order", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/orders/ord-1",
+      headers: authHeaders(),
+    });
+    const item = res.json().data;
+    expect(item.slug).toBe("will-btc-hit-100k");
+    expect(item.question).toBe("Will BTC hit 100k?");
+  });
+
+  it("GET /fills enriches items with market metadata", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/fills",
+      headers: authHeaders(),
+    });
+    const item = res.json().data.items.find((f: any) => f.tokenId === "tok-1");
+    expect(item.slug).toBe("will-btc-hit-100k");
+    expect(item.question).toBe("Will BTC hit 100k?");
+    expect(item.outcome).toBe("Yes");
+    expect(item.conditionId).toBe("cond-1");
+  });
+
+  it("GET /positions enriches items with market metadata", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/positions",
+      headers: authHeaders(),
+    });
+    const enriched = res.json().data.find((p: any) => p.tokenId === "tok-1");
+    expect(enriched.slug).toBe("will-btc-hit-100k");
+    expect(enriched.question).toBe("Will BTC hit 100k?");
+    expect(enriched.outcome).toBe("Yes");
+    expect(enriched.conditionId).toBe("cond-1");
+  });
+
+  it("GET /positions/:id enriches single position", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/positions/pos-1",
+      headers: authHeaders(),
+    });
+    const item = res.json().data;
+    expect(item.slug).toBe("will-btc-hit-100k");
+  });
+
+  it("returns null metadata when no market row exists for token", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/positions",
+      headers: authHeaders(),
+    });
+    // tok-2 (pos-dust) has no market row
+    const dust = res.json().data.find((p: any) => p.tokenId === "tok-2");
+    expect(dust.slug).toBeNull();
+    expect(dust.question).toBeNull();
+    expect(dust.outcome).toBeNull();
+    expect(dust.conditionId).toBeNull();
   });
 });
 

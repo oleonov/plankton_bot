@@ -13,6 +13,8 @@ import {
 export interface CreateGatewaysInput {
   runtimeMode: "simulation" | "paper" | "live-lite";
   polyClient?: unknown;
+  /** Optional slug filter passed to live market data gateway. */
+  slugFilter?: ((slug: string) => boolean) | undefined;
 }
 
 export interface CreateGatewaysResult {
@@ -24,7 +26,7 @@ export interface CreateGatewaysResult {
 }
 
 export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult {
-  const { runtimeMode, polyClient } = input;
+  const { runtimeMode, polyClient, slugFilter } = input;
 
   if (runtimeMode === "simulation") {
     return {
@@ -42,7 +44,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
 
   if (runtimeMode === "paper") {
     return {
-      marketDataGateway: new LiveMarketDataGateway({ client: polyClient }),
+      marketDataGateway: new LiveMarketDataGateway({ client: polyClient, slugFilter }),
       exchangeGateway: new SimulationExchangeGateway(),
       modeLabel: "paper",
       marketDataSource: "live",
@@ -52,7 +54,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
 
   // live-lite
   return {
-    marketDataGateway: new LiveMarketDataGateway({ client: polyClient }),
+    marketDataGateway: new LiveMarketDataGateway({ client: polyClient, slugFilter }),
     exchangeGateway: new LiveExchangeGateway({ client: polyClient }),
     modeLabel: "live-lite",
     marketDataSource: "live",

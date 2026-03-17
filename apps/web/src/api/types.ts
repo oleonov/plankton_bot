@@ -29,6 +29,7 @@ export interface StatusData {
     maxActiveMarkets: number;
   };
   reconciliationDriftDetected: boolean;
+  marketDataPoll?: { active: boolean; page: number };
 }
 
 /** GET /metrics */
@@ -71,6 +72,10 @@ export interface PositionDTO {
   openedAt: string;
   closedAt: string | null;
   updatedAt: string;
+  slug: string | null;
+  question: string | null;
+  outcome: string | null;
+  conditionId: string | null;
 }
 
 /** GET /orders item */
@@ -87,6 +92,10 @@ export interface OrderDTO {
   status: string;
   createdAt: string;
   updatedAt: string;
+  slug: string | null;
+  question: string | null;
+  outcome: string | null;
+  conditionId: string | null;
 }
 
 /** GET /fills item */
@@ -101,6 +110,10 @@ export interface FillDTO {
   sizeUsdc: number;
   fee: number;
   filledAt: string;
+  slug: string | null;
+  question: string | null;
+  outcome: string | null;
+  conditionId: string | null;
 }
 
 /** GET /families item */

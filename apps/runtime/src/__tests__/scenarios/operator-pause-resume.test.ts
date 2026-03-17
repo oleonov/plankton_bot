@@ -15,7 +15,7 @@ describe("Scenario: operator pause/resume flow", () => {
     const familyConfig = makeFamilyConfig({
       familyId: "fam-pause-test",
       familyKey: "pause-test",
-      slugPattern: "^will-.*-happen$",
+      slugPattern: "will-*-happen",
       defaultMaxBuysPerLeg: 10,
     });
 

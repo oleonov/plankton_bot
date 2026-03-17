@@ -33,8 +33,11 @@ export const pnlSeriesRoutes: FastifyPluginAsync<PnlSeriesOpts> = async (app, op
       )
       .all(sinceStr) as DailyBucket[];
 
-    // Compute cumulative sum
-    let cumulative = 0;
+    // Start from pre-window cumulative so the chart reflects total realized PnL
+    const preWindow = opts.db
+      .prepare(`SELECT COALESCE(SUM(delta), 0) AS total FROM pnl_ledger WHERE filled_at < ?`)
+      .get(sinceStr) as { total: number };
+    let cumulative = preWindow.total;
     const items = rows.map((row) => {
       cumulative += row.daily_pnl;
       return { date: row.date, realizedPnl: cumulative };

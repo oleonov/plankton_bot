@@ -15,6 +15,7 @@ import type {
   RuntimeModule,
   EventBus,
   ExchangeGateway,
+  MarketRepository,
   OrderRepository,
   FillRepository,
   Order,
@@ -33,6 +34,7 @@ import type { LiveLiteGuard } from "../../live-lite-guard.js";
 export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
   bus: EventBus;
+  marketRepo: MarketRepository;
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
   log: Logger;
@@ -129,6 +131,21 @@ export class ExecutionModule implements RuntimeModule {
         });
         return;
       }
+    }
+
+    // Market active check: reject orders on deactivated/resolved markets
+    const market = this.deps.marketRepo.findByTokenId(cmd.tokenId);
+    if (market && !market.active) {
+      this.log.warn({ commandId: cmd.commandId, tokenId: cmd.tokenId }, "order rejected — market inactive");
+      await this.deps.bus.publish("OrderRejected", {
+        commandId: cmd.commandId,
+        clientOrderId: cmd.clientOrderId,
+        reason: "market-inactive",
+        errorCode: "MARKET_INACTIVE",
+        familyId: cmd.familyId,
+        timestamp: Date.now(),
+      });
+      return;
     }
 
     // Idempotency: skip already-processed commandId

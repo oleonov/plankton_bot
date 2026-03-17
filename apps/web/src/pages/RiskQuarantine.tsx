@@ -18,7 +18,7 @@ export function RiskQuarantine() {
   });
 
   const attentionFamilies = families?.filter(
-    (f) => f.state?.runtimeMode === "quarantined" || f.state?.runtimeMode === "reduce-only"
+    (f) => f.state?.runtimeMode === "quarantine" || f.state?.runtimeMode === "reduce-only"
   ) ?? [];
 
   return (
@@ -31,7 +31,7 @@ export function RiskQuarantine() {
             {attentionFamilies.map((f) => {
               const mode = f.state?.runtimeMode ?? "unknown";
               return (
-                <div key={f.familyId} className={`card ${mode === "quarantined" ? "card-accent-red" : "card-accent-orange"}`}>
+                <div key={f.familyId} className={`card ${mode === "quarantine" ? "card-accent-red" : "card-accent-orange"}`}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                     <span style={{ fontWeight: 700 }}>{f.familyKey}</span>
                     <Badge value={mode} type="mode" />

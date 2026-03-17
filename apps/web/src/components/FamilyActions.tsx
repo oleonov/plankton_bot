@@ -14,7 +14,7 @@ export function FamilyActions({ familyId, mode }: { familyId: string; mode: stri
           <ConfirmAction label="Q" confirmText={`Quarantine ${familyId}?`} variant="danger" showReason onConfirm={(r) => quarantine.mutate(r)} isPending={quarantine.isPending} />
         </>
       )}
-      {mode === "quarantined" && (
+      {mode === "quarantine" && (
         <ConfirmAction label="Activate" confirmText={`Activate ${familyId}?`} variant="success" showReason onConfirm={(r) => activate.mutate(r)} isPending={activate.isPending} />
       )}
       {mode === "reduce-only" && (

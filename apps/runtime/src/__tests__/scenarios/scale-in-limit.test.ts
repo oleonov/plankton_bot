@@ -10,7 +10,7 @@ describe("Scenario: scale-in limit respected", () => {
     const familyConfig = makeFamilyConfig({
       familyId: "fam-elections",
       familyKey: "elections",
-      slugPattern: "^will-.*-happen$",
+      slugPattern: "will-*-happen",
       defaultMaxBuysPerLeg: 1,
     });
 

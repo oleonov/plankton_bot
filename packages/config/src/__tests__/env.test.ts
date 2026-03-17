@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { loadEnv } from "../env.js";
 
@@ -45,6 +48,11 @@ const BASE_LIVE_LITE_VARS = {
 describe("loadEnv", () => {
   const saved: Record<string, string | undefined> = {};
 
+  // Explicit empty .env file to prevent loadEnv() from loading the real root .env
+  const emptyEnvDir = mkdtempSync(path.join(os.tmpdir(), "plankton-env-test-"));
+  const emptyEnvPath = path.join(emptyEnvDir, "empty.env");
+  writeFileSync(emptyEnvPath, "");
+
   beforeEach(() => {
     for (const key of ALL_KEYS) {
       saved[key] = process.env[key];
@@ -60,12 +68,20 @@ describe("loadEnv", () => {
   });
 
   it("returns defaults when no env vars are set", () => {
-    const config = loadEnv();
-    expect(config.runtimeMode).toBe("simulation");
-    expect(config.logLevel).toBe("info");
-    expect(config.dbPath).toContain("plankton.db");
-    expect(config.familyRulesPath).toContain("family_rules.yaml");
-    expect(config.polyApiKey).toBeUndefined();
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), "plankton-config-test-"));
+    const envPath = path.join(tempDir, "empty.env");
+    writeFileSync(envPath, "");
+
+    try {
+      const config = loadEnv(envPath);
+      expect(config.runtimeMode).toBe("simulation");
+      expect(config.logLevel).toBe("info");
+      expect(config.dbPath).toContain("plankton.db");
+      expect(config.familyRulesPath).toContain("family_rules.yaml");
+      expect(config.polyApiKey).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("reads env vars correctly", () => {
@@ -98,7 +114,7 @@ describe("loadEnv", () => {
 
   it("requires POLY_API_KEY in live-lite mode", () => {
     setEnvVars({ RUNTIME_MODE: "live-lite", LIVE_LITE_CONFIRM: "true" });
-    expect(() => loadEnv()).toThrow("POLY_API_KEY");
+    expect(() => loadEnv(emptyEnvPath)).toThrow("POLY_API_KEY");
   });
 
   it("requires POLY_API_SECRET in paper mode", () => {
@@ -107,7 +123,7 @@ describe("loadEnv", () => {
       POLY_API_KEY: "key",
       POLY_PASSPHRASE: "pass",
     });
-    expect(() => loadEnv()).toThrow("POLY_API_SECRET");
+    expect(() => loadEnv(emptyEnvPath)).toThrow("POLY_API_SECRET");
   });
 
   it("requires POLY_PASSPHRASE in live-lite mode", () => {
@@ -117,7 +133,7 @@ describe("loadEnv", () => {
       POLY_API_KEY: "key",
       POLY_API_SECRET: "secret",
     });
-    expect(() => loadEnv()).toThrow("POLY_PASSPHRASE");
+    expect(() => loadEnv(emptyEnvPath)).toThrow("POLY_PASSPHRASE");
   });
 
   it("does not require POLY_* in simulation mode", () => {

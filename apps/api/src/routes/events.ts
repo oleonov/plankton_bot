@@ -72,7 +72,7 @@ function takeSnapshot(db: Database.Database): ChangeSnapshot {
     .prepare("SELECT MAX(started_at) as ts FROM bot_runs")
     .get() as { ts: string | null };
   const reconMetric = db
-    .prepare("SELECT MAX(captured_at) as ts FROM runtime_metrics WHERE metric_name IN ('last_reconciliation','market_data_last_update')")
+    .prepare("SELECT MAX(captured_at) as ts FROM runtime_metrics WHERE metric_name IN ('last_reconciliation','market_data_last_update','market_data_poll_progress')")
     .get() as { ts: string | null };
 
   return {

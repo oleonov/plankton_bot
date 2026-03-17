@@ -9,8 +9,8 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
     this.db
       .prepare(
         `INSERT INTO market_resolutions
-           (condition_id, resolution, resolved_at, detected_at, source, raw_response)
-         VALUES (?, ?, ?, ?, ?, ?)
+           (condition_id, resolution, resolved_at, detected_at, source, raw_response, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(condition_id) DO NOTHING`,
       )
       .run(
@@ -20,6 +20,7 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
         resolution.detectedAt,
         resolution.source,
         resolution.rawResponse,
+        resolution.status,
       );
   }
 
@@ -37,6 +38,12 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
     return rows.map((r) => this.rowToResolution(r));
   }
 
+  markSettled(conditionId: string): void {
+    this.db
+      .prepare("UPDATE market_resolutions SET status = 'settled' WHERE condition_id = ?")
+      .run(conditionId);
+  }
+
   private rowToResolution(row: Record<string, unknown>): MarketResolution {
     return {
       conditionId: row.condition_id as string,
@@ -45,6 +52,7 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
       detectedAt: row.detected_at as string,
       source: row.source as MarketResolution["source"],
       rawResponse: (row.raw_response as string) ?? null,
+      status: (row.status as "detected" | "settled") ?? "settled",
     };
   }
 }

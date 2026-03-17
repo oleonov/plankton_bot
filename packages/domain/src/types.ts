@@ -406,6 +406,7 @@ export interface MarketResolution {
   detectedAt: string;       // ISO timestamp
   source: "gamma-api" | "gamma-delisted" | "manual";
   rawResponse: string | null; // JSON for debugging
+  status: "detected" | "settled";
 }
 
 // ─── ReconciliationResult ────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ export function AlertStrip() {
 
   const alerts: string[] = [];
 
-  const quarantined = families?.filter((f) => f.state?.runtimeMode === "quarantined") ?? [];
+  const quarantined = families?.filter((f) => f.state?.runtimeMode === "quarantine") ?? [];
   if (quarantined.length > 0) {
     const names = quarantined.map((f) => f.familyKey).join(", ");
     alerts.push(`${quarantined.length} families quarantined \u2014 ${names}`);

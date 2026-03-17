@@ -10,7 +10,7 @@ describe("Scenario: reduce-only blocks new entry", () => {
     const familyConfig = makeFamilyConfig({
       familyId: "fam-elections",
       familyKey: "elections",
-      slugPattern: "^will-.*-happen$",
+      slugPattern: "will-*-happen",
     });
 
     const market = makeMarket({ slug: "will-test-happen" });

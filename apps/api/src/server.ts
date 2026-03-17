@@ -37,6 +37,7 @@ export async function buildServer(deps: ServerDeps) {
   // Auth hook — skip for /api/v1/health
   const authenticate = createAuthHook(deps.config.planktonApiKey);
   app.addHook("onRequest", async (request, reply) => {
+    if (!request.url.startsWith("/api/")) return;
     if (request.url === "/api/v1/health") return;
     await authenticate(request, reply);
   });

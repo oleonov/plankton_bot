@@ -29,7 +29,7 @@ import type {
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
-import { scan, createBuyTracker, type BuyTracker } from "./scanner.js";
+import { scan, createBuyTracker, createSessionTracker, type BuyTracker, type SessionTracker } from "./scanner.js";
 import { SignalToOrderBridge } from "./signal-to-order.js";
 
 export interface StrategyModuleDeps {
@@ -46,6 +46,7 @@ export interface StrategyModuleDeps {
 export class StrategyModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly buyTracker: BuyTracker;
+  private readonly sessionTracker: SessionTracker;
   private readonly bridge: SignalToOrderBridge;
   /** Last-known size per position — used to distinguish buy-fill updates from sell-fill updates. */
   private readonly lastKnownSize = new Map<string, number>();
@@ -60,6 +61,7 @@ export class StrategyModule implements RuntimeModule {
   constructor(private readonly deps: StrategyModuleDeps) {
     this.log = deps.log.child({ module: "strategy" });
     this.buyTracker = createBuyTracker();
+    this.sessionTracker = createSessionTracker();
     this.bridge = new SignalToOrderBridge({ bus: deps.bus, log: this.log });
   }
 
@@ -133,6 +135,7 @@ export class StrategyModule implements RuntimeModule {
         },
         this.buyTracker,
         tickTs,
+        this.sessionTracker,
       );
 
       const filteredSignals = this.deps.liveLiteGuard
@@ -187,6 +190,16 @@ export class StrategyModule implements RuntimeModule {
       const prevSize = this.lastKnownSize.get(posId) ?? 0;
       if (position.size > prevSize) {
         this.buyTracker.incrementBuyCount(posId);
+
+        // Session tracker: record filled probe/entry (P1-6).
+        // A new position (prevSize === 0) means this is the initial probe fill.
+        if (prevSize === 0) {
+          this.sessionTracker.incrementProbeCount(String(position.tokenId));
+          this.sessionTracker.recordNewMarket(
+            String(position.familyId),
+            String(position.tokenId),
+          );
+        }
       }
       this.lastKnownSize.set(posId, position.size);
     }

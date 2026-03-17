@@ -1,0 +1,109 @@
+import type Database from "better-sqlite3";
+import type { PositionRepository, Position } from "@plankton/domain";
+import type {
+  TokenId,
+  FamilyId,
+  OrderSide,
+  PositionStatus,
+} from "@plankton/domain";
+import {
+  createPositionId,
+  createTokenId,
+  createFamilyId,
+} from "@plankton/domain";
+
+export class SqlitePositionRepository implements PositionRepository {
+  constructor(private readonly db: Database.Database) {}
+
+  save(position: Position): void {
+    this.db
+      .prepare(
+        `INSERT INTO positions
+         (position_id, token_id, family_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, realized_pnl, status,
+          opened_at, closed_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(position_id) DO UPDATE SET
+           size = excluded.size,
+           avg_entry_price = excluded.avg_entry_price,
+           cost_basis_usdc = excluded.cost_basis_usdc,
+           current_value_usdc = excluded.current_value_usdc,
+           realized_pnl = excluded.realized_pnl,
+           status = excluded.status,
+           closed_at = excluded.closed_at,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        position.positionId,
+        position.tokenId,
+        position.familyId,
+        position.side,
+        position.size,
+        position.avgEntryPrice,
+        position.costBasisUsdc,
+        position.currentValueUsdc,
+        position.realizedPnl,
+        position.status,
+        position.openedAt,
+        position.closedAt,
+        position.updatedAt,
+      );
+  }
+
+  findByTokenId(tokenId: TokenId): Position | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM positions
+         WHERE token_id = ? AND status != 'closed'
+         ORDER BY opened_at DESC LIMIT 1`,
+      )
+      .get(tokenId) as Record<string, unknown> | undefined;
+    return row ? this.rowToPosition(row) : null;
+  }
+
+  findByFamily(familyId: FamilyId): Position[] {
+    const rows = this.db
+      .prepare("SELECT * FROM positions WHERE family_id = ?")
+      .all(familyId) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToPosition(r));
+  }
+
+  findOpen(): Position[] {
+    const rows = this.db
+      .prepare("SELECT * FROM positions WHERE status = 'open'")
+      .all() as Record<string, unknown>[];
+    return rows.map((r) => this.rowToPosition(r));
+  }
+
+  findDust(): Position[] {
+    const rows = this.db
+      .prepare("SELECT * FROM positions WHERE status = 'dust'")
+      .all() as Record<string, unknown>[];
+    return rows.map((r) => this.rowToPosition(r));
+  }
+
+  findAll(): Position[] {
+    const rows = this.db
+      .prepare("SELECT * FROM positions")
+      .all() as Record<string, unknown>[];
+    return rows.map((r) => this.rowToPosition(r));
+  }
+
+  private rowToPosition(row: Record<string, unknown>): Position {
+    return {
+      positionId: createPositionId(row.position_id as string),
+      tokenId: createTokenId(row.token_id as string),
+      familyId: createFamilyId(row.family_id as string),
+      side: row.side as OrderSide,
+      size: row.size as number,
+      avgEntryPrice: row.avg_entry_price as number,
+      costBasisUsdc: row.cost_basis_usdc as number,
+      currentValueUsdc: (row.current_value_usdc as number) ?? null,
+      realizedPnl: row.realized_pnl as number,
+      status: row.status as PositionStatus,
+      openedAt: row.opened_at as string,
+      closedAt: (row.closed_at as string) ?? null,
+      updatedAt: row.updated_at as string,
+    };
+  }
+}

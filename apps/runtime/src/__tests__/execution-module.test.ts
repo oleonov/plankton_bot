@@ -77,7 +77,22 @@ function createMockGateway(): ExchangeGateway {
       .mockResolvedValue([]),
     getFills: vi.fn<(sinceMs: number) => Promise<ExchangeFill[]>>().mockResolvedValue([]),
     getBalances: vi.fn<() => Promise<ExchangeBalance[]>>().mockResolvedValue([]),
+    getPositionBalance: vi.fn<(tokenId: TokenId) => Promise<number>>().mockResolvedValue(0),
     healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+  };
+}
+
+function createMockMarketRepo() {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue({ active: true }),
+    findByTokenIds: vi.fn().mockReturnValue([]),
+    findByConditionId: vi.fn().mockReturnValue([]),
+    findActive: vi.fn().mockReturnValue([]),
+    findByFamily: vi.fn().mockReturnValue([]),
+    findAll: vi.fn().mockReturnValue([]),
+    upsertAll: vi.fn(),
+    deactivate: vi.fn(),
   };
 }
 
@@ -118,6 +133,7 @@ const silentLog = {
 describe("ExecutionModule", () => {
   let gateway: ReturnType<typeof createMockGateway>;
   let bus: InProcessEventBus;
+  let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
   let mod: ExecutionModule;
@@ -125,11 +141,13 @@ describe("ExecutionModule", () => {
   beforeEach(() => {
     gateway = createMockGateway();
     bus = new InProcessEventBus();
+    marketRepo = createMockMarketRepo();
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
     mod = new ExecutionModule({
       gateway,
       bus,
+      marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
       log: silentLog,
@@ -533,6 +551,7 @@ describe("ExecutionModule", () => {
     const guardedMod = new ExecutionModule({
       gateway,
       bus,
+      marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
       log: silentLog,
@@ -569,6 +588,7 @@ describe("ExecutionModule", () => {
     const guardedMod = new ExecutionModule({
       gateway,
       bus,
+      marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
       log: silentLog,
@@ -595,6 +615,44 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
+  // ─── Market inactive guard ──────────────────────────────────────────
+
+  it("rejects order when market is inactive (resolved/deactivated)", async () => {
+    marketRepo.findByTokenId.mockReturnValue({ active: false });
+
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("market-inactive");
+    expect(rejected[0].errorCode).toBe("MARKET_INACTIVE");
+
+    await mod.stop();
+  });
+
+  it("allows order when market is not found in repo (new market)", async () => {
+    marketRepo.findByTokenId.mockReturnValue(null);
+
+    await mod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
   // ─── Unsubscribe on stop ──────────────────────────────────────────
 
   it("does not process events after stop", async () => {
@@ -615,6 +673,7 @@ describe("ExecutionModule", () => {
     const pausedMod = new ExecutionModule({
       gateway,
       bus,
+      marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
       log: silentLog,

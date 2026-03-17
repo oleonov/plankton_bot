@@ -106,6 +106,7 @@ function createMockResolutionRepo(): MarketResolutionRepository {
     save: vi.fn(),
     findByConditionId: vi.fn().mockReturnValue(null),
     findAll: vi.fn().mockReturnValue([]),
+    markSettled: vi.fn(),
   } as unknown as MarketResolutionRepository;
 }
 
@@ -235,13 +236,29 @@ describe("ResolutionDetector", () => {
     expect(results).toHaveLength(0);
   });
 
-  it("skips already-resolved conditionId", async () => {
-    (resolutionRepo.findByConditionId as any).mockReturnValue({ conditionId: CONDITION });
+  it("skips settled conditionId", async () => {
+    (resolutionRepo.findByConditionId as any).mockReturnValue({
+      conditionId: CONDITION,
+      status: "settled",
+    });
 
     const results = await detector.detect(0);
 
     expect(results).toHaveLength(0);
     expect((gammaClient.getMarketBySlug as any)).not.toHaveBeenCalled();
+  });
+
+  it("returns detected (non-settled) conditionId for retry", async () => {
+    (resolutionRepo.findByConditionId as any).mockReturnValue({
+      conditionId: CONDITION,
+      status: "detected",
+    });
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(makeGammaInfo());
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.conditionId).toBe(CONDITION);
   });
 
   it("includes dust positions in detection", async () => {

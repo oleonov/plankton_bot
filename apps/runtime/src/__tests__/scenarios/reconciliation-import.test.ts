@@ -12,7 +12,7 @@ describe("Scenario: reconciliation imports missing fill", () => {
     const familyConfig = makeFamilyConfig({
       familyId: "fam-recon-test",
       familyKey: "recon-test",
-      slugPattern: "^will-.*-happen$",
+      slugPattern: "will-*-happen",
     });
 
     const market = makeMarket({ slug: "will-test-happen" });

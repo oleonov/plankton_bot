@@ -20,3 +20,17 @@ research/data/*.db-shm
 # WAL artifacts anywhere
 *.db-wal
 *.db-shm
+
+# Superpowers brainstorm sessions
+.superpowers/
+
+# IDE
+.idea/
+
+# Runtime logs and snapshots
+logs/
+snapshots/
+
+# Claude Code local settings
+.claude/settings.json
+.claude/settings.local.json

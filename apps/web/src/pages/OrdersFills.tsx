@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useOrders, useFills, useFamilies } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
+import { MarketLink } from "../components/MarketLink.tsx";
 
 export function OrdersFills() {
   const [tab, setTab] = useState<"orders" | "fills">("orders");
@@ -40,14 +41,14 @@ export function OrdersFills() {
         <>
           <table>
             <thead>
-              <tr><th>Order</th><th>Family</th><th>Token</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Updated</th></tr>
+              <tr><th>Order</th><th>Market</th><th>Family</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Updated</th></tr>
             </thead>
             <tbody>
               {orders.data?.items.map((o) => (
                 <tr key={o.orderId}>
                   <td style={{ fontSize: 11, color: "var(--blue)" }}>{o.orderId.slice(0, 12)}</td>
+                  <td><MarketLink slug={o.slug} question={o.question} outcome={o.outcome} /></td>
                   <td>{o.familyId.slice(0, 12)}</td>
-                  <td>{o.tokenId.slice(0, 12)}</td>
                   <td style={{ color: o.side === "buy" ? "var(--green)" : "var(--red)", fontWeight: 600 }}>{o.side.toUpperCase()}</td>
                   <td>${o.price.toFixed(4)}</td>
                   <td>{o.size.toFixed(2)}</td>
@@ -63,14 +64,14 @@ export function OrdersFills() {
         <>
           <table>
             <thead>
-              <tr><th>Fill</th><th>Family</th><th>Token</th><th>Side</th><th>Price</th><th>Size</th><th>USDC</th><th>Filled At</th></tr>
+              <tr><th>Fill</th><th>Market</th><th>Family</th><th>Side</th><th>Price</th><th>Size</th><th>USDC</th><th>Filled At</th></tr>
             </thead>
             <tbody>
               {fills.data?.items.map((f) => (
                 <tr key={f.fillId}>
                   <td style={{ fontSize: 11, color: "var(--blue)" }}>{f.fillId.slice(0, 12)}</td>
+                  <td><MarketLink slug={f.slug} question={f.question} outcome={f.outcome} /></td>
                   <td>{f.familyId.slice(0, 12)}</td>
-                  <td>{f.tokenId.slice(0, 12)}</td>
                   <td style={{ color: f.side === "buy" ? "var(--green)" : "var(--red)", fontWeight: 600 }}>{f.side.toUpperCase()}</td>
                   <td>${f.price.toFixed(4)}</td>
                   <td>{f.size.toFixed(2)}</td>

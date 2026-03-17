@@ -21,7 +21,7 @@ export function ConfirmAction({
   const [reason, setReason] = useState("");
 
   if (isPending || phase === "pending") {
-    return <button className="btn-pending" disabled>{label.replace(/^./, "")}&hellip;</button>;
+    return <button className="btn-pending" disabled>{label}&hellip;</button>;
   }
 
   if (phase === "confirm") {

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import type { MarketDataGateway, ClobMarket, OrderBookSnapshot, TokenId, EventBus } from "@plankton/domain";
+import type { MarketDataGateway, ClobMarket, OrderBookSnapshot, TokenId, EventBus, Market } from "@plankton/domain";
+import { createTokenId, createFamilyId } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { MarketDataModule } from "../../modules/market-data/market-data-module.js";
 
@@ -7,7 +8,7 @@ import { MarketDataModule } from "../../modules/market-data/market-data-module.j
 
 function createMockGateway(): MarketDataGateway {
   return {
-    getMarkets: vi.fn<() => Promise<ClobMarket[]>>().mockResolvedValue([]),
+    getMarkets: vi.fn<(onPage?: (page: number) => Promise<void> | void) => Promise<ClobMarket[]>>().mockResolvedValue([]),
     getMarket: vi.fn().mockResolvedValue(null),
     getOrderBook: vi.fn<(tokenId: TokenId) => Promise<OrderBookSnapshot>>().mockResolvedValue({
       tokenId: "tok" as TokenId,
@@ -21,6 +22,7 @@ function createMockGateway(): MarketDataGateway {
     }),
     getTickSize: vi.fn().mockResolvedValue(0.01),
     healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+    getMarketPricing: vi.fn().mockResolvedValue(new Map()),
   };
 }
 
@@ -33,6 +35,34 @@ const silentLog = {
   child: () => silentLog,
 } as any;
 
+const trackedMarket: Market = {
+  tokenId: createTokenId("tok-1"),
+  conditionId: "cond-1",
+  slug: "test-market",
+  question: "Test?",
+  outcome: "YES",
+  familyId: createFamilyId("fam-1"),
+  familyKey: "test",
+  regime: "threshold",
+  horizon: "daily",
+  endDate: "2026-12-31",
+  active: true,
+  tickSize: 0.01,
+  negRisk: false,
+  createdAt: "2026-01-01T00:00:00Z",
+  updatedAt: "2026-01-01T00:00:00Z",
+};
+
+const mockMarketRepo = {
+  findActive: vi.fn().mockReturnValue([trackedMarket]),
+  save: vi.fn(),
+  findByTokenId: vi.fn().mockReturnValue(null),
+  findByTokenIds: vi.fn().mockReturnValue([]),
+  findByConditionId: vi.fn().mockReturnValue([]),
+  findByFamily: vi.fn().mockReturnValue([]),
+  findAll: vi.fn().mockReturnValue([]),
+};
+
 // ─── Scenario ─────────────────────────────────────────────────────────────
 
 describe("Scenario: stale market data detection", () => {
@@ -41,6 +71,7 @@ describe("Scenario: stale market data detection", () => {
     const bus = new InProcessEventBus();
     const mod = new MarketDataModule({
       gateway: createMockGateway(),
+      marketRepo: mockMarketRepo as any,
       bus,
       log: silentLog,
       pollIntervalMs: 60_000,

@@ -211,6 +211,9 @@ export interface MarketResolutionRepository {
 
   /** Return all recorded resolutions. */
   findAll(): MarketResolution[];
+
+  /** Mark a resolution as fully settled (all positions processed). */
+  markSettled(conditionId: string): void;
 }
 
 // ─── OperatorCommandRepository ───────────────────────────────────────────

@@ -32,8 +32,8 @@ export function buildStatusSnapshot(
 
   // Runtime mode from the latest bot run
   const botRun = db
-    .prepare("SELECT mode FROM bot_runs ORDER BY started_at DESC LIMIT 1")
-    .get() as { mode: string } | undefined;
+    .prepare("SELECT run_id, mode FROM bot_runs ORDER BY started_at DESC LIMIT 1")
+    .get() as { run_id: string; mode: string } | undefined;
 
   // Paused = most recently applied pause/resume command is 'pause'
   const lastPauseResume = db
@@ -82,6 +82,19 @@ export function buildStatusSnapshot(
     ? (!lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at))
     : false;
 
+  // Poll progress: only include if active and belongs to current bot run
+  const pollProgressRow = db
+    .prepare("SELECT labels FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress' LIMIT 1")
+    .get() as { labels: string } | undefined;
+
+  let marketDataPoll: { active: boolean; page: number } | undefined;
+  if (pollProgressRow) {
+    const parsed = JSON.parse(pollProgressRow.labels) as { active?: boolean; page?: number; botRunId?: string };
+    if (parsed.active === true && botRun && parsed.botRunId === botRun.run_id) {
+      marketDataPoll = { active: true, page: parsed.page ?? 0 };
+    }
+  }
+
   return {
     runtimeMode: botRun?.mode ?? "simulation",
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
@@ -98,6 +111,7 @@ export function buildStatusSnapshot(
     executionMode: execMode ? JSON.parse(execMode.labels).value : "simulation",
     liveLite: envelopeRow ? JSON.parse(envelopeRow.labels) : undefined,
     reconciliationDriftDetected,
+    ...(marketDataPoll ? { marketDataPoll } : {}),
   };
 }
 

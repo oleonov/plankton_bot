@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { usePositions, useFamilies } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
+import { MarketLink } from "../components/MarketLink.tsx";
 
 export function Positions() {
   const [familyId, setFamilyId] = useState("");
@@ -37,9 +38,7 @@ export function Positions() {
         </label>
         <select value={sort} onChange={(e) => setSort(e.target.value)}>
           <option value="">Default sort</option>
-          <option value="pnl_desc">PnL desc</option>
-          <option value="value_desc">Value desc</option>
-          <option value="updated_desc">Recently updated</option>
+          <option value="tail_cost">Tail cost desc</option>
         </select>
       </div>
 
@@ -47,7 +46,7 @@ export function Positions() {
         <table>
           <thead>
             <tr>
-              <th>Position</th><th>Family</th><th>Token</th><th>Size</th>
+              <th>Position</th><th>Market</th><th>Family</th><th>Size</th>
               <th>Avg Entry</th><th>Cost Basis</th><th>Value</th><th>PnL</th><th>Status</th>
             </tr>
           </thead>
@@ -55,8 +54,8 @@ export function Positions() {
             {positions?.map((p) => (
               <tr key={p.positionId} style={p.status === "dust" ? { background: "rgba(255,152,0,0.06)" } : undefined}>
                 <td style={{ color: "var(--blue)", fontSize: 11 }}>{p.positionId.slice(0, 12)}</td>
+                <td><MarketLink slug={p.slug} question={p.question} outcome={p.outcome} /></td>
                 <td>{p.familyId.slice(0, 12)}</td>
-                <td>{p.tokenId.slice(0, 12)}</td>
                 <td>{p.size.toFixed(2)}</td>
                 <td>${p.avgEntryPrice.toFixed(4)}</td>
                 <td>${p.costBasisUsdc.toFixed(2)}</td>

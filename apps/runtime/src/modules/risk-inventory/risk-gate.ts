@@ -9,6 +9,11 @@
  *  4. Max active markets not exceeded (entry signals only)
  *  5. Max dust positions not exceeded (entry signals only)
  *  6. Tail quarantine threshold not exceeded (entry signals only)
+ *  7. Tail-adjusted PnL gating:
+ *     - heavy-scale: always blocked when tailAdjustedPnlLive <= 0
+ *     - scale-in/confirm-scale: blocked when tailAdjustedPnlLive <= 0
+ *       AND requirePositiveRecycleHistoryForScale is true
+ *     - probe-entry: blocked when tailAdjustedPnlLive < 0 (allows zero for cold start)
  */
 
 import type {
@@ -24,7 +29,7 @@ import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 
 /** Signal reasons that represent entries (new exposure). */
-const ENTRY_REASONS = new Set(["probe-entry", "scale-in"]);
+const ENTRY_REASONS = new Set(["probe-entry", "confirm-scale", "scale-in", "heavy-scale", "two-sided-entry"]);
 
 function isEntrySignal(signal: Signal): boolean {
   return signal.side === "buy" && ENTRY_REASONS.has(signal.reason);
@@ -82,8 +87,8 @@ export class RiskGateImpl implements RiskGate {
       }
     }
 
-    if (mode === "probe-only" && signal.reason === "scale-in") {
-      rejected.push(`family in probe-only mode — scale-in blocked`);
+    if (mode === "probe-only" && signal.reason !== "probe-entry") {
+      rejected.push(`family in probe-only mode — ${signal.reason} blocked`);
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("runtime_mode_allows");
@@ -167,6 +172,41 @@ export class RiskGateImpl implements RiskGate {
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("tail_threshold_ok");
+
+    // 7. Tail-adjusted PnL gating
+    const tailPnl = familyState.tailAdjustedPnlLive;
+    const scaleRules = bundle.rules.scaleIn;
+
+    // Heavy campaigns always require positive tail-adjusted PnL
+    if (signal.reason === "heavy-scale" && tailPnl <= 0) {
+      rejected.push(
+        `heavy-scale blocked — tailAdjustedPnlLive ${tailPnl.toFixed(2)} <= 0`,
+      );
+      return this.decision(signal, false, rejected, passed);
+    }
+
+    // Confirm/scale-in: gated by requirePositiveRecycleHistoryForScale config
+    if (
+      (signal.reason === "scale-in" || signal.reason === "confirm-scale") &&
+      scaleRules.requirePositiveRecycleHistoryForScale &&
+      tailPnl <= 0
+    ) {
+      rejected.push(
+        `${signal.reason} blocked — requirePositiveRecycleHistoryForScale ` +
+        `and tailAdjustedPnlLive ${tailPnl.toFixed(2)} <= 0`,
+      );
+      return this.decision(signal, false, rejected, passed);
+    }
+
+    // Probe / two-sided entry: gentler gate — only blocked when NEGATIVE (zero allows cold start)
+    if ((signal.reason === "probe-entry" || signal.reason === "two-sided-entry") && tailPnl < 0) {
+      rejected.push(
+        `${signal.reason} blocked — tailAdjustedPnlLive ${tailPnl.toFixed(2)} < 0`,
+      );
+      return this.decision(signal, false, rejected, passed);
+    }
+
+    passed.push("tail_adjusted_pnl_ok");
 
     return this.decision(signal, true, rejected, passed);
   }

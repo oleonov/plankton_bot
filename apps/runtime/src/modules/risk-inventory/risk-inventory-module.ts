@@ -4,6 +4,10 @@
  * Subscribes to:
  *  - SignalProduced → evaluate via RiskGate → publish SignalApproved / SignalRejected
  *  - FillReceived → apply to inventory → publish PositionUpdated + FamilyExposureChanged
+ *  - NormalizedMarketUpdated → mark-to-market revaluation of open positions (P2-1)
+ *
+ * Exposes:
+ *  - getDiagnostics() → operator-facing signal/rejection stats per family (P2-2)
  *
  * Does NOT:
  *  - place/cancel orders (execution's job)
@@ -20,6 +24,8 @@ import type {
   PositionRepository,
   InventoryLotRepository,
   RuntimeEventMap,
+  NormalizedMarket,
+  FamilyId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
@@ -38,6 +44,25 @@ export interface RiskInventoryModuleDeps {
   liveLiteGuard?: LiveLiteGuard | undefined;
 }
 
+/** Per-family diagnostic counters (P2-2). */
+export interface FamilyDiagnostics {
+  signalsApproved: number;
+  signalsRejected: number;
+  lastRejectionReason: string | null;
+  lastSignalReason: string | null;
+  lastSignalAt: string | null;
+}
+
+/** Full diagnostics snapshot returned by getDiagnostics(). */
+export interface RiskDiagnostics {
+  signalsProcessed: number;
+  signalsApproved: number;
+  signalsRejected: number;
+  fillsProcessed: number;
+  markToMarketUpdates: number;
+  families: Record<string, FamilyDiagnostics>;
+}
+
 export class RiskInventoryModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly riskGate: RiskGateImpl;
@@ -46,7 +71,13 @@ export class RiskInventoryModule implements RuntimeModule {
   private unsubs: Array<() => void> = [];
   private started = false;
   private signalsProcessed = 0;
+  private signalsApprovedCount = 0;
+  private signalsRejectedCount = 0;
   private fillsProcessed = 0;
+  private mtmUpdates = 0;
+
+  /** Per-family diagnostic counters (P2-2). */
+  private readonly familyDiag = new Map<string, FamilyDiagnostics>();
 
   constructor(private readonly deps: RiskInventoryModuleDeps) {
     this.log = deps.log.child({ module: "risk-inventory" });
@@ -79,6 +110,9 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.bus.subscribe("FillReceived", (p) =>
         this.handleFill(p),
       ),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (p) =>
+        this.handleMarketUpdate(p),
+      ),
     );
     this.started = true;
     this.log.info("risk-inventory module started");
@@ -97,8 +131,42 @@ export class RiskInventoryModule implements RuntimeModule {
     }
     return {
       ok: true,
-      detail: `signals=${this.signalsProcessed} fills=${this.fillsProcessed}`,
+      detail: `signals=${this.signalsProcessed} approved=${this.signalsApprovedCount} rejected=${this.signalsRejectedCount} fills=${this.fillsProcessed} mtm=${this.mtmUpdates}`,
     };
+  }
+
+  /** Operator-facing diagnostics snapshot (P2-2). */
+  getDiagnostics(): RiskDiagnostics {
+    const families: Record<string, FamilyDiagnostics> = {};
+    for (const [key, diag] of this.familyDiag) {
+      families[key] = { ...diag };
+    }
+    return {
+      signalsProcessed: this.signalsProcessed,
+      signalsApproved: this.signalsApprovedCount,
+      signalsRejected: this.signalsRejectedCount,
+      fillsProcessed: this.fillsProcessed,
+      markToMarketUpdates: this.mtmUpdates,
+      families,
+    };
+  }
+
+  // ─── Diagnostics helpers (P2-2) ───────────────────────────────────
+
+  private getFamilyDiag(familyId: FamilyId): FamilyDiagnostics {
+    const key = String(familyId);
+    let d = this.familyDiag.get(key);
+    if (!d) {
+      d = {
+        signalsApproved: 0,
+        signalsRejected: 0,
+        lastRejectionReason: null,
+        lastSignalReason: null,
+        lastSignalAt: null,
+      };
+      this.familyDiag.set(key, d);
+    }
+    return d;
   }
 
   // ─── Signal evaluation ────────────────────────────────────────────
@@ -109,10 +177,16 @@ export class RiskInventoryModule implements RuntimeModule {
     const { signal } = payload;
     this.signalsProcessed++;
 
+    const diag = this.getFamilyDiag(signal.familyId);
+    diag.lastSignalReason = signal.reason;
+    diag.lastSignalAt = signal.generatedAt;
+
     try {
       const decision = await this.riskGate.evaluate(signal);
 
       if (decision.approved) {
+        this.signalsApprovedCount++;
+        diag.signalsApproved++;
         this.log.info(
           { signalId: signal.signalId, checks: decision.checksPassed },
           "signal approved",
@@ -122,6 +196,9 @@ export class RiskInventoryModule implements RuntimeModule {
           approvedAt: Date.now(),
         });
       } else {
+        this.signalsRejectedCount++;
+        diag.signalsRejected++;
+        diag.lastRejectionReason = decision.rejectionReasons.join("; ");
         this.log.info(
           { signalId: signal.signalId, reasons: decision.rejectionReasons },
           "signal rejected",
@@ -133,6 +210,9 @@ export class RiskInventoryModule implements RuntimeModule {
         });
       }
     } catch (err) {
+      this.signalsRejectedCount++;
+      diag.signalsRejected++;
+      diag.lastRejectionReason = "internal error during risk evaluation";
       this.log.error({ err, signalId: signal.signalId }, "signal evaluation failed");
       await this.deps.bus.publish("SignalRejected", {
         signal,
@@ -182,6 +262,46 @@ export class RiskInventoryModule implements RuntimeModule {
         { err, fillId: payload.fillId, tokenId: payload.tokenId },
         "fill application failed",
       );
+    }
+  }
+
+  // ─── Mark-to-market (P2-1) ────────────────────────────────────────
+
+  private async handleMarketUpdate(
+    payload: RuntimeEventMap["NormalizedMarketUpdated"],
+  ): Promise<void> {
+    // Build lookup: tokenId → live midPrice
+    const priceMap = new Map<string, number>();
+    for (const m of payload.markets) {
+      if (m.midPrice !== null) {
+        priceMap.set(String(m.tokenId), m.midPrice);
+      }
+    }
+    if (priceMap.size === 0) return;
+
+    // Revalue open positions that have a live price
+    const openPositions = this.deps.positionRepo.findOpen();
+    let updated = 0;
+    for (const pos of openPositions) {
+      const livePrice = priceMap.get(String(pos.tokenId));
+      if (livePrice === undefined) continue;
+
+      const newValue = pos.size * livePrice;
+      if (pos.currentValueUsdc !== null && Math.abs(newValue - pos.currentValueUsdc) < 0.001) {
+        continue; // Skip if value hasn't meaningfully changed
+      }
+
+      this.deps.positionRepo.save({
+        ...pos,
+        currentValueUsdc: newValue,
+        updatedAt: new Date().toISOString(),
+      });
+      updated++;
+    }
+
+    if (updated > 0) {
+      this.mtmUpdates++;
+      this.log.debug({ updated, total: openPositions.length }, "mark-to-market update");
     }
   }
 }

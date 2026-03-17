@@ -5,8 +5,10 @@ import {
   createPositionId,
 } from "@plankton/domain";
 import type {
+  ExchangeGateway,
   MarketRepository,
   MarketResolutionRepository,
+  OrderRepository,
   MarketResolution,
   FamilyRulesProvider,
   FamilyRuleBundle,
@@ -92,11 +94,23 @@ function createMockMarketRepo(): MarketRepository {
   } as unknown as MarketRepository;
 }
 
+function createMockOrderRepo(): OrderRepository {
+  return {
+    save: vi.fn(),
+    findById: vi.fn().mockReturnValue(null),
+    findByClientOrderId: vi.fn().mockReturnValue(null),
+    findOpen: vi.fn().mockReturnValue([]),
+    findByTokenId: vi.fn().mockReturnValue([]),
+    updateStatus: vi.fn(),
+  } as unknown as OrderRepository;
+}
+
 function createMockResolutionRepo(): MarketResolutionRepository {
   return {
     save: vi.fn(),
     findByConditionId: vi.fn().mockReturnValue(null),
     findAll: vi.fn().mockReturnValue([]),
+    markSettled: vi.fn(),
   } as unknown as MarketResolutionRepository;
 }
 
@@ -126,6 +140,22 @@ function createMockExposureCalculator(): FamilyExposureCalculator {
   } as unknown as FamilyExposureCalculator;
 }
 
+function createMockGateway(balanceByToken?: Record<string, number>): ExchangeGateway {
+  return {
+    getPositionBalance: vi.fn(async (tokenId: TokenId) => {
+      return balanceByToken?.[String(tokenId)] ?? 0;
+    }),
+    placeOrder: vi.fn(),
+    cancelOrder: vi.fn(),
+    cancelAllOrders: vi.fn(),
+    getOpenOrders: vi.fn().mockResolvedValue([]),
+    getOpenOrdersForToken: vi.fn().mockResolvedValue([]),
+    getFills: vi.fn().mockResolvedValue([]),
+    getBalances: vi.fn().mockResolvedValue([]),
+    healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 0 }),
+  } as unknown as ExchangeGateway;
+}
+
 const log = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -143,22 +173,28 @@ describe("ResolutionModule", () => {
   let settler: ReturnType<typeof createMockSettler>;
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let resolutionRepo: ReturnType<typeof createMockResolutionRepo>;
+  let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let rulesProvider: ReturnType<typeof createMockRulesProvider>;
   let exposureCalculator: ReturnType<typeof createMockExposureCalculator>;
   let mod: ResolutionModule;
 
-  function createModule(overrides?: { rulesProvider?: FamilyRulesProvider }) {
+  function createModule(overrides?: {
+    rulesProvider?: FamilyRulesProvider;
+    gateway?: ExchangeGateway;
+  }) {
     return new ResolutionModule({
       detector: detector as unknown as ResolutionDetector,
       settler: settler as unknown as PositionSettler,
       marketRepo: marketRepo as unknown as MarketRepository,
       resolutionRepo: resolutionRepo as unknown as MarketResolutionRepository,
+      orderRepo: orderRepo as unknown as OrderRepository,
       rulesProvider: (overrides?.rulesProvider ?? rulesProvider) as unknown as FamilyRulesProvider,
       exposureCalculator: exposureCalculator as unknown as FamilyExposureCalculator,
       bus,
       log: log as any,
       checkIntervalMs: 60_000,
       graceMinutes: 30,
+      ...(overrides?.gateway ? { gateway: overrides.gateway } : {}),
     });
   }
 
@@ -169,6 +205,7 @@ describe("ResolutionModule", () => {
     settler = createMockSettler();
     marketRepo = createMockMarketRepo();
     resolutionRepo = createMockResolutionRepo();
+    orderRepo = createMockOrderRepo();
     rulesProvider = createMockRulesProvider();
     exposureCalculator = createMockExposureCalculator();
     mod = createModule();
@@ -188,6 +225,7 @@ describe("ResolutionModule", () => {
       settler: settler as unknown as PositionSettler,
       marketRepo: marketRepo as unknown as MarketRepository,
       resolutionRepo: resolutionRepo as unknown as MarketResolutionRepository,
+      orderRepo: orderRepo as unknown as OrderRepository,
       rulesProvider: rulesProvider as unknown as FamilyRulesProvider,
       exposureCalculator: exposureCalculator as unknown as FamilyExposureCalculator,
       bus,
@@ -201,7 +239,7 @@ describe("ResolutionModule", () => {
 
   // ─── Resolution persistence ─────────────────────────────────────────────
 
-  it("saves resolution record to repository", async () => {
+  it("saves resolution record with status 'detected'", async () => {
     const resolution = makeDetectedResolution();
     (detector.detect as any).mockResolvedValue([resolution]);
 
@@ -212,6 +250,7 @@ describe("ResolutionModule", () => {
         conditionId: CONDITION,
         resolution: "YES",
         source: "gamma-api",
+        status: "detected",
       }),
     );
   });
@@ -466,7 +505,7 @@ describe("ResolutionModule", () => {
     expect((marketRepo.deactivate as any)).toHaveBeenCalledWith(TOK_YES);
   });
 
-  it("still persists resolution record for unknown resolution", async () => {
+  it("still persists resolution record for unknown resolution with status 'detected'", async () => {
     const resolution = makeDetectedResolution({
       resolution: "unknown",
       source: "gamma-delisted",
@@ -479,8 +518,439 @@ describe("ResolutionModule", () => {
       expect.objectContaining({
         conditionId: CONDITION,
         resolution: "unknown",
+        status: "detected",
       }),
     );
+  });
+
+  // ─── Order cancellation on resolved markets ─────────────────────────────
+
+  it("publishes CancelOrderRequested for open orders on resolved tokens", async () => {
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (orderRepo.findByTokenId as any).mockReturnValue([
+      { orderId: "ord-1", status: "open", familyId: FAM },
+      { orderId: "ord-2", status: "filled", familyId: FAM }, // should not be cancelled
+      { orderId: "ord-3", status: "partially-filled", familyId: FAM },
+    ]);
+
+    const cancelEvents: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+
+    await mod.runCheck();
+
+    expect(cancelEvents).toHaveLength(2);
+    const cancelledIds = cancelEvents.map((e) => e.command.orderId).sort();
+    expect(cancelledIds).toEqual(["ord-1", "ord-3"]);
+    expect(cancelEvents[0].command.reason).toBe("market_resolved");
+  });
+
+  it("publishes CancelOrderRequested even when resolution is unknown", async () => {
+    const resolution = makeDetectedResolution({
+      resolution: "unknown",
+      source: "gamma-delisted",
+    });
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (orderRepo.findByTokenId as any).mockReturnValue([
+      { orderId: "ord-1", status: "open", familyId: FAM },
+    ]);
+
+    const cancelEvents: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+
+    await mod.runCheck();
+
+    expect(cancelEvents).toHaveLength(1);
+    expect(cancelEvents[0].command.orderId).toBe("ord-1");
+  });
+
+  it("full cancel chain: MarketResolved triggers CancelOrderRequested with correct command shape", async () => {
+    const resolution = makeDetectedResolution({
+      candidates: [
+        {
+          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
+          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
+          positionId: POS, familyId: FAM,
+        },
+        {
+          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
+          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2, familyId: FAM2,
+        },
+      ],
+    });
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (orderRepo.findByTokenId as any).mockImplementation((tokenId: TokenId) => {
+      if (String(tokenId) === String(TOK_YES)) {
+        return [{ orderId: "ord-yes", status: "open", familyId: FAM }];
+      }
+      if (String(tokenId) === String(TOK_NO)) {
+        return [{ orderId: "ord-no", status: "pending", familyId: FAM2, exchangeOrderId: null }];
+      }
+      return [];
+    });
+
+    const resolvedEvents: any[] = [];
+    const cancelEvents: any[] = [];
+    bus.subscribe("MarketResolved", async (e) => { resolvedEvents.push(e); });
+    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+
+    await mod.runCheck();
+
+    // MarketResolved was published
+    expect(resolvedEvents).toHaveLength(1);
+    expect(resolvedEvents[0]).toEqual(
+      expect.objectContaining({
+        conditionId: CONDITION,
+        tokenIds: [TOK_YES, TOK_NO],
+        resolution: "YES",
+      }),
+    );
+
+    // CancelOrderRequested only for the open order with exchange ID
+    expect(cancelEvents).toHaveLength(1);
+
+    expect(cancelEvents[0].command).toEqual(
+      expect.objectContaining({
+        type: "CancelOrderCommand",
+        orderId: "ord-yes",
+        reason: "market_resolved",
+        familyId: FAM,
+      }),
+    );
+
+    // Pending order without exchange ID is locally cancelled
+    expect((orderRepo.updateStatus as any)).toHaveBeenCalledWith("ord-no", "cancelled");
+  });
+
+  it("publishes CancelOrderRequested for pending orders that have an exchange ID", async () => {
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (orderRepo.findByTokenId as any).mockReturnValue([
+      { orderId: "ord-1", status: "pending", familyId: FAM, exchangeOrderId: "exch-123" },
+    ]);
+
+    const cancelEvents: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+
+    await mod.runCheck();
+
+    expect(cancelEvents).toHaveLength(1);
+    expect(cancelEvents[0].command.orderId).toBe("ord-1");
+    expect((orderRepo.updateStatus as any)).not.toHaveBeenCalled();
+  });
+
+  it("locally cancels pending orders without exchange ID instead of publishing cancel event", async () => {
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (orderRepo.findByTokenId as any).mockReturnValue([
+      { orderId: "ord-1", status: "pending", familyId: FAM, exchangeOrderId: null },
+    ]);
+
+    const cancelEvents: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+
+    await mod.runCheck();
+
+    expect(cancelEvents).toHaveLength(0);
+    expect((orderRepo.updateStatus as any)).toHaveBeenCalledWith("ord-1", "cancelled");
+  });
+
+  // ─── Balance verification (gateway-based settlement gate) ───────────────
+
+  it("skips settlement when on-chain balance is non-zero", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+
+    const count = await mod.runCheck();
+
+    expect(count).toBe(0);
+    expect((settler.settle as any)).not.toHaveBeenCalled();
+    expect((gateway.getPositionBalance as any)).toHaveBeenCalledWith(TOK_YES);
+  });
+
+  it("settles when on-chain balance is zero", async () => {
+    const gateway = createMockGateway({ "tok-yes": 0 });
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution();
+    const settled = [makeSettledPosition()];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    const count = await mod.runCheck();
+
+    expect(count).toBe(1);
+    expect((settler.settle as any)).toHaveBeenCalled();
+  });
+
+  it("still deactivates markets and cancels orders when balance is non-zero", async () => {
+    const gateway = createMockGateway({ "tok-yes": 100 });
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (orderRepo.findByTokenId as any).mockReturnValue([
+      { orderId: "ord-1", status: "open", familyId: FAM },
+    ]);
+
+    const cancelEvents: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+
+    await mod.runCheck();
+
+    expect((marketRepo.deactivate as any)).toHaveBeenCalledWith(TOK_YES);
+    expect(cancelEvents).toHaveLength(1);
+    expect(cancelEvents[0].command.orderId).toBe("ord-1");
+  });
+
+  it("publishes MarketResolved even when balance blocks settlement", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+
+    const events: unknown[] = [];
+    bus.subscribe("MarketResolved", async (e) => { events.push(e); });
+
+    await mod.runCheck();
+
+    expect(events).toHaveLength(1);
+  });
+
+  it("settles without balance check when no gateway is provided", async () => {
+    // No gateway = simulation/paper mode, settle immediately
+    mod = createModule();
+    const resolution = makeDetectedResolution();
+    const settled = [makeSettledPosition()];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    const count = await mod.runCheck();
+
+    expect(count).toBe(1);
+  });
+
+  it("skips settlement and logs warning when balance check throws", async () => {
+    const gateway = createMockGateway();
+    (gateway.getPositionBalance as any).mockRejectedValue(new Error("Network error"));
+    mod = createModule({ gateway });
+
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+
+    const count = await mod.runCheck();
+
+    expect(count).toBe(0);
+    expect((settler.settle as any)).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tokenId: String(TOK_YES),
+        conditionId: CONDITION,
+      }),
+      "skipping settlement — balance check failed",
+    );
+  });
+
+  it("settles zero-balance candidates and skips errored ones in mixed batch", async () => {
+    const gateway = createMockGateway({ "tok-yes": 0 });
+    // TOK_NO balance check will throw
+    (gateway.getPositionBalance as any).mockImplementation(async (tokenId: TokenId) => {
+      if (String(tokenId) === "tok-yes") return 0;
+      throw new Error("SDK timeout");
+    });
+    mod = createModule({ gateway });
+
+    const resolution = makeDetectedResolution({
+      candidates: [
+        {
+          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
+          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
+          positionId: POS, familyId: FAM,
+        },
+        {
+          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
+          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2, familyId: FAM,
+        },
+      ],
+    });
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue([makeSettledPosition()]);
+
+    await mod.runCheck();
+
+    // settler should only receive the zero-balance candidate (TOK_YES)
+    const settleArg = (settler.settle as any).mock.calls[0][0];
+    expect(settleArg.candidates).toHaveLength(1);
+    expect(settleArg.candidates[0].tokenId).toBe(TOK_YES);
+  });
+
+  it("filters mixed-balance candidates — settles only zero-balance tokens", async () => {
+    const gateway = createMockGateway({ "tok-yes": 0, "tok-no": 25 });
+    mod = createModule({ gateway });
+
+    const resolution = makeDetectedResolution({
+      candidates: [
+        {
+          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
+          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
+          positionId: POS, familyId: FAM,
+        },
+        {
+          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
+          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2, familyId: FAM,
+        },
+      ],
+    });
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue([makeSettledPosition()]);
+
+    await mod.runCheck();
+
+    // settler should only receive the zero-balance candidate (TOK_YES)
+    const settleArg = (settler.settle as any).mock.calls[0][0];
+    expect(settleArg.candidates).toHaveLength(1);
+    expect(settleArg.candidates[0].tokenId).toBe(TOK_YES);
+  });
+
+  // ─── Status tracking and settlement retry ──────────────────────────────
+
+  it("calls markSettled when all candidates are settled (no gateway)", async () => {
+    const resolution = makeDetectedResolution();
+    const settled = [makeSettledPosition()];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    await mod.runCheck();
+
+    expect((resolutionRepo.markSettled as any)).toHaveBeenCalledWith(CONDITION);
+  });
+
+  it("calls markSettled when all candidates pass balance check", async () => {
+    const gateway = createMockGateway({ "tok-yes": 0 });
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution();
+    const settled = [makeSettledPosition()];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    await mod.runCheck();
+
+    expect((resolutionRepo.markSettled as any)).toHaveBeenCalledWith(CONDITION);
+  });
+
+  it("does NOT call markSettled when some candidates have non-zero balance", async () => {
+    const gateway = createMockGateway({ "tok-yes": 0, "tok-no": 25 });
+    mod = createModule({ gateway });
+
+    const resolution = makeDetectedResolution({
+      candidates: [
+        {
+          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
+          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
+          positionId: POS, familyId: FAM,
+        },
+        {
+          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
+          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2, familyId: FAM,
+        },
+      ],
+    });
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue([makeSettledPosition()]);
+
+    await mod.runCheck();
+
+    expect((resolutionRepo.markSettled as any)).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call markSettled for unknown resolution", async () => {
+    const resolution = makeDetectedResolution({
+      resolution: "unknown",
+      source: "gamma-delisted",
+    });
+    (detector.detect as any).mockResolvedValue([resolution]);
+
+    await mod.runCheck();
+
+    expect((resolutionRepo.markSettled as any)).not.toHaveBeenCalled();
+  });
+
+  it("calls markSettled when all families have autoSettle=false (nothing to retry)", async () => {
+    const provider = createMockRulesProvider({ autoSettle: false });
+    mod = createModule({ rulesProvider: provider });
+
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+
+    await mod.runCheck();
+
+    expect((resolutionRepo.markSettled as any)).toHaveBeenCalledWith(CONDITION);
+  });
+
+  it("skips deactivation and cancel on retry (resolution already exists)", async () => {
+    // Simulate retry: findByConditionId returns existing "detected" record
+    (resolutionRepo.findByConditionId as any).mockReturnValue({
+      conditionId: CONDITION,
+      status: "detected",
+    });
+
+    const resolution = makeDetectedResolution();
+    const settled = [makeSettledPosition()];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    await mod.runCheck();
+
+    // Should NOT save again (isRetry=true)
+    expect((resolutionRepo.save as any)).not.toHaveBeenCalled();
+    // Should NOT deactivate or cancel on retry
+    expect((marketRepo.deactivate as any)).not.toHaveBeenCalled();
+    // Should still settle
+    expect((settler.settle as any)).toHaveBeenCalled();
+    // Should mark settled
+    expect((resolutionRepo.markSettled as any)).toHaveBeenCalledWith(CONDITION);
+  });
+
+  it("does not publish MarketResolved on retry", async () => {
+    (resolutionRepo.findByConditionId as any).mockReturnValue({
+      conditionId: CONDITION,
+      status: "detected",
+    });
+
+    const resolution = makeDetectedResolution();
+    const settled = [makeSettledPosition()];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    const events: unknown[] = [];
+    bus.subscribe("MarketResolved", async (e) => { events.push(e); });
+
+    await mod.runCheck();
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("still publishes PositionSettled on retry when positions are settled", async () => {
+    (resolutionRepo.findByConditionId as any).mockReturnValue({
+      conditionId: CONDITION,
+      status: "detected",
+    });
+
+    const resolution = makeDetectedResolution();
+    const settled = [makeSettledPosition()];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    const events: unknown[] = [];
+    bus.subscribe("PositionSettled", async (e) => { events.push(e); });
+
+    await mod.runCheck();
+
+    expect(events).toHaveLength(1);
   });
 
   // ─── Re-entrancy guard ─────────────────────────────────────────────────

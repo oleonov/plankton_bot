@@ -1,7 +1,73 @@
-import { useState } from "react";
-import { useFamilies } from "../api/hooks.ts";
+import { useState, Fragment } from "react";
+import { useFamilies, useFamilyPositions, useFamilyOrders } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { FamilyActions } from "../components/FamilyActions.tsx";
+
+function FamilyDetail({ familyId }: { familyId: string }) {
+  const { data: positions } = useFamilyPositions(familyId);
+  const { data: orders } = useFamilyOrders(familyId);
+
+  return (
+    <tr>
+      <td colSpan={7} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}>
+              Positions ({positions?.length ?? 0})
+            </div>
+            {positions && positions.length > 0 ? (
+              <table style={{ fontSize: 11 }}>
+                <thead>
+                  <tr><th>Token</th><th>Size</th><th>Value</th><th>PnL</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                  {positions.map((p) => (
+                    <tr key={p.positionId}>
+                      <td>{p.tokenId.slice(0, 12)}</td>
+                      <td>{p.size.toFixed(2)}</td>
+                      <td>{p.currentValueUsdc != null ? `$${p.currentValueUsdc.toFixed(2)}` : "\u2014"}</td>
+                      <td style={{ color: p.realizedPnl >= 0 ? "var(--green)" : "var(--red)" }}>
+                        {p.realizedPnl >= 0 ? "+" : ""}${p.realizedPnl.toFixed(2)}
+                      </td>
+                      <td><Badge value={p.status} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div style={{ color: "var(--text-dim)", fontSize: 11 }}>No positions</div>
+            )}
+          </div>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}>
+              Orders ({orders?.items?.length ?? 0})
+            </div>
+            {orders?.items && orders.items.length > 0 ? (
+              <table style={{ fontSize: 11 }}>
+                <thead>
+                  <tr><th>Token</th><th>Side</th><th>Size</th><th>Price</th><th>Status</th></tr>
+                </thead>
+                <tbody>
+                  {orders.items.map((o) => (
+                    <tr key={o.orderId}>
+                      <td>{o.tokenId.slice(0, 12)}</td>
+                      <td>{o.side}</td>
+                      <td>{o.size.toFixed(2)}</td>
+                      <td>${o.price.toFixed(4)}</td>
+                      <td><Badge value={o.status} /></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : (
+              <div style={{ color: "var(--text-dim)", fontSize: 11 }}>No orders</div>
+            )}
+          </div>
+        </div>
+      </td>
+    </tr>
+  );
+}
 
 export function Families() {
   const { data: families, isLoading } = useFamilies();
@@ -19,24 +85,29 @@ export function Families() {
         <tbody>
           {families?.map((f) => {
             const mode = f.state?.runtimeMode ?? "unknown";
+            const isExpanded = expanded === f.familyId;
             return (
-              <tr
-                key={f.familyId}
-                style={mode === "quarantined" ? { background: "rgba(239,83,80,0.06)" } : undefined}
-                onClick={() => setExpanded(expanded === f.familyId ? null : f.familyId)}
-              >
-                <td style={{ cursor: "pointer", color: "var(--blue)" }}>{f.familyKey}</td>
-                <td><Badge value={mode} type="mode" /></td>
-                <td>${(f.state?.openValueUsdc ?? 0).toFixed(2)}</td>
-                <td>{f.state?.openPositionCount ?? 0} ({f.state?.dustPositionCount ?? 0} dust)</td>
-                <td style={{ color: "var(--orange)" }}>${(f.state?.currentTailCostUsdc ?? 0).toFixed(2)}</td>
-                <td style={{ color: (f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
-                  {(f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "+" : ""}${(f.state?.tailAdjustedPnlLive ?? 0).toFixed(2)}
-                </td>
-                <td onClick={(e) => e.stopPropagation()}>
-                  <FamilyActions familyId={f.familyId} mode={mode} />
-                </td>
-              </tr>
+              <Fragment key={f.familyId}>
+                <tr
+                  style={mode === "quarantine" ? { background: "rgba(239,83,80,0.06)" } : undefined}
+                  onClick={() => setExpanded(isExpanded ? null : f.familyId)}
+                >
+                  <td style={{ cursor: "pointer", color: "var(--blue)" }}>
+                    {isExpanded ? "\u25BC" : "\u25B6"} {f.familyKey}
+                  </td>
+                  <td><Badge value={mode} type="mode" /></td>
+                  <td>${(f.state?.openValueUsdc ?? 0).toFixed(2)}</td>
+                  <td>{f.state?.openPositionCount ?? 0} ({f.state?.openDustCount ?? 0} dust)</td>
+                  <td style={{ color: "var(--orange)" }}>${(f.state?.currentTailCostUsdc ?? 0).toFixed(2)}</td>
+                  <td style={{ color: (f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
+                    {(f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "+" : ""}${(f.state?.tailAdjustedPnlLive ?? 0).toFixed(2)}
+                  </td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <FamilyActions familyId={f.familyId} mode={mode} />
+                  </td>
+                </tr>
+                {isExpanded && <FamilyDetail familyId={f.familyId} />}
+              </Fragment>
             );
           })}
         </tbody>

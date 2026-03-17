@@ -39,6 +39,7 @@ export function Overview() {
           <div className="card card-accent-blue" style={{ cursor: "pointer" }}>
             <div className="label">Open Orders</div>
             <div className="value-lg text-blue">{status.openOrderCount}</div>
+            <div className="value-sm">&nbsp;</div>
           </div>
         </Link>
         <Link to="/families" style={{ textDecoration: "none" }}>
