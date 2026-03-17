@@ -12,13 +12,14 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@plankton/domain": "workspace:*",
     "@plankton/config": "workspace:*",
-    "@plankton/event-bus": "workspace:*",
     "@plankton/db": "workspace:*",
+    "@plankton/domain": "workspace:*",
+    "@plankton/event-bus": "workspace:*",
     "@plankton/exchange": "workspace:*",
     "@plankton/family-rules": "workspace:*",
     "@polymarket/clob-client": "^4.0.0",
+    "ethers": "^5.7.1",
     "pino": "^9.6.0"
   },
   "devDependencies": {

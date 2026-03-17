@@ -19,6 +19,7 @@ function testConfig(overrides?: Partial<AppConfig>): AppConfig {
     polyApiKey: undefined,
     polyApiSecret: undefined,
     polyPassphrase: undefined,
+    polyPrivateKey: undefined,
     planktonApiKey: TEST_API_KEY,
     planktonApiPort: 0,
     ...overrides,

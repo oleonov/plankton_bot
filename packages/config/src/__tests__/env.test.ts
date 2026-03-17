@@ -24,6 +24,7 @@ const ALL_KEYS = [
   "POLY_API_KEY",
   "POLY_API_SECRET",
   "POLY_PASSPHRASE",
+  "POLY_PRIVATE_KEY",
   "LIVE_LITE_CONFIRM",
   "LIVE_LITE_FAMILY_ALLOWLIST",
   "LIVE_LITE_MAX_FAMILIES",
@@ -38,6 +39,7 @@ const BASE_LIVE_LITE_VARS = {
   POLY_API_KEY: "key",
   POLY_API_SECRET: "secret",
   POLY_PASSPHRASE: "pass",
+  POLY_PRIVATE_KEY: "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   LIVE_LITE_FAMILY_ALLOWLIST: "familyA,familyB",
   LIVE_LITE_MAX_FAMILIES: "5",
   LIVE_LITE_MAX_OPEN_VALUE_USDC: "10000",
@@ -152,6 +154,25 @@ describe("loadEnv", () => {
     expect(() => loadEnv()).toThrow("Invalid environment configuration");
   });
 
+  it("requires POLY_PRIVATE_KEY in live-lite mode", () => {
+    setEnvVars({
+      RUNTIME_MODE: "live-lite",
+      LIVE_LITE_CONFIRM: "true",
+      POLY_API_KEY: "key",
+      POLY_API_SECRET: "secret",
+      POLY_PASSPHRASE: "pass",
+    });
+    expect(() => loadEnv()).toThrow("POLY_PRIVATE_KEY");
+  });
+
+  it("rejects malformed POLY_PRIVATE_KEY in live-lite mode", () => {
+    setEnvVars({
+      ...BASE_LIVE_LITE_VARS,
+      POLY_PRIVATE_KEY: "not-a-valid-key",
+    });
+    expect(() => loadEnv()).toThrow("0x-prefixed 32-byte hex");
+  });
+
   it("requires live-lite envelope vars when RUNTIME_MODE=live-lite", () => {
     setEnvVars({
       RUNTIME_MODE: "live-lite",
@@ -159,6 +180,7 @@ describe("loadEnv", () => {
       POLY_API_KEY: "key",
       POLY_API_SECRET: "secret",
       POLY_PASSPHRASE: "pass",
+      POLY_PRIVATE_KEY: "0xabc",
     });
     expect(() => loadEnv()).toThrow("LIVE_LITE_FAMILY_ALLOWLIST");
   });

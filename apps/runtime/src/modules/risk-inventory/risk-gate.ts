@@ -173,6 +173,17 @@ export class RiskGateImpl implements RiskGate {
     }
     passed.push("tail_threshold_ok");
 
+    // 6b. Tail quarantine ratio check
+    const realizedPnl = familyState.tailAdjustedPnlLive + familyState.currentTailCostUsdc;
+    if (realizedPnl > 0 && projectedTailCost / realizedPnl > tail.tailQuarantineThresholdRatio) {
+      rejected.push(
+        `tail cost ratio ${(projectedTailCost / realizedPnl).toFixed(2)} ` +
+        `exceeds threshold ${tail.tailQuarantineThresholdRatio}`,
+      );
+      return this.decision(signal, false, rejected, passed);
+    }
+    passed.push("tail_ratio_ok");
+
     // 7. Tail-adjusted PnL gating
     const tailPnl = familyState.tailAdjustedPnlLive;
     const scaleRules = bundle.rules.scaleIn;

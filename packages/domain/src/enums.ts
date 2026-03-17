@@ -167,6 +167,7 @@ export const SignalReason = {
   MediumHoldExit: "medium-hold-exit",
   TwoSidedEntry: "two-sided-entry",
   TailPrune: "tail-prune",
+  StalePrune: "stale-prune",
   ReduceOnly: "reduce-only",
   Operator: "operator",
 } as const;

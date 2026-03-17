@@ -546,6 +546,47 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  it("rejects entry when tail quarantine ratio exceeded", async () => {
+    // realizedPnl = tailAdjustedPnlLive + currentTailCostUsdc = 2 + 8 = 10
+    // projectedTailCost = currentTailCostUsdc + signalSize = 8 + 5 = 13
+    // ratio = 13 / 10 = 1.3 > threshold 0.5
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 2, currentTailCostUsdc: 8 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("tail cost ratio");
+
+    await mod.stop();
+  });
+
+  it("skips tail ratio check when realizedPnl is non-positive", async () => {
+    // realizedPnl = tailAdjustedPnlLive + currentTailCostUsdc = -20 + 5 = -15
+    // ratio check skipped — no division by non-positive
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: -20, currentTailCostUsdc: 5 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() });
+
+    const ratioRejection = rejected.find((r: any) => r.reason.includes("tail cost ratio"));
+    expect(ratioRejection).toBeUndefined();
+
+    await mod.stop();
+  });
+
   // ─── Fill handling: buy ───────────────────────────────────────────
 
   it("creates new position on buy fill", async () => {

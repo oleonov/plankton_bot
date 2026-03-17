@@ -17,6 +17,7 @@ const envSchema = z
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
     POLY_PASSPHRASE: z.string().optional(),
+    POLY_PRIVATE_KEY: z.string().optional(),
     PLANKTON_API_KEY: z.string().optional(),
     LIVE_LITE_CONFIRM: z.string().optional(),
     PLANKTON_API_PORT: z.coerce.number().int().positive().default(3100),
@@ -53,6 +54,7 @@ const envSchema = z
 
     if (data.RUNTIME_MODE === "live-lite") {
       for (const field of [
+        "POLY_PRIVATE_KEY",
         "LIVE_LITE_FAMILY_ALLOWLIST",
         "LIVE_LITE_MAX_FAMILIES",
         "LIVE_LITE_MAX_OPEN_VALUE_USDC",
@@ -66,6 +68,14 @@ const envSchema = z
             message: `${field} is required when RUNTIME_MODE is "live-lite"`,
           });
         }
+      }
+
+      if (data.POLY_PRIVATE_KEY && !/^0x[0-9a-fA-F]{64}$/.test(data.POLY_PRIVATE_KEY)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["POLY_PRIVATE_KEY"],
+          message: "POLY_PRIVATE_KEY must be a 0x-prefixed 32-byte hex private key",
+        });
       }
 
       if (data.LIVE_LITE_FAMILY_ALLOWLIST && data.LIVE_LITE_MAX_FAMILIES) {
@@ -91,6 +101,7 @@ export interface AppConfig {
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
   polyPassphrase: string | undefined;
+  polyPrivateKey: string | undefined;
   planktonApiKey: string | undefined;
   planktonApiPort: number;
   liveLite?: {
@@ -153,6 +164,7 @@ export function loadEnv(envPath?: string): AppConfig {
     polyApiKey: env.POLY_API_KEY,
     polyApiSecret: env.POLY_API_SECRET,
     polyPassphrase: env.POLY_PASSPHRASE,
+    polyPrivateKey: env.POLY_PRIVATE_KEY,
     planktonApiKey: env.PLANKTON_API_KEY,
     planktonApiPort: env.PLANKTON_API_PORT,
     liveLite,

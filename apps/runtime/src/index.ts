@@ -56,6 +56,7 @@ import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-mod
 import { StrategyModule } from "./modules/strategy/strategy-module.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
+import { StalePruningModule } from "./modules/pruning/stale-pruning-module.js";
 import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
 import { PositionSettler } from "./modules/resolution/position-settler.js";
 import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
@@ -179,10 +180,12 @@ async function main(): Promise<void> {
     if (config.runtimeMode === "paper") {
       polyClient = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID);
     } else {
+      const { Wallet } = await import("ethers");
+      const signer = new Wallet(config.polyPrivateKey!);
       polyClient = new ClobClient(
         CLOB_HOST,
         POLYGON_CHAIN_ID,
-        undefined,
+        signer,
         {
           key: config.polyApiKey!,
           secret: config.polyApiSecret!,
@@ -356,6 +359,16 @@ async function main(): Promise<void> {
     ...(config.runtimeMode === "live-lite" && exchangeGateway ? { gateway: exchangeGateway } : {}),
   });
 
+  // 7k. Stale tail pruning module
+  const stalePruningModule = new StalePruningModule({
+    positionRepo: repos.position,
+    marketRepo: repos.market,
+    rulesProvider,
+    bus,
+    log,
+    checkIntervalMs: 10 * 60_000, // 10 minutes
+  });
+
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
     ["market-scanner", marketScannerModule],
@@ -365,10 +378,11 @@ async function main(): Promise<void> {
     ["strategy", strategyModule],
     ["risk-inventory", riskInventoryModule],
     ["resolution", resolutionModule],
+    ["stale-pruning", stalePruningModule],
     ["execution", executionModule],
   ];
 
-  // 7k. Persist key timestamps to runtime_metrics for API consumption
+  // 7l. Persist key timestamps to runtime_metrics for API consumption
   const upsertMetric = conn.db.prepare(`
     INSERT INTO runtime_metrics (metric_name, value, captured_at)
     VALUES (?, 1, ?)
