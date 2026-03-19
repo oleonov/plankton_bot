@@ -283,6 +283,7 @@ async function main(): Promise<void> {
     runtimeControl,
     liveLiteGuard,
     runtimeMode: config.runtimeMode,
+    maxConcurrency: config.executionMaxConcurrency,
   });
 
   // 7g. Risk + Inventory module
