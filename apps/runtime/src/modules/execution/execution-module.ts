@@ -41,6 +41,7 @@ export interface ExecutionModuleDeps {
   botRunId: BotRunId;
   runtimeControl?: RuntimeControl | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
+  runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -225,8 +226,10 @@ export class ExecutionModule implements RuntimeModule {
       timestamp: now,
     });
 
-    // Check for immediate fills (simulation mode)
-    await this.checkForFills(orderId, cmd);
+    // Check for immediate fills (simulation mode only)
+    if (!this.deps.runtimeMode || this.deps.runtimeMode === "simulation") {
+      await this.checkForFills(orderId, cmd);
+    }
   }
 
   // ─── Cancel order handler ─────────────────────────────────────────────

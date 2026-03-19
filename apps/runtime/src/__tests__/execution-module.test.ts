@@ -653,6 +653,51 @@ describe("ExecutionModule", () => {
     await mod.stop();
   });
 
+  // ─── Runtime mode gating ─────────────────────────────────────────
+
+  it("skips inline checkForFills when runtimeMode is paper", async () => {
+    const paperMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "paper",
+    });
+
+    const mockFill: ExchangeFill = {
+      fillId: "sim-fill-1",
+      orderId: "sim-ord-1",
+      clientOrderId: "plk_abc123",
+      tokenId: createTokenId("tok-yes"),
+      side: "buy",
+      price: 0.5,
+      size: 10,
+      fee: 0,
+      timestamp: Date.now(),
+    };
+    (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([mockFill]);
+
+    await paperMod.start();
+
+    const fills: any[] = [];
+    bus.subscribe("FillReceived", async (p) => { fills.push(p); });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    // In paper mode, checkForFills should NOT be called
+    expect(gateway.getFills).not.toHaveBeenCalled();
+    expect(fills).toHaveLength(0);
+
+    await paperMod.stop();
+  });
+
   // ─── Unsubscribe on stop ──────────────────────────────────────────
 
   it("does not process events after stop", async () => {
