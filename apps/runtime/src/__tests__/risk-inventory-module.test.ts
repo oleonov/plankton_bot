@@ -6,6 +6,7 @@ import {
   createOrderId,
   createPositionId,
   createLotId,
+  createCommandId,
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -18,8 +19,10 @@ import type {
   FamilyStateRepository,
   PositionRepository,
   InventoryLotRepository,
+  OrderRepository,
   Position,
   InventoryLot,
+  Order,
   Signal,
   NormalizedMarket,
   TokenId,
@@ -217,6 +220,17 @@ function createMockLotRepo(): InventoryLotRepository {
   };
 }
 
+function createMockOrderRepo(order?: Order | null): OrderRepository {
+  return {
+    save: vi.fn(),
+    findById: vi.fn().mockReturnValue(order ?? null),
+    findByClientOrderId: vi.fn().mockReturnValue(null),
+    findOpen: vi.fn().mockReturnValue([]),
+    findByTokenId: vi.fn().mockReturnValue([]),
+    updateStatus: vi.fn(),
+  };
+}
+
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -238,6 +252,7 @@ describe("RiskInventoryModule", () => {
   let familyStateRepo: ReturnType<typeof createMockFamilyStateRepo>;
   let positionRepo: ReturnType<typeof createMockPositionRepo>;
   let lotRepo: ReturnType<typeof createMockLotRepo>;
+  let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let mod: RiskInventoryModule;
 
   function createModule(liveLiteGuard?: LiveLiteGuard) {
@@ -247,6 +262,7 @@ describe("RiskInventoryModule", () => {
       familyStateRepo,
       positionRepo,
       inventoryLotRepo: lotRepo,
+      orderRepo,
       log: silentLog,
       db: mockDb,
       liveLiteGuard,
@@ -259,6 +275,7 @@ describe("RiskInventoryModule", () => {
     familyStateRepo = createMockFamilyStateRepo(makeFamilyState());
     positionRepo = createMockPositionRepo();
     lotRepo = createMockLotRepo();
+    orderRepo = createMockOrderRepo();
     mod = createModule();
   });
 
@@ -562,7 +579,7 @@ describe("RiskInventoryModule", () => {
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
     expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toContain("tail cost ratio");
+    expect(rejected[0].reason).toContain("reduce-only");
 
     await mod.stop();
   });
@@ -1139,22 +1156,21 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
-  it("rejects probe-entry when tailAdjustedPnlLive < 0", async () => {
+  it("approves probe-entry when tailAdjustedPnlLive < 0 (probe-only mode)", async () => {
     familyStateRepo = createMockFamilyStateRepo(
       makeFamilyState({ tailAdjustedPnlLive: -1 }),
     );
     mod = createModule();
     await mod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "probe-entry" }),
     });
 
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toContain("tailAdjustedPnlLive");
+    expect(approved).toHaveLength(1);
 
     await mod.stop();
   });
@@ -1191,6 +1207,116 @@ describe("RiskInventoryModule", () => {
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "two-sided-entry" }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("probe-entry rejected when projected tail cost exceeds absolute threshold (reduce-only)", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ currentTailCostUsdc: 48, tailAdjustedPnlLive: 5 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "probe-entry", suggestedSizeUsdc: 5 }),
+    });
+
+    // projected = 48 + 5 = 53 > 50 threshold → reduce-only
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("reduce-only");
+
+    await mod.stop();
+  });
+
+  it("probe-entry rejected when tail ratio threshold breached (reduce-only)", async () => {
+    // realizedPnl = tailPnl + tailCost = 10 + 5 = 15
+    // ratio = 10 / 15 = 0.667 > 0.5 threshold → reduce-only
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ currentTailCostUsdc: 5, tailAdjustedPnlLive: 10 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "probe-entry", suggestedSizeUsdc: 5 }),
+    });
+
+    // projected = 5 + 5 = 10, realizedPnl = 10 + 5 = 15, ratio = 10/15 = 0.667 > 0.5
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("reduce-only");
+
+    await mod.stop();
+  });
+
+  it("confirm-scale rejected when family in derived probe-only", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: -5 }),
+    );
+    const customBundle = makeRuleBundle();
+    customBundle.rules.scaleIn.requirePositiveRecycleHistoryForScale = true;
+    rulesProvider = createMockRulesProvider(customBundle);
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "confirm-scale" }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("probe-only");
+
+    await mod.stop();
+  });
+
+  it("scale-in rejected when family in derived probe-only", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: -5 }),
+    );
+    const customBundle = makeRuleBundle();
+    customBundle.rules.scaleIn.requirePositiveRecycleHistoryForScale = true;
+    rulesProvider = createMockRulesProvider(customBundle);
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "scale-in" }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("probe-only");
+
+    await mod.stop();
+  });
+
+  it("allows scale-in in derived probe-only when requirePositiveRecycleHistoryForScale is false", async () => {
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: -5 }),
+    );
+    // Default bundle has requirePositiveRecycleHistoryForScale: false
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "scale-in" }),
     });
 
     expect(approved).toHaveLength(1);
@@ -1266,6 +1392,7 @@ describe("RiskInventoryModule", () => {
           tokenId: TOK_ID,
           conditionId: "c1",
           slug: "test",
+          eventSlug: null,
           question: "test?",
           outcome: "YES" as const,
           familyId: FAM_ID,
@@ -1321,6 +1448,7 @@ describe("RiskInventoryModule", () => {
           tokenId: createTokenId("tok-other"),
           conditionId: "c1",
           slug: "test",
+          eventSlug: null,
           question: "test?",
           outcome: "YES" as const,
           familyId: FAM_ID,
@@ -1416,6 +1544,7 @@ describe("RiskInventoryModule", () => {
           tokenId: TOK_ID,
           conditionId: "c1",
           slug: "test",
+          eventSlug: null,
           question: "test?",
           outcome: "YES" as const,
           familyId: FAM_ID,
@@ -1452,6 +1581,87 @@ describe("RiskInventoryModule", () => {
       expect(h.detail).toContain("approved=1");
       expect(h.detail).toContain("rejected=0");
       expect(h.detail).toContain("mtm=0");
+
+      await mod.stop();
+    });
+  });
+
+  // ─── Per-family in-flight limiter (B2.2) ──────────────────────────
+
+  describe("per-family in-flight limiter", () => {
+    function makePlaceOrderRequested(familyId: FamilyId = FAM_ID) {
+      return {
+        command: {
+          type: "PlaceOrderCommand" as const,
+          commandId: createCommandId("cmd-1"),
+          clientOrderId: "plk_test" as ClientOrderId,
+          source: "strategy" as const,
+          tokenId: TOK_ID,
+          side: "buy" as const,
+          size: 10,
+          price: 0.5,
+          orderType: "GTC" as const,
+          tickSize: 0.01,
+          negRisk: false,
+          familyId,
+          sequenceInTick: 0,
+        },
+        timestamp: Date.now(),
+      };
+    }
+
+    it("rejects entry signal when family has >= 2 in-flight orders", async () => {
+      await mod.start();
+
+      const rejected: any[] = [];
+      bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
+
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toContain("family-in-flight-limit");
+
+      await mod.stop();
+    });
+
+    it("allows entry signal after in-flight order is rejected (counter decremented)", async () => {
+      await mod.start();
+
+      const approved: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("OrderRejected", {
+        commandId: createCommandId("cmd-1"),
+        clientOrderId: "plk_test" as ClientOrderId,
+        reason: "insufficient balance",
+        errorCode: "INSUFFICIENT_BALANCE",
+        familyId: FAM_ID,
+        timestamp: Date.now(),
+      });
+      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
+
+      expect(approved).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    it("does not apply in-flight limit to exit signals", async () => {
+      await mod.start();
+
+      const approved: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("SignalProduced", {
+        signal: makeSignal({ reason: "repricing-exit", side: "sell" }),
+      });
+
+      expect(approved).toHaveLength(1);
 
       await mod.stop();
     });

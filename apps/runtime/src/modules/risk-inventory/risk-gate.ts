@@ -8,12 +8,11 @@
  *  3. Max open value not exceeded (entry signals only)
  *  4. Max active markets not exceeded (entry signals only)
  *  5. Max dust positions not exceeded (entry signals only)
- *  6. Tail quarantine threshold not exceeded (entry signals only)
- *  7. Tail-adjusted PnL gating:
- *     - heavy-scale: always blocked when tailAdjustedPnlLive <= 0
- *     - scale-in/confirm-scale: blocked when tailAdjustedPnlLive <= 0
- *       AND requirePositiveRecycleHistoryForScale is true
- *     - probe-entry: blocked when tailAdjustedPnlLive < 0 (allows zero for cold start)
+ *  6. Derived family mode from tail health:
+ *     - reduce-only: tail cap breached → block all entries
+ *     - probe-only: tail PnL negative but caps OK → allow probes;
+ *       scale-in/confirm-scale pass only when requirePositiveRecycleHistoryForScale=false
+ *     - active: healthy → everything allowed (heavy-scale still requires positive PnL)
  */
 
 import type {
@@ -22,6 +21,7 @@ import type {
   RiskDecision,
   FamilyRulesProvider,
   FamilyStateRepository,
+  FamilyState,
   PositionRepository,
   FamilyId,
 } from "@plankton/domain";
@@ -30,6 +30,33 @@ import type { LiveLiteGuard } from "../../live-lite-guard.js";
 
 /** Signal reasons that represent entries (new exposure). */
 const ENTRY_REASONS = new Set(["probe-entry", "confirm-scale", "scale-in", "heavy-scale", "two-sided-entry"]);
+
+type DerivedFamilyMode = "active" | "probe-only" | "reduce-only";
+
+/**
+ * Derive a family's effective trading mode from tail health metrics.
+ *
+ * - reduce-only: hard tail cap breached → block all entries
+ * - probe-only:  tail PnL negative but caps not breached → allow probes only
+ * - active:      healthy → everything allowed
+ */
+function resolveFamilyMode(
+  familyState: FamilyState,
+  projectedTailCost: number,
+  tailThresholdUsdc: number,
+  tailThresholdRatio: number,
+): DerivedFamilyMode {
+  if (projectedTailCost > tailThresholdUsdc) return "reduce-only";
+
+  const realizedPnl = familyState.tailAdjustedPnlLive + familyState.currentTailCostUsdc;
+  if (realizedPnl > 0 && projectedTailCost / realizedPnl > tailThresholdRatio) {
+    return "reduce-only";
+  }
+
+  if (familyState.tailAdjustedPnlLive < 0) return "probe-only";
+
+  return "active";
+}
 
 function isEntrySignal(signal: Signal): boolean {
   return signal.side === "buy" && ENTRY_REASONS.has(signal.reason);
@@ -42,6 +69,8 @@ export class RiskGateImpl implements RiskGate {
     private readonly positionRepo: PositionRepository,
     private readonly log: Logger,
     private readonly liveLiteGuard?: LiveLiteGuard,
+    private readonly getInFlightCount?: (familyId: FamilyId) => number,
+    private readonly maxConcurrentOrdersPerFamily: number = 2,
   ) {}
 
   async evaluate(signal: Signal): Promise<RiskDecision> {
@@ -92,6 +121,17 @@ export class RiskGateImpl implements RiskGate {
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("runtime_mode_allows");
+
+    // In-flight limiter (B2.2) — entry signals only
+    if (
+      isEntrySignal(signal) &&
+      this.getInFlightCount &&
+      this.getInFlightCount(signal.familyId) >= this.maxConcurrentOrdersPerFamily
+    ) {
+      rejected.push("family-in-flight-limit");
+      return this.decision(signal, false, rejected, passed);
+    }
+    passed.push("in_flight_limit_ok");
 
     // For exit/reduce signals, skip exposure checks — they reduce risk
     if (!isEntrySignal(signal)) {
@@ -162,57 +202,55 @@ export class RiskGateImpl implements RiskGate {
     }
     passed.push("max_dust_ok");
 
-    // 6. Tail quarantine threshold
+    // 6. Derive family mode from tail health
     const projectedTailCost = familyState.currentTailCostUsdc + signal.suggestedSizeUsdc;
-    if (projectedTailCost > tail.tailQuarantineThresholdUsdc) {
-      rejected.push(
-        `projected tail cost ${projectedTailCost.toFixed(2)} USDC ` +
-        `exceeds quarantine threshold ${tail.tailQuarantineThresholdUsdc} USDC`,
-      );
-      return this.decision(signal, false, rejected, passed);
-    }
-    passed.push("tail_threshold_ok");
-
-    // 6b. Tail quarantine ratio check
-    const realizedPnl = familyState.tailAdjustedPnlLive + familyState.currentTailCostUsdc;
-    if (realizedPnl > 0 && projectedTailCost / realizedPnl > tail.tailQuarantineThresholdRatio) {
-      rejected.push(
-        `tail cost ratio ${(projectedTailCost / realizedPnl).toFixed(2)} ` +
-        `exceeds threshold ${tail.tailQuarantineThresholdRatio}`,
-      );
-      return this.decision(signal, false, rejected, passed);
-    }
-    passed.push("tail_ratio_ok");
-
-    // 7. Tail-adjusted PnL gating
-    const tailPnl = familyState.tailAdjustedPnlLive;
     const scaleRules = bundle.rules.scaleIn;
+    const derivedMode = resolveFamilyMode(
+      familyState, projectedTailCost,
+      tail.tailQuarantineThresholdUsdc, tail.tailQuarantineThresholdRatio,
+    );
 
-    // Heavy campaigns always require positive tail-adjusted PnL
-    if (signal.reason === "heavy-scale" && tailPnl <= 0) {
+    if (derivedMode === "reduce-only") {
       rejected.push(
-        `heavy-scale blocked — tailAdjustedPnlLive ${tailPnl.toFixed(2)} <= 0`,
+        `entry blocked — family in derived reduce-only (tail cost ${projectedTailCost.toFixed(2)} breaches cap)`,
       );
       return this.decision(signal, false, rejected, passed);
     }
 
-    // Confirm/scale-in: gated by requirePositiveRecycleHistoryForScale config
+    if (derivedMode === "probe-only") {
+      if (signal.reason === "probe-entry") {
+        passed.push("probe_allowed_in_probe_only");
+      } else if (
+        (signal.reason === "scale-in" || signal.reason === "confirm-scale") &&
+        !scaleRules.requirePositiveRecycleHistoryForScale
+      ) {
+        passed.push("scale_allowed_flag_false");
+      } else {
+        rejected.push(
+          `${signal.reason} blocked — family in derived probe-only (tailAdjustedPnlLive ${familyState.tailAdjustedPnlLive.toFixed(2)} < 0)`,
+        );
+        return this.decision(signal, false, rejected, passed);
+      }
+    }
+
+    // Active mode: scale-in/confirm-scale gated by requirePositiveRecycleHistoryForScale
     if (
+      derivedMode === "active" &&
       (signal.reason === "scale-in" || signal.reason === "confirm-scale") &&
       scaleRules.requirePositiveRecycleHistoryForScale &&
-      tailPnl <= 0
+      familyState.tailAdjustedPnlLive <= 0
     ) {
       rejected.push(
         `${signal.reason} blocked — requirePositiveRecycleHistoryForScale ` +
-        `and tailAdjustedPnlLive ${tailPnl.toFixed(2)} <= 0`,
+        `and tailAdjustedPnlLive ${familyState.tailAdjustedPnlLive.toFixed(2)} <= 0`,
       );
       return this.decision(signal, false, rejected, passed);
     }
 
-    // Probe / two-sided entry: gentler gate — only blocked when NEGATIVE (zero allows cold start)
-    if ((signal.reason === "probe-entry" || signal.reason === "two-sided-entry") && tailPnl < 0) {
+    // Heavy-scale always requires positive tail PnL
+    if (signal.reason === "heavy-scale" && familyState.tailAdjustedPnlLive <= 0) {
       rejected.push(
-        `${signal.reason} blocked — tailAdjustedPnlLive ${tailPnl.toFixed(2)} < 0`,
+        `heavy-scale blocked — tailAdjustedPnlLive ${familyState.tailAdjustedPnlLive.toFixed(2)} <= 0`,
       );
       return this.decision(signal, false, rejected, passed);
     }

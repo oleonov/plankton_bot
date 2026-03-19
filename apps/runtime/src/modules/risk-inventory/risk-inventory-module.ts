@@ -23,6 +23,7 @@ import type {
   FamilyStateRepository,
   PositionRepository,
   InventoryLotRepository,
+  OrderRepository,
   RuntimeEventMap,
   NormalizedMarket,
   FamilyId,
@@ -39,6 +40,7 @@ export interface RiskInventoryModuleDeps {
   familyStateRepo: FamilyStateRepository;
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
+  orderRepo: OrderRepository;
   log: Logger;
   db: Database.Database;
   liveLiteGuard?: LiveLiteGuard | undefined;
@@ -79,6 +81,9 @@ export class RiskInventoryModule implements RuntimeModule {
   /** Per-family diagnostic counters (P2-2). */
   private readonly familyDiag = new Map<string, FamilyDiagnostics>();
 
+  /** Per-family in-flight order counter (B2.2). */
+  private readonly familyInFlight = new Map<string, number>();
+
   constructor(private readonly deps: RiskInventoryModuleDeps) {
     this.log = deps.log.child({ module: "risk-inventory" });
     this.riskGate = new RiskGateImpl(
@@ -87,6 +92,7 @@ export class RiskInventoryModule implements RuntimeModule {
       deps.positionRepo,
       this.log,
       deps.liveLiteGuard,
+      (fid) => this.getInFlightCount(fid),
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,
@@ -113,6 +119,18 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) =>
         this.handleMarketUpdate(p),
       ),
+      this.deps.bus.subscribe("PlaceOrderRequested", (p) => {
+        this.incrementInFlight(p.command.familyId);
+        return Promise.resolve();
+      }),
+      this.deps.bus.subscribe("OrderRejected", (p) => {
+        this.decrementInFlight(p.familyId);
+        return Promise.resolve();
+      }),
+      this.deps.bus.subscribe("OrderCancelled", (p) => {
+        this.decrementInFlight(p.familyId);
+        return Promise.resolve();
+      }),
     );
     this.started = true;
     this.log.info("risk-inventory module started");
@@ -167,6 +185,22 @@ export class RiskInventoryModule implements RuntimeModule {
       this.familyDiag.set(key, d);
     }
     return d;
+  }
+
+  // ─── In-flight counter helpers (B2.2) ────────────────────────────
+
+  private incrementInFlight(familyId: FamilyId): void {
+    const fid = String(familyId);
+    this.familyInFlight.set(fid, (this.familyInFlight.get(fid) ?? 0) + 1);
+  }
+
+  private decrementInFlight(familyId: FamilyId): void {
+    const fid = String(familyId);
+    this.familyInFlight.set(fid, Math.max(0, (this.familyInFlight.get(fid) ?? 0) - 1));
+  }
+
+  private getInFlightCount(familyId: FamilyId): number {
+    return this.familyInFlight.get(String(familyId)) ?? 0;
   }
 
   // ─── Signal evaluation ────────────────────────────────────────────
@@ -257,6 +291,11 @@ export class RiskInventoryModule implements RuntimeModule {
         familyState,
         timestamp: Date.now(),
       });
+
+      const order = this.deps.orderRepo.findById(payload.orderId);
+      if (order && order.status === "filled") {
+        this.decrementInFlight(payload.familyId);
+      }
     } catch (err) {
       this.log.error(
         { err, fillId: payload.fillId, tokenId: payload.tokenId },

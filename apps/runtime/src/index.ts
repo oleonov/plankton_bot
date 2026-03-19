@@ -293,6 +293,7 @@ async function main(): Promise<void> {
     familyStateRepo: repos.familyState,
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
+    orderRepo: repos.order,
     log,
     db: conn.db,
     liveLiteGuard,
