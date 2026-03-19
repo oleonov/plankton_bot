@@ -12,8 +12,11 @@ const envSchema = z
     LOG_LEVEL: logLevelSchema.default("info"),
     DB_PATH: z.string().default("./apps/runtime/data/plankton.db"),
     FAMILY_RULES_PATH: z.string().default("./config/family_rules.yaml"),
-    MARKET_DATA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+    MARKET_DATA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().int().positive().default(120_000),
+    STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
+    FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
+    EXECUTION_MAX_CONCURRENCY: z.coerce.number().int().positive().default(4),
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
     POLY_PASSPHRASE: z.string().optional(),
@@ -98,6 +101,9 @@ export interface AppConfig {
   familyRulesPath: string;
   marketDataPollIntervalMs: number;
   marketDataStaleThresholdMs: number;
+  strategyScanIntervalMs: number;
+  fillPollIntervalMs: number;
+  executionMaxConcurrency: number;
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
   polyPassphrase: string | undefined;
@@ -161,6 +167,9 @@ export function loadEnv(envPath?: string): AppConfig {
     familyRulesPath: path.resolve(root, env.FAMILY_RULES_PATH),
     marketDataPollIntervalMs: env.MARKET_DATA_POLL_INTERVAL_MS,
     marketDataStaleThresholdMs: env.MARKET_DATA_STALE_THRESHOLD_MS,
+    strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,
+    fillPollIntervalMs: env.FILL_POLL_INTERVAL_MS,
+    executionMaxConcurrency: env.EXECUTION_MAX_CONCURRENCY,
     polyApiKey: env.POLY_API_KEY,
     polyApiSecret: env.POLY_API_SECRET,
     polyPassphrase: env.POLY_PASSPHRASE,
