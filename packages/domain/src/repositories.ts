@@ -102,6 +102,9 @@ export interface FillRepository {
 
   /** Mark one or more fills as reconciled (applied to position/lot). */
   markReconciled(fillIds: FillId[]): void;
+
+  /** Return the epoch ms of the most recent fill, or null if no fills exist. */
+  getLatestTimestamp(): number | null;
 }
 
 // ─── PositionRepository ──────────────────────────────────────────────────

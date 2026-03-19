@@ -79,6 +79,14 @@ export class SqliteFillRepository implements FillRepository {
       .run(...fillIds);
   }
 
+  getLatestTimestamp(): number | null {
+    const row = this.db
+      .prepare("SELECT filled_at FROM fills ORDER BY filled_at DESC LIMIT 1")
+      .get() as { filled_at: string } | undefined;
+    if (!row) return null;
+    return new Date(row.filled_at).getTime();
+  }
+
   private rowToFill(row: Record<string, unknown>): Fill {
     return {
       fillId: createFillId(row.fill_id as string),
