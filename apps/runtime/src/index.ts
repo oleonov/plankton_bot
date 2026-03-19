@@ -57,6 +57,7 @@ import { StrategyModule } from "./modules/strategy/strategy-module.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
 import { StalePruningModule } from "./modules/pruning/stale-pruning-module.js";
+import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
 import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
 import { PositionSettler } from "./modules/resolution/position-settler.js";
 import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
@@ -281,6 +282,7 @@ async function main(): Promise<void> {
     botRunId,
     runtimeControl,
     liveLiteGuard,
+    runtimeMode: config.runtimeMode,
   });
 
   // 7g. Risk + Inventory module
@@ -302,7 +304,7 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     familyStateRepo: repos.familyState,
     log,
-    scanIntervalMs: 30_000,
+    scanIntervalMs: config.strategyScanIntervalMs,
     runtimeControl,
     liveLiteGuard,
   });
@@ -366,6 +368,17 @@ async function main(): Promise<void> {
     checkIntervalMs: 10 * 60_000, // 10 minutes
   });
 
+  // 7l. Fill poller module — fast-interval fill detection
+  const fillPollerModule = new FillPollerModule({
+    gateway: exchangeGateway,
+    fillRepo: repos.fill,
+    orderRepo: repos.order,
+    bus,
+    log,
+    pollIntervalMs: config.fillPollIntervalMs,
+    overlapMs: 5_000,
+  });
+
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
     ["market-scanner", marketScannerModule],
@@ -376,10 +389,11 @@ async function main(): Promise<void> {
     ["risk-inventory", riskInventoryModule],
     ["resolution", resolutionModule],
     ["stale-pruning", stalePruningModule],
+    ["fill-poller", fillPollerModule],
     ["execution", executionModule],
   ];
 
-  // 7l. Persist key timestamps to runtime_metrics for API consumption
+  // 7m. Persist key timestamps to runtime_metrics for API consumption
   const upsertMetric = conn.db.prepare(`
     INSERT INTO runtime_metrics (metric_name, value, captured_at)
     VALUES (?, 1, ?)

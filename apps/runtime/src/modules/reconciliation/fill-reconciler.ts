@@ -16,6 +16,7 @@ import type {
   Fill,
   ExchangeFill,
   OrderId,
+  ClientOrderId,
 } from "@plankton/domain";
 import {
   createFillId,
@@ -98,7 +99,7 @@ export async function importExchangeFills(
     await bus.publish("FillReceived", {
       fillId,
       orderId,
-      clientOrderId: ef.clientOrderId,
+      clientOrderId: ef.clientOrderId as ClientOrderId,
       tokenId: ef.tokenId,
       side: ef.side,
       price: ef.price,

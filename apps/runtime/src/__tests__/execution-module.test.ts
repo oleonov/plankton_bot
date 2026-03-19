@@ -116,6 +116,7 @@ function createMockFillRepo(): FillRepository {
     findRecent: vi.fn().mockReturnValue([]),
     findUnreconciled: vi.fn().mockReturnValue([]),
     markReconciled: vi.fn(),
+    getLatestTimestamp: vi.fn().mockReturnValue(null),
   };
 }
 

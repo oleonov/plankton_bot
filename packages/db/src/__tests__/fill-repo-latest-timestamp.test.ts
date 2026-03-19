@@ -3,7 +3,7 @@ import { bootstrapDatabase } from "../bootstrap.js";
 import { SqliteFillRepository } from "../repositories/fill-repository.js";
 import { createFillId, createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
 import type { Fill } from "@plankton/domain";
-import type { DbConnection } from "../bootstrap.js";
+import type { DbConnection } from "../connection.js";
 
 describe("SqliteFillRepository.getLatestTimestamp", () => {
   let conn: DbConnection;
