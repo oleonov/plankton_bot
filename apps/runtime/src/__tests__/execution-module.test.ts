@@ -699,6 +699,48 @@ describe("ExecutionModule", () => {
     await paperMod.stop();
   });
 
+  // ─── Queue integration ────────────────────────────────────────────
+
+  it("uses queue for non-blocking execution when maxConcurrency is set", async () => {
+    let resolvePlace: () => void;
+    const slowPlace = new Promise<PlaceOrderResult>((r) => {
+      resolvePlace = () => r({ success: true, orderId: "sim-ord-slow" });
+    });
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockReturnValueOnce(slowPlace);
+
+    const queuedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      maxConcurrency: 4,
+    });
+
+    await queuedMod.start();
+
+    // Publish should return quickly (enqueue, not await gateway)
+    const publishPromise = bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    // publish should resolve even though gateway hasn't responded
+    await publishPromise;
+
+    // Gateway call is in-flight but not resolved
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    // Resolve the gateway call
+    resolvePlace!();
+
+    // Drain the queue
+    await queuedMod.stop();
+  });
+
   // ─── Unsubscribe on stop ──────────────────────────────────────────
 
   it("does not process events after stop", async () => {

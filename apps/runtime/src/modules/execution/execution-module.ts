@@ -30,6 +30,7 @@ import type {
 import { createOrderId, createFillId, createBotRunId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { ExecutionQueue } from "./execution-queue.js";
 
 export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
@@ -42,16 +43,32 @@ export interface ExecutionModuleDeps {
   runtimeControl?: RuntimeControl | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
+  maxConcurrency?: number | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly processedCommandIds = new Set<string>();
+  private readonly processedCommandOrder: string[] = [];
+  private readonly queue: ExecutionQueue | null;
   private unsubs: Array<() => void> = [];
   private started = false;
 
   constructor(private readonly deps: ExecutionModuleDeps) {
     this.log = deps.log.child({ module: "execution" });
+    this.queue = deps.maxConcurrency
+      ? new ExecutionQueue({
+          maxConcurrency: deps.maxConcurrency,
+          shutdownTimeoutMs: 10_000,
+          execute: (cmd) => this.executeCommand(cmd),
+          resolveTokenId: (cmd) => {
+            if (cmd.type === "PlaceOrderCommand") return cmd.tokenId;
+            const order = this.deps.orderRepo.findById(cmd.orderId);
+            return order?.tokenId ?? (cmd.orderId as any);
+          },
+          log: this.log,
+        })
+      : null;
   }
 
   async start(): Promise<void> {
@@ -70,6 +87,7 @@ export class ExecutionModule implements RuntimeModule {
   async stop(): Promise<void> {
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
+    if (this.queue) await this.queue.shutdown();
     this.started = false;
     this.log.info("execution module stopped");
   }
@@ -167,7 +185,49 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     this.processedCommandIds.add(cmd.commandId);
+    this.processedCommandOrder.push(String(cmd.commandId));
+    this.pruneProcessedCommandIds();
 
+    if (this.queue) {
+      this.queue.enqueue(cmd);
+      return;
+    }
+
+    await this.executePlace(cmd);
+  }
+
+  // ─── Cancel order handler ─────────────────────────────────────────────
+
+  private async handleCancel(cmd: CancelOrderCommand): Promise<void> {
+    if (this.processedCommandIds.has(cmd.commandId)) {
+      this.log.debug({ commandId: cmd.commandId }, "duplicate cancel commandId — skipping");
+      return;
+    }
+    this.processedCommandIds.add(cmd.commandId);
+    this.processedCommandOrder.push(String(cmd.commandId));
+    this.pruneProcessedCommandIds();
+
+    if (this.queue) {
+      this.queue.enqueue(cmd);
+      return;
+    }
+
+    await this.executeCancel(cmd);
+  }
+
+  // ─── Command dispatcher ───────────────────────────────────────────────
+
+  private async executeCommand(cmd: PlaceOrderCommand | CancelOrderCommand): Promise<void> {
+    if (cmd.type === "PlaceOrderCommand") {
+      await this.executePlace(cmd);
+    } else {
+      await this.executeCancel(cmd);
+    }
+  }
+
+  // ─── Place execution (gateway call) ──────────────────────────────────
+
+  private async executePlace(cmd: PlaceOrderCommand): Promise<void> {
     const placeParams = {
       clientOrderId: cmd.clientOrderId as string,
       tokenId: cmd.tokenId,
@@ -232,15 +292,9 @@ export class ExecutionModule implements RuntimeModule {
     }
   }
 
-  // ─── Cancel order handler ─────────────────────────────────────────────
+  // ─── Cancel execution (gateway call) ─────────────────────────────────
 
-  private async handleCancel(cmd: CancelOrderCommand): Promise<void> {
-    if (this.processedCommandIds.has(cmd.commandId)) {
-      this.log.debug({ commandId: cmd.commandId }, "duplicate cancel commandId — skipping");
-      return;
-    }
-    this.processedCommandIds.add(cmd.commandId);
-
+  private async executeCancel(cmd: CancelOrderCommand): Promise<void> {
     const result = await this.deps.gateway.cancelOrder({
       orderId: String(cmd.orderId),
     });
@@ -327,6 +381,15 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────
+
+  private pruneProcessedCommandIds(): void {
+    if (this.processedCommandIds.size > 10_000) {
+      const toRemove = this.processedCommandOrder.splice(0, 1000);
+      for (const id of toRemove) {
+        this.processedCommandIds.delete(id);
+      }
+    }
+  }
 
   private buildOrder(
     cmd: PlaceOrderCommand,
