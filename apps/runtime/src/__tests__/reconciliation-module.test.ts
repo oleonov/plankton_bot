@@ -4,8 +4,6 @@ import {
   createFamilyId,
   createOrderId,
   createFillId,
-  createPositionId,
-  createLotId,
 } from "@plankton/domain";
 import type {
   ExchangeGateway,
@@ -18,17 +16,10 @@ import type {
   ExchangeBalance,
   OrderRepository,
   FillRepository,
-  PositionRepository,
-  InventoryLotRepository,
   Order,
   Fill,
-  Position,
-  InventoryLot,
   TokenId,
   ClientOrderId,
-  OrderId,
-  FillId,
-  PositionId,
   ReconciliationResult,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
@@ -79,27 +70,7 @@ function createMockFillRepo(): FillRepository {
     findRecent: vi.fn().mockReturnValue([]),
     findUnreconciled: vi.fn().mockReturnValue([]),
     markReconciled: vi.fn(),
-  };
-}
-
-function createMockPositionRepo(): PositionRepository {
-  return {
-    save: vi.fn(),
-    findByTokenId: vi.fn().mockReturnValue(null),
-    findByFamily: vi.fn().mockReturnValue([]),
-    findOpen: vi.fn().mockReturnValue([]),
-    findDust: vi.fn().mockReturnValue([]),
-    findAll: vi.fn().mockReturnValue([]),
-  };
-}
-
-function createMockLotRepo(): InventoryLotRepository {
-  return {
-    save: vi.fn(),
-    findByTokenId: vi.fn().mockReturnValue([]),
-    findOpen: vi.fn().mockReturnValue([]),
-    consumeFifo: vi.fn().mockReturnValue([]),
-    settleAll: vi.fn(),
+    getLatestTimestamp: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -110,10 +81,6 @@ const silentLog = {
   debug: vi.fn(),
   fatal: vi.fn(),
   child: () => silentLog,
-} as any;
-
-const mockDb = {
-  prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
 } as any;
 
 function makeExchangeOrder(overrides?: Partial<ExchangeOrder>): ExchangeOrder {
@@ -175,8 +142,6 @@ describe("ReconciliationModule", () => {
   let bus: InProcessEventBus;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
-  let positionRepo: ReturnType<typeof createMockPositionRepo>;
-  let lotRepo: ReturnType<typeof createMockLotRepo>;
   let mod: ReconciliationModule;
 
   beforeEach(() => {
@@ -184,18 +149,13 @@ describe("ReconciliationModule", () => {
     bus = new InProcessEventBus();
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
-    positionRepo = createMockPositionRepo();
-    lotRepo = createMockLotRepo();
     mod = new ReconciliationModule({
       gateway,
       bus,
       orderRepo,
       fillRepo,
-      positionRepo,
-      inventoryLotRepo: lotRepo,
       log: silentLog,
       reconcileIntervalMs: 60_000,
-      db: mockDb,
     });
   });
 
@@ -318,40 +278,31 @@ describe("ReconciliationModule", () => {
   // ─── Fill reconciliation ──────────────────────────────────────────
 
   describe("fill reconciliation", () => {
-    it("imports missing fills from exchange", async () => {
+    it("imports missing fills from exchange and publishes FillReceived", async () => {
       const exFill = makeExchangeFill({ fillId: "fill-new" });
       gateway.getFills = vi.fn().mockResolvedValue([exFill]);
-      fillRepo.findByOrderId = vi.fn().mockReturnValue([]); // no local fills for this order
+      fillRepo.exists = vi.fn().mockReturnValue(false);
 
       // Need local order for familyId lookup
       const local = makeLocalOrder();
       orderRepo.findByClientOrderId = vi.fn().mockReturnValue(local);
+
+      const fillEvents: any[] = [];
+      bus.subscribe("FillReceived", async (p) => { fillEvents.push(p); });
 
       const result = await mod.runReconciliation();
 
       expect(result.missingFills).toBe(1);
       expect(result.clean).toBe(false);
       expect(fillRepo.save).toHaveBeenCalledTimes(1);
-      expect(positionRepo.save).toHaveBeenCalled(); // inventory handler creates position
+      expect(fillEvents).toHaveLength(1);
+      expect(fillEvents[0].fillId).toBe("fill-new");
     });
 
     it("skips fills already known locally", async () => {
       const exFill = makeExchangeFill({ fillId: "fill-known" });
       gateway.getFills = vi.fn().mockResolvedValue([exFill]);
-
-      const localFill: Fill = {
-        fillId: createFillId("fill-known"),
-        orderId: createOrderId("ex-ord-1"),
-        tokenId: TOK,
-        familyId: FAM,
-        side: "buy",
-        price: 0.5,
-        size: 10,
-        sizeUsdc: 5,
-        fee: 0.01,
-        filledAt: new Date().toISOString(),
-      };
-      fillRepo.findByOrderId = vi.fn().mockReturnValue([localFill]);
+      fillRepo.exists = vi.fn().mockReturnValue(true);
 
       const result = await mod.runReconciliation();
 
@@ -365,33 +316,13 @@ describe("ReconciliationModule", () => {
         clientOrderId: "unknown-client",
       });
       gateway.getFills = vi.fn().mockResolvedValue([exFill]);
-      fillRepo.findByOrderId = vi.fn().mockReturnValue([]);
+      fillRepo.exists = vi.fn().mockReturnValue(false);
       orderRepo.findByClientOrderId = vi.fn().mockReturnValue(null);
 
       const result = await mod.runReconciliation();
 
       expect(result.missingFills).toBe(0);
       expect(result.details.some((d) => d.includes("no matching local order"))).toBe(true);
-    });
-
-    it("handles inventory apply failure gracefully", async () => {
-      const exFill = makeExchangeFill({ fillId: "fill-bad" });
-      gateway.getFills = vi.fn().mockResolvedValue([exFill]);
-      fillRepo.findByOrderId = vi.fn().mockReturnValue([]);
-
-      const local = makeLocalOrder();
-      orderRepo.findByClientOrderId = vi.fn().mockReturnValue(local);
-
-      // Make position repo throw on save (simulating inventory drift)
-      positionRepo.save = vi.fn().mockImplementation(() => {
-        throw new Error("constraint violation");
-      });
-
-      const result = await mod.runReconciliation();
-
-      // Fill is still counted as imported (it was saved to fillRepo)
-      expect(result.missingFills).toBe(1);
-      expect(result.details.some((d) => d.includes("inventory apply failed"))).toBe(true);
     });
   });
 
@@ -401,7 +332,7 @@ describe("ReconciliationModule", () => {
     it("publishes ReconciliationDriftDetected with severity=critical for missing fills", async () => {
       const exFill = makeExchangeFill({ fillId: "fill-drift" });
       gateway.getFills = vi.fn().mockResolvedValue([exFill]);
-      fillRepo.findByOrderId = vi.fn().mockReturnValue([]);
+      fillRepo.exists = vi.fn().mockReturnValue(false);
       orderRepo.findByClientOrderId = vi.fn().mockReturnValue(makeLocalOrder());
 
       const drifts: Array<{ severity: string; details: string }> = [];

@@ -9,25 +9,21 @@
  * Drift categories:
  *  - Phantom orders (local open, not on exchange) → cancelled locally
  *  - Unknown exchange orders (on exchange, not local) → logged
- *  - Missing fills → imported through InventoryHandler exactly once
+ *  - Missing fills → imported via importExchangeFills, FillReceived published on bus
  *  - Unrecoverable inventory drift → emits critical severity event
  *
  * Exchange is source of truth. Does NOT fabricate state.
  */
 
-import type Database from "better-sqlite3";
 import type {
   RuntimeModule,
   EventBus,
   ExchangeGateway,
   OrderRepository,
   FillRepository,
-  PositionRepository,
-  InventoryLotRepository,
   ReconciliationResult,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import { InventoryHandler } from "../risk-inventory/inventory-handler.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
 
@@ -36,16 +32,12 @@ export interface ReconciliationModuleDeps {
   bus: EventBus;
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
-  positionRepo: PositionRepository;
-  inventoryLotRepo: InventoryLotRepository;
   log: Logger;
   reconcileIntervalMs: number;
-  db: Database.Database;
 }
 
 export class ReconciliationModule implements RuntimeModule {
   private readonly log: Logger;
-  private readonly inventoryHandler: InventoryHandler;
   private unsubs: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private reconciling = false;
@@ -56,12 +48,6 @@ export class ReconciliationModule implements RuntimeModule {
 
   constructor(private readonly deps: ReconciliationModuleDeps) {
     this.log = deps.log.child({ module: "reconciliation" });
-    this.inventoryHandler = new InventoryHandler(
-      deps.positionRepo,
-      deps.inventoryLotRepo,
-      this.log,
-      deps.db,
-    );
   }
 
   async start(): Promise<void> {
@@ -132,7 +118,7 @@ export class ReconciliationModule implements RuntimeModule {
           gateway: this.deps.gateway,
           fillRepo: this.deps.fillRepo,
           orderRepo: this.deps.orderRepo,
-          inventoryHandler: this.inventoryHandler,
+          bus: this.deps.bus,
           log: this.log,
         },
         sinceMs,

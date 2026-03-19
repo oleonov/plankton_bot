@@ -313,11 +313,8 @@ async function main(): Promise<void> {
     bus,
     orderRepo: repos.order,
     fillRepo: repos.fill,
-    positionRepo: repos.position,
-    inventoryLotRepo: repos.inventoryLot,
     log,
     reconcileIntervalMs: 60_000,
-    db: conn.db,
   });
 
   // 7j. Resolution module — detect resolved markets, settle positions

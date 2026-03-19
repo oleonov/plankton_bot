@@ -2,34 +2,142 @@
  * Fill Reconciler — imports exchange fills missing from local DB.
  *
  * Exchange is source of truth. For each exchange fill not found locally,
- * the fill is persisted and applied through InventoryHandler exactly once.
+ * the fill is persisted and a FillReceived event published on the bus.
  *
- * Dedup: builds a Set of known local fill IDs from fillRepo.findByOrderId()
- * for each relevant order, avoiding duplicate imports.
+ * Shared importExchangeFills() is the core import function used by both
+ * FillPollerModule (hot path) and ReconciliationModule (safety net).
  */
 
 import type {
   ExchangeGateway,
   FillRepository,
   OrderRepository,
+  EventBus,
   Fill,
-  FillId,
   ExchangeFill,
+  OrderId,
 } from "@plankton/domain";
 import {
   createFillId,
   createOrderId,
-  createTokenId,
-  createFamilyId,
 } from "@plankton/domain";
-import type { InventoryHandler } from "../risk-inventory/inventory-handler.js";
 import type { Logger } from "../../logger.js";
+
+// ─── Shared fill import (DRY) ─────────────────────────────────────────────
+
+export interface ImportFillsDeps {
+  fillRepo: FillRepository;
+  orderRepo: OrderRepository;
+  bus: EventBus;
+  log: Logger;
+}
+
+export interface ImportFillsResult {
+  imported: number;
+  skipped: number;
+  details: string[];
+}
+
+/**
+ * Import exchange fills into local DB. Publishes FillReceived for each new fill
+ * and updates order status based on cumulative fill size.
+ *
+ * Used by both FillPollerModule (hot path) and reconcileFills (safety net).
+ */
+export async function importExchangeFills(
+  fills: ExchangeFill[],
+  deps: ImportFillsDeps,
+): Promise<ImportFillsResult> {
+  const { fillRepo, orderRepo, bus, log } = deps;
+  let imported = 0;
+  let skipped = 0;
+  const details: string[] = [];
+
+  // Track which orders received new fills for status update
+  const ordersWithNewFills = new Set<string>();
+
+  for (const ef of fills) {
+    const fillId = createFillId(ef.fillId);
+
+    // Dedup by fillId
+    if (fillRepo.exists(fillId)) {
+      skipped++;
+      continue;
+    }
+
+    // Order lookup for familyId
+    const localOrder = orderRepo.findByClientOrderId(ef.clientOrderId);
+    if (!localOrder) {
+      skipped++;
+      const msg = `fill ${ef.fillId} has no matching local order (clientOrderId: ${ef.clientOrderId}) — skipped`;
+      details.push(msg);
+      log.warn({ fillId: ef.fillId }, msg);
+      continue;
+    }
+
+    const sizeUsdc = ef.size * ef.price;
+    const orderId = createOrderId(ef.orderId);
+
+    const fill: Fill = {
+      fillId,
+      orderId,
+      tokenId: ef.tokenId,
+      familyId: localOrder.familyId,
+      side: ef.side,
+      price: ef.price,
+      size: ef.size,
+      sizeUsdc,
+      fee: ef.fee,
+      filledAt: new Date(ef.timestamp).toISOString(),
+    };
+
+    fillRepo.save(fill);
+    imported++;
+    ordersWithNewFills.add(ef.orderId);
+
+    await bus.publish("FillReceived", {
+      fillId,
+      orderId,
+      clientOrderId: ef.clientOrderId,
+      tokenId: ef.tokenId,
+      side: ef.side,
+      price: ef.price,
+      size: ef.size,
+      sizeUsdc,
+      fee: ef.fee,
+      familyId: localOrder.familyId,
+      timestamp: ef.timestamp,
+    });
+
+    const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size})`;
+    details.push(msg);
+    log.info({ fillId: ef.fillId }, msg);
+  }
+
+  // Update order status for each order that received new fills
+  for (const oid of ordersWithNewFills) {
+    const orderId = createOrderId(oid);
+    const allFills = fillRepo.findByOrderId(orderId);
+    const cumulativeFilled = allFills.reduce((sum, f) => sum + f.size, 0);
+    const localOrder = orderRepo.findById(orderId);
+    if (!localOrder) continue;
+    if (cumulativeFilled >= localOrder.size) {
+      orderRepo.updateStatus(orderId, "filled");
+    } else if (cumulativeFilled > 0) {
+      orderRepo.updateStatus(orderId, "partially-filled");
+    }
+  }
+
+  return { imported, skipped, details };
+}
+
+// ─── Reconciler (uses shared import) ──────────────────────────────────────
 
 export interface FillReconcilerDeps {
   gateway: ExchangeGateway;
   fillRepo: FillRepository;
   orderRepo: OrderRepository;
-  inventoryHandler: InventoryHandler;
+  bus: EventBus;
   log: Logger;
 }
 
@@ -43,90 +151,18 @@ export async function reconcileFills(
   deps: FillReconcilerDeps,
   sinceMs: number,
 ): Promise<FillReconcileResult> {
-  const { gateway, fillRepo, orderRepo, inventoryHandler, log } = deps;
-  const details: string[] = [];
+  const { gateway, fillRepo, orderRepo, bus, log } = deps;
 
   const exchangeFills = await gateway.getFills(sinceMs);
   if (exchangeFills.length === 0) {
-    return { exchangeFillCount: 0, missingFillsImported: 0, details };
+    return { exchangeFillCount: 0, missingFillsImported: 0, details: [] };
   }
 
-  // Build set of known local fill IDs by querying per-order
-  const queriedOrders = new Set<string>();
-  const knownFillIds = new Set<string>();
-
-  for (const ef of exchangeFills) {
-    if (!queriedOrders.has(ef.orderId)) {
-      queriedOrders.add(ef.orderId);
-      const localFills = fillRepo.findByOrderId(createOrderId(ef.orderId));
-      for (const lf of localFills) {
-        knownFillIds.add(String(lf.fillId));
-      }
-    }
-  }
-
-  let missingFillsImported = 0;
-
-  for (const ef of exchangeFills) {
-    if (knownFillIds.has(ef.fillId)) continue;
-
-    // Look up the local order to get familyId
-    const localOrder = orderRepo.findByClientOrderId(ef.clientOrderId);
-    if (!localOrder) {
-      const msg = `missing fill ${ef.fillId} has no matching local order (clientOrderId: ${ef.clientOrderId}) — skipped`;
-      details.push(msg);
-      log.warn({ fillId: ef.fillId }, msg);
-      continue;
-    }
-
-    const fillId = createFillId(ef.fillId);
-    const sizeUsdc = ef.size * ef.price;
-
-    const fill: Fill = {
-      fillId,
-      orderId: createOrderId(ef.orderId),
-      tokenId: ef.tokenId,
-      familyId: localOrder.familyId,
-      side: ef.side,
-      price: ef.price,
-      size: ef.size,
-      sizeUsdc,
-      fee: ef.fee,
-      filledAt: new Date(ef.timestamp).toISOString(),
-    };
-
-    fillRepo.save(fill);
-
-    // Apply through inventory handler
-    try {
-      inventoryHandler.applyFill({
-        fillId,
-        tokenId: ef.tokenId,
-        familyId: localOrder.familyId,
-        side: ef.side,
-        price: ef.price,
-        size: ef.size,
-        sizeUsdc,
-        fee: ef.fee,
-        timestamp: ef.timestamp,
-      });
-    } catch (err) {
-      const msg = `fill ${ef.fillId} imported but inventory apply failed: ${err}`;
-      details.push(msg);
-      log.error({ err, fillId: ef.fillId }, msg);
-    }
-
-    knownFillIds.add(ef.fillId);
-    missingFillsImported++;
-
-    const msg = `missing fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size})`;
-    details.push(msg);
-    log.info({ fillId: ef.fillId }, msg);
-  }
+  const result = await importExchangeFills(exchangeFills, { fillRepo, orderRepo, bus, log });
 
   return {
     exchangeFillCount: exchangeFills.length,
-    missingFillsImported,
-    details,
+    missingFillsImported: result.imported,
+    details: result.details,
   };
 }

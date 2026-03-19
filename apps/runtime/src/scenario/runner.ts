@@ -234,11 +234,8 @@ async function executeScenario(
     bus,
     orderRepo: repos.order,
     fillRepo: repos.fill,
-    positionRepo: repos.position,
-    inventoryLotRepo: repos.inventoryLot,
     log,
     reconcileIntervalMs: 60_000,
-    db: conn.db,
   });
 
   // 8. Create supervisor and start
@@ -273,6 +270,7 @@ async function executeScenario(
         tokenId: createTokenId(token.tokenId),
         conditionId: clobMarket.conditionId,
         slug: clobMarket.slug,
+        eventSlug: clobMarket.eventSlug ?? null,
         question: clobMarket.question,
         outcome: token.outcome.toUpperCase() === "YES" ? "YES" : "NO",
         familyId: matched?.identity.familyId ?? null,
