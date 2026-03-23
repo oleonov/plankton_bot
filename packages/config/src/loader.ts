@@ -4,7 +4,13 @@ import {
   familyYamlSchema,
   familyRulesFileSchema,
   type FamilyConfig,
+  type GlobalConfig,
 } from "./schemas.js";
+
+export interface LoadedFamilyRules {
+  global: GlobalConfig;
+  families: FamilyConfig[];
+}
 
 // ─── camelCase conversion ───────────────────────────────────────────────────
 
@@ -60,7 +66,7 @@ function parseSingleFamily(raw: unknown, index: number): FamilyConfig {
   return transformFamily(parsed.data);
 }
 
-export function loadFamilyRulesYaml(filePath: string): FamilyConfig[] {
+export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
   let content: string;
   try {
     content = readFileSync(filePath, "utf-8");
@@ -96,12 +102,24 @@ export function loadFamilyRulesYaml(filePath: string): FamilyConfig[] {
         `Schema validation failed for multi-family file "${filePath}":\n${details}`,
       );
     }
-    return parsed.data.families.map((f, i) => transformFamily(f));
+    return {
+      global: transformKeys(parsed.data.global) as GlobalConfig,
+      families: parsed.data.families.map((f, i) => transformFamily(f)),
+    };
   }
 
   // Single-family file (like the template)
   if (typeof record["family_id"] === "string") {
-    return [parseSingleFamily(doc, 0)];
+    if (record["global"] !== undefined) {
+      throw new Error(
+        `"global" section is not supported in single-family format. ` +
+        `Use the multi-family format (with "families" array) to set global config.`,
+      );
+    }
+    return {
+      global: { initialBalanceUsdc: 10_000 },
+      families: [parseSingleFamily(doc, 0)],
+    };
   }
 
   throw new Error(

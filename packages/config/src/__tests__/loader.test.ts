@@ -28,10 +28,10 @@ function cleanup(): void {
 
 describe("loadFamilyRulesYaml", () => {
   it("loads the template YAML successfully", () => {
-    const families = loadFamilyRulesYaml(TEMPLATE_PATH);
-    expect(families).toHaveLength(1);
+    const result = loadFamilyRulesYaml(TEMPLATE_PATH);
+    expect(result.families).toHaveLength(1);
 
-    const family = families[0]!;
+    const family = result.families[0]!;
     expect(family.identity.familyId).toBe("bitcoin-above:threshold:daily");
     expect(family.identity.familyKey).toBe("bitcoin-above");
     expect(family.identity.primaryCategory).toBe("crypto-btc");
@@ -40,8 +40,8 @@ describe("loadFamilyRulesYaml", () => {
   });
 
   it("transforms snake_case to camelCase", () => {
-    const families = loadFamilyRulesYaml(TEMPLATE_PATH);
-    const family = families[0]!;
+    const result = loadFamilyRulesYaml(TEMPLATE_PATH);
+    const family = result.families[0]!;
 
     // Evidence layer
     expect(family.evidence.evidenceStatus).toBe("confirmed");
@@ -65,8 +65,8 @@ describe("loadFamilyRulesYaml", () => {
   });
 
   it("injects familyId into identity, evidence, and rules", () => {
-    const families = loadFamilyRulesYaml(TEMPLATE_PATH);
-    const family = families[0]!;
+    const result = loadFamilyRulesYaml(TEMPLATE_PATH);
+    const family = result.families[0]!;
     const expectedId = "bitcoin-above:threshold:daily";
 
     expect(family.identity.familyId).toBe(expectedId);
@@ -75,8 +75,8 @@ describe("loadFamilyRulesYaml", () => {
   });
 
   it("sets updatedAt on runtimeState if present", () => {
-    const families = loadFamilyRulesYaml(TEMPLATE_PATH);
-    const family = families[0]!;
+    const result = loadFamilyRulesYaml(TEMPLATE_PATH);
+    const family = result.families[0]!;
 
     expect(family.runtimeState).toBeDefined();
     expect(family.runtimeState!.updatedAt).toBeDefined();
@@ -223,11 +223,11 @@ families:
 `;
     const filePath = writeTmpYaml("multi.yaml", content);
     try {
-      const families = loadFamilyRulesYaml(filePath);
-      expect(families).toHaveLength(2);
-      expect(families[0]!.identity.familyKey).toBe("test-a");
-      expect(families[1]!.identity.familyKey).toBe("test-b");
-      expect(families[1]!.rules.universe.action).toBe("monitor");
+      const result = loadFamilyRulesYaml(filePath);
+      expect(result.families).toHaveLength(2);
+      expect(result.families[0]!.identity.familyKey).toBe("test-a");
+      expect(result.families[1]!.identity.familyKey).toBe("test-b");
+      expect(result.families[1]!.rules.universe.action).toBe("monitor");
     } finally {
       cleanup();
     }
