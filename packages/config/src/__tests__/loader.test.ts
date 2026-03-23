@@ -413,4 +413,174 @@ rules:
       cleanup();
     }
   });
+
+  // Minimal valid family block reused by global-related tests
+  const MINIMAL_FAMILY_YAML = `
+    - family_id: "min:threshold:daily"
+      identity:
+        family_key: "min"
+        primary_category: "test"
+        regime: "threshold"
+        horizon: "daily"
+        cadence: "daily"
+        strategy_profile: "scalp"
+      evidence:
+        evidence_status: "unknown"
+        evidence_score: 0
+        promotion_state: "probe-only"
+        local_trade_count: 0
+        local_market_count: 0
+        local_realized_pnl_fifo: 0
+        open_tail_cost_usdc: 0
+        tail_adjusted_pnl: 0
+        both_sided_eligible: false
+        heavy_campaign_eligible: false
+      rules:
+        universe:
+          enabled: true
+          action: "trade"
+          priority_rank: 1
+          allow_weekends: false
+          session_mode: "active-window"
+        entry:
+          entry_mode: "probe-first"
+          min_entry_price: 0.01
+          max_entry_price: 0.50
+          max_initial_notional_usdc: 5
+          allow_high_price_one_shot: false
+          high_price_threshold: 0.50
+          require_proven_family_above_price: 0.50
+        scale_in:
+          scale_mode: "confirm-only"
+          default_max_buys_per_leg: 3
+          heavy_max_buys_per_leg: 6
+          allow_heavy_campaigns: false
+          require_positive_recycle_history_for_scale: true
+        exit:
+          exit_mode: "repricing-sell"
+          primary_profit_model: "sell-into-strength"
+          allow_runner_extension: false
+          prefer_fast_recycle: true
+          resolution_holding_allowed: false
+        two_sided:
+          allow_two_sided: false
+          two_sided_mode: "disabled"
+        tail_suppression:
+          max_open_value_usdc: 50
+          max_active_markets: 5
+          max_dust_positions: 2
+          tail_quarantine_threshold_usdc: 50
+          tail_quarantine_threshold_ratio: 1.0
+          stale_tail_prune_enabled: true
+          threshold_cleanup_required: true
+        session:
+          active_windows_utc:
+            - start: "14:00"
+              end: "21:00"
+          reduced_windows_utc: []
+          weekday_bias: "normal"
+          weekend_mode: "reduced"`;
+
+  it("defaults global.initialBalanceUsdc to 10000 when global section is omitted", () => {
+    const content = `version: 1\nfamilies:\n${MINIMAL_FAMILY_YAML}\n`;
+    const filePath = writeTmpYaml("no-global.yaml", content);
+    try {
+      const result = loadFamilyRulesYaml(filePath);
+      expect(result.global.initialBalanceUsdc).toBe(10_000);
+      expect(result.families).toHaveLength(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("parses custom global.initial_balance_usdc correctly", () => {
+    const content = `version: 1\nglobal:\n  initial_balance_usdc: 250\nfamilies:\n${MINIMAL_FAMILY_YAML}\n`;
+    const filePath = writeTmpYaml("custom-global.yaml", content);
+    try {
+      const result = loadFamilyRulesYaml(filePath);
+      expect(result.global.initialBalanceUsdc).toBe(250);
+      expect(result.families).toHaveLength(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rejects single-family file with global: key", () => {
+    const content = `
+family_id: "test:threshold:daily"
+global:
+  initial_balance_usdc: 100
+identity:
+  family_key: "test"
+  primary_category: "test"
+  regime: "threshold"
+  horizon: "daily"
+  cadence: "daily"
+  strategy_profile: "scalp"
+evidence:
+  evidence_status: "unknown"
+  evidence_score: 0
+  promotion_state: "probe-only"
+  local_trade_count: 0
+  local_market_count: 0
+  local_realized_pnl_fifo: 0
+  open_tail_cost_usdc: 0
+  tail_adjusted_pnl: 0
+  both_sided_eligible: false
+  heavy_campaign_eligible: false
+rules:
+  universe:
+    enabled: true
+    action: "trade"
+    priority_rank: 1
+    allow_weekends: false
+    session_mode: "active-window"
+  entry:
+    entry_mode: "probe-first"
+    min_entry_price: 0.01
+    max_entry_price: 0.50
+    max_initial_notional_usdc: 5
+    allow_high_price_one_shot: false
+    high_price_threshold: 0.50
+    require_proven_family_above_price: 0.50
+  scale_in:
+    scale_mode: "confirm-only"
+    default_max_buys_per_leg: 3
+    heavy_max_buys_per_leg: 6
+    allow_heavy_campaigns: false
+    require_positive_recycle_history_for_scale: true
+  exit:
+    exit_mode: "repricing-sell"
+    primary_profit_model: "sell-into-strength"
+    allow_runner_extension: false
+    prefer_fast_recycle: true
+    resolution_holding_allowed: false
+  two_sided:
+    allow_two_sided: false
+    two_sided_mode: "disabled"
+  tail_suppression:
+    max_open_value_usdc: 50
+    max_active_markets: 5
+    max_dust_positions: 2
+    tail_quarantine_threshold_usdc: 50
+    tail_quarantine_threshold_ratio: 1.0
+    stale_tail_prune_enabled: true
+    threshold_cleanup_required: true
+  session:
+    active_windows_utc:
+      - start: "14:00"
+        end: "21:00"
+    reduced_windows_utc: []
+    weekday_bias: "normal"
+    weekend_mode: "reduced"
+`;
+    const filePath = writeTmpYaml("single-with-global.yaml", content);
+    try {
+      expect(() => loadFamilyRulesYaml(filePath)).toThrow(
+        '"global" section is not supported in single-family format',
+      );
+    } finally {
+      cleanup();
+    }
+  });
 });
