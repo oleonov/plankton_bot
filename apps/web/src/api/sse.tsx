@@ -1,7 +1,5 @@
 import { useEffect, useRef, useState, createContext, useContext, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { getApiKey } from "./client.ts";
-
 export type SSEState = "connected" | "reconnecting" | "disconnected";
 
 const SSE_INVALIDATION_MAP: Record<string, string[][]> = {
@@ -28,8 +26,7 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   const esRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
-    const token = getApiKey();
-    const url = `/api/v1/events?token=${encodeURIComponent(token)}`;
+    const url = "/api/v1/events";
     const es = new EventSource(url);
     esRef.current = es;
 

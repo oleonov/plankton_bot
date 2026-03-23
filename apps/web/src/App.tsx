@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { SSEProvider } from "./api/sse.tsx";
+import { AuthGate } from "./components/AuthGate.tsx";
 import { Layout } from "./components/Layout.tsx";
 import { Overview } from "./pages/Overview.tsx";
 import { Positions } from "./pages/Positions.tsx";
@@ -15,20 +16,22 @@ const queryClient = new QueryClient({
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <SSEProvider>
-        <BrowserRouter>
-          <Routes>
-            <Route element={<Layout />}>
-              <Route path="/" element={<Navigate to="/overview" replace />} />
-              <Route path="/overview" element={<Overview />} />
-              <Route path="/positions" element={<Positions />} />
-              <Route path="/orders" element={<OrdersFills />} />
-              <Route path="/families" element={<Families />} />
-              <Route path="/risk" element={<RiskQuarantine />} />
-            </Route>
-          </Routes>
-        </BrowserRouter>
-      </SSEProvider>
+      <AuthGate>
+        <SSEProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route element={<Layout />}>
+                <Route path="/" element={<Navigate to="/overview" replace />} />
+                <Route path="/overview" element={<Overview />} />
+                <Route path="/positions" element={<Positions />} />
+                <Route path="/orders" element={<OrdersFills />} />
+                <Route path="/families" element={<Families />} />
+                <Route path="/risk" element={<RiskQuarantine />} />
+              </Route>
+            </Routes>
+          </BrowserRouter>
+        </SSEProvider>
+      </AuthGate>
     </QueryClientProvider>
   );
 }

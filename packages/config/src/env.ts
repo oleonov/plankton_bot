@@ -29,6 +29,10 @@ const envSchema = z
     LIVE_LITE_MAX_OPEN_VALUE_USDC: z.coerce.number().positive().optional(),
     LIVE_LITE_MAX_ORDER_USDC: z.coerce.number().positive().optional(),
     LIVE_LITE_MAX_ACTIVE_MARKETS: z.coerce.number().int().positive().optional(),
+    PLANKTON_AUTH_USERNAME: z.string().optional(),
+    PLANKTON_AUTH_PASSWORD: z.string().optional(),
+    PLANKTON_SESSION_SECRET: z.string().optional(),
+    TRUST_PROXY: z.enum(["true", "false"]).default("false").transform(v => v === "true"),
   })
   .superRefine((data, ctx) => {
     if (data.RUNTIME_MODE === "live-lite" || data.RUNTIME_MODE === "paper") {
@@ -110,6 +114,10 @@ export interface AppConfig {
   polyPrivateKey: string | undefined;
   planktonApiKey: string | undefined;
   planktonApiPort: number;
+  planktonAuthUsername: string | undefined;
+  planktonAuthPassword: string | undefined;
+  planktonSessionSecret: string | undefined;
+  trustProxy: boolean;
   liveLite?: {
     familyAllowlist: string[];
     maxFamilies: number;
@@ -176,6 +184,10 @@ export function loadEnv(envPath?: string): AppConfig {
     polyPrivateKey: env.POLY_PRIVATE_KEY,
     planktonApiKey: env.PLANKTON_API_KEY,
     planktonApiPort: env.PLANKTON_API_PORT,
+    planktonAuthUsername: env.PLANKTON_AUTH_USERNAME,
+    planktonAuthPassword: env.PLANKTON_AUTH_PASSWORD,
+    planktonSessionSecret: env.PLANKTON_SESSION_SECRET,
+    trustProxy: env.TRUST_PROXY,
     liveLite,
   };
 }

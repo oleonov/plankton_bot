@@ -1,19 +1,25 @@
 import type { ApiEnvelope } from "./types.ts";
 
-function getApiKey(): string {
-  return localStorage.getItem("plankton_api_key")
-    ?? import.meta.env.VITE_PLANKTON_API_KEY
-    ?? "";
+// ─── Unauthorized callback ───────────────────────────────────────────
+
+let onUnauthorized: (() => void) | null = null;
+
+export function registerOnUnauthorized(cb: () => void): () => void {
+  onUnauthorized = cb;
+  return () => {
+    if (onUnauthorized === cb) onUnauthorized = null;
+  };
 }
 
+// ─── API transport ───────────────────────────────────────────────────
+
 export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      ...init?.headers,
-      Authorization: `Bearer ${getApiKey()}`,
-    },
-  });
+  const res = await fetch(path, init);
+
+  if (res.status === 401) {
+    onUnauthorized?.();
+    throw new Error("Unauthorized");
+  }
 
   const body = (await res.json()) as ApiEnvelope<T>;
 
@@ -31,6 +37,3 @@ export function apiPost<T>(path: string, payload?: unknown): Promise<T> {
     body: payload ? JSON.stringify(payload) : undefined,
   });
 }
-
-/** Exported for SSE (EventSource cannot send headers, needs key for URL param). */
-export { getApiKey };

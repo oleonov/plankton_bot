@@ -35,10 +35,10 @@ export function buildStatusSnapshot(
     .prepare("SELECT run_id, mode FROM bot_runs ORDER BY started_at DESC LIMIT 1")
     .get() as { run_id: string; mode: string } | undefined;
 
-  // Paused = most recently applied pause/resume command is 'pause'
-  const lastPauseResume = db
-    .prepare("SELECT action FROM operator_commands WHERE action IN ('pause','resume') AND status = 'applied' ORDER BY applied_at DESC LIMIT 1")
-    .get() as { action: string } | undefined;
+  // Paused state persisted by runtime via runtime_metrics
+  const pausedMetric = db
+    .prepare("SELECT value FROM runtime_metrics WHERE metric_name = 'runtime_paused' ORDER BY captured_at DESC LIMIT 1")
+    .get() as { value: number } | undefined;
 
   // Last reconciliation from runtime_metrics (written by ReconciliationComplete event listener)
   const lastRecon = db
@@ -98,7 +98,7 @@ export function buildStatusSnapshot(
   return {
     runtimeMode: botRun?.mode ?? "simulation",
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-    paused: lastPauseResume?.action === "pause",
+    paused: pausedMetric?.value === 1,
     lastReconciliationAt: lastRecon?.ts ?? null,
     marketDataStale,
     marketDataLastUpdateAt,

@@ -127,6 +127,20 @@ describe("Supervisor", () => {
     expect(supervisor.isPaused()).toBe(false);
   });
 
+  it("can be paused immediately after start (start-paused pattern)", async () => {
+    const mod = createTestModule("a");
+    const supervisor = new Supervisor({ modules: [["a", mod]], bus, log });
+
+    await supervisor.start();
+    supervisor.setPaused(true);
+
+    expect(supervisor.getPhase()).toBe("READY");
+    expect(supervisor.isPaused()).toBe(true);
+    expect(mod.started).toBe(true);
+
+    await supervisor.stop();
+  });
+
   it("STOPPED event handlers complete before stop() resolves", async () => {
     let handlerRan = false;
     bus.subscribe("RuntimePhaseChanged", async (payload) => {

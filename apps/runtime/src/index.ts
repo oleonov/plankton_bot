@@ -170,6 +170,23 @@ async function main(): Promise<void> {
   let supervisor: Supervisor;
   const runtimeControl = { isPaused: () => supervisor.isPaused() };
 
+  // Persist pause state to runtime_metrics so the API can read it
+  const deletePauseMetric = conn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'runtime_paused'",
+  );
+  const insertPauseMetric = conn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('runtime_paused', ?, ?)",
+  );
+  const persistPauseState = conn.db.transaction((paused: boolean) => {
+    deletePauseMetric.run();
+    insertPauseMetric.run(paused ? 1 : 0, new Date().toISOString());
+  });
+
+  function setPausedAndPersist(paused: boolean): void {
+    supervisor.setPaused(paused);
+    persistPauseState(paused);
+  }
+
   const commandPoller = new CommandPoller({
     commandRepo: repos.operatorCommand,
     actionRepo: repos.operatorAction,
@@ -177,7 +194,7 @@ async function main(): Promise<void> {
     bus,
     log,
     getPaused: () => supervisor.isPaused(),
-    setPaused: (p) => supervisor.setPaused(p),
+    setPaused: setPausedAndPersist,
     pollIntervalMs: 5_000,
   });
 
@@ -520,7 +537,7 @@ async function main(): Promise<void> {
       for (const v of preflight.violations) {
         log.warn({ violation: v }, "live-lite preflight violation — starting paused");
       }
-      supervisor.setPaused(true);
+      setPausedAndPersist(true);
     } else {
       log.info("live-lite preflight passed — no violations");
     }
@@ -534,7 +551,12 @@ async function main(): Promise<void> {
   // 11. Start
   try {
     await supervisor.start();
-    log.info({ phase: supervisor.getPhase() }, "runtime ready");
+
+    // Safety: always start paused. Operator must explicitly resume via dashboard.
+    setPausedAndPersist(true);
+    log.info({ mode: config.runtimeMode }, "runtime started PAUSED — operator must resume via dashboard");
+
+    log.info({ phase: supervisor.getPhase(), paused: supervisor.isPaused() }, "runtime ready");
   } catch (err) {
     log.fatal({ err }, "runtime startup failed");
     conn.close();

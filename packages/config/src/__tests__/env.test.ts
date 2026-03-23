@@ -31,6 +31,10 @@ const ALL_KEYS = [
   "LIVE_LITE_MAX_OPEN_VALUE_USDC",
   "LIVE_LITE_MAX_ORDER_USDC",
   "LIVE_LITE_MAX_ACTIVE_MARKETS",
+  "PLANKTON_AUTH_USERNAME",
+  "PLANKTON_AUTH_PASSWORD",
+  "PLANKTON_SESSION_SECRET",
+  "TRUST_PROXY",
 ];
 
 const BASE_LIVE_LITE_VARS = {
@@ -203,6 +207,17 @@ describe("loadEnv", () => {
       LIVE_LITE_MAX_FAMILIES: "2",
     });
     expect(() => loadEnv()).toThrow("allowlist length 4 exceeds maxFamilies 2");
+  });
+
+  it("parses TRUST_PROXY string to boolean", () => {
+    setEnvVars({ TRUST_PROXY: "true" });
+    const config = loadEnv(emptyEnvPath);
+    expect(config.trustProxy).toBe(true);
+  });
+
+  it("defaults TRUST_PROXY to false", () => {
+    const config = loadEnv(emptyEnvPath);
+    expect(config.trustProxy).toBe(false);
   });
 
   it("returns undefined liveLite in simulation mode", () => {

@@ -12,7 +12,6 @@
  *   status   → status
  *   metrics  → metrics:snapshot
  *
- * Auth via `?token=<api_key>` (EventSource can't send headers).
  */
 
 import type { FastifyPluginAsync } from "fastify";
@@ -22,7 +21,6 @@ import { normalizeRiskEvent } from "./normalize-risk-event.js";
 
 interface EventsOpts {
   db: Database.Database;
-  apiKey: string | undefined;
   marketDataStaleThresholdMs?: number;
 }
 
@@ -88,7 +86,7 @@ function takeSnapshot(db: Database.Database): ChangeSnapshot {
 export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) => {
   const staleMs = opts.marketDataStaleThresholdMs ?? 120_000;
 
-  app.get<{ Querystring: { types?: string; token?: string } }>(
+  app.get<{ Querystring: { types?: string } }>(
     "/events",
     async (request, reply) => {
       // Build allowed event set from coarse filter categories

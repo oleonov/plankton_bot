@@ -4,6 +4,8 @@
 
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import secureSession from "@fastify/secure-session";
+import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +14,7 @@ import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { createAuthHook } from "./auth.js";
 import { fail } from "./errors.js";
+import { authRoutes } from "./routes/auth.js";
 import { healthRoutes } from "./routes/health.js";
 import { statusRoutes } from "./routes/status.js";
 import { familyRoutes } from "./routes/families.js";
@@ -30,17 +33,34 @@ export interface ServerDeps {
 }
 
 export async function buildServer(deps: ServerDeps) {
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, trustProxy: deps.config.trustProxy });
 
   await app.register(cors, { origin: true });
 
-  // Auth hook — skip for /api/v1/health
-  const authenticate = createAuthHook(deps.config.planktonApiKey);
-  app.addHook("onRequest", async (request, reply) => {
-    if (!request.url.startsWith("/api/")) return;
-    if (request.url === "/api/v1/health") return;
-    await authenticate(request, reply);
+  // Session auth — only registered if password is configured
+  if (deps.config.planktonSessionSecret) {
+    await app.register(secureSession, {
+      cookieName: "plankton_session",
+      key: Buffer.from(deps.config.planktonSessionSecret, "hex"),
+      expiry: 15 * 24 * 60 * 60,
+      cookie: {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        path: "/api",
+        maxAge: 15 * 24 * 60 * 60,
+      },
+    });
+  }
+
+  await app.register(rateLimit, { global: false });
+
+  // Auth hook — dual mechanism (session cookie OR Bearer API key)
+  const authenticate = createAuthHook({
+    apiKey: deps.config.planktonApiKey,
+    authPasswordConfigured: !!deps.config.planktonAuthPassword,
   });
+  app.addHook("onRequest", authenticate);
 
   // Error handler
   app.setErrorHandler((error: Error & { statusCode?: number; code?: string }, _request, reply) => {
@@ -51,6 +71,7 @@ export async function buildServer(deps: ServerDeps) {
 
   // Routes
   const db = deps.conn.db;
+  await app.register(authRoutes, { prefix: "/api/v1", username: deps.config.planktonAuthUsername, password: deps.config.planktonAuthPassword });
   await app.register(healthRoutes, { prefix: "/api/v1" });
   const staleMs = deps.config.marketDataStaleThresholdMs;
   await app.register(statusRoutes, { prefix: "/api/v1", db, marketDataStaleThresholdMs: staleMs });
@@ -60,7 +81,7 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(fillRoutes, { prefix: "/api/v1", db });
   await app.register(metricsRoutes, { prefix: "/api/v1", db });
   await app.register(actionRoutes, { prefix: "/api/v1", db });
-  await app.register(eventsRoutes, { prefix: "/api/v1", db, apiKey: deps.config.planktonApiKey, marketDataStaleThresholdMs: staleMs });
+  await app.register(eventsRoutes, { prefix: "/api/v1", db, marketDataStaleThresholdMs: staleMs });
   await app.register(riskEventsRoutes, { prefix: "/api/v1", db });
   await app.register(pnlSeriesRoutes, { prefix: "/api/v1", db });
 

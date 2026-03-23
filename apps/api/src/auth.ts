@@ -1,47 +1,75 @@
 /**
- * Static API key auth middleware.
+ * Dual-mechanism auth hook: session cookie OR Bearer API key.
  *
- * All routes except GET /health require `Authorization: Bearer <key>`.
- * SSE endpoint also accepts `?token=<key>`.
+ * Bypass list (no auth required):
+ *   GET  /api/v1/health
+ *   POST /api/v1/auth/login
+ *   POST /api/v1/auth/logout
  *
- * Fail-closed: if PLANKTON_API_KEY is not configured, all protected
- * routes return 401. Auth is never silently disabled.
+ * Fail-closed: if neither session auth nor API key is configured,
+ * all protected routes return 401.
  */
 
 import type { FastifyRequest, FastifyReply } from "fastify";
+import crypto from "node:crypto";
+import { fail } from "./errors.js";
 
-const FAIL_CLOSED_ERROR = {
-  ok: false,
-  data: null,
-  error: { code: "AUTH_NOT_CONFIGURED", message: "PLANKTON_API_KEY is not set — API is locked" },
-  ts: "",
-};
+export function constantTimeEqual(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a, "utf-8");
+  const bBuf = Buffer.from(b, "utf-8");
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
+}
 
-export function createAuthHook(apiKey: string | undefined) {
+interface AuthConfig {
+  apiKey: string | undefined;
+  authPasswordConfigured: boolean;
+}
+
+const BYPASS_ROUTES: Array<{ method: string; url: string }> = [
+  { method: "GET", url: "/api/v1/health" },
+  { method: "GET", url: "/api/v1/auth/config" },
+  { method: "POST", url: "/api/v1/auth/login" },
+  { method: "POST", url: "/api/v1/auth/logout" },
+];
+
+export function createAuthHook(config: AuthConfig) {
   return async function authenticate(
     request: FastifyRequest,
     reply: FastifyReply,
   ): Promise<void> {
-    // Fail-closed: no key configured = reject everything
-    if (!apiKey) {
-      reply.status(401).send({ ...FAIL_CLOSED_ERROR, ts: new Date().toISOString() });
+    if (!request.url.startsWith("/api/")) return;
+
+    // Check bypass list using registered route pattern + method
+    const routeUrl = request.routeOptions?.url;
+    if (
+      routeUrl &&
+      BYPASS_ROUTES.some((r) => r.method === request.method && r.url === routeUrl)
+    ) {
       return;
     }
 
-    const header = request.headers.authorization;
-    const queryToken = (request.query as Record<string, string>)?.token;
-
-    const token = header?.startsWith("Bearer ")
-      ? header.slice(7)
-      : queryToken;
-
-    if (!token || token !== apiKey) {
-      reply.status(401).send({
-        ok: false,
-        data: null,
-        error: { code: "UNAUTHORIZED", message: "invalid or missing API key" },
-        ts: new Date().toISOString(),
-      });
+    // 1. Check session cookie — only valid when password auth is configured
+    if (config.authPasswordConfigured && request.session?.get("authenticated") === true) {
+      return;
     }
+
+    // 2. Check Bearer token
+    if (config.apiKey) {
+      const header = request.headers.authorization;
+      if (header?.startsWith("Bearer ") && constantTimeEqual(header.slice(7), config.apiKey)) {
+        return;
+      }
+    }
+
+    // 3. Fail-closed
+    if (!config.apiKey && !config.authPasswordConfigured) {
+      reply
+        .status(401)
+        .send(fail("AUTH_NOT_CONFIGURED", "no authentication method is configured — API is locked"));
+      return;
+    }
+
+    reply.status(401).send(fail("UNAUTHORIZED", "invalid or missing credentials"));
   };
 }

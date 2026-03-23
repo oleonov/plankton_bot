@@ -38,6 +38,25 @@ export function Layout() {
             {item.label}
           </NavLink>
         ))}
+        <button
+          onClick={() => {
+            fetch("/api/v1/auth/logout", { method: "POST" })
+              .then(() => window.location.reload())
+              .catch(() => window.location.reload());
+          }}
+          style={{
+            marginLeft: "auto",
+            padding: "4px 10px",
+            borderRadius: 4,
+            border: "1px solid var(--border)",
+            background: "transparent",
+            color: "var(--text-muted)",
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          Logout
+        </button>
       </nav>
       <StatusBar />
       <AlertStrip />

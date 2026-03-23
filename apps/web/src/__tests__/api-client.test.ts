@@ -1,50 +1,86 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { apiFetch } from "../api/client.ts";
+import { apiFetch, apiPost, registerOnUnauthorized } from "../api/client.ts";
 
-// Mock fetch globally
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
-// Mock localStorage
-const store: Record<string, string> = {};
-vi.stubGlobal("localStorage", {
-  getItem: (key: string) => store[key] ?? null,
-  setItem: (key: string, val: string) => { store[key] = val; },
-  removeItem: (key: string) => { delete store[key]; },
-  clear: () => { for (const k in store) delete store[k]; },
-});
+function jsonResponse<T>(status: number, body: T) {
+  return { status, ok: status >= 200 && status < 300, json: () => Promise.resolve(body) };
+}
+
+function okEnvelope<T>(data: T) {
+  return jsonResponse(200, { ok: true, data, error: null, ts: "2026-01-01T00:00:00Z" });
+}
 
 describe("apiFetch", () => {
   beforeEach(() => {
     mockFetch.mockReset();
-    localStorage.clear();
   });
 
-  it("adds Authorization header", async () => {
-    localStorage.setItem("plankton_api_key", "test-key-123");
-
-    mockFetch.mockResolvedValue({
-      json: () => Promise.resolve({ ok: true, data: { status: "ok" }, error: null, ts: "" }),
-    });
+  it("makes requests without Authorization header", async () => {
+    mockFetch.mockResolvedValue(okEnvelope({ status: "ok" }));
 
     await apiFetch("/api/v1/health");
 
-    expect(mockFetch).toHaveBeenCalledWith(
-      "/api/v1/health",
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: "Bearer test-key-123",
-        }),
-      }),
-    );
+    const callInit = mockFetch.mock.calls[0]?.[1] as RequestInit | undefined;
+    const headers = callInit?.headers as Record<string, string> | undefined;
+    expect(headers?.["Authorization"]).toBeUndefined();
   });
 
-  it("throws on error response", async () => {
-    mockFetch.mockResolvedValue({
-      status: 401,
-      json: () => Promise.resolve({ ok: false, data: null, error: { code: "UNAUTHORIZED", message: "bad" }, ts: "" }),
-    });
+  it("calls registered onUnauthorized callback on 401", async () => {
+    mockFetch.mockResolvedValue(
+      jsonResponse(401, { ok: false, data: null, error: { code: "UNAUTHORIZED", message: "Unauthorized" }, ts: "" }),
+    );
 
-    await expect(apiFetch("/api/v1/status")).rejects.toThrow("bad");
+    const cb = vi.fn();
+    const deregister = registerOnUnauthorized(cb);
+
+    await expect(apiFetch("/api/v1/status")).rejects.toThrow("Unauthorized");
+    expect(cb).toHaveBeenCalledOnce();
+
+    deregister();
+  });
+
+  it("deregister prevents callback from being called", async () => {
+    mockFetch.mockResolvedValue(
+      jsonResponse(401, { ok: false, data: null, error: { code: "UNAUTHORIZED", message: "Unauthorized" }, ts: "" }),
+    );
+
+    const cb = vi.fn();
+    const deregister = registerOnUnauthorized(cb);
+    deregister();
+
+    await expect(apiFetch("/api/v1/status")).rejects.toThrow("Unauthorized");
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("throws on non-ok response with error message from body", async () => {
+    mockFetch.mockResolvedValue(
+      jsonResponse(500, { ok: false, data: null, error: { code: "INTERNAL", message: "something broke" }, ts: "" }),
+    );
+
+    await expect(apiFetch("/api/v1/status")).rejects.toThrow("something broke");
+  });
+});
+
+describe("apiPost", () => {
+  beforeEach(() => {
+    mockFetch.mockReset();
+  });
+
+  it("sends JSON body with POST method", async () => {
+    mockFetch.mockResolvedValue(okEnvelope({ id: 1 }));
+
+    const payload = { action: "pause" };
+    await apiPost("/api/v1/control", payload);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/v1/control",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }),
+    );
   });
 });

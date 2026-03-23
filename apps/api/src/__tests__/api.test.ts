@@ -25,6 +25,10 @@ function testConfig(overrides?: Partial<AppConfig>): AppConfig {
     polyPrivateKey: undefined,
     planktonApiKey: TEST_API_KEY,
     planktonApiPort: 0,
+    planktonAuthUsername: undefined,
+    planktonAuthPassword: undefined,
+    planktonSessionSecret: undefined,
+    trustProxy: false,
     ...overrides,
   };
 }
@@ -188,8 +192,8 @@ describe("GET /status", () => {
     expect(body.data.runtimeMode).toBe("simulation");
   });
 
-  it("paused reflects applied pause/resume commands", async () => {
-    // No applied pause/resume commands yet → paused=false
+  it("paused reflects runtime_paused metric", async () => {
+    // No runtime_paused metric yet → paused=false
     const res1 = await app.inject({
       method: "GET",
       url: "/api/v1/status",
@@ -197,10 +201,10 @@ describe("GET /status", () => {
     });
     expect(res1.json().data.paused).toBe(false);
 
-    // Insert an applied pause command
+    // Runtime persists paused=true
     conn.db.exec(`
-      INSERT INTO operator_commands (action, target_id, reason, status, created_at, applied_at)
-      VALUES ('pause', NULL, 'test', 'applied', '2026-03-14T02:00:00Z', '2026-03-14T02:00:01Z')
+      INSERT INTO runtime_metrics (metric_name, value, captured_at)
+      VALUES ('runtime_paused', 1, '2026-03-14T02:00:00Z')
     `);
 
     const res2 = await app.inject({
@@ -210,10 +214,11 @@ describe("GET /status", () => {
     });
     expect(res2.json().data.paused).toBe(true);
 
-    // Insert an applied resume command (more recent)
+    // Runtime persists paused=false (resumed)
     conn.db.exec(`
-      INSERT INTO operator_commands (action, target_id, reason, status, created_at, applied_at)
-      VALUES ('resume', NULL, 'unpausing', 'applied', '2026-03-14T03:00:00Z', '2026-03-14T03:00:01Z')
+      DELETE FROM runtime_metrics WHERE metric_name = 'runtime_paused';
+      INSERT INTO runtime_metrics (metric_name, value, captured_at)
+      VALUES ('runtime_paused', 0, '2026-03-14T03:00:00Z')
     `);
 
     const res3 = await app.inject({
