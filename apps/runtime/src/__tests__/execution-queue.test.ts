@@ -97,6 +97,44 @@ describe("ExecutionQueue", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it("same-token commands do not waste concurrency slots for other tokens", async () => {
+    const callOrder: string[] = [];
+    const execute = vi.fn(async (cmd: PlaceOrderCommand | CancelOrderCommand) => {
+      const id = String((cmd as PlaceOrderCommand).commandId);
+      callOrder.push(`start-${id}`);
+      await new Promise(r => setTimeout(r, 50));
+      callOrder.push(`end-${id}`);
+    });
+
+    const queue = new ExecutionQueue({
+      maxConcurrency: 2,
+      shutdownTimeoutMs: 5000,
+      execute,
+      resolveTokenId: (cmd) => (cmd as PlaceOrderCommand).tokenId,
+      log: silentLog,
+    });
+
+    // Enqueue: 2 commands for tok-a, then 1 for tok-b
+    queue.enqueue(makePlaceCmd({ commandId: createCommandId("a1"), tokenId: createTokenId("tok-a") }));
+    queue.enqueue(makePlaceCmd({ commandId: createCommandId("a2"), tokenId: createTokenId("tok-a") }));
+    queue.enqueue(makePlaceCmd({ commandId: createCommandId("b1"), tokenId: createTokenId("tok-b") }));
+
+    await queue.shutdown();
+
+    expect(execute).toHaveBeenCalledTimes(3);
+
+    // b1 should start concurrently with a1 (not blocked behind a2 waiting for a1)
+    const a1Start = callOrder.indexOf("start-a1");
+    const b1Start = callOrder.indexOf("start-b1");
+    const a1End = callOrder.indexOf("end-a1");
+
+    // b1 starts before a1 ends — proves it ran concurrently, not blocked by a2
+    expect(b1Start).toBeLessThan(a1End);
+    // a2 starts after a1 ends (per-token mutex)
+    const a2Start = callOrder.indexOf("start-a2");
+    expect(a2Start).toBeGreaterThan(a1End - 1);
+  });
+
   it("handles execute errors without breaking the queue", async () => {
     let callCount = 0;
     const execute = vi.fn(async () => {

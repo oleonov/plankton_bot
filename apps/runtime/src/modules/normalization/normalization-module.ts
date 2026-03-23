@@ -120,6 +120,7 @@ export class NormalizationModule implements RuntimeModule {
         tokenId: market.tokenId,
         conditionId: market.conditionId,
         slug: market.slug,
+        eventSlug: market.eventSlug,
         question: market.question,
         outcome: market.outcome,
         familyId: family?.familyId ?? null,

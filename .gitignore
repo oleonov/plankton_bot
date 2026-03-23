@@ -16,6 +16,7 @@ apps/runtime/data/
 research/data/*.db
 research/data/*.db-wal
 research/data/*.db-shm
+research/data/docs/
 
 # WAL artifacts anywhere
 *.db-wal
@@ -30,6 +31,9 @@ research/data/*.db-shm
 # Runtime logs and snapshots
 logs/
 snapshots/
+
+# Local backup copies
+config/*.bak
 
 # Claude Code local settings
 .claude/settings.json

@@ -262,6 +262,7 @@ describe("MarketScannerModule", () => {
       tokenId: createTokenId("tok-old"),
       conditionId: "cond-old",
       slug: "bitcoin-above-50k-on-jan-1",
+      eventSlug: null,
       question: "Will BTC be above 50k on Jan 1?",
       outcome: "YES",
       familyId: createFamilyId("fam-btc"),

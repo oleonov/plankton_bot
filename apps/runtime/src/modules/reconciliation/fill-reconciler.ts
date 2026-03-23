@@ -14,6 +14,8 @@ import type {
   OrderRepository,
   EventBus,
   Fill,
+  FillId,
+  FamilyId,
   ExchangeFill,
   OrderId,
   ClientOrderId,
@@ -40,8 +42,9 @@ export interface ImportFillsResult {
 }
 
 /**
- * Import exchange fills into local DB. Publishes FillReceived for each new fill
- * and updates order status based on cumulative fill size.
+ * Import exchange fills into local DB. Updates order status first, then publishes
+ * FillReceived for each new fill so that downstream handlers (e.g. in-flight
+ * counter) see the terminal order status during the event.
  *
  * Used by both FillPollerModule (hot path) and reconcileFills (safety net).
  */
@@ -57,16 +60,24 @@ export async function importExchangeFills(
   // Track which orders received new fills for status update
   const ordersWithNewFills = new Set<string>();
 
+  // Collect saved fills for deferred FillReceived publish
+  const savedFills: Array<{
+    ef: ExchangeFill;
+    fillId: FillId;
+    orderId: OrderId;
+    sizeUsdc: number;
+    familyId: FamilyId;
+  }> = [];
+
+  // Phase 1: Save fills to DB
   for (const ef of fills) {
     const fillId = createFillId(ef.fillId);
 
-    // Dedup by fillId
     if (fillRepo.exists(fillId)) {
       skipped++;
       continue;
     }
 
-    // Order lookup for familyId
     const localOrder = orderRepo.findByClientOrderId(ef.clientOrderId);
     if (!localOrder) {
       skipped++;
@@ -95,27 +106,14 @@ export async function importExchangeFills(
     fillRepo.save(fill);
     imported++;
     ordersWithNewFills.add(ef.orderId);
-
-    await bus.publish("FillReceived", {
-      fillId,
-      orderId,
-      clientOrderId: ef.clientOrderId as ClientOrderId,
-      tokenId: ef.tokenId,
-      side: ef.side,
-      price: ef.price,
-      size: ef.size,
-      sizeUsdc,
-      fee: ef.fee,
-      familyId: localOrder.familyId,
-      timestamp: ef.timestamp,
-    });
+    savedFills.push({ ef, fillId, orderId, sizeUsdc, familyId: localOrder.familyId });
 
     const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size})`;
     details.push(msg);
     log.info({ fillId: ef.fillId }, msg);
   }
 
-  // Update order status for each order that received new fills
+  // Phase 2: Update order statuses (before publishing events so handlers see terminal status)
   for (const oid of ordersWithNewFills) {
     const orderId = createOrderId(oid);
     const allFills = fillRepo.findByOrderId(orderId);
@@ -127,6 +125,23 @@ export async function importExchangeFills(
     } else if (cumulativeFilled > 0) {
       orderRepo.updateStatus(orderId, "partially-filled");
     }
+  }
+
+  // Phase 3: Publish FillReceived events (handlers now see correct order status)
+  for (const { ef, fillId, orderId, sizeUsdc, familyId } of savedFills) {
+    await bus.publish("FillReceived", {
+      fillId,
+      orderId,
+      clientOrderId: ef.clientOrderId as ClientOrderId,
+      tokenId: ef.tokenId,
+      side: ef.side,
+      price: ef.price,
+      size: ef.size,
+      sizeUsdc,
+      fee: ef.fee,
+      familyId,
+      timestamp: ef.timestamp,
+    });
   }
 
   return { imported, skipped, details };

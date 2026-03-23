@@ -24,6 +24,7 @@ function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     slug: meta.slug,
+    eventSlug: meta.eventSlug,
     question: meta.question,
     outcome: meta.outcome,
     conditionId: meta.conditionId,

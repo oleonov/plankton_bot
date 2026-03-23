@@ -390,6 +390,7 @@ export function scan(
         // Probe entry — allowed in reduced mode (probes are low-risk)
         const probeSignal = evaluateProbeEntry(
           market, bundle, midPrice, tickTs, nextSeq, sizeMult,
+          !!(familyState && familyState.tailAdjustedPnlLive < 0),
         );
         if (probeSignal) {
           signals.push(probeSignal);
@@ -470,6 +471,7 @@ function evaluateProbeEntry(
   tickTs: number,
   nextSeq: (f: FamilyId, t: TokenId, s: string) => number,
   sizeMult: number = 1.0,
+  tailPnlNegative: boolean = false,
 ): Signal | null {
   const entry = bundle.rules.entry;
 
@@ -487,8 +489,9 @@ function evaluateProbeEntry(
     if (bundle.evidence.evidenceStatus !== "confirmed") return null;
   }
 
-  // Size: probeSizeUsdc adjusted by evidence multiplier, capped by max notional
-  const suggestedSizeUsdc = Math.min(entry.probeSizeUsdc * sizeMult, entry.maxInitialNotionalUsdc);
+  // Size: probeSizeUsdc adjusted by evidence multiplier + probe haircut, capped by max notional
+  const probeHaircut = tailPnlNegative ? 0.5 : 1.0;
+  const suggestedSizeUsdc = Math.min(entry.probeSizeUsdc * sizeMult * probeHaircut, entry.maxInitialNotionalUsdc);
   const suggestedSize = suggestedSizeUsdc / midPrice;
 
   return {

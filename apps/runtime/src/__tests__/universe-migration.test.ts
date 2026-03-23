@@ -66,6 +66,7 @@ function makeMarket(overrides?: Partial<Market>): Market {
     tokenId: createTokenId("tok-1"),
     conditionId: "cond-1",
     slug: "bitcoin-above-100k-on-march-16",
+    eventSlug: null,
     question: "Bitcoin above 100k?",
     outcome: "YES",
     familyId: createFamilyId("fam-btc"),

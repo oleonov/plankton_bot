@@ -370,28 +370,31 @@ async function main(): Promise<void> {
     checkIntervalMs: 10 * 60_000, // 10 minutes
   });
 
-  // 7l. Fill poller module — fast-interval fill detection
-  const fillPollerModule = new FillPollerModule({
-    gateway: exchangeGateway,
-    fillRepo: repos.fill,
-    orderRepo: repos.order,
-    bus,
-    log,
-    pollIntervalMs: config.fillPollIntervalMs,
-    overlapMs: 5_000,
-  });
+  // 7l. Fill poller module — fast-interval fill detection (paper/live-lite only;
+  // simulation mode uses inline checkForFills after each placement)
+  const fillPollerModule = config.runtimeMode !== "simulation"
+    ? new FillPollerModule({
+        gateway: exchangeGateway,
+        fillRepo: repos.fill,
+        orderRepo: repos.order,
+        bus,
+        log,
+        pollIntervalMs: config.fillPollIntervalMs,
+        overlapMs: 5_000,
+      })
+    : null;
 
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
     ["market-scanner", marketScannerModule],
     ["market-data", marketDataModule],
     ["normalization", normalizationModule],
+    ["risk-inventory", riskInventoryModule],
     ["reconciliation", reconciliationModule],
     ["strategy", strategyModule],
-    ["risk-inventory", riskInventoryModule],
     ["resolution", resolutionModule],
     ["stale-pruning", stalePruningModule],
-    ["fill-poller", fillPollerModule],
+    ...(fillPollerModule ? [["fill-poller", fillPollerModule] as [string, import("@plankton/domain").RuntimeModule]] : []),
     ["execution", executionModule],
   ];
 

@@ -70,30 +70,32 @@ export class ExecutionQueue {
   }
 
   private drain(): void {
-    while (this.queue.length > 0 && this.activeCount < this.config.maxConcurrency) {
-      const cmd = this.queue.shift()!;
+    let i = 0;
+    while (i < this.queue.length && this.activeCount < this.config.maxConcurrency) {
+      const cmd = this.queue[i]!;
       const tokenId = String(this.config.resolveTokenId(cmd));
 
-      // Per-token promise chain (mutex)
-      const prev = this.tokenLocks.get(tokenId) ?? Promise.resolve();
+      // Token already has an in-flight operation — skip (don't waste a concurrency slot)
+      if (this.tokenLocks.has(tokenId)) {
+        i++;
+        continue;
+      }
 
+      // Remove from queue and execute
+      this.queue.splice(i, 1);
       this.activeCount++;
 
-      const next = prev
-        .then(() => this.config.execute(cmd))
+      const promise = this.config.execute(cmd)
         .catch((err) => this.config.log.error({ err, type: cmd.type }, "queue worker error"))
         .finally(() => {
           this.activeCount--;
-          // Clean up token lock if chain is done
-          if (this.tokenLocks.get(tokenId) === next) {
-            this.tokenLocks.delete(tokenId);
-          }
-          this.inFlight.delete(next);
+          this.tokenLocks.delete(tokenId);
+          this.inFlight.delete(promise);
           this.drain();
         });
 
-      this.tokenLocks.set(tokenId, next);
-      this.inFlight.add(next);
+      this.tokenLocks.set(tokenId, promise);
+      this.inFlight.add(promise);
     }
   }
 }

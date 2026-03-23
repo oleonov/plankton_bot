@@ -7,12 +7,13 @@ import type Database from "better-sqlite3";
 
 export interface MarketMeta {
   slug: string | null;
+  eventSlug: string | null;
   question: string | null;
   outcome: string | null;
   conditionId: string | null;
 }
 
-const EMPTY_META: MarketMeta = { slug: null, question: null, outcome: null, conditionId: null };
+const EMPTY_META: MarketMeta = { slug: null, eventSlug: null, question: null, outcome: null, conditionId: null };
 
 /**
  * Build a Map<tokenId, MarketMeta> for a set of token IDs.
@@ -29,13 +30,14 @@ export function buildMarketMetaMap(
   const placeholders = unique.map(() => "?").join(",");
   const rows = db
     .prepare(
-      `SELECT token_id, slug, question, outcome, condition_id FROM markets WHERE token_id IN (${placeholders})`,
+      `SELECT token_id, slug, event_slug, question, outcome, condition_id FROM markets WHERE token_id IN (${placeholders})`,
     )
     .all(...unique) as Array<Record<string, unknown>>;
 
   for (const row of rows) {
     result.set(row.token_id as string, {
       slug: (row.slug as string) ?? null,
+      eventSlug: (row.event_slug as string) ?? null,
       question: (row.question as string) ?? null,
       outcome: (row.outcome as string) ?? null,
       conditionId: (row.condition_id as string) ?? null,

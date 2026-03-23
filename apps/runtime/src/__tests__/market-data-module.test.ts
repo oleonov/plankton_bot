@@ -20,6 +20,7 @@ function makeTrackedMarket(overrides?: Partial<Market>): Market {
     tokenId: createTokenId("tok-yes"),
     conditionId: "cond-1",
     slug: "bitcoin-above-100k",
+    eventSlug: null,
     question: "Will BTC hit 100k?",
     outcome: "YES",
     familyId: createFamilyId("fam-btc"),

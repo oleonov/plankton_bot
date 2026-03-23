@@ -38,6 +38,7 @@ function makeNormalizedMarket(
     tokenId: createTokenId("tok-1"),
     conditionId: "cond-1",
     slug: "btc-above-100k-price",
+    eventSlug: null,
     question: "Will BTC go above 100k?",
     outcome: "YES",
     familyId: null,

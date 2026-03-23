@@ -35,6 +35,7 @@ function makeNormalizedMarket(overrides?: Partial<NormalizedMarket>): Normalized
     tokenId: TOK_ID,
     conditionId: "cond-1",
     slug: "will-btc-reach-100k",
+    eventSlug: null,
     question: "Will BTC reach 100k?",
     outcome: "YES",
     familyId: FAM_ID,
@@ -2680,8 +2681,8 @@ describe("StrategyModule", () => {
 
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(1);
-      // negative tailPnl → 0.75x: 10 * 0.75 = 7.5
-      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(7.5);
+      // negative tailPnl → 0.75x evidence mult + 0.5x probe haircut: 10 * 0.75 * 0.5 = 3.75
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(3.75);
     });
   });
 

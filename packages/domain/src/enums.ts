@@ -5,6 +5,7 @@ export const Regime = {
   PriceRange: "price-range",
   DirectionalUpdown: "directional-updown",
   SocialActivity: "social-activity",
+  Succession: "succession",
   Geopolitics: "geopolitics",
   Generic: "generic",
   Tournament: "tournament",
@@ -226,4 +227,3 @@ export const ExchangeErrorCode = {
   Unknown: "UNKNOWN",
 } as const;
 export type ExchangeErrorCode = (typeof ExchangeErrorCode)[keyof typeof ExchangeErrorCode];
-

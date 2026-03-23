@@ -11,12 +11,13 @@ export class SqliteMarketRepository implements MarketRepository {
     this.db
       .prepare(
         `INSERT INTO markets
-         (token_id, condition_id, slug, question, outcome, family_id, family_key,
+         (token_id, condition_id, slug, event_slug, question, outcome, family_id, family_key,
           regime, horizon, end_date, active, tick_size, neg_risk, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(token_id) DO UPDATE SET
            condition_id = excluded.condition_id,
            slug = excluded.slug,
+           event_slug = COALESCE(excluded.event_slug, markets.event_slug),
            question = excluded.question,
            outcome = excluded.outcome,
            family_id = excluded.family_id,
@@ -33,6 +34,7 @@ export class SqliteMarketRepository implements MarketRepository {
         market.tokenId,
         market.conditionId,
         market.slug,
+        market.eventSlug,
         market.question,
         market.outcome,
         market.familyId,
@@ -105,6 +107,7 @@ export class SqliteMarketRepository implements MarketRepository {
       tokenId: createTokenId(row.token_id as string),
       conditionId: row.condition_id as string,
       slug: row.slug as string,
+      eventSlug: (row.event_slug as string) ?? null,
       question: row.question as string,
       outcome: row.outcome as "YES" | "NO",
       familyId: row.family_id

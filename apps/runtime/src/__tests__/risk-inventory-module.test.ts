@@ -1649,6 +1649,57 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
+    it("decrements in-flight only once when a multi-fill order reaches filled", async () => {
+      await mod.start();
+
+      // 2 in-flight orders for the family
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+
+      // Mock: order is "filled" (set before FillReceived, as importExchangeFills does)
+      (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue({
+        orderId: createOrderId("ord-1"),
+        familyId: FAM_ID,
+        status: "filled",
+        size: 10,
+      });
+
+      // Two fills for the same order (e.g. partial fills in one import batch)
+      const fillBase = {
+        orderId: createOrderId("ord-1"),
+        clientOrderId: "plk_test" as ClientOrderId,
+        tokenId: TOK_ID,
+        side: "buy" as const,
+        sizeUsdc: 2.5,
+        fee: 0,
+        familyId: FAM_ID,
+        timestamp: Date.now(),
+      };
+      await bus.publish("FillReceived", { ...fillBase, fillId: "fill-1" as any, price: 0.5, size: 5 });
+      await bus.publish("FillReceived", { ...fillBase, fillId: "fill-2" as any, price: 0.5, size: 5 });
+
+      // Counter should have decremented once (2 → 1), not twice (2 → 0)
+      // So a new entry signal should still be rejected (1 in-flight remaining + the 1 just decremented = still at limit? No: 2 - 1 = 1, limit is 2, so it should pass)
+      // Actually: started at 2, decremented once → 1. So next entry should be allowed.
+      const approved: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+
+      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
+      expect(approved).toHaveLength(1);
+
+      // If it had double-decremented (2 → 0), we'd be at 0 in-flight.
+      // Increment back to 2 to prove counter is at 1 not 0.
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      // Now at 2 in-flight — next entry should be rejected
+      const rejected: any[] = [];
+      bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry", signalId: "sig-check" as any }) });
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toContain("family-in-flight-limit");
+
+      await mod.stop();
+    });
+
     it("does not apply in-flight limit to exit signals", async () => {
       await mod.start();
 

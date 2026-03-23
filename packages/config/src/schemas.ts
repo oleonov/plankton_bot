@@ -7,6 +7,7 @@ const regimeSchema = z.enum([
   "price-range",
   "directional-updown",
   "social-activity",
+  "succession",
   "geopolitics",
   "generic",
   "tournament",

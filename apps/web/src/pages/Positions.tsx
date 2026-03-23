@@ -54,7 +54,7 @@ export function Positions() {
             {positions?.map((p) => (
               <tr key={p.positionId} style={p.status === "dust" ? { background: "rgba(255,152,0,0.06)" } : undefined}>
                 <td style={{ color: "var(--blue)", fontSize: 11 }}>{p.positionId.slice(0, 12)}</td>
-                <td><MarketLink slug={p.slug} question={p.question} outcome={p.outcome} /></td>
+                <td><MarketLink slug={p.slug} eventSlug={p.eventSlug} question={p.question} outcome={p.outcome} /></td>
                 <td>{p.familyId.slice(0, 12)}</td>
                 <td>{p.size.toFixed(2)}</td>
                 <td>${p.avgEntryPrice.toFixed(4)}</td>

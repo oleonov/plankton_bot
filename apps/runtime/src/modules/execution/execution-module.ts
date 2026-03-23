@@ -19,15 +19,14 @@ import type {
   OrderRepository,
   FillRepository,
   Order,
-  Fill,
   PlaceOrderCommand,
   CancelOrderCommand,
   OrderId,
-  FillId,
   BotRunId,
   RuntimeControl,
 } from "@plankton/domain";
-import { createOrderId, createFillId, createBotRunId } from "@plankton/domain";
+import { createOrderId } from "@plankton/domain";
+import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { ExecutionQueue } from "./execution-queue.js";
@@ -324,60 +323,17 @@ export class ExecutionModule implements RuntimeModule {
 
   // ─── Fill detection ───────────────────────────────────────────────────
 
-  private async checkForFills(
-    orderId: OrderId,
-    cmd: PlaceOrderCommand,
-  ): Promise<void> {
-    const fills = await this.deps.gateway.getFills(0);
-    const orderFills = fills.filter((f) => f.orderId === String(orderId));
+  private async checkForFills(orderId: OrderId, _cmd: PlaceOrderCommand): Promise<void> {
+    const allFills = await this.deps.gateway.getFills(0);
+    const orderFills = allFills.filter((f) => f.orderId === String(orderId));
     if (orderFills.length === 0) return;
 
-    let cumulativeFilled = 0;
-
-    for (const ef of orderFills) {
-      const fillId = createFillId(ef.fillId);
-
-      // Skip fills already persisted (idempotent on restart)
-      if (this.deps.fillRepo.exists(fillId)) {
-        cumulativeFilled += ef.size;
-        continue;
-      }
-
-      const sizeUsdc = ef.size * ef.price;
-
-      const fill: Fill = {
-        fillId,
-        orderId,
-        tokenId: cmd.tokenId,
-        familyId: cmd.familyId,
-        side: cmd.side,
-        price: ef.price,
-        size: ef.size,
-        sizeUsdc,
-        fee: ef.fee,
-        filledAt: new Date(ef.timestamp).toISOString(),
-      };
-      this.deps.fillRepo.save(fill);
-
-      cumulativeFilled += ef.size;
-
-      await this.deps.bus.publish("FillReceived", {
-        fillId,
-        orderId,
-        clientOrderId: cmd.clientOrderId,
-        tokenId: cmd.tokenId,
-        side: cmd.side,
-        price: ef.price,
-        size: ef.size,
-        sizeUsdc,
-        fee: ef.fee,
-        familyId: cmd.familyId,
-        timestamp: ef.timestamp,
-      });
-    }
-
-    const status = cumulativeFilled >= cmd.size ? "filled" : "partially-filled";
-    this.deps.orderRepo.updateStatus(orderId, status);
+    await importExchangeFills(orderFills, {
+      fillRepo: this.deps.fillRepo,
+      orderRepo: this.deps.orderRepo,
+      bus: this.deps.bus,
+      log: this.log,
+    });
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────

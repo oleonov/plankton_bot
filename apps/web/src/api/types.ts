@@ -73,6 +73,7 @@ export interface PositionDTO {
   closedAt: string | null;
   updatedAt: string;
   slug: string | null;
+  eventSlug: string | null;
   question: string | null;
   outcome: string | null;
   conditionId: string | null;
@@ -93,6 +94,7 @@ export interface OrderDTO {
   createdAt: string;
   updatedAt: string;
   slug: string | null;
+  eventSlug: string | null;
   question: string | null;
   outcome: string | null;
   conditionId: string | null;
@@ -111,6 +113,7 @@ export interface FillDTO {
   fee: number;
   filledAt: string;
   slug: string | null;
+  eventSlug: string | null;
   question: string | null;
   outcome: string | null;
   conditionId: string | null;

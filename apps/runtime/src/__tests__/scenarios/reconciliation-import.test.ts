@@ -20,7 +20,7 @@ describe("Scenario: reconciliation imports missing fill", () => {
     const fixture = {
       name: "reconciliation-import",
       description: "Pre-seed order + exchange fill, verify reconciliation imports it",
-      marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+      marketSnapshots: [makeMarketFixture(market, 0.44, 0.46)],
       ticks: 2,
       setup: async (ctx: { db: any; exchangeGateway: any; repos: any }) => {
         const now = new Date().toISOString();

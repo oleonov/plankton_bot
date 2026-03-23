@@ -47,7 +47,7 @@ export function OrdersFills() {
               {orders.data?.items.map((o) => (
                 <tr key={o.orderId}>
                   <td style={{ fontSize: 11, color: "var(--blue)" }}>{o.orderId.slice(0, 12)}</td>
-                  <td><MarketLink slug={o.slug} question={o.question} outcome={o.outcome} /></td>
+                  <td><MarketLink slug={o.slug} eventSlug={o.eventSlug} question={o.question} outcome={o.outcome} /></td>
                   <td>{o.familyId.slice(0, 12)}</td>
                   <td style={{ color: o.side === "buy" ? "var(--green)" : "var(--red)", fontWeight: 600 }}>{o.side.toUpperCase()}</td>
                   <td>${o.price.toFixed(4)}</td>
@@ -70,7 +70,7 @@ export function OrdersFills() {
               {fills.data?.items.map((f) => (
                 <tr key={f.fillId}>
                   <td style={{ fontSize: 11, color: "var(--blue)" }}>{f.fillId.slice(0, 12)}</td>
-                  <td><MarketLink slug={f.slug} question={f.question} outcome={f.outcome} /></td>
+                  <td><MarketLink slug={f.slug} eventSlug={f.eventSlug} question={f.question} outcome={f.outcome} /></td>
                   <td>{f.familyId.slice(0, 12)}</td>
                   <td style={{ color: f.side === "buy" ? "var(--green)" : "var(--red)", fontWeight: 600 }}>{f.side.toUpperCase()}</td>
                   <td>${f.price.toFixed(4)}</td>

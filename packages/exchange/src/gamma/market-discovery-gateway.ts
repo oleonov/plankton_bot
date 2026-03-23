@@ -60,8 +60,9 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
         const nestedMarkets = Array.isArray(event.markets)
           ? (event.markets as Record<string, unknown>[])
           : [];
+        const parentSlug = typeof event.slug === "string" ? event.slug : undefined;
         for (const raw of nestedMarkets) {
-          allMarkets.push(mapGammaMarket(raw));
+          allMarkets.push(mapGammaMarket(raw, parentSlug));
         }
       }
 

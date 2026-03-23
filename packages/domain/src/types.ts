@@ -46,6 +46,7 @@ export interface Market {
   tokenId: TokenId;
   conditionId: string;
   slug: string;
+  eventSlug: string | null;
   question: string;
   outcome: "YES" | "NO";
   familyId: FamilyId | null;
@@ -380,6 +381,7 @@ export interface NormalizedMarket {
   tokenId: TokenId;
   conditionId: string;
   slug: string;
+  eventSlug: string | null;
   question: string;
   outcome: "YES" | "NO";
   familyId: FamilyId | null;

@@ -39,6 +39,7 @@ const trackedMarket: Market = {
   tokenId: createTokenId("tok-1"),
   conditionId: "cond-1",
   slug: "test-market",
+  eventSlug: null,
   question: "Test?",
   outcome: "YES",
   familyId: createFamilyId("fam-1"),

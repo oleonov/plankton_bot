@@ -375,6 +375,34 @@ describe("ExecutionModule", () => {
     };
     (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([mockFill]);
 
+    // importExchangeFills needs order lookup to resolve familyId + status.
+    // findByClientOrderId must return null for dedup check (handlePlace),
+    // then return the order when called by importExchangeFills after placement.
+    const savedOrder: Order = {
+      orderId: createOrderId("sim-ord-1"),
+      clientOrderId: "plk_abc123" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      familyId: createFamilyId("fam-1"),
+      side: "buy",
+      orderType: "GTC",
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      status: "open",
+      exchangeOrderId: "sim-ord-1",
+      signalId: null,
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(null)       // semantic dedup check in handlePlace
+      .mockReturnValue(savedOrder);    // importExchangeFills order lookup
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    (fillRepo.findByOrderId as ReturnType<typeof vi.fn>).mockReturnValue([
+      { fillId: "sim-fill-1", size: 10 },
+    ]);
+
     await mod.start();
 
     const fills: any[] = [];
@@ -398,7 +426,7 @@ describe("ExecutionModule", () => {
 
     // Order status updated to filled
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-      "sim-ord-1",
+      createOrderId("sim-ord-1"),
       "filled",
     );
 
@@ -419,6 +447,31 @@ describe("ExecutionModule", () => {
     };
     (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([partialFill]);
 
+    const savedOrder: Order = {
+      orderId: createOrderId("sim-ord-1"),
+      clientOrderId: "plk_abc123" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      familyId: createFamilyId("fam-1"),
+      side: "buy",
+      orderType: "GTC",
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      status: "open",
+      exchangeOrderId: "sim-ord-1",
+      signalId: null,
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(null)
+      .mockReturnValue(savedOrder);
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    (fillRepo.findByOrderId as ReturnType<typeof vi.fn>).mockReturnValue([
+      { fillId: "sim-fill-1", size: 4 },
+    ]);
+
     await mod.start();
 
     await bus.publish("PlaceOrderRequested", {
@@ -427,7 +480,7 @@ describe("ExecutionModule", () => {
     });
 
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-      "sim-ord-1",
+      createOrderId("sim-ord-1"),
       "partially-filled",
     );
 
@@ -459,6 +512,32 @@ describe("ExecutionModule", () => {
     };
     (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([fill1, fill2]);
 
+    const savedOrder: Order = {
+      orderId: createOrderId("sim-ord-1"),
+      clientOrderId: "plk_abc123" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      familyId: createFamilyId("fam-1"),
+      side: "buy",
+      orderType: "GTC",
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      status: "open",
+      exchangeOrderId: "sim-ord-1",
+      signalId: null,
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>)
+      .mockReturnValueOnce(null)
+      .mockReturnValue(savedOrder);
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+    (fillRepo.findByOrderId as ReturnType<typeof vi.fn>).mockReturnValue([
+      { fillId: "sim-fill-1", size: 6 },
+      { fillId: "sim-fill-2", size: 4 },
+    ]);
+
     await mod.start();
 
     const fills: any[] = [];
@@ -475,7 +554,7 @@ describe("ExecutionModule", () => {
 
     // Final status is filled (6+4 = 10 = order size)
     expect(orderRepo.updateStatus).toHaveBeenCalledTimes(1);
-    expect(orderRepo.updateStatus).toHaveBeenCalledWith("sim-ord-1", "filled");
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("sim-ord-1"), "filled");
 
     await mod.stop();
   });

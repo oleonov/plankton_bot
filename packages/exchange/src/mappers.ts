@@ -193,7 +193,7 @@ export function parseStringOrArray(value: unknown): string[] {
  * Gamma uses flat arrays `clobTokenIds[]` and `outcomes[]` that must be
  * zipped together to form the `tokens` array.
  */
-export function mapGammaMarket(raw: Record<string, unknown>): ClobMarket {
+export function mapGammaMarket(raw: Record<string, unknown>, eventSlug?: string): ClobMarket {
   const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
   const outcomes = parseStringOrArray(raw.outcomes);
 
@@ -207,6 +207,7 @@ export function mapGammaMarket(raw: Record<string, unknown>): ClobMarket {
     tokens,
     question: String(raw.question ?? ""),
     slug: String(raw.slug ?? ""),
+    ...(eventSlug != null ? { eventSlug } : {}),
     endDate: String(raw.endDate ?? ""),
     active: Boolean(raw.active),
     negRisk: Boolean(raw.negRisk),

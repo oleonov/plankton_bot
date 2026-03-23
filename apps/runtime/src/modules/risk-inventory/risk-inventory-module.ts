@@ -84,6 +84,9 @@ export class RiskInventoryModule implements RuntimeModule {
   /** Per-family in-flight order counter (B2.2). */
   private readonly familyInFlight = new Map<string, number>();
 
+  /** Orders already decremented from in-flight (prevents double-decrement on multi-fill orders). */
+  private readonly inFlightDecremented = new Set<string>();
+
   constructor(private readonly deps: RiskInventoryModuleDeps) {
     this.log = deps.log.child({ module: "risk-inventory" });
     this.riskGate = new RiskGateImpl(
@@ -292,8 +295,10 @@ export class RiskInventoryModule implements RuntimeModule {
         timestamp: Date.now(),
       });
 
+      const oid = String(payload.orderId);
       const order = this.deps.orderRepo.findById(payload.orderId);
-      if (order && order.status === "filled") {
+      if (order && order.status === "filled" && !this.inFlightDecremented.has(oid)) {
+        this.inFlightDecremented.add(oid);
         this.decrementInFlight(payload.familyId);
       }
     } catch (err) {

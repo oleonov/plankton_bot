@@ -18,6 +18,7 @@ function makeMarket(overrides?: Partial<Market>): Market {
     tokenId: createTokenId("tok-1"),
     conditionId: "cond-1",
     slug: "test-slug",
+    eventSlug: null,
     question: "Will it rain?",
     outcome: "YES" as const,
     familyId: createFamilyId("fam-1"),

@@ -26,6 +26,8 @@ export interface ClobMarket {
   }>;
   readonly question: string;
   readonly slug: string;
+  /** Event-level slug for Polymarket URL (e.g. "bitcoin-above-on-march-19"). */
+  readonly eventSlug?: string;
   readonly endDate: string;
   readonly active: boolean;
   readonly negRisk: boolean;
