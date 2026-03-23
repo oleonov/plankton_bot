@@ -41,7 +41,7 @@ export function SSEProvider({ children }: { children: ReactNode }) {
         const keys = SSE_INVALIDATION_MAP[eventType];
         if (keys) {
           for (const key of keys) {
-            queryClient.invalidateQueries({ queryKey: key });
+            void queryClient.invalidateQueries({ queryKey: key });
           }
         }
       });

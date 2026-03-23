@@ -1,0 +1,7 @@
+title = "Poly Plankton gitleaks config"
+
+[allowlist]
+  paths = [
+    '''\.env\.example$''',
+    '''\.env\.simulation\.example$''',
+  ]

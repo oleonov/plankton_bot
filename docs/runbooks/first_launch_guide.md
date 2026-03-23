@@ -87,6 +87,7 @@ Create three local env files in the repo root:
 - `.env.paper`
 - `.env.live-lite`
 
+All `.env*` files (except `.env.example` and `.env.simulation.example`) are gitignored.
 Before each run, copy the one you want into `.env`.
 
 Example:
@@ -94,6 +95,8 @@ Example:
 ```bash
 cp .env.simulation .env
 ```
+
+> First time? Create `.env.simulation` from the template: `cp .env.simulation.example .env.simulation`
 
 Both `@plankton/runtime` and `@plankton/api` read the same `.env`.
 

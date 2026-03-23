@@ -13,6 +13,15 @@ import type {
   Paginated,
 } from "./types.ts";
 
+function withParams(base: string, params: Record<string, string | number | boolean | undefined>): string {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v !== undefined && v !== false && v !== "") sp.set(k, String(v));
+  }
+  const qs = sp.toString();
+  return qs ? `${base}?${qs}` : base;
+}
+
 // ─── Status ─────────────────────────────────────────────────────
 
 export function useStatus() {
@@ -57,15 +66,17 @@ interface PositionFilters {
 }
 
 export function usePositions(filters: PositionFilters = {}) {
-  const params = new URLSearchParams();
-  if (filters.familyId) params.set("family_id", filters.familyId);
-  if (filters.dust) params.set("dust", "true");
-  if (filters.status) params.set("status", filters.status);
-  if (filters.sort) params.set("sort", filters.sort);
-  const qs = params.toString();
   return useQuery({
     queryKey: ["positions", filters],
-    queryFn: () => apiFetch<PositionDTO[]>(`/api/v1/positions${qs ? `?${qs}` : ""}`),
+    queryFn: () =>
+      apiFetch<PositionDTO[]>(
+        withParams("/api/v1/positions", {
+          family_id: filters.familyId,
+          dust: filters.dust || undefined,
+          status: filters.status,
+          sort: filters.sort,
+        }),
+      ),
   });
 }
 
@@ -79,15 +90,17 @@ interface OrderFilters {
 }
 
 export function useOrders(filters: OrderFilters = {}) {
-  const params = new URLSearchParams();
-  if (filters.status) params.set("status", filters.status);
-  if (filters.familyId) params.set("family_id", filters.familyId);
-  if (filters.limit) params.set("limit", String(filters.limit));
-  if (filters.cursor) params.set("cursor", filters.cursor);
-  const qs = params.toString();
   return useQuery({
     queryKey: ["orders", filters],
-    queryFn: () => apiFetch<Paginated<OrderDTO>>(`/api/v1/orders${qs ? `?${qs}` : ""}`),
+    queryFn: () =>
+      apiFetch<Paginated<OrderDTO>>(
+        withParams("/api/v1/orders", {
+          status: filters.status,
+          family_id: filters.familyId,
+          limit: filters.limit,
+          cursor: filters.cursor,
+        }),
+      ),
   });
 }
 
@@ -101,15 +114,17 @@ interface FillFilters {
 }
 
 export function useFills(filters: FillFilters = {}) {
-  const params = new URLSearchParams();
-  if (filters.familyId) params.set("family_id", filters.familyId);
-  if (filters.since) params.set("since", filters.since);
-  if (filters.limit) params.set("limit", String(filters.limit));
-  if (filters.cursor) params.set("cursor", filters.cursor);
-  const qs = params.toString();
   return useQuery({
     queryKey: ["fills", filters],
-    queryFn: () => apiFetch<Paginated<FillDTO>>(`/api/v1/fills${qs ? `?${qs}` : ""}`),
+    queryFn: () =>
+      apiFetch<Paginated<FillDTO>>(
+        withParams("/api/v1/fills", {
+          family_id: filters.familyId,
+          since: filters.since,
+          limit: filters.limit,
+          cursor: filters.cursor,
+        }),
+      ),
   });
 }
 
@@ -148,15 +163,17 @@ interface RiskEventFilters {
 }
 
 export function useRiskEvents(filters: RiskEventFilters = {}) {
-  const params = new URLSearchParams();
-  if (filters.familyId) params.set("family_id", filters.familyId);
-  if (filters.eventType) params.set("event_type", filters.eventType);
-  if (filters.limit) params.set("limit", String(filters.limit));
-  if (filters.cursor) params.set("cursor", filters.cursor);
-  const qs = params.toString();
   return useQuery({
     queryKey: ["risk-events", filters],
-    queryFn: () => apiFetch<Paginated<RiskEventDTO>>(`/api/v1/risk-events${qs ? `?${qs}` : ""}`),
+    queryFn: () =>
+      apiFetch<Paginated<RiskEventDTO>>(
+        withParams("/api/v1/risk-events", {
+          family_id: filters.familyId,
+          event_type: filters.eventType,
+          limit: filters.limit,
+          cursor: filters.cursor,
+        }),
+      ),
   });
 }
 
@@ -183,9 +200,11 @@ export function useFamilyAction(familyId: string, action: "quarantine" | "reduce
   return useMutation({
     mutationFn: (reason?: string) =>
       apiPost(`/api/v1/actions/family/${familyId}/${action}`, { reason }),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["families"] });
-      qc.invalidateQueries({ queryKey: ["status"] });
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["families"] }),
+        qc.invalidateQueries({ queryKey: ["status"] }),
+      ]);
     },
   });
 }

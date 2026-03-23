@@ -6,7 +6,9 @@ coverage/
 __pycache__/
 *.pyc
 .DS_Store
-.env
+.env*
+!.env.example
+!.env.simulation.example
 
 # Runtime data (never committed)
 apps/runtime/data/
