@@ -15,6 +15,8 @@ export interface CreateGatewaysInput {
   polyClient?: unknown;
   /** Optional slug filter passed to live market data gateway. */
   slugFilter?: ((slug: string) => boolean) | undefined;
+  /** Initial USDC balance for simulation/paper exchange gateway. Ignored in live-lite. */
+  initialBalanceUsdc?: number;
 }
 
 export interface CreateGatewaysResult {
@@ -26,12 +28,14 @@ export interface CreateGatewaysResult {
 }
 
 export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult {
-  const { runtimeMode, polyClient, slugFilter } = input;
+  const { runtimeMode, polyClient, slugFilter, initialBalanceUsdc } = input;
 
   if (runtimeMode === "simulation") {
     return {
       marketDataGateway: new SimulationMarketDataGateway(),
-      exchangeGateway: new SimulationExchangeGateway(),
+      exchangeGateway: new SimulationExchangeGateway(
+        initialBalanceUsdc !== undefined ? { initialBalanceUsdc } : undefined,
+      ),
       modeLabel: "simulation",
       marketDataSource: "simulation",
       executionMode: "simulation",
@@ -45,7 +49,9 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
   if (runtimeMode === "paper") {
     return {
       marketDataGateway: new LiveMarketDataGateway({ client: polyClient, slugFilter }),
-      exchangeGateway: new SimulationExchangeGateway(),
+      exchangeGateway: new SimulationExchangeGateway(
+        initialBalanceUsdc !== undefined ? { initialBalanceUsdc } : undefined,
+      ),
       modeLabel: "paper",
       marketDataSource: "live",
       executionMode: "simulation",
