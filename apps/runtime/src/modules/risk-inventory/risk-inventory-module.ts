@@ -24,6 +24,7 @@ import type {
   PositionRepository,
   InventoryLotRepository,
   OrderRepository,
+  FillRepository,
   RuntimeEventMap,
   NormalizedMarket,
   FamilyId,
@@ -41,6 +42,7 @@ export interface RiskInventoryModuleDeps {
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
   orderRepo: OrderRepository;
+  fillRepo: Pick<FillRepository, "markReconciled">;
   log: Logger;
   db: Database.Database;
   liveLiteGuard?: LiveLiteGuard | undefined;
@@ -278,6 +280,8 @@ export class RiskInventoryModule implements RuntimeModule {
         fee: payload.fee,
         timestamp: payload.timestamp,
       });
+
+      this.deps.fillRepo.markReconciled([payload.fillId]);
 
       await this.deps.bus.publish("PositionUpdated", { position });
 

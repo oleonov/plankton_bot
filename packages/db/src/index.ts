@@ -11,3 +11,5 @@ export { SqliteFamilyCatalogRepository } from "./repositories/family-catalog-rep
 export { SqliteOperatorCommandRepository } from "./repositories/operator-command-repository.js";
 export { SqliteOperatorActionRepository } from "./repositories/operator-action-repository.js";
 export { SqliteMarketResolutionRepository } from "./repositories/market-resolution-repository.js";
+export { SqliteMarketSnapshotRepository } from "./repositories/market-snapshot-repository.js";
+export { SqliteRiskEventRepository } from "./repositories/risk-event-repository.js";

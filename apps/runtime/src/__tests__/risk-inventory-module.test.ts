@@ -253,6 +253,7 @@ describe("RiskInventoryModule", () => {
   let positionRepo: ReturnType<typeof createMockPositionRepo>;
   let lotRepo: ReturnType<typeof createMockLotRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
+  let fillRepo: { markReconciled: ReturnType<typeof vi.fn> };
   let mod: RiskInventoryModule;
 
   function createModule(liveLiteGuard?: LiveLiteGuard) {
@@ -263,6 +264,7 @@ describe("RiskInventoryModule", () => {
       positionRepo,
       inventoryLotRepo: lotRepo,
       orderRepo,
+      fillRepo,
       log: silentLog,
       db: mockDb,
       liveLiteGuard,
@@ -276,6 +278,7 @@ describe("RiskInventoryModule", () => {
     positionRepo = createMockPositionRepo();
     lotRepo = createMockLotRepo();
     orderRepo = createMockOrderRepo();
+    fillRepo = { markReconciled: vi.fn() };
     mod = createModule();
   });
 
@@ -858,6 +861,53 @@ describe("RiskInventoryModule", () => {
     expect(changes).toHaveLength(1);
     expect(changes[0].familyId).toBe(FAM_ID);
     expect(changes[0].familyState).toBeDefined();
+
+    await mod.stop();
+  });
+
+  // ─── Fill reconciliation marking ─────────────────────────────────
+
+  it("marks fill as reconciled after successful applyFill", async () => {
+    await mod.start();
+
+    await bus.publish("FillReceived", {
+      fillId: createFillId("fill-1"),
+      orderId: createOrderId("ord-1"),
+      clientOrderId: "plk_test" as ClientOrderId,
+      tokenId: TOK_ID,
+      familyId: FAM_ID,
+      side: "buy" as const,
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      fee: 0.01,
+      timestamp: Date.now(),
+    });
+
+    expect(fillRepo.markReconciled).toHaveBeenCalledWith([createFillId("fill-1")]);
+
+    await mod.stop();
+  });
+
+  it("does NOT call markReconciled when applyFill throws", async () => {
+    await mod.start();
+
+    // Sell fill for a token with no existing position — applyFill will throw
+    await bus.publish("FillReceived", {
+      fillId: createFillId("fill-err"),
+      orderId: createOrderId("ord-err"),
+      clientOrderId: "plk_err" as ClientOrderId,
+      tokenId: createTokenId("tok-nonexistent"),
+      familyId: FAM_ID,
+      side: "sell" as const,
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      fee: 0.01,
+      timestamp: Date.now(),
+    });
+
+    expect(fillRepo.markReconciled).not.toHaveBeenCalled();
 
     await mod.stop();
   });

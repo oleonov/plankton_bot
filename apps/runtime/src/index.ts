@@ -35,6 +35,8 @@ import {
   SqliteFamilyCatalogRepository,
   SqliteOperatorCommandRepository,
   SqliteOperatorActionRepository,
+  SqliteMarketSnapshotRepository,
+  SqliteRiskEventRepository,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { FamilyIdentity, FamilyState } from "@plankton/domain";
@@ -63,6 +65,8 @@ import { PositionSettler } from "./modules/resolution/position-settler.js";
 import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
 import { GammaResolutionClient } from "@plankton/exchange";
 import { SqliteMarketResolutionRepository } from "@plankton/db";
+import { SnapshotWriter } from "./snapshot-writer.js";
+import { RiskEventWriter } from "./risk-event-writer.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -93,6 +97,8 @@ async function main(): Promise<void> {
     familyCatalog: new SqliteFamilyCatalogRepository(conn.db),
     operatorCommand: new SqliteOperatorCommandRepository(conn.db),
     operatorAction: new SqliteOperatorActionRepository(conn.db),
+    marketSnapshot: new SqliteMarketSnapshotRepository(conn.db),
+    riskEvent: new SqliteRiskEventRepository(conn.db),
   };
 
   // 4. Load family rules
@@ -299,6 +305,7 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
     orderRepo: repos.order,
+    fillRepo: repos.fill,
     log,
     db: conn.db,
     liveLiteGuard,
@@ -422,6 +429,36 @@ async function main(): Promise<void> {
 
   bus.subscribe("MarketSnapshotReceived", async ({ timestamp }) => {
     upsertMetric.run("market_data_last_update", new Date(timestamp).toISOString());
+  });
+
+  // 7n. Persist downsampled market snapshots (5-min per token, 7-day TTL)
+  const snapshotWriter = new SnapshotWriter(repos.marketSnapshot, {
+    intervalMs: 5 * 60 * 1000,
+    pruneIntervalMs: 60 * 60 * 1000,
+    pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+  });
+
+  bus.subscribe("MarketSnapshotReceived", async ({ markets, timestamp }) => {
+    snapshotWriter.onSnapshot(markets, timestamp);
+  });
+
+  // 7o. Persist risk events — deduplicated signal rejections, operator commands, drift
+  const riskEventWriter = new RiskEventWriter(repos.riskEvent, {
+    rejectCooldownMs: 15 * 60 * 1000,
+  });
+
+  bus.subscribe("SignalRejected", async ({ signal, reason, rejectedAt }) => {
+    riskEventWriter.onSignalRejected(signal, reason, rejectedAt);
+  });
+
+  bus.subscribe("OperatorCommandApplied", async (ev) => {
+    riskEventWriter.onOperatorCommand(
+      ev.action, ev.targetFamilyId, ev.commandDbId, ev.reason,
+    );
+  });
+
+  bus.subscribe("ReconciliationDriftDetected", async ({ details, severity, timestamp }) => {
+    riskEventWriter.onReconciliationDrift(details, severity, timestamp);
   });
 
   const deletePollProgress = conn.db.prepare(

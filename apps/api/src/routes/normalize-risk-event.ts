@@ -43,7 +43,20 @@ const EVENT_RULES: Record<string, EventRule> = {
   },
   reconciliation_drift: {
     severity: "warning",
-    summary: (_fid, p) => `Reconciliation drift: ${p.detail ?? "detected"}`,
+    summary: (_fid, p) => `Reconciliation drift: ${p.details ?? "detected"}`,
+  },
+  signal_rejected: {
+    severity: "info",
+    summary: (fid, p) =>
+      `${fid ?? "unknown"}: ${p.reasonCode ?? "rejected"} — ${p.rawReason ?? ""}`,
+  },
+  family_reduce_only: {
+    severity: "warning",
+    summary: (fid, p) => `${fid ?? "unknown"} set to reduce-only: ${p.reason ?? "no reason"}`,
+  },
+  family_activated: {
+    severity: "info",
+    summary: (fid, p) => `${fid ?? "unknown"} activated: ${p.reason ?? "no reason"}`,
   },
 };
 

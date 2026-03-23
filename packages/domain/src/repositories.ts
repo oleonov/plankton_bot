@@ -19,6 +19,7 @@ import type {
   InventoryLot,
   Market,
   MarketResolution,
+  MarketSnapshot,
   OperatorAction,
   OperatorCommand,
   Order,
@@ -249,4 +250,25 @@ export interface OperatorActionRepository {
 
   /** Return all audit records for a specific family, newest first. */
   findByFamily(familyId: FamilyId): OperatorAction[];
+}
+
+// ─── MarketSnapshotRepository ───────────────────────────────────────────
+
+export interface MarketSnapshotRepository {
+  /** Persist a batch of market snapshots. */
+  saveBatch(snapshots: MarketSnapshot[]): void;
+
+  /** Delete snapshots older than the given ISO timestamp. Returns rows deleted. */
+  prune(olderThanIso: string): number;
+}
+
+// ─── RiskEventRepository ────────────────────────────────────────────────
+
+export interface RiskEventRepository {
+  /** Insert a risk event into the audit log. */
+  insert(event: {
+    eventType: string;
+    familyId: FamilyId | null;
+    payload: Record<string, unknown>;
+  }): void;
 }

@@ -216,6 +216,7 @@ async function executeScenario(
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
     orderRepo: repos.order,
+    fillRepo: repos.fill,
     log,
     db: conn.db,
   });

@@ -819,6 +819,71 @@ describe("GET /risk-events", () => {
       expect(item.eventType).toBe("family_quarantined");
     }
   });
+
+  it("normalizes signal_rejected events", async () => {
+    conn.db.exec(`
+      INSERT INTO risk_events (event_type, family_id, payload, created_at)
+      VALUES ('signal_rejected', 'fam-1', '{"reasonCode":"max_dust_positions","rawReason":"dust 3 >= max 2"}', '2026-03-22T12:00:00Z')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/risk-events",
+      headers: authHeaders(),
+    });
+    const body = res.json();
+    expect(body.data.items[0].severity).toBe("info");
+    expect(body.data.items[0].summary).toContain("max_dust_positions");
+  });
+
+  it("normalizes family_reduce_only events", async () => {
+    conn.db.exec(`
+      INSERT INTO risk_events (event_type, family_id, payload, created_at)
+      VALUES ('family_reduce_only', 'fam-1', '{"reason":"operator command"}', '2026-03-22T12:00:00Z')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/risk-events",
+      headers: authHeaders(),
+    });
+    const body = res.json();
+    expect(body.data.items[0].severity).toBe("warning");
+    expect(body.data.items[0].summary).toContain("reduce-only");
+  });
+
+  it("normalizes family_activated events", async () => {
+    conn.db.exec(`
+      INSERT INTO risk_events (event_type, family_id, payload, created_at)
+      VALUES ('family_activated', 'fam-1', '{"reason":"resumed"}', '2026-03-22T12:00:00Z')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/risk-events",
+      headers: authHeaders(),
+    });
+    const body = res.json();
+    expect(body.data.items[0].severity).toBe("info");
+    expect(body.data.items[0].summary).toContain("activated");
+  });
+
+  it("normalizes reconciliation_drift with details (plural, not detail)", async () => {
+    conn.db.exec(`
+      INSERT INTO risk_events (event_type, family_id, payload, created_at)
+      VALUES ('reconciliation_drift', NULL, '{"details":"phantom order detected","severity":"warn"}', '2026-03-22T13:00:00Z')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/risk-events",
+      headers: authHeaders(),
+    });
+    const body = res.json();
+    const drift = body.data.items.find((e: any) => e.eventType === "reconciliation_drift");
+    expect(drift.summary).toContain("phantom order detected");
+    expect(drift.summary).not.toBe("Reconciliation drift: detected"); // regression: p.detail vs p.details
+  });
 });
 
 // ─── PnL Series ─────────────────────────────────────────────────────
