@@ -104,7 +104,7 @@ export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
     }
     return {
       global: transformKeys(parsed.data.global) as GlobalConfig,
-      families: parsed.data.families.map((f, i) => transformFamily(f)),
+      families: parsed.data.families.map((f) => transformFamily(f)),
     };
   }
 
