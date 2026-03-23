@@ -49,4 +49,19 @@ describe("createGateways", () => {
       "polyClient is required for live-lite mode",
     );
   });
+
+  it("simulation mode passes initialBalanceUsdc to exchange gateway", async () => {
+    const result = createGateways({ runtimeMode: "simulation", initialBalanceUsdc: 250 });
+    expect(result.exchangeGateway).toBeInstanceOf(SimulationExchangeGateway);
+    const balances = await result.exchangeGateway.getBalances();
+    expect(balances[0]!.available).toBe(250);
+  });
+
+  it("paper mode passes initialBalanceUsdc to exchange gateway", async () => {
+    const mockClient = { getOk: async () => "OK" };
+    const result = createGateways({ runtimeMode: "paper", polyClient: mockClient, initialBalanceUsdc: 100 });
+    expect(result.exchangeGateway).toBeInstanceOf(SimulationExchangeGateway);
+    const balances = await result.exchangeGateway.getBalances();
+    expect(balances[0]!.available).toBe(100);
+  });
 });
