@@ -22,8 +22,10 @@ research/data/docs/
 *.db-wal
 *.db-shm
 
-# Superpowers brainstorm sessions
+# Superpowers working documents
 .superpowers/
+docs/superpowers/plans/
+docs/superpowers/specs/
 
 # IDE
 .idea/
