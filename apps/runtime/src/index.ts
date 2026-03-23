@@ -21,7 +21,7 @@ const _origLookup: any = dns.lookup;
 };
 
 import process from "node:process";
-import { loadEnv, loadFamilyRulesYaml } from "@plankton/config";
+import { loadEnv, loadFamilyRulesYaml, type LoadedFamilyRules } from "@plankton/config";
 import { createFamilyRulesProvider } from "@plankton/family-rules";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
@@ -98,11 +98,15 @@ async function main(): Promise<void> {
   // 4. Load family rules
   let families: FamilyIdentity[];
   let rulesProvider: ReturnType<typeof createFamilyRulesProvider>;
+  let loaded: LoadedFamilyRules;
   try {
-    const familyConfigs = loadFamilyRulesYaml(config.familyRulesPath);
-    rulesProvider = createFamilyRulesProvider(familyConfigs);
+    loaded = loadFamilyRulesYaml(config.familyRulesPath);
+    rulesProvider = createFamilyRulesProvider(loaded.families);
     families = rulesProvider.getAllFamilies();
     log.info({ count: families.length }, "family rules loaded");
+    if (config.runtimeMode !== "live-lite") {
+      log.info({ initialBalanceUsdc: loaded.global.initialBalanceUsdc, runtimeMode: config.runtimeMode }, "simulated exchange balance configured");
+    }
   } catch (err) {
     log.fatal({ err, path: config.familyRulesPath }, "family rules load failed");
     conn.close();
@@ -217,6 +221,7 @@ async function main(): Promise<void> {
     runtimeMode: config.runtimeMode,
     polyClient,
     slugFilter,
+    initialBalanceUsdc: loaded.global.initialBalanceUsdc,
   });
   log.info({ mode: modeLabel }, "gateways created");
 
