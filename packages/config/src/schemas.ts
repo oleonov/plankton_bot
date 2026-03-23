@@ -213,8 +213,17 @@ export const familyYamlSchema = z.object({
   runtime_state: runtimeStateYamlSchema.optional(),
 });
 
+// ─── Global config (operator-level runtime settings) ─────────────────────────
+
+const globalYamlSchema = z.object({
+  initial_balance_usdc: z.number().positive().max(1_000_000).default(10_000),
+});
+
+export type GlobalYaml = z.infer<typeof globalYamlSchema>;
+
 export const familyRulesFileSchema = z.object({
   version: z.number().int(),
+  global: globalYamlSchema.default({ initial_balance_usdc: 10_000 }),
   families: z.array(familyYamlSchema),
 });
 
@@ -253,4 +262,8 @@ export interface FamilyConfig {
   evidence: EvidenceConfig;
   rules: RulesConfig;
   runtimeState?: RuntimeStateConfig;
+}
+
+export interface GlobalConfig {
+  initialBalanceUsdc: number;
 }
