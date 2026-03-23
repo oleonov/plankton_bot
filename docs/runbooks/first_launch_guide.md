@@ -75,6 +75,10 @@ For real `paper` and `live-lite` runs, replace it with actual family rules or ad
 
 - `docs/family_rules_template_v1.yaml`
 
+> The template uses multi-family format. To set a custom starting balance for simulation/paper
+> mode, edit `global.initial_balance_usdc` in `config/family_rules.yaml`. Default is $10,000.
+> This field is ignored in live-lite mode (real Polymarket balance is used).
+
 ## Recommended Files To Create
 
 Create three local env files in the repo root:
@@ -102,6 +106,7 @@ RUNTIME_MODE=simulation
 LOG_LEVEL=info
 DB_PATH=./apps/runtime/data/plankton-sim.db
 FAMILY_RULES_PATH=./config/family_rules.yaml
+# Starting balance is configured in family_rules.yaml under global.initial_balance_usdc (not in env)
 PLANKTON_API_KEY=replace-with-a-long-random-string
 PLANKTON_API_PORT=3100
 ```
@@ -115,6 +120,7 @@ RUNTIME_MODE=paper
 LOG_LEVEL=info
 DB_PATH=./apps/runtime/data/plankton-paper.db
 FAMILY_RULES_PATH=./config/family_rules.yaml
+# Starting balance is configured in family_rules.yaml under global.initial_balance_usdc (not in env)
 PLANKTON_API_KEY=replace-with-a-long-random-string
 PLANKTON_API_PORT=3100
 
@@ -146,6 +152,17 @@ LIVE_LITE_MAX_OPEN_VALUE_USDC=50
 LIVE_LITE_MAX_ORDER_USDC=10
 LIVE_LITE_MAX_ACTIVE_MARKETS=2
 ```
+
+### Budget for simulation / paper mode
+
+The simulated starting balance is set in `config/family_rules.yaml`:
+
+```yaml
+global:
+  initial_balance_usdc: 100.00  # match your planned live-lite deposit
+```
+
+When the balance runs out, new buy orders are rejected with `INSUFFICIENT_BALANCE`. Sells return funds to the balance, so the bot can recycle capital. The balance resets on every restart. This field is ignored in live-lite mode (real Polymarket balance is used).
 
 ## Step 1: First Local Smoke Run In Simulation
 
