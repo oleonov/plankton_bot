@@ -1,5 +1,5 @@
 export { loadEnv, type AppConfig } from "./env.js";
-export { loadFamilyRulesYaml } from "./loader.js";
+export { loadFamilyRulesYaml, type LoadedFamilyRules } from "./loader.js";
 export {
   familyYamlSchema,
   familyRulesFileSchema,
@@ -8,5 +8,6 @@ export {
   rulesYamlSchema,
   runtimeStateYamlSchema,
   type FamilyConfig,
+  type GlobalConfig,
   type TimeWindow,
 } from "./schemas.js";
