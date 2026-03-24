@@ -9,6 +9,7 @@ __pycache__/
 .env*
 !.env.example
 !.env.simulation.example
+!.env.production.example
 
 # Runtime data (never committed)
 apps/runtime/data/

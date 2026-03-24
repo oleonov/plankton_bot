@@ -1,0 +1,110 @@
+# ─── Base ─────────────────────────────────────────────────────────────────────
+FROM node:24-bookworm-slim AS base
+RUN corepack enable && corepack prepare pnpm@10.6.1 --activate
+WORKDIR /app
+
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+FROM base AS deps
+
+# Native build tools for better-sqlite3
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 make g++ && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy package manifests for all workspaces (for cache-efficient installs)
+# ⚠️  Update this list when adding new workspace packages
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY apps/api/package.json apps/api/package.json
+COPY apps/runtime/package.json apps/runtime/package.json
+COPY apps/web/package.json apps/web/package.json
+COPY packages/config/package.json packages/config/package.json
+COPY packages/db/package.json packages/db/package.json
+COPY packages/domain/package.json packages/domain/package.json
+COPY packages/event-bus/package.json packages/event-bus/package.json
+COPY packages/exchange/package.json packages/exchange/package.json
+COPY packages/family-rules/package.json packages/family-rules/package.json
+
+RUN pnpm install --frozen-lockfile
+
+# Ensure all workspace node_modules dirs exist (pnpm may skip empty ones)
+RUN mkdir -p apps/api/node_modules apps/runtime/node_modules apps/web/node_modules \
+    packages/config/node_modules packages/db/node_modules packages/domain/node_modules \
+    packages/event-bus/node_modules packages/exchange/node_modules packages/family-rules/node_modules
+
+# ─── Builder ──────────────────────────────────────────────────────────────────
+FROM base AS builder
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules
+COPY --from=deps /app/apps/runtime/node_modules ./apps/runtime/node_modules
+COPY --from=deps /app/apps/web/node_modules ./apps/web/node_modules
+COPY --from=deps /app/packages/config/node_modules ./packages/config/node_modules
+COPY --from=deps /app/packages/db/node_modules ./packages/db/node_modules
+COPY --from=deps /app/packages/domain/node_modules ./packages/domain/node_modules
+COPY --from=deps /app/packages/event-bus/node_modules ./packages/event-bus/node_modules
+COPY --from=deps /app/packages/exchange/node_modules ./packages/exchange/node_modules
+COPY --from=deps /app/packages/family-rules/node_modules ./packages/family-rules/node_modules
+
+# Copy source
+COPY . .
+
+# Build everything via turbo
+RUN pnpm run build
+
+# ─── Runner ───────────────────────────────────────────────────────────────────
+FROM base AS runner
+
+ENV NODE_ENV=production
+
+# Install wget for healthcheck
+RUN apt-get update && apt-get install -y --no-install-recommends wget && \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root user
+RUN groupadd --system --gid 1001 plankton && \
+    useradd --system --uid 1001 --gid plankton plankton
+
+# Copy monorepo structure marker
+COPY --from=builder /app/pnpm-workspace.yaml ./
+
+# Copy production node_modules (pnpm hoisted structure)
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules
+COPY --from=deps /app/apps/runtime/node_modules ./apps/runtime/node_modules
+COPY --from=deps /app/packages/config/node_modules ./packages/config/node_modules
+COPY --from=deps /app/packages/db/node_modules ./packages/db/node_modules
+COPY --from=deps /app/packages/domain/node_modules ./packages/domain/node_modules
+COPY --from=deps /app/packages/event-bus/node_modules ./packages/event-bus/node_modules
+COPY --from=deps /app/packages/exchange/node_modules ./packages/exchange/node_modules
+COPY --from=deps /app/packages/family-rules/node_modules ./packages/family-rules/node_modules
+
+# Copy compiled output — preserves monorepo layout
+COPY --from=builder /app/apps/api/dist ./apps/api/dist
+COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
+COPY --from=builder /app/apps/runtime/dist ./apps/runtime/dist
+COPY --from=builder /app/apps/runtime/package.json ./apps/runtime/package.json
+COPY --from=builder /app/apps/web/dist ./apps/web/dist
+COPY --from=builder /app/packages/config/dist ./packages/config/dist
+COPY --from=builder /app/packages/config/package.json ./packages/config/package.json
+COPY --from=builder /app/packages/db/dist ./packages/db/dist
+COPY --from=builder /app/packages/db/package.json ./packages/db/package.json
+COPY --from=builder /app/packages/domain/dist ./packages/domain/dist
+COPY --from=builder /app/packages/domain/package.json ./packages/domain/package.json
+COPY --from=builder /app/packages/event-bus/dist ./packages/event-bus/dist
+COPY --from=builder /app/packages/event-bus/package.json ./packages/event-bus/package.json
+COPY --from=builder /app/packages/exchange/dist ./packages/exchange/dist
+COPY --from=builder /app/packages/exchange/package.json ./packages/exchange/package.json
+COPY --from=builder /app/packages/family-rules/dist ./packages/family-rules/dist
+COPY --from=builder /app/packages/family-rules/package.json ./packages/family-rules/package.json
+
+# Copy default family rules (operator can override via volume mount)
+COPY --from=builder /app/config ./config
+
+# Note: DB migrations (.sql files) are already in packages/db/dist/migrations/
+# because the db package build script copies them there (see packages/db/package.json).
+
+# Create data directory for SQLite (will be volume-mounted)
+RUN mkdir -p /app/apps/runtime/data && chown plankton:plankton /app/apps/runtime/data
+
+USER plankton
+
+EXPOSE 3100

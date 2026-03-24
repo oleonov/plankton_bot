@@ -1,0 +1,37 @@
+services:
+  plankton-runtime:
+    image: plankton:latest
+    command: ["node", "apps/runtime/dist/index.js"]
+    working_dir: /app
+    volumes:
+      - plankton-data:/app/apps/runtime/data
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    env_file: .env.production
+
+  plankton-api:
+    image: plankton:latest
+    command: ["node", "apps/api/dist/index.js"]
+    working_dir: /app
+    ports:
+      - "3100:3100"
+    volumes:
+      - plankton-data:/app/apps/runtime/data
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    depends_on:
+      - plankton-runtime
+    env_file: .env.production
+    environment:
+      # Always behind nginx in production
+      - TRUST_PROXY=true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  plankton-data:
+    name: plankton-data

@@ -9,7 +9,31 @@
 import process from "node:process";
 import { loadEnv } from "@plankton/config";
 import { openDatabase } from "@plankton/db";
+import type { DbConnection } from "@plankton/db";
 import { buildServer } from "./server.js";
+
+const LATEST_MIGRATION = "005_event_slug.sql";
+
+async function waitForDatabase(dbPath: string, maxRetries = 10, delayMs = 2000): Promise<DbConnection> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    let conn: DbConnection | undefined;
+    try {
+      conn = openDatabase(dbPath);
+      const row = conn.db
+        .prepare("SELECT name FROM schema_migrations WHERE name = ?")
+        .get(LATEST_MIGRATION) as { name: string } | undefined;
+      if (!row) throw new Error(`migration ${LATEST_MIGRATION} not yet applied`);
+      return conn;
+    } catch (err) {
+      conn?.close();
+      if (attempt === maxRetries) throw err;
+      // eslint-disable-next-line no-console
+      console.log(`database not ready (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms...`);
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error("unreachable");
+}
 
 async function main(): Promise<void> {
   const config = loadEnv();
@@ -36,7 +60,7 @@ async function main(): Promise<void> {
     console.log("PLANKTON_AUTH_USERNAME not set — password-only login (username recommended)");
   }
 
-  const conn = openDatabase(config.dbPath);
+  const conn = await waitForDatabase(config.dbPath);
 
   const app = await buildServer({ config, conn });
 

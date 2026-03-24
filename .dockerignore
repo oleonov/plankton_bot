@@ -1,0 +1,43 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.turbo/
+coverage/
+.DS_Store
+
+# Secrets — env files passed via docker compose, not baked in
+.env*
+!.env.example
+!.env.simulation.example
+!.env.production.example
+
+# Git
+.git/
+.gitignore
+
+# IDE / tooling
+.idea/
+.vscode/
+.claude/
+.superpowers/
+.worktrees/
+
+# Runtime data (created at runtime via volume mount)
+apps/runtime/data/
+logs/
+snapshots/
+
+# Docs and research (not needed in image)
+docs/
+research/
+*.md
+!README.md
+
+# Config backups
+config/*.bak
+
+# Test files (not needed in production image)
+**/__tests__/
+**/*.test.ts
+**/*.spec.ts
+vitest.config.ts
