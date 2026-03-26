@@ -1730,9 +1730,7 @@ describe("RiskInventoryModule", () => {
     familyStateRepo = createMockFamilyStateRepo(
       makeFamilyState({ tailAdjustedPnlLive: 100, currentTailCostUsdc: 40 }),
     );
-    rulesProvider = createMockRulesProvider(
-      makeRuleBundle({ tailQuarantineThresholdUsdc: 50 }),
-    );
+    rulesProvider = createMockRulesProvider(makeRuleBundle({ tailQuarantineThresholdUsdc: 50 }));
     mod = createModule();
     await mod.start();
 
@@ -1755,9 +1753,7 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejection message for ratio breach includes ratio value and realized PnL", async () => {
-    // Ratio breach: currentTail=8, signal=5, projected=13, realized=10+8=18? No...
-    // tailAdjustedPnlLive=2, currentTailCostUsdc=8
-    // realized = 2 + 8 = 10, projected = 8 + 5 = 13, ratio = 13/10 = 1.3 > 0.5
+    // Ratio breach: currentTail=8, signal=5, projected=13, realized=10, ratio=1.3 > 0.5
     familyStateRepo = createMockFamilyStateRepo(
       makeFamilyState({ tailAdjustedPnlLive: 2, currentTailCostUsdc: 8 }),
     );
