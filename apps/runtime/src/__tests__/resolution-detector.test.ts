@@ -266,4 +266,93 @@ describe("ResolutionDetector", () => {
 
     expect(results).toHaveLength(0);
   });
+
+  // ─── Resolution inference from outcomePrices ────────────────────────
+
+  it("infers YES resolution from outcomePrices field", async () => {
+    // Gamma /markets/slug/ returns outcomes and outcomePrices as stringified arrays
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          outcomes: '["Yes", "No"]',
+          outcomePrices: '["1", "0"]',
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("YES");
+  });
+
+  it("infers NO resolution from outcomePrices field", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          outcomes: '["Yes", "No"]',
+          outcomePrices: '["0", "1"]',
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("NO");
+  });
+
+  it("returns unknown when outcomePrices has no winner (no price=1)", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        umaResolutionStatus: null,
+        rawPayload: {
+          outcomes: '["Yes", "No"]',
+          outcomePrices: '["0.5", "0.5"]',
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("unknown");
+  });
+
+  it("prefers tokens.winner over outcomePrices when both present", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          tokens: [
+            { outcome: "Yes", winner: true },
+            { outcome: "No", winner: false },
+          ],
+          outcomes: '["Yes", "No"]',
+          outcomePrices: '["0", "1"]', // says NO won
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("YES"); // tokens.winner takes priority
+  });
+
+  it("handles numeric outcomePrices (non-stringified JSON array)", async () => {
+    // Gamma sometimes returns outcomePrices as "[1,0]" where values parse to numbers, not strings
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          outcomes: '["Yes", "No"]',
+          outcomePrices: "[1, 0]",
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("YES");
+  });
 });

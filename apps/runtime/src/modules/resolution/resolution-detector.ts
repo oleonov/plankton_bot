@@ -185,7 +185,7 @@ export class ResolutionDetector {
     umaStatus: string | null,
     rawPayload: Record<string, unknown>,
   ): "YES" | "NO" | "unknown" {
-    // Try to determine winner from payload
+    // 1. tokens array with winner flag (some Gamma endpoints)
     const tokens = rawPayload.tokens as Array<Record<string, unknown>> | undefined;
     if (tokens && Array.isArray(tokens)) {
       for (const t of tokens) {
@@ -195,14 +195,48 @@ export class ResolutionDetector {
       }
     }
 
-    // Check uma_resolution_status for resolved state
+    // 2. outcomePrices + outcomes (Gamma /markets/slug/ endpoint).
+    //    Both are stringified JSON arrays: outcomes '["Yes","No"]', outcomePrices '["1","0"]'.
+    //    The outcome with price "1" is the winner.
+    const winner = this.inferFromOutcomePrices(rawPayload);
+    if (winner) return winner;
+
+    // 3. Fallback: uma resolved but winner not determinable from above
     if (umaStatus === "resolved") {
-      // Resolution happened but we couldn't determine winner from tokens
-      // Check for outcome in other fields
-      const outcome = rawPayload.resolution_outcome as string | undefined;
+      const outcome = (rawPayload.resolutionOutcome ?? rawPayload.resolution_outcome) as
+        | string
+        | undefined;
       if (outcome) return outcome.toUpperCase() === "YES" ? "YES" : "NO";
     }
 
     return "unknown";
+  }
+
+  private inferFromOutcomePrices(
+    rawPayload: Record<string, unknown>,
+  ): "YES" | "NO" | null {
+    const rawOutcomes = rawPayload.outcomes;
+    const rawPrices = rawPayload.outcomePrices;
+    if (!rawOutcomes || !rawPrices) return null;
+
+    try {
+      const outcomes: unknown[] =
+        typeof rawOutcomes === "string" ? JSON.parse(rawOutcomes) : rawOutcomes;
+      const prices: unknown[] =
+        typeof rawPrices === "string" ? JSON.parse(rawPrices) : rawPrices;
+
+      if (!Array.isArray(outcomes) || !Array.isArray(prices)) return null;
+      if (outcomes.length !== prices.length) return null;
+
+      for (let i = 0; i < outcomes.length; i++) {
+        if (Number(prices[i]) === 1) {
+          return String(outcomes[i]).toUpperCase() === "YES" ? "YES" : "NO";
+        }
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
   }
 }
