@@ -288,8 +288,13 @@ export class ExecutionModule implements RuntimeModule {
       timestamp: now,
     });
 
-    // Check for immediate fills (simulation mode only)
-    if (!this.deps.runtimeMode || this.deps.runtimeMode === "simulation") {
+    // Check for immediate fills (simulation and paper modes use SimulationExchangeGateway
+    // which fills orders immediately in memory — must import fills inline, not via recon)
+    if (
+      !this.deps.runtimeMode ||
+      this.deps.runtimeMode === "simulation" ||
+      this.deps.runtimeMode === "paper"
+    ) {
       await this.checkForFills(orderId, cmd);
     }
   }

@@ -137,8 +137,9 @@ export class ResolutionDetector {
       };
     }
 
-    // Slug not found — try conditionId lookup before declaring delisted.
-    // Slug mismatches (rename/remap) would otherwise cause false delist.
+    // Slug not found — try conditionId as fallback before declaring delisted.
+    // Note: /markets/{id} doesn't accept conditionId (returns 422, treated as not-found).
+    // Kept as a defensive fallback; if both return null, market is declared delisted.
     let idInfo;
     try {
       idInfo = await this.gammaClient.getMarketById(conditionId);

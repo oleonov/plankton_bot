@@ -744,7 +744,7 @@ describe("ExecutionModule", () => {
 
   // ─── Runtime mode gating ─────────────────────────────────────────
 
-  it("skips inline checkForFills when runtimeMode is paper", async () => {
+  it("calls inline checkForFills in paper mode (uses SimulationExchangeGateway)", async () => {
     const paperMod = new ExecutionModule({
       gateway,
       bus,
@@ -782,11 +782,37 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
 
-    // In paper mode, checkForFills should NOT be called
-    expect(gateway.getFills).not.toHaveBeenCalled();
-    expect(fills).toHaveLength(0);
+    // Paper mode uses SimulationExchangeGateway with immediate fills,
+    // so checkForFills must run inline (same as simulation mode)
+    expect(gateway.getFills).toHaveBeenCalled();
 
     await paperMod.stop();
+  });
+
+  it("skips inline checkForFills in live-lite mode", async () => {
+    const liveMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+    });
+
+    await liveMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    // Live-lite uses real exchange — fills come via reconciliation, not inline
+    expect(gateway.getFills).not.toHaveBeenCalled();
+
+    await liveMod.stop();
   });
 
   // ─── Queue integration ────────────────────────────────────────────
