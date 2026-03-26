@@ -42,7 +42,11 @@ interface FamilyCaps {
   maxDustPositions: number;
 }
 
-function toFamilyDto(catalog: FamilyCatalogRow, state: FamilyStateRow | undefined, caps: FamilyCaps | null) {
+function toFamilyDto(
+  catalog: FamilyCatalogRow,
+  state: FamilyStateRow | undefined,
+  caps: FamilyCaps | null,
+) {
   return {
     familyId: catalog.family_id,
     familyKey: catalog.family_key,
@@ -90,7 +94,11 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     "SELECT * FROM orders WHERE family_id = ? ORDER BY created_at DESC LIMIT 100",
   );
 
-  function toCaps(row: { max_open_value_usdc: number; max_active_markets: number; max_dust_positions: number }): FamilyCaps {
+  function toCaps(row: {
+    max_open_value_usdc: number;
+    max_active_markets: number;
+    max_dust_positions: number;
+  }): FamilyCaps {
     return {
       maxOpenValueUsdc: row.max_open_value_usdc,
       maxActiveMarkets: row.max_active_markets,
@@ -102,9 +110,18 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     const catalogs = listCatalog.all() as FamilyCatalogRow[];
     const states = listState.all() as FamilyStateRow[];
     const stateMap = new Map(states.map((s) => [s.family_id, s]));
-    const capsRows = listCaps.all() as Array<{ family_id: string; max_open_value_usdc: number; max_active_markets: number; max_dust_positions: number }>;
+    const capsRows = listCaps.all() as Array<{
+      family_id: string;
+      max_open_value_usdc: number;
+      max_active_markets: number;
+      max_dust_positions: number;
+    }>;
     const capsMap = new Map(capsRows.map((r) => [r.family_id, toCaps(r)]));
-    return ok(catalogs.map((c) => toFamilyDto(c, stateMap.get(c.family_id), capsMap.get(c.family_id) ?? null)));
+    return ok(
+      catalogs.map((c) =>
+        toFamilyDto(c, stateMap.get(c.family_id), capsMap.get(c.family_id) ?? null),
+      ),
+    );
   });
 
   app.get<{ Params: { familyId: string } }>("/families/:familyId", async (request) => {
@@ -112,7 +129,14 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
     if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
     const state = getState.get(familyId) as FamilyStateRow | undefined;
-    const capsRow = getCaps.get(familyId) as { family_id: string; max_open_value_usdc: number; max_active_markets: number; max_dust_positions: number } | undefined;
+    const capsRow = getCaps.get(familyId) as
+      | {
+          family_id: string;
+          max_open_value_usdc: number;
+          max_active_markets: number;
+          max_dust_positions: number;
+        }
+      | undefined;
     return ok(toFamilyDto(catalog, state, capsRow ? toCaps(capsRow) : null));
   });
 

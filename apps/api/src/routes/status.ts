@@ -84,7 +84,11 @@ function computeTradingState(
     .get() as { total: number; probeOnly: number };
 
   let tradingState: string;
-  if (sa.entryApproved > 0 && allProbeOnly.total > 0 && allProbeOnly.probeOnly === allProbeOnly.total) {
+  if (
+    sa.entryApproved > 0 &&
+    allProbeOnly.total > 0 &&
+    allProbeOnly.probeOnly === allProbeOnly.total
+  ) {
     tradingState = "PROBING_ONLY";
   } else if (sa.entryApproved > 0) {
     tradingState = "ACTIVELY_TRADING";

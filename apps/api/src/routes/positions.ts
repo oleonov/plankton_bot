@@ -9,11 +9,7 @@ interface PositionOpts {
   db: Database.Database;
 }
 
-function toDto(
-  row: Record<string, unknown>,
-  meta: MarketMeta,
-  resInfo?: ResolutionInfo,
-) {
+function toDto(row: Record<string, unknown>, meta: MarketMeta, resInfo?: ResolutionInfo) {
   return {
     positionId: row.position_id,
     tokenId: row.token_id,
@@ -81,7 +77,9 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(opts.db, tokenIds);
-    const conditionIds = [...metaMap.values()].map((m) => m.conditionId).filter(Boolean) as string[];
+    const conditionIds = [...metaMap.values()]
+      .map((m) => m.conditionId)
+      .filter(Boolean) as string[];
     const resMap = buildResolutionMap(opts.db, conditionIds);
 
     return ok(

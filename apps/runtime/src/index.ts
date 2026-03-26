@@ -564,15 +564,20 @@ async function main(): Promise<void> {
   const insertLastSignalRejected = conn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('last_signal_rejected', 1, ?)",
   );
-  const upsertSignalActivity = conn.db.transaction(
-    (labels: string, capturedAt: string) => {
-      deleteSignalActivity.run();
-      insertSignalActivity.run(labels, capturedAt);
-    },
-  );
+  const upsertSignalActivity = conn.db.transaction((labels: string, capturedAt: string) => {
+    deleteSignalActivity.run();
+    insertSignalActivity.run(labels, capturedAt);
+  });
 
   // Track signal counts in a sliding window (resets every 10 minutes — approximate, not rolling)
-  const signalWindow = { produced: 0, approved: 0, rejected: 0, entryApproved: 0, exitApproved: 0, lastReset: Date.now() };
+  const signalWindow = {
+    produced: 0,
+    approved: 0,
+    rejected: 0,
+    entryApproved: 0,
+    exitApproved: 0,
+    lastReset: Date.now(),
+  };
   const SIGNAL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
   bus.subscribe("SignalProduced", async () => {

@@ -97,9 +97,7 @@ export function OrdersFills() {
                 const ends = formatTimeLeft(o.endDate);
                 return (
                   <tr key={o.orderId}>
-                    <td style={{ fontSize: 11, color: "var(--blue)" }}>
-                      {o.orderId.slice(0, 12)}
-                    </td>
+                    <td style={{ fontSize: 11, color: "var(--blue)" }}>{o.orderId.slice(0, 12)}</td>
                     <td>
                       <MarketLink
                         slug={o.slug}

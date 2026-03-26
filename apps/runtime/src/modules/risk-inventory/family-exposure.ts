@@ -107,7 +107,10 @@ export class FamilyExposureCalculator {
         if (currentTailCostUsdc > ts.tailQuarantineThresholdUsdc) {
           effectiveMode = "reduce-only";
           derivedModeReason = `tail cost $${currentTailCostUsdc.toFixed(2)} > cap $${ts.tailQuarantineThresholdUsdc}`;
-        } else if (totalRealizedPnl > 0 && currentTailCostUsdc / totalRealizedPnl > ts.tailQuarantineThresholdRatio) {
+        } else if (
+          totalRealizedPnl > 0 &&
+          currentTailCostUsdc / totalRealizedPnl > ts.tailQuarantineThresholdRatio
+        ) {
           effectiveMode = "reduce-only";
           derivedModeReason = `tail/pnl ratio ${(currentTailCostUsdc / totalRealizedPnl).toFixed(2)} > ${ts.tailQuarantineThresholdRatio}`;
         } else if (tailAdjustedPnlLive < 0) {

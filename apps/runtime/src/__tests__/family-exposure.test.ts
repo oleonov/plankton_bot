@@ -152,7 +152,13 @@ function seedFamily(db: import("better-sqlite3").Database) {
 
 function seedPosition(
   db: import("better-sqlite3").Database,
-  opts: { positionId: string; tokenId: string; realizedPnl: number; status?: string; costBasisUsdc?: number },
+  opts: {
+    positionId: string;
+    tokenId: string;
+    realizedPnl: number;
+    status?: string;
+    costBasisUsdc?: number;
+  },
 ) {
   const status = opts.status ?? "open";
   const cost = opts.costBasisUsdc ?? 5;
@@ -168,7 +174,13 @@ let seedCounter = 0;
 
 function seedLot(
   db: import("better-sqlite3").Database,
-  opts: { lotId: string; positionId: string; tokenId: string; remainingSize: number; entryPrice: number },
+  opts: {
+    lotId: string;
+    positionId: string;
+    tokenId: string;
+    remainingSize: number;
+    entryPrice: number;
+  },
 ) {
   // Seed the order + fill chain required by FK constraints
   const n = ++seedCounter;
@@ -196,14 +208,26 @@ describe("FamilyExposureCalculator effective mode", () => {
     const conn = bootstrapDatabase(":memory:");
     seedFamily(conn.db);
     seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: 10 });
-    seedLot(conn.db, { lotId: "lot-1", positionId: "pos-1", tokenId: String(TOK_ID), remainingSize: 10, entryPrice: 0.05 });
+    seedLot(conn.db, {
+      lotId: "lot-1",
+      positionId: "pos-1",
+      tokenId: String(TOK_ID),
+      remainingSize: 10,
+      entryPrice: 0.05,
+    });
 
     const posRepo = new SqlitePositionRepository(conn.db);
     const lotRepo = new SqliteInventoryLotRepository(conn.db);
     const stateRepo = new SqliteFamilyStateRepository(conn.db);
     const rulesProvider = createMockRulesProvider();
 
-    const calc = new FamilyExposureCalculator(stateRepo, posRepo, lotRepo, silentLog, rulesProvider);
+    const calc = new FamilyExposureCalculator(
+      stateRepo,
+      posRepo,
+      lotRepo,
+      silentLog,
+      rulesProvider,
+    );
     const result = calc.recompute(FAM_ID, true);
 
     expect(result.effectiveMode).toBe("active");
@@ -216,14 +240,26 @@ describe("FamilyExposureCalculator effective mode", () => {
     seedFamily(conn.db);
     // realizedPnl = -5, tailCost = 10 => tailAdjustedPnl = -5 - 10 = -15
     seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: -5 });
-    seedLot(conn.db, { lotId: "lot-1", positionId: "pos-1", tokenId: String(TOK_ID), remainingSize: 100, entryPrice: 0.1 });
+    seedLot(conn.db, {
+      lotId: "lot-1",
+      positionId: "pos-1",
+      tokenId: String(TOK_ID),
+      remainingSize: 100,
+      entryPrice: 0.1,
+    });
 
     const posRepo = new SqlitePositionRepository(conn.db);
     const lotRepo = new SqliteInventoryLotRepository(conn.db);
     const stateRepo = new SqliteFamilyStateRepository(conn.db);
     const rulesProvider = createMockRulesProvider();
 
-    const calc = new FamilyExposureCalculator(stateRepo, posRepo, lotRepo, silentLog, rulesProvider);
+    const calc = new FamilyExposureCalculator(
+      stateRepo,
+      posRepo,
+      lotRepo,
+      silentLog,
+      rulesProvider,
+    );
     const result = calc.recompute(FAM_ID, true);
 
     expect(result.tailAdjustedPnlLive).toBeLessThan(0);
@@ -237,14 +273,26 @@ describe("FamilyExposureCalculator effective mode", () => {
     seedFamily(conn.db);
     seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: 100 });
     // tailCost = 1000 * 0.1 = 100 > threshold 50
-    seedLot(conn.db, { lotId: "lot-1", positionId: "pos-1", tokenId: String(TOK_ID), remainingSize: 1000, entryPrice: 0.1 });
+    seedLot(conn.db, {
+      lotId: "lot-1",
+      positionId: "pos-1",
+      tokenId: String(TOK_ID),
+      remainingSize: 1000,
+      entryPrice: 0.1,
+    });
 
     const posRepo = new SqlitePositionRepository(conn.db);
     const lotRepo = new SqliteInventoryLotRepository(conn.db);
     const stateRepo = new SqliteFamilyStateRepository(conn.db);
     const rulesProvider = createMockRulesProvider();
 
-    const calc = new FamilyExposureCalculator(stateRepo, posRepo, lotRepo, silentLog, rulesProvider);
+    const calc = new FamilyExposureCalculator(
+      stateRepo,
+      posRepo,
+      lotRepo,
+      silentLog,
+      rulesProvider,
+    );
     const result = calc.recompute(FAM_ID, true);
 
     expect(result.currentTailCostUsdc).toBeGreaterThan(50);
@@ -258,14 +306,26 @@ describe("FamilyExposureCalculator effective mode", () => {
     seedFamily(conn.db);
     // realizedPnl = 10, tailCost = 100 * 0.08 = 8, ratio = 8/10 = 0.8 > 0.5 threshold
     seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: 10 });
-    seedLot(conn.db, { lotId: "lot-1", positionId: "pos-1", tokenId: String(TOK_ID), remainingSize: 100, entryPrice: 0.08 });
+    seedLot(conn.db, {
+      lotId: "lot-1",
+      positionId: "pos-1",
+      tokenId: String(TOK_ID),
+      remainingSize: 100,
+      entryPrice: 0.08,
+    });
 
     const posRepo = new SqlitePositionRepository(conn.db);
     const lotRepo = new SqliteInventoryLotRepository(conn.db);
     const stateRepo = new SqliteFamilyStateRepository(conn.db);
     const rulesProvider = createMockRulesProvider();
 
-    const calc = new FamilyExposureCalculator(stateRepo, posRepo, lotRepo, silentLog, rulesProvider);
+    const calc = new FamilyExposureCalculator(
+      stateRepo,
+      posRepo,
+      lotRepo,
+      silentLog,
+      rulesProvider,
+    );
     const result = calc.recompute(FAM_ID, true);
 
     expect(result.effectiveMode).toBe("reduce-only");
@@ -277,7 +337,13 @@ describe("FamilyExposureCalculator effective mode", () => {
     const conn = bootstrapDatabase(":memory:");
     seedFamily(conn.db);
     seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: 0 });
-    seedLot(conn.db, { lotId: "lot-1", positionId: "pos-1", tokenId: String(TOK_ID), remainingSize: 10, entryPrice: 0.05 });
+    seedLot(conn.db, {
+      lotId: "lot-1",
+      positionId: "pos-1",
+      tokenId: String(TOK_ID),
+      remainingSize: 10,
+      entryPrice: 0.05,
+    });
 
     const posRepo = new SqlitePositionRepository(conn.db);
     const lotRepo = new SqliteInventoryLotRepository(conn.db);

@@ -130,7 +130,11 @@ export function Families() {
             return (
               <Fragment key={f.familyId}>
                 <tr
-                  style={operatorMode === "quarantine" ? { background: "rgba(239,83,80,0.06)" } : undefined}
+                  style={
+                    operatorMode === "quarantine"
+                      ? { background: "rgba(239,83,80,0.06)" }
+                      : undefined
+                  }
                   onClick={() => setExpanded(isExpanded ? null : f.familyId)}
                 >
                   <td style={{ cursor: "pointer", color: "var(--blue)" }}>
@@ -145,17 +149,39 @@ export function Families() {
                       </div>
                     )}
                   </td>
-                  <td style={{ color: f.caps ? utilizationColor(f.state?.openValueUsdc ?? 0, f.caps.maxOpenValueUsdc) : undefined }}>
+                  <td
+                    style={{
+                      color: f.caps
+                        ? utilizationColor(f.state?.openValueUsdc ?? 0, f.caps.maxOpenValueUsdc)
+                        : undefined,
+                    }}
+                  >
                     ${(f.state?.openValueUsdc ?? 0).toFixed(0)}
-                    {f.caps && <span style={{ color: "var(--text-dim)", fontSize: 11 }}> / ${f.caps.maxOpenValueUsdc}</span>}
+                    {f.caps && (
+                      <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                        {" "}
+                        / ${f.caps.maxOpenValueUsdc}
+                      </span>
+                    )}
                   </td>
                   <td>
                     {f.state?.openPositionCount ?? 0}
                     {f.state?.openDustCount ? ` (${f.state.openDustCount} dust)` : ""}
                   </td>
-                  <td style={{ color: f.caps ? utilizationColor(f.state?.activeMarketCount ?? 0, f.caps.maxActiveMarkets) : undefined }}>
+                  <td
+                    style={{
+                      color: f.caps
+                        ? utilizationColor(f.state?.activeMarketCount ?? 0, f.caps.maxActiveMarkets)
+                        : undefined,
+                    }}
+                  >
                     {f.state?.activeMarketCount ?? 0}
-                    {f.caps && <span style={{ color: "var(--text-dim)", fontSize: 11 }}> / {f.caps.maxActiveMarkets}</span>}
+                    {f.caps && (
+                      <span style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                        {" "}
+                        / {f.caps.maxActiveMarkets}
+                      </span>
+                    )}
                   </td>
                   <td style={{ color: "var(--orange)" }}>
                     ${(f.state?.currentTailCostUsdc ?? 0).toFixed(2)}

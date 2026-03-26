@@ -12,25 +12,39 @@ import { formatAgo } from "../utils/format.ts";
 
 function tradingStateColor(state?: string): string {
   switch (state) {
-    case "ACTIVELY_TRADING": return "var(--green)";
-    case "PROBING_ONLY": return "var(--blue, #42a5f5)";
-    case "EXITS_ONLY": return "var(--orange)";
-    case "ALIVE_BUT_BLOCKED": return "#cc8800";
-    case "PAUSED": return "var(--red)";
-    case "NO_SIGNALS": return "#666";
-    default: return "#666";
+    case "ACTIVELY_TRADING":
+      return "var(--green)";
+    case "PROBING_ONLY":
+      return "var(--blue, #42a5f5)";
+    case "EXITS_ONLY":
+      return "var(--orange)";
+    case "ALIVE_BUT_BLOCKED":
+      return "#cc8800";
+    case "PAUSED":
+      return "var(--red)";
+    case "NO_SIGNALS":
+      return "#666";
+    default:
+      return "#666";
   }
 }
 
 function tradingStateLabel(state?: string): string {
   switch (state) {
-    case "ACTIVELY_TRADING": return "ACTIVELY TRADING";
-    case "PROBING_ONLY": return "PROBING ONLY";
-    case "EXITS_ONLY": return "EXITS ONLY";
-    case "ALIVE_BUT_BLOCKED": return "BLOCKED BY LIMITS";
-    case "PAUSED": return "PAUSED";
-    case "NO_SIGNALS": return "NO SIGNALS";
-    default: return "UNKNOWN";
+    case "ACTIVELY_TRADING":
+      return "ACTIVELY TRADING";
+    case "PROBING_ONLY":
+      return "PROBING ONLY";
+    case "EXITS_ONLY":
+      return "EXITS ONLY";
+    case "ALIVE_BUT_BLOCKED":
+      return "BLOCKED BY LIMITS";
+    case "PAUSED":
+      return "PAUSED";
+    case "NO_SIGNALS":
+      return "NO SIGNALS";
+    default:
+      return "UNKNOWN";
   }
 }
 
@@ -200,7 +214,8 @@ export function Overview() {
           </div>
           {status.tradingState === "ALIVE_BUT_BLOCKED" && status.signalActivity && (
             <div style={{ marginTop: 8, fontSize: 12, color: "var(--orange)" }}>
-              All {status.signalActivity.signalsRejectedLast10m} entry signals were rejected by risk limits
+              All {status.signalActivity.signalsRejectedLast10m} entry signals were rejected by risk
+              limits
             </div>
           )}
           {status.tradingState === "NO_SIGNALS" && (
