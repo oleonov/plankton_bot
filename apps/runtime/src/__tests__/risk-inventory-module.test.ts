@@ -1674,6 +1674,54 @@ describe("RiskInventoryModule", () => {
     });
   });
 
+  // ─── Flat-family anti-deadlock (projected-ratio carve-out) ────────
+
+  it("does NOT reject entry on flat family where only projected ratio would exceed threshold", async () => {
+    // Family has $0 current tail (flat), $1.58 realized PnL
+    // Signal suggests $5.00 entry
+    // projected = 0 + 5 = 5, realized = 1.58 + 0 = 1.58, ratio = 5/1.58 = 3.16 > 0.5
+    // But currentTailCostUsdc === 0, so ratio should NOT trigger reduce-only
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 1.58, currentTailCostUsdc: 0 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+
+    await bus.publish("SignalProduced", { signal: makeSignal({ suggestedSizeUsdc: 5 }) });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("still rejects entry when currentTailCostUsdc > 0 and ratio exceeded", async () => {
+    // Family has $8 current tail, $2 tail-adjusted PnL
+    // realizedPnl = 2 + 8 = 10, projected = 8 + 5 = 13, ratio = 13/10 = 1.3 > 0.5
+    // currentTailCostUsdc > 0, so ratio check STILL applies
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 2, currentTailCostUsdc: 8 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("reduce-only");
+
+    await mod.stop();
+  });
+
   // ─── Per-family in-flight limiter (B2.2) ──────────────────────────
 
   describe("per-family in-flight limiter", () => {

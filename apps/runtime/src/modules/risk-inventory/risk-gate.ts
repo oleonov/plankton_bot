@@ -44,11 +44,18 @@ function resolveFamilyMode(
   tailThresholdUsdc: number,
   tailThresholdRatio: number,
 ): DerivedFamilyMode {
+  // Absolute tail cap always applies
   if (projectedTailCost > tailThresholdUsdc) return "reduce-only";
 
-  const realizedPnl = familyState.tailAdjustedPnlLive + familyState.currentTailCostUsdc;
-  if (realizedPnl > 0 && projectedTailCost / realizedPnl > tailThresholdRatio) {
-    return "reduce-only";
+  // Ratio check: only when family has accumulated tail (currentTailCostUsdc > 0).
+  // When family is flat (zero open risk), projected-ratio alone cannot force
+  // reduce-only — prevents deadlock on families that recycled all positions
+  // but can't re-enter because probe size exceeds small realized PnL.
+  if (familyState.currentTailCostUsdc > 0) {
+    const realizedPnl = familyState.tailAdjustedPnlLive + familyState.currentTailCostUsdc;
+    if (realizedPnl > 0 && projectedTailCost / realizedPnl > tailThresholdRatio) {
+      return "reduce-only";
+    }
   }
 
   if (familyState.tailAdjustedPnlLive < 0) return "probe-only";
