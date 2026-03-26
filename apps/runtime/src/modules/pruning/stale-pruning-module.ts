@@ -1,10 +1,10 @@
 /**
- * StalePruningModule — prunes cheap stale positions past maxTailHoldHours.
+ * StalePruningModule — prunes stale positions past maxTailHoldHours.
  *
  * Polling loop (default 10 min):
  *  1. For each family with staleTailPruneEnabled and maxTailHoldHours set
- *  2. Find open positions older than maxTailHoldHours
- *  3. Filter to cheap tail positions (avgEntryPrice < minEntryPrice)
+ *  2. Find open/dust positions older than maxTailHoldHours
+ *  3. Dust positions are pruned by age alone; open positions require cheap entry price
  *  4. Publish SignalProduced with reason "stale-prune" and side "sell"
  */
 
@@ -75,7 +75,9 @@ export class StalePruningModule implements RuntimeModule {
         const stale = positions.filter((p) => {
           if (p.status !== "open" && p.status !== "dust") return false;
           if (p.openedAt >= cutoff) return false;
-          if (p.avgEntryPrice >= entry.minEntryPrice) return false;
+          // Dust positions are pruned by age alone (recycling dust cleanup).
+          // Open positions still require cheap entry price (original stale-tail logic).
+          if (p.status !== "dust" && p.avgEntryPrice >= entry.minEntryPrice) return false;
           // Skip positions on inactive/resolved markets — resolution handles those
           const market = this.deps.marketRepo.findByTokenId(p.tokenId);
           if (market && !market.active) return false;

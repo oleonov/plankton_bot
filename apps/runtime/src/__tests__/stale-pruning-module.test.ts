@@ -335,6 +335,53 @@ describe("StalePruningModule", () => {
     await mod.stop();
   });
 
+  it("prunes dust position with avgEntryPrice above minEntryPrice when old enough", async () => {
+    const bundle = makeBundle({ minEntryPrice: 0.03, maxTailHoldHours: 24 });
+    // avgEntryPrice 0.10 is above minEntryPrice 0.03 — previously skipped, now should prune
+    const pos = makePosition({
+      status: "dust",
+      avgEntryPrice: 0.1,
+      openedAt: hoursAgo(48), // well past 24h maxTailHoldHours
+    });
+
+    const mod = new StalePruningModule({
+      positionRepo: createMockPositionRepo([pos]),
+      marketRepo: createMockMarketRepo(),
+      rulesProvider: createMockRulesProvider(bundle),
+      bus,
+      log: silentLog,
+      checkIntervalMs: 60_000,
+    });
+
+    const pruned = await mod.runCheck();
+    expect(pruned).toBe(1);
+
+    await mod.stop();
+  });
+
+  it("does NOT prune open (non-dust) position with avgEntryPrice above minEntryPrice", async () => {
+    const bundle = makeBundle({ minEntryPrice: 0.03, maxTailHoldHours: 24 });
+    const pos = makePosition({
+      status: "open",
+      avgEntryPrice: 0.1, // above minEntryPrice
+      openedAt: hoursAgo(48),
+    });
+
+    const mod = new StalePruningModule({
+      positionRepo: createMockPositionRepo([pos]),
+      marketRepo: createMockMarketRepo(),
+      rulesProvider: createMockRulesProvider(bundle),
+      bus,
+      log: silentLog,
+      checkIntervalMs: 60_000,
+    });
+
+    const pruned = await mod.runCheck();
+    expect(pruned).toBe(0);
+
+    await mod.stop();
+  });
+
   it("skips positions on inactive/resolved markets", async () => {
     const bundle = makeBundle();
     const pos = makePosition(); // would normally be pruned
