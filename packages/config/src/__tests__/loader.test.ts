@@ -3,13 +3,11 @@ import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { loadFamilyRulesYaml } from "../loader.js";
 
-const TEMPLATE_PATH =
-  "~/Downloads/tmp_proj/poly_plankton/docs/family_rules_template_v1.yaml";
-
-const TMP_DIR = path.join(
-  "~/Downloads/tmp_proj/poly_plankton/packages/config",
-  ".test-tmp",
-);
+// Resolve paths relative to this test file → packages/config/src/__tests__/
+const PKG_ROOT = path.resolve(import.meta.dirname, "../..");
+const MONOREPO_ROOT = path.resolve(PKG_ROOT, "../..");
+const TEMPLATE_PATH = path.join(MONOREPO_ROOT, "docs/family_rules_template_v1.yaml");
+const TMP_DIR = path.join(PKG_ROOT, ".test-tmp");
 
 function writeTmpYaml(name: string, content: string): string {
   mkdirSync(TMP_DIR, { recursive: true });
