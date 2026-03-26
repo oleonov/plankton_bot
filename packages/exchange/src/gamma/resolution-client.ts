@@ -1,9 +1,11 @@
 /**
  * GammaResolutionClient — queries Gamma API for market resolution status.
  *
- * Uses documented endpoints:
- *  - GET /markets/slug/{slug}
- *  - GET /markets/{conditionId}
+ * Primary endpoint: GET /markets/slug/{slug}
+ * Fallback endpoint: GET /markets/{id} — accepts Gamma's internal numeric id,
+ *   NOT conditionId (returns 422 for conditionId; treated as not-found).
+ *
+ * Gamma returns camelCase fields (conditionId, endDateIso, closedTime, etc.).
  *
  * Rate limits: 300 req/10s for /markets (documented).
  * We target ~10 req/s max to stay well within limits.
@@ -49,6 +51,12 @@ export class GammaResolutionClient {
     return this.fetchMarket(url);
   }
 
+  /**
+   * Fallback lookup by conditionId. The /markets/{id} endpoint doesn't actually
+   * accept conditionId (returns 422), so this gracefully returns null in that case.
+   * Kept as a fallback for slug-rename scenarios where Gamma may eventually
+   * support conditionId lookups.
+   */
   async getMarketById(conditionId: string): Promise<GammaMarketInfo | null> {
     const url = new URL(`/markets/${encodeURIComponent(conditionId)}`, this.baseUrl);
     return this.fetchMarket(url);
@@ -61,7 +69,8 @@ export class GammaResolutionClient {
           signal: AbortSignal.timeout(this.timeoutMs),
         });
 
-        if (response.status === 404) return null;
+        // 404 = not found, 422 = endpoint doesn't accept this ID format
+        if (response.status === 404 || response.status === 422) return null;
 
         if (!response.ok) {
           throw new Error(`Gamma API responded with ${response.status}: ${response.statusText}`);
@@ -71,15 +80,19 @@ export class GammaResolutionClient {
 
         // Gamma returns an empty object or array for delisted markets
         if (!raw || (Array.isArray(raw) && raw.length === 0)) return null;
-        if (typeof raw !== "object" || !raw.condition_id) return null;
+        // Gamma returns camelCase fields (conditionId, endDateIso, etc.)
+        const cid = (raw.conditionId ?? raw.condition_id) as string | undefined;
+        if (typeof raw !== "object" || !cid) return null;
 
         return {
-          conditionId: raw.condition_id as string,
+          conditionId: cid,
           slug: (raw.slug as string) ?? "",
           closed: raw.closed === true || raw.closed === "true",
-          closedTime: (raw.closed_time as string) ?? null,
-          umaResolutionStatus: (raw.uma_resolution_status as string) ?? null,
-          endDate: (raw.end_date_iso as string) ?? (raw.end_date as string) ?? "",
+          closedTime: ((raw.closedTime ?? raw.closed_time) as string) ?? null,
+          umaResolutionStatus:
+            ((raw.umaResolutionStatus ?? raw.uma_resolution_status) as string) ?? null,
+          endDate:
+            ((raw.endDateIso ?? raw.end_date_iso ?? raw.endDate ?? raw.end_date) as string) ?? "",
           rawPayload: raw,
         };
       } catch (err: unknown) {
