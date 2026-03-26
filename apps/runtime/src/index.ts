@@ -40,7 +40,7 @@ import {
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { FamilyIdentity, FamilyState } from "@plankton/domain";
-import { createFamilyId, createBotRunId, slugPatternToRegex } from "@plankton/domain";
+import { createBotRunId, slugPatternToRegex } from "@plankton/domain";
 import { migrateOrphanedPositions } from "./universe-migration.js";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
@@ -167,8 +167,9 @@ async function main(): Promise<void> {
   const bus = new InProcessEventBus();
 
   // 7. Build modules
-  let supervisor: Supervisor;
-  const runtimeControl = { isPaused: () => supervisor.isPaused() };
+  // supervisorRef is set before any closure that uses it is actually called
+  const supervisorRef = { current: null as unknown as Supervisor };
+  const runtimeControl = { isPaused: () => supervisorRef.current.isPaused() };
 
   // Persist pause state to runtime_metrics so the API can read it
   const deletePauseMetric = conn.db.prepare(
@@ -183,7 +184,7 @@ async function main(): Promise<void> {
   });
 
   function setPausedAndPersist(paused: boolean): void {
-    supervisor.setPaused(paused);
+    supervisorRef.current.setPaused(paused);
     persistPauseState(paused);
   }
 
@@ -193,13 +194,13 @@ async function main(): Promise<void> {
     familyStateRepo: repos.familyState,
     bus,
     log,
-    getPaused: () => supervisor.isPaused(),
+    getPaused: () => supervisorRef.current.isPaused(),
     setPaused: setPausedAndPersist,
     pollIntervalMs: 5_000,
   });
 
   // 7b. Create gateways via factory
-  let polyClient: unknown | undefined;
+  let polyClient: unknown;
   if (config.runtimeMode === "paper" || config.runtimeMode === "live-lite") {
     const { ClobClient } = await import("@polymarket/clob-client");
     const CLOB_HOST = "https://clob.polymarket.com";
@@ -503,7 +504,8 @@ async function main(): Promise<void> {
   });
 
   // 8. Create supervisor
-  supervisor = new Supervisor({ modules, bus, log });
+  supervisorRef.current = new Supervisor({ modules, bus, log });
+  const supervisor = supervisorRef.current;
 
   // 9. Signal handling
   let shuttingDown = false;

@@ -24,7 +24,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   const handleRetry = useCallback(() => {
     setState("loading");
-    checkSession().then(setState);
+    void checkSession().then(setState);
   }, []);
 
   // Register unauthorized callback
@@ -34,10 +34,10 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   // Check session on mount — only 401 means "not logged in", other errors get a retry
   useEffect(() => {
-    checkSession().then((result) => {
+    void checkSession().then((result) => {
       if (result === "server_error") {
         // Single retry after 3s for transient startup issues
-        setTimeout(() => checkSession().then(setState), 3000);
+        setTimeout(() => { void checkSession().then(setState); }, 3000);
       } else {
         setState(result);
       }

@@ -18,9 +18,8 @@ import type {
   FamilyRulesProvider,
   FamilyIdentity,
   Market,
-  ClobMarket,
 } from "@plankton/domain";
-import { slugPatternToRegex, matchesHorizon, createTokenId, createFamilyId } from "@plankton/domain";
+import { slugPatternToRegex, matchesHorizon, createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 export interface MarketScannerModuleDeps {

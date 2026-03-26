@@ -9,7 +9,6 @@ import type {
   MarketRepository,
   MarketResolutionRepository,
   Position,
-  TokenId,
 } from "@plankton/domain";
 import type { GammaResolutionClient, GammaMarketInfo } from "@plankton/exchange";
 import { ResolutionDetector } from "../modules/resolution/resolution-detector.js";

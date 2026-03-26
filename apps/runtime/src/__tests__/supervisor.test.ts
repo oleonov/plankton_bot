@@ -6,7 +6,7 @@ import { Supervisor } from "../supervisor/supervisor.js";
 
 const log = pino({ level: "silent" });
 
-function createTestModule(name: string): RuntimeModule & { started: boolean; stopped: boolean } {
+function createTestModule(_name: string): RuntimeModule & { started: boolean; stopped: boolean } {
   const mod = {
     started: false,
     stopped: false,

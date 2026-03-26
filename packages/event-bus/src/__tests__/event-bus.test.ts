@@ -180,9 +180,9 @@ describe("InProcessEventBus", () => {
 
   it("enforces type safety on payloads", () => {
     // @ts-expect-error - wrong payload shape for SignalProduced
-    bus.publish("SignalProduced", { wrong: true });
+    void bus.publish("SignalProduced", { wrong: true });
 
     // @ts-expect-error - wrong event name
-    bus.publish("NonExistentEvent", {});
+    void bus.publish("NonExistentEvent", {});
   });
 });

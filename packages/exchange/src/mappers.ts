@@ -76,7 +76,7 @@ export function mapOpenOrder(raw: Record<string, unknown>): ExchangeOrder {
     status: mapOrderStatus(String(raw.status ?? "OPEN")),
     createdAt:
       typeof raw.created_at === "number"
-        ? (raw.created_at as number)
+        ? raw.created_at
         : Date.now(),
   };
 }

@@ -17,7 +17,6 @@ import type {
   MarketRepository,
   NormalizedMarket,
   FamilyIdentity,
-  Market,
 } from "@plankton/domain";
 import { slugPatternToRegex, matchesHorizon } from "@plankton/domain";
 import type { Logger } from "../../logger.js";

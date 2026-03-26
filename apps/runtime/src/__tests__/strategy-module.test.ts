@@ -17,7 +17,6 @@ import type {
   NormalizedMarket,
   TokenId,
   FamilyId,
-  PositionId,
   Regime,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
@@ -1061,7 +1060,7 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       // Fire two ticks concurrently
-      const [r1, r2] = await Promise.all([mod.tick(), mod.tick()]);
+      const [_r1, _r2] = await Promise.all([mod.tick(), mod.tick()]);
 
       await bus.drain();
 

@@ -7,7 +7,6 @@ import type {
   FamilyState,
   Position,
   Market,
-  FamilyId,
   TokenId,
 } from "@plankton/domain";
 import { createFamilyId, createTokenId, createPositionId } from "@plankton/domain";

@@ -71,7 +71,7 @@ export class ResolutionDetector {
         tokenId: pos.tokenId,
         conditionId: market.conditionId,
         slug: market.slug,
-        outcome: market.outcome as "YES" | "NO",
+        outcome: market.outcome,
         endDate: market.endDate,
         positionId: pos.positionId,
         familyId: pos.familyId,

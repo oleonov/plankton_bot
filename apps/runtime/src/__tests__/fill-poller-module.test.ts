@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FillPollerModule } from "../modules/fill-poller/fill-poller-module.js";
 import { InProcessEventBus } from "@plankton/event-bus";
-import { createFillId, createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
+import { createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
 import type { ExchangeGateway, ExchangeFill, FillRepository, OrderRepository, TokenId, ExchangeOrder, ExchangeBalance, PlaceOrderParams, CancelOrderParams, PlaceOrderResult, CancelOrderResult } from "@plankton/domain";
 
 function createMockGateway(): ExchangeGateway {

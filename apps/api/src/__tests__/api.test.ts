@@ -4,6 +4,8 @@ import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { buildServer } from "../server.js";
 
+function json(res: { json: () => unknown }): any { return res.json(); }
+
 // ─── Test setup ─────────────────────────────────────────────────────
 
 const TEST_API_KEY = "test-key-abc123";
@@ -104,7 +106,7 @@ describe("auth", () => {
   it("protected route returns 401 without token", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/status" });
     expect(res.statusCode).toBe(401);
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(false);
     expect(body.error.code).toBe("UNAUTHORIZED");
   });
@@ -125,7 +127,7 @@ describe("auth", () => {
       headers: authHeaders(),
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().ok).toBe(true);
+    expect(json(res).ok).toBe(true);
   });
 
   it("fail-closed when PLANKTON_API_KEY is not configured", async () => {
@@ -138,7 +140,7 @@ describe("auth", () => {
       url: "/api/v1/status",
     });
     expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe("AUTH_NOT_CONFIGURED");
+    expect(json(res).error.code).toBe("AUTH_NOT_CONFIGURED");
     await noKeyApp.close();
   });
 });
@@ -148,7 +150,7 @@ describe("auth", () => {
 describe("GET /health", () => {
   it("returns ok envelope", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/health" });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.status).toBe("ok");
     expect(body.ts).toBeDefined();
@@ -164,7 +166,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(typeof body.data.runtimeMode).toBe("string");
     expect(typeof body.data.uptimeSeconds).toBe("number");
@@ -187,7 +189,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     // bot_runs has mode='simulation', family_runtime_state has runtime_mode='active'
     expect(body.data.runtimeMode).toBe("simulation");
   });
@@ -199,7 +201,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res1.json().data.paused).toBe(false);
+    expect(json(res1).data.paused).toBe(false);
 
     // Runtime persists paused=true
     conn.db.exec(`
@@ -212,7 +214,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res2.json().data.paused).toBe(true);
+    expect(json(res2).data.paused).toBe(true);
 
     // Runtime persists paused=false (resumed)
     conn.db.exec(`
@@ -226,7 +228,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res3.json().data.paused).toBe(false);
+    expect(json(res3).data.paused).toBe(false);
   });
 
   it("lastReconciliationAt reads from runtime_metrics", async () => {
@@ -236,7 +238,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res1.json().data.lastReconciliationAt).toBeNull();
+    expect(json(res1).data.lastReconciliationAt).toBeNull();
 
     // Insert a reconciliation metric
     conn.db.exec(`
@@ -249,7 +251,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res2.json().data.lastReconciliationAt).toBe("2026-03-14T01:30:00Z");
+    expect(json(res2).data.lastReconciliationAt).toBe("2026-03-14T01:30:00Z");
   });
 
   it("marketDataStale is true when no market data metric exists", async () => {
@@ -258,7 +260,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    const d = res.json().data;
+    const d = json(res).data;
     expect(d.marketDataStale).toBe(true);
     expect(d.marketDataLastUpdateAt).toBeNull();
   });
@@ -275,8 +277,8 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res.json().data.marketDataStale).toBe(false);
-    expect(res.json().data.marketDataLastUpdateAt).toBeTruthy();
+    expect(json(res).data.marketDataStale).toBe(false);
+    expect(json(res).data.marketDataLastUpdateAt).toBeTruthy();
   });
 
   it("marketDataPoll is included when active progress exists for current bot run", async () => {
@@ -290,7 +292,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    const d = res.json().data;
+    const d = json(res).data;
     expect(d.marketDataPoll).toEqual({ active: true, page: 5 });
 
     // Clean up
@@ -308,7 +310,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res.json().data.marketDataPoll).toBeUndefined();
+    expect(json(res).data.marketDataPoll).toBeUndefined();
 
     conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'`);
   });
@@ -324,7 +326,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res.json().data.marketDataPoll).toBeUndefined();
+    expect(json(res).data.marketDataPoll).toBeUndefined();
 
     conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'`);
   });
@@ -338,7 +340,7 @@ describe("GET /status", () => {
       url: "/api/v1/status",
       headers: authHeaders(),
     });
-    expect(res.json().data.marketDataPoll).toBeUndefined();
+    expect(json(res).data.marketDataPoll).toBeUndefined();
   });
 });
 
@@ -351,7 +353,7 @@ describe("families", () => {
       url: "/api/v1/families",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data).toHaveLength(1);
     expect(body.data[0].familyId).toBe("fam-1");
@@ -365,7 +367,7 @@ describe("families", () => {
       url: "/api/v1/families/fam-1",
       headers: authHeaders(),
     });
-    expect(res.json().data.familyId).toBe("fam-1");
+    expect(json(res).data.familyId).toBe("fam-1");
   });
 
   it("GET /families/:id returns 404 with error object", async () => {
@@ -375,7 +377,7 @@ describe("families", () => {
       headers: authHeaders(),
     });
     expect(res.statusCode).toBe(404);
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(false);
     expect(body.error.code).toBe("FAMILY_NOT_FOUND");
   });
@@ -386,7 +388,7 @@ describe("families", () => {
       url: "/api/v1/families/fam-1/positions",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.length).toBeGreaterThanOrEqual(1);
   });
@@ -397,7 +399,7 @@ describe("families", () => {
       url: "/api/v1/families/fam-1/orders",
       headers: authHeaders(),
     });
-    expect(res.json().data.length).toBeGreaterThanOrEqual(1);
+    expect(json(res).data.length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -410,7 +412,7 @@ describe("positions", () => {
       url: "/api/v1/positions",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.length).toBe(2); // open + dust
   });
@@ -421,7 +423,7 @@ describe("positions", () => {
       url: "/api/v1/positions?family_id=fam-1",
       headers: authHeaders(),
     });
-    expect(res.json().data.length).toBe(2);
+    expect(json(res).data.length).toBe(2);
   });
 
   it("GET /positions?dust=true returns only dust positions", async () => {
@@ -430,7 +432,7 @@ describe("positions", () => {
       url: "/api/v1/positions?dust=true",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.data.length).toBe(1);
     expect(body.data[0].status).toBe("dust");
   });
@@ -441,7 +443,7 @@ describe("positions", () => {
       url: "/api/v1/positions?status=open",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.data.length).toBe(1);
     expect(body.data[0].status).toBe("open");
   });
@@ -452,7 +454,7 @@ describe("positions", () => {
       url: "/api/v1/positions/pos-1",
       headers: authHeaders(),
     });
-    expect(res.json().data.positionId).toBe("pos-1");
+    expect(json(res).data.positionId).toBe("pos-1");
   });
 
   it("GET /positions/:id returns 404 for unknown", async () => {
@@ -474,7 +476,7 @@ describe("orders", () => {
       url: "/api/v1/orders?limit=10",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.items.length).toBeGreaterThanOrEqual(1);
     // nextCursor is null when fewer results than limit
@@ -487,7 +489,7 @@ describe("orders", () => {
       url: "/api/v1/orders?status=open",
       headers: authHeaders(),
     });
-    const items = res.json().data.items;
+    const items = json(res).data.items;
     expect(items.length).toBe(1);
     expect(items[0].status).toBe("open");
   });
@@ -498,7 +500,7 @@ describe("orders", () => {
       url: "/api/v1/orders?family_id=fam-1",
       headers: authHeaders(),
     });
-    expect(res.json().data.items.length).toBe(2);
+    expect(json(res).data.items.length).toBe(2);
   });
 
   it("GET /orders/:id returns single order", async () => {
@@ -507,7 +509,7 @@ describe("orders", () => {
       url: "/api/v1/orders/ord-1",
       headers: authHeaders(),
     });
-    expect(res.json().data.orderId).toBe("ord-1");
+    expect(json(res).data.orderId).toBe("ord-1");
   });
 });
 
@@ -520,7 +522,7 @@ describe("fills", () => {
       url: "/api/v1/fills",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.items.length).toBeGreaterThanOrEqual(1);
   });
@@ -531,7 +533,7 @@ describe("fills", () => {
       url: "/api/v1/fills?family_id=fam-1",
       headers: authHeaders(),
     });
-    expect(res.json().data.items.length).toBe(1);
+    expect(json(res).data.items.length).toBe(1);
   });
 
   it("GET /fills?since= filters by date", async () => {
@@ -540,7 +542,7 @@ describe("fills", () => {
       url: "/api/v1/fills?since=2026-03-15T00:00:00Z",
       headers: authHeaders(),
     });
-    expect(res.json().data.items.length).toBe(0);
+    expect(json(res).data.items.length).toBe(0);
   });
 });
 
@@ -553,7 +555,7 @@ describe("market metadata enrichment", () => {
       url: "/api/v1/orders?status=open",
       headers: authHeaders(),
     });
-    const item = res.json().data.items[0];
+    const item = json(res).data.items[0];
     // tok-1 has a market row
     expect(item.slug).toBe("will-btc-hit-100k");
     expect(item.question).toBe("Will BTC hit 100k?");
@@ -567,7 +569,7 @@ describe("market metadata enrichment", () => {
       url: "/api/v1/orders/ord-1",
       headers: authHeaders(),
     });
-    const item = res.json().data;
+    const item = json(res).data;
     expect(item.slug).toBe("will-btc-hit-100k");
     expect(item.question).toBe("Will BTC hit 100k?");
   });
@@ -578,7 +580,7 @@ describe("market metadata enrichment", () => {
       url: "/api/v1/fills",
       headers: authHeaders(),
     });
-    const item = res.json().data.items.find((f: any) => f.tokenId === "tok-1");
+    const item = json(res).data.items.find((f: any) => f.tokenId === "tok-1");
     expect(item.slug).toBe("will-btc-hit-100k");
     expect(item.question).toBe("Will BTC hit 100k?");
     expect(item.outcome).toBe("Yes");
@@ -591,7 +593,7 @@ describe("market metadata enrichment", () => {
       url: "/api/v1/positions",
       headers: authHeaders(),
     });
-    const enriched = res.json().data.find((p: any) => p.tokenId === "tok-1");
+    const enriched = json(res).data.find((p: any) => p.tokenId === "tok-1");
     expect(enriched.slug).toBe("will-btc-hit-100k");
     expect(enriched.question).toBe("Will BTC hit 100k?");
     expect(enriched.outcome).toBe("Yes");
@@ -604,7 +606,7 @@ describe("market metadata enrichment", () => {
       url: "/api/v1/positions/pos-1",
       headers: authHeaders(),
     });
-    const item = res.json().data;
+    const item = json(res).data;
     expect(item.slug).toBe("will-btc-hit-100k");
   });
 
@@ -615,7 +617,7 @@ describe("market metadata enrichment", () => {
       headers: authHeaders(),
     });
     // tok-2 (pos-dust) has no market row
-    const dust = res.json().data.find((p: any) => p.tokenId === "tok-2");
+    const dust = json(res).data.find((p: any) => p.tokenId === "tok-2");
     expect(dust.slug).toBeNull();
     expect(dust.question).toBeNull();
     expect(dust.outcome).toBeNull();
@@ -632,7 +634,7 @@ describe("metrics", () => {
       url: "/api/v1/metrics",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.positions).toBeDefined();
     expect(body.data.orders).toBeDefined();
@@ -645,7 +647,7 @@ describe("metrics", () => {
       url: "/api/v1/metrics/families",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.data).toHaveLength(1);
     expect(body.data[0].familyId).toBe("fam-1");
   });
@@ -661,7 +663,7 @@ describe("operator actions", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: { reason: "test pause" },
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.status).toBe("enqueued");
 
@@ -680,7 +682,7 @@ describe("operator actions", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {},
     });
-    expect(res.json().ok).toBe(true);
+    expect(json(res).ok).toBe(true);
   });
 
   it("POST /actions/family/:id/quarantine validates family exists", async () => {
@@ -700,7 +702,7 @@ describe("operator actions", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: { reason: "risk concern" },
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
 
     const row = conn.db
@@ -717,7 +719,7 @@ describe("operator actions", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {},
     });
-    expect(res.json().ok).toBe(true);
+    expect(json(res).ok).toBe(true);
   });
 
   it("POST /actions/family/:id/activate works", async () => {
@@ -727,7 +729,7 @@ describe("operator actions", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {},
     });
-    expect(res.json().ok).toBe(true);
+    expect(json(res).ok).toBe(true);
   });
 });
 
@@ -736,7 +738,7 @@ describe("operator actions", () => {
 describe("response envelope", () => {
   it("success responses have ok/data/error/ts fields", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/health" });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data).toBeDefined();
     expect(body.error).toBeNull();
@@ -749,7 +751,7 @@ describe("response envelope", () => {
       url: "/api/v1/positions/nonexistent",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(false);
     expect(body.error).toBeDefined();
     expect(typeof body.error.code).toBe("string");
@@ -771,7 +773,7 @@ describe("GET /risk-events", () => {
       url: "/api/v1/risk-events",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.items.length).toBeGreaterThanOrEqual(1);
 
@@ -789,7 +791,7 @@ describe("GET /risk-events", () => {
       url: "/api/v1/risk-events?limit=1",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.data.items).toHaveLength(1);
     if (body.data.nextCursor) {
       const res2 = await app.inject({
@@ -797,7 +799,7 @@ describe("GET /risk-events", () => {
         url: `/api/v1/risk-events?cursor=${body.data.nextCursor}`,
         headers: authHeaders(),
       });
-      expect(res2.json().ok).toBe(true);
+      expect(json(res2).ok).toBe(true);
     }
   });
 
@@ -807,7 +809,7 @@ describe("GET /risk-events", () => {
       url: "/api/v1/risk-events?family_id=fam-1",
       headers: authHeaders(),
     });
-    const items = res.json().data.items;
+    const items = json(res).data.items;
     for (const item of items) {
       expect(item.familyId).toBe("fam-1");
     }
@@ -819,7 +821,7 @@ describe("GET /risk-events", () => {
       url: "/api/v1/risk-events?event_type=family_quarantined",
       headers: authHeaders(),
     });
-    const items = res.json().data.items;
+    const items = json(res).data.items;
     for (const item of items) {
       expect(item.eventType).toBe("family_quarantined");
     }
@@ -836,7 +838,7 @@ describe("GET /risk-events", () => {
       url: "/api/v1/risk-events",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.data.items[0].severity).toBe("info");
     expect(body.data.items[0].summary).toContain("max_dust_positions");
   });
@@ -852,7 +854,7 @@ describe("GET /risk-events", () => {
       url: "/api/v1/risk-events",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.data.items[0].severity).toBe("warning");
     expect(body.data.items[0].summary).toContain("reduce-only");
   });
@@ -868,7 +870,7 @@ describe("GET /risk-events", () => {
       url: "/api/v1/risk-events",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.data.items[0].severity).toBe("info");
     expect(body.data.items[0].summary).toContain("activated");
   });
@@ -884,7 +886,7 @@ describe("GET /risk-events", () => {
       url: "/api/v1/risk-events",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     const drift = body.data.items.find((e: any) => e.eventType === "reconciliation_drift");
     expect(drift.summary).toContain("phantom order detected");
     expect(drift.summary).not.toBe("Reconciliation drift: detected"); // regression: p.detail vs p.details
@@ -900,7 +902,7 @@ describe("GET /metrics/pnl-series", () => {
       url: "/api/v1/metrics/pnl-series",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.items).toEqual([]);
   });
@@ -925,7 +927,7 @@ describe("GET /metrics/pnl-series", () => {
       url: "/api/v1/metrics/pnl-series?days=14",
       headers: authHeaders(),
     });
-    const body = res.json();
+    const body = json(res);
     expect(body.ok).toBe(true);
 
     const items = body.data.items;
@@ -942,6 +944,6 @@ describe("GET /metrics/pnl-series", () => {
       url: "/api/v1/metrics/pnl-series?days=1",
       headers: authHeaders(),
     });
-    expect(res.json().ok).toBe(true);
+    expect(json(res).ok).toBe(true);
   });
 });

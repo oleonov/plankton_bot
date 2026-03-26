@@ -57,7 +57,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
       }}
     >
       <form
-        onSubmit={handleSubmit}
+        onSubmit={(e) => { void handleSubmit(e); }}
         style={{
           background: "var(--bg-nav)",
           padding: 32,

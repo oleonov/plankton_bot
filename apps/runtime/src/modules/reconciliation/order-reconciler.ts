@@ -12,8 +12,6 @@
 import type {
   ExchangeGateway,
   OrderRepository,
-  ExchangeOrder,
-  Order,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 

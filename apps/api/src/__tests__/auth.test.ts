@@ -4,6 +4,16 @@ import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { buildServer } from "../server.js";
 
+interface ApiResponse {
+  ok: boolean;
+  data: Record<string, unknown>;
+  error: { code: string; message: string };
+}
+
+function json(res: { json: () => unknown }): ApiResponse {
+  return res.json() as ApiResponse;
+}
+
 const TEST_USERNAME = "admin";
 const TEST_PASSWORD = "test-secret-password";
 const TEST_API_KEY = "test-key-abc123";
@@ -53,7 +63,7 @@ describe("Session Auth", () => {
       payload: { username: TEST_USERNAME, password: TEST_PASSWORD },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().ok).toBe(true);
+    expect(json(res).ok).toBe(true);
     expect(res.headers["set-cookie"]).toBeDefined();
     const cookie = res.headers["set-cookie"];
     expect(typeof cookie === "string" ? cookie : "").toContain("plankton_session");
@@ -68,7 +78,7 @@ describe("Session Auth", () => {
       payload: { username: TEST_USERNAME, password: "wrong" },
     });
     expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe("INVALID_CREDENTIALS");
+    expect(json(res).error.code).toBe("INVALID_CREDENTIALS");
     await app.close();
   });
 
@@ -80,7 +90,7 @@ describe("Session Auth", () => {
       payload: { username: "hacker", password: TEST_PASSWORD },
     });
     expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe("INVALID_CREDENTIALS");
+    expect(json(res).error.code).toBe("INVALID_CREDENTIALS");
     await app.close();
   });
 
@@ -92,7 +102,7 @@ describe("Session Auth", () => {
       payload: { password: TEST_PASSWORD },
     });
     expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe("INVALID_CREDENTIALS");
+    expect(json(res).error.code).toBe("INVALID_CREDENTIALS");
     await app.close();
   });
 
@@ -107,7 +117,7 @@ describe("Session Auth", () => {
       payload: { password: TEST_PASSWORD },
     });
     expect(res.statusCode).toBe(200);
-    expect(res.json().ok).toBe(true);
+    expect(json(res).ok).toBe(true);
     await app.close();
   });
 
@@ -115,7 +125,7 @@ describe("Session Auth", () => {
     const app = await buildServer({ config: testConfig(), conn });
     const res = await app.inject({ method: "GET", url: "/api/v1/auth/config" });
     expect(res.statusCode).toBe(200);
-    expect(res.json().data.usernameRequired).toBe(true);
+    expect(json(res).data.usernameRequired).toBe(true);
     await app.close();
   });
 
@@ -126,7 +136,7 @@ describe("Session Auth", () => {
     });
     const res = await app.inject({ method: "GET", url: "/api/v1/auth/config" });
     expect(res.statusCode).toBe(200);
-    expect(res.json().data.usernameRequired).toBe(false);
+    expect(json(res).data.usernameRequired).toBe(false);
     await app.close();
   });
 
@@ -151,7 +161,7 @@ describe("Session Auth", () => {
       payload: { password: "any" },
     });
     expect(res.statusCode).toBe(501);
-    expect(res.json().error.code).toBe("LOGIN_NOT_CONFIGURED");
+    expect(json(res).error.code).toBe("LOGIN_NOT_CONFIGURED");
     await app.close();
   });
 
@@ -209,7 +219,7 @@ describe("Session Auth", () => {
       headers: { cookie },
     });
     expect(meRes.statusCode).toBe(200);
-    expect(meRes.json().data.authenticated).toBe(true);
+    expect(json(meRes).data?.authenticated).toBe(true);
     await app.close();
   });
 
@@ -268,6 +278,16 @@ describe("Session Auth", () => {
     await app.close();
   });
 
+  it("HEAD on health endpoint works without auth (Docker healthcheck)", async () => {
+    const app = await buildServer({ config: testConfig(), conn });
+    const res = await app.inject({
+      method: "HEAD",
+      url: "/api/v1/health",
+    });
+    expect(res.statusCode).toBe(200);
+    await app.close();
+  });
+
   it("rate-limits login to 5 attempts per minute", async () => {
     const app = await buildServer({ config: testConfig(), conn });
 
@@ -302,7 +322,7 @@ describe("Session Auth", () => {
       url: "/api/v1/status",
     });
     expect(res.statusCode).toBe(401);
-    expect(res.json().error.code).toBe("AUTH_NOT_CONFIGURED");
+    expect(json(res).error.code).toBe("AUTH_NOT_CONFIGURED");
     await app.close();
   });
 });

@@ -26,7 +26,6 @@ import type {
   OrderRepository,
   FillRepository,
   RuntimeEventMap,
-  NormalizedMarket,
   FamilyId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";

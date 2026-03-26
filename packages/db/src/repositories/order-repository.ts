@@ -7,8 +7,6 @@ import type {
   OrderStatus,
   OrderSide,
   OrderType,
-  FamilyId,
-  BotRunId,
 } from "@plankton/domain";
 import {
   createOrderId,

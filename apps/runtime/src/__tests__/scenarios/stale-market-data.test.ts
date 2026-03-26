@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import type { MarketDataGateway, ClobMarket, OrderBookSnapshot, TokenId, EventBus, Market } from "@plankton/domain";
+import type { MarketDataGateway, ClobMarket, OrderBookSnapshot, TokenId, Market } from "@plankton/domain";
 import { createTokenId, createFamilyId } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { MarketDataModule } from "../../modules/market-data/market-data-module.js";

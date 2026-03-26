@@ -9,12 +9,10 @@ import type {
   MarketRepository,
   MarketResolutionRepository,
   OrderRepository,
-  MarketResolution,
   FamilyRulesProvider,
   FamilyRuleBundle,
   FamilyId,
   TokenId,
-  PositionId,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { ResolutionModule } from "../modules/resolution/resolution-module.js";

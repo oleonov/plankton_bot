@@ -2,9 +2,6 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createTokenId, createFamilyId } from "@plankton/domain";
 import type {
   MarketDataGateway,
-  ClobMarket,
-  OrderBookSnapshot,
-  TokenId,
   NormalizedMarket,
   RuntimeEventMap,
   MarketRepository,

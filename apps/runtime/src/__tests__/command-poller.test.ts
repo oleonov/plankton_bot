@@ -221,7 +221,7 @@ describe("CommandPoller", () => {
     const poller = createPoller();
 
     // Fire two polls concurrently — second should be skipped
-    const [r1, r2] = await Promise.all([poller.poll(), poller.poll()]);
+    const [_r1, _r2] = await Promise.all([poller.poll(), poller.poll()]);
 
     // Only one audit action should exist (not two)
     const actions = actionRepo.findRecent(10);

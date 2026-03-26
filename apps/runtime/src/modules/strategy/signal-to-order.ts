@@ -18,12 +18,8 @@ import type {
   NormalizedMarket,
   RuntimeEventMap,
   PlaceOrderCommand,
-  Signal,
 } from "@plankton/domain";
-import {
-  createCommandId,
-  type TokenId,
-} from "@plankton/domain";
+import { createCommandId } from "@plankton/domain";
 import { buildClientOrderId } from "@plankton/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";

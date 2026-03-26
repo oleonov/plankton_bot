@@ -1,6 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ExecutionQueue } from "../modules/execution/execution-queue.js";
-import { createTokenId, createCommandId, createFamilyId, createOrderId } from "@plankton/domain";
+import { createTokenId, createCommandId, createFamilyId } from "@plankton/domain";
 import type { PlaceOrderCommand, CancelOrderCommand, ClientOrderId } from "@plankton/domain";
 
 const silentLog = {
@@ -124,7 +124,7 @@ describe("ExecutionQueue", () => {
     expect(execute).toHaveBeenCalledTimes(3);
 
     // b1 should start concurrently with a1 (not blocked behind a2 waiting for a1)
-    const a1Start = callOrder.indexOf("start-a1");
+    const _a1Start = callOrder.indexOf("start-a1");
     const b1Start = callOrder.indexOf("start-b1");
     const a1End = callOrder.indexOf("end-a1");
 

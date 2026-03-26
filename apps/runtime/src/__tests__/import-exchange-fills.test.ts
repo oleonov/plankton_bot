@@ -1,12 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { importExchangeFills } from "../modules/reconciliation/fill-reconciler.js";
 import {
-  createFillId,
   createOrderId,
   createTokenId,
   createFamilyId,
 } from "@plankton/domain";
-import type { ExchangeFill, FillRepository, OrderRepository, EventBus } from "@plankton/domain";
+import type { ExchangeFill, FillRepository, OrderRepository } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 
 function createMockFillRepo(): FillRepository {

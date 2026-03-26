@@ -225,7 +225,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
       const timer = setTimeout(() => reject(new Error(`request timed out after ${ms}ms`)), ms);
       promise.then(
         (val) => { clearTimeout(timer); resolve(val); },
-        (err) => { clearTimeout(timer); reject(err); },
+        (err) => { clearTimeout(timer); reject(err instanceof Error ? err : new Error(String(err))); },
       );
     });
   }

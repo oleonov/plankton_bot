@@ -20,7 +20,6 @@ import type {
   FillId,
   TokenId,
   FamilyId,
-  PositionId,
 } from "@plankton/domain";
 import { createPositionId, createLotId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";

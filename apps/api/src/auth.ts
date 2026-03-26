@@ -41,10 +41,12 @@ export function createAuthHook(config: AuthConfig) {
     if (!request.url.startsWith("/api/")) return;
 
     // Check bypass list using registered route pattern + method
+    // Fastify auto-generates HEAD handlers for GET routes, so treat HEAD as GET
     const routeUrl = request.routeOptions?.url;
+    const method = request.method === "HEAD" ? "GET" : request.method;
     if (
       routeUrl &&
-      BYPASS_ROUTES.some((r) => r.method === request.method && r.url === routeUrl)
+      BYPASS_ROUTES.some((r) => r.method === method && r.url === routeUrl)
     ) {
       return;
     }

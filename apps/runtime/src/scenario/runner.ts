@@ -167,8 +167,9 @@ async function executeScenario(
   ).run(botRunId, "simulation", new Date().toISOString());
 
   // 7. Create modules (long intervals — we bypass timers)
-  let supervisor: Supervisor;
-  const runtimeControl = { isPaused: () => supervisor.isPaused() };
+  // supervisorRef is set before any closure that uses it is actually called
+  const supervisorRef = { current: null as unknown as Supervisor };
+  const runtimeControl = { isPaused: () => supervisorRef.current.isPaused() };
 
   const commandPoller = new CommandPoller({
     commandRepo: repos.operatorCommand,
@@ -176,8 +177,8 @@ async function executeScenario(
     familyStateRepo: repos.familyState,
     bus,
     log,
-    getPaused: () => supervisor.isPaused(),
-    setPaused: (p) => supervisor.setPaused(p),
+    getPaused: () => supervisorRef.current.isPaused(),
+    setPaused: (p) => supervisorRef.current.setPaused(p),
     pollIntervalMs: 60_000, // Long — we poll manually
   });
 
@@ -241,7 +242,7 @@ async function executeScenario(
   });
 
   // 8. Create supervisor and start
-  supervisor = new Supervisor({
+  supervisorRef.current = new Supervisor({
     modules: [
       ["command-poller", commandPoller],
       ["market-data", marketDataModule],
@@ -254,6 +255,7 @@ async function executeScenario(
     bus,
     log,
   });
+  const supervisor = supervisorRef.current;
 
   await supervisor.start();
 

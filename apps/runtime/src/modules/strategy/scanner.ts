@@ -324,7 +324,7 @@ export function scan(
     );
 
     // Fetch family state once (used for cooldown + evidence sizing)
-    const familyState = deps.familyStateRepo.get(market.familyId!);
+    const familyState = deps.familyStateRepo.get(market.familyId);
     const sizeMult = evidenceSizeMultiplier(bundle.evidence, familyState);
 
     // Entry cooldown check (per-family) — skip entry/scale-in if cooldown not elapsed

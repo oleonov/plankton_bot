@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { FillRepository, Fill } from "@plankton/domain";
-import type { OrderId, TokenId, FillId, OrderSide, FamilyId } from "@plankton/domain";
+import type { OrderId, TokenId, FillId, OrderSide } from "@plankton/domain";
 import {
   createFillId,
   createOrderId,
