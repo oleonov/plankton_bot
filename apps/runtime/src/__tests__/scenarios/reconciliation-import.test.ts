@@ -30,8 +30,8 @@ describe("Scenario: reconciliation imports missing fill", () => {
         const now = new Date().toISOString();
         const tokenId = market.tokens[0]!.tokenId;
 
-        // Place order through gateway (creates sim-ord-1 + auto-fill in immediate mode)
-        await ctx.exchangeGateway.placeOrder({
+        // Place order through gateway (auto-fill in immediate mode)
+        const placeResult = await ctx.exchangeGateway.placeOrder({
           clientOrderId: "co-recon-1",
           tokenId,
           side: "buy",
@@ -48,7 +48,7 @@ describe("Scenario: reconciliation imports missing fill", () => {
             "INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
-            "sim-ord-1",
+            placeResult.orderId,
             "co-recon-1",
             tokenId,
             "fam-recon-test",

@@ -19,6 +19,7 @@ export interface SimulationExchangeConfig {
 }
 
 export class SimulationExchangeGateway implements ExchangeGateway {
+  private readonly sessionId = Date.now();
   private orderCounter = 0;
   private fillCounter = 0;
   private readonly orders = new Map<string, ExchangeOrder>();
@@ -64,7 +65,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     }
 
     this.orderCounter++;
-    const orderId = `sim-ord-${this.orderCounter}`;
+    const orderId = `sim-ord-${this.sessionId}-${this.orderCounter}`;
     const now = Date.now();
 
     this.clientOrderIds.add(params.clientOrderId);
@@ -72,7 +73,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     if (this.fillMode === "immediate") {
       const fee = params.size * params.price * this.feeRate;
       this.fillCounter++;
-      const fillId = `sim-fill-${this.fillCounter}`;
+      const fillId = `sim-fill-${this.sessionId}-${this.fillCounter}`;
 
       const fill: ExchangeFill = {
         fillId,
@@ -199,7 +200,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     const size = Math.min(fillSize, order.sizeRemaining);
     const fee = size * order.price * this.feeRate;
     this.fillCounter++;
-    const fillId = `sim-fill-${this.fillCounter}`;
+    const fillId = `sim-fill-${this.sessionId}-${this.fillCounter}`;
 
     const fill: ExchangeFill = {
       fillId,
