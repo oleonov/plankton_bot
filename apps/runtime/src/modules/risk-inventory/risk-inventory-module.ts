@@ -109,6 +109,7 @@ export class RiskInventoryModule implements RuntimeModule {
       deps.positionRepo,
       deps.inventoryLotRepo,
       this.log,
+      deps.rulesProvider,
     );
   }
 

@@ -47,8 +47,12 @@ const EVENT_RULES: Record<string, EventRule> = {
   },
   signal_rejected: {
     severity: "info",
-    summary: (fid, p) =>
-      `${fid ?? "unknown"}: ${p.reasonCode ?? "rejected"} — ${p.rawReason ?? ""}`,
+    summary: (fid, p) => {
+      // rawReason already contains the human-readable detail (e.g., "dust positions 6 >= max 3")
+      // Prefer it over the normalized reasonCode when available
+      const reason = (p.rawReason as string) || (p.reasonCode as string) || "rejected";
+      return `${fid ?? "unknown"}: ${reason}`;
+    },
   },
   family_reduce_only: {
     severity: "warning",

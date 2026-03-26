@@ -82,6 +82,8 @@ function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
     lastEntryTs: null,
     lastExitTs: null,
     quarantineReason: null,
+    effectiveMode: null,
+    derivedModeReason: null,
     updatedAt: new Date().toISOString(),
     ...overrides,
   };
@@ -606,6 +608,32 @@ describe("StrategyModule", () => {
       // Should produce scale-in, not probe-entry
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(0);
+    });
+  });
+
+  // ─── Scanner blocker metadata ─────────────────────────────
+
+  describe("scanner blocker metadata", () => {
+    it("scan returns resolution buffer blocker count", async () => {
+      await mod.start();
+      const ticks: any[] = [];
+      bus.subscribe("ScanTickCompleted", async (p) => {
+        ticks.push(p);
+      });
+
+      // Market with endDate in the past (within resolution buffer)
+      const pastEnd = new Date(Date.now() - 60_000).toISOString();
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03, endDate: pastEnd })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      expect(ticks).toHaveLength(1);
+      expect(ticks[0].blockedByResolutionBuffer).toBeGreaterThan(0);
     });
   });
 

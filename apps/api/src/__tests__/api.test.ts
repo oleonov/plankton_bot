@@ -52,6 +52,9 @@ beforeAll(async () => {
       active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
     VALUES ('fam-1', 'active', 50.0, 2, 0, 3, 10.0, 5.0, '2026-03-14T00:00:00Z');
 
+    INSERT INTO family_rules (family_id, max_open_value_usdc, max_active_markets, max_dust_positions)
+    VALUES ('fam-1', 50, 5, 3);
+
     INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
       current_value_usdc, realized_pnl, status, opened_at, updated_at)
     VALUES ('pos-1', 'tok-1', 'fam-1', 'buy', 100, 0.5, 50, 60, 0, 'open', '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z');
@@ -76,13 +79,16 @@ beforeAll(async () => {
     INSERT INTO bot_runs (run_id, mode, started_at)
     VALUES ('run-1', 'simulation', '2026-03-14T00:00:00Z');
 
-    INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, created_at, updated_at)
-    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 1, 0.01, 0, '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
+    INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
+    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
 
     INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
     VALUES ('market_data_source', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
     INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
     VALUES ('execution_mode', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
+
+    INSERT INTO market_resolutions (condition_id, resolution, resolved_at, detected_at, source, status)
+    VALUES ('cond-1', 'YES', '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z', 'gamma-api', 'detected');
   `);
 
   app = await buildServer({ config: testConfig(), conn });
@@ -344,6 +350,29 @@ describe("GET /status", () => {
     });
     expect(json(res).data.marketDataPoll).toBeUndefined();
   });
+
+  it("includes tradingState in status response", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/status",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    expect(body.data.tradingState).toBeDefined();
+    // No signal_activity metric exists in test DB, so state should be NO_SIGNALS or PAUSED
+    expect(["NO_SIGNALS", "PAUSED"]).toContain(body.data.tradingState);
+  });
+
+  it("returns ACTIVELY_TRADING when entry signals approved", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('signal_activity', 1, '{"produced":10,"approved":3,"rejected":7,"entryApproved":2,"exitApproved":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
+    `);
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
+    expect(json(res).data.tradingState).toBe("ACTIVELY_TRADING");
+    // Clean up
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'signal_activity'`);
+  });
 });
 
 // ─── Families ───────────────────────────────────────────────────────
@@ -361,6 +390,20 @@ describe("families", () => {
     expect(body.data[0].familyId).toBe("fam-1");
     expect(body.data[0].state).toBeDefined();
     expect(body.data[0].state.runtimeMode).toBe("active");
+  });
+
+  it("GET /families includes caps from family_rules", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/families",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    expect(body.data[0].caps).toEqual({
+      maxOpenValueUsdc: 50,
+      maxActiveMarkets: 5,
+      maxDustPositions: 3,
+    });
   });
 
   it("GET /families/:id returns detail", async () => {
@@ -467,6 +510,23 @@ describe("positions", () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  it("GET /positions enriches with resolution status", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/positions",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    const pos = body.data.find((p: any) => p.tokenId === "tok-1");
+    expect(pos.resolution).toBe("YES");
+    expect(pos.resolutionStatus).toBe("detected");
+
+    // tok-2 has no market row, so no resolution info
+    const dust = body.data.find((p: any) => p.tokenId === "tok-2");
+    expect(dust.resolution).toBeNull();
+    expect(dust.resolutionStatus).toBeNull();
+  });
 });
 
 // ─── Orders with filters ────────────────────────────────────────────
@@ -563,6 +623,7 @@ describe("market metadata enrichment", () => {
     expect(item.question).toBe("Will BTC hit 100k?");
     expect(item.outcome).toBe("Yes");
     expect(item.conditionId).toBe("cond-1");
+    expect(item.endDate).toBe("2026-04-15T00:00:00Z");
   });
 
   it("GET /orders/:id enriches single order", async () => {
@@ -587,6 +648,7 @@ describe("market metadata enrichment", () => {
     expect(item.question).toBe("Will BTC hit 100k?");
     expect(item.outcome).toBe("Yes");
     expect(item.conditionId).toBe("cond-1");
+    expect(item.endDate).toBe("2026-04-15T00:00:00Z");
   });
 
   it("GET /positions enriches items with market metadata", async () => {
@@ -600,6 +662,7 @@ describe("market metadata enrichment", () => {
     expect(enriched.question).toBe("Will BTC hit 100k?");
     expect(enriched.outcome).toBe("Yes");
     expect(enriched.conditionId).toBe("cond-1");
+    expect(enriched.endDate).toBe("2026-04-15T00:00:00Z");
   });
 
   it("GET /positions/:id enriches single position", async () => {
@@ -624,6 +687,7 @@ describe("market metadata enrichment", () => {
     expect(dust.question).toBeNull();
     expect(dust.outcome).toBeNull();
     expect(dust.conditionId).toBeNull();
+    expect(dust.endDate).toBeNull();
   });
 });
 
@@ -842,7 +906,7 @@ describe("GET /risk-events", () => {
     });
     const body = json(res);
     expect(body.data.items[0].severity).toBe("info");
-    expect(body.data.items[0].summary).toContain("max_dust_positions");
+    expect(body.data.items[0].summary).toContain("dust 3 >= max 2");
   });
 
   it("normalizes family_reduce_only events", async () => {
@@ -909,6 +973,36 @@ describe("GET /metrics/pnl-series", () => {
     expect(body.data.items).toEqual([]);
   });
 
+  it("prepends $0 baseline when no pre-window PnL exists", async () => {
+    conn.db.exec(`
+      DELETE FROM pnl_ledger;
+      DELETE FROM fills WHERE fill_id LIKE 'f-%';
+      INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at, reconciled)
+      VALUES ('f-baseline', 'ord-1', 'tok-1', 'fam-1', 'sell', 0.6, 10, 6, 0.01, '${new Date().toISOString()}', 0);
+      INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at)
+      VALUES ('f-baseline', 'pos-1', 'fam-1', 5.0, '${new Date().toISOString()}')
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/pnl-series?days=14",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    expect(body.ok).toBe(true);
+
+    const items = body.data.items;
+    expect(items.length).toBe(2);
+    expect(items[0].realizedPnl).toBe(0);
+    expect(items[1].realizedPnl).toBeCloseTo(5.0);
+    const dataDate = new Date(items[1].date);
+    const baselineDate = new Date(items[0].date);
+    expect(dataDate.getTime() - baselineDate.getTime()).toBe(86400000);
+
+    conn.db.exec(`DELETE FROM pnl_ledger WHERE fill_id = 'f-baseline'`);
+    conn.db.exec(`DELETE FROM fills WHERE fill_id = 'f-baseline'`);
+  });
+
   it("returns cumulative realized PnL by day", async () => {
     conn.db.exec(`
       INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at, reconciled)
@@ -933,11 +1027,13 @@ describe("GET /metrics/pnl-series", () => {
     expect(body.ok).toBe(true);
 
     const items = body.data.items;
-    expect(items.length).toBe(2);
-    expect(items[0].date).toBe("2026-03-12");
-    expect(items[0].realizedPnl).toBeCloseTo(7.3); // 10.5 + (-3.2) cumulative
-    expect(items[1].date).toBe("2026-03-13");
-    expect(items[1].realizedPnl).toBeCloseTo(12.3); // 7.3 + 5.0 cumulative
+    // 3 items: baseline $0 point prepended + 2 data days
+    expect(items.length).toBe(3);
+    expect(items[0].realizedPnl).toBe(0); // baseline
+    expect(items[1].date).toBe("2026-03-12");
+    expect(items[1].realizedPnl).toBeCloseTo(7.3); // 10.5 + (-3.2) cumulative
+    expect(items[2].date).toBe("2026-03-13");
+    expect(items[2].realizedPnl).toBeCloseTo(12.3); // 7.3 + 5.0 cumulative
   });
 
   it("respects days parameter", async () => {

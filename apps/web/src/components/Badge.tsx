@@ -16,6 +16,8 @@ const STATUS_STYLES: Record<string, string> = {
   cancelled: "badge-red",
   closed: "badge-red",
   dust: "badge-orange",
+  resolving: "badge-orange",
+  settled: "badge-green",
 };
 
 const SEVERITY_STYLES: Record<string, string> = {

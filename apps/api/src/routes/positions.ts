@@ -2,13 +2,18 @@ import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { ok, ApiError } from "../errors.js";
 import type { MarketMeta } from "../enrich-market.js";
-import { buildMarketMetaMap, getMetaOrEmpty } from "../enrich-market.js";
+import { buildMarketMetaMap, getMetaOrEmpty, buildResolutionMap } from "../enrich-market.js";
+import type { ResolutionInfo } from "../enrich-market.js";
 
 interface PositionOpts {
   db: Database.Database;
 }
 
-function toDto(row: Record<string, unknown>, meta: MarketMeta) {
+function toDto(
+  row: Record<string, unknown>,
+  meta: MarketMeta,
+  resInfo?: ResolutionInfo,
+) {
   return {
     positionId: row.position_id,
     tokenId: row.token_id,
@@ -28,6 +33,9 @@ function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     question: meta.question,
     outcome: meta.outcome,
     conditionId: meta.conditionId,
+    endDate: meta.endDate,
+    resolution: resInfo?.resolution ?? null,
+    resolutionStatus: resInfo?.resolutionStatus ?? null,
   };
 }
 
@@ -73,8 +81,16 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(opts.db, tokenIds);
+    const conditionIds = [...metaMap.values()].map((m) => m.conditionId).filter(Boolean) as string[];
+    const resMap = buildResolutionMap(opts.db, conditionIds);
 
-    return ok(rows.map((r) => toDto(r, getMetaOrEmpty(metaMap, r.token_id as string))));
+    return ok(
+      rows.map((r) => {
+        const meta = getMetaOrEmpty(metaMap, r.token_id as string);
+        const res = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
+        return toDto(r, meta, res);
+      }),
+    );
   });
 
   app.get<{ Params: { positionId: string } }>("/positions/:positionId", async (request) => {
@@ -86,6 +102,10 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
         "POSITION_NOT_FOUND",
       );
     const metaMap = buildMarketMetaMap(opts.db, [row.token_id as string]);
-    return ok(toDto(row, getMetaOrEmpty(metaMap, row.token_id as string)));
+    const meta = getMetaOrEmpty(metaMap, row.token_id as string);
+    const conditionIds = meta.conditionId ? [meta.conditionId] : [];
+    const resMap = buildResolutionMap(opts.db, conditionIds);
+    const resInfo = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
+    return ok(toDto(row, meta, resInfo));
   });
 };

@@ -28,6 +28,7 @@ function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     question: meta.question,
     outcome: meta.outcome,
     conditionId: meta.conditionId,
+    endDate: meta.endDate,
   };
 }
 

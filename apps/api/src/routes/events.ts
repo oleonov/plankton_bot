@@ -201,6 +201,8 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
               openValueUsdc: row.open_value_usdc,
               openPositionCount: row.open_position_count,
               quarantineReason: row.quarantine_reason,
+              effectiveMode: row.effective_mode ?? null,
+              derivedModeReason: row.derived_mode_reason ?? null,
               updatedAt: row.updated_at,
             });
           }

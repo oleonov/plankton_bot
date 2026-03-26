@@ -174,6 +174,15 @@ export const SignalReason = {
 } as const;
 export type SignalReason = (typeof SignalReason)[keyof typeof SignalReason];
 
+/** Signal reasons that represent entries (new exposure). */
+export const ENTRY_REASONS: ReadonlySet<string> = new Set([
+  SignalReason.ProbeEntry,
+  SignalReason.ConfirmScale,
+  SignalReason.ScaleIn,
+  SignalReason.HeavyScale,
+  SignalReason.TwoSidedEntry,
+]);
+
 // ─── Operator ─────────────────────────────────────────────────────────────────
 
 export const OperatorActionType = {

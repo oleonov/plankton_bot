@@ -109,6 +109,8 @@ async function executeScenario(
         lastEntryTs: null,
         lastExitTs: null,
         quarantineReason: null,
+        effectiveMode: null,
+        derivedModeReason: null,
         updatedAt: new Date().toISOString(),
       };
       repos.familyState.save(baseline);

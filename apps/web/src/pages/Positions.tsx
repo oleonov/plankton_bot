@@ -2,6 +2,16 @@ import { useState } from "react";
 import { usePositions, useFamilies } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
+import { formatTimeLeft } from "../utils/format.ts";
+
+function formatAge(openedAt: string): string {
+  const ms = Date.now() - new Date(openedAt).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "\u2014";
+  const hours = ms / 3_600_000;
+  if (hours < 1) return `${Math.round(ms / 60_000)}m`;
+  if (hours < 24) return `${Math.round(hours)}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
 
 export function Positions() {
   const [familyId, setFamilyId] = useState("");
@@ -65,38 +75,54 @@ export function Positions() {
               <th>Value</th>
               <th>PnL</th>
               <th>Status</th>
+              <th>Age</th>
+              <th>Ends</th>
+              <th>Resolution</th>
             </tr>
           </thead>
           <tbody>
-            {positions?.map((p) => (
-              <tr
-                key={p.positionId}
-                style={p.status === "dust" ? { background: "rgba(255,152,0,0.06)" } : undefined}
-              >
-                <td style={{ color: "var(--blue)", fontSize: 11 }}>{p.positionId.slice(0, 12)}</td>
-                <td>
-                  <MarketLink
-                    slug={p.slug}
-                    eventSlug={p.eventSlug}
-                    question={p.question}
-                    outcome={p.outcome}
-                  />
-                </td>
-                <td>{p.familyId.slice(0, 12)}</td>
-                <td>{p.size.toFixed(2)}</td>
-                <td>${p.avgEntryPrice.toFixed(4)}</td>
-                <td>${p.costBasisUsdc.toFixed(2)}</td>
-                <td>
-                  {p.currentValueUsdc != null ? `$${p.currentValueUsdc.toFixed(2)}` : "\u2014"}
-                </td>
-                <td style={{ color: p.realizedPnl >= 0 ? "var(--green)" : "var(--red)" }}>
-                  {p.realizedPnl >= 0 ? "+" : ""}${p.realizedPnl.toFixed(2)}
-                </td>
-                <td>
-                  <Badge value={p.status} />
-                </td>
-              </tr>
-            ))}
+            {positions?.map((p) => {
+              const ends = formatTimeLeft(p.endDate);
+              return (
+                <tr
+                  key={p.positionId}
+                  style={p.status === "dust" ? { background: "rgba(255,152,0,0.06)" } : undefined}
+                >
+                  <td style={{ color: "var(--blue)", fontSize: 11 }}>
+                    {p.positionId.slice(0, 12)}
+                  </td>
+                  <td>
+                    <MarketLink
+                      slug={p.slug}
+                      eventSlug={p.eventSlug}
+                      question={p.question}
+                      outcome={p.outcome}
+                    />
+                  </td>
+                  <td>{p.familyId.slice(0, 12)}</td>
+                  <td>{p.size.toFixed(2)}</td>
+                  <td>${p.avgEntryPrice.toFixed(4)}</td>
+                  <td>${p.costBasisUsdc.toFixed(2)}</td>
+                  <td>
+                    {p.currentValueUsdc != null ? `$${p.currentValueUsdc.toFixed(2)}` : "\u2014"}
+                  </td>
+                  <td style={{ color: p.realizedPnl >= 0 ? "var(--green)" : "var(--red)" }}>
+                    {p.realizedPnl >= 0 ? "+" : ""}${p.realizedPnl.toFixed(2)}
+                  </td>
+                  <td>
+                    <Badge value={p.status} />
+                  </td>
+                  <td style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                    {formatAge(p.openedAt)}
+                  </td>
+                  <td style={{ color: ends.color, fontSize: 12 }}>{ends.text}</td>
+                  <td>
+                    {p.resolutionStatus === "detected" && <Badge value="resolving" />}
+                    {p.resolutionStatus === "settled" && <Badge value="settled" />}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       )}

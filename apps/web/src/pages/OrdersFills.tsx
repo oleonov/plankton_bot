@@ -3,6 +3,7 @@ import { useOrders, useFills, useFamilies } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
+import { formatTimeLeft } from "../utils/format.ts";
 
 export function OrdersFills() {
   const [tab, setTab] = useState<"orders" | "fills">("orders");
@@ -87,40 +88,47 @@ export function OrdersFills() {
                 <th>Price</th>
                 <th>Size</th>
                 <th>Status</th>
+                <th>Ends</th>
                 <th>Updated</th>
               </tr>
             </thead>
             <tbody>
-              {orders.data?.items.map((o) => (
-                <tr key={o.orderId}>
-                  <td style={{ fontSize: 11, color: "var(--blue)" }}>{o.orderId.slice(0, 12)}</td>
-                  <td>
-                    <MarketLink
-                      slug={o.slug}
-                      eventSlug={o.eventSlug}
-                      question={o.question}
-                      outcome={o.outcome}
-                    />
-                  </td>
-                  <td>{o.familyId.slice(0, 12)}</td>
-                  <td
-                    style={{
-                      color: o.side === "buy" ? "var(--green)" : "var(--red)",
-                      fontWeight: 600,
-                    }}
-                  >
-                    {o.side.toUpperCase()}
-                  </td>
-                  <td>${o.price.toFixed(4)}</td>
-                  <td>{o.size.toFixed(2)}</td>
-                  <td>
-                    <Badge value={o.status} />
-                  </td>
-                  <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                    {new Date(o.updatedAt).toLocaleTimeString()}
-                  </td>
-                </tr>
-              ))}
+              {orders.data?.items.map((o) => {
+                const ends = formatTimeLeft(o.endDate);
+                return (
+                  <tr key={o.orderId}>
+                    <td style={{ fontSize: 11, color: "var(--blue)" }}>
+                      {o.orderId.slice(0, 12)}
+                    </td>
+                    <td>
+                      <MarketLink
+                        slug={o.slug}
+                        eventSlug={o.eventSlug}
+                        question={o.question}
+                        outcome={o.outcome}
+                      />
+                    </td>
+                    <td>{o.familyId.slice(0, 12)}</td>
+                    <td
+                      style={{
+                        color: o.side === "buy" ? "var(--green)" : "var(--red)",
+                        fontWeight: 600,
+                      }}
+                    >
+                      {o.side.toUpperCase()}
+                    </td>
+                    <td>${o.price.toFixed(4)}</td>
+                    <td>{o.size.toFixed(2)}</td>
+                    <td>
+                      <Badge value={o.status} />
+                    </td>
+                    <td style={{ color: ends.color, fontSize: 12 }}>{ends.text}</td>
+                    <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                      {new Date(o.updatedAt).toLocaleTimeString()}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
           <Pagination nextCursor={orders.data?.nextCursor ?? null} onNext={setCursor} />

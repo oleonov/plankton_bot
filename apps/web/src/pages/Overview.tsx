@@ -10,6 +10,30 @@ import {
 import { PnlChart } from "../components/PnlChart.tsx";
 import { formatAgo } from "../utils/format.ts";
 
+function tradingStateColor(state?: string): string {
+  switch (state) {
+    case "ACTIVELY_TRADING": return "var(--green)";
+    case "PROBING_ONLY": return "var(--blue, #42a5f5)";
+    case "EXITS_ONLY": return "var(--orange)";
+    case "ALIVE_BUT_BLOCKED": return "#cc8800";
+    case "PAUSED": return "var(--red)";
+    case "NO_SIGNALS": return "#666";
+    default: return "#666";
+  }
+}
+
+function tradingStateLabel(state?: string): string {
+  switch (state) {
+    case "ACTIVELY_TRADING": return "ACTIVELY TRADING";
+    case "PROBING_ONLY": return "PROBING ONLY";
+    case "EXITS_ONLY": return "EXITS ONLY";
+    case "ALIVE_BUT_BLOCKED": return "BLOCKED BY LIMITS";
+    case "PAUSED": return "PAUSED";
+    case "NO_SIGNALS": return "NO SIGNALS";
+    default: return "UNKNOWN";
+  }
+}
+
 export function Overview() {
   const { data: status } = useStatus();
   const { data: metrics } = useMetrics();
@@ -137,6 +161,68 @@ export function Overview() {
           </div>
         </div>
       </div>
+
+      {/* Trading Activity */}
+      {status && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="label">Trading Activity (10m window)</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 8 }}>
+            <span
+              style={{
+                padding: "4px 10px",
+                borderRadius: 4,
+                fontSize: 13,
+                fontWeight: 700,
+                color: "#fff",
+                background: tradingStateColor(status.tradingState),
+              }}
+            >
+              {tradingStateLabel(status.tradingState)}
+            </span>
+            {status.signalActivity && (
+              <span style={{ fontSize: 12, color: "var(--text-dim)" }}>
+                {status.signalActivity.signalsProducedLast10m} produced
+                {" · "}
+                {status.signalActivity.signalsApprovedLast10m} approved
+                {status.signalActivity.lastEntryApprovedAt && (
+                  <> ({formatAgo(status.signalActivity.lastEntryApprovedAt)})</>
+                )}
+                {" · "}
+                {status.signalActivity.signalsRejectedLast10m} rejected
+                {status.signalActivity.lastSignalRejectedAt && (
+                  <> ({formatAgo(status.signalActivity.lastSignalRejectedAt)})</>
+                )}
+                {status.signalActivity.approvalRate != null && (
+                  <> · {status.signalActivity.approvalRate}% approval</>
+                )}
+              </span>
+            )}
+          </div>
+          {status.tradingState === "ALIVE_BUT_BLOCKED" && status.signalActivity && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "var(--orange)" }}>
+              All {status.signalActivity.signalsRejectedLast10m} entry signals were rejected by risk limits
+            </div>
+          )}
+          {status.tradingState === "NO_SIGNALS" && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-dim)" }}>
+              {status.signalActivity?.candidatesConsideredLast10m != null &&
+              status.signalActivity.candidatesConsideredLast10m > 0
+                ? `${status.signalActivity.candidatesConsideredLast10m} candidates considered — ${status.signalActivity.blockedByResolutionBufferLast10m ?? 0} in resolution buffer, ${status.signalActivity.blockedByWeekendLast10m ?? 0} blocked by weekend, ${status.signalActivity.blockedByWindowLast10m ?? 0} outside active window`
+                : "No signals produced — markets may be outside active window or in resolution buffer"}
+            </div>
+          )}
+          {status.tradingState === "PROBING_ONLY" && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "var(--blue, #42a5f5)" }}>
+              Only probe entries allowed — all families in derived probe-only mode
+            </div>
+          )}
+          {status.tradingState === "EXITS_ONLY" && (
+            <div style={{ marginTop: 8, fontSize: 12, color: "var(--orange)" }}>
+              Only exit signals active — no new entries being opened
+            </div>
+          )}
+        </div>
+      )}
 
       {/* PnL Chart */}
       <div style={{ marginBottom: 16 }}>

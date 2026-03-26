@@ -30,6 +30,22 @@ export interface StatusData {
   };
   reconciliationDriftDetected: boolean;
   marketDataPoll?: { active: boolean; page: number };
+  tradingState?: string;
+  signalActivity?: {
+    signalsProducedLast10m: number;
+    signalsApprovedLast10m: number;
+    signalsRejectedLast10m: number;
+    entrySignalsApprovedLast10m: number;
+    exitSignalsApprovedLast10m: number;
+    lastEntryApprovedAt: string | null;
+    lastSignalRejectedAt: string | null;
+    approvalRate: number | null;
+    candidatesConsideredLast10m?: number;
+    blockedByResolutionBufferLast10m?: number;
+    blockedByWeekendLast10m?: number;
+    blockedByWindowLast10m?: number;
+    topBlockingLayer?: string | null;
+  };
 }
 
 /** GET /metrics */
@@ -54,6 +70,8 @@ export interface FamilyMetric {
   openPositionCount: number;
   tailAdjustedPnlLive: number;
   quarantineReason: string | null;
+  effectiveMode: string | null;
+  derivedModeReason: string | null;
   updatedAt: string;
 }
 
@@ -77,6 +95,9 @@ export interface PositionDTO {
   question: string | null;
   outcome: string | null;
   conditionId: string | null;
+  endDate: string | null;
+  resolution: string | null;
+  resolutionStatus: string | null;
 }
 
 /** GET /orders item */
@@ -98,6 +119,7 @@ export interface OrderDTO {
   question: string | null;
   outcome: string | null;
   conditionId: string | null;
+  endDate: string | null;
 }
 
 /** GET /fills item */
@@ -117,6 +139,7 @@ export interface FillDTO {
   question: string | null;
   outcome: string | null;
   conditionId: string | null;
+  endDate: string | null;
 }
 
 /** GET /families item */
@@ -130,9 +153,17 @@ export interface FamilyDTO {
     openValueUsdc: number;
     openPositionCount: number;
     openDustCount: number;
+    activeMarketCount: number;
     currentTailCostUsdc: number;
     tailAdjustedPnlLive: number;
     quarantineReason: string | null;
+    effectiveMode: string | null;
+    derivedModeReason: string | null;
+  } | null;
+  caps: {
+    maxOpenValueUsdc: number;
+    maxActiveMarkets: number;
+    maxDustPositions: number;
   } | null;
 }
 

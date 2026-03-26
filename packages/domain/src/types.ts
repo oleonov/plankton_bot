@@ -236,6 +236,8 @@ export interface FamilyState {
   lastEntryTs: string | null; // ISO timestamp
   lastExitTs: string | null; // ISO timestamp
   quarantineReason: string | null;
+  effectiveMode: string | null;
+  derivedModeReason: string | null;
   updatedAt: string; // ISO timestamp
 }
 

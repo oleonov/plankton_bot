@@ -17,20 +17,21 @@
  * Does NOT place orders — signals flow through the bus.
  */
 
-import type {
-  NormalizedMarket,
-  FamilyRulesProvider,
-  FamilyRuleBundle,
-  PositionRepository,
-  FamilyStateRepository,
-  FamilyState,
-  Signal,
-  Position,
-  FamilyId,
-  FamilyEvidence,
-  TokenId,
-  SignalReason,
-  ScaleInRules,
+import {
+  ENTRY_REASONS,
+  type NormalizedMarket,
+  type FamilyRulesProvider,
+  type FamilyRuleBundle,
+  type PositionRepository,
+  type FamilyStateRepository,
+  type FamilyState,
+  type Signal,
+  type Position,
+  type FamilyId,
+  type FamilyEvidence,
+  type TokenId,
+  type SignalReason,
+  type ScaleInRules,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
@@ -231,6 +232,19 @@ function evidenceSizeMultiplier(evidence: FamilyEvidence, familyState: FamilySta
   return Math.max(0.5, Math.min(1.5, mult));
 }
 
+/** Metadata about what the scanner blocked/produced in a single scan cycle. */
+export interface ScanResult {
+  signals: Signal[];
+  meta: {
+    candidatesConsidered: number;
+    blockedByResolutionBuffer: number;
+    blockedByWeekend: number;
+    blockedByWindow: number;
+    entrySignals: number;
+    exitSignals: number;
+  };
+}
+
 /**
  * Scan a batch of normalized markets and produce signals.
  * Pure function of market state + rules + positions — no side effects.
@@ -245,12 +259,17 @@ export function scan(
   buyTracker: BuyTracker,
   tickTs: number,
   sessionTracker?: SessionTracker,
-): Signal[] {
+): ScanResult {
   const signals: Signal[] = [];
   const d = new Date(tickTs);
   const nowMinutes = d.getUTCHours() * 60 + d.getUTCMinutes();
   const dayOfWeek = d.getUTCDay();
   const weekend = isWeekend(dayOfWeek);
+
+  let candidatesConsidered = 0;
+  let blockedByResolutionBuffer = 0;
+  let blockedByWeekend = 0;
+  let blockedByWindow = 0;
 
   // Sort markets by composite family score (P1-1: higher-ranked families first)
   const sorted = sortByFamilyPriority(markets, deps.rulesProvider, deps.familyStateRepo);
@@ -282,6 +301,8 @@ export function scan(
     // Check universe action
     if (bundle.rules.universe.action !== "trade") continue;
 
+    candidatesConsidered++;
+
     const midPrice = market.midPrice;
     if (midPrice === null) continue;
 
@@ -305,6 +326,7 @@ export function scan(
       const endMs = new Date(market.endDate).getTime();
       const bufferMs = bundle.rules.exit.resolutionBufferMinutes * 60_000;
       if (!isNaN(endMs) && tickTs > endMs - bufferMs) {
+        blockedByResolutionBuffer++;
         continue; // too close to resolution — skip entry/scale-in
       }
     }
@@ -314,6 +336,7 @@ export function scan(
     if (weekend) {
       const weekendMode = bundle.rules.session.weekendMode;
       if (!bundle.rules.universe.allowWeekends || weekendMode === "disabled") {
+        blockedByWeekend++;
         // Weekend entries fully blocked
         continue;
       }
@@ -350,8 +373,9 @@ export function scan(
       // exit means "sell everything", a concurrent buy is contradictory
       // and would create opposing orders on the same token.
       if (!exitEmitted) {
-        // Reduced mode: only probes allowed, no scale-in/confirm/heavy
-        if (!reduced) {
+        if (reduced) {
+          blockedByWindow++;
+        } else {
           const scaleSignal = evaluateScaleIn(
             market,
             bundle,
@@ -425,7 +449,19 @@ export function scan(
     }
   }
 
-  return signals;
+  const entrySignals = signals.filter((s) => ENTRY_REASONS.has(s.reason)).length;
+
+  return {
+    signals,
+    meta: {
+      candidatesConsidered,
+      blockedByResolutionBuffer,
+      blockedByWeekend,
+      blockedByWindow,
+      entrySignals,
+      exitSignals: signals.length - entrySignals,
+    },
+  };
 }
 
 /**

@@ -51,6 +51,8 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         openPositionCount: r.open_position_count,
         tailAdjustedPnlLive: r.tail_adjusted_pnl_live,
         quarantineReason: r.quarantine_reason,
+        effectiveMode: (r.effective_mode as string | null) ?? null,
+        derivedModeReason: (r.derived_mode_reason as string | null) ?? null,
         updatedAt: r.updated_at,
       })),
     );

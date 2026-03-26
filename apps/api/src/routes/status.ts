@@ -9,6 +9,104 @@ interface StatusOpts {
 
 const startedAt = Date.now();
 
+function computeTradingState(
+  db: Database.Database,
+  paused: boolean,
+): { tradingState: string; signalActivity: Record<string, unknown> | null } {
+  if (paused) return { tradingState: "PAUSED", signalActivity: null };
+
+  const signalActivityRow = db
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'signal_activity' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { labels: string } | undefined;
+
+  if (!signalActivityRow) return { tradingState: "NO_SIGNALS", signalActivity: null };
+
+  const lastEntryApprovedRow = db
+    .prepare(
+      "SELECT captured_at FROM runtime_metrics WHERE metric_name = 'last_entry_approved' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { captured_at: string } | undefined;
+
+  const lastSignalRejectedRow = db
+    .prepare(
+      "SELECT captured_at FROM runtime_metrics WHERE metric_name = 'last_signal_rejected' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { captured_at: string } | undefined;
+
+  const scannerActivityRow = db
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'scanner_activity' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { labels: string } | undefined;
+
+  const scanner = scannerActivityRow
+    ? (JSON.parse(scannerActivityRow.labels) as {
+        candidatesConsidered: number;
+        blockedByResolutionBuffer: number;
+        blockedByWeekend: number;
+        blockedByWindow: number;
+      })
+    : null;
+
+  const sa = JSON.parse(signalActivityRow.labels) as {
+    produced: number;
+    approved: number;
+    rejected: number;
+    entryApproved: number;
+    exitApproved: number;
+    windowStartMs: number;
+  };
+
+  const signalActivity: Record<string, unknown> = {
+    signalsProducedLast10m: sa.produced,
+    signalsApprovedLast10m: sa.approved,
+    signalsRejectedLast10m: sa.rejected,
+    entrySignalsApprovedLast10m: sa.entryApproved,
+    exitSignalsApprovedLast10m: sa.exitApproved ?? 0,
+    lastEntryApprovedAt: lastEntryApprovedRow?.captured_at ?? null,
+    lastSignalRejectedAt: lastSignalRejectedRow?.captured_at ?? null,
+    approvalRate: sa.produced > 0 ? Math.round((sa.approved / sa.produced) * 100) : null,
+  };
+
+  if (scanner) {
+    signalActivity.candidatesConsideredLast10m = scanner.candidatesConsidered;
+    signalActivity.blockedByResolutionBufferLast10m = scanner.blockedByResolutionBuffer;
+    signalActivity.blockedByWeekendLast10m = scanner.blockedByWeekend;
+    signalActivity.blockedByWindowLast10m = scanner.blockedByWindow;
+  }
+
+  const allProbeOnly = db
+    .prepare(
+      "SELECT COUNT(*) as total, COUNT(CASE WHEN effective_mode = 'probe-only' THEN 1 END) as probeOnly FROM family_runtime_state WHERE runtime_mode = 'active'",
+    )
+    .get() as { total: number; probeOnly: number };
+
+  let tradingState: string;
+  if (sa.entryApproved > 0 && allProbeOnly.total > 0 && allProbeOnly.probeOnly === allProbeOnly.total) {
+    tradingState = "PROBING_ONLY";
+  } else if (sa.entryApproved > 0) {
+    tradingState = "ACTIVELY_TRADING";
+  } else if (sa.produced > 0 && sa.rejected > 0 && sa.entryApproved === 0) {
+    tradingState = "ALIVE_BUT_BLOCKED";
+  } else if (sa.produced > 0 && (sa.exitApproved ?? 0) > 0 && sa.entryApproved === 0) {
+    tradingState = "EXITS_ONLY";
+  } else {
+    tradingState = "NO_SIGNALS";
+  }
+
+  if (tradingState === "NO_SIGNALS" && scanner && scanner.candidatesConsidered > 0) {
+    signalActivity.topBlockingLayer = "scanner";
+  } else if (tradingState === "ALIVE_BUT_BLOCKED") {
+    signalActivity.topBlockingLayer = "risk-gate";
+  } else {
+    signalActivity.topBlockingLayer = null;
+  }
+
+  return { tradingState, signalActivity };
+}
+
 /** Build the status snapshot — shared by GET /status and SSE status events. */
 export function buildStatusSnapshot(
   db: Database.Database,
@@ -103,6 +201,10 @@ export function buildStatusSnapshot(
     ? !lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at)
     : false;
 
+  const paused = pausedMetric?.value === 1;
+
+  const { tradingState, signalActivity } = computeTradingState(db, paused);
+
   // Poll progress: only include if active and belongs to current bot run
   const pollProgressRow = db
     .prepare(
@@ -125,7 +227,7 @@ export function buildStatusSnapshot(
   return {
     runtimeMode: botRun?.mode ?? "simulation",
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
-    paused: pausedMetric?.value === 1,
+    paused,
     lastReconciliationAt: lastRecon?.ts ?? null,
     marketDataStale,
     marketDataLastUpdateAt,
@@ -138,6 +240,8 @@ export function buildStatusSnapshot(
     executionMode: execMode ? JSON.parse(execMode.labels).value : "simulation",
     liveLite: envelopeRow ? JSON.parse(envelopeRow.labels) : undefined,
     reconciliationDriftDetected,
+    tradingState,
+    signalActivity,
     ...(marketDataPoll ? { marketDataPoll } : {}),
   };
 }

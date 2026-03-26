@@ -40,7 +40,7 @@ import {
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { FamilyIdentity, FamilyState } from "@plankton/domain";
-import { createBotRunId, slugPatternToRegex } from "@plankton/domain";
+import { createBotRunId, slugPatternToRegex, ENTRY_REASONS } from "@plankton/domain";
 import { migrateOrphanedPositions } from "./universe-migration.js";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
@@ -141,12 +141,57 @@ async function main(): Promise<void> {
         lastEntryTs: null,
         lastExitTs: null,
         quarantineReason: null,
+        effectiveMode: null,
+        derivedModeReason: null,
         updatedAt: new Date().toISOString(),
       };
       repos.familyState.save(baseline);
     }
   }
   log.info("family runtime state baseline ensured");
+
+  // 5b. Seed family rules (caps) for API consumption
+  const upsertFamilyRules = conn.db.prepare(`
+    INSERT INTO family_rules (family_id, max_open_value_usdc, max_active_markets, max_dust_positions,
+      enabled, action, priority_rank, entry_mode, max_initial_notional_usdc,
+      tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(family_id) DO UPDATE SET
+      max_open_value_usdc = excluded.max_open_value_usdc,
+      max_active_markets = excluded.max_active_markets,
+      max_dust_positions = excluded.max_dust_positions,
+      enabled = excluded.enabled,
+      action = excluded.action,
+      priority_rank = excluded.priority_rank,
+      entry_mode = excluded.entry_mode,
+      max_initial_notional_usdc = excluded.max_initial_notional_usdc,
+      tail_quarantine_threshold_usdc = excluded.tail_quarantine_threshold_usdc,
+      tail_quarantine_threshold_ratio = excluded.tail_quarantine_threshold_ratio,
+      updated_at = excluded.updated_at
+  `);
+
+  for (const identity of families) {
+    const bundle = rulesProvider.getRule(identity.familyId);
+    if (!bundle) continue;
+    const ts = bundle.rules.tailSuppression;
+    const uni = bundle.rules.universe;
+    const entry = bundle.rules.entry;
+    upsertFamilyRules.run(
+      String(identity.familyId),
+      ts.maxOpenValueUsdc,
+      ts.maxActiveMarkets,
+      ts.maxDustPositions,
+      uni.enabled ? 1 : 0,
+      uni.action,
+      uni.priorityRank,
+      entry.entryMode,
+      entry.maxInitialNotionalUsdc,
+      ts.tailQuarantineThresholdUsdc,
+      ts.tailQuarantineThresholdRatio,
+      new Date().toISOString(),
+    );
+  }
+  log.info({ count: families.length }, "family rules seeded");
 
   // 5.5. Migrate orphaned positions — close positions whose market no longer
   // matches the family's current slug pattern or horizon filter. Without this,
@@ -359,6 +404,7 @@ async function main(): Promise<void> {
     repos.position,
     repos.inventoryLot,
     log,
+    rulesProvider,
   );
   const resolutionDetector = new ResolutionDetector(
     repos.position,
@@ -497,6 +543,125 @@ async function main(): Promise<void> {
       deletePollProgress.run();
     }
   });
+
+  // 7p. Persist signal activity metrics for API trading-state computation
+
+  const deleteSignalActivity = conn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'signal_activity'",
+  );
+  const insertSignalActivity = conn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('signal_activity', 1, ?, ?)",
+  );
+  const deleteLastEntryApproved = conn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'last_entry_approved'",
+  );
+  const insertLastEntryApproved = conn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('last_entry_approved', 1, ?)",
+  );
+  const deleteLastSignalRejected = conn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'last_signal_rejected'",
+  );
+  const insertLastSignalRejected = conn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('last_signal_rejected', 1, ?)",
+  );
+  const upsertSignalActivity = conn.db.transaction(
+    (labels: string, capturedAt: string) => {
+      deleteSignalActivity.run();
+      insertSignalActivity.run(labels, capturedAt);
+    },
+  );
+
+  // Track signal counts in a sliding window (resets every 10 minutes — approximate, not rolling)
+  const signalWindow = { produced: 0, approved: 0, rejected: 0, entryApproved: 0, exitApproved: 0, lastReset: Date.now() };
+  const SIGNAL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
+  bus.subscribe("SignalProduced", async () => {
+    signalWindow.produced++;
+  });
+
+  bus.subscribe("SignalApproved", async ({ signal }) => {
+    signalWindow.approved++;
+    if (ENTRY_REASONS.has(signal.reason)) {
+      signalWindow.entryApproved++;
+      // Persist last entry approval timestamp separately (not cleared by signal_activity upsert)
+      deleteLastEntryApproved.run();
+      insertLastEntryApproved.run(new Date().toISOString());
+    } else {
+      signalWindow.exitApproved++;
+    }
+  });
+
+  bus.subscribe("SignalRejected", async () => {
+    signalWindow.rejected++;
+    deleteLastSignalRejected.run();
+    insertLastSignalRejected.run(new Date().toISOString());
+  });
+
+  // Scanner-layer metrics
+  const scannerWindow = {
+    candidatesConsidered: 0,
+    blockedByResolutionBuffer: 0,
+    blockedByWeekend: 0,
+    blockedByWindow: 0,
+    lastReset: Date.now(),
+  };
+
+  bus.subscribe("ScanTickCompleted", async (ev) => {
+    scannerWindow.candidatesConsidered += ev.candidatesConsidered;
+    scannerWindow.blockedByResolutionBuffer += ev.blockedByResolutionBuffer;
+    scannerWindow.blockedByWeekend += ev.blockedByWeekend;
+    scannerWindow.blockedByWindow += ev.blockedByWindow;
+  });
+
+  const deleteScanner = conn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'scanner_activity'",
+  );
+  const insertScanner = conn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('scanner_activity', 1, ?, ?)",
+  );
+
+  // Flush signal + scanner activity to DB every 30 seconds, reset windows every 10 minutes
+  setInterval(() => {
+    const now = Date.now();
+    if (now - signalWindow.lastReset > SIGNAL_WINDOW_MS) {
+      signalWindow.produced = 0;
+      signalWindow.approved = 0;
+      signalWindow.rejected = 0;
+      signalWindow.entryApproved = 0;
+      signalWindow.exitApproved = 0;
+      signalWindow.lastReset = now;
+    }
+    upsertSignalActivity(
+      JSON.stringify({
+        produced: signalWindow.produced,
+        approved: signalWindow.approved,
+        rejected: signalWindow.rejected,
+        entryApproved: signalWindow.entryApproved,
+        exitApproved: signalWindow.exitApproved,
+        windowStartMs: signalWindow.lastReset,
+      }),
+      new Date().toISOString(),
+    );
+
+    // Reset scanner window on same schedule as signal window
+    if (now - scannerWindow.lastReset > SIGNAL_WINDOW_MS) {
+      scannerWindow.candidatesConsidered = 0;
+      scannerWindow.blockedByResolutionBuffer = 0;
+      scannerWindow.blockedByWeekend = 0;
+      scannerWindow.blockedByWindow = 0;
+      scannerWindow.lastReset = now;
+    }
+    deleteScanner.run();
+    insertScanner.run(
+      JSON.stringify({
+        candidatesConsidered: scannerWindow.candidatesConsidered,
+        blockedByResolutionBuffer: scannerWindow.blockedByResolutionBuffer,
+        blockedByWeekend: scannerWindow.blockedByWeekend,
+        blockedByWindow: scannerWindow.blockedByWindow,
+      }),
+      new Date().toISOString(),
+    );
+  }, 30_000);
 
   // 8. Create supervisor
   supervisorRef.current = new Supervisor({ modules, bus, log });

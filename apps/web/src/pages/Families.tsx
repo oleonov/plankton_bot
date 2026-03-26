@@ -9,7 +9,7 @@ function FamilyDetail({ familyId }: { familyId: string }) {
 
   return (
     <tr>
-      <td colSpan={7} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
+      <td colSpan={8} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
           <div>
             <div
@@ -93,6 +93,13 @@ function FamilyDetail({ familyId }: { familyId: string }) {
   );
 }
 
+function utilizationColor(current: number, max: number): string {
+  const pct = current / max;
+  if (pct > 0.9) return "var(--red)";
+  if (pct > 0.7) return "var(--orange)";
+  return "var(--text)";
+}
+
 export function Families() {
   const { data: families, isLoading } = useFamilies();
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -109,6 +116,7 @@ export function Families() {
             <th>Mode</th>
             <th>Open Value</th>
             <th>Positions</th>
+            <th>Markets</th>
             <th>Tail Cost</th>
             <th>Tail-Adj PnL</th>
             <th>Actions</th>
@@ -116,23 +124,38 @@ export function Families() {
         </thead>
         <tbody>
           {families?.map((f) => {
-            const mode = f.state?.runtimeMode ?? "unknown";
+            const operatorMode = f.state?.runtimeMode ?? "unknown";
+            const displayMode = f.state?.effectiveMode ?? operatorMode;
             const isExpanded = expanded === f.familyId;
             return (
               <Fragment key={f.familyId}>
                 <tr
-                  style={mode === "quarantine" ? { background: "rgba(239,83,80,0.06)" } : undefined}
+                  style={operatorMode === "quarantine" ? { background: "rgba(239,83,80,0.06)" } : undefined}
                   onClick={() => setExpanded(isExpanded ? null : f.familyId)}
                 >
                   <td style={{ cursor: "pointer", color: "var(--blue)" }}>
                     {isExpanded ? "\u25BC" : "\u25B6"} {f.familyKey}
                   </td>
                   <td>
-                    <Badge value={mode} type="mode" />
+                    <Badge value={operatorMode} type="mode" />
+                    {f.state?.effectiveMode && f.state.effectiveMode !== operatorMode && (
+                      <div style={{ fontSize: 10, color: "var(--orange)", marginTop: 2 }}>
+                        eff: {displayMode}
+                        {f.state.derivedModeReason && ` — ${f.state.derivedModeReason}`}
+                      </div>
+                    )}
                   </td>
-                  <td>${(f.state?.openValueUsdc ?? 0).toFixed(2)}</td>
+                  <td style={{ color: f.caps ? utilizationColor(f.state?.openValueUsdc ?? 0, f.caps.maxOpenValueUsdc) : undefined }}>
+                    ${(f.state?.openValueUsdc ?? 0).toFixed(0)}
+                    {f.caps && <span style={{ color: "var(--text-dim)", fontSize: 11 }}> / ${f.caps.maxOpenValueUsdc}</span>}
+                  </td>
                   <td>
-                    {f.state?.openPositionCount ?? 0} ({f.state?.openDustCount ?? 0} dust)
+                    {f.state?.openPositionCount ?? 0}
+                    {f.state?.openDustCount ? ` (${f.state.openDustCount} dust)` : ""}
+                  </td>
+                  <td style={{ color: f.caps ? utilizationColor(f.state?.activeMarketCount ?? 0, f.caps.maxActiveMarkets) : undefined }}>
+                    {f.state?.activeMarketCount ?? 0}
+                    {f.caps && <span style={{ color: "var(--text-dim)", fontSize: 11 }}> / {f.caps.maxActiveMarkets}</span>}
                   </td>
                   <td style={{ color: "var(--orange)" }}>
                     ${(f.state?.currentTailCostUsdc ?? 0).toFixed(2)}
@@ -147,7 +170,7 @@ export function Families() {
                     {(f.state?.tailAdjustedPnlLive ?? 0).toFixed(2)}
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
-                    <FamilyActions familyId={f.familyId} mode={mode} />
+                    <FamilyActions familyId={f.familyId} mode={operatorMode} />
                   </td>
                 </tr>
                 {isExpanded && <FamilyDetail familyId={f.familyId} />}

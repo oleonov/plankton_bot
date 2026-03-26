@@ -17,6 +17,7 @@ import type {
   FamilyStateRepository,
   PositionRepository,
   InventoryLotRepository,
+  FamilyRulesProvider,
   FamilyState,
   FamilyId,
 } from "@plankton/domain";
@@ -28,6 +29,7 @@ export class FamilyExposureCalculator {
     private readonly positionRepo: PositionRepository,
     private readonly lotRepo: InventoryLotRepository,
     private readonly log: Logger,
+    private readonly rulesProvider?: FamilyRulesProvider,
   ) {}
 
   /**
@@ -51,6 +53,8 @@ export class FamilyExposureCalculator {
         lastEntryTs: null,
         lastExitTs: null,
         quarantineReason: null,
+        effectiveMode: null,
+        derivedModeReason: null,
         updatedAt: new Date().toISOString(),
       };
     }
@@ -91,6 +95,31 @@ export class FamilyExposureCalculator {
 
     const tailAdjustedPnlLive = totalRealizedPnl - currentTailCostUsdc;
 
+    // Compute signal-independent effective mode from current tail health
+    let effectiveMode: string | null = existing.effectiveMode ?? null;
+    let derivedModeReason: string | null = existing.derivedModeReason ?? null;
+
+    if (this.rulesProvider) {
+      const bundle = this.rulesProvider.getRule(familyId);
+      if (bundle) {
+        const ts = bundle.rules.tailSuppression;
+
+        if (currentTailCostUsdc > ts.tailQuarantineThresholdUsdc) {
+          effectiveMode = "reduce-only";
+          derivedModeReason = `tail cost $${currentTailCostUsdc.toFixed(2)} > cap $${ts.tailQuarantineThresholdUsdc}`;
+        } else if (totalRealizedPnl > 0 && currentTailCostUsdc / totalRealizedPnl > ts.tailQuarantineThresholdRatio) {
+          effectiveMode = "reduce-only";
+          derivedModeReason = `tail/pnl ratio ${(currentTailCostUsdc / totalRealizedPnl).toFixed(2)} > ${ts.tailQuarantineThresholdRatio}`;
+        } else if (tailAdjustedPnlLive < 0) {
+          effectiveMode = "probe-only";
+          derivedModeReason = `tailAdjustedPnl $${tailAdjustedPnlLive.toFixed(2)} < 0`;
+        } else {
+          effectiveMode = "active";
+          derivedModeReason = null;
+        }
+      }
+    }
+
     const updated: FamilyState = {
       ...existing,
       openValueUsdc,
@@ -99,6 +128,8 @@ export class FamilyExposureCalculator {
       activeMarketCount: activeTokens.size,
       currentTailCostUsdc,
       tailAdjustedPnlLive,
+      effectiveMode,
+      derivedModeReason,
       lastEntryTs: isBuy ? now : existing.lastEntryTs,
       lastExitTs: !isBuy ? now : existing.lastExitTs,
       updatedAt: now,

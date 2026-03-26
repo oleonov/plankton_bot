@@ -57,6 +57,18 @@ export interface SignalRejected {
   readonly rejectedAt: number;
 }
 
+export interface ScanTickCompleted {
+  readonly type: "ScanTickCompleted";
+  readonly candidatesConsidered: number;
+  readonly blockedByResolutionBuffer: number;
+  readonly blockedByWeekend: number;
+  readonly blockedByWindow: number;
+  readonly signalsProduced: number;
+  readonly entrySignals: number;
+  readonly exitSignals: number;
+  readonly timestamp: number;
+}
+
 // ─── Order Lifecycle ──────────────────────────────────────────────────────
 
 export interface OrderPlaced {
@@ -183,6 +195,7 @@ export type DomainEvent =
   | SignalProduced
   | SignalApproved
   | SignalRejected
+  | ScanTickCompleted
   | OrderPlaced
   | OrderFilled
   | OrderCancelled

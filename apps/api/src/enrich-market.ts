@@ -11,6 +11,7 @@ export interface MarketMeta {
   question: string | null;
   outcome: string | null;
   conditionId: string | null;
+  endDate: string | null;
 }
 
 const EMPTY_META: MarketMeta = {
@@ -19,6 +20,7 @@ const EMPTY_META: MarketMeta = {
   question: null,
   outcome: null,
   conditionId: null,
+  endDate: null,
 };
 
 /**
@@ -36,7 +38,7 @@ export function buildMarketMetaMap(
   const placeholders = unique.map(() => "?").join(",");
   const rows = db
     .prepare(
-      `SELECT token_id, slug, event_slug, question, outcome, condition_id FROM markets WHERE token_id IN (${placeholders})`,
+      `SELECT token_id, slug, event_slug, question, outcome, condition_id, end_date FROM markets WHERE token_id IN (${placeholders})`,
     )
     .all(...unique) as Array<Record<string, unknown>>;
 
@@ -47,6 +49,7 @@ export function buildMarketMetaMap(
       question: (row.question as string) ?? null,
       outcome: (row.outcome as string) ?? null,
       conditionId: (row.condition_id as string) ?? null,
+      endDate: (row.end_date as string) ?? null,
     });
   }
 
@@ -56,4 +59,38 @@ export function buildMarketMetaMap(
 /** Get meta for a single tokenId, returning EMPTY_META if not found. */
 export function getMetaOrEmpty(metaMap: Map<string, MarketMeta>, tokenId: string): MarketMeta {
   return metaMap.get(tokenId) ?? EMPTY_META;
+}
+
+export interface ResolutionInfo {
+  resolution: string; // "YES" | "NO" | "unknown"
+  resolutionStatus: string; // "detected" | "settled"
+}
+
+/**
+ * Build a Map<conditionId, ResolutionInfo> for a set of condition IDs.
+ * Single query with IN clause — avoids N+1.
+ */
+export function buildResolutionMap(
+  db: Database.Database,
+  conditionIds: string[],
+): Map<string, ResolutionInfo> {
+  const result = new Map<string, ResolutionInfo>();
+  const unique = [...new Set(conditionIds.filter(Boolean))];
+  if (unique.length === 0) return result;
+
+  const placeholders = unique.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT condition_id, resolution, status FROM market_resolutions WHERE condition_id IN (${placeholders})`,
+    )
+    .all(...unique) as Array<Record<string, unknown>>;
+
+  for (const row of rows) {
+    result.set(row.condition_id as string, {
+      resolution: row.resolution as string,
+      resolutionStatus: row.status as string,
+    });
+  }
+
+  return result;
 }

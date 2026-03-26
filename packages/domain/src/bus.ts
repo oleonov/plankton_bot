@@ -82,6 +82,17 @@ export interface RuntimeEventMap {
     readonly rejectedAt: number;
   };
 
+  ScanTickCompleted: {
+    readonly candidatesConsidered: number;
+    readonly blockedByResolutionBuffer: number;
+    readonly blockedByWeekend: number;
+    readonly blockedByWindow: number;
+    readonly signalsProduced: number;
+    readonly entrySignals: number;
+    readonly exitSignals: number;
+    readonly timestamp: number;
+  };
+
   OrderPlaced: {
     readonly commandId: CommandId;
     readonly clientOrderId: ClientOrderId;

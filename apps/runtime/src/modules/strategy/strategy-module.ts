@@ -122,7 +122,7 @@ export class StrategyModule implements RuntimeModule {
       this.tickCount++;
       const tickTs = Date.now();
 
-      const signals = scan(
+      const { signals, meta: scanMeta } = scan(
         this.cachedMarkets,
         {
           rulesProvider: this.deps.rulesProvider,
@@ -143,6 +143,13 @@ export class StrategyModule implements RuntimeModule {
         this.signalCount++;
         await this.deps.bus.publish("SignalProduced", { signal });
       }
+
+      // Publish scanner metadata every tick (even when no signals) for trading state computation
+      await this.deps.bus.publish("ScanTickCompleted", {
+        ...scanMeta,
+        signalsProduced: filteredSignals.length,
+        timestamp: tickTs,
+      });
 
       if (filteredSignals.length > 0) {
         this.log.info(

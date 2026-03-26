@@ -31,10 +31,18 @@ interface FamilyStateRow {
   last_entry_ts: string | null;
   last_exit_ts: string | null;
   quarantine_reason: string | null;
+  effective_mode: string | null;
+  derived_mode_reason: string | null;
   updated_at: string;
 }
 
-function toFamilyDto(catalog: FamilyCatalogRow, state: FamilyStateRow | undefined) {
+interface FamilyCaps {
+  maxOpenValueUsdc: number;
+  maxActiveMarkets: number;
+  maxDustPositions: number;
+}
+
+function toFamilyDto(catalog: FamilyCatalogRow, state: FamilyStateRow | undefined, caps: FamilyCaps | null) {
   return {
     familyId: catalog.family_id,
     familyKey: catalog.family_key,
@@ -55,17 +63,26 @@ function toFamilyDto(catalog: FamilyCatalogRow, state: FamilyStateRow | undefine
           lastEntryTs: state.last_entry_ts,
           lastExitTs: state.last_exit_ts,
           quarantineReason: state.quarantine_reason,
+          effectiveMode: state.effective_mode,
+          derivedModeReason: state.derived_mode_reason,
           updatedAt: state.updated_at,
         }
       : null,
+    caps,
   };
 }
 
 export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) => {
   const listCatalog = opts.db.prepare("SELECT * FROM family_catalog");
   const listState = opts.db.prepare("SELECT * FROM family_runtime_state");
+  const listCaps = opts.db.prepare(
+    "SELECT family_id, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules",
+  );
   const getCatalog = opts.db.prepare("SELECT * FROM family_catalog WHERE family_id = ?");
   const getState = opts.db.prepare("SELECT * FROM family_runtime_state WHERE family_id = ?");
+  const getCaps = opts.db.prepare(
+    "SELECT family_id, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules WHERE family_id = ?",
+  );
   const getPositions = opts.db.prepare(
     "SELECT * FROM positions WHERE family_id = ? ORDER BY updated_at DESC",
   );
@@ -73,11 +90,21 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     "SELECT * FROM orders WHERE family_id = ? ORDER BY created_at DESC LIMIT 100",
   );
 
+  function toCaps(row: { max_open_value_usdc: number; max_active_markets: number; max_dust_positions: number }): FamilyCaps {
+    return {
+      maxOpenValueUsdc: row.max_open_value_usdc,
+      maxActiveMarkets: row.max_active_markets,
+      maxDustPositions: row.max_dust_positions,
+    };
+  }
+
   app.get("/families", async () => {
     const catalogs = listCatalog.all() as FamilyCatalogRow[];
     const states = listState.all() as FamilyStateRow[];
     const stateMap = new Map(states.map((s) => [s.family_id, s]));
-    return ok(catalogs.map((c) => toFamilyDto(c, stateMap.get(c.family_id))));
+    const capsRows = listCaps.all() as Array<{ family_id: string; max_open_value_usdc: number; max_active_markets: number; max_dust_positions: number }>;
+    const capsMap = new Map(capsRows.map((r) => [r.family_id, toCaps(r)]));
+    return ok(catalogs.map((c) => toFamilyDto(c, stateMap.get(c.family_id), capsMap.get(c.family_id) ?? null)));
   });
 
   app.get<{ Params: { familyId: string } }>("/families/:familyId", async (request) => {
@@ -85,7 +112,8 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
     if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
     const state = getState.get(familyId) as FamilyStateRow | undefined;
-    return ok(toFamilyDto(catalog, state));
+    const capsRow = getCaps.get(familyId) as { family_id: string; max_open_value_usdc: number; max_active_markets: number; max_dust_positions: number } | undefined;
+    return ok(toFamilyDto(catalog, state, capsRow ? toCaps(capsRow) : null));
   });
 
   app.get<{ Params: { familyId: string } }>("/families/:familyId/positions", async (request) => {

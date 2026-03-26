@@ -18,9 +18,10 @@ export function RiskQuarantine() {
   });
 
   const attentionFamilies =
-    families?.filter(
-      (f) => f.state?.runtimeMode === "quarantine" || f.state?.runtimeMode === "reduce-only",
-    ) ?? [];
+    families?.filter((f) => {
+      const em = f.state?.effectiveMode ?? f.state?.runtimeMode;
+      return em === "quarantine" || em === "reduce-only" || em === "probe-only";
+    }) ?? [];
 
   return (
     <div className="page">
@@ -30,7 +31,7 @@ export function RiskQuarantine() {
           <div className="page-title">Families Requiring Attention</div>
           <div className="grid-3" style={{ marginBottom: 24 }}>
             {attentionFamilies.map((f) => {
-              const mode = f.state?.runtimeMode ?? "unknown";
+              const mode = f.state?.effectiveMode ?? f.state?.runtimeMode ?? "unknown";
               return (
                 <div
                   key={f.familyId}

@@ -16,7 +16,8 @@ export function PnlChart({ data, tailCostUsdc }: { data: PnlDataPoint[]; tailCos
   const values = data.map((d) => d.realizedPnl);
   const minY = Math.min(0, ...values);
   const maxY = Math.max(0, ...values);
-  const rangeY = maxY - minY || 1;
+  // Ensure minimum $2 range so small values aren't squished to a flat line
+  const rangeY = Math.max(maxY - minY, 2);
 
   const plotW = WIDTH - PAD.left - PAD.right;
   const plotH = HEIGHT - PAD.top - PAD.bottom;
@@ -89,6 +90,17 @@ export function PnlChart({ data, tailCostUsdc }: { data: PnlDataPoint[]; tailCos
 
         {/* PnL line */}
         <path d={linePath} fill="none" stroke="var(--green)" strokeWidth={2} />
+
+        {/* Data point dots — visible even with 1-2 points */}
+        {data.map((d, i) => (
+          <circle
+            key={d.date}
+            cx={x(i)}
+            cy={y(d.realizedPnl)}
+            r={data.length <= 7 ? 3.5 : 2}
+            fill="var(--green)"
+          />
+        ))}
 
         {/* Tail cost annotation */}
         {tailCostUsdc > 0 && (

@@ -12,7 +12,7 @@ import { openDatabase } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import { buildServer } from "./server.js";
 
-const LATEST_MIGRATION = "005_event_slug.sql";
+const LATEST_MIGRATION = "006_effective_mode.sql";
 
 async function waitForDatabase(
   dbPath: string,

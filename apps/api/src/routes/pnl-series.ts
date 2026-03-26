@@ -43,6 +43,15 @@ export const pnlSeriesRoutes: FastifyPluginAsync<PnlSeriesOpts> = async (app, op
       return { date: row.date, realizedPnl: cumulative };
     });
 
+    // Prepend a $0 baseline point when the chart would otherwise start mid-air.
+    // Only when there's no pre-window PnL and at least one data point.
+    if (preWindow.total === 0 && items.length > 0) {
+      const firstDate = new Date(items[0]!.date + "T00:00:00Z");
+      firstDate.setUTCDate(firstDate.getUTCDate() - 1);
+      const baselineDate = firstDate.toISOString().slice(0, 10);
+      items.unshift({ date: baselineDate, realizedPnl: 0 });
+    }
+
     return ok({ items });
   });
 };

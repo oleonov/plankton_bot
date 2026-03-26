@@ -15,27 +15,19 @@
  *     - active: healthy → everything allowed (heavy-scale still requires positive PnL)
  */
 
-import type {
-  RiskGate,
-  Signal,
-  RiskDecision,
-  FamilyRulesProvider,
-  FamilyStateRepository,
-  FamilyState,
-  PositionRepository,
-  FamilyId,
+import {
+  ENTRY_REASONS,
+  type RiskGate,
+  type Signal,
+  type RiskDecision,
+  type FamilyRulesProvider,
+  type FamilyStateRepository,
+  type FamilyState,
+  type PositionRepository,
+  type FamilyId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
-
-/** Signal reasons that represent entries (new exposure). */
-const ENTRY_REASONS = new Set([
-  "probe-entry",
-  "confirm-scale",
-  "scale-in",
-  "heavy-scale",
-  "two-sided-entry",
-]);
 
 type DerivedFamilyMode = "active" | "probe-only" | "reduce-only";
 
