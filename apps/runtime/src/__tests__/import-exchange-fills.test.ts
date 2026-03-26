@@ -1,10 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { importExchangeFills } from "../modules/reconciliation/fill-reconciler.js";
-import {
-  createOrderId,
-  createTokenId,
-  createFamilyId,
-} from "@plankton/domain";
+import { createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
 import type { ExchangeFill, FillRepository, OrderRepository } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 
@@ -56,17 +52,19 @@ describe("importExchangeFills", () => {
   });
 
   it("imports a new fill, publishes FillReceived, and updates order status", async () => {
-    const fills: ExchangeFill[] = [{
-      fillId: "fill-1",
-      orderId: "ord-1",
-      clientOrderId: "co-1",
-      tokenId: createTokenId("tok-1"),
-      side: "buy",
-      price: 0.5,
-      size: 10,
-      fee: 0,
-      timestamp: Date.now(),
-    }];
+    const fills: ExchangeFill[] = [
+      {
+        fillId: "fill-1",
+        orderId: "ord-1",
+        clientOrderId: "co-1",
+        tokenId: createTokenId("tok-1"),
+        side: "buy",
+        price: 0.5,
+        size: 10,
+        fee: 0,
+        timestamp: Date.now(),
+      },
+    ];
 
     const localOrder = {
       orderId: createOrderId("ord-1"),
@@ -76,12 +74,12 @@ describe("importExchangeFills", () => {
     (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
     (orderRepo.findById as any).mockReturnValue(localOrder);
 
-    (fillRepo.findByOrderId as any).mockReturnValue([
-      { size: 10 },
-    ]);
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 10 }]);
 
     const received: any[] = [];
-    bus.subscribe("FillReceived", async (p) => { received.push(p); });
+    bus.subscribe("FillReceived", async (p) => {
+      received.push(p);
+    });
 
     const result = await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
 
@@ -96,17 +94,19 @@ describe("importExchangeFills", () => {
   it("skips already-existing fills (dedup by fillId)", async () => {
     (fillRepo.exists as any).mockReturnValue(true);
 
-    const fills: ExchangeFill[] = [{
-      fillId: "fill-dup",
-      orderId: "ord-1",
-      clientOrderId: "co-1",
-      tokenId: createTokenId("tok-1"),
-      side: "buy",
-      price: 0.5,
-      size: 10,
-      fee: 0,
-      timestamp: Date.now(),
-    }];
+    const fills: ExchangeFill[] = [
+      {
+        fillId: "fill-dup",
+        orderId: "ord-1",
+        clientOrderId: "co-1",
+        tokenId: createTokenId("tok-1"),
+        side: "buy",
+        price: 0.5,
+        size: 10,
+        fee: 0,
+        timestamp: Date.now(),
+      },
+    ];
 
     const result = await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
 
@@ -118,17 +118,19 @@ describe("importExchangeFills", () => {
   it("skips fills with no matching local order", async () => {
     (orderRepo.findByClientOrderId as any).mockReturnValue(null);
 
-    const fills: ExchangeFill[] = [{
-      fillId: "fill-orphan",
-      orderId: "ord-unknown",
-      clientOrderId: "co-unknown",
-      tokenId: createTokenId("tok-1"),
-      side: "buy",
-      price: 0.5,
-      size: 10,
-      fee: 0,
-      timestamp: Date.now(),
-    }];
+    const fills: ExchangeFill[] = [
+      {
+        fillId: "fill-orphan",
+        orderId: "ord-unknown",
+        clientOrderId: "co-unknown",
+        tokenId: createTokenId("tok-1"),
+        side: "buy",
+        price: 0.5,
+        size: 10,
+        fee: 0,
+        timestamp: Date.now(),
+      },
+    ];
 
     const result = await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
 
@@ -138,17 +140,19 @@ describe("importExchangeFills", () => {
   });
 
   it("sets partially-filled when cumulative < order size", async () => {
-    const fills: ExchangeFill[] = [{
-      fillId: "fill-partial",
-      orderId: "ord-1",
-      clientOrderId: "co-1",
-      tokenId: createTokenId("tok-1"),
-      side: "buy",
-      price: 0.5,
-      size: 4,
-      fee: 0,
-      timestamp: Date.now(),
-    }];
+    const fills: ExchangeFill[] = [
+      {
+        fillId: "fill-partial",
+        orderId: "ord-1",
+        clientOrderId: "co-1",
+        tokenId: createTokenId("tok-1"),
+        side: "buy",
+        price: 0.5,
+        size: 4,
+        fee: 0,
+        timestamp: Date.now(),
+      },
+    ];
 
     const localOrder = {
       orderId: createOrderId("ord-1"),

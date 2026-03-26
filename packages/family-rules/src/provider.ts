@@ -48,14 +48,10 @@ class FamilyRulesProviderImpl implements FamilyRulesProvider {
   }
 
   getRulesForRegime(regime: Regime): FamilyRuleBundle[] {
-    return [...this.bundles.values()].filter(
-      (b) => b.identity.regime === regime,
-    );
+    return [...this.bundles.values()].filter((b) => b.identity.regime === regime);
   }
 }
 
-export function createFamilyRulesProvider(
-  configs: FamilyConfig[],
-): FamilyRulesProvider {
+export function createFamilyRulesProvider(configs: FamilyConfig[]): FamilyRulesProvider {
   return new FamilyRulesProviderImpl(configs);
 }

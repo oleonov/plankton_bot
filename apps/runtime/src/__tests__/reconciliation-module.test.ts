@@ -1,9 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  createTokenId,
-  createFamilyId,
-  createOrderId,
-} from "@plankton/domain";
+import { createTokenId, createFamilyId, createOrderId } from "@plankton/domain";
 import type {
   ExchangeGateway,
   ExchangeOrder,
@@ -228,18 +224,15 @@ describe("ReconciliationModule", () => {
 
       expect(result.phantomOrders).toBe(1);
       expect(result.clean).toBe(false);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-        local.orderId,
-        "cancelled",
-      );
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(local.orderId, "cancelled");
     });
 
     it("does not cancel local orders that exist on exchange", async () => {
       const local = makeLocalOrder({ exchangeOrderId: "ex-ord-1" });
       orderRepo.findOpen = vi.fn().mockReturnValue([local]);
-      gateway.getOpenOrders = vi.fn().mockResolvedValue([
-        makeExchangeOrder({ orderId: "ex-ord-1" }),
-      ]);
+      gateway.getOpenOrders = vi
+        .fn()
+        .mockResolvedValue([makeExchangeOrder({ orderId: "ex-ord-1" })]);
 
       const result = await mod.runReconciliation();
 
@@ -249,9 +242,9 @@ describe("ReconciliationModule", () => {
 
     it("detects unknown exchange orders without local match", async () => {
       orderRepo.findOpen = vi.fn().mockReturnValue([]);
-      gateway.getOpenOrders = vi.fn().mockResolvedValue([
-        makeExchangeOrder({ orderId: "ex-mystery" }),
-      ]);
+      gateway.getOpenOrders = vi
+        .fn()
+        .mockResolvedValue([makeExchangeOrder({ orderId: "ex-mystery" })]);
 
       const result = await mod.runReconciliation();
 
@@ -262,9 +255,9 @@ describe("ReconciliationModule", () => {
     it("counts exchange and local open orders", async () => {
       const local = makeLocalOrder();
       orderRepo.findOpen = vi.fn().mockReturnValue([local]);
-      gateway.getOpenOrders = vi.fn().mockResolvedValue([
-        makeExchangeOrder({ orderId: "ex-ord-1" }),
-      ]);
+      gateway.getOpenOrders = vi
+        .fn()
+        .mockResolvedValue([makeExchangeOrder({ orderId: "ex-ord-1" })]);
 
       const result = await mod.runReconciliation();
 
@@ -286,7 +279,9 @@ describe("ReconciliationModule", () => {
       orderRepo.findByClientOrderId = vi.fn().mockReturnValue(local);
 
       const fillEvents: any[] = [];
-      bus.subscribe("FillReceived", async (p) => { fillEvents.push(p); });
+      bus.subscribe("FillReceived", async (p) => {
+        fillEvents.push(p);
+      });
 
       const result = await mod.runReconciliation();
 

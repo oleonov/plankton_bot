@@ -113,7 +113,10 @@ export class ResolutionDetector {
     try {
       info = await this.gammaClient.getMarketBySlug(slug);
     } catch (err) {
-      this.log.warn({ conditionId, slug, err }, "Gamma slug lookup failed (transport error) — skipping");
+      this.log.warn(
+        { conditionId, slug, err },
+        "Gamma slug lookup failed (transport error) — skipping",
+      );
       return null;
     }
 
@@ -162,7 +165,10 @@ export class ResolutionDetector {
     }
 
     // Both slug and ID lookups returned not-found — market genuinely delisted.
-    this.log.info({ conditionId, slug }, "market not found on Gamma by slug or ID — treating as delisted");
+    this.log.info(
+      { conditionId, slug },
+      "market not found on Gamma by slug or ID — treating as delisted",
+    );
 
     return {
       conditionId,

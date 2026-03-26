@@ -64,9 +64,7 @@ export class GammaResolutionClient {
         if (response.status === 404) return null;
 
         if (!response.ok) {
-          throw new Error(
-            `Gamma API responded with ${response.status}: ${response.statusText}`,
-          );
+          throw new Error(`Gamma API responded with ${response.status}: ${response.statusText}`);
         }
 
         const raw = (await response.json()) as Record<string, unknown>;

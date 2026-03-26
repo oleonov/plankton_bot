@@ -10,17 +10,52 @@ export function FamilyActions({ familyId, mode }: { familyId: string; mode: stri
     <span style={{ display: "inline-flex", gap: 4 }}>
       {mode === "active" && (
         <>
-          <ConfirmAction label="R/O" confirmText={`Reduce-only ${familyId}?`} variant="danger" showReason onConfirm={(r) => reduceOnly.mutate(r)} isPending={reduceOnly.isPending} />
-          <ConfirmAction label="Q" confirmText={`Quarantine ${familyId}?`} variant="danger" showReason onConfirm={(r) => quarantine.mutate(r)} isPending={quarantine.isPending} />
+          <ConfirmAction
+            label="R/O"
+            confirmText={`Reduce-only ${familyId}?`}
+            variant="danger"
+            showReason
+            onConfirm={(r) => reduceOnly.mutate(r)}
+            isPending={reduceOnly.isPending}
+          />
+          <ConfirmAction
+            label="Q"
+            confirmText={`Quarantine ${familyId}?`}
+            variant="danger"
+            showReason
+            onConfirm={(r) => quarantine.mutate(r)}
+            isPending={quarantine.isPending}
+          />
         </>
       )}
       {mode === "quarantine" && (
-        <ConfirmAction label="Activate" confirmText={`Activate ${familyId}?`} variant="success" showReason onConfirm={(r) => activate.mutate(r)} isPending={activate.isPending} />
+        <ConfirmAction
+          label="Activate"
+          confirmText={`Activate ${familyId}?`}
+          variant="success"
+          showReason
+          onConfirm={(r) => activate.mutate(r)}
+          isPending={activate.isPending}
+        />
       )}
       {mode === "reduce-only" && (
         <>
-          <ConfirmAction label="Activate" confirmText={`Activate ${familyId}?`} variant="success" showReason onConfirm={(r) => activate.mutate(r)} isPending={activate.isPending} />
-          <ConfirmAction label="Q" confirmText={`Quarantine ${familyId}?`} variant="danger" showReason onConfirm={(r) => quarantine.mutate(r)} isPending={quarantine.isPending} />
+          <ConfirmAction
+            label="Activate"
+            confirmText={`Activate ${familyId}?`}
+            variant="success"
+            showReason
+            onConfirm={(r) => activate.mutate(r)}
+            isPending={activate.isPending}
+          />
+          <ConfirmAction
+            label="Q"
+            confirmText={`Quarantine ${familyId}?`}
+            variant="danger"
+            showReason
+            onConfirm={(r) => quarantine.mutate(r)}
+            isPending={quarantine.isPending}
+          />
         </>
       )}
     </span>

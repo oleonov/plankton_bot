@@ -134,9 +134,7 @@ export interface MarketDataGateway {
    * Returns a map of tokenId → pricing snapshot.
    * Used by the fast pricing loop (Phase 1: Gamma-backed).
    */
-  getMarketPricing(
-    tokenIds: string[],
-  ): Promise<
+  getMarketPricing(tokenIds: string[]): Promise<
     Map<
       string,
       {

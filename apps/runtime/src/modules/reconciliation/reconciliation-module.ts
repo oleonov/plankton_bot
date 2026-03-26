@@ -148,7 +148,8 @@ export class ReconciliationModule implements RuntimeModule {
 
       // 4. Publish events
       if (!clean) {
-        const severity = fillResult.missingFillsImported > 0 ? "critical" as const : "warn" as const;
+        const severity =
+          fillResult.missingFillsImported > 0 ? ("critical" as const) : ("warn" as const);
         await this.deps.bus.publish("ReconciliationDriftDetected", {
           details: allDetails.join("; "),
           severity,

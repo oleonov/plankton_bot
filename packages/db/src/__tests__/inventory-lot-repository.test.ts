@@ -108,8 +108,20 @@ describe("SqliteInventoryLotRepository", () => {
     setupPrereqs(conn.db);
     insertFill(conn.db, "fill-2", "ord-1");
 
-    repo.save(makeLot({ lotId: createLotId("lot-open"), fillId: createFillId("fill-1"), remainingSize: 25 }));
-    repo.save(makeLot({ lotId: createLotId("lot-empty"), fillId: createFillId("fill-2"), remainingSize: 0 }));
+    repo.save(
+      makeLot({
+        lotId: createLotId("lot-open"),
+        fillId: createFillId("fill-1"),
+        remainingSize: 25,
+      }),
+    );
+    repo.save(
+      makeLot({
+        lotId: createLotId("lot-empty"),
+        fillId: createFillId("fill-2"),
+        remainingSize: 0,
+      }),
+    );
 
     const open = repo.findOpen(createPositionId("pos-1"));
     expect(open).toHaveLength(1);
@@ -130,20 +142,24 @@ describe("SqliteInventoryLotRepository", () => {
     setupPrereqs(conn.db);
     insertFill(conn.db, "fill-2", "ord-1");
 
-    repo.save(makeLot({
-      lotId: createLotId("lot-A"),
-      fillId: createFillId("fill-1"),
-      size: 30,
-      remainingSize: 30,
-      createdAt: "2026-01-01T00:00:00Z",
-    }));
-    repo.save(makeLot({
-      lotId: createLotId("lot-B"),
-      fillId: createFillId("fill-2"),
-      size: 40,
-      remainingSize: 40,
-      createdAt: "2026-01-02T00:00:00Z",
-    }));
+    repo.save(
+      makeLot({
+        lotId: createLotId("lot-A"),
+        fillId: createFillId("fill-1"),
+        size: 30,
+        remainingSize: 30,
+        createdAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeLot({
+        lotId: createLotId("lot-B"),
+        fillId: createFillId("fill-2"),
+        size: 40,
+        remainingSize: 40,
+        createdAt: "2026-01-02T00:00:00Z",
+      }),
+    );
 
     const result = repo.consumeFifo(createPositionId("pos-1"), 50);
     expect(result).toHaveLength(2);

@@ -8,12 +8,7 @@ import type {
   OrderSide,
   OrderType,
 } from "@plankton/domain";
-import {
-  createOrderId,
-  createTokenId,
-  createFamilyId,
-  createBotRunId,
-} from "@plankton/domain";
+import { createOrderId, createTokenId, createFamilyId, createBotRunId } from "@plankton/domain";
 
 export class SqliteOrderRepository implements OrderRepository {
   constructor(private readonly db: Database.Database) {}
@@ -53,9 +48,9 @@ export class SqliteOrderRepository implements OrderRepository {
   }
 
   findById(id: OrderId): Order | null {
-    const row = this.db
-      .prepare("SELECT * FROM orders WHERE order_id = ?")
-      .get(id) as Record<string, unknown> | undefined;
+    const row = this.db.prepare("SELECT * FROM orders WHERE order_id = ?").get(id) as
+      | Record<string, unknown>
+      | undefined;
     return row ? this.rowToOrder(row) : null;
   }
 
@@ -74,17 +69,14 @@ export class SqliteOrderRepository implements OrderRepository {
   }
 
   findByTokenId(tokenId: TokenId): Order[] {
-    const rows = this.db
-      .prepare("SELECT * FROM orders WHERE token_id = ?")
-      .all(tokenId) as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM orders WHERE token_id = ?").all(tokenId) as Record<
+      string,
+      unknown
+    >[];
     return rows.map((r) => this.rowToOrder(r));
   }
 
-  updateStatus(
-    id: OrderId,
-    status: OrderStatus,
-    exchangeOrderId?: string,
-  ): void {
+  updateStatus(id: OrderId, status: OrderStatus, exchangeOrderId?: string): void {
     if (exchangeOrderId !== undefined) {
       this.db
         .prepare(
@@ -107,7 +99,7 @@ export class SqliteOrderRepository implements OrderRepository {
   private rowToOrder(row: Record<string, unknown>): Order {
     return {
       orderId: createOrderId(row.order_id as string),
-      clientOrderId: (row.client_order_id as string) as ClientOrderId,
+      clientOrderId: row.client_order_id as string as ClientOrderId,
       tokenId: createTokenId(row.token_id as string),
       familyId: createFamilyId(row.family_id as string),
       side: row.side as OrderSide,

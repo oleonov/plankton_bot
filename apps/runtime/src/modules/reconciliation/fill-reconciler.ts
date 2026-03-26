@@ -20,10 +20,7 @@ import type {
   OrderId,
   ClientOrderId,
 } from "@plankton/domain";
-import {
-  createFillId,
-  createOrderId,
-} from "@plankton/domain";
+import { createFillId, createOrderId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 // ─── Shared fill import (DRY) ─────────────────────────────────────────────

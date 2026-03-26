@@ -47,9 +47,7 @@ export class FillPollerModule implements RuntimeModule {
     this.highWatermarkMs = latest ?? Date.now();
 
     this.timer = setInterval(() => {
-      this.poll().catch((err) =>
-        this.log.error({ err }, "fill poller error"),
-      );
+      this.poll().catch((err) => this.log.error({ err }, "fill poller error"));
     }, this.deps.pollIntervalMs);
 
     this.started = true;

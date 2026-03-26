@@ -58,9 +58,7 @@ function parseSingleFamily(raw: unknown, index: number): FamilyConfig {
     const details = parsed.error.issues
       .map((i) => `  [${i.path.join(".")}] ${i.message}`)
       .join("\n");
-    throw new Error(
-      `Schema validation failed for family at index ${index}:\n${details}`,
-    );
+    throw new Error(`Schema validation failed for family at index ${index}:\n${details}`);
   }
 
   return transformFamily(parsed.data);
@@ -84,9 +82,7 @@ export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
   }
 
   if (doc === null || typeof doc !== "object") {
-    throw new Error(
-      `Family rules file "${filePath}" must contain a YAML object`,
-    );
+    throw new Error(`Family rules file "${filePath}" must contain a YAML object`);
   }
 
   const record = doc as Record<string, unknown>;
@@ -98,9 +94,7 @@ export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
       const details = parsed.error.issues
         .map((i) => `  [${i.path.join(".")}] ${i.message}`)
         .join("\n");
-      throw new Error(
-        `Schema validation failed for multi-family file "${filePath}":\n${details}`,
-      );
+      throw new Error(`Schema validation failed for multi-family file "${filePath}":\n${details}`);
     }
     return {
       global: transformKeys(parsed.data.global) as GlobalConfig,
@@ -113,7 +107,7 @@ export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
     if (record["global"] !== undefined) {
       throw new Error(
         `"global" section is not supported in single-family format. ` +
-        `Use the multi-family format (with "families" array) to set global config.`,
+          `Use the multi-family format (with "families" array) to set global config.`,
       );
     }
     return {

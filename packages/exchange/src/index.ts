@@ -29,7 +29,11 @@ export { LiveMarketDataGateway, type LiveMarketDataConfig } from "./live/market-
 
 // Gamma discovery + resolution
 export { GammaMarketDiscoveryGateway, type GammaDiscoveryConfig } from "./gamma/index.js";
-export { GammaResolutionClient, type GammaResolutionConfig, type GammaMarketInfo } from "./gamma/index.js";
+export {
+  GammaResolutionClient,
+  type GammaResolutionConfig,
+  type GammaMarketInfo,
+} from "./gamma/index.js";
 
 // Shared utilities
 export { classifyError } from "./errors.js";

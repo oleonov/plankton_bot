@@ -55,14 +55,10 @@ export class ResolutionModule implements RuntimeModule {
 
   async start(): Promise<void> {
     // Run once at startup (non-blocking)
-    this.runCheck().catch((err) =>
-      this.deps.log.error(err, "startup resolution check failed"),
-    );
+    this.runCheck().catch((err) => this.deps.log.error(err, "startup resolution check failed"));
 
     this.intervalHandle = setInterval(() => {
-      this.runCheck().catch((err) =>
-        this.deps.log.error(err, "resolution check failed"),
-      );
+      this.runCheck().catch((err) => this.deps.log.error(err, "resolution check failed"));
     }, this.deps.checkIntervalMs);
   }
 
@@ -139,8 +135,10 @@ export class ResolutionModule implements RuntimeModule {
 
         if (eligibleCandidates.length < resolution.candidates.length) {
           this.deps.log.info(
-            { conditionId: resolution.conditionId,
-              skipped: resolution.candidates.length - eligibleCandidates.length },
+            {
+              conditionId: resolution.conditionId,
+              skipped: resolution.candidates.length - eligibleCandidates.length,
+            },
             "skipped settlement for families with autoSettleResolvedMarkets=false",
           );
         }
@@ -168,16 +166,18 @@ export class ResolutionModule implements RuntimeModule {
         // already redeemed/sold) before allowing ledger settlement.
         const preFilterCount = eligibleCandidates.length;
         if (this.deps.gateway && eligibleCandidates.length > 0) {
-          eligibleCandidates = await this.filterByZeroBalance(eligibleCandidates, resolution.conditionId);
+          eligibleCandidates = await this.filterByZeroBalance(
+            eligibleCandidates,
+            resolution.conditionId,
+          );
         }
         const allVerified = !this.deps.gateway || eligibleCandidates.length === preFilterCount;
 
         const settleable = { ...resolution, candidates: eligibleCandidates };
 
         // Settle positions
-        const settled = settleable.candidates.length > 0
-          ? this.deps.settler.settle(settleable)
-          : [];
+        const settled =
+          settleable.candidates.length > 0 ? this.deps.settler.settle(settleable) : [];
         totalSettled += settled.length;
 
         // Mark settled when all candidates passed balance verification and were settled

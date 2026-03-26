@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { runScenario } from "../../scenario/runner.js";
-import { makeMarket, makeMarketFixture, resetFixtureCounters } from "../../scenario/fixture-helpers.js";
+import {
+  makeMarket,
+  makeMarketFixture,
+  resetFixtureCounters,
+} from "../../scenario/fixture-helpers.js";
 import { makeFamilyConfig } from "../../scenario/family-fixtures.js";
 
 afterEach(() => {

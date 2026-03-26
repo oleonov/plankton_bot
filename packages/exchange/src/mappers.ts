@@ -74,10 +74,7 @@ export function mapOpenOrder(raw: Record<string, unknown>): ExchangeOrder {
     sizeFilled: sizeMatched,
     sizeRemaining: originalSize - sizeMatched,
     status: mapOrderStatus(String(raw.status ?? "OPEN")),
-    createdAt:
-      typeof raw.created_at === "number"
-        ? raw.created_at
-        : Date.now(),
+    createdAt: typeof raw.created_at === "number" ? raw.created_at : Date.now(),
   };
 }
 
@@ -98,9 +95,7 @@ export function mapTrade(raw: Record<string, unknown>): ExchangeFill {
     price,
     size,
     fee,
-    timestamp: raw.match_time
-      ? new Date(String(raw.match_time)).getTime()
-      : Date.now(),
+    timestamp: raw.match_time ? new Date(String(raw.match_time)).getTime() : Date.now(),
   };
 }
 
@@ -136,19 +131,14 @@ function mapLevels(levels: unknown): PriceLevel[] {
   }));
 }
 
-export function mapOrderBook(
-  tokenId: TokenId,
-  raw: Record<string, unknown>,
-): OrderBookSnapshot {
+export function mapOrderBook(tokenId: TokenId, raw: Record<string, unknown>): OrderBookSnapshot {
   const bids = mapLevels(raw.bids);
   const asks = mapLevels(raw.asks);
 
   const bestBid = bids.length > 0 ? bids[0]!.price : null;
   const bestAsk = asks.length > 0 ? asks[0]!.price : null;
-  const midPrice =
-    bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : null;
-  const spread =
-    bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
+  const midPrice = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : null;
+  const spread = bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
 
   return {
     tokenId,
@@ -158,9 +148,7 @@ export function mapOrderBook(
     bestAsk,
     midPrice,
     spread,
-    timestamp: raw.timestamp
-      ? new Date(String(raw.timestamp)).getTime()
-      : Date.now(),
+    timestamp: raw.timestamp ? new Date(String(raw.timestamp)).getTime() : Date.now(),
   };
 }
 
@@ -183,7 +171,9 @@ export function parseStringOrArray(value: unknown): string[] {
     try {
       const parsed = JSON.parse(value);
       if (Array.isArray(parsed)) return parsed as string[];
-    } catch { /* not valid JSON, ignore */ }
+    } catch {
+      /* not valid JSON, ignore */
+    }
   }
   return [];
 }
@@ -224,8 +214,7 @@ export function mapGammaPricing(raw: Record<string, unknown>): GammaPricing {
   return {
     bestBid: raw.bestBid != null ? Number(raw.bestBid) : null,
     bestAsk: raw.bestAsk != null ? Number(raw.bestAsk) : null,
-    lastTradePrice:
-      raw.lastTradePrice != null ? Number(raw.lastTradePrice) : null,
+    lastTradePrice: raw.lastTradePrice != null ? Number(raw.lastTradePrice) : null,
   };
 }
 

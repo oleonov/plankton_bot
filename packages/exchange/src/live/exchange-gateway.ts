@@ -17,13 +17,7 @@ import type {
   TokenId,
 } from "@plankton/domain";
 import { classifyError } from "../errors.js";
-import {
-  mapOpenOrder,
-  mapTrade,
-  mapBalance,
-  toSdkSide,
-  toSdkTickSize,
-} from "../mappers.js";
+import { mapOpenOrder, mapTrade, mapBalance, toSdkSide, toSdkTickSize } from "../mappers.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -45,9 +39,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         price: params.price,
         size: params.size,
         side: toSdkSide(params.side),
-        ...(params.expiration !== undefined
-          ? { expiration: params.expiration }
-          : {}),
+        ...(params.expiration !== undefined ? { expiration: params.expiration } : {}),
       };
 
       const options = {
@@ -55,11 +47,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         negRisk: params.negRisk,
       };
 
-      const result = await this.client.createAndPostOrder(
-        userOrder,
-        options,
-        params.orderType,
-      );
+      const result = await this.client.createAndPostOrder(userOrder, options, params.orderType);
       const orderId = result?.orderID ?? result?.id ?? "";
 
       return { success: true, orderId: String(orderId) };
@@ -92,9 +80,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
   async getOpenOrders(): Promise<ExchangeOrder[]> {
     try {
       const raw = await this.client.getOpenOrders();
-      return extractArray(raw).map((o: Record<string, unknown>) =>
-        mapOpenOrder(o),
-      );
+      return extractArray(raw).map((o: Record<string, unknown>) => mapOpenOrder(o));
     } catch {
       return [];
     }
@@ -105,9 +91,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       const raw = await this.client.getOpenOrders({
         asset_id: String(tokenId),
       });
-      return extractArray(raw).map((o: Record<string, unknown>) =>
-        mapOpenOrder(o),
-      );
+      return extractArray(raw).map((o: Record<string, unknown>) => mapOpenOrder(o));
     } catch {
       return [];
     }
@@ -118,9 +102,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       const raw = await this.client.getTrades({
         after: Math.floor(sinceMs / 1000).toString(),
       });
-      return extractArray(raw).map((t: Record<string, unknown>) =>
-        mapTrade(t),
-      );
+      return extractArray(raw).map((t: Record<string, unknown>) => mapTrade(t));
     } catch {
       return [];
     }

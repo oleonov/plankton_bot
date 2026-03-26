@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { runScenario } from "../../scenario/runner.js";
-import { makeMarket, makeMarketFixture, resetFixtureCounters } from "../../scenario/fixture-helpers.js";
+import {
+  makeMarket,
+  makeMarketFixture,
+  resetFixtureCounters,
+} from "../../scenario/fixture-helpers.js";
 import { makeFamilyConfig } from "../../scenario/family-fixtures.js";
 
 afterEach(() => resetFixtureCounters());
@@ -19,7 +23,11 @@ describe("Scenario: quarantine blocks strategy", () => {
       description: "Family in quarantine",
       marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
       familyStateOverrides: [
-        { familyId: "fam-elections", runtimeMode: "quarantine", quarantineReason: "test-quarantine" },
+        {
+          familyId: "fam-elections",
+          runtimeMode: "quarantine",
+          quarantineReason: "test-quarantine",
+        },
       ],
       ticks: 3,
     };

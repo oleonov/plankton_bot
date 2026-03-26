@@ -34,20 +34,14 @@ const BYPASS_ROUTES: Array<{ method: string; url: string }> = [
 ];
 
 export function createAuthHook(config: AuthConfig) {
-  return async function authenticate(
-    request: FastifyRequest,
-    reply: FastifyReply,
-  ): Promise<void> {
+  return async function authenticate(request: FastifyRequest, reply: FastifyReply): Promise<void> {
     if (!request.url.startsWith("/api/")) return;
 
     // Check bypass list using registered route pattern + method
     // Fastify auto-generates HEAD handlers for GET routes, so treat HEAD as GET
     const routeUrl = request.routeOptions?.url;
     const method = request.method === "HEAD" ? "GET" : request.method;
-    if (
-      routeUrl &&
-      BYPASS_ROUTES.some((r) => r.method === method && r.url === routeUrl)
-    ) {
+    if (routeUrl && BYPASS_ROUTES.some((r) => r.method === method && r.url === routeUrl)) {
       return;
     }
 
@@ -68,7 +62,9 @@ export function createAuthHook(config: AuthConfig) {
     if (!config.apiKey && !config.authPasswordConfigured) {
       reply
         .status(401)
-        .send(fail("AUTH_NOT_CONFIGURED", "no authentication method is configured — API is locked"));
+        .send(
+          fail("AUTH_NOT_CONFIGURED", "no authentication method is configured — API is locked"),
+        );
       return;
     }
 

@@ -63,14 +63,17 @@ describe("SimulationMarketDataGateway", () => {
     const tokenId = createTokenId("tok-1");
     gw.setOrderBook(
       tokenId,
-      [{ price: 0.50, size: 100 }, { price: 0.49, size: 200 }],
+      [
+        { price: 0.5, size: 100 },
+        { price: 0.49, size: 200 },
+      ],
       [{ price: 0.52, size: 150 }],
     );
 
     const book = await gw.getOrderBook(tokenId);
     expect(book.bids).toHaveLength(2);
     expect(book.asks).toHaveLength(1);
-    expect(book.bestBid).toBe(0.50);
+    expect(book.bestBid).toBe(0.5);
     expect(book.bestAsk).toBe(0.52);
     expect(book.midPrice).toBe(0.51);
     expect(book.spread).toBeCloseTo(0.02);

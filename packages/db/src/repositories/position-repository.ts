@@ -1,16 +1,7 @@
 import type Database from "better-sqlite3";
 import type { PositionRepository, Position } from "@plankton/domain";
-import type {
-  TokenId,
-  FamilyId,
-  OrderSide,
-  PositionStatus,
-} from "@plankton/domain";
-import {
-  createPositionId,
-  createTokenId,
-  createFamilyId,
-} from "@plankton/domain";
+import type { TokenId, FamilyId, OrderSide, PositionStatus } from "@plankton/domain";
+import { createPositionId, createTokenId, createFamilyId } from "@plankton/domain";
 
 export class SqlitePositionRepository implements PositionRepository {
   constructor(private readonly db: Database.Database) {}
@@ -69,23 +60,23 @@ export class SqlitePositionRepository implements PositionRepository {
   }
 
   findOpen(): Position[] {
-    const rows = this.db
-      .prepare("SELECT * FROM positions WHERE status = 'open'")
-      .all() as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM positions WHERE status = 'open'").all() as Record<
+      string,
+      unknown
+    >[];
     return rows.map((r) => this.rowToPosition(r));
   }
 
   findDust(): Position[] {
-    const rows = this.db
-      .prepare("SELECT * FROM positions WHERE status = 'dust'")
-      .all() as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM positions WHERE status = 'dust'").all() as Record<
+      string,
+      unknown
+    >[];
     return rows.map((r) => this.rowToPosition(r));
   }
 
   findAll(): Position[] {
-    const rows = this.db
-      .prepare("SELECT * FROM positions")
-      .all() as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM positions").all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToPosition(r));
   }
 

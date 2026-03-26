@@ -14,7 +14,11 @@ export function classifyError(err: unknown): { code: ExchangeErrorCode; message:
   if (lower.includes("invalid price") || lower.includes("price must")) {
     return { code: "INVALID_PRICE", message };
   }
-  if (lower.includes("invalid size") || lower.includes("size must") || lower.includes("min order size")) {
+  if (
+    lower.includes("invalid size") ||
+    lower.includes("size must") ||
+    lower.includes("min order size")
+  ) {
     return { code: "INVALID_SIZE", message };
   }
   if (lower.includes("duplicate") || lower.includes("already exists")) {

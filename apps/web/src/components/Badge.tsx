@@ -24,7 +24,13 @@ const SEVERITY_STYLES: Record<string, string> = {
   info: "badge-blue",
 };
 
-export function Badge({ value, type = "status" }: { value: string; type?: "mode" | "status" | "severity" }) {
+export function Badge({
+  value,
+  type = "status",
+}: {
+  value: string;
+  type?: "mode" | "status" | "severity";
+}) {
   const map = type === "mode" ? MODE_STYLES : type === "severity" ? SEVERITY_STYLES : STATUS_STYLES;
   const cls = map[value] ?? "badge-blue";
   return <span className={`badge ${cls}`}>{value}</span>;

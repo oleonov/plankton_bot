@@ -88,11 +88,13 @@ describe("SqliteFamilyCatalogRepository", () => {
   });
 
   it("handles optional fields (topicKey, slugPattern, notes)", () => {
-    repo.upsert(makeIdentity({
-      topicKey: "elections",
-      slugPattern: "will-*-win",
-      notes: "Political family",
-    }));
+    repo.upsert(
+      makeIdentity({
+        topicKey: "elections",
+        slugPattern: "will-*-win",
+        notes: "Political family",
+      }),
+    );
 
     const found = repo.findById(createFamilyId("fam-1"));
     expect(found!.topicKey).toBe("elections");

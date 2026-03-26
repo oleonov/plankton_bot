@@ -29,7 +29,13 @@ import type {
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
-import { scan, createBuyTracker, createSessionTracker, type BuyTracker, type SessionTracker } from "./scanner.js";
+import {
+  scan,
+  createBuyTracker,
+  createSessionTracker,
+  type BuyTracker,
+  type SessionTracker,
+} from "./scanner.js";
 import { SignalToOrderBridge } from "./signal-to-order.js";
 
 export interface StrategyModuleDeps {
@@ -67,26 +73,17 @@ export class StrategyModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.unsubs.push(
-      this.deps.bus.subscribe("NormalizedMarketUpdated", (p) =>
-        this.handleMarketUpdate(p),
-      ),
-      this.deps.bus.subscribe("PositionUpdated", (p) =>
-        this.handlePositionUpdated(p),
-      ),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
     );
     this.bridge.subscribe();
 
     this.timer = setInterval(() => {
-      this.tick().catch((err) =>
-        this.log.error({ err }, "strategy tick error"),
-      );
+      this.tick().catch((err) => this.log.error({ err }, "strategy tick error"));
     }, this.deps.scanIntervalMs);
 
     this.started = true;
-    this.log.info(
-      { scanIntervalMs: this.deps.scanIntervalMs },
-      "strategy module started",
-    );
+    this.log.info({ scanIntervalMs: this.deps.scanIntervalMs }, "strategy module started");
   }
 
   async stop(): Promise<void> {
@@ -139,7 +136,7 @@ export class StrategyModule implements RuntimeModule {
       );
 
       const filteredSignals = this.deps.liveLiteGuard
-        ? signals.filter(s => this.deps.liveLiteGuard!.isFamilyAllowed(String(s.familyId)))
+        ? signals.filter((s) => this.deps.liveLiteGuard!.isFamilyAllowed(String(s.familyId)))
         : signals;
 
       for (const signal of filteredSignals) {
@@ -164,15 +161,10 @@ export class StrategyModule implements RuntimeModule {
     payload: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
     this.cachedMarkets = payload.markets;
-    this.log.debug(
-      { count: payload.markets.length },
-      "market cache updated",
-    );
+    this.log.debug({ count: payload.markets.length }, "market cache updated");
   }
 
-  private async handlePositionUpdated(
-    payload: RuntimeEventMap["PositionUpdated"],
-  ): Promise<void> {
+  private async handlePositionUpdated(payload: RuntimeEventMap["PositionUpdated"]): Promise<void> {
     const { position } = payload;
     const posId = String(position.positionId);
 
@@ -195,10 +187,7 @@ export class StrategyModule implements RuntimeModule {
         // A new position (prevSize === 0) means this is the initial probe fill.
         if (prevSize === 0) {
           this.sessionTracker.incrementProbeCount(String(position.tokenId));
-          this.sessionTracker.recordNewMarket(
-            String(position.familyId),
-            String(position.tokenId),
-          );
+          this.sessionTracker.recordNewMarket(String(position.familyId), String(position.tokenId));
         }
       }
       this.lastKnownSize.set(posId, position.size);

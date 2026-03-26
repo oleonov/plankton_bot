@@ -29,7 +29,13 @@ import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 
 /** Signal reasons that represent entries (new exposure). */
-const ENTRY_REASONS = new Set(["probe-entry", "confirm-scale", "scale-in", "heavy-scale", "two-sided-entry"]);
+const ENTRY_REASONS = new Set([
+  "probe-entry",
+  "confirm-scale",
+  "scale-in",
+  "heavy-scale",
+  "two-sided-entry",
+]);
 
 type DerivedFamilyMode = "active" | "probe-only" | "reduce-only";
 
@@ -78,7 +84,10 @@ export class RiskGateImpl implements RiskGate {
     const rejected: string[] = [];
 
     // Live-lite allowlist check (Layer 2)
-    if (this.liveLiteGuard?.isActive && !this.liveLiteGuard.isFamilyAllowed(String(signal.familyId))) {
+    if (
+      this.liveLiteGuard?.isActive &&
+      !this.liveLiteGuard.isFamilyAllowed(String(signal.familyId))
+    ) {
       rejected.push("live-lite-allowlist-rejected");
       return this.decision(signal, false, rejected, passed);
     }
@@ -176,7 +185,7 @@ export class RiskGateImpl implements RiskGate {
     if (projectedValue > tail.maxOpenValueUsdc) {
       rejected.push(
         `open value would be ${projectedValue.toFixed(2)} USDC, ` +
-        `exceeds max ${tail.maxOpenValueUsdc} USDC`,
+          `exceeds max ${tail.maxOpenValueUsdc} USDC`,
       );
       return this.decision(signal, false, rejected, passed);
     }
@@ -195,9 +204,7 @@ export class RiskGateImpl implements RiskGate {
 
     // 5. Max dust positions
     if (familyState.openDustCount >= tail.maxDustPositions) {
-      rejected.push(
-        `dust positions ${familyState.openDustCount} >= max ${tail.maxDustPositions}`,
-      );
+      rejected.push(`dust positions ${familyState.openDustCount} >= max ${tail.maxDustPositions}`);
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("max_dust_ok");
@@ -206,8 +213,10 @@ export class RiskGateImpl implements RiskGate {
     const projectedTailCost = familyState.currentTailCostUsdc + signal.suggestedSizeUsdc;
     const scaleRules = bundle.rules.scaleIn;
     const derivedMode = resolveFamilyMode(
-      familyState, projectedTailCost,
-      tail.tailQuarantineThresholdUsdc, tail.tailQuarantineThresholdRatio,
+      familyState,
+      projectedTailCost,
+      tail.tailQuarantineThresholdUsdc,
+      tail.tailQuarantineThresholdRatio,
     );
 
     if (derivedMode === "reduce-only") {
@@ -242,7 +251,7 @@ export class RiskGateImpl implements RiskGate {
     ) {
       rejected.push(
         `${signal.reason} blocked — requirePositiveRecycleHistoryForScale ` +
-        `and tailAdjustedPnlLive ${familyState.tailAdjustedPnlLive.toFixed(2)} <= 0`,
+          `and tailAdjustedPnlLive ${familyState.tailAdjustedPnlLive.toFixed(2)} <= 0`,
       );
       return this.decision(signal, false, rejected, passed);
     }

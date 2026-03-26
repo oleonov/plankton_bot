@@ -43,17 +43,15 @@ export const riskEventsRoutes: FastifyPluginAsync<RiskEventsOpts> = async (app, 
     const rows = opts.db
       .prepare(`SELECT * FROM risk_events ${where} ORDER BY id DESC LIMIT ?`)
       .all(...params) as Array<{
-        id: number;
-        event_type: string;
-        family_id: string | null;
-        payload: string;
-        created_at: string;
-      }>;
+      id: number;
+      event_type: string;
+      family_id: string | null;
+      payload: string;
+      created_at: string;
+    }>;
 
     const items = rows.map(normalizeRiskEvent);
-    const nextCursor = rows.length === limit
-      ? String(rows[rows.length - 1]!.id)
-      : null;
+    const nextCursor = rows.length === limit ? String(rows[rows.length - 1]!.id) : null;
 
     return ok({ items, nextCursor });
   });

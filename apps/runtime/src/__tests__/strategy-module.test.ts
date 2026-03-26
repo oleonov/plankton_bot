@@ -1,9 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  createTokenId,
-  createFamilyId,
-  createPositionId,
-} from "@plankton/domain";
+import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
 import type {
   FamilyRulesProvider,
   FamilyRuleBundle,
@@ -108,7 +104,7 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       maxInitialNotionalUsdc: 5,
       allowHighPriceOneShot: false,
       highPriceThreshold: 0.85,
-      requireProvenFamilyAbovePrice: 0.10,
+      requireProvenFamilyAbovePrice: 0.1,
       preferredEntryBand: null,
       maxProbeCountPerMarket: null,
       entryCooldownSeconds: null,
@@ -216,21 +212,25 @@ function createMockRulesProvider(bundle: FamilyRuleBundle | null = makeBundle())
   return {
     getRule: vi.fn((_id: FamilyId) => bundle),
     isEnabled: vi.fn((_id: FamilyId) => true),
-    getAllFamilies: vi.fn(() => bundle ? [bundle.identity] : []),
-    getRulesForRegime: vi.fn(() => bundle ? [bundle] : []),
+    getAllFamilies: vi.fn(() => (bundle ? [bundle.identity] : [])),
+    getRulesForRegime: vi.fn(() => (bundle ? [bundle] : [])),
   } satisfies FamilyRulesProvider;
 }
 
 function createMockPositionRepo() {
   const positions = new Map<string, Position>();
   return {
-    save: vi.fn((p: Position) => { positions.set(String(p.tokenId), p); }),
+    save: vi.fn((p: Position) => {
+      positions.set(String(p.tokenId), p);
+    }),
     findByTokenId: vi.fn((tokenId: TokenId) => positions.get(String(tokenId)) ?? null),
     findOpen: vi.fn(() => [...positions.values()].filter((p) => p.status === "open")),
     findDust: vi.fn(() => [...positions.values()].filter((p) => p.status === "dust")),
     findByFamily: vi.fn((_id: FamilyId) => [...positions.values()]),
     findAll: vi.fn(() => [...positions.values()]),
-    _setPosition(tokenId: TokenId, pos: Position) { positions.set(String(tokenId), pos); },
+    _setPosition(tokenId: TokenId, pos: Position) {
+      positions.set(String(tokenId), pos);
+    },
   } satisfies PositionRepository & { _setPosition: (t: TokenId, p: Position) => void };
 }
 
@@ -238,7 +238,9 @@ function createMockFamilyStateRepo() {
   const states = new Map<string, FamilyState>();
   return {
     get: vi.fn((_id: FamilyId) => states.get(String(_id)) ?? null),
-    save: vi.fn((s: FamilyState) => { states.set(String(s.familyId), s); }),
+    save: vi.fn((s: FamilyState) => {
+      states.set(String(s.familyId), s);
+    }),
     findAll: vi.fn(() => [...states.values()]),
     findByMode: vi.fn(() => []),
     findQuarantined: vi.fn(() => []),
@@ -317,7 +319,9 @@ describe("StrategyModule", () => {
       await mod.stop();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Publish markets after stop — should not trigger scan
       await bus.publish("NormalizedMarketUpdated", {
@@ -349,7 +353,9 @@ describe("StrategyModule", () => {
     it("tick with no cached markets produces no signals", async () => {
       await mod.start();
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await mod.tick();
       await bus.drain();
@@ -363,7 +369,9 @@ describe("StrategyModule", () => {
     it("produces probe-entry signal for market in entry band", async () => {
       await mod.start();
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -384,7 +392,9 @@ describe("StrategyModule", () => {
     it("skips market with price below entry band", async () => {
       await mod.start();
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.005 })],
@@ -400,10 +410,12 @@ describe("StrategyModule", () => {
     it("skips market with price above entry band", async () => {
       await mod.start();
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ midPrice: 0.10 })],
+        markets: [makeNormalizedMarket({ midPrice: 0.1 })],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -416,7 +428,9 @@ describe("StrategyModule", () => {
     it("skips market with no familyId", async () => {
       await mod.start();
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ familyId: null })],
@@ -432,7 +446,9 @@ describe("StrategyModule", () => {
     it("skips inactive market", async () => {
       await mod.start();
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ active: false })],
@@ -448,7 +464,9 @@ describe("StrategyModule", () => {
     it("skips market with null midPrice", async () => {
       await mod.start();
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: null })],
@@ -462,18 +480,26 @@ describe("StrategyModule", () => {
     });
 
     it("skips family with disabled entry mode", async () => {
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, entryMode: "disabled" } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryMode: "disabled" } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -487,18 +513,26 @@ describe("StrategyModule", () => {
     });
 
     it("skips family with universe action != trade", async () => {
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { universe: { ...makeRules().universe, action: "monitor" } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { universe: { ...makeRules().universe, action: "monitor" } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -516,7 +550,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -534,7 +570,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -552,7 +590,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -577,7 +617,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -595,18 +637,26 @@ describe("StrategyModule", () => {
 
     it("skips scale-in when scale mode is disabled", async () => {
       positionRepo._setPosition(TOK_ID, makePosition());
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { scaleIn: { ...makeRules().scaleIn, scaleMode: "disabled" } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { scaleIn: { ...makeRules().scaleIn, scaleMode: "disabled" } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -618,8 +668,9 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       // May still produce exit signals but no scale-in
-      const scaleIns = (signals as Array<{ signal: import("@plankton/domain").Signal }>)
-        .filter((s) => s.signal.reason === "scale-in");
+      const scaleIns = (signals as Array<{ signal: import("@plankton/domain").Signal }>).filter(
+        (s) => s.signal.reason === "scale-in",
+      );
       expect(scaleIns).toHaveLength(0);
     });
 
@@ -630,7 +681,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Simulate 3 buy fills with increasing size (defaultMaxBuysPerLeg = 3)
       for (let i = 0; i < 3; i++) {
@@ -658,10 +711,12 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ midPrice: 0.10 })], // outside band
+        markets: [makeNormalizedMarket({ midPrice: 0.1 })], // outside band
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -669,8 +724,9 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const scaleIns = (signals as Array<{ signal: import("@plankton/domain").Signal }>)
-        .filter((s) => s.signal.reason === "scale-in");
+      const scaleIns = (signals as Array<{ signal: import("@plankton/domain").Signal }>).filter(
+        (s) => s.signal.reason === "scale-in",
+      );
       expect(scaleIns).toHaveLength(0);
     });
 
@@ -680,7 +736,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Simulate 1 buy via PositionUpdated
       await bus.publish("PositionUpdated", { position: pos });
@@ -706,7 +764,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Simulate 2 buys via PositionUpdated
       await bus.publish("PositionUpdated", { position: pos });
@@ -735,7 +795,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Simulate 3 buys (= defaultMaxBuysPerLeg)
       for (let i = 0; i < 3; i++) {
@@ -762,16 +824,22 @@ describe("StrategyModule", () => {
     });
 
     it("emits heavy-scale when allowHeavyCampaigns=true and buyCount >= defaultMax", async () => {
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          scaleIn: {
-            ...makeRules().scaleIn,
-            allowHeavyCampaigns: true,
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            scaleIn: {
+              ...makeRules().scaleIn,
+              allowHeavyCampaigns: true,
+            },
           },
-        },
-      }));
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
@@ -781,7 +849,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Simulate 3 buys (= defaultMaxBuysPerLeg)
       for (let i = 0; i < 3; i++) {
@@ -806,16 +876,22 @@ describe("StrategyModule", () => {
     });
 
     it("exhausts all stages when buyCount >= heavyMaxBuysPerLeg", async () => {
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          scaleIn: {
-            ...makeRules().scaleIn,
-            allowHeavyCampaigns: true,
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            scaleIn: {
+              ...makeRules().scaleIn,
+              allowHeavyCampaigns: true,
+            },
           },
-        },
-      }));
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
@@ -825,7 +901,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Simulate 5 buys (= heavyMaxBuysPerLeg)
       for (let i = 0; i < 5; i++) {
@@ -861,7 +939,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.04 })],
@@ -884,7 +964,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.031 })],
@@ -903,18 +985,26 @@ describe("StrategyModule", () => {
       // Position at 0.03, market at 0.06 → ROI = 100% (above 50%)
       // allowRunnerExtension: true → above-band positions are held as runners
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { exit: { ...makeRules().exit, allowRunnerExtension: true } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { exit: { ...makeRules().exit, allowRunnerExtension: true } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.06 })],
@@ -931,18 +1021,26 @@ describe("StrategyModule", () => {
 
     it("skips exit when exit mode is disabled", async () => {
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { exit: { ...makeRules().exit, exitMode: "disabled" } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { exit: { ...makeRules().exit, exitMode: "disabled" } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.04 })],
@@ -953,8 +1051,9 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const exits = (signals as Array<{ signal: import("@plankton/domain").Signal }>)
-        .filter((s) => s.signal.reason === "repricing-exit");
+      const exits = (signals as Array<{ signal: import("@plankton/domain").Signal }>).filter(
+        (s) => s.signal.reason === "repricing-exit",
+      );
       expect(exits).toHaveLength(0);
     });
 
@@ -974,14 +1073,20 @@ describe("StrategyModule", () => {
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
 
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Use a tick timestamp at 15:00 UTC (outside 03:00-04:00 window)
       const tickAt15Utc = new Date();
@@ -1018,14 +1123,20 @@ describe("StrategyModule", () => {
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1038,8 +1149,9 @@ describe("StrategyModule", () => {
 
       // Entry should be blocked outside session window (depends on current UTC hour)
       // If test is run at 03:xx UTC, entry will be produced — the test verifies the mechanism
-      const probes = (signals as Array<{ signal: import("@plankton/domain").Signal }>)
-        .filter((s) => s.signal.reason === "probe-entry");
+      const probes = (signals as Array<{ signal: import("@plankton/domain").Signal }>).filter(
+        (s) => s.signal.reason === "probe-entry",
+      );
       // At minimum, we verify the window check runs without error
       expect(probes.length).toBeLessThanOrEqual(1);
     });
@@ -1051,7 +1163,9 @@ describe("StrategyModule", () => {
     it("skips overlapping tick", async () => {
       await mod.start();
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1075,7 +1189,9 @@ describe("StrategyModule", () => {
     it("sets correct signal fields for probe entry", async () => {
       await mod.start();
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.04 })],
@@ -1106,14 +1222,20 @@ describe("StrategyModule", () => {
       const bundle = makeBundle();
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Two different tokens in same family
       await bus.publish("NormalizedMarketUpdated", {
@@ -1151,17 +1273,23 @@ describe("StrategyModule", () => {
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ midPrice: 0.90 })],
+        markets: [makeNormalizedMarket({ midPrice: 0.9 })],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -1184,17 +1312,23 @@ describe("StrategyModule", () => {
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ midPrice: 0.90 })],
+        markets: [makeNormalizedMarket({ midPrice: 0.9 })],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -1210,22 +1344,28 @@ describe("StrategyModule", () => {
         rules: {
           entry: {
             ...makeRules().entry,
-            maxEntryPrice: 0.50,
-            requireProvenFamilyAbovePrice: 0.10,
+            maxEntryPrice: 0.5,
+            requireProvenFamilyAbovePrice: 0.1,
           },
         },
         evidence: { evidenceStatus: "weak" },
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.15 })],
@@ -1246,14 +1386,19 @@ describe("StrategyModule", () => {
       // Position at 0.025, market at 0.035 → ROI = 40% (in band)
       // Price 0.035 is also in entry band [0.01, 0.05] → scale-in would be eligible
       // But exit takes priority — emitting both would create opposing orders.
-      positionRepo._setPosition(TOK_ID, makePosition({
-        avgEntryPrice: 0.025,
-        size: 100,
-      }));
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({
+          avgEntryPrice: 0.025,
+          size: 100,
+        }),
+      );
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.035 })],
@@ -1273,14 +1418,19 @@ describe("StrategyModule", () => {
     it("emits scale-in when ROI is below exit band", async () => {
       // Position at 0.03, market at 0.031 → ROI = 3.3% (below medium-hold band)
       // Price 0.031 is in entry band → scale-in is eligible, no exit.
-      positionRepo._setPosition(TOK_ID, makePosition({
-        avgEntryPrice: 0.03,
-        size: 100,
-      }));
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({
+          avgEntryPrice: 0.03,
+          size: 100,
+        }),
+      );
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.031 })],
@@ -1325,7 +1475,9 @@ describe("StrategyModule", () => {
       // Buy count is now 3, which equals defaultMaxBuysPerLeg
       // So scale-in should be blocked on next tick
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1358,7 +1510,9 @@ describe("StrategyModule", () => {
       // Buy count should still be 1, not 2
       // So confirm-scale should still be allowed (buyCount=1 → confirm stage)
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1384,7 +1538,12 @@ describe("StrategyModule", () => {
 
       // Close position
       await bus.publish("PositionUpdated", {
-        position: { ...pos, status: "closed" as const, size: 0, closedAt: new Date().toISOString() },
+        position: {
+          ...pos,
+          status: "closed" as const,
+          size: 0,
+          closedAt: new Date().toISOString(),
+        },
       });
       await bus.drain();
 
@@ -1407,7 +1566,9 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       const orderRequests: Array<{ command: import("@plankton/domain").PlaceOrderCommand }> = [];
-      bus.subscribe("PlaceOrderRequested", async (p) => { orderRequests.push(p); });
+      bus.subscribe("PlaceOrderRequested", async (p) => {
+        orderRequests.push(p);
+      });
 
       // Publish an approved signal
       const signal = {
@@ -1444,7 +1605,9 @@ describe("StrategyModule", () => {
       // No market cache seeded
 
       const orderRequests: unknown[] = [];
-      bus.subscribe("PlaceOrderRequested", async (p) => { orderRequests.push(p); });
+      bus.subscribe("PlaceOrderRequested", async (p) => {
+        orderRequests.push(p);
+      });
 
       await bus.publish("SignalApproved", {
         signal: {
@@ -1480,7 +1643,9 @@ describe("StrategyModule", () => {
       await mod.stop();
 
       const orderRequests: unknown[] = [];
-      bus.subscribe("PlaceOrderRequested", async (p) => { orderRequests.push(p); });
+      bus.subscribe("PlaceOrderRequested", async (p) => {
+        orderRequests.push(p);
+      });
 
       await bus.publish("SignalApproved", {
         signal: {
@@ -1517,7 +1682,11 @@ describe("StrategyModule", () => {
         maxActiveMarkets: 3,
       });
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
         liveLiteGuard,
@@ -1525,7 +1694,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1549,7 +1720,11 @@ describe("StrategyModule", () => {
         maxActiveMarkets: 3,
       });
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
         liveLiteGuard,
@@ -1557,7 +1732,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1590,7 +1767,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: unknown[] = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1621,14 +1800,20 @@ describe("StrategyModule", () => {
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1657,19 +1842,28 @@ describe("StrategyModule", () => {
         },
       });
       rulesProvider = createMockRulesProvider(bundle);
-      positionRepo._setPosition(TOK_ID, makePosition({
-        avgEntryPrice: 0.03,
-        size: 100,
-      }));
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({
+          avgEntryPrice: 0.03,
+          size: 100,
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.031 })],
@@ -1698,14 +1892,20 @@ describe("StrategyModule", () => {
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1725,7 +1925,9 @@ describe("StrategyModule", () => {
   // ─── Wave 3: active session / reduced mode ──────────────────────────────
 
   describe("active session window (P1-2)", () => {
-    afterEach(() => { vi.useRealTimers(); });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
 
     it("allows probe entry outside active window", async () => {
       // Window: 14:00-21:00 UTC. Tick at 10:00 UTC → outside window.
@@ -1733,18 +1935,26 @@ describe("StrategyModule", () => {
       vi.setSystemTime(new Date("2026-03-16T10:00:00Z"));
 
       const outsideWindowRules = makeBundle({
-        rules: { session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] } },
+        rules: {
+          session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] },
+        },
       });
       rulesProvider = createMockRulesProvider(outsideWindowRules);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1766,19 +1976,27 @@ describe("StrategyModule", () => {
       vi.setSystemTime(new Date("2026-03-16T10:00:00Z"));
 
       const outsideWindowRules = makeBundle({
-        rules: { session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] } },
+        rules: {
+          session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] },
+        },
       });
       rulesProvider = createMockRulesProvider(outsideWindowRules);
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1788,7 +2006,9 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const entries = signals.filter((s) => s.signal.side === "buy" && s.signal.reason !== "probe-entry");
+      const entries = signals.filter(
+        (s) => s.signal.side === "buy" && s.signal.reason !== "probe-entry",
+      );
       expect(entries).toHaveLength(0);
 
       vi.useRealTimers();
@@ -1800,19 +2020,27 @@ describe("StrategyModule", () => {
       vi.setSystemTime(new Date("2026-03-16T10:00:00Z"));
 
       const outsideWindowRules = makeBundle({
-        rules: { session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] } },
+        rules: {
+          session: { ...makeRules().session, activeWindowsUtc: [{ start: "14:00", end: "21:00" }] },
+        },
       });
       rulesProvider = createMockRulesProvider(outsideWindowRules);
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // midPrice 0.04 → ROI = (0.04-0.03)/0.03 = 33%, in [20%, 50%] band
       await bus.publish("NormalizedMarketUpdated", {
@@ -1837,22 +2065,33 @@ describe("StrategyModule", () => {
       // Position opened 30 min ago. lowBand = 20%, effectiveLow = 10%.
       // ROI = (0.033 - 0.03) / 0.03 = 10% — should exit with fast recycle.
       const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
-      positionRepo._setPosition(TOK_ID, makePosition({
-        avgEntryPrice: 0.03,
-        openedAt: thirtyMinAgo,
-      }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { exit: { ...makeRules().exit, preferFastRecycle: true } },
-      }));
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({
+          avgEntryPrice: 0.03,
+          openedAt: thirtyMinAgo,
+        }),
+      );
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { exit: { ...makeRules().exit, preferFastRecycle: true } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       const now = Date.now();
       await bus.publish("NormalizedMarketUpdated", {
@@ -1871,22 +2110,33 @@ describe("StrategyModule", () => {
       // Position opened 2 hours ago. lowBand = 20%, no reduction.
       // ROI = (0.033 - 0.03) / 0.03 = 10% — below 20%, should NOT exit.
       const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-      positionRepo._setPosition(TOK_ID, makePosition({
-        avgEntryPrice: 0.03,
-        openedAt: twoHoursAgo,
-      }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { exit: { ...makeRules().exit, preferFastRecycle: true } },
-      }));
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({
+          avgEntryPrice: 0.03,
+          openedAt: twoHoursAgo,
+        }),
+      );
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { exit: { ...makeRules().exit, preferFastRecycle: true } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       const now = Date.now();
       await bus.publish("NormalizedMarketUpdated", {
@@ -1909,18 +2159,26 @@ describe("StrategyModule", () => {
       // ROI = (0.06 - 0.03) / 0.03 = 100% — above 50% highBand.
       // allowRunnerExtension: true → hold as runner.
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { exit: { ...makeRules().exit, allowRunnerExtension: true } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { exit: { ...makeRules().exit, allowRunnerExtension: true } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.06 })],
@@ -1942,7 +2200,9 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.06 })],
@@ -1964,18 +2224,26 @@ describe("StrategyModule", () => {
       // entryCooldownSeconds: 300 (5 min), lastEntryTs: 2 min ago → blocked.
       const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
       familyStateRepo.save(makeFamilyState({ lastEntryTs: twoMinAgo }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -1992,18 +2260,26 @@ describe("StrategyModule", () => {
       // entryCooldownSeconds: 300 (5 min), lastEntryTs: 10 min ago → allowed.
       const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
       familyStateRepo.save(makeFamilyState({ lastEntryTs: tenMinAgo }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2023,18 +2299,26 @@ describe("StrategyModule", () => {
       const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
       familyStateRepo.save(makeFamilyState({ lastEntryTs: twoMinAgo }));
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // ROI = (0.04 - 0.03) / 0.03 = 33% → in exit band
       await bus.publish("NormalizedMarketUpdated", {
@@ -2053,18 +2337,26 @@ describe("StrategyModule", () => {
       // Two markets in the same family, cooldown elapsed → only one probe emitted.
       const tenMinAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
       familyStateRepo.save(makeFamilyState({ lastEntryTs: tenMinAgo }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Two distinct markets in the same family, both in entry band
       await bus.publish("NormalizedMarketUpdated", {
@@ -2086,28 +2378,38 @@ describe("StrategyModule", () => {
   // ─── Wave 4: weekend policy (P1-3) ─────────────────────────────────────
 
   describe("weekend policy (P1-3)", () => {
-    afterEach(() => { vi.useRealTimers(); });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
 
     it("blocks all entries on weekend when allowWeekends is false", async () => {
       // Saturday 2026-03-21 at 16:00 UTC (inside active window)
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
 
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          universe: { ...makeRules().universe, allowWeekends: false },
-          session: { ...makeRules().session, weekendMode: "normal" },
-        },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            universe: { ...makeRules().universe, allowWeekends: false },
+            session: { ...makeRules().session, weekendMode: "normal" },
+          },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2127,21 +2429,29 @@ describe("StrategyModule", () => {
       vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
 
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          universe: { ...makeRules().universe, allowWeekends: true },
-          session: { ...makeRules().session, weekendMode: "reduced" },
-        },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            universe: { ...makeRules().universe, allowWeekends: true },
+            session: { ...makeRules().session, weekendMode: "reduced" },
+          },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2151,8 +2461,8 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const scaleIns = signals.filter((s) =>
-        s.signal.side === "buy" && s.signal.reason !== "probe-entry",
+      const scaleIns = signals.filter(
+        (s) => s.signal.side === "buy" && s.signal.reason !== "probe-entry",
       );
       expect(scaleIns).toHaveLength(0);
     });
@@ -2161,21 +2471,29 @@ describe("StrategyModule", () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
 
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          universe: { ...makeRules().universe, allowWeekends: true },
-          session: { ...makeRules().session, weekendMode: "reduced" },
-        },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            universe: { ...makeRules().universe, allowWeekends: true },
+            session: { ...makeRules().session, weekendMode: "reduced" },
+          },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2194,20 +2512,28 @@ describe("StrategyModule", () => {
       vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
 
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          universe: { ...makeRules().universe, allowWeekends: false },
-        },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            universe: { ...makeRules().universe, allowWeekends: false },
+          },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // ROI = (0.04 - 0.03) / 0.03 = 33% → in exit band
       await bus.publish("NormalizedMarketUpdated", {
@@ -2261,14 +2587,20 @@ describe("StrategyModule", () => {
       } satisfies FamilyRulesProvider;
 
       mod = new StrategyModule({
-        bus, rulesProvider: customRulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider: customRulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // ETH market appears first in array, but BTC has higher priority (lower rank)
       await bus.publish("NormalizedMarketUpdated", {
@@ -2295,18 +2627,26 @@ describe("StrategyModule", () => {
   describe("max probe count per market (P1-6)", () => {
     it("blocks probe after filled entry reaches maxProbeCountPerMarket", async () => {
       // maxProbeCountPerMarket: 1 → after first filled probe, re-probe is blocked.
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, maxProbeCountPerMarket: 1 } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, maxProbeCountPerMarket: 1 } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // First tick: probe signal fires
       await bus.publish("NormalizedMarketUpdated", {
@@ -2342,18 +2682,26 @@ describe("StrategyModule", () => {
       // maxProbeCountPerMarket: 1. Signal fires but risk rejects it.
       // The probe count should NOT be incremented — a rejected probe
       // doesn't count against the limit.
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, maxProbeCountPerMarket: 1 } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, maxProbeCountPerMarket: 1 } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // First tick: probe signal fires
       await bus.publish("NormalizedMarketUpdated", {
@@ -2382,18 +2730,26 @@ describe("StrategyModule", () => {
   describe("max new markets per session (P1-6)", () => {
     it("blocks new market entry after filled entries reach session limit", async () => {
       // maxNewMarketsPerSession: 1 → after one filled new market, block new ones.
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, maxNewMarketsPerSession: 1 } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, maxNewMarketsPerSession: 1 } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // First tick: probe fires for TOK_ID
       await bus.publish("NormalizedMarketUpdated", {
@@ -2427,18 +2783,26 @@ describe("StrategyModule", () => {
     it("does not count rejected signal as a new market entry", async () => {
       // maxNewMarketsPerSession: 1. First probe signal is rejected (no fill).
       // A second attempt to a different market should still be allowed.
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: { entry: { ...makeRules().entry, maxNewMarketsPerSession: 1 } },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, maxNewMarketsPerSession: 1 } },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // First tick: probe signal fires for TOK_ID
       await bus.publish("NormalizedMarketUpdated", {
@@ -2469,33 +2833,43 @@ describe("StrategyModule", () => {
   // ─── P1-2 completion: config-driven reduced mode ─────────────────────
 
   describe("config-driven reduced mode (P1-2)", () => {
-    afterEach(() => { vi.useRealTimers(); });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
 
     it("always-reduced sessionMode blocks scale-in even inside active window", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-03-18T17:00:00Z")); // Wednesday 17:00 UTC (inside 14-21 window)
 
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          universe: { ...makeRules().universe, sessionMode: "always-reduced" },
-          session: {
-            activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
-            reducedWindowsUtc: [],
-            weekdayBias: "normal",
-            weekendMode: "normal",
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            universe: { ...makeRules().universe, sessionMode: "always-reduced" },
+            session: {
+              activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
+              reducedWindowsUtc: [],
+              weekdayBias: "normal",
+              weekendMode: "normal",
+            },
           },
-        },
-      }));
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2505,7 +2879,9 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale");
+      const scaleIns = signals.filter(
+        (s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale",
+      );
       expect(scaleIns).toHaveLength(0);
     });
 
@@ -2514,25 +2890,33 @@ describe("StrategyModule", () => {
       vi.setSystemTime(new Date("2026-03-18T17:00:00Z")); // Wednesday 17:00 UTC
 
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          session: {
-            activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
-            reducedWindowsUtc: [{ start: "16:00", end: "18:00" }], // 17:00 is inside
-            weekdayBias: "normal",
-            weekendMode: "normal",
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            session: {
+              activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
+              reducedWindowsUtc: [{ start: "16:00", end: "18:00" }], // 17:00 is inside
+              weekdayBias: "normal",
+              weekendMode: "normal",
+            },
           },
-        },
-      }));
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2542,7 +2926,9 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale");
+      const scaleIns = signals.filter(
+        (s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale",
+      );
       expect(scaleIns).toHaveLength(0);
     });
 
@@ -2551,26 +2937,34 @@ describe("StrategyModule", () => {
       vi.setSystemTime(new Date("2026-03-18T19:00:00Z")); // Wednesday 19:00 UTC
 
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          exit: { ...makeRules().exit, preferFastRecycle: false },
-          session: {
-            activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
-            reducedWindowsUtc: [{ start: "16:00", end: "18:00" }], // 19:00 is outside
-            weekdayBias: "normal",
-            weekendMode: "normal",
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            exit: { ...makeRules().exit, preferFastRecycle: false },
+            session: {
+              activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
+              reducedWindowsUtc: [{ start: "16:00", end: "18:00" }], // 19:00 is outside
+              weekdayBias: "normal",
+              weekendMode: "normal",
+            },
           },
-        },
-      }));
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.031 })],
@@ -2580,7 +2974,9 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const scaleIns = signals.filter((s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale");
+      const scaleIns = signals.filter(
+        (s) => s.signal.reason === "scale-in" || s.signal.reason === "confirm-scale",
+      );
       expect(scaleIns).toHaveLength(1);
     });
   });
@@ -2597,14 +2993,20 @@ describe("StrategyModule", () => {
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2629,14 +3031,20 @@ describe("StrategyModule", () => {
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2661,14 +3069,20 @@ describe("StrategyModule", () => {
       });
       rulesProvider = createMockRulesProvider(bundle);
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.03 })],
@@ -2692,15 +3106,20 @@ describe("StrategyModule", () => {
       // avgEntryPrice: 0.03, midPrice: 0.032 → ROI = 6.7%
       // With fast recycle on young position: effectiveLowBand = 10%, mediumHoldBand = 5%
       // 6.7% is between 5% and 10% → medium-hold-exit
-      positionRepo._setPosition(TOK_ID, makePosition({
-        avgEntryPrice: 0.03,
-        size: 100,
-        openedAt: new Date().toISOString(), // young position
-      }));
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({
+          avgEntryPrice: 0.03,
+          size: 100,
+          openedAt: new Date().toISOString(), // young position
+        }),
+      );
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.032 })],
@@ -2719,14 +3138,19 @@ describe("StrategyModule", () => {
 
     it("emits full repricing-exit when ROI is in target band", async () => {
       // avgEntryPrice: 0.03, midPrice: 0.04 → ROI = 33% (in 20-50% band)
-      positionRepo._setPosition(TOK_ID, makePosition({
-        avgEntryPrice: 0.03,
-        size: 100,
-      }));
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({
+          avgEntryPrice: 0.03,
+          size: 100,
+        }),
+      );
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.04 })],
@@ -2743,15 +3167,20 @@ describe("StrategyModule", () => {
 
     it("skips medium-hold when position too small to split", async () => {
       // Size 0.001 → 0.001 * 0.5 = 0.0005 → below 0.001 threshold
-      positionRepo._setPosition(TOK_ID, makePosition({
-        avgEntryPrice: 0.03,
-        size: 0.001,
-        openedAt: new Date().toISOString(),
-      }));
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({
+          avgEntryPrice: 0.03,
+          size: 0.001,
+          openedAt: new Date().toISOString(),
+        }),
+      );
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ midPrice: 0.032 })],
@@ -2770,21 +3199,33 @@ describe("StrategyModule", () => {
 
   describe("two-sided overlay (P1-5)", () => {
     it("emits two-sided-entry for NO-outcome market when allowTwoSided is true", async () => {
-      rulesProvider = createMockRulesProvider(makeBundle({
-        evidence: { bothSidedEligible: true, localTradeCount: 50 },
-        rules: {
-          twoSided: { allowTwoSided: true, twoSidedMode: "selective", minActivityForTwoSided: 10 },
-        },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          evidence: { bothSidedEligible: true, localTradeCount: 50 },
+          rules: {
+            twoSided: {
+              allowTwoSided: true,
+              twoSidedMode: "selective",
+              minActivityForTwoSided: 10,
+            },
+          },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
@@ -2801,20 +3242,32 @@ describe("StrategyModule", () => {
     });
 
     it("blocks two-sided entry when twoSidedMode is disabled", async () => {
-      rulesProvider = createMockRulesProvider(makeBundle({
-        rules: {
-          twoSided: { allowTwoSided: false, twoSidedMode: "disabled", minActivityForTwoSided: null },
-        },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: {
+            twoSided: {
+              allowTwoSided: false,
+              twoSidedMode: "disabled",
+              minActivityForTwoSided: null,
+            },
+          },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
@@ -2829,21 +3282,33 @@ describe("StrategyModule", () => {
     });
 
     it("blocks two-sided in selective mode when bothSidedEligible is false", async () => {
-      rulesProvider = createMockRulesProvider(makeBundle({
-        evidence: { bothSidedEligible: false },
-        rules: {
-          twoSided: { allowTwoSided: true, twoSidedMode: "selective", minActivityForTwoSided: null },
-        },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          evidence: { bothSidedEligible: false },
+          rules: {
+            twoSided: {
+              allowTwoSided: true,
+              twoSidedMode: "selective",
+              minActivityForTwoSided: null,
+            },
+          },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
@@ -2861,27 +3326,39 @@ describe("StrategyModule", () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-03-18T05:00:00Z")); // 05:00 UTC (outside 14-21)
 
-      rulesProvider = createMockRulesProvider(makeBundle({
-        evidence: { bothSidedEligible: true },
-        rules: {
-          twoSided: { allowTwoSided: true, twoSidedMode: "selective", minActivityForTwoSided: null },
-          session: {
-            activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
-            reducedWindowsUtc: [],
-            weekdayBias: "normal",
-            weekendMode: "normal",
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          evidence: { bothSidedEligible: true },
+          rules: {
+            twoSided: {
+              allowTwoSided: true,
+              twoSidedMode: "selective",
+              minActivityForTwoSided: null,
+            },
+            session: {
+              activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
+              reducedWindowsUtc: [],
+              weekdayBias: "normal",
+              weekendMode: "normal",
+            },
           },
-        },
-      }));
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
@@ -2898,21 +3375,29 @@ describe("StrategyModule", () => {
     });
 
     it("blocks two-sided when activity below minActivityForTwoSided", async () => {
-      rulesProvider = createMockRulesProvider(makeBundle({
-        evidence: { bothSidedEligible: true, localTradeCount: 5 },
-        rules: {
-          twoSided: { allowTwoSided: true, twoSidedMode: "active", minActivityForTwoSided: 20 },
-        },
-      }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          evidence: { bothSidedEligible: true, localTradeCount: 5 },
+          rules: {
+            twoSided: { allowTwoSided: true, twoSidedMode: "active", minActivityForTwoSided: 20 },
+          },
+        }),
+      );
       mod = new StrategyModule({
-        bus, rulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
@@ -2965,14 +3450,20 @@ describe("StrategyModule", () => {
       } satisfies FamilyRulesProvider;
 
       mod = new StrategyModule({
-        bus, rulesProvider: customRulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider: customRulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       // Weak family market first in array, strong second
       await bus.publish("NormalizedMarketUpdated", {
@@ -3006,11 +3497,13 @@ describe("StrategyModule", () => {
           entry: { ...makeRules().entry, entryCooldownSeconds: 300 },
         },
       });
-      familyStateRepo.save(makeFamilyState({
-        familyId: FAM_ID,
-        tailAdjustedPnlLive: 500,
-        currentTailCostUsdc: 0,
-      }));
+      familyStateRepo.save(
+        makeFamilyState({
+          familyId: FAM_ID,
+          tailAdjustedPnlLive: 500,
+          currentTailCostUsdc: 0,
+        }),
+      );
 
       const lowEvidenceBundle = makeBundle({
         identity: { ...makeIdentity(), familyId: FAM_LOW },
@@ -3022,11 +3515,13 @@ describe("StrategyModule", () => {
           entry: { ...makeRules().entry, entryCooldownSeconds: 300 },
         },
       });
-      familyStateRepo.save(makeFamilyState({
-        familyId: FAM_LOW,
-        tailAdjustedPnlLive: -100,
-        currentTailCostUsdc: 500,
-      }));
+      familyStateRepo.save(
+        makeFamilyState({
+          familyId: FAM_LOW,
+          tailAdjustedPnlLive: -100,
+          currentTailCostUsdc: 500,
+        }),
+      );
 
       const customRulesProvider = {
         getRule: vi.fn((id: FamilyId) => {
@@ -3040,14 +3535,20 @@ describe("StrategyModule", () => {
       } satisfies FamilyRulesProvider;
 
       mod = new StrategyModule({
-        bus, rulesProvider: customRulesProvider, positionRepo, familyStateRepo, log,
+        bus,
+        rulesProvider: customRulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
         scanIntervalMs: 60_000,
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [

@@ -8,11 +8,7 @@
  * FIFO ordering. Errors in individual commands do not break the queue.
  */
 
-import type {
-  PlaceOrderCommand,
-  CancelOrderCommand,
-  TokenId,
-} from "@plankton/domain";
+import type { PlaceOrderCommand, CancelOrderCommand, TokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 type Command = PlaceOrderCommand | CancelOrderCommand;
@@ -85,7 +81,8 @@ export class ExecutionQueue {
       this.queue.splice(i, 1);
       this.activeCount++;
 
-      const promise = this.config.execute(cmd)
+      const promise = this.config
+        .execute(cmd)
         .catch((err) => this.config.log.error({ err, type: cmd.type }, "queue worker error"))
         .finally(() => {
           this.activeCount--;

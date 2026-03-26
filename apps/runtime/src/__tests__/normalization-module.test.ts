@@ -29,9 +29,7 @@ function makeIdentity(overrides?: Partial<FamilyIdentity>): FamilyIdentity {
   };
 }
 
-function makeNormalizedMarket(
-  overrides?: Partial<NormalizedMarket>,
-): NormalizedMarket {
+function makeNormalizedMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
   return {
     tokenId: createTokenId("tok-1"),
     conditionId: "cond-1",
@@ -56,9 +54,7 @@ function makeNormalizedMarket(
   };
 }
 
-function createMockRulesProvider(
-  families: FamilyIdentity[],
-): FamilyRulesProvider {
+function createMockRulesProvider(families: FamilyIdentity[]): FamilyRulesProvider {
   return {
     getRule: vi.fn().mockReturnValue(null),
     isEnabled: vi.fn().mockReturnValue(true),
@@ -182,13 +178,11 @@ describe("NormalizationModule", () => {
     expect(marketRepo.save).toHaveBeenCalledTimes(2);
 
     // First call should have familyId set (matched)
-    const firstSave = (marketRepo.save as ReturnType<typeof vi.fn>).mock
-      .calls[0]![0] as Market;
+    const firstSave = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
     expect(firstSave.familyId).toBe("fam-btc");
 
     // Second call should have familyId null (unmatched)
-    const secondSave = (marketRepo.save as ReturnType<typeof vi.fn>).mock
-      .calls[1]![0] as Market;
+    const secondSave = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[1]![0] as Market;
     expect(secondSave.familyId).toBeNull();
 
     await mod.stop();
@@ -236,9 +230,7 @@ describe("NormalizationModule", () => {
   });
 
   it("does not crash on families without slug pattern", async () => {
-    rulesProvider = createMockRulesProvider([
-      makeIdentity({ slugPattern: null }),
-    ]);
+    rulesProvider = createMockRulesProvider([makeIdentity({ slugPattern: null })]);
     mod = new NormalizationModule({
       bus,
       rulesProvider,
@@ -283,10 +275,12 @@ describe("NormalizationModule", () => {
     });
 
     await bus.publish("MarketSnapshotReceived", {
-      markets: [makeNormalizedMarket({
-        slug: "btc-above-100k-price",
-        endDate: new Date(Date.now() + 270 * 24 * 60 * 60 * 1000).toISOString(),
-      })],
+      markets: [
+        makeNormalizedMarket({
+          slug: "btc-above-100k-price",
+          endDate: new Date(Date.now() + 270 * 24 * 60 * 60 * 1000).toISOString(),
+        }),
+      ],
       timestamp: Date.now(),
     });
 
@@ -317,10 +311,12 @@ describe("NormalizationModule", () => {
     });
 
     await bus.publish("MarketSnapshotReceived", {
-      markets: [makeNormalizedMarket({
-        slug: "btc-above-100k-price",
-        endDate: tomorrow.toISOString(),
-      })],
+      markets: [
+        makeNormalizedMarket({
+          slug: "btc-above-100k-price",
+          endDate: tomorrow.toISOString(),
+        }),
+      ],
       timestamp: Date.now(),
     });
 
@@ -330,9 +326,7 @@ describe("NormalizationModule", () => {
   });
 
   it("treats special characters in slug pattern as literal (glob, not regex)", async () => {
-    rulesProvider = createMockRulesProvider([
-      makeIdentity({ slugPattern: "[special]*" }),
-    ]);
+    rulesProvider = createMockRulesProvider([makeIdentity({ slugPattern: "[special]*" })]);
     mod = new NormalizationModule({
       bus,
       rulesProvider,

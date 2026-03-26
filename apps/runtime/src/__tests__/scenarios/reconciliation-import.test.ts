@@ -1,6 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { runScenario } from "../../scenario/runner.js";
-import { makeMarket, makeMarketFixture, resetFixtureCounters } from "../../scenario/fixture-helpers.js";
+import {
+  makeMarket,
+  makeMarketFixture,
+  resetFixtureCounters,
+} from "../../scenario/fixture-helpers.js";
 import { makeFamilyConfig } from "../../scenario/family-fixtures.js";
 
 afterEach(() => {
@@ -39,15 +43,25 @@ describe("Scenario: reconciliation imports missing fill", () => {
         });
 
         // Insert same order into local DB as "open" — local DB doesn't know about the fill
-        ctx.db.prepare(
-          "INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        ).run(
-          "sim-ord-1", "co-recon-1",
-          tokenId, "fam-recon-test",
-          "buy", "GTC", 0.45, 10, 4.5,
-          "open", "prev-run",
-          now, now,
-        );
+        ctx.db
+          .prepare(
+            "INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            "sim-ord-1",
+            "co-recon-1",
+            tokenId,
+            "fam-recon-test",
+            "buy",
+            "GTC",
+            0.45,
+            10,
+            4.5,
+            "open",
+            "prev-run",
+            now,
+            now,
+          );
       },
     };
 

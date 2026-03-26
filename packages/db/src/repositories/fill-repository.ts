@@ -1,12 +1,7 @@
 import type Database from "better-sqlite3";
 import type { FillRepository, Fill } from "@plankton/domain";
 import type { OrderId, TokenId, FillId, OrderSide } from "@plankton/domain";
-import {
-  createFillId,
-  createOrderId,
-  createTokenId,
-  createFamilyId,
-} from "@plankton/domain";
+import { createFillId, createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
 
 export class SqliteFillRepository implements FillRepository {
   constructor(private readonly db: Database.Database) {}
@@ -34,23 +29,23 @@ export class SqliteFillRepository implements FillRepository {
   }
 
   exists(fillId: FillId): boolean {
-    const row = this.db
-      .prepare("SELECT 1 FROM fills WHERE fill_id = ? LIMIT 1")
-      .get(fillId);
+    const row = this.db.prepare("SELECT 1 FROM fills WHERE fill_id = ? LIMIT 1").get(fillId);
     return row !== undefined;
   }
 
   findByOrderId(orderId: OrderId): Fill[] {
-    const rows = this.db
-      .prepare("SELECT * FROM fills WHERE order_id = ?")
-      .all(orderId) as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM fills WHERE order_id = ?").all(orderId) as Record<
+      string,
+      unknown
+    >[];
     return rows.map((r) => this.rowToFill(r));
   }
 
   findByTokenId(tokenId: TokenId): Fill[] {
-    const rows = this.db
-      .prepare("SELECT * FROM fills WHERE token_id = ?")
-      .all(tokenId) as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM fills WHERE token_id = ?").all(tokenId) as Record<
+      string,
+      unknown
+    >[];
     return rows.map((r) => this.rowToFill(r));
   }
 
@@ -62,9 +57,10 @@ export class SqliteFillRepository implements FillRepository {
   }
 
   findUnreconciled(): Fill[] {
-    const rows = this.db
-      .prepare("SELECT * FROM fills WHERE reconciled = 0")
-      .all() as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM fills WHERE reconciled = 0").all() as Record<
+      string,
+      unknown
+    >[];
     return rows.map((r) => this.rowToFill(r));
   }
 
@@ -73,9 +69,7 @@ export class SqliteFillRepository implements FillRepository {
 
     const placeholders = fillIds.map(() => "?").join(", ");
     this.db
-      .prepare(
-        `UPDATE fills SET reconciled = 1 WHERE fill_id IN (${placeholders})`,
-      )
+      .prepare(`UPDATE fills SET reconciled = 1 WHERE fill_id IN (${placeholders})`)
       .run(...fillIds);
   }
 

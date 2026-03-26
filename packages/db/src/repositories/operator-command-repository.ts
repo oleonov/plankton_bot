@@ -25,9 +25,7 @@ function rowToCommand(row: CommandRow): OperatorCommand {
   };
 }
 
-export class SqliteOperatorCommandRepository
-  implements OperatorCommandRepository
-{
+export class SqliteOperatorCommandRepository implements OperatorCommandRepository {
   constructor(private readonly db: Database.Database) {}
 
   insert(cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt">): number {
@@ -43,22 +41,14 @@ export class SqliteOperatorCommandRepository
 
   getPending(): OperatorCommand[] {
     const rows = this.db
-      .prepare(
-        `SELECT * FROM operator_commands WHERE status = 'pending' ORDER BY created_at ASC`,
-      )
+      .prepare(`SELECT * FROM operator_commands WHERE status = 'pending' ORDER BY created_at ASC`)
       .all() as CommandRow[];
     return rows.map(rowToCommand);
   }
 
-  updateStatus(
-    id: number,
-    status: "applied" | "rejected",
-    appliedAt: string,
-  ): void {
+  updateStatus(id: number, status: "applied" | "rejected", appliedAt: string): void {
     this.db
-      .prepare(
-        `UPDATE operator_commands SET status = ?, applied_at = ? WHERE id = ?`,
-      )
+      .prepare(`UPDATE operator_commands SET status = ?, applied_at = ? WHERE id = ?`)
       .run(status, appliedAt, id);
   }
 }

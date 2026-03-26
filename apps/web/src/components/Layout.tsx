@@ -13,15 +13,17 @@ const NAV_ITEMS = [
 export function Layout() {
   return (
     <>
-      <nav style={{
-        background: "var(--bg-nav)",
-        color: "var(--text)",
-        padding: "8px 16px",
-        display: "flex",
-        alignItems: "center",
-        gap: 24,
-        fontSize: 13,
-      }}>
+      <nav
+        style={{
+          background: "var(--bg-nav)",
+          color: "var(--text)",
+          padding: "8px 16px",
+          display: "flex",
+          alignItems: "center",
+          gap: 24,
+          fontSize: 13,
+        }}
+      >
         <span style={{ fontWeight: 700, color: "var(--blue)", fontSize: 15 }}>PLANKTON</span>
         {NAV_ITEMS.map((item) => (
           <NavLink

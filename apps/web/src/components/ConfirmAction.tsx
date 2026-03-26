@@ -21,7 +21,11 @@ export function ConfirmAction({
   const [reason, setReason] = useState("");
 
   if (isPending || phase === "pending") {
-    return <button className="btn-pending" disabled>{label}&hellip;</button>;
+    return (
+      <button className="btn-pending" disabled>
+        {label}&hellip;
+      </button>
+    );
   }
 
   if (phase === "confirm") {
@@ -46,7 +50,13 @@ export function ConfirmAction({
         >
           Confirm
         </button>
-        <button className="btn-secondary" onClick={() => { setPhase("idle"); setReason(""); }}>
+        <button
+          className="btn-secondary"
+          onClick={() => {
+            setPhase("idle");
+            setReason("");
+          }}
+        >
           Cancel
         </button>
       </span>

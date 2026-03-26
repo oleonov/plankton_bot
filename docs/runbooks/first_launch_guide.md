@@ -162,7 +162,7 @@ The simulated starting balance is set in `config/family_rules.yaml`:
 
 ```yaml
 global:
-  initial_balance_usdc: 100.00  # match your planned live-lite deposit
+  initial_balance_usdc: 100.00 # match your planned live-lite deposit
 ```
 
 When the balance runs out, new buy orders are rejected with `INSUFFICIENT_BALANCE`. Sells return funds to the balance, so the bot can recycle capital. The balance resets on every restart. This field is ignored in live-lite mode (real Polymarket balance is used).

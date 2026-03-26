@@ -16,7 +16,7 @@ interface RawRiskEvent {
   id: number;
   event_type: string;
   family_id: string | null;
-  payload: string;           // NOT NULL in DB schema
+  payload: string; // NOT NULL in DB schema
   created_at: string;
 }
 

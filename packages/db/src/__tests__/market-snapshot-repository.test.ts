@@ -47,10 +47,7 @@ afterEach(() => {
 
 describe("SqliteMarketSnapshotRepository", () => {
   it("saveBatch inserts rows", () => {
-    const batch = [
-      makeSnapshot(),
-      makeSnapshot({ tokenId: createTokenId("tok-2"), bestBid: 0.6 }),
-    ];
+    const batch = [makeSnapshot(), makeSnapshot({ tokenId: createTokenId("tok-2"), bestBid: 0.6 })];
     repo.saveBatch(batch);
 
     const rows = conn.db
@@ -65,9 +62,9 @@ describe("SqliteMarketSnapshotRepository", () => {
 
   it("saveBatch with empty array is a no-op", () => {
     repo.saveBatch([]);
-    const count = conn.db
-      .prepare("SELECT COUNT(*) as c FROM market_snapshots")
-      .get() as { c: number };
+    const count = conn.db.prepare("SELECT COUNT(*) as c FROM market_snapshots").get() as {
+      c: number;
+    };
     expect(count.c).toBe(0);
   });
 
@@ -83,9 +80,10 @@ describe("SqliteMarketSnapshotRepository", () => {
     const deleted = repo.prune("2026-03-15T00:00:00.000Z");
     expect(deleted).toBe(1);
 
-    const remaining = conn.db
-      .prepare("SELECT * FROM market_snapshots")
-      .all() as Record<string, unknown>[];
+    const remaining = conn.db.prepare("SELECT * FROM market_snapshots").all() as Record<
+      string,
+      unknown
+    >[];
     expect(remaining).toHaveLength(1);
     expect(remaining[0]!.token_id).toBe("tok-2");
   });

@@ -94,7 +94,9 @@ describe("CommandPoller", () => {
       bus,
       log,
       getPaused: () => paused,
-      setPaused: (p) => { paused = p; },
+      setPaused: (p) => {
+        paused = p;
+      },
       pollIntervalMs: 60_000, // high interval so tests control poll timing
     });
   }

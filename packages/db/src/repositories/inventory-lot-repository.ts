@@ -84,10 +84,7 @@ export class SqliteInventoryLotRepository implements InventoryLotRepository {
     return rows.map(rowToLot);
   }
 
-  consumeFifo(
-    positionId: PositionId,
-    size: number,
-  ): { lot: InventoryLot; consumed: number }[] {
+  consumeFifo(positionId: PositionId, size: number): { lot: InventoryLot; consumed: number }[] {
     return this.db.transaction(() => {
       const openLots = this.db
         .prepare(
@@ -97,14 +94,9 @@ export class SqliteInventoryLotRepository implements InventoryLotRepository {
         )
         .all(positionId) as LotRow[];
 
-      const totalAvailable = openLots.reduce(
-        (sum, r) => sum + r.remaining_size,
-        0,
-      );
+      const totalAvailable = openLots.reduce((sum, r) => sum + r.remaining_size, 0);
       if (totalAvailable < size) {
-        throw new Error(
-          `Insufficient inventory: requested ${size}, available ${totalAvailable}`,
-        );
+        throw new Error(`Insufficient inventory: requested ${size}, available ${totalAvailable}`);
       }
 
       const updateStmt = this.db.prepare(

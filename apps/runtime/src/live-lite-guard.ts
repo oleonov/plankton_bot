@@ -25,11 +25,11 @@ export class LiveLiteGuard {
 
   wouldExceedOpenValueCap(currentValue: number, additionalValue: number): boolean {
     if (!this.config) return false;
-    return (currentValue + additionalValue) > this.config.maxOpenValueUsdc;
+    return currentValue + additionalValue > this.config.maxOpenValueUsdc;
   }
 
   wouldExceedActiveMarketsCap(currentCount: number, additional: number): boolean {
     if (!this.config) return false;
-    return (currentCount + additional) > this.config.maxActiveMarkets;
+    return currentCount + additional > this.config.maxActiveMarkets;
   }
 }

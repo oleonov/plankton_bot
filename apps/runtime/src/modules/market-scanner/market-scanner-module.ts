@@ -47,10 +47,7 @@ export class MarketScannerModule implements RuntimeModule {
   }
 
   async start(): Promise<void> {
-    this.log.info(
-      { intervalMs: this.deps.scanIntervalMs },
-      "starting market-scanner module",
-    );
+    this.log.info({ intervalMs: this.deps.scanIntervalMs }, "starting market-scanner module");
     // Fire first scan without blocking startup
     this.scan().catch((err) => this.log.error({ err }, "initial scan failed"));
     this.timer = setInterval(() => {

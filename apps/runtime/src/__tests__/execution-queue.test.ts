@@ -4,7 +4,10 @@ import { createTokenId, createCommandId, createFamilyId } from "@plankton/domain
 import type { PlaceOrderCommand, CancelOrderCommand, ClientOrderId } from "@plankton/domain";
 
 const silentLog = {
-  info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
   child: () => silentLog,
 } as any;
 
@@ -32,7 +35,7 @@ describe("ExecutionQueue", () => {
     const order: string[] = [];
     const execute = vi.fn(async (cmd: PlaceOrderCommand | CancelOrderCommand) => {
       order.push(String((cmd as PlaceOrderCommand).commandId));
-      await new Promise(r => setTimeout(r, 10));
+      await new Promise((r) => setTimeout(r, 10));
     });
 
     const queue = new ExecutionQueue({
@@ -43,9 +46,15 @@ describe("ExecutionQueue", () => {
       log: silentLog,
     });
 
-    queue.enqueue(makePlaceCmd({ commandId: createCommandId("a"), tokenId: createTokenId("tok-a") }));
-    queue.enqueue(makePlaceCmd({ commandId: createCommandId("b"), tokenId: createTokenId("tok-b") }));
-    queue.enqueue(makePlaceCmd({ commandId: createCommandId("c"), tokenId: createTokenId("tok-c") }));
+    queue.enqueue(
+      makePlaceCmd({ commandId: createCommandId("a"), tokenId: createTokenId("tok-a") }),
+    );
+    queue.enqueue(
+      makePlaceCmd({ commandId: createCommandId("b"), tokenId: createTokenId("tok-b") }),
+    );
+    queue.enqueue(
+      makePlaceCmd({ commandId: createCommandId("c"), tokenId: createTokenId("tok-c") }),
+    );
 
     await queue.shutdown();
 
@@ -56,7 +65,7 @@ describe("ExecutionQueue", () => {
     const callOrder: string[] = [];
     const execute = vi.fn(async (cmd: PlaceOrderCommand | CancelOrderCommand) => {
       callOrder.push(`start-${(cmd as PlaceOrderCommand).commandId}`);
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 50));
       callOrder.push(`end-${(cmd as PlaceOrderCommand).commandId}`);
     });
 
@@ -102,7 +111,7 @@ describe("ExecutionQueue", () => {
     const execute = vi.fn(async (cmd: PlaceOrderCommand | CancelOrderCommand) => {
       const id = String((cmd as PlaceOrderCommand).commandId);
       callOrder.push(`start-${id}`);
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 50));
       callOrder.push(`end-${id}`);
     });
 
@@ -115,9 +124,15 @@ describe("ExecutionQueue", () => {
     });
 
     // Enqueue: 2 commands for tok-a, then 1 for tok-b
-    queue.enqueue(makePlaceCmd({ commandId: createCommandId("a1"), tokenId: createTokenId("tok-a") }));
-    queue.enqueue(makePlaceCmd({ commandId: createCommandId("a2"), tokenId: createTokenId("tok-a") }));
-    queue.enqueue(makePlaceCmd({ commandId: createCommandId("b1"), tokenId: createTokenId("tok-b") }));
+    queue.enqueue(
+      makePlaceCmd({ commandId: createCommandId("a1"), tokenId: createTokenId("tok-a") }),
+    );
+    queue.enqueue(
+      makePlaceCmd({ commandId: createCommandId("a2"), tokenId: createTokenId("tok-a") }),
+    );
+    queue.enqueue(
+      makePlaceCmd({ commandId: createCommandId("b1"), tokenId: createTokenId("tok-b") }),
+    );
 
     await queue.shutdown();
 
@@ -150,7 +165,9 @@ describe("ExecutionQueue", () => {
       log: silentLog,
     });
 
-    queue.enqueue(makePlaceCmd({ commandId: createCommandId("fail"), tokenId: createTokenId("t1") }));
+    queue.enqueue(
+      makePlaceCmd({ commandId: createCommandId("fail"), tokenId: createTokenId("t1") }),
+    );
     queue.enqueue(makePlaceCmd({ commandId: createCommandId("ok"), tokenId: createTokenId("t2") }));
 
     await queue.shutdown();

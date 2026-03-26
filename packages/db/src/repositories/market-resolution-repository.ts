@@ -32,9 +32,10 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
   }
 
   findAll(): MarketResolution[] {
-    const rows = this.db
-      .prepare("SELECT * FROM market_resolutions")
-      .all() as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM market_resolutions").all() as Record<
+      string,
+      unknown
+    >[];
     return rows.map((r) => this.rowToResolution(r));
   }
 

@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootstrapDatabase } from "@plankton/db";
 import { runScenario } from "../../scenario/runner.js";
-import { makeMarket, makeMarketFixture, resetFixtureCounters } from "../../scenario/fixture-helpers.js";
+import {
+  makeMarket,
+  makeMarketFixture,
+  resetFixtureCounters,
+} from "../../scenario/fixture-helpers.js";
 import { makeFamilyConfig } from "../../scenario/family-fixtures.js";
 
 afterEach(() => {
@@ -60,7 +64,9 @@ describe("Scenario: restart/recovery on existing DB", () => {
 
       // Verify new bot_run entry was created
       const conn = bootstrapDatabase(dbPath);
-      const botRuns = conn.db.prepare("SELECT COUNT(*) as cnt FROM bot_runs").get() as { cnt: number };
+      const botRuns = conn.db.prepare("SELECT COUNT(*) as cnt FROM bot_runs").get() as {
+        cnt: number;
+      };
       expect(botRuns.cnt).toBeGreaterThanOrEqual(2);
       conn.close();
     } finally {

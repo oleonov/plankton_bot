@@ -11,18 +11,18 @@
 
 Verify these env vars are set:
 
-| Env var | Expected value |
-|---------|---------------|
-| `RUNTIME_MODE` | `live-lite` |
-| `LIVE_LITE_CONFIRM` | `true` |
-| `LIVE_LITE_FAMILY_ALLOWLIST` | comma-separated family IDs |
-| `LIVE_LITE_MAX_FAMILIES` | positive integer |
-| `LIVE_LITE_MAX_OPEN_VALUE_USDC` | positive number |
-| `LIVE_LITE_MAX_ORDER_USDC` | positive number |
-| `LIVE_LITE_MAX_ACTIVE_MARKETS` | positive integer |
-| `POLY_API_KEY` | set |
-| `POLY_API_SECRET` | set |
-| `POLY_PASSPHRASE` | set |
+| Env var                         | Expected value             |
+| ------------------------------- | -------------------------- |
+| `RUNTIME_MODE`                  | `live-lite`                |
+| `LIVE_LITE_CONFIRM`             | `true`                     |
+| `LIVE_LITE_FAMILY_ALLOWLIST`    | comma-separated family IDs |
+| `LIVE_LITE_MAX_FAMILIES`        | positive integer           |
+| `LIVE_LITE_MAX_OPEN_VALUE_USDC` | positive number            |
+| `LIVE_LITE_MAX_ORDER_USDC`      | positive number            |
+| `LIVE_LITE_MAX_ACTIVE_MARKETS`  | positive integer           |
+| `POLY_API_KEY`                  | set                        |
+| `POLY_API_SECRET`               | set                        |
+| `POLY_PASSPHRASE`               | set                        |
 
 ## DB State Verification
 
@@ -41,6 +41,7 @@ Verify these env vars are set:
 ## Fail Closed Conditions
 
 The runtime will **exit immediately** if:
+
 - Missing `LIVE_LITE_FAMILY_ALLOWLIST`
 - Missing any cap env var (`MAX_FAMILIES`, `MAX_OPEN_VALUE_USDC`, `MAX_ORDER_USDC`, `MAX_ACTIVE_MARKETS`)
 - Missing `LIVE_LITE_CONFIRM=true`
@@ -50,6 +51,7 @@ The runtime will **exit immediately** if:
 ## Start Paused Conditions
 
 The runtime will **start in paused state** if:
+
 - Open positions exist with `familyId` not in allowlist
 - Open orders exist with `familyId` not in allowlist
 - Existing active markets count exceeds `MAX_ACTIVE_MARKETS`

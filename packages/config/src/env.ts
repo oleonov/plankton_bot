@@ -32,15 +32,14 @@ const envSchema = z
     PLANKTON_AUTH_USERNAME: z.string().optional(),
     PLANKTON_AUTH_PASSWORD: z.string().optional(),
     PLANKTON_SESSION_SECRET: z.string().optional(),
-    TRUST_PROXY: z.enum(["true", "false"]).default("false").transform(v => v === "true"),
+    TRUST_PROXY: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((v) => v === "true"),
   })
   .superRefine((data, ctx) => {
     if (data.RUNTIME_MODE === "live-lite" || data.RUNTIME_MODE === "paper") {
-      for (const field of [
-        "POLY_API_KEY",
-        "POLY_API_SECRET",
-        "POLY_PASSPHRASE",
-      ] as const) {
+      for (const field of ["POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE"] as const) {
         if (!data[field]) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -55,7 +54,8 @@ const envSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["LIVE_LITE_CONFIRM"],
-        message: "LIVE_LITE_CONFIRM=true is required when RUNTIME_MODE is \"live-lite\" — this is a safety gate to prevent accidental live trading",
+        message:
+          'LIVE_LITE_CONFIRM=true is required when RUNTIME_MODE is "live-lite" — this is a safety gate to prevent accidental live trading',
       });
     }
 
@@ -86,7 +86,9 @@ const envSchema = z
       }
 
       if (data.LIVE_LITE_FAMILY_ALLOWLIST && data.LIVE_LITE_MAX_FAMILIES) {
-        const allowlist = data.LIVE_LITE_FAMILY_ALLOWLIST.split(",").map(s => s.trim()).filter(Boolean);
+        const allowlist = data.LIVE_LITE_FAMILY_ALLOWLIST.split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
         if (allowlist.length > data.LIVE_LITE_MAX_FAMILIES) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -118,13 +120,15 @@ export interface AppConfig {
   planktonAuthPassword: string | undefined;
   planktonSessionSecret: string | undefined;
   trustProxy: boolean;
-  liveLite?: {
-    familyAllowlist: string[];
-    maxFamilies: number;
-    maxOpenValueUsdc: number;
-    maxOrderUsdc: number;
-    maxActiveMarkets: number;
-  } | undefined;
+  liveLite?:
+    | {
+        familyAllowlist: string[];
+        maxFamilies: number;
+        maxOpenValueUsdc: number;
+        maxOrderUsdc: number;
+        maxActiveMarkets: number;
+      }
+    | undefined;
 }
 
 function findMonorepoRoot(): string {
@@ -158,15 +162,18 @@ export function loadEnv(envPath?: string): AppConfig {
 
   const env = result.data;
 
-  const liveLite = env.RUNTIME_MODE === "live-lite" && env.LIVE_LITE_FAMILY_ALLOWLIST
-    ? {
-        familyAllowlist: env.LIVE_LITE_FAMILY_ALLOWLIST.split(",").map(s => s.trim()).filter(Boolean),
-        maxFamilies: env.LIVE_LITE_MAX_FAMILIES!,
-        maxOpenValueUsdc: env.LIVE_LITE_MAX_OPEN_VALUE_USDC!,
-        maxOrderUsdc: env.LIVE_LITE_MAX_ORDER_USDC!,
-        maxActiveMarkets: env.LIVE_LITE_MAX_ACTIVE_MARKETS!,
-      }
-    : undefined;
+  const liveLite =
+    env.RUNTIME_MODE === "live-lite" && env.LIVE_LITE_FAMILY_ALLOWLIST
+      ? {
+          familyAllowlist: env.LIVE_LITE_FAMILY_ALLOWLIST.split(",")
+            .map((s) => s.trim())
+            .filter(Boolean),
+          maxFamilies: env.LIVE_LITE_MAX_FAMILIES!,
+          maxOpenValueUsdc: env.LIVE_LITE_MAX_OPEN_VALUE_USDC!,
+          maxOrderUsdc: env.LIVE_LITE_MAX_ORDER_USDC!,
+          maxActiveMarkets: env.LIVE_LITE_MAX_ACTIVE_MARKETS!,
+        }
+      : undefined;
 
   return {
     runtimeMode: env.RUNTIME_MODE,

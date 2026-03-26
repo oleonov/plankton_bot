@@ -5,16 +5,19 @@ import type { FamilyConfig } from "@plankton/config";
 
 function makeFamilyConfig(overrides: {
   familyId: string;
-  regime?: "threshold" | "price-range" | "directional-updown" | "social-activity" | "geopolitics" | "generic" | "tournament" | "weather-range";
+  regime?:
+    | "threshold"
+    | "price-range"
+    | "directional-updown"
+    | "social-activity"
+    | "geopolitics"
+    | "generic"
+    | "tournament"
+    | "weather-range";
   enabled?: boolean;
   action?: "trade" | "monitor" | "reduce-only" | "blocked";
 }): FamilyConfig {
-  const {
-    familyId,
-    regime = "threshold",
-    enabled = true,
-    action = "trade",
-  } = overrides;
+  const { familyId, regime = "threshold", enabled = true, action = "trade" } = overrides;
 
   return {
     identity: {
@@ -130,9 +133,7 @@ describe("FamilyRulesProvider", () => {
   });
 
   it("getRule returns null for unknown family", () => {
-    const provider = createFamilyRulesProvider([
-      makeFamilyConfig({ familyId: "fam-1" }),
-    ]);
+    const provider = createFamilyRulesProvider([makeFamilyConfig({ familyId: "fam-1" })]);
 
     expect(provider.getRule(createFamilyId("unknown"))).toBeNull();
   });
@@ -230,9 +231,7 @@ describe("FamilyRulesProvider", () => {
   });
 
   it("getRulesForRegime returns empty for unmatched regime", () => {
-    const configs = [
-      makeFamilyConfig({ familyId: "fam-1", regime: "threshold" }),
-    ];
+    const configs = [makeFamilyConfig({ familyId: "fam-1", regime: "threshold" })];
     const provider = createFamilyRulesProvider(configs);
 
     expect(provider.getRulesForRegime("geopolitics")).toEqual([]);

@@ -47,18 +47,14 @@ describe("bootstrapDatabase", () => {
     conn = bootstrapDatabase(dbPath);
 
     const tables = conn.db
-      .prepare(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
-      )
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
       .all() as { name: string }[];
 
     expect(tables.length).toBeGreaterThan(0);
   });
 
   it("records the migration in schema_migrations", () => {
-    const rows = conn.db
-      .prepare("SELECT name FROM schema_migrations")
-      .all() as { name: string }[];
+    const rows = conn.db.prepare("SELECT name FROM schema_migrations").all() as { name: string }[];
 
     expect(rows.length).toBeGreaterThanOrEqual(1);
     expect(rows[0]!.name).toBe("001_initial.sql");

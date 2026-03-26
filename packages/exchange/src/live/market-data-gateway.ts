@@ -6,12 +6,7 @@
  * to prevent SDK types from leaking into @plankton/domain consumers.
  */
 
-import type {
-  MarketDataGateway,
-  ClobMarket,
-  OrderBookSnapshot,
-  TokenId,
-} from "@plankton/domain";
+import type { MarketDataGateway, ClobMarket, OrderBookSnapshot, TokenId } from "@plankton/domain";
 import { mapMarket, mapOrderBook, parseStringOrArray } from "../mappers.js";
 
 const GAMMA_PRICING_BASE_URL = "https://gamma-api.polymarket.com/markets";
@@ -182,13 +177,15 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
   private extractPricing(
     data: Array<Record<string, unknown>>,
-    result: Map<string, { bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null }>,
+    result: Map<
+      string,
+      { bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null }
+    >,
   ): void {
     for (const raw of data) {
       const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
       const outcomePrices = parseStringOrArray(raw.outcomePrices);
-      const lastTradePrice =
-        raw.lastTradePrice != null ? Number(raw.lastTradePrice) : null;
+      const lastTradePrice = raw.lastTradePrice != null ? Number(raw.lastTradePrice) : null;
 
       // Gamma provides market-level bestBid/bestAsk (for the first outcome token).
       const marketBestBid = raw.bestBid != null ? Number(raw.bestBid) : null;
@@ -200,10 +197,18 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
         // First token gets Gamma's real bestBid/bestAsk. Subsequent tokens
         // fall back to outcomePrices (Gamma only exposes top-of-book for the primary outcome).
-        const bestBid = i === 0 && marketBestBid !== null ? marketBestBid
-          : outcomePrice !== null && !isNaN(outcomePrice) ? outcomePrice : null;
-        const bestAsk = i === 0 && marketBestAsk !== null ? marketBestAsk
-          : outcomePrice !== null && !isNaN(outcomePrice) ? outcomePrice : null;
+        const bestBid =
+          i === 0 && marketBestBid !== null
+            ? marketBestBid
+            : outcomePrice !== null && !isNaN(outcomePrice)
+              ? outcomePrice
+              : null;
+        const bestAsk =
+          i === 0 && marketBestAsk !== null
+            ? marketBestAsk
+            : outcomePrice !== null && !isNaN(outcomePrice)
+              ? outcomePrice
+              : null;
 
         result.set(tokenId, { bestBid, bestAsk, lastTradePrice });
       }
@@ -224,8 +229,14 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`request timed out after ${ms}ms`)), ms);
       promise.then(
-        (val) => { clearTimeout(timer); resolve(val); },
-        (err) => { clearTimeout(timer); reject(err instanceof Error ? err : new Error(String(err))); },
+        (val) => {
+          clearTimeout(timer);
+          resolve(val);
+        },
+        (err) => {
+          clearTimeout(timer);
+          reject(err instanceof Error ? err : new Error(String(err)));
+        },
       );
     });
   }

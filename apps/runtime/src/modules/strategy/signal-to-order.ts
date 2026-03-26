@@ -40,12 +40,8 @@ export class SignalToOrderBridge {
 
   subscribe(): void {
     this.unsubs.push(
-      this.deps.bus.subscribe("NormalizedMarketUpdated", (p) =>
-        this.handleMarketUpdate(p),
-      ),
-      this.deps.bus.subscribe("SignalApproved", (p) =>
-        this.handleApproved(p),
-      ),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("SignalApproved", (p) => this.handleApproved(p)),
     );
   }
 
@@ -62,9 +58,7 @@ export class SignalToOrderBridge {
     }
   }
 
-  private async handleApproved(
-    payload: RuntimeEventMap["SignalApproved"],
-  ): Promise<void> {
+  private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
     const { signal } = payload;
     const market = this.marketCache.get(String(signal.tokenId));
 

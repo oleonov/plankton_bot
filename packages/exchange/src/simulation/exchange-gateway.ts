@@ -37,18 +37,30 @@ export class SimulationExchangeGateway implements ExchangeGateway {
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
     if (params.price < 0 || params.price > 1) {
-      return { success: false, errorCode: "INVALID_PRICE", errorMessage: "Price must be in [0, 1]" };
+      return {
+        success: false,
+        errorCode: "INVALID_PRICE",
+        errorMessage: "Price must be in [0, 1]",
+      };
     }
     if (params.size <= 0) {
       return { success: false, errorCode: "INVALID_SIZE", errorMessage: "Size must be positive" };
     }
     if (this.clientOrderIds.has(params.clientOrderId)) {
-      return { success: false, errorCode: "DUPLICATE_CLIENT_ORDER_ID", errorMessage: "Duplicate clientOrderId" };
+      return {
+        success: false,
+        errorCode: "DUPLICATE_CLIENT_ORDER_ID",
+        errorMessage: "Duplicate clientOrderId",
+      };
     }
 
     const cost = params.side === "buy" ? params.size * params.price : 0;
     if (cost > this.balanceUsdc - this.lockedUsdc) {
-      return { success: false, errorCode: "INSUFFICIENT_BALANCE", errorMessage: "Insufficient USDC balance" };
+      return {
+        success: false,
+        errorCode: "INSUFFICIENT_BALANCE",
+        errorMessage: "Insufficient USDC balance",
+      };
     }
 
     this.orderCounter++;

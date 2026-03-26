@@ -37,10 +37,7 @@ export class CommandPoller implements RuntimeModule {
   }
 
   async start(): Promise<void> {
-    this.log.info(
-      { intervalMs: this.deps.pollIntervalMs },
-      "starting command poller",
-    );
+    this.log.info({ intervalMs: this.deps.pollIntervalMs }, "starting command poller");
     await this.poll();
     this.timer = setInterval(() => {
       this.poll().catch((err) => this.log.error({ err }, "poll error"));
@@ -103,10 +100,7 @@ export class CommandPoller implements RuntimeModule {
           break;
 
         default:
-          this.log.warn(
-            { action: cmd.action },
-            "unknown command action -- rejecting",
-          );
+          this.log.warn({ action: cmd.action }, "unknown command action -- rejecting");
           this.deps.commandRepo.updateStatus(cmd.id, "rejected", now);
           return;
       }
@@ -117,26 +111,17 @@ export class CommandPoller implements RuntimeModule {
       await this.deps.bus.publish("OperatorCommandApplied", {
         commandDbId: cmd.id,
         action: cmd.action,
-        targetFamilyId: cmd.targetId
-          ? createFamilyId(cmd.targetId)
-          : null,
+        targetFamilyId: cmd.targetId ? createFamilyId(cmd.targetId) : null,
         reason: cmd.reason,
         appliedAt: Date.now(),
       });
     } catch (err) {
-      this.log.error(
-        { id: cmd.id, action: cmd.action, err },
-        "command failed -- rejecting",
-      );
+      this.log.error({ id: cmd.id, action: cmd.action, err }, "command failed -- rejecting");
       this.deps.commandRepo.updateStatus(cmd.id, "rejected", now);
     }
   }
 
-  private applyFamilyModeChange(
-    cmd: OperatorCommand,
-    targetMode: RuntimeMode,
-    now: string,
-  ): void {
+  private applyFamilyModeChange(cmd: OperatorCommand, targetMode: RuntimeMode, now: string): void {
     if (!cmd.targetId) {
       throw new Error(`${cmd.action} requires targetId (familyId)`);
     }
@@ -151,10 +136,7 @@ export class CommandPoller implements RuntimeModule {
     this.deps.familyStateRepo.save({
       ...state,
       runtimeMode: targetMode,
-      quarantineReason:
-        targetMode === "quarantine"
-          ? (cmd.reason ?? "operator command")
-          : null,
+      quarantineReason: targetMode === "quarantine" ? (cmd.reason ?? "operator command") : null,
       updatedAt: now,
     });
 

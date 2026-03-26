@@ -10,18 +10,28 @@ function createTestModule(_name: string): RuntimeModule & { started: boolean; st
   const mod = {
     started: false,
     stopped: false,
-    async start() { mod.started = true; },
-    async stop() { mod.stopped = true; },
-    async healthCheck() { return { ok: mod.started } as const; },
+    async start() {
+      mod.started = true;
+    },
+    async stop() {
+      mod.stopped = true;
+    },
+    async healthCheck() {
+      return { ok: mod.started } as const;
+    },
   };
   return mod;
 }
 
 function createFailingModule(): RuntimeModule {
   return {
-    async start() { throw new Error("boom"); },
+    async start() {
+      throw new Error("boom");
+    },
     async stop() {},
-    async healthCheck() { return { ok: false }; },
+    async healthCheck() {
+      return { ok: false };
+    },
   };
 }
 
@@ -37,7 +47,10 @@ describe("Supervisor", () => {
     const modB = createTestModule("b");
 
     const supervisor = new Supervisor({
-      modules: [["a", modA], ["b", modB]],
+      modules: [
+        ["a", modA],
+        ["b", modB],
+      ],
       bus,
       log,
     });
@@ -53,17 +66,28 @@ describe("Supervisor", () => {
     const order: string[] = [];
     const modA: RuntimeModule = {
       async start() {},
-      async stop() { order.push("a"); },
-      async healthCheck() { return { ok: true }; },
+      async stop() {
+        order.push("a");
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
     };
     const modB: RuntimeModule = {
       async start() {},
-      async stop() { order.push("b"); },
-      async healthCheck() { return { ok: true }; },
+      async stop() {
+        order.push("b");
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
     };
 
     const supervisor = new Supervisor({
-      modules: [["a", modA], ["b", modB]],
+      modules: [
+        ["a", modA],
+        ["b", modB],
+      ],
       bus,
       log,
     });
@@ -80,7 +104,10 @@ describe("Supervisor", () => {
     const bad = createFailingModule();
 
     const supervisor = new Supervisor({
-      modules: [["good", good], ["bad", bad]],
+      modules: [
+        ["good", good],
+        ["bad", bad],
+      ],
       bus,
       log,
     });
@@ -161,13 +188,20 @@ describe("Supervisor", () => {
   it("continues stopping remaining modules when one module stop throws", async () => {
     const modA: RuntimeModule = {
       async start() {},
-      async stop() { throw new Error("stop fail"); },
-      async healthCheck() { return { ok: true }; },
+      async stop() {
+        throw new Error("stop fail");
+      },
+      async healthCheck() {
+        return { ok: true };
+      },
     };
     const modB = createTestModule("b");
 
     const supervisor = new Supervisor({
-      modules: [["a", modA], ["b", modB]],
+      modules: [
+        ["a", modA],
+        ["b", modB],
+      ],
       bus,
       log,
     });

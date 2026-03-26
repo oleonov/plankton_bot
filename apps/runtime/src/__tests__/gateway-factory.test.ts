@@ -59,7 +59,11 @@ describe("createGateways", () => {
 
   it("paper mode passes initialBalanceUsdc to exchange gateway", async () => {
     const mockClient = { getOk: async () => "OK" };
-    const result = createGateways({ runtimeMode: "paper", polyClient: mockClient, initialBalanceUsdc: 100 });
+    const result = createGateways({
+      runtimeMode: "paper",
+      polyClient: mockClient,
+      initialBalanceUsdc: 100,
+    });
     expect(result.exchangeGateway).toBeInstanceOf(SimulationExchangeGateway);
     const balances = await result.exchangeGateway.getBalances();
     expect(balances[0]!.available).toBe(100);

@@ -4,7 +4,9 @@ import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { buildServer } from "../server.js";
 
-function json(res: { json: () => unknown }): any { return res.json(); }
+function json(res: { json: () => unknown }): any {
+  return res.json();
+}
 
 // ─── Test setup ─────────────────────────────────────────────────────
 
@@ -933,9 +935,9 @@ describe("GET /metrics/pnl-series", () => {
     const items = body.data.items;
     expect(items.length).toBe(2);
     expect(items[0].date).toBe("2026-03-12");
-    expect(items[0].realizedPnl).toBeCloseTo(7.3);   // 10.5 + (-3.2) cumulative
+    expect(items[0].realizedPnl).toBeCloseTo(7.3); // 10.5 + (-3.2) cumulative
     expect(items[1].date).toBe("2026-03-13");
-    expect(items[1].realizedPnl).toBeCloseTo(12.3);  // 7.3 + 5.0 cumulative
+    expect(items[1].realizedPnl).toBeCloseTo(12.3); // 7.3 + 5.0 cumulative
   });
 
   it("respects days parameter", async () => {

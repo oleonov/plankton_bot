@@ -1,15 +1,5 @@
-import type {
-  OrderStatus,
-  RuntimeMode,
-  Regime,
-} from "./enums.js";
-import type {
-  FamilyId,
-  FillId,
-  OrderId,
-  PositionId,
-  TokenId,
-} from "./ids.js";
+import type { OrderStatus, RuntimeMode, Regime } from "./enums.js";
+import type { FamilyId, FillId, OrderId, PositionId, TokenId } from "./ids.js";
 import type {
   FamilyEvidence,
   FamilyIdentity,
@@ -73,11 +63,7 @@ export interface OrderRepository {
   findByTokenId(tokenId: TokenId): Order[];
 
   /** Update the status (and optionally exchange_order_id) of an existing order. */
-  updateStatus(
-    id: OrderId,
-    status: OrderStatus,
-    exchangeOrderId?: string,
-  ): void;
+  updateStatus(id: OrderId, status: OrderStatus, exchangeOrderId?: string): void;
 }
 
 // ─── FillRepository ──────────────────────────────────────────────────────
@@ -146,10 +132,7 @@ export interface InventoryLotRepository {
    * Consume lots in FIFO order to account for a sell of `size` shares.
    * Updates remaining_size on each touched lot and returns the lots consumed.
    */
-  consumeFifo(
-    positionId: PositionId,
-    size: number,
-  ): { lot: InventoryLot; consumed: number }[];
+  consumeFifo(positionId: PositionId, size: number): { lot: InventoryLot; consumed: number }[];
 
   /** Zero out all remaining lots for a position (market resolution settlement). */
   settleAll(positionId: PositionId): void;
@@ -224,19 +207,13 @@ export interface MarketResolutionRepository {
 
 export interface OperatorCommandRepository {
   /** Insert a new pending command. Returns the auto-incremented row id. */
-  insert(
-    cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt">,
-  ): number;
+  insert(cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt">): number;
 
   /** Return all commands with status = "pending". */
   getPending(): OperatorCommand[];
 
   /** Mark a command as applied or rejected. */
-  updateStatus(
-    id: number,
-    status: "applied" | "rejected",
-    appliedAt: string,
-  ): void;
+  updateStatus(id: number, status: "applied" | "rejected", appliedAt: string): void;
 }
 
 // ─── OperatorActionRepository ────────────────────────────────────────────

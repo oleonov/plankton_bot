@@ -10,9 +10,7 @@ export class SqliteRiskEventRepository implements RiskEventRepository {
     payload: Record<string, unknown>;
   }): void {
     this.db
-      .prepare(
-        "INSERT INTO risk_events (event_type, family_id, payload) VALUES (?, ?, ?)",
-      )
+      .prepare("INSERT INTO risk_events (event_type, family_id, payload) VALUES (?, ?, ?)")
       .run(event.eventType, event.familyId, JSON.stringify(event.payload));
   }
 }

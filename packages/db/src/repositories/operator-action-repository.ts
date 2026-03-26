@@ -24,9 +24,7 @@ function rowToAction(row: ActionRow): OperatorAction {
   };
 }
 
-export class SqliteOperatorActionRepository
-  implements OperatorActionRepository
-{
+export class SqliteOperatorActionRepository implements OperatorActionRepository {
   constructor(private readonly db: Database.Database) {}
 
   insert(action: Omit<OperatorAction, "actionId">): void {
@@ -49,9 +47,7 @@ export class SqliteOperatorActionRepository
 
   findRecent(limit: number): OperatorAction[] {
     const rows = this.db
-      .prepare(
-        `SELECT * FROM operator_actions ORDER BY performed_at DESC LIMIT ?`,
-      )
+      .prepare(`SELECT * FROM operator_actions ORDER BY performed_at DESC LIMIT ?`)
       .all(limit) as ActionRow[];
     return rows.map(rowToAction);
   }

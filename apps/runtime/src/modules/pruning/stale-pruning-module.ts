@@ -42,9 +42,7 @@ export class StalePruningModule implements RuntimeModule {
     // No startup fire-and-forget: stale positions are 69+ hours old, waiting
     // for the first interval tick avoids racing the execution pipeline.
     this.intervalHandle = setInterval(() => {
-      this.runCheck().catch((err) =>
-        this.deps.log.error(err, "stale-prune check failed"),
-      );
+      this.runCheck().catch((err) => this.deps.log.error(err, "stale-prune check failed"));
     }, this.deps.checkIntervalMs);
   }
 
@@ -103,7 +101,11 @@ export class StalePruningModule implements RuntimeModule {
           pruned++;
 
           this.deps.log.info(
-            { positionId: String(pos.positionId), familyId: String(pos.familyId), ageHours: exit.maxTailHoldHours },
+            {
+              positionId: String(pos.positionId),
+              familyId: String(pos.familyId),
+              ageHours: exit.maxTailHoldHours,
+            },
             "stale-prune signal emitted",
           );
         }

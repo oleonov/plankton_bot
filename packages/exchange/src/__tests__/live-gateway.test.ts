@@ -180,9 +180,7 @@ describe("LiveExchangeGateway", () => {
 
   it("getPositionBalance throws on SDK failure instead of returning 0", async () => {
     client.getBalanceAllowance.mockRejectedValue(new Error("Network error"));
-    await expect(gw.getPositionBalance(createTokenId("tok-1"))).rejects.toThrow(
-      "Network error",
-    );
+    await expect(gw.getPositionBalance(createTokenId("tok-1"))).rejects.toThrow("Network error");
   });
 
   it("healthCheck returns ok on success", async () => {
@@ -282,7 +280,7 @@ describe("LiveMarketDataGateway", () => {
     const tokenId = createTokenId("tok-1");
     const book = await gw.getOrderBook(tokenId);
     expect(book.tokenId).toBe("tok-1");
-    expect(book.bestBid).toBe(0.50);
+    expect(book.bestBid).toBe(0.5);
     expect(book.bestAsk).toBe(0.55);
   });
 
@@ -399,8 +397,7 @@ describe("LiveMarketDataGateway", () => {
     try {
       await gw.getMarketPricing(["tok-a", "tok-b"]);
 
-      const calledUrl = (globalThis.fetch as ReturnType<typeof vi.fn>).mock
-        .calls[0]![0] as string;
+      const calledUrl = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
       expect(calledUrl).toContain("clob_token_ids=tok-a&clob_token_ids=tok-b");
       expect(calledUrl).toContain("gamma-api.polymarket.com/markets");
     } finally {
@@ -444,9 +441,7 @@ describe("LiveMarketDataGateway", () => {
 
     try {
       // Real Polymarket token IDs are ~77 chars; generate enough to force multiple batches
-      const tokenIds = Array.from({ length: 50 }, (_, i) =>
-        String(i).padStart(77, "0"),
-      );
+      const tokenIds = Array.from({ length: 50 }, (_, i) => String(i).padStart(77, "0"));
       await gw.getMarketPricing(tokenIds);
 
       // With 77-char IDs + "clob_token_ids=" overhead, each batch should stay under 3500 chars
@@ -519,9 +514,7 @@ describe("buildTokenIdBatches", () => {
   });
 
   it("handles realistic 77-char Polymarket token IDs", () => {
-    const ids = Array.from({ length: 40 }, (_, i) =>
-      String(i).padStart(77, "0"),
-    );
+    const ids = Array.from({ length: 40 }, (_, i) => String(i).padStart(77, "0"));
     const batches = buildTokenIdBatches(base, ids, 3500);
 
     // Every batch URL must be under the limit (except oversized singles)

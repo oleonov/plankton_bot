@@ -197,8 +197,7 @@ describe("ExecutionModule", () => {
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
     expect(orderRepo.save).toHaveBeenCalledTimes(1);
 
-    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock
-      .calls[0]![0] as Order;
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
     expect(savedOrder.clientOrderId).toBe("plk_abc123");
     expect(savedOrder.status).toBe("open");
     expect(savedOrder.exchangeOrderId).toBe("sim-ord-1");
@@ -211,7 +210,9 @@ describe("ExecutionModule", () => {
     await mod.start();
 
     const placed: any[] = [];
-    bus.subscribe("OrderPlaced", async (p) => { placed.push(p); });
+    bus.subscribe("OrderPlaced", async (p) => {
+      placed.push(p);
+    });
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(),
@@ -236,7 +237,9 @@ describe("ExecutionModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(),
@@ -248,8 +251,7 @@ describe("ExecutionModule", () => {
     expect(rejected[0].reason).toBe("no funds");
 
     // Rejected order should still be persisted
-    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock
-      .calls[0]![0] as Order;
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
     expect(savedOrder.status).toBe("rejected");
 
     await mod.stop();
@@ -396,8 +398,8 @@ describe("ExecutionModule", () => {
       updatedAt: new Date().toISOString(),
     };
     (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>)
-      .mockReturnValueOnce(null)       // semantic dedup check in handlePlace
-      .mockReturnValue(savedOrder);    // importExchangeFills order lookup
+      .mockReturnValueOnce(null) // semantic dedup check in handlePlace
+      .mockReturnValue(savedOrder); // importExchangeFills order lookup
     (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
     (fillRepo.findByOrderId as ReturnType<typeof vi.fn>).mockReturnValue([
       { fillId: "sim-fill-1", size: 10 },
@@ -406,7 +408,9 @@ describe("ExecutionModule", () => {
     await mod.start();
 
     const fills: any[] = [];
-    bus.subscribe("FillReceived", async (p) => { fills.push(p); });
+    bus.subscribe("FillReceived", async (p) => {
+      fills.push(p);
+    });
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(),
@@ -420,15 +424,11 @@ describe("ExecutionModule", () => {
 
     // Fill persisted
     expect(fillRepo.save).toHaveBeenCalledTimes(1);
-    const savedFill = (fillRepo.save as ReturnType<typeof vi.fn>).mock
-      .calls[0]![0] as Fill;
+    const savedFill = (fillRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Fill;
     expect(savedFill.fillId).toBe("sim-fill-1");
 
     // Order status updated to filled
-    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-      createOrderId("sim-ord-1"),
-      "filled",
-    );
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("sim-ord-1"), "filled");
 
     await mod.stop();
   });
@@ -541,7 +541,9 @@ describe("ExecutionModule", () => {
     await mod.start();
 
     const fills: any[] = [];
-    bus.subscribe("FillReceived", async (p) => { fills.push(p); });
+    bus.subscribe("FillReceived", async (p) => {
+      fills.push(p);
+    });
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(), // size=10
@@ -565,7 +567,9 @@ describe("ExecutionModule", () => {
     await mod.start();
 
     const cancelled: any[] = [];
-    bus.subscribe("OrderCancelled", async (p) => { cancelled.push(p); });
+    bus.subscribe("OrderCancelled", async (p) => {
+      cancelled.push(p);
+    });
 
     await bus.publish("CancelOrderRequested", {
       command: makeCancelCmd(),
@@ -573,10 +577,7 @@ describe("ExecutionModule", () => {
     });
 
     expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
-    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
-      createOrderId("sim-ord-1"),
-      "cancelled",
-    );
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("sim-ord-1"), "cancelled");
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].reason).toBe("strategy_exit");
 
@@ -605,7 +606,9 @@ describe("ExecutionModule", () => {
     await mod.start();
 
     const cancelled: any[] = [];
-    bus.subscribe("OrderCancelled", async (p) => { cancelled.push(p); });
+    bus.subscribe("OrderCancelled", async (p) => {
+      cancelled.push(p);
+    });
 
     await bus.publish("CancelOrderRequested", {
       command: makeCancelCmd(),
@@ -643,7 +646,9 @@ describe("ExecutionModule", () => {
     await guardedMod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd({ familyId: createFamilyId("fam-bad") }),
@@ -680,7 +685,9 @@ describe("ExecutionModule", () => {
     await guardedMod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
 
     // price=0.5, size=21 → notional=10.5 > 10
     await bus.publish("PlaceOrderRequested", {
@@ -703,7 +710,9 @@ describe("ExecutionModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(),
@@ -764,7 +773,9 @@ describe("ExecutionModule", () => {
     await paperMod.start();
 
     const fills: any[] = [];
-    bus.subscribe("FillReceived", async (p) => { fills.push(p); });
+    bus.subscribe("FillReceived", async (p) => {
+      fills.push(p);
+    });
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(),
@@ -851,7 +862,9 @@ describe("ExecutionModule", () => {
     await pausedMod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(),

@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import type { MarketDataGateway, ClobMarket, OrderBookSnapshot, TokenId, Market } from "@plankton/domain";
+import type {
+  MarketDataGateway,
+  ClobMarket,
+  OrderBookSnapshot,
+  TokenId,
+  Market,
+} from "@plankton/domain";
 import { createTokenId, createFamilyId } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { MarketDataModule } from "../../modules/market-data/market-data-module.js";
@@ -8,7 +14,9 @@ import { MarketDataModule } from "../../modules/market-data/market-data-module.j
 
 function createMockGateway(): MarketDataGateway {
   return {
-    getMarkets: vi.fn<(onPage?: (page: number) => Promise<void> | void) => Promise<ClobMarket[]>>().mockResolvedValue([]),
+    getMarkets: vi
+      .fn<(onPage?: (page: number) => Promise<void> | void) => Promise<ClobMarket[]>>()
+      .mockResolvedValue([]),
     getMarket: vi.fn().mockResolvedValue(null),
     getOrderBook: vi.fn<(tokenId: TokenId) => Promise<OrderBookSnapshot>>().mockResolvedValue({
       tokenId: "tok" as TokenId,

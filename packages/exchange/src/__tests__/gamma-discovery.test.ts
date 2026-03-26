@@ -60,9 +60,7 @@ describe("GammaMarketDiscoveryGateway", () => {
       ]),
     );
     // Page 2: 1 event (partial) -> stop
-    fetchMock.mockResolvedValueOnce(
-      mockFetchResponse([makeEvent("c", [makeGammaMarket("4")])]),
-    );
+    fetchMock.mockResolvedValueOnce(mockFetchResponse([makeEvent("c", [makeGammaMarket("4")])]));
 
     const markets = await gateway.discoverMarkets();
 
@@ -135,13 +133,9 @@ describe("GammaMarketDiscoveryGateway", () => {
     });
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    fetchMock.mockResolvedValueOnce(
-      mockFetchResponse(null, false, 500),
-    );
+    fetchMock.mockResolvedValueOnce(mockFetchResponse(null, false, 500));
 
-    await expect(gateway.discoverMarkets()).rejects.toThrow(
-      "Gamma API responded with 500",
-    );
+    await expect(gateway.discoverMarkets()).rejects.toThrow("Gamma API responded with 500");
   });
 
   it("healthCheck() returns ok:true when Gamma is reachable", async () => {
@@ -196,10 +190,7 @@ describe("GammaMarketDiscoveryGateway", () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValueOnce(
-      mockFetchResponse([
-        makeEvent("empty", []),
-        { id: "no-markets-field", slug: "bare-event" },
-      ]),
+      mockFetchResponse([makeEvent("empty", []), { id: "no-markets-field", slug: "bare-event" }]),
     );
 
     const markets = await gateway.discoverMarkets();

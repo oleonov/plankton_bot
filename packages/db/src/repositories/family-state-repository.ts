@@ -84,9 +84,7 @@ export class SqliteFamilyStateRepository implements FamilyStateRepository {
   }
 
   findAll(): FamilyState[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM family_runtime_state`)
-      .all() as StateRow[];
+    const rows = this.db.prepare(`SELECT * FROM family_runtime_state`).all() as StateRow[];
     return rows.map(rowToState);
   }
 
@@ -99,9 +97,7 @@ export class SqliteFamilyStateRepository implements FamilyStateRepository {
 
   findQuarantined(): FamilyState[] {
     const rows = this.db
-      .prepare(
-        `SELECT * FROM family_runtime_state WHERE runtime_mode = 'quarantine'`,
-      )
+      .prepare(`SELECT * FROM family_runtime_state WHERE runtime_mode = 'quarantine'`)
       .all() as StateRow[];
     return rows.map(rowToState);
   }

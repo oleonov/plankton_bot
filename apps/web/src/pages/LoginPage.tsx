@@ -14,7 +14,9 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   useEffect(() => {
     fetch("/api/v1/auth/config")
       .then((r) => r.json())
-      .then((body) => { if (body.data?.usernameRequired) setUsernameRequired(true); })
+      .then((body) => {
+        if (body.data?.usernameRequired) setUsernameRequired(true);
+      })
       .catch(() => {});
   }, []);
 
@@ -57,7 +59,9 @@ export function LoginPage({ onLogin }: LoginPageProps) {
       }}
     >
       <form
-        onSubmit={(e) => { void handleSubmit(e); }}
+        onSubmit={(e) => {
+          void handleSubmit(e);
+        }}
         style={{
           background: "var(--bg-nav)",
           padding: 32,
@@ -68,9 +72,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           width: 320,
         }}
       >
-        <span
-          style={{ fontWeight: 700, color: "var(--blue)", fontSize: 18, textAlign: "center" }}
-        >
+        <span style={{ fontWeight: 700, color: "var(--blue)", fontSize: 18, textAlign: "center" }}>
           PLANKTON
         </span>
         {usernameRequired && (

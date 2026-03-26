@@ -51,9 +51,9 @@ export class SqliteMarketRepository implements MarketRepository {
   }
 
   findByTokenId(tokenId: TokenId): Market | null {
-    const row = this.db
-      .prepare("SELECT * FROM markets WHERE token_id = ?")
-      .get(tokenId) as Record<string, unknown> | undefined;
+    const row = this.db.prepare("SELECT * FROM markets WHERE token_id = ?").get(tokenId) as
+      | Record<string, unknown>
+      | undefined;
     return row ? this.rowToMarket(row) : null;
   }
 
@@ -74,9 +74,10 @@ export class SqliteMarketRepository implements MarketRepository {
   }
 
   findActive(): Market[] {
-    const rows = this.db
-      .prepare("SELECT * FROM markets WHERE active = 1")
-      .all() as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM markets WHERE active = 1").all() as Record<
+      string,
+      unknown
+    >[];
     return rows.map((r) => this.rowToMarket(r));
   }
 
@@ -88,17 +89,13 @@ export class SqliteMarketRepository implements MarketRepository {
   }
 
   findAll(): Market[] {
-    const rows = this.db
-      .prepare("SELECT * FROM markets")
-      .all() as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM markets").all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
   }
 
   deactivate(tokenId: TokenId): void {
     this.db
-      .prepare(
-        `UPDATE markets SET active = 0, updated_at = datetime('now') WHERE token_id = ?`,
-      )
+      .prepare(`UPDATE markets SET active = 0, updated_at = datetime('now') WHERE token_id = ?`)
       .run(tokenId);
   }
 
@@ -110,9 +107,7 @@ export class SqliteMarketRepository implements MarketRepository {
       eventSlug: (row.event_slug as string) ?? null,
       question: row.question as string,
       outcome: row.outcome as "YES" | "NO",
-      familyId: row.family_id
-        ? createFamilyId(row.family_id as string)
-        : null,
+      familyId: row.family_id ? createFamilyId(row.family_id as string) : null,
       familyKey: (row.family_key as string) ?? null,
       regime: (row.regime as Regime) ?? null,
       horizon: (row.horizon as string) ?? null,

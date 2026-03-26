@@ -68,7 +68,9 @@ describe("InProcessEventBus", () => {
     const signal = makeSignal();
     const received: Signal[] = [];
 
-    bus.subscribe("SignalProduced", async (p) => { received.push(p.signal); });
+    bus.subscribe("SignalProduced", async (p) => {
+      received.push(p.signal);
+    });
     await bus.publish("SignalProduced", { signal });
 
     expect(received).toEqual([signal]);
@@ -78,8 +80,12 @@ describe("InProcessEventBus", () => {
     const position = makePosition();
     const calls: number[] = [];
 
-    bus.subscribe("PositionUpdated", async () => { calls.push(1); });
-    bus.subscribe("PositionUpdated", async () => { calls.push(2); });
+    bus.subscribe("PositionUpdated", async () => {
+      calls.push(1);
+    });
+    bus.subscribe("PositionUpdated", async () => {
+      calls.push(2);
+    });
     await bus.publish("PositionUpdated", { position });
 
     expect(calls).toHaveLength(2);
@@ -88,14 +94,14 @@ describe("InProcessEventBus", () => {
   });
 
   it("resolves without error when no subscribers exist", async () => {
-    await expect(
-      bus.publish("SignalProduced", { signal: makeSignal() }),
-    ).resolves.toBeUndefined();
+    await expect(bus.publish("SignalProduced", { signal: makeSignal() })).resolves.toBeUndefined();
   });
 
   it("stops calling handler after unsubscribe", async () => {
     const calls: number[] = [];
-    const unsub = bus.subscribe("PositionUpdated", async () => { calls.push(1); });
+    const unsub = bus.subscribe("PositionUpdated", async () => {
+      calls.push(1);
+    });
 
     await bus.publish("PositionUpdated", { position: makePosition() });
     expect(calls).toHaveLength(1);
@@ -115,12 +121,14 @@ describe("InProcessEventBus", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const calls: number[] = [];
 
-    bus.subscribe("SignalProduced", async () => { throw new Error("boom"); });
-    bus.subscribe("SignalProduced", async () => { calls.push(1); });
+    bus.subscribe("SignalProduced", async () => {
+      throw new Error("boom");
+    });
+    bus.subscribe("SignalProduced", async () => {
+      calls.push(1);
+    });
 
-    await expect(
-      bus.publish("SignalProduced", { signal: makeSignal() }),
-    ).resolves.toBeUndefined();
+    await expect(bus.publish("SignalProduced", { signal: makeSignal() })).resolves.toBeUndefined();
 
     expect(calls).toEqual([1]);
     spy.mockRestore();
@@ -130,7 +138,9 @@ describe("InProcessEventBus", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const err = new Error("handler-fail");
 
-    bus.subscribe("SignalProduced", async () => { throw err; });
+    bus.subscribe("SignalProduced", async () => {
+      throw err;
+    });
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
     expect(spy).toHaveBeenCalledWith(err);

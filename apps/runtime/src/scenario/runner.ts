@@ -26,13 +26,15 @@ import {
   SqliteOperatorActionRepository,
 } from "@plankton/db";
 import type { FamilyState } from "@plankton/domain";
-import { createFamilyId, createBotRunId, createTokenId, slugPatternToRegex } from "@plankton/domain";
+import {
+  createFamilyId,
+  createBotRunId,
+  createTokenId,
+  slugPatternToRegex,
+} from "@plankton/domain";
 import type { Market, ClobMarket } from "@plankton/domain";
 import type { FamilyConfig } from "@plankton/config";
-import {
-  SimulationMarketDataGateway,
-  SimulationExchangeGateway,
-} from "@plankton/exchange";
+import { SimulationMarketDataGateway, SimulationExchangeGateway } from "@plankton/exchange";
 
 import { MarketDataModule } from "../modules/market-data/market-data-module.js";
 import { NormalizationModule } from "../modules/normalization/normalization-module.js";
@@ -122,9 +124,10 @@ async function executeScenario(
         repos.familyState.save({
           ...existing,
           runtimeMode: (override.runtimeMode as FamilyState["runtimeMode"]) ?? existing.runtimeMode,
-          quarantineReason: override.quarantineReason !== undefined
-            ? override.quarantineReason
-            : existing.quarantineReason,
+          quarantineReason:
+            override.quarantineReason !== undefined
+              ? override.quarantineReason
+              : existing.quarantineReason,
           updatedAt: new Date().toISOString(),
         });
       }
@@ -152,19 +155,33 @@ async function executeScenario(
     reconciliationRan: false,
   };
 
-  bus.subscribe("SignalProduced", async () => { counters.signals++; });
-  bus.subscribe("SignalApproved", async () => { counters.approved++; });
-  bus.subscribe("SignalRejected", async () => { counters.rejected++; });
-  bus.subscribe("OrderPlaced", async () => { counters.placed++; });
-  bus.subscribe("OrderCancelled", async () => { counters.cancelled++; });
-  bus.subscribe("FillReceived", async () => { counters.fills++; });
-  bus.subscribe("ReconciliationComplete", async () => { counters.reconciliationRan = true; });
+  bus.subscribe("SignalProduced", async () => {
+    counters.signals++;
+  });
+  bus.subscribe("SignalApproved", async () => {
+    counters.approved++;
+  });
+  bus.subscribe("SignalRejected", async () => {
+    counters.rejected++;
+  });
+  bus.subscribe("OrderPlaced", async () => {
+    counters.placed++;
+  });
+  bus.subscribe("OrderCancelled", async () => {
+    counters.cancelled++;
+  });
+  bus.subscribe("FillReceived", async () => {
+    counters.fills++;
+  });
+  bus.subscribe("ReconciliationComplete", async () => {
+    counters.reconciliationRan = true;
+  });
 
   // 6. Record bot run
   const botRunId = createBotRunId(`scenario-${Date.now()}`);
-  conn.db.prepare(
-    "INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)",
-  ).run(botRunId, "simulation", new Date().toISOString());
+  conn.db
+    .prepare("INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)")
+    .run(botRunId, "simulation", new Date().toISOString());
 
   // 7. Create modules (long intervals — we bypass timers)
   // supervisorRef is set before any closure that uses it is actually called
@@ -346,14 +363,12 @@ async function executeScenario(
   const openPositions = repos.position.findOpen();
   const dustPositions = repos.position.findDust();
 
-  const totalRealizedPnl = openPositions.reduce((sum, p) => sum + p.realizedPnl, 0)
-    + dustPositions.reduce((sum, p) => sum + p.realizedPnl, 0)
-    + sumClosedRealizedPnl(conn.db);
+  const totalRealizedPnl =
+    openPositions.reduce((sum, p) => sum + p.realizedPnl, 0) +
+    dustPositions.reduce((sum, p) => sum + p.realizedPnl, 0) +
+    sumClosedRealizedPnl(conn.db);
 
-  const totalTailCostUsdc = finalFamilyStates.reduce(
-    (sum, fs) => sum + fs.currentTailCostUsdc,
-    0,
-  );
+  const totalTailCostUsdc = finalFamilyStates.reduce((sum, fs) => sum + fs.currentTailCostUsdc, 0);
 
   conn.close();
 
@@ -380,9 +395,7 @@ async function executeScenario(
   };
 }
 
-function groupCommandsByTick(
-  commands: ScheduledCommand[],
-): Map<number, ScheduledCommand[]> {
+function groupCommandsByTick(commands: ScheduledCommand[]): Map<number, ScheduledCommand[]> {
   const map = new Map<number, ScheduledCommand[]>();
   for (const cmd of commands) {
     const list = map.get(cmd.atTick);
@@ -397,7 +410,9 @@ function groupCommandsByTick(
 
 function sumClosedRealizedPnl(db: import("better-sqlite3").Database): number {
   const row = db
-    .prepare("SELECT COALESCE(SUM(realized_pnl), 0) AS total FROM positions WHERE status = 'closed'")
+    .prepare(
+      "SELECT COALESCE(SUM(realized_pnl), 0) AS total FROM positions WHERE status = 'closed'",
+    )
     .get() as { total: number };
   return row.total;
 }

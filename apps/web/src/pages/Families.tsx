@@ -12,24 +12,38 @@ function FamilyDetail({ familyId }: { familyId: string }) {
       <td colSpan={7} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}>
+            <div
+              style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}
+            >
               Positions ({positions?.length ?? 0})
             </div>
             {positions && positions.length > 0 ? (
               <table style={{ fontSize: 11 }}>
                 <thead>
-                  <tr><th>Token</th><th>Size</th><th>Value</th><th>PnL</th><th>Status</th></tr>
+                  <tr>
+                    <th>Token</th>
+                    <th>Size</th>
+                    <th>Value</th>
+                    <th>PnL</th>
+                    <th>Status</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {positions.map((p) => (
                     <tr key={p.positionId}>
                       <td>{p.tokenId.slice(0, 12)}</td>
                       <td>{p.size.toFixed(2)}</td>
-                      <td>{p.currentValueUsdc != null ? `$${p.currentValueUsdc.toFixed(2)}` : "\u2014"}</td>
+                      <td>
+                        {p.currentValueUsdc != null
+                          ? `$${p.currentValueUsdc.toFixed(2)}`
+                          : "\u2014"}
+                      </td>
                       <td style={{ color: p.realizedPnl >= 0 ? "var(--green)" : "var(--red)" }}>
                         {p.realizedPnl >= 0 ? "+" : ""}${p.realizedPnl.toFixed(2)}
                       </td>
-                      <td><Badge value={p.status} /></td>
+                      <td>
+                        <Badge value={p.status} />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -39,13 +53,21 @@ function FamilyDetail({ familyId }: { familyId: string }) {
             )}
           </div>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}>
+            <div
+              style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}
+            >
               Orders ({orders?.items?.length ?? 0})
             </div>
             {orders?.items && orders.items.length > 0 ? (
               <table style={{ fontSize: 11 }}>
                 <thead>
-                  <tr><th>Token</th><th>Side</th><th>Size</th><th>Price</th><th>Status</th></tr>
+                  <tr>
+                    <th>Token</th>
+                    <th>Side</th>
+                    <th>Size</th>
+                    <th>Price</th>
+                    <th>Status</th>
+                  </tr>
                 </thead>
                 <tbody>
                   {orders.items.map((o) => (
@@ -54,7 +76,9 @@ function FamilyDetail({ familyId }: { familyId: string }) {
                       <td>{o.side}</td>
                       <td>{o.size.toFixed(2)}</td>
                       <td>${o.price.toFixed(4)}</td>
-                      <td><Badge value={o.status} /></td>
+                      <td>
+                        <Badge value={o.status} />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -80,7 +104,15 @@ export function Families() {
       <div className="page-title">Families</div>
       <table>
         <thead>
-          <tr><th>Family</th><th>Mode</th><th>Open Value</th><th>Positions</th><th>Tail Cost</th><th>Tail-Adj PnL</th><th>Actions</th></tr>
+          <tr>
+            <th>Family</th>
+            <th>Mode</th>
+            <th>Open Value</th>
+            <th>Positions</th>
+            <th>Tail Cost</th>
+            <th>Tail-Adj PnL</th>
+            <th>Actions</th>
+          </tr>
         </thead>
         <tbody>
           {families?.map((f) => {
@@ -95,12 +127,24 @@ export function Families() {
                   <td style={{ cursor: "pointer", color: "var(--blue)" }}>
                     {isExpanded ? "\u25BC" : "\u25B6"} {f.familyKey}
                   </td>
-                  <td><Badge value={mode} type="mode" /></td>
+                  <td>
+                    <Badge value={mode} type="mode" />
+                  </td>
                   <td>${(f.state?.openValueUsdc ?? 0).toFixed(2)}</td>
-                  <td>{f.state?.openPositionCount ?? 0} ({f.state?.openDustCount ?? 0} dust)</td>
-                  <td style={{ color: "var(--orange)" }}>${(f.state?.currentTailCostUsdc ?? 0).toFixed(2)}</td>
-                  <td style={{ color: (f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "var(--green)" : "var(--red)" }}>
-                    {(f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "+" : ""}${(f.state?.tailAdjustedPnlLive ?? 0).toFixed(2)}
+                  <td>
+                    {f.state?.openPositionCount ?? 0} ({f.state?.openDustCount ?? 0} dust)
+                  </td>
+                  <td style={{ color: "var(--orange)" }}>
+                    ${(f.state?.currentTailCostUsdc ?? 0).toFixed(2)}
+                  </td>
+                  <td
+                    style={{
+                      color:
+                        (f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "var(--green)" : "var(--red)",
+                    }}
+                  >
+                    {(f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "+" : ""}$
+                    {(f.state?.tailAdjustedPnlLive ?? 0).toFixed(2)}
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <FamilyActions familyId={f.familyId} mode={mode} />

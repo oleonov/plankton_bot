@@ -45,11 +45,15 @@ export function liveLitePreflight(
 
   // 4. Total exposure = positions cost_basis_usdc + open buy order notional (conservative full size_usdc)
   const positionValue = db
-    .prepare("SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status = 'open'")
+    .prepare(
+      "SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status = 'open'",
+    )
     .get() as { total: number };
 
   const buyOrderNotional = db
-    .prepare("SELECT COALESCE(SUM(size_usdc), 0) as total FROM orders WHERE side = 'buy' AND status IN ('open','pending','partially-filled')")
+    .prepare(
+      "SELECT COALESCE(SUM(size_usdc), 0) as total FROM orders WHERE side = 'buy' AND status IN ('open','pending','partially-filled')",
+    )
     .get() as { total: number };
 
   const totalExposure = positionValue.total + buyOrderNotional.total;

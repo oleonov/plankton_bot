@@ -25,7 +25,7 @@ import { createPositionId, createLotId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 /** Dust threshold in USDC — positions below this are marked "dust". */
-const DUST_THRESHOLD_USDC = 0.50;
+const DUST_THRESHOLD_USDC = 0.5;
 
 export interface FillEvent {
   fillId: FillId;
@@ -111,10 +111,7 @@ export class InventoryHandler {
     };
     this.lotRepo.save(lot);
 
-    this.log.info(
-      { positionId, tokenId: fill.tokenId, size: fill.size },
-      "new position created",
-    );
+    this.log.info({ positionId, tokenId: fill.tokenId, size: fill.size }, "new position created");
 
     return position;
   }
@@ -169,7 +166,7 @@ export class InventoryHandler {
       );
       throw new Error(
         `Inventory drift: sell fill ${fill.fillId} for token ${fill.tokenId} ` +
-        `has no matching open position`,
+          `has no matching open position`,
       );
     }
 
@@ -216,10 +213,7 @@ export class InventoryHandler {
     let remainingAvgPrice = existing.avgEntryPrice;
     if (remainingLots.length > 0) {
       const totalRemaining = remainingLots.reduce((s, l) => s + l.remainingSize, 0);
-      const totalCost = remainingLots.reduce(
-        (s, l) => s + l.remainingSize * l.entryPrice,
-        0,
-      );
+      const totalCost = remainingLots.reduce((s, l) => s + l.remainingSize * l.entryPrice, 0);
       remainingAvgPrice = totalRemaining > 0 ? totalCost / totalRemaining : 0;
     }
 

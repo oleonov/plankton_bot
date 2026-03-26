@@ -31,7 +31,8 @@ export function SSEProvider({ children }: { children: ReactNode }) {
     esRef.current = es;
 
     es.onopen = () => setState("connected");
-    es.onerror = () => setState(es.readyState === EventSource.CONNECTING ? "reconnecting" : "disconnected");
+    es.onerror = () =>
+      setState(es.readyState === EventSource.CONNECTING ? "reconnecting" : "disconnected");
 
     for (const eventType of Object.keys(SSE_INVALIDATION_MAP)) {
       es.addEventListener(eventType, () => {

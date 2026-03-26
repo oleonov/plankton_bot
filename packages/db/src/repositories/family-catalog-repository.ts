@@ -64,9 +64,7 @@ export class SqliteFamilyCatalogRepository {
   }
 
   findAll(): FamilyIdentity[] {
-    const rows = this.db
-      .prepare("SELECT * FROM family_catalog")
-      .all() as Record<string, unknown>[];
+    const rows = this.db.prepare("SELECT * FROM family_catalog").all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToIdentity(r));
   }
 

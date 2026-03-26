@@ -143,7 +143,11 @@ function isInTimeWindow(
  * Weekend + weekendMode="reduced" also forces reduced mode.
  */
 function isReducedMode(
-  session: { activeWindowsUtc: Array<{ start: string; end: string }>; reducedWindowsUtc: Array<{ start: string; end: string }>; weekendMode: string; },
+  session: {
+    activeWindowsUtc: Array<{ start: string; end: string }>;
+    reducedWindowsUtc: Array<{ start: string; end: string }>;
+    weekendMode: string;
+  },
   sessionMode: string,
   nowMinutes: number,
   weekend: boolean,
@@ -159,7 +163,10 @@ function isReducedMode(
   if (!inActive) return true;
 
   // Inside an explicit reduced window overrides active window
-  if (session.reducedWindowsUtc.length > 0 && isInTimeWindow(session.reducedWindowsUtc, nowMinutes)) {
+  if (
+    session.reducedWindowsUtc.length > 0 &&
+    isInTimeWindow(session.reducedWindowsUtc, nowMinutes)
+  ) {
     return true;
   }
 
@@ -193,16 +200,16 @@ function isWeekend(dayOfWeek: number): boolean {
  *
  * Multipliers stack multiplicatively, then clamp to [0.5, 1.5].
  */
-function evidenceSizeMultiplier(
-  evidence: FamilyEvidence,
-  familyState: FamilyState | null,
-): number {
+function evidenceSizeMultiplier(evidence: FamilyEvidence, familyState: FamilyState | null): number {
   let mult = 1.0;
 
   // Promotion state: unproven families get smaller sizes
   if (evidence.promotionState === "probe-only") {
     mult *= 0.6;
-  } else if (evidence.promotionState === "restricted" || evidence.promotionState === "reduce-only") {
+  } else if (
+    evidence.promotionState === "restricted" ||
+    evidence.promotionState === "reduce-only"
+  ) {
     mult *= 0.5;
   }
 
@@ -284,9 +291,7 @@ export function scan(
     // Exits fire regardless of weekend/window policy — they reduce risk.
     let exitEmitted = false;
     if (existingPosition && existingPosition.status === "open") {
-      const exitSignal = evaluateExit(
-        market, bundle, existingPosition, midPrice, tickTs, nextSeq,
-      );
+      const exitSignal = evaluateExit(market, bundle, existingPosition, midPrice, tickTs, nextSeq);
       if (exitSignal) {
         signals.push(exitSignal);
         exitEmitted = true;
@@ -348,8 +353,14 @@ export function scan(
         // Reduced mode: only probes allowed, no scale-in/confirm/heavy
         if (!reduced) {
           const scaleSignal = evaluateScaleIn(
-            market, bundle, existingPosition, midPrice, tickTs, nextSeq,
-            buyTracker, sizeMult,
+            market,
+            bundle,
+            existingPosition,
+            midPrice,
+            tickTs,
+            nextSeq,
+            buyTracker,
+            sizeMult,
           );
           if (scaleSignal) {
             signals.push(scaleSignal);
@@ -367,20 +378,29 @@ export function scan(
       // P1-6: max new markets per session — skip if adding a genuinely new market would exceed limit
       const maxNew = bundle.rules.entry.maxNewMarketsPerSession;
       if (sessionTracker && maxNew !== null) {
-        const isNew = !sessionTracker.isKnownMarket(String(market.familyId), String(market.tokenId));
+        const isNew = !sessionTracker.isKnownMarket(
+          String(market.familyId),
+          String(market.tokenId),
+        );
         if (isNew && sessionTracker.getNewMarketCount(String(market.familyId)) >= maxNew) continue;
       }
 
       // ─── Two-sided overlay (P1-5) ────────────────────────────
       // NO-outcome markets with two-sided enabled go through the two-sided
       // entry path instead of the standard probe path.
-      const isTwoSidedCandidate = market.outcome === "NO" &&
+      const isTwoSidedCandidate =
+        market.outcome === "NO" &&
         bundle.rules.twoSided.allowTwoSided &&
         bundle.rules.twoSided.twoSidedMode !== "disabled";
 
       if (isTwoSidedCandidate && !reduced) {
         const twoSidedSignal = evaluateTwoSidedEntry(
-          market, bundle, midPrice, tickTs, nextSeq, sizeMult,
+          market,
+          bundle,
+          midPrice,
+          tickTs,
+          nextSeq,
+          sizeMult,
         );
         if (twoSidedSignal) {
           signals.push(twoSidedSignal);
@@ -389,7 +409,12 @@ export function scan(
       } else {
         // Probe entry — allowed in reduced mode (probes are low-risk)
         const probeSignal = evaluateProbeEntry(
-          market, bundle, midPrice, tickTs, nextSeq, sizeMult,
+          market,
+          bundle,
+          midPrice,
+          tickTs,
+          nextSeq,
+          sizeMult,
           !!(familyState && familyState.tailAdjustedPnlLive < 0),
         );
         if (probeSignal) {
@@ -491,7 +516,10 @@ function evaluateProbeEntry(
 
   // Size: probeSizeUsdc adjusted by evidence multiplier + probe haircut, capped by max notional
   const probeHaircut = tailPnlNegative ? 0.5 : 1.0;
-  const suggestedSizeUsdc = Math.min(entry.probeSizeUsdc * sizeMult * probeHaircut, entry.maxInitialNotionalUsdc);
+  const suggestedSizeUsdc = Math.min(
+    entry.probeSizeUsdc * sizeMult * probeHaircut,
+    entry.maxInitialNotionalUsdc,
+  );
   const suggestedSize = suggestedSizeUsdc / midPrice;
 
   return {
@@ -553,10 +581,7 @@ function evaluateScaleIn(
 }
 
 /** Map buy count to scale stage reason. Returns null if no more buys allowed. */
-function resolveScaleStage(
-  buyCount: number,
-  scale: ScaleInRules,
-): SignalReason | null {
+function resolveScaleStage(buyCount: number, scale: ScaleInRules): SignalReason | null {
   if (buyCount === 1) return "confirm-scale";
   if (buyCount < scale.defaultMaxBuysPerLeg) return "scale-in";
   if (scale.allowHeavyCampaigns && buyCount < scale.heavyMaxBuysPerLeg) return "heavy-scale";
@@ -669,7 +694,10 @@ function evaluateTwoSidedEntry(
   if (ts.twoSidedMode === "selective" && !bundle.evidence.bothSidedEligible) return null;
 
   // Activity threshold gate
-  if (ts.minActivityForTwoSided !== null && bundle.evidence.localTradeCount < ts.minActivityForTwoSided) {
+  if (
+    ts.minActivityForTwoSided !== null &&
+    bundle.evidence.localTradeCount < ts.minActivityForTwoSided
+  ) {
     return null;
   }
 

@@ -37,9 +37,7 @@ function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
   };
 }
 
-function makeFamilyIdentity(
-  overrides?: Partial<FamilyIdentity>,
-): FamilyIdentity {
+function makeFamilyIdentity(overrides?: Partial<FamilyIdentity>): FamilyIdentity {
   return {
     familyId: createFamilyId("fam-btc"),
     familyKey: "btc-above",
@@ -153,7 +151,9 @@ describe("MarketScannerModule", () => {
       slug: "will-it-rain-tomorrow",
     });
 
-    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([unrelatedMarket]);
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      unrelatedMarket,
+    ]);
     (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
       makeFamilyIdentity({ slugPattern: "bitcoin-above-*" }),
     ]);
@@ -309,7 +309,9 @@ describe("MarketScannerModule", () => {
       endDate: new Date(Date.now() + 270 * 24 * 60 * 60 * 1000).toISOString(),
     });
 
-    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([longDatedMarket]);
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      longDatedMarket,
+    ]);
     (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
       makeFamilyIdentity({ horizon: "daily", slugPattern: "bitcoin-above-*" }),
     ]);

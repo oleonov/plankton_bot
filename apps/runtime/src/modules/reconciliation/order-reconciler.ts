@@ -9,10 +9,7 @@
  * Unknown exchange orders are logged but not fabricated locally (we lack familyId).
  */
 
-import type {
-  ExchangeGateway,
-  OrderRepository,
-} from "@plankton/domain";
+import type { ExchangeGateway, OrderRepository } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 export interface OrderReconcilerDeps {
@@ -29,31 +26,22 @@ export interface OrderReconcileResult {
   details: string[];
 }
 
-export async function reconcileOrders(
-  deps: OrderReconcilerDeps,
-): Promise<OrderReconcileResult> {
+export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderReconcileResult> {
   const { gateway, orderRepo, log } = deps;
   const details: string[] = [];
 
   const exchangeOrders = await gateway.getOpenOrders();
   const localOrders = orderRepo.findOpen();
 
-  const exchangeOrderIds = new Set(
-    exchangeOrders.map((o) => o.orderId),
-  );
+  const exchangeOrderIds = new Set(exchangeOrders.map((o) => o.orderId));
   const localExchangeIds = new Set(
-    localOrders
-      .filter((o) => o.exchangeOrderId !== null)
-      .map((o) => o.exchangeOrderId!),
+    localOrders.filter((o) => o.exchangeOrderId !== null).map((o) => o.exchangeOrderId!),
   );
 
   // Phantom orders: local open orders not on exchange
   let phantomsCancelled = 0;
   for (const local of localOrders) {
-    if (
-      local.exchangeOrderId !== null &&
-      !exchangeOrderIds.has(local.exchangeOrderId)
-    ) {
+    if (local.exchangeOrderId !== null && !exchangeOrderIds.has(local.exchangeOrderId)) {
       orderRepo.updateStatus(local.orderId, "cancelled");
       phantomsCancelled++;
       const msg = `phantom order cancelled: ${local.orderId} (exchange: ${local.exchangeOrderId})`;

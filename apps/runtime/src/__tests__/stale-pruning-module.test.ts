@@ -82,7 +82,13 @@ function makeBundle(overrides?: {
     },
     rules: {
       familyId: FAM_ID,
-      universe: { enabled: true, action: "trade", priorityRank: 1, allowWeekends: false, sessionMode: "active-window" },
+      universe: {
+        enabled: true,
+        action: "trade",
+        priorityRank: 1,
+        allowWeekends: false,
+        sessionMode: "active-window",
+      },
       entry: {
         entryMode: "probe-first",
         minEntryPrice,
@@ -98,7 +104,13 @@ function makeBundle(overrides?: {
         probeSizeUsdc: 5,
         addSizeUsdc: 4,
       },
-      scaleIn: { scaleMode: "confirm-only", defaultMaxBuysPerLeg: 3, heavyMaxBuysPerLeg: 5, allowHeavyCampaigns: false, requirePositiveRecycleHistoryForScale: false },
+      scaleIn: {
+        scaleMode: "confirm-only",
+        defaultMaxBuysPerLeg: 3,
+        heavyMaxBuysPerLeg: 5,
+        allowHeavyCampaigns: false,
+        requirePositiveRecycleHistoryForScale: false,
+      },
       exit: {
         exitMode: "repricing-sell",
         primaryProfitModel: "sell-into-strength",
@@ -122,7 +134,12 @@ function makeBundle(overrides?: {
         thresholdCleanupRequired: false,
         autoSettleResolvedMarkets: true,
       },
-      session: { activeWindowsUtc: [], reducedWindowsUtc: [], weekdayBias: "normal", weekendMode: "normal" },
+      session: {
+        activeWindowsUtc: [],
+        reducedWindowsUtc: [],
+        weekdayBias: "normal",
+        weekendMode: "normal",
+      },
     } as FamilyRules,
   };
 }
@@ -189,7 +206,9 @@ describe("StalePruningModule", () => {
     });
 
     const signals: any[] = [];
-    bus.subscribe("SignalProduced", async (p) => { signals.push(p); });
+    bus.subscribe("SignalProduced", async (p) => {
+      signals.push(p);
+    });
 
     const pruned = await mod.runCheck();
 
@@ -223,7 +242,7 @@ describe("StalePruningModule", () => {
 
   it("skips position with entry price above minEntryPrice", async () => {
     const bundle = makeBundle({ minEntryPrice: 0.03 });
-    const pos = makePosition({ avgEntryPrice: 0.10 }); // not a cheap tail position
+    const pos = makePosition({ avgEntryPrice: 0.1 }); // not a cheap tail position
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),

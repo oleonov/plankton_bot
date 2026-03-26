@@ -2,12 +2,28 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FillPollerModule } from "../modules/fill-poller/fill-poller-module.js";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
-import type { ExchangeGateway, ExchangeFill, FillRepository, OrderRepository, TokenId, ExchangeOrder, ExchangeBalance, PlaceOrderParams, CancelOrderParams, PlaceOrderResult, CancelOrderResult } from "@plankton/domain";
+import type {
+  ExchangeGateway,
+  ExchangeFill,
+  FillRepository,
+  OrderRepository,
+  TokenId,
+  ExchangeOrder,
+  ExchangeBalance,
+  PlaceOrderParams,
+  CancelOrderParams,
+  PlaceOrderResult,
+  CancelOrderResult,
+} from "@plankton/domain";
 
 function createMockGateway(): ExchangeGateway {
   return {
-    placeOrder: vi.fn<(p: PlaceOrderParams) => Promise<PlaceOrderResult>>().mockResolvedValue({ success: true }),
-    cancelOrder: vi.fn<(p: CancelOrderParams) => Promise<CancelOrderResult>>().mockResolvedValue({ success: true }),
+    placeOrder: vi
+      .fn<(p: PlaceOrderParams) => Promise<PlaceOrderResult>>()
+      .mockResolvedValue({ success: true }),
+    cancelOrder: vi
+      .fn<(p: CancelOrderParams) => Promise<CancelOrderResult>>()
+      .mockResolvedValue({ success: true }),
     cancelAllOrders: vi.fn().mockResolvedValue({ success: true }),
     getOpenOrders: vi.fn<() => Promise<ExchangeOrder[]>>().mockResolvedValue([]),
     getOpenOrdersForToken: vi.fn<(t: TokenId) => Promise<ExchangeOrder[]>>().mockResolvedValue([]),
@@ -47,7 +63,11 @@ function createMockOrderRepo(): OrderRepository {
 }
 
 const silentLog = {
-  info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), fatal: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+  fatal: vi.fn(),
   child: () => silentLog,
 } as any;
 
@@ -115,7 +135,9 @@ describe("FillPollerModule", () => {
     (fillRepo.findByOrderId as any).mockReturnValue([{ size: 10 }]);
 
     const received: any[] = [];
-    bus.subscribe("FillReceived", async (p) => { received.push(p); });
+    bus.subscribe("FillReceived", async (p) => {
+      received.push(p);
+    });
 
     await mod.start();
     await mod.poll();
@@ -127,9 +149,11 @@ describe("FillPollerModule", () => {
   it("skips poll when already polling (re-entrancy guard)", async () => {
     // Make getFills hang
     let resolveGetFills: () => void;
-    (gateway.getFills as any).mockReturnValue(new Promise<ExchangeFill[]>(r => {
-      resolveGetFills = () => r([]);
-    }));
+    (gateway.getFills as any).mockReturnValue(
+      new Promise<ExchangeFill[]>((r) => {
+        resolveGetFills = () => r([]);
+      }),
+    );
 
     await mod.start();
     const poll1 = mod.poll();

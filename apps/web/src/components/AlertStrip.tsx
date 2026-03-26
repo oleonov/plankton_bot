@@ -21,16 +21,18 @@ export function AlertStrip() {
   if (alerts.length === 0) return null;
 
   return (
-    <div style={{
-      background: "var(--red-bg)",
-      borderBottom: "1px solid #6d2b2b",
-      padding: "6px 16px",
-      fontSize: 11,
-      color: "#ef9a9a",
-      display: "flex",
-      alignItems: "center",
-      gap: 12,
-    }}>
+    <div
+      style={{
+        background: "var(--red-bg)",
+        borderBottom: "1px solid #6d2b2b",
+        padding: "6px 16px",
+        fontSize: 11,
+        color: "#ef9a9a",
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+      }}
+    >
       <span style={{ fontWeight: 700, color: "var(--red)" }}>&#9888;</span>
       <span>{alerts.join(" \u2022 ")}</span>
       <Link to="/risk" style={{ marginLeft: "auto", color: "var(--red)", fontSize: 10 }}>

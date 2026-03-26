@@ -115,7 +115,9 @@ describe("migrateOrphanedPositions", () => {
     const saved: Position[] = [];
     const findByFamilyCalls: number[] = [];
     const positionRepo: PositionRepository = {
-      save: vi.fn((p: Position) => { saved.push(p); }),
+      save: vi.fn((p: Position) => {
+        saved.push(p);
+      }),
       findByTokenId: vi.fn().mockReturnValue(null),
       findByFamily: vi.fn().mockImplementation(() => {
         findByFamilyCalls.push(1);
@@ -337,11 +339,25 @@ describe("migrateOrphanedPositions", () => {
     // Two positions: one orphaned, one valid
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
-    const orphan = makePosition({ positionId: createPositionId("pos-orphan"), tokenId: createTokenId("tok-orphan") });
-    const valid = makePosition({ positionId: createPositionId("pos-valid"), tokenId: createTokenId("tok-valid"), costBasisUsdc: 5 });
+    const orphan = makePosition({
+      positionId: createPositionId("pos-orphan"),
+      tokenId: createTokenId("tok-orphan"),
+    });
+    const valid = makePosition({
+      positionId: createPositionId("pos-valid"),
+      tokenId: createTokenId("tok-valid"),
+      costBasisUsdc: 5,
+    });
 
-    const orphanMarket = makeMarket({ tokenId: createTokenId("tok-orphan"), slug: "will-bitcoin-reach-200k-by-december" });
-    const validMarket = makeMarket({ tokenId: createTokenId("tok-valid"), slug: "bitcoin-above-100k", endDate: tomorrow.toISOString() });
+    const orphanMarket = makeMarket({
+      tokenId: createTokenId("tok-orphan"),
+      slug: "will-bitcoin-reach-200k-by-december",
+    });
+    const validMarket = makeMarket({
+      tokenId: createTokenId("tok-valid"),
+      slug: "bitcoin-above-100k",
+      endDate: tomorrow.toISOString(),
+    });
 
     // After closing orphan, findByFamily returns only valid
     const findByFamilyCalls: number[] = [];
@@ -359,9 +375,11 @@ describe("migrateOrphanedPositions", () => {
     };
     const marketRepo = {
       save: vi.fn(),
-      findByTokenId: vi.fn().mockImplementation((tid: TokenId) =>
-        String(tid) === "tok-orphan" ? orphanMarket : validMarket,
-      ),
+      findByTokenId: vi
+        .fn()
+        .mockImplementation((tid: TokenId) =>
+          String(tid) === "tok-orphan" ? orphanMarket : validMarket,
+        ),
       findByTokenIds: vi.fn().mockReturnValue([]),
       findByConditionId: vi.fn().mockReturnValue([]),
       findActive: vi.fn().mockReturnValue([]),
@@ -373,7 +391,9 @@ describe("migrateOrphanedPositions", () => {
     const savedStates: FamilyState[] = [];
     const familyStateRepo = {
       get: vi.fn().mockReturnValue(makeFamilyState()),
-      save: vi.fn((s: FamilyState) => { savedStates.push(s); }),
+      save: vi.fn((s: FamilyState) => {
+        savedStates.push(s);
+      }),
       findAll: vi.fn().mockReturnValue([]),
       findByMode: vi.fn().mockReturnValue([]),
       findQuarantined: vi.fn().mockReturnValue([]),

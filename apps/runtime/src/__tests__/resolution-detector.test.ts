@@ -1,9 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  createTokenId,
-  createFamilyId,
-  createPositionId,
-} from "@plankton/domain";
+import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
 import type {
   PositionRepository,
   MarketRepository,
@@ -151,14 +147,12 @@ describe("ResolutionDetector", () => {
     expect(results).toHaveLength(1);
     expect(results[0]!.source).toBe("gamma-api");
     expect(results[0]!.resolution).toBe("YES");
-    expect((gammaClient.getMarketById as any)).toHaveBeenCalledWith(CONDITION);
+    expect(gammaClient.getMarketById as any).toHaveBeenCalledWith(CONDITION);
   });
 
   it("returns gamma-api source when ID lookup finds closed market", async () => {
     (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
-    (gammaClient.getMarketById as any).mockResolvedValue(
-      makeGammaInfo({ closed: true }),
-    );
+    (gammaClient.getMarketById as any).mockResolvedValue(makeGammaInfo({ closed: true }));
 
     const results = await detector.detect(0);
 
@@ -168,9 +162,7 @@ describe("ResolutionDetector", () => {
 
   it("skips when ID lookup finds open market", async () => {
     (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
-    (gammaClient.getMarketById as any).mockResolvedValue(
-      makeGammaInfo({ closed: false }),
-    );
+    (gammaClient.getMarketById as any).mockResolvedValue(makeGammaInfo({ closed: false }));
 
     const results = await detector.detect(0);
     expect(results).toHaveLength(0);
@@ -179,21 +171,17 @@ describe("ResolutionDetector", () => {
   // ─── Transient Gamma errors → no settlement ────────────────────────────
 
   it("skips market when slug lookup throws transport error", async () => {
-    (gammaClient.getMarketBySlug as any).mockRejectedValue(
-      new Error("ECONNRESET"),
-    );
+    (gammaClient.getMarketBySlug as any).mockRejectedValue(new Error("ECONNRESET"));
 
     const results = await detector.detect(0);
 
     expect(results).toHaveLength(0);
-    expect((gammaClient.getMarketById as any)).not.toHaveBeenCalled();
+    expect(gammaClient.getMarketById as any).not.toHaveBeenCalled();
   });
 
   it("skips market when slug returns null but ID lookup throws", async () => {
     (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
-    (gammaClient.getMarketById as any).mockRejectedValue(
-      new Error("socket hang up"),
-    );
+    (gammaClient.getMarketById as any).mockRejectedValue(new Error("socket hang up"));
 
     const results = await detector.detect(0);
 
@@ -227,9 +215,7 @@ describe("ResolutionDetector", () => {
   });
 
   it("skips market not yet closed on Gamma", async () => {
-    (gammaClient.getMarketBySlug as any).mockResolvedValue(
-      makeGammaInfo({ closed: false }),
-    );
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(makeGammaInfo({ closed: false }));
 
     const results = await detector.detect(0);
     expect(results).toHaveLength(0);
@@ -244,7 +230,7 @@ describe("ResolutionDetector", () => {
     const results = await detector.detect(0);
 
     expect(results).toHaveLength(0);
-    expect((gammaClient.getMarketBySlug as any)).not.toHaveBeenCalled();
+    expect(gammaClient.getMarketBySlug as any).not.toHaveBeenCalled();
   });
 
   it("returns detected (non-settled) conditionId for retry", async () => {

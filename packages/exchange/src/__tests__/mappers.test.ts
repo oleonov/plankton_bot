@@ -94,9 +94,9 @@ describe("mapTrade", () => {
     expect(fill.tokenId).toBe("tok-x");
     expect(fill.side).toBe("sell");
     expect(fill.size).toBe(50);
-    expect(fill.price).toBe(0.60);
+    expect(fill.price).toBe(0.6);
     // fee = 50 * 0.60 * (200/10000) = 0.60
-    expect(fill.fee).toBeCloseTo(0.60);
+    expect(fill.fee).toBeCloseTo(0.6);
   });
 
   it("clientOrderId defaults to empty when SDK omits it", () => {
@@ -148,16 +148,14 @@ describe("mapOrderBook", () => {
         { price: "0.50", size: "100" },
         { price: "0.49", size: "200" },
       ],
-      asks: [
-        { price: "0.52", size: "150" },
-      ],
+      asks: [{ price: "0.52", size: "150" }],
     });
 
     expect(book.tokenId).toBe("tok-1");
     expect(book.bids).toHaveLength(2);
     expect(book.asks).toHaveLength(1);
-    expect(book.bids[0]!.price).toBe(0.50);
-    expect(book.bestBid).toBe(0.50);
+    expect(book.bids[0]!.price).toBe(0.5);
+    expect(book.bestBid).toBe(0.5);
     expect(book.bestAsk).toBe(0.52);
     expect(book.midPrice).toBe(0.51);
     expect(book.spread).toBeCloseTo(0.02);
@@ -175,7 +173,7 @@ describe("mapBalance", () => {
   it("maps SDK balance to domain ExchangeBalance", () => {
     const balance = mapBalance({ balance: "1500.50", allowance: "2000" });
     expect(balance.asset).toBe("USDC");
-    expect(balance.available).toBe(1500.50);
+    expect(balance.available).toBe(1500.5);
     // locked is always 0 — SDK doesn't provide real locked collateral info;
     // actual locked amount is computed by reconciliation from open orders
     expect(balance.locked).toBe(0);
@@ -281,12 +279,12 @@ describe("mapGammaPricing", () => {
     const pricing = mapGammaPricing({
       bestBid: 0.45,
       bestAsk: 0.55,
-      lastTradePrice: 0.50,
+      lastTradePrice: 0.5,
     });
 
     expect(pricing.bestBid).toBe(0.45);
     expect(pricing.bestAsk).toBe(0.55);
-    expect(pricing.lastTradePrice).toBe(0.50);
+    expect(pricing.lastTradePrice).toBe(0.5);
   });
 
   it("returns null for missing pricing fields", () => {
@@ -306,7 +304,7 @@ describe("mapGammaPricing", () => {
 
     expect(pricing.bestBid).toBe(0.35);
     expect(pricing.bestAsk).toBe(0.65);
-    expect(pricing.lastTradePrice).toBe(0.50);
+    expect(pricing.lastTradePrice).toBe(0.5);
   });
 
   it("returns null when fields are explicitly null", () => {

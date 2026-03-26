@@ -13,7 +13,10 @@ import type {
   Paginated,
 } from "./types.ts";
 
-function withParams(base: string, params: Record<string, string | number | boolean | undefined>): string {
+function withParams(
+  base: string,
+  params: Record<string, string | number | boolean | undefined>,
+): string {
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== false && v !== "") sp.set(k, String(v));
@@ -195,7 +198,10 @@ export function useResume() {
   });
 }
 
-export function useFamilyAction(familyId: string, action: "quarantine" | "reduce-only" | "activate") {
+export function useFamilyAction(
+  familyId: string,
+  action: "quarantine" | "reduce-only" | "activate",
+) {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (reason?: string) =>

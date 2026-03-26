@@ -12,54 +12,65 @@ export function StatusBar() {
 
   if (!status) return null;
 
-  const sseIndicator = sseState === "connected"
-    ? <span style={{ color: "var(--green)" }}>&#9679; connected</span>
-    : sseState === "reconnecting"
-      ? <span style={{ color: "var(--orange)" }}>&#9676; reconnecting</span>
-      : <span style={{ color: "var(--red)" }}>&#10005; disconnected</span>;
+  const sseIndicator =
+    sseState === "connected" ? (
+      <span style={{ color: "var(--green)" }}>&#9679; connected</span>
+    ) : sseState === "reconnecting" ? (
+      <span style={{ color: "var(--orange)" }}>&#9676; reconnecting</span>
+    ) : (
+      <span style={{ color: "var(--red)" }}>&#10005; disconnected</span>
+    );
 
   return (
-    <div style={{
-      background: "var(--bg-status)",
-      color: "var(--text-muted)",
-      padding: "6px 16px",
-      display: "flex",
-      alignItems: "center",
-      gap: 16,
-      fontSize: 11,
-      borderBottom: "1px solid var(--border)",
-    }}>
+    <div
+      style={{
+        background: "var(--bg-status)",
+        color: "var(--text-muted)",
+        padding: "6px 16px",
+        display: "flex",
+        alignItems: "center",
+        gap: 16,
+        fontSize: 11,
+        borderBottom: "1px solid var(--border)",
+      }}
+    >
       <Badge value={status.runtimeMode} type="mode" />
       <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: 4 }}>
         data:{status.marketDataSource} exec:{status.executionMode}
       </span>
       {status.runtimeMode === "live-lite" && (
-        <span style={{
-          background: "var(--red)",
-          color: "white",
-          padding: "2px 8px",
-          borderRadius: 3,
-          fontWeight: 700,
-          fontSize: 10,
-          letterSpacing: 0.5,
-        }}>
+        <span
+          style={{
+            background: "var(--red)",
+            color: "white",
+            padding: "2px 8px",
+            borderRadius: 3,
+            fontWeight: 700,
+            fontSize: 10,
+            letterSpacing: 0.5,
+          }}
+        >
           ⚠ LIVE-LITE — real orders on exchange
         </span>
       )}
       <Badge value={status.paused ? "PAUSED" : "RUNNING"} type="mode" />
       <span>uptime: {formatUptime(status.uptimeSeconds)}</span>
       <span>recon: {formatAgo(status.lastReconciliationAt)}</span>
-      <span>mktdata: {status.marketDataStale
-        ? <span className="badge badge-red">STALE</span>
-        : <span className="badge badge-green">FRESH</span>}
+      <span>
+        mktdata:{" "}
+        {status.marketDataStale ? (
+          <span className="badge badge-red">STALE</span>
+        ) : (
+          <span className="badge badge-green">FRESH</span>
+        )}
       </span>
       {status.marketDataPoll?.active && (
-        <span style={{ color: "var(--text-dim)", fontSize: 10 }}>
-          refreshing prices
-        </span>
+        <span style={{ color: "var(--text-dim)", fontSize: 10 }}>refreshing prices</span>
       )}
       {status.reconciliationDriftDetected && (
-        <span className="badge badge-red" style={{ fontWeight: 700 }}>RECON DRIFT</span>
+        <span className="badge badge-red" style={{ fontWeight: 700 }}>
+          RECON DRIFT
+        </span>
       )}
       {sseIndicator}
       <span style={{ marginLeft: "auto" }}>

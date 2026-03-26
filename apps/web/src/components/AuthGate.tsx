@@ -37,7 +37,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
     void checkSession().then((result) => {
       if (result === "server_error") {
         // Single retry after 3s for transient startup issues
-        setTimeout(() => { void checkSession().then(setState); }, 3000);
+        setTimeout(() => {
+          void checkSession().then(setState);
+        }, 3000);
       } else {
         setState(result);
       }
@@ -51,15 +53,18 @@ export function AuthGate({ children }: { children: ReactNode }) {
       return;
     }
 
-    heartbeatRef.current = setInterval(() => {
-      fetch("/api/v1/auth/me")
-        .then((res) => {
-          if (res.status === 401) setState("unauthenticated");
-        })
-        .catch(() => {
-          /* network error — transient, don't logout */
-        });
-    }, 5 * 60 * 1000);
+    heartbeatRef.current = setInterval(
+      () => {
+        fetch("/api/v1/auth/me")
+          .then((res) => {
+            if (res.status === 401) setState("unauthenticated");
+          })
+          .catch(() => {
+            /* network error — transient, don't logout */
+          });
+      },
+      5 * 60 * 1000,
+    );
 
     return () => {
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
@@ -79,8 +84,14 @@ export function AuthGate({ children }: { children: ReactNode }) {
         <button
           onClick={handleRetry}
           style={{
-            marginTop: 12, padding: "6px 16px", borderRadius: 4, border: "1px solid var(--border)",
-            background: "transparent", color: "var(--text)", fontSize: 13, cursor: "pointer",
+            marginTop: 12,
+            padding: "6px 16px",
+            borderRadius: 4,
+            border: "1px solid var(--border)",
+            background: "transparent",
+            color: "var(--text)",
+            fontSize: 13,
+            cursor: "pointer",
           }}
         >
           Retry

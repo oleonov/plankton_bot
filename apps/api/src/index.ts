@@ -14,7 +14,11 @@ import { buildServer } from "./server.js";
 
 const LATEST_MIGRATION = "005_event_slug.sql";
 
-async function waitForDatabase(dbPath: string, maxRetries = 10, delayMs = 2000): Promise<DbConnection> {
+async function waitForDatabase(
+  dbPath: string,
+  maxRetries = 10,
+  delayMs = 2000,
+): Promise<DbConnection> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     let conn: DbConnection | undefined;
     try {
@@ -28,7 +32,9 @@ async function waitForDatabase(dbPath: string, maxRetries = 10, delayMs = 2000):
       conn?.close();
       if (attempt === maxRetries) throw err;
       // eslint-disable-next-line no-console
-      console.log(`database not ready (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms...`);
+      console.log(
+        `database not ready (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms...`,
+      );
       await new Promise((r) => setTimeout(r, delayMs));
     }
   }
@@ -47,9 +53,7 @@ async function main(): Promise<void> {
   }
 
   if (config.planktonSessionSecret && !/^[0-9a-f]{64}$/i.test(config.planktonSessionSecret)) {
-    throw new Error(
-      "PLANKTON_SESSION_SECRET must be exactly 64 hex characters (32 bytes).",
-    );
+    throw new Error("PLANKTON_SESSION_SECRET must be exactly 64 hex characters (32 bytes).");
   }
 
   if (!config.planktonAuthPassword) {

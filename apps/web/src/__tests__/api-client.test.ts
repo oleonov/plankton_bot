@@ -29,7 +29,12 @@ describe("apiFetch", () => {
 
   it("calls registered onUnauthorized callback on 401", async () => {
     mockFetch.mockResolvedValue(
-      jsonResponse(401, { ok: false, data: null, error: { code: "UNAUTHORIZED", message: "Unauthorized" }, ts: "" }),
+      jsonResponse(401, {
+        ok: false,
+        data: null,
+        error: { code: "UNAUTHORIZED", message: "Unauthorized" },
+        ts: "",
+      }),
     );
 
     const cb = vi.fn();
@@ -43,7 +48,12 @@ describe("apiFetch", () => {
 
   it("deregister prevents callback from being called", async () => {
     mockFetch.mockResolvedValue(
-      jsonResponse(401, { ok: false, data: null, error: { code: "UNAUTHORIZED", message: "Unauthorized" }, ts: "" }),
+      jsonResponse(401, {
+        ok: false,
+        data: null,
+        error: { code: "UNAUTHORIZED", message: "Unauthorized" },
+        ts: "",
+      }),
     );
 
     const cb = vi.fn();
@@ -56,7 +66,12 @@ describe("apiFetch", () => {
 
   it("throws on non-ok response with error message from body", async () => {
     mockFetch.mockResolvedValue(
-      jsonResponse(500, { ok: false, data: null, error: { code: "INTERNAL", message: "something broke" }, ts: "" }),
+      jsonResponse(500, {
+        ok: false,
+        data: null,
+        error: { code: "INTERNAL", message: "something broke" },
+        ts: "",
+      }),
     );
 
     await expect(apiFetch("/api/v1/status")).rejects.toThrow("something broke");

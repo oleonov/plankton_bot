@@ -6,7 +6,9 @@ function okModule(): RuntimeModule {
   return {
     async start() {},
     async stop() {},
-    async healthCheck() { return { ok: true, detail: "running" }; },
+    async healthCheck() {
+      return { ok: true, detail: "running" };
+    },
   };
 }
 
@@ -14,7 +16,9 @@ function failModule(): RuntimeModule {
   return {
     async start() {},
     async stop() {},
-    async healthCheck() { throw new Error("check failed"); },
+    async healthCheck() {
+      throw new Error("check failed");
+    },
   };
 }
 

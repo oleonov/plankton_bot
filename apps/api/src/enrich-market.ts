@@ -13,7 +13,13 @@ export interface MarketMeta {
   conditionId: string | null;
 }
 
-const EMPTY_META: MarketMeta = { slug: null, eventSlug: null, question: null, outcome: null, conditionId: null };
+const EMPTY_META: MarketMeta = {
+  slug: null,
+  eventSlug: null,
+  question: null,
+  outcome: null,
+  conditionId: null,
+};
 
 /**
  * Build a Map<tokenId, MarketMeta> for a set of token IDs.
@@ -48,9 +54,6 @@ export function buildMarketMetaMap(
 }
 
 /** Get meta for a single tokenId, returning EMPTY_META if not found. */
-export function getMetaOrEmpty(
-  metaMap: Map<string, MarketMeta>,
-  tokenId: string,
-): MarketMeta {
+export function getMetaOrEmpty(metaMap: Map<string, MarketMeta>, tokenId: string): MarketMeta {
   return metaMap.get(tokenId) ?? EMPTY_META;
 }

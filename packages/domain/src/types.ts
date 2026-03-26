@@ -131,7 +131,7 @@ export interface FamilyEvidence {
 
 export interface TimeWindow {
   start: string; // "HH:MM" UTC
-  end: string;   // "HH:MM" UTC
+  end: string; // "HH:MM" UTC
 }
 
 export interface UniverseRules {
@@ -154,8 +154,8 @@ export interface EntryRules {
   maxProbeCountPerMarket: number | null;
   entryCooldownSeconds: number | null;
   maxNewMarketsPerSession: number | null;
-  probeSizeUsdc: number;   // size for first buy (probe entry)
-  addSizeUsdc: number;     // size for subsequent buys (scale-in)
+  probeSizeUsdc: number; // size for first buy (probe entry)
+  addSizeUsdc: number; // size for subsequent buys (scale-in)
 }
 
 export interface ScaleInRules {
@@ -233,10 +233,10 @@ export interface FamilyState {
   activeMarketCount: number;
   currentTailCostUsdc: number;
   tailAdjustedPnlLive: number;
-  lastEntryTs: string | null;  // ISO timestamp
-  lastExitTs: string | null;   // ISO timestamp
+  lastEntryTs: string | null; // ISO timestamp
+  lastExitTs: string | null; // ISO timestamp
   quarantineReason: string | null;
-  updatedAt: string;           // ISO timestamp
+  updatedAt: string; // ISO timestamp
 }
 
 // ─── Signal ───────────────────────────────────────────────────────────────────
@@ -251,12 +251,12 @@ export interface Signal {
   tokenId: TokenId;
   side: OrderSide;
   suggestedPrice: number;
-  suggestedSize: number;       // share quantity
-  suggestedSizeUsdc: number;   // USDC notional (= suggestedSize × suggestedPrice)
+  suggestedSize: number; // share quantity
+  suggestedSizeUsdc: number; // USDC notional (= suggestedSize × suggestedPrice)
   reason: SignalReason;
-  strategyTick: number;        // epoch ms of the scanner tick
-  sequenceInTick: number;      // 0-based within tick for same family+token+side
-  generatedAt: string;         // ISO timestamp
+  strategyTick: number; // epoch ms of the scanner tick
+  sequenceInTick: number; // 0-based within tick for same family+token+side
+  generatedAt: string; // ISO timestamp
 }
 
 // ─── Risk Decision ────────────────────────────────────────────────────────────
@@ -284,14 +284,14 @@ export interface Order {
   side: OrderSide;
   orderType: OrderType;
   price: number;
-  size: number;       // shares
-  sizeUsdc: number;   // notional
+  size: number; // shares
+  sizeUsdc: number; // notional
   status: OrderStatus;
   exchangeOrderId: string | null;
   signalId: string | null;
   botRunId: BotRunId;
-  createdAt: string;  // ISO timestamp
-  updatedAt: string;  // ISO timestamp
+  createdAt: string; // ISO timestamp
+  updatedAt: string; // ISO timestamp
 }
 
 // ─── Fill ─────────────────────────────────────────────────────────────────────
@@ -305,10 +305,10 @@ export interface Fill {
   familyId: FamilyId;
   side: OrderSide;
   price: number;
-  size: number;      // shares executed
-  sizeUsdc: number;  // notional (= size × price)
+  size: number; // shares executed
+  sizeUsdc: number; // notional (= size × price)
   fee: number;
-  filledAt: string;  // ISO timestamp
+  filledAt: string; // ISO timestamp
 }
 
 // ─── Position ─────────────────────────────────────────────────────────────────
@@ -318,15 +318,15 @@ export interface Position {
   tokenId: TokenId;
   familyId: FamilyId;
   side: OrderSide;
-  size: number;              // current share quantity
+  size: number; // current share quantity
   avgEntryPrice: number;
-  costBasisUsdc: number;     // total USDC paid to acquire current size
+  costBasisUsdc: number; // total USDC paid to acquire current size
   currentValueUsdc: number | null;
   realizedPnl: number;
   status: PositionStatus;
-  openedAt: string;          // ISO timestamp
-  closedAt: string | null;   // ISO timestamp
-  updatedAt: string;         // ISO timestamp
+  openedAt: string; // ISO timestamp
+  closedAt: string | null; // ISO timestamp
+  updatedAt: string; // ISO timestamp
 }
 
 // ─── Inventory Lot (FIFO cost basis tracking) ────────────────────────────────
@@ -337,12 +337,12 @@ export interface InventoryLot {
   tokenId: TokenId;
   familyId: FamilyId;
   side: OrderSide;
-  size: number;          // original lot size in shares
+  size: number; // original lot size in shares
   remainingSize: number; // shares not yet matched against a sell
   entryPrice: number;
-  costUsdc: number;      // original USDC cost for this lot
+  costUsdc: number; // original USDC cost for this lot
   fillId: FillId;
-  createdAt: string;     // ISO timestamp
+  createdAt: string; // ISO timestamp
 }
 
 // ─── Operator Command (pending queue; API writes, runtime polls) ──────────────
@@ -356,7 +356,7 @@ export interface OperatorCommand {
   targetId: string | null; // familyId for family-scoped commands; null for global
   reason: string | null;
   status: CommandStatus;
-  createdAt: string;      // ISO timestamp
+  createdAt: string; // ISO timestamp
   appliedAt: string | null; // ISO timestamp; set when status transitions to applied/rejected
 }
 
@@ -404,8 +404,8 @@ export interface NormalizedMarket {
 export interface MarketResolution {
   conditionId: string;
   resolution: "YES" | "NO" | "unknown";
-  resolvedAt: string;       // ISO timestamp
-  detectedAt: string;       // ISO timestamp
+  resolvedAt: string; // ISO timestamp
+  detectedAt: string; // ISO timestamp
   source: "gamma-api" | "gamma-delisted" | "manual";
   rawResponse: string | null; // JSON for debugging
   status: "detected" | "settled";

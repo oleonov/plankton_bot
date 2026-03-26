@@ -13,13 +13,13 @@ export class InProcessEventBus implements EventBus {
     const subs = this.handlers.get(event);
     if (!subs?.size) return;
 
-    const settled = Promise.allSettled(
-      [...subs].map((fn) => fn(payload as never)),
-    ).then((results) => {
-      for (const r of results) {
-        if (r.status === "rejected") console.error(r.reason);
-      }
-    });
+    const settled = Promise.allSettled([...subs].map((fn) => fn(payload as never))).then(
+      (results) => {
+        for (const r of results) {
+          if (r.status === "rejected") console.error(r.reason);
+        }
+      },
+    );
 
     const tracked = settled.finally(() => this.inflight.delete(tracked));
     this.inflight.add(tracked);
@@ -38,7 +38,9 @@ export class InProcessEventBus implements EventBus {
     const h = handler as Handler;
     set.add(h);
 
-    return () => { set.delete(h); };
+    return () => {
+      set.delete(h);
+    };
   }
 
   async drain(timeoutMs?: number): Promise<void> {
@@ -51,9 +53,6 @@ export class InProcessEventBus implements EventBus {
       return;
     }
 
-    await Promise.race([
-      pending,
-      new Promise<void>((r) => setTimeout(r, timeoutMs)),
-    ]);
+    await Promise.race([pending, new Promise<void>((r) => setTimeout(r, timeoutMs))]);
   }
 }

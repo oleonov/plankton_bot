@@ -5,11 +5,7 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqlitePositionRepository } from "../repositories/position-repository.js";
-import {
-  createPositionId,
-  createTokenId,
-  createFamilyId,
-} from "@plankton/domain";
+import { createPositionId, createTokenId, createFamilyId } from "@plankton/domain";
 import type { Position } from "@plankton/domain";
 
 let conn: DbConnection;
@@ -68,9 +64,27 @@ describe("SqlitePositionRepository", () => {
   });
 
   it("findOpen returns only open positions", () => {
-    repo.save(makePosition({ positionId: createPositionId("p1"), tokenId: createTokenId("t1"), status: "open" }));
-    repo.save(makePosition({ positionId: createPositionId("p2"), tokenId: createTokenId("t2"), status: "closed" }));
-    repo.save(makePosition({ positionId: createPositionId("p3"), tokenId: createTokenId("t3"), status: "dust" }));
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p1"),
+        tokenId: createTokenId("t1"),
+        status: "open",
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p2"),
+        tokenId: createTokenId("t2"),
+        status: "closed",
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p3"),
+        tokenId: createTokenId("t3"),
+        status: "dust",
+      }),
+    );
 
     const open = repo.findOpen();
     expect(open).toHaveLength(1);
@@ -78,27 +92,81 @@ describe("SqlitePositionRepository", () => {
   });
 
   it("findDust returns only dust positions", () => {
-    repo.save(makePosition({ positionId: createPositionId("p1"), tokenId: createTokenId("t1"), status: "open" }));
-    repo.save(makePosition({ positionId: createPositionId("p2"), tokenId: createTokenId("t2"), status: "dust" }));
-    repo.save(makePosition({ positionId: createPositionId("p3"), tokenId: createTokenId("t3"), status: "dust" }));
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p1"),
+        tokenId: createTokenId("t1"),
+        status: "open",
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p2"),
+        tokenId: createTokenId("t2"),
+        status: "dust",
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p3"),
+        tokenId: createTokenId("t3"),
+        status: "dust",
+      }),
+    );
 
     const dust = repo.findDust();
     expect(dust).toHaveLength(2);
   });
 
   it("findByFamily works", () => {
-    repo.save(makePosition({ positionId: createPositionId("p1"), tokenId: createTokenId("t1"), familyId: createFamilyId("fam-A") }));
-    repo.save(makePosition({ positionId: createPositionId("p2"), tokenId: createTokenId("t2"), familyId: createFamilyId("fam-A") }));
-    repo.save(makePosition({ positionId: createPositionId("p3"), tokenId: createTokenId("t3"), familyId: createFamilyId("fam-B") }));
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p1"),
+        tokenId: createTokenId("t1"),
+        familyId: createFamilyId("fam-A"),
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p2"),
+        tokenId: createTokenId("t2"),
+        familyId: createFamilyId("fam-A"),
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p3"),
+        tokenId: createTokenId("t3"),
+        familyId: createFamilyId("fam-B"),
+      }),
+    );
 
     expect(repo.findByFamily(createFamilyId("fam-A"))).toHaveLength(2);
     expect(repo.findByFamily(createFamilyId("fam-B"))).toHaveLength(1);
   });
 
   it("findAll returns all statuses", () => {
-    repo.save(makePosition({ positionId: createPositionId("p1"), tokenId: createTokenId("t1"), status: "open" }));
-    repo.save(makePosition({ positionId: createPositionId("p2"), tokenId: createTokenId("t2"), status: "closed" }));
-    repo.save(makePosition({ positionId: createPositionId("p3"), tokenId: createTokenId("t3"), status: "dust" }));
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p1"),
+        tokenId: createTokenId("t1"),
+        status: "open",
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p2"),
+        tokenId: createTokenId("t2"),
+        status: "closed",
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p3"),
+        tokenId: createTokenId("t3"),
+        status: "dust",
+      }),
+    );
 
     expect(repo.findAll()).toHaveLength(3);
   });
@@ -113,25 +181,35 @@ describe("SqlitePositionRepository", () => {
   });
 
   it("findByTokenId excludes closed positions", () => {
-    repo.save(makePosition({ positionId: createPositionId("p-closed"), tokenId: createTokenId("tok-1"), status: "closed" }));
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p-closed"),
+        tokenId: createTokenId("tok-1"),
+        status: "closed",
+      }),
+    );
 
     const found = repo.findByTokenId(createTokenId("tok-1"));
     expect(found).toBeNull();
   });
 
   it("findByTokenId returns most recent open position", () => {
-    repo.save(makePosition({
-      positionId: createPositionId("p-old"),
-      tokenId: createTokenId("tok-1"),
-      status: "open",
-      openedAt: "2026-01-01T00:00:00Z",
-    }));
-    repo.save(makePosition({
-      positionId: createPositionId("p-new"),
-      tokenId: createTokenId("tok-1"),
-      status: "dust",
-      openedAt: "2026-01-02T00:00:00Z",
-    }));
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p-old"),
+        tokenId: createTokenId("tok-1"),
+        status: "open",
+        openedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p-new"),
+        tokenId: createTokenId("tok-1"),
+        status: "dust",
+        openedAt: "2026-01-02T00:00:00Z",
+      }),
+    );
 
     const found = repo.findByTokenId(createTokenId("tok-1"));
     expect(found).not.toBeNull();
@@ -144,15 +222,21 @@ describe("SqlitePositionRepository", () => {
     repo.save(pos);
 
     // Insert FK prerequisites and an inventory lot
-    conn.db.prepare(
-      `INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES ('ord-1','cloid-1','tok-1','fam-1','buy','GTC',0.55,100,55,'open','run-1',datetime('now'),datetime('now'))`,
-    ).run();
-    conn.db.prepare(
-      `INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at) VALUES ('fill-1','ord-1','tok-1','fam-1','buy',0.55,50,27.5,0,datetime('now'))`,
-    ).run();
-    conn.db.prepare(
-      `INSERT INTO inventory_lots (lot_id, position_id, token_id, family_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at) VALUES ('lot-1','pos-1','tok-1','fam-1','buy',50,50,0.55,27.5,'fill-1',datetime('now'))`,
-    ).run();
+    conn.db
+      .prepare(
+        `INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES ('ord-1','cloid-1','tok-1','fam-1','buy','GTC',0.55,100,55,'open','run-1',datetime('now'),datetime('now'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at) VALUES ('fill-1','ord-1','tok-1','fam-1','buy',0.55,50,27.5,0,datetime('now'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT INTO inventory_lots (lot_id, position_id, token_id, family_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at) VALUES ('lot-1','pos-1','tok-1','fam-1','buy',50,50,0.55,27.5,'fill-1',datetime('now'))`,
+      )
+      .run();
 
     // Upsert the position — must NOT delete+reinsert (would break FK from inventory_lots)
     repo.save(makePosition({ size: 200 }));

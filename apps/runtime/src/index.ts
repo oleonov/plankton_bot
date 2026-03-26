@@ -111,7 +111,10 @@ async function main(): Promise<void> {
     families = rulesProvider.getAllFamilies();
     log.info({ count: families.length }, "family rules loaded");
     if (config.runtimeMode !== "live-lite") {
-      log.info({ initialBalanceUsdc: loaded.global.initialBalanceUsdc, runtimeMode: config.runtimeMode }, "simulated exchange balance configured");
+      log.info(
+        { initialBalanceUsdc: loaded.global.initialBalanceUsdc, runtimeMode: config.runtimeMode },
+        "simulated exchange balance configured",
+      );
     }
   } catch (err) {
     log.fatal({ err, path: config.familyRulesPath }, "family rules load failed");
@@ -211,16 +214,11 @@ async function main(): Promise<void> {
     } else {
       const { Wallet } = await import("ethers");
       const signer = new Wallet(config.polyPrivateKey!);
-      polyClient = new ClobClient(
-        CLOB_HOST,
-        POLYGON_CHAIN_ID,
-        signer,
-        {
-          key: config.polyApiKey!,
-          secret: config.polyApiSecret!,
-          passphrase: config.polyPassphrase!,
-        },
-      );
+      polyClient = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signer, {
+        key: config.polyApiKey!,
+        secret: config.polyApiSecret!,
+        passphrase: config.polyPassphrase!,
+      });
     }
   }
 
@@ -237,16 +235,18 @@ async function main(): Promise<void> {
       );
     }
   }
-  const slugFilter = slugPatterns.length > 0
-    ? (slug: string) => slugPatterns.some((re) => re.test(slug))
-    : undefined;
+  const slugFilter =
+    slugPatterns.length > 0
+      ? (slug: string) => slugPatterns.some((re) => re.test(slug))
+      : undefined;
 
-  const { marketDataGateway, exchangeGateway, modeLabel, marketDataSource, executionMode } = createGateways({
-    runtimeMode: config.runtimeMode,
-    polyClient,
-    slugFilter,
-    initialBalanceUsdc: loaded.global.initialBalanceUsdc,
-  });
+  const { marketDataGateway, exchangeGateway, modeLabel, marketDataSource, executionMode } =
+    createGateways({
+      runtimeMode: config.runtimeMode,
+      polyClient,
+      slugFilter,
+      initialBalanceUsdc: loaded.global.initialBalanceUsdc,
+    });
   log.info({ mode: modeLabel }, "gateways created");
 
   const liveLiteGuard = new LiveLiteGuard(config.liveLite);
@@ -255,9 +255,9 @@ async function main(): Promise<void> {
   const botRunId = createBotRunId(`run-${Date.now()}`);
 
   // Record this run in bot_runs for API consumption
-  conn.db.prepare(
-    "INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)",
-  ).run(botRunId, config.runtimeMode, new Date().toISOString());
+  conn.db
+    .prepare("INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)")
+    .run(botRunId, config.runtimeMode, new Date().toISOString());
   log.info({ botRunId, mode: config.runtimeMode }, "bot run recorded");
 
   // 7d. Market scanner (discovery via Gamma API)
@@ -367,11 +367,7 @@ async function main(): Promise<void> {
     gammaResolutionClient,
     log,
   );
-  const positionSettler = new PositionSettler(
-    repos.position,
-    repos.inventoryLot,
-    conn.db,
-  );
+  const positionSettler = new PositionSettler(repos.position, repos.inventoryLot, conn.db);
   const resolutionModule = new ResolutionModule({
     detector: resolutionDetector,
     settler: positionSettler,
@@ -402,17 +398,18 @@ async function main(): Promise<void> {
 
   // 7l. Fill poller module — fast-interval fill detection (paper/live-lite only;
   // simulation mode uses inline checkForFills after each placement)
-  const fillPollerModule = config.runtimeMode !== "simulation"
-    ? new FillPollerModule({
-        gateway: exchangeGateway,
-        fillRepo: repos.fill,
-        orderRepo: repos.order,
-        bus,
-        log,
-        pollIntervalMs: config.fillPollIntervalMs,
-        overlapMs: 5_000,
-      })
-    : null;
+  const fillPollerModule =
+    config.runtimeMode !== "simulation"
+      ? new FillPollerModule({
+          gateway: exchangeGateway,
+          fillRepo: repos.fill,
+          orderRepo: repos.order,
+          bus,
+          log,
+          pollIntervalMs: config.fillPollIntervalMs,
+          overlapMs: 5_000,
+        })
+      : null;
 
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
@@ -424,7 +421,9 @@ async function main(): Promise<void> {
     ["strategy", strategyModule],
     ["resolution", resolutionModule],
     ["stale-pruning", stalePruningModule],
-    ...(fillPollerModule ? [["fill-poller", fillPollerModule] as [string, import("@plankton/domain").RuntimeModule]] : []),
+    ...(fillPollerModule
+      ? [["fill-poller", fillPollerModule] as [string, import("@plankton/domain").RuntimeModule]]
+      : []),
     ["execution", executionModule],
   ];
 
@@ -470,9 +469,7 @@ async function main(): Promise<void> {
   });
 
   bus.subscribe("OperatorCommandApplied", async (ev) => {
-    riskEventWriter.onOperatorCommand(
-      ev.action, ev.targetFamilyId, ev.commandDbId, ev.reason,
-    );
+    riskEventWriter.onOperatorCommand(ev.action, ev.targetFamilyId, ev.commandDbId, ev.reason);
   });
 
   bus.subscribe("ReconciliationDriftDetected", async ({ details, severity, timestamp }) => {
@@ -485,12 +482,10 @@ async function main(): Promise<void> {
   const insertPollProgress = conn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('market_data_poll_progress', 1, ?, ?)",
   );
-  const upsertPollProgress = conn.db.transaction(
-    (labels: string, capturedAt: string) => {
-      deletePollProgress.run();
-      insertPollProgress.run(labels, capturedAt);
-    },
-  );
+  const upsertPollProgress = conn.db.transaction((labels: string, capturedAt: string) => {
+    deletePollProgress.run();
+    insertPollProgress.run(labels, capturedAt);
+  });
 
   bus.subscribe("MarketDataPollProgress", async ({ active, page, botRunId: runId }) => {
     if (active) {
@@ -545,9 +540,11 @@ async function main(): Promise<void> {
     }
 
     // Persist envelope for API consumption, tied to this bot_run_id
-    conn.db.prepare(
-      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
-    ).run("live_lite_envelope", JSON.stringify(config.liveLite), new Date().toISOString());
+    conn.db
+      .prepare(
+        "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
+      )
+      .run("live_lite_envelope", JSON.stringify(config.liveLite), new Date().toISOString());
   }
 
   // 11. Start
@@ -556,7 +553,10 @@ async function main(): Promise<void> {
 
     // Safety: always start paused. Operator must explicitly resume via dashboard.
     setPausedAndPersist(true);
-    log.info({ mode: config.runtimeMode }, "runtime started PAUSED — operator must resume via dashboard");
+    log.info(
+      { mode: config.runtimeMode },
+      "runtime started PAUSED — operator must resume via dashboard",
+    );
 
     log.info({ phase: supervisor.getPhase(), paused: supervisor.isPaused() }, "runtime ready");
   } catch (err) {

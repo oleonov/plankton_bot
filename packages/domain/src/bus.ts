@@ -13,9 +13,30 @@
  *  - RiskGate is resolved inline by the risk-inventory module on SignalProduced.
  */
 
-import type { TokenId, FamilyId, OrderId, FillId, ClientOrderId, CommandId, PositionId } from "./ids.js";
-import type { OrderSide, OrderType, OperatorActionType, ExchangeErrorCode, RuntimePhase } from "./enums.js";
-import type { Signal, Position, FamilyState, NormalizedMarket, ReconciliationResult, RiskDecision } from "./types.js";
+import type {
+  TokenId,
+  FamilyId,
+  OrderId,
+  FillId,
+  ClientOrderId,
+  CommandId,
+  PositionId,
+} from "./ids.js";
+import type {
+  OrderSide,
+  OrderType,
+  OperatorActionType,
+  ExchangeErrorCode,
+  RuntimePhase,
+} from "./enums.js";
+import type {
+  Signal,
+  Position,
+  FamilyState,
+  NormalizedMarket,
+  ReconciliationResult,
+  RiskDecision,
+} from "./types.js";
 import type { PlaceOrderCommand, CancelOrderCommand } from "./commands.js";
 
 // ─── RuntimeEventMap ──────────────────────────────────────────────────────
@@ -186,10 +207,7 @@ export interface RuntimeEventMap {
 
 export interface EventBus {
   /** Publish an event to all registered subscribers for that event type. */
-  publish<K extends keyof RuntimeEventMap>(
-    event: K,
-    payload: RuntimeEventMap[K],
-  ): Promise<void>;
+  publish<K extends keyof RuntimeEventMap>(event: K, payload: RuntimeEventMap[K]): Promise<void>;
 
   /** Register an async handler for an event type. Returns an unsubscribe function. */
   subscribe<K extends keyof RuntimeEventMap>(

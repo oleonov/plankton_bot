@@ -5,12 +5,7 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteOrderRepository } from "../repositories/order-repository.js";
-import {
-  createOrderId,
-  createTokenId,
-  createFamilyId,
-  createBotRunId,
-} from "@plankton/domain";
+import { createOrderId, createTokenId, createFamilyId, createBotRunId } from "@plankton/domain";
 import type { Order, ClientOrderId } from "@plankton/domain";
 
 let conn: DbConnection;
@@ -84,12 +79,48 @@ describe("SqliteOrderRepository", () => {
   });
 
   it("findOpen returns pending, open, and partially-filled orders", () => {
-    repo.save(makeOrder({ orderId: createOrderId("o1"), clientOrderId: "c1" as ClientOrderId, status: "pending" }));
-    repo.save(makeOrder({ orderId: createOrderId("o2"), clientOrderId: "c2" as ClientOrderId, status: "open" }));
-    repo.save(makeOrder({ orderId: createOrderId("o3"), clientOrderId: "c3" as ClientOrderId, status: "filled" }));
-    repo.save(makeOrder({ orderId: createOrderId("o4"), clientOrderId: "c4" as ClientOrderId, status: "cancelled" }));
-    repo.save(makeOrder({ orderId: createOrderId("o5"), clientOrderId: "c5" as ClientOrderId, status: "rejected" }));
-    repo.save(makeOrder({ orderId: createOrderId("o6"), clientOrderId: "c6" as ClientOrderId, status: "partially-filled" }));
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o1"),
+        clientOrderId: "c1" as ClientOrderId,
+        status: "pending",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o2"),
+        clientOrderId: "c2" as ClientOrderId,
+        status: "open",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o3"),
+        clientOrderId: "c3" as ClientOrderId,
+        status: "filled",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o4"),
+        clientOrderId: "c4" as ClientOrderId,
+        status: "cancelled",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o5"),
+        clientOrderId: "c5" as ClientOrderId,
+        status: "rejected",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o6"),
+        clientOrderId: "c6" as ClientOrderId,
+        status: "partially-filled",
+      }),
+    );
 
     const open = repo.findOpen();
     expect(open).toHaveLength(3);
@@ -99,9 +130,27 @@ describe("SqliteOrderRepository", () => {
   });
 
   it("findByTokenId returns orders for token", () => {
-    repo.save(makeOrder({ orderId: createOrderId("o1"), clientOrderId: "c1" as ClientOrderId, tokenId: createTokenId("tok-A") }));
-    repo.save(makeOrder({ orderId: createOrderId("o2"), clientOrderId: "c2" as ClientOrderId, tokenId: createTokenId("tok-A") }));
-    repo.save(makeOrder({ orderId: createOrderId("o3"), clientOrderId: "c3" as ClientOrderId, tokenId: createTokenId("tok-B") }));
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o1"),
+        clientOrderId: "c1" as ClientOrderId,
+        tokenId: createTokenId("tok-A"),
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o2"),
+        clientOrderId: "c2" as ClientOrderId,
+        tokenId: createTokenId("tok-A"),
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o3"),
+        clientOrderId: "c3" as ClientOrderId,
+        tokenId: createTokenId("tok-B"),
+      }),
+    );
 
     const tokA = repo.findByTokenId(createTokenId("tok-A"));
     expect(tokA).toHaveLength(2);

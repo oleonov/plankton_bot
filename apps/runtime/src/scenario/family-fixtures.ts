@@ -9,7 +9,15 @@ export function makeFamilyConfig(overrides: {
   familyId: string;
   familyKey?: string;
   slugPattern?: string | null;
-  regime?: "threshold" | "price-range" | "directional-updown" | "social-activity" | "geopolitics" | "generic" | "tournament" | "weather-range";
+  regime?:
+    | "threshold"
+    | "price-range"
+    | "directional-updown"
+    | "social-activity"
+    | "geopolitics"
+    | "generic"
+    | "tournament"
+    | "weather-range";
   enabled?: boolean;
   action?: "trade" | "monitor" | "reduce-only" | "blocked";
   entryMode?: "probe-first" | "conviction-only" | "disabled";

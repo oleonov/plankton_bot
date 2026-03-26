@@ -6,12 +6,7 @@ import type Database from "better-sqlite3";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteFillRepository } from "../repositories/fill-repository.js";
-import {
-  createFillId,
-  createOrderId,
-  createTokenId,
-  createFamilyId,
-} from "@plankton/domain";
+import { createFillId, createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
 import type { Fill } from "@plankton/domain";
 
 let conn: DbConnection;
@@ -86,8 +81,20 @@ describe("SqliteFillRepository", () => {
     insertOrder(conn.db, { order_id: "ord-A", client_order_id: "c-A", token_id: "tok-A" });
     insertOrder(conn.db, { order_id: "ord-B", client_order_id: "c-B", token_id: "tok-B" });
 
-    repo.save(makeFill({ fillId: createFillId("f1"), orderId: createOrderId("ord-A"), tokenId: createTokenId("tok-A") }));
-    repo.save(makeFill({ fillId: createFillId("f2"), orderId: createOrderId("ord-B"), tokenId: createTokenId("tok-B") }));
+    repo.save(
+      makeFill({
+        fillId: createFillId("f1"),
+        orderId: createOrderId("ord-A"),
+        tokenId: createTokenId("tok-A"),
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f2"),
+        orderId: createOrderId("ord-B"),
+        tokenId: createTokenId("tok-B"),
+      }),
+    );
 
     const tokA = repo.findByTokenId(createTokenId("tok-A"));
     expect(tokA).toHaveLength(1);

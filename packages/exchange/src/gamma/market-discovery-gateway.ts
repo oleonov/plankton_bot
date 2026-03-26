@@ -95,9 +95,7 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
         });
 
         if (!response.ok) {
-          throw new Error(
-            `Gamma API responded with ${response.status}: ${response.statusText}`,
-          );
+          throw new Error(`Gamma API responded with ${response.status}: ${response.statusText}`);
         }
 
         return (await response.json()) as Array<Record<string, unknown>>;

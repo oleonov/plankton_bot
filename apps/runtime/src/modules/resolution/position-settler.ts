@@ -8,11 +8,7 @@
  */
 
 import type Database from "better-sqlite3";
-import type {
-  PositionRepository,
-  InventoryLotRepository,
-  Position,
-} from "@plankton/domain";
+import type { PositionRepository, InventoryLotRepository, Position } from "@plankton/domain";
 import type { RuntimeEventMap } from "@plankton/domain";
 import type { DetectedResolution, ResolutionCandidate } from "./resolution-detector.js";
 
@@ -63,8 +59,7 @@ export class PositionSettler {
   ): SettledPosition | null {
     const isWinner = candidate.outcome === resolution.resolution;
     const settlementPrice = isWinner ? 1.0 : 0.0;
-    const settlementPnl =
-      (settlementPrice - position.avgEntryPrice) * position.size;
+    const settlementPnl = (settlementPrice - position.avgEntryPrice) * position.size;
 
     // Zero out all inventory lots
     this.lotRepo.settleAll(position.positionId);

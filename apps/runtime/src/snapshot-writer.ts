@@ -1,4 +1,9 @@
-import type { MarketSnapshotRepository, MarketSnapshot, NormalizedMarket, TokenId } from "@plankton/domain";
+import type {
+  MarketSnapshotRepository,
+  MarketSnapshot,
+  NormalizedMarket,
+  TokenId,
+} from "@plankton/domain";
 
 export interface SnapshotWriterConfig {
   intervalMs: number;

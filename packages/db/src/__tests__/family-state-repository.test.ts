@@ -117,11 +117,13 @@ describe("SqliteFamilyStateRepository", () => {
     catalogRepo.upsert(makeIdentity("fam-3"));
 
     repo.save(makeState({ familyId: createFamilyId("fam-1"), runtimeMode: "active" }));
-    repo.save(makeState({
-      familyId: createFamilyId("fam-2"),
-      runtimeMode: "quarantine",
-      quarantineReason: "tail exceeded",
-    }));
+    repo.save(
+      makeState({
+        familyId: createFamilyId("fam-2"),
+        runtimeMode: "quarantine",
+        quarantineReason: "tail exceeded",
+      }),
+    );
     repo.save(makeState({ familyId: createFamilyId("fam-3"), runtimeMode: "reduce-only" }));
 
     const quarantined = repo.findQuarantined();

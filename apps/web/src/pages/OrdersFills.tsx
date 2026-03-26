@@ -11,23 +11,61 @@ export function OrdersFills() {
   const [cursor, setCursor] = useState<string | undefined>();
 
   const { data: families } = useFamilies();
-  const orders = useOrders(tab === "orders" ? { status: orderStatus || undefined, familyId: familyId || undefined, limit: 50, cursor } : {});
-  const fills = useFills(tab === "fills" ? { familyId: familyId || undefined, limit: 50, cursor } : {});
+  const orders = useOrders(
+    tab === "orders"
+      ? { status: orderStatus || undefined, familyId: familyId || undefined, limit: 50, cursor }
+      : {},
+  );
+  const fills = useFills(
+    tab === "fills" ? { familyId: familyId || undefined, limit: 50, cursor } : {},
+  );
 
   return (
     <div className="page">
       <div className="tab-bar">
-        <div className={`tab ${tab === "orders" ? "active" : ""}`} onClick={() => { setTab("orders"); setCursor(undefined); }}>Orders</div>
-        <div className={`tab ${tab === "fills" ? "active" : ""}`} onClick={() => { setTab("fills"); setCursor(undefined); }}>Fills</div>
+        <div
+          className={`tab ${tab === "orders" ? "active" : ""}`}
+          onClick={() => {
+            setTab("orders");
+            setCursor(undefined);
+          }}
+        >
+          Orders
+        </div>
+        <div
+          className={`tab ${tab === "fills" ? "active" : ""}`}
+          onClick={() => {
+            setTab("fills");
+            setCursor(undefined);
+          }}
+        >
+          Fills
+        </div>
       </div>
 
       <div className="filter-bar">
-        <select value={familyId} onChange={(e) => { setFamilyId(e.target.value); setCursor(undefined); }}>
+        <select
+          value={familyId}
+          onChange={(e) => {
+            setFamilyId(e.target.value);
+            setCursor(undefined);
+          }}
+        >
           <option value="">All families</option>
-          {families?.map((f) => <option key={f.familyId} value={f.familyId}>{f.familyKey}</option>)}
+          {families?.map((f) => (
+            <option key={f.familyId} value={f.familyId}>
+              {f.familyKey}
+            </option>
+          ))}
         </select>
         {tab === "orders" && (
-          <select value={orderStatus} onChange={(e) => { setOrderStatus(e.target.value); setCursor(undefined); }}>
+          <select
+            value={orderStatus}
+            onChange={(e) => {
+              setOrderStatus(e.target.value);
+              setCursor(undefined);
+            }}
+          >
             <option value="">All statuses</option>
             <option value="pending">Pending</option>
             <option value="open">Open</option>
@@ -41,19 +79,46 @@ export function OrdersFills() {
         <>
           <table>
             <thead>
-              <tr><th>Order</th><th>Market</th><th>Family</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>Updated</th></tr>
+              <tr>
+                <th>Order</th>
+                <th>Market</th>
+                <th>Family</th>
+                <th>Side</th>
+                <th>Price</th>
+                <th>Size</th>
+                <th>Status</th>
+                <th>Updated</th>
+              </tr>
             </thead>
             <tbody>
               {orders.data?.items.map((o) => (
                 <tr key={o.orderId}>
                   <td style={{ fontSize: 11, color: "var(--blue)" }}>{o.orderId.slice(0, 12)}</td>
-                  <td><MarketLink slug={o.slug} eventSlug={o.eventSlug} question={o.question} outcome={o.outcome} /></td>
+                  <td>
+                    <MarketLink
+                      slug={o.slug}
+                      eventSlug={o.eventSlug}
+                      question={o.question}
+                      outcome={o.outcome}
+                    />
+                  </td>
                   <td>{o.familyId.slice(0, 12)}</td>
-                  <td style={{ color: o.side === "buy" ? "var(--green)" : "var(--red)", fontWeight: 600 }}>{o.side.toUpperCase()}</td>
+                  <td
+                    style={{
+                      color: o.side === "buy" ? "var(--green)" : "var(--red)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {o.side.toUpperCase()}
+                  </td>
                   <td>${o.price.toFixed(4)}</td>
                   <td>{o.size.toFixed(2)}</td>
-                  <td><Badge value={o.status} /></td>
-                  <td style={{ fontSize: 11, color: "var(--text-dim)" }}>{new Date(o.updatedAt).toLocaleTimeString()}</td>
+                  <td>
+                    <Badge value={o.status} />
+                  </td>
+                  <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                    {new Date(o.updatedAt).toLocaleTimeString()}
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -64,19 +129,44 @@ export function OrdersFills() {
         <>
           <table>
             <thead>
-              <tr><th>Fill</th><th>Market</th><th>Family</th><th>Side</th><th>Price</th><th>Size</th><th>USDC</th><th>Filled At</th></tr>
+              <tr>
+                <th>Fill</th>
+                <th>Market</th>
+                <th>Family</th>
+                <th>Side</th>
+                <th>Price</th>
+                <th>Size</th>
+                <th>USDC</th>
+                <th>Filled At</th>
+              </tr>
             </thead>
             <tbody>
               {fills.data?.items.map((f) => (
                 <tr key={f.fillId}>
                   <td style={{ fontSize: 11, color: "var(--blue)" }}>{f.fillId.slice(0, 12)}</td>
-                  <td><MarketLink slug={f.slug} eventSlug={f.eventSlug} question={f.question} outcome={f.outcome} /></td>
+                  <td>
+                    <MarketLink
+                      slug={f.slug}
+                      eventSlug={f.eventSlug}
+                      question={f.question}
+                      outcome={f.outcome}
+                    />
+                  </td>
                   <td>{f.familyId.slice(0, 12)}</td>
-                  <td style={{ color: f.side === "buy" ? "var(--green)" : "var(--red)", fontWeight: 600 }}>{f.side.toUpperCase()}</td>
+                  <td
+                    style={{
+                      color: f.side === "buy" ? "var(--green)" : "var(--red)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {f.side.toUpperCase()}
+                  </td>
                   <td>${f.price.toFixed(4)}</td>
                   <td>{f.size.toFixed(2)}</td>
                   <td>${f.sizeUsdc.toFixed(2)}</td>
-                  <td style={{ fontSize: 11, color: "var(--text-dim)" }}>{new Date(f.filledAt).toLocaleTimeString()}</td>
+                  <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                    {new Date(f.filledAt).toLocaleTimeString()}
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -57,9 +57,7 @@ describe("loadFamilyRulesYaml", () => {
     expect(family.rules.exit.primaryProfitModel).toBe("sell-into-strength");
     expect(family.rules.twoSided.allowTwoSided).toBe(false);
     expect(family.rules.tailSuppression.maxOpenValueUsdc).toBe(75.0);
-    expect(family.rules.session.activeWindowsUtc).toEqual([
-      { start: "14:00", end: "21:00" },
-    ]);
+    expect(family.rules.session.activeWindowsUtc).toEqual([{ start: "14:00", end: "21:00" }]);
   });
 
   it("injects familyId into identity, evidence, and rules", () => {
@@ -79,9 +77,7 @@ describe("loadFamilyRulesYaml", () => {
     expect(family.runtimeState).toBeDefined();
     expect(family.runtimeState!.updatedAt).toBeDefined();
     expect(family.runtimeState!.runtimeMode).toBe("active");
-    expect(family.runtimeState!.familyId).toBe(
-      "bitcoin-above:threshold:daily",
-    );
+    expect(family.runtimeState!.familyId).toBe("bitcoin-above:threshold:daily");
   });
 
   it("loads multi-family YAML format", () => {
@@ -301,9 +297,7 @@ families:
 `;
     const filePath = writeTmpYaml("no-version.yaml", content);
     try {
-      expect(() => loadFamilyRulesYaml(filePath)).toThrow(
-        "Schema validation failed",
-      );
+      expect(() => loadFamilyRulesYaml(filePath)).toThrow("Schema validation failed");
     } finally {
       cleanup();
     }
@@ -393,9 +387,7 @@ rules:
 `;
     const filePath = writeTmpYaml("invalid-schema.yaml", content);
     try {
-      expect(() => loadFamilyRulesYaml(filePath)).toThrow(
-        "Schema validation failed",
-      );
+      expect(() => loadFamilyRulesYaml(filePath)).toThrow("Schema validation failed");
     } finally {
       cleanup();
     }
@@ -404,9 +396,7 @@ rules:
   it("throws when YAML is not an object", () => {
     const filePath = writeTmpYaml("scalar.yaml", '"just a string"');
     try {
-      expect(() => loadFamilyRulesYaml(filePath)).toThrow(
-        "must contain a YAML object",
-      );
+      expect(() => loadFamilyRulesYaml(filePath)).toThrow("must contain a YAML object");
     } finally {
       cleanup();
     }

@@ -174,7 +174,9 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
   };
 }
 
-function createMockRulesProvider(bundle: FamilyRuleBundle | null = makeRuleBundle()): FamilyRulesProvider {
+function createMockRulesProvider(
+  bundle: FamilyRuleBundle | null = makeRuleBundle(),
+): FamilyRulesProvider {
   return {
     getRule: vi.fn().mockReturnValue(bundle),
     isEnabled: vi.fn().mockReturnValue(bundle !== null),
@@ -296,7 +298,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -315,7 +319,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
@@ -334,7 +340,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -347,14 +355,14 @@ describe("RiskInventoryModule", () => {
   // ─── Signal rejection: quarantine ─────────────────────────────────
 
   it("rejects strategy signal for quarantined family", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ runtimeMode: "quarantine" }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "quarantine" }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -365,14 +373,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("allows operator signal for quarantined family", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ runtimeMode: "quarantine" }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "quarantine" }));
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "operator", side: "sell" }),
@@ -386,14 +394,14 @@ describe("RiskInventoryModule", () => {
   // ─── Signal rejection: reduce-only ────────────────────────────────
 
   it("rejects entry signal for reduce-only family", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ runtimeMode: "reduce-only" }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "reduce-only" }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ side: "buy", reason: "probe-entry" }),
@@ -406,14 +414,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("allows exit signal for reduce-only family", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ runtimeMode: "reduce-only" }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "reduce-only" }));
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
@@ -427,14 +435,14 @@ describe("RiskInventoryModule", () => {
   // ─── Signal rejection: probe-only blocks scale-in ─────────────────
 
   it("rejects scale-in signal for probe-only family", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ runtimeMode: "probe-only" }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "probe-only" }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "scale-in" }),
@@ -449,14 +457,14 @@ describe("RiskInventoryModule", () => {
   // ─── Signal rejection: exposure limits ────────────────────────────
 
   it("rejects entry when max open value exceeded", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ openValueUsdc: 98 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ openValueUsdc: 98 }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     // signal suggestedSizeUsdc=5, existing=98, total=103 > max=100
     await bus.publish("SignalProduced", { signal: makeSignal() });
@@ -468,16 +476,16 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects entry for new market when max active markets exceeded", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ activeMarketCount: 5 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 5 }));
     // No existing position for this token — it's a new market
     positionRepo = createMockPositionRepo(null);
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -488,9 +496,7 @@ describe("RiskInventoryModule", () => {
   });
 
   it("allows scale-in to existing market even when max active markets reached", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ activeMarketCount: 5 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 5 }));
     // Existing position for this token — scale-in, not a new market
     const existingPos: Position = {
       positionId: createPositionId("pos-1"),
@@ -512,7 +518,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "scale-in" }),
@@ -524,14 +532,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects entry when max dust positions exceeded", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ openDustCount: 3 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ openDustCount: 3 }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -542,14 +550,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects entry when tail quarantine threshold exceeded", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ currentTailCostUsdc: 48 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ currentTailCostUsdc: 48 }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     // tail=48 + signal=5 = 53 > threshold=50
     await bus.publish("SignalProduced", { signal: makeSignal() });
@@ -571,7 +579,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -591,7 +601,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -607,9 +619,13 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const posUpdates: any[] = [];
-    bus.subscribe("PositionUpdated", async (p) => { posUpdates.push(p); });
+    bus.subscribe("PositionUpdated", async (p) => {
+      posUpdates.push(p);
+    });
     const expChanges: any[] = [];
-    bus.subscribe("FamilyExposureChanged", async (p) => { expChanges.push(p); });
+    bus.subscribe("FamilyExposureChanged", async (p) => {
+      expChanges.push(p);
+    });
 
     await bus.publish("FillReceived", {
       fillId: createFillId("fill-1"),
@@ -677,8 +693,7 @@ describe("RiskInventoryModule", () => {
     });
 
     // Position updated with new avg price
-    const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock
-      .calls[0]![0] as Position;
+    const saved = (positionRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Position;
     expect(saved.size).toBe(20); // 10 + 10
     expect(saved.costBasisUsdc).toBe(10); // 4 + 6
     expect(saved.avgEntryPrice).toBe(0.5); // 10/20
@@ -732,7 +747,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const posUpdates: any[] = [];
-    bus.subscribe("PositionUpdated", async (p) => { posUpdates.push(p); });
+    bus.subscribe("PositionUpdated", async (p) => {
+      posUpdates.push(p);
+    });
 
     await bus.publish("FillReceived", {
       fillId: createFillId("fill-sell"),
@@ -748,10 +765,7 @@ describe("RiskInventoryModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(lotRepo.consumeFifo).toHaveBeenCalledWith(
-      createPositionId("pos-1"),
-      5,
-    );
+    expect(lotRepo.consumeFifo).toHaveBeenCalledWith(createPositionId("pos-1"), 5);
 
     // Position updated
     expect(posUpdates).toHaveLength(1);
@@ -804,7 +818,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const posUpdates: any[] = [];
-    bus.subscribe("PositionUpdated", async (p) => { posUpdates.push(p); });
+    bus.subscribe("PositionUpdated", async (p) => {
+      posUpdates.push(p);
+    });
 
     await bus.publish("FillReceived", {
       fillId: createFillId("fill-sell-all"),
@@ -836,7 +852,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const changes: any[] = [];
-    bus.subscribe("FamilyExposureChanged", async (p) => { changes.push(p); });
+    bus.subscribe("FamilyExposureChanged", async (p) => {
+      changes.push(p);
+    });
 
     await bus.publish("FillReceived", {
       fillId: createFillId("fill-1"),
@@ -913,7 +931,9 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -931,7 +951,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -955,7 +977,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() }); // familyId = FAM_ID = "fam-btc"
 
@@ -977,7 +1001,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() }); // familyId = fam-btc
 
@@ -987,13 +1013,11 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects entry signal when live-lite open value cap would be exceeded", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ openValueUsdc: 490 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ openValueUsdc: 490 }));
     const liveLiteGuard = new LiveLiteGuard({
       familyAllowlist: ["fam-btc"],
       maxFamilies: 2,
-      maxOpenValueUsdc: 490,  // current + signal (5) = 495 > 490
+      maxOpenValueUsdc: 490, // current + signal (5) = 495 > 490
       maxOrderUsdc: 50,
       maxActiveMarkets: 3,
     });
@@ -1001,7 +1025,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -1012,22 +1038,22 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects entry for new market when live-lite active markets cap would be exceeded", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ activeMarketCount: 3 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 3 }));
     positionRepo = createMockPositionRepo(null); // no existing position → new market
     const liveLiteGuard = new LiveLiteGuard({
       familyAllowlist: ["fam-btc"],
       maxFamilies: 2,
       maxOpenValueUsdc: 10_000,
       maxOrderUsdc: 50,
-      maxActiveMarkets: 3,  // current 3 + 1 would exceed 3
+      maxActiveMarkets: 3, // current 3 + 1 would exceed 3
     });
     mod = createModule(liveLiteGuard);
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
@@ -1044,15 +1070,17 @@ describe("RiskInventoryModule", () => {
     const liveLiteGuard = new LiveLiteGuard({
       familyAllowlist: ["fam-btc"],
       maxFamilies: 2,
-      maxOpenValueUsdc: 1,  // would reject any entry
+      maxOpenValueUsdc: 1, // would reject any entry
       maxOrderUsdc: 50,
-      maxActiveMarkets: 1,  // would reject new markets
+      maxActiveMarkets: 1, // would reject new markets
     });
     mod = createModule(liveLiteGuard);
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     // Exit signal — must never be blocked by live-lite caps
     await bus.publish("SignalProduced", {
@@ -1073,7 +1101,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const posUpdates: any[] = [];
-    bus.subscribe("PositionUpdated", async (p) => { posUpdates.push(p); });
+    bus.subscribe("PositionUpdated", async (p) => {
+      posUpdates.push(p);
+    });
 
     await bus.publish("FillReceived", {
       fillId: createFillId("fill-orphan"),
@@ -1103,14 +1133,14 @@ describe("RiskInventoryModule", () => {
     const bundle = makeRuleBundle();
     bundle.rules.scaleIn.requirePositiveRecycleHistoryForScale = true;
     rulesProvider = createMockRulesProvider(bundle);
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: 0 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 0 }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "scale-in" }),
@@ -1124,14 +1154,14 @@ describe("RiskInventoryModule", () => {
 
   it("allows scale-in when tailAdjustedPnlLive <= 0 but requirePositiveRecycleHistoryForScale is false", async () => {
     // Default bundle has requirePositiveRecycleHistoryForScale: false
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: 0 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 0 }));
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "scale-in" }),
@@ -1143,14 +1173,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects heavy-scale when tailAdjustedPnlLive <= 0", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: -5 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -5 }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "heavy-scale" }),
@@ -1163,14 +1193,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("approves heavy-scale when family is healthy (tailAdjustedPnlLive > 0)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: 10 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 10 }));
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "heavy-scale" }),
@@ -1182,14 +1212,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("approves probe-entry when tailAdjustedPnlLive is zero (cold start)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: 0 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 0 }));
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "probe-entry" }),
@@ -1201,14 +1231,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("approves probe-entry when tailAdjustedPnlLive < 0 (probe-only mode)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: -1 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -1 }));
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "probe-entry" }),
@@ -1220,14 +1250,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects two-sided-entry when tailAdjustedPnlLive < 0", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: -1 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -1 }));
     mod = createModule();
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "two-sided-entry" }),
@@ -1240,14 +1270,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("approves two-sided-entry when tailAdjustedPnlLive is zero (cold start)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: 0 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 0 }));
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "two-sided-entry" }),
@@ -1266,7 +1296,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "probe-entry", suggestedSizeUsdc: 5 }),
@@ -1289,7 +1321,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "probe-entry", suggestedSizeUsdc: 5 }),
@@ -1303,9 +1337,7 @@ describe("RiskInventoryModule", () => {
   });
 
   it("confirm-scale rejected when family in derived probe-only", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: -5 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -5 }));
     const customBundle = makeRuleBundle();
     customBundle.rules.scaleIn.requirePositiveRecycleHistoryForScale = true;
     rulesProvider = createMockRulesProvider(customBundle);
@@ -1313,7 +1345,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "confirm-scale" }),
@@ -1326,9 +1360,7 @@ describe("RiskInventoryModule", () => {
   });
 
   it("scale-in rejected when family in derived probe-only", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: -5 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -5 }));
     const customBundle = makeRuleBundle();
     customBundle.rules.scaleIn.requirePositiveRecycleHistoryForScale = true;
     rulesProvider = createMockRulesProvider(customBundle);
@@ -1336,7 +1368,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "scale-in" }),
@@ -1349,15 +1383,15 @@ describe("RiskInventoryModule", () => {
   });
 
   it("allows scale-in in derived probe-only when requirePositiveRecycleHistoryForScale is false", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: -5 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -5 }));
     // Default bundle has requirePositiveRecycleHistoryForScale: false
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "scale-in" }),
@@ -1369,14 +1403,14 @@ describe("RiskInventoryModule", () => {
   });
 
   it("exit signal approved under degraded tail state", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: -50 }),
-    );
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -50 }));
     mod = createModule();
     await mod.start();
 
     const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
@@ -1395,7 +1429,9 @@ describe("RiskInventoryModule", () => {
     await mod.start();
 
     const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ reason: "confirm-scale" }),
@@ -1432,27 +1468,29 @@ describe("RiskInventoryModule", () => {
 
       // Market moves from 0.05 to 0.08 → new value = 100 * 0.08 = 8.0
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [{
-          tokenId: TOK_ID,
-          conditionId: "c1",
-          slug: "test",
-          eventSlug: null,
-          question: "test?",
-          outcome: "YES" as const,
-          familyId: FAM_ID,
-          familyKey: "btc",
-          regime: "threshold" as Regime,
-          horizon: "daily",
-          endDate: null,
-          active: true,
-          tickSize: 0.01,
-          negRisk: false,
-          bestBid: 0.07,
-          bestAsk: 0.09,
-          midPrice: 0.08,
-          spread: 0.02,
-          snapshotTs: Date.now(),
-        }],
+        markets: [
+          {
+            tokenId: TOK_ID,
+            conditionId: "c1",
+            slug: "test",
+            eventSlug: null,
+            question: "test?",
+            outcome: "YES" as const,
+            familyId: FAM_ID,
+            familyKey: "btc",
+            regime: "threshold" as Regime,
+            horizon: "daily",
+            endDate: null,
+            active: true,
+            tickSize: 0.01,
+            negRisk: false,
+            bestBid: 0.07,
+            bestAsk: 0.09,
+            midPrice: 0.08,
+            spread: 0.02,
+            snapshotTs: Date.now(),
+          },
+        ],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -1488,27 +1526,29 @@ describe("RiskInventoryModule", () => {
 
       // Market update with null midPrice → no revaluation
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [{
-          tokenId: createTokenId("tok-other"),
-          conditionId: "c1",
-          slug: "test",
-          eventSlug: null,
-          question: "test?",
-          outcome: "YES" as const,
-          familyId: FAM_ID,
-          familyKey: "btc",
-          regime: "threshold" as Regime,
-          horizon: "daily",
-          endDate: null,
-          active: true,
-          tickSize: 0.01,
-          negRisk: false,
-          bestBid: null,
-          bestAsk: null,
-          midPrice: null,
-          spread: null,
-          snapshotTs: Date.now(),
-        }],
+        markets: [
+          {
+            tokenId: createTokenId("tok-other"),
+            conditionId: "c1",
+            slug: "test",
+            eventSlug: null,
+            question: "test?",
+            outcome: "YES" as const,
+            familyId: FAM_ID,
+            familyKey: "btc",
+            regime: "threshold" as Regime,
+            horizon: "daily",
+            endDate: null,
+            active: true,
+            tickSize: 0.01,
+            negRisk: false,
+            bestBid: null,
+            bestAsk: null,
+            midPrice: null,
+            spread: null,
+            snapshotTs: Date.now(),
+          },
+        ],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -1584,27 +1624,29 @@ describe("RiskInventoryModule", () => {
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [{
-          tokenId: TOK_ID,
-          conditionId: "c1",
-          slug: "test",
-          eventSlug: null,
-          question: "test?",
-          outcome: "YES" as const,
-          familyId: FAM_ID,
-          familyKey: "btc",
-          regime: "threshold" as Regime,
-          horizon: "daily",
-          endDate: null,
-          active: true,
-          tickSize: 0.01,
-          negRisk: false,
-          bestBid: 0.07,
-          bestAsk: 0.09,
-          midPrice: 0.08,
-          spread: 0.02,
-          snapshotTs: Date.now(),
-        }],
+        markets: [
+          {
+            tokenId: TOK_ID,
+            conditionId: "c1",
+            slug: "test",
+            eventSlug: null,
+            question: "test?",
+            outcome: "YES" as const,
+            familyId: FAM_ID,
+            familyKey: "btc",
+            regime: "threshold" as Regime,
+            horizon: "daily",
+            endDate: null,
+            active: true,
+            tickSize: 0.01,
+            negRisk: false,
+            bestBid: 0.07,
+            bestAsk: 0.09,
+            midPrice: 0.08,
+            spread: 0.02,
+            snapshotTs: Date.now(),
+          },
+        ],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -1658,7 +1700,9 @@ describe("RiskInventoryModule", () => {
       await mod.start();
 
       const rejected: any[] = [];
-      bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
+      bus.subscribe("SignalRejected", async (p) => {
+        rejected.push(p);
+      });
 
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
@@ -1674,7 +1718,9 @@ describe("RiskInventoryModule", () => {
       await mod.start();
 
       const approved: any[] = [];
-      bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
 
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
@@ -1719,14 +1765,26 @@ describe("RiskInventoryModule", () => {
         familyId: FAM_ID,
         timestamp: Date.now(),
       };
-      await bus.publish("FillReceived", { ...fillBase, fillId: "fill-1" as any, price: 0.5, size: 5 });
-      await bus.publish("FillReceived", { ...fillBase, fillId: "fill-2" as any, price: 0.5, size: 5 });
+      await bus.publish("FillReceived", {
+        ...fillBase,
+        fillId: "fill-1" as any,
+        price: 0.5,
+        size: 5,
+      });
+      await bus.publish("FillReceived", {
+        ...fillBase,
+        fillId: "fill-2" as any,
+        price: 0.5,
+        size: 5,
+      });
 
       // Counter should have decremented once (2 → 1), not twice (2 → 0)
       // So a new entry signal should still be rejected (1 in-flight remaining + the 1 just decremented = still at limit? No: 2 - 1 = 1, limit is 2, so it should pass)
       // Actually: started at 2, decremented once → 1. So next entry should be allowed.
       const approved: any[] = [];
-      bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
 
       await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
       expect(approved).toHaveLength(1);
@@ -1736,8 +1794,12 @@ describe("RiskInventoryModule", () => {
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
       // Now at 2 in-flight — next entry should be rejected
       const rejected: any[] = [];
-      bus.subscribe("SignalRejected", async (p) => { rejected.push(p); });
-      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry", signalId: "sig-check" as any }) });
+      bus.subscribe("SignalRejected", async (p) => {
+        rejected.push(p);
+      });
+      await bus.publish("SignalProduced", {
+        signal: makeSignal({ reason: "probe-entry", signalId: "sig-check" as any }),
+      });
       expect(rejected).toHaveLength(1);
       expect(rejected[0].reason).toContain("family-in-flight-limit");
 
@@ -1748,7 +1810,9 @@ describe("RiskInventoryModule", () => {
       await mod.start();
 
       const approved: any[] = [];
-      bus.subscribe("SignalApproved", async (p) => { approved.push(p); });
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
 
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());

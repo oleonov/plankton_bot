@@ -95,7 +95,11 @@ describe("SnapshotWriter", () => {
   it("sets lastPrice to null, volume24h to null, liquidity to null", () => {
     writer.onSnapshot([makeMarket("tok-1")], Date.now());
 
-    const batch = repo.saveBatch.mock.calls[0]![0] as { lastPrice: unknown; volume24h: unknown; liquidity: unknown }[];
+    const batch = repo.saveBatch.mock.calls[0]![0] as {
+      lastPrice: unknown;
+      volume24h: unknown;
+      liquidity: unknown;
+    }[];
     expect(batch[0]!.lastPrice).toBeNull();
     expect(batch[0]!.volume24h).toBeNull();
     expect(batch[0]!.liquidity).toBeNull();

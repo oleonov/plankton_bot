@@ -30,16 +30,11 @@ describe("SqliteRiskEventRepository", () => {
       payload: { reasonCode: "max_dust_positions", rawReason: "dust 3 >= max 2" },
     });
 
-    const rows = conn.db
-      .prepare("SELECT * FROM risk_events")
-      .all() as Record<string, unknown>[];
+    const rows = conn.db.prepare("SELECT * FROM risk_events").all() as Record<string, unknown>[];
     expect(rows).toHaveLength(1);
     expect(rows[0]!.event_type).toBe("signal_rejected");
     expect(rows[0]!.family_id).toBe("fam-btc");
-    const payload = JSON.parse(rows[0]!.payload as string) as Record<
-      string,
-      unknown
-    >;
+    const payload = JSON.parse(rows[0]!.payload as string) as Record<string, unknown>;
     expect(payload.reasonCode).toBe("max_dust_positions");
   });
 
@@ -50,9 +45,7 @@ describe("SqliteRiskEventRepository", () => {
       payload: { details: "phantom order detected" },
     });
 
-    const rows = conn.db
-      .prepare("SELECT * FROM risk_events")
-      .all() as Record<string, unknown>[];
+    const rows = conn.db.prepare("SELECT * FROM risk_events").all() as Record<string, unknown>[];
     expect(rows).toHaveLength(1);
     expect(rows[0]!.family_id).toBeNull();
   });
@@ -69,9 +62,7 @@ describe("SqliteRiskEventRepository", () => {
       payload: { reason: "resumed" },
     });
 
-    const count = conn.db
-      .prepare("SELECT COUNT(*) as c FROM risk_events")
-      .get() as { c: number };
+    const count = conn.db.prepare("SELECT COUNT(*) as c FROM risk_events").get() as { c: number };
     expect(count.c).toBe(2);
   });
 });

@@ -54,7 +54,13 @@ export interface CancelOrderCommand {
   readonly commandId: CommandId;
   /** Exchange-assigned order ID. */
   readonly orderId: OrderId;
-  readonly reason: "strategy_exit" | "risk_breach" | "operator" | "shutdown" | "reconciliation" | "market_resolved";
+  readonly reason:
+    | "strategy_exit"
+    | "risk_breach"
+    | "operator"
+    | "shutdown"
+    | "reconciliation"
+    | "market_resolved";
   readonly familyId: FamilyId;
 }
 

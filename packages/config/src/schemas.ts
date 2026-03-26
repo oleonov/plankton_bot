@@ -22,12 +22,7 @@ const strategyProfileSchema = z.enum([
   "restricted",
 ]);
 
-const evidenceStatusSchema = z.enum([
-  "confirmed",
-  "partial",
-  "weak",
-  "unknown",
-]);
+const evidenceStatusSchema = z.enum(["confirmed", "partial", "weak", "unknown"]);
 
 const promotionStateSchema = z.enum([
   "probe-only",
@@ -39,23 +34,11 @@ const promotionStateSchema = z.enum([
 
 const actionSchema = z.enum(["trade", "monitor", "reduce-only", "blocked"]);
 
-const sessionModeSchema = z.enum([
-  "active-window",
-  "reduced",
-  "always-reduced",
-]);
+const sessionModeSchema = z.enum(["active-window", "reduced", "always-reduced"]);
 
-const entryModeSchema = z.enum([
-  "probe-first",
-  "conviction-only",
-  "disabled",
-]);
+const entryModeSchema = z.enum(["probe-first", "conviction-only", "disabled"]);
 
-const scaleModeSchema = z.enum([
-  "confirm-only",
-  "disabled",
-  "aggressive-confirm",
-]);
+const scaleModeSchema = z.enum(["confirm-only", "disabled", "aggressive-confirm"]);
 
 const exitModeSchema = z.enum(["repricing-sell", "reduce-only", "disabled"]);
 
@@ -67,12 +50,7 @@ const weekdayBiasSchema = z.enum(["normal", "preferred", "required"]);
 
 const weekendModeSchema = z.enum(["normal", "reduced", "disabled"]);
 
-const runtimeModeSchema = z.enum([
-  "active",
-  "probe-only",
-  "reduce-only",
-  "quarantine",
-]);
+const runtimeModeSchema = z.enum(["active", "probe-only", "reduce-only", "quarantine"]);
 
 // ─── Sub-schemas (snake_case YAML input) ────────────────────────────────────
 

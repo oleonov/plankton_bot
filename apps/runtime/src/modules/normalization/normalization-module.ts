@@ -45,15 +45,11 @@ export class NormalizationModule implements RuntimeModule {
   async start(): Promise<void> {
     this.buildPatternCache();
 
-    this.unsubscribe = this.deps.bus.subscribe(
-      "MarketSnapshotReceived",
-      async (payload) => { await this.handleSnapshot(payload); },
-    );
+    this.unsubscribe = this.deps.bus.subscribe("MarketSnapshotReceived", async (payload) => {
+      await this.handleSnapshot(payload);
+    });
 
-    this.log.info(
-      { patterns: this.patterns.length },
-      "normalization module started",
-    );
+    this.log.info({ patterns: this.patterns.length }, "normalization module started");
   }
 
   async stop(): Promise<void> {

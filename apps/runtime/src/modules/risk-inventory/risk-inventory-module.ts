@@ -114,15 +114,9 @@ export class RiskInventoryModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.unsubs.push(
-      this.deps.bus.subscribe("SignalProduced", (p) =>
-        this.handleSignal(p),
-      ),
-      this.deps.bus.subscribe("FillReceived", (p) =>
-        this.handleFill(p),
-      ),
-      this.deps.bus.subscribe("NormalizedMarketUpdated", (p) =>
-        this.handleMarketUpdate(p),
-      ),
+      this.deps.bus.subscribe("SignalProduced", (p) => this.handleSignal(p)),
+      this.deps.bus.subscribe("FillReceived", (p) => this.handleFill(p)),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("PlaceOrderRequested", (p) => {
         this.incrementInFlight(p.command.familyId);
         return Promise.resolve();
@@ -209,9 +203,7 @@ export class RiskInventoryModule implements RuntimeModule {
 
   // ─── Signal evaluation ────────────────────────────────────────────
 
-  private async handleSignal(
-    payload: RuntimeEventMap["SignalProduced"],
-  ): Promise<void> {
+  private async handleSignal(payload: RuntimeEventMap["SignalProduced"]): Promise<void> {
     const { signal } = payload;
     this.signalsProcessed++;
 
@@ -262,9 +254,7 @@ export class RiskInventoryModule implements RuntimeModule {
 
   // ─── Fill application ─────────────────────────────────────────────
 
-  private async handleFill(
-    payload: RuntimeEventMap["FillReceived"],
-  ): Promise<void> {
+  private async handleFill(payload: RuntimeEventMap["FillReceived"]): Promise<void> {
     this.fillsProcessed++;
 
     try {
@@ -285,10 +275,7 @@ export class RiskInventoryModule implements RuntimeModule {
       await this.deps.bus.publish("PositionUpdated", { position });
 
       // Recompute family exposure
-      const familyState = this.exposure.recompute(
-        payload.familyId,
-        payload.side === "buy",
-      );
+      const familyState = this.exposure.recompute(payload.familyId, payload.side === "buy");
 
       await this.deps.bus.publish("FamilyExposureChanged", {
         familyId: payload.familyId,

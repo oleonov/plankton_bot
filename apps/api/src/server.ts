@@ -71,7 +71,11 @@ export async function buildServer(deps: ServerDeps) {
 
   // Routes
   const db = deps.conn.db;
-  await app.register(authRoutes, { prefix: "/api/v1", username: deps.config.planktonAuthUsername, password: deps.config.planktonAuthPassword });
+  await app.register(authRoutes, {
+    prefix: "/api/v1",
+    username: deps.config.planktonAuthUsername,
+    password: deps.config.planktonAuthPassword,
+  });
   await app.register(healthRoutes, { prefix: "/api/v1" });
   const staleMs = deps.config.marketDataStaleThresholdMs;
   await app.register(statusRoutes, { prefix: "/api/v1", db, marketDataStaleThresholdMs: staleMs });

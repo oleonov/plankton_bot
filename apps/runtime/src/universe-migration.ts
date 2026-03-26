@@ -50,9 +50,7 @@ export function migrateOrphanedPositions(deps: UniverseMigrationDeps): Migration
     }
 
     const positions = positionRepo.findByFamily(family.familyId);
-    const openPositions = positions.filter(
-      (p) => p.status === "open" || p.status === "dust",
-    );
+    const openPositions = positions.filter((p) => p.status === "open" || p.status === "dust");
 
     for (const pos of openPositions) {
       const market = marketRepo.findByTokenId(pos.tokenId);
@@ -126,11 +124,7 @@ export function migrateOrphanedPositions(deps: UniverseMigrationDeps): Migration
   return { closedCount: closed.length, closedPositionIds: closed };
 }
 
-function closePosition(
-  repo: PositionRepository,
-  pos: Position,
-  nowIso: string,
-): void {
+function closePosition(repo: PositionRepository, pos: Position, nowIso: string): void {
   repo.save({
     ...pos,
     status: "closed",

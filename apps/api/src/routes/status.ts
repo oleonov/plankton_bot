@@ -15,7 +15,9 @@ export function buildStatusSnapshot(
   staleThresholdMs: number,
 ): Record<string, unknown> {
   const openOrders = db
-    .prepare("SELECT COUNT(*) as cnt FROM orders WHERE status IN ('pending','open','partially-filled')")
+    .prepare(
+      "SELECT COUNT(*) as cnt FROM orders WHERE status IN ('pending','open','partially-filled')",
+    )
     .get() as { cnt: number };
 
   const openPositions = db
@@ -27,7 +29,9 @@ export function buildStatusSnapshot(
     .get() as { cnt: number };
 
   const totalExposure = db
-    .prepare("SELECT COALESCE(SUM(open_value_usdc),0) as total, COALESCE(SUM(current_tail_cost_usdc),0) as tail FROM family_runtime_state")
+    .prepare(
+      "SELECT COALESCE(SUM(open_value_usdc),0) as total, COALESCE(SUM(current_tail_cost_usdc),0) as tail FROM family_runtime_state",
+    )
     .get() as { total: number; tail: number };
 
   // Runtime mode from the latest bot run
@@ -37,59 +41,82 @@ export function buildStatusSnapshot(
 
   // Paused state persisted by runtime via runtime_metrics
   const pausedMetric = db
-    .prepare("SELECT value FROM runtime_metrics WHERE metric_name = 'runtime_paused' ORDER BY captured_at DESC LIMIT 1")
+    .prepare(
+      "SELECT value FROM runtime_metrics WHERE metric_name = 'runtime_paused' ORDER BY captured_at DESC LIMIT 1",
+    )
     .get() as { value: number } | undefined;
 
   // Last reconciliation from runtime_metrics (written by ReconciliationComplete event listener)
   const lastRecon = db
-    .prepare("SELECT captured_at as ts FROM runtime_metrics WHERE metric_name = 'last_reconciliation' ORDER BY captured_at DESC LIMIT 1")
+    .prepare(
+      "SELECT captured_at as ts FROM runtime_metrics WHERE metric_name = 'last_reconciliation' ORDER BY captured_at DESC LIMIT 1",
+    )
     .get() as { ts: string } | undefined;
 
   // Market data freshness from runtime_metrics (written by MarketSnapshotReceived event listener)
   const lastMarketData = db
-    .prepare("SELECT captured_at as ts FROM runtime_metrics WHERE metric_name = 'market_data_last_update' ORDER BY captured_at DESC LIMIT 1")
+    .prepare(
+      "SELECT captured_at as ts FROM runtime_metrics WHERE metric_name = 'market_data_last_update' ORDER BY captured_at DESC LIMIT 1",
+    )
     .get() as { ts: string } | undefined;
 
   // Two-part mode decomposition for operator clarity
   const mdSource = db
-    .prepare("SELECT labels FROM runtime_metrics WHERE metric_name = 'market_data_source' ORDER BY captured_at DESC LIMIT 1")
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'market_data_source' ORDER BY captured_at DESC LIMIT 1",
+    )
     .get() as { labels: string } | undefined;
   const execMode = db
-    .prepare("SELECT labels FROM runtime_metrics WHERE metric_name = 'execution_mode' ORDER BY captured_at DESC LIMIT 1")
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'execution_mode' ORDER BY captured_at DESC LIMIT 1",
+    )
     .get() as { labels: string } | undefined;
 
   const marketDataLastUpdateAt = lastMarketData?.ts ?? null;
   const marketDataStale = marketDataLastUpdateAt
-    ? (Date.now() - new Date(marketDataLastUpdateAt).getTime()) > staleThresholdMs
+    ? Date.now() - new Date(marketDataLastUpdateAt).getTime() > staleThresholdMs
     : true; // no data yet = stale
 
   // Live-lite envelope — only show when current run is live-lite
-  const envelopeRow = botRun?.mode === "live-lite"
-    ? db
-        .prepare("SELECT labels FROM runtime_metrics WHERE metric_name = 'live_lite_envelope' ORDER BY captured_at DESC LIMIT 1")
-        .get() as { labels: string } | undefined
-    : undefined;
+  const envelopeRow =
+    botRun?.mode === "live-lite"
+      ? (db
+          .prepare(
+            "SELECT labels FROM runtime_metrics WHERE metric_name = 'live_lite_envelope' ORDER BY captured_at DESC LIMIT 1",
+          )
+          .get() as { labels: string } | undefined)
+      : undefined;
 
   // Reconciliation drift: current-state (set on drift, reset on clean)
   const lastDrift = db
-    .prepare("SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_drift' ORDER BY captured_at DESC LIMIT 1")
+    .prepare(
+      "SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_drift' ORDER BY captured_at DESC LIMIT 1",
+    )
     .get() as { captured_at: string } | undefined;
   const lastCleanRecon = db
-    .prepare("SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_clean' ORDER BY captured_at DESC LIMIT 1")
+    .prepare(
+      "SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_clean' ORDER BY captured_at DESC LIMIT 1",
+    )
     .get() as { captured_at: string } | undefined;
 
   const reconciliationDriftDetected = lastDrift
-    ? (!lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at))
+    ? !lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at)
     : false;
 
   // Poll progress: only include if active and belongs to current bot run
   const pollProgressRow = db
-    .prepare("SELECT labels FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress' LIMIT 1")
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress' LIMIT 1",
+    )
     .get() as { labels: string } | undefined;
 
   let marketDataPoll: { active: boolean; page: number } | undefined;
   if (pollProgressRow) {
-    const parsed = JSON.parse(pollProgressRow.labels) as { active?: boolean; page?: number; botRunId?: string };
+    const parsed = JSON.parse(pollProgressRow.labels) as {
+      active?: boolean;
+      page?: number;
+      botRunId?: string;
+    };
     if (parsed.active === true && botRun && parsed.botRunId === botRun.run_id) {
       marketDataPoll = { active: true, page: parsed.page ?? 0 };
     }

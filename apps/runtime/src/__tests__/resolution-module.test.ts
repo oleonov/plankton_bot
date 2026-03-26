@@ -1,9 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  createTokenId,
-  createFamilyId,
-  createPositionId,
-} from "@plankton/domain";
+import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
 import type {
   ExchangeGateway,
   MarketRepository,
@@ -16,7 +12,10 @@ import type {
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { ResolutionModule } from "../modules/resolution/resolution-module.js";
-import type { ResolutionDetector, DetectedResolution } from "../modules/resolution/resolution-detector.js";
+import type {
+  ResolutionDetector,
+  DetectedResolution,
+} from "../modules/resolution/resolution-detector.js";
 import type { PositionSettler, SettledPosition } from "../modules/resolution/position-settler.js";
 import type { FamilyExposureCalculator } from "../modules/risk-inventory/family-exposure.js";
 
@@ -112,9 +111,7 @@ function createMockResolutionRepo(): MarketResolutionRepository {
   } as unknown as MarketResolutionRepository;
 }
 
-function createMockRulesProvider(overrides?: {
-  autoSettle?: boolean;
-}): FamilyRulesProvider {
+function createMockRulesProvider(overrides?: { autoSettle?: boolean }): FamilyRulesProvider {
   const autoSettle = overrides?.autoSettle ?? true;
   return {
     getRule: vi.fn<(familyId: FamilyId) => FamilyRuleBundle | null>().mockReturnValue({
@@ -214,7 +211,7 @@ describe("ResolutionModule", () => {
   it("returns 0 when detector finds no resolutions", async () => {
     const count = await mod.runCheck();
     expect(count).toBe(0);
-    expect((detector.detect as any)).toHaveBeenCalledWith(30);
+    expect(detector.detect as any).toHaveBeenCalledWith(30);
   });
 
   it("passes graceMinutes to detector", async () => {
@@ -232,7 +229,7 @@ describe("ResolutionModule", () => {
       graceMinutes: 45,
     });
     await custom.runCheck();
-    expect((detector.detect as any)).toHaveBeenCalledWith(45);
+    expect(detector.detect as any).toHaveBeenCalledWith(45);
   });
 
   // ─── Resolution persistence ─────────────────────────────────────────────
@@ -243,7 +240,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((resolutionRepo.save as any)).toHaveBeenCalledWith(
+    expect(resolutionRepo.save as any).toHaveBeenCalledWith(
       expect.objectContaining({
         conditionId: CONDITION,
         resolution: "YES",
@@ -261,21 +258,29 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((marketRepo.deactivate as any)).toHaveBeenCalledWith(TOK_YES);
+    expect(marketRepo.deactivate as any).toHaveBeenCalledWith(TOK_YES);
   });
 
   it("deactivates all tokens in a multi-token resolution", async () => {
     const resolution = makeDetectedResolution({
       candidates: [
         {
-          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
-          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS, familyId: FAM,
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS,
+          familyId: FAM,
         },
         {
-          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
-          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2, familyId: FAM,
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+          familyId: FAM,
         },
       ],
     });
@@ -283,8 +288,8 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((marketRepo.deactivate as any)).toHaveBeenCalledWith(TOK_YES);
-    expect((marketRepo.deactivate as any)).toHaveBeenCalledWith(TOK_NO);
+    expect(marketRepo.deactivate as any).toHaveBeenCalledWith(TOK_YES);
+    expect(marketRepo.deactivate as any).toHaveBeenCalledWith(TOK_NO);
   });
 
   // ─── Settlement ─────────────────────────────────────────────────────────
@@ -298,7 +303,7 @@ describe("ResolutionModule", () => {
     const count = await mod.runCheck();
 
     expect(count).toBe(1);
-    expect((settler.settle as any)).toHaveBeenCalledWith(
+    expect(settler.settle as any).toHaveBeenCalledWith(
       expect.objectContaining({ conditionId: CONDITION }),
     );
   });
@@ -327,7 +332,7 @@ describe("ResolutionModule", () => {
     const count = await mod.runCheck();
 
     expect(count).toBe(0);
-    expect((settler.settle as any)).not.toHaveBeenCalled();
+    expect(settler.settle as any).not.toHaveBeenCalled();
   });
 
   it("settles only families with autoSettle enabled in mixed batch", async () => {
@@ -349,14 +354,22 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution({
       candidates: [
         {
-          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
-          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS, familyId: FAM,
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS,
+          familyId: FAM,
         },
         {
-          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
-          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2, familyId: FAM2,
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+          familyId: FAM2,
         },
       ],
     });
@@ -378,7 +391,9 @@ describe("ResolutionModule", () => {
     (detector.detect as any).mockResolvedValue([resolution]);
 
     const events: unknown[] = [];
-    bus.subscribe("MarketResolved", async (e) => { events.push(e); });
+    bus.subscribe("MarketResolved", async (e) => {
+      events.push(e);
+    });
 
     await mod.runCheck();
 
@@ -402,7 +417,9 @@ describe("ResolutionModule", () => {
     (settler.settle as any).mockReturnValue(settled);
 
     const events: unknown[] = [];
-    bus.subscribe("PositionSettled", async (e) => { events.push(e); });
+    bus.subscribe("PositionSettled", async (e) => {
+      events.push(e);
+    });
 
     await mod.runCheck();
 
@@ -417,7 +434,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((exposureCalculator.recompute as any)).toHaveBeenCalledWith(FAM, false);
+    expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM, false);
   });
 
   it("publishes FamilyExposureChanged after recompute", async () => {
@@ -425,28 +442,36 @@ describe("ResolutionModule", () => {
     (detector.detect as any).mockResolvedValue([resolution]);
 
     const events: unknown[] = [];
-    bus.subscribe("FamilyExposureChanged", async (e) => { events.push(e); });
+    bus.subscribe("FamilyExposureChanged", async (e) => {
+      events.push(e);
+    });
 
     await mod.runCheck();
 
     expect(events).toHaveLength(1);
-    expect(events[0]).toEqual(
-      expect.objectContaining({ familyId: FAM }),
-    );
+    expect(events[0]).toEqual(expect.objectContaining({ familyId: FAM }));
   });
 
   it("deduplicates family recompute when multiple positions share a family", async () => {
     const resolution = makeDetectedResolution({
       candidates: [
         {
-          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
-          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS, familyId: FAM,
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS,
+          familyId: FAM,
         },
         {
-          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
-          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2, familyId: FAM, // same family
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+          familyId: FAM, // same family
         },
       ],
     });
@@ -455,7 +480,7 @@ describe("ResolutionModule", () => {
     await mod.runCheck();
 
     // recompute should only be called once for FAM
-    expect((exposureCalculator.recompute as any)).toHaveBeenCalledTimes(1);
+    expect(exposureCalculator.recompute as any).toHaveBeenCalledTimes(1);
   });
 
   // ─── Unknown resolution guard ────────────────────────────────────────
@@ -470,7 +495,7 @@ describe("ResolutionModule", () => {
     const count = await mod.runCheck();
 
     expect(count).toBe(0);
-    expect((settler.settle as any)).not.toHaveBeenCalled();
+    expect(settler.settle as any).not.toHaveBeenCalled();
   });
 
   it("still publishes MarketResolved for unknown resolution", async () => {
@@ -481,14 +506,14 @@ describe("ResolutionModule", () => {
     (detector.detect as any).mockResolvedValue([resolution]);
 
     const events: unknown[] = [];
-    bus.subscribe("MarketResolved", async (e) => { events.push(e); });
+    bus.subscribe("MarketResolved", async (e) => {
+      events.push(e);
+    });
 
     await mod.runCheck();
 
     expect(events).toHaveLength(1);
-    expect(events[0]).toEqual(
-      expect.objectContaining({ resolution: "unknown" }),
-    );
+    expect(events[0]).toEqual(expect.objectContaining({ resolution: "unknown" }));
   });
 
   it("still deactivates markets for unknown resolution", async () => {
@@ -500,7 +525,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((marketRepo.deactivate as any)).toHaveBeenCalledWith(TOK_YES);
+    expect(marketRepo.deactivate as any).toHaveBeenCalledWith(TOK_YES);
   });
 
   it("still persists resolution record for unknown resolution with status 'detected'", async () => {
@@ -512,7 +537,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((resolutionRepo.save as any)).toHaveBeenCalledWith(
+    expect(resolutionRepo.save as any).toHaveBeenCalledWith(
       expect.objectContaining({
         conditionId: CONDITION,
         resolution: "unknown",
@@ -533,7 +558,9 @@ describe("ResolutionModule", () => {
     ]);
 
     const cancelEvents: any[] = [];
-    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+    bus.subscribe("CancelOrderRequested", async (e) => {
+      cancelEvents.push(e);
+    });
 
     await mod.runCheck();
 
@@ -554,7 +581,9 @@ describe("ResolutionModule", () => {
     ]);
 
     const cancelEvents: any[] = [];
-    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+    bus.subscribe("CancelOrderRequested", async (e) => {
+      cancelEvents.push(e);
+    });
 
     await mod.runCheck();
 
@@ -566,14 +595,22 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution({
       candidates: [
         {
-          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
-          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS, familyId: FAM,
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS,
+          familyId: FAM,
         },
         {
-          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
-          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2, familyId: FAM2,
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+          familyId: FAM2,
         },
       ],
     });
@@ -590,8 +627,12 @@ describe("ResolutionModule", () => {
 
     const resolvedEvents: any[] = [];
     const cancelEvents: any[] = [];
-    bus.subscribe("MarketResolved", async (e) => { resolvedEvents.push(e); });
-    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+    bus.subscribe("MarketResolved", async (e) => {
+      resolvedEvents.push(e);
+    });
+    bus.subscribe("CancelOrderRequested", async (e) => {
+      cancelEvents.push(e);
+    });
 
     await mod.runCheck();
 
@@ -618,7 +659,7 @@ describe("ResolutionModule", () => {
     );
 
     // Pending order without exchange ID is locally cancelled
-    expect((orderRepo.updateStatus as any)).toHaveBeenCalledWith("ord-no", "cancelled");
+    expect(orderRepo.updateStatus as any).toHaveBeenCalledWith("ord-no", "cancelled");
   });
 
   it("publishes CancelOrderRequested for pending orders that have an exchange ID", async () => {
@@ -629,13 +670,15 @@ describe("ResolutionModule", () => {
     ]);
 
     const cancelEvents: any[] = [];
-    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+    bus.subscribe("CancelOrderRequested", async (e) => {
+      cancelEvents.push(e);
+    });
 
     await mod.runCheck();
 
     expect(cancelEvents).toHaveLength(1);
     expect(cancelEvents[0].command.orderId).toBe("ord-1");
-    expect((orderRepo.updateStatus as any)).not.toHaveBeenCalled();
+    expect(orderRepo.updateStatus as any).not.toHaveBeenCalled();
   });
 
   it("locally cancels pending orders without exchange ID instead of publishing cancel event", async () => {
@@ -646,12 +689,14 @@ describe("ResolutionModule", () => {
     ]);
 
     const cancelEvents: any[] = [];
-    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+    bus.subscribe("CancelOrderRequested", async (e) => {
+      cancelEvents.push(e);
+    });
 
     await mod.runCheck();
 
     expect(cancelEvents).toHaveLength(0);
-    expect((orderRepo.updateStatus as any)).toHaveBeenCalledWith("ord-1", "cancelled");
+    expect(orderRepo.updateStatus as any).toHaveBeenCalledWith("ord-1", "cancelled");
   });
 
   // ─── Balance verification (gateway-based settlement gate) ───────────────
@@ -665,8 +710,8 @@ describe("ResolutionModule", () => {
     const count = await mod.runCheck();
 
     expect(count).toBe(0);
-    expect((settler.settle as any)).not.toHaveBeenCalled();
-    expect((gateway.getPositionBalance as any)).toHaveBeenCalledWith(TOK_YES);
+    expect(settler.settle as any).not.toHaveBeenCalled();
+    expect(gateway.getPositionBalance as any).toHaveBeenCalledWith(TOK_YES);
   });
 
   it("settles when on-chain balance is zero", async () => {
@@ -680,7 +725,7 @@ describe("ResolutionModule", () => {
     const count = await mod.runCheck();
 
     expect(count).toBe(1);
-    expect((settler.settle as any)).toHaveBeenCalled();
+    expect(settler.settle as any).toHaveBeenCalled();
   });
 
   it("still deactivates markets and cancels orders when balance is non-zero", async () => {
@@ -693,11 +738,13 @@ describe("ResolutionModule", () => {
     ]);
 
     const cancelEvents: any[] = [];
-    bus.subscribe("CancelOrderRequested", async (e) => { cancelEvents.push(e); });
+    bus.subscribe("CancelOrderRequested", async (e) => {
+      cancelEvents.push(e);
+    });
 
     await mod.runCheck();
 
-    expect((marketRepo.deactivate as any)).toHaveBeenCalledWith(TOK_YES);
+    expect(marketRepo.deactivate as any).toHaveBeenCalledWith(TOK_YES);
     expect(cancelEvents).toHaveLength(1);
     expect(cancelEvents[0].command.orderId).toBe("ord-1");
   });
@@ -709,7 +756,9 @@ describe("ResolutionModule", () => {
     (detector.detect as any).mockResolvedValue([resolution]);
 
     const events: unknown[] = [];
-    bus.subscribe("MarketResolved", async (e) => { events.push(e); });
+    bus.subscribe("MarketResolved", async (e) => {
+      events.push(e);
+    });
 
     await mod.runCheck();
 
@@ -740,7 +789,7 @@ describe("ResolutionModule", () => {
     const count = await mod.runCheck();
 
     expect(count).toBe(0);
-    expect((settler.settle as any)).not.toHaveBeenCalled();
+    expect(settler.settle as any).not.toHaveBeenCalled();
     expect(log.warn).toHaveBeenCalledWith(
       expect.objectContaining({
         tokenId: String(TOK_YES),
@@ -762,14 +811,22 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution({
       candidates: [
         {
-          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
-          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS, familyId: FAM,
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS,
+          familyId: FAM,
         },
         {
-          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
-          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2, familyId: FAM,
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+          familyId: FAM,
         },
       ],
     });
@@ -791,14 +848,22 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution({
       candidates: [
         {
-          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
-          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS, familyId: FAM,
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS,
+          familyId: FAM,
         },
         {
-          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
-          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2, familyId: FAM,
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+          familyId: FAM,
         },
       ],
     });
@@ -823,7 +888,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((resolutionRepo.markSettled as any)).toHaveBeenCalledWith(CONDITION);
+    expect(resolutionRepo.markSettled as any).toHaveBeenCalledWith(CONDITION);
   });
 
   it("calls markSettled when all candidates pass balance check", async () => {
@@ -836,7 +901,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((resolutionRepo.markSettled as any)).toHaveBeenCalledWith(CONDITION);
+    expect(resolutionRepo.markSettled as any).toHaveBeenCalledWith(CONDITION);
   });
 
   it("does NOT call markSettled when some candidates have non-zero balance", async () => {
@@ -846,14 +911,22 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution({
       candidates: [
         {
-          tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x",
-          outcome: "YES", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS, familyId: FAM,
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS,
+          familyId: FAM,
         },
         {
-          tokenId: TOK_NO, conditionId: CONDITION, slug: "will-x",
-          outcome: "NO", endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2, familyId: FAM,
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+          familyId: FAM,
         },
       ],
     });
@@ -862,7 +935,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((resolutionRepo.markSettled as any)).not.toHaveBeenCalled();
+    expect(resolutionRepo.markSettled as any).not.toHaveBeenCalled();
   });
 
   it("does NOT call markSettled for unknown resolution", async () => {
@@ -874,7 +947,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((resolutionRepo.markSettled as any)).not.toHaveBeenCalled();
+    expect(resolutionRepo.markSettled as any).not.toHaveBeenCalled();
   });
 
   it("calls markSettled when all families have autoSettle=false (nothing to retry)", async () => {
@@ -886,7 +959,7 @@ describe("ResolutionModule", () => {
 
     await mod.runCheck();
 
-    expect((resolutionRepo.markSettled as any)).toHaveBeenCalledWith(CONDITION);
+    expect(resolutionRepo.markSettled as any).toHaveBeenCalledWith(CONDITION);
   });
 
   it("skips deactivation and cancel on retry (resolution already exists)", async () => {
@@ -904,13 +977,13 @@ describe("ResolutionModule", () => {
     await mod.runCheck();
 
     // Should NOT save again (isRetry=true)
-    expect((resolutionRepo.save as any)).not.toHaveBeenCalled();
+    expect(resolutionRepo.save as any).not.toHaveBeenCalled();
     // Should NOT deactivate or cancel on retry
-    expect((marketRepo.deactivate as any)).not.toHaveBeenCalled();
+    expect(marketRepo.deactivate as any).not.toHaveBeenCalled();
     // Should still settle
-    expect((settler.settle as any)).toHaveBeenCalled();
+    expect(settler.settle as any).toHaveBeenCalled();
     // Should mark settled
-    expect((resolutionRepo.markSettled as any)).toHaveBeenCalledWith(CONDITION);
+    expect(resolutionRepo.markSettled as any).toHaveBeenCalledWith(CONDITION);
   });
 
   it("does not publish MarketResolved on retry", async () => {
@@ -925,7 +998,9 @@ describe("ResolutionModule", () => {
     (settler.settle as any).mockReturnValue(settled);
 
     const events: unknown[] = [];
-    bus.subscribe("MarketResolved", async (e) => { events.push(e); });
+    bus.subscribe("MarketResolved", async (e) => {
+      events.push(e);
+    });
 
     await mod.runCheck();
 
@@ -944,7 +1019,9 @@ describe("ResolutionModule", () => {
     (settler.settle as any).mockReturnValue(settled);
 
     const events: unknown[] = [];
-    bus.subscribe("PositionSettled", async (e) => { events.push(e); });
+    bus.subscribe("PositionSettled", async (e) => {
+      events.push(e);
+    });
 
     await mod.runCheck();
 
@@ -956,7 +1033,9 @@ describe("ResolutionModule", () => {
   it("prevents concurrent runCheck invocations", async () => {
     let resolveDetect: () => void;
     (detector.detect as any).mockReturnValue(
-      new Promise<DetectedResolution[]>((r) => { resolveDetect = () => r([]); }),
+      new Promise<DetectedResolution[]>((r) => {
+        resolveDetect = () => r([]);
+      }),
     );
 
     const p1 = mod.runCheck();

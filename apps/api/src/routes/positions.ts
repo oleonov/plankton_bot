@@ -64,7 +64,8 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const orderBy = sort === "tail_cost" ? "ORDER BY cost_basis_usdc DESC" : "ORDER BY updated_at DESC";
+    const orderBy =
+      sort === "tail_cost" ? "ORDER BY cost_basis_usdc DESC" : "ORDER BY updated_at DESC";
 
     const rows = opts.db
       .prepare(`SELECT * FROM positions ${where} ${orderBy}`)
@@ -78,7 +79,12 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
 
   app.get<{ Params: { positionId: string } }>("/positions/:positionId", async (request) => {
     const row = getById.get(request.params.positionId) as Record<string, unknown> | undefined;
-    if (!row) throw new ApiError(404, `position ${request.params.positionId} not found`, "POSITION_NOT_FOUND");
+    if (!row)
+      throw new ApiError(
+        404,
+        `position ${request.params.positionId} not found`,
+        "POSITION_NOT_FOUND",
+      );
     const metaMap = buildMarketMetaMap(opts.db, [row.token_id as string]);
     return ok(toDto(row, getMetaOrEmpty(metaMap, row.token_id as string)));
   });

@@ -72,12 +72,8 @@ export class ExecutionModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.unsubs.push(
-      this.deps.bus.subscribe("PlaceOrderRequested", (p) =>
-        this.handlePlace(p.command),
-      ),
-      this.deps.bus.subscribe("CancelOrderRequested", (p) =>
-        this.handleCancel(p.command),
-      ),
+      this.deps.bus.subscribe("PlaceOrderRequested", (p) => this.handlePlace(p.command)),
+      this.deps.bus.subscribe("CancelOrderRequested", (p) => this.handleCancel(p.command)),
     );
     this.started = true;
     this.log.info("execution module started");
@@ -98,9 +94,7 @@ export class ExecutionModule implements RuntimeModule {
     const gw = await this.deps.gateway.healthCheck();
     return {
       ok: gw.ok,
-      detail: gw.ok
-        ? `gateway ok (${gw.latencyMs}ms)`
-        : "gateway unreachable",
+      detail: gw.ok ? `gateway ok (${gw.latencyMs}ms)` : "gateway unreachable",
     };
   }
 
@@ -121,8 +115,14 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     // Live-lite allowlist check (Layer 4)
-    if (this.deps.liveLiteGuard?.isActive && !this.deps.liveLiteGuard.isFamilyAllowed(String(cmd.familyId))) {
-      this.log.warn({ commandId: cmd.commandId, familyId: cmd.familyId }, "order rejected — family not in live-lite allowlist");
+    if (
+      this.deps.liveLiteGuard?.isActive &&
+      !this.deps.liveLiteGuard.isFamilyAllowed(String(cmd.familyId))
+    ) {
+      this.log.warn(
+        { commandId: cmd.commandId, familyId: cmd.familyId },
+        "order rejected — family not in live-lite allowlist",
+      );
       await this.deps.bus.publish("OrderRejected", {
         commandId: cmd.commandId,
         clientOrderId: cmd.clientOrderId,
@@ -138,7 +138,10 @@ export class ExecutionModule implements RuntimeModule {
     if (this.deps.liveLiteGuard?.isActive) {
       const notional = cmd.price * cmd.size;
       if (!this.deps.liveLiteGuard.isOrderWithinCap(notional)) {
-        this.log.warn({ commandId: cmd.commandId, notional }, "order rejected — exceeds live-lite order cap");
+        this.log.warn(
+          { commandId: cmd.commandId, notional },
+          "order rejected — exceeds live-lite order cap",
+        );
         await this.deps.bus.publish("OrderRejected", {
           commandId: cmd.commandId,
           clientOrderId: cmd.clientOrderId,
@@ -154,7 +157,10 @@ export class ExecutionModule implements RuntimeModule {
     // Market active check: reject orders on deactivated/resolved markets
     const market = this.deps.marketRepo.findByTokenId(cmd.tokenId);
     if (market && !market.active) {
-      this.log.warn({ commandId: cmd.commandId, tokenId: cmd.tokenId }, "order rejected — market inactive");
+      this.log.warn(
+        { commandId: cmd.commandId, tokenId: cmd.tokenId },
+        "order rejected — market inactive",
+      );
       await this.deps.bus.publish("OrderRejected", {
         commandId: cmd.commandId,
         clientOrderId: cmd.clientOrderId,
@@ -267,10 +273,7 @@ export class ExecutionModule implements RuntimeModule {
     const order = this.buildOrder(cmd, "open", result.orderId!);
     this.deps.orderRepo.save(order);
 
-    this.log.info(
-      { commandId: cmd.commandId, orderId: result.orderId },
-      "order placed",
-    );
+    this.log.info({ commandId: cmd.commandId, orderId: result.orderId }, "order placed");
 
     await this.deps.bus.publish("OrderPlaced", {
       commandId: cmd.commandId,

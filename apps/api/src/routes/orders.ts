@@ -71,19 +71,21 @@ export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
       .prepare(`SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT ?`)
       .all(...params) as Record<string, unknown>[];
 
-    const nextCursor = rows.length === limit
-      ? (rows[rows.length - 1]!.created_at as string)
-      : null;
+    const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.created_at as string) : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(opts.db, tokenIds);
 
-    return ok({ items: rows.map((r) => toDto(r, getMetaOrEmpty(metaMap, r.token_id as string))), nextCursor });
+    return ok({
+      items: rows.map((r) => toDto(r, getMetaOrEmpty(metaMap, r.token_id as string))),
+      nextCursor,
+    });
   });
 
   app.get<{ Params: { orderId: string } }>("/orders/:orderId", async (request) => {
     const row = getById.get(request.params.orderId) as Record<string, unknown> | undefined;
-    if (!row) throw new ApiError(404, `order ${request.params.orderId} not found`, "ORDER_NOT_FOUND");
+    if (!row)
+      throw new ApiError(404, `order ${request.params.orderId} not found`, "ORDER_NOT_FOUND");
     const metaMap = buildMarketMetaMap(opts.db, [row.token_id as string]);
     return ok(toDto(row, getMetaOrEmpty(metaMap, row.token_id as string)));
   });

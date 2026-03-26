@@ -17,9 +17,10 @@ export function RiskQuarantine() {
     cursor,
   });
 
-  const attentionFamilies = families?.filter(
-    (f) => f.state?.runtimeMode === "quarantine" || f.state?.runtimeMode === "reduce-only"
-  ) ?? [];
+  const attentionFamilies =
+    families?.filter(
+      (f) => f.state?.runtimeMode === "quarantine" || f.state?.runtimeMode === "reduce-only",
+    ) ?? [];
 
   return (
     <div className="page">
@@ -31,16 +32,28 @@ export function RiskQuarantine() {
             {attentionFamilies.map((f) => {
               const mode = f.state?.runtimeMode ?? "unknown";
               return (
-                <div key={f.familyId} className={`card ${mode === "quarantine" ? "card-accent-red" : "card-accent-orange"}`}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div
+                  key={f.familyId}
+                  className={`card ${mode === "quarantine" ? "card-accent-red" : "card-accent-orange"}`}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
                     <span style={{ fontWeight: 700 }}>{f.familyKey}</span>
                     <Badge value={mode} type="mode" />
                   </div>
                   {f.state?.quarantineReason && (
-                    <div className="value-sm" style={{ marginTop: 4 }}>Reason: {f.state.quarantineReason}</div>
+                    <div className="value-sm" style={{ marginTop: 4 }}>
+                      Reason: {f.state.quarantineReason}
+                    </div>
                   )}
                   <div className="value-sm">
-                    ${(f.state?.openValueUsdc ?? 0).toFixed(2)} open &middot; {f.state?.openPositionCount ?? 0} positions
+                    ${(f.state?.openValueUsdc ?? 0).toFixed(2)} open &middot;{" "}
+                    {f.state?.openPositionCount ?? 0} positions
                   </div>
                   <div style={{ marginTop: 8 }}>
                     <FamilyActions familyId={f.familyId} mode={mode} />
@@ -55,11 +68,27 @@ export function RiskQuarantine() {
       {/* Recent Risk Events */}
       <div className="page-title">Recent Risk Events</div>
       <div className="filter-bar">
-        <select value={eventFamily} onChange={(e) => { setEventFamily(e.target.value); setCursor(undefined); }}>
+        <select
+          value={eventFamily}
+          onChange={(e) => {
+            setEventFamily(e.target.value);
+            setCursor(undefined);
+          }}
+        >
           <option value="">All families</option>
-          {families?.map((f) => <option key={f.familyId} value={f.familyId}>{f.familyKey}</option>)}
+          {families?.map((f) => (
+            <option key={f.familyId} value={f.familyId}>
+              {f.familyKey}
+            </option>
+          ))}
         </select>
-        <select value={eventType} onChange={(e) => { setEventType(e.target.value); setCursor(undefined); }}>
+        <select
+          value={eventType}
+          onChange={(e) => {
+            setEventType(e.target.value);
+            setCursor(undefined);
+          }}
+        >
           <option value="">All types</option>
           <option value="family_quarantined">Quarantined</option>
           <option value="max_exposure_breach">Exposure Breach</option>
@@ -69,14 +98,24 @@ export function RiskQuarantine() {
       </div>
       <table>
         <thead>
-          <tr><th>Time</th><th>Type</th><th>Severity</th><th>Family</th><th>Summary</th></tr>
+          <tr>
+            <th>Time</th>
+            <th>Type</th>
+            <th>Severity</th>
+            <th>Family</th>
+            <th>Summary</th>
+          </tr>
         </thead>
         <tbody>
           {riskEvents?.items.map((e) => (
             <tr key={e.id}>
-              <td style={{ fontSize: 11, color: "var(--text-dim)" }}>{new Date(e.createdAt).toLocaleTimeString()}</td>
+              <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                {new Date(e.createdAt).toLocaleTimeString()}
+              </td>
               <td>{e.eventType}</td>
-              <td><Badge value={e.severity} type="severity" /></td>
+              <td>
+                <Badge value={e.severity} type="severity" />
+              </td>
               <td>{e.familyId ?? "\u2014"}</td>
               <td>{e.summary}</td>
             </tr>

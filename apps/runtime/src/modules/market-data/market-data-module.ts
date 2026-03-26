@@ -116,10 +116,8 @@ export class MarketDataModule implements RuntimeModule {
         const pricing = pricingMap.get(String(market.tokenId));
         const bestBid = pricing?.bestBid ?? null;
         const bestAsk = pricing?.bestAsk ?? null;
-        const midPrice =
-          bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : null;
-        const spread =
-          bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
+        const midPrice = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : null;
+        const spread = bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
 
         markets.push({
           tokenId: market.tokenId,
