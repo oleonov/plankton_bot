@@ -1748,6 +1748,7 @@ describe("RiskInventoryModule", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toContain("tail cost");
     expect(rejected[0].reason).toContain("> cap");
+    expect(rejected[0].reason).toContain("50");
     expect(rejected[0].reason).not.toContain("ratio");
 
     await mod.stop();
@@ -1773,6 +1774,7 @@ describe("RiskInventoryModule", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toContain("tail/pnl ratio");
     expect(rejected[0].reason).toContain("realized");
+    expect(rejected[0].reason).toContain("1.30");
 
     await mod.stop();
   });
