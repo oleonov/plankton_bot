@@ -20,6 +20,7 @@ export const pnlSeriesRoutes: FastifyPluginAsync<PnlSeriesOpts> = async (app, op
     const days = Math.min(Math.max(Number(request.query.days) || 14, 1), 90);
 
     const since = new Date();
+    since.setUTCHours(0, 0, 0, 0);
     since.setDate(since.getDate() - days);
     const sinceStr = since.toISOString();
 
