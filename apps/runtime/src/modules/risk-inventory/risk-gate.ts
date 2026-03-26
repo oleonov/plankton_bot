@@ -219,9 +219,17 @@ export class RiskGateImpl implements RiskGate {
     );
 
     if (derivedMode === "reduce-only") {
-      rejected.push(
-        `entry blocked — family in derived reduce-only (tail cost ${projectedTailCost.toFixed(2)} breaches cap)`,
-      );
+      const isAbsoluteCap = projectedTailCost > tail.tailQuarantineThresholdUsdc;
+      if (isAbsoluteCap) {
+        rejected.push(
+          `entry blocked — family in derived reduce-only (tail cost ${projectedTailCost.toFixed(2)} > cap ${tail.tailQuarantineThresholdUsdc})`,
+        );
+      } else {
+        const realizedPnl = familyState.tailAdjustedPnlLive + familyState.currentTailCostUsdc;
+        rejected.push(
+          `entry blocked — family in derived reduce-only (tail/pnl ratio ${(projectedTailCost / realizedPnl).toFixed(2)} > ${tail.tailQuarantineThresholdRatio}, tail ${projectedTailCost.toFixed(2)}, realized ${realizedPnl.toFixed(2)})`,
+        );
+      }
       return this.decision(signal, false, rejected, passed);
     }
 

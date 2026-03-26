@@ -1722,6 +1722,61 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  // ─── Rejection message distinguishes absolute cap vs ratio ────────
+
+  it("rejection message distinguishes absolute cap breach from ratio breach", async () => {
+    // Absolute cap breach: projectedTailCost > tailQuarantineThresholdUsdc
+    // currentTail=40, signal=15, projected=55, threshold=50 → absolute cap breach
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 100, currentTailCostUsdc: 40 }),
+    );
+    rulesProvider = createMockRulesProvider(
+      makeRuleBundle({ tailQuarantineThresholdUsdc: 50 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ suggestedSizeUsdc: 15 }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("tail cost");
+    expect(rejected[0].reason).toContain("> cap");
+    expect(rejected[0].reason).not.toContain("ratio");
+
+    await mod.stop();
+  });
+
+  it("rejection message for ratio breach includes ratio value and realized PnL", async () => {
+    // Ratio breach: currentTail=8, signal=5, projected=13, realized=10+8=18? No...
+    // tailAdjustedPnlLive=2, currentTailCostUsdc=8
+    // realized = 2 + 8 = 10, projected = 8 + 5 = 13, ratio = 13/10 = 1.3 > 0.5
+    familyStateRepo = createMockFamilyStateRepo(
+      makeFamilyState({ tailAdjustedPnlLive: 2, currentTailCostUsdc: 8 }),
+    );
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("tail/pnl ratio");
+    expect(rejected[0].reason).toContain("realized");
+
+    await mod.stop();
+  });
+
   // ─── Per-family in-flight limiter (B2.2) ──────────────────────────
 
   describe("per-family in-flight limiter", () => {
@@ -1874,5 +1929,25 @@ describe("RiskInventoryModule", () => {
 
       await mod.stop();
     });
+  });
+});
+
+// ─── Normalization tests ──────────────────────────────────────────────
+
+import { normalizeReasonCode } from "../risk-event-codes.js";
+
+describe("risk event code normalization for new rejection messages", () => {
+  it("normalizes absolute cap rejection to derived_reduce_only", () => {
+    const code = normalizeReasonCode(
+      "entry blocked — family in derived reduce-only (tail cost 55.00 > cap 50)",
+    );
+    expect(code).toBe("derived_reduce_only");
+  });
+
+  it("normalizes ratio rejection to same derived_reduce_only code", () => {
+    const code = normalizeReasonCode(
+      "entry blocked — family in derived reduce-only (tail/pnl ratio 1.30 > 0.5, tail 13.00, realized 10.00)",
+    );
+    expect(code).toBe("derived_reduce_only");
   });
 });
