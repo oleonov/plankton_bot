@@ -13,7 +13,6 @@
 import type {
   PositionRepository,
   MarketRepository,
-  FamilyStateRepository,
   InventoryLotRepository,
   FamilyIdentity,
   Position,
@@ -24,7 +23,6 @@ import type { Logger } from "./logger.js";
 export interface UniverseMigrationDeps {
   positionRepo: PositionRepository;
   marketRepo: MarketRepository;
-  familyStateRepo: FamilyStateRepository;
   lotRepo: InventoryLotRepository;
   families: FamilyIdentity[];
   log: Logger;
@@ -36,7 +34,7 @@ export interface MigrationResult {
 }
 
 export function migrateOrphanedPositions(deps: UniverseMigrationDeps): MigrationResult {
-  const { positionRepo, marketRepo, familyStateRepo, families, log } = deps;
+  const { positionRepo, marketRepo, families, log } = deps;
   const now = new Date();
   const nowIso = now.toISOString();
   const closed: string[] = [];
@@ -100,38 +98,6 @@ export function migrateOrphanedPositions(deps: UniverseMigrationDeps): Migration
       }
     }
 
-    // Recompute family state after closing orphans
-    if (closed.length > 0) {
-      const remaining = positionRepo.findByFamily(family.familyId);
-      let openValueUsdc = 0;
-      let openPositionCount = 0;
-      let openDustCount = 0;
-      const activeTokens = new Set<string>();
-
-      for (const p of remaining) {
-        if (p.status === "open") {
-          openPositionCount++;
-          openValueUsdc += p.costBasisUsdc;
-          activeTokens.add(String(p.tokenId));
-        } else if (p.status === "dust") {
-          openDustCount++;
-          openValueUsdc += p.costBasisUsdc;
-          activeTokens.add(String(p.tokenId));
-        }
-      }
-
-      const existing = familyStateRepo.get(family.familyId);
-      if (existing) {
-        familyStateRepo.save({
-          ...existing,
-          openValueUsdc,
-          openPositionCount,
-          openDustCount,
-          activeMarketCount: activeTokens.size,
-          updatedAt: nowIso,
-        });
-      }
-    }
   }
 
   if (closed.length > 0) {

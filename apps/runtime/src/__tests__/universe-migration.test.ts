@@ -2,10 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 import type {
   PositionRepository,
   MarketRepository,
-  FamilyStateRepository,
   InventoryLotRepository,
   FamilyIdentity,
-  FamilyState,
   Position,
   Market,
   TokenId,
@@ -84,26 +82,6 @@ function makeMarket(overrides?: Partial<Market>): Market {
   };
 }
 
-function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
-  return {
-    familyId: createFamilyId("fam-btc"),
-    runtimeMode: "active",
-    openValueUsdc: 75,
-    openPositionCount: 10,
-    openDustCount: 0,
-    activeMarketCount: 10,
-    currentTailCostUsdc: 0,
-    tailAdjustedPnlLive: 0,
-    lastEntryTs: null,
-    lastExitTs: null,
-    quarantineReason: null,
-    effectiveMode: null,
-    derivedModeReason: null,
-    updatedAt: "2026-03-14T00:00:00Z",
-    ...overrides,
-  };
-}
-
 function makeLotRepo(openLots: { positionId: string; lots: any[] }[] = []): InventoryLotRepository {
   return {
     save: vi.fn(),
@@ -115,6 +93,19 @@ function makeLotRepo(openLots: { positionId: string; lots: any[] }[] = []): Inve
     consumeFifo: vi.fn().mockReturnValue([]),
     settleAll: vi.fn(),
   };
+}
+
+function makeMarketRepo(findByTokenId: Market | null = null): MarketRepository {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue(findByTokenId),
+    findByTokenIds: vi.fn().mockReturnValue([]),
+    findByConditionId: vi.fn().mockReturnValue([]),
+    findActive: vi.fn().mockReturnValue([]),
+    findByFamily: vi.fn().mockReturnValue([]),
+    findAll: vi.fn().mockReturnValue([]),
+    deactivate: vi.fn(),
+  } satisfies MarketRepository;
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────
@@ -131,43 +122,20 @@ describe("migrateOrphanedPositions", () => {
     });
 
     const saved: Position[] = [];
-    const findByFamilyCalls: number[] = [];
     const positionRepo: PositionRepository = {
       save: vi.fn((p: Position) => {
         saved.push(p);
       }),
       findByTokenId: vi.fn().mockReturnValue(null),
-      findByFamily: vi.fn().mockImplementation(() => {
-        findByFamilyCalls.push(1);
-        // First call returns the orphan, second call (recompute) returns empty
-        return findByFamilyCalls.length === 1 ? [oldPosition] : [];
-      }),
+      findByFamily: vi.fn().mockReturnValue([oldPosition]),
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
     };
-    const marketRepo = {
-      save: vi.fn(),
-      findByTokenId: vi.fn().mockReturnValue(oldMarket),
-      findByTokenIds: vi.fn().mockReturnValue([]),
-      findByConditionId: vi.fn().mockReturnValue([]),
-      findActive: vi.fn().mockReturnValue([]),
-      findByFamily: vi.fn().mockReturnValue([]),
-      findAll: vi.fn().mockReturnValue([]),
-      deactivate: vi.fn(),
-    } satisfies MarketRepository;
-    const familyStateRepo = {
-      get: vi.fn().mockReturnValue(makeFamilyState()),
-      save: vi.fn(),
-      findAll: vi.fn().mockReturnValue([]),
-      findByMode: vi.fn().mockReturnValue([]),
-      findQuarantined: vi.fn().mockReturnValue([]),
-    } satisfies FamilyStateRepository;
 
     const result = migrateOrphanedPositions({
       positionRepo,
-      marketRepo,
-      familyStateRepo,
+      marketRepo: makeMarketRepo(oldMarket),
       lotRepo: makeLotRepo(),
       families: [makeFamily({ slugPattern: "bitcoin-above-*" })],
       log: silentLog,
@@ -176,10 +144,6 @@ describe("migrateOrphanedPositions", () => {
     expect(result.closedCount).toBe(1);
     expect(saved[0]!.status).toBe("closed");
     expect(saved[0]!.closedAt).toBeTruthy();
-    // Family state should be recomputed with zeroed caps
-    expect(familyStateRepo.save).toHaveBeenCalledWith(
-      expect.objectContaining({ openValueUsdc: 0, openPositionCount: 0 }),
-    );
   });
 
   it("closes positions whose market has long-dated endDate for daily horizon", () => {
@@ -198,28 +162,10 @@ describe("migrateOrphanedPositions", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
     };
-    const marketRepo = {
-      save: vi.fn(),
-      findByTokenId: vi.fn().mockReturnValue(market),
-      findByTokenIds: vi.fn().mockReturnValue([]),
-      findByConditionId: vi.fn().mockReturnValue([]),
-      findActive: vi.fn().mockReturnValue([]),
-      findByFamily: vi.fn().mockReturnValue([]),
-      findAll: vi.fn().mockReturnValue([]),
-      deactivate: vi.fn(),
-    } satisfies MarketRepository;
-    const familyStateRepo = {
-      get: vi.fn().mockReturnValue(makeFamilyState()),
-      save: vi.fn(),
-      findAll: vi.fn().mockReturnValue([]),
-      findByMode: vi.fn().mockReturnValue([]),
-      findQuarantined: vi.fn().mockReturnValue([]),
-    } satisfies FamilyStateRepository;
 
     const result = migrateOrphanedPositions({
       positionRepo,
-      marketRepo,
-      familyStateRepo,
+      marketRepo: makeMarketRepo(market),
       lotRepo: makeLotRepo(),
       families: [makeFamily({ horizon: "daily" })],
       log: silentLog,
@@ -245,28 +191,10 @@ describe("migrateOrphanedPositions", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
     };
-    const marketRepo = {
-      save: vi.fn(),
-      findByTokenId: vi.fn().mockReturnValue(market),
-      findByTokenIds: vi.fn().mockReturnValue([]),
-      findByConditionId: vi.fn().mockReturnValue([]),
-      findActive: vi.fn().mockReturnValue([]),
-      findByFamily: vi.fn().mockReturnValue([]),
-      findAll: vi.fn().mockReturnValue([]),
-      deactivate: vi.fn(),
-    } satisfies MarketRepository;
-    const familyStateRepo = {
-      get: vi.fn().mockReturnValue(makeFamilyState()),
-      save: vi.fn(),
-      findAll: vi.fn().mockReturnValue([]),
-      findByMode: vi.fn().mockReturnValue([]),
-      findQuarantined: vi.fn().mockReturnValue([]),
-    } satisfies FamilyStateRepository;
 
     const result = migrateOrphanedPositions({
       positionRepo,
-      marketRepo,
-      familyStateRepo,
+      marketRepo: makeMarketRepo(market),
       lotRepo: makeLotRepo(),
       families: [makeFamily()],
       log: silentLog,
@@ -287,28 +215,10 @@ describe("migrateOrphanedPositions", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
     };
-    const marketRepo = {
-      save: vi.fn(),
-      findByTokenId: vi.fn().mockReturnValue(null), // market not found
-      findByTokenIds: vi.fn().mockReturnValue([]),
-      findByConditionId: vi.fn().mockReturnValue([]),
-      findActive: vi.fn().mockReturnValue([]),
-      findByFamily: vi.fn().mockReturnValue([]),
-      findAll: vi.fn().mockReturnValue([]),
-      deactivate: vi.fn(),
-    } satisfies MarketRepository;
-    const familyStateRepo = {
-      get: vi.fn().mockReturnValue(makeFamilyState()),
-      save: vi.fn(),
-      findAll: vi.fn().mockReturnValue([]),
-      findByMode: vi.fn().mockReturnValue([]),
-      findQuarantined: vi.fn().mockReturnValue([]),
-    } satisfies FamilyStateRepository;
 
     const result = migrateOrphanedPositions({
       positionRepo,
-      marketRepo,
-      familyStateRepo,
+      marketRepo: makeMarketRepo(null),
       lotRepo: makeLotRepo(),
       families: [makeFamily()],
       log: silentLog,
@@ -328,28 +238,10 @@ describe("migrateOrphanedPositions", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
     };
-    const marketRepo = {
-      save: vi.fn(),
-      findByTokenId: vi.fn().mockReturnValue(null),
-      findByTokenIds: vi.fn().mockReturnValue([]),
-      findByConditionId: vi.fn().mockReturnValue([]),
-      findActive: vi.fn().mockReturnValue([]),
-      findByFamily: vi.fn().mockReturnValue([]),
-      findAll: vi.fn().mockReturnValue([]),
-      deactivate: vi.fn(),
-    } satisfies MarketRepository;
-    const familyStateRepo = {
-      get: vi.fn().mockReturnValue(null),
-      save: vi.fn(),
-      findAll: vi.fn().mockReturnValue([]),
-      findByMode: vi.fn().mockReturnValue([]),
-      findQuarantined: vi.fn().mockReturnValue([]),
-    } satisfies FamilyStateRepository;
 
     const result = migrateOrphanedPositions({
       positionRepo,
-      marketRepo,
-      familyStateRepo,
+      marketRepo: makeMarketRepo(null),
       lotRepo: makeLotRepo(),
       families: [makeFamily()],
       log: silentLog,
@@ -358,8 +250,7 @@ describe("migrateOrphanedPositions", () => {
     expect(result.closedCount).toBe(0);
   });
 
-  it("recomputes family state after closing orphans", () => {
-    // Two positions: one orphaned, one valid
+  it("returns closedPositionIds for caller to trigger recompute", () => {
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     const orphan = makePosition({
@@ -384,16 +275,10 @@ describe("migrateOrphanedPositions", () => {
       endDate: tomorrow.toISOString(),
     });
 
-    // After closing orphan, findByFamily returns only valid
-    const findByFamilyCalls: number[] = [];
     const positionRepo: PositionRepository = {
       save: vi.fn(),
       findByTokenId: vi.fn().mockReturnValue(null),
-      findByFamily: vi.fn().mockImplementation(() => {
-        findByFamilyCalls.push(1);
-        // First call returns both, second call (recompute) returns only valid
-        return findByFamilyCalls.length === 1 ? [orphan, valid] : [valid];
-      }),
+      findByFamily: vi.fn().mockReturnValue([orphan, valid]),
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
@@ -413,36 +298,21 @@ describe("migrateOrphanedPositions", () => {
       deactivate: vi.fn(),
     } satisfies MarketRepository;
 
-    const savedStates: FamilyState[] = [];
-    const familyStateRepo = {
-      get: vi.fn().mockReturnValue(makeFamilyState()),
-      save: vi.fn((s: FamilyState) => {
-        savedStates.push(s);
-      }),
-      findAll: vi.fn().mockReturnValue([]),
-      findByMode: vi.fn().mockReturnValue([]),
-      findQuarantined: vi.fn().mockReturnValue([]),
-    } satisfies FamilyStateRepository;
-
-    migrateOrphanedPositions({
+    const result = migrateOrphanedPositions({
       positionRepo,
       marketRepo,
-      familyStateRepo,
       lotRepo: makeLotRepo(),
       families: [makeFamily()],
       log: silentLog,
     });
 
-    // State should reflect only the remaining valid position
-    expect(savedStates.length).toBe(1);
-    expect(savedStates[0]!.openValueUsdc).toBe(5);
-    expect(savedStates[0]!.openPositionCount).toBe(1);
-    expect(savedStates[0]!.activeMarketCount).toBe(1);
+    // Migration should close the orphan and return its ID for the caller
+    // to trigger a full recompute via FamilyExposureCalculator
+    expect(result.closedCount).toBe(1);
+    expect(result.closedPositionIds).toContain("pos-orphan");
   });
 
   it("does NOT close position with non-zero size or open inventory lots — logs warning instead", () => {
-    // Position whose market doesn't match slug pattern (orphaned),
-    // but has open inventory lots — should NOT be closed
     const pos = makePosition({
       positionId: createPositionId("pos-with-lots"),
       tokenId: createTokenId("tok-orphan"),
@@ -461,23 +331,6 @@ describe("migrateOrphanedPositions", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
     };
-    const marketRepo = {
-      save: vi.fn(),
-      findByTokenId: vi.fn().mockReturnValue(market),
-      findByTokenIds: vi.fn().mockReturnValue([]),
-      findByConditionId: vi.fn().mockReturnValue([]),
-      findActive: vi.fn().mockReturnValue([]),
-      findByFamily: vi.fn().mockReturnValue([]),
-      findAll: vi.fn().mockReturnValue([]),
-      deactivate: vi.fn(),
-    } satisfies MarketRepository;
-    const familyStateRepo = {
-      get: vi.fn().mockReturnValue(makeFamilyState()),
-      save: vi.fn(),
-      findAll: vi.fn().mockReturnValue([]),
-      findByMode: vi.fn().mockReturnValue([]),
-      findQuarantined: vi.fn().mockReturnValue([]),
-    } satisfies FamilyStateRepository;
     const lotRepo = makeLotRepo([
       {
         positionId: "pos-with-lots",
@@ -496,8 +349,7 @@ describe("migrateOrphanedPositions", () => {
 
     const result = migrateOrphanedPositions({
       positionRepo,
-      marketRepo,
-      familyStateRepo,
+      marketRepo: makeMarketRepo(market),
       lotRepo,
       families: [makeFamily({ slugPattern: "bitcoin-above-*" })],
       log,
@@ -525,23 +377,6 @@ describe("migrateOrphanedPositions", () => {
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
     };
-    const marketRepo = {
-      save: vi.fn(),
-      findByTokenId: vi.fn().mockReturnValue(null),
-      findByTokenIds: vi.fn().mockReturnValue([]),
-      findByConditionId: vi.fn().mockReturnValue([]),
-      findActive: vi.fn().mockReturnValue([]),
-      findByFamily: vi.fn().mockReturnValue([]),
-      findAll: vi.fn().mockReturnValue([]),
-      deactivate: vi.fn(),
-    } satisfies MarketRepository;
-    const familyStateRepo = {
-      get: vi.fn().mockReturnValue(makeFamilyState()),
-      save: vi.fn(),
-      findAll: vi.fn().mockReturnValue([]),
-      findByMode: vi.fn().mockReturnValue([]),
-      findQuarantined: vi.fn().mockReturnValue([]),
-    } satisfies FamilyStateRepository;
     const lotRepo = makeLotRepo([
       {
         positionId: "pos-no-market",
@@ -560,8 +395,7 @@ describe("migrateOrphanedPositions", () => {
 
     const result = migrateOrphanedPositions({
       positionRepo,
-      marketRepo,
-      familyStateRepo,
+      marketRepo: makeMarketRepo(null),
       lotRepo,
       families: [makeFamily()],
       log,

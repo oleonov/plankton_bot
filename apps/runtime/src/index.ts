@@ -200,7 +200,6 @@ async function main(): Promise<void> {
   const migration = migrateOrphanedPositions({
     positionRepo: repos.position,
     marketRepo: repos.market,
-    familyStateRepo: repos.familyState,
     lotRepo: repos.inventoryLot,
     families,
     log,
@@ -407,6 +406,17 @@ async function main(): Promise<void> {
     log,
     rulesProvider,
   );
+
+  // Recompute family state after universe migration — the migration only patches
+  // position status, doesn't recompute tail cost or tail-adjusted PnL. Recomputing
+  // all families is cheap at startup and ensures no stale state persists.
+  if (migration.closedCount > 0) {
+    for (const fam of families) {
+      exposureCalculator.recompute(fam.familyId, false);
+    }
+    log.info({ families: families.length }, "family state recomputed after universe migration");
+  }
+
   const resolutionDetector = new ResolutionDetector(
     repos.position,
     repos.market,
