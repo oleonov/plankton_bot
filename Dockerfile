@@ -53,7 +53,9 @@ RUN pnpm run build
 # ─── Runner ───────────────────────────────────────────────────────────────────
 FROM base AS runner
 
+ARG GIT_SHA=unknown
 ENV NODE_ENV=production
+LABEL org.opencontainers.image.revision="$GIT_SHA"
 
 # Install wget for healthcheck
 RUN apt-get update && apt-get install -y --no-install-recommends wget && \
@@ -101,6 +103,9 @@ COPY --from=builder /app/config ./config
 
 # Note: DB migrations (.sql files) are already in packages/db/dist/migrations/
 # because the db package build script copies them there (see packages/db/package.json).
+
+# Write deploy SHA for traceability (readable via /api/v1/health or cat /app/GIT_SHA)
+RUN echo "$GIT_SHA" > /app/GIT_SHA
 
 # Create data directory for SQLite (will be volume-mounted)
 RUN mkdir -p /app/apps/runtime/data && chown plankton:plankton /app/apps/runtime/data

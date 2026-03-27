@@ -24,8 +24,13 @@ if [ ! -f ".env.production" ]; then
 fi
 
 # Step 1: Build Docker image locally
-echo -e "${GREEN}[1/5] Building Docker image locally (linux/amd64)...${NC}"
-docker build --platform linux/amd64 -t ${IMAGE_NAME}:${IMAGE_TAG} .
+GIT_SHA=$(git rev-parse --short HEAD)
+if [ -n "$(git status --porcelain)" ]; then
+  GIT_SHA="${GIT_SHA}-dirty"
+  echo -e "${YELLOW}WARNING: working tree is dirty — SHA will be marked as ${GIT_SHA}${NC}"
+fi
+echo -e "${GREEN}[1/5] Building Docker image locally (linux/amd64, sha: ${GIT_SHA})...${NC}"
+docker build --platform linux/amd64 --build-arg GIT_SHA="${GIT_SHA}" -t ${IMAGE_NAME}:${IMAGE_TAG} .
 
 # Step 2: Save image to archive
 echo -e "\n${GREEN}[2/5] Saving image to archive...${NC}"
