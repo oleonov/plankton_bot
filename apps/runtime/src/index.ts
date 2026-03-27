@@ -201,6 +201,7 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     marketRepo: repos.market,
     familyStateRepo: repos.familyState,
+    lotRepo: repos.inventoryLot,
     families,
     log,
   });

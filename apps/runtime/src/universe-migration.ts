@@ -14,6 +14,7 @@ import type {
   PositionRepository,
   MarketRepository,
   FamilyStateRepository,
+  InventoryLotRepository,
   FamilyIdentity,
   Position,
 } from "@plankton/domain";
@@ -24,6 +25,7 @@ export interface UniverseMigrationDeps {
   positionRepo: PositionRepository;
   marketRepo: MarketRepository;
   familyStateRepo: FamilyStateRepository;
+  lotRepo: InventoryLotRepository;
   families: FamilyIdentity[];
   log: Logger;
 }
@@ -55,8 +57,15 @@ export function migrateOrphanedPositions(deps: UniverseMigrationDeps): Migration
     for (const pos of openPositions) {
       const market = marketRepo.findByTokenId(pos.tokenId);
       if (!market) {
-        closePosition(positionRepo, pos, nowIso);
-        closed.push(String(pos.positionId));
+        if (needsSettlementBeforeClose(deps.lotRepo, pos)) {
+          log.warn(
+            { positionId: String(pos.positionId), familyId: String(pos.familyId) },
+            "skipping close — no market found but position has open lots, needs recovery",
+          );
+        } else {
+          closePosition(positionRepo, pos, nowIso);
+          closed.push(String(pos.positionId));
+        }
         continue;
       }
 
@@ -64,19 +73,30 @@ export function migrateOrphanedPositions(deps: UniverseMigrationDeps): Migration
       const horizonMatches = matchesHorizon(family.horizon, market.endDate, now);
 
       if (!slugMatches || !horizonMatches) {
-        log.info(
-          {
-            positionId: String(pos.positionId),
-            tokenId: String(pos.tokenId),
-            slug: market.slug,
-            familyId: String(family.familyId),
-            slugMatches,
-            horizonMatches,
-          },
-          "closing orphaned position — market no longer in family universe",
-        );
-        closePosition(positionRepo, pos, nowIso);
-        closed.push(String(pos.positionId));
+        if (needsSettlementBeforeClose(deps.lotRepo, pos)) {
+          log.warn(
+            {
+              positionId: String(pos.positionId),
+              familyId: String(pos.familyId),
+              slug: market.slug,
+            },
+            "skipping close — market no longer in universe but position has open lots, needs recovery",
+          );
+        } else {
+          log.info(
+            {
+              positionId: String(pos.positionId),
+              tokenId: String(pos.tokenId),
+              slug: market.slug,
+              familyId: String(family.familyId),
+              slugMatches,
+              horizonMatches,
+            },
+            "closing orphaned position — market no longer in family universe",
+          );
+          closePosition(positionRepo, pos, nowIso);
+          closed.push(String(pos.positionId));
+        }
       }
     }
 
@@ -122,6 +142,12 @@ export function migrateOrphanedPositions(deps: UniverseMigrationDeps): Migration
   }
 
   return { closedCount: closed.length, closedPositionIds: closed };
+}
+
+function needsSettlementBeforeClose(lotRepo: InventoryLotRepository, pos: Position): boolean {
+  if (pos.size > 0) return true;
+  const lots = lotRepo.findOpen(pos.positionId);
+  return lots.length > 0;
 }
 
 function closePosition(repo: PositionRepository, pos: Position, nowIso: string): void {

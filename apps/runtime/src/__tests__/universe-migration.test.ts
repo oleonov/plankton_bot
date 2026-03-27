@@ -3,11 +3,13 @@ import type {
   PositionRepository,
   MarketRepository,
   FamilyStateRepository,
+  InventoryLotRepository,
   FamilyIdentity,
   FamilyState,
   Position,
   Market,
   TokenId,
+  PositionId,
 } from "@plankton/domain";
 import { createFamilyId, createTokenId, createPositionId } from "@plankton/domain";
 import { migrateOrphanedPositions } from "../universe-migration.js";
@@ -102,12 +104,26 @@ function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
   };
 }
 
+function makeLotRepo(openLots: { positionId: string; lots: any[] }[] = []): InventoryLotRepository {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue([]),
+    findOpen: vi.fn().mockImplementation((pid: PositionId) => {
+      const entry = openLots.find((e) => e.positionId === String(pid));
+      return entry ? entry.lots : [];
+    }),
+    consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
+  };
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────
 
 describe("migrateOrphanedPositions", () => {
   it("closes positions whose market slug no longer matches family pattern", () => {
     const oldPosition = makePosition({
       tokenId: createTokenId("tok-old"),
+      size: 0,
     });
     const oldMarket = makeMarket({
       tokenId: createTokenId("tok-old"),
@@ -152,6 +168,7 @@ describe("migrateOrphanedPositions", () => {
       positionRepo,
       marketRepo,
       familyStateRepo,
+      lotRepo: makeLotRepo(),
       families: [makeFamily({ slugPattern: "bitcoin-above-*" })],
       log: silentLog,
     });
@@ -167,7 +184,7 @@ describe("migrateOrphanedPositions", () => {
 
   it("closes positions whose market has long-dated endDate for daily horizon", () => {
     const longEndDate = new Date(Date.now() + 270 * 24 * 60 * 60 * 1000).toISOString();
-    const pos = makePosition();
+    const pos = makePosition({ size: 0 });
     const market = makeMarket({
       slug: "bitcoin-above-190k",
       endDate: longEndDate,
@@ -203,6 +220,7 @@ describe("migrateOrphanedPositions", () => {
       positionRepo,
       marketRepo,
       familyStateRepo,
+      lotRepo: makeLotRepo(),
       families: [makeFamily({ horizon: "daily" })],
       log: silentLog,
     });
@@ -249,6 +267,7 @@ describe("migrateOrphanedPositions", () => {
       positionRepo,
       marketRepo,
       familyStateRepo,
+      lotRepo: makeLotRepo(),
       families: [makeFamily()],
       log: silentLog,
     });
@@ -258,7 +277,7 @@ describe("migrateOrphanedPositions", () => {
   });
 
   it("closes positions when market not found in DB", () => {
-    const pos = makePosition();
+    const pos = makePosition({ size: 0 });
 
     const positionRepo: PositionRepository = {
       save: vi.fn(),
@@ -290,6 +309,7 @@ describe("migrateOrphanedPositions", () => {
       positionRepo,
       marketRepo,
       familyStateRepo,
+      lotRepo: makeLotRepo(),
       families: [makeFamily()],
       log: silentLog,
     });
@@ -330,6 +350,7 @@ describe("migrateOrphanedPositions", () => {
       positionRepo,
       marketRepo,
       familyStateRepo,
+      lotRepo: makeLotRepo(),
       families: [makeFamily()],
       log: silentLog,
     });
@@ -344,10 +365,12 @@ describe("migrateOrphanedPositions", () => {
     const orphan = makePosition({
       positionId: createPositionId("pos-orphan"),
       tokenId: createTokenId("tok-orphan"),
+      size: 0,
     });
     const valid = makePosition({
       positionId: createPositionId("pos-valid"),
       tokenId: createTokenId("tok-valid"),
+      size: 0,
       costBasisUsdc: 5,
     });
 
@@ -405,6 +428,7 @@ describe("migrateOrphanedPositions", () => {
       positionRepo,
       marketRepo,
       familyStateRepo,
+      lotRepo: makeLotRepo(),
       families: [makeFamily()],
       log: silentLog,
     });
@@ -414,5 +438,140 @@ describe("migrateOrphanedPositions", () => {
     expect(savedStates[0]!.openValueUsdc).toBe(5);
     expect(savedStates[0]!.openPositionCount).toBe(1);
     expect(savedStates[0]!.activeMarketCount).toBe(1);
+  });
+
+  it("does NOT close position with non-zero size or open inventory lots — logs warning instead", () => {
+    // Position whose market doesn't match slug pattern (orphaned),
+    // but has open inventory lots — should NOT be closed
+    const pos = makePosition({
+      positionId: createPositionId("pos-with-lots"),
+      tokenId: createTokenId("tok-orphan"),
+      size: 50,
+    });
+    const market = makeMarket({
+      tokenId: createTokenId("tok-orphan"),
+      slug: "will-bitcoin-reach-200k-by-december",
+    });
+
+    const positionRepo: PositionRepository = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findByFamily: vi.fn().mockReturnValue([pos]),
+      findOpen: vi.fn().mockReturnValue([]),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+    };
+    const marketRepo = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(market),
+      findByTokenIds: vi.fn().mockReturnValue([]),
+      findByConditionId: vi.fn().mockReturnValue([]),
+      findActive: vi.fn().mockReturnValue([]),
+      findByFamily: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      deactivate: vi.fn(),
+    } satisfies MarketRepository;
+    const familyStateRepo = {
+      get: vi.fn().mockReturnValue(makeFamilyState()),
+      save: vi.fn(),
+      findAll: vi.fn().mockReturnValue([]),
+      findByMode: vi.fn().mockReturnValue([]),
+      findQuarantined: vi.fn().mockReturnValue([]),
+    } satisfies FamilyStateRepository;
+    const lotRepo = makeLotRepo([
+      {
+        positionId: "pos-with-lots",
+        lots: [{ lotId: "lot-1", remainingSize: 50 }],
+      },
+    ]);
+
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      child: () => log,
+      fatal: vi.fn(),
+    } as any;
+
+    const result = migrateOrphanedPositions({
+      positionRepo,
+      marketRepo,
+      familyStateRepo,
+      lotRepo,
+      families: [makeFamily({ slugPattern: "bitcoin-above-*" })],
+      log,
+    });
+
+    expect(result.closedCount).toBe(0);
+    expect(positionRepo.save).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ positionId: "pos-with-lots" }),
+      expect.stringContaining("skipping close"),
+    );
+  });
+
+  it("does NOT close position with open lots when market not found", () => {
+    const pos = makePosition({
+      positionId: createPositionId("pos-no-market"),
+      size: 25,
+    });
+
+    const positionRepo: PositionRepository = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findByFamily: vi.fn().mockReturnValue([pos]),
+      findOpen: vi.fn().mockReturnValue([]),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+    };
+    const marketRepo = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findByTokenIds: vi.fn().mockReturnValue([]),
+      findByConditionId: vi.fn().mockReturnValue([]),
+      findActive: vi.fn().mockReturnValue([]),
+      findByFamily: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      deactivate: vi.fn(),
+    } satisfies MarketRepository;
+    const familyStateRepo = {
+      get: vi.fn().mockReturnValue(makeFamilyState()),
+      save: vi.fn(),
+      findAll: vi.fn().mockReturnValue([]),
+      findByMode: vi.fn().mockReturnValue([]),
+      findQuarantined: vi.fn().mockReturnValue([]),
+    } satisfies FamilyStateRepository;
+    const lotRepo = makeLotRepo([
+      {
+        positionId: "pos-no-market",
+        lots: [{ lotId: "lot-1", remainingSize: 25 }],
+      },
+    ]);
+
+    const log = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      child: () => log,
+      fatal: vi.fn(),
+    } as any;
+
+    const result = migrateOrphanedPositions({
+      positionRepo,
+      marketRepo,
+      familyStateRepo,
+      lotRepo,
+      families: [makeFamily()],
+      log,
+    });
+
+    expect(result.closedCount).toBe(0);
+    expect(positionRepo.save).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ positionId: "pos-no-market" }),
+      expect.stringContaining("skipping close"),
+    );
   });
 });
