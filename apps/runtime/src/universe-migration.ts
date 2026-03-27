@@ -97,7 +97,6 @@ export function migrateOrphanedPositions(deps: UniverseMigrationDeps): Migration
         }
       }
     }
-
   }
 
   if (closed.length > 0) {

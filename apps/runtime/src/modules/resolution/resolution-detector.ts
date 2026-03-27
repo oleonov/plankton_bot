@@ -33,6 +33,61 @@ export interface DetectedResolution {
   candidates: ResolutionCandidate[];
 }
 
+/** Exported for use by resolution recovery path. */
+export function inferResolution(
+  umaStatus: string | null,
+  rawPayload: Record<string, unknown>,
+): "YES" | "NO" | "unknown" {
+  // 1. tokens array with winner flag (some Gamma endpoints)
+  const tokens = rawPayload.tokens as Array<Record<string, unknown>> | undefined;
+  if (tokens && Array.isArray(tokens)) {
+    for (const t of tokens) {
+      if (t.winner === true) {
+        return (t.outcome as string)?.toUpperCase() === "YES" ? "YES" : "NO";
+      }
+    }
+  }
+
+  // 2. outcomePrices + outcomes (Gamma /markets/slug/ endpoint).
+  const winner = inferFromOutcomePrices(rawPayload);
+  if (winner) return winner;
+
+  // 3. Fallback: uma resolved but winner not determinable from above
+  if (umaStatus === "resolved") {
+    const outcome = (rawPayload.resolutionOutcome ?? rawPayload.resolution_outcome) as
+      | string
+      | undefined;
+    if (outcome) return outcome.toUpperCase() === "YES" ? "YES" : "NO";
+  }
+
+  return "unknown";
+}
+
+function inferFromOutcomePrices(rawPayload: Record<string, unknown>): "YES" | "NO" | null {
+  const rawOutcomes = rawPayload.outcomes;
+  const rawPrices = rawPayload.outcomePrices;
+  if (!rawOutcomes || !rawPrices) return null;
+
+  try {
+    const outcomes: unknown[] =
+      typeof rawOutcomes === "string" ? JSON.parse(rawOutcomes) : rawOutcomes;
+    const prices: unknown[] = typeof rawPrices === "string" ? JSON.parse(rawPrices) : rawPrices;
+
+    if (!Array.isArray(outcomes) || !Array.isArray(prices)) return null;
+    if (outcomes.length !== prices.length) return null;
+
+    for (let i = 0; i < outcomes.length; i++) {
+      if (Number(prices[i]) === 1) {
+        return String(outcomes[i]).toUpperCase() === "YES" ? "YES" : "NO";
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
 export class ResolutionDetector {
   constructor(
     private readonly positionRepo: PositionRepository,
@@ -126,7 +181,7 @@ export class ResolutionDetector {
         return null;
       }
 
-      const resolution = this.inferResolution(info.umaResolutionStatus, info.rawPayload);
+      const resolution = inferResolution(info.umaResolutionStatus, info.rawPayload);
       return {
         conditionId,
         resolution,
@@ -154,7 +209,7 @@ export class ResolutionDetector {
         return null;
       }
 
-      const resolution = this.inferResolution(idInfo.umaResolutionStatus, idInfo.rawPayload);
+      const resolution = inferResolution(idInfo.umaResolutionStatus, idInfo.rawPayload);
       return {
         conditionId,
         resolution,
@@ -179,64 +234,5 @@ export class ResolutionDetector {
       rawResponse: null,
       candidates,
     };
-  }
-
-  private inferResolution(
-    umaStatus: string | null,
-    rawPayload: Record<string, unknown>,
-  ): "YES" | "NO" | "unknown" {
-    // 1. tokens array with winner flag (some Gamma endpoints)
-    const tokens = rawPayload.tokens as Array<Record<string, unknown>> | undefined;
-    if (tokens && Array.isArray(tokens)) {
-      for (const t of tokens) {
-        if (t.winner === true) {
-          return (t.outcome as string)?.toUpperCase() === "YES" ? "YES" : "NO";
-        }
-      }
-    }
-
-    // 2. outcomePrices + outcomes (Gamma /markets/slug/ endpoint).
-    //    Both are stringified JSON arrays: outcomes '["Yes","No"]', outcomePrices '["1","0"]'.
-    //    The outcome with price "1" is the winner.
-    const winner = this.inferFromOutcomePrices(rawPayload);
-    if (winner) return winner;
-
-    // 3. Fallback: uma resolved but winner not determinable from above
-    if (umaStatus === "resolved") {
-      const outcome = (rawPayload.resolutionOutcome ?? rawPayload.resolution_outcome) as
-        | string
-        | undefined;
-      if (outcome) return outcome.toUpperCase() === "YES" ? "YES" : "NO";
-    }
-
-    return "unknown";
-  }
-
-  private inferFromOutcomePrices(
-    rawPayload: Record<string, unknown>,
-  ): "YES" | "NO" | null {
-    const rawOutcomes = rawPayload.outcomes;
-    const rawPrices = rawPayload.outcomePrices;
-    if (!rawOutcomes || !rawPrices) return null;
-
-    try {
-      const outcomes: unknown[] =
-        typeof rawOutcomes === "string" ? JSON.parse(rawOutcomes) : rawOutcomes;
-      const prices: unknown[] =
-        typeof rawPrices === "string" ? JSON.parse(rawPrices) : rawPrices;
-
-      if (!Array.isArray(outcomes) || !Array.isArray(prices)) return null;
-      if (outcomes.length !== prices.length) return null;
-
-      for (let i = 0; i < outcomes.length; i++) {
-        if (Number(prices[i]) === 1) {
-          return String(outcomes[i]).toUpperCase() === "YES" ? "YES" : "NO";
-        }
-      }
-    } catch {
-      return null;
-    }
-
-    return null;
   }
 }

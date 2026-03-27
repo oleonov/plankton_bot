@@ -433,6 +433,10 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     rulesProvider,
     exposureCalculator,
+    gammaClient: gammaResolutionClient,
+    lotRepo: repos.inventoryLot,
+    positionRepo: repos.position,
+    db: conn.db,
     bus,
     log,
     checkIntervalMs: 5 * 60_000, // 5 minutes

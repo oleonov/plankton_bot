@@ -5,11 +5,14 @@ import type {
   MarketRepository,
   MarketResolutionRepository,
   OrderRepository,
+  InventoryLotRepository,
+  PositionRepository,
   FamilyRulesProvider,
   FamilyRuleBundle,
   FamilyId,
   TokenId,
 } from "@plankton/domain";
+import type { GammaResolutionClient } from "@plankton/exchange";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { ResolutionModule } from "../modules/resolution/resolution-module.js";
 import type {
@@ -84,6 +87,7 @@ function createMockMarketRepo(): MarketRepository {
   return {
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByTokenId: vi.fn().mockReturnValue(null),
+    findByConditionId: vi.fn().mockReturnValue([]),
     upsertAll: vi.fn(),
     findAll: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
@@ -108,6 +112,7 @@ function createMockResolutionRepo(): MarketResolutionRepository {
     findByConditionId: vi.fn().mockReturnValue(null),
     findAll: vi.fn().mockReturnValue([]),
     markSettled: vi.fn(),
+    updateResolution: vi.fn(),
   } as unknown as MarketResolutionRepository;
 }
 
@@ -123,6 +128,44 @@ function createMockRulesProvider(overrides?: { autoSettle?: boolean }): FamilyRu
     getAllFamilies: vi.fn().mockReturnValue([]),
     getRulesForRegime: vi.fn().mockReturnValue([]),
   } as unknown as FamilyRulesProvider;
+}
+
+function createMockGammaClient(): GammaResolutionClient {
+  return {
+    getMarketBySlug: vi.fn().mockResolvedValue(null),
+    getMarketById: vi.fn().mockResolvedValue(null),
+  } as unknown as GammaResolutionClient;
+}
+
+function createMockLotRepo(): InventoryLotRepository {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue([]),
+    findOpen: vi.fn().mockReturnValue([]),
+    consumeFifo: vi.fn().mockReturnValue([]),
+    settleAll: vi.fn(),
+  } as unknown as InventoryLotRepository;
+}
+
+function createMockPositionRepo(): PositionRepository {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue(null),
+    findByFamily: vi.fn().mockReturnValue([]),
+    findOpen: vi.fn().mockReturnValue([]),
+    findDust: vi.fn().mockReturnValue([]),
+    findAll: vi.fn().mockReturnValue([]),
+  } as unknown as PositionRepository;
+}
+
+function createMockDb() {
+  return {
+    transaction: vi.fn((fn: Function) => {
+      const wrapped = (...args: unknown[]) => fn(...args);
+      return wrapped;
+    }),
+    prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
+  };
 }
 
 function createMockExposureCalculator(): FamilyExposureCalculator {
@@ -171,6 +214,10 @@ describe("ResolutionModule", () => {
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let rulesProvider: ReturnType<typeof createMockRulesProvider>;
   let exposureCalculator: ReturnType<typeof createMockExposureCalculator>;
+  let gammaClient: ReturnType<typeof createMockGammaClient>;
+  let lotRepo: ReturnType<typeof createMockLotRepo>;
+  let positionRepo: ReturnType<typeof createMockPositionRepo>;
+  let mockDb: ReturnType<typeof createMockDb>;
   let mod: ResolutionModule;
 
   function createModule(overrides?: {
@@ -185,6 +232,10 @@ describe("ResolutionModule", () => {
       orderRepo: orderRepo as unknown as OrderRepository,
       rulesProvider: (overrides?.rulesProvider ?? rulesProvider) as unknown as FamilyRulesProvider,
       exposureCalculator: exposureCalculator as unknown as FamilyExposureCalculator,
+      gammaClient: gammaClient as unknown as GammaResolutionClient,
+      lotRepo: lotRepo as unknown as InventoryLotRepository,
+      positionRepo: positionRepo as unknown as PositionRepository,
+      db: mockDb as any,
       bus,
       log: log as any,
       checkIntervalMs: 60_000,
@@ -203,6 +254,10 @@ describe("ResolutionModule", () => {
     orderRepo = createMockOrderRepo();
     rulesProvider = createMockRulesProvider();
     exposureCalculator = createMockExposureCalculator();
+    gammaClient = createMockGammaClient();
+    lotRepo = createMockLotRepo();
+    positionRepo = createMockPositionRepo();
+    mockDb = createMockDb();
     mod = createModule();
   });
 
@@ -223,6 +278,10 @@ describe("ResolutionModule", () => {
       orderRepo: orderRepo as unknown as OrderRepository,
       rulesProvider: rulesProvider as unknown as FamilyRulesProvider,
       exposureCalculator: exposureCalculator as unknown as FamilyExposureCalculator,
+      gammaClient: gammaClient as unknown as GammaResolutionClient,
+      lotRepo: lotRepo as unknown as InventoryLotRepository,
+      positionRepo: positionRepo as unknown as PositionRepository,
+      db: mockDb as any,
       bus,
       log: log as any,
       checkIntervalMs: 60_000,
@@ -1060,5 +1119,186 @@ describe("ResolutionModule", () => {
   it("healthCheck returns ok", async () => {
     const health = await mod.healthCheck();
     expect(health.ok).toBe(true);
+  });
+
+  // ─── Resolution recovery ─────────────────────────────────────────────────
+
+  it("recoverUnresolved settles closed positions with orphaned lots", async () => {
+    // Setup: market_resolution with detected/unknown
+    (resolutionRepo.findAll as any).mockReturnValue([
+      {
+        conditionId: CONDITION,
+        resolution: "unknown",
+        resolvedAt: "2026-01-15T00:00:00Z",
+        detectedAt: "2026-01-15T01:00:00Z",
+        source: "gamma-delisted",
+        rawResponse: null,
+        status: "detected",
+      },
+    ]);
+
+    // Mock: markets for this conditionId
+    (marketRepo.findByConditionId as any).mockReturnValue([
+      {
+        tokenId: TOK_YES,
+        conditionId: CONDITION,
+        slug: "will-x-happen",
+        outcome: "YES",
+        familyId: FAM,
+      },
+    ]);
+
+    // Mock: Gamma returns resolved market with outcomePrices
+    (gammaClient.getMarketBySlug as any).mockResolvedValue({
+      closed: true,
+      umaResolutionStatus: null,
+      closedTime: "2026-01-15T00:00:00Z",
+      rawPayload: {
+        outcomePrices: '["1","0"]',
+        outcomes: '["Yes","No"]',
+      },
+    });
+
+    // Mock: positionRepo.findByFamily returns closed position
+    (positionRepo.findByFamily as any).mockReturnValue([
+      {
+        positionId: POS,
+        tokenId: TOK_YES,
+        familyId: FAM,
+        side: "BUY",
+        size: 0,
+        avgEntryPrice: 0.3,
+        costBasisUsdc: 30,
+        currentValueUsdc: 0,
+        realizedPnl: 0,
+        status: "closed",
+        openedAt: "2026-01-10T00:00:00Z",
+        closedAt: "2026-01-14T00:00:00Z",
+        updatedAt: "2026-01-14T00:00:00Z",
+      },
+    ]);
+
+    // Mock: lotRepo.findOpen returns open lots (orphaned)
+    (lotRepo.findOpen as any).mockReturnValue([
+      {
+        lotId: "lot-1",
+        positionId: POS,
+        tokenId: TOK_YES,
+        familyId: FAM,
+        side: "BUY",
+        size: 100,
+        remainingSize: 100,
+        entryPrice: 0.3,
+        costUsdc: 30,
+        fillId: "fill-1",
+        createdAt: "2026-01-10T00:00:00Z",
+      },
+    ]);
+
+    // start() triggers recoverUnresolved non-blocking; wait for it
+    await mod.start();
+    // Give async recoverUnresolved time to complete
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await mod.stop();
+
+    // Verify resolution was updated
+    expect(resolutionRepo.updateResolution as any).toHaveBeenCalledWith(
+      CONDITION,
+      "YES",
+      "2026-01-15T00:00:00Z",
+      "gamma-api",
+    );
+
+    // Verify lots were settled
+    expect(lotRepo.settleAll as any).toHaveBeenCalledWith(POS);
+
+    // Verify position was saved with size: 0 and updated realizedPnl
+    expect(positionRepo.save as any).toHaveBeenCalledWith(
+      expect.objectContaining({
+        positionId: POS,
+        size: 0,
+        realizedPnl: 70, // (1.0 - 0.3) * 100
+        currentValueUsdc: 0,
+      }),
+    );
+
+    // Verify exposure was recomputed
+    expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM, false);
+  });
+
+  it("recoverUnresolved skips when Gamma still returns unknown", async () => {
+    (resolutionRepo.findAll as any).mockReturnValue([
+      {
+        conditionId: CONDITION,
+        resolution: "unknown",
+        status: "detected",
+        resolvedAt: "2026-01-15T00:00:00Z",
+        detectedAt: "2026-01-15T01:00:00Z",
+        source: "gamma-delisted",
+        rawResponse: null,
+      },
+    ]);
+
+    (marketRepo.findByConditionId as any).mockReturnValue([
+      {
+        tokenId: TOK_YES,
+        conditionId: CONDITION,
+        slug: "will-x-happen",
+        outcome: "YES",
+        familyId: FAM,
+      },
+    ]);
+
+    // Gamma returns closed but no price data → still unknown
+    (gammaClient.getMarketBySlug as any).mockResolvedValue({
+      closed: true,
+      umaResolutionStatus: null,
+      closedTime: "2026-01-15T00:00:00Z",
+      rawPayload: {},
+    });
+
+    await mod.start();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await mod.stop();
+
+    // Should not update resolution
+    expect(resolutionRepo.updateResolution as any).not.toHaveBeenCalled();
+    expect(lotRepo.settleAll as any).not.toHaveBeenCalled();
+  });
+
+  it("recoverUnresolved skips when Gamma lookup fails", async () => {
+    (resolutionRepo.findAll as any).mockReturnValue([
+      {
+        conditionId: CONDITION,
+        resolution: "unknown",
+        status: "detected",
+        resolvedAt: "2026-01-15T00:00:00Z",
+        detectedAt: "2026-01-15T01:00:00Z",
+        source: "gamma-delisted",
+        rawResponse: null,
+      },
+    ]);
+
+    (marketRepo.findByConditionId as any).mockReturnValue([
+      {
+        tokenId: TOK_YES,
+        conditionId: CONDITION,
+        slug: "will-x-happen",
+        outcome: "YES",
+        familyId: FAM,
+      },
+    ]);
+
+    (gammaClient.getMarketBySlug as any).mockRejectedValue(new Error("Network error"));
+
+    await mod.start();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await mod.stop();
+
+    expect(resolutionRepo.updateResolution as any).not.toHaveBeenCalled();
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+      "recovery Gamma lookup failed — skipping",
+    );
   });
 });

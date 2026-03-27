@@ -9,6 +9,7 @@
  *  5. Publish MarketResolved + PositionSettled events
  */
 
+import type Database from "better-sqlite3";
 import type {
   EventBus,
   ExchangeGateway,
@@ -17,12 +18,16 @@ import type {
   MarketResolutionRepository,
   OrderRepository,
   FamilyRulesProvider,
+  InventoryLotRepository,
+  PositionRepository,
   FamilyId,
   TokenId,
 } from "@plankton/domain";
 import { createCommandId } from "@plankton/domain";
+import type { GammaResolutionClient } from "@plankton/exchange";
 import type { FamilyExposureCalculator } from "../risk-inventory/family-exposure.js";
 import type { ResolutionDetector, ResolutionCandidate } from "./resolution-detector.js";
+import { inferResolution } from "./resolution-detector.js";
 import type { PositionSettler } from "./position-settler.js";
 import type { Logger } from "../../logger.js";
 
@@ -34,6 +39,10 @@ export interface ResolutionModuleDeps {
   orderRepo: OrderRepository;
   rulesProvider: FamilyRulesProvider;
   exposureCalculator: FamilyExposureCalculator;
+  gammaClient: GammaResolutionClient;
+  lotRepo: InventoryLotRepository;
+  positionRepo: PositionRepository;
+  db: Database.Database;
   bus: EventBus;
   log: Logger;
   checkIntervalMs: number;
@@ -56,6 +65,7 @@ export class ResolutionModule implements RuntimeModule {
   async start(): Promise<void> {
     // Run once at startup (non-blocking)
     this.runCheck().catch((err) => this.deps.log.error(err, "startup resolution check failed"));
+    this.recoverUnresolved().catch((err) => this.deps.log.error(err, "resolution recovery failed"));
 
     this.intervalHandle = setInterval(() => {
       this.runCheck().catch((err) => this.deps.log.error(err, "resolution check failed"));
@@ -302,6 +312,133 @@ export class ResolutionModule implements RuntimeModule {
         "requested cancel for order on resolved market",
       );
     }
+  }
+
+  /** Re-resolve market_resolutions stuck in detected/unknown status. */
+  private async recoverUnresolved(): Promise<number> {
+    const allResolutions = this.deps.resolutionRepo.findAll();
+    const unresolved = allResolutions.filter(
+      (r) => r.status === "detected" && r.resolution === "unknown",
+    );
+    if (unresolved.length === 0) return 0;
+
+    this.deps.log.info(
+      { count: unresolved.length },
+      "attempting recovery of unresolved conditions",
+    );
+    let recovered = 0;
+
+    for (const mr of unresolved) {
+      const markets = this.deps.marketRepo.findByConditionId(mr.conditionId);
+      if (markets.length === 0) continue;
+
+      const slug = markets[0]!.slug;
+      let info;
+      try {
+        info = await this.deps.gammaClient.getMarketBySlug(slug);
+      } catch (err) {
+        this.deps.log.warn(
+          { conditionId: mr.conditionId, err },
+          "recovery Gamma lookup failed — skipping",
+        );
+        continue;
+      }
+      if (!info?.closed) continue;
+
+      const resolution = inferResolution(info.umaResolutionStatus, info.rawPayload);
+      if (resolution === "unknown") continue;
+
+      const resolvedAt = info.closedTime ?? new Date().toISOString();
+      const affectedFamilies = new Set<FamilyId>();
+
+      // Wrap ALL writes in a single transaction for atomicity
+      const runSettlement = this.deps.db.transaction(() => {
+        this.deps.resolutionRepo.updateResolution(
+          mr.conditionId,
+          resolution,
+          resolvedAt,
+          "gamma-api",
+        );
+
+        for (const market of markets) {
+          // Find closed positions with orphaned lots for this token
+          const allFamilyPositions = this.deps.positionRepo.findByFamily(
+            market.familyId as FamilyId,
+          );
+          const closedWithLots = allFamilyPositions.filter((p) => {
+            if (String(p.tokenId) !== String(market.tokenId)) return false;
+            if (p.status !== "closed") return false;
+            const lots = this.deps.lotRepo.findOpen(p.positionId);
+            return lots.length > 0;
+          });
+
+          for (const pos of closedWithLots) {
+            const openLots = this.deps.lotRepo.findOpen(pos.positionId);
+            const remainingSize = openLots.reduce((sum, l) => sum + l.remainingSize, 0);
+            const isWinner = market.outcome.toUpperCase() === resolution;
+            const settlementPrice = isWinner ? 1.0 : 0.0;
+            const settlementPnl = (settlementPrice - pos.avgEntryPrice) * remainingSize;
+
+            this.deps.lotRepo.settleAll(pos.positionId);
+
+            const settlementId = `recovery-${mr.conditionId}-${String(market.tokenId)}`;
+            this.deps.db
+              .prepare(
+                `INSERT OR IGNORE INTO settlement_ledger
+                   (settlement_id, condition_id, position_id, token_id, family_id,
+                    resolution, settlement_price, size, delta, settled_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .run(
+                settlementId,
+                mr.conditionId,
+                String(pos.positionId),
+                String(market.tokenId),
+                String(pos.familyId),
+                resolution,
+                settlementPrice,
+                remainingSize,
+                settlementPnl,
+                resolvedAt,
+              );
+
+            this.deps.positionRepo.save({
+              ...pos,
+              size: 0,
+              realizedPnl: pos.realizedPnl + settlementPnl,
+              currentValueUsdc: 0,
+              closedAt: resolvedAt,
+              updatedAt: new Date().toISOString(),
+            });
+
+            affectedFamilies.add(pos.familyId);
+
+            this.deps.log.info(
+              {
+                positionId: String(pos.positionId),
+                resolution,
+                settlementPnl: settlementPnl.toFixed(4),
+              },
+              "recovery: settled orphaned closed position",
+            );
+          }
+        }
+      });
+      runSettlement();
+
+      // Recompute family state OUTSIDE transaction (reads, not writes)
+      for (const fid of affectedFamilies) {
+        this.deps.exposureCalculator.recompute(fid, false);
+      }
+
+      this.deps.log.info(
+        { conditionId: mr.conditionId, resolution, families: affectedFamilies.size },
+        "recovered unresolved condition",
+      );
+      recovered++;
+    }
+
+    return recovered;
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
