@@ -199,6 +199,14 @@ export interface MarketResolutionRepository {
   /** Return all recorded resolutions. */
   findAll(): MarketResolution[];
 
+  /** Update resolution, resolved_at, and status for an existing record (e.g., unknown → YES). */
+  updateResolution(
+    conditionId: string,
+    resolution: "YES" | "NO",
+    resolvedAt: string,
+    source: string,
+  ): void;
+
   /** Mark a resolution as fully settled (all positions processed). */
   markSettled(conditionId: string): void;
 }

@@ -39,6 +39,21 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
     return rows.map((r) => this.rowToResolution(r));
   }
 
+  updateResolution(
+    conditionId: string,
+    resolution: "YES" | "NO",
+    resolvedAt: string,
+    source: string,
+  ): void {
+    this.db
+      .prepare(
+        `UPDATE market_resolutions
+         SET resolution = ?, resolved_at = ?, source = ?, status = 'settled'
+         WHERE condition_id = ?`,
+      )
+      .run(resolution, resolvedAt, source, conditionId);
+  }
+
   markSettled(conditionId: string): void {
     this.db
       .prepare("UPDATE market_resolutions SET status = 'settled' WHERE condition_id = ?")
