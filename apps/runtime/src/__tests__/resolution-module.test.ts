@@ -160,7 +160,7 @@ function createMockPositionRepo(): PositionRepository {
 
 function createMockDb() {
   return {
-    transaction: vi.fn((fn: Function) => {
+    transaction: vi.fn((fn: (...args: unknown[]) => unknown) => {
       const wrapped = (...args: unknown[]) => fn(...args);
       return wrapped;
     }),
