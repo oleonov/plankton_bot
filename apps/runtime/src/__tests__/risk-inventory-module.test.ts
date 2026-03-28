@@ -1794,6 +1794,7 @@ describe("RiskInventoryModule", () => {
           negRisk: false,
           familyId,
           sequenceInTick: 0,
+          signalReason: null,
         },
         timestamp: Date.now(),
       };

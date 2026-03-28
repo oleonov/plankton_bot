@@ -47,6 +47,7 @@ function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand
     negRisk: false,
     familyId: createFamilyId("fam-1"),
     sequenceInTick: 0,
+    signalReason: null,
     ...overrides,
   };
 }
