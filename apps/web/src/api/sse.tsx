@@ -12,6 +12,9 @@ const SSE_INVALIDATION_MAP: Record<string, string[][]> = {
   "fill:new": [["fills"], ["pnl-series"], ["metrics"]],
   "family:state_changed": [["families"], ["metrics-families"], ["status"]],
   "risk:event": [["risk-events"]],
+  candidate_updates: [["discovery", "candidates"]],
+  proposals: [["families", "proposals"]],
+  transitions: [["families", "transitions"]],
 };
 
 const SSEContext = createContext<SSEState>("disconnected");

@@ -46,6 +46,7 @@ function toFamilyDto(
   catalog: FamilyCatalogRow,
   state: FamilyStateRow | undefined,
   caps: FamilyCaps | null,
+  promotionState?: string | null,
 ) {
   return {
     familyId: catalog.family_id,
@@ -55,6 +56,7 @@ function toFamilyDto(
     horizon: catalog.horizon,
     cadence: catalog.cadence,
     strategyProfile: catalog.strategy_profile,
+    promotionState: promotionState ?? null,
     state: state
       ? {
           runtimeMode: state.runtime_mode,
@@ -106,6 +108,10 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     };
   }
 
+  const listEvidence = opts.db.prepare(
+    "SELECT family_id, promotion_state FROM family_evidence",
+  );
+
   app.get("/families", async () => {
     const catalogs = listCatalog.all() as FamilyCatalogRow[];
     const states = listState.all() as FamilyStateRow[];
@@ -117,9 +123,19 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       max_dust_positions: number;
     }>;
     const capsMap = new Map(capsRows.map((r) => [r.family_id, toCaps(r)]));
+    const evidenceRows = listEvidence.all() as Array<{
+      family_id: string;
+      promotion_state: string | null;
+    }>;
+    const promoMap = new Map(evidenceRows.map((r) => [r.family_id, r.promotion_state]));
     return ok(
       catalogs.map((c) =>
-        toFamilyDto(c, stateMap.get(c.family_id), capsMap.get(c.family_id) ?? null),
+        toFamilyDto(
+          c,
+          stateMap.get(c.family_id),
+          capsMap.get(c.family_id) ?? null,
+          promoMap.get(c.family_id),
+        ),
       ),
     );
   });
@@ -187,6 +203,34 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       });
     },
   );
+
+  // ── GET /families/recent-demotions ─────────────────────────────────────
+  app.get("/families/recent-demotions", async () => {
+    const rows = opts.db
+      .prepare(
+        `SELECT * FROM state_transitions
+         WHERE entity_type = 'family'
+           AND trigger_type = 'system'
+           AND to_state IN ('reduce-only', 'quarantine')
+           AND created_at > datetime('now', '-1 hour')
+         ORDER BY created_at DESC`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    return ok(
+      rows.map((r) => ({
+        id: r.id,
+        entityType: r.entity_type,
+        entityId: r.entity_id,
+        fromState: r.from_state,
+        toState: r.to_state,
+        triggerType: r.trigger_type,
+        initiator: r.initiator,
+        reason: r.reason,
+        scoresSnapshot: r.scores_snapshot,
+        createdAt: r.created_at,
+      })),
+    );
+  });
 
   // ── GET /families/:familyId/transitions ────────────────────────────────
   app.get<{ Params: { familyId: string } }>(

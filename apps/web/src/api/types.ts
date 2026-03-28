@@ -148,6 +148,10 @@ export interface FamilyDTO {
   familyKey: string;
   primaryCategory: string;
   regime: string;
+  horizon: string;
+  cadence: string;
+  strategyProfile: string;
+  promotionState: string | null;
   state: {
     runtimeMode: string;
     openValueUsdc: number;
@@ -181,4 +185,96 @@ export interface RiskEventDTO {
 export interface Paginated<T> {
   items: T[];
   nextCursor: string | null;
+}
+
+/** GET /discovery/candidates item */
+export interface CandidateDTO {
+  candidateId: string;
+  familyKey: string;
+  regime: string;
+  horizon: string;
+  cadence: string;
+  patternConfidence: string;
+  primaryCategory: string;
+  strategyProfile: string;
+  slugPattern: string | null;
+  matchedFamilyId: string | null;
+  activeMarketCount: number;
+  nearestEndDate: string | null;
+  clusterVolume24h: number;
+  recurrenceScore: number | null;
+  recycleScore: number | null;
+  liveViabilityScore: number | null;
+  toxicityPenalty: number | null;
+  gateRecommendation: string;
+  recommendationReason: string | null;
+  scoresUpdatedAt: string | null;
+  status: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  reviewedAt: string | null;
+  materializedAt: string | null;
+}
+
+/** GET /discovery/candidates/:id (detail) */
+export interface CandidateDetailDTO extends CandidateDTO {
+  recentObservations: ObservationDTO[];
+}
+
+/** Candidate observation */
+export interface ObservationDTO {
+  id: number;
+  candidateId: string;
+  activeMarketCount: number;
+  clusterVolume24h: number;
+  nearestEndDate: string | null;
+  observedAt: string;
+}
+
+/** GET /families/proposals item */
+export interface ProposalDTO {
+  id: number;
+  familyId: string;
+  currentState: string;
+  proposedState: string;
+  reason: string;
+  scoresSnapshot: string | null;
+  status: string;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+}
+
+/** GET /families/:id/evidence */
+export interface FamilyEvidenceDTO {
+  familyId: string;
+  evidenceStatus: string | null;
+  evidenceScore: number | null;
+  promotionState: string | null;
+  localTradeCount: number | null;
+  localMarketCount: number | null;
+  localRealizedPnlFifo: number | null;
+  openTailCostUsdc: number | null;
+  tailAdjustedPnl: number | null;
+  remoteClosedRealizedPnl: number | null;
+  openPositionCount: number | null;
+  openDustCount: number | null;
+  bothSidedEligible: boolean;
+  heavyCampaignEligible: boolean;
+  activeWindowEdgeScore: number | null;
+  lastValidatedAt: string | null;
+}
+
+/** GET /families/:id/transitions item */
+export interface TransitionDTO {
+  id: number;
+  entityType: string;
+  entityId: string;
+  fromState: string;
+  toState: string;
+  triggerType: string;
+  initiator: string;
+  reason: string;
+  scoresSnapshot: string | null;
+  createdAt: string;
 }

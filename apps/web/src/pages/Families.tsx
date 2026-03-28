@@ -1,15 +1,23 @@
 import { useState, Fragment } from "react";
-import { useFamilies, useFamilyPositions, useFamilyOrders } from "../api/hooks.ts";
+import {
+  useFamilies,
+  useFamilyPositions,
+  useFamilyOrders,
+  useFamilyEvidence,
+} from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { FamilyActions } from "../components/FamilyActions.tsx";
+import { EvidenceSection } from "../components/EvidenceSection.tsx";
 
 function FamilyDetail({ familyId }: { familyId: string }) {
   const { data: positions } = useFamilyPositions(familyId);
   const { data: orders } = useFamilyOrders(familyId);
+  const { data: evidence } = useFamilyEvidence(familyId);
 
   return (
     <tr>
-      <td colSpan={8} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
+      <td colSpan={9} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
+        {evidence && <EvidenceSection evidence={evidence} familyId={familyId} />}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
           <div>
             <div
@@ -114,6 +122,7 @@ export function Families() {
           <tr>
             <th>Family</th>
             <th>Mode</th>
+            <th>Promotion</th>
             <th>Open Value</th>
             <th>Positions</th>
             <th>Markets</th>
@@ -148,6 +157,9 @@ export function Families() {
                         {f.state.derivedModeReason && ` — ${f.state.derivedModeReason}`}
                       </div>
                     )}
+                  </td>
+                  <td>
+                    {f.promotionState ? <Badge value={f.promotionState} /> : "\u2014"}
                   </td>
                   <td
                     style={{

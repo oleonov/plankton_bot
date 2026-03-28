@@ -9,7 +9,12 @@ import type {
   OrderDTO,
   FillDTO,
   FamilyDTO,
+  FamilyEvidenceDTO,
+  TransitionDTO,
   RiskEventDTO,
+  CandidateDTO,
+  CandidateDetailDTO,
+  ProposalDTO,
   Paginated,
 } from "./types.ts";
 
@@ -195,6 +200,112 @@ export function useResume() {
   return useMutation({
     mutationFn: (reason?: string) => apiPost("/api/v1/actions/resume", { reason }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["status"] }),
+  });
+}
+
+export function useFamilyEvidence(familyId: string) {
+  return useQuery({
+    queryKey: ["families", familyId, "evidence"],
+    queryFn: () => apiFetch<FamilyEvidenceDTO | null>(`/api/v1/families/${familyId}/evidence`),
+    enabled: !!familyId,
+  });
+}
+
+export function useFamilyTransitions(familyId: string) {
+  return useQuery({
+    queryKey: ["families", familyId, "transitions"],
+    queryFn: () => apiFetch<TransitionDTO[]>(`/api/v1/families/${familyId}/transitions`),
+    enabled: !!familyId,
+  });
+}
+
+// ─── Discovery ─────────────────────────────────────────────────
+
+interface CandidateFilters {
+  status?: string;
+  recommendation?: string;
+}
+
+export function useCandidates(filters: CandidateFilters = {}) {
+  return useQuery({
+    queryKey: ["discovery", "candidates", filters],
+    queryFn: () =>
+      apiFetch<CandidateDTO[]>(
+        withParams("/api/v1/discovery/candidates", {
+          status: filters.status,
+          recommendation: filters.recommendation,
+        }),
+      ),
+  });
+}
+
+export function useCandidateDetail(candidateId: string | null) {
+  return useQuery({
+    queryKey: ["discovery", "candidates", candidateId],
+    queryFn: () =>
+      apiFetch<CandidateDetailDTO>(`/api/v1/discovery/candidates/${candidateId}`),
+    enabled: !!candidateId,
+  });
+}
+
+export function useProposals() {
+  return useQuery({
+    queryKey: ["families", "proposals"],
+    queryFn: () => apiFetch<ProposalDTO[]>("/api/v1/families/proposals"),
+  });
+}
+
+export function useCandidateAction(
+  candidateId: string,
+  action: "review" | "accept" | "reject",
+) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiPost(`/api/v1/discovery/candidates/${candidateId}/${action}`),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["discovery", "candidates"] }),
+        qc.invalidateQueries({ queryKey: ["families"] }),
+      ]);
+    },
+  });
+}
+
+export function usePromoteFamily(familyId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (reason?: string) =>
+      apiPost(`/api/v1/actions/family/${familyId}/promote`, { reason }),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["families", "proposals"] }),
+        qc.invalidateQueries({ queryKey: ["families"] }),
+      ]);
+    },
+  });
+}
+
+export function useDismissProposal(proposalId: number) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (reason?: string) =>
+      apiPost(`/api/v1/families/proposals/${proposalId}/dismiss`, { reason }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["families", "proposals"] }),
+  });
+}
+
+export function useResetToProbe(familyId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (reason?: string) =>
+      apiPost(`/api/v1/actions/family/${familyId}/reset-to-probe`, { reason }),
+    onSuccess: async () => {
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: ["families"] }),
+        qc.invalidateQueries({ queryKey: ["status"] }),
+      ]);
+    },
   });
 }
 
