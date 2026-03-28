@@ -8,10 +8,10 @@ function parseScores(snapshot: string | null) {
   try {
     const obj = JSON.parse(snapshot);
     return {
-      recurrence: obj.recurrence_score ?? obj.recurrenceScore ?? null,
-      recycle: obj.recycle_score ?? obj.recycleScore ?? null,
-      liveViability: obj.live_viability_score ?? obj.liveViabilityScore ?? null,
-      toxicity: obj.toxicity_penalty ?? obj.toxicityPenalty ?? null,
+      recurrence: obj.recurrence ?? null,
+      recycle: obj.recycle ?? null,
+      liveViability: obj.liveViability ?? null,
+      toxicity: obj.toxicity ?? null,
     };
   } catch {
     return { recurrence: null, recycle: null, liveViability: null, toxicity: null };

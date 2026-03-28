@@ -60,6 +60,7 @@ export class FamilyEvidenceEngine implements RuntimeModule {
   private unsubscribers: (() => void)[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastRecomputeAt: string | null = null;
+  private negativeTailCounters = new Map<string, number>();
 
   constructor(deps: EvidenceEngineDeps) {
     this.bus = deps.bus;
@@ -348,7 +349,8 @@ export class FamilyEvidenceEngine implements RuntimeModule {
       return;
     }
 
-    // Horizon-aware negative tail window
+    // Horizon-aware negative tail window: track consecutive negative recomputes
+    const familyIdStr = String(familyId);
     if (metrics.tailAdjustedPnl < 0) {
       const DEMOTION_WINDOWS: Record<string, number> = {
         "intraday-4h": 2,
@@ -357,13 +359,20 @@ export class FamilyEvidenceEngine implements RuntimeModule {
         "ad-hoc": 7,
       };
       const windowDays = DEMOTION_WINDOWS[metrics.horizon] ?? 7;
-      // TODO: Track first_negative_tail_at for proper window enforcement.
-      // For v1: persistent negative tail at evaluation time triggers reduce-only.
-      this.enqueueDemotion(
-        familyId,
-        OperatorActionType.FamilyReduceOnly,
-        `persistent negative tail ${metrics.tailAdjustedPnl.toFixed(2)} (${metrics.horizon} window: ${windowDays}d)`,
-      );
+      const count = (this.negativeTailCounters.get(familyIdStr) ?? 0) + 1;
+      this.negativeTailCounters.set(familyIdStr, count);
+      const hoursNegative = count * (this.intervalMs / 3_600_000);
+      const windowHours = windowDays * 24;
+
+      if (hoursNegative >= windowHours) {
+        this.enqueueDemotion(
+          familyId,
+          OperatorActionType.FamilyReduceOnly,
+          `persistent negative tail ${metrics.tailAdjustedPnl.toFixed(2)} for ${hoursNegative.toFixed(0)}h (${metrics.horizon} window: ${windowDays}d)`,
+        );
+      }
+    } else {
+      this.negativeTailCounters.delete(familyIdStr);
     }
   }
 

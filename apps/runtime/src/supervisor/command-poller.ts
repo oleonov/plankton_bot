@@ -104,9 +104,10 @@ export class CommandPoller implements RuntimeModule {
   private async applyCommand(cmd: OperatorCommand): Promise<void> {
     const now = new Date().toISOString();
     try {
-      // Capture previous mode BEFORE applying changes (needed for demotion events)
-      const previousMode = cmd.targetId
-        ? this.deps.familyStateRepo.get(createFamilyId(cmd.targetId))?.runtimeMode ?? "unknown"
+      // Capture previous lifecycle state BEFORE applying changes (needed for transitions)
+      const previousPromotionState = cmd.targetId
+        ? this.deps.familyEvidenceRepo?.getEvidence(createFamilyId(cmd.targetId))
+            ?.promotionState ?? "unknown"
         : "unknown";
 
       switch (cmd.action) {
@@ -177,7 +178,7 @@ export class CommandPoller implements RuntimeModule {
         this.deps.stateTransitionRepo?.insert({
           entityType: "family",
           entityId: cmd.targetId,
-          fromState: previousMode,
+          fromState: previousPromotionState,
           toState: newState,
           triggerType: cmd.initiatorType,
           initiator: cmd.initiator ?? null,
@@ -187,7 +188,7 @@ export class CommandPoller implements RuntimeModule {
 
         await this.deps.bus.publish("FamilyDemotionApplied", {
           familyId: createFamilyId(cmd.targetId),
-          previousState: previousMode,
+          previousState: previousPromotionState,
           newState,
           reason: cmd.reason ?? "system demotion",
           timestamp: Date.now(),
@@ -281,15 +282,19 @@ export class CommandPoller implements RuntimeModule {
       updatedAt: now,
     });
 
+    // Read previous promotion state before updating
+    const prevPromotionState =
+      this.deps.familyEvidenceRepo?.getEvidence(familyId)?.promotionState ?? "unknown";
+
     // Set promotion_state to scaled
     this.deps.familyEvidenceRepo?.updatePromotionState(familyId, "scaled");
 
-    // Write state transition
+    // Write state transition using lifecycle states
     this.deps.stateTransitionRepo?.insert({
       entityType: "family",
       entityId: cmd.targetId,
-      fromState: state.runtimeMode,
-      toState: "active",
+      fromState: prevPromotionState,
+      toState: "scaled",
       triggerType: cmd.initiatorType,
       initiator: cmd.initiator ?? null,
       reason: cmd.reason ?? "promote to scaled",
@@ -338,15 +343,19 @@ export class CommandPoller implements RuntimeModule {
       updatedAt: now,
     });
 
+    // Read previous promotion state before updating
+    const prevPromotionState =
+      this.deps.familyEvidenceRepo?.getEvidence(familyId)?.promotionState ?? "unknown";
+
     // Set promotion_state to probe-only
     this.deps.familyEvidenceRepo?.updatePromotionState(familyId, "probe-only");
 
-    // Write state transition
+    // Write state transition using lifecycle states
     this.deps.stateTransitionRepo?.insert({
       entityType: "family",
       entityId: cmd.targetId,
-      fromState: state.runtimeMode,
-      toState: "active",
+      fromState: prevPromotionState,
+      toState: "probe-only",
       triggerType: cmd.initiatorType,
       initiator: cmd.initiator ?? null,
       reason: cmd.reason ?? "reset to probe",

@@ -403,7 +403,8 @@ describe("CommandPoller", () => {
 
       const transitions = transitionRepo.findByEntity("family", "fam-1");
       expect(transitions).toHaveLength(1);
-      expect(transitions[0]!.toState).toBe("active");
+      expect(transitions[0]!.fromState).toBe("probe-only");
+      expect(transitions[0]!.toState).toBe("scaled");
 
       expect(rulesManager.reload).toHaveBeenCalledOnce();
       expect(normalizationModule.rebuildPatterns).toHaveBeenCalledOnce();
@@ -455,7 +456,8 @@ describe("CommandPoller", () => {
 
       const transitions = transitionRepo.findByEntity("family", "fam-1");
       expect(transitions).toHaveLength(1);
-      expect(transitions[0]!.toState).toBe("active");
+      expect(transitions[0]!.fromState).toBe("probe-only");
+      expect(transitions[0]!.toState).toBe("probe-only");
       expect(transitions[0]!.scoresSnapshot).toBe(rulesJson);
     });
 
@@ -487,6 +489,7 @@ describe("CommandPoller", () => {
       seedFamilyEvidence("fam-1");
 
       const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const transitionRepo = new SqliteStateTransitionRepository(conn.db);
       const demotionEvents: RuntimeEventMap["FamilyDemotionApplied"][] = [];
       bus.subscribe("FamilyDemotionApplied", async (p) => {
         demotionEvents.push(p);
@@ -496,13 +499,23 @@ describe("CommandPoller", () => {
         initiatorType: "system",
         initiator: "evidence-engine",
       });
-      const poller = createPoller({ familyEvidenceRepo: evidenceRepo });
+      const poller = createPoller({
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: transitionRepo,
+      });
 
       await poller.poll();
 
       expect(demotionEvents).toHaveLength(1);
+      expect(demotionEvents[0]!.previousState).toBe("probe-only");
       expect(demotionEvents[0]!.newState).toBe("reduce-only");
       expect(demotionEvents[0]!.familyId).toEqual(createFamilyId("fam-1"));
+
+      // Verify state transition uses lifecycle states
+      const transitions = transitionRepo.findByEntity("family", "fam-1");
+      expect(transitions).toHaveLength(1);
+      expect(transitions[0]!.fromState).toBe("probe-only");
+      expect(transitions[0]!.toState).toBe("reduce-only");
 
       // Also check promotion_state was synced
       const evidence = evidenceRepo.getEvidence(createFamilyId("fam-1"));
