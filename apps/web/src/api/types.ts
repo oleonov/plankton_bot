@@ -231,6 +231,35 @@ export interface ObservationDTO {
   observedAt: string;
 }
 
+/** GET /discovery/status */
+export interface DiscoveryScanStatsDTO {
+  marketsFound: number;
+  clustersCreated: number;
+  candidatesUpserted: number;
+  matched: number;
+  pruned: number;
+}
+
+export interface DiscoveryRunDTO {
+  id: number;
+  triggerType: "startup" | "schedule" | "manual";
+  status: "queued" | "running" | "succeeded" | "failed";
+  requestedBy: string | null;
+  requestedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  heartbeatAt: string | null;
+  stats: DiscoveryScanStatsDTO | null;
+  error: string | null;
+}
+
+export interface DiscoveryStatusDTO {
+  lastRun: DiscoveryRunDTO | null;
+  lastSuccessfulRun: DiscoveryRunDTO | null;
+  activeRun: DiscoveryRunDTO | null;
+  workerState: "healthy" | "offline";
+}
+
 /** GET /families/proposals item */
 export interface ProposalDTO {
   id: number;

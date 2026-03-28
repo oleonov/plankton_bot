@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { useCandidates, useCandidateAction } from "../api/hooks.ts";
+import { useCandidates, useCandidateAction, useDiscoveryStatus } from "../api/hooks.ts";
 import { ProposalPanel } from "../components/ProposalPanel.tsx";
+import { DiscoveryStatusPanel } from "../components/DiscoveryStatusPanel.tsx";
 import { CandidateDetail } from "../components/CandidateDetail.tsx";
 import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
@@ -115,12 +116,14 @@ export function Discovery() {
     confidence: confFilter || undefined,
     cadence: cadenceFilter || undefined,
   });
+  const { data: status } = useDiscoveryStatus();
 
   if (isLoading) return <div className="page">Loading...</div>;
 
   return (
     <div className="page">
       <div className="page-title">Family Discovery</div>
+      <DiscoveryStatusPanel />
       <ProposalPanel />
       <div className="filter-bar">
         <label>
@@ -163,7 +166,19 @@ export function Discovery() {
           </select>
         </label>
       </div>
-      <CandidateTable candidates={candidates ?? []} onSelect={setSelectedId} />
+      {(candidates ?? []).length === 0 ? (
+        <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>
+          {!status?.lastRun
+            ? "Run your first scan to discover candidate families"
+            : status?.activeRun?.status === "running"
+              ? "Initial scan in progress..."
+              : status?.lastRun?.status === "failed" && !status?.activeRun
+                ? `Last scan failed: ${status.lastRun.error ?? "unknown error"}. Try scanning again.`
+                : "No recurring market families found"}
+        </div>
+      ) : (
+        <CandidateTable candidates={candidates!} onSelect={setSelectedId} />
+      )}
       {selectedId && (
         <CandidateDetail candidateId={selectedId} onClose={() => setSelectedId(null)} />
       )}

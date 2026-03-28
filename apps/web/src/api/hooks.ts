@@ -14,6 +14,8 @@ import type {
   RiskEventDTO,
   CandidateDTO,
   CandidateDetailDTO,
+  DiscoveryStatusDTO,
+  DiscoveryRunDTO,
   ProposalDTO,
   Paginated,
 } from "./types.ts";
@@ -258,6 +260,32 @@ export function useCandidateDetail(candidateId: string | null) {
     queryFn: () =>
       apiFetch<CandidateDetailDTO>(`/api/v1/discovery/candidates/${candidateId}`),
     enabled: !!candidateId,
+  });
+}
+
+export function useDiscoveryStatus() {
+  return useQuery({
+    queryKey: ["discovery", "status"],
+    queryFn: () => apiFetch<DiscoveryStatusDTO>("/api/v1/discovery/status"),
+    refetchInterval: (query) => (query.state.data?.activeRun ? 5_000 : false),
+  });
+}
+
+export function useDiscoveryRuns(limit = 10) {
+  return useQuery({
+    queryKey: ["discovery", "runs", limit],
+    queryFn: () => apiFetch<DiscoveryRunDTO[]>(`/api/v1/discovery/runs?limit=${limit}`),
+  });
+}
+
+export function useTriggerScan() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () =>
+      apiPost<{ runId: number; status: string; alreadyActive: boolean }>(
+        "/api/v1/discovery/scan",
+      ),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["discovery"] }),
   });
 }
 
