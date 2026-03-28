@@ -1,5 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import type { DiscoveryRun } from "@plankton/domain";
+import { SqliteDiscoveryRunRepository } from "@plankton/db";
 import { ok, ApiError } from "../errors.js";
 
 interface DiscoveryOpts {
@@ -83,8 +85,79 @@ function getCandidate(db: Database.Database, candidateId: string): CandidateRow 
   return row;
 }
 
+function formatRun(run: DiscoveryRun | null) {
+  if (!run) return null;
+  return {
+    id: run.id,
+    triggerType: run.triggerType,
+    status: run.status,
+    requestedBy: run.requestedBy,
+    requestedAt: run.requestedAt,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    heartbeatAt: run.heartbeatAt,
+    stats: run.stats,
+    error: run.error,
+  };
+}
+
 export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, opts) => {
   const { db } = opts;
+
+  // ── GET /discovery/status ───────────────────────────────────────────────
+  app.get("/discovery/status", async () => {
+    const runRepo = new SqliteDiscoveryRunRepository(db);
+    const lastRun = runRepo.findRecent(1)[0] ?? null;
+    const lastSuccessfulRun = runRepo.findLastSuccessful();
+    const activeRun = runRepo.findActive();
+
+    const heartbeatRow = db
+      .prepare(
+        "SELECT MAX(captured_at) as ts FROM runtime_metrics WHERE metric_name = 'discovery_worker_heartbeat'",
+      )
+      .get() as { ts: string | null } | undefined;
+    const heartbeatAt = heartbeatRow?.ts ?? null;
+    const workerState =
+      heartbeatAt && Date.now() - new Date(heartbeatAt).getTime() < 90_000
+        ? "healthy"
+        : "offline";
+
+    return ok({
+      lastRun: formatRun(lastRun),
+      lastSuccessfulRun: formatRun(lastSuccessfulRun),
+      activeRun: formatRun(activeRun),
+      workerState,
+    });
+  });
+
+  // ── POST /discovery/scan ────────────────────────────────────────────────
+  app.post("/discovery/scan", async () => {
+    const runRepo = new SqliteDiscoveryRunRepository(db);
+    const active = runRepo.findActive();
+    if (active) {
+      return ok({ runId: active.id, status: active.status, alreadyActive: true });
+    }
+
+    try {
+      const id = runRepo.enqueue("manual", "operator");
+      return ok({ runId: id, status: "queued", alreadyActive: false });
+    } catch {
+      const nowActive = runRepo.findActive();
+      return ok({
+        runId: nowActive?.id ?? 0,
+        status: nowActive?.status ?? "unknown",
+        alreadyActive: true,
+      });
+    }
+  });
+
+  // ── GET /discovery/runs ─────────────────────────────────────────────────
+  app.get<{ Querystring: { limit?: string } }>("/discovery/runs", async (req) => {
+    const runRepo = new SqliteDiscoveryRunRepository(db);
+    const limit = Math.min(parseInt(req.query.limit ?? "20", 10) || 20, 100);
+    const runs = runRepo.findRecent(limit);
+    return ok(runs.map(formatRun));
+  });
 
   // ── GET /discovery/candidates ──────────────────────────────────────────
   app.get<{
