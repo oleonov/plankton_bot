@@ -62,10 +62,10 @@ export function EvidenceSection({
             )}
           </div>
           <ScoreBars
-            recurrence={null}
-            recycle={null}
-            liveViability={evidence.activeWindowEdgeScore}
-            toxicity={null}
+            recurrence={evidence.recurrenceScore}
+            recycle={evidence.recycleScore}
+            liveViability={evidence.liveViabilityScore}
+            toxicity={evidence.toxicityPenalty}
           />
         </div>
       )}

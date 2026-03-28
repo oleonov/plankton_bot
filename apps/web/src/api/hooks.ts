@@ -224,6 +224,8 @@ export function useFamilyTransitions(familyId: string) {
 interface CandidateFilters {
   status?: string;
   recommendation?: string;
+  confidence?: string;
+  cadence?: string;
 }
 
 export function useCandidates(filters: CandidateFilters = {}) {
@@ -234,8 +236,19 @@ export function useCandidates(filters: CandidateFilters = {}) {
         withParams("/api/v1/discovery/candidates", {
           status: filters.status,
           recommendation: filters.recommendation,
+          confidence: filters.confidence,
+          cadence: filters.cadence,
         }),
       ),
+  });
+}
+
+export function useCandidateTransitions(candidateId: string | null) {
+  return useQuery({
+    queryKey: ["discovery", "candidates", candidateId, "transitions"],
+    queryFn: () =>
+      apiFetch<TransitionDTO[]>(`/api/v1/discovery/candidates/${candidateId}/transitions`),
+    enabled: !!candidateId,
   });
 }
 

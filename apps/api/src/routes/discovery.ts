@@ -181,18 +181,18 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
     "/discovery/candidates/:candidateId/accept",
     async (request) => {
       const row = getCandidate(db, request.params.candidateId);
-      if (row.status !== "reviewed") {
-        throw new ApiError(
-          409,
-          `candidate status is '${row.status}', expected 'reviewed'`,
-          "INVALID_STATUS",
-        );
-      }
-
       const familyId = row.candidate_id;
       const now = new Date().toISOString();
 
       const materialize = db.transaction(() => {
+        // Atomically guard + update candidate status (race-safe)
+        const result = db.prepare(
+          `UPDATE family_candidates
+           SET status = 'materialized', materialized_at = ?
+           WHERE candidate_id = ? AND status = 'reviewed'`,
+        ).run(now, row.candidate_id);
+        if (result.changes === 0) return false;
+
         // 1. INSERT family_catalog
         db.prepare(
           `INSERT INTO family_catalog
@@ -246,14 +246,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
            VALUES (?, ?, 'probe-baseline', ?)`,
         ).run(familyId, JSON.stringify(rulesRow), now);
 
-        // 6. UPDATE candidate status
-        db.prepare(
-          `UPDATE family_candidates
-           SET status = 'materialized', materialized_at = ?
-           WHERE candidate_id = ?`,
-        ).run(now, row.candidate_id);
-
-        // 7. INSERT operator_commands (rules_reload, deduped)
+        // 6. INSERT operator_commands (rules_reload, deduped)
         const pending = db
           .prepare(
             "SELECT 1 FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending' LIMIT 1",
@@ -267,21 +260,59 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           ).run(`materialized candidate ${familyId}`, now);
         }
 
-        // 8. INSERT state_transitions
+        // 7. INSERT state_transitions
         db.prepare(
           `INSERT INTO state_transitions
              (entity_type, entity_id, from_state, to_state, trigger_type, initiator, reason)
            VALUES ('candidate', ?, 'reviewed', 'materialized', 'operator', 'api', ?)`,
         ).run(row.candidate_id, `accepted via API`);
+
+        return true;
       });
 
-      materialize();
+      const applied = materialize();
+      if (!applied) {
+        throw new ApiError(
+          409,
+          `candidate was concurrently modified (no longer 'reviewed')`,
+          "CONCURRENT_MODIFICATION",
+        );
+      }
 
       return ok({
         ...toCandidateDto(row),
         status: "materialized",
         materializedAt: now,
       });
+    },
+  );
+
+  // ── GET /discovery/candidates/:candidateId/transitions ────────────────
+  app.get<{ Params: { candidateId: string } }>(
+    "/discovery/candidates/:candidateId/transitions",
+    async (request) => {
+      getCandidate(db, request.params.candidateId);
+      const rows = db
+        .prepare(
+          `SELECT * FROM state_transitions
+           WHERE entity_type = 'candidate' AND entity_id = ?
+           ORDER BY created_at DESC, id DESC`,
+        )
+        .all(request.params.candidateId) as Array<Record<string, unknown>>;
+      return ok(
+        rows.map((r) => ({
+          id: r.id,
+          entityType: r.entity_type,
+          entityId: r.entity_id,
+          fromState: r.from_state,
+          toState: r.to_state,
+          triggerType: r.trigger_type,
+          initiator: r.initiator,
+          reason: r.reason,
+          scoresSnapshot: r.scores_snapshot,
+          createdAt: r.created_at,
+        })),
+      );
     },
   );
 

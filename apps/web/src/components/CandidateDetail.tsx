@@ -1,13 +1,47 @@
-import { useCandidateDetail } from "../api/hooks.ts";
+import { useCandidateDetail, useCandidateTransitions } from "../api/hooks.ts";
 import { ScoreBars } from "./ScoreBars.tsx";
 import { Badge } from "./Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
+import type { TransitionDTO } from "../api/types.ts";
 
 function DetailField({ label, value }: { label: string; value: string | null | undefined }) {
   return (
     <div style={{ marginBottom: 4 }}>
       <span style={{ fontSize: 10, color: "var(--text-muted)", marginRight: 6 }}>{label}:</span>
       <span style={{ fontSize: 11 }}>{value ?? "\u2014"}</span>
+    </div>
+  );
+}
+
+function CandidateTransitions({ transitions }: { transitions: TransitionDTO[] }) {
+  if (transitions.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginBottom: 6 }}>
+        Transitions ({transitions.length})
+      </div>
+      <table style={{ fontSize: 11 }}>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>From</th>
+            <th>To</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {transitions.map((t) => (
+            <tr key={t.id}>
+              <td>{formatAgo(t.createdAt)}</td>
+              <td><Badge value={t.fromState} /></td>
+              <td><Badge value={t.toState} /></td>
+              <td style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {t.reason}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -20,6 +54,7 @@ export function CandidateDetail({
   onClose: () => void;
 }) {
   const { data, isLoading } = useCandidateDetail(candidateId);
+  const { data: transitions } = useCandidateTransitions(candidateId);
 
   return (
     <div
@@ -48,6 +83,13 @@ export function CandidateDetail({
       {data && (
         <>
           <IdentitySection data={data} />
+          {data.matchedFamilyId && (
+            <div style={{ marginBottom: 12, fontSize: 11 }}>
+              <a href={`#/families/${data.matchedFamilyId}`} style={{ color: "var(--blue)" }}>
+                View family &rarr;
+              </a>
+            </div>
+          )}
           <div style={{ margin: "12px 0" }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginBottom: 6 }}>
               Scores
@@ -59,6 +101,7 @@ export function CandidateDetail({
               toxicity={data.toxicityPenalty}
             />
           </div>
+          {transitions && <CandidateTransitions transitions={transitions} />}
           <ObservationList observations={data.recentObservations} />
         </>
       )}

@@ -4,10 +4,49 @@ import {
   useFamilyPositions,
   useFamilyOrders,
   useFamilyEvidence,
+  useFamilyTransitions,
 } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { FamilyActions } from "../components/FamilyActions.tsx";
 import { EvidenceSection } from "../components/EvidenceSection.tsx";
+import { formatAgo } from "../utils/format.ts";
+
+function TransitionTimeline({ familyId }: { familyId: string }) {
+  const { data: transitions } = useFamilyTransitions(familyId);
+  if (!transitions || transitions.length === 0) return null;
+
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}>
+        Transitions ({transitions.length})
+      </div>
+      <table style={{ fontSize: 11 }}>
+        <thead>
+          <tr>
+            <th>When</th>
+            <th>From</th>
+            <th>To</th>
+            <th>Trigger</th>
+            <th>Reason</th>
+          </tr>
+        </thead>
+        <tbody>
+          {transitions.map((t) => (
+            <tr key={t.id}>
+              <td>{formatAgo(t.createdAt)}</td>
+              <td><Badge value={t.fromState} /></td>
+              <td><Badge value={t.toState} /></td>
+              <td>{t.triggerType}</td>
+              <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {t.reason}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 function FamilyDetail({ familyId }: { familyId: string }) {
   const { data: positions } = useFamilyPositions(familyId);
@@ -18,6 +57,7 @@ function FamilyDetail({ familyId }: { familyId: string }) {
     <tr>
       <td colSpan={9} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
         {evidence && <EvidenceSection evidence={evidence} familyId={familyId} />}
+        <TransitionTimeline familyId={familyId} />
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
           <div>
             <div

@@ -191,6 +191,10 @@ function makeEvidence(overrides?: Partial<FamilyEvidence>): FamilyEvidence {
     bothSidedEligible: false,
     heavyCampaignEligible: false,
     activeWindowEdgeScore: null,
+    recurrenceScore: null,
+    recycleScore: null,
+    liveViabilityScore: null,
+    toxicityPenalty: null,
     lastValidatedAt: null,
     ...overrides,
   };

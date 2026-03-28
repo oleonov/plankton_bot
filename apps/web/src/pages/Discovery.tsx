@@ -6,8 +6,9 @@ import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
 import type { CandidateDTO } from "../api/types.ts";
 
-const STATUS_BG: Record<string, string | undefined> = {
+const RECOMMENDATION_BG: Record<string, string | undefined> = {
   ignore: "rgba(100,100,100,0.06)",
+  monitor: "rgba(255,193,7,0.06)",
   "probe-candidate": "rgba(79,195,247,0.06)",
   "scaled-candidate": "rgba(76,175,80,0.06)",
 };
@@ -75,7 +76,7 @@ function CandidateTable({
         {candidates.map((c) => (
           <tr
             key={c.candidateId}
-            style={{ background: STATUS_BG[c.status], cursor: "pointer" }}
+            style={{ background: RECOMMENDATION_BG[c.gateRecommendation], cursor: "pointer" }}
             onClick={() => onSelect(c.candidateId)}
           >
             <td style={{ color: "var(--blue)" }}>{c.familyKey}</td>
@@ -104,11 +105,15 @@ function CandidateTable({
 export function Discovery() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [recFilter, setRecFilter] = useState<string>("");
+  const [confFilter, setConfFilter] = useState<string>("");
+  const [cadenceFilter, setCadenceFilter] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const { data: candidates, isLoading } = useCandidates({
     status: statusFilter || undefined,
     recommendation: recFilter || undefined,
+    confidence: confFilter || undefined,
+    cadence: cadenceFilter || undefined,
   });
 
   if (isLoading) return <div className="page">Loading...</div>;
@@ -136,6 +141,25 @@ export function Discovery() {
             <option value="monitor">Monitor</option>
             <option value="probe-candidate">Probe Candidate</option>
             <option value="scaled-candidate">Scaled Candidate</option>
+          </select>
+        </label>
+        <label>
+          Confidence:
+          <select value={confFilter} onChange={(e) => setConfFilter(e.target.value)}>
+            <option value="">All</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </label>
+        <label>
+          Cadence:
+          <select value={cadenceFilter} onChange={(e) => setCadenceFilter(e.target.value)}>
+            <option value="">All</option>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="ad-hoc">Ad-hoc</option>
           </select>
         </label>
       </div>

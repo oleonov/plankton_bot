@@ -250,13 +250,18 @@ export class FamilyEvidenceEngine implements RuntimeModule {
     const currentState = evidence?.promotionState ?? "probe-only";
     if (currentState === "scaled") return; // already at highest
 
+    const recurrence = evidence?.recurrenceScore ?? null;
+    const liveViability = evidence?.liveViabilityScore ?? null;
+
     this.proposalRepo.insert({
       familyId,
       currentState,
       proposedState: "scaled",
       reason: `Auto: recycle=${recycleScore.toFixed(2)}, toxicity=${toxicity.toFixed(2)}, trades=${recycleMetrics.tradeCount}`,
       scoresSnapshot: JSON.stringify({
+        recurrence,
         recycle: recycleScore,
+        liveViability,
         toxicity,
         tradeCount: recycleMetrics.tradeCount,
         distinctMarkets: recycleMetrics.distinctMarkets,
@@ -272,9 +277,9 @@ export class FamilyEvidenceEngine implements RuntimeModule {
         proposedState: "scaled",
         reason: "auto-promotion: thresholds met",
         scores: {
-          recurrence: 0,
+          recurrence: recurrence ?? 0,
           recycle: recycleScore,
-          liveViability: 0,
+          liveViability: liveViability ?? 0,
           toxicity,
         },
         timestamp: Date.now(),

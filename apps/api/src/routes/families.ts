@@ -199,6 +199,10 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
         bothSidedEligible: Boolean(row.both_sided_eligible),
         heavyCampaignEligible: Boolean(row.heavy_campaign_eligible),
         activeWindowEdgeScore: row.active_window_edge_score ?? null,
+        recurrenceScore: row.recurrence_score ?? null,
+        recycleScore: row.recycle_score ?? null,
+        liveViabilityScore: row.live_viability_score ?? null,
+        toxicityPenalty: row.toxicity_penalty ?? null,
         lastValidatedAt: row.last_validated_at ?? null,
       });
     },

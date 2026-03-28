@@ -262,6 +262,10 @@ export interface FamilyEvidenceDTO {
   bothSidedEligible: boolean;
   heavyCampaignEligible: boolean;
   activeWindowEdgeScore: number | null;
+  recurrenceScore: number | null;
+  recycleScore: number | null;
+  liveViabilityScore: number | null;
+  toxicityPenalty: number | null;
   lastValidatedAt: string | null;
 }
 

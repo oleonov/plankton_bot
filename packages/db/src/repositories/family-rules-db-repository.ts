@@ -166,6 +166,10 @@ export class SqliteFamilyRulesDbRepository {
         bothSidedEligible: Boolean(row.both_sided_eligible),
         heavyCampaignEligible: Boolean(row.heavy_campaign_eligible),
         activeWindowEdgeScore: (row.active_window_edge_score as number) ?? null,
+        recurrenceScore: (row.recurrence_score as number) ?? null,
+        recycleScore: (row.recycle_score as number) ?? null,
+        liveViabilityScore: (row.live_viability_score as number) ?? null,
+        toxicityPenalty: (row.toxicity_penalty as number) ?? null,
         lastValidatedAt: (row.last_validated_at as string) ?? null,
       },
       rules: {
