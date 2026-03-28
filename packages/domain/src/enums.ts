@@ -191,6 +191,9 @@ export const OperatorActionType = {
   FamilyReduceOnly: "family_reduce_only",
   FamilyQuarantine: "family_quarantine",
   FamilyActivate: "family_activate",
+  RulesReload: "rules_reload",
+  FamilyPromoteScaled: "family_promote_scaled",
+  FamilyResetToProbe: "family_reset_to_probe",
 } as const;
 export type OperatorActionType = (typeof OperatorActionType)[keyof typeof OperatorActionType];
 
