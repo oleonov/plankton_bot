@@ -291,6 +291,7 @@ export interface Order {
   status: OrderStatus;
   exchangeOrderId: string | null;
   signalId: string | null;
+  signalReason: string | null;
   botRunId: BotRunId;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
@@ -360,6 +361,8 @@ export interface OperatorCommand {
   status: CommandStatus;
   createdAt: string; // ISO timestamp
   appliedAt: string | null; // ISO timestamp; set when status transitions to applied/rejected
+  initiatorType: "operator" | "system";
+  initiator: string | null;
 }
 
 // ─── Operator Action (immutable audit log; runtime writes after applying) ─────
