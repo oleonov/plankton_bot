@@ -1,6 +1,15 @@
 import type Database from "better-sqlite3";
-import type { FamilyConfig } from "@plankton/config";
 import type { FamilyId } from "@plankton/domain";
+
+/**
+ * Locally-defined config shape matching @plankton/config FamilyConfig.
+ * Avoids adding @plankton/config as a dependency of @plankton/db.
+ */
+export interface DbFamilyConfig {
+  identity: Record<string, unknown>;
+  evidence: Record<string, unknown>;
+  rules: Record<string, unknown>;
+}
 
 /**
  * DB-backed family rules provider.
@@ -10,7 +19,7 @@ import type { FamilyId } from "@plankton/domain";
 export class SqliteFamilyRulesDbRepository {
   constructor(private readonly db: Database.Database) {}
 
-  loadAll(): FamilyConfig[] {
+  loadAll(): DbFamilyConfig[] {
     const rows = this.db
       .prepare(
         `SELECT
@@ -107,7 +116,7 @@ export class SqliteFamilyRulesDbRepository {
       );
   }
 
-  private rowToConfig(row: Record<string, unknown>): FamilyConfig {
+  private rowToConfig(row: Record<string, unknown>): DbFamilyConfig {
     const familyId = row.family_id as string;
 
     return {
@@ -208,6 +217,6 @@ export class SqliteFamilyRulesDbRepository {
           weekendMode: row.weekend_mode as string,
         },
       },
-    } as FamilyConfig;
+    };
   }
 }

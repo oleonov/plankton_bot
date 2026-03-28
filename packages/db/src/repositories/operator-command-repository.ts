@@ -29,10 +29,13 @@ function rowToCommand(row: CommandRow): OperatorCommand {
   };
 }
 
+type InsertCommand = Omit<OperatorCommand, "id" | "status" | "appliedAt" | "initiatorType" | "initiator"> &
+  Partial<Pick<OperatorCommand, "initiatorType" | "initiator">>;
+
 export class SqliteOperatorCommandRepository implements OperatorCommandRepository {
   constructor(private readonly db: Database.Database) {}
 
-  insert(cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt">): number {
+  insert(cmd: InsertCommand): number {
     const info = this.db
       .prepare(
         `INSERT INTO operator_commands

@@ -78,7 +78,8 @@ describe("SqliteFamilyRulesDbRepository", () => {
     const configs = repo.loadAll();
     expect(configs).toHaveLength(1);
 
-    const cfg = configs[0]!;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cfg = configs[0]! as any;
     // Identity
     expect(cfg.identity.familyId).toBe("fam-1");
     expect(cfg.identity.familyKey).toBe("test-key");
@@ -162,7 +163,8 @@ describe("SqliteFamilyRulesDbRepository", () => {
     );
 
     const configs = repo.loadAll();
-    const cfg = configs[0]!;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cfg = configs[0]! as any;
     expect(cfg.rules.universe.enabled).toBe(false);
     expect(cfg.rules.universe.action).toBe("blocked");
     expect(cfg.rules.entry.entryMode).toBe("disabled");
