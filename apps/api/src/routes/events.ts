@@ -3,14 +3,17 @@
  *
  * Polls SQLite for state changes and streams events to connected clients.
  *
- * Filter: `?types=position,order,fill,family,status,metrics`
+ * Filter: `?types=position,order,fill,family,status,metrics,discovery,proposals,transitions`
  * These are coarse categories. Each maps to one or more event names:
- *   position → position:updated
- *   order    → order:created, order:filled, order:cancelled
- *   fill     → fill:new
- *   family   → family:state_changed
- *   status   → status
- *   metrics  → metrics:snapshot
+ *   position    → position:updated
+ *   order       → order:created, order:filled, order:cancelled
+ *   fill        → fill:new
+ *   family      → family:state_changed
+ *   status      → status
+ *   metrics     → metrics:snapshot
+ *   discovery   → candidate_updates
+ *   proposals   → proposals
+ *   transitions → transitions
  *
  */
 
@@ -32,6 +35,9 @@ interface ChangeSnapshot {
   riskEvents: string;
   /** Composite key: changes in operator_commands OR bot_runs OR runtime_metrics trigger status events. */
   statusHash: string;
+  candidates: string;
+  proposalCount: number;
+  transitions: string;
 }
 
 /** Maps coarse filter names to the fine-grained event types they include. */
@@ -43,6 +49,9 @@ const CATEGORY_TO_EVENTS: Record<string, string[]> = {
   status: ["status"],
   metrics: ["metrics:snapshot"],
   risk: ["risk:event"],
+  discovery: ["candidate_updates"],
+  proposals: ["proposals"],
+  transitions: ["transitions"],
 };
 
 function takeSnapshot(db: Database.Database): ChangeSnapshot {
@@ -71,6 +80,19 @@ function takeSnapshot(db: Database.Database): ChangeSnapshot {
     )
     .get() as { ts: string | null };
 
+  const candidateMaxTs = db
+    .prepare("SELECT MAX(scores_updated_at) FROM family_candidates")
+    .pluck()
+    .get() as string | null;
+  const proposalCount = db
+    .prepare("SELECT COUNT(*) FROM promotion_proposals WHERE status = 'pending'")
+    .pluck()
+    .get() as number;
+  const transitionMaxTs = db
+    .prepare("SELECT MAX(created_at) FROM state_transitions")
+    .pluck()
+    .get() as string | null;
+
   return {
     positions: pos.ts ?? "",
     orders: ord.ts ?? "",
@@ -78,6 +100,9 @@ function takeSnapshot(db: Database.Database): ChangeSnapshot {
     families: fam.ts ?? "",
     riskEvents: risk.ts ?? "",
     statusHash: `${opCmd.ts ?? ""}|${botRun.ts ?? ""}|${reconMetric.ts ?? ""}`,
+    candidates: candidateMaxTs ?? "",
+    proposalCount,
+    transitions: transitionMaxTs ?? "",
   };
 }
 
@@ -229,6 +254,21 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
           for (const row of rows) {
             sendEvent("risk:event", normalizeRiskEvent(row));
           }
+        }
+
+        // Emit candidate_updates when scores change
+        if (next.candidates !== snapshot.candidates) {
+          sendEvent("candidate_updates", { updatedAt: next.candidates });
+        }
+
+        // Emit proposals when pending count changes
+        if (next.proposalCount !== snapshot.proposalCount) {
+          sendEvent("proposals", { pendingCount: next.proposalCount });
+        }
+
+        // Emit transitions when new state transitions appear
+        if (next.transitions !== snapshot.transitions) {
+          sendEvent("transitions", { latestAt: next.transitions });
         }
 
         // Emit metrics:snapshot every ~30s (15 ticks at 2s interval)
