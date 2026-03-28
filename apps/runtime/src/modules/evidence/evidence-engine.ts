@@ -210,7 +210,12 @@ export class FamilyEvidenceEngine implements RuntimeModule {
       });
 
       this.checkPromotion(familyId, recycleMetrics, recycle, toxicity, now);
-      this.checkDemotion(familyId, identity.horizon, toxicity, now);
+      this.checkDemotion(familyId, {
+        toxicity,
+        tailAdjustedPnl: recycleMetrics.tailAdjustedPnl,
+        horizon: identity.horizon,
+        regime: identity.regime,
+      });
 
       this.log.debug(
         { familyId: familyIdStr, recycle, toxicity },
@@ -283,45 +288,98 @@ export class FamilyEvidenceEngine implements RuntimeModule {
 
   private checkDemotion(
     familyId: import("@plankton/domain").FamilyId,
-    horizon: string,
-    toxicity: number,
-    now: string,
+    metrics: {
+      toxicity: number;
+      tailAdjustedPnl: number;
+      horizon: string;
+      regime: string;
+    },
   ): void {
-    if (toxicity < TOXICITY_DEMOTION_THRESHOLD) return;
-
-    // Check if already in reduce-only / quarantine to avoid spamming commands
     const state = this.familyStateRepo.get(familyId);
-    if (
-      state?.runtimeMode === "reduce-only" ||
-      state?.runtimeMode === "quarantine" ||
-      state?.effectiveMode === "reduce-only"
-    ) {
+    const currentMode = state?.runtimeMode ?? "active";
+
+    // Already quarantined or restricted — nothing to do
+    if (currentMode === "quarantine") return;
+
+    // Already reduce-only — only escalate to quarantine
+    if (currentMode === "reduce-only") {
+      if (metrics.toxicity > 0.8) {
+        this.enqueueDemotion(
+          familyId,
+          OperatorActionType.FamilyQuarantine,
+          `escalation from reduce-only: severe toxicity ${metrics.toxicity.toFixed(2)}`,
+        );
+      }
       return;
     }
 
+    // Threshold regime: immediate quarantine on negative tail (HR12)
+    if (metrics.regime === "threshold" && metrics.tailAdjustedPnl < 0) {
+      this.enqueueDemotion(
+        familyId,
+        OperatorActionType.FamilyQuarantine,
+        `threshold regime, negative tail ${metrics.tailAdjustedPnl.toFixed(2)} (HR12)`,
+      );
+      return;
+    }
+
+    // Toxicity > 0.8: quarantine
+    if (metrics.toxicity > 0.8) {
+      this.enqueueDemotion(
+        familyId,
+        OperatorActionType.FamilyQuarantine,
+        `severe toxicity ${metrics.toxicity.toFixed(2)}`,
+      );
+      return;
+    }
+
+    // Toxicity > 0.6: reduce-only
+    if (metrics.toxicity > TOXICITY_DEMOTION_THRESHOLD) {
+      this.enqueueDemotion(
+        familyId,
+        OperatorActionType.FamilyReduceOnly,
+        `toxicity ${metrics.toxicity.toFixed(2)}`,
+      );
+      return;
+    }
+
+    // Horizon-aware negative tail window
+    if (metrics.tailAdjustedPnl < 0) {
+      const DEMOTION_WINDOWS: Record<string, number> = {
+        "intraday-4h": 2,
+        daily: 5,
+        deadline: 10,
+        "ad-hoc": 7,
+      };
+      const windowDays = DEMOTION_WINDOWS[metrics.horizon] ?? 7;
+      // TODO: Track first_negative_tail_at for proper window enforcement.
+      // For v1: persistent negative tail at evaluation time triggers reduce-only.
+      this.enqueueDemotion(
+        familyId,
+        OperatorActionType.FamilyReduceOnly,
+        `persistent negative tail ${metrics.tailAdjustedPnl.toFixed(2)} (${metrics.horizon} window: ${windowDays}d)`,
+      );
+    }
+  }
+
+  /** Enqueue a demotion command. State transition is written by CommandPoller after apply. */
+  private enqueueDemotion(
+    familyId: import("@plankton/domain").FamilyId,
+    action: typeof OperatorActionType.FamilyReduceOnly | typeof OperatorActionType.FamilyQuarantine,
+    reason: string,
+  ): void {
     this.commandRepo.insert({
-      action: OperatorActionType.FamilyReduceOnly,
+      action,
       targetId: String(familyId),
-      reason: `Auto-demotion: toxicity=${toxicity.toFixed(2)} >= ${TOXICITY_DEMOTION_THRESHOLD}`,
-      createdAt: now,
+      reason: `Auto-demotion: ${reason}`,
+      createdAt: new Date().toISOString(),
       initiatorType: "system",
       initiator: "evidence-engine",
     });
 
-    this.stateTransitionRepo.insert({
-      entityType: "family",
-      entityId: String(familyId),
-      fromState: state?.runtimeMode ?? "active",
-      toState: "reduce-only",
-      triggerType: "system",
-      initiator: "evidence-engine",
-      reason: `toxicity=${toxicity.toFixed(2)} exceeded threshold`,
-      scoresSnapshot: JSON.stringify({ toxicity, horizon }),
-    });
-
     this.log.warn(
-      { familyId: String(familyId), toxicity },
-      "demotion command enqueued — toxicity exceeded threshold",
+      { familyId: String(familyId), action, reason },
+      "demotion command enqueued",
     );
   }
 }

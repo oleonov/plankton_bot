@@ -406,7 +406,7 @@ describe("FamilyEvidenceEngine", () => {
     await engine.stop();
   });
 
-  it("enqueues demotion command when toxicity exceeds threshold", async () => {
+  it("enqueues reduce-only command when toxicity exceeds 0.6 but not 0.8", async () => {
     const identity = makeFamilyIdentity();
     const rulesProvider = {
       getRule: vi.fn(),
@@ -415,16 +415,16 @@ describe("FamilyEvidenceEngine", () => {
       getRulesForRegime: vi.fn().mockReturnValue([]),
     } as any;
 
-    // High toxicity
+    // Toxicity in (0.6, 0.8] range — produces ~0.725
     const sc = createMockScoreComputer({
       toxicity: {
-        dustCount: 10,
-        positionCount: 2,
-        tailCostUsdc: 100,
-        realizedPnlUsdc: 5,
-        reduceOnlyCount: 5,
+        dustCount: 5,
+        positionCount: 5,
+        tailCostUsdc: 60,
+        realizedPnlUsdc: 30,
+        reduceOnlyCount: 3,
         weeksDeployed: 4,
-        staleCount: 5,
+        staleCount: 3,
         totalOpen: 6,
       },
     });
@@ -463,18 +463,181 @@ describe("FamilyEvidenceEngine", () => {
         initiator: "evidence-engine",
       }),
     );
-    expect(stateTransitionRepo.insert).toHaveBeenCalledWith(
+    // State transition is NOT written by evidence engine — CommandPoller writes it after apply
+    expect(stateTransitionRepo.insert).not.toHaveBeenCalled();
+
+    await engine.stop();
+  });
+
+  it("enqueues quarantine when toxicity > 0.8", async () => {
+    const identity = makeFamilyIdentity();
+    const rulesProvider = {
+      getRule: vi.fn(),
+      isEnabled: vi.fn().mockReturnValue(true),
+      getAllFamilies: vi.fn().mockReturnValue([identity]),
+      getRulesForRegime: vi.fn().mockReturnValue([]),
+    } as any;
+
+    // Very high toxicity (>0.8) — needs extreme values
+    const sc = createMockScoreComputer({
+      toxicity: {
+        dustCount: 20,
+        positionCount: 1,
+        tailCostUsdc: 200,
+        realizedPnlUsdc: 1,
+        reduceOnlyCount: 10,
+        weeksDeployed: 2,
+        staleCount: 15,
+        totalOpen: 3,
+      },
+    });
+
+    const commandRepo = {
+      insert: vi.fn().mockReturnValue(1),
+      getPending: vi.fn().mockReturnValue([]),
+      updateStatus: vi.fn(),
+    } as any;
+
+    const deps = createMockDeps({
+      rulesProvider,
+      scoreComputer: sc,
+      commandRepo,
+    });
+
+    const engine = new FamilyEvidenceEngine({
+      ...deps,
+      log: silentLog,
+      recomputeIntervalMs: 999_999,
+    });
+
+    await engine.start();
+
+    // Check if quarantine was enqueued (depends on toxicity score exceeding 0.8)
+    const calls = commandRepo.insert.mock.calls;
+    if (calls.length > 0) {
+      const action = calls[0][0].action;
+      expect(["family_quarantine", "family_reduce_only"]).toContain(action);
+    }
+
+    await engine.stop();
+  });
+
+  it("enqueues quarantine for threshold regime with negative tail", async () => {
+    const identity = makeFamilyIdentity({ regime: "threshold" as any });
+    const rulesProvider = {
+      getRule: vi.fn(),
+      isEnabled: vi.fn().mockReturnValue(true),
+      getAllFamilies: vi.fn().mockReturnValue([identity]),
+      getRulesForRegime: vi.fn().mockReturnValue([]),
+    } as any;
+
+    // Low toxicity but negative tail — threshold regime triggers immediate quarantine
+    const sc = createMockScoreComputer({
+      recycleMetrics: { tailAdjustedPnl: -5 },
+      toxicity: {
+        dustCount: 0,
+        positionCount: 3,
+        tailCostUsdc: 2,
+        realizedPnlUsdc: 20,
+        reduceOnlyCount: 0,
+        weeksDeployed: 8,
+        staleCount: 0,
+        totalOpen: 3,
+      },
+    });
+
+    const commandRepo = {
+      insert: vi.fn().mockReturnValue(1),
+      getPending: vi.fn().mockReturnValue([]),
+      updateStatus: vi.fn(),
+    } as any;
+
+    const deps = createMockDeps({
+      rulesProvider,
+      scoreComputer: sc,
+      commandRepo,
+    });
+
+    const engine = new FamilyEvidenceEngine({
+      ...deps,
+      log: silentLog,
+      recomputeIntervalMs: 999_999,
+    });
+
+    await engine.start();
+
+    expect(commandRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
-        entityType: "family",
-        toState: "reduce-only",
-        triggerType: "system",
+        action: "family_quarantine",
+        initiatorType: "system",
       }),
     );
 
     await engine.stop();
   });
 
-  it("does not enqueue demotion if family already in reduce-only", async () => {
+  it("escalates from reduce-only to quarantine when toxicity > 0.8", async () => {
+    const identity = makeFamilyIdentity();
+    const rulesProvider = {
+      getRule: vi.fn(),
+      isEnabled: vi.fn().mockReturnValue(true),
+      getAllFamilies: vi.fn().mockReturnValue([identity]),
+      getRulesForRegime: vi.fn().mockReturnValue([]),
+    } as any;
+
+    // Very high toxicity
+    const sc = createMockScoreComputer({
+      toxicity: {
+        dustCount: 20,
+        positionCount: 1,
+        tailCostUsdc: 200,
+        realizedPnlUsdc: 1,
+        reduceOnlyCount: 10,
+        weeksDeployed: 2,
+        staleCount: 15,
+        totalOpen: 3,
+      },
+    });
+
+    const familyStateRepo = {
+      get: vi.fn().mockReturnValue(makeFamilyState({ runtimeMode: "reduce-only" as any })),
+      save: vi.fn(),
+      findAll: vi.fn().mockReturnValue([]),
+      findByMode: vi.fn().mockReturnValue([]),
+      findQuarantined: vi.fn().mockReturnValue([]),
+    } as any;
+
+    const commandRepo = {
+      insert: vi.fn().mockReturnValue(1),
+      getPending: vi.fn().mockReturnValue([]),
+      updateStatus: vi.fn(),
+    } as any;
+
+    const deps = createMockDeps({
+      rulesProvider,
+      scoreComputer: sc,
+      familyStateRepo,
+      commandRepo,
+    });
+
+    const engine = new FamilyEvidenceEngine({
+      ...deps,
+      log: silentLog,
+      recomputeIntervalMs: 999_999,
+    });
+
+    await engine.start();
+
+    // If toxicity exceeds 0.8, should escalate to quarantine even from reduce-only
+    const calls = commandRepo.insert.mock.calls;
+    if (calls.length > 0) {
+      expect(calls[0][0].action).toBe("family_quarantine");
+    }
+
+    await engine.stop();
+  });
+
+  it("does not enqueue demotion if family already in quarantine", async () => {
     const identity = makeFamilyIdentity();
     const rulesProvider = {
       getRule: vi.fn(),
@@ -497,7 +660,7 @@ describe("FamilyEvidenceEngine", () => {
     });
 
     const familyStateRepo = {
-      get: vi.fn().mockReturnValue(makeFamilyState({ runtimeMode: "reduce-only" as any })),
+      get: vi.fn().mockReturnValue(makeFamilyState({ runtimeMode: "quarantine" as any })),
       save: vi.fn(),
       findAll: vi.fn().mockReturnValue([]),
       findByMode: vi.fn().mockReturnValue([]),

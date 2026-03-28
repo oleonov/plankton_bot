@@ -274,23 +274,19 @@ async function main(): Promise<void> {
     }
   }
 
-  // Build slug filter from family rules so we only keep relevant markets during pagination
-  const slugPatterns: RegExp[] = [];
-  for (const f of families) {
-    if (!f.slugPattern) continue;
-    try {
-      slugPatterns.push(slugPatternToRegex(f.slugPattern));
-    } catch {
-      log.warn(
-        { familyId: String(f.familyId), pattern: f.slugPattern },
-        "invalid slug pattern — skipping for market-data filter",
-      );
-    }
-  }
-  const slugFilter =
-    slugPatterns.length > 0
-      ? (slug: string) => slugPatterns.some((re) => re.test(slug))
-      : undefined;
+  // Build slug filter dynamically from rules manager so new families added via
+  // rules_reload are picked up without restart.
+  const slugFilter = (slug: string): boolean => {
+    const currentFamilies = rulesManager.getAllFamilies();
+    return currentFamilies.some((f) => {
+      if (!f.slugPattern) return false;
+      try {
+        return slugPatternToRegex(f.slugPattern).test(slug);
+      } catch {
+        return false;
+      }
+    });
+  };
 
   const { marketDataGateway, exchangeGateway, modeLabel, marketDataSource, executionMode } =
     createGateways({

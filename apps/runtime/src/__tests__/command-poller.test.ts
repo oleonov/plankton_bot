@@ -350,14 +350,29 @@ describe("CommandPoller", () => {
   // ── family_promote_scaled ───────────────────────────────────────────────
 
   describe("family_promote_scaled", () => {
-    it("sets runtime_mode to active and promotion_state to scaled", async () => {
+    it("updates family_rules to scaled defaults, sets runtime_mode to active, and promotion_state to scaled", async () => {
       seedFamily("fam-1");
       seedFamilyEvidence("fam-1");
+
+      // Seed a family_rules row so updateToScaledDefaults has a target
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO family_rules (family_id, max_open_value_usdc, max_active_markets,
+             max_dust_positions, enabled, action, priority_rank, entry_mode,
+             max_initial_notional_usdc, tail_quarantine_threshold_usdc,
+             tail_quarantine_threshold_ratio, scale_mode, default_max_buys_per_leg,
+             allow_heavy_campaigns, require_positive_recycle_history_for_scale, updated_at)
+           VALUES ('fam-1', 10.0, 2, 1, 1, 'trade', 1, 'probe-first', 5.0, 100, 0.5,
+                   'disabled', 1, 0, 0, datetime('now'))`,
+        )
+        .run();
 
       const rulesManager: ReloadableRules = { reload: vi.fn() };
       const normalizationModule: PatternRebuilder = { rebuildPatterns: vi.fn() };
       const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
       const transitionRepo = new SqliteStateTransitionRepository(conn.db);
+      const { SqliteFamilyRulesDbRepository } = await import("@plankton/db");
+      const dbWriter = new SqliteFamilyRulesDbRepository(conn.db);
 
       insertCommand("family_promote_scaled", "fam-1", "promotion approved");
       const poller = createPoller({
@@ -365,6 +380,7 @@ describe("CommandPoller", () => {
         normalizationModule,
         familyEvidenceRepo: evidenceRepo,
         stateTransitionRepo: transitionRepo,
+        familyRulesDbWriter: dbWriter,
       });
 
       await poller.poll();
@@ -374,6 +390,16 @@ describe("CommandPoller", () => {
 
       const evidence = evidenceRepo.getEvidence(createFamilyId("fam-1"));
       expect(evidence!.promotionState).toBe("scaled");
+
+      // Verify family_rules were updated to scaled defaults
+      const rulesRow = conn.db
+        .prepare("SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions, default_max_buys_per_leg FROM family_rules WHERE family_id = ?")
+        .get("fam-1") as Record<string, unknown>;
+      expect(rulesRow.scale_mode).toBe("confirm-only");
+      expect(rulesRow.max_open_value_usdc).toBe(50.0);
+      expect(rulesRow.max_active_markets).toBe(5);
+      expect(rulesRow.max_dust_positions).toBe(3);
+      expect(rulesRow.default_max_buys_per_leg).toBe(3);
 
       const transitions = transitionRepo.findByEntity("family", "fam-1");
       expect(transitions).toHaveLength(1);
@@ -404,7 +430,7 @@ describe("CommandPoller", () => {
       const normalizationModule: PatternRebuilder = { rebuildPatterns: vi.fn() };
       const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
       const transitionRepo = new SqliteStateTransitionRepository(conn.db);
-      const dbWriter: FamilyRulesDbWriter = { overwriteRules: vi.fn() };
+      const dbWriter: FamilyRulesDbWriter = { overwriteRules: vi.fn(), updateToScaledDefaults: vi.fn() };
 
       insertCommand("family_reset_to_probe", "fam-1", "resetting");
       const poller = createPoller({
@@ -422,21 +448,21 @@ describe("CommandPoller", () => {
       expect(rulesManager.reload).toHaveBeenCalledOnce();
 
       const state = familyStateRepo.get(createFamilyId("fam-1"));
-      expect(state!.runtimeMode).toBe("probe-only");
+      expect(state!.runtimeMode).toBe("active");
 
       const evidence = evidenceRepo.getEvidence(createFamilyId("fam-1"));
       expect(evidence!.promotionState).toBe("probe-only");
 
       const transitions = transitionRepo.findByEntity("family", "fam-1");
       expect(transitions).toHaveLength(1);
-      expect(transitions[0]!.toState).toBe("probe-only");
+      expect(transitions[0]!.toState).toBe("active");
       expect(transitions[0]!.scoresSnapshot).toBe(rulesJson);
     });
 
     it("rejects when no snapshot exists", async () => {
       seedFamily("fam-1");
       const snapshotRepo = new SqliteFamilyRulesSnapshotRepository(conn.db);
-      const dbWriter: FamilyRulesDbWriter = { overwriteRules: vi.fn() };
+      const dbWriter: FamilyRulesDbWriter = { overwriteRules: vi.fn(), updateToScaledDefaults: vi.fn() };
 
       insertCommand("family_reset_to_probe", "fam-1", "resetting");
       const poller = createPoller({

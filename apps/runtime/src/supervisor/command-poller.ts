@@ -25,9 +25,10 @@ export interface PatternRebuilder {
   rebuildPatterns(): void;
 }
 
-/** Minimal interface for the DB family rules repository (overwrite on reset). */
+/** Minimal interface for the DB family rules repository (overwrite on reset / promote). */
 export interface FamilyRulesDbWriter {
   overwriteRules(familyId: import("@plankton/domain").FamilyId, rulesJson: string): void;
+  updateToScaledDefaults(familyId: import("@plankton/domain").FamilyId): void;
 }
 
 export interface CommandPollerDeps {
@@ -103,6 +104,11 @@ export class CommandPoller implements RuntimeModule {
   private async applyCommand(cmd: OperatorCommand): Promise<void> {
     const now = new Date().toISOString();
     try {
+      // Capture previous mode BEFORE applying changes (needed for demotion events)
+      const previousMode = cmd.targetId
+        ? this.deps.familyStateRepo.get(createFamilyId(cmd.targetId))?.runtimeMode ?? "unknown"
+        : "unknown";
+
       switch (cmd.action) {
         case "pause":
           this.deps.setPaused(true);
@@ -160,17 +166,29 @@ export class CommandPoller implements RuntimeModule {
         appliedAt: Date.now(),
       });
 
-      // System-initiated demotions publish FamilyDemotionApplied
+      // System-initiated demotions: write state transition and publish event
       if (
         cmd.initiatorType === "system" &&
         cmd.targetId &&
         (cmd.action === "family_reduce_only" || cmd.action === "family_quarantine")
       ) {
-        const state = this.deps.familyStateRepo.get(createFamilyId(cmd.targetId));
+        const newState = cmd.action === "family_reduce_only" ? "reduce-only" : "quarantine";
+
+        this.deps.stateTransitionRepo?.insert({
+          entityType: "family",
+          entityId: cmd.targetId,
+          fromState: previousMode,
+          toState: newState,
+          triggerType: cmd.initiatorType,
+          initiator: cmd.initiator ?? null,
+          reason: cmd.reason ?? "system demotion",
+          scoresSnapshot: null,
+        });
+
         await this.deps.bus.publish("FamilyDemotionApplied", {
           familyId: createFamilyId(cmd.targetId),
-          previousState: state?.runtimeMode ?? "unknown",
-          newState: cmd.action === "family_reduce_only" ? "reduce-only" : "quarantine",
+          previousState: previousMode,
+          newState,
           reason: cmd.reason ?? "system demotion",
           timestamp: Date.now(),
         });
@@ -245,7 +263,13 @@ export class CommandPoller implements RuntimeModule {
       throw new Error(`Family ${cmd.targetId} not found in runtime state`);
     }
 
-    // Reload rules to pick up any pending DB changes
+    // Update family_rules to scaled defaults before reloading
+    if (!this.deps.familyRulesDbWriter) {
+      throw new Error("family_promote_scaled requires familyRulesDbWriter dep");
+    }
+    this.deps.familyRulesDbWriter.updateToScaledDefaults(familyId);
+
+    // Reload rules to pick up the DB changes
     this.deps.rulesManager?.reload();
     this.deps.normalizationModule?.rebuildPatterns();
 
@@ -305,10 +329,11 @@ export class CommandPoller implements RuntimeModule {
     this.deps.rulesManager?.reload();
     this.deps.normalizationModule?.rebuildPatterns();
 
-    // Set runtime_mode to probe-only
+    // Set runtime_mode to active — probe behavior is enforced by entry_mode/scale_mode
+    // in the rules, not by runtime_mode. Setting probe-only would block repricing exits.
     this.deps.familyStateRepo.save({
       ...state,
-      runtimeMode: "probe-only",
+      runtimeMode: "active",
       quarantineReason: null,
       updatedAt: now,
     });
@@ -321,7 +346,7 @@ export class CommandPoller implements RuntimeModule {
       entityType: "family",
       entityId: cmd.targetId,
       fromState: state.runtimeMode,
-      toState: "probe-only",
+      toState: "active",
       triggerType: cmd.initiatorType,
       initiator: cmd.initiator ?? null,
       reason: cmd.reason ?? "reset to probe",

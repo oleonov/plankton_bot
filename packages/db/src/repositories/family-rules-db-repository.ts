@@ -41,6 +41,24 @@ export class SqliteFamilyRulesDbRepository {
     return rows.map((row) => this.rowToConfig(row));
   }
 
+  updateToScaledDefaults(familyId: FamilyId): void {
+    this.db
+      .prepare(
+        `UPDATE family_rules SET
+           scale_mode = 'confirm-only',
+           entry_mode = 'probe-first',
+           allow_heavy_campaigns = 0,
+           max_open_value_usdc = 50.0,
+           max_active_markets = 5,
+           max_dust_positions = 3,
+           require_positive_recycle_history_for_scale = 1,
+           default_max_buys_per_leg = 3,
+           updated_at = datetime('now')
+         WHERE family_id = ?`,
+      )
+      .run(familyId);
+  }
+
   overwriteRules(familyId: FamilyId, rulesJson: string): void {
     const rules = JSON.parse(rulesJson) as Record<string, unknown>;
     this.db
