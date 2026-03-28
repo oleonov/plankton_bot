@@ -482,6 +482,136 @@ describe("CommandPoller", () => {
     });
   });
 
+  // ── promote → reset round-trip verifying actual DB rules ──────────────
+
+  describe("promote then reset round-trip", () => {
+    it("promote changes scale_mode and caps, reset reverts them, runtime_mode stays active", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      // Seed probe-only family_rules row
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO family_rules (family_id, max_open_value_usdc, max_active_markets,
+             max_dust_positions, enabled, action, priority_rank, entry_mode,
+             max_initial_notional_usdc, tail_quarantine_threshold_usdc,
+             tail_quarantine_threshold_ratio, scale_mode, default_max_buys_per_leg,
+             allow_heavy_campaigns, require_positive_recycle_history_for_scale, updated_at)
+           VALUES ('fam-1', 10.0, 2, 1, 1, 'trade', 1, 'probe-first', 5.0, 100, 0.5,
+                   'disabled', 1, 0, 0, datetime('now'))`,
+        )
+        .run();
+
+      // Save a baseline snapshot for reset (camelCase keys matching overwriteRules expectation)
+      const snapshotRepo = new SqliteFamilyRulesSnapshotRepository(conn.db);
+      const baselineJson = JSON.stringify({
+        enabled: true,
+        action: "trade",
+        priorityRank: 1,
+        allowWeekends: false,
+        sessionMode: "active-window",
+        entryMode: "probe-first",
+        minEntryPrice: 0,
+        maxEntryPrice: 1,
+        maxInitialNotionalUsdc: 5.0,
+        allowHighPriceOneShot: false,
+        highPriceThreshold: 0.2,
+        requireProvenFamilyAbovePrice: 0.2,
+        preferredEntryBand: null,
+        maxProbeCountPerMarket: null,
+        entryCooldownSeconds: null,
+        maxNewMarketsPerSession: null,
+        scaleMode: "disabled",
+        defaultMaxBuysPerLeg: 1,
+        heavyMaxBuysPerLeg: 6,
+        allowHeavyCampaigns: false,
+        requirePositiveRecycleHistoryForScale: false,
+        exitMode: "disabled",
+        primaryProfitModel: "sell-into-strength",
+        allowRunnerExtension: false,
+        preferFastRecycle: true,
+        resolutionHoldingAllowed: false,
+        targetRoiBandLow: null,
+        targetRoiBandHigh: null,
+        maxUnmovedHoldHours: null,
+        maxTailHoldHours: null,
+        allowTwoSided: false,
+        twoSidedMode: "disabled",
+        minActivityForTwoSided: null,
+        maxOpenValueUsdc: 10.0,
+        maxActiveMarkets: 2,
+        maxDustPositions: 1,
+        tailQuarantineThresholdUsdc: 100,
+        tailQuarantineThresholdRatio: 0.5,
+        staleTailPruneEnabled: false,
+        thresholdCleanupRequired: false,
+        activeWindowsUtc: [],
+        reducedWindowsUtc: [],
+        weekdayBias: "normal",
+        weekendMode: "reduced",
+      });
+      snapshotRepo.save({
+        familyId: createFamilyId("fam-1"),
+        snapshot: baselineJson,
+        reason: "probe-baseline",
+        capturedAt: new Date().toISOString(),
+      });
+
+      const rulesManager: ReloadableRules = { reload: vi.fn() };
+      const normalizationModule: PatternRebuilder = { rebuildPatterns: vi.fn() };
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const transitionRepo = new SqliteStateTransitionRepository(conn.db);
+      const { SqliteFamilyRulesDbRepository } = await import("@plankton/db");
+      const dbWriter = new SqliteFamilyRulesDbRepository(conn.db);
+
+      const poller = createPoller({
+        rulesManager,
+        normalizationModule,
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: transitionRepo,
+        familyRulesDbWriter: dbWriter,
+        familyRulesSnapshotRepo: snapshotRepo,
+      });
+
+      // ── Step 1: Promote ─────────────────────────────────────────────
+      insertCommand("family_promote_scaled", "fam-1", "promotion approved");
+      await poller.poll();
+
+      const afterPromote = conn.db
+        .prepare(
+          "SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules WHERE family_id = ?",
+        )
+        .get("fam-1") as Record<string, unknown>;
+      expect(afterPromote.scale_mode).toBe("confirm-only");
+      expect(afterPromote.max_open_value_usdc).toBe(50.0);
+      expect(afterPromote.max_active_markets).toBe(5);
+      expect(afterPromote.max_dust_positions).toBe(3);
+
+      const stateAfterPromote = familyStateRepo.get(createFamilyId("fam-1"));
+      expect(stateAfterPromote!.runtimeMode).toBe("active");
+
+      // ── Step 2: Reset to probe ──────────────────────────────────────
+      insertCommand("family_reset_to_probe", "fam-1", "resetting to probe");
+      await poller.poll();
+
+      const afterReset = conn.db
+        .prepare(
+          "SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules WHERE family_id = ?",
+        )
+        .get("fam-1") as Record<string, unknown>;
+      expect(afterReset.scale_mode).toBe("disabled");
+      expect(afterReset.max_open_value_usdc).toBe(10.0);
+      expect(afterReset.max_active_markets).toBe(2);
+      expect(afterReset.max_dust_positions).toBe(1);
+
+      const stateAfterReset = familyStateRepo.get(createFamilyId("fam-1"));
+      expect(stateAfterReset!.runtimeMode).toBe("active");
+
+      const evidence = evidenceRepo.getEvidence(createFamilyId("fam-1"));
+      expect(evidence!.promotionState).toBe("probe-only");
+    });
+  });
+
   // ── family_reduce_only with system initiator ───────────────────────────
 
   describe("system-initiated demotion", () => {

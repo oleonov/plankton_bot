@@ -932,6 +932,166 @@ describe("FamilyEvidenceEngine", () => {
     }
   });
 
+  it("resumes negative tail window from DB timestamp on restart", async () => {
+    vi.useFakeTimers();
+    try {
+      // Simulate: family has been negative for 4 days already (stored in DB from previous session)
+      const fourDaysAgo = new Date(Date.now() - 4 * 24 * 3_600_000).toISOString();
+
+      const identity = makeFamilyIdentity({ regime: "non-threshold" as any, horizon: "daily" });
+      const rulesProvider = {
+        getRule: vi.fn(),
+        isEnabled: vi.fn().mockReturnValue(true),
+        getAllFamilies: vi.fn().mockReturnValue([identity]),
+        getRulesForRegime: vi.fn().mockReturnValue([]),
+      } as any;
+
+      const sc = createMockScoreComputer({
+        recycleMetrics: { tailAdjustedPnl: -3 },
+        toxicity: {
+          dustCount: 0,
+          positionCount: 3,
+          tailCostUsdc: 2,
+          realizedPnlUsdc: 20,
+          reduceOnlyCount: 0,
+          weeksDeployed: 8,
+          staleCount: 0,
+          totalOpen: 3,
+        },
+      });
+
+      const commandRepo = {
+        insert: vi.fn().mockReturnValue(1),
+        getPending: vi.fn().mockReturnValue([]),
+        updateStatus: vi.fn(),
+      } as any;
+
+      // familyStateRepo returns state WITH firstNegativeTailAt from previous session
+      const familyStateRepo = {
+        get: vi.fn().mockReturnValue(
+          makeFamilyState({ firstNegativeTailAt: fourDaysAgo }),
+        ),
+        save: vi.fn(),
+        findAll: vi.fn().mockReturnValue([]),
+        findByMode: vi.fn().mockReturnValue([]),
+        findQuarantined: vi.fn().mockReturnValue([]),
+      } as any;
+
+      const deps = createMockDeps({
+        rulesProvider,
+        scoreComputer: sc,
+        commandRepo,
+        familyStateRepo,
+      });
+
+      const engine = new FamilyEvidenceEngine({
+        ...deps,
+        log: silentLog,
+        recomputeIntervalMs: 3_600_000,
+      });
+
+      await engine.start(); // first recompute — picks up fourDaysAgo from DB
+
+      // 4 days elapsed < 5 day window — no demotion yet
+      expect(commandRepo.insert).not.toHaveBeenCalled();
+
+      // Advance 1.5 more days (total 5.5 days > 5 day window)
+      vi.advanceTimersByTime(1.5 * 24 * 3_600_000);
+      await engine.recompute();
+
+      // NOW should demote
+      expect(commandRepo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({ action: "family_reduce_only", initiatorType: "system" }),
+      );
+
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears DB timestamp when tail recovers after restart", async () => {
+    vi.useFakeTimers();
+    try {
+      const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3_600_000).toISOString();
+      const identity = makeFamilyIdentity({ regime: "non-threshold" as any, horizon: "daily" });
+      const rulesProvider = {
+        getRule: vi.fn(),
+        isEnabled: vi.fn().mockReturnValue(true),
+        getAllFamilies: vi.fn().mockReturnValue([identity]),
+        getRulesForRegime: vi.fn().mockReturnValue([]),
+      } as any;
+
+      // Start with negative tail so engine picks up DB timestamp
+      const recycleMetrics = {
+        tradeCount: 25,
+        distinctMarkets: 6,
+        tailAdjustedPnl: -3,
+        repricingExits: 4,
+        totalNonSettlementClosed: 8,
+      };
+      const sc = createMockScoreComputer({
+        recycleMetrics,
+        toxicity: {
+          dustCount: 0,
+          positionCount: 3,
+          tailCostUsdc: 2,
+          realizedPnlUsdc: 20,
+          reduceOnlyCount: 0,
+          weeksDeployed: 8,
+          staleCount: 0,
+          totalOpen: 3,
+        },
+      });
+
+      const familyStateRepo = {
+        get: vi.fn().mockReturnValue(
+          makeFamilyState({ firstNegativeTailAt: twoDaysAgo }),
+        ),
+        save: vi.fn(),
+        findAll: vi.fn().mockReturnValue([]),
+        findByMode: vi.fn().mockReturnValue([]),
+        findQuarantined: vi.fn().mockReturnValue([]),
+      } as any;
+
+      const commandRepo = {
+        insert: vi.fn().mockReturnValue(1),
+        getPending: vi.fn().mockReturnValue([]),
+        updateStatus: vi.fn(),
+      } as any;
+
+      const deps = createMockDeps({
+        rulesProvider,
+        scoreComputer: sc,
+        commandRepo,
+        familyStateRepo,
+      });
+
+      const engine = new FamilyEvidenceEngine({
+        ...deps,
+        log: silentLog,
+        recomputeIntervalMs: 999_999,
+      });
+
+      await engine.start(); // picks up twoDaysAgo from DB
+
+      // Now tail recovers — should clear timestamp from DB
+      (sc.computeRecycleMetrics as any).mockReturnValue({ ...recycleMetrics, tailAdjustedPnl: 5 });
+      await engine.recompute();
+
+      // Verify familyStateRepo.save was called with firstNegativeTailAt: null
+      const saveCalls = familyStateRepo.save.mock.calls;
+      const clearCall = saveCalls.find(
+        (c: any[]) => c[0].firstNegativeTailAt === null,
+      );
+      expect(clearCall).toBeDefined();
+
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("periodic timer triggers recompute", async () => {
     const candidateRepo = {
       findAll: vi.fn().mockReturnValue([makeCandidate()]),
