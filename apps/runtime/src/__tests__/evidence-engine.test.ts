@@ -717,199 +717,218 @@ describe("FamilyEvidenceEngine", () => {
     await engine.stop();
   });
 
-  it("does not demote on first negative tail for non-threshold regime (window enforcement)", async () => {
-    // Non-threshold regime with negative tail but low toxicity — should NOT demote on first recompute
-    const identity = makeFamilyIdentity({ regime: "non-threshold" as any, horizon: "daily" });
-    const rulesProvider = {
-      getRule: vi.fn(),
-      isEnabled: vi.fn().mockReturnValue(true),
-      getAllFamilies: vi.fn().mockReturnValue([identity]),
-      getRulesForRegime: vi.fn().mockReturnValue([]),
-    } as any;
+  it("does not demote on first negative tail for non-threshold regime (wall-clock window)", async () => {
+    vi.useFakeTimers();
+    try {
+      // Non-threshold regime with negative tail but low toxicity — should NOT demote immediately
+      const identity = makeFamilyIdentity({ regime: "non-threshold" as any, horizon: "daily" });
+      const rulesProvider = {
+        getRule: vi.fn(),
+        isEnabled: vi.fn().mockReturnValue(true),
+        getAllFamilies: vi.fn().mockReturnValue([identity]),
+        getRulesForRegime: vi.fn().mockReturnValue([]),
+      } as any;
 
-    const sc = createMockScoreComputer({
-      recycleMetrics: { tailAdjustedPnl: -3 },
-      toxicity: {
-        dustCount: 0,
-        positionCount: 3,
-        tailCostUsdc: 2,
-        realizedPnlUsdc: 20,
-        reduceOnlyCount: 0,
-        weeksDeployed: 8,
-        staleCount: 0,
-        totalOpen: 3,
-      },
-    });
+      const sc = createMockScoreComputer({
+        recycleMetrics: { tailAdjustedPnl: -3 },
+        toxicity: {
+          dustCount: 0,
+          positionCount: 3,
+          tailCostUsdc: 2,
+          realizedPnlUsdc: 20,
+          reduceOnlyCount: 0,
+          weeksDeployed: 8,
+          staleCount: 0,
+          totalOpen: 3,
+        },
+      });
 
-    const commandRepo = {
-      insert: vi.fn().mockReturnValue(1),
-      getPending: vi.fn().mockReturnValue([]),
-      updateStatus: vi.fn(),
-    } as any;
+      const commandRepo = {
+        insert: vi.fn().mockReturnValue(1),
+        getPending: vi.fn().mockReturnValue([]),
+        updateStatus: vi.fn(),
+      } as any;
 
-    const deps = createMockDeps({
-      rulesProvider,
-      scoreComputer: sc,
-      commandRepo,
-    });
+      const deps = createMockDeps({
+        rulesProvider,
+        scoreComputer: sc,
+        commandRepo,
+      });
 
-    const engine = new FamilyEvidenceEngine({
-      ...deps,
-      log: silentLog,
-      recomputeIntervalMs: 3_600_000, // 1 hour
-    });
+      const engine = new FamilyEvidenceEngine({
+        ...deps,
+        log: silentLog,
+        recomputeIntervalMs: 3_600_000,
+      });
 
-    await engine.start();
+      await engine.start();
 
-    // Daily window = 5 days = 120 hours. A single 1-hour recompute should NOT trigger demotion.
-    expect(commandRepo.insert).not.toHaveBeenCalled();
+      // Daily window = 5 days. Immediately after first recompute, should NOT trigger demotion.
+      expect(commandRepo.insert).not.toHaveBeenCalled();
 
-    await engine.stop();
+      // Advance 4 days — still under 5-day window
+      vi.advanceTimersByTime(4 * 24 * 3_600_000);
+      await engine.recompute();
+      expect(commandRepo.insert).not.toHaveBeenCalled();
+
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
-  it("demotes after enough consecutive negative tail recomputes exceed window", async () => {
-    // Non-threshold regime, daily horizon (5-day window = 120h).
-    // With 1h interval, need 120 consecutive negative recomputes.
-    const identity = makeFamilyIdentity({ regime: "non-threshold" as any, horizon: "intraday-4h" });
-    const rulesProvider = {
-      getRule: vi.fn(),
-      isEnabled: vi.fn().mockReturnValue(true),
-      getAllFamilies: vi.fn().mockReturnValue([identity]),
-      getRulesForRegime: vi.fn().mockReturnValue([]),
-    } as any;
+  it("demotes after wall-clock time exceeds horizon window", async () => {
+    vi.useFakeTimers();
+    try {
+      // intraday-4h window = 2 days
+      const identity = makeFamilyIdentity({ regime: "non-threshold" as any, horizon: "intraday-4h" });
+      const rulesProvider = {
+        getRule: vi.fn(),
+        isEnabled: vi.fn().mockReturnValue(true),
+        getAllFamilies: vi.fn().mockReturnValue([identity]),
+        getRulesForRegime: vi.fn().mockReturnValue([]),
+      } as any;
 
-    const sc = createMockScoreComputer({
-      recycleMetrics: { tailAdjustedPnl: -3 },
-      toxicity: {
-        dustCount: 0,
-        positionCount: 3,
-        tailCostUsdc: 2,
-        realizedPnlUsdc: 20,
-        reduceOnlyCount: 0,
-        weeksDeployed: 8,
-        staleCount: 0,
-        totalOpen: 3,
-      },
-    });
+      const sc = createMockScoreComputer({
+        recycleMetrics: { tailAdjustedPnl: -3 },
+        toxicity: {
+          dustCount: 0,
+          positionCount: 3,
+          tailCostUsdc: 2,
+          realizedPnlUsdc: 20,
+          reduceOnlyCount: 0,
+          weeksDeployed: 8,
+          staleCount: 0,
+          totalOpen: 3,
+        },
+      });
 
-    const commandRepo = {
-      insert: vi.fn().mockReturnValue(1),
-      getPending: vi.fn().mockReturnValue([]),
-      updateStatus: vi.fn(),
-    } as any;
+      const commandRepo = {
+        insert: vi.fn().mockReturnValue(1),
+        getPending: vi.fn().mockReturnValue([]),
+        updateStatus: vi.fn(),
+      } as any;
 
-    const deps = createMockDeps({
-      rulesProvider,
-      scoreComputer: sc,
-      commandRepo,
-    });
+      const deps = createMockDeps({
+        rulesProvider,
+        scoreComputer: sc,
+        commandRepo,
+      });
 
-    // intraday-4h window = 2 days = 48 hours. With 1h interval, need 48 recomputes.
-    const engine = new FamilyEvidenceEngine({
-      ...deps,
-      log: silentLog,
-      recomputeIntervalMs: 3_600_000, // 1 hour
-    });
+      const engine = new FamilyEvidenceEngine({
+        ...deps,
+        log: silentLog,
+        recomputeIntervalMs: 3_600_000,
+      });
 
-    await engine.start(); // recompute #1
-    expect(commandRepo.insert).not.toHaveBeenCalled();
+      await engine.start(); // records firstNegativeTailAt
+      expect(commandRepo.insert).not.toHaveBeenCalled();
 
-    // Run 46 more recomputes (total 47, still under 48)
-    for (let i = 0; i < 46; i++) {
+      // Advance 1 day — still under 2-day window
+      vi.advanceTimersByTime(1 * 24 * 3_600_000);
       await engine.recompute();
+      expect(commandRepo.insert).not.toHaveBeenCalled();
+
+      // Advance to 2 days + 1 hour — exceeds window
+      vi.advanceTimersByTime(1 * 24 * 3_600_000 + 3_600_000);
+      await engine.recompute();
+      expect(commandRepo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "family_reduce_only",
+          initiatorType: "system",
+        }),
+      );
+
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
     }
-    expect(commandRepo.insert).not.toHaveBeenCalled();
-
-    // Recompute #48 should trigger demotion
-    await engine.recompute();
-    expect(commandRepo.insert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: "family_reduce_only",
-        initiatorType: "system",
-      }),
-    );
-
-    await engine.stop();
   });
 
-  it("resets negative tail counter when tail recovers", async () => {
-    const identity = makeFamilyIdentity({ regime: "non-threshold" as any, horizon: "intraday-4h" });
-    const rulesProvider = {
-      getRule: vi.fn(),
-      isEnabled: vi.fn().mockReturnValue(true),
-      getAllFamilies: vi.fn().mockReturnValue([identity]),
-      getRulesForRegime: vi.fn().mockReturnValue([]),
-    } as any;
+  it("resets negative tail timestamp when tail recovers", async () => {
+    vi.useFakeTimers();
+    try {
+      const identity = makeFamilyIdentity({ regime: "non-threshold" as any, horizon: "intraday-4h" });
+      const rulesProvider = {
+        getRule: vi.fn(),
+        isEnabled: vi.fn().mockReturnValue(true),
+        getAllFamilies: vi.fn().mockReturnValue([identity]),
+        getRulesForRegime: vi.fn().mockReturnValue([]),
+      } as any;
 
-    const recycleMetrics = {
-      tradeCount: 25,
-      distinctMarkets: 6,
-      tailAdjustedPnl: -3,
-      repricingExits: 4,
-      totalNonSettlementClosed: 8,
-    };
+      const recycleMetrics = {
+        tradeCount: 25,
+        distinctMarkets: 6,
+        tailAdjustedPnl: -3,
+        repricingExits: 4,
+        totalNonSettlementClosed: 8,
+      };
 
-    const sc = createMockScoreComputer({
-      recycleMetrics,
-      toxicity: {
-        dustCount: 0,
-        positionCount: 3,
-        tailCostUsdc: 2,
-        realizedPnlUsdc: 20,
-        reduceOnlyCount: 0,
-        weeksDeployed: 8,
-        staleCount: 0,
-        totalOpen: 3,
-      },
-    });
+      const sc = createMockScoreComputer({
+        recycleMetrics,
+        toxicity: {
+          dustCount: 0,
+          positionCount: 3,
+          tailCostUsdc: 2,
+          realizedPnlUsdc: 20,
+          reduceOnlyCount: 0,
+          weeksDeployed: 8,
+          staleCount: 0,
+          totalOpen: 3,
+        },
+      });
 
-    const commandRepo = {
-      insert: vi.fn().mockReturnValue(1),
-      getPending: vi.fn().mockReturnValue([]),
-      updateStatus: vi.fn(),
-    } as any;
+      const commandRepo = {
+        insert: vi.fn().mockReturnValue(1),
+        getPending: vi.fn().mockReturnValue([]),
+        updateStatus: vi.fn(),
+      } as any;
 
-    const deps = createMockDeps({
-      rulesProvider,
-      scoreComputer: sc,
-      commandRepo,
-    });
+      const deps = createMockDeps({
+        rulesProvider,
+        scoreComputer: sc,
+        commandRepo,
+      });
 
-    const engine = new FamilyEvidenceEngine({
-      ...deps,
-      log: silentLog,
-      recomputeIntervalMs: 3_600_000,
-    });
+      const engine = new FamilyEvidenceEngine({
+        ...deps,
+        log: silentLog,
+        recomputeIntervalMs: 3_600_000,
+      });
 
-    await engine.start(); // recompute #1
+      await engine.start(); // records firstNegativeTailAt
 
-    // Run 30 more negative recomputes
-    for (let i = 0; i < 30; i++) {
+      // Advance 1 day into negative territory
+      vi.advanceTimersByTime(1 * 24 * 3_600_000);
       await engine.recompute();
-    }
-    expect(commandRepo.insert).not.toHaveBeenCalled();
+      expect(commandRepo.insert).not.toHaveBeenCalled();
 
-    // Tail recovers — counter should reset
-    (sc.computeRecycleMetrics as any).mockReturnValue({ ...recycleMetrics, tailAdjustedPnl: 5 });
-    await engine.recompute();
-
-    // Now go negative again — counter restarts from 0
-    (sc.computeRecycleMetrics as any).mockReturnValue({ ...recycleMetrics, tailAdjustedPnl: -3 });
-    for (let i = 0; i < 47; i++) {
+      // Tail recovers — timestamp should reset
+      (sc.computeRecycleMetrics as any).mockReturnValue({ ...recycleMetrics, tailAdjustedPnl: 5 });
       await engine.recompute();
+
+      // Now go negative again — wall-clock timer restarts
+      (sc.computeRecycleMetrics as any).mockReturnValue({ ...recycleMetrics, tailAdjustedPnl: -3 });
+      await engine.recompute(); // records new firstNegativeTailAt
+
+      // Advance 1.5 days — still under 2-day window
+      vi.advanceTimersByTime(1.5 * 24 * 3_600_000);
+      await engine.recompute();
+      expect(commandRepo.insert).not.toHaveBeenCalled();
+
+      // Advance past 2-day window total
+      vi.advanceTimersByTime(1 * 24 * 3_600_000);
+      await engine.recompute();
+      expect(commandRepo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          action: "family_reduce_only",
+        }),
+      );
+
+      await engine.stop();
+    } finally {
+      vi.useRealTimers();
     }
-    // 47 recomputes after reset < 48 needed for intraday-4h (2d window)
-    expect(commandRepo.insert).not.toHaveBeenCalled();
-
-    // 48th triggers demotion
-    await engine.recompute();
-    expect(commandRepo.insert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        action: "family_reduce_only",
-      }),
-    );
-
-    await engine.stop();
   });
 
   it("periodic timer triggers recompute", async () => {

@@ -60,7 +60,8 @@ export class FamilyEvidenceEngine implements RuntimeModule {
   private unsubscribers: (() => void)[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastRecomputeAt: string | null = null;
-  private negativeTailCounters = new Map<string, number>();
+  /** Tracks wall-clock ISO timestamp when tail first went negative per family. Persists across recomputes but not restarts — on restart, falls back to DB query. */
+  private firstNegativeTailAt = new Map<string, string>();
 
   constructor(deps: EvidenceEngineDeps) {
     this.bus = deps.bus;
@@ -349,7 +350,7 @@ export class FamilyEvidenceEngine implements RuntimeModule {
       return;
     }
 
-    // Horizon-aware negative tail window: track consecutive negative recomputes
+    // Horizon-aware negative tail window: wall-clock timestamp tracking
     const familyIdStr = String(familyId);
     if (metrics.tailAdjustedPnl < 0) {
       const DEMOTION_WINDOWS: Record<string, number> = {
@@ -359,20 +360,25 @@ export class FamilyEvidenceEngine implements RuntimeModule {
         "ad-hoc": 7,
       };
       const windowDays = DEMOTION_WINDOWS[metrics.horizon] ?? 7;
-      const count = (this.negativeTailCounters.get(familyIdStr) ?? 0) + 1;
-      this.negativeTailCounters.set(familyIdStr, count);
-      const hoursNegative = count * (this.intervalMs / 3_600_000);
+
+      // Record wall-clock time when tail first went negative
+      if (!this.firstNegativeTailAt.has(familyIdStr)) {
+        this.firstNegativeTailAt.set(familyIdStr, new Date().toISOString());
+      }
+      const firstNegAt = new Date(this.firstNegativeTailAt.get(familyIdStr)!);
+      const elapsedMs = Date.now() - firstNegAt.getTime();
+      const elapsedHours = elapsedMs / 3_600_000;
       const windowHours = windowDays * 24;
 
-      if (hoursNegative >= windowHours) {
+      if (elapsedHours >= windowHours) {
         this.enqueueDemotion(
           familyId,
           OperatorActionType.FamilyReduceOnly,
-          `persistent negative tail ${metrics.tailAdjustedPnl.toFixed(2)} for ${hoursNegative.toFixed(0)}h (${metrics.horizon} window: ${windowDays}d)`,
+          `persistent negative tail ${metrics.tailAdjustedPnl.toFixed(2)} for ${elapsedHours.toFixed(0)}h (${metrics.horizon} window: ${windowDays}d)`,
         );
       }
     } else {
-      this.negativeTailCounters.delete(familyIdStr);
+      this.firstNegativeTailAt.delete(familyIdStr);
     }
   }
 
