@@ -3,17 +3,18 @@
  *
  * Polls SQLite for state changes and streams events to connected clients.
  *
- * Filter: `?types=position,order,fill,family,status,metrics,discovery,proposals,transitions`
+ * Filter: `?types=position,order,fill,family,status,metrics,discovery,discovery_status,proposals,transitions`
  * These are coarse categories. Each maps to one or more event names:
- *   position    → position:updated
- *   order       → order:created, order:filled, order:cancelled
- *   fill        → fill:new
- *   family      → family:state_changed
- *   status      → status
- *   metrics     → metrics:snapshot
- *   discovery   → candidate_updates
- *   proposals   → proposals
- *   transitions → transitions
+ *   position         → position:updated
+ *   order            → order:created, order:filled, order:cancelled
+ *   fill             → fill:new
+ *   family           → family:state_changed
+ *   status           → status
+ *   metrics          → metrics:snapshot
+ *   discovery        → candidate_updates
+ *   discovery_status → discovery_status
+ *   proposals        → proposals
+ *   transitions      → transitions
  *
  */
 
@@ -36,6 +37,7 @@ interface ChangeSnapshot {
   /** Composite key: changes in operator_commands OR bot_runs OR runtime_metrics trigger status events. */
   statusHash: string;
   candidates: string;
+  discoveryRuns: string;
   proposalCount: number;
   transitions: string;
 }
@@ -50,6 +52,7 @@ const CATEGORY_TO_EVENTS: Record<string, string[]> = {
   metrics: ["metrics:snapshot"],
   risk: ["risk:event"],
   discovery: ["candidate_updates"],
+  discovery_status: ["discovery_status"],
   proposals: ["proposals"],
   transitions: ["transitions"],
 };
@@ -80,6 +83,12 @@ function takeSnapshot(db: Database.Database): ChangeSnapshot {
     )
     .get() as { ts: string | null };
 
+  const discoveryRunTs = db
+    .prepare(
+      "SELECT MAX(COALESCE(finished_at, started_at, requested_at)) FROM discovery_runs",
+    )
+    .pluck()
+    .get() as string | null;
   const candidateMaxTs = db
     .prepare("SELECT MAX(scores_updated_at) FROM family_candidates")
     .pluck()
@@ -101,6 +110,7 @@ function takeSnapshot(db: Database.Database): ChangeSnapshot {
     riskEvents: risk.ts ?? "",
     statusHash: `${opCmd.ts ?? ""}|${botRun.ts ?? ""}|${reconMetric.ts ?? ""}`,
     candidates: candidateMaxTs ?? "",
+    discoveryRuns: discoveryRunTs ?? "",
     proposalCount,
     transitions: transitionMaxTs ?? "",
   };
@@ -254,6 +264,13 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
           for (const row of rows) {
             sendEvent("risk:event", normalizeRiskEvent(row));
           }
+        }
+
+        // Emit discovery_status when scan state changes (queued/running/finished)
+        if (next.discoveryRuns !== snapshot.discoveryRuns) {
+          sendEvent("discovery_status", { updatedAt: next.discoveryRuns });
+          // Completed scan likely produced new/updated candidates
+          sendEvent("candidate_updates", { updatedAt: next.candidates });
         }
 
         // Emit candidate_updates when scores change
