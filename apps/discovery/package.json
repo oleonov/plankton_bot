@@ -1,0 +1,25 @@
+{
+  "name": "@plankton/discovery",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "scan": "node --import tsx src/index.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@plankton/config": "workspace:*",
+    "@plankton/db": "workspace:*",
+    "@plankton/domain": "workspace:*",
+    "@plankton/exchange": "workspace:*",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^3.0.0"
+  }
+}
