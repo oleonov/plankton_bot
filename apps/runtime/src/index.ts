@@ -161,6 +161,7 @@ async function main(): Promise<void> {
         quarantineReason: null,
         effectiveMode: null,
         derivedModeReason: null,
+        firstNegativeTailAt: null,
         updatedAt: new Date().toISOString(),
       };
       repos.familyState.save(baseline);

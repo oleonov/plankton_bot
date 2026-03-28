@@ -68,6 +68,7 @@ function seedFamily(familyId: string): void {
     quarantineReason: null,
     effectiveMode: null,
     derivedModeReason: null,
+        firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
   });
 }

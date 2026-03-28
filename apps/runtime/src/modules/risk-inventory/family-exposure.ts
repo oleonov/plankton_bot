@@ -55,6 +55,7 @@ export class FamilyExposureCalculator {
         quarantineReason: null,
         effectiveMode: null,
         derivedModeReason: null,
+        firstNegativeTailAt: null,
         updatedAt: new Date().toISOString(),
       };
     }

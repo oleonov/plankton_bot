@@ -350,7 +350,7 @@ export class FamilyEvidenceEngine implements RuntimeModule {
       return;
     }
 
-    // Horizon-aware negative tail window: wall-clock timestamp tracking
+    // Horizon-aware negative tail window: DB-persisted wall-clock timestamp
     const familyIdStr = String(familyId);
     if (metrics.tailAdjustedPnl < 0) {
       const DEMOTION_WINDOWS: Record<string, number> = {
@@ -361,9 +361,20 @@ export class FamilyEvidenceEngine implements RuntimeModule {
       };
       const windowDays = DEMOTION_WINDOWS[metrics.horizon] ?? 7;
 
-      // Record wall-clock time when tail first went negative
+      // Record wall-clock time when tail first went negative (persist to DB)
       if (!this.firstNegativeTailAt.has(familyIdStr)) {
-        this.firstNegativeTailAt.set(familyIdStr, new Date().toISOString());
+        // Check DB first (survives restart)
+        const state = this.familyStateRepo.get(familyId);
+        if (state?.firstNegativeTailAt) {
+          this.firstNegativeTailAt.set(familyIdStr, state.firstNegativeTailAt);
+        } else {
+          const now = new Date().toISOString();
+          this.firstNegativeTailAt.set(familyIdStr, now);
+          // Persist to DB so it survives restart
+          if (state) {
+            this.familyStateRepo.save({ ...state, firstNegativeTailAt: now });
+          }
+        }
       }
       const firstNegAt = new Date(this.firstNegativeTailAt.get(familyIdStr)!);
       const elapsedMs = Date.now() - firstNegAt.getTime();
@@ -378,7 +389,14 @@ export class FamilyEvidenceEngine implements RuntimeModule {
         );
       }
     } else {
-      this.firstNegativeTailAt.delete(familyIdStr);
+      // Tail recovered — clear timestamp from memory and DB
+      if (this.firstNegativeTailAt.has(familyIdStr)) {
+        this.firstNegativeTailAt.delete(familyIdStr);
+        const state = this.familyStateRepo.get(familyId);
+        if (state?.firstNegativeTailAt) {
+          this.familyStateRepo.save({ ...state, firstNegativeTailAt: null });
+        }
+      }
     }
   }
 
