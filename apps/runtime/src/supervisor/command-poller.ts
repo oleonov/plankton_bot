@@ -113,6 +113,8 @@ export class CommandPoller implements RuntimeModule {
         action: cmd.action,
         targetFamilyId: cmd.targetId ? createFamilyId(cmd.targetId) : null,
         reason: cmd.reason,
+        initiatorType: cmd.initiatorType,
+        initiator: cmd.initiator,
         appliedAt: Date.now(),
       });
     } catch (err) {

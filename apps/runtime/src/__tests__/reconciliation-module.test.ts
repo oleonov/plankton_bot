@@ -107,6 +107,7 @@ function makeLocalOrder(overrides?: Partial<Order>): Order {
     status: "open",
     exchangeOrderId: "ex-ord-1",
     signalId: null,
+    signalReason: null,
     botRunId: "run-1" as any,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
