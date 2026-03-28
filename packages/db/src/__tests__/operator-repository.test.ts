@@ -95,6 +95,35 @@ describe("SqliteOperatorCommandRepository", () => {
     expect(pending).toHaveLength(0);
   });
 
+  it("round-trips initiatorType and initiator", () => {
+    cmdRepo.insert({
+      action: "family_activate",
+      targetId: "fam-1",
+      reason: "auto-promote",
+      createdAt: "2026-01-01T00:00:00Z",
+      initiatorType: "system",
+      initiator: "discovery-engine",
+    });
+
+    const pending = cmdRepo.getPending();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.initiatorType).toBe("system");
+    expect(pending[0]!.initiator).toBe("discovery-engine");
+  });
+
+  it("defaults initiatorType to operator when omitted", () => {
+    cmdRepo.insert({
+      action: "pause",
+      targetId: null,
+      reason: null,
+      createdAt: "2026-01-01T00:00:00Z",
+    });
+
+    const pending = cmdRepo.getPending();
+    expect(pending[0]!.initiatorType).toBe("operator");
+    expect(pending[0]!.initiator).toBeNull();
+  });
+
   it("getPending does not return applied/rejected commands", () => {
     const id1 = cmdRepo.insert({
       action: "pause",

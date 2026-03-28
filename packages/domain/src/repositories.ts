@@ -221,7 +221,10 @@ export interface MarketResolutionRepository {
 
 export interface OperatorCommandRepository {
   /** Insert a new pending command. Returns the auto-incremented row id. */
-  insert(cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt">): number;
+  insert(
+    cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt" | "initiatorType" | "initiator"> &
+      Partial<Pick<OperatorCommand, "initiatorType" | "initiator">>,
+  ): number;
 
   /** Return all commands with status = "pending". */
   getPending(): OperatorCommand[];
