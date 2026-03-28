@@ -433,3 +433,48 @@ export interface FamilyRulesSnapshotRepository {
   save(snapshot: Omit<FamilyRulesSnapshot, "id">): void;
   findLatest(familyId: FamilyId): FamilyRulesSnapshot | null;
 }
+
+// ─── DiscoveryRunRepository ─────────────────────────────────────────────
+
+export interface DiscoveryScanStats {
+  marketsFound: number;
+  clustersCreated: number;
+  candidatesUpserted: number;
+  matched: number;
+  pruned: number;
+}
+
+export interface DiscoveryRun {
+  id: number;
+  triggerType: "startup" | "schedule" | "manual";
+  status: "queued" | "running" | "succeeded" | "failed";
+  requestedBy: string | null;
+  requestedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  heartbeatAt: string | null;
+  stats: DiscoveryScanStats | null;
+  error: string | null;
+  workerId: string | null;
+}
+
+export interface DiscoveryRunRepository {
+  /** Enqueue a new run. Uses BEGIN IMMEDIATE for multi-process safety. Throws if active run exists. */
+  enqueue(triggerType: DiscoveryRun["triggerType"], requestedBy: string | null): number;
+  /** Atomically claim a queued run. SELECT + UPDATE in transaction. Returns run or null. */
+  claim(workerId: string): DiscoveryRun | null;
+  /** Update heartbeat timestamp. */
+  heartbeat(id: number): void;
+  /** Mark succeeded with stats. */
+  succeed(id: number, stats: DiscoveryScanStats): void;
+  /** Mark failed with error. */
+  fail(id: number, error: string): void;
+  /** Find active run (queued or running), or null. */
+  findActive(): DiscoveryRun | null;
+  /** Find most recent successful run, or null. */
+  findLastSuccessful(): DiscoveryRun | null;
+  /** Find recent runs, newest first. */
+  findRecent(limit: number): DiscoveryRun[];
+  /** Mark stale running jobs as failed. Returns count. */
+  failStale(staleThresholdMs: number): number;
+}
