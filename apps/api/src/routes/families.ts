@@ -155,6 +155,107 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     const rows = getOrders.all(familyId) as Record<string, unknown>[];
     return ok(rows.map(toOrderDto));
   });
+
+  // ── GET /families/:familyId/evidence ───────────────────────────────────
+  app.get<{ Params: { familyId: string } }>(
+    "/families/:familyId/evidence",
+    async (request) => {
+      const { familyId } = request.params;
+      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+      const row = opts.db
+        .prepare("SELECT * FROM family_evidence WHERE family_id = ?")
+        .get(familyId) as Record<string, unknown> | undefined;
+      if (!row) return ok(null);
+      return ok({
+        familyId: row.family_id,
+        evidenceStatus: row.evidence_status,
+        evidenceScore: row.evidence_score,
+        promotionState: row.promotion_state,
+        localTradeCount: row.local_trade_count,
+        localMarketCount: row.local_market_count,
+        localRealizedPnlFifo: row.local_realized_pnl_fifo,
+        openTailCostUsdc: row.open_tail_cost_usdc,
+        tailAdjustedPnl: row.tail_adjusted_pnl,
+        remoteClosedRealizedPnl: row.remote_closed_realized_pnl ?? null,
+        openPositionCount: row.open_position_count ?? null,
+        openDustCount: row.open_dust_count ?? null,
+        bothSidedEligible: Boolean(row.both_sided_eligible),
+        heavyCampaignEligible: Boolean(row.heavy_campaign_eligible),
+        activeWindowEdgeScore: row.active_window_edge_score ?? null,
+        lastValidatedAt: row.last_validated_at ?? null,
+      });
+    },
+  );
+
+  // ── GET /families/:familyId/transitions ────────────────────────────────
+  app.get<{ Params: { familyId: string } }>(
+    "/families/:familyId/transitions",
+    async (request) => {
+      const { familyId } = request.params;
+      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+      const rows = opts.db
+        .prepare(
+          `SELECT * FROM state_transitions
+           WHERE entity_type = 'family' AND entity_id = ?
+           ORDER BY created_at DESC, id DESC`,
+        )
+        .all(familyId) as Array<Record<string, unknown>>;
+      return ok(
+        rows.map((r) => ({
+          id: r.id,
+          entityType: r.entity_type,
+          entityId: r.entity_id,
+          fromState: r.from_state,
+          toState: r.to_state,
+          triggerType: r.trigger_type,
+          initiator: r.initiator,
+          reason: r.reason,
+          scoresSnapshot: r.scores_snapshot,
+          createdAt: r.created_at,
+        })),
+      );
+    },
+  );
+
+  // ── GET /families/proposals ────────────────────────────────────────────
+  app.get("/families/proposals", async () => {
+    const rows = opts.db
+      .prepare(
+        "SELECT * FROM promotion_proposals WHERE status = 'pending' ORDER BY created_at ASC",
+      )
+      .all() as Array<Record<string, unknown>>;
+    return ok(rows.map(toProposalDto));
+  });
+
+  // ── POST /families/proposals/:proposalId/dismiss ───────────────────────
+  app.post<{ Params: { proposalId: string }; Body: { reason?: string } }>(
+    "/families/proposals/:proposalId/dismiss",
+    async (request) => {
+      const id = Number(request.params.proposalId);
+      const body = (request.body ?? {}) as { reason?: string };
+      const row = opts.db
+        .prepare("SELECT * FROM promotion_proposals WHERE id = ?")
+        .get(id) as Record<string, unknown> | undefined;
+      if (!row) throw new ApiError(404, `proposal ${id} not found`, "PROPOSAL_NOT_FOUND");
+      if (row.status !== "pending") {
+        throw new ApiError(
+          409,
+          `proposal status is '${row.status}', expected 'pending'`,
+          "INVALID_STATUS",
+        );
+      }
+      opts.db
+        .prepare(
+          `UPDATE promotion_proposals
+           SET status = 'dismissed', resolved_at = datetime('now'), resolved_by = ?
+           WHERE id = ?`,
+        )
+        .run(body.reason ?? "operator", id);
+      return ok({ proposalId: id, status: "dismissed" });
+    },
+  );
 };
 
 function toPositionDto(row: Record<string, unknown>) {
@@ -172,6 +273,21 @@ function toPositionDto(row: Record<string, unknown>) {
     openedAt: row.opened_at,
     closedAt: row.closed_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function toProposalDto(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    familyId: row.family_id,
+    currentState: row.current_state,
+    proposedState: row.proposed_state,
+    reason: row.reason,
+    scoresSnapshot: row.scores_snapshot,
+    status: row.status,
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at,
+    resolvedBy: row.resolved_by,
   };
 }
 
