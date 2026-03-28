@@ -23,3 +23,4 @@ export {
 export { SqliteStateTransitionRepository } from "./repositories/state-transition-repository.js";
 export { SqliteFamilyEvidenceRepository } from "./repositories/family-evidence-repository.js";
 export { SqliteFamilyRulesSnapshotRepository } from "./repositories/family-rules-snapshot-repository.js";
+export { SqliteDiscoveryRunRepository } from "./repositories/discovery-run-repository.js";
