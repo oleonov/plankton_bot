@@ -60,6 +60,11 @@ export class NormalizationModule implements RuntimeModule {
     this.log.info("normalization module stopped");
   }
 
+  rebuildPatterns(): void {
+    this.buildPatternCache();
+    this.log.info({ patterns: this.patterns.length }, "pattern cache rebuilt");
+  }
+
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
     return {
       ok: this.unsubscribe !== null,

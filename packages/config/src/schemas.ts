@@ -86,6 +86,10 @@ export const evidenceYamlSchema = z.object({
   both_sided_eligible: z.boolean(),
   heavy_campaign_eligible: z.boolean(),
   active_window_edge_score: z.number().nullable().optional().default(null),
+  recurrence_score: z.number().nullable().optional().default(null),
+  recycle_score: z.number().nullable().optional().default(null),
+  live_viability_score: z.number().nullable().optional().default(null),
+  toxicity_penalty: z.number().nullable().optional().default(null),
   last_validated_at: z.string().nullable().optional().default(null),
 });
 

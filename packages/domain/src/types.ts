@@ -124,7 +124,13 @@ export interface FamilyEvidence {
   bothSidedEligible: boolean;
   heavyCampaignEligible: boolean;
   activeWindowEdgeScore: number | null;
+  recurrenceScore: number | null;
+  recycleScore: number | null;
+  liveViabilityScore: number | null;
+  toxicityPenalty: number | null;
   lastValidatedAt: string | null; // ISO timestamp
+  probeSubstate: string | null;
+  repricingExitCount: number;
 }
 
 // ─── Family — Rules layer (seven sub-blocks) ──────────────────────────────────
@@ -238,6 +244,7 @@ export interface FamilyState {
   quarantineReason: string | null;
   effectiveMode: string | null;
   derivedModeReason: string | null;
+  firstNegativeTailAt: string | null;
   updatedAt: string; // ISO timestamp
 }
 
@@ -291,6 +298,7 @@ export interface Order {
   status: OrderStatus;
   exchangeOrderId: string | null;
   signalId: string | null;
+  signalReason: string | null;
   botRunId: BotRunId;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
@@ -360,6 +368,8 @@ export interface OperatorCommand {
   status: CommandStatus;
   createdAt: string; // ISO timestamp
   appliedAt: string | null; // ISO timestamp; set when status transitions to applied/rejected
+  initiatorType: "operator" | "system";
+  initiator: string | null;
 }
 
 // ─── Operator Action (immutable audit log; runtime writes after applying) ─────

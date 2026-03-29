@@ -48,6 +48,10 @@ function makeFamilyConfig(overrides: {
       bothSidedEligible: false,
       heavyCampaignEligible: false,
       activeWindowEdgeScore: null,
+      recurrenceScore: null,
+      recycleScore: null,
+      liveViabilityScore: null,
+      toxicityPenalty: null,
       lastValidatedAt: null,
     },
     rules: {

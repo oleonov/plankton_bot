@@ -26,6 +26,7 @@ import { actionRoutes } from "./routes/actions.js";
 import { eventsRoutes } from "./routes/events.js";
 import { riskEventsRoutes } from "./routes/risk-events.js";
 import { pnlSeriesRoutes } from "./routes/pnl-series.js";
+import { discoveryRoutes } from "./routes/discovery.js";
 
 export interface ServerDeps {
   config: AppConfig;
@@ -88,6 +89,7 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(eventsRoutes, { prefix: "/api/v1", db, marketDataStaleThresholdMs: staleMs });
   await app.register(riskEventsRoutes, { prefix: "/api/v1", db });
   await app.register(pnlSeriesRoutes, { prefix: "/api/v1", db });
+  await app.register(discoveryRoutes, { prefix: "/api/v1", db });
 
   // Serve web UI static files in production
   const webDistPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");

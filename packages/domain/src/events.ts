@@ -184,7 +184,35 @@ export interface OperatorCommandApplied {
   readonly action: OperatorActionType;
   readonly targetFamilyId: FamilyId | null;
   readonly reason: string | null;
+  readonly initiatorType: "operator" | "system";
+  readonly initiator: string | null;
   readonly appliedAt: number;
+}
+
+// ─── Discovery / Evidence ────────────────────────────────────────────────
+
+export interface FamilyPromotionProposed {
+  readonly type: "FamilyPromotionProposed";
+  readonly familyId: FamilyId;
+  readonly currentState: string;
+  readonly proposedState: string;
+  readonly reason: string;
+  readonly scores: {
+    recurrence: number;
+    recycle: number;
+    liveViability: number;
+    toxicity: number;
+  };
+  readonly timestamp: number;
+}
+
+export interface FamilyDemotionApplied {
+  readonly type: "FamilyDemotionApplied";
+  readonly familyId: FamilyId;
+  readonly previousState: string;
+  readonly newState: string;
+  readonly reason: string;
+  readonly timestamp: number;
 }
 
 // ─── Discriminated Union ──────────────────────────────────────────────────
@@ -206,4 +234,6 @@ export type DomainEvent =
   | ReconciliationDriftDetected
   | ReconciliationComplete
   | RuntimePhaseChanged
-  | OperatorCommandApplied;
+  | OperatorCommandApplied
+  | FamilyPromotionProposed
+  | FamilyDemotionApplied;

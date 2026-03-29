@@ -17,6 +17,7 @@ interface StateRow {
   quarantine_reason: string | null;
   effective_mode: string | null;
   derived_mode_reason: string | null;
+  first_negative_tail_at: string | null;
   updated_at: string;
 }
 
@@ -35,6 +36,7 @@ function rowToState(row: StateRow): FamilyState {
     quarantineReason: row.quarantine_reason ?? null,
     effectiveMode: row.effective_mode ?? null,
     derivedModeReason: row.derived_mode_reason ?? null,
+    firstNegativeTailAt: row.first_negative_tail_at ?? null,
     updatedAt: row.updated_at,
   };
 }
@@ -56,8 +58,9 @@ export class SqliteFamilyStateRepository implements FamilyStateRepository {
            (family_id, runtime_mode, open_value_usdc, open_position_count,
             open_dust_count, active_market_count, current_tail_cost_usdc,
             tail_adjusted_pnl_live, last_entry_ts, last_exit_ts,
-            quarantine_reason, effective_mode, derived_mode_reason, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            quarantine_reason, effective_mode, derived_mode_reason,
+            first_negative_tail_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(family_id) DO UPDATE SET
            runtime_mode = excluded.runtime_mode,
            open_value_usdc = excluded.open_value_usdc,
@@ -71,6 +74,7 @@ export class SqliteFamilyStateRepository implements FamilyStateRepository {
            quarantine_reason = excluded.quarantine_reason,
            effective_mode = excluded.effective_mode,
            derived_mode_reason = excluded.derived_mode_reason,
+           first_negative_tail_at = excluded.first_negative_tail_at,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -87,6 +91,7 @@ export class SqliteFamilyStateRepository implements FamilyStateRepository {
         state.quarantineReason,
         state.effectiveMode,
         state.derivedModeReason,
+        state.firstNegativeTailAt,
         state.updatedAt,
       );
   }

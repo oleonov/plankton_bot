@@ -66,6 +66,7 @@ function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
     quarantineReason: null,
     effectiveMode: null,
     derivedModeReason: null,
+        firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
     ...overrides,
   };
@@ -115,7 +116,13 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
       bothSidedEligible: false,
       heavyCampaignEligible: false,
       activeWindowEdgeScore: null,
+      recurrenceScore: null,
+      recycleScore: null,
+      liveViabilityScore: null,
+      toxicityPenalty: null,
       lastValidatedAt: null,
+      probeSubstate: null,
+      repricingExitCount: 0,
     },
     rules: {
       familyId: FAM_ID,
@@ -1794,6 +1801,7 @@ describe("RiskInventoryModule", () => {
           negRisk: false,
           familyId,
           sequenceInTick: 0,
+          signalReason: null,
         },
         timestamp: Date.now(),
       };

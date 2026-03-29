@@ -19,8 +19,8 @@ export class SqliteOrderRepository implements OrderRepository {
         `INSERT INTO orders
          (order_id, client_order_id, token_id, family_id, side, order_type,
           price, size, size_usdc, status, exchange_order_id, signal_id,
-          bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          signal_reason, bot_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
@@ -41,6 +41,7 @@ export class SqliteOrderRepository implements OrderRepository {
         order.status,
         order.exchangeOrderId,
         order.signalId,
+        order.signalReason,
         order.botRunId,
         order.createdAt,
         order.updatedAt,
@@ -110,6 +111,7 @@ export class SqliteOrderRepository implements OrderRepository {
       status: row.status as OrderStatus,
       exchangeOrderId: (row.exchange_order_id as string) ?? null,
       signalId: (row.signal_id as string) ?? null,
+      signalReason: (row.signal_reason as string) ?? null,
       botRunId: createBotRunId(row.bot_run_id as string),
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,

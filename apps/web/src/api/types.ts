@@ -148,6 +148,11 @@ export interface FamilyDTO {
   familyKey: string;
   primaryCategory: string;
   regime: string;
+  horizon: string;
+  cadence: string;
+  strategyProfile: string;
+  promotionState: string | null;
+  probeSubstate: string | null;
   state: {
     runtimeMode: string;
     openValueUsdc: number;
@@ -181,4 +186,140 @@ export interface RiskEventDTO {
 export interface Paginated<T> {
   items: T[];
   nextCursor: string | null;
+}
+
+/** GET /discovery/candidates item */
+export interface CandidateDTO {
+  candidateId: string;
+  familyKey: string;
+  regime: string;
+  horizon: string;
+  cadence: string;
+  patternConfidence: string;
+  primaryCategory: string;
+  strategyProfile: string;
+  slugPattern: string | null;
+  matchedFamilyId: string | null;
+  activeMarketCount: number;
+  nearestEndDate: string | null;
+  clusterVolume24h: number;
+  recurrenceScore: number | null;
+  recycleScore: number | null;
+  liveViabilityScore: number | null;
+  toxicityPenalty: number | null;
+  gateRecommendation: string;
+  recommendationReason: string | null;
+  scoresUpdatedAt: string | null;
+  status: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  reviewedAt: string | null;
+  materializedAt: string | null;
+}
+
+/** GET /discovery/candidates/:id (detail) */
+export interface CandidateDetailDTO extends CandidateDTO {
+  recentObservations: ObservationDTO[];
+}
+
+/** Candidate observation */
+export interface ObservationDTO {
+  id: number;
+  candidateId: string;
+  activeMarketCount: number;
+  clusterVolume24h: number;
+  nearestEndDate: string | null;
+  observedAt: string;
+}
+
+/** GET /discovery/status */
+export interface DiscoveryScanStatsDTO {
+  marketsFound: number;
+  clustersCreated: number;
+  candidatesUpserted: number;
+  matched: number;
+  pruned: number;
+}
+
+export interface DiscoveryRunDTO {
+  id: number;
+  triggerType: "startup" | "schedule" | "manual";
+  status: "queued" | "running" | "succeeded" | "failed";
+  requestedBy: string | null;
+  requestedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  heartbeatAt: string | null;
+  stats: DiscoveryScanStatsDTO | null;
+  error: string | null;
+}
+
+export interface DiscoveryStatusDTO {
+  lastRun: DiscoveryRunDTO | null;
+  lastSuccessfulRun: DiscoveryRunDTO | null;
+  activeRun: DiscoveryRunDTO | null;
+  workerState: "healthy" | "offline";
+}
+
+/** GET /families/proposals item */
+export interface ProposalDTO {
+  id: number;
+  familyId: string;
+  currentState: string;
+  proposedState: string;
+  reason: string;
+  scoresSnapshot: string | null;
+  status: string;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+}
+
+/** Promotion blocker threshold check */
+export interface PromotionBlockerDTO {
+  metric: string;
+  current: number;
+  required: number;
+  passed: boolean;
+}
+
+/** GET /families/:id/evidence */
+export interface FamilyEvidenceDTO {
+  familyId: string;
+  evidenceStatus: string | null;
+  evidenceScore: number | null;
+  promotionState: string | null;
+  localTradeCount: number | null;
+  localMarketCount: number | null;
+  localRealizedPnlFifo: number | null;
+  openTailCostUsdc: number | null;
+  tailAdjustedPnl: number | null;
+  remoteClosedRealizedPnl: number | null;
+  openPositionCount: number | null;
+  openDustCount: number | null;
+  bothSidedEligible: boolean;
+  heavyCampaignEligible: boolean;
+  activeWindowEdgeScore: number | null;
+  recurrenceScore: number | null;
+  recycleScore: number | null;
+  liveViabilityScore: number | null;
+  toxicityPenalty: number | null;
+  lastValidatedAt: string | null;
+  probeSubstate: string | null;
+  repricingExitCount: number;
+  promotionBlockers?: PromotionBlockerDTO[];
+}
+
+/** GET /families/:id/transitions item */
+export interface TransitionDTO {
+  id: number;
+  entityType: string;
+  entityId: string;
+  fromState: string;
+  toState: string;
+  triggerType: string;
+  initiator: string;
+  reason: string;
+  scoresSnapshot: string | null;
+  createdAt: string;
 }

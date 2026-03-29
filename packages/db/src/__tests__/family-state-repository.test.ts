@@ -45,6 +45,7 @@ function makeState(overrides?: Partial<FamilyState>): FamilyState {
     quarantineReason: null,
     effectiveMode: null,
     derivedModeReason: null,
+    firstNegativeTailAt: null,
     updatedAt: now,
     ...overrides,
   };

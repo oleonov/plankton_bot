@@ -13,3 +13,14 @@ export { SqliteOperatorActionRepository } from "./repositories/operator-action-r
 export { SqliteMarketResolutionRepository } from "./repositories/market-resolution-repository.js";
 export { SqliteMarketSnapshotRepository } from "./repositories/market-snapshot-repository.js";
 export { SqliteRiskEventRepository } from "./repositories/risk-event-repository.js";
+export { SqliteFamilyCandidateRepository } from "./repositories/family-candidate-repository.js";
+export { SqliteCandidateObservationRepository } from "./repositories/candidate-observation-repository.js";
+export { SqlitePromotionProposalRepository } from "./repositories/promotion-proposal-repository.js";
+export {
+  SqliteFamilyRulesDbRepository,
+  type DbFamilyConfig,
+} from "./repositories/family-rules-db-repository.js";
+export { SqliteStateTransitionRepository } from "./repositories/state-transition-repository.js";
+export { SqliteFamilyEvidenceRepository } from "./repositories/family-evidence-repository.js";
+export { SqliteFamilyRulesSnapshotRepository } from "./repositories/family-rules-snapshot-repository.js";
+export { SqliteDiscoveryRunRepository } from "./repositories/discovery-run-repository.js";

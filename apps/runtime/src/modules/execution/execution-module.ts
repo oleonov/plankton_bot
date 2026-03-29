@@ -376,6 +376,7 @@ export class ExecutionModule implements RuntimeModule {
       status,
       exchangeOrderId,
       signalId: null,
+      signalReason: cmd.signalReason ?? null,
       botRunId: this.deps.botRunId,
       createdAt: now,
       updatedAt: now,

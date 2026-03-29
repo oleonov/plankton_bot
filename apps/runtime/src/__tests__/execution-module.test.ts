@@ -47,6 +47,7 @@ function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand
     negRisk: false,
     familyId: createFamilyId("fam-1"),
     sequenceInTick: 0,
+    signalReason: null,
     ...overrides,
   };
 }
@@ -393,6 +394,7 @@ describe("ExecutionModule", () => {
       status: "open",
       exchangeOrderId: "sim-ord-1",
       signalId: null,
+      signalReason: null,
       botRunId: BOT_RUN_ID,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -460,6 +462,7 @@ describe("ExecutionModule", () => {
       status: "open",
       exchangeOrderId: "sim-ord-1",
       signalId: null,
+      signalReason: null,
       botRunId: BOT_RUN_ID,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -525,6 +528,7 @@ describe("ExecutionModule", () => {
       status: "open",
       exchangeOrderId: "sim-ord-1",
       signalId: null,
+      signalReason: null,
       botRunId: BOT_RUN_ID,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),

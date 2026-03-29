@@ -1,4 +1,10 @@
-import type { OrderStatus, RuntimeMode, Regime } from "./enums.js";
+import type {
+  OrderStatus,
+  PromotionState,
+  Regime,
+  RuntimeMode,
+  StrategyProfile,
+} from "./enums.js";
 import type { FamilyId, FillId, OrderId, PositionId, TokenId } from "./ids.js";
 import type {
   FamilyEvidence,
@@ -215,7 +221,10 @@ export interface MarketResolutionRepository {
 
 export interface OperatorCommandRepository {
   /** Insert a new pending command. Returns the auto-incremented row id. */
-  insert(cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt">): number;
+  insert(
+    cmd: Omit<OperatorCommand, "id" | "status" | "appliedAt" | "initiatorType" | "initiator"> &
+      Partial<Pick<OperatorCommand, "initiatorType" | "initiator">>,
+  ): number;
 
   /** Return all commands with status = "pending". */
   getPending(): OperatorCommand[];
@@ -256,4 +265,219 @@ export interface RiskEventRepository {
     familyId: FamilyId | null;
     payload: Record<string, unknown>;
   }): void;
+}
+
+// ─── FamilyCandidate ────────────────────────────────────────────────────
+
+export interface FamilyCandidate {
+  candidateId: string;
+  familyKey: string;
+  regime: Regime;
+  horizon: string;
+  cadence: string;
+  patternConfidence: string;
+  primaryCategory: string;
+  strategyProfile: StrategyProfile;
+  slugPattern: string | null;
+  matchedFamilyId: FamilyId | null;
+  activeMarketCount: number;
+  nearestEndDate: string | null;
+  clusterVolume24h: number;
+  recurrenceScore: number | null;
+  recycleScore: number | null;
+  liveViabilityScore: number | null;
+  toxicityPenalty: number | null;
+  gateRecommendation: string;
+  recommendationReason: string | null;
+  scoresUpdatedAt: string | null;
+  status: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  reviewedAt: string | null;
+  materializedAt: string | null;
+}
+
+// ─── CandidateObservation ───────────────────────────────────────────────
+
+export interface CandidateObservation {
+  id: number;
+  candidateId: string;
+  activeMarketCount: number;
+  clusterVolume24h: number;
+  nearestEndDate: string | null;
+  observedAt: string;
+}
+
+// ─── CandidateObservationMarket ─────────────────────────────────────────
+
+export interface CandidateObservationMarket {
+  candidateId: string;
+  observedAt: string;
+  conditionId: string;
+  slug: string;
+  endDate: string | null;
+  volume24h: number | null;
+}
+
+// ─── FamilyCandidateRepository ──────────────────────────────────────────
+
+export interface FamilyCandidateRepository {
+  upsert(candidate: FamilyCandidate): void;
+  findById(candidateId: string): FamilyCandidate | null;
+  findAll(): FamilyCandidate[];
+  findByStatus(status: string): FamilyCandidate[];
+  findUnscored(): FamilyCandidate[];
+  updateStatus(candidateId: string, status: string): void;
+  updateScores(
+    candidateId: string,
+    scores: {
+      recurrenceScore: number | null;
+      recycleScore: number | null;
+      liveViabilityScore: number | null;
+      toxicityPenalty: number | null;
+      gateRecommendation: string;
+      recommendationReason: string | null;
+      scoresUpdatedAt: string;
+    },
+  ): void;
+}
+
+// ─── CandidateObservationRepository ─────────────────────────────────────
+
+export interface CandidateObservationRepository {
+  insertObservation(obs: Omit<CandidateObservation, "id">): void;
+  insertMarkets(markets: CandidateObservationMarket[]): void;
+  findObservations(candidateId: string, limit: number): CandidateObservation[];
+  findMarkets(candidateId: string, observedAt: string): CandidateObservationMarket[];
+  countDistinctConditions(candidateId: string): number;
+  prune(olderThanIso: string): number;
+}
+
+// ─── PromotionProposal ──────────────────────────────────────────────────
+
+export interface PromotionProposal {
+  id: number;
+  familyId: FamilyId;
+  currentState: PromotionState;
+  proposedState: PromotionState;
+  reason: string;
+  scoresSnapshot: string;
+  status: string;
+  createdAt: string;
+  resolvedAt: string | null;
+  resolvedBy: string | null;
+}
+
+// ─── PromotionProposalRepository ────────────────────────────────────────
+
+export interface PromotionProposalRepository {
+  insert(proposal: Omit<PromotionProposal, "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy">): number;
+  findPending(): PromotionProposal[];
+  findByFamily(familyId: FamilyId): PromotionProposal[];
+  hasPending(familyId: FamilyId): boolean;
+  resolve(id: number, status: string, resolvedBy: string): void;
+}
+
+// ─── StateTransition ────────────────────────────────────────────────────
+
+export interface StateTransition {
+  id: number;
+  entityType: string;
+  entityId: string;
+  fromState: string;
+  toState: string;
+  triggerType: string;
+  initiator: string | null;
+  reason: string;
+  scoresSnapshot: string | null;
+  createdAt: string;
+}
+
+// ─── StateTransitionRepository ──────────────────────────────────────────
+
+export interface StateTransitionRepository {
+  insert(transition: Omit<StateTransition, "id" | "createdAt">): void;
+  findByEntity(entityType: string, entityId: string): StateTransition[];
+  findRecent(limit: number): StateTransition[];
+}
+
+// ─── FamilyEvidenceRepository ───────────────────────────────────────────
+
+export interface FamilyEvidenceRepository {
+  updateScores(
+    familyId: FamilyId,
+    scores: {
+      recurrenceScore: number | null;
+      recycleScore: number | null;
+      liveViabilityScore: number | null;
+      toxicityPenalty: number | null;
+      repricingExitCount: number;
+      scoresUpdatedAt: string;
+    },
+  ): void;
+  updatePromotionState(familyId: FamilyId, promotionState: PromotionState): void;
+  updateProbeSubstate(familyId: FamilyId, substate: string | null): void;
+  getEvidence(familyId: FamilyId): FamilyEvidence | null;
+}
+
+// ─── FamilyRulesSnapshot ────────────────────────────────────────────────
+
+export interface FamilyRulesSnapshot {
+  id: number;
+  familyId: FamilyId;
+  snapshot: string;
+  reason: string;
+  capturedAt: string;
+}
+
+// ─── FamilyRulesSnapshotRepository ──────────────────────────────────────
+
+export interface FamilyRulesSnapshotRepository {
+  save(snapshot: Omit<FamilyRulesSnapshot, "id">): void;
+  findLatest(familyId: FamilyId): FamilyRulesSnapshot | null;
+}
+
+// ─── DiscoveryRunRepository ─────────────────────────────────────────────
+
+export interface DiscoveryScanStats {
+  marketsFound: number;
+  clustersCreated: number;
+  candidatesUpserted: number;
+  matched: number;
+  pruned: number;
+}
+
+export interface DiscoveryRun {
+  id: number;
+  triggerType: "startup" | "schedule" | "manual";
+  status: "queued" | "running" | "succeeded" | "failed";
+  requestedBy: string | null;
+  requestedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  heartbeatAt: string | null;
+  stats: DiscoveryScanStats | null;
+  error: string | null;
+  workerId: string | null;
+}
+
+export interface DiscoveryRunRepository {
+  /** Enqueue a new run. Uses BEGIN IMMEDIATE for multi-process safety. Throws if active run exists. */
+  enqueue(triggerType: DiscoveryRun["triggerType"], requestedBy: string | null): number;
+  /** Atomically claim a queued run. SELECT + UPDATE in transaction. Returns run or null. */
+  claim(workerId: string): DiscoveryRun | null;
+  /** Update heartbeat timestamp. */
+  heartbeat(id: number): void;
+  /** Mark succeeded with stats. */
+  succeed(id: number, stats: DiscoveryScanStats): void;
+  /** Mark failed with error. */
+  fail(id: number, error: string): void;
+  /** Find active run (queued or running), or null. */
+  findActive(): DiscoveryRun | null;
+  /** Find most recent successful run, or null. */
+  findLastSuccessful(): DiscoveryRun | null;
+  /** Find recent runs, newest first. */
+  findRecent(limit: number): DiscoveryRun[];
+  /** Mark stale running jobs as failed. Returns count. */
+  failStale(staleThresholdMs: number): number;
 }

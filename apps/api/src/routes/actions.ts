@@ -59,4 +59,72 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
       },
     );
   }
+
+  // ── POST /actions/family/:familyId/promote ─────────────────────────────
+  app.post<{ Params: { familyId: string }; Body: { reason?: string } }>(
+    "/actions/family/:familyId/promote",
+    async (request) => {
+      const { familyId } = request.params;
+      const exists = opts.db
+        .prepare("SELECT 1 FROM family_catalog WHERE family_id = ?")
+        .get(familyId);
+      if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+
+      const result = opts.db.transaction(() => {
+        const info = opts.db
+          .prepare(
+            `UPDATE promotion_proposals
+             SET status = 'approved', resolved_at = datetime('now'), resolved_by = 'operator'
+             WHERE family_id = ? AND status = 'pending'`,
+          )
+          .run(familyId);
+        if (info.changes === 0) {
+          throw new ApiError(
+            409,
+            `no pending promotion proposal for family ${familyId}`,
+            "NO_PENDING_PROPOSAL",
+          );
+        }
+
+        const proposal = opts.db
+          .prepare(
+            `SELECT id FROM promotion_proposals
+             WHERE family_id = ? AND status = 'approved'
+             ORDER BY resolved_at DESC LIMIT 1`,
+          )
+          .get(familyId) as { id: number };
+
+        const commandId = insertCommand(
+          opts.db,
+          "family_promote_scaled",
+          familyId,
+          (request.body as { reason?: string })?.reason ?? null,
+        );
+
+        opts.db
+          .prepare("UPDATE promotion_proposals SET applied_command_id = ? WHERE id = ?")
+          .run(commandId, proposal.id);
+
+        return { commandId, proposalId: proposal.id };
+      })();
+
+      return ok(result);
+    },
+  );
+
+  // ── POST /actions/family/:familyId/reset-to-probe ─────────────────────
+  app.post<{ Params: { familyId: string }; Body: { reason?: string } }>(
+    "/actions/family/:familyId/reset-to-probe",
+    async (request) => {
+      const { familyId } = request.params;
+      const exists = opts.db
+        .prepare("SELECT 1 FROM family_catalog WHERE family_id = ?")
+        .get(familyId);
+      if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+
+      const body = (request.body ?? {}) as { reason?: string };
+      const id = insertCommand(opts.db, "family_reset_to_probe", familyId, body.reason ?? null);
+      return ok({ commandId: id, status: "enqueued" });
+    },
+  );
 };

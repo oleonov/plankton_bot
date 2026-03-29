@@ -1,6 +1,8 @@
 import { NavLink, Outlet } from "react-router-dom";
 import { StatusBar } from "./StatusBar.tsx";
 import { AlertStrip } from "./AlertStrip.tsx";
+import { DemotionAlertStrip } from "./DemotionAlertStrip.tsx";
+import { useProposals } from "../api/hooks.ts";
 
 const NAV_ITEMS = [
   { to: "/overview", label: "Overview" },
@@ -8,7 +10,29 @@ const NAV_ITEMS = [
   { to: "/orders", label: "Orders/Fills" },
   { to: "/families", label: "Families" },
   { to: "/risk", label: "Risk" },
+  { to: "/discovery", label: "Discovery" },
 ];
+
+function ProposalBadge() {
+  const { data: proposals } = useProposals();
+  const count = proposals?.length ?? 0;
+  if (count === 0) return null;
+  return (
+    <span
+      style={{
+        background: "var(--orange)",
+        color: "#000",
+        borderRadius: 8,
+        padding: "1px 5px",
+        fontSize: 9,
+        fontWeight: 700,
+        marginLeft: 4,
+      }}
+    >
+      {count}
+    </span>
+  );
+}
 
 export function Layout() {
   return (
@@ -38,6 +62,7 @@ export function Layout() {
             })}
           >
             {item.label}
+            {item.to === "/discovery" && <ProposalBadge />}
           </NavLink>
         ))}
         <button
@@ -62,6 +87,7 @@ export function Layout() {
       </nav>
       <StatusBar />
       <AlertStrip />
+      <DemotionAlertStrip />
       <Outlet />
     </>
   );

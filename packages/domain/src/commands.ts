@@ -44,6 +44,8 @@ export interface PlaceOrderCommand {
    * Carried forward from Signal.sequenceInTick (F3 resolution).
    */
   readonly sequenceInTick: number;
+  /** Original signal reason (e.g. "probe-entry", "confirm-scale") for audit trails. */
+  readonly signalReason: string | null;
   /** Unix seconds, used only when orderType is "GTD". */
   readonly expiration?: number;
   readonly metadata?: Readonly<Record<string, unknown>>;

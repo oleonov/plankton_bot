@@ -1,0 +1,416 @@
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { bootstrapDatabase } from "@plankton/db";
+import type { DbConnection } from "@plankton/db";
+import type { AppConfig } from "@plankton/config";
+import { buildServer } from "../server.js";
+
+function json(res: { json: () => unknown }): any {
+  return res.json();
+}
+
+const TEST_API_KEY = "test-key-disc";
+
+function testConfig(overrides?: Partial<AppConfig>): AppConfig {
+  return {
+    runtimeMode: "simulation",
+    logLevel: "error",
+    dbPath: "",
+    familyRulesPath: "",
+    marketDataPollIntervalMs: 30_000,
+    marketDataStaleThresholdMs: 120_000,
+    strategyScanIntervalMs: 5_000,
+    fillPollIntervalMs: 5_000,
+    executionMaxConcurrency: 4,
+    polyApiKey: undefined,
+    polyApiSecret: undefined,
+    polyPassphrase: undefined,
+    polyPrivateKey: undefined,
+    planktonApiKey: TEST_API_KEY,
+    planktonApiPort: 0,
+    planktonAuthUsername: undefined,
+    planktonAuthPassword: undefined,
+    planktonSessionSecret: undefined,
+    trustProxy: false,
+    ...overrides,
+  };
+}
+
+function authHeaders() {
+  return { authorization: `Bearer ${TEST_API_KEY}` };
+}
+
+let conn: DbConnection;
+let app: Awaited<ReturnType<typeof buildServer>>;
+
+beforeAll(async () => {
+  conn = bootstrapDatabase(":memory:");
+  app = await buildServer({ config: testConfig(), conn });
+});
+
+afterAll(async () => {
+  await app.close();
+  conn.close();
+});
+
+// ─── Status ─────────────────────────────────────────────────────────────
+
+describe("GET /discovery/status", () => {
+  it("returns worker state and last scan info", async () => {
+    const db = conn.db;
+
+    // Seed a succeeded discovery_run
+    db.prepare(
+      `INSERT INTO discovery_runs (trigger_type, status, requested_by, finished_at, stats_json)
+       VALUES ('schedule', 'succeeded', 'worker', datetime('now'), ?)`,
+    ).run(JSON.stringify({ marketsFound: 50, clustersCreated: 8, candidatesUpserted: 3, matched: 2, pruned: 1 }));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/status",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.lastSuccessfulRun).not.toBeNull();
+    expect(body.data.lastSuccessfulRun.status).toBe("succeeded");
+    expect(body.data.lastSuccessfulRun.stats.marketsFound).toBe(50);
+    // No heartbeat in test → worker is offline
+    expect(body.data.workerState).toBe("offline");
+  });
+});
+
+// ─── Scan trigger ───────────────────────────────────────────────────────
+
+describe("POST /discovery/scan", () => {
+  it("enqueues a new run when none active", async () => {
+    // Clear any active runs from prior tests
+    conn.db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/discovery/scan",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBe("queued");
+    expect(body.data.alreadyActive).toBe(false);
+    expect(body.data.runId).toBeGreaterThan(0);
+  });
+
+  it("returns existing active run instead of duplicating", async () => {
+    const db = conn.db;
+
+    // Clear and seed an active (queued) run
+    db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+    db.prepare(
+      "INSERT INTO discovery_runs (trigger_type, status, requested_by) VALUES ('manual', 'queued', 'operator')",
+    ).run();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/discovery/scan",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.alreadyActive).toBe(true);
+  });
+});
+
+// ─── Runs history ───────────────────────────────────────────────────────
+
+describe("GET /discovery/runs", () => {
+  it("returns recent runs, newest first, respects limit", async () => {
+    const db = conn.db;
+
+    // Clean existing runs from previous tests
+    db.prepare("DELETE FROM discovery_runs").run();
+
+    // Seed 3 runs
+    for (const trigger of ["startup", "schedule", "manual"]) {
+      db.prepare(
+        "INSERT INTO discovery_runs (trigger_type, status, requested_by) VALUES (?, 'succeeded', 'worker')",
+      ).run(trigger);
+    }
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/runs?limit=2",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(2);
+    // Newest first (highest id)
+    expect(body.data[0].id).toBeGreaterThan(body.data[1].id);
+  });
+});
+
+// ─── Accept ──────────────────────────────────────────────────────────────
+
+describe("POST /discovery/candidates/:id/accept", () => {
+  it("materializes candidate and enqueues rules_reload", async () => {
+    const db = conn.db;
+    const now = new Date().toISOString();
+
+    // Seed a candidate with status='reviewed'
+    db.prepare(
+      `INSERT INTO family_candidates
+         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+          primary_category, strategy_profile, slug_pattern, active_market_count,
+          cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at,
+          reviewed_at)
+       VALUES ('cand-accept-1', 'test-accept-key', 'standard', 'daily', 'daily', 'high',
+               'crypto', 'scalp', 'bitcoin-above-*', 3, 5000, 'promote', 'reviewed',
+               ?, ?, ?)`,
+    ).run(now, now, now);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/discovery/candidates/cand-accept-1/accept",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBe("materialized");
+
+    // Verify family_catalog row exists
+    const catalog = db
+      .prepare("SELECT * FROM family_catalog WHERE family_id = ?")
+      .get("cand-accept-1") as Record<string, unknown>;
+    expect(catalog).toBeDefined();
+    expect(catalog.family_key).toBe("test-accept-key");
+
+    // Verify family_rules row exists with probe-only defaults
+    const rules = db
+      .prepare("SELECT * FROM family_rules WHERE family_id = ?")
+      .get("cand-accept-1") as Record<string, unknown>;
+    expect(rules).toBeDefined();
+    expect(rules.scale_mode).toBe("disabled");
+    expect(rules.entry_mode).toBe("probe-first");
+
+    // Verify family_runtime_state row exists
+    const state = db
+      .prepare("SELECT * FROM family_runtime_state WHERE family_id = ?")
+      .get("cand-accept-1") as Record<string, unknown>;
+    expect(state).toBeDefined();
+    expect(state.runtime_mode).toBe("active");
+
+    // Verify candidate status updated
+    const candidate = db
+      .prepare("SELECT * FROM family_candidates WHERE candidate_id = ?")
+      .get("cand-accept-1") as Record<string, unknown>;
+    expect(candidate.status).toBe("materialized");
+
+    // Verify pending rules_reload command exists
+    const cmd = db
+      .prepare(
+        "SELECT * FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending'",
+      )
+      .get() as Record<string, unknown>;
+    expect(cmd).toBeDefined();
+  });
+
+  it("returns 409 for non-reviewed candidate", async () => {
+    const db = conn.db;
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO family_candidates
+         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+          primary_category, strategy_profile, active_market_count,
+          cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at)
+       VALUES ('cand-disc-only', 'test-disc-key', 'standard', 'daily', 'daily', 'low',
+               'crypto', 'scalp', 2, 1000, 'ignore', 'discovered', ?, ?)`,
+    ).run(now, now);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/discovery/candidates/cand-disc-only/accept",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(409);
+  });
+});
+
+// ─── Evidence endpoint ──────────────────────────────────────────────────
+
+describe("GET /families/:familyId/evidence", () => {
+  it("returns probeSubstate and repricingExitCount", async () => {
+    const db = conn.db;
+    const familyId = "fam-ev-1";
+    const now = new Date().toISOString();
+
+    // Seed family catalog
+    db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+       VALUES (?, 'ev-key', 'crypto', 'standard', 'daily', 'daily', 'scalp')`,
+    ).run(familyId);
+
+    // Seed evidence with probe_substate and repricing_exit_count
+    db.prepare(
+      `INSERT INTO family_evidence
+         (family_id, evidence_status, evidence_score, promotion_state,
+          local_trade_count, local_market_count, local_realized_pnl_fifo,
+          open_tail_cost_usdc, tail_adjusted_pnl, both_sided_eligible,
+          heavy_campaign_eligible, probe_substate, repricing_exit_count, updated_at)
+       VALUES (?, 'confirmed', 1, 'probe-only', 15, 4, 5.0, 2.0, 3.0, 0, 0,
+               'warming-up', 2, ?)`,
+    ).run(familyId, now);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/families/${familyId}/evidence`,
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.probeSubstate).toBe("warming-up");
+    expect(body.data.repricingExitCount).toBe(2);
+  });
+
+  it("returns promotion blockers array", async () => {
+    const db = conn.db;
+    const familyId = "fam-ev-blockers";
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+       VALUES (?, 'ev-block-key', 'crypto', 'standard', 'daily', 'daily', 'scalp')`,
+    ).run(familyId);
+
+    db.prepare(
+      `INSERT INTO family_evidence
+         (family_id, evidence_status, evidence_score, promotion_state,
+          local_trade_count, local_market_count, local_realized_pnl_fifo,
+          open_tail_cost_usdc, tail_adjusted_pnl, both_sided_eligible,
+          heavy_campaign_eligible, repricing_exit_count, recycle_score,
+          toxicity_penalty, updated_at)
+       VALUES (?, 'confirmed', 1, 'probe-only', 25, 6, 10.0, 2.0, 5.0, 0, 0,
+               4, 0.7, 0.1, ?)`,
+    ).run(familyId, now);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/families/${familyId}/evidence`,
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.promotionBlockers).toBeDefined();
+    expect(Array.isArray(body.data.promotionBlockers)).toBe(true);
+    expect(body.data.promotionBlockers.length).toBe(6);
+
+    // All should pass with these values
+    const allPassed = body.data.promotionBlockers.every((b: any) => b.passed);
+    expect(allPassed).toBe(true);
+  });
+});
+
+// ─── Promote ─────────────────────────────────────────────────────────────
+
+describe("POST /actions/family/:id/promote", () => {
+  it("approves proposal and enqueues command", async () => {
+    const db = conn.db;
+    const familyId = "fam-promote-1";
+    const now = new Date().toISOString();
+
+    // Seed family
+    db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+       VALUES (?, 'promote-key', 'crypto', 'standard', 'daily', 'daily', 'scalp')`,
+    ).run(familyId);
+
+    // Seed pending proposal
+    db.prepare(
+      `INSERT INTO promotion_proposals
+         (family_id, current_state, proposed_state, reason, scores_snapshot, status, created_at)
+       VALUES (?, 'probe-only', 'scaled', 'auto-promo', '{}', 'pending', ?)`,
+    ).run(familyId, now);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/actions/family/${familyId}/promote`,
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: { reason: "looks good" },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.commandId).toBeDefined();
+    expect(body.data.proposalId).toBeDefined();
+
+    // Verify proposal status changed to approved
+    const proposal = db
+      .prepare("SELECT * FROM promotion_proposals WHERE family_id = ? AND status = 'approved'")
+      .get(familyId) as Record<string, unknown>;
+    expect(proposal).toBeDefined();
+    expect(proposal.applied_command_id).toBe(body.data.commandId);
+
+    // Verify command enqueued
+    const cmd = db
+      .prepare("SELECT * FROM operator_commands WHERE id = ?")
+      .get(body.data.commandId) as Record<string, unknown>;
+    expect(cmd.action).toBe("family_promote_scaled");
+    expect(cmd.target_id).toBe(familyId);
+    expect(cmd.status).toBe("pending");
+  });
+
+  it("returns 409 when no pending proposal", async () => {
+    const db = conn.db;
+    const familyId = "fam-no-proposal";
+
+    db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+       VALUES (?, 'no-prop-key', 'crypto', 'standard', 'daily', 'daily', 'scalp')`,
+    ).run(familyId);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/actions/family/${familyId}/promote`,
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(409);
+    const body = json(res);
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("NO_PENDING_PROPOSAL");
+  });
+
+  it("returns 404 for unknown family", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/family/nonexistent/promote",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(404);
+  });
+});

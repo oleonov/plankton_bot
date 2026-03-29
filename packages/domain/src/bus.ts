@@ -183,7 +183,31 @@ export interface RuntimeEventMap {
     readonly action: OperatorActionType;
     readonly targetFamilyId: FamilyId | null;
     readonly reason: string | null;
+    readonly initiatorType: "operator" | "system";
+    readonly initiator: string | null;
     readonly appliedAt: number;
+  };
+
+  FamilyPromotionProposed: {
+    readonly familyId: FamilyId;
+    readonly currentState: string;
+    readonly proposedState: string;
+    readonly reason: string;
+    readonly scores: {
+      recurrence: number;
+      recycle: number;
+      liveViability: number;
+      toxicity: number;
+    };
+    readonly timestamp: number;
+  };
+
+  FamilyDemotionApplied: {
+    readonly familyId: FamilyId;
+    readonly previousState: string;
+    readonly newState: string;
+    readonly reason: string;
+    readonly timestamp: number;
   };
 
   MarketDataPollProgress: {

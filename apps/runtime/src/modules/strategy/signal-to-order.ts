@@ -92,6 +92,7 @@ export class SignalToOrderBridge {
       negRisk: market.negRisk,
       familyId: signal.familyId,
       sequenceInTick: signal.sequenceInTick,
+      signalReason: signal.reason,
     };
 
     this.log.info(

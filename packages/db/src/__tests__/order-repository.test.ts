@@ -27,6 +27,7 @@ function makeOrder(overrides?: Partial<Order>): Order {
     status: "pending",
     exchangeOrderId: null,
     signalId: null,
+    signalReason: null,
     botRunId: createBotRunId("run-1"),
     createdAt: now,
     updatedAt: now,
@@ -176,6 +177,20 @@ describe("SqliteOrderRepository", () => {
     const found = repo.findById(createOrderId("ord-1"));
     expect(found!.status).toBe("open");
     expect(found!.exchangeOrderId).toBe("exch-123");
+  });
+
+  it("persists and retrieves signalReason", () => {
+    repo.save(makeOrder({ signalReason: "repricing-exit" }));
+
+    const found = repo.findById(createOrderId("ord-1"));
+    expect(found!.signalReason).toBe("repricing-exit");
+  });
+
+  it("signalReason defaults to null", () => {
+    repo.save(makeOrder());
+
+    const found = repo.findById(createOrderId("ord-1"));
+    expect(found!.signalReason).toBeNull();
   });
 
   it("findById returns null for unknown id", () => {

@@ -8,6 +8,7 @@ import { Positions } from "./pages/Positions.tsx";
 import { OrdersFills } from "./pages/OrdersFills.tsx";
 import { Families } from "./pages/Families.tsx";
 import { RiskQuarantine } from "./pages/RiskQuarantine.tsx";
+import { Discovery } from "./pages/Discovery.tsx";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { staleTime: 10_000, retry: 1 } },
@@ -27,6 +28,7 @@ export function App() {
                 <Route path="/orders" element={<OrdersFills />} />
                 <Route path="/families" element={<Families />} />
                 <Route path="/risk" element={<RiskQuarantine />} />
+                <Route path="/discovery" element={<Discovery />} />
               </Route>
             </Routes>
           </BrowserRouter>

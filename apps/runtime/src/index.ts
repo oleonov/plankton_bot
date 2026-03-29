@@ -22,7 +22,6 @@ const _origLookup: any = dns.lookup;
 
 import process from "node:process";
 import { loadEnv, loadFamilyRulesYaml, type LoadedFamilyRules } from "@plankton/config";
-import { createFamilyRulesProvider } from "@plankton/family-rules";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
   bootstrapDatabase,
@@ -37,9 +36,16 @@ import {
   SqliteOperatorActionRepository,
   SqliteMarketSnapshotRepository,
   SqliteRiskEventRepository,
+  SqliteFamilyCandidateRepository,
+  SqliteFamilyEvidenceRepository,
+  SqliteFamilyRulesSnapshotRepository,
+  SqliteStateTransitionRepository,
+  SqlitePromotionProposalRepository,
+  SqliteCandidateObservationRepository,
+  SqliteFamilyRulesDbRepository,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
-import type { FamilyIdentity, FamilyState } from "@plankton/domain";
+import type { FamilyIdentity, FamilyState, FamilyRulesProvider } from "@plankton/domain";
 import { createBotRunId, slugPatternToRegex, ENTRY_REASONS } from "@plankton/domain";
 import { migrateOrphanedPositions } from "./universe-migration.js";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
@@ -67,6 +73,9 @@ import { GammaResolutionClient } from "@plankton/exchange";
 import { SqliteMarketResolutionRepository } from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
+import { ReloadableFamilyRulesManager } from "./family-rules-manager.js";
+import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";
+import { ScoreComputer } from "./modules/evidence/score-computer.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -99,15 +108,24 @@ async function main(): Promise<void> {
     operatorAction: new SqliteOperatorActionRepository(conn.db),
     marketSnapshot: new SqliteMarketSnapshotRepository(conn.db),
     riskEvent: new SqliteRiskEventRepository(conn.db),
+    familyCandidate: new SqliteFamilyCandidateRepository(conn.db),
+    familyEvidence: new SqliteFamilyEvidenceRepository(conn.db),
+    familyRulesSnapshot: new SqliteFamilyRulesSnapshotRepository(conn.db),
+    stateTransition: new SqliteStateTransitionRepository(conn.db),
+    promotionProposal: new SqlitePromotionProposalRepository(conn.db),
+    candidateObservation: new SqliteCandidateObservationRepository(conn.db),
   };
 
-  // 4. Load family rules
+  // 4. Load family rules (YAML + DB merge via ReloadableFamilyRulesManager)
   let families: FamilyIdentity[];
-  let rulesProvider: ReturnType<typeof createFamilyRulesProvider>;
+  let rulesProvider: FamilyRulesProvider;
+  let rulesManager: ReloadableFamilyRulesManager;
   let loaded: LoadedFamilyRules;
+  const dbRulesReader = new SqliteFamilyRulesDbRepository(conn.db);
   try {
     loaded = loadFamilyRulesYaml(config.familyRulesPath);
-    rulesProvider = createFamilyRulesProvider(loaded.families);
+    rulesManager = new ReloadableFamilyRulesManager(loaded.families, dbRulesReader);
+    rulesProvider = rulesManager;
     families = rulesProvider.getAllFamilies();
     log.info({ count: families.length }, "family rules loaded");
     if (config.runtimeMode !== "live-lite") {
@@ -143,6 +161,7 @@ async function main(): Promise<void> {
         quarantineReason: null,
         effectiveMode: null,
         derivedModeReason: null,
+        firstNegativeTailAt: null,
         updatedAt: new Date().toISOString(),
       };
       repos.familyState.save(baseline);
@@ -236,17 +255,6 @@ async function main(): Promise<void> {
     persistPauseState(paused);
   }
 
-  const commandPoller = new CommandPoller({
-    commandRepo: repos.operatorCommand,
-    actionRepo: repos.operatorAction,
-    familyStateRepo: repos.familyState,
-    bus,
-    log,
-    getPaused: () => supervisorRef.current.isPaused(),
-    setPaused: setPausedAndPersist,
-    pollIntervalMs: 5_000,
-  });
-
   // 7b. Create gateways via factory
   let polyClient: unknown;
   if (config.runtimeMode === "paper" || config.runtimeMode === "live-lite") {
@@ -267,23 +275,19 @@ async function main(): Promise<void> {
     }
   }
 
-  // Build slug filter from family rules so we only keep relevant markets during pagination
-  const slugPatterns: RegExp[] = [];
-  for (const f of families) {
-    if (!f.slugPattern) continue;
-    try {
-      slugPatterns.push(slugPatternToRegex(f.slugPattern));
-    } catch {
-      log.warn(
-        { familyId: String(f.familyId), pattern: f.slugPattern },
-        "invalid slug pattern — skipping for market-data filter",
-      );
-    }
-  }
-  const slugFilter =
-    slugPatterns.length > 0
-      ? (slug: string) => slugPatterns.some((re) => re.test(slug))
-      : undefined;
+  // Build slug filter dynamically from rules manager so new families added via
+  // rules_reload are picked up without restart.
+  const slugFilter = (slug: string): boolean => {
+    const currentFamilies = rulesManager.getAllFamilies();
+    return currentFamilies.some((f) => {
+      if (!f.slugPattern) return false;
+      try {
+        return slugPatternToRegex(f.slugPattern).test(slug);
+      } catch {
+        return false;
+      }
+    });
+  };
 
   const { marketDataGateway, exchangeGateway, modeLabel, marketDataSource, executionMode } =
     createGateways({
@@ -334,6 +338,25 @@ async function main(): Promise<void> {
     rulesProvider,
     marketRepo: repos.market,
     log,
+  });
+
+  // 7e2. Command poller (created here so normalizationModule is available)
+  const commandPoller = new CommandPoller({
+    commandRepo: repos.operatorCommand,
+    actionRepo: repos.operatorAction,
+    familyStateRepo: repos.familyState,
+    bus,
+    log,
+    getPaused: () => supervisorRef.current.isPaused(),
+    setPaused: setPausedAndPersist,
+    pollIntervalMs: 5_000,
+    rulesManager,
+    normalizationModule,
+    familyEvidenceRepo: repos.familyEvidence,
+    familyRulesSnapshotRepo: repos.familyRulesSnapshot,
+    familyCandidateRepo: repos.familyCandidate,
+    stateTransitionRepo: repos.stateTransition,
+    familyRulesDbWriter: dbRulesReader,
   });
 
   // 7f. Execution module
@@ -472,12 +495,28 @@ async function main(): Promise<void> {
         })
       : null;
 
+  // 7l2. Family evidence engine — periodic scoring for discovery candidates
+  const scoreComputer = new ScoreComputer(conn.db);
+  const evidenceEngine = new FamilyEvidenceEngine({
+    bus,
+    log,
+    scoreComputer,
+    candidateRepo: repos.familyCandidate,
+    evidenceRepo: repos.familyEvidence,
+    proposalRepo: repos.promotionProposal,
+    commandRepo: repos.operatorCommand,
+    stateTransitionRepo: repos.stateTransition,
+    familyStateRepo: repos.familyState,
+    rulesProvider: rulesManager,
+  });
+
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
     ["market-scanner", marketScannerModule],
     ["market-data", marketDataModule],
     ["normalization", normalizationModule],
     ["risk-inventory", riskInventoryModule],
+    ["evidence-engine", evidenceEngine],
     ["reconciliation", reconciliationModule],
     ["strategy", strategyModule],
     ["resolution", resolutionModule],
