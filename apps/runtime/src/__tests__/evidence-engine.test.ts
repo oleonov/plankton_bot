@@ -697,6 +697,71 @@ describe("FamilyEvidenceEngine", () => {
     await engine.stop();
   });
 
+  it("does not enqueue duplicate demotion if same action already pending", async () => {
+    const identity = makeFamilyIdentity({ regime: "threshold" as any, horizon: "daily" });
+    const rulesProvider = {
+      getRule: vi.fn(),
+      isEnabled: vi.fn().mockReturnValue(true),
+      getAllFamilies: vi.fn().mockReturnValue([identity]),
+      getRulesForRegime: vi.fn().mockReturnValue([]),
+    } as any;
+
+    const sc = createMockScoreComputer({
+      recycleMetrics: { tailAdjustedPnl: -5 },
+      toxicity: { dustCount: 0, positionCount: 1, tailCostUsdc: 5, realizedPnlUsdc: 10, reduceOnlyCount: 0, weeksDeployed: 4, staleCount: 0, totalOpen: 1 },
+    });
+
+    const commandRepo = {
+      insert: vi.fn(),
+      // Same action (quarantine) already pending for this family
+      getPending: vi.fn().mockReturnValue([
+        { action: "family_quarantine", targetId: String(identity.familyId) },
+      ]),
+      updateStatus: vi.fn(),
+    } as any;
+
+    const deps = createMockDeps({ rulesProvider, scoreComputer: sc, commandRepo });
+    const engine = new FamilyEvidenceEngine({ ...deps, log: silentLog, recomputeIntervalMs: 999_999 });
+
+    await engine.start();
+    expect(commandRepo.insert).not.toHaveBeenCalled();
+    await engine.stop();
+  });
+
+  it("allows escalation from pending reduce-only to quarantine", async () => {
+    const identity = makeFamilyIdentity({ regime: "threshold" as any, horizon: "daily" });
+    const rulesProvider = {
+      getRule: vi.fn(),
+      isEnabled: vi.fn().mockReturnValue(true),
+      getAllFamilies: vi.fn().mockReturnValue([identity]),
+      getRulesForRegime: vi.fn().mockReturnValue([]),
+    } as any;
+
+    const sc = createMockScoreComputer({
+      recycleMetrics: { tailAdjustedPnl: -5 },
+      toxicity: { dustCount: 0, positionCount: 1, tailCostUsdc: 5, realizedPnlUsdc: 10, reduceOnlyCount: 0, weeksDeployed: 4, staleCount: 0, totalOpen: 1 },
+    });
+
+    const commandRepo = {
+      insert: vi.fn(),
+      // Weaker action (reduce-only) pending — quarantine should still be enqueued
+      getPending: vi.fn().mockReturnValue([
+        { action: "family_reduce_only", targetId: String(identity.familyId) },
+      ]),
+      updateStatus: vi.fn(),
+    } as any;
+
+    const deps = createMockDeps({ rulesProvider, scoreComputer: sc, commandRepo });
+    const engine = new FamilyEvidenceEngine({ ...deps, log: silentLog, recomputeIntervalMs: 999_999 });
+
+    await engine.start();
+    // Threshold regime with negative tail → quarantine should be enqueued despite pending reduce-only
+    expect(commandRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "family_quarantine" }),
+    );
+    await engine.stop();
+  });
+
   it("ReconciliationComplete triggers out-of-cycle recompute", async () => {
     const deps = createMockDeps();
     const engine = new FamilyEvidenceEngine({

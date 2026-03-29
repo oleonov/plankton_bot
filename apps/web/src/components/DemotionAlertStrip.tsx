@@ -2,11 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiFetch } from "../api/client.ts";
 import type { TransitionDTO } from "../api/types.ts";
-
-function formatMinsAgo(iso: string): string {
-  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60_000);
-  return mins < 1 ? "just now" : `${mins}m ago`;
-}
+import { formatAgo } from "../utils/format.ts";
 
 export function DemotionAlertStrip() {
   const [dismissed, setDismissed] = useState<Set<number>>(new Set());
@@ -17,7 +13,14 @@ export function DemotionAlertStrip() {
     refetchInterval: 30_000,
   });
 
-  const visible = (transitions ?? []).filter((t) => !dismissed.has(t.id));
+  // Dedup: show only the latest transition per family
+  const dedupedByFamily = new Map<string, TransitionDTO>();
+  for (const t of transitions ?? []) {
+    if (!dedupedByFamily.has(t.entityId) || t.id > dedupedByFamily.get(t.entityId)!.id) {
+      dedupedByFamily.set(t.entityId, t);
+    }
+  }
+  const visible = [...dedupedByFamily.values()].filter((t) => !dismissed.has(t.id));
   if (visible.length === 0) return null;
 
   return (
@@ -38,7 +41,7 @@ export function DemotionAlertStrip() {
         {visible.map((t, i) => (
           <span key={t.id}>
             {i > 0 && " \u2022 "}
-            Family {t.entityId} demoted to {t.toState} {formatMinsAgo(t.createdAt)}
+            Family {t.entityId} demoted to {t.toState} {formatAgo(t.createdAt)}
             {t.reason && ` (${t.reason})`}
           </span>
         ))}

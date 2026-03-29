@@ -447,6 +447,20 @@ export class FamilyEvidenceEngine implements RuntimeModule {
     action: typeof OperatorActionType.FamilyReduceOnly | typeof OperatorActionType.FamilyQuarantine,
     reason: string,
   ): void {
+    // Dedup: skip if an equal-or-stronger pending command already exists for this family.
+    // Escalation (reduce-only pending → quarantine requested) must NOT be blocked.
+    const pending = this.commandRepo.getPending();
+    const familyPending = pending.filter(
+      (c) => c.targetId === String(familyId) && (c.action === "family_reduce_only" || c.action === "family_quarantine"),
+    );
+    if (familyPending.length > 0) {
+      // Same action already pending → skip
+      if (familyPending.some((c) => c.action === action)) return;
+      // Stronger action already pending → skip
+      if (familyPending.some((c) => c.action === "family_quarantine")) return;
+      // Only weaker pending — allow escalation
+    }
+
     this.commandRepo.insert({
       action,
       targetId: String(familyId),
