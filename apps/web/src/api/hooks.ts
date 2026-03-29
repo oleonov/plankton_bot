@@ -267,7 +267,9 @@ export function useDiscoveryStatus() {
   return useQuery({
     queryKey: ["discovery", "status"],
     queryFn: () => apiFetch<DiscoveryStatusDTO>("/api/v1/discovery/status"),
-    refetchInterval: (query) => (query.state.data?.activeRun ? 5_000 : false),
+    // Always poll: 5s when scan active (fast feedback), 30s when idle (detect worker offline).
+    // SSE only tracks discovery_runs changes, not worker heartbeat metric.
+    refetchInterval: (query) => (query.state.data?.activeRun ? 5_000 : 30_000),
   });
 }
 

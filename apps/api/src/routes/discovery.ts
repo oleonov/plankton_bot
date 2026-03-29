@@ -141,13 +141,16 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
     try {
       const id = runRepo.enqueue("manual", "operator");
       return ok({ runId: id, status: "queued", alreadyActive: false });
-    } catch {
-      const nowActive = runRepo.findActive();
-      return ok({
-        runId: nowActive?.id ?? 0,
-        status: nowActive?.status ?? "unknown",
-        alreadyActive: true,
-      });
+    } catch (err) {
+      // Only handle the expected "active run exists" race condition
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("Active discovery run already exists")) {
+        const nowActive = runRepo.findActive();
+        if (nowActive) {
+          return ok({ runId: nowActive.id, status: nowActive.status, alreadyActive: true });
+        }
+      }
+      throw new ApiError(500, msg);
     }
   });
 

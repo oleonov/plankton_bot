@@ -333,6 +333,7 @@ describe("FamilyEvidenceEngine", () => {
     const evidenceRepo = {
       updateScores: vi.fn(),
       updatePromotionState: vi.fn(),
+      updateProbeSubstate: vi.fn(),
       getEvidence: vi.fn().mockReturnValue({
         promotionState: "probe-only",
       } as Partial<FamilyEvidence>),

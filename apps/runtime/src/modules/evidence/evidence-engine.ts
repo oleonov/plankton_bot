@@ -246,6 +246,9 @@ export class FamilyEvidenceEngine implements RuntimeModule {
         });
         if (!eligible) {
           this.evidenceRepo.updateProbeSubstate(familyId, "retained");
+        } else {
+          // Thresholds met — clear substate, proposal panel shows promotion pending
+          this.evidenceRepo.updateProbeSubstate(familyId, null);
         }
       }
 
