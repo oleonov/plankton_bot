@@ -231,7 +231,7 @@ export class CommandPoller implements RuntimeModule {
     this.deps.familyEvidenceRepo.updateProbeSubstate(familyId, null);
   }
 
-  private applyRulesReload(now: string): void {
+  private applyRulesReload(_now: string): void {
     if (!this.deps.rulesManager) {
       throw new Error("rules_reload requires rulesManager dep");
     }

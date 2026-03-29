@@ -45,7 +45,7 @@ describe("SqliteDiscoveryRunRepository", () => {
   });
 
   it("enqueue allowed after previous run completes", () => {
-    const id = repo.enqueue("startup", null);
+    repo.enqueue("startup", null);
     const run = repo.claim("w-1");
     repo.succeed(run!.id, {
       marketsFound: 0,
@@ -78,7 +78,7 @@ describe("SqliteDiscoveryRunRepository", () => {
   it("heartbeat updates timestamp", () => {
     repo.enqueue("startup", null);
     const run = repo.claim("w-1");
-    const before = run!.heartbeatAt;
+    const _before = run!.heartbeatAt;
 
     // SQLite datetime('now') has second precision, so heartbeat will at least not error
     repo.heartbeat(run!.id);

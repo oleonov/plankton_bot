@@ -274,7 +274,7 @@ export class FamilyEvidenceEngine implements RuntimeModule {
     recycleMetrics: import("./score-computer.js").RecycleMetrics,
     recycleScore: number,
     toxicity: number,
-    now: string,
+    _now: string,
   ): void {
     if (this.proposalRepo.hasPending(familyId)) return;
 

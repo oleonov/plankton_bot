@@ -20,7 +20,6 @@ import { createFamilyId } from "@plankton/domain";
 import type {
   FamilyIdentity,
   OperatorActionType,
-  FamilyCandidate,
   RuntimeEventMap,
 } from "@plankton/domain";
 import { CommandPoller } from "../supervisor/command-poller.js";

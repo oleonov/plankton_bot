@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useCandidates, useCandidateAction, useDiscoveryStatus, useStatus } from "../api/hooks.ts";
 import { ProposalPanel } from "../components/ProposalPanel.tsx";
 import { DiscoveryStatusPanel } from "../components/DiscoveryStatusPanel.tsx";
@@ -16,8 +16,13 @@ const RECOMMENDATION_BG: Record<string, string | undefined> = {
 };
 
 function MaterializedWarning({ materializedAt }: { materializedAt: string | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, []);
   if (!materializedAt) return null;
-  const elapsed = Date.now() - new Date(materializedAt).getTime();
+  const elapsed = now - new Date(materializedAt).getTime();
   if (elapsed < 60_000) return null;
   const isVeryStuck = elapsed > 300_000;
   return (
