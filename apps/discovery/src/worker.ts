@@ -68,6 +68,12 @@ async function main(): Promise<void> {
     }
   }, SCHEDULE_INTERVAL_MS);
 
+  // Periodic stale check — catches runs orphaned by deploy restarts
+  const staleCheckTimer = setInterval(() => {
+    const recovered = runRepo.failStale(STALE_THRESHOLD_MS);
+    if (recovered > 0) logger.warn({ recovered }, "Periodic stale check: recovered orphaned runs");
+  }, STALE_THRESHOLD_MS); // check every 2 minutes
+
   // Poll loop
   let executing = false;
   let shuttingDown = false;
@@ -111,6 +117,7 @@ async function main(): Promise<void> {
     clearInterval(schedulerTimer);
     clearInterval(pollTimer);
     clearInterval(idleTimer);
+    clearInterval(staleCheckTimer);
 
     const deadline = Date.now() + 5 * 60_000;
     while (executing && Date.now() < deadline) {

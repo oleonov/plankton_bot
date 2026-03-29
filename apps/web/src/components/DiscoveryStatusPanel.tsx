@@ -6,7 +6,11 @@ function formatElapsed(iso: string | null): string {
   if (!iso) return "";
   const ms = Date.now() - new Date(iso).getTime();
   const s = Math.floor(ms / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
 function scanLabel(status: DiscoveryStatusDTO): string {

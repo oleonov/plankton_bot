@@ -33,7 +33,8 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
 export function apiPost<T>(path: string, payload?: unknown): Promise<T> {
   return apiFetch<T>(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: payload ? JSON.stringify(payload) : undefined,
+    ...(payload != null
+      ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }
+      : {}),
   });
 }
