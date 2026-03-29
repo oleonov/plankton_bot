@@ -101,6 +101,17 @@ function formatRun(run: DiscoveryRun | null) {
   };
 }
 
+const SCORE_EXPR = "(COALESCE(recurrence_score, 0) * COALESCE(live_viability_score, 0))";
+
+function parseCursor(raw: string): { score: number; id: string } | null {
+  const idx = raw.indexOf("|");
+  if (idx < 1) return null;
+  const score = Number(raw.slice(0, idx));
+  const id = raw.slice(idx + 1);
+  if (!Number.isFinite(score) || !id) return null;
+  return { score, id };
+}
+
 export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, opts) => {
   const { db } = opts;
 
@@ -169,9 +180,13 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       confidence?: string;
       cadence?: string;
       recommendation?: string;
+      limit?: string;
+      cursor?: string;
     };
   }>("/discovery/candidates", async (request) => {
-    const { status, confidence, cadence, recommendation } = request.query;
+    const { status, confidence, cadence, recommendation, cursor } = request.query;
+    const rawLimit = parseInt(request.query.limit ?? "50", 10);
+    const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 50, 200);
 
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -192,13 +207,30 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       clauses.push("gate_recommendation = ?");
       params.push(recommendation);
     }
+    if (cursor) {
+      const parsed = parseCursor(cursor);
+      if (!parsed) throw new ApiError(400, "invalid cursor format", "INVALID_CURSOR");
+      clauses.push(`(${SCORE_EXPR} < ? OR (${SCORE_EXPR} = ? AND candidate_id > ?))`);
+      params.push(parsed.score, parsed.score, parsed.id);
+    }
 
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const sql = `SELECT * FROM family_candidates ${where}
-      ORDER BY (COALESCE(recurrence_score, 0) * COALESCE(live_viability_score, 0)) DESC`;
+      ORDER BY ${SCORE_EXPR} DESC, candidate_id ASC
+      LIMIT ?`;
+    params.push(limit + 1);
 
     const rows = db.prepare(sql).all(...params) as CandidateRow[];
-    return ok(rows.map(toCandidateDto));
+    const hasMore = rows.length > limit;
+    if (hasMore) rows.pop();
+
+    const last = rows[rows.length - 1];
+    const nextCursor =
+      hasMore && last
+        ? `${(last.recurrence_score ?? 0) * (last.live_viability_score ?? 0)}|${last.candidate_id}`
+        : null;
+
+    return ok({ items: rows.map(toCandidateDto), nextCursor });
   });
 
   // ── GET /discovery/candidates/:candidateId ─────────────────────────────

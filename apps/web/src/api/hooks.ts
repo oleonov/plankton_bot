@@ -230,16 +230,18 @@ interface CandidateFilters {
   cadence?: string;
 }
 
-export function useCandidates(filters: CandidateFilters = {}) {
+export function useCandidates(filters: CandidateFilters & { cursor?: string; limit?: number } = {}) {
   return useQuery({
     queryKey: ["discovery", "candidates", filters],
     queryFn: () =>
-      apiFetch<CandidateDTO[]>(
+      apiFetch<Paginated<CandidateDTO>>(
         withParams("/api/v1/discovery/candidates", {
           status: filters.status,
           recommendation: filters.recommendation,
           confidence: filters.confidence,
           cadence: filters.cadence,
+          limit: filters.limit ?? 50,
+          cursor: filters.cursor,
         }),
       ),
   });

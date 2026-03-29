@@ -1,8 +1,8 @@
 import pino from "pino";
 import { randomUUID } from "node:crypto";
-import { config as loadDotenv } from "dotenv";
 import { bootstrapDatabase, SqliteDiscoveryRunRepository } from "@plankton/db";
 import { ScanService } from "./scan-service.js";
+import { loadDiscoveryEnv, getDbPath, createDiscoveryGateway } from "./gateway-factory.js";
 
 const SCHEDULE_INTERVAL_MS = 60 * 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -10,20 +10,14 @@ const STALE_THRESHOLD_MS = 2 * 60_000;
 const POLL_INTERVAL_MS = 5_000;
 const IDLE_HEARTBEAT_MS = 30_000;
 
-function loadDbPath(): string {
-  const mode = process.env["RUNTIME_MODE"] ?? "simulation";
-  loadDotenv({ path: `.env.${mode}` });
-  loadDotenv();
-  return process.env["DB_PATH"] ?? "./apps/runtime/data/plankton-sim.db";
-}
-
 const logger = pino({
   transport: { target: "pino-pretty", options: { colorize: true } },
 });
 const workerId = randomUUID();
 
 async function main(): Promise<void> {
-  const dbPath = loadDbPath();
+  loadDiscoveryEnv();
+  const dbPath = getDbPath();
   logger.info({ dbPath, workerId }, "Discovery worker starting");
   const conn = bootstrapDatabase(dbPath);
   const runRepo = new SqliteDiscoveryRunRepository(conn.db);
@@ -95,6 +89,7 @@ async function main(): Promise<void> {
       const service = new ScanService({
         db: conn.db,
         log: logger,
+        gateway: createDiscoveryGateway(),
         onProgress: () => runRepo.heartbeat(run.id),
       });
       const stats = await service.run();

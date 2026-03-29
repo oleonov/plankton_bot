@@ -414,3 +414,128 @@ describe("POST /actions/family/:id/promote", () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+// ─── Candidates pagination ──────────────────────────────────────────────
+
+function seedCandidate(
+  db: ReturnType<typeof bootstrapDatabase>["db"],
+  id: string,
+  recurrence: number,
+  viability: number,
+  status = "discovered",
+) {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO family_candidates
+       (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+        primary_category, strategy_profile, active_market_count, cluster_volume_24h,
+        recurrence_score, live_viability_score, gate_recommendation, status,
+        first_seen_at, last_seen_at, scores_updated_at)
+     VALUES (?, ?, 'standard', 'daily', 'daily', 'high', 'crypto', 'scalp',
+             3, 5000, ?, ?, 'monitor', ?, ?, ?, ?)`,
+  ).run(id, `key-${id}`, recurrence, viability, status, now, now, now); // 8 params for 8 ?-placeholders
+}
+
+describe("GET /discovery/candidates pagination", () => {
+  it("returns { items, nextCursor } with limit", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM family_candidates").run();
+
+    for (let i = 0; i < 5; i++) {
+      seedCandidate(db, `pag-${i}`, 0.5 + i * 0.05, 0.8);
+    }
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/candidates?limit=2",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.items).toHaveLength(2);
+    expect(body.data.nextCursor).not.toBeNull();
+  });
+
+  it("cursor pagination walks through all candidates without duplicates", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM family_candidates").run();
+
+    // 3 candidates with same score (0.5 * 0.7 = 0.35)
+    seedCandidate(db, "tie-a", 0.5, 0.7);
+    seedCandidate(db, "tie-b", 0.5, 0.7);
+    seedCandidate(db, "tie-c", 0.5, 0.7);
+    // 2 with different scores
+    seedCandidate(db, "high-1", 0.9, 0.9);
+    seedCandidate(db, "low-1", 0.1, 0.1);
+
+    const allIds: string[] = [];
+    let nextCursor: string | null = null;
+
+    for (let page = 0; page < 5; page++) {
+      const url = nextCursor
+        ? `/api/v1/discovery/candidates?limit=2&cursor=${encodeURIComponent(nextCursor)}`
+        : "/api/v1/discovery/candidates?limit=2";
+
+      const res = await app.inject({ method: "GET", url, headers: authHeaders() });
+      const body = json(res);
+      expect(body.ok).toBe(true);
+      allIds.push(...body.data.items.map((c: any) => c.candidateId));
+      nextCursor = body.data.nextCursor;
+      if (!nextCursor) break;
+    }
+
+    expect(allIds).toHaveLength(5);
+    expect(new Set(allIds).size).toBe(5);
+    // Within tied scores, candidateIds should be in ASC order
+    const tieIds = allIds.filter((id) => id.startsWith("tie-"));
+    expect(tieIds).toEqual([...tieIds].sort());
+  });
+
+  it("returns 400 on invalid cursor format", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/candidates?cursor=invalid",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(400);
+    const body = json(res);
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe("INVALID_CURSOR");
+  });
+
+  it("filters work together with cursor", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM family_candidates").run();
+
+    seedCandidate(db, "filt-d1", 0.9, 0.8, "discovered");
+    seedCandidate(db, "filt-d2", 0.7, 0.8, "discovered");
+    seedCandidate(db, "filt-d3", 0.5, 0.8, "discovered");
+    seedCandidate(db, "filt-r1", 0.8, 0.8, "reviewed");
+    seedCandidate(db, "filt-r2", 0.6, 0.8, "reviewed");
+
+    // Page 1: reviewed only, limit 1
+    const res1 = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/candidates?status=reviewed&limit=1",
+      headers: authHeaders(),
+    });
+    const body1 = json(res1);
+    expect(body1.data.items).toHaveLength(1);
+    expect(body1.data.items[0].status).toBe("reviewed");
+    expect(body1.data.nextCursor).not.toBeNull();
+
+    // Page 2 — last page, no phantom extra page
+    const res2 = await app.inject({
+      method: "GET",
+      url: `/api/v1/discovery/candidates?status=reviewed&limit=1&cursor=${encodeURIComponent(body1.data.nextCursor)}`,
+      headers: authHeaders(),
+    });
+    const body2 = json(res2);
+    expect(body2.data.items).toHaveLength(1);
+    expect(body2.data.items[0].status).toBe("reviewed");
+    expect(body2.data.nextCursor).toBeNull();
+  });
+});

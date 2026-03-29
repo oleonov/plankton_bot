@@ -4,6 +4,7 @@ import { ProposalPanel } from "../components/ProposalPanel.tsx";
 import { DiscoveryStatusPanel } from "../components/DiscoveryStatusPanel.tsx";
 import { CandidateDetail } from "../components/CandidateDetail.tsx";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { Pagination } from "../components/Pagination.tsx";
 import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
 import type { CandidateDTO } from "../api/types.ts";
@@ -163,13 +164,16 @@ export function Discovery() {
   const [confFilter, setConfFilter] = useState<string>("");
   const [cadenceFilter, setCadenceFilter] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [cursor, setCursor] = useState<string | undefined>();
 
-  const { data: candidates, isLoading } = useCandidates({
+  const { data, isLoading } = useCandidates({
     status: statusFilter || undefined,
     recommendation: recFilter || undefined,
     confidence: confFilter || undefined,
     cadence: cadenceFilter || undefined,
+    cursor,
   });
+  const candidates = data?.items;
   const { data: status } = useDiscoveryStatus();
 
   if (isLoading) return <div className="page">Loading...</div>;
@@ -182,7 +186,7 @@ export function Discovery() {
       <div className="filter-bar">
         <label>
           Status:
-          <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setCursor(undefined); }}>
             <option value="">All</option>
             <option value="discovered">Discovered</option>
             <option value="reviewed">Reviewed</option>
@@ -192,7 +196,7 @@ export function Discovery() {
         </label>
         <label>
           Recommendation:
-          <select value={recFilter} onChange={(e) => setRecFilter(e.target.value)}>
+          <select value={recFilter} onChange={(e) => { setRecFilter(e.target.value); setCursor(undefined); }}>
             <option value="">All</option>
             <option value="ignore">Ignore</option>
             <option value="monitor">Monitor</option>
@@ -202,7 +206,7 @@ export function Discovery() {
         </label>
         <label>
           Confidence:
-          <select value={confFilter} onChange={(e) => setConfFilter(e.target.value)}>
+          <select value={confFilter} onChange={(e) => { setConfFilter(e.target.value); setCursor(undefined); }}>
             <option value="">All</option>
             <option value="high">High</option>
             <option value="medium">Medium</option>
@@ -211,7 +215,7 @@ export function Discovery() {
         </label>
         <label>
           Cadence:
-          <select value={cadenceFilter} onChange={(e) => setCadenceFilter(e.target.value)}>
+          <select value={cadenceFilter} onChange={(e) => { setCadenceFilter(e.target.value); setCursor(undefined); }}>
             <option value="">All</option>
             <option value="daily">Daily</option>
             <option value="weekly">Weekly</option>
@@ -231,7 +235,10 @@ export function Discovery() {
                 : "No recurring market families found"}
         </div>
       ) : (
-        <CandidateTable candidates={candidates!} onSelect={setSelectedId} />
+        <>
+          <CandidateTable candidates={candidates!} onSelect={setSelectedId} />
+          <Pagination nextCursor={data?.nextCursor ?? null} onNext={setCursor} />
+        </>
       )}
       {selectedId && (
         <CandidateDetail candidateId={selectedId} onClose={() => setSelectedId(null)} />
