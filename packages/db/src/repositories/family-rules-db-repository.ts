@@ -171,6 +171,8 @@ export class SqliteFamilyRulesDbRepository {
         liveViabilityScore: (row.live_viability_score as number) ?? null,
         toxicityPenalty: (row.toxicity_penalty as number) ?? null,
         lastValidatedAt: (row.last_validated_at as string) ?? null,
+        probeSubstate: (row.probe_substate as string) ?? null,
+        repricingExitCount: (row.repricing_exit_count as number) ?? 0,
       },
       rules: {
         familyId,

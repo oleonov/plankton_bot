@@ -129,6 +129,8 @@ export interface FamilyEvidence {
   liveViabilityScore: number | null;
   toxicityPenalty: number | null;
   lastValidatedAt: string | null; // ISO timestamp
+  probeSubstate: string | null;
+  repricingExitCount: number;
 }
 
 // ─── Family — Rules layer (seven sub-blocks) ──────────────────────────────────

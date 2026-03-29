@@ -225,10 +225,10 @@ export class CommandPoller implements RuntimeModule {
   /** Sync promotion_state in family_evidence when runtime mode changes. */
   private syncPromotionState(cmd: OperatorCommand, promotionState: PromotionState): void {
     if (!cmd.targetId || !this.deps.familyEvidenceRepo) return;
-    this.deps.familyEvidenceRepo.updatePromotionState(
-      createFamilyId(cmd.targetId),
-      promotionState,
-    );
+    const familyId = createFamilyId(cmd.targetId);
+    this.deps.familyEvidenceRepo.updatePromotionState(familyId, promotionState);
+    // Transitioning out of probe clears substate
+    this.deps.familyEvidenceRepo.updateProbeSubstate(familyId, null);
   }
 
   private applyRulesReload(now: string): void {
@@ -286,8 +286,9 @@ export class CommandPoller implements RuntimeModule {
     const prevPromotionState =
       this.deps.familyEvidenceRepo?.getEvidence(familyId)?.promotionState ?? "unknown";
 
-    // Set promotion_state to scaled
+    // Set promotion_state to scaled, clear probe substate
     this.deps.familyEvidenceRepo?.updatePromotionState(familyId, "scaled");
+    this.deps.familyEvidenceRepo?.updateProbeSubstate(familyId, null);
 
     // Write state transition using lifecycle states
     this.deps.stateTransitionRepo?.insert({
@@ -347,8 +348,9 @@ export class CommandPoller implements RuntimeModule {
     const prevPromotionState =
       this.deps.familyEvidenceRepo?.getEvidence(familyId)?.promotionState ?? "unknown";
 
-    // Set promotion_state to probe-only
+    // Set promotion_state to probe-only with reset substate
     this.deps.familyEvidenceRepo?.updatePromotionState(familyId, "probe-only");
+    this.deps.familyEvidenceRepo?.updateProbeSubstate(familyId, "reset-probe");
 
     // Write state transition using lifecycle states
     this.deps.stateTransitionRepo?.insert({

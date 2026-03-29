@@ -295,9 +295,9 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
                    0, 10.0, 3, 2, ?)`,
         ).run(familyId, now);
 
-        // 3. INSERT family_evidence with zeros
+        // 3. INSERT family_evidence with zeros + probe warming-up substate
         db.prepare(
-          "INSERT INTO family_evidence (family_id, updated_at) VALUES (?, ?)",
+          "INSERT INTO family_evidence (family_id, probe_substate, updated_at) VALUES (?, 'warming-up', ?)",
         ).run(familyId, now);
 
         // 4. INSERT family_runtime_state baseline

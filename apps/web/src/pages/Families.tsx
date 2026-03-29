@@ -200,6 +200,19 @@ export function Families() {
                   </td>
                   <td>
                     {f.promotionState ? <Badge value={f.promotionState} /> : "\u2014"}
+                    {f.probeSubstate && (
+                      <span
+                        className={`badge ${
+                          f.probeSubstate === "warming-up"
+                            ? "badge-blue"
+                            : f.probeSubstate === "retained"
+                              ? "badge-orange"
+                              : "badge-orange"
+                        }`}
+                      >
+                        {f.probeSubstate}
+                      </span>
+                    )}
                   </td>
                   <td
                     style={{

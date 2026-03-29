@@ -83,6 +83,8 @@ function makeBundle(overrides?: {
       liveViabilityScore: null,
       toxicityPenalty: null,
       lastValidatedAt: null,
+      probeSubstate: null,
+      repricingExitCount: 0,
     },
     rules: {
       familyId: FAM_ID,

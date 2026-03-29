@@ -152,6 +152,7 @@ export interface FamilyDTO {
   cadence: string;
   strategyProfile: string;
   promotionState: string | null;
+  probeSubstate: string | null;
   state: {
     runtimeMode: string;
     openValueUsdc: number;
@@ -274,6 +275,14 @@ export interface ProposalDTO {
   resolvedBy: string | null;
 }
 
+/** Promotion blocker threshold check */
+export interface PromotionBlockerDTO {
+  metric: string;
+  current: number;
+  required: number;
+  passed: boolean;
+}
+
 /** GET /families/:id/evidence */
 export interface FamilyEvidenceDTO {
   familyId: string;
@@ -296,6 +305,9 @@ export interface FamilyEvidenceDTO {
   liveViabilityScore: number | null;
   toxicityPenalty: number | null;
   lastValidatedAt: string | null;
+  probeSubstate: string | null;
+  repricingExitCount: number;
+  promotionBlockers?: PromotionBlockerDTO[];
 }
 
 /** GET /families/:id/transitions item */

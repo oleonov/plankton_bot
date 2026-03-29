@@ -41,6 +41,8 @@ function makeFamilyConfig(familyId: string, overrides?: Partial<{ familyKey: str
       liveViabilityScore: null,
       toxicityPenalty: null,
       lastValidatedAt: null,
+      probeSubstate: null,
+      repricingExitCount: 0,
     },
     rules: {
       familyId,

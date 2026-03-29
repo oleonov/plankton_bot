@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { useCandidates, useCandidateAction, useDiscoveryStatus } from "../api/hooks.ts";
+import { useCandidates, useCandidateAction, useDiscoveryStatus, useStatus } from "../api/hooks.ts";
 import { ProposalPanel } from "../components/ProposalPanel.tsx";
 import { DiscoveryStatusPanel } from "../components/DiscoveryStatusPanel.tsx";
 import { CandidateDetail } from "../components/CandidateDetail.tsx";
+import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
 import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
 import type { CandidateDTO } from "../api/types.ts";
@@ -14,10 +15,33 @@ const RECOMMENDATION_BG: Record<string, string | undefined> = {
   "scaled-candidate": "rgba(76,175,80,0.06)",
 };
 
+function MaterializedWarning({ materializedAt }: { materializedAt: string | null }) {
+  if (!materializedAt) return null;
+  const elapsed = Date.now() - new Date(materializedAt).getTime();
+  if (elapsed < 60_000) return null;
+  const isVeryStuck = elapsed > 300_000;
+  return (
+    <span
+      className="badge badge-orange"
+      title={isVeryStuck ? "Check runtime logs" : "Waiting for rules_reload"}
+    >
+      {isVeryStuck ? "Stuck — check runtime logs" : "Waiting for runtime reload"}
+    </span>
+  );
+}
+
+function ScoresPendingBadge() {
+  return <span className="badge badge-orange">scores pending</span>;
+}
+
 function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
   const review = useCandidateAction(candidate.candidateId, "review");
   const accept = useCandidateAction(candidate.candidateId, "accept");
   const reject = useCandidateAction(candidate.candidateId, "reject");
+  const { data: statusData } = useStatus();
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  const runtimeMode = statusData?.runtimeMode;
 
   return (
     <span style={{ display: "inline-flex", gap: 4 }}>
@@ -33,12 +57,28 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
       )}
       {candidate.status === "reviewed" && (
         <>
-          <button className="btn-success" onClick={() => accept.mutate()} disabled={accept.isPending}>
+          <button
+            className="btn-success"
+            onClick={() => setConfirmOpen(true)}
+            disabled={accept.isPending}
+          >
             Accept
           </button>
           <button className="btn-danger" onClick={() => reject.mutate()} disabled={reject.isPending}>
             Reject
           </button>
+          <ConfirmDialog
+            open={confirmOpen}
+            title={`Accept ${candidate.familyKey}?`}
+            description="This will materialize the candidate as a probe-only family."
+            runtimeMode={runtimeMode}
+            caps="Probe caps: $10 max, 3 markets, 2 dust"
+            onConfirm={() => {
+              setConfirmOpen(false);
+              accept.mutate();
+            }}
+            onCancel={() => setConfirmOpen(false)}
+          />
         </>
       )}
     </span>
@@ -83,14 +123,23 @@ function CandidateTable({
             <td style={{ color: "var(--blue)" }}>{c.familyKey}</td>
             <td>{c.regime}</td>
             <td>{c.horizon}</td>
-            <ScoreCell value={c.recurrenceScore} color="var(--blue)" />
-            <ScoreCell value={c.liveViabilityScore} color="#26a69a" />
+            {c.scoresUpdatedAt === null ? (
+              <td colSpan={2}><ScoresPendingBadge /></td>
+            ) : (
+              <>
+                <ScoreCell value={c.recurrenceScore} color="var(--blue)" />
+                <ScoreCell value={c.liveViabilityScore} color="#26a69a" />
+              </>
+            )}
             <td>
               <Badge value={c.gateRecommendation} />
             </td>
             <td>{c.patternConfidence}</td>
             <td>
               <Badge value={c.status} />
+              {c.status === "materialized" && (
+                <MaterializedWarning materializedAt={c.materializedAt} />
+              )}
             </td>
             <td>{formatAgo(c.lastSeenAt)}</td>
             <td onClick={(e) => e.stopPropagation()}>

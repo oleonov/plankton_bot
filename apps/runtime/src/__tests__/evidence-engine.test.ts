@@ -176,6 +176,7 @@ function createMockDeps(overrides?: Partial<MockDeps>): MockDeps {
       findAll: vi.fn().mockReturnValue([]),
       findById: vi.fn().mockReturnValue(null),
       findByStatus: vi.fn().mockReturnValue([]),
+      findUnscored: vi.fn().mockReturnValue([]),
       upsert: vi.fn(),
       updateStatus: vi.fn(),
       updateScores: vi.fn(),
@@ -183,6 +184,7 @@ function createMockDeps(overrides?: Partial<MockDeps>): MockDeps {
     evidenceRepo: {
       updateScores: vi.fn(),
       updatePromotionState: vi.fn(),
+      updateProbeSubstate: vi.fn(),
       getEvidence: vi.fn().mockReturnValue(null),
     } as any,
     proposalRepo: {
@@ -1090,6 +1092,160 @@ describe("FamilyEvidenceEngine", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("quick-check scores reviewed candidate with null scoresUpdatedAt", async () => {
+    const unscoredCandidate = makeCandidate({ status: "reviewed", scoresUpdatedAt: null });
+    const candidateRepo = {
+      findAll: vi.fn().mockReturnValue([unscoredCandidate]),
+      findUnscored: vi.fn().mockReturnValue([unscoredCandidate]),
+      updateScores: vi.fn(),
+      findById: vi.fn(),
+      findByStatus: vi.fn(),
+      upsert: vi.fn(),
+      updateStatus: vi.fn(),
+    } as any;
+
+    const deps = createMockDeps({ candidateRepo });
+    const engine = new FamilyEvidenceEngine({
+      ...deps,
+      log: silentLog,
+      recomputeIntervalMs: 999_999,
+    });
+
+    await engine.start();
+    // Clear the updateScores call from start() recompute
+    candidateRepo.updateScores.mockClear();
+
+    // Advance to trigger quick-check (5 minutes)
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    // Quick-check should have triggered scoreCandidates since there are unscored
+    expect(candidateRepo.updateScores).toHaveBeenCalled();
+
+    await engine.stop();
+  });
+
+  it("quick-check skips already-scored candidates", async () => {
+    const scoredCandidate = makeCandidate({
+      status: "reviewed",
+      scoresUpdatedAt: "2026-03-20T00:00:00Z",
+    });
+    const candidateRepo = {
+      findAll: vi.fn().mockReturnValue([scoredCandidate]),
+      findUnscored: vi.fn().mockReturnValue([]),
+      updateScores: vi.fn(),
+      findById: vi.fn(),
+      findByStatus: vi.fn(),
+      upsert: vi.fn(),
+      updateStatus: vi.fn(),
+    } as any;
+
+    const deps = createMockDeps({ candidateRepo });
+    const engine = new FamilyEvidenceEngine({
+      ...deps,
+      log: silentLog,
+      recomputeIntervalMs: 999_999,
+    });
+
+    await engine.start();
+    candidateRepo.updateScores.mockClear();
+
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    // Quick-check found no unscored → no scoring triggered
+    expect(candidateRepo.updateScores).not.toHaveBeenCalled();
+
+    await engine.stop();
+  });
+
+  it("warming-up persists while evidence insufficient", async () => {
+    const identity = makeFamilyIdentity();
+    const rulesProvider = {
+      getRule: vi.fn(),
+      isEnabled: vi.fn().mockReturnValue(true),
+      getAllFamilies: vi.fn().mockReturnValue([identity]),
+      getRulesForRegime: vi.fn().mockReturnValue([]),
+    } as any;
+
+    // Low trade count = insufficient evidence
+    const sc = createMockScoreComputer({
+      recycleMetrics: {
+        tradeCount: 5,
+        distinctMarkets: 2,
+        tailAdjustedPnl: 1,
+        repricingExits: 0,
+        totalNonSettlementClosed: 1,
+      },
+    });
+
+    const evidenceRepo = {
+      updateScores: vi.fn(),
+      updatePromotionState: vi.fn(),
+      updateProbeSubstate: vi.fn(),
+      getEvidence: vi.fn().mockReturnValue({
+        promotionState: "probe-only",
+        probeSubstate: "warming-up",
+      } as Partial<FamilyEvidence>),
+    } as any;
+
+    const deps = createMockDeps({ rulesProvider, scoreComputer: sc, evidenceRepo });
+    const engine = new FamilyEvidenceEngine({
+      ...deps,
+      log: silentLog,
+      recomputeIntervalMs: 999_999,
+    });
+
+    await engine.start();
+
+    // tradeCount < 20 → no substate update to "retained"
+    expect(evidenceRepo.updateProbeSubstate).not.toHaveBeenCalled();
+
+    await engine.stop();
+  });
+
+  it("retained set when trade_count >= 20 but thresholds not met", async () => {
+    const identity = makeFamilyIdentity();
+    const rulesProvider = {
+      getRule: vi.fn(),
+      isEnabled: vi.fn().mockReturnValue(true),
+      getAllFamilies: vi.fn().mockReturnValue([identity]),
+      getRulesForRegime: vi.fn().mockReturnValue([]),
+    } as any;
+
+    // Enough trades but failing other thresholds (only 1 repricing exit, 2 markets)
+    const sc = createMockScoreComputer({
+      recycleMetrics: {
+        tradeCount: 25,
+        distinctMarkets: 2,
+        tailAdjustedPnl: -5,
+        repricingExits: 1,
+        totalNonSettlementClosed: 4,
+      },
+    });
+
+    const evidenceRepo = {
+      updateScores: vi.fn(),
+      updatePromotionState: vi.fn(),
+      updateProbeSubstate: vi.fn(),
+      getEvidence: vi.fn().mockReturnValue({
+        promotionState: "probe-only",
+        probeSubstate: "warming-up",
+      } as Partial<FamilyEvidence>),
+    } as any;
+
+    const deps = createMockDeps({ rulesProvider, scoreComputer: sc, evidenceRepo });
+    const engine = new FamilyEvidenceEngine({
+      ...deps,
+      log: silentLog,
+      recomputeIntervalMs: 999_999,
+    });
+
+    await engine.start();
+
+    expect(evidenceRepo.updateProbeSubstate).toHaveBeenCalledWith(FAM_ID, "retained");
+
+    await engine.stop();
   });
 
   it("periodic timer triggers recompute", async () => {

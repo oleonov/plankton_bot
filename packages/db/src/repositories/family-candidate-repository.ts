@@ -141,6 +141,16 @@ export class SqliteFamilyCandidateRepository implements FamilyCandidateRepositor
     return rows.map(rowToCandidate);
   }
 
+  findUnscored(): FamilyCandidate[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM family_candidates
+         WHERE status IN ('discovered', 'reviewed') AND scores_updated_at IS NULL`,
+      )
+      .all() as CandidateRow[];
+    return rows.map(rowToCandidate);
+  }
+
   updateStatus(candidateId: string, status: string): void {
     this.db
       .prepare("UPDATE family_candidates SET status = ? WHERE candidate_id = ?")

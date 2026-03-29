@@ -13,6 +13,7 @@ export class SqliteFamilyEvidenceRepository implements FamilyEvidenceRepository 
       recycleScore: number | null;
       liveViabilityScore: number | null;
       toxicityPenalty: number | null;
+      repricingExitCount: number;
       scoresUpdatedAt: string;
     },
   ): void {
@@ -20,7 +21,8 @@ export class SqliteFamilyEvidenceRepository implements FamilyEvidenceRepository 
       .prepare(
         `UPDATE family_evidence
          SET recurrence_score = ?, recycle_score = ?, live_viability_score = ?,
-             toxicity_penalty = ?, scores_updated_at = ?, updated_at = datetime('now')
+             toxicity_penalty = ?, repricing_exit_count = ?,
+             scores_updated_at = ?, updated_at = datetime('now')
          WHERE family_id = ?`,
       )
       .run(
@@ -28,6 +30,7 @@ export class SqliteFamilyEvidenceRepository implements FamilyEvidenceRepository 
         scores.recycleScore,
         scores.liveViabilityScore,
         scores.toxicityPenalty,
+        scores.repricingExitCount,
         scores.scoresUpdatedAt,
         familyId,
       );
@@ -41,6 +44,16 @@ export class SqliteFamilyEvidenceRepository implements FamilyEvidenceRepository 
          WHERE family_id = ?`,
       )
       .run(promotionState, familyId);
+  }
+
+  updateProbeSubstate(familyId: FamilyId, substate: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE family_evidence
+         SET probe_substate = ?, updated_at = datetime('now')
+         WHERE family_id = ?`,
+      )
+      .run(substate, familyId);
   }
 
   getEvidence(familyId: FamilyId): FamilyEvidence | null {
@@ -70,6 +83,8 @@ export class SqliteFamilyEvidenceRepository implements FamilyEvidenceRepository 
       liveViabilityScore: (row.live_viability_score as number) ?? null,
       toxicityPenalty: (row.toxicity_penalty as number) ?? null,
       lastValidatedAt: (row.last_validated_at as string) ?? null,
+      probeSubstate: (row.probe_substate as string) ?? null,
+      repricingExitCount: (row.repricing_exit_count as number) ?? 0,
     };
   }
 }

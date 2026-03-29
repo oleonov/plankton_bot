@@ -612,6 +612,104 @@ describe("CommandPoller", () => {
     });
   });
 
+  // ── probe_substate management ──────────────────────────────────────────
+
+  describe("probe_substate management", () => {
+    it("family_reset_to_probe sets probe_substate = 'reset-probe'", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      const snapshotRepo = new SqliteFamilyRulesSnapshotRepository(conn.db);
+      const rulesJson = JSON.stringify({ enabled: true, action: "trade" });
+      snapshotRepo.save({
+        familyId: createFamilyId("fam-1"),
+        snapshot: rulesJson,
+        reason: "probe-baseline",
+        capturedAt: new Date().toISOString(),
+      });
+
+      const rulesManager: ReloadableRules = { reload: vi.fn() };
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const dbWriter: FamilyRulesDbWriter = { overwriteRules: vi.fn(), updateToScaledDefaults: vi.fn() };
+
+      insertCommand("family_reset_to_probe", "fam-1", "resetting");
+      const poller = createPoller({
+        rulesManager,
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: new SqliteStateTransitionRepository(conn.db),
+        familyRulesSnapshotRepo: snapshotRepo,
+        familyRulesDbWriter: dbWriter,
+      });
+
+      await poller.poll();
+
+      const evidence = evidenceRepo.getEvidence(createFamilyId("fam-1"));
+      expect(evidence!.probeSubstate).toBe("reset-probe");
+    });
+
+    it("family_promote_scaled clears probe_substate", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      // Set probe_substate to simulate an existing value
+      conn.db
+        .prepare("UPDATE family_evidence SET probe_substate = 'warming-up' WHERE family_id = ?")
+        .run("fam-1");
+
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO family_rules (family_id, max_open_value_usdc, max_active_markets,
+             max_dust_positions, enabled, action, priority_rank, entry_mode,
+             max_initial_notional_usdc, tail_quarantine_threshold_usdc,
+             tail_quarantine_threshold_ratio, scale_mode, default_max_buys_per_leg,
+             allow_heavy_campaigns, require_positive_recycle_history_for_scale, updated_at)
+           VALUES ('fam-1', 10.0, 2, 1, 1, 'trade', 1, 'probe-first', 5.0, 100, 0.5,
+                   'disabled', 1, 0, 0, datetime('now'))`,
+        )
+        .run();
+
+      const rulesManager: ReloadableRules = { reload: vi.fn() };
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const { SqliteFamilyRulesDbRepository } = await import("@plankton/db");
+      const dbWriter = new SqliteFamilyRulesDbRepository(conn.db);
+
+      insertCommand("family_promote_scaled", "fam-1", "promotion approved");
+      const poller = createPoller({
+        rulesManager,
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: new SqliteStateTransitionRepository(conn.db),
+        familyRulesDbWriter: dbWriter,
+      });
+
+      await poller.poll();
+
+      const evidence = evidenceRepo.getEvidence(createFamilyId("fam-1"));
+      expect(evidence!.promotionState).toBe("scaled");
+      expect(evidence!.probeSubstate).toBeNull();
+    });
+
+    it("family_reduce_only clears probe_substate", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      conn.db
+        .prepare("UPDATE family_evidence SET probe_substate = 'warming-up' WHERE family_id = ?")
+        .run("fam-1");
+
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      insertCommand("family_reduce_only", "fam-1", "manual demotion");
+      const poller = createPoller({
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: new SqliteStateTransitionRepository(conn.db),
+      });
+
+      await poller.poll();
+
+      const evidence = evidenceRepo.getEvidence(createFamilyId("fam-1"));
+      expect(evidence!.probeSubstate).toBeNull();
+    });
+  });
+
   // ── family_reduce_only with system initiator ───────────────────────────
 
   describe("system-initiated demotion", () => {

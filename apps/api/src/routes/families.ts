@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import { getPromotionBlockers } from "@plankton/domain";
 import { ok, ApiError } from "../errors.js";
 
 interface FamilyOpts {
@@ -47,6 +48,7 @@ function toFamilyDto(
   state: FamilyStateRow | undefined,
   caps: FamilyCaps | null,
   promotionState?: string | null,
+  probeSubstate?: string | null,
 ) {
   return {
     familyId: catalog.family_id,
@@ -57,6 +59,7 @@ function toFamilyDto(
     cadence: catalog.cadence,
     strategyProfile: catalog.strategy_profile,
     promotionState: promotionState ?? null,
+    probeSubstate: probeSubstate ?? null,
     state: state
       ? {
           runtimeMode: state.runtime_mode,
@@ -109,7 +112,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   }
 
   const listEvidence = opts.db.prepare(
-    "SELECT family_id, promotion_state FROM family_evidence",
+    "SELECT family_id, promotion_state, probe_substate FROM family_evidence",
   );
 
   app.get("/families", async () => {
@@ -126,8 +129,10 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     const evidenceRows = listEvidence.all() as Array<{
       family_id: string;
       promotion_state: string | null;
+      probe_substate: string | null;
     }>;
     const promoMap = new Map(evidenceRows.map((r) => [r.family_id, r.promotion_state]));
+    const substateMap = new Map(evidenceRows.map((r) => [r.family_id, r.probe_substate]));
     return ok(
       catalogs.map((c) =>
         toFamilyDto(
@@ -135,6 +140,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           stateMap.get(c.family_id),
           capsMap.get(c.family_id) ?? null,
           promoMap.get(c.family_id),
+          substateMap.get(c.family_id),
         ),
       ),
     );
@@ -183,6 +189,17 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
         .prepare("SELECT * FROM family_evidence WHERE family_id = ?")
         .get(familyId) as Record<string, unknown> | undefined;
       if (!row) return ok(null);
+
+      const repricingExitCount = (row.repricing_exit_count as number) ?? 0;
+      const blockers = getPromotionBlockers({
+        repricingExits: repricingExitCount,
+        distinctMarkets: (row.local_market_count as number) ?? 0,
+        tradeCount: (row.local_trade_count as number) ?? 0,
+        recycleScore: (row.recycle_score as number) ?? 0,
+        toxicity: (row.toxicity_penalty as number) ?? 0,
+        tailAdjustedPnl: (row.tail_adjusted_pnl as number) ?? 0,
+      });
+
       return ok({
         familyId: row.family_id,
         evidenceStatus: row.evidence_status,
@@ -204,6 +221,9 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
         liveViabilityScore: row.live_viability_score ?? null,
         toxicityPenalty: row.toxicity_penalty ?? null,
         lastValidatedAt: row.last_validated_at ?? null,
+        probeSubstate: (row.probe_substate as string) ?? null,
+        repricingExitCount,
+        promotionBlockers: blockers,
       });
     },
   );

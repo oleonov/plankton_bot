@@ -59,6 +59,7 @@ export class FamilyEvidenceEngine implements RuntimeModule {
 
   private unsubscribers: (() => void)[] = [];
   private timer: ReturnType<typeof setInterval> | null = null;
+  private quickCheckTimer: ReturnType<typeof setInterval> | null = null;
   private lastRecomputeAt: string | null = null;
   /** Tracks wall-clock ISO timestamp when tail first went negative per family. Persists across recomputes but not restarts — on restart, falls back to DB query. */
   private firstNegativeTailAt = new Map<string, string>();
@@ -100,6 +101,13 @@ export class FamilyEvidenceEngine implements RuntimeModule {
       );
     }, this.intervalMs);
 
+    // 5-minute quick-check for unscored candidates
+    this.quickCheckTimer = setInterval(() => {
+      this.quickCheckUnscored().catch((err) =>
+        this.log.error({ err }, "quick-check unscored failed"),
+      );
+    }, 300_000);
+
     await this.recompute();
     this.log.info("FamilyEvidenceEngine started");
   }
@@ -111,6 +119,11 @@ export class FamilyEvidenceEngine implements RuntimeModule {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+
+    if (this.quickCheckTimer) {
+      clearInterval(this.quickCheckTimer);
+      this.quickCheckTimer = null;
     }
 
     this.log.info("FamilyEvidenceEngine stopped");
@@ -127,6 +140,14 @@ export class FamilyEvidenceEngine implements RuntimeModule {
     this.scoreCandidates(now);
     this.scoreDeployedFamilies(now);
     this.lastRecomputeAt = now;
+  }
+
+  private quickCheckUnscored(): Promise<void> {
+    const unscored = this.candidateRepo.findUnscored();
+    if (unscored.length === 0) return Promise.resolve();
+    this.log.info({ count: unscored.length }, "quick-check: scoring unscored candidates");
+    this.scoreCandidates(new Date().toISOString());
+    return Promise.resolve();
   }
 
   private scoreCandidates(now: string): void {
@@ -208,8 +229,25 @@ export class FamilyEvidenceEngine implements RuntimeModule {
         recycleScore: recycle,
         liveViabilityScore: liveViability,
         toxicityPenalty: toxicity,
+        repricingExitCount: recycleMetrics.repricingExits,
         scoresUpdatedAt: now,
       });
+
+      // If probe-only with sufficient evidence but not meeting promotion thresholds → retained
+      const evidence = this.evidenceRepo.getEvidence(familyId);
+      if (evidence?.promotionState === "probe-only" && recycleMetrics.tradeCount >= 20) {
+        const eligible = meetsPromotionThresholds({
+          repricingExits: recycleMetrics.repricingExits,
+          distinctMarkets: recycleMetrics.distinctMarkets,
+          tradeCount: recycleMetrics.tradeCount,
+          recycleScore: recycle,
+          toxicity,
+          tailAdjustedPnl: recycleMetrics.tailAdjustedPnl,
+        });
+        if (!eligible) {
+          this.evidenceRepo.updateProbeSubstate(familyId, "retained");
+        }
+      }
 
       this.checkPromotion(familyId, recycleMetrics, recycle, toxicity, now);
       this.checkDemotion(familyId, {

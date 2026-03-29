@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { useProposals, usePromoteFamily, useDismissProposal } from "../api/hooks.ts";
+import { useProposals, usePromoteFamily, useDismissProposal, useStatus } from "../api/hooks.ts";
 import { ScoreBars } from "./ScoreBars.tsx";
+import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { ConfirmAction } from "./ConfirmAction.tsx";
 
 function parseScores(snapshot: string | null) {
@@ -21,7 +22,10 @@ function parseScores(snapshot: string | null) {
 function ProposalRow({ proposal }: { proposal: { id: number; familyId: string; currentState: string; proposedState: string; reason: string; scoresSnapshot: string | null } }) {
   const promote = usePromoteFamily(proposal.familyId);
   const dismiss = useDismissProposal(proposal.id);
+  const { data: statusData } = useStatus();
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const scores = parseScores(proposal.scoresSnapshot);
+  const runtimeMode = statusData?.runtimeMode;
 
   return (
     <div
@@ -44,12 +48,24 @@ function ProposalRow({ proposal }: { proposal: { id: number; familyId: string; c
       </div>
       <ScoreBars {...scores} />
       <div style={{ display: "flex", gap: 4 }}>
-        <ConfirmAction
-          label="Approve"
-          confirmText={`Promote ${proposal.familyId}?`}
-          variant="success"
-          onConfirm={(r) => promote.mutate(r)}
-          isPending={promote.isPending}
+        <button
+          className="btn-success"
+          onClick={() => setConfirmOpen(true)}
+          disabled={promote.isPending}
+        >
+          Approve
+        </button>
+        <ConfirmDialog
+          open={confirmOpen}
+          title={`Promote ${proposal.familyId}?`}
+          description={`${proposal.currentState} -> ${proposal.proposedState}: ${proposal.reason}`}
+          runtimeMode={runtimeMode}
+          caps="Scaled caps: $50 max, 5 markets, 3 dust"
+          onConfirm={() => {
+            setConfirmOpen(false);
+            promote.mutate(undefined);
+          }}
+          onCancel={() => setConfirmOpen(false)}
         />
         <ConfirmAction
           label="Dismiss"

@@ -326,6 +326,7 @@ export interface FamilyCandidateRepository {
   findById(candidateId: string): FamilyCandidate | null;
   findAll(): FamilyCandidate[];
   findByStatus(status: string): FamilyCandidate[];
+  findUnscored(): FamilyCandidate[];
   updateStatus(candidateId: string, status: string): void;
   updateScores(
     candidateId: string,
@@ -410,10 +411,12 @@ export interface FamilyEvidenceRepository {
       recycleScore: number | null;
       liveViabilityScore: number | null;
       toxicityPenalty: number | null;
+      repricingExitCount: number;
       scoresUpdatedAt: string;
     },
   ): void;
   updatePromotionState(familyId: FamilyId, promotionState: PromotionState): void;
+  updateProbeSubstate(familyId: FamilyId, substate: string | null): void;
   getEvidence(familyId: FamilyId): FamilyEvidence | null;
 }
 

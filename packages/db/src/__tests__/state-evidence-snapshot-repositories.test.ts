@@ -154,6 +154,7 @@ describe("SqliteFamilyEvidenceRepository", () => {
       recycleScore: 0.6,
       liveViabilityScore: 0.7,
       toxicityPenalty: 0.1,
+      repricingExitCount: 3,
       scoresUpdatedAt: "2026-01-15T00:00:00Z",
     });
 

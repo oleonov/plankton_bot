@@ -11,3 +11,4 @@ export * from "./runtime-control.js";
 export * from "./slug-pattern.js";
 export * from "./horizon-filter.js";
 export * from "./scoring.js";
+export * from "./promotion-blockers.js";

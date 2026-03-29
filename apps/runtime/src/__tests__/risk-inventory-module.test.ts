@@ -121,6 +121,8 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
       liveViabilityScore: null,
       toxicityPenalty: null,
       lastValidatedAt: null,
+      probeSubstate: null,
+      repricingExitCount: 0,
     },
     rules: {
       familyId: FAM_ID,

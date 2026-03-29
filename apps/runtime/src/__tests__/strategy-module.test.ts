@@ -197,6 +197,8 @@ function makeEvidence(overrides?: Partial<FamilyEvidence>): FamilyEvidence {
     liveViabilityScore: null,
     toxicityPenalty: null,
     lastValidatedAt: null,
+    probeSubstate: null,
+    repricingExitCount: 0,
     ...overrides,
   };
 }

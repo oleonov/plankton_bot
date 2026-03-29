@@ -52,6 +52,111 @@ afterAll(async () => {
   conn.close();
 });
 
+// ─── Status ─────────────────────────────────────────────────────────────
+
+describe("GET /discovery/status", () => {
+  it("returns worker state and last scan info", async () => {
+    const db = conn.db;
+
+    // Seed a succeeded discovery_run
+    db.prepare(
+      `INSERT INTO discovery_runs (trigger_type, status, requested_by, finished_at, stats_json)
+       VALUES ('schedule', 'succeeded', 'worker', datetime('now'), ?)`,
+    ).run(JSON.stringify({ marketsFound: 50, clustersCreated: 8, candidatesUpserted: 3, matched: 2, pruned: 1 }));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/status",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.lastSuccessfulRun).not.toBeNull();
+    expect(body.data.lastSuccessfulRun.status).toBe("succeeded");
+    expect(body.data.lastSuccessfulRun.stats.marketsFound).toBe(50);
+    // No heartbeat in test → worker is offline
+    expect(body.data.workerState).toBe("offline");
+  });
+});
+
+// ─── Scan trigger ───────────────────────────────────────────────────────
+
+describe("POST /discovery/scan", () => {
+  it("enqueues a new run when none active", async () => {
+    // Clear any active runs from prior tests
+    conn.db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/discovery/scan",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.status).toBe("queued");
+    expect(body.data.alreadyActive).toBe(false);
+    expect(body.data.runId).toBeGreaterThan(0);
+  });
+
+  it("returns existing active run instead of duplicating", async () => {
+    const db = conn.db;
+
+    // Clear and seed an active (queued) run
+    db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+    db.prepare(
+      "INSERT INTO discovery_runs (trigger_type, status, requested_by) VALUES ('manual', 'queued', 'operator')",
+    ).run();
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/discovery/scan",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.alreadyActive).toBe(true);
+  });
+});
+
+// ─── Runs history ───────────────────────────────────────────────────────
+
+describe("GET /discovery/runs", () => {
+  it("returns recent runs, newest first, respects limit", async () => {
+    const db = conn.db;
+
+    // Clean existing runs from previous tests
+    db.prepare("DELETE FROM discovery_runs").run();
+
+    // Seed 3 runs
+    for (const trigger of ["startup", "schedule", "manual"]) {
+      db.prepare(
+        "INSERT INTO discovery_runs (trigger_type, status, requested_by) VALUES (?, 'succeeded', 'worker')",
+      ).run(trigger);
+    }
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/runs?limit=2",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(2);
+    // Newest first (highest id)
+    expect(body.data[0].id).toBeGreaterThan(body.data[1].id);
+  });
+});
+
 // ─── Accept ──────────────────────────────────────────────────────────────
 
 describe("POST /discovery/candidates/:id/accept", () => {
@@ -141,6 +246,86 @@ describe("POST /discovery/candidates/:id/accept", () => {
     });
 
     expect(res.statusCode).toBe(409);
+  });
+});
+
+// ─── Evidence endpoint ──────────────────────────────────────────────────
+
+describe("GET /families/:familyId/evidence", () => {
+  it("returns probeSubstate and repricingExitCount", async () => {
+    const db = conn.db;
+    const familyId = "fam-ev-1";
+    const now = new Date().toISOString();
+
+    // Seed family catalog
+    db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+       VALUES (?, 'ev-key', 'crypto', 'standard', 'daily', 'daily', 'scalp')`,
+    ).run(familyId);
+
+    // Seed evidence with probe_substate and repricing_exit_count
+    db.prepare(
+      `INSERT INTO family_evidence
+         (family_id, evidence_status, evidence_score, promotion_state,
+          local_trade_count, local_market_count, local_realized_pnl_fifo,
+          open_tail_cost_usdc, tail_adjusted_pnl, both_sided_eligible,
+          heavy_campaign_eligible, probe_substate, repricing_exit_count, updated_at)
+       VALUES (?, 'confirmed', 1, 'probe-only', 15, 4, 5.0, 2.0, 3.0, 0, 0,
+               'warming-up', 2, ?)`,
+    ).run(familyId, now);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/families/${familyId}/evidence`,
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.probeSubstate).toBe("warming-up");
+    expect(body.data.repricingExitCount).toBe(2);
+  });
+
+  it("returns promotion blockers array", async () => {
+    const db = conn.db;
+    const familyId = "fam-ev-blockers";
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+       VALUES (?, 'ev-block-key', 'crypto', 'standard', 'daily', 'daily', 'scalp')`,
+    ).run(familyId);
+
+    db.prepare(
+      `INSERT INTO family_evidence
+         (family_id, evidence_status, evidence_score, promotion_state,
+          local_trade_count, local_market_count, local_realized_pnl_fifo,
+          open_tail_cost_usdc, tail_adjusted_pnl, both_sided_eligible,
+          heavy_campaign_eligible, repricing_exit_count, recycle_score,
+          toxicity_penalty, updated_at)
+       VALUES (?, 'confirmed', 1, 'probe-only', 25, 6, 10.0, 2.0, 5.0, 0, 0,
+               4, 0.7, 0.1, ?)`,
+    ).run(familyId, now);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/families/${familyId}/evidence`,
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.promotionBlockers).toBeDefined();
+    expect(Array.isArray(body.data.promotionBlockers)).toBe(true);
+    expect(body.data.promotionBlockers.length).toBe(6);
+
+    // All should pass with these values
+    const allPassed = body.data.promotionBlockers.every((b: any) => b.passed);
+    expect(allPassed).toBe(true);
   });
 });
 
