@@ -9,6 +9,18 @@ services:
     restart: unless-stopped
     env_file: .env.production
 
+  plankton-discovery:
+    image: plankton:latest
+    command: ["node", "apps/discovery/dist/worker.js"]
+    working_dir: /app
+    volumes:
+      - plankton-data:/app/apps/runtime/data
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    depends_on:
+      - plankton-runtime
+    env_file: .env.production
+
   plankton-api:
     image: plankton:latest
     command: ["node", "apps/api/dist/index.js"]

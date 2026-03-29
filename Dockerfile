@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/runtime/package.json apps/runtime/package.json
+COPY apps/discovery/package.json apps/discovery/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/config/package.json packages/config/package.json
 COPY packages/db/package.json packages/db/package.json
@@ -27,7 +28,7 @@ COPY packages/family-rules/package.json packages/family-rules/package.json
 RUN pnpm install --frozen-lockfile
 
 # Ensure all workspace node_modules dirs exist (pnpm may skip empty ones)
-RUN mkdir -p apps/api/node_modules apps/runtime/node_modules apps/web/node_modules \
+RUN mkdir -p apps/api/node_modules apps/runtime/node_modules apps/discovery/node_modules apps/web/node_modules \
     packages/config/node_modules packages/db/node_modules packages/domain/node_modules \
     packages/event-bus/node_modules packages/exchange/node_modules packages/family-rules/node_modules
 
@@ -72,6 +73,7 @@ COPY --from=builder /app/pnpm-workspace.yaml ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=deps /app/apps/runtime/node_modules ./apps/runtime/node_modules
+COPY --from=deps /app/apps/discovery/node_modules ./apps/discovery/node_modules
 COPY --from=deps /app/packages/config/node_modules ./packages/config/node_modules
 COPY --from=deps /app/packages/db/node_modules ./packages/db/node_modules
 COPY --from=deps /app/packages/domain/node_modules ./packages/domain/node_modules
@@ -84,6 +86,8 @@ COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/apps/runtime/dist ./apps/runtime/dist
 COPY --from=builder /app/apps/runtime/package.json ./apps/runtime/package.json
+COPY --from=builder /app/apps/discovery/dist ./apps/discovery/dist
+COPY --from=builder /app/apps/discovery/package.json ./apps/discovery/package.json
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
 COPY --from=builder /app/packages/config/dist ./packages/config/dist
 COPY --from=builder /app/packages/config/package.json ./packages/config/package.json
