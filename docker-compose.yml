@@ -44,24 +44,51 @@ services:
       retries: 3
       start_period: 30s
 
+  # Minimal Docker socket proxy — only allows container inspect/stop/start.
+  # No exec, no images, no volumes, no networks, no build.
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    environment:
+      - CONTAINERS=1
+      - ALLOW_START=1
+      - ALLOW_STOP=1
+      - POST=1
+      # Everything else stays at default 0 (denied):
+      # AUTH, BUILD, COMMIT, CONFIGS, DISTRIBUTION, EXEC, GRPC,
+      # IMAGES, INFO, NETWORKS, NODES, PLUGINS, SECRETS, SERVICES,
+      # SESSION, SWARM, SYSTEM, TASKS, VOLUMES = 0
+    restart: unless-stopped
+    networks:
+      - manager-net
+
   plankton-runtime-manager:
     image: plankton:latest
     command: ["node", "apps/runtime-manager/dist/index.js"]
     working_dir: /app
-    user: "0:0"
     volumes:
       - plankton-data:/app/apps/runtime/data
-      - /var/run/docker.sock:/var/run/docker.sock
+      # No docker.sock mount — connects via proxy
     restart: unless-stopped
     depends_on:
       - plankton-runtime
+      - docker-socket-proxy
     env_file: .env.production
     environment:
       - CONTROL_DB_PATH=/app/apps/runtime/data/control.db
       - MANAGED_CONTAINER=plankton-plankton-runtime-1
       - POLL_INTERVAL_MS=3000
       - RESTART_TIMEOUT_S=30
+      - DOCKER_HOST=tcp://docker-socket-proxy:2375
+    networks:
+      - default
+      - manager-net
 
 volumes:
   plankton-data:
     name: plankton-data
+
+networks:
+  manager-net:
+    internal: true
