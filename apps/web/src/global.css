@@ -239,70 +239,45 @@ button {
   border-bottom-color: var(--blue);
 }
 
-/* App shell — left nav + top bar grid */
-.app-shell {
-  display: grid;
-  grid-template-columns: 180px 1fr;
-  grid-template-rows: auto 1fr;
-  height: 100vh;
-}
-.top-bar {
-  grid-column: 1 / -1;
-  background: var(--bg-status);
-  padding: 8px 16px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  border-bottom: 1px solid var(--border);
-  font-size: 11px;
-  color: var(--text-muted);
-}
-.left-nav {
-  background: var(--bg-nav);
-  border-right: 1px solid var(--border);
-  padding: 8px 0;
-  display: flex;
-  flex-direction: column;
-  overflow-y: auto;
-}
-.left-nav a {
-  display: block;
-  padding: 8px 16px;
+/* ─── Horizontal top nav ──────────────────────────── */
+.nav-link {
   color: var(--text-muted);
   text-decoration: none;
   font-size: 13px;
-}
-.left-nav a:hover {
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
-}
-.left-nav a.active {
-  color: var(--text);
-  background: rgba(79, 195, 247, 0.1);
-  border-left: 2px solid var(--blue);
-}
-.left-nav .separator {
-  border-top: 1px solid var(--border);
-  margin: 8px 16px;
-}
-.left-nav-logout {
-  margin: 8px 16px;
-  padding: 4px 10px;
+  padding: 6px 12px;
   border-radius: 4px;
+}
+.nav-link:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.nav-link.active { color: var(--text); background: rgba(79,195,247,.15); }
+
+/* Settings dropdown */
+.settings-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  background: var(--bg-card);
   border: 1px solid var(--border);
-  background: transparent;
+  border-radius: 6px;
+  min-width: 160px;
+  z-index: 50;
+  padding: 4px 0;
+}
+.settings-dropdown button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
   color: var(--text-muted);
+  font-family: inherit;
   font-size: 12px;
+  padding: 8px 14px;
   cursor: pointer;
 }
-.left-nav-logout:hover {
+.settings-dropdown button:hover {
+  background: rgba(255,255,255,.05);
   color: var(--text);
-  border-color: var(--text-muted);
-}
-.main-content {
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
 }
 
 /* Page layout */

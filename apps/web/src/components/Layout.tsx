@@ -1,11 +1,9 @@
-import { NavLink, Outlet } from "react-router-dom";
-import { useStatus, usePause, useResume } from "../api/hooks.ts";
-import { useSSEState } from "../api/sse.tsx";
-import { Badge } from "./Badge.tsx";
-import { ConfirmAction } from "./ConfirmAction.tsx";
+import { useState, useRef, useEffect } from "react";
+import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useProposals } from "../api/hooks.ts";
+import { StatusBar } from "./StatusBar.tsx";
 import { AlertStrip } from "./AlertStrip.tsx";
 import { DemotionAlertStrip } from "./DemotionAlertStrip.tsx";
-import { useProposals } from "../api/hooks.ts";
 
 function ProposalBadge() {
   const { data: proposals } = useProposals();
@@ -28,117 +26,93 @@ function ProposalBadge() {
   );
 }
 
-function TopBar() {
-  const { data: status } = useStatus();
-  const sseState = useSSEState();
-  const pause = usePause();
-  const resume = useResume();
+function SettingsDropdown() {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
 
-  const sseIndicator =
-    sseState === "connected" ? (
-      <span style={{ color: "var(--green)" }}>&#9679;</span>
-    ) : sseState === "reconnecting" ? (
-      <span style={{ color: "var(--orange)" }}>&#9676;</span>
-    ) : (
-      <span style={{ color: "var(--red)" }}>&#10005;</span>
-    );
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  const go = (path: string) => {
+    setOpen(false);
+    navigate(path);
+  };
 
   return (
-    <div className="top-bar">
-      <span style={{ fontWeight: 700, color: "var(--blue)", fontSize: 15 }}>PLANKTON</span>
-      {status && (
-        <>
-          <Badge value={status.runtimeMode} type="mode" />
-          <Badge value={status.paused ? "PAUSED" : "RUNNING"} type="mode" />
-          {status.runtimeMode === "live-lite" && (
-            <span
-              style={{
-                background: "var(--red)",
-                color: "white",
-                padding: "2px 8px",
-                borderRadius: 3,
-                fontWeight: 700,
-                fontSize: 10,
-              }}
-            >
-              LIVE-LITE
-            </span>
-          )}
-          <span style={{ fontSize: 11 }}>
-            ${status.totalOpenValueUsdc?.toFixed(2) ?? "0.00"}
-          </span>
-          {sseIndicator}
-        </>
+    <div ref={ref} style={{ position: "relative", display: "inline-block" }}>
+      <button
+        className="nav-link"
+        onClick={() => setOpen(!open)}
+        style={{
+          background: "none",
+          border: "none",
+          color: "var(--text-muted)",
+          cursor: "pointer",
+          fontFamily: "inherit",
+          fontSize: 13,
+          padding: "6px 12px",
+        }}
+      >
+        Settings ▾
+      </button>
+      {open && (
+        <div className="settings-dropdown">
+          <button onClick={() => go("/control")}>Control Center</button>
+          <button onClick={() => go("/profiles")}>Profiles</button>
+          <button onClick={() => go("/settings/risk")}>Risk Settings</button>
+          <button onClick={() => go("/audit")}>Audit Log</button>
+        </div>
       )}
-      <span style={{ marginLeft: "auto" }}>
-        {status?.paused ? (
-          <ConfirmAction
-            key="resume-action"
-            label="&#9654; RESUME"
-            confirmText="Resume trading?"
-            variant="success"
-            onConfirm={(r) => resume.mutate(r)}
-            isPending={resume.isPending}
-          />
-        ) : (
-          <ConfirmAction
-            key="pause-action"
-            label="&#9646;&#9646; PAUSE"
-            confirmText="Pause all trading?"
-            variant="danger"
-            onConfirm={(r) => pause.mutate(r)}
-            isPending={pause.isPending}
-          />
-        )}
-      </span>
     </div>
   );
 }
 
-const NAV_ITEMS: { to: string; label: string; badge?: boolean }[] = [
-  { to: "/control", label: "Control" },
-  { to: "/profiles", label: "Profiles" },
-  { to: "/families", label: "Families" },
-  { to: "/discovery", label: "Discovery", badge: true },
-];
-
-const NAV_ITEMS_2: { to: string; label: string }[] = [
-  { to: "/positions", label: "Positions" },
-  { to: "/orders", label: "Orders" },
-  { to: "/risk", label: "Risk" },
-];
-
-const NAV_ITEMS_3: { to: string; label: string }[] = [
-  { to: "/settings", label: "Settings" },
-  { to: "/audit", label: "Audit" },
-];
-
 export function Layout() {
   return (
-    <div className="app-shell">
-      <TopBar />
-      <nav className="left-nav">
-        {NAV_ITEMS.map((item) => (
-          <NavLink key={item.to} to={item.to}>
-            {item.label}
-            {item.badge && <ProposalBadge />}
-          </NavLink>
-        ))}
-        <div className="separator" />
-        {NAV_ITEMS_2.map((item) => (
-          <NavLink key={item.to} to={item.to}>
-            {item.label}
-          </NavLink>
-        ))}
-        <div className="separator" />
-        {NAV_ITEMS_3.map((item) => (
-          <NavLink key={item.to} to={item.to}>
-            {item.label}
-          </NavLink>
-        ))}
-        <div style={{ flex: 1 }} />
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+      <header
+        style={{
+          background: "var(--bg-nav)",
+          borderBottom: "1px solid var(--border)",
+          padding: "0 16px",
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          height: 40,
+        }}
+      >
+        <span style={{ fontWeight: 700, color: "var(--blue)", fontSize: 15, marginRight: 12 }}>
+          PLANKTON
+        </span>
+        <NavLink className="nav-link" to="/overview">Overview</NavLink>
+        <NavLink className="nav-link" to="/positions">Positions</NavLink>
+        <NavLink className="nav-link" to="/orders">Orders/Fills</NavLink>
+        <NavLink className="nav-link" to="/families">Families</NavLink>
+        <NavLink className="nav-link" to="/risk">Risk</NavLink>
+        <NavLink className="nav-link" to="/discovery">
+          Discovery
+          <ProposalBadge />
+        </NavLink>
+        <SettingsDropdown />
+        <span style={{ flex: 1 }} />
         <button
-          className="left-nav-logout"
+          className="nav-link"
+          style={{
+            background: "none",
+            border: "none",
+            color: "var(--text-muted)",
+            cursor: "pointer",
+            fontFamily: "inherit",
+            fontSize: 13,
+            padding: "6px 12px",
+          }}
           onClick={() => {
             fetch("/api/v1/auth/logout", { method: "POST" })
               .then(() => window.location.reload())
@@ -147,10 +121,11 @@ export function Layout() {
         >
           Logout
         </button>
-      </nav>
-      <div className="main-content">
-        <AlertStrip />
-        <DemotionAlertStrip />
+      </header>
+      <StatusBar />
+      <AlertStrip />
+      <DemotionAlertStrip />
+      <div style={{ flex: 1, overflowY: "auto" }}>
         <Outlet />
       </div>
     </div>
