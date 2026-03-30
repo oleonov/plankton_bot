@@ -46,8 +46,12 @@ services:
 
   # Minimal Docker socket proxy — only allows container inspect/stop/start.
   # No exec, no images, no volumes, no networks, no build.
+  # Known limitation: proxy restricts by API section, not by container ID.
+  # If runtime-manager is compromised, it can stop/start any container on the
+  # daemon — not just MANAGED_CONTAINER. This is accepted as a residual risk
+  # since per-container ACLs aren't supported by HAProxy-based proxies.
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy
+    image: tecnativa/docker-socket-proxy:v0.4.2@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:
