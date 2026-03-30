@@ -52,25 +52,41 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
 
   async discoverMarkets(): Promise<ClobMarket[]> {
     const allMarkets: ClobMarket[] = [];
+    await this.forEachMarketPage((pageMarkets) => {
+      allMarkets.push(...pageMarkets);
+    });
+    return allMarkets;
+  }
+
+  async forEachMarketPage(
+    callback: (markets: ClobMarket[]) => void,
+  ): Promise<{ totalMarkets: number }> {
     let offset = 0;
+    let totalMarkets = 0;
 
     while (true) {
       const events = await this.fetchPage(offset);
+      const pageMarkets: ClobMarket[] = [];
       for (const event of events) {
         const nestedMarkets = Array.isArray(event.markets)
           ? (event.markets as Record<string, unknown>[])
           : [];
         const parentSlug = typeof event.slug === "string" ? event.slug : undefined;
         for (const raw of nestedMarkets) {
-          allMarkets.push(mapGammaMarket(raw, parentSlug));
+          pageMarkets.push(mapGammaMarket(raw, parentSlug));
         }
+      }
+
+      if (pageMarkets.length > 0) {
+        callback(pageMarkets);
+        totalMarkets += pageMarkets.length;
       }
 
       if (events.length < this.pageSize) break;
       offset += this.pageSize;
     }
 
-    return allMarkets;
+    return { totalMarkets };
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly latencyMs: number }> {

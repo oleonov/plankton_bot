@@ -8,7 +8,7 @@ import {
 } from "@plankton/db";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
 import { createFamilyId } from "@plankton/domain";
-import { clusterMarkets } from "./candidate-clusterer.js";
+import { IncrementalClusterer, type CandidateCluster } from "./candidate-clusterer.js";
 import { inferCategory, inferStrategyProfile } from "./category-inference.js";
 
 const PRUNE_DAYS = 90;
@@ -32,14 +32,16 @@ export class ScanService {
     const observationRepo = new SqliteCandidateObservationRepository(db);
     const catalogRepo = new SqliteFamilyCatalogRepository(db);
 
-    // Fetch all active markets
+    // Stream markets page-by-page into the clusterer
     log.info("Fetching markets from Gamma API");
-    const markets = await gateway.discoverMarkets();
-    log.info({ marketCount: markets.length }, "Fetched markets");
+    const clusterer = new IncrementalClusterer();
+    const { totalMarkets } = await gateway.forEachMarketPage((pageMarkets) => {
+      clusterer.addBatch(pageMarkets);
+    });
+    log.info({ marketCount: totalMarkets }, "Fetched markets");
     onProgress?.();
 
-    // Cluster markets into candidate families
-    const clusters = clusterMarkets(markets);
+    const clusters = clusterer.finalize();
     log.info({ clusterCount: clusters.length }, "Clustered markets into candidates");
     onProgress?.();
 
@@ -98,7 +100,7 @@ export class ScanService {
     const pruned = this.pruneAndCooldown(db, observationRepo, log);
 
     return {
-      marketsFound: markets.length,
+      marketsFound: totalMarkets,
       clustersCreated: clusters.length,
       candidatesUpserted: upserted,
       matched,
@@ -107,7 +109,7 @@ export class ScanService {
   }
 
   private buildCandidate(
-    cluster: ReturnType<typeof clusterMarkets>[number],
+    cluster: CandidateCluster,
     familyIdSet: Set<string>,
     now: string,
   ): FamilyCandidate {

@@ -129,48 +129,63 @@ export function generateSlugPattern(normalizedSlug: string): string {
   return `${normalizedSlug}-*`;
 }
 
+// ─── Incremental clusterer ───────────────────────────────────────────────────
+
+export class IncrementalClusterer {
+  private readonly groups = new Map<
+    string,
+    { markets: ClusterMarket[]; slugs: string[]; questions: string[] }
+  >();
+
+  addBatch(markets: ClobMarket[]): void {
+    for (const m of markets) {
+      const key = normalizeSlug(m.slug);
+      let group = this.groups.get(key);
+      if (!group) {
+        group = { markets: [], slugs: [], questions: [] };
+        this.groups.set(key, group);
+      }
+      group.markets.push({
+        conditionId: m.conditionId,
+        slug: m.slug,
+        endDate: m.endDate || null,
+      });
+      group.slugs.push(m.slug);
+      group.questions.push(m.question);
+    }
+  }
+
+  finalize(): CandidateCluster[] {
+    const clusters: CandidateCluster[] = [];
+    for (const [familyKey, group] of this.groups) {
+      const endDates = group.markets.map((m) => m.endDate);
+      const regime = inferRegime(group.slugs, group.questions);
+      const horizon = inferHorizon(endDates);
+      const cadence = inferCadence(endDates, horizon);
+      const patternConfidence = classifyConfidence(group.markets.length);
+
+      clusters.push({
+        candidateId: `${familyKey}:${regime}:${horizon}`,
+        familyKey,
+        regime,
+        horizon,
+        cadence,
+        slugPattern: generateSlugPattern(familyKey),
+        patternConfidence,
+        markets: group.markets,
+      });
+    }
+    this.groups.clear();
+    return clusters;
+  }
+}
+
 // ─── Main clustering ────────────────────────────────────────────────────────
 
 export function clusterMarkets(markets: ClobMarket[]): CandidateCluster[] {
-  const groups = new Map<string, { markets: ClusterMarket[]; slugs: string[]; questions: string[] }>();
-
-  for (const m of markets) {
-    const key = normalizeSlug(m.slug);
-    let group = groups.get(key);
-    if (!group) {
-      group = { markets: [], slugs: [], questions: [] };
-      groups.set(key, group);
-    }
-    group.markets.push({
-      conditionId: m.conditionId,
-      slug: m.slug,
-      endDate: m.endDate || null,
-    });
-    group.slugs.push(m.slug);
-    group.questions.push(m.question);
-  }
-
-  const clusters: CandidateCluster[] = [];
-  for (const [familyKey, group] of groups) {
-    const endDates = group.markets.map((m) => m.endDate);
-    const regime = inferRegime(group.slugs, group.questions);
-    const horizon = inferHorizon(endDates);
-    const cadence = inferCadence(endDates, horizon);
-    const patternConfidence = classifyConfidence(group.markets.length);
-
-    clusters.push({
-      candidateId: `${familyKey}:${regime}:${horizon}`,
-      familyKey,
-      regime,
-      horizon,
-      cadence,
-      slugPattern: generateSlugPattern(familyKey),
-      patternConfidence,
-      markets: group.markets,
-    });
-  }
-
-  return clusters;
+  const clusterer = new IncrementalClusterer();
+  clusterer.addBatch(markets);
+  return clusterer.finalize();
 }
 
 function classifyConfidence(count: number): "high" | "medium" | "low" {

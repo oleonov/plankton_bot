@@ -155,6 +155,9 @@ export interface MarketDiscoveryGateway {
   /** Discover active markets matching configured filters. */
   discoverMarkets(): Promise<ClobMarket[]>;
 
+  /** Stream markets page-by-page so the full array is never held in memory. */
+  forEachMarketPage(callback: (markets: ClobMarket[]) => void): Promise<{ totalMarkets: number }>;
+
   /** Validate connectivity. */
   healthCheck(): Promise<{ readonly ok: boolean; readonly latencyMs: number }>;
 }

@@ -54,8 +54,14 @@ function makeFamilyIdentity(overrides?: Partial<FamilyIdentity>): FamilyIdentity
 }
 
 function createMockDiscoveryGateway(): MarketDiscoveryGateway {
+  const discoverMarkets = vi.fn<() => Promise<ClobMarket[]>>().mockResolvedValue([]);
   return {
-    discoverMarkets: vi.fn<() => Promise<ClobMarket[]>>().mockResolvedValue([]),
+    discoverMarkets,
+    forEachMarketPage: vi.fn(async (cb: (markets: ClobMarket[]) => void) => {
+      const markets = await discoverMarkets();
+      if (markets.length > 0) cb(markets);
+      return { totalMarkets: markets.length };
+    }),
     healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
   };
 }
@@ -347,5 +353,39 @@ describe("MarketScannerModule", () => {
     expect(discoveryGateway.discoverMarkets).toHaveBeenCalledTimes(1);
 
     await mod.stop();
+  });
+
+  it("scan() handles multi-page discovery correctly", async () => {
+    const page1Market = makeClobMarket({
+      slug: "bitcoin-above-100k",
+      conditionId: "cond-page1",
+      tokens: [{ tokenId: "tok-p1", outcome: "Yes" }],
+    });
+    const page2Market = makeClobMarket({
+      slug: "bitcoin-above-110k",
+      conditionId: "cond-page2",
+      tokens: [{ tokenId: "tok-p2", outcome: "Yes" }],
+    });
+
+    // Override forEachMarketPage to deliver 2 separate pages
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: (markets: ClobMarket[]) => void) => {
+        cb([page1Market]);
+        cb([page2Market]);
+        return { totalMarkets: 2 };
+      },
+    );
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeFamilyIdentity({ slugPattern: "bitcoin-above-*" }),
+    ]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(2);
+    const slugs = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c: [Market]) => c[0].slug,
+    );
+    expect(slugs).toContain("bitcoin-above-100k");
+    expect(slugs).toContain("bitcoin-above-110k");
   });
 });

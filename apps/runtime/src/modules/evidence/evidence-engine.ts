@@ -7,6 +7,7 @@
 
 import type { EventBus, RuntimeModule } from "@plankton/domain";
 import type {
+  FamilyCandidate,
   FamilyCandidateRepository,
   FamilyEvidenceRepository,
   PromotionProposalRepository,
@@ -137,8 +138,9 @@ export class FamilyEvidenceEngine implements RuntimeModule {
 
   async recompute(): Promise<void> {
     const now = new Date().toISOString();
-    this.scoreCandidates(now);
-    this.scoreDeployedFamilies(now);
+    const candidates = this.candidateRepo.findAll();
+    this.scoreCandidates(candidates, now);
+    this.scoreDeployedFamilies(candidates, now);
     this.lastRecomputeAt = now;
   }
 
@@ -146,12 +148,11 @@ export class FamilyEvidenceEngine implements RuntimeModule {
     const unscored = this.candidateRepo.findUnscored();
     if (unscored.length === 0) return Promise.resolve();
     this.log.info({ count: unscored.length }, "quick-check: scoring unscored candidates");
-    this.scoreCandidates(new Date().toISOString());
+    this.scoreCandidates(unscored, new Date().toISOString());
     return Promise.resolve();
   }
 
-  private scoreCandidates(now: string): void {
-    const candidates = this.candidateRepo.findAll();
+  private scoreCandidates(candidates: FamilyCandidate[], now: string): void {
     for (const cand of candidates) {
       const recurrenceMetrics = this.sc.computeRecurrenceMetrics(cand.candidateId);
       const recurrence = computeRecurrenceScore(recurrenceMetrics);
@@ -195,8 +196,17 @@ export class FamilyEvidenceEngine implements RuntimeModule {
     }
   }
 
-  private scoreDeployedFamilies(now: string): void {
+  private scoreDeployedFamilies(candidates: FamilyCandidate[], now: string): void {
     const families = this.rulesProvider.getAllFamilies();
+
+    // Preserve find() semantics: first matching candidate wins
+    const candidateByFamily = new Map<string, FamilyCandidate>();
+    for (const c of candidates) {
+      if (c.matchedFamilyId && !candidateByFamily.has(String(c.matchedFamilyId))) {
+        candidateByFamily.set(String(c.matchedFamilyId), c);
+      }
+    }
+
     for (const identity of families) {
       const familyId = identity.familyId;
       const familyIdStr = String(familyId);
@@ -207,13 +217,9 @@ export class FamilyEvidenceEngine implements RuntimeModule {
       const toxicityMetrics = this.sc.computeToxicityMetrics(familyIdStr);
       const toxicity = computeToxicityPenalty(toxicityMetrics);
 
-      // If this family has a matching candidate, also compute recurrence + viability
       let recurrence: number | null = null;
       let liveViability: number | null = null;
-      const candidates = this.candidateRepo.findAll();
-      const matchingCandidate = candidates.find(
-        (c) => c.matchedFamilyId && String(c.matchedFamilyId) === familyIdStr,
-      );
+      const matchingCandidate = candidateByFamily.get(familyIdStr);
       if (matchingCandidate) {
         const recurrenceMetrics = this.sc.computeRecurrenceMetrics(matchingCandidate.candidateId);
         recurrence = computeRecurrenceScore(recurrenceMetrics);

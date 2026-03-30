@@ -26,6 +26,10 @@ function makeClobMarket(
 function makeGateway(markets: ClobMarket[]): MarketDiscoveryGateway {
   return {
     discoverMarkets: async () => markets,
+    forEachMarketPage: async (cb) => {
+      if (markets.length > 0) cb(markets);
+      return { totalMarkets: markets.length };
+    },
     healthCheck: async () => ({ ok: true, latencyMs: 0 }),
   };
 }
@@ -128,5 +132,37 @@ describe("ScanService", () => {
       .get() as { first_seen_at: string };
 
     expect(row2.first_seen_at).toBe(row1.first_seen_at);
+  });
+
+  it("handles multi-page discovery correctly", async () => {
+    const page1 = [
+      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000", endDate: "2026-03-28T12:00:00Z" }),
+    ];
+    const page2 = [
+      makeClobMarket({ conditionId: "c2", slug: "bitcoin-above-100000", endDate: "2026-03-28T14:00:00Z" }),
+      makeClobMarket({ conditionId: "c3", slug: "ethereum-above-4000" }),
+    ];
+
+    const gateway: MarketDiscoveryGateway = {
+      discoverMarkets: async () => [...page1, ...page2],
+      forEachMarketPage: async (cb) => {
+        cb(page1);
+        cb(page2);
+        return { totalMarkets: 3 };
+      },
+      healthCheck: async () => ({ ok: true, latencyMs: 0 }),
+    };
+
+    const service = new ScanService({
+      db: conn.db,
+      log: silentLogger,
+      gateway,
+    });
+
+    const stats = await service.run();
+
+    expect(stats.marketsFound).toBe(3);
+    expect(stats.clustersCreated).toBe(2); // bitcoin-above + ethereum-above
+    expect(stats.candidatesUpserted).toBe(2);
   });
 });

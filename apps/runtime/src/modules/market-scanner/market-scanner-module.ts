@@ -87,43 +87,46 @@ export class MarketScannerModule implements RuntimeModule {
     try {
       this.log.debug("scan cycle starting");
 
-      const discovered = await this.deps.discoveryGateway.discoverMarkets();
       const families = this.deps.familyRules.getAllFamilies();
       const compiled = this.compileFamilyPatterns(families);
 
       let matchedCount = 0;
+      let discoveredCount = 0;
       const now = new Date().toISOString();
       const discoveredTokenIds = new Set<string>();
 
-      for (const clobMarket of discovered) {
-        const family = this.matchFamily(clobMarket.slug, clobMarket.endDate, compiled);
-        if (!family) continue;
+      await this.deps.discoveryGateway.forEachMarketPage((pageMarkets) => {
+        discoveredCount += pageMarkets.length;
+        for (const clobMarket of pageMarkets) {
+          const family = this.matchFamily(clobMarket.slug, clobMarket.endDate, compiled);
+          if (!family) continue;
 
-        for (const token of clobMarket.tokens) {
-          const tokenId = createTokenId(token.tokenId);
-          discoveredTokenIds.add(String(tokenId));
-          const market: Market = {
-            tokenId,
-            conditionId: clobMarket.conditionId,
-            slug: clobMarket.slug,
-            eventSlug: clobMarket.eventSlug ?? null,
-            question: clobMarket.question,
-            outcome: token.outcome.toUpperCase() === "YES" ? "YES" : "NO",
-            familyId: family.familyId,
-            familyKey: family.familyKey,
-            regime: family.regime,
-            horizon: family.horizon,
-            endDate: clobMarket.endDate || null,
-            active: clobMarket.active,
-            tickSize: clobMarket.tickSize,
-            negRisk: clobMarket.negRisk,
-            createdAt: now,
-            updatedAt: now,
-          };
-          this.deps.marketRepo.save(market);
-          matchedCount++;
+          for (const token of clobMarket.tokens) {
+            const tokenId = createTokenId(token.tokenId);
+            discoveredTokenIds.add(String(tokenId));
+            const market: Market = {
+              tokenId,
+              conditionId: clobMarket.conditionId,
+              slug: clobMarket.slug,
+              eventSlug: clobMarket.eventSlug ?? null,
+              question: clobMarket.question,
+              outcome: token.outcome.toUpperCase() === "YES" ? "YES" : "NO",
+              familyId: family.familyId,
+              familyKey: family.familyKey,
+              regime: family.regime,
+              horizon: family.horizon,
+              endDate: clobMarket.endDate || null,
+              active: clobMarket.active,
+              tickSize: clobMarket.tickSize,
+              negRisk: clobMarket.negRisk,
+              createdAt: now,
+              updatedAt: now,
+            };
+            this.deps.marketRepo.save(market);
+            matchedCount++;
+          }
         }
-      }
+      });
 
       // Deactivate tracked markets that were not in the latest discovery result
       let deactivatedCount = 0;
@@ -140,7 +143,7 @@ export class MarketScannerModule implements RuntimeModule {
 
       this.log.info(
         {
-          discovered: discovered.length,
+          discovered: discoveredCount,
           matched: matchedCount,
           deactivated: deactivatedCount,
           families: families.length,
