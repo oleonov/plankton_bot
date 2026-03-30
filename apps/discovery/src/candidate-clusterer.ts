@@ -134,7 +134,7 @@ export function generateSlugPattern(normalizedSlug: string): string {
 export class IncrementalClusterer {
   private readonly groups = new Map<
     string,
-    { markets: ClusterMarket[]; slugs: string[]; questions: string[] }
+    { markets: ClusterMarket[]; slugs: string[]; questions: string[]; seenConditions: Set<string> }
   >();
 
   addBatch(markets: ClobMarket[]): void {
@@ -142,13 +142,16 @@ export class IncrementalClusterer {
       const key = normalizeSlug(m.slug);
       let group = this.groups.get(key);
       if (!group) {
-        group = { markets: [], slugs: [], questions: [] };
+        group = { markets: [], slugs: [], questions: [], seenConditions: new Set() };
         this.groups.set(key, group);
       }
+      if (group.seenConditions.has(m.conditionId)) continue;
+      group.seenConditions.add(m.conditionId);
       group.markets.push({
         conditionId: m.conditionId,
         slug: m.slug,
         endDate: m.endDate || null,
+        ...(m.volume24h != null ? { volume24h: m.volume24h } : {}),
       });
       group.slugs.push(m.slug);
       group.questions.push(m.question);

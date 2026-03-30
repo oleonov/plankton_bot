@@ -68,7 +68,7 @@ export class SqliteCandidateObservationRepository implements CandidateObservatio
     if (markets.length === 0) return;
     const insertMany = this.db.transaction((items: CandidateObservationMarket[]) => {
       const stmt = this.db.prepare(
-        `INSERT INTO candidate_observation_markets
+        `INSERT OR IGNORE INTO candidate_observation_markets
            (candidate_id, observed_at, condition_id, slug, end_date, volume_24h)
          VALUES (?, ?, ?, ?, ?, ?)`,
       );

@@ -118,6 +118,7 @@ export function mapMarket(raw: Record<string, unknown>): ClobMarket {
     active: Boolean(raw.active),
     negRisk: Boolean(raw.neg_risk),
     tickSize: Number(raw.minimum_tick_size ?? raw.tick_size ?? 0.01),
+    volume24h: raw.volume_num != null ? Number(raw.volume_num) : null,
   };
 }
 
@@ -202,6 +203,7 @@ export function mapGammaMarket(raw: Record<string, unknown>, eventSlug?: string)
     active: Boolean(raw.active),
     negRisk: Boolean(raw.negRisk),
     tickSize: Number(raw.orderPriceMinTickSize ?? 0.01),
+    volume24h: raw.volume24hr != null ? Number(raw.volume24hr) : null,
   };
 }
 

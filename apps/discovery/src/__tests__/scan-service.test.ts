@@ -19,6 +19,7 @@ function makeClobMarket(
     active: true,
     negRisk: false,
     tickSize: 0.01,
+    volume24h: null,
     ...overrides,
   };
 }
@@ -132,6 +133,34 @@ describe("ScanService", () => {
       .get() as { first_seen_at: string };
 
     expect(row2.first_seen_at).toBe(row1.first_seen_at);
+  });
+
+  it("handles duplicate conditionId across pages without UNIQUE violation", async () => {
+    const dupeMarket = makeClobMarket({
+      conditionId: "same-cond",
+      slug: "bitcoin-above-95000",
+      volume24h: 5000,
+    });
+    const gateway: MarketDiscoveryGateway = {
+      discoverMarkets: async () => [dupeMarket, dupeMarket],
+      forEachMarketPage: async (cb) => {
+        cb([dupeMarket]);
+        cb([dupeMarket]); // same conditionId on second page
+        return { totalMarkets: 2 };
+      },
+      healthCheck: async () => ({ ok: true, latencyMs: 0 }),
+    };
+
+    const stats = await new ScanService({ db: conn.db, log: silentLogger, gateway }).run();
+    expect(stats.marketsFound).toBe(2);
+
+    // Verify only one observation market row per conditionId
+    const obsMarkets = conn.db
+      .prepare(
+        "SELECT COUNT(*) as cnt FROM candidate_observation_markets WHERE condition_id = 'same-cond'",
+      )
+      .get() as { cnt: number };
+    expect(obsMarkets.cnt).toBe(1);
   });
 
   it("handles multi-page discovery correctly", async () => {

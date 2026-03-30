@@ -33,6 +33,7 @@ function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
     active: true,
     negRisk: false,
     tickSize: 0.01,
+    volume24h: null,
     ...overrides,
   };
 }
@@ -383,7 +384,7 @@ describe("MarketScannerModule", () => {
 
     expect(marketRepo.save).toHaveBeenCalledTimes(2);
     const slugs = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls.map(
-      (c: [Market]) => c[0].slug,
+      (c: unknown[]) => (c[0] as Market).slug,
     );
     expect(slugs).toContain("bitcoin-above-100k");
     expect(slugs).toContain("bitcoin-above-110k");

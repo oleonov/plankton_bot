@@ -33,6 +33,8 @@ export interface ClobMarket {
   readonly negRisk: boolean;
   /** Minimum price increment (e.g., 0.01). */
   readonly tickSize: number;
+  /** 24-hour trading volume in USD. Null when unavailable. */
+  readonly volume24h: number | null;
 }
 
 // ─── Exchange order param / result types ──────────────────────────────────

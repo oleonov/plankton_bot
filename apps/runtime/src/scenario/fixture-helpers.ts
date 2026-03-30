@@ -36,6 +36,7 @@ export function makeMarket(overrides: {
     active: overrides.active ?? true,
     negRisk: overrides.negRisk ?? false,
     tickSize: overrides.tickSize ?? 0.01,
+    volume24h: null,
   };
 }
 

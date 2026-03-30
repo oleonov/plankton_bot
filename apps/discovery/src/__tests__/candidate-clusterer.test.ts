@@ -6,6 +6,7 @@ import {
   inferCadence,
   generateSlugPattern,
   clusterMarkets,
+  IncrementalClusterer,
 } from "../candidate-clusterer.js";
 import type { ClobMarket } from "@plankton/domain";
 
@@ -166,6 +167,7 @@ function makeClobMarket(overrides: Partial<ClobMarket> & { slug: string; conditi
     active: true,
     negRisk: false,
     tickSize: 0.01,
+    volume24h: null,
     ...overrides,
   };
 }
@@ -227,5 +229,46 @@ describe("clusterMarkets", () => {
     ];
     const clusters = clusterMarkets(markets);
     expect(clusters).toHaveLength(2);
+  });
+});
+
+// ─── IncrementalClusterer dedup ──────────────────────────────────────────────
+
+describe("IncrementalClusterer", () => {
+  it("deduplicates markets with the same conditionId across batches", () => {
+    const clusterer = new IncrementalClusterer();
+    const market = makeClobMarket({ conditionId: "same-cond", slug: "bitcoin-above-95000" });
+
+    clusterer.addBatch([market]);
+    clusterer.addBatch([market]); // duplicate conditionId in second batch
+
+    const clusters = clusterer.finalize();
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]!.markets).toHaveLength(1);
+  });
+
+  it("deduplicates markets with the same conditionId within a single batch", () => {
+    const clusterer = new IncrementalClusterer();
+    const market = makeClobMarket({ conditionId: "same-cond", slug: "bitcoin-above-95000" });
+
+    clusterer.addBatch([market, market]);
+
+    const clusters = clusterer.finalize();
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]!.markets).toHaveLength(1);
+  });
+
+  it("preserves volume24h on clustered markets", () => {
+    const clusterer = new IncrementalClusterer();
+    clusterer.addBatch([
+      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000", volume24h: 42_000 }),
+      makeClobMarket({ conditionId: "c2", slug: "bitcoin-above-100000", volume24h: 0 }),
+      makeClobMarket({ conditionId: "c3", slug: "bitcoin-above-105000", volume24h: null }),
+    ]);
+
+    const clusters = clusterer.finalize();
+    expect(clusters[0]!.markets[0]!.volume24h).toBe(42_000);
+    expect(clusters[0]!.markets[1]!.volume24h).toBe(0);
+    expect(clusters[0]!.markets[2]!.volume24h).toBeUndefined();
   });
 });
