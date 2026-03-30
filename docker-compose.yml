@@ -48,6 +48,7 @@ services:
     image: plankton:latest
     command: ["node", "apps/runtime-manager/dist/index.js"]
     working_dir: /app
+    user: "0:0"
     volumes:
       - plankton-data:/app/apps/runtime/data
       - /var/run/docker.sock:/var/run/docker.sock
