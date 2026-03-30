@@ -516,7 +516,7 @@ async function main(): Promise<void> {
       : null;
 
   // 7l2. Family evidence engine — periodic ledger-side scoring for deployed families
-  const scoreComputer = new ScoreComputer(ledgerConn.db);
+  const scoreComputer = new ScoreComputer(ledgerConn.db, controlConn.db);
   const evidenceEngine = new FamilyEvidenceEngine({
     bus,
     log,

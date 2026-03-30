@@ -140,7 +140,7 @@ describe("ScoreComputer", () => {
   describe("computeRecurrenceMetrics", () => {
     it("returns zeroes for unknown candidate", () => {
       const conn = freshDb();
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecurrenceMetrics("nonexistent");
 
       expect(m.spanDays).toBe(0);
@@ -164,7 +164,7 @@ describe("ScoreComputer", () => {
         "2026-03-11T10:00:00Z",
       ]);
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecurrenceMetrics(CANDIDATE_ID);
 
       expect(m.spanDays).toBeCloseTo(10, 0);
@@ -180,7 +180,7 @@ describe("ScoreComputer", () => {
       seedObservations(conn.db, ["2026-03-01T10:00:00Z"], 3); // qualifies
       seedObservations(conn.db, ["2026-03-02T10:00:00Z"], 1); // does not qualify
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecurrenceMetrics(CANDIDATE_ID);
 
       expect(m.totalDays).toBe(2);
@@ -198,7 +198,7 @@ describe("ScoreComputer", () => {
         "2026-03-05T10:00:00Z",
       ]);
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecurrenceMetrics(CANDIDATE_ID);
 
       expect(m.cadenceMean).toBeCloseTo(2, 1);
@@ -216,7 +216,7 @@ describe("ScoreComputer", () => {
         { conditionId: "c3", slug: "s3", endDate: null },
       ]);
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecurrenceMetrics(CANDIDATE_ID);
 
       expect(m.distinctConditions).toBe(3);
@@ -228,7 +228,7 @@ describe("ScoreComputer", () => {
     it("returns zeroes for family with no activity", () => {
       const conn = freshDb();
       seedFamily(conn.db);
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecycleMetrics(FAMILY_ID);
 
       expect(m.tradeCount).toBe(0);
@@ -246,7 +246,7 @@ describe("ScoreComputer", () => {
       seedFillChain(conn.db, { tokenId: "tok-A" });
       seedFillChain(conn.db, { tokenId: "tok-B" });
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecycleMetrics(FAMILY_ID);
 
       expect(m.tradeCount).toBe(3);
@@ -269,7 +269,7 @@ describe("ScoreComputer", () => {
       seedPnlLedger(conn.db, f2.fillId, "pos-2", -3.0);
       seedPnlLedger(conn.db, f3.fillId, "pos-3", 2.0);
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecycleMetrics(FAMILY_ID);
 
       expect(m.repricingExits).toBe(2); // pos-1 and pos-3
@@ -293,7 +293,7 @@ describe("ScoreComputer", () => {
         VALUES ('set-3', 'cond-3', 'pos-3', 'tok-pos-3', '${FAMILY_ID}', 'YES', 1.0, 100, 10, '2026-02-01');
       `);
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeRecycleMetrics(FAMILY_ID);
 
       expect(m.totalNonSettlementClosed).toBe(2);
@@ -304,7 +304,7 @@ describe("ScoreComputer", () => {
   describe("computeLiveViabilityMetrics", () => {
     it("returns zeroes for unknown candidate", () => {
       const conn = freshDb();
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeLiveViabilityMetrics("nonexistent", "daily");
 
       expect(m.activeMarketCount).toBe(0);
@@ -316,7 +316,7 @@ describe("ScoreComputer", () => {
     it("reads market count and volume from candidate row", () => {
       const conn = freshDb();
       seedCandidate(conn.db);
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeLiveViabilityMetrics(CANDIDATE_ID, "daily");
 
       expect(m.activeMarketCount).toBe(4);
@@ -338,7 +338,7 @@ describe("ScoreComputer", () => {
         { conditionId: "c3", slug: "s3", endDate: "2025-01-01T00:00:00Z" },
       ]);
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeLiveViabilityMetrics(CANDIDATE_ID, "daily");
 
       // 2 of 3 are healthy
@@ -351,7 +351,7 @@ describe("ScoreComputer", () => {
     it("reads dust/position counts from runtime state", () => {
       const conn = freshDb();
       seedFamily(conn.db);
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeToxicityMetrics(FAMILY_ID);
 
       expect(m.dustCount).toBe(1);
@@ -366,7 +366,7 @@ describe("ScoreComputer", () => {
       seedPosition(conn.db, "pos-a", { realizedPnl: 10 });
       seedPosition(conn.db, "pos-b", { realizedPnl: -3, status: "closed" });
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeToxicityMetrics(FAMILY_ID);
 
       expect(m.realizedPnlUsdc).toBe(7);
@@ -385,7 +385,7 @@ describe("ScoreComputer", () => {
         VALUES ('family', '${FAMILY_ID}', 'active', 'reduce-only', 'system', 'tail cost again');
       `);
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeToxicityMetrics(FAMILY_ID);
 
       expect(m.reduceOnlyCount).toBe(2);
@@ -395,7 +395,7 @@ describe("ScoreComputer", () => {
     it("computes weeks deployed from family_catalog created_at", () => {
       const conn = freshDb();
       seedFamily(conn.db);
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeToxicityMetrics(FAMILY_ID);
 
       // Family created 2026-01-01, now is ~2026-03-28 => ~12 weeks
@@ -412,7 +412,7 @@ describe("ScoreComputer", () => {
       // Fresh position
       seedPosition(conn.db, "pos-fresh", { updatedAt: new Date().toISOString() });
 
-      const sc = new ScoreComputer(conn.db);
+      const sc = new ScoreComputer(conn.db, conn.db);
       const m = sc.computeToxicityMetrics(FAMILY_ID, 48);
 
       expect(m.staleCount).toBe(1);

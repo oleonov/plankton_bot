@@ -63,7 +63,13 @@ function computeGapStats(sortedDates: string[]): { mean: number; stddev: number 
 // ─── ScoreComputer ───────────────────────────────────────────────────────
 
 export class ScoreComputer {
-  constructor(private readonly db: Database.Database) {}
+  private readonly controlDb: Database.Database | null;
+  constructor(
+    private readonly db: Database.Database,
+    controlDb?: Database.Database,
+  ) {
+    this.controlDb = controlDb ?? null;
+  }
 
   computeRecurrenceMetrics(candidateId: string): RecurrenceMetrics {
     const span = this.db
@@ -226,17 +232,23 @@ export class ScoreComputer {
       .prepare(`SELECT SUM(realized_pnl) AS v FROM positions WHERE family_id = ?`)
       .get(familyId) as { v: number | null } | undefined;
 
-    const reduceOnlyRow = this.db
-      .prepare(
-        `SELECT COUNT(*) AS v FROM state_transitions
-         WHERE entity_type = 'family' AND entity_id = ?
-         AND to_state IN ('reduce-only', 'ReduceOnly')`,
-      )
-      .get(familyId) as { v: number } | undefined;
+    // state_transitions and family_catalog live in control.db, not ledger
+    const ctrlDb = this.controlDb;
+    const reduceOnlyRow = ctrlDb
+      ? (ctrlDb
+          .prepare(
+            `SELECT COUNT(*) AS v FROM state_transitions
+             WHERE entity_type = 'family' AND entity_id = ?
+             AND to_state IN ('reduce-only', 'ReduceOnly')`,
+          )
+          .get(familyId) as { v: number } | undefined)
+      : undefined;
 
-    const catalogRow = this.db
-      .prepare(`SELECT created_at FROM family_catalog WHERE family_id = ?`)
-      .get(familyId) as { created_at: string } | undefined;
+    const catalogRow = ctrlDb
+      ? (ctrlDb
+          .prepare(`SELECT created_at FROM family_catalog WHERE family_id = ?`)
+          .get(familyId) as { created_at: string } | undefined)
+      : undefined;
 
     const weeksDeployed = catalogRow
       ? (Date.now() - new Date(catalogRow.created_at).getTime()) / (1000 * 60 * 60 * 24 * 7)
