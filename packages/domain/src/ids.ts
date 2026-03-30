@@ -52,3 +52,23 @@ export function createCommandId(raw: string): CommandId {
 export function createBotRunId(raw: string): BotRunId {
   return raw as BotRunId;
 }
+
+export type ScorecardId = string & { readonly __brand: "ScorecardId" };
+export function createScorecardId(raw: string): ScorecardId {
+  return raw as ScorecardId;
+}
+
+export type SwitchId = string & { readonly __brand: "SwitchId" };
+export function createSwitchId(raw: string): SwitchId {
+  return raw as SwitchId;
+}
+
+export type ReportId = string & { readonly __brand: "ReportId" };
+export function createReportId(raw: string): ReportId {
+  return raw as ReportId;
+}
+
+export type ImportId = string & { readonly __brand: "ImportId" };
+export function createImportId(raw: string): ImportId {
+  return raw as ImportId;
+}

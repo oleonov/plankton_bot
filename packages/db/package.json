@@ -13,7 +13,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b && mkdir -p dist/migrations && cp src/migrations/*.sql dist/migrations/",
+    "build": "tsc -b && mkdir -p dist/migrations dist/schemas && cp src/migrations/*.sql dist/migrations/ && cp src/schemas/*.sql dist/schemas/",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "test": "vitest run"

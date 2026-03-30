@@ -30,6 +30,11 @@ export class ExecutionQueue {
 
   constructor(private readonly config: ExecutionQueueConfig) {}
 
+  /** Number of queued commands + in-flight tasks. Zero means fully drained. */
+  get pendingCount(): number {
+    return this.queue.length + this.inFlight.size;
+  }
+
   enqueue(cmd: Command): void {
     if (!this.accepting) {
       this.config.log.warn({ type: cmd.type }, "queue not accepting — command dropped");

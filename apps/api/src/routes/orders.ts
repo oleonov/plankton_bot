@@ -8,7 +8,7 @@ interface OrderOpts {
   db: Database.Database;
 }
 
-function toDto(row: Record<string, unknown>, meta: MarketMeta) {
+export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
   return {
     orderId: row.order_id,
     clientOrderId: row.client_order_id,

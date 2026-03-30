@@ -187,13 +187,33 @@ export const runtimeStateYamlSchema = z.object({
 
 // ─── Top-level family YAML schema ───────────────────────────────────────────
 
-export const familyYamlSchema = z.object({
-  family_id: z.string(),
-  identity: identityYamlSchema,
-  evidence: evidenceYamlSchema,
-  rules: rulesYamlSchema,
-  runtime_state: runtimeStateYamlSchema.optional(),
-});
+export const evidenceYamlDefaults = {
+  evidence_status: "unknown" as const,
+  evidence_score: 0,
+  promotion_state: "probe-only" as const,
+  local_trade_count: 0,
+  local_market_count: 0,
+  local_realized_pnl_fifo: 0,
+  open_tail_cost_usdc: 0,
+  tail_adjusted_pnl: 0,
+  both_sided_eligible: false,
+  heavy_campaign_eligible: false,
+};
+
+/**
+ * V2 import schema: identity + rules only.
+ * Evidence and runtime_state are stripped — they come from DB, not YAML.
+ * Evidence defaults are provided for backward compat with v1 YAML files.
+ * .strip() silently drops runtime_state and any other unknown keys from v1 files.
+ */
+export const familyYamlSchema = z
+  .object({
+    family_id: z.string(),
+    identity: identityYamlSchema,
+    evidence: evidenceYamlSchema.optional().default(evidenceYamlDefaults),
+    rules: rulesYamlSchema,
+  })
+  .strip();
 
 // ─── Global config (operator-level runtime settings) ─────────────────────────
 

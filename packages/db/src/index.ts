@@ -1,6 +1,6 @@
-export { openDatabase, type DbConnection } from "./connection.js";
+export { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
 export { runMigrations } from "./migrations/runner.js";
-export { bootstrapDatabase } from "./bootstrap.js";
+export { bootstrapDatabase, bootstrapControlDb, bootstrapLedgerDb } from "./bootstrap.js";
 export { SqliteMarketRepository } from "./repositories/market-repository.js";
 export { SqliteOrderRepository } from "./repositories/order-repository.js";
 export { SqliteFillRepository } from "./repositories/fill-repository.js";
@@ -24,3 +24,16 @@ export { SqliteStateTransitionRepository } from "./repositories/state-transition
 export { SqliteFamilyEvidenceRepository } from "./repositories/family-evidence-repository.js";
 export { SqliteFamilyRulesSnapshotRepository } from "./repositories/family-rules-snapshot-repository.js";
 export { SqliteDiscoveryRunRepository } from "./repositories/discovery-run-repository.js";
+export { SqliteFamilyProfileRuntimeStateRepository } from "./repositories/family-profile-runtime-state-repository.js";
+export { SqliteProfileRepository } from "./repositories/profile-repository.js";
+export { SqliteProfileSettingsRepository } from "./repositories/profile-settings-repository.js";
+export { SqliteFamilyDeploymentRepository } from "./repositories/family-deployment-repository.js";
+export { SqliteValidationScorecardRepository } from "./repositories/validation-scorecard-repository.js";
+export { SqliteProfileSummaryRepository } from "./repositories/profile-summary-repository.js";
+export { SqliteRuntimeControlStateRepository } from "./repositories/runtime-control-state-repository.js";
+export { SqliteSwitchRequestRepository } from "./repositories/switch-request-repository.js";
+export { SqlitePreflightReportRepository } from "./repositories/preflight-report-repository.js";
+export { SqliteServiceHeartbeatRepository } from "./repositories/service-heartbeat-repository.js";
+export { SqliteConfigImportRepository } from "./repositories/config-import-repository.js";
+export { SqliteFamilyConfigMetaRepository } from "./repositories/family-config-meta-repository.js";
+export { SqliteFamilyProfileRollupRepository } from "./repositories/family-profile-rollup-repository.js";

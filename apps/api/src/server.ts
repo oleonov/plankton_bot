@@ -10,8 +10,9 @@ import fastifyStatic from "@fastify/static";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
-import type { DbConnection } from "@plankton/db";
+import type Database from "better-sqlite3";
 import type { AppConfig } from "@plankton/config";
+import type { LedgerPool } from "./ledger-pool.js";
 import { createAuthHook } from "./auth.js";
 import { fail } from "./errors.js";
 import { authRoutes } from "./routes/auth.js";
@@ -27,10 +28,15 @@ import { eventsRoutes } from "./routes/events.js";
 import { riskEventsRoutes } from "./routes/risk-events.js";
 import { pnlSeriesRoutes } from "./routes/pnl-series.js";
 import { discoveryRoutes } from "./routes/discovery.js";
+import { configRoutes } from "./routes/config.js";
+import { profileRoutes } from "./routes/profiles.js";
+import { auditRoutes } from "./routes/audit.js";
 
 export interface ServerDeps {
   config: AppConfig;
-  conn: DbConnection;
+  controlDb: Database.Database;
+  ledgerDb: Database.Database;
+  ledgerPool: LedgerPool;
 }
 
 export async function buildServer(deps: ServerDeps) {
@@ -70,26 +76,61 @@ export async function buildServer(deps: ServerDeps) {
     reply.status(status).send(fail(code, error.message));
   });
 
-  // Routes
-  const db = deps.conn.db;
+  // Routes — each receives only the DB(s) it needs
   await app.register(authRoutes, {
     prefix: "/api/v1",
     username: deps.config.planktonAuthUsername,
     password: deps.config.planktonAuthPassword,
   });
   await app.register(healthRoutes, { prefix: "/api/v1" });
+
   const staleMs = deps.config.marketDataStaleThresholdMs;
-  await app.register(statusRoutes, { prefix: "/api/v1", db, marketDataStaleThresholdMs: staleMs });
-  await app.register(familyRoutes, { prefix: "/api/v1", db });
-  await app.register(positionRoutes, { prefix: "/api/v1", db });
-  await app.register(orderRoutes, { prefix: "/api/v1", db });
-  await app.register(fillRoutes, { prefix: "/api/v1", db });
-  await app.register(metricsRoutes, { prefix: "/api/v1", db });
-  await app.register(actionRoutes, { prefix: "/api/v1", db });
-  await app.register(eventsRoutes, { prefix: "/api/v1", db, marketDataStaleThresholdMs: staleMs });
-  await app.register(riskEventsRoutes, { prefix: "/api/v1", db });
-  await app.register(pnlSeriesRoutes, { prefix: "/api/v1", db });
-  await app.register(discoveryRoutes, { prefix: "/api/v1", db });
+
+  // Control-only routes
+  await app.register(actionRoutes, { prefix: "/api/v1", db: deps.controlDb });
+  await app.register(configRoutes, { prefix: "/api/v1", controlDb: deps.controlDb });
+
+  // Ledger-only routes
+  await app.register(statusRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    marketDataStaleThresholdMs: staleMs,
+  });
+  await app.register(positionRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(orderRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(fillRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(eventsRoutes, {
+    prefix: "/api/v1",
+    controlDb: deps.controlDb,
+    ledgerDb: deps.ledgerDb,
+    marketDataStaleThresholdMs: staleMs,
+  });
+  await app.register(riskEventsRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(pnlSeriesRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+
+  // Mixed routes — pass both
+  await app.register(familyRoutes, {
+    prefix: "/api/v1",
+    controlDb: deps.controlDb,
+    ledgerDb: deps.ledgerDb,
+  });
+  await app.register(discoveryRoutes, {
+    prefix: "/api/v1",
+    controlDb: deps.controlDb,
+    ledgerDb: deps.ledgerDb,
+  });
+  await app.register(metricsRoutes, {
+    prefix: "/api/v1",
+    controlDb: deps.controlDb,
+    ledgerDb: deps.ledgerDb,
+  });
+  await app.register(profileRoutes, {
+    prefix: "/api/v1",
+    controlDb: deps.controlDb,
+    ledgerDb: deps.ledgerDb,
+    ledgerPool: deps.ledgerPool,
+  });
+  await app.register(auditRoutes, { prefix: "/api/v1", controlDb: deps.controlDb });
 
   // Serve web UI static files in production
   const webDistPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");

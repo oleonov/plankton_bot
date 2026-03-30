@@ -20,35 +20,25 @@ const ALL_KEYS = [
   "RUNTIME_MODE",
   "LOG_LEVEL",
   "DB_PATH",
+  "BOOTSTRAP_FAMILY_RULES_PATH",
   "FAMILY_RULES_PATH",
   "POLY_API_KEY",
   "POLY_API_SECRET",
   "POLY_PASSPHRASE",
   "POLY_PRIVATE_KEY",
-  "LIVE_LITE_CONFIRM",
-  "LIVE_LITE_FAMILY_ALLOWLIST",
-  "LIVE_LITE_MAX_FAMILIES",
-  "LIVE_LITE_MAX_OPEN_VALUE_USDC",
-  "LIVE_LITE_MAX_ORDER_USDC",
-  "LIVE_LITE_MAX_ACTIVE_MARKETS",
   "PLANKTON_AUTH_USERNAME",
   "PLANKTON_AUTH_PASSWORD",
   "PLANKTON_SESSION_SECRET",
   "TRUST_PROXY",
 ];
 
+// LIVE_LITE_* env vars removed in Phase 3 — envelope caps now come from profile_settings in control.db
 const BASE_LIVE_LITE_VARS = {
   RUNTIME_MODE: "live-lite",
-  LIVE_LITE_CONFIRM: "true",
   POLY_API_KEY: "key",
   POLY_API_SECRET: "secret",
   POLY_PASSPHRASE: "pass",
   POLY_PRIVATE_KEY: "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  LIVE_LITE_FAMILY_ALLOWLIST: "familyA,familyB",
-  LIVE_LITE_MAX_FAMILIES: "5",
-  LIVE_LITE_MAX_OPEN_VALUE_USDC: "10000",
-  LIVE_LITE_MAX_ORDER_USDC: "500",
-  LIVE_LITE_MAX_ACTIVE_MARKETS: "20",
 };
 
 describe("loadEnv", () => {
@@ -80,7 +70,7 @@ describe("loadEnv", () => {
 
     try {
       const config = loadEnv(envPath);
-      expect(config.runtimeMode).toBe("simulation");
+      expect(config.runtimeMode).toBeUndefined();
       expect(config.logLevel).toBe("info");
       expect(config.dbPath).toContain("plankton.db");
       expect(config.familyRulesPath).toContain("family_rules.yaml");
@@ -111,6 +101,27 @@ describe("loadEnv", () => {
     expect(config.polyPassphrase).toBe("pass789");
   });
 
+  it("BOOTSTRAP_FAMILY_RULES_PATH takes precedence over FAMILY_RULES_PATH", () => {
+    setEnvVars({
+      BOOTSTRAP_FAMILY_RULES_PATH: "/tmp/bootstrap-rules.yaml",
+      FAMILY_RULES_PATH: "/tmp/old-rules.yaml",
+    });
+    const config = loadEnv();
+    expect(config.familyRulesPath).toBe("/tmp/bootstrap-rules.yaml");
+  });
+
+  it("falls back to FAMILY_RULES_PATH when BOOTSTRAP_FAMILY_RULES_PATH is unset", () => {
+    setEnvVars({ FAMILY_RULES_PATH: "/tmp/legacy-rules.yaml" });
+    const config = loadEnv();
+    expect(config.familyRulesPath).toBe("/tmp/legacy-rules.yaml");
+  });
+
+  it("accepts live-lite mode without LIVE_LITE_* envelope vars", () => {
+    setEnvVars(BASE_LIVE_LITE_VARS);
+    const config = loadEnv();
+    expect(config.runtimeMode).toBe("live-lite");
+  });
+
   it("resolves relative DB_PATH to absolute", () => {
     setEnvVars({ DB_PATH: "./data/test.db" });
     const config = loadEnv();
@@ -119,7 +130,7 @@ describe("loadEnv", () => {
   });
 
   it("requires POLY_API_KEY in live-lite mode", () => {
-    setEnvVars({ RUNTIME_MODE: "live-lite", LIVE_LITE_CONFIRM: "true" });
+    setEnvVars({ RUNTIME_MODE: "live-lite" });
     expect(() => loadEnv(emptyEnvPath)).toThrow("POLY_API_KEY");
   });
 
@@ -135,7 +146,6 @@ describe("loadEnv", () => {
   it("requires POLY_PASSPHRASE in live-lite mode", () => {
     setEnvVars({
       RUNTIME_MODE: "live-lite",
-      LIVE_LITE_CONFIRM: "true",
       POLY_API_KEY: "key",
       POLY_API_SECRET: "secret",
     });
@@ -161,7 +171,6 @@ describe("loadEnv", () => {
   it("requires POLY_PRIVATE_KEY in live-lite mode", () => {
     setEnvVars({
       RUNTIME_MODE: "live-lite",
-      LIVE_LITE_CONFIRM: "true",
       POLY_API_KEY: "key",
       POLY_API_SECRET: "secret",
       POLY_PASSPHRASE: "pass",
@@ -177,37 +186,7 @@ describe("loadEnv", () => {
     expect(() => loadEnv()).toThrow("0x-prefixed 32-byte hex");
   });
 
-  it("requires live-lite envelope vars when RUNTIME_MODE=live-lite", () => {
-    setEnvVars({
-      RUNTIME_MODE: "live-lite",
-      LIVE_LITE_CONFIRM: "true",
-      POLY_API_KEY: "key",
-      POLY_API_SECRET: "secret",
-      POLY_PASSPHRASE: "pass",
-      POLY_PRIVATE_KEY: "0xabc",
-    });
-    expect(() => loadEnv()).toThrow("LIVE_LITE_FAMILY_ALLOWLIST");
-  });
-
-  it("parses live-lite envelope vars correctly when all are present", () => {
-    setEnvVars(BASE_LIVE_LITE_VARS);
-    const config = loadEnv();
-    expect(config.liveLite).toBeDefined();
-    expect(config.liveLite?.familyAllowlist).toEqual(["familyA", "familyB"]);
-    expect(config.liveLite?.maxFamilies).toBe(5);
-    expect(config.liveLite?.maxOpenValueUsdc).toBe(10000);
-    expect(config.liveLite?.maxOrderUsdc).toBe(500);
-    expect(config.liveLite?.maxActiveMarkets).toBe(20);
-  });
-
-  it("rejects allowlist longer than maxFamilies", () => {
-    setEnvVars({
-      ...BASE_LIVE_LITE_VARS,
-      LIVE_LITE_FAMILY_ALLOWLIST: "a,b,c,d",
-      LIVE_LITE_MAX_FAMILIES: "2",
-    });
-    expect(() => loadEnv()).toThrow("allowlist length 4 exceeds maxFamilies 2");
-  });
+  // LIVE_LITE_* envelope tests removed — envelope caps moved to profile_settings in control.db
 
   it("parses TRUST_PROXY string to boolean", () => {
     setEnvVars({ TRUST_PROXY: "true" });
@@ -218,11 +197,5 @@ describe("loadEnv", () => {
   it("defaults TRUST_PROXY to false", () => {
     const config = loadEnv(emptyEnvPath);
     expect(config.trustProxy).toBe(false);
-  });
-
-  it("returns undefined liveLite in simulation mode", () => {
-    setEnvVars({ RUNTIME_MODE: "simulation" });
-    const config = loadEnv();
-    expect(config.liveLite).toBeUndefined();
   });
 });

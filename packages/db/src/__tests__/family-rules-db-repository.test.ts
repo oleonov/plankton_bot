@@ -87,12 +87,12 @@ describe("SqliteFamilyRulesDbRepository", () => {
     expect(cfg.identity.strategyProfile).toBe("scalp");
 
     // Evidence
-    expect(cfg.evidence.familyId).toBe("fam-1");
-    expect(cfg.evidence.evidenceStatus).toBe("confirmed");
-    expect(cfg.evidence.evidenceScore).toBe(80);
-    expect(cfg.evidence.localTradeCount).toBe(10);
-    expect(cfg.evidence.bothSidedEligible).toBe(true);
-    expect(cfg.evidence.heavyCampaignEligible).toBe(false);
+    expect(cfg.evidence?.familyId).toBe("fam-1");
+    expect(cfg.evidence?.evidenceStatus).toBe("confirmed");
+    expect(cfg.evidence?.evidenceScore).toBe(80);
+    expect(cfg.evidence?.localTradeCount).toBe(10);
+    expect(cfg.evidence?.bothSidedEligible).toBe(true);
+    expect(cfg.evidence?.heavyCampaignEligible).toBe(false);
 
     // Rules - universe
     expect(cfg.rules.familyId).toBe("fam-1");

@@ -201,7 +201,11 @@ function isWeekend(dayOfWeek: number): boolean {
  *
  * Multipliers stack multiplicatively, then clamp to [0.5, 1.5].
  */
-function evidenceSizeMultiplier(evidence: FamilyEvidence, familyState: FamilyState | null): number {
+function evidenceSizeMultiplier(
+  evidence: FamilyEvidence | undefined,
+  familyState: FamilyState | null,
+): number {
+  if (!evidence) return 1.0;
   let mult = 1.0;
 
   // Promotion state: unproven families get smaller sizes
@@ -483,7 +487,7 @@ function familyCompositeScore(
   const state = familyStateRepo.get(bundle.rules.familyId);
 
   // Evidence score: higher is better → subtract (capped at 0.15)
-  const evidenceBonus = Math.min(evidence.evidenceScore / 1000, 0.15);
+  const evidenceBonus = Math.min((evidence?.evidenceScore ?? 0) / 1000, 0.15);
 
   // Tail-adjusted PnL: positive is better → subtract (capped at 0.15)
   const tailPnl = state?.tailAdjustedPnlLive ?? 0;
@@ -547,7 +551,7 @@ function evaluateProbeEntry(
 
   // Proven family gate for above-threshold prices
   if (midPrice > entry.requireProvenFamilyAbovePrice) {
-    if (bundle.evidence.evidenceStatus !== "confirmed") return null;
+    if (bundle.evidence?.evidenceStatus !== "confirmed") return null;
   }
 
   // Size: probeSizeUsdc adjusted by evidence multiplier + probe haircut, capped by max notional
@@ -727,12 +731,12 @@ function evaluateTwoSidedEntry(
   if (market.outcome !== "NO") return null;
 
   // Selective mode requires evidence of both-sided eligibility
-  if (ts.twoSidedMode === "selective" && !bundle.evidence.bothSidedEligible) return null;
+  if (ts.twoSidedMode === "selective" && !bundle.evidence?.bothSidedEligible) return null;
 
   // Activity threshold gate
   if (
     ts.minActivityForTwoSided !== null &&
-    bundle.evidence.localTradeCount < ts.minActivityForTwoSided
+    (bundle.evidence?.localTradeCount ?? 0) < ts.minActivityForTwoSided
   ) {
     return null;
   }

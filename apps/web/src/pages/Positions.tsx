@@ -2,16 +2,7 @@ import { useState } from "react";
 import { usePositions, useFamilies } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
-import { formatTimeLeft } from "../utils/format.ts";
-
-function formatAge(openedAt: string): string {
-  const ms = Date.now() - new Date(openedAt).getTime();
-  if (Number.isNaN(ms) || ms < 0) return "\u2014";
-  const hours = ms / 3_600_000;
-  if (hours < 1) return `${Math.round(ms / 60_000)}m`;
-  if (hours < 24) return `${Math.round(hours)}h`;
-  return `${Math.floor(hours / 24)}d`;
-}
+import { formatAge, formatTimeLeft } from "../utils/format.ts";
 
 export function Positions() {
   const [familyId, setFamilyId] = useState("");

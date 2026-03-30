@@ -7,6 +7,10 @@ import type {
   ClientOrderId,
   LotId,
   BotRunId,
+  ScorecardId,
+  SwitchId,
+  ReportId,
+  ImportId,
 } from "./ids.js";
 import type {
   Regime,
@@ -30,6 +34,15 @@ import type {
   SignalReason,
   OperatorActionType,
   CommandStatus,
+  ProfileId,
+  DeploymentStage,
+  StrategyStage,
+  OperatorMode,
+  SwitchState,
+  PreflightKind,
+  PreflightStatus,
+  RuntimeStatus,
+  LedgerResetPolicy,
 } from "./enums.js";
 
 // ─── Market ───────────────────────────────────────────────────────────────────
@@ -436,4 +449,169 @@ export interface ReconciliationResult {
   /** True when no discrepancies were found. */
   clean: boolean;
   details: string[];
+}
+
+// ─── Profile Switching — New entities ────────────────────────────────────────
+
+export interface Profile {
+  profileId: ProfileId;
+  displayName: string;
+  description: string | null;
+  createdAt: string;
+}
+
+export interface ProfileSettings {
+  profileId: ProfileId;
+  initialBalanceUsdc: number | null;
+  envelopeJson: string | null;
+  riskCapsJson: string | null;
+  updatedAt: string;
+}
+
+export interface FamilyDeployment {
+  familyId: FamilyId;
+  profile: ProfileId;
+  enabled: boolean;
+  operatorMode: OperatorMode;
+  strategyStage: StrategyStage;
+  probeSubstate: string | null;
+  deploymentStage: DeploymentStage;
+  approvedSnapshotId: number | null;
+  approvedScorecardId: ScorecardId | null;
+  operatorReason: string | null;
+  priority: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ValidationScorecard {
+  scorecardId: ScorecardId;
+  familyId: FamilyId;
+  profile: ProfileId;
+  evidenceStatus: EvidenceStatus;
+  evidenceScore: number;
+  recurrenceScore: number | null;
+  recycleScore: number | null;
+  liveViabilityScore: number | null;
+  toxicityPenalty: number | null;
+  tradeCount: number;
+  marketCount: number;
+  realizedPnl: number;
+  tailAdjustedPnl: number;
+  bothSidedEligible: boolean;
+  heavyCampaignEligible: boolean;
+  activeWindowEdgeScore: number | null;
+  summaryJson: string | null;
+  validatedAt: string;
+}
+
+export interface ProfileSummary {
+  profileId: ProfileId;
+  paused: boolean;
+  lastRunAt: string | null;
+  openOrders: number;
+  openPositions: number;
+  totalExposureUsdc: number;
+  balanceUsdc: number | null;
+  lastPreflightStatus: PreflightStatus | null;
+  updatedAt: string;
+}
+
+export interface RuntimeControlState {
+  currentProfile: ProfileId | null;
+  desiredProfile: ProfileId | null;
+  currentSwitchId: SwitchId | null;
+  currentRunId: string | null;
+  currentInstanceId: string | null;
+  runtimeStatus: RuntimeStatus;
+  paused: boolean;
+  schemaVersion: number;
+  updatedAt: string;
+}
+
+export interface SwitchRequest {
+  switchId: SwitchId;
+  fromProfile: ProfileId;
+  toProfile: ProfileId;
+  ledgerResetPolicy: LedgerResetPolicy;
+  deployPlanJson: string | null;
+  state: SwitchState;
+  errorMessage: string | null;
+  archivePath: string | null;
+  requestedBy: string | null;
+  requestedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface PreflightReport {
+  reportId: ReportId;
+  switchRequestId: SwitchId | null;
+  profile: ProfileId;
+  kind: PreflightKind;
+  status: PreflightStatus;
+  blockersJson: string | null;
+  warningsJson: string | null;
+  infoJson: string | null;
+  createdAt: string;
+}
+
+export interface ServiceHeartbeat {
+  serviceName: string;
+  instanceId: string;
+  profile: ProfileId | null;
+  runId: string | null;
+  lastHeartbeatAt: string;
+  statusJson: string | null;
+}
+
+export interface ConfigImport {
+  importId: ImportId;
+  sourcePath: string | null;
+  sourceChecksum: string;
+  sourceVersion: number | null;
+  familiesAdded: number;
+  familiesUpdated: number;
+  familiesSkipped: number;
+  familiesUnchanged: number;
+  resultJson: string | null;
+  importedAt: string;
+  importedBy: string | null;
+}
+
+export interface FamilyConfigMeta {
+  familyId: FamilyId;
+  lastImportedAt: string | null;
+  lastOperatorEditAt: string | null;
+  importChecksum: string | null;
+}
+
+export interface FamilyProfileRollup {
+  familyId: FamilyId;
+  profile: ProfileId;
+  openValueUsdc: number;
+  openPositions: number;
+  activeMarkets: number;
+  realizedPnl: number;
+  tailCostUsdc: number;
+  tailAdjustedPnl: number;
+  effectiveMode: string | null;
+  lastTradeAt: string | null;
+  updatedAt: string;
+}
+
+export interface FamilyProfileRuntimeState {
+  familyId: FamilyId;
+  openValueUsdc: number;
+  openPositionCount: number;
+  openDustCount: number;
+  activeMarketCount: number;
+  currentTailCostUsdc: number;
+  tailAdjustedPnlLive: number;
+  lastEntryTs: string | null;
+  lastExitTs: string | null;
+  effectiveMode: string | null;
+  derivedModeReason: string | null;
+  firstNegativeTailAt: string | null;
+  updatedAt: string;
 }

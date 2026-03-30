@@ -1,15 +1,17 @@
 import type Database from "better-sqlite3";
 import type { PromotionProposalRepository, PromotionProposal } from "@plankton/domain";
-import { createFamilyId } from "@plankton/domain";
-import type { FamilyId, PromotionState } from "@plankton/domain";
+import { createFamilyId, createScorecardId } from "@plankton/domain";
+import type { FamilyId, PromotionState, ProfileId } from "@plankton/domain";
 
 interface ProposalRow {
   id: number;
   family_id: string;
+  profile: string | null;
   current_state: string;
   proposed_state: string;
   reason: string;
   scores_snapshot: string;
+  source_scorecard_id: string | null;
   status: string;
   created_at: string;
   resolved_at: string | null;
@@ -20,10 +22,14 @@ function rowToProposal(row: ProposalRow): PromotionProposal {
   return {
     id: row.id,
     familyId: createFamilyId(row.family_id),
+    profile: (row.profile as ProfileId) ?? null,
     currentState: row.current_state as PromotionState,
     proposedState: row.proposed_state as PromotionState,
     reason: row.reason,
     scoresSnapshot: row.scores_snapshot,
+    sourceScorecardId: row.source_scorecard_id
+      ? createScorecardId(row.source_scorecard_id)
+      : null,
     status: row.status,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
@@ -40,16 +46,19 @@ export class SqlitePromotionProposalRepository implements PromotionProposalRepos
     const info = this.db
       .prepare(
         `INSERT INTO promotion_proposals
-           (family_id, current_state, proposed_state, reason, scores_snapshot,
+           (family_id, profile, current_state, proposed_state, reason,
+            scores_snapshot, source_scorecard_id,
             status, created_at, resolved_at, resolved_by)
-         VALUES (?, ?, ?, ?, ?, 'pending', datetime('now'), NULL, NULL)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), NULL, NULL)`,
       )
       .run(
         proposal.familyId,
+        proposal.profile,
         proposal.currentState,
         proposal.proposedState,
         proposal.reason,
         proposal.scoresSnapshot,
+        proposal.sourceScorecardId,
       );
     return Number(info.lastInsertRowid);
   }
@@ -70,7 +79,15 @@ export class SqlitePromotionProposalRepository implements PromotionProposalRepos
     return rows.map(rowToProposal);
   }
 
-  hasPending(familyId: FamilyId): boolean {
+  hasPending(familyId: FamilyId, profile?: ProfileId | null): boolean {
+    if (profile != null) {
+      const row = this.db
+        .prepare(
+          "SELECT 1 FROM promotion_proposals WHERE family_id = ? AND profile = ? AND status = 'pending' LIMIT 1",
+        )
+        .get(familyId, profile);
+      return row !== undefined;
+    }
     const row = this.db
       .prepare(
         "SELECT 1 FROM promotion_proposals WHERE family_id = ? AND status = 'pending' LIMIT 1",

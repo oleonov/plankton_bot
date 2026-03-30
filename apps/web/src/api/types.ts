@@ -323,3 +323,91 @@ export interface TransitionDTO {
   scoresSnapshot: string | null;
   createdAt: string;
 }
+
+/** GET /profiles item */
+export interface ProfileDTO {
+  profile_id: string;
+  display_name: string;
+  description: string | null;
+  paused: number | null;
+  last_run_at: string | null;
+  open_orders: number | null;
+  open_positions: number | null;
+  total_exposure_usdc: number | null;
+  balance_usdc: number | null;
+  last_preflight_status: string | null;
+  updated_at: string | null;
+}
+
+/** GET /profiles response */
+export interface ProfilesResponse {
+  profiles: ProfileDTO[];
+  runtimeState: {
+    current_profile: string | null;
+    desired_profile: string | null;
+    runtime_status: string;
+  } | null;
+}
+
+/** GET /profiles/:id response */
+export interface ProfileDetailDTO {
+  profile: ProfileDTO;
+  settings: ProfileSettingsDTO | null;
+  deployedFamilies: DeployedFamilyDTO[];
+}
+
+export interface ProfileSettingsDTO {
+  profile_id: string;
+  initial_balance_usdc: number | null;
+  envelope_json: string | null;
+  risk_caps_json: string | null;
+  updated_at: string;
+}
+
+export interface DeployedFamilyDTO {
+  family_id: string;
+  enabled: number;
+  operator_mode: string;
+  strategy_stage: string;
+  deployment_stage: string;
+  priority: number;
+  family_key: string;
+  primary_category: string;
+  regime: string;
+}
+
+/** GET /audit item */
+export interface AuditEntryDTO {
+  id: number;
+  entity_type: string;
+  entity_id: string;
+  from_state: string;
+  to_state: string;
+  trigger_type: string;
+  initiator: string;
+  reason: string;
+  profile: string | null;
+  created_at: string;
+}
+
+/** POST /actions/switch-profile response */
+export interface SwitchResponse {
+  switchId: string;
+  status: string;
+}
+
+/** GET /control/overview response */
+export interface ControlOverviewDTO {
+  profiles: ProfileDTO[];
+  runtimeState: {
+    current_profile: string | null;
+    desired_profile: string | null;
+    runtime_status: string;
+    paused: number | null;
+    current_run_id: string | null;
+  } | null;
+  activeSwitch: Record<string, unknown> | null;
+  recentTransitions: AuditEntryDTO[];
+  pendingProposals: number;
+  heartbeats: Record<string, unknown>[];
+}

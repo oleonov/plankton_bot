@@ -64,25 +64,18 @@ function parseSingleFamily(raw: unknown, index: number): FamilyConfig {
   return transformFamily(parsed.data);
 }
 
-export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
-  let content: string;
-  try {
-    content = readFileSync(filePath, "utf-8");
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Failed to read family rules file "${filePath}": ${msg}`);
-  }
-
+/** Parse a YAML string into LoadedFamilyRules (no filesystem access). */
+export function parseFamilyRulesYaml(content: string, source = "input"): LoadedFamilyRules {
   let doc: unknown;
   try {
     doc = parseYaml(content);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Invalid YAML in "${filePath}": ${msg}`);
+    throw new Error(`Invalid YAML in "${source}": ${msg}`);
   }
 
   if (doc === null || typeof doc !== "object") {
-    throw new Error(`Family rules file "${filePath}" must contain a YAML object`);
+    throw new Error(`YAML from "${source}" must contain a YAML object`);
   }
 
   const record = doc as Record<string, unknown>;
@@ -94,7 +87,7 @@ export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
       const details = parsed.error.issues
         .map((i) => `  [${i.path.join(".")}] ${i.message}`)
         .join("\n");
-      throw new Error(`Schema validation failed for multi-family file "${filePath}":\n${details}`);
+      throw new Error(`Schema validation failed for "${source}":\n${details}`);
     }
     return {
       global: transformKeys(parsed.data.global) as GlobalConfig,
@@ -117,6 +110,18 @@ export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
   }
 
   throw new Error(
-    `Family rules file "${filePath}" must have a "families" array or be a single-family document with "family_id"`,
+    `YAML from "${source}" must have a "families" array or be a single-family document with "family_id"`,
   );
+}
+
+export function loadFamilyRulesYaml(filePath: string): LoadedFamilyRules {
+  let content: string;
+  try {
+    content = readFileSync(filePath, "utf-8");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to read family rules file "${filePath}": ${msg}`);
+  }
+
+  return parseFamilyRulesYaml(content, filePath);
 }

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { bootstrapDatabase, type DbConnection } from "@plankton/db";
+import { bootstrapControlDb, type DbConnection } from "@plankton/db";
 import type { MarketDiscoveryGateway, ClobMarket } from "@plankton/domain";
 import { ScanService } from "../scan-service.js";
 
@@ -40,7 +40,7 @@ let tmpDir: string;
 
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-scan-"));
-  conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
+  conn = bootstrapControlDb(path.join(tmpDir, "test.db"));
 });
 
 afterEach(() => {

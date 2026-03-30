@@ -87,6 +87,11 @@ export class ExecutionModule implements RuntimeModule {
     this.log.info("execution module stopped");
   }
 
+  /** Number of queued + in-flight execution tasks. Zero = fully drained. */
+  get pendingCount(): number {
+    return this.queue?.pendingCount ?? 0;
+  }
+
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
     if (!this.started) {
       return { ok: false, detail: "not started" };

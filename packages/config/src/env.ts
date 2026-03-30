@@ -8,9 +8,10 @@ const logLevelSchema = z.enum(["debug", "info", "warn", "error"]);
 
 const envSchema = z
   .object({
-    RUNTIME_MODE: runtimeModeSchema.default("simulation"),
+    RUNTIME_MODE: runtimeModeSchema.optional(),
     LOG_LEVEL: logLevelSchema.default("info"),
     DB_PATH: z.string().default("./apps/runtime/data/plankton.db"),
+    BOOTSTRAP_FAMILY_RULES_PATH: z.string().optional(),
     FAMILY_RULES_PATH: z.string().default("./config/family_rules.yaml"),
     MARKET_DATA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().int().positive().default(120_000),
@@ -22,13 +23,9 @@ const envSchema = z
     POLY_PASSPHRASE: z.string().optional(),
     POLY_PRIVATE_KEY: z.string().optional(),
     PLANKTON_API_KEY: z.string().optional(),
-    LIVE_LITE_CONFIRM: z.string().optional(),
     PLANKTON_API_PORT: z.coerce.number().int().positive().default(3100),
-    LIVE_LITE_FAMILY_ALLOWLIST: z.string().optional(),
-    LIVE_LITE_MAX_FAMILIES: z.coerce.number().int().positive().optional(),
-    LIVE_LITE_MAX_OPEN_VALUE_USDC: z.coerce.number().positive().optional(),
-    LIVE_LITE_MAX_ORDER_USDC: z.coerce.number().positive().optional(),
-    LIVE_LITE_MAX_ACTIVE_MARKETS: z.coerce.number().int().positive().optional(),
+    // LIVE_LITE_* env vars removed — envelope caps now come from profile_settings in control.db
+    // Kept as optional for backward compat during migration; ignored by runtime.
     PLANKTON_AUTH_USERNAME: z.string().optional(),
     PLANKTON_AUTH_PASSWORD: z.string().optional(),
     PLANKTON_SESSION_SECRET: z.string().optional(),
@@ -38,6 +35,9 @@ const envSchema = z
       .transform((v) => v === "true"),
   })
   .superRefine((data, ctx) => {
+    // When RUNTIME_MODE is undefined, mode comes from control.db — skip env validation
+    if (!data.RUNTIME_MODE) return;
+
     if (data.RUNTIME_MODE === "live-lite" || data.RUNTIME_MODE === "paper") {
       for (const field of ["POLY_API_KEY", "POLY_API_SECRET", "POLY_PASSPHRASE"] as const) {
         if (!data[field]) {
@@ -50,23 +50,9 @@ const envSchema = z
       }
     }
 
-    if (data.RUNTIME_MODE === "live-lite" && data.LIVE_LITE_CONFIRM !== "true") {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["LIVE_LITE_CONFIRM"],
-        message:
-          'LIVE_LITE_CONFIRM=true is required when RUNTIME_MODE is "live-lite" — this is a safety gate to prevent accidental live trading',
-      });
-    }
-
     if (data.RUNTIME_MODE === "live-lite") {
       for (const field of [
         "POLY_PRIVATE_KEY",
-        "LIVE_LITE_FAMILY_ALLOWLIST",
-        "LIVE_LITE_MAX_FAMILIES",
-        "LIVE_LITE_MAX_OPEN_VALUE_USDC",
-        "LIVE_LITE_MAX_ORDER_USDC",
-        "LIVE_LITE_MAX_ACTIVE_MARKETS",
       ] as const) {
         if (!data[field]) {
           ctx.addIssue({
@@ -85,23 +71,11 @@ const envSchema = z
         });
       }
 
-      if (data.LIVE_LITE_FAMILY_ALLOWLIST && data.LIVE_LITE_MAX_FAMILIES) {
-        const allowlist = data.LIVE_LITE_FAMILY_ALLOWLIST.split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        if (allowlist.length > data.LIVE_LITE_MAX_FAMILIES) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["LIVE_LITE_FAMILY_ALLOWLIST"],
-            message: `allowlist length ${allowlist.length} exceeds maxFamilies ${data.LIVE_LITE_MAX_FAMILIES}`,
-          });
-        }
-      }
     }
   });
 
 export interface AppConfig {
-  runtimeMode: "simulation" | "paper" | "live-lite";
+  runtimeMode: "simulation" | "paper" | "live-lite" | undefined;
   logLevel: "debug" | "info" | "warn" | "error";
   dbPath: string;
   familyRulesPath: string;
@@ -120,15 +94,6 @@ export interface AppConfig {
   planktonAuthPassword: string | undefined;
   planktonSessionSecret: string | undefined;
   trustProxy: boolean;
-  liveLite?:
-    | {
-        familyAllowlist: string[];
-        maxFamilies: number;
-        maxOpenValueUsdc: number;
-        maxOrderUsdc: number;
-        maxActiveMarkets: number;
-      }
-    | undefined;
 }
 
 function findMonorepoRoot(): string {
@@ -162,24 +127,11 @@ export function loadEnv(envPath?: string): AppConfig {
 
   const env = result.data;
 
-  const liveLite =
-    env.RUNTIME_MODE === "live-lite" && env.LIVE_LITE_FAMILY_ALLOWLIST
-      ? {
-          familyAllowlist: env.LIVE_LITE_FAMILY_ALLOWLIST.split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
-          maxFamilies: env.LIVE_LITE_MAX_FAMILIES!,
-          maxOpenValueUsdc: env.LIVE_LITE_MAX_OPEN_VALUE_USDC!,
-          maxOrderUsdc: env.LIVE_LITE_MAX_ORDER_USDC!,
-          maxActiveMarkets: env.LIVE_LITE_MAX_ACTIVE_MARKETS!,
-        }
-      : undefined;
-
   return {
     runtimeMode: env.RUNTIME_MODE,
     logLevel: env.LOG_LEVEL,
     dbPath: path.resolve(root, env.DB_PATH),
-    familyRulesPath: path.resolve(root, env.FAMILY_RULES_PATH),
+    familyRulesPath: path.resolve(root, env.BOOTSTRAP_FAMILY_RULES_PATH ?? env.FAMILY_RULES_PATH),
     marketDataPollIntervalMs: env.MARKET_DATA_POLL_INTERVAL_MS,
     marketDataStaleThresholdMs: env.MARKET_DATA_STALE_THRESHOLD_MS,
     strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,
@@ -195,6 +147,5 @@ export function loadEnv(envPath?: string): AppConfig {
     planktonAuthPassword: env.PLANKTON_AUTH_PASSWORD,
     planktonSessionSecret: env.PLANKTON_SESSION_SECRET,
     trustProxy: env.TRUST_PROXY,
-    liveLite,
   };
 }

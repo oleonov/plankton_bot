@@ -1,45 +1,18 @@
 /**
  * Plankton API — operator-facing REST + SSE server.
  *
- * Reads runtime state from shared SQLite database.
- * Writes operator commands via operator_commands table.
+ * Reads from two databases:
+ *   control.db  — family catalog, rules, candidates, operator commands
+ *   ledger-{profile}.db — positions, orders, fills, metrics, market data
+ *
  * Does NOT import runtime modules or exchange SDK.
  */
 
 import process from "node:process";
 import { loadEnv } from "@plankton/config";
-import { openDatabase } from "@plankton/db";
-import type { DbConnection } from "@plankton/db";
+import { bootstrapControlDb, bootstrapLedgerDb } from "@plankton/db";
 import { buildServer } from "./server.js";
-
-const LATEST_MIGRATION = "006_effective_mode.sql";
-
-async function waitForDatabase(
-  dbPath: string,
-  maxRetries = 10,
-  delayMs = 2000,
-): Promise<DbConnection> {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    let conn: DbConnection | undefined;
-    try {
-      conn = openDatabase(dbPath);
-      const row = conn.db
-        .prepare("SELECT name FROM schema_migrations WHERE name = ?")
-        .get(LATEST_MIGRATION) as { name: string } | undefined;
-      if (!row) throw new Error(`migration ${LATEST_MIGRATION} not yet applied`);
-      return conn;
-    } catch (err) {
-      conn?.close();
-      if (attempt === maxRetries) throw err;
-      // eslint-disable-next-line no-console
-      console.log(
-        `database not ready (attempt ${attempt}/${maxRetries}), retrying in ${delayMs}ms...`,
-      );
-      await new Promise((r) => setTimeout(r, delayMs));
-    }
-  }
-  throw new Error("unreachable");
-}
+import { LedgerPool } from "./ledger-pool.js";
 
 async function main(): Promise<void> {
   const config = loadEnv();
@@ -64,9 +37,30 @@ async function main(): Promise<void> {
     console.log("PLANKTON_AUTH_USERNAME not set — password-only login (username recommended)");
   }
 
-  const conn = await waitForDatabase(config.dbPath);
+  // Derive control DB path from legacy dbPath
+  const controlDbPath =
+    process.env["CONTROL_DB_PATH"] ?? config.dbPath.replace(/[^/]+\.db$/, "control.db");
+  const controlConn = bootstrapControlDb(controlDbPath);
 
-  const app = await buildServer({ config, conn });
+  // Read desired profile from control DB to determine ledger path
+  const profileRow = controlConn.db
+    .prepare("SELECT desired_profile FROM runtime_control_state WHERE id = 1")
+    .get() as { desired_profile: string } | undefined;
+  const activeProfile = profileRow?.desired_profile ?? "simulation";
+  const ledgerDbPath = controlDbPath.replace("control.db", `ledger-${activeProfile}.db`);
+  const ledgerConn = bootstrapLedgerDb(ledgerDbPath);
+
+  const ledgerPool = new LedgerPool(controlDbPath);
+
+  // eslint-disable-next-line no-console
+  console.log(`databases opened — control: ${controlDbPath}, ledger: ${ledgerDbPath} (profile: ${activeProfile})`);
+
+  const app = await buildServer({
+    config,
+    controlDb: controlConn.db,
+    ledgerDb: ledgerConn.db,
+    ledgerPool,
+  });
 
   const port = config.planktonApiPort;
 
@@ -76,7 +70,9 @@ async function main(): Promise<void> {
 
   const shutdown = async () => {
     await app.close();
-    conn.close();
+    ledgerPool.closeAll();
+    ledgerConn.close();
+    controlConn.close();
     process.exit(0);
   };
 

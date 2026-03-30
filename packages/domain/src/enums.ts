@@ -239,3 +239,78 @@ export const ExchangeErrorCode = {
   Unknown: "UNKNOWN",
 } as const;
 export type ExchangeErrorCode = (typeof ExchangeErrorCode)[keyof typeof ExchangeErrorCode];
+
+// ─── Profile Switching ──────────────────────────────────────────────────
+
+export const ProfileId = {
+  Simulation: "simulation",
+  Paper: "paper",
+  LiveLite: "live-lite",
+} as const;
+export type ProfileId = (typeof ProfileId)[keyof typeof ProfileId];
+
+export const DeploymentStage = {
+  PaperOnly: "paper-only",
+  LiveProbe: "live-probe",
+  LiveScaled: "live-scaled",
+  Disabled: "disabled",
+} as const;
+export type DeploymentStage = (typeof DeploymentStage)[keyof typeof DeploymentStage];
+
+export const StrategyStage = {
+  ProbeOnly: "probe-only",
+  Scaled: "scaled",
+  BothSided: "both-sided",
+} as const;
+export type StrategyStage = (typeof StrategyStage)[keyof typeof StrategyStage];
+
+export const OperatorMode = {
+  Active: "active",
+  ReduceOnly: "reduce-only",
+  Quarantine: "quarantine",
+  Disabled: "disabled",
+} as const;
+export type OperatorMode = (typeof OperatorMode)[keyof typeof OperatorMode];
+
+export const SwitchState = {
+  Requested: "requested",
+  Pausing: "pausing",
+  Stopping: "stopping",
+  PreparingTarget: "preparing_target",
+  StartingTarget: "starting_target",
+  ReadyPaused: "ready_paused",
+  Completed: "completed",
+  Failed: "failed",
+  RolledBack: "rolled_back",
+} as const;
+export type SwitchState = (typeof SwitchState)[keyof typeof SwitchState];
+
+export const PreflightKind = {
+  Precheck: "precheck",
+  Startup: "startup",
+  Resume: "resume",
+} as const;
+export type PreflightKind = (typeof PreflightKind)[keyof typeof PreflightKind];
+
+export const PreflightStatus = {
+  Passed: "passed",
+  PassedWithWarnings: "passed_with_warnings",
+  Failed: "failed",
+} as const;
+export type PreflightStatus = (typeof PreflightStatus)[keyof typeof PreflightStatus];
+
+export const RuntimeStatus = {
+  Stopped: "stopped",
+  Starting: "starting",
+  ReadyPaused: "ready_paused",
+  Running: "running",
+  Stopping: "stopping",
+  Failed: "failed",
+} as const;
+export type RuntimeStatus = (typeof RuntimeStatus)[keyof typeof RuntimeStatus];
+
+export const LedgerResetPolicy = {
+  Preserve: "preserve",
+  ArchiveReset: "archive-reset",
+} as const;
+export type LedgerResetPolicy = (typeof LedgerResetPolicy)[keyof typeof LedgerResetPolicy];

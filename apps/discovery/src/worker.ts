@@ -1,10 +1,12 @@
 import pino from "pino";
 import { randomUUID } from "node:crypto";
-import { bootstrapDatabase, SqliteDiscoveryRunRepository } from "@plankton/db";
+import { bootstrapControlDb, SqliteDiscoveryRunRepository } from "@plankton/db";
 import { ScanService } from "./scan-service.js";
-import { loadDiscoveryEnv, getDbPath, createDiscoveryGateway } from "./gateway-factory.js";
+import { ControlEvaluator } from "./control-evaluator.js";
+import { loadDiscoveryEnv, getControlDbPath, createDiscoveryGateway } from "./gateway-factory.js";
 
 const SCHEDULE_INTERVAL_MS = 60 * 60 * 1000;
+const EVAL_INTERVAL_MS = 60 * 60 * 1000; // 1 hour, offset from scan
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const STALE_THRESHOLD_MS = 2 * 60_000;
 const POLL_INTERVAL_MS = 5_000;
@@ -17,9 +19,9 @@ const workerId = randomUUID();
 
 async function main(): Promise<void> {
   loadDiscoveryEnv();
-  const dbPath = getDbPath();
-  logger.info({ dbPath, workerId }, "Discovery worker starting");
-  const conn = bootstrapDatabase(dbPath);
+  const controlDbPath = getControlDbPath();
+  logger.info({ dbPath: controlDbPath, workerId }, "Discovery worker starting");
+  const conn = bootstrapControlDb(controlDbPath);
   const runRepo = new SqliteDiscoveryRunRepository(conn.db);
 
   // Recover stale runs
@@ -40,14 +42,17 @@ async function main(): Promise<void> {
     }
   }
 
-  // Idle heartbeat — append-only metric proving worker is alive between scans
+  // Idle heartbeat — upsert into service_heartbeats proving worker is alive between scans
   const writeHeartbeat = (): void => {
     conn.db
       .prepare(
-        `INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
-         VALUES ('discovery_worker_heartbeat', 1, ?, datetime('now'))`,
+        `INSERT INTO service_heartbeats (service_name, instance_id, last_heartbeat_at, status_json)
+         VALUES ('discovery', ?, datetime('now'), ?)
+         ON CONFLICT(service_name, instance_id) DO UPDATE SET
+           last_heartbeat_at = excluded.last_heartbeat_at,
+           status_json = excluded.status_json`,
       )
-      .run(JSON.stringify({ workerId }));
+      .run(workerId, JSON.stringify({ workerId }));
   };
   writeHeartbeat();
   const idleTimer = setInterval(writeHeartbeat, IDLE_HEARTBEAT_MS);
@@ -67,6 +72,22 @@ async function main(): Promise<void> {
     const recovered = runRepo.failStale(STALE_THRESHOLD_MS);
     if (recovered > 0) logger.warn({ recovered }, "Periodic stale check: recovered orphaned runs");
   }, STALE_THRESHOLD_MS); // check every 2 minutes
+
+  // Control evaluator — scores candidates and proposes promotions
+  const controlEvaluator = new ControlEvaluator({ db: conn.db, log: logger });
+
+  const runEvaluation = (): void => {
+    try {
+      controlEvaluator.run();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ error: msg }, "Control evaluation failed");
+    }
+  };
+
+  // Run initial evaluation, then on a timer
+  runEvaluation();
+  const evalTimer = setInterval(runEvaluation, EVAL_INTERVAL_MS);
 
   // Poll loop
   let executing = false;
@@ -113,6 +134,7 @@ async function main(): Promise<void> {
     clearInterval(pollTimer);
     clearInterval(idleTimer);
     clearInterval(staleCheckTimer);
+    clearInterval(evalTimer);
 
     const deadline = Date.now() + 5 * 60_000;
     while (executing && Date.now() < deadline) {
@@ -127,7 +149,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 
-  logger.info("Worker running. Poll 5s, schedule 1h, idle heartbeat 30s.");
+  logger.info("Worker running. Poll 5s, scan schedule 1h, eval 1h, idle heartbeat 30s.");
 }
 
 main().catch((err) => {

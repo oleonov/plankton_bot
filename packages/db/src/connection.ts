@@ -20,3 +20,12 @@ export function openDatabase(dbPath: string): DbConnection {
     },
   };
 }
+
+export function openDatabaseWithSchema(
+  dbPath: string,
+  schemaSql: string,
+): DbConnection {
+  const conn = openDatabase(dbPath);
+  conn.db.exec(schemaSql);
+  return conn;
+}

@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, apiPost } from "./client.ts";
+import { apiFetch, apiPost, apiPut } from "./client.ts";
 import type {
   StatusData,
   MetricsData,
@@ -18,6 +18,12 @@ import type {
   DiscoveryRunDTO,
   ProposalDTO,
   Paginated,
+  ProfilesResponse,
+  ProfileDetailDTO,
+  ProfileSettingsDTO,
+  AuditEntryDTO,
+  SwitchResponse,
+  ControlOverviewDTO,
 } from "./types.ts";
 
 function withParams(
@@ -193,7 +199,7 @@ export function usePause() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (reason?: string) => apiPost("/api/v1/actions/pause", { reason }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["status"] }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["status"] }),
   });
 }
 
@@ -201,7 +207,7 @@ export function useResume() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (reason?: string) => apiPost("/api/v1/actions/resume", { reason }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["status"] }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["status"] }),
   });
 }
 
@@ -289,7 +295,7 @@ export function useTriggerScan() {
       apiPost<{ runId: number; status: string; alreadyActive: boolean }>(
         "/api/v1/discovery/scan",
       ),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["discovery"] }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["discovery"] }),
   });
 }
 
@@ -336,7 +342,7 @@ export function useDismissProposal(proposalId: number) {
   return useMutation({
     mutationFn: (reason?: string) =>
       apiPost(`/api/v1/families/proposals/${proposalId}/dismiss`, { reason }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["families", "proposals"] }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: ["families", "proposals"] }),
   });
 }
 
@@ -367,6 +373,156 @@ export function useFamilyAction(
         qc.invalidateQueries({ queryKey: ["families"] }),
         qc.invalidateQueries({ queryKey: ["status"] }),
       ]);
+    },
+  });
+}
+
+// ─── Profiles ─────────────────────────────────────────────────────────
+
+export function useProfiles() {
+  return useQuery({
+    queryKey: ["profiles"],
+    queryFn: () => apiFetch<ProfilesResponse>("/api/v1/profiles"),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useProfileDetail(profileId: string | null) {
+  return useQuery({
+    queryKey: ["profiles", profileId],
+    queryFn: () => apiFetch<ProfileDetailDTO>(`/api/v1/profiles/${profileId}`),
+    enabled: !!profileId,
+  });
+}
+
+export function useProfileSettings(profileId: string | null) {
+  return useQuery({
+    queryKey: ["profiles", profileId, "settings"],
+    queryFn: () => apiFetch<ProfileSettingsDTO>(`/api/v1/profiles/${profileId}/settings`),
+    enabled: !!profileId,
+  });
+}
+
+export function useUpdateProfileSettings(profileId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: {
+      initialBalanceUsdc?: number;
+      envelopeJson?: string;
+      riskCapsJson?: string;
+    }) => apiPut<ProfileSettingsDTO>(`/api/v1/profiles/${profileId}/settings`, body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["profiles"] });
+      void qc.invalidateQueries({ queryKey: ["profiles", profileId] });
+    },
+  });
+}
+
+// ─── Profile-scoped ledger hooks ──────────────────────────────────────
+
+export function useProfileOrders(
+  profileId: string | undefined,
+  filters: OrderFilters = {},
+) {
+  return useQuery({
+    queryKey: ["profiles", profileId, "orders", filters],
+    queryFn: () =>
+      apiFetch<Paginated<OrderDTO>>(
+        withParams(`/api/v1/profiles/${profileId}/orders`, {
+          status: filters.status,
+          family_id: filters.familyId,
+          limit: filters.limit,
+          cursor: filters.cursor,
+        }),
+      ),
+    enabled: !!profileId,
+  });
+}
+
+export function useProfilePositions(
+  profileId: string | undefined,
+  filters: PositionFilters = {},
+) {
+  return useQuery({
+    queryKey: ["profiles", profileId, "positions", filters],
+    queryFn: () =>
+      apiFetch<PositionDTO[]>(
+        withParams(`/api/v1/profiles/${profileId}/positions`, {
+          family_id: filters.familyId,
+          dust: filters.dust || undefined,
+          status: filters.status,
+          sort: filters.sort,
+        }),
+      ),
+    enabled: !!profileId,
+  });
+}
+
+export function useProfileFills(
+  profileId: string | undefined,
+  filters: FillFilters = {},
+) {
+  return useQuery({
+    queryKey: ["profiles", profileId, "fills", filters],
+    queryFn: () =>
+      apiFetch<Paginated<FillDTO>>(
+        withParams(`/api/v1/profiles/${profileId}/fills`, {
+          family_id: filters.familyId,
+          since: filters.since,
+          limit: filters.limit,
+          cursor: filters.cursor,
+        }),
+      ),
+    enabled: !!profileId,
+  });
+}
+
+// ─── Control Overview ─────────────────────────────────────────────────
+
+export function useControlOverview() {
+  return useQuery({
+    queryKey: ["control", "overview"],
+    queryFn: () => apiFetch<ControlOverviewDTO>("/api/v1/control/overview"),
+    refetchInterval: 15_000,
+  });
+}
+
+// ─── Audit ────────────────────────────────────────────────────────────
+
+interface AuditFilters {
+  limit?: number;
+  cursor?: string;
+  type?: string;
+  profile?: string;
+  familyId?: string;
+}
+
+export function useAudit(filters: AuditFilters = {}) {
+  return useQuery({
+    queryKey: ["audit", filters],
+    queryFn: () =>
+      apiFetch<Paginated<AuditEntryDTO>>(
+        withParams("/api/v1/audit", {
+          limit: filters.limit,
+          cursor: filters.cursor,
+          type: filters.type,
+          profile: filters.profile,
+          familyId: filters.familyId,
+        }),
+      ),
+  });
+}
+
+// ─── Profile Switch ───────────────────────────────────────────────────
+
+export function useSwitchProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { toProfile: string; ledgerResetPolicy?: string; reason?: string }) =>
+      apiPost<SwitchResponse>("/api/v1/actions/switch-profile", body),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["profiles"] });
+      void qc.invalidateQueries({ queryKey: ["status"] });
     },
   });
 }

@@ -5,7 +5,8 @@ import { SqliteDiscoveryRunRepository } from "@plankton/db";
 import { ok, ApiError } from "../errors.js";
 
 interface DiscoveryOpts {
-  db: Database.Database;
+  controlDb: Database.Database;
+  ledgerDb: Database.Database;
 }
 
 interface CandidateRow {
@@ -113,7 +114,9 @@ function parseCursor(raw: string): { score: number; id: string } | null {
 }
 
 export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, opts) => {
-  const { db } = opts;
+  const { controlDb, ledgerDb } = opts;
+  // Most discovery tables live in control DB; ledger is only needed for materialization
+  const db = controlDb;
 
   // ── GET /discovery/status ───────────────────────────────────────────────
   app.get("/discovery/status", async () => {
@@ -122,9 +125,10 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
     const lastSuccessfulRun = runRepo.findLastSuccessful();
     const activeRun = runRepo.findActive();
 
+    // Discovery worker writes to service_heartbeats (moved from runtime_metrics in Phase 1)
     const heartbeatRow = db
       .prepare(
-        "SELECT MAX(captured_at) as ts FROM runtime_metrics WHERE metric_name = 'discovery_worker_heartbeat'",
+        "SELECT MAX(last_heartbeat_at) as ts FROM service_heartbeats WHERE service_name = 'discovery'",
       )
       .get() as { ts: string | null } | undefined;
     const heartbeatAt = heartbeatRow?.ts ?? null;
@@ -292,9 +296,10 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       const familyId = row.candidate_id;
       const now = new Date().toISOString();
 
-      const materialize = db.transaction(() => {
+      // Control DB transaction: all control-side inserts are atomic
+      const materializeControl = controlDb.transaction(() => {
         // Atomically guard + update candidate status (race-safe)
-        const result = db.prepare(
+        const result = controlDb.prepare(
           `UPDATE family_candidates
            SET status = 'materialized', materialized_at = ?
            WHERE candidate_id = ? AND status = 'reviewed'`,
@@ -302,7 +307,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
         if (result.changes === 0) return false;
 
         // 1. INSERT family_catalog
-        db.prepare(
+        controlDb.prepare(
           `INSERT INTO family_catalog
              (family_id, family_key, primary_category, regime, horizon, cadence,
               strategy_profile, slug_pattern, created_at, updated_at)
@@ -321,7 +326,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
         );
 
         // 2. INSERT family_rules with probe-only defaults
-        db.prepare(
+        controlDb.prepare(
           `INSERT INTO family_rules
              (family_id, enabled, action, entry_mode, scale_mode, exit_mode,
               allow_heavy_campaigns, max_open_value_usdc, max_active_markets,
@@ -331,45 +336,35 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
         ).run(familyId, now);
 
         // 3. INSERT family_evidence with zeros + probe warming-up substate
-        db.prepare(
+        controlDb.prepare(
           "INSERT INTO family_evidence (family_id, probe_substate, updated_at) VALUES (?, 'warming-up', ?)",
         ).run(familyId, now);
 
-        // 4. INSERT family_runtime_state baseline
-        db.prepare(
-          `INSERT INTO family_runtime_state
-             (family_id, runtime_mode, open_value_usdc, open_position_count,
-              open_dust_count, active_market_count, current_tail_cost_usdc,
-              tail_adjusted_pnl_live, effective_mode, derived_mode_reason, updated_at)
-           VALUES (?, 'active', 0, 0, 0, 0, 0, 0, 'active',
-                   'baseline: zero exposure, probe-only gated by entry rules', ?)`,
-        ).run(familyId, now);
-
-        // 5. INSERT family_rules_snapshot
-        const rulesRow = db
+        // 4. INSERT family_rules_snapshot
+        const rulesRow = controlDb
           .prepare("SELECT * FROM family_rules WHERE family_id = ?")
           .get(familyId) as Record<string, unknown>;
-        db.prepare(
+        controlDb.prepare(
           `INSERT INTO family_rules_snapshot (family_id, snapshot, reason, captured_at)
            VALUES (?, ?, 'probe-baseline', ?)`,
         ).run(familyId, JSON.stringify(rulesRow), now);
 
-        // 6. INSERT operator_commands (rules_reload, deduped)
-        const pending = db
+        // 5. INSERT operator_commands (rules_reload, deduped)
+        const pending = controlDb
           .prepare(
             "SELECT 1 FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending' LIMIT 1",
           )
           .get();
         if (!pending) {
-          db.prepare(
+          controlDb.prepare(
             `INSERT INTO operator_commands
                (action, target_id, reason, status, initiator_type, created_at)
              VALUES ('rules_reload', NULL, ?, 'pending', 'system', ?)`,
           ).run(`materialized candidate ${familyId}`, now);
         }
 
-        // 7. INSERT state_transitions
-        db.prepare(
+        // 6. INSERT state_transitions
+        controlDb.prepare(
           `INSERT INTO state_transitions
              (entity_type, entity_id, from_state, to_state, trigger_type, initiator, reason)
            VALUES ('candidate', ?, 'reviewed', 'materialized', 'operator', 'api', ?)`,
@@ -378,7 +373,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
         return true;
       });
 
-      const applied = materialize();
+      const applied = materializeControl();
       if (!applied) {
         throw new ApiError(
           409,
@@ -386,6 +381,16 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           "CONCURRENT_MODIFICATION",
         );
       }
+
+      // Ledger DB: insert family_runtime_state baseline (separate DB, not transactional with control)
+      ledgerDb.prepare(
+        `INSERT INTO family_runtime_state
+           (family_id, runtime_mode, open_value_usdc, open_position_count,
+            open_dust_count, active_market_count, current_tail_cost_usdc,
+            tail_adjusted_pnl_live, effective_mode, derived_mode_reason, updated_at)
+         VALUES (?, 'active', 0, 0, 0, 0, 0, 0, 'active',
+                 'baseline: zero exposure, probe-only gated by entry rules', ?)`,
+      ).run(familyId, now);
 
       return ok({
         ...toCandidateDto(row),

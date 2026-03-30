@@ -24,7 +24,8 @@ import { buildStatusSnapshot } from "./status.js";
 import { normalizeRiskEvent } from "./normalize-risk-event.js";
 
 interface EventsOpts {
-  db: Database.Database;
+  controlDb: Database.Database;
+  ledgerDb: Database.Database;
   marketDataStaleThresholdMs?: number;
 }
 
@@ -57,47 +58,54 @@ const CATEGORY_TO_EVENTS: Record<string, string[]> = {
   transitions: ["transitions"],
 };
 
-function takeSnapshot(db: Database.Database): ChangeSnapshot {
-  const pos = db.prepare("SELECT MAX(updated_at) as ts FROM positions").get() as {
+function takeSnapshot(
+  controlDb: Database.Database,
+  ledgerDb: Database.Database,
+): ChangeSnapshot {
+  // Ledger tables
+  const pos = ledgerDb.prepare("SELECT MAX(updated_at) as ts FROM positions").get() as {
     ts: string | null;
   };
-  const ord = db.prepare("SELECT MAX(updated_at) as ts FROM orders").get() as { ts: string | null };
-  const fill = db.prepare("SELECT MAX(filled_at) as ts FROM fills").get() as { ts: string | null };
-  const fam = db.prepare("SELECT MAX(updated_at) as ts FROM family_runtime_state").get() as {
+  const ord = ledgerDb.prepare("SELECT MAX(updated_at) as ts FROM orders").get() as {
     ts: string | null;
   };
-  const risk = db.prepare("SELECT MAX(created_at) as ts FROM risk_events").get() as {
+  const fill = ledgerDb.prepare("SELECT MAX(filled_at) as ts FROM fills").get() as {
     ts: string | null;
   };
-
-  // Composite hash for status-affecting tables
-  const opCmd = db
-    .prepare("SELECT MAX(applied_at) as ts FROM operator_commands WHERE status = 'applied'")
-    .get() as { ts: string | null };
-  const botRun = db.prepare("SELECT MAX(started_at) as ts FROM bot_runs").get() as {
+  const fam = ledgerDb.prepare("SELECT MAX(updated_at) as ts FROM family_runtime_state").get() as {
     ts: string | null;
   };
-  const reconMetric = db
+  const risk = ledgerDb.prepare("SELECT MAX(created_at) as ts FROM risk_events").get() as {
+    ts: string | null;
+  };
+  const botRun = ledgerDb.prepare("SELECT MAX(started_at) as ts FROM bot_runs").get() as {
+    ts: string | null;
+  };
+  const reconMetric = ledgerDb
     .prepare(
       "SELECT MAX(captured_at) as ts FROM runtime_metrics WHERE metric_name IN ('last_reconciliation','market_data_last_update','market_data_poll_progress')",
     )
     .get() as { ts: string | null };
 
-  const discoveryRunTs = db
+  // Control tables
+  const opCmd = controlDb
+    .prepare("SELECT MAX(applied_at) as ts FROM operator_commands WHERE status = 'applied'")
+    .get() as { ts: string | null };
+  const discoveryRunTs = controlDb
     .prepare(
       "SELECT MAX(COALESCE(finished_at, started_at, requested_at)) FROM discovery_runs",
     )
     .pluck()
     .get() as string | null;
-  const candidateMaxTs = db
+  const candidateMaxTs = controlDb
     .prepare("SELECT MAX(scores_updated_at) FROM family_candidates")
     .pluck()
     .get() as string | null;
-  const proposalCount = db
+  const proposalCount = controlDb
     .prepare("SELECT COUNT(*) FROM promotion_proposals WHERE status = 'pending'")
     .pluck()
     .get() as number;
-  const transitionMaxTs = db
+  const transitionMaxTs = controlDb
     .prepare("SELECT MAX(created_at) FROM state_transitions")
     .pluck()
     .get() as string | null;
@@ -117,6 +125,7 @@ function takeSnapshot(db: Database.Database): ChangeSnapshot {
 }
 
 export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) => {
+  const { controlDb, ledgerDb } = opts;
   const staleMs = opts.marketDataStaleThresholdMs ?? 120_000;
 
   app.get<{ Querystring: { types?: string } }>("/events", async (request, reply) => {
@@ -138,7 +147,7 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
       Connection: "keep-alive",
     });
 
-    let snapshot = takeSnapshot(opts.db);
+    let snapshot = takeSnapshot(controlDb, ledgerDb);
     let alive = true;
     let metricsTickCount = 0;
 
@@ -157,10 +166,10 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
       }
 
       try {
-        const next = takeSnapshot(opts.db);
+        const next = takeSnapshot(controlDb, ledgerDb);
 
         if (next.positions !== snapshot.positions) {
-          const rows = opts.db
+          const rows = ledgerDb
             .prepare(
               "SELECT * FROM positions WHERE updated_at > ? ORDER BY updated_at DESC LIMIT 20",
             )
@@ -179,7 +188,7 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
         }
 
         if (next.orders !== snapshot.orders) {
-          const rows = opts.db
+          const rows = ledgerDb
             .prepare("SELECT * FROM orders WHERE updated_at > ? ORDER BY updated_at DESC LIMIT 20")
             .all(snapshot.orders) as Record<string, unknown>[];
           for (const row of rows) {
@@ -205,7 +214,7 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
         }
 
         if (next.fills !== snapshot.fills) {
-          const rows = opts.db
+          const rows = ledgerDb
             .prepare("SELECT * FROM fills WHERE filled_at > ? ORDER BY filled_at DESC LIMIT 20")
             .all(snapshot.fills) as Record<string, unknown>[];
           for (const row of rows) {
@@ -224,7 +233,7 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
         }
 
         if (next.families !== snapshot.families) {
-          const rows = opts.db
+          const rows = ledgerDb
             .prepare(
               "SELECT * FROM family_runtime_state WHERE updated_at > ? ORDER BY updated_at DESC LIMIT 20",
             )
@@ -245,12 +254,12 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
 
         // Emit status event (same shape as GET /status) on any status-affecting change
         if (next.statusHash !== snapshot.statusHash) {
-          sendEvent("status", buildStatusSnapshot(opts.db, staleMs));
+          sendEvent("status", buildStatusSnapshot(ledgerDb, staleMs));
         }
 
         // Emit risk:event when new risk events appear
         if (next.riskEvents !== snapshot.riskEvents) {
-          const rows = opts.db
+          const rows = ledgerDb
             .prepare(
               "SELECT * FROM risk_events WHERE created_at > ? ORDER BY created_at DESC LIMIT 20",
             )
@@ -293,13 +302,13 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
         if (metricsTickCount >= 15) {
           metricsTickCount = 0;
 
-          const positions = opts.db
+          const positions = ledgerDb
             .prepare("SELECT status, COUNT(*) as cnt FROM positions GROUP BY status")
             .all() as Array<{ status: string; cnt: number }>;
-          const totalFills = opts.db
+          const totalFills = ledgerDb
             .prepare("SELECT COUNT(*) as cnt, COALESCE(SUM(size_usdc),0) as volume FROM fills")
             .get() as { cnt: number; volume: number };
-          const pnl = opts.db
+          const pnl = ledgerDb
             .prepare("SELECT COALESCE(SUM(realized_pnl),0) as total FROM positions")
             .get() as { total: number };
 

@@ -9,7 +9,7 @@ interface PositionOpts {
   db: Database.Database;
 }
 
-function toDto(row: Record<string, unknown>, meta: MarketMeta, resInfo?: ResolutionInfo) {
+export function toDto(row: Record<string, unknown>, meta: MarketMeta, resInfo?: ResolutionInfo) {
   return {
     positionId: row.position_id,
     tokenId: row.token_id,

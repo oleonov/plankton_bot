@@ -20,6 +20,15 @@ export function formatAgo(iso: string | null): string {
   return `${months}mo ago`;
 }
 
+export function formatAge(openedAt: string): string {
+  const ms = Date.now() - new Date(openedAt).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "\u2014";
+  const hours = ms / 3_600_000;
+  if (hours < 1) return `${Math.round(ms / 60_000)}m`;
+  if (hours < 24) return `${Math.round(hours)}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
 export function formatTimeLeft(endDate: string | null): { text: string; color: string } {
   if (!endDate) return { text: "\u2014", color: "var(--text-dim)" };
   const end = new Date(endDate).getTime();

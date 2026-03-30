@@ -4,7 +4,8 @@ import { getPromotionBlockers } from "@plankton/domain";
 import { ok, ApiError } from "../errors.js";
 
 interface FamilyOpts {
-  db: Database.Database;
+  controlDb: Database.Database;
+  ledgerDb: Database.Database;
 }
 
 interface FamilyCatalogRow {
@@ -82,20 +83,25 @@ function toFamilyDto(
 }
 
 export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) => {
-  const listCatalog = opts.db.prepare("SELECT * FROM family_catalog");
-  const listState = opts.db.prepare("SELECT * FROM family_runtime_state");
-  const listCaps = opts.db.prepare(
+  const { controlDb, ledgerDb } = opts;
+
+  // Control DB: catalog, rules, evidence
+  const listCatalog = controlDb.prepare("SELECT * FROM family_catalog");
+  const listCaps = controlDb.prepare(
     "SELECT family_id, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules",
   );
-  const getCatalog = opts.db.prepare("SELECT * FROM family_catalog WHERE family_id = ?");
-  const getState = opts.db.prepare("SELECT * FROM family_runtime_state WHERE family_id = ?");
-  const getCaps = opts.db.prepare(
+  const getCatalog = controlDb.prepare("SELECT * FROM family_catalog WHERE family_id = ?");
+  const getCaps = controlDb.prepare(
     "SELECT family_id, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules WHERE family_id = ?",
   );
-  const getPositions = opts.db.prepare(
+
+  // Ledger DB: runtime state, positions, orders
+  const listState = ledgerDb.prepare("SELECT * FROM family_runtime_state");
+  const getState = ledgerDb.prepare("SELECT * FROM family_runtime_state WHERE family_id = ?");
+  const getPositions = ledgerDb.prepare(
     "SELECT * FROM positions WHERE family_id = ? ORDER BY updated_at DESC",
   );
-  const getOrders = opts.db.prepare(
+  const getOrders = ledgerDb.prepare(
     "SELECT * FROM orders WHERE family_id = ? ORDER BY created_at DESC LIMIT 100",
   );
 
@@ -111,7 +117,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     };
   }
 
-  const listEvidence = opts.db.prepare(
+  const listEvidence = controlDb.prepare(
     "SELECT family_id, promotion_state, probe_substate FROM family_evidence",
   );
 
@@ -185,7 +191,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       const { familyId } = request.params;
       const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
       if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-      const row = opts.db
+      const row = controlDb
         .prepare("SELECT * FROM family_evidence WHERE family_id = ?")
         .get(familyId) as Record<string, unknown> | undefined;
       if (!row) return ok(null);
@@ -230,7 +236,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
 
   // ── GET /families/recent-demotions ─────────────────────────────────────
   app.get("/families/recent-demotions", async () => {
-    const rows = opts.db
+    const rows = controlDb
       .prepare(
         `SELECT * FROM state_transitions
          WHERE entity_type = 'family'
@@ -263,7 +269,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       const { familyId } = request.params;
       const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
       if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-      const rows = opts.db
+      const rows = controlDb
         .prepare(
           `SELECT * FROM state_transitions
            WHERE entity_type = 'family' AND entity_id = ?
@@ -287,9 +293,91 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     },
   );
 
+  // ── GET /families/:familyId/scorecards ─────────────────────────────────
+  app.get<{ Params: { familyId: string } }>(
+    "/families/:familyId/scorecards",
+    async (request) => {
+      const { familyId } = request.params;
+      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+      const rows = controlDb
+        .prepare(
+          "SELECT * FROM family_validation_scorecards WHERE family_id = ? ORDER BY validated_at DESC LIMIT 50",
+        )
+        .all(familyId);
+      return ok(rows);
+    },
+  );
+
+  // ── GET /families/:familyId/deployments ──────────────────────────────
+  app.get<{ Params: { familyId: string } }>(
+    "/families/:familyId/deployments",
+    async (request) => {
+      const { familyId } = request.params;
+      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+      const rows = controlDb
+        .prepare(
+          `SELECT fd.*, p.display_name as profile_name
+           FROM family_deployments fd
+           JOIN profiles p ON fd.profile = p.profile_id
+           WHERE fd.family_id = ?
+           ORDER BY p.profile_id`,
+        )
+        .all(familyId);
+      return ok(rows);
+    },
+  );
+
+  // ── GET /families/:familyId/rollups ──────────────────────────────────
+  app.get<{ Params: { familyId: string } }>(
+    "/families/:familyId/rollups",
+    async (request) => {
+      const { familyId } = request.params;
+      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+      const rows = controlDb
+        .prepare("SELECT * FROM family_profile_rollups WHERE family_id = ? ORDER BY profile")
+        .all(familyId);
+      return ok(rows);
+    },
+  );
+
+  // ── GET /families/:familyId/audit ────────────────────────────────────
+  app.get<{ Params: { familyId: string } }>(
+    "/families/:familyId/audit",
+    async (request) => {
+      const { familyId } = request.params;
+      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+      const rows = controlDb
+        .prepare(
+          "SELECT * FROM state_transitions WHERE entity_id = ? ORDER BY created_at DESC LIMIT 100",
+        )
+        .all(familyId);
+      return ok(rows);
+    },
+  );
+
+  // ── GET /families/:familyId/rules-snapshots ──────────────────────────
+  app.get<{ Params: { familyId: string } }>(
+    "/families/:familyId/rules-snapshots",
+    async (request) => {
+      const { familyId } = request.params;
+      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+      const rows = controlDb
+        .prepare(
+          "SELECT * FROM family_rules_snapshot WHERE family_id = ? ORDER BY captured_at DESC LIMIT 50",
+        )
+        .all(familyId);
+      return ok(rows);
+    },
+  );
+
   // ── GET /families/proposals ────────────────────────────────────────────
   app.get("/families/proposals", async () => {
-    const rows = opts.db
+    const rows = controlDb
       .prepare(
         "SELECT * FROM promotion_proposals WHERE status = 'pending' ORDER BY created_at ASC",
       )
@@ -303,7 +391,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     async (request) => {
       const id = Number(request.params.proposalId);
       const body = (request.body ?? {}) as { reason?: string };
-      const row = opts.db
+      const row = controlDb
         .prepare("SELECT * FROM promotion_proposals WHERE id = ?")
         .get(id) as Record<string, unknown> | undefined;
       if (!row) throw new ApiError(404, `proposal ${id} not found`, "PROPOSAL_NOT_FOUND");
@@ -314,7 +402,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           "INVALID_STATUS",
         );
       }
-      opts.db
+      controlDb
         .prepare(
           `UPDATE promotion_proposals
            SET status = 'dismissed', resolved_at = datetime('now'), resolved_by = ?

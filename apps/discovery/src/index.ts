@@ -1,7 +1,7 @@
 import pino from "pino";
-import { bootstrapDatabase } from "@plankton/db";
+import { bootstrapControlDb } from "@plankton/db";
 import { ScanService } from "./scan-service.js";
-import { loadDiscoveryEnv, getDbPath, createDiscoveryGateway } from "./gateway-factory.js";
+import { loadDiscoveryEnv, getControlDbPath, createDiscoveryGateway } from "./gateway-factory.js";
 
 const logger = pino({
   transport: { target: "pino-pretty", options: { colorize: true } },
@@ -9,9 +9,9 @@ const logger = pino({
 
 async function main(): Promise<void> {
   loadDiscoveryEnv();
-  const dbPath = getDbPath();
-  logger.info({ dbPath }, "CLI scan starting");
-  const conn = bootstrapDatabase(dbPath);
+  const controlDbPath = getControlDbPath();
+  logger.info({ dbPath: controlDbPath }, "CLI scan starting");
+  const conn = bootstrapControlDb(controlDbPath);
   try {
     const service = new ScanService({ db: conn.db, log: logger, gateway: createDiscoveryGateway() });
     const stats = await service.run();

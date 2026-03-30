@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bootstrapDatabase, SqliteDiscoveryRunRepository, type DbConnection } from "@plankton/db";
+import { bootstrapControlDb, SqliteDiscoveryRunRepository, type DbConnection } from "@plankton/db";
 
 /**
  * Integration tests for worker startup + queue lifecycle.
@@ -25,7 +25,7 @@ const emptyStats = {
 
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-wint-"));
-  conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
+  conn = bootstrapControlDb(path.join(tmpDir, "test.db"));
   repo = new SqliteDiscoveryRunRepository(conn.db);
 });
 

@@ -3,19 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { InProcessEventBus } from "@plankton/event-bus";
-import {
-  bootstrapDatabase,
-  SqliteFamilyCandidateRepository,
-  SqliteFamilyEvidenceRepository,
-  SqlitePromotionProposalRepository,
-  SqliteOperatorCommandRepository,
-  SqliteStateTransitionRepository,
-  SqliteFamilyStateRepository,
-} from "@plankton/db";
+import { bootstrapDatabase, SqliteFamilyEvidenceRepository } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
+import { createFamilyId } from "@plankton/domain";
 import type { FamilyRulesProvider } from "@plankton/domain";
 import { FamilyEvidenceEngine } from "../modules/evidence/evidence-engine.js";
 import type { ScoreComputer } from "../modules/evidence/score-computer.js";
+
+const FAM_ID = createFamilyId("fam-deployed-1");
 
 const silentLog = {
   info: vi.fn(),
@@ -31,7 +26,7 @@ let tmpDir: string;
 
 beforeEach(() => {
   vi.useFakeTimers();
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-unscored-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-evidence-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
 });
 
@@ -41,48 +36,18 @@ afterEach(() => {
   rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe("Unscored candidate quick-check flow", () => {
-  it("seeds unscored candidate, runs quick-check, verifies scores set", async () => {
-    const candidateRepo = new SqliteFamilyCandidateRepository(conn.db);
+describe("Evidence engine deployed family scoring", () => {
+  it("scores deployed families and writes to family_evidence", async () => {
     const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
-    const proposalRepo = new SqlitePromotionProposalRepository(conn.db);
-    const commandRepo = new SqliteOperatorCommandRepository(conn.db);
-    const transitionRepo = new SqliteStateTransitionRepository(conn.db);
-    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     const bus = new InProcessEventBus();
 
-    // Seed an unscored candidate (no scoresUpdatedAt)
-    candidateRepo.upsert({
-      candidateId: "cand-unscored-1",
-      familyKey: "unscored-key",
-      regime: "threshold",
-      horizon: "daily",
-      cadence: "daily",
-      patternConfidence: "medium",
-      primaryCategory: "crypto",
-      strategyProfile: "scalp",
-      slugPattern: null,
-      matchedFamilyId: null,
-      activeMarketCount: 3,
-      nearestEndDate: null,
-      clusterVolume24h: 5000,
-      recurrenceScore: null,
-      recycleScore: null,
-      liveViabilityScore: null,
-      toxicityPenalty: null,
-      gateRecommendation: "ignore",
-      recommendationReason: null,
-      scoresUpdatedAt: null,
-      status: "discovered",
-      firstSeenAt: new Date().toISOString(),
-      lastSeenAt: new Date().toISOString(),
-      reviewedAt: null,
-      materializedAt: null,
-    });
-
-    // Verify it's unscored
-    const unscored = candidateRepo.findUnscored();
-    expect(unscored).toHaveLength(1);
+    // Seed FK parent and family_evidence row
+    conn.db
+      .prepare("INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(String(FAM_ID), "deployed-fam", "crypto", "threshold", "daily", "daily", "scalp");
+    conn.db
+      .prepare("INSERT INTO family_evidence (family_id) VALUES (?)")
+      .run(String(FAM_ID));
 
     const mockSc: ScoreComputer = {
       computeRecurrenceMetrics: vi.fn().mockReturnValue({
@@ -120,7 +85,20 @@ describe("Unscored candidate quick-check flow", () => {
     const rulesProvider: FamilyRulesProvider = {
       getRule: vi.fn().mockReturnValue(null),
       isEnabled: vi.fn().mockReturnValue(true),
-      getAllFamilies: vi.fn().mockReturnValue([]),
+      getAllFamilies: vi.fn().mockReturnValue([
+        {
+          familyId: FAM_ID,
+          familyKey: "deployed-fam",
+          primaryCategory: "crypto",
+          regime: "threshold",
+          horizon: "daily",
+          cadence: "daily",
+          strategyProfile: "scalp",
+          topicKey: null,
+          slugPattern: null,
+          notes: null,
+        },
+      ]),
       getRulesForRegime: vi.fn().mockReturnValue([]),
     } as any;
 
@@ -128,26 +106,18 @@ describe("Unscored candidate quick-check flow", () => {
       bus,
       log: silentLog,
       scoreComputer: mockSc,
-      candidateRepo,
       evidenceRepo,
-      proposalRepo,
-      commandRepo,
-      stateTransitionRepo: transitionRepo,
-      familyStateRepo,
       rulesProvider,
       recomputeIntervalMs: 999_999,
     });
 
     await engine.start();
 
-    // After start(), recompute should have scored the candidate
-    const updated = candidateRepo.findById("cand-unscored-1");
-    expect(updated!.scoresUpdatedAt).not.toBeNull();
-    expect(updated!.recurrenceScore).not.toBeNull();
-    expect(updated!.liveViabilityScore).not.toBeNull();
-
-    // No more unscored
-    expect(candidateRepo.findUnscored()).toHaveLength(0);
+    // After start(), recompute should have scored the deployed family
+    const evidence = evidenceRepo.getEvidence(FAM_ID);
+    expect(evidence).not.toBeNull();
+    expect(evidence!.recycleScore).not.toBeNull();
+    expect(evidence!.toxicityPenalty).not.toBeNull();
 
     await engine.stop();
   });

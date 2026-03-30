@@ -3,24 +3,27 @@ import type Database from "better-sqlite3";
 import { ok } from "../errors.js";
 
 interface MetricsOpts {
-  db: Database.Database;
+  controlDb: Database.Database;
+  ledgerDb: Database.Database;
 }
 
 export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) => {
+  const { ledgerDb } = opts;
+
   app.get("/metrics", async () => {
-    const positions = opts.db
+    const positions = ledgerDb
       .prepare("SELECT status, COUNT(*) as cnt FROM positions GROUP BY status")
       .all() as Array<{ status: string; cnt: number }>;
 
-    const orders = opts.db
+    const orders = ledgerDb
       .prepare("SELECT status, COUNT(*) as cnt FROM orders GROUP BY status")
       .all() as Array<{ status: string; cnt: number }>;
 
-    const totalFills = opts.db
+    const totalFills = ledgerDb
       .prepare("SELECT COUNT(*) as cnt, COALESCE(SUM(size_usdc),0) as volume FROM fills")
       .get() as { cnt: number; volume: number };
 
-    const pnl = opts.db
+    const pnl = ledgerDb
       .prepare("SELECT COALESCE(SUM(realized_pnl),0) as total FROM positions")
       .get() as { total: number };
 
@@ -33,7 +36,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
   });
 
   app.get("/metrics/families", async () => {
-    const rows = opts.db
+    const rows = ledgerDb
       .prepare(
         `SELECT fs.family_id, fs.runtime_mode, fs.open_value_usdc,
                 fs.open_position_count, fs.tail_adjusted_pnl_live,

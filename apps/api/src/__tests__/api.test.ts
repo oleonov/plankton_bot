@@ -3,6 +3,7 @@ import { bootstrapDatabase } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { buildServer } from "../server.js";
+import { stubLedgerPool } from "./test-helpers.js";
 
 function json(res: { json: () => unknown }): any {
   return res.json();
@@ -91,7 +92,7 @@ beforeAll(async () => {
     VALUES ('cond-1', 'YES', '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z', 'gamma-api', 'detected');
   `);
 
-  app = await buildServer({ config: testConfig(), conn });
+  app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
 });
 
 afterAll(async () => {
@@ -141,7 +142,9 @@ describe("auth", () => {
   it("fail-closed when PLANKTON_API_KEY is not configured", async () => {
     const noKeyApp = await buildServer({
       config: testConfig({ planktonApiKey: undefined }),
-      conn,
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
     });
     const res = await noKeyApp.inject({
       method: "GET",

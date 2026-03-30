@@ -1,5 +1,5 @@
 export { loadEnv, type AppConfig } from "./env.js";
-export { loadFamilyRulesYaml, type LoadedFamilyRules } from "./loader.js";
+export { loadFamilyRulesYaml, parseFamilyRulesYaml, type LoadedFamilyRules } from "./loader.js";
 export {
   familyYamlSchema,
   familyRulesFileSchema,

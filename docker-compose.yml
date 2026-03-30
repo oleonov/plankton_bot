@@ -44,6 +44,23 @@ services:
       retries: 3
       start_period: 30s
 
+  plankton-runtime-manager:
+    image: plankton:latest
+    command: ["node", "apps/runtime-manager/dist/index.js"]
+    working_dir: /app
+    volumes:
+      - plankton-data:/app/apps/runtime/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    depends_on:
+      - plankton-runtime
+    env_file: .env.production
+    environment:
+      - CONTROL_DB_PATH=/app/apps/runtime/data/control.db
+      - MANAGED_CONTAINER=plankton-plankton-runtime-1
+      - POLL_INTERVAL_MS=3000
+      - RESTART_TIMEOUT_S=30
+
 volumes:
   plankton-data:
     name: plankton-data

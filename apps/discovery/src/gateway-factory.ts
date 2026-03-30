@@ -18,18 +18,13 @@ export function getRepoRoot(): string {
 /**
  * Load .env files from repo root. Safe to call multiple times.
  *
- * Precedence (highest → lowest): process env > root .env > .env.{mode}
- * Root .env is loaded first so RUNTIME_MODE is available for mode selection.
- * Mode-specific file only fills remaining gaps.
+ * Discovery only needs CONTROL_DB_PATH and GAMMA_TIMEOUT_MS.
+ * Root .env is loaded for base vars. No mode-specific file is needed
+ * since the runtime mode lives in control.db, not in env vars.
  */
 export function loadDiscoveryEnv(): void {
   const root = getRepoRoot();
-  // 1. Root .env first — establishes RUNTIME_MODE and base vars (never overrides process env)
   loadDotenv({ path: join(root, ".env") });
-  // 2. Read mode (now available from either process env or root .env)
-  const mode = process.env["RUNTIME_MODE"] ?? "simulation";
-  // 3. Mode-specific file fills remaining gaps (never overrides process env or root .env)
-  loadDotenv({ path: join(root, `.env.${mode}`) });
 }
 
 export function getGammaTimeoutMs(): number {
@@ -37,12 +32,11 @@ export function getGammaTimeoutMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TIMEOUT_MS;
 }
 
-export function getDbPath(): string {
+export function getControlDbPath(): string {
   const root = getRepoRoot();
   const raw =
-    process.env["PLANKTON_DB_PATH"] ??
-    process.env["DB_PATH"] ??
-    "./apps/runtime/data/plankton-sim.db";
+    process.env["CONTROL_DB_PATH"] ??
+    "./apps/runtime/data/control.db";
   return resolve(root, raw);
 }
 

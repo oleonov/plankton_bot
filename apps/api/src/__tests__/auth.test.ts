@@ -3,6 +3,7 @@ import { bootstrapDatabase } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { buildServer } from "../server.js";
+import { stubLedgerPool } from "./test-helpers.js";
 
 interface ApiResponse {
   ok: boolean;
@@ -56,7 +57,7 @@ afterAll(() => {
 
 describe("Session Auth", () => {
   it("login sets session cookie on correct password", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
@@ -71,7 +72,7 @@ describe("Session Auth", () => {
   });
 
   it("login returns 401 on wrong password", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
@@ -83,7 +84,7 @@ describe("Session Auth", () => {
   });
 
   it("login returns 401 on wrong username", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
@@ -95,7 +96,7 @@ describe("Session Auth", () => {
   });
 
   it("login returns 401 when username required but missing", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
@@ -109,7 +110,9 @@ describe("Session Auth", () => {
   it("login succeeds without username when not configured", async () => {
     const app = await buildServer({
       config: testConfig({ planktonAuthUsername: undefined }),
-      conn,
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
     });
     const res = await app.inject({
       method: "POST",
@@ -122,7 +125,7 @@ describe("Session Auth", () => {
   });
 
   it("GET /auth/config returns usernameRequired=true when configured", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({ method: "GET", url: "/api/v1/auth/config" });
     expect(res.statusCode).toBe(200);
     expect(json(res).data.usernameRequired).toBe(true);
@@ -132,7 +135,9 @@ describe("Session Auth", () => {
   it("GET /auth/config returns usernameRequired=false when not configured", async () => {
     const app = await buildServer({
       config: testConfig({ planktonAuthUsername: undefined }),
-      conn,
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
     });
     const res = await app.inject({ method: "GET", url: "/api/v1/auth/config" });
     expect(res.statusCode).toBe(200);
@@ -143,7 +148,9 @@ describe("Session Auth", () => {
   it("GET /auth/config is accessible without authentication", async () => {
     const app = await buildServer({
       config: testConfig({ planktonApiKey: undefined }),
-      conn,
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
     });
     const res = await app.inject({ method: "GET", url: "/api/v1/auth/config" });
     expect(res.statusCode).toBe(200);
@@ -153,7 +160,9 @@ describe("Session Auth", () => {
   it("login returns 501 when password not configured", async () => {
     const app = await buildServer({
       config: testConfig({ planktonAuthPassword: undefined, planktonSessionSecret: undefined }),
-      conn,
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
     });
     const res = await app.inject({
       method: "POST",
@@ -166,7 +175,7 @@ describe("Session Auth", () => {
   });
 
   it("session cookie grants access to protected routes", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const loginRes = await app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
@@ -184,7 +193,7 @@ describe("Session Auth", () => {
   });
 
   it("Bearer token still grants access", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "GET",
       url: "/api/v1/status",
@@ -195,7 +204,7 @@ describe("Session Auth", () => {
   });
 
   it("no auth returns 401", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "GET",
       url: "/api/v1/status",
@@ -205,7 +214,7 @@ describe("Session Auth", () => {
   });
 
   it("GET /auth/me returns 200 with valid session", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const loginRes = await app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
@@ -224,7 +233,7 @@ describe("Session Auth", () => {
   });
 
   it("GET /auth/me returns 401 without session", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "GET",
       url: "/api/v1/auth/me",
@@ -234,7 +243,7 @@ describe("Session Auth", () => {
   });
 
   it("POST /auth/logout clears session and is idempotent", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
 
     // Logout without session should work (idempotent)
     const logoutRes = await app.inject({
@@ -269,7 +278,7 @@ describe("Session Auth", () => {
   });
 
   it("health endpoint works without auth", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "GET",
       url: "/api/v1/health",
@@ -279,7 +288,7 @@ describe("Session Auth", () => {
   });
 
   it("HEAD on health endpoint works without auth (Docker healthcheck)", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
     const res = await app.inject({
       method: "HEAD",
       url: "/api/v1/health",
@@ -289,7 +298,7 @@ describe("Session Auth", () => {
   });
 
   it("rate-limits login to 5 attempts per minute", async () => {
-    const app = await buildServer({ config: testConfig(), conn });
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
 
     for (let i = 0; i < 5; i++) {
       await app.inject({
@@ -315,7 +324,9 @@ describe("Session Auth", () => {
         planktonAuthPassword: undefined,
         planktonSessionSecret: undefined,
       }),
-      conn,
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
     });
     const res = await app.inject({
       method: "GET",

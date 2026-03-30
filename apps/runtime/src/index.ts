@@ -20,11 +20,13 @@ const _origLookup: any = dns.lookup;
   return _origLookup(hostname, opts, maybeCb);
 };
 
+import { randomUUID } from "node:crypto";
 import process from "node:process";
-import { loadEnv, loadFamilyRulesYaml, type LoadedFamilyRules } from "@plankton/config";
+import { loadEnv, loadFamilyRulesYaml } from "@plankton/config";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
-  bootstrapDatabase,
+  bootstrapControlDb,
+  bootstrapLedgerDb,
   SqliteMarketRepository,
   SqliteOrderRepository,
   SqliteFillRepository,
@@ -43,15 +45,16 @@ import {
   SqlitePromotionProposalRepository,
   SqliteCandidateObservationRepository,
   SqliteFamilyRulesDbRepository,
+  SqliteFamilyDeploymentRepository,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
-import type { FamilyIdentity, FamilyState, FamilyRulesProvider } from "@plankton/domain";
+import type { FamilyState } from "@plankton/domain";
 import { createBotRunId, slugPatternToRegex, ENTRY_REASONS } from "@plankton/domain";
 import { migrateOrphanedPositions } from "./universe-migration.js";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
-import { liveLitePreflight } from "./live-lite-preflight.js";
+import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
 
 import { createLogger } from "./logger.js";
 import { Supervisor } from "./supervisor/supervisor.js";
@@ -73,9 +76,14 @@ import { GammaResolutionClient } from "@plankton/exchange";
 import { SqliteMarketResolutionRepository } from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
-import { ReloadableFamilyRulesManager } from "./family-rules-manager.js";
+import { DbFamilyRulesProvider } from "./db-family-rules-provider.js";
+import { needsBootstrap, bootstrapImport } from "./bootstrap-import.js";
+import { resolveActiveProfile } from "./profile-boot.js";
 import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";
 import { ScoreComputer } from "./modules/evidence/score-computer.js";
+import { RuntimeSafetyEvaluator } from "./modules/safety/runtime-safety-evaluator.js";
+import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
+import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -83,61 +91,87 @@ async function main(): Promise<void> {
   // 1. Load config
   const config = loadEnv();
   const log = createLogger(config.logLevel, config.runtimeMode);
-  log.info({ mode: config.runtimeMode }, "plankton runtime starting");
+  log.info({ mode: config.runtimeMode }, "plankton runtime starting (env mode)");
 
-  // 2. Bootstrap DB
-  let conn: DbConnection;
+  // 2. Bootstrap DBs
+  const controlDbPath =
+    process.env["CONTROL_DB_PATH"] ?? config.dbPath.replace(/[^/]+\.db$/, "control.db");
+
+  let controlConn: DbConnection;
   try {
-    conn = bootstrapDatabase(config.dbPath);
-    log.info({ path: config.dbPath }, "database ready");
+    controlConn = bootstrapControlDb(controlDbPath);
+    log.info({ path: controlDbPath }, "control database ready");
   } catch (err) {
-    log.fatal({ err, path: config.dbPath }, "database bootstrap failed");
+    log.fatal({ err }, "database bootstrap failed");
+    process.exit(1);
+  }
+
+  // 2b. Bootstrap import — seed control.db from YAML if empty
+  if (needsBootstrap(controlConn.db)) {
+    const loaded = loadFamilyRulesYaml(config.familyRulesPath);
+    bootstrapImport(controlConn.db, loaded);
+    log.info("control.db bootstrapped from YAML");
+  }
+
+  // 2c. Resolve active profile from control.db (falls back to RUNTIME_MODE env)
+  type RuntimeMode = "simulation" | "paper" | "live-lite";
+  const { profile: activeProfile, runtimeMode } = resolveActiveProfile(
+    controlConn.db,
+    config.runtimeMode,
+  ) as { profile: string; runtimeMode: RuntimeMode };
+  log.info({ activeProfile, runtimeMode }, "active profile resolved");
+
+  // 2d. Open ledger DB scoped to active profile
+  const ledgerDbPath = controlDbPath.replace("control.db", `ledger-${activeProfile}.db`);
+  let ledgerConn: DbConnection;
+  try {
+    ledgerConn = bootstrapLedgerDb(ledgerDbPath);
+    log.info({ path: ledgerDbPath }, "ledger database ready");
+  } catch (err) {
+    log.fatal({ err }, "ledger database bootstrap failed");
+    controlConn.close();
     process.exit(1);
   }
 
   // 3. Create repositories
   const repos = {
-    market: new SqliteMarketRepository(conn.db),
-    order: new SqliteOrderRepository(conn.db),
-    fill: new SqliteFillRepository(conn.db),
-    position: new SqlitePositionRepository(conn.db),
-    inventoryLot: new SqliteInventoryLotRepository(conn.db),
-    familyState: new SqliteFamilyStateRepository(conn.db),
-    familyCatalog: new SqliteFamilyCatalogRepository(conn.db),
-    operatorCommand: new SqliteOperatorCommandRepository(conn.db),
-    operatorAction: new SqliteOperatorActionRepository(conn.db),
-    marketSnapshot: new SqliteMarketSnapshotRepository(conn.db),
-    riskEvent: new SqliteRiskEventRepository(conn.db),
-    familyCandidate: new SqliteFamilyCandidateRepository(conn.db),
-    familyEvidence: new SqliteFamilyEvidenceRepository(conn.db),
-    familyRulesSnapshot: new SqliteFamilyRulesSnapshotRepository(conn.db),
-    stateTransition: new SqliteStateTransitionRepository(conn.db),
-    promotionProposal: new SqlitePromotionProposalRepository(conn.db),
-    candidateObservation: new SqliteCandidateObservationRepository(conn.db),
+    // Ledger-side
+    market: new SqliteMarketRepository(ledgerConn.db),
+    order: new SqliteOrderRepository(ledgerConn.db),
+    fill: new SqliteFillRepository(ledgerConn.db),
+    position: new SqlitePositionRepository(ledgerConn.db),
+    inventoryLot: new SqliteInventoryLotRepository(ledgerConn.db),
+    familyState: new SqliteFamilyStateRepository(ledgerConn.db),
+    marketSnapshot: new SqliteMarketSnapshotRepository(ledgerConn.db),
+    riskEvent: new SqliteRiskEventRepository(ledgerConn.db),
+    // Control-side
+    familyCatalog: new SqliteFamilyCatalogRepository(controlConn.db),
+    operatorCommand: new SqliteOperatorCommandRepository(controlConn.db),
+    operatorAction: new SqliteOperatorActionRepository(controlConn.db),
+    familyCandidate: new SqliteFamilyCandidateRepository(controlConn.db),
+    familyEvidence: new SqliteFamilyEvidenceRepository(controlConn.db),
+    familyRulesSnapshot: new SqliteFamilyRulesSnapshotRepository(controlConn.db),
+    stateTransition: new SqliteStateTransitionRepository(controlConn.db),
+    promotionProposal: new SqlitePromotionProposalRepository(controlConn.db),
+    candidateObservation: new SqliteCandidateObservationRepository(controlConn.db),
   };
 
-  // 4. Load family rules (YAML + DB merge via ReloadableFamilyRulesManager)
-  let families: FamilyIdentity[];
-  let rulesProvider: FamilyRulesProvider;
-  let rulesManager: ReloadableFamilyRulesManager;
-  let loaded: LoadedFamilyRules;
-  const dbRulesReader = new SqliteFamilyRulesDbRepository(conn.db);
-  try {
-    loaded = loadFamilyRulesYaml(config.familyRulesPath);
-    rulesManager = new ReloadableFamilyRulesManager(loaded.families, dbRulesReader);
-    rulesProvider = rulesManager;
-    families = rulesProvider.getAllFamilies();
-    log.info({ count: families.length }, "family rules loaded");
-    if (config.runtimeMode !== "live-lite") {
-      log.info(
-        { initialBalanceUsdc: loaded.global.initialBalanceUsdc, runtimeMode: config.runtimeMode },
-        "simulated exchange balance configured",
-      );
-    }
-  } catch (err) {
-    log.fatal({ err, path: config.familyRulesPath }, "family rules load failed");
-    conn.close();
-    process.exit(1);
+  // 4. Family rules — DB-backed provider
+  const rulesProvider = new DbFamilyRulesProvider(controlConn.db, activeProfile);
+  const families = rulesProvider.getAllFamilies();
+  log.info({ count: families.length }, "family rules loaded from control.db");
+
+  // Read initial balance from profile_settings (control.db) instead of YAML
+  const settingsRow = controlConn.db
+    .prepare("SELECT initial_balance_usdc FROM profile_settings WHERE profile_id = ?")
+    .get(activeProfile) as { initial_balance_usdc: number | null } | undefined;
+  const initialBalanceUsdc = settingsRow?.initial_balance_usdc ?? 1000;
+
+  if (runtimeMode !== "live-lite") {
+    log.info(
+      { initialBalanceUsdc, runtimeMode },
+      "simulated exchange balance configured",
+    );
   }
 
   // 5. Seed family catalog + ensure baseline runtime state
@@ -169,49 +203,6 @@ async function main(): Promise<void> {
   }
   log.info("family runtime state baseline ensured");
 
-  // 5b. Seed family rules (caps) for API consumption
-  const upsertFamilyRules = conn.db.prepare(`
-    INSERT INTO family_rules (family_id, max_open_value_usdc, max_active_markets, max_dust_positions,
-      enabled, action, priority_rank, entry_mode, max_initial_notional_usdc,
-      tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(family_id) DO UPDATE SET
-      max_open_value_usdc = excluded.max_open_value_usdc,
-      max_active_markets = excluded.max_active_markets,
-      max_dust_positions = excluded.max_dust_positions,
-      enabled = excluded.enabled,
-      action = excluded.action,
-      priority_rank = excluded.priority_rank,
-      entry_mode = excluded.entry_mode,
-      max_initial_notional_usdc = excluded.max_initial_notional_usdc,
-      tail_quarantine_threshold_usdc = excluded.tail_quarantine_threshold_usdc,
-      tail_quarantine_threshold_ratio = excluded.tail_quarantine_threshold_ratio,
-      updated_at = excluded.updated_at
-  `);
-
-  for (const identity of families) {
-    const bundle = rulesProvider.getRule(identity.familyId);
-    if (!bundle) continue;
-    const ts = bundle.rules.tailSuppression;
-    const uni = bundle.rules.universe;
-    const entry = bundle.rules.entry;
-    upsertFamilyRules.run(
-      String(identity.familyId),
-      ts.maxOpenValueUsdc,
-      ts.maxActiveMarkets,
-      ts.maxDustPositions,
-      uni.enabled ? 1 : 0,
-      uni.action,
-      uni.priorityRank,
-      entry.entryMode,
-      entry.maxInitialNotionalUsdc,
-      ts.tailQuarantineThresholdUsdc,
-      ts.tailQuarantineThresholdRatio,
-      new Date().toISOString(),
-    );
-  }
-  log.info({ count: families.length }, "family rules seeded");
-
   // 5.5. Migrate orphaned positions — close positions whose market no longer
   // matches the family's current slug pattern or horizon filter. Without this,
   // stale positions from a previous universe (e.g. will-bitcoin-reach-*) would
@@ -236,16 +227,17 @@ async function main(): Promise<void> {
   // 7. Build modules
   // supervisorRef is set before any closure that uses it is actually called
   const supervisorRef = { current: null as unknown as Supervisor };
+  const statePublisherRef = { current: null as RuntimeStatePublisher | null };
   const runtimeControl = { isPaused: () => supervisorRef.current.isPaused() };
 
   // Persist pause state to runtime_metrics so the API can read it
-  const deletePauseMetric = conn.db.prepare(
+  const deletePauseMetric = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'runtime_paused'",
   );
-  const insertPauseMetric = conn.db.prepare(
+  const insertPauseMetric = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('runtime_paused', ?, ?)",
   );
-  const persistPauseState = conn.db.transaction((paused: boolean) => {
+  const persistPauseState = ledgerConn.db.transaction((paused: boolean) => {
     deletePauseMetric.run();
     insertPauseMetric.run(paused ? 1 : 0, new Date().toISOString());
   });
@@ -253,16 +245,21 @@ async function main(): Promise<void> {
   function setPausedAndPersist(paused: boolean): void {
     supervisorRef.current.setPaused(paused);
     persistPauseState(paused);
+    if (paused) {
+      statePublisherRef.current?.publishPaused();
+    } else {
+      statePublisherRef.current?.publishRunning();
+    }
   }
 
   // 7b. Create gateways via factory
   let polyClient: unknown;
-  if (config.runtimeMode === "paper" || config.runtimeMode === "live-lite") {
+  if (runtimeMode === "paper" || runtimeMode === "live-lite") {
     const { ClobClient } = await import("@polymarket/clob-client");
     const CLOB_HOST = "https://clob.polymarket.com";
     const POLYGON_CHAIN_ID = 137;
 
-    if (config.runtimeMode === "paper") {
+    if (runtimeMode === "paper") {
       polyClient = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID);
     } else {
       const { Wallet } = await import("ethers");
@@ -278,7 +275,7 @@ async function main(): Promise<void> {
   // Build slug filter dynamically from rules manager so new families added via
   // rules_reload are picked up without restart.
   const slugFilter = (slug: string): boolean => {
-    const currentFamilies = rulesManager.getAllFamilies();
+    const currentFamilies = rulesProvider.getAllFamilies();
     return currentFamilies.some((f) => {
       if (!f.slugPattern) return false;
       try {
@@ -291,23 +288,46 @@ async function main(): Promise<void> {
 
   const { marketDataGateway, exchangeGateway, modeLabel, marketDataSource, executionMode } =
     createGateways({
-      runtimeMode: config.runtimeMode,
+      runtimeMode,
       polyClient,
       slugFilter,
-      initialBalanceUsdc: loaded.global.initialBalanceUsdc,
+      initialBalanceUsdc,
     });
   log.info({ mode: modeLabel }, "gateways created");
 
-  const liveLiteGuard = new LiveLiteGuard(config.liveLite);
+  // Build live-lite envelope from control.db profile_settings (replaces env vars)
+  const liveLiteConfig = (() => {
+    if (runtimeMode !== "live-lite") return undefined;
+    const settings = controlConn.db
+      .prepare("SELECT envelope_json FROM profile_settings WHERE profile_id = 'live-lite'")
+      .get() as { envelope_json: string | null } | undefined;
+    const envelope = settings?.envelope_json ? JSON.parse(settings.envelope_json) : null;
+    if (!envelope) {
+      log.warn("live-lite profile_settings.envelope_json is empty — using permissive defaults");
+      return undefined;
+    }
+    // Derive allowlist from enabled family_deployments for live-lite
+    const deployedFamilies = controlConn.db
+      .prepare("SELECT family_id FROM family_deployments WHERE profile = 'live-lite' AND enabled = 1")
+      .all() as { family_id: string }[];
+    return {
+      familyAllowlist: deployedFamilies.map((f) => f.family_id),
+      maxFamilies: Number(envelope.maxFamilies ?? 10),
+      maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
+      maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
+      maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
+    };
+  })();
+  const liveLiteGuard = new LiveLiteGuard(liveLiteConfig);
 
   // 7c. Create bot run ID (needed by market-data and execution modules)
   const botRunId = createBotRunId(`run-${Date.now()}`);
 
   // Record this run in bot_runs for API consumption
-  conn.db
+  ledgerConn.db
     .prepare("INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)")
-    .run(botRunId, config.runtimeMode, new Date().toISOString());
-  log.info({ botRunId, mode: config.runtimeMode }, "bot run recorded");
+    .run(botRunId, runtimeMode, new Date().toISOString());
+  log.info({ botRunId, mode: runtimeMode }, "bot run recorded");
 
   // 7d. Market scanner (discovery via Gamma API)
   // TODO: pass tagId for server-side narrowing once we have a category→tagId mapping.
@@ -350,19 +370,19 @@ async function main(): Promise<void> {
     getPaused: () => supervisorRef.current.isPaused(),
     setPaused: setPausedAndPersist,
     pollIntervalMs: 5_000,
-    rulesManager,
+    rulesManager: rulesProvider,
     normalizationModule,
     familyEvidenceRepo: repos.familyEvidence,
     familyRulesSnapshotRepo: repos.familyRulesSnapshot,
     familyCandidateRepo: repos.familyCandidate,
     stateTransitionRepo: repos.stateTransition,
-    familyRulesDbWriter: dbRulesReader,
+    familyRulesDbWriter: new SqliteFamilyRulesDbRepository(controlConn.db),
   });
 
   // 7f. Execution module
 
   // Persist two-part mode for API/web consumption
-  const upsertModeMetric = conn.db.prepare(
+  const upsertModeMetric = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
   );
   const modeNow = new Date().toISOString();
@@ -379,7 +399,7 @@ async function main(): Promise<void> {
     botRunId,
     runtimeControl,
     liveLiteGuard,
-    runtimeMode: config.runtimeMode,
+    runtimeMode,
     maxConcurrency: config.executionMaxConcurrency,
   });
 
@@ -393,7 +413,7 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     fillRepo: repos.fill,
     log,
-    db: conn.db,
+    db: ledgerConn.db,
     liveLiteGuard,
   });
 
@@ -420,7 +440,7 @@ async function main(): Promise<void> {
   });
 
   // 7j. Resolution module — detect resolved markets, settle positions
-  const marketResolutionRepo = new SqliteMarketResolutionRepository(conn.db);
+  const marketResolutionRepo = new SqliteMarketResolutionRepository(ledgerConn.db);
   const gammaResolutionClient = new GammaResolutionClient();
   const exposureCalculator = new FamilyExposureCalculator(
     repos.familyState,
@@ -447,7 +467,7 @@ async function main(): Promise<void> {
     gammaResolutionClient,
     log,
   );
-  const positionSettler = new PositionSettler(repos.position, repos.inventoryLot, conn.db);
+  const positionSettler = new PositionSettler(repos.position, repos.inventoryLot, ledgerConn.db);
   const resolutionModule = new ResolutionModule({
     detector: resolutionDetector,
     settler: positionSettler,
@@ -459,7 +479,7 @@ async function main(): Promise<void> {
     gammaClient: gammaResolutionClient,
     lotRepo: repos.inventoryLot,
     positionRepo: repos.position,
-    db: conn.db,
+    db: ledgerConn.db,
     bus,
     log,
     checkIntervalMs: 5 * 60_000, // 5 minutes
@@ -467,7 +487,7 @@ async function main(): Promise<void> {
     // In live-lite mode, provide the exchange gateway so the resolution module
     // verifies on-chain token balance is 0 before settling in the ledger.
     // In simulation/paper modes, no gateway is needed (no on-chain state).
-    ...(config.runtimeMode === "live-lite" && exchangeGateway ? { gateway: exchangeGateway } : {}),
+    ...(runtimeMode === "live-lite" && exchangeGateway ? { gateway: exchangeGateway } : {}),
   });
 
   // 7k. Stale tail pruning module
@@ -483,7 +503,7 @@ async function main(): Promise<void> {
   // 7l. Fill poller module — fast-interval fill detection (paper/live-lite only;
   // simulation mode uses inline checkForFills after each placement)
   const fillPollerModule =
-    config.runtimeMode !== "simulation"
+    runtimeMode !== "simulation"
       ? new FillPollerModule({
           gateway: exchangeGateway,
           fillRepo: repos.fill,
@@ -495,19 +515,38 @@ async function main(): Promise<void> {
         })
       : null;
 
-  // 7l2. Family evidence engine — periodic scoring for discovery candidates
-  const scoreComputer = new ScoreComputer(conn.db);
+  // 7l2. Family evidence engine — periodic ledger-side scoring for deployed families
+  const scoreComputer = new ScoreComputer(ledgerConn.db);
   const evidenceEngine = new FamilyEvidenceEngine({
     bus,
     log,
     scoreComputer,
-    candidateRepo: repos.familyCandidate,
     evidenceRepo: repos.familyEvidence,
-    proposalRepo: repos.promotionProposal,
-    commandRepo: repos.operatorCommand,
+    rulesProvider,
+  });
+
+  // 7l2b. Safety evaluator — toxicity-based demotion writes to family_deployments
+  const deploymentRepo = new SqliteFamilyDeploymentRepository(controlConn.db);
+  const safetyEvaluator = new RuntimeSafetyEvaluator({
+    bus,
+    log,
+    scoreComputer,
+    deploymentRepo,
     stateTransitionRepo: repos.stateTransition,
     familyStateRepo: repos.familyState,
-    rulesProvider: rulesManager,
+    rulesProvider,
+    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
+  });
+
+  // 7l3. Profile runtime publisher — periodic rollup of family metrics to control.db
+  const profilePublisher = new ProfileRuntimePublisher({
+    controlDb: controlConn.db,
+    ledgerDb: ledgerConn.db,
+    profile: activeProfile,
+    deployedFamilyIds: () => rulesProvider.getAllFamilies().map((f) => String(f.familyId)),
+    getPaused: () => supervisorRef.current.isPaused(),
+    log,
+    intervalMs: 60_000,
   });
 
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
@@ -517,6 +556,8 @@ async function main(): Promise<void> {
     ["normalization", normalizationModule],
     ["risk-inventory", riskInventoryModule],
     ["evidence-engine", evidenceEngine],
+    ["safety-evaluator", safetyEvaluator],
+    ["profile-publisher", profilePublisher],
     ["reconciliation", reconciliationModule],
     ["strategy", strategyModule],
     ["resolution", resolutionModule],
@@ -528,7 +569,7 @@ async function main(): Promise<void> {
   ];
 
   // 7m. Persist key timestamps to runtime_metrics for API consumption
-  const upsertMetric = conn.db.prepare(`
+  const upsertMetric = ledgerConn.db.prepare(`
     INSERT INTO runtime_metrics (metric_name, value, captured_at)
     VALUES (?, 1, ?)
   `);
@@ -576,13 +617,13 @@ async function main(): Promise<void> {
     riskEventWriter.onReconciliationDrift(details, severity, timestamp);
   });
 
-  const deletePollProgress = conn.db.prepare(
+  const deletePollProgress = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'",
   );
-  const insertPollProgress = conn.db.prepare(
+  const insertPollProgress = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('market_data_poll_progress', 1, ?, ?)",
   );
-  const upsertPollProgress = conn.db.transaction((labels: string, capturedAt: string) => {
+  const upsertPollProgress = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
     deletePollProgress.run();
     insertPollProgress.run(labels, capturedAt);
   });
@@ -600,25 +641,25 @@ async function main(): Promise<void> {
 
   // 7p. Persist signal activity metrics for API trading-state computation
 
-  const deleteSignalActivity = conn.db.prepare(
+  const deleteSignalActivity = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'signal_activity'",
   );
-  const insertSignalActivity = conn.db.prepare(
+  const insertSignalActivity = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('signal_activity', 1, ?, ?)",
   );
-  const deleteLastEntryApproved = conn.db.prepare(
+  const deleteLastEntryApproved = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'last_entry_approved'",
   );
-  const insertLastEntryApproved = conn.db.prepare(
+  const insertLastEntryApproved = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('last_entry_approved', 1, ?)",
   );
-  const deleteLastSignalRejected = conn.db.prepare(
+  const deleteLastSignalRejected = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'last_signal_rejected'",
   );
-  const insertLastSignalRejected = conn.db.prepare(
+  const insertLastSignalRejected = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('last_signal_rejected', 1, ?)",
   );
-  const upsertSignalActivity = conn.db.transaction((labels: string, capturedAt: string) => {
+  const upsertSignalActivity = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
     deleteSignalActivity.run();
     insertSignalActivity.run(labels, capturedAt);
   });
@@ -672,10 +713,10 @@ async function main(): Promise<void> {
     scannerWindow.blockedByWindow += ev.blockedByWindow;
   });
 
-  const deleteScanner = conn.db.prepare(
+  const deleteScanner = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'scanner_activity'",
   );
-  const insertScanner = conn.db.prepare(
+  const insertScanner = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('scanner_activity', 1, ?, ?)",
   );
 
@@ -740,35 +781,75 @@ async function main(): Promise<void> {
       log.error({ err }, "supervisor stop error");
     }
 
-    conn.close();
-    log.info("database closed — runtime stopped");
+    if (statePublisherRef.current) {
+      statePublisherRef.current.stopHeartbeatLoop();
+      statePublisherRef.current.publishShutdown();
+    }
+
+    controlConn.close();
+    ledgerConn.close();
+    log.info("databases closed — runtime stopped");
     process.exit(0);
   };
 
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  // 10. Live-lite preflight: reconcile first, then check DB state
-  if (config.liveLite) {
+  // 10. Profile-aware preflight — runs for ALL profiles before supervisor.start()
+  if (liveLiteConfig) {
     log.info("running pre-supervisor reconciliation for live-lite preflight");
     await reconciliationModule.runReconciliation();
+  }
 
-    const preflight = liveLitePreflight(conn.db, config.liveLite);
-    if (preflight.shouldPause) {
-      for (const v of preflight.violations) {
-        log.warn({ violation: v }, "live-lite preflight violation — starting paused");
-      }
-      setPausedAndPersist(true);
-    } else {
-      log.info("live-lite preflight passed — no violations");
+  // Read active switch request ID (if this boot is part of a profile switch)
+  const activeSwitchRow = controlConn.db
+    .prepare(
+      "SELECT switch_id FROM profile_switch_requests WHERE state NOT IN ('completed', 'failed', 'rolled_back') LIMIT 1",
+    )
+    .get() as { switch_id: string } | undefined;
+
+  const preflightResult = runProfilePreflight({
+    profile: activeProfile,
+    ledgerDb: ledgerConn.db,
+    controlDb: controlConn.db,
+    ...(liveLiteConfig ? { liveLiteConfig } : {}),
+  });
+  writePreflightReport(controlConn.db, activeProfile, preflightResult, activeSwitchRow?.switch_id);
+  log.info(
+    { status: preflightResult.status, info: preflightResult.info },
+    "startup preflight complete",
+  );
+
+  if (preflightResult.status === "failed") {
+    for (const b of preflightResult.blockers) {
+      log.warn({ blocker: b }, "startup preflight blocker");
     }
+    // Publish failed status so the runtime manager can detect and transition to failed
+    const failPublisher = new RuntimeStatePublisher(controlConn.db, {
+      profile: activeProfile,
+      instanceId: randomUUID(),
+      runId: "preflight-failed",
+    });
+    failPublisher.publishFailed();
+    log.fatal("startup preflight failed — exiting");
+    controlConn.close();
+    ledgerConn.close();
+    process.exit(1);
+  }
 
-    // Persist envelope for API consumption, tied to this bot_run_id
-    conn.db
+  if (preflightResult.warnings.length > 0) {
+    for (const w of preflightResult.warnings) {
+      log.warn({ warning: w }, "startup preflight warning");
+    }
+  }
+
+  // Persist live-lite envelope for API consumption
+  if (liveLiteConfig) {
+    ledgerConn.db
       .prepare(
         "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
       )
-      .run("live_lite_envelope", JSON.stringify(config.liveLite), new Date().toISOString());
+      .run("live_lite_envelope", JSON.stringify(liveLiteConfig), new Date().toISOString());
   }
 
   // 11. Start
@@ -778,14 +859,27 @@ async function main(): Promise<void> {
     // Safety: always start paused. Operator must explicitly resume via dashboard.
     setPausedAndPersist(true);
     log.info(
-      { mode: config.runtimeMode },
+      { mode: runtimeMode },
       "runtime started PAUSED — operator must resume via dashboard",
     );
+
+    // Publish runtime state to control.db for cross-service visibility
+    const instanceId = randomUUID();
+    const statePublisher = new RuntimeStatePublisher(controlConn.db, {
+      profile: activeProfile,
+      instanceId,
+      runId: String(botRunId),
+      getExecutionPendingCount: () => executionModule.pendingCount,
+    });
+    statePublisherRef.current = statePublisher;
+    statePublisher.publishStartup();
+    statePublisher.startHeartbeatLoop(15_000);
 
     log.info({ phase: supervisor.getPhase(), paused: supervisor.isPaused() }, "runtime ready");
   } catch (err) {
     log.fatal({ err }, "runtime startup failed");
-    conn.close();
+    controlConn.close();
+    ledgerConn.close();
     process.exit(1);
   }
 }

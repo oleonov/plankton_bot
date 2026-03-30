@@ -3,6 +3,7 @@ import { bootstrapDatabase } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { buildServer } from "../server.js";
+import { stubLedgerPool } from "./test-helpers.js";
 
 function json(res: { json: () => unknown }): any {
   return res.json();
@@ -44,7 +45,19 @@ let app: Awaited<ReturnType<typeof buildServer>>;
 
 beforeAll(async () => {
   conn = bootstrapDatabase(":memory:");
-  app = await buildServer({ config: testConfig(), conn });
+  // Add service_heartbeats table (Phase 1 control schema) to legacy monolithic DB
+  conn.db.exec(`
+    CREATE TABLE IF NOT EXISTS service_heartbeats (
+      service_name      TEXT NOT NULL,
+      instance_id       TEXT NOT NULL,
+      profile           TEXT,
+      run_id            TEXT,
+      last_heartbeat_at TEXT NOT NULL,
+      status_json       TEXT,
+      PRIMARY KEY (service_name, instance_id)
+    )
+  `);
+  app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
 });
 
 afterAll(async () => {

@@ -30,11 +30,19 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
   return body.data;
 }
 
-export function apiPost<T>(path: string, payload?: unknown): Promise<T> {
+function apiMutate<T>(method: string, path: string, payload?: unknown): Promise<T> {
   return apiFetch<T>(path, {
-    method: "POST",
+    method,
     ...(payload != null
       ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }
       : {}),
   });
+}
+
+export function apiPost<T>(path: string, payload?: unknown): Promise<T> {
+  return apiMutate<T>("POST", path, payload);
+}
+
+export function apiPut<T>(path: string, payload?: unknown): Promise<T> {
+  return apiMutate<T>("PUT", path, payload);
 }

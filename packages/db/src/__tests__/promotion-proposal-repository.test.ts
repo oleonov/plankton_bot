@@ -32,6 +32,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "scaled",
       reason: "strong recurrence",
       scoresSnapshot: '{"recurrence":0.8}',
+      profile: null,
+      sourceScorecardId: null,
     });
 
     expect(id).toBe(1);
@@ -53,6 +55,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "scaled",
       reason: "reason-1",
       scoresSnapshot: "{}",
+      profile: null,
+      sourceScorecardId: null,
     });
     repo.insert({
       familyId: createFamilyId("fam-2"),
@@ -60,6 +64,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "scaled",
       reason: "reason-2",
       scoresSnapshot: "{}",
+      profile: null,
+      sourceScorecardId: null,
     });
 
     const proposals = repo.findByFamily(familyId);
@@ -74,6 +80,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "scaled",
       reason: "test",
       scoresSnapshot: "{}",
+      profile: null,
+      sourceScorecardId: null,
     });
 
     expect(repo.hasPending(familyId)).toBe(true);
@@ -87,6 +95,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "scaled",
       reason: "test",
       scoresSnapshot: "{}",
+      profile: null,
+      sourceScorecardId: null,
     });
 
     repo.resolve(id, "approved", "operator");
@@ -107,6 +117,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "scaled",
       reason: "test",
       scoresSnapshot: "{}",
+      profile: null,
+      sourceScorecardId: null,
     });
     repo.resolve(id, "rejected", "operator");
 
@@ -120,6 +132,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "scaled",
       reason: "first",
       scoresSnapshot: "{}",
+      profile: null,
+      sourceScorecardId: null,
     });
 
     expect(() =>
@@ -129,6 +143,8 @@ describe("SqlitePromotionProposalRepository", () => {
         proposedState: "scaled",
         reason: "second",
         scoresSnapshot: "{}",
+        profile: null,
+        sourceScorecardId: null,
       }),
     ).toThrow();
   });
@@ -140,6 +156,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "scaled",
       reason: "first",
       scoresSnapshot: "{}",
+      profile: null,
+      sourceScorecardId: null,
     });
     repo.resolve(id, "approved", "operator");
 
@@ -150,6 +168,8 @@ describe("SqlitePromotionProposalRepository", () => {
       proposedState: "restricted",
       reason: "second",
       scoresSnapshot: "{}",
+      profile: null,
+      sourceScorecardId: null,
     });
     expect(id2).toBe(2);
   });

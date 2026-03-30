@@ -4,8 +4,12 @@ import type {
   Regime,
   RuntimeMode,
   StrategyProfile,
+  ProfileId,
+  SwitchState,
+  DeploymentStage,
+  OperatorMode,
 } from "./enums.js";
-import type { FamilyId, FillId, OrderId, PositionId, TokenId } from "./ids.js";
+import type { FamilyId, FillId, OrderId, PositionId, TokenId, ScorecardId, SwitchId, ReportId, ImportId } from "./ids.js";
 import type {
   FamilyEvidence,
   FamilyIdentity,
@@ -20,6 +24,19 @@ import type {
   OperatorCommand,
   Order,
   Position,
+  FamilyDeployment,
+  FamilyConfigMeta,
+  FamilyProfileRollup,
+  FamilyProfileRuntimeState,
+  Profile,
+  ProfileSettings,
+  ProfileSummary,
+  RuntimeControlState,
+  SwitchRequest,
+  PreflightReport,
+  ServiceHeartbeat,
+  ConfigImport,
+  ValidationScorecard,
 } from "./types.js";
 
 // ─── MarketRepository ────────────────────────────────────────────────────
@@ -189,7 +206,7 @@ export interface FamilyRulesProvider {
  */
 export interface FamilyRuleBundle {
   identity: FamilyIdentity;
-  evidence: FamilyEvidence;
+  evidence?: FamilyEvidence;
   rules: FamilyRules;
 }
 
@@ -358,10 +375,12 @@ export interface CandidateObservationRepository {
 export interface PromotionProposal {
   id: number;
   familyId: FamilyId;
+  profile: ProfileId | null;
   currentState: PromotionState;
   proposedState: PromotionState;
   reason: string;
   scoresSnapshot: string;
+  sourceScorecardId: ScorecardId | null;
   status: string;
   createdAt: string;
   resolvedAt: string | null;
@@ -374,7 +393,7 @@ export interface PromotionProposalRepository {
   insert(proposal: Omit<PromotionProposal, "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy">): number;
   findPending(): PromotionProposal[];
   findByFamily(familyId: FamilyId): PromotionProposal[];
-  hasPending(familyId: FamilyId): boolean;
+  hasPending(familyId: FamilyId, profile?: ProfileId | null): boolean;
   resolve(id: number, status: string, resolvedBy: string): void;
 }
 
@@ -480,4 +499,113 @@ export interface DiscoveryRunRepository {
   findRecent(limit: number): DiscoveryRun[];
   /** Mark stale running jobs as failed. Returns count. */
   failStale(staleThresholdMs: number): number;
+}
+
+// ─── ProfileRepository ──────────────────────────────────────────────────
+
+export interface ProfileRepository {
+  findAll(): Profile[];
+  findById(profileId: ProfileId): Profile | null;
+  save(profile: Profile): void;
+}
+
+// ─── ProfileSettingsRepository ──────────────────────────────────────────
+
+export interface ProfileSettingsRepository {
+  get(profileId: ProfileId): ProfileSettings | null;
+  save(settings: ProfileSettings): void;
+}
+
+// ─── FamilyDeploymentRepository ─────────────────────────────────────────
+
+export interface FamilyDeploymentRepository {
+  find(familyId: FamilyId, profile: ProfileId): FamilyDeployment | null;
+  findByProfile(profile: ProfileId): FamilyDeployment[];
+  findEnabled(profile: ProfileId): FamilyDeployment[];
+  save(deployment: FamilyDeployment): void;
+  updateOperatorMode(familyId: FamilyId, profile: ProfileId, mode: OperatorMode, reason: string | null): void;
+  updateDeploymentStage(familyId: FamilyId, profile: ProfileId, stage: DeploymentStage): void;
+}
+
+// ─── ValidationScorecardRepository ──────────────────────────────────────
+
+export interface ValidationScorecardRepository {
+  save(scorecard: ValidationScorecard): void;
+  findLatest(familyId: FamilyId, profile: ProfileId): ValidationScorecard | null;
+  findByFamily(familyId: FamilyId): ValidationScorecard[];
+  findByFamilyAndProfile(familyId: FamilyId, profile: ProfileId): ValidationScorecard[];
+}
+
+// ─── ProfileSummaryRepository ───────────────────────────────────────────
+
+export interface ProfileSummaryRepository {
+  get(profileId: ProfileId): ProfileSummary | null;
+  getAll(): ProfileSummary[];
+  save(summary: ProfileSummary): void;
+}
+
+// ─── RuntimeControlStateRepository ──────────────────────────────────────
+
+export interface RuntimeControlStateRepository {
+  get(): RuntimeControlState | null;
+  save(state: RuntimeControlState): void;
+}
+
+// ─── SwitchRequestRepository ────────────────────────────────────────────
+
+export interface SwitchRequestRepository {
+  save(request: SwitchRequest): void;
+  findById(switchId: SwitchId): SwitchRequest | null;
+  findActive(): SwitchRequest | null;
+  updateState(switchId: SwitchId, state: SwitchState, error?: string | null): void;
+}
+
+// ─── PreflightReportRepository ──────────────────────────────────────────
+
+export interface PreflightReportRepository {
+  save(report: PreflightReport): void;
+  findById(reportId: ReportId): PreflightReport | null;
+  findBySwitchRequest(switchId: SwitchId): PreflightReport[];
+  findLatestByProfile(profile: ProfileId): PreflightReport | null;
+}
+
+// ─── ServiceHeartbeatRepository ─────────────────────────────────────────
+
+export interface ServiceHeartbeatRepository {
+  upsert(heartbeat: ServiceHeartbeat): void;
+  findByService(serviceName: string): ServiceHeartbeat[];
+  findAll(): ServiceHeartbeat[];
+}
+
+// ─── ConfigImportRepository ─────────────────────────────────────────────
+
+export interface ConfigImportRepository {
+  save(importRecord: ConfigImport): void;
+  findById(importId: ImportId): ConfigImport | null;
+  findLatest(): ConfigImport | null;
+}
+
+// ─── FamilyConfigMetaRepository ─────────────────────────────────────────
+
+export interface FamilyConfigMetaRepository {
+  get(familyId: FamilyId): FamilyConfigMeta | null;
+  save(meta: FamilyConfigMeta): void;
+  findOperatorEdited(): FamilyConfigMeta[];
+}
+
+// ─── FamilyProfileRollupRepository ──────────────────────────────────────
+
+export interface FamilyProfileRollupRepository {
+  save(rollup: FamilyProfileRollup): void;
+  findByProfile(profile: ProfileId): FamilyProfileRollup[];
+  find(familyId: FamilyId, profile: ProfileId): FamilyProfileRollup | null;
+}
+
+// ─── FamilyProfileRuntimeStateRepository ────────────────────────────────
+// Lives in ledger DB — runtime-derived state per family within a profile.
+
+export interface FamilyProfileRuntimeStateRepository {
+  get(familyId: FamilyId): FamilyProfileRuntimeState | null;
+  save(state: FamilyProfileRuntimeState): void;
+  findAll(): FamilyProfileRuntimeState[];
 }

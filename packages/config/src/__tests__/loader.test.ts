@@ -70,14 +70,11 @@ describe("loadFamilyRulesYaml", () => {
     expect(family.rules.familyId).toBe(expectedId);
   });
 
-  it("sets updatedAt on runtimeState if present", () => {
+  it("strips runtimeState from v2 import schema", () => {
     const result = loadFamilyRulesYaml(TEMPLATE_PATH);
     const family = result.families[0]!;
-
-    expect(family.runtimeState).toBeDefined();
-    expect(family.runtimeState!.updatedAt).toBeDefined();
-    expect(family.runtimeState!.runtimeMode).toBe("active");
-    expect(family.runtimeState!.familyId).toBe("bitcoin-above:threshold:daily");
+    // V2 schema strips runtime_state — it comes from DB, not YAML
+    expect(family.runtimeState).toBeUndefined();
   });
 
   it("loads multi-family YAML format", () => {

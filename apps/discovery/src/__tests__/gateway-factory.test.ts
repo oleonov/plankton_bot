@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { getGammaTimeoutMs, getDbPath, loadDiscoveryEnv } from "../gateway-factory.js";
+import { getGammaTimeoutMs, getControlDbPath, loadDiscoveryEnv } from "../gateway-factory.js";
 
-const ENV_KEYS = ["GAMMA_TIMEOUT_MS", "PLANKTON_DB_PATH", "DB_PATH", "RUNTIME_MODE"] as const;
+const ENV_KEYS = ["GAMMA_TIMEOUT_MS", "CONTROL_DB_PATH", "DB_PATH", "RUNTIME_MODE"] as const;
 
 let savedEnv: Record<string, string | undefined>;
 
@@ -40,44 +40,32 @@ describe("getGammaTimeoutMs", () => {
   });
 });
 
-describe("getDbPath", () => {
-  it("returns PLANKTON_DB_PATH over DB_PATH", () => {
-    process.env["PLANKTON_DB_PATH"] = "/custom/plankton.db";
-    process.env["DB_PATH"] = "/other/path.db";
-    expect(getDbPath()).toBe("/custom/plankton.db");
-  });
-
-  it("falls back to DB_PATH when PLANKTON_DB_PATH unset", () => {
-    delete process.env["PLANKTON_DB_PATH"];
-    process.env["DB_PATH"] = "/from/db-path.db";
-    expect(getDbPath()).toBe("/from/db-path.db");
+describe("getControlDbPath", () => {
+  it("reads CONTROL_DB_PATH env", () => {
+    process.env["CONTROL_DB_PATH"] = "/custom/control.db";
+    expect(getControlDbPath()).toBe("/custom/control.db");
   });
 
   it("returns repo-root-based default when no env", () => {
-    delete process.env["PLANKTON_DB_PATH"];
-    delete process.env["DB_PATH"];
-    const result = getDbPath();
-    expect(result).toContain("apps/runtime/data/plankton-sim.db");
+    delete process.env["CONTROL_DB_PATH"];
+    const result = getControlDbPath();
+    expect(result).toContain("apps/runtime/data/control.db");
     expect(result).toMatch(/^\//);
   });
 });
 
 describe("loadDiscoveryEnv", () => {
-  it("reads RUNTIME_MODE from root .env and uses it for mode-specific file", () => {
-    // Clear all env vars that loadDiscoveryEnv touches
+  it("loads vars from root .env only (no mode-specific file)", () => {
     for (const key of ENV_KEYS) delete process.env[key];
 
     loadDiscoveryEnv();
 
-    // Root .env defines RUNTIME_MODE=paper — verify it was picked up
-    // (not defaulted to "simulation")
+    // Root .env defines RUNTIME_MODE and DB_PATH directly
     expect(process.env["RUNTIME_MODE"]).toBe("paper");
-    // DB_PATH should come from root .env (paper path), not .env.simulation
     expect(process.env["DB_PATH"]).toContain("paper");
   });
 
   it("process env takes precedence over .env files", () => {
-    // Set process env before loading — should not be overwritten
     process.env["RUNTIME_MODE"] = "live-lite";
     process.env["DB_PATH"] = "/explicit/path.db";
 

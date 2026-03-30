@@ -8,7 +8,7 @@ interface FillOpts {
   db: Database.Database;
 }
 
-function toDto(row: Record<string, unknown>, meta: MarketMeta) {
+export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
   return {
     fillId: row.fill_id,
     orderId: row.order_id,
