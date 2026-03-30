@@ -49,19 +49,6 @@ function ProfileCard({
   );
 }
 
-function RuntimeStatus({ currentProfile, runtimeStatus, paused }: { currentProfile: string | null; runtimeStatus: string; paused: boolean }) {
-  return (
-    <div className="card" style={{ marginTop: 16 }}>
-      <div className="label" style={{ marginBottom: 8 }}>Runtime Status</div>
-      <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
-        {currentProfile && <Badge value={currentProfile} type="mode" />}
-        <Badge value={runtimeStatus} type="mode" />
-        <Badge value={paused ? "paused" : "running"} type="status" />
-      </div>
-    </div>
-  );
-}
-
 export function ControlCenter() {
   const { data: overview } = useControlOverview();
   const { data: status } = useStatus();
@@ -89,14 +76,6 @@ export function ControlCenter() {
           />
         ))}
       </div>
-
-      {runtimeState && (
-        <RuntimeStatus
-          currentProfile={runtimeState.current_profile as string | null}
-          runtimeStatus={runtimeState.runtime_status}
-          paused={status?.paused ?? false}
-        />
-      )}
 
       <div className="card" style={{ marginTop: 16 }}>
         <div className="label" style={{ marginBottom: 8 }}>Quick Actions</div>
