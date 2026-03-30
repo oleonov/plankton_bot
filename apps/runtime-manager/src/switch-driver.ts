@@ -14,11 +14,30 @@ interface Logger {
   error(obj: Record<string, unknown>, msg: string): void;
 }
 
+const MAX_TRANSIENT_ERRORS = 10;
+
+function isTransientError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message;
+  return (
+    msg.includes("ECONNREFUSED") ||
+    msg.includes("ECONNRESET") ||
+    msg.includes("EACCES") ||
+    msg.includes("ETIMEDOUT") ||
+    msg.includes("socket hang up") ||
+    msg.includes("connect EHOSTUNREACH")
+  );
+}
+
 /**
  * Drives the profile-switch state machine one transition per tick().
  * Each handler is idempotent so crash recovery works via normal ticking.
+ * Transient Docker/proxy errors are retried up to MAX_TRANSIENT_ERRORS
+ * before permanently failing the switch.
  */
 export class SwitchDriver {
+  private transientErrorCount = 0;
+
   constructor(
     private readonly db: Database.Database,
     private readonly switchRepo: SwitchRequestRepository,
@@ -35,11 +54,22 @@ export class SwitchDriver {
 
     try {
       await this.advance(request);
+      this.transientErrorCount = 0; // reset on success
     } catch (err) {
+      if (isTransientError(err) && this.transientErrorCount < MAX_TRANSIENT_ERRORS) {
+        this.transientErrorCount++;
+        this.log.warn(
+          { switchId: request.switchId, state: request.state, attempt: this.transientErrorCount, err },
+          "transient Docker/proxy error, will retry",
+        );
+        return; // don't fail — retry on next tick
+      }
+
       this.log.error(
-        { switchId: request.switchId, state: request.state, err },
-        "switch tick failed",
+        { switchId: request.switchId, state: request.state, transientAttempts: this.transientErrorCount, err },
+        "switch tick failed permanently",
       );
+      this.transientErrorCount = 0;
       this.transitionTo(request.switchId, request.state, SwitchState.Failed);
       this.switchRepo.updateState(
         request.switchId,

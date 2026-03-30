@@ -64,6 +64,12 @@ services:
       # IMAGES, INFO, NETWORKS, NODES, PLUGINS, SECRETS, SERVICES,
       # SESSION, SWARM, SYSTEM, TASKS, VOLUMES = 0
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:2375/_ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     networks:
       - manager-net
 
@@ -76,8 +82,10 @@ services:
       # No docker.sock mount — connects via proxy
     restart: unless-stopped
     depends_on:
-      - plankton-runtime
-      - docker-socket-proxy
+      plankton-runtime:
+        condition: service_started
+      docker-socket-proxy:
+        condition: service_healthy
     env_file: .env.production
     environment:
       - CONTROL_DB_PATH=/app/apps/runtime/data/control.db
