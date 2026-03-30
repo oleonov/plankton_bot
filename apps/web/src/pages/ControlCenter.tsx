@@ -13,15 +13,20 @@ type Wizard = "switch" | "resume-live" | "reset" | null;
 function ProfileCard({
   profile,
   isCurrent,
+  runtimePaused,
 }: {
   profile: ProfileDTO;
   isCurrent: boolean;
+  runtimePaused: boolean;
 }) {
+  const profileStatus = isCurrent
+    ? runtimePaused ? "paused" : "running"
+    : "stopped";
   return (
     <div className={`profile-card ${isCurrent ? "current" : ""}`}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
         <h3>{profile.display_name}</h3>
-        <Badge value={profile.paused ? "paused" : "running"} type="status" />
+        <Badge value={profileStatus} type="status" />
       </div>
       <div className="profile-stat">
         <span className="label">Exposure</span>
@@ -44,11 +49,12 @@ function ProfileCard({
   );
 }
 
-function RuntimeStatus({ runtimeStatus, paused }: { runtimeStatus: string; paused: boolean }) {
+function RuntimeStatus({ currentProfile, runtimeStatus, paused }: { currentProfile: string | null; runtimeStatus: string; paused: boolean }) {
   return (
     <div className="card" style={{ marginTop: 16 }}>
       <div className="label" style={{ marginBottom: 8 }}>Runtime Status</div>
       <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+        {currentProfile && <Badge value={currentProfile} type="mode" />}
         <Badge value={runtimeStatus} type="mode" />
         <Badge value={paused ? "paused" : "running"} type="status" />
       </div>
@@ -75,12 +81,18 @@ export function ControlCenter() {
 
       <div className="profile-cards">
         {profiles.map((p) => (
-          <ProfileCard key={p.profile_id} profile={p} isCurrent={p.profile_id === currentProfile} />
+          <ProfileCard
+            key={p.profile_id}
+            profile={p}
+            isCurrent={p.profile_id === currentProfile}
+            runtimePaused={status?.paused ?? true}
+          />
         ))}
       </div>
 
       {runtimeState && (
         <RuntimeStatus
+          currentProfile={runtimeState.current_profile as string | null}
           runtimeStatus={runtimeState.runtime_status}
           paused={status?.paused ?? false}
         />
