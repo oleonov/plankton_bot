@@ -24,6 +24,7 @@ import type {
   AuditEntryDTO,
   SwitchResponse,
   ControlOverviewDTO,
+  TradingActivitySnapshot,
 } from "./types.ts";
 
 function withParams(
@@ -62,6 +63,17 @@ export function usePnlSeries(days = 14) {
   return useQuery({
     queryKey: ["pnl-series", days],
     queryFn: () => apiFetch<{ items: PnlDataPoint[] }>(`/api/v1/metrics/pnl-series?days=${days}`),
+  });
+}
+
+export function useTradingActivity(days = 14) {
+  return useQuery({
+    queryKey: ["trading-activity", days],
+    queryFn: () =>
+      apiFetch<{ items: TradingActivitySnapshot[] }>(
+        `/api/v1/metrics/trading-activity?days=${days}`,
+      ),
+    refetchInterval: 60_000,
   });
 }
 
