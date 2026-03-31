@@ -83,7 +83,7 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       );
     }
 
-    const balanceUsdc = this.reader.readBalanceUsdc();
+    const balanceUsdc = this.computeBalance(profileMetrics.totalExposureUsdc);
     const paused = this.deps.getPaused();
     const lastPreflightStatus = this.readLastPreflightStatus();
 
@@ -119,6 +119,16 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       { families: familyMetrics.length, profile: this.deps.profile },
       "profile runtime rollups published",
     );
+  }
+
+  private computeBalance(totalExposureUsdc: number): number | null {
+    const settingsRow = this.deps.controlDb
+      .prepare("SELECT initial_balance_usdc FROM profile_settings WHERE profile_id = ?")
+      .get(this.deps.profile) as { initial_balance_usdc: number | null } | undefined;
+    const initialBalance = settingsRow?.initial_balance_usdc;
+    if (initialBalance == null) return null;
+    const realizedPnl = this.reader.readRealizedPnl();
+    return initialBalance - totalExposureUsdc + realizedPnl;
   }
 
   private readLastPreflightStatus(): string | null {

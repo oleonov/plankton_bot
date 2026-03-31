@@ -106,7 +106,8 @@ export class ValidationMetricsReader {
     };
   }
 
-  readBalanceUsdc(): number | null {
+  /** Sum of realized PnL from all positions (closed + dust). */
+  readRealizedPnl(): number {
     const row = this.ledgerDb
       .prepare(
         "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions",
