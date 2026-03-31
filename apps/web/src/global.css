@@ -46,6 +46,8 @@ a:hover {
   background: var(--bg-card);
   border-radius: 6px;
   padding: 14px;
+  height: 100%;
+  box-sizing: border-box;
 }
 .card-accent-green {
   border-left: 3px solid var(--green);
