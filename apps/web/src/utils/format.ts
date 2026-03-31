@@ -4,9 +4,21 @@ export function formatUptime(seconds: number): string {
   return `${h}h ${m}m`;
 }
 
+/** Parse a timestamp as UTC. SQLite's datetime() omits the Z suffix. */
+function parseUtc(ts: string): number {
+  // If no timezone info, treat as UTC by appending Z
+  if (!ts.includes("Z") && !ts.includes("+") && !ts.includes("T")) {
+    return new Date(ts.replace(" ", "T") + "Z").getTime();
+  }
+  if (!ts.includes("Z") && !ts.includes("+")) {
+    return new Date(ts + "Z").getTime();
+  }
+  return new Date(ts).getTime();
+}
+
 export function formatAgo(iso: string | null): string {
   if (!iso) return "never";
-  const diff = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  const diff = Math.floor((Date.now() - parseUtc(iso)) / 1000);
   if (diff < 60) return `${diff}s ago`;
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
   if (diff < 86400) {
@@ -21,7 +33,7 @@ export function formatAgo(iso: string | null): string {
 }
 
 export function formatAge(openedAt: string): string {
-  const ms = Date.now() - new Date(openedAt).getTime();
+  const ms = Date.now() - parseUtc(openedAt);
   if (Number.isNaN(ms) || ms < 0) return "\u2014";
   const hours = ms / 3_600_000;
   if (hours < 1) return `${Math.round(ms / 60_000)}m`;
@@ -31,7 +43,7 @@ export function formatAge(openedAt: string): string {
 
 export function formatTimeLeft(endDate: string | null): { text: string; color: string } {
   if (!endDate) return { text: "\u2014", color: "var(--text-dim)" };
-  const end = new Date(endDate).getTime();
+  const end = parseUtc(endDate);
   if (Number.isNaN(end)) return { text: "\u2014", color: "var(--text-dim)" };
   const diffMs = end - Date.now();
 

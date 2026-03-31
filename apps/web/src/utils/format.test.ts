@@ -43,6 +43,20 @@ describe("formatAgo", () => {
     vi.setSystemTime(new Date("2026-06-01T12:00:00Z"));
     expect(formatAgo("2026-03-29T12:00:00Z")).toBe("2mo ago");
   });
+
+  it("treats SQLite datetime (no T, no Z) as UTC", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-31T01:04:00Z"));
+    // SQLite datetime() returns "2026-03-31 00:32:30" — no T, no Z
+    expect(formatAgo("2026-03-31 00:32:30")).toBe("31m ago");
+  });
+
+  it("treats ISO without Z suffix as UTC", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-31T01:04:00Z"));
+    // Some paths produce "2026-03-31T00:32:30" without Z
+    expect(formatAgo("2026-03-31T00:32:30")).toBe("31m ago");
+  });
 });
 
 describe("formatUptime", () => {
