@@ -223,6 +223,73 @@ describe("ProfileRuntimePublisher", () => {
     expect(summary.balance_usdc).toBeCloseTo(68.5, 1);
   });
 
+  it("publish() writes wallet_balance_usdc from exchangeGateway", async () => {
+    const walletPublisher = new ProfileRuntimePublisher({
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db,
+      profile: PROFILE,
+      deployedFamilyIds: () => familyIds,
+      getPaused: () => false,
+      log,
+      intervalMs: 999_999,
+      exchangeGateway: {
+        getBalances: async () => [{ asset: "USDC", available: 487.50, locked: 0 }],
+      } as any,
+    });
+
+    seedFamilyState(ledgerConn, FAMILY_A);
+
+    await walletPublisher.publish();
+
+    const summary = getSummary()!;
+    expect(summary.wallet_balance_usdc).toBeCloseTo(487.5, 1);
+  });
+
+  it("publish() keeps last wallet_balance_usdc on exchange error", async () => {
+    // First publish with working gateway
+    const workingPublisher = new ProfileRuntimePublisher({
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db,
+      profile: PROFILE,
+      deployedFamilyIds: () => familyIds,
+      getPaused: () => false,
+      log,
+      intervalMs: 999_999,
+      exchangeGateway: {
+        getBalances: async () => [{ asset: "USDC", available: 300, locked: 0 }],
+      } as any,
+    });
+
+    seedFamilyState(ledgerConn, FAMILY_A);
+    await workingPublisher.publish();
+    expect(getSummary()!.wallet_balance_usdc).toBeCloseTo(300, 0);
+
+    // Second publish with failing gateway — should retain 300
+    const failingPublisher = new ProfileRuntimePublisher({
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db,
+      profile: PROFILE,
+      deployedFamilyIds: () => familyIds,
+      getPaused: () => false,
+      log,
+      intervalMs: 999_999,
+      exchangeGateway: {
+        getBalances: async () => { throw new Error("network timeout"); },
+      } as any,
+    });
+
+    await failingPublisher.publish();
+    expect(getSummary()!.wallet_balance_usdc).toBeCloseTo(300, 0);
+  });
+
+  it("publish() writes null wallet_balance_usdc without exchangeGateway", async () => {
+    seedFamilyState(ledgerConn, FAMILY_A);
+    await publisher.publish();
+
+    const summary = getSummary()!;
+    expect(summary.wallet_balance_usdc).toBeNull();
+  });
+
   it("second publish() upserts (no duplicate rows)", async () => {
     seedFamilyState(ledgerConn, FAMILY_A, { open_value_usdc: 10 });
 
