@@ -41,6 +41,22 @@ describe("Profiles", () => {
     expect(await screen.findByText(/Deployed Families \(1\)/)).toBeInTheDocument();
   });
 
+  it("only current profile shows RUNNING, others show STOPPED", async () => {
+    renderWithProviders(<Profiles />);
+
+    // Wait for profiles to load — current_profile is "paper" in mock
+    await screen.findByText("Live-Lite");
+
+    // Get all badge texts — paper should be RUNNING, others STOPPED
+    const badges = screen.getAllByText(/running|stopped|paused/i);
+    const badgeTexts = badges.map((b) => b.textContent?.toLowerCase());
+
+    // Mock has current_profile = "paper" and paused = false
+    // Live-Lite and Simulation should be "stopped", Paper should be "running"
+    expect(badgeTexts.filter((t) => t === "stopped")).toHaveLength(2);
+    expect(badgeTexts.filter((t) => t === "running")).toHaveLength(1);
+  });
+
   it("switching to Deployed Families sub-tab shows family table", async () => {
     const user = userEvent.setup();
     renderWithProviders(<Profiles />);

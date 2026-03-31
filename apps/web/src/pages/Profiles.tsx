@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useProfiles, useProfileDetail } from "../api/hooks.ts";
+import { useProfiles, useProfileDetail, useStatus } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
 import type { ProfileDTO, DeployedFamilyDTO } from "../api/types.ts";
@@ -74,9 +74,16 @@ function ProfileContent({ profileId }: { profileId: string }) {
   );
 }
 
+function profileStatus(profileId: string, currentProfile: string | null, runtimePaused: boolean): string {
+  if (profileId !== currentProfile) return "stopped";
+  return runtimePaused ? "paused" : "running";
+}
+
 export function Profiles() {
   const { data, isLoading } = useProfiles();
+  const { data: status } = useStatus();
   const profiles = data?.profiles ?? [];
+  const currentProfile = data?.runtimeState?.current_profile ?? null;
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // Auto-select first profile
@@ -95,7 +102,7 @@ export function Profiles() {
             onClick={() => setSelectedId(p.profile_id)}
           >
             {p.display_name}
-            <Badge value={p.paused ? "paused" : "running"} type="status" />
+            <Badge value={profileStatus(p.profile_id, currentProfile, status?.paused ?? true)} type="status" />
           </button>
         ))}
       </div>
