@@ -519,6 +519,138 @@ describe("GET /discovery/candidates pagination", () => {
     expect(body.error.code).toBe("INVALID_CURSOR");
   });
 
+  it("returns 400 on structurally incomplete cursor (missing fields)", async () => {
+    // Valid base64 JSON but missing required fields (rr, cr, sc, ls)
+    const partial = Buffer.from(JSON.stringify({ sr: 0, id: "x" })).toString("base64");
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/discovery/candidates?cursor=${encodeURIComponent(partial)}`,
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(json(res).error.code).toBe("INVALID_CURSOR");
+  });
+
+  it("multi-criteria sort: status → recommendation → confidence → score", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM family_candidates").run();
+    const now = new Date().toISOString();
+
+    // Helper: seed with explicit recommendation, confidence, status
+    const seed = (id: string, status: string, rec: string, conf: string, recScore: number, viab: number) => {
+      db.prepare(
+        `INSERT INTO family_candidates
+           (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+            primary_category, strategy_profile, active_market_count, cluster_volume_24h,
+            recurrence_score, live_viability_score, gate_recommendation, status,
+            first_seen_at, last_seen_at, scores_updated_at)
+         VALUES (?, ?, 'standard', 'daily', 'daily', ?, 'crypto', 'scalp',
+                 3, 5000, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, `key-${id}`, conf, recScore, viab, rec, status, now, now, now);
+    };
+
+    // Mix of statuses, recommendations, confidences
+    seed("d-scaled-high", "discovered", "scaled-candidate", "high", 0.9, 0.9); // should be 1st
+    seed("d-probe-high", "discovered", "probe-candidate", "high", 0.9, 0.9);   // 2nd
+    seed("d-probe-med", "discovered", "probe-candidate", "medium", 0.9, 0.9);  // 3rd
+    seed("d-monitor-high", "discovered", "monitor", "high", 0.8, 0.8);         // 4th
+    seed("d-pending-high", "discovered", "pending", "high", 0.0, 0.0);         // 5th (pending before ignore)
+    seed("d-ignore-high", "discovered", "ignore", "high", 0.5, 0.5);           // 6th
+    seed("r-scaled-high", "reviewed", "scaled-candidate", "high", 0.9, 0.9);   // 7th (reviewed after all discovered)
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/candidates?limit=10",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    const ids = body.data.items.map((c: any) => c.candidateId);
+
+    expect(ids[0]).toBe("d-scaled-high");
+    expect(ids[1]).toBe("d-probe-high");
+    expect(ids[2]).toBe("d-probe-med");
+    expect(ids[3]).toBe("d-monitor-high");
+    expect(ids[4]).toBe("d-pending-high");
+    expect(ids[5]).toBe("d-ignore-high");
+    expect(ids[6]).toBe("r-scaled-high");
+  });
+
+  it("pending candidates sort between monitor and ignore", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM family_candidates").run();
+    const now = new Date().toISOString();
+
+    const seed = (id: string, rec: string) => {
+      db.prepare(
+        `INSERT INTO family_candidates
+           (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+            primary_category, strategy_profile, active_market_count, cluster_volume_24h,
+            recurrence_score, live_viability_score, gate_recommendation, status,
+            first_seen_at, last_seen_at)
+         VALUES (?, ?, 'standard', 'daily', 'daily', 'high', 'crypto', 'scalp',
+                 3, 5000, 0.5, 0.5, ?, 'discovered', ?, ?)`,
+      ).run(id, `key-${id}`, rec, now, now);
+    };
+
+    seed("ignore-1", "ignore");
+    seed("pending-1", "pending");
+    seed("monitor-1", "monitor");
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/candidates?limit=10",
+      headers: authHeaders(),
+    });
+    const ids = json(res).data.items.map((c: any) => c.candidateId);
+    expect(ids).toEqual(["monitor-1", "pending-1", "ignore-1"]);
+  });
+
+  it("cursor handles sub-second timestamp differences correctly", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM family_candidates").run();
+
+    // Three candidates: same status/rec/conf/score, different sub-second timestamps
+    for (const [id, ts] of [
+      ["sub-a", "2026-03-31T12:00:00.100Z"],
+      ["sub-b", "2026-03-31T12:00:00.500Z"],
+      ["sub-c", "2026-03-31T12:00:00.900Z"],
+    ] as const) {
+      db.prepare(
+        `INSERT INTO family_candidates
+           (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+            primary_category, strategy_profile, active_market_count, cluster_volume_24h,
+            recurrence_score, live_viability_score, gate_recommendation, status,
+            first_seen_at, last_seen_at, scores_updated_at)
+         VALUES (?, ?, 'standard', 'daily', 'daily', 'high', 'crypto', 'scalp',
+                 3, 5000, 0.5, 0.5, 'monitor', 'discovered', ?, ?, ?)`,
+      ).run(id, `key-${id}`, ts, ts, ts);
+    }
+
+    // Page 1: get first 2 (sub-c, sub-b — DESC by last_seen_at)
+    const res1 = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/candidates?limit=2",
+      headers: authHeaders(),
+    });
+    const body1 = json(res1);
+    expect(body1.data.items).toHaveLength(2);
+    expect(body1.data.items[0].candidateId).toBe("sub-c");
+    expect(body1.data.items[1].candidateId).toBe("sub-b");
+    expect(body1.data.nextCursor).not.toBeNull();
+
+    // Page 2: should get sub-a (not skip it)
+    const res2 = await app.inject({
+      method: "GET",
+      url: `/api/v1/discovery/candidates?limit=2&cursor=${encodeURIComponent(body1.data.nextCursor)}`,
+      headers: authHeaders(),
+    });
+    const body2 = json(res2);
+    expect(body2.data.items).toHaveLength(1);
+    expect(body2.data.items[0].candidateId).toBe("sub-a");
+    expect(body2.data.nextCursor).toBeNull();
+  });
+
   it("filters work together with cursor", async () => {
     const db = conn.db;
     db.prepare("DELETE FROM family_candidates").run();

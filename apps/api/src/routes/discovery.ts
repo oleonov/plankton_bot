@@ -104,13 +104,119 @@ function formatRun(run: DiscoveryRun | null) {
 
 const SCORE_EXPR = "(COALESCE(recurrence_score, 0) * COALESCE(live_viability_score, 0))";
 
-function parseCursor(raw: string): { score: number; id: string } | null {
-  const idx = raw.indexOf("|");
-  if (idx < 1) return null;
-  const score = Number(raw.slice(0, idx));
-  const id = raw.slice(idx + 1);
-  if (!Number.isFinite(score) || !id) return null;
-  return { score, id };
+// Multi-criteria sort: status → recommendation → confidence → score → freshness
+const STATUS_RANK = `CASE status
+  WHEN 'discovered' THEN 0 WHEN 'reviewed' THEN 1
+  WHEN 'materialized' THEN 2 WHEN 'deployed' THEN 3
+  WHEN 'rejected' THEN 4 ELSE 5 END`;
+
+const REC_RANK = `CASE gate_recommendation
+  WHEN 'scaled-candidate' THEN 0 WHEN 'probe-candidate' THEN 1
+  WHEN 'monitor' THEN 2 WHEN 'pending' THEN 3
+  WHEN 'ignore' THEN 4 ELSE 5 END`;
+
+const CONF_RANK = `CASE pattern_confidence
+  WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END`;
+
+const ORDER_BY = `${STATUS_RANK}, ${REC_RANK}, ${CONF_RANK}, ${SCORE_EXPR} DESC, last_seen_at DESC, candidate_id ASC`;
+
+interface CursorData {
+  sr: number;  // status rank
+  rr: number;  // recommendation rank
+  cr: number;  // confidence rank
+  sc: number;  // score (positive, not negated)
+  ls: string;  // last_seen_at ISO string (full precision)
+  id: string;  // candidate_id
+}
+
+function encodeCursor(row: CandidateRow): string {
+  const data: CursorData = {
+    sr: statusRank(row.status),
+    rr: recRank(row.gate_recommendation),
+    cr: confRank(row.pattern_confidence),
+    sc: (row.recurrence_score ?? 0) * (row.live_viability_score ?? 0),
+    ls: row.last_seen_at || "2000-01-01T00:00:00Z",
+    id: row.candidate_id,
+  };
+  return Buffer.from(JSON.stringify(data)).toString("base64");
+}
+
+function decodeCursor(raw: string): CursorData | null {
+  try {
+    const json = Buffer.from(raw, "base64").toString("utf-8");
+    const data = JSON.parse(json) as CursorData;
+    if (
+      typeof data.sr !== "number" ||
+      typeof data.rr !== "number" ||
+      typeof data.cr !== "number" ||
+      typeof data.sc !== "number" ||
+      typeof data.ls !== "string" ||
+      typeof data.id !== "string"
+    ) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Build keyset WHERE clause for multi-criteria pagination.
+ * Equivalent to: "row sorts after cursor in the ORDER BY"
+ * For ASC columns: col > val. For DESC columns: col < val.
+ */
+function buildKeysetClause(c: CursorData): { sql: string; params: unknown[] } {
+  // SR ASC, RR ASC, CR ASC, SCORE DESC, LS DESC, ID ASC
+  // Expand: (sr > ?) OR (sr = ? AND rr > ?) OR (sr = ? AND rr = ? AND cr > ?)
+  //         OR (sr = ? AND rr = ? AND cr = ? AND score < ?)
+  //         OR (sr = ? AND rr = ? AND cr = ? AND score = ? AND ls < ?)
+  //         OR (sr = ? AND rr = ? AND cr = ? AND score = ? AND ls = ? AND id > ?)
+  const sql = `(
+    (${STATUS_RANK}) > ? OR
+    ((${STATUS_RANK}) = ? AND (${REC_RANK}) > ?) OR
+    ((${STATUS_RANK}) = ? AND (${REC_RANK}) = ? AND (${CONF_RANK}) > ?) OR
+    ((${STATUS_RANK}) = ? AND (${REC_RANK}) = ? AND (${CONF_RANK}) = ? AND (${SCORE_EXPR}) < ?) OR
+    ((${STATUS_RANK}) = ? AND (${REC_RANK}) = ? AND (${CONF_RANK}) = ? AND (${SCORE_EXPR}) = ? AND COALESCE(last_seen_at, '2000-01-01') < ?) OR
+    ((${STATUS_RANK}) = ? AND (${REC_RANK}) = ? AND (${CONF_RANK}) = ? AND (${SCORE_EXPR}) = ? AND COALESCE(last_seen_at, '2000-01-01') = ? AND candidate_id > ?)
+  )`;
+  const params = [
+    c.sr,
+    c.sr, c.rr,
+    c.sr, c.rr, c.cr,
+    c.sr, c.rr, c.cr, c.sc,
+    c.sr, c.rr, c.cr, c.sc, c.ls,
+    c.sr, c.rr, c.cr, c.sc, c.ls, c.id,
+  ];
+  return { sql, params };
+}
+
+function statusRank(s: string): number {
+  switch (s) {
+    case "discovered": return 0;
+    case "reviewed": return 1;
+    case "materialized": return 2;
+    case "deployed": return 3;
+    case "rejected": return 4;
+    default: return 5;
+  }
+}
+
+function recRank(r: string): number {
+  switch (r) {
+    case "scaled-candidate": return 0;
+    case "probe-candidate": return 1;
+    case "monitor": return 2;
+    case "pending": return 3;
+    case "ignore": return 4;
+    default: return 5;
+  }
+}
+
+function confRank(c: string): number {
+  switch (c) {
+    case "high": return 0;
+    case "medium": return 1;
+    default: return 2;
+  }
 }
 
 export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, opts) => {
@@ -212,15 +318,16 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       params.push(recommendation);
     }
     if (cursor) {
-      const parsed = parseCursor(cursor);
+      const parsed = decodeCursor(cursor);
       if (!parsed) throw new ApiError(400, "invalid cursor format", "INVALID_CURSOR");
-      clauses.push(`(${SCORE_EXPR} < ? OR (${SCORE_EXPR} = ? AND candidate_id > ?))`);
-      params.push(parsed.score, parsed.score, parsed.id);
+      const keyset = buildKeysetClause(parsed);
+      clauses.push(keyset.sql);
+      params.push(...keyset.params);
     }
 
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const sql = `SELECT * FROM family_candidates ${where}
-      ORDER BY ${SCORE_EXPR} DESC, candidate_id ASC
+      ORDER BY ${ORDER_BY}
       LIMIT ?`;
     params.push(limit + 1);
 
@@ -229,10 +336,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
     if (hasMore) rows.pop();
 
     const last = rows[rows.length - 1];
-    const nextCursor =
-      hasMore && last
-        ? `${(last.recurrence_score ?? 0) * (last.live_viability_score ?? 0)}|${last.candidate_id}`
-        : null;
+    const nextCursor = hasMore && last ? encodeCursor(last) : null;
 
     return ok({ items: rows.map(toCandidateDto), nextCursor });
   });

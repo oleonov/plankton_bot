@@ -23,6 +23,13 @@ if [ ! -f ".env.production" ]; then
     exit 1
 fi
 
+# Pre-flight: run tests, lint, typecheck
+echo -e "${GREEN}[0/5] Running pre-flight checks (typecheck, test, lint)...${NC}"
+pnpm run typecheck || { echo -e "${RED}ERROR: typecheck failed${NC}"; exit 1; }
+pnpm run test || { echo -e "${RED}ERROR: tests failed${NC}"; exit 1; }
+pnpm run lint || { echo -e "${RED}ERROR: lint failed${NC}"; exit 1; }
+echo -e "${GREEN}Pre-flight checks passed ✓${NC}\n"
+
 # Step 1: Build Docker image locally
 GIT_SHA=$(git rev-parse --short HEAD)
 if [ -n "$(git status --porcelain)" ]; then
