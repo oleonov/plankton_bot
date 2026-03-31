@@ -6,14 +6,11 @@ export function formatUptime(seconds: number): string {
 
 /** Parse a timestamp as UTC. SQLite's datetime() omits the Z suffix. */
 function parseUtc(ts: string): number {
-  // If no timezone info, treat as UTC by appending Z
-  if (!ts.includes("Z") && !ts.includes("+") && !ts.includes("T")) {
-    return new Date(ts.replace(" ", "T") + "Z").getTime();
-  }
-  if (!ts.includes("Z") && !ts.includes("+")) {
-    return new Date(ts + "Z").getTime();
-  }
-  return new Date(ts).getTime();
+  // Check if timestamp already has timezone info (Z, +HH:MM, or -HH:MM after time)
+  // The regex matches Z or ±HH:MM at the end of the string
+  if (/[Zz]$|[+-]\d{2}:\d{2}$/.test(ts)) return new Date(ts).getTime();
+  // No timezone — SQLite datetime format. Normalize to ISO UTC.
+  return new Date(ts.replace(" ", "T") + "Z").getTime();
 }
 
 export function formatAgo(iso: string | null): string {

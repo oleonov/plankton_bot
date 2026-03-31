@@ -57,6 +57,20 @@ describe("formatAgo", () => {
     // Some paths produce "2026-03-31T00:32:30" without Z
     expect(formatAgo("2026-03-31T00:32:30")).toBe("31m ago");
   });
+
+  it("handles negative timezone offset correctly", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-31T06:00:00Z"));
+    // -05:00 means the timestamp is UTC-5, so 01:00-05:00 = 06:00 UTC → 0s ago
+    expect(formatAgo("2026-03-31T01:00:00-05:00")).toBe("0s ago");
+  });
+
+  it("handles positive timezone offset correctly", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-31T01:00:00Z"));
+    // +03:00 means 04:00+03:00 = 01:00 UTC → 0s ago
+    expect(formatAgo("2026-03-31T04:00:00+03:00")).toBe("0s ago");
+  });
 });
 
 describe("formatUptime", () => {
