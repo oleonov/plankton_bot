@@ -265,7 +265,7 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
         // Emit status event (same shape as GET /status) on any status-affecting change
         if (next.statusHash !== snapshot.statusHash) {
           const active = resolveActiveLedger(startupLedger, controlDb, opts.ledgerPool);
-          sendEvent("status", buildStatusSnapshot(active.db, staleMs, active.profile));
+          sendEvent("status", buildStatusSnapshot(active.db, staleMs, active.profile, controlDb));
         }
 
         // Emit risk:event when new risk events appear

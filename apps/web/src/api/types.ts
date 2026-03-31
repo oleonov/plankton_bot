@@ -19,6 +19,9 @@ export interface StatusData {
   openPositionCount: number;
   totalOpenValueUsdc: number;
   totalTailCostUsdc: number;
+  initialBalanceUsdc: number | null;
+  balanceUsdc: number | null;
+  totalRealizedPnl: number;
   marketDataSource: "live" | "simulation";
   executionMode: "simulation" | "live";
   liveLite?: {

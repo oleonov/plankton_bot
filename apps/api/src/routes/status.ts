@@ -143,6 +143,7 @@ export function buildStatusSnapshot(
   db: Database.Database,
   staleThresholdMs: number,
   profileOverride?: string | null,
+  controlDb?: Database.Database,
 ): Record<string, unknown> {
   const openOrders = db
     .prepare(
@@ -258,6 +259,27 @@ export function buildStatusSnapshot(
     }
   }
 
+  // Balance: initial balance from profile_settings, realized PnL from ledger
+  let initialBalanceUsdc: number | null = null;
+  if (controlDb && runtimeMode) {
+    try {
+      const settingsRow = controlDb
+        .prepare("SELECT initial_balance_usdc FROM profile_settings WHERE profile_id = ?")
+        .get(runtimeMode) as { initial_balance_usdc: number | null } | undefined;
+      initialBalanceUsdc = settingsRow?.initial_balance_usdc ?? null;
+    } catch {
+      // Table may not exist in legacy DBs
+    }
+  }
+
+  const totalRealizedPnl = (
+    db.prepare("SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions").get() as { total: number }
+  ).total;
+
+  const balanceUsdc = initialBalanceUsdc != null
+    ? initialBalanceUsdc - totalExposure.total + totalRealizedPnl
+    : null;
+
   return {
     runtimeMode,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
@@ -270,6 +292,9 @@ export function buildStatusSnapshot(
     openPositionCount: openPositions.cnt,
     totalOpenValueUsdc: totalExposure.total,
     totalTailCostUsdc: totalExposure.tail,
+    initialBalanceUsdc,
+    balanceUsdc,
+    totalRealizedPnl,
     marketDataSource: mdSource ? JSON.parse(mdSource.labels).value : "simulation",
     executionMode: execMode ? JSON.parse(execMode.labels).value : "simulation",
     liveLite: envelopeRow ? JSON.parse(envelopeRow.labels) : undefined,
@@ -287,6 +312,6 @@ export const statusRoutes: FastifyPluginAsync<StatusOpts> = async (app, opts) =>
 
   app.get("/status", async () => {
     const { db, profile } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
-    return ok(buildStatusSnapshot(db, staleMs, profile));
+    return ok(buildStatusSnapshot(db, staleMs, profile, opts.controlDb));
   });
 };
