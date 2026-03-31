@@ -742,6 +742,8 @@ describe("operator actions", () => {
     expect(row.action).toBe("pause");
     expect(row.status).toBe("pending");
     expect(row.reason).toBe("test pause");
+    // Bearer API key → initiator is "api_key"
+    expect(row.initiator).toBe("api_key");
   });
 
   it("POST /actions/resume inserts command", async () => {
@@ -779,6 +781,7 @@ describe("operator actions", () => {
       .get(body.data.commandId) as Record<string, unknown>;
     expect(row.action).toBe("family_quarantine");
     expect(row.target_id).toBe("fam-1");
+    expect(row.initiator).toBe("api_key");
   });
 
   it("POST /actions/family/:id/reduce-only works", async () => {

@@ -317,6 +317,36 @@ describe("Session Auth", () => {
     await app.close();
   });
 
+  it("session login stores username for audit attribution", async () => {
+    const app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
+
+    // Login as "admin"
+    const loginRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      payload: { username: TEST_USERNAME, password: TEST_PASSWORD },
+    });
+    const cookie = loginRes.headers["set-cookie"] as string;
+
+    // Perform an action via session auth
+    const pauseRes = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/pause",
+      headers: { cookie, "content-type": "application/json" },
+      payload: { reason: "attribution test" },
+    });
+    expect(pauseRes.statusCode).toBe(200);
+    const body = json(pauseRes);
+
+    // Verify the command was attributed to the session username
+    const row = conn.db
+      .prepare("SELECT initiator FROM operator_commands WHERE id = ?")
+      .get(body.data.commandId) as { initiator: string };
+    expect(row.initiator).toBe("admin");
+
+    await app.close();
+  });
+
   it("fail-closed when no auth configured at all", async () => {
     const app = await buildServer({
       config: testConfig({

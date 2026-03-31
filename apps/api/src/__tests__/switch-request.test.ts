@@ -152,6 +152,8 @@ describe("POST /actions/switch-profile", () => {
     expect(row.to_profile).toBe("paper");
     expect(row.ledger_reset_policy).toBe("preserve");
     expect(row.state).toBe("requested");
+    // Bearer API key auth → actor is "api_key"
+    expect(row.requested_by).toBe("api_key");
   });
 
   it("returns 409 when a switch is already in progress", async () => {
