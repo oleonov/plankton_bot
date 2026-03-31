@@ -62,6 +62,11 @@ beforeAll(async () => {
     VALUES ('fam-1', 50, 5, 3);
 
     INSERT INTO family_evidence (family_id) VALUES ('fam-1');
+
+    INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation');
+    INSERT INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
+    INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused)
+    VALUES (1, 'simulation', 'simulation', 'running', 0);
   `);
 
   // Ledger: runtime state, positions, orders, bot_runs, metrics, markets
@@ -162,5 +167,57 @@ describe("API against real split schemas", () => {
       body: JSON.stringify({ reason: "test" }),
     });
     expect(res.statusCode).toBe(200);
+  });
+
+  it("GET /status reads from active profile's ledger after switch (not startup ledger)", async () => {
+    // Create a paper ledger with different data
+    const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));
+    paperConn.db.exec(`
+      INSERT INTO bot_runs (run_id, mode, started_at)
+      VALUES ('run-paper', 'paper', '2026-03-15T00:00:00Z');
+
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('runtime_paused', 0, NULL, '2026-03-15T00:00:00Z');
+
+      INSERT INTO family_runtime_state (family_id, runtime_mode, open_value_usdc, open_position_count,
+        open_dust_count, active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
+      VALUES ('fam-1', 'active', 100.0, 5, 1, 4, 20.0, 10.0, '2026-03-15T00:00:00Z');
+    `);
+
+    // Update control.db to point to paper as current profile
+    controlConn.db
+      .prepare("UPDATE runtime_control_state SET current_profile = 'paper', updated_at = datetime('now') WHERE id = 1")
+      .run();
+
+    // Create a real LedgerPool that finds the paper ledger
+    const { LedgerPool } = await import("../ledger-pool.js");
+    const pool = new LedgerPool(path.join(tmpDir, "control.db"));
+
+    // Build a fresh server with the pool
+    const freshApp = await buildServer({
+      config: testConfig(),
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db, // startup ledger is still simulation
+      ledgerPool: pool,
+    });
+
+    const res = await freshApp.inject({ method: "GET", url: "/api/v1/status", headers: auth() });
+    const body = res.json();
+
+    expect(body.ok).toBe(true);
+    // Should read from paper ledger, not simulation
+    expect(body.data.runtimeMode).toBe("paper");
+    expect(body.data.paused).toBe(false); // paper ledger has runtime_paused=0
+    expect(body.data.totalOpenValueUsdc).toBe(100.0); // paper ledger has 100, sim has 50
+    expect(body.data.activeFamilyCount).toBe(1);
+
+    await freshApp.close();
+    pool.closeAll();
+    paperConn.close();
+
+    // Restore control state for other tests
+    controlConn.db
+      .prepare("UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1")
+      .run();
   });
 });

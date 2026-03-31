@@ -20,12 +20,13 @@
 
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { buildStatusSnapshot } from "./status.js";
+import { buildStatusSnapshot, resolveActiveLedger } from "./status.js";
 import { normalizeRiskEvent } from "./normalize-risk-event.js";
 
 interface EventsOpts {
   controlDb: Database.Database;
   ledgerDb: Database.Database;
+  ledgerPool?: import("../ledger-pool.js").LedgerPool;
   marketDataStaleThresholdMs?: number;
 }
 
@@ -254,7 +255,8 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
 
         // Emit status event (same shape as GET /status) on any status-affecting change
         if (next.statusHash !== snapshot.statusHash) {
-          sendEvent("status", buildStatusSnapshot(ledgerDb, staleMs));
+          const active = resolveActiveLedger(ledgerDb, controlDb, opts.ledgerPool);
+          sendEvent("status", buildStatusSnapshot(active.db, staleMs, active.profile));
         }
 
         // Emit risk:event when new risk events appear

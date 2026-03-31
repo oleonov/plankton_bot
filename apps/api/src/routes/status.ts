@@ -1,14 +1,40 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import type { LedgerPool } from "../ledger-pool.js";
 import { ok } from "../errors.js";
 
 interface StatusOpts {
   db: Database.Database;
   controlDb?: Database.Database;
+  ledgerPool?: LedgerPool;
   marketDataStaleThresholdMs?: number;
 }
 
 const startedAt = Date.now();
+
+/**
+ * Resolve the ledger DB for the currently active profile.
+ * Falls back to the startup-fixed ledger if control.db or pool unavailable.
+ */
+function resolveActiveLedger(
+  fallback: Database.Database,
+  controlDb?: Database.Database,
+  ledgerPool?: LedgerPool,
+): { db: Database.Database; profile: string | null } {
+  if (!controlDb || !ledgerPool) return { db: fallback, profile: null };
+  try {
+    const row = controlDb
+      .prepare("SELECT current_profile FROM runtime_control_state WHERE id = 1")
+      .get() as { current_profile: string | null } | undefined;
+    if (row?.current_profile) {
+      const ledger = ledgerPool.get(row.current_profile);
+      if (ledger) return { db: ledger, profile: row.current_profile };
+    }
+  } catch {
+    // Table may not exist in legacy/test DBs
+  }
+  return { db: fallback, profile: null };
+}
 
 function computeTradingState(
   db: Database.Database,
@@ -116,6 +142,7 @@ function computeTradingState(
 export function buildStatusSnapshot(
   db: Database.Database,
   staleThresholdMs: number,
+  profileOverride?: string | null,
 ): Record<string, unknown> {
   const openOrders = db
     .prepare(
@@ -180,9 +207,11 @@ export function buildStatusSnapshot(
     ? Date.now() - new Date(marketDataLastUpdateAt).getTime() > staleThresholdMs
     : true; // no data yet = stale
 
+  const runtimeMode = profileOverride ?? botRun?.mode ?? "simulation";
+
   // Live-lite envelope — only show when current run is live-lite
   const envelopeRow =
-    botRun?.mode === "live-lite"
+    runtimeMode === "live-lite"
       ? (db
           .prepare(
             "SELECT labels FROM runtime_metrics WHERE metric_name = 'live_lite_envelope' ORDER BY captured_at DESC LIMIT 1",
@@ -230,7 +259,7 @@ export function buildStatusSnapshot(
   }
 
   return {
-    runtimeMode: botRun?.mode ?? "simulation",
+    runtimeMode,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
     paused,
     lastReconciliationAt: lastRecon?.ts ?? null,
@@ -251,27 +280,13 @@ export function buildStatusSnapshot(
   };
 }
 
+export { resolveActiveLedger };
+
 export const statusRoutes: FastifyPluginAsync<StatusOpts> = async (app, opts) => {
   const staleMs = opts.marketDataStaleThresholdMs ?? 120_000;
 
   app.get("/status", async () => {
-    const snapshot = buildStatusSnapshot(opts.db, staleMs);
-
-    // Override runtimeMode with actual current profile from control.db
-    // (the API's ledger connection is fixed at startup, but profile may have changed)
-    if (opts.controlDb) {
-      try {
-        const row = opts.controlDb
-          .prepare("SELECT current_profile FROM runtime_control_state WHERE id = 1")
-          .get() as { current_profile: string | null } | undefined;
-        if (row?.current_profile) {
-          snapshot.runtimeMode = row.current_profile;
-        }
-      } catch {
-        // Table may not exist in legacy/test DBs — fall through to ledger-based mode
-      }
-    }
-
-    return ok(snapshot);
+    const { db, profile } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
+    return ok(buildStatusSnapshot(db, staleMs, profile));
   });
 };

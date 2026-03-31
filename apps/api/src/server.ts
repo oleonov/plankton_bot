@@ -90,11 +90,12 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(actionRoutes, { prefix: "/api/v1", db: deps.controlDb });
   await app.register(configRoutes, { prefix: "/api/v1", controlDb: deps.controlDb });
 
-  // Status — ledger for metrics, control for current profile
+  // Status — resolves active profile's ledger via pool for consistent snapshot
   await app.register(statusRoutes, {
     prefix: "/api/v1",
     db: deps.ledgerDb,
     controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
     marketDataStaleThresholdMs: staleMs,
   });
   await app.register(positionRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
@@ -104,6 +105,7 @@ export async function buildServer(deps: ServerDeps) {
     prefix: "/api/v1",
     controlDb: deps.controlDb,
     ledgerDb: deps.ledgerDb,
+    ledgerPool: deps.ledgerPool,
     marketDataStaleThresholdMs: staleMs,
   });
   await app.register(riskEventsRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
