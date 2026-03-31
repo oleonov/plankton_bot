@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useTradingActivity } from "../api/hooks.ts";
 import { aggregateSnapshots, collapseStates } from "../utils/tradingActivity.ts";
 
@@ -96,6 +96,11 @@ function SignalBars({ buckets }: { buckets: { signalsProduced: number; signalsAp
 
 export function TradingActivityPanel() {
   const [rangeIdx, setRangeIdx] = useState(2); // default 14d
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
   const range = RANGE_OPTIONS[rangeIdx]!;
   const { data } = useTradingActivity(range.days);
   const snapshots = data?.items ?? [];
@@ -104,7 +109,7 @@ export function TradingActivityPanel() {
   const buckets = aggregateSnapshots(snapshots, range.bucketMinutes);
 
   const rangeMs = range.days * 24 * 60 * 60 * 1000;
-  const rangeStart = Date.now() - rangeMs;
+  const rangeStart = now - rangeMs;
   const bandSegments = segments.map((seg) => {
     const startMs = Math.max(new Date(seg.startAt).getTime() - rangeStart, 0);
     const endMs = new Date(seg.endAt).getTime() - rangeStart + 10 * 60 * 1000;

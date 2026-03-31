@@ -69,7 +69,6 @@ describe("TradingActivityPanel", () => {
     await screen.findByText("Trading Activity");
 
     const btn24h = screen.getByRole("button", { name: "24h" });
-    const btn7d = screen.getByRole("button", { name: "7d" });
     const btn14d = screen.getByRole("button", { name: "14d" });
 
     expect(btn14d.className).toContain("btn-success");
