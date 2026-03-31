@@ -194,4 +194,85 @@ describe("ScanService", () => {
     expect(stats.clustersCreated).toBe(2); // bitcoin-above + ethereum-above
     expect(stats.candidatesUpserted).toBe(2);
   });
+
+  it("pruneAndCooldown prunes low-value tail but preserves protected candidates", async () => {
+    // Seed mixed candidates directly in DB
+    const db = conn.db;
+
+    // 1. Low-value tail, stale (should be pruned)
+    db.prepare(`
+      INSERT INTO family_candidates
+        (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+         primary_category, strategy_profile, gate_recommendation, status,
+         matched_family_id, first_seen_at, last_seen_at)
+      VALUES ('lv-stale', 'lv-key', 'generic', 'ad-hoc', 'ad-hoc', 'low',
+              'other', 'scalp', 'ignore', 'discovered',
+              NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+    `).run();
+    db.prepare(`
+      INSERT INTO candidate_observations (candidate_id, active_market_count, cluster_volume_24h, observed_at)
+      VALUES ('lv-stale', 1, 100, '2026-01-01T00:00:00Z')
+    `).run();
+    db.prepare(`
+      INSERT INTO candidate_observation_markets (candidate_id, observed_at, condition_id, slug)
+      VALUES ('lv-stale', '2026-01-01T00:00:00Z', 'c1', 's1')
+    `).run();
+
+    // 2. Protected: reviewed, old (should survive)
+    db.prepare(`
+      INSERT INTO family_candidates
+        (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+         primary_category, strategy_profile, gate_recommendation, status,
+         matched_family_id, first_seen_at, last_seen_at)
+      VALUES ('reviewed-old', 'rev-key', 'generic', 'ad-hoc', 'ad-hoc', 'low',
+              'other', 'scalp', 'ignore', 'reviewed',
+              NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+    `).run();
+    db.prepare(`
+      INSERT INTO candidate_observations (candidate_id, active_market_count, cluster_volume_24h, observed_at)
+      VALUES ('reviewed-old', 1, 100, '2026-01-01T00:00:00Z')
+    `).run();
+
+    // 3. Protected: matched, old (should survive)
+    db.prepare(`
+      INSERT INTO family_candidates
+        (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+         primary_category, strategy_profile, gate_recommendation, status,
+         matched_family_id, first_seen_at, last_seen_at)
+      VALUES ('matched-old', 'match-key', 'generic', 'ad-hoc', 'ad-hoc', 'low',
+              'other', 'scalp', 'ignore', 'discovered',
+              'fam-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
+    `).run();
+
+    // Run a scan (with empty market list) which triggers pruneAndCooldown
+    const gateway = makeGateway([]);
+    const service = new ScanService({ db: conn.db, log: silentLogger, gateway });
+    const stats = await service.run();
+
+    expect(stats.pruned).toBeGreaterThan(0);
+
+    // Low-value stale: candidate row + observations deleted
+    expect(
+      db.prepare("SELECT 1 FROM family_candidates WHERE candidate_id = 'lv-stale'").get(),
+    ).toBeUndefined();
+    expect(
+      db.prepare("SELECT COUNT(*) as cnt FROM candidate_observations WHERE candidate_id = 'lv-stale'").get(),
+    ).toEqual({ cnt: 0 });
+    expect(
+      db.prepare("SELECT COUNT(*) as cnt FROM candidate_observation_markets WHERE candidate_id = 'lv-stale'").get(),
+    ).toEqual({ cnt: 0 });
+
+    // Protected: reviewed candidate + observations preserved
+    expect(
+      db.prepare("SELECT 1 FROM family_candidates WHERE candidate_id = 'reviewed-old'").get(),
+    ).toBeDefined();
+    expect(
+      (db.prepare("SELECT COUNT(*) as cnt FROM candidate_observations WHERE candidate_id = 'reviewed-old'").get() as { cnt: number }).cnt,
+    ).toBe(1);
+
+    // Protected: matched candidate preserved
+    expect(
+      db.prepare("SELECT 1 FROM family_candidates WHERE candidate_id = 'matched-old'").get(),
+    ).toBeDefined();
+  });
 });

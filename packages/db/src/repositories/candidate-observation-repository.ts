@@ -125,4 +125,39 @@ export class SqliteCandidateObservationRepository implements CandidateObservatio
       .run(olderThanIso);
     return info.changes;
   }
+
+  /**
+   * Aggressively prune observation history for low-value tail candidates.
+   * Low-value tail: discovered + ignore + low confidence + unmatched.
+   * Deletes markets first (FK-safe), then observations.
+   */
+  pruneLowValueTail(olderThanIso: string): number {
+    const lowValueFilter = `
+      candidate_id IN (
+        SELECT candidate_id FROM family_candidates
+        WHERE status = 'discovered'
+          AND gate_recommendation = 'ignore'
+          AND pattern_confidence = 'low'
+          AND matched_family_id IS NULL
+      )
+    `;
+
+    this.db
+      .prepare(
+        `DELETE FROM candidate_observation_markets
+         WHERE ${lowValueFilter}
+           AND observed_at < ?`,
+      )
+      .run(olderThanIso);
+
+    const info = this.db
+      .prepare(
+        `DELETE FROM candidate_observations
+         WHERE ${lowValueFilter}
+           AND observed_at < ?`,
+      )
+      .run(olderThanIso);
+
+    return info.changes;
+  }
 }

@@ -157,6 +157,29 @@ export class SqliteFamilyCandidateRepository implements FamilyCandidateRepositor
       .run(status, candidateId);
   }
 
+  /**
+   * Delete stale low-value tail candidates.
+   * Low-value tail: discovered + ignore + low confidence + unmatched + no pending proposals.
+   * Only deletes when last_seen_at is older than the cutoff.
+   */
+  deleteStaleLowValueTail(olderThanIso: string): number {
+    const info = this.db
+      .prepare(
+        `DELETE FROM family_candidates
+         WHERE status = 'discovered'
+           AND gate_recommendation = 'ignore'
+           AND pattern_confidence = 'low'
+           AND matched_family_id IS NULL
+           AND last_seen_at < ?
+           AND NOT EXISTS (
+             SELECT 1 FROM promotion_proposals
+             WHERE family_id = candidate_id AND status = 'pending'
+           )`,
+      )
+      .run(olderThanIso);
+    return info.changes;
+  }
+
   updateScores(
     candidateId: string,
     scores: {

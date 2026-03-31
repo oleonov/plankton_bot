@@ -132,4 +132,73 @@ describe("SqliteFamilyCandidateRepository", () => {
   it("findAll returns empty array on empty table", () => {
     expect(repo.findAll()).toHaveLength(0);
   });
+
+  // ─── deleteStaleLowValueTail ────────────────────────────────────────
+
+  describe("deleteStaleLowValueTail", () => {
+    const lowValueTail = (id: string, lastSeenAt: string) =>
+      makeCandidate({
+        candidateId: id,
+        status: "discovered",
+        gateRecommendation: "ignore",
+        patternConfidence: "low",
+        matchedFamilyId: null,
+        lastSeenAt,
+      });
+
+    it("deletes stale low-value tail candidates", () => {
+      repo.upsert(lowValueTail("stale-1", "2026-01-01T00:00:00Z"));
+      const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
+      expect(deleted).toBe(1);
+      expect(repo.findById("stale-1")).toBeNull();
+    });
+
+    it("does not delete recent low-value tail candidates", () => {
+      repo.upsert(lowValueTail("recent-1", "2026-03-30T00:00:00Z"));
+      const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
+      expect(deleted).toBe(0);
+      expect(repo.findById("recent-1")).not.toBeNull();
+    });
+
+    it("does not delete reviewed candidates even if old", () => {
+      repo.upsert({ ...lowValueTail("rev-1", "2026-01-01T00:00:00Z"), status: "reviewed" });
+      const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
+      expect(deleted).toBe(0);
+    });
+
+    it("does not delete materialized candidates even if old", () => {
+      repo.upsert({ ...lowValueTail("mat-1", "2026-01-01T00:00:00Z"), status: "materialized" });
+      const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
+      expect(deleted).toBe(0);
+    });
+
+    it("does not delete matched candidates even if old", () => {
+      repo.upsert({ ...lowValueTail("match-1", "2026-01-01T00:00:00Z"), matchedFamilyId: "fam-1" as any });
+      const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
+      expect(deleted).toBe(0);
+    });
+
+    it("does not delete medium/high confidence candidates", () => {
+      repo.upsert({ ...lowValueTail("med-1", "2026-01-01T00:00:00Z"), patternConfidence: "medium" });
+      const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
+      expect(deleted).toBe(0);
+    });
+
+    it("does not delete candidates with non-ignore recommendation", () => {
+      repo.upsert({ ...lowValueTail("green-1", "2026-01-01T00:00:00Z"), gateRecommendation: "green" });
+      const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
+      expect(deleted).toBe(0);
+    });
+
+    it("does not delete candidate with pending proposal", () => {
+      repo.upsert(lowValueTail("prop-1", "2026-01-01T00:00:00Z"));
+      // Insert a pending proposal referencing the candidate_id as family_id
+      conn.db.prepare(
+        `INSERT INTO promotion_proposals (family_id, current_state, proposed_state, reason, scores_snapshot, status)
+         VALUES ('prop-1', 'probe-only', 'scaled', 'test', '{}', 'pending')`,
+      ).run();
+      const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
+      expect(deleted).toBe(0);
+    });
+  });
 });

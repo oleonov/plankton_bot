@@ -13,6 +13,8 @@ import { inferCategory, inferStrategyProfile } from "./category-inference.js";
 
 const PRUNE_DAYS = 90;
 const COOLDOWN_DAYS = 7;
+const LOW_VALUE_OBS_RETENTION_HOURS = 24;
+const LOW_VALUE_CANDIDATE_RETENTION_DAYS = 3;
 
 export interface ScanServiceDeps {
   db: DbConnection["db"];
@@ -97,7 +99,7 @@ export class ScanService {
     log.info({ upserted, matched, total: clusters.length }, "Candidate upsert complete");
 
     // Pruning & cooldown
-    const pruned = this.pruneAndCooldown(db, observationRepo, log);
+    const pruned = this.pruneAndCooldown(db, observationRepo, candidateRepo, log);
 
     return {
       marketsFound: totalMarkets,
@@ -155,13 +157,34 @@ export class ScanService {
   private pruneAndCooldown(
     db: DbConnection["db"],
     observationRepo: InstanceType<typeof SqliteCandidateObservationRepository>,
+    candidateRepo: InstanceType<typeof SqliteFamilyCandidateRepository>,
     log: Logger,
   ): number {
-    const pruneDate = new Date(Date.now() - PRUNE_DAYS * 86_400_000).toISOString();
+    // 1. Aggressive prune: low-value tail observation history (24h retention)
+    const lowValueObsCutoff = new Date(
+      Date.now() - LOW_VALUE_OBS_RETENTION_HOURS * 3_600_000,
+    ).toISOString();
+    const lowValueObsPruned = observationRepo.pruneLowValueTail(lowValueObsCutoff);
+    if (lowValueObsPruned > 0) {
+      log.info({ pruned: lowValueObsPruned, olderThan: lowValueObsCutoff }, "Pruned low-value tail observations");
+    }
 
+    // 2. Aggressive prune: stale low-value tail candidate rows (3d retention)
+    // Must run AFTER observation prune to avoid FK violations
+    const lowValueCandCutoff = new Date(
+      Date.now() - LOW_VALUE_CANDIDATE_RETENTION_DAYS * 86_400_000,
+    ).toISOString();
+    const lowValueCandDeleted = candidateRepo.deleteStaleLowValueTail(lowValueCandCutoff);
+    if (lowValueCandDeleted > 0) {
+      log.info({ deleted: lowValueCandDeleted }, "Deleted stale low-value tail candidates");
+    }
+
+    // 3. Global prune: all observations older than 90 days
+    const pruneDate = new Date(Date.now() - PRUNE_DAYS * 86_400_000).toISOString();
     const pruned = observationRepo.prune(pruneDate);
     if (pruned > 0) log.info({ pruned, olderThan: pruneDate }, "Pruned old observations");
 
+    // 4. Global prune: stale discovered candidates older than 90 days
     const staleDeleted = db
       .prepare("DELETE FROM family_candidates WHERE last_seen_at < ? AND status = 'discovered'")
       .run(pruneDate);
@@ -169,6 +192,7 @@ export class ScanService {
       log.info({ deleted: staleDeleted.changes }, "Deleted stale discovered candidates");
     }
 
+    // 5. Cooldown: re-enter rejected candidates after 7 days
     const cooldownResult = db
       .prepare(
         `UPDATE family_candidates SET status = 'discovered'
@@ -179,6 +203,6 @@ export class ScanService {
       log.info({ reEntered: cooldownResult.changes }, "Re-entered rejected candidates past cooldown");
     }
 
-    return pruned + staleDeleted.changes;
+    return lowValueObsPruned + lowValueCandDeleted + pruned + staleDeleted.changes;
   }
 }
