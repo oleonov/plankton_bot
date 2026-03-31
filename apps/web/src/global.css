@@ -280,6 +280,18 @@ button {
   color: var(--text);
 }
 
+/* ─── Profile tabs ────────────────────────────────── */
+.profile-tabs { display: flex; gap: 0; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+.profile-tab {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 20px;
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--text-muted); font-family: inherit; font-size: 13px; font-weight: 600;
+  cursor: pointer; transition: all .15s;
+}
+.profile-tab:hover { color: var(--text); background: rgba(255,255,255,.03); }
+.profile-tab.active { color: var(--text); border-bottom-color: var(--blue); }
+
 /* Page layout */
 .page {
   padding: 16px;

@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useProfiles, useProfileDetail, useUpdateProfileSettings } from "../api/hooks.ts";
-import { Badge } from "../components/Badge.tsx";
 
 interface RiskCaps {
   dailyLossCap?: number;
@@ -12,33 +11,28 @@ interface RiskCaps {
 
 function parseRiskCaps(json: string | null): RiskCaps {
   if (!json) return {};
-  try {
-    return JSON.parse(json) as RiskCaps;
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(json) as RiskCaps; } catch { return {}; }
 }
 
-function ProfileRiskForm({ profileId, displayName }: { profileId: string; displayName: string }) {
-  const { data: detail } = useProfileDetail(profileId);
+function RiskForm({ profileId }: { profileId: string }) {
+  const { data: detail, dataUpdatedAt } = useProfileDetail(profileId);
   const update = useUpdateProfileSettings(profileId);
-  const caps = parseRiskCaps(detail?.settings?.risk_caps_json ?? null);
 
-  const [dailyLossCap, setDailyLossCap] = useState<string>("");
-  const [dailyNotionalCap, setDailyNotionalCap] = useState<string>("");
-  const [maxNewMarkets, setMaxNewMarkets] = useState<string>("");
-  const [maxFamilies, setMaxFamilies] = useState<string>("");
-  const [maxExposure, setMaxExposure] = useState<string>("");
-  const [initialized, setInitialized] = useState(false);
+  if (!detail) return <div style={{ fontSize: 12, padding: 16 }}>Loading...</div>;
 
-  if (detail?.settings && !initialized) {
-    setDailyLossCap(String(caps.dailyLossCap ?? ""));
-    setDailyNotionalCap(String(caps.dailyNotionalCap ?? ""));
-    setMaxNewMarkets(String(caps.maxNewMarketsPerDay ?? ""));
-    setMaxFamilies(String(caps.maxOpenFamilies ?? ""));
-    setMaxExposure(String(caps.maxTotalExposureUsdc ?? ""));
-    setInitialized(true);
-  }
+  return <RiskFormInner key={dataUpdatedAt} riskCapsJson={detail.settings?.risk_caps_json ?? null} update={update} />;
+}
+
+function RiskFormInner({ riskCapsJson, update }: {
+  riskCapsJson: string | null;
+  update: ReturnType<typeof useUpdateProfileSettings>;
+}) {
+  const caps = parseRiskCaps(riskCapsJson);
+  const [dailyLossCap, setDailyLossCap] = useState(caps.dailyLossCap?.toString() ?? "");
+  const [dailyNotionalCap, setDailyNotionalCap] = useState(caps.dailyNotionalCap?.toString() ?? "");
+  const [maxNewMarkets, setMaxNewMarkets] = useState(caps.maxNewMarketsPerDay?.toString() ?? "");
+  const [maxFamilies, setMaxFamilies] = useState(caps.maxOpenFamilies?.toString() ?? "");
+  const [maxExposure, setMaxExposure] = useState(caps.maxTotalExposureUsdc?.toString() ?? "");
 
   const handleSave = () => {
     const riskCaps: RiskCaps = {};
@@ -51,11 +45,7 @@ function ProfileRiskForm({ profileId, displayName }: { profileId: string; displa
   };
 
   return (
-    <div className="card" style={{ marginBottom: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>{displayName}</span>
-        <Badge value={profileId} type="mode" />
-      </div>
+    <div className="card">
       <div className="settings-form">
         <div className="form-field">
           <label>Daily Loss Cap (USDC)</label>
@@ -82,7 +72,7 @@ function ProfileRiskForm({ profileId, displayName }: { profileId: string; displa
             {update.isPending ? "Saving..." : "Save"}
           </button>
           {update.isSuccess && <span style={{ marginLeft: 8, color: "var(--green)", fontSize: 11 }}>Saved</span>}
-          {update.isError && <span style={{ marginLeft: 8, color: "var(--red)", fontSize: 11 }}>Error saving</span>}
+          {update.isError && <span style={{ marginLeft: 8, color: "var(--red)", fontSize: 11 }}>Error</span>}
         </div>
       </div>
     </div>
@@ -92,19 +82,27 @@ function ProfileRiskForm({ profileId, displayName }: { profileId: string; displa
 export function RiskSettings() {
   const { data } = useProfiles();
   const profiles = data?.profiles ?? [];
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const activeId = selectedId ?? profiles[0]?.profile_id ?? null;
 
   return (
     <div className="page">
       <div className="page-title">Risk Settings</div>
-      <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12 }}>
         Configure risk caps per profile. Empty fields mean no limit.
       </p>
-      {profiles.map((p) => (
-        <ProfileRiskForm key={p.profile_id} profileId={p.profile_id} displayName={p.display_name} />
-      ))}
-      {profiles.length === 0 && (
-        <div className="card" style={{ fontSize: 12, color: "var(--text-muted)" }}>Loading profiles...</div>
-      )}
+      <div className="profile-tabs">
+        {profiles.map((p) => (
+          <button
+            key={p.profile_id}
+            className={`profile-tab ${activeId === p.profile_id ? "active" : ""}`}
+            onClick={() => setSelectedId(p.profile_id)}
+          >
+            {p.display_name}
+          </button>
+        ))}
+      </div>
+      {activeId && <RiskForm profileId={activeId} />}
     </div>
   );
 }

@@ -1,55 +1,105 @@
-import { useNavigate } from "react-router-dom";
-import { useProfiles } from "../api/hooks.ts";
+import { useState } from "react";
+import { useProfiles, useProfileDetail } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
-import type { ProfileDTO } from "../api/types.ts";
+import type { ProfileDTO, DeployedFamilyDTO } from "../api/types.ts";
 
-function ProfileListCard({
-  profile,
-  onClick,
-}: {
-  profile: ProfileDTO;
-  onClick: () => void;
-}) {
+function SummaryTab({ profile }: { profile: ProfileDTO }) {
   return (
-    <div className="profile-card" onClick={onClick}>
-      <h3>{profile.display_name}</h3>
-      <div className="profile-stat">
-        <span className="label">Status</span>
-        <Badge value={profile.paused ? "paused" : "running"} type="status" />
+    <div style={{ fontSize: 12 }}>
+      <div className="profile-stat"><span className="label">Exposure</span><span>${profile.total_exposure_usdc?.toFixed(2) ?? "0.00"}</span></div>
+      <div className="profile-stat"><span className="label">Balance</span><span>${profile.balance_usdc?.toFixed(2) ?? "0.00"}</span></div>
+      <div className="profile-stat"><span className="label">Positions</span><span>{profile.open_positions ?? 0}</span></div>
+      <div className="profile-stat"><span className="label">Open Orders</span><span>{profile.open_orders ?? 0}</span></div>
+      <div className="profile-stat"><span className="label">Preflight Status</span><span>{profile.last_preflight_status ?? "n/a"}</span></div>
+      <div className="profile-stat"><span className="label">Last Run</span><span>{formatAgo(profile.last_run_at)}</span></div>
+      {profile.description && (
+        <div className="profile-stat"><span className="label">Description</span><span>{profile.description}</span></div>
+      )}
+    </div>
+  );
+}
+
+function FamiliesTab({ families }: { families: DeployedFamilyDTO[] }) {
+  if (families.length === 0) {
+    return <div style={{ fontSize: 12, color: "var(--text-dim)" }}>No families deployed</div>;
+  }
+  return (
+    <table>
+      <thead>
+        <tr>
+          <th>Family</th>
+          <th>Category</th>
+          <th>Regime</th>
+          <th>Operator Mode</th>
+          <th>Strategy Stage</th>
+          <th>Deployment Stage</th>
+        </tr>
+      </thead>
+      <tbody>
+        {families.map((f) => (
+          <tr key={f.family_id}>
+            <td style={{ color: "var(--blue)" }}>{f.family_key}</td>
+            <td>{f.primary_category}</td>
+            <td>{f.regime}</td>
+            <td><Badge value={f.operator_mode} type="mode" /></td>
+            <td><Badge value={f.strategy_stage} /></td>
+            <td><Badge value={f.deployment_stage} /></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function ProfileContent({ profileId }: { profileId: string }) {
+  const { data, isLoading } = useProfileDetail(profileId);
+  const [tab, setTab] = useState<"summary" | "families">("summary");
+
+  if (isLoading || !data) return <div style={{ fontSize: 12, padding: 16 }}>Loading...</div>;
+
+  return (
+    <div className="card">
+      <div className="tab-bar">
+        <div className={`tab ${tab === "summary" ? "active" : ""}`} onClick={() => setTab("summary")}>
+          Summary
+        </div>
+        <div className={`tab ${tab === "families" ? "active" : ""}`} onClick={() => setTab("families")}>
+          Deployed Families ({data.deployedFamilies.length})
+        </div>
       </div>
-      <div className="profile-stat">
-        <span className="label">Positions</span>
-        <span>{profile.open_positions ?? 0}</span>
-      </div>
-      <div className="profile-stat">
-        <span className="label">Last Run</span>
-        <span>{formatAgo(profile.last_run_at)}</span>
-      </div>
+      {tab === "summary" && <SummaryTab profile={data.profile} />}
+      {tab === "families" && <FamiliesTab families={data.deployedFamilies} />}
     </div>
   );
 }
 
 export function Profiles() {
   const { data, isLoading } = useProfiles();
-  const navigate = useNavigate();
+  const profiles = data?.profiles ?? [];
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  // Auto-select first profile
+  const activeId = selectedId ?? profiles[0]?.profile_id ?? null;
 
   if (isLoading) return <div className="page">Loading...</div>;
-
-  const profiles = data?.profiles ?? [];
 
   return (
     <div className="page">
       <div className="page-title">Profiles</div>
-      <div className="profile-cards">
+      <div className="profile-tabs">
         {profiles.map((p) => (
-          <ProfileListCard
+          <button
             key={p.profile_id}
-            profile={p}
-            onClick={() => navigate(`/profiles/${p.profile_id}`)}
-          />
+            className={`profile-tab ${activeId === p.profile_id ? "active" : ""}`}
+            onClick={() => setSelectedId(p.profile_id)}
+          >
+            {p.display_name}
+            <Badge value={p.paused ? "paused" : "running"} type="status" />
+          </button>
         ))}
       </div>
+      {activeId && <ProfileContent profileId={activeId} />}
     </div>
   );
 }
