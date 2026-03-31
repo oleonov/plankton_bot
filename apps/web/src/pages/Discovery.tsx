@@ -46,6 +46,7 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
   const reject = useCandidateAction(candidate.candidateId, "reject");
   const { data: statusData } = useStatus();
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [reviewConfirmOpen, setReviewConfirmOpen] = useState(false);
   const [rejectConfirmOpen, setRejectConfirmOpen] = useState(false);
 
   const runtimeMode = statusData?.runtimeMode;
@@ -69,9 +70,16 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
     <span style={{ display: "inline-flex", gap: 4 }}>
       {candidate.status === "discovered" && (
         <>
-          <button className="btn-success" onClick={() => review.mutate()} disabled={review.isPending}>
+          <button className="btn-success" onClick={() => setReviewConfirmOpen(true)} disabled={review.isPending}>
             {review.isPending ? "Reviewing..." : "Review"}
           </button>
+          <ConfirmDialog
+            open={reviewConfirmOpen && !review.isPending}
+            title={`Review ${candidate.familyKey}?`}
+            description="This will move the candidate to reviewed status for further evaluation."
+            onConfirm={() => { setReviewConfirmOpen(false); review.mutate(); }}
+            onCancel={() => setReviewConfirmOpen(false)}
+          />
           {rejectButton}
         </>
       )}
