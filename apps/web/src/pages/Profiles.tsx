@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useProfiles, useProfileDetail, useStatus } from "../api/hooks.ts";
+import { useProfiles, useProfileDetail } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
 import type { ProfileDTO, DeployedFamilyDTO } from "../api/types.ts";
@@ -74,14 +74,16 @@ function ProfileContent({ profileId }: { profileId: string }) {
   );
 }
 
-function profileStatus(profileId: string, currentProfile: string | null, runtimePaused: boolean): string {
+function profileStatus(profileId: string, currentProfile: string | null, runtimeStatus: string): string {
   if (profileId !== currentProfile) return "stopped";
-  return runtimePaused ? "paused" : "running";
+  // runtime_status: stopped | starting | ready_paused | running | stopping | failed
+  if (runtimeStatus === "running") return "running";
+  if (runtimeStatus === "ready_paused") return "paused";
+  return runtimeStatus; // stopped, starting, stopping, failed — show as-is
 }
 
 export function Profiles() {
   const { data, isLoading } = useProfiles();
-  const { data: status } = useStatus();
   const profiles = data?.profiles ?? [];
   const currentProfile = data?.runtimeState?.current_profile ?? null;
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -102,7 +104,7 @@ export function Profiles() {
             onClick={() => setSelectedId(p.profile_id)}
           >
             {p.display_name}
-            <Badge value={profileStatus(p.profile_id, currentProfile, status?.paused ?? true)} type="status" />
+            <Badge value={profileStatus(p.profile_id, currentProfile, data?.runtimeState?.runtime_status ?? "stopped")} type="status" />
           </button>
         ))}
       </div>
