@@ -169,6 +169,7 @@ export const handlers = [
   http.get("/api/v1/positions", () => ok([])),
   http.get("/api/v1/orders", () => ok({ items: [], nextCursor: null })),
   http.get("/api/v1/fills", () => ok({ items: [], nextCursor: null })),
+  http.get("/api/v1/metrics/trading-activity", () => ok({ items: [] })),
   http.get("/api/v1/events", () => new HttpResponse(null, { status: 200 })),
   http.post("/api/v1/actions/pause", () => ok({ commandId: 1, status: "enqueued" })),
   http.post("/api/v1/actions/resume", () => ok({ commandId: 2, status: "enqueued" })),
