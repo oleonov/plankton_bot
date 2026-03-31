@@ -8,6 +8,7 @@ import {
   useOrders,
 } from "../api/hooks.ts";
 import { PnlChart } from "../components/PnlChart.tsx";
+import { TradingActivityPanel } from "../components/TradingActivityPanel.tsx";
 import { formatAgo } from "../utils/format.ts";
 
 function tradingStateColor(state?: string): string {
@@ -274,9 +275,10 @@ export function Overview() {
         </div>
       )}
 
-      {/* PnL Chart */}
-      <div style={{ marginBottom: 16 }}>
+      {/* PnL Chart + Trading Activity side by side */}
+      <div className="grid-2" style={{ marginBottom: 16 }}>
         <PnlChart data={pnlData?.items ?? []} tailCostUsdc={status.totalTailCostUsdc} />
+        <TradingActivityPanel />
       </div>
 
       {/* Bottom row */}
