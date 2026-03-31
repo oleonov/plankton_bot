@@ -192,6 +192,37 @@ describe("ProfileRuntimePublisher", () => {
     expect(summary.total_exposure_usdc).toBe(35); // 20 + 15
   });
 
+  it("publish() computes balance_usdc as initial - exposure + realizedPnl", async () => {
+    // Seed initial balance in profile_settings
+    controlConn.db
+      .prepare("INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES (?, ?)")
+      .run(PROFILE, 100);
+
+    // Seed exposure: two families with open value
+    seedFamilyState(ledgerConn, FAMILY_A, { open_value_usdc: 20 });
+    seedFamilyState(ledgerConn, FAMILY_B, { open_value_usdc: 15 });
+
+    // Seed realized PnL from closed positions
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO positions (position_id, token_id, family_id, side, status, realized_pnl)
+         VALUES ('closed-1', 't1', ?, 'buy', 'closed', 5.50)`,
+      )
+      .run(FAMILY_A);
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO positions (position_id, token_id, family_id, side, status, realized_pnl)
+         VALUES ('closed-2', 't2', ?, 'buy', 'closed', -2.00)`,
+      )
+      .run(FAMILY_B);
+
+    await publisher.publish();
+
+    const summary = getSummary()!;
+    // balance = 100 (initial) - 35 (exposure) + 3.50 (realized PnL) = 68.50
+    expect(summary.balance_usdc).toBeCloseTo(68.5, 1);
+  });
+
   it("second publish() upserts (no duplicate rows)", async () => {
     seedFamilyState(ledgerConn, FAMILY_A, { open_value_usdc: 10 });
 
