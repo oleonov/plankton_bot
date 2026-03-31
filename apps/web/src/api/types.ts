@@ -67,6 +67,15 @@ export interface PnlDataPoint {
   realizedPnl: number;
 }
 
+/** GET /metrics/trading-activity item */
+export interface TradingActivitySnapshot {
+  tradingState: string;
+  signalsProduced: number;
+  signalsApproved: number;
+  signalsRejected: number;
+  capturedAt: string;
+}
+
 /** GET /metrics/families item */
 export interface FamilyMetric {
   familyId: string;
