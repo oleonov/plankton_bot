@@ -59,13 +59,21 @@ export class ScanService {
       const candidate = this.buildCandidate(cluster, familyIdSet, now);
       if (candidate.matchedFamilyId) matched++;
 
-      // Preserve fields from existing record
+      // Preserve fields from existing record (scan must not reset evaluator's work)
       const existing = candidateRepo.findById(cluster.candidateId);
       if (existing) {
         candidate.firstSeenAt = existing.firstSeenAt;
         candidate.status = existing.status;
         candidate.reviewedAt = existing.reviewedAt;
         candidate.materializedAt = existing.materializedAt;
+        // Preserve scores and gate recommendation set by ControlEvaluator
+        candidate.recurrenceScore = existing.recurrenceScore;
+        candidate.recycleScore = existing.recycleScore;
+        candidate.liveViabilityScore = existing.liveViabilityScore;
+        candidate.toxicityPenalty = existing.toxicityPenalty;
+        candidate.gateRecommendation = existing.gateRecommendation;
+        candidate.recommendationReason = existing.recommendationReason;
+        candidate.scoresUpdatedAt = existing.scoresUpdatedAt;
       }
       candidateRepo.upsert(candidate);
       upserted++;
