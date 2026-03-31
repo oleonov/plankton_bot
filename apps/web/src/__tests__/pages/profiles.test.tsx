@@ -1,0 +1,56 @@
+import { describe, it, expect } from "vitest";
+import { screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { renderWithProviders } from "../../test/test-utils.tsx";
+import { Profiles } from "../../pages/Profiles.tsx";
+
+describe("Profiles", () => {
+  it("renders profile tabs for all 3 profiles", async () => {
+    renderWithProviders(<Profiles />);
+
+    expect(await screen.findByText("Live-Lite")).toBeInTheDocument();
+    expect(screen.getByText("Paper")).toBeInTheDocument();
+    expect(screen.getByText("Simulation")).toBeInTheDocument();
+  });
+
+  it("first tab auto-selected shows Summary content", async () => {
+    renderWithProviders(<Profiles />);
+
+    expect(await screen.findByText("Summary")).toBeInTheDocument();
+    expect(screen.getByText("Exposure")).toBeInTheDocument();
+  });
+
+  it("clicking another tab switches content", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Profiles />);
+
+    await screen.findByText("Live-Lite");
+    await user.click(screen.getByText("Paper"));
+
+    expect(await screen.findByText("Summary")).toBeInTheDocument();
+    expect(await screen.findByText("$32.06")).toBeInTheDocument();
+  });
+
+  it("shows deployed families count in sub-tab", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Profiles />);
+
+    await screen.findByText("Live-Lite");
+    await user.click(screen.getByText("Paper"));
+
+    expect(await screen.findByText(/Deployed Families \(1\)/)).toBeInTheDocument();
+  });
+
+  it("switching to Deployed Families sub-tab shows family table", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<Profiles />);
+
+    await screen.findByText("Live-Lite");
+    await user.click(screen.getByText("Paper"));
+
+    const familiesTab = await screen.findByText(/Deployed Families \(1\)/);
+    await user.click(familiesTab);
+
+    expect(await screen.findByText("bitcoin-above")).toBeInTheDocument();
+  });
+});

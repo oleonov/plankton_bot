@@ -1,5 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from "vitest";
 import { apiFetch, apiPost, registerOnUnauthorized } from "../api/client.ts";
+import { server } from "../test/server.ts";
+
+// Pause MSW so vi.stubGlobal("fetch") works without interception
+beforeAll(() => server.close());
+afterAll(() => server.listen());
 
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
