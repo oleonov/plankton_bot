@@ -126,8 +126,14 @@ function takeSnapshot(
 }
 
 export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) => {
-  const { controlDb, ledgerDb } = opts;
+  const { controlDb, ledgerDb: startupLedger } = opts;
   const staleMs = opts.marketDataStaleThresholdMs ?? 120_000;
+
+  /** Resolve the active profile's ledger, falling back to startup ledger. */
+  function activeLedger(): Database.Database {
+    const { db } = resolveActiveLedger(startupLedger, controlDb, opts.ledgerPool);
+    return db;
+  }
 
   app.get<{ Querystring: { types?: string } }>("/events", async (request, reply) => {
     // Build allowed event set from coarse filter categories
@@ -148,7 +154,8 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
       Connection: "keep-alive",
     });
 
-    let snapshot = takeSnapshot(controlDb, ledgerDb);
+    // Initial snapshot uses the active ledger at connection time
+    let snapshot = takeSnapshot(controlDb, activeLedger());
     let alive = true;
     let metricsTickCount = 0;
 
@@ -167,6 +174,8 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
       }
 
       try {
+        // Resolve the active ledger on every tick — it may change after a profile switch
+        const ledgerDb = activeLedger();
         const next = takeSnapshot(controlDb, ledgerDb);
 
         if (next.positions !== snapshot.positions) {
@@ -255,7 +264,7 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
 
         // Emit status event (same shape as GET /status) on any status-affecting change
         if (next.statusHash !== snapshot.statusHash) {
-          const active = resolveActiveLedger(ledgerDb, controlDb, opts.ledgerPool);
+          const active = resolveActiveLedger(startupLedger, controlDb, opts.ledgerPool);
           sendEvent("status", buildStatusSnapshot(active.db, staleMs, active.profile));
         }
 

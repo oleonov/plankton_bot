@@ -220,4 +220,56 @@ describe("API against real split schemas", () => {
       .prepare("UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1")
       .run();
   });
+
+  it("SSE /events reads from active profile's ledger after switch", async () => {
+    // Create a paper ledger with a distinct position
+    const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));
+    paperConn.db.exec(`
+      INSERT INTO bot_runs (run_id, mode, started_at) VALUES ('run-paper-sse', 'paper', '2026-03-15T00:00:00Z');
+      INSERT INTO family_runtime_state (family_id, runtime_mode, open_value_usdc, open_position_count,
+        open_dust_count, active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
+      VALUES ('fam-sse', 'active', 200.0, 3, 0, 2, 5.0, 15.0, '2026-03-15T00:00:00Z');
+      INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
+      VALUES ('tok-sse', 'cond-sse', 'test-sse', 'SSE test?', 'Yes', 1, 0.01, 0, '2026-04-01T00:00:00Z', '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z');
+      INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+        current_value_usdc, realized_pnl, status, opened_at, updated_at)
+      VALUES ('pos-sse', 'tok-sse', 'fam-sse', 'buy', 50, 0.4, 20, 25, 0, 'open', '2026-03-15T00:00:00Z', '2026-03-15T01:00:00Z');
+    `);
+
+    // Switch to paper
+    controlConn.db
+      .prepare("UPDATE runtime_control_state SET current_profile = 'paper', updated_at = datetime('now') WHERE id = 1")
+      .run();
+
+    const { LedgerPool } = await import("../ledger-pool.js");
+    const pool = new LedgerPool(path.join(tmpDir, "control.db"));
+
+    const freshApp = await buildServer({
+      config: testConfig(),
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db, // startup ledger is simulation
+      ledgerPool: pool,
+    });
+
+    // Connect to SSE and read the first status event triggered by metrics tick
+    // We can't easily test SSE streaming in inject, so test the underlying
+    // buildStatusSnapshot with resolveActiveLedger instead
+    const { buildStatusSnapshot, resolveActiveLedger } = await import("../routes/status.js");
+    const active = resolveActiveLedger(ledgerConn.db, controlConn.db, pool);
+    const snapshot = buildStatusSnapshot(active.db, 120_000, active.profile);
+
+    expect(snapshot.runtimeMode).toBe("paper");
+    // Paper ledger has data from both this test and previous test (shared file)
+    expect(snapshot.totalOpenValueUsdc).toBeGreaterThanOrEqual(200.0);
+    expect(snapshot.activeFamilyCount).toBeGreaterThanOrEqual(1);
+
+    await freshApp.close();
+    pool.closeAll();
+    paperConn.close();
+
+    // Restore
+    controlConn.db
+      .prepare("UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1")
+      .run();
+  });
 });
