@@ -233,6 +233,21 @@ CREATE TABLE IF NOT EXISTS risk_events (
 CREATE INDEX IF NOT EXISTS idx_risk_events_family ON risk_events(family_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_risk_events_type ON risk_events(event_type, created_at DESC);
 
+-- ═══════════ TRADING STATE SNAPSHOTS ═══════════
+-- From 014_trading_state_snapshots.sql
+
+CREATE TABLE IF NOT EXISTS trading_state_snapshots (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  trading_state     TEXT    NOT NULL,
+  signals_produced  INTEGER NOT NULL,
+  signals_approved  INTEGER NOT NULL,
+  signals_rejected  INTEGER NOT NULL,
+  captured_at       TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_trading_state_snapshots_ts
+  ON trading_state_snapshots(captured_at DESC);
+
 -- ═══════════ FAMILY RUNTIME STATE (legacy compat) ═══════════
 -- Kept for backward compatibility with existing repos and raw SQL.
 -- Phase 4 will migrate consumers to family_profile_runtime_state.
