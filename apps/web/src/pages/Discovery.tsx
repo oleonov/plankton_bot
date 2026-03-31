@@ -54,10 +54,10 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
       {candidate.status === "discovered" && (
         <>
           <button className="btn-success" onClick={() => review.mutate()} disabled={review.isPending}>
-            Review
+            {review.isPending ? "Reviewing..." : "Review"}
           </button>
           <button className="btn-danger" onClick={() => reject.mutate()} disabled={reject.isPending}>
-            Reject
+            {reject.isPending ? "Rejecting..." : "Reject"}
           </button>
         </>
       )}
@@ -68,13 +68,13 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
             onClick={() => setConfirmOpen(true)}
             disabled={accept.isPending}
           >
-            Accept
+            {accept.isPending ? "Accepting..." : "Accept"}
           </button>
           <button className="btn-danger" onClick={() => reject.mutate()} disabled={reject.isPending}>
-            Reject
+            {reject.isPending ? "Rejecting..." : "Reject"}
           </button>
           <ConfirmDialog
-            open={confirmOpen}
+            open={confirmOpen && !accept.isPending}
             title={`Accept ${candidate.familyKey}?`}
             description="This will materialize the candidate as a probe-only family."
             runtimeMode={runtimeMode}
