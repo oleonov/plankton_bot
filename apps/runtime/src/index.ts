@@ -720,6 +720,15 @@ async function main(): Promise<void> {
   const insertScanner = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('scanner_activity', 1, ?, ?)",
   );
+  const insertSnapshot = ledgerConn.db.prepare(
+    `INSERT INTO trading_state_snapshots (trading_state, signals_produced, signals_approved, signals_rejected, captured_at)
+   VALUES (?, ?, ?, ?, ?)`,
+  );
+  const pruneSnapshots = ledgerConn.db.prepare(
+    "DELETE FROM trading_state_snapshots WHERE captured_at < datetime('now', '-14 days')",
+  );
+
+  let lastSnapshotMs = 0;
 
   // Flush signal + scanner activity to DB every 30 seconds, reset windows every 10 minutes
   setInterval(() => {
@@ -762,6 +771,42 @@ async function main(): Promise<void> {
       }),
       new Date().toISOString(),
     );
+
+    // Write trading-state snapshot every 10 minutes
+    const SNAPSHOT_INTERVAL_MS = 10 * 60 * 1000;
+    if (now - lastSnapshotMs >= SNAPSHOT_INTERVAL_MS) {
+      lastSnapshotMs = now;
+
+      // Derive trading state from current window — mirrors API computeTradingState logic
+      const sa = signalWindow;
+      let tradingState: string;
+      if (sa.entryApproved > 0) {
+        const allProbeOnly = ledgerConn.db
+          .prepare(
+            "SELECT COUNT(*) as total, COUNT(CASE WHEN effective_mode = 'probe-only' THEN 1 END) as probeOnly FROM family_runtime_state WHERE runtime_mode = 'active'",
+          )
+          .get() as { total: number; probeOnly: number };
+        tradingState =
+          allProbeOnly.total > 0 && allProbeOnly.probeOnly === allProbeOnly.total
+            ? "PROBING_ONLY"
+            : "ACTIVELY_TRADING";
+      } else if (sa.produced > 0 && sa.rejected > 0 && sa.entryApproved === 0) {
+        tradingState = "ALIVE_BUT_BLOCKED";
+      } else if (sa.produced > 0 && sa.exitApproved > 0 && sa.entryApproved === 0) {
+        tradingState = "EXITS_ONLY";
+      } else {
+        tradingState = "NO_SIGNALS";
+      }
+
+      insertSnapshot.run(
+        tradingState,
+        sa.produced,
+        sa.approved,
+        sa.rejected,
+        new Date().toISOString(),
+      );
+      pruneSnapshots.run();
+    }
   }, 30_000);
 
   // 8. Create supervisor
