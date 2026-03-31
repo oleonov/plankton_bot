@@ -46,8 +46,24 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
   const reject = useCandidateAction(candidate.candidateId, "reject");
   const { data: statusData } = useStatus();
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [rejectConfirmOpen, setRejectConfirmOpen] = useState(false);
 
   const runtimeMode = statusData?.runtimeMode;
+
+  const rejectButton = (
+    <>
+      <button className="btn-danger" onClick={() => setRejectConfirmOpen(true)} disabled={reject.isPending}>
+        {reject.isPending ? "Rejecting..." : "Reject"}
+      </button>
+      <ConfirmDialog
+        open={rejectConfirmOpen && !reject.isPending}
+        title={`Reject ${candidate.familyKey}?`}
+        description="This candidate will be hidden for 7 days (cooldown period)."
+        onConfirm={() => { setRejectConfirmOpen(false); reject.mutate(); }}
+        onCancel={() => setRejectConfirmOpen(false)}
+      />
+    </>
+  );
 
   return (
     <span style={{ display: "inline-flex", gap: 4 }}>
@@ -56,9 +72,7 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
           <button className="btn-success" onClick={() => review.mutate()} disabled={review.isPending}>
             {review.isPending ? "Reviewing..." : "Review"}
           </button>
-          <button className="btn-danger" onClick={() => reject.mutate()} disabled={reject.isPending}>
-            {reject.isPending ? "Rejecting..." : "Reject"}
-          </button>
+          {rejectButton}
         </>
       )}
       {candidate.status === "reviewed" && (
@@ -70,9 +84,7 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
           >
             {accept.isPending ? "Accepting..." : "Accept"}
           </button>
-          <button className="btn-danger" onClick={() => reject.mutate()} disabled={reject.isPending}>
-            {reject.isPending ? "Rejecting..." : "Reject"}
-          </button>
+          {rejectButton}
           <ConfirmDialog
             open={confirmOpen && !accept.isPending}
             title={`Accept ${candidate.familyKey}?`}
