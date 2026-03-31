@@ -4,6 +4,7 @@ import { ok } from "../errors.js";
 
 interface StatusOpts {
   db: Database.Database;
+  controlDb?: Database.Database;
   marketDataStaleThresholdMs?: number;
 }
 
@@ -254,6 +255,23 @@ export const statusRoutes: FastifyPluginAsync<StatusOpts> = async (app, opts) =>
   const staleMs = opts.marketDataStaleThresholdMs ?? 120_000;
 
   app.get("/status", async () => {
-    return ok(buildStatusSnapshot(opts.db, staleMs));
+    const snapshot = buildStatusSnapshot(opts.db, staleMs);
+
+    // Override runtimeMode with actual current profile from control.db
+    // (the API's ledger connection is fixed at startup, but profile may have changed)
+    if (opts.controlDb) {
+      try {
+        const row = opts.controlDb
+          .prepare("SELECT current_profile FROM runtime_control_state WHERE id = 1")
+          .get() as { current_profile: string | null } | undefined;
+        if (row?.current_profile) {
+          snapshot.runtimeMode = row.current_profile;
+        }
+      } catch {
+        // Table may not exist in legacy/test DBs — fall through to ledger-based mode
+      }
+    }
+
+    return ok(snapshot);
   });
 };

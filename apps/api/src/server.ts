@@ -90,10 +90,11 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(actionRoutes, { prefix: "/api/v1", db: deps.controlDb });
   await app.register(configRoutes, { prefix: "/api/v1", controlDb: deps.controlDb });
 
-  // Ledger-only routes
+  // Status — ledger for metrics, control for current profile
   await app.register(statusRoutes, {
     prefix: "/api/v1",
     db: deps.ledgerDb,
+    controlDb: deps.controlDb,
     marketDataStaleThresholdMs: staleMs,
   });
   await app.register(positionRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
