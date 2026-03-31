@@ -48,6 +48,40 @@ function tradingStateLabel(state?: string): string {
   }
 }
 
+function BalanceCard({ status }: { status: import("../api/types.ts").StatusData }) {
+  const isLive = status.runtimeMode === "live-lite";
+  const dim = { color: "var(--text-dim)" };
+
+  // Top number: wallet balance (live-lite) or virtual balance (paper/sim)
+  const topBalance = isLive ? status.walletBalanceUsdc : status.balanceUsdc;
+
+  // If-close-all: top balance + current value of open positions
+  const ifCloseAll = topBalance != null
+    ? topBalance + status.totalCurrentValueUsdc
+    : null;
+
+  // Invested vs cap
+  const invested = status.totalOpenValueUsdc;
+  const cap = isLive
+    ? status.liveLite?.maxOpenValueUsdc
+    : status.initialBalanceUsdc;
+
+  return (
+    <div className={`card ${isLive ? "card-accent-green" : ""}`}>
+      <div className="label" style={isLive ? undefined : dim}>Balance</div>
+      <div className="value-lg" style={isLive ? { color: "var(--green)" } : dim}>
+        {topBalance != null ? `$${topBalance.toFixed(0)}` : "—"}
+      </div>
+      <div className="value-sm" style={dim}>
+        {ifCloseAll != null ? `$${ifCloseAll.toFixed(0)} if close all` : ""}
+      </div>
+      <div className="value-sm" style={dim}>
+        ${invested.toFixed(0)} / ${cap?.toFixed(0) ?? "?"} {isLive ? "cap" : ""} invested
+      </div>
+    </div>
+  );
+}
+
 export function Overview() {
   const { data: status } = useStatus();
   const { data: metrics } = useMetrics();
@@ -67,30 +101,13 @@ export function Overview() {
   return (
     <div className="page">
       {/* Primary status cards */}
-      <div className="grid-4" style={{ marginBottom: 16 }}>
+      <div className="grid-5" style={{ marginBottom: 16 }}>
         <div className="card card-accent-green">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-            <div>
-              <div className="label">Runtime Mode</div>
-              <div className="value-lg text-green">{status.runtimeMode.toUpperCase()}</div>
-              <div className="value-sm">{status.paused ? "Paused" : "Not paused"}</div>
-            </div>
-            {status.balanceUsdc != null && (
-              <div style={{ textAlign: "right" }}>
-                <div className="label">Balance</div>
-                <div
-                  className="value-lg"
-                  style={{ color: status.runtimeMode === "live-lite" ? "var(--green)" : "var(--text-dim)" }}
-                >
-                  ${status.balanceUsdc.toFixed(0)}
-                </div>
-                <div className="value-sm" style={{ color: "var(--text-dim)" }}>
-                  of ${status.initialBalanceUsdc?.toFixed(0) ?? "?"}
-                </div>
-              </div>
-            )}
-          </div>
+          <div className="label">Runtime Mode</div>
+          <div className="value-lg text-green">{status.runtimeMode.toUpperCase()}</div>
+          <div className="value-sm">{status.paused ? "Paused" : "Not paused"}</div>
         </div>
+        <BalanceCard status={status} />
         <Link to="/positions" style={{ textDecoration: "none" }}>
           <div className="card card-accent-blue" style={{ cursor: "pointer" }}>
             <div className="label">Open Positions</div>

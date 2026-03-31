@@ -1,4 +1,4 @@
-import type { RuntimeModule, ValidationScorecard, ProfileId } from "@plankton/domain";
+import type { RuntimeModule, ValidationScorecard, ProfileId, ExchangeGateway } from "@plankton/domain";
 import { createScorecardId, createFamilyId, computeRecycleScore, computeToxicityPenalty } from "@plankton/domain";
 import { SqliteValidationScorecardRepository } from "@plankton/db";
 import type Database from "better-sqlite3";
@@ -14,6 +14,7 @@ export interface ProfileRuntimePublisherDeps {
   getPaused: () => boolean;
   log: Logger;
   intervalMs?: number;
+  exchangeGateway?: ExchangeGateway;
 }
 
 export class ProfileRuntimePublisher implements RuntimeModule {
@@ -86,13 +87,14 @@ export class ProfileRuntimePublisher implements RuntimeModule {
     const balanceUsdc = this.computeBalance(profileMetrics.totalExposureUsdc);
     const paused = this.deps.getPaused();
     const lastPreflightStatus = this.readLastPreflightStatus();
+    const walletBalanceUsdc = await this.fetchWalletBalance();
 
     this.deps.controlDb
       .prepare(
         `INSERT INTO profile_summaries
            (profile_id, paused, last_run_at, open_orders, open_positions,
-            total_exposure_usdc, balance_usdc, last_preflight_status, updated_at)
-         VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, datetime('now'))
+            total_exposure_usdc, balance_usdc, wallet_balance_usdc, last_preflight_status, updated_at)
+         VALUES (?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(profile_id) DO UPDATE SET
            paused               = excluded.paused,
            last_run_at          = excluded.last_run_at,
@@ -100,6 +102,7 @@ export class ProfileRuntimePublisher implements RuntimeModule {
            open_positions       = excluded.open_positions,
            total_exposure_usdc  = excluded.total_exposure_usdc,
            balance_usdc         = excluded.balance_usdc,
+           wallet_balance_usdc  = COALESCE(excluded.wallet_balance_usdc, profile_summaries.wallet_balance_usdc),
            last_preflight_status = excluded.last_preflight_status,
            updated_at           = excluded.updated_at`,
       )
@@ -110,6 +113,7 @@ export class ProfileRuntimePublisher implements RuntimeModule {
         profileMetrics.openPositions,
         profileMetrics.totalExposureUsdc,
         balanceUsdc,
+        walletBalanceUsdc,
         lastPreflightStatus,
       );
 
@@ -138,6 +142,17 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       )
       .get(this.deps.profile) as { status: string } | undefined;
     return row?.status ?? null;
+  }
+
+  private async fetchWalletBalance(): Promise<number | null> {
+    if (!this.deps.exchangeGateway) return null;
+    try {
+      const balances = await this.deps.exchangeGateway.getBalances();
+      return balances[0]?.available ?? null;
+    } catch (err) {
+      this.deps.log.warn({ err }, "failed to fetch wallet balance — keeping last known");
+      return null;
+    }
   }
 
   private publishScorecards(familyIds: string[]): void {

@@ -119,6 +119,11 @@ tr:hover td {
   grid-template-columns: repeat(4, 1fr);
   gap: 12px;
 }
+.grid-5 {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+}
 .grid-3 {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

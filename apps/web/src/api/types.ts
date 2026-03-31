@@ -21,6 +21,8 @@ export interface StatusData {
   totalTailCostUsdc: number;
   initialBalanceUsdc: number | null;
   balanceUsdc: number | null;
+  walletBalanceUsdc: number | null;
+  totalCurrentValueUsdc: number;
   totalRealizedPnl: number;
   marketDataSource: "live" | "simulation";
   executionMode: "simulation" | "live";

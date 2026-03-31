@@ -280,6 +280,28 @@ export function buildStatusSnapshot(
     ? initialBalanceUsdc - totalExposure.total + totalRealizedPnl
     : null;
 
+  // Wallet balance from exchange (live-lite only, written by runtime publisher)
+  let walletBalanceUsdc: number | null = null;
+  if (controlDb) {
+    try {
+      const walletRow = controlDb
+        .prepare("SELECT wallet_balance_usdc FROM profile_summaries WHERE profile_id = ?")
+        .get(runtimeMode) as { wallet_balance_usdc: number | null } | undefined;
+      walletBalanceUsdc = walletRow?.wallet_balance_usdc ?? null;
+    } catch {
+      // Column may not exist in legacy DBs before migration 013
+    }
+  }
+
+  // Total current value of open positions
+  const totalCurrentValueUsdc = (
+    db
+      .prepare(
+        "SELECT COALESCE(SUM(current_value_usdc), 0) as total FROM positions WHERE status = 'open'",
+      )
+      .get() as { total: number }
+  ).total;
+
   return {
     runtimeMode,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
@@ -294,6 +316,8 @@ export function buildStatusSnapshot(
     totalTailCostUsdc: totalExposure.tail,
     initialBalanceUsdc,
     balanceUsdc,
+    walletBalanceUsdc,
+    totalCurrentValueUsdc,
     totalRealizedPnl,
     marketDataSource: mdSource ? JSON.parse(mdSource.labels).value : "simulation",
     executionMode: execMode ? JSON.parse(execMode.labels).value : "simulation",

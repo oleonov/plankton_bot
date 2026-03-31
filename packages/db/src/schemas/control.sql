@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS profile_summaries (
   open_positions       INTEGER NOT NULL DEFAULT 0,
   total_exposure_usdc  REAL NOT NULL DEFAULT 0,
   balance_usdc         REAL,
+  wallet_balance_usdc  REAL,
   last_preflight_status TEXT,
   updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );

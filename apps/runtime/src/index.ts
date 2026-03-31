@@ -547,6 +547,7 @@ async function main(): Promise<void> {
     getPaused: () => supervisorRef.current.isPaused(),
     log,
     intervalMs: 60_000,
+    ...(runtimeMode === "live-lite" ? { exchangeGateway } : {}),
   });
 
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
