@@ -9,7 +9,10 @@ import {
 import { Badge } from "../components/Badge.tsx";
 import { FamilyActions } from "../components/FamilyActions.tsx";
 import { EvidenceSection } from "../components/EvidenceSection.tsx";
+import { SortTh } from "../components/SortTh.tsx";
 import { formatAgo } from "../utils/format.ts";
+import { useSort, sortItems } from "../utils/useSort.ts";
+import type { FamilyDTO } from "../api/types.ts";
 
 function TransitionTimeline({ familyId }: { familyId: string }) {
   const { data: transitions } = useFamilyTransitions(familyId);
@@ -148,11 +151,24 @@ function utilizationColor(current: number, max: number): string {
   return "var(--text)";
 }
 
+const familyAccessors: Record<string, (f: FamilyDTO) => string | number | null> = {
+  mode: (f) => f.state?.runtimeMode ?? "",
+  promotion: (f) => f.promotionState,
+  openValue: (f) => f.state?.openValueUsdc ?? 0,
+  positions: (f) => f.state?.openPositionCount ?? 0,
+  markets: (f) => f.state?.activeMarketCount ?? 0,
+  tailCost: (f) => f.state?.currentTailCostUsdc ?? 0,
+  tailAdjPnl: (f) => f.state?.tailAdjustedPnlLive ?? 0,
+};
+
 export function Families() {
   const { data: families, isLoading } = useFamilies();
   const [expanded, setExpanded] = useState<string | null>(null);
+  const { sort, toggle } = useSort();
 
   if (isLoading) return <div className="page">Loading...</div>;
+
+  const sorted = sortItems(families ?? [], sort, familyAccessors);
 
   return (
     <div className="page">
@@ -161,18 +177,18 @@ export function Families() {
         <thead>
           <tr>
             <th>Family</th>
-            <th>Mode</th>
-            <th>Promotion</th>
-            <th>Open Value</th>
-            <th>Positions</th>
-            <th>Markets</th>
-            <th>Tail Cost</th>
-            <th>Tail-Adj PnL</th>
+            <SortTh label="Mode" sortKey="mode" sort={sort} onToggle={toggle} />
+            <SortTh label="Promotion" sortKey="promotion" sort={sort} onToggle={toggle} />
+            <SortTh label="Open Value" sortKey="openValue" sort={sort} onToggle={toggle} />
+            <SortTh label="Positions" sortKey="positions" sort={sort} onToggle={toggle} />
+            <SortTh label="Markets" sortKey="markets" sort={sort} onToggle={toggle} />
+            <SortTh label="Tail Cost" sortKey="tailCost" sort={sort} onToggle={toggle} />
+            <SortTh label="Tail-Adj PnL" sortKey="tailAdjPnl" sort={sort} onToggle={toggle} />
             <th>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {families?.map((f) => {
+          {sorted.map((f) => {
             const operatorMode = f.state?.runtimeMode ?? "unknown";
             const displayMode = f.state?.effectiveMode ?? operatorMode;
             const isExpanded = expanded === f.familyId;

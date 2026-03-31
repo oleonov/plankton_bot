@@ -3,13 +3,41 @@ import { useOrders, useFills, useFamilies } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
+import { SortTh } from "../components/SortTh.tsx";
 import { formatTimeLeft } from "../utils/format.ts";
+import { useSort, sortItems } from "../utils/useSort.ts";
+import type { OrderDTO, FillDTO } from "../api/types.ts";
+
+const orderAccessors: Record<string, (o: OrderDTO) => string | number | null> = {
+  orderId: (o) => o.orderId,
+  market: (o) => o.question,
+  family: (o) => o.familyId,
+  side: (o) => o.side,
+  price: (o) => o.price,
+  size: (o) => o.size,
+  status: (o) => o.status,
+  ends: (o) => o.endDate,
+  updated: (o) => o.updatedAt,
+};
+
+const fillAccessors: Record<string, (f: FillDTO) => string | number | null> = {
+  fillId: (f) => f.fillId,
+  market: (f) => f.question,
+  family: (f) => f.familyId,
+  side: (f) => f.side,
+  price: (f) => f.price,
+  size: (f) => f.size,
+  usdc: (f) => f.sizeUsdc,
+  filledAt: (f) => f.filledAt,
+};
 
 export function OrdersFills() {
   const [tab, setTab] = useState<"orders" | "fills">("orders");
   const [familyId, setFamilyId] = useState("");
   const [orderStatus, setOrderStatus] = useState("");
   const [cursor, setCursor] = useState<string | undefined>();
+  const orderSort = useSort();
+  const fillSort = useSort();
 
   const { data: families } = useFamilies();
   const orders = useOrders(
@@ -81,19 +109,19 @@ export function OrdersFills() {
           <table>
             <thead>
               <tr>
-                <th>Order</th>
-                <th>Market</th>
-                <th>Family</th>
-                <th>Side</th>
-                <th>Price</th>
-                <th>Size</th>
-                <th>Status</th>
-                <th>Ends</th>
-                <th>Updated</th>
+                <SortTh label="Order" sortKey="orderId" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh label="Market" sortKey="market" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh label="Family" sortKey="family" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh label="Side" sortKey="side" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh label="Price" sortKey="price" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh label="Size" sortKey="size" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh label="Status" sortKey="status" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh label="Ends" sortKey="ends" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh label="Updated" sortKey="updated" sort={orderSort.sort} onToggle={orderSort.toggle} />
               </tr>
             </thead>
             <tbody>
-              {orders.data?.items.map((o) => {
+              {sortItems(orders.data?.items ?? [], orderSort.sort, orderAccessors).map((o) => {
                 const ends = formatTimeLeft(o.endDate);
                 return (
                   <tr key={o.orderId}>
@@ -136,18 +164,18 @@ export function OrdersFills() {
           <table>
             <thead>
               <tr>
-                <th>Fill</th>
-                <th>Market</th>
-                <th>Family</th>
-                <th>Side</th>
-                <th>Price</th>
-                <th>Size</th>
-                <th>USDC</th>
-                <th>Filled At</th>
+                <SortTh label="Fill" sortKey="fillId" sort={fillSort.sort} onToggle={fillSort.toggle} />
+                <SortTh label="Market" sortKey="market" sort={fillSort.sort} onToggle={fillSort.toggle} />
+                <SortTh label="Family" sortKey="family" sort={fillSort.sort} onToggle={fillSort.toggle} />
+                <SortTh label="Side" sortKey="side" sort={fillSort.sort} onToggle={fillSort.toggle} />
+                <SortTh label="Price" sortKey="price" sort={fillSort.sort} onToggle={fillSort.toggle} />
+                <SortTh label="Size" sortKey="size" sort={fillSort.sort} onToggle={fillSort.toggle} />
+                <SortTh label="USDC" sortKey="usdc" sort={fillSort.sort} onToggle={fillSort.toggle} />
+                <SortTh label="Filled At" sortKey="filledAt" sort={fillSort.sort} onToggle={fillSort.toggle} />
               </tr>
             </thead>
             <tbody>
-              {fills.data?.items.map((f) => (
+              {sortItems(fills.data?.items ?? [], fillSort.sort, fillAccessors).map((f) => (
                 <tr key={f.fillId}>
                   <td style={{ fontSize: 11, color: "var(--blue)" }}>{f.fillId.slice(0, 12)}</td>
                   <td>
