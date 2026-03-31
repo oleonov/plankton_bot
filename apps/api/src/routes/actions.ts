@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { ok, ApiError } from "../errors.js";
+import { getActor } from "../auth.js";
 
 interface ActionOpts {
   db: Database.Database;
@@ -12,14 +13,15 @@ function insertCommand(
   action: string,
   targetId: string | null,
   reason: string | null,
+  actor: string = "operator",
 ): number {
   const info = db
     .prepare(
       `INSERT INTO operator_commands
-         (action, target_id, reason, status, created_at, applied_at)
-       VALUES (?, ?, ?, 'pending', ?, NULL)`,
+         (action, target_id, reason, initiator_type, initiator, status, created_at, applied_at)
+       VALUES (?, ?, ?, 'operator', ?, 'pending', ?, NULL)`,
     )
-    .run(action, targetId, reason, new Date().toISOString());
+    .run(action, targetId, reason, actor, new Date().toISOString());
   return Number(info.lastInsertRowid);
 }
 
@@ -27,13 +29,15 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
   // Global actions
   app.post<{ Body: { reason?: string } }>("/actions/pause", async (request) => {
     const body = (request.body ?? {}) as { reason?: string };
-    const id = insertCommand(opts.db, "pause", null, body.reason ?? null);
+    const actor = getActor(request);
+    const id = insertCommand(opts.db, "pause", null, body.reason ?? null, actor);
     return ok({ commandId: id, status: "enqueued" });
   });
 
   app.post<{ Body: { reason?: string } }>("/actions/resume", async (request) => {
     const body = (request.body ?? {}) as { reason?: string };
-    const id = insertCommand(opts.db, "resume", null, body.reason ?? null);
+    const actor = getActor(request);
+    const id = insertCommand(opts.db, "resume", null, body.reason ?? null, actor);
     return ok({ commandId: id, status: "enqueued" });
   });
 
@@ -55,7 +59,8 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
         if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
 
         const body = (request.body ?? {}) as { reason?: string };
-        const id = insertCommand(opts.db, action, familyId, body.reason ?? null);
+        const actor = getActor(request);
+        const id = insertCommand(opts.db, action, familyId, body.reason ?? null, actor);
         return ok({ commandId: id, status: "enqueued" });
       },
     );
@@ -71,14 +76,15 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
         .get(familyId);
       if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
 
+      const actor = getActor(request);
       const result = opts.db.transaction(() => {
         const info = opts.db
           .prepare(
             `UPDATE promotion_proposals
-             SET status = 'approved', resolved_at = datetime('now'), resolved_by = 'operator'
+             SET status = 'approved', resolved_at = datetime('now'), resolved_by = ?
              WHERE family_id = ? AND status = 'pending'`,
           )
-          .run(familyId);
+          .run(actor, familyId);
         if (info.changes === 0) {
           throw new ApiError(
             409,
@@ -100,6 +106,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
           "family_promote_scaled",
           familyId,
           (request.body as { reason?: string })?.reason ?? null,
+          actor,
         );
 
         opts.db
@@ -124,7 +131,8 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
       if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
 
       const body = (request.body ?? {}) as { reason?: string };
-      const id = insertCommand(opts.db, "family_reset_to_probe", familyId, body.reason ?? null);
+      const actor = getActor(request);
+      const id = insertCommand(opts.db, "family_reset_to_probe", familyId, body.reason ?? null, actor);
       return ok({ commandId: id, status: "enqueued" });
     },
   );
@@ -170,12 +178,13 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
         throw new ApiError(409, `already on profile '${toProfile}'`, "SAME_PROFILE");
       }
 
+      const actor = getActor(request);
       const switchId = randomUUID();
       db.prepare(
         `INSERT INTO profile_switch_requests
            (switch_id, from_profile, to_profile, ledger_reset_policy, state, requested_by, requested_at)
-         VALUES (?, ?, ?, ?, 'requested', 'operator', datetime('now'))`,
-      ).run(switchId, fromProfile, toProfile, ledgerResetPolicy ?? "preserve");
+         VALUES (?, ?, ?, ?, 'requested', ?, datetime('now'))`,
+      ).run(switchId, fromProfile, toProfile, ledgerResetPolicy ?? "preserve", actor);
 
       return ok({ switchId, status: "requested" });
     },

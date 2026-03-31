@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { getPromotionBlockers } from "@plankton/domain";
 import { ok, ApiError } from "../errors.js";
+import { getActor } from "../auth.js";
 
 interface FamilyOpts {
   controlDb: Database.Database;
@@ -390,7 +391,6 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     "/families/proposals/:proposalId/dismiss",
     async (request) => {
       const id = Number(request.params.proposalId);
-      const body = (request.body ?? {}) as { reason?: string };
       const row = controlDb
         .prepare("SELECT * FROM promotion_proposals WHERE id = ?")
         .get(id) as Record<string, unknown> | undefined;
@@ -408,7 +408,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
            SET status = 'dismissed', resolved_at = datetime('now'), resolved_by = ?
            WHERE id = ?`,
         )
-        .run(body.reason ?? "operator", id);
+        .run(getActor(request), id);
       return ok({ proposalId: id, status: "dismissed" });
     },
   );

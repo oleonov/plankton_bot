@@ -41,7 +41,9 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOpts> = async (app, opts) 
         return reply.status(401).send(fail("INVALID_CREDENTIALS", "invalid credentials"));
       }
 
-      request.session.set("authenticated", true);
+      const session = request.session as unknown as Record<string, unknown> & { set(k: string, v: unknown): void };
+      session.set("authenticated", true);
+      session.set("username", username ?? "operator");
       return reply.send(ok({ authenticated: true }));
     },
   );

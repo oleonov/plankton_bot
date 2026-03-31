@@ -14,6 +14,24 @@ import type { FastifyRequest, FastifyReply } from "fastify";
 import crypto from "node:crypto";
 import { fail } from "./errors.js";
 
+/**
+ * Resolve the actor identity for audit attribution.
+ *   - Session auth → username from session (set at login)
+ *   - Bearer API key → "api_key"
+ *   - Fallback → "operator"
+ */
+export function getActor(request: FastifyRequest): string {
+  // Session auth — username stored at login
+  const sessionUser = request.session?.get("username") as string | undefined;
+  if (sessionUser) return sessionUser;
+
+  // Bearer API key auth
+  const header = request.headers.authorization;
+  if (header?.startsWith("Bearer ")) return "api_key";
+
+  return "operator";
+}
+
 export function constantTimeEqual(a: string, b: string): boolean {
   const aBuf = Buffer.from(a, "utf-8");
   const bBuf = Buffer.from(b, "utf-8");
