@@ -195,6 +195,44 @@ describe("ScanService", () => {
     expect(stats.candidatesUpserted).toBe(2);
   });
 
+  it("scan preserves existing gate_recommendation and scores (not reset to pending)", async () => {
+    const db = conn.db;
+
+    // Slug "bitcoin-above-95000" normalizes to "bitcoin-above", regime inferred as "threshold",
+    // single endDate → horizon "deadline". So candidateId = "bitcoin-above:threshold:deadline"
+    const candidateId = "bitcoin-above:threshold:deadline";
+
+    // Pre-seed as if evaluator already scored this candidate
+    db.prepare(`
+      INSERT INTO family_candidates
+        (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+         primary_category, strategy_profile, gate_recommendation, status,
+         matched_family_id, recurrence_score, live_viability_score, scores_updated_at,
+         first_seen_at, last_seen_at)
+      VALUES (?, 'bitcoin-above', 'threshold', 'deadline', 'deadline', 'high',
+              'crypto', 'scalp', 'ignore', 'discovered',
+              NULL, 0.3, 0.1, '2026-03-30T00:00:00Z',
+              '2026-03-30T00:00:00Z', '2026-03-30T00:00:00Z')
+    `).run(candidateId);
+
+    // Run a scan that rediscovers the same market
+    const markets = [
+      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000", endDate: "2026-04-01T00:00:00Z" }),
+    ];
+    const service = new ScanService({ db: conn.db, log: silentLogger, gateway: makeGateway(markets) });
+    await service.run();
+
+    // Verify scores and gate_recommendation were NOT reset to pending/null
+    const row = db
+      .prepare("SELECT gate_recommendation, recurrence_score, live_viability_score, scores_updated_at FROM family_candidates WHERE candidate_id = ?")
+      .get(candidateId) as Record<string, unknown>;
+
+    expect(row.gate_recommendation).toBe("ignore");
+    expect(row.recurrence_score).toBe(0.3);
+    expect(row.live_viability_score).toBe(0.1);
+    expect(row.scores_updated_at).toBe("2026-03-30T00:00:00Z");
+  });
+
   it("pruneAndCooldown prunes low-value tail but preserves protected candidates", async () => {
     // Seed mixed candidates directly in DB
     const db = conn.db;
