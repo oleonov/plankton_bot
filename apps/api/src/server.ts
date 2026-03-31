@@ -142,6 +142,15 @@ export async function buildServer(deps: ServerDeps) {
       root: webDistPath,
       prefix: "/",
       wildcard: false,
+      setHeaders(res, pathName) {
+        if (pathName.includes("/assets/")) {
+          // Hashed filenames — safe to cache forever
+          res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+        } else {
+          // index.html — always revalidate to pick up new asset hashes
+          res.setHeader("Cache-Control", "no-cache");
+        }
+      },
     });
 
     // SPA fallback — serve index.html for non-API routes
@@ -149,6 +158,7 @@ export async function buildServer(deps: ServerDeps) {
       if (request.url.startsWith("/api/")) {
         reply.status(404).send(fail("NOT_FOUND", `route ${request.url} not found`));
       } else {
+        reply.header("Cache-Control", "no-cache");
         reply.sendFile("index.html");
       }
     });
