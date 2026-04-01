@@ -37,3 +37,4 @@ export { SqliteServiceHeartbeatRepository } from "./repositories/service-heartbe
 export { SqliteConfigImportRepository } from "./repositories/config-import-repository.js";
 export { SqliteFamilyConfigMetaRepository } from "./repositories/family-config-meta-repository.js";
 export { SqliteFamilyProfileRollupRepository } from "./repositories/family-profile-rollup-repository.js";
+export { withImmediate } from "./immediate-transaction.js";

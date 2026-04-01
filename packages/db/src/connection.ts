@@ -10,7 +10,7 @@ export function openDatabase(dbPath: string): DbConnection {
 
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-  db.pragma("busy_timeout = 5000");
+  db.pragma("busy_timeout = 15000");
   db.pragma("synchronous = NORMAL");
 
   return {
