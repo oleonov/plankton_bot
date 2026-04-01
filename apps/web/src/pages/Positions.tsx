@@ -140,15 +140,14 @@ export function Positions() {
       <Pagination
         nextCursor={data?.nextCursor ?? null}
         onNext={(next) => {
-          if (cursor) setCursorStack((s) => [...s, cursor]);
-          else setCursorStack([]);
+          setCursorStack((s) => [...s, cursor ?? ""]);
           setCursor(next);
         }}
         hasPrev={cursorStack.length > 0}
         onPrev={() => {
           const prev = cursorStack[cursorStack.length - 1];
           setCursorStack((s) => s.slice(0, -1));
-          setCursor(prev ?? undefined);
+          setCursor(prev || undefined);
         }}
         pageInfo={pageInfo}
       />

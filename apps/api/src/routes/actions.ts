@@ -86,6 +86,17 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
         maxDustPositions: body.maxDustPositions,
       };
       const hasCaps = caps.maxOpenValueUsdc != null || caps.maxActiveMarkets != null || caps.maxDustPositions != null;
+      if (hasCaps) {
+        if (caps.maxOpenValueUsdc != null && (!Number.isFinite(caps.maxOpenValueUsdc) || caps.maxOpenValueUsdc < 1)) {
+          throw new ApiError(400, "maxOpenValueUsdc must be >= 1", "INVALID_CAPS");
+        }
+        if (caps.maxActiveMarkets != null && (!Number.isInteger(caps.maxActiveMarkets) || caps.maxActiveMarkets < 1)) {
+          throw new ApiError(400, "maxActiveMarkets must be integer >= 1", "INVALID_CAPS");
+        }
+        if (caps.maxDustPositions != null && (!Number.isInteger(caps.maxDustPositions) || caps.maxDustPositions < 0)) {
+          throw new ApiError(400, "maxDustPositions must be integer >= 0", "INVALID_CAPS");
+        }
+      }
       const reason = hasCaps
         ? JSON.stringify({ reason: body.reason ?? "operator approved", caps })
         : body.reason ?? null;

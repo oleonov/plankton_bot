@@ -68,14 +68,16 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     }
     // No default filter — return all statuses when not specified
 
+    const isTailCostSort = sort === "tail_cost";
+    const cursorCol = isTailCostSort ? "cost_basis_usdc" : "updated_at";
+    const orderBy = isTailCostSort ? "ORDER BY cost_basis_usdc DESC" : "ORDER BY updated_at DESC";
+
     if (cursor) {
-      conditions.push("updated_at < ?");
+      conditions.push(`${cursorCol} < ?`);
       params.push(cursor);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    const orderBy =
-      sort === "tail_cost" ? "ORDER BY cost_basis_usdc DESC" : "ORDER BY updated_at DESC";
 
     const rows = opts.db
       .prepare(`SELECT * FROM positions ${where} ${orderBy} LIMIT ?`)
@@ -88,7 +90,8 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       .filter(Boolean) as string[];
     const resMap = buildResolutionMap(opts.db, conditionIds);
 
-    const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.updated_at as string) : null;
+    const lastRow = rows[rows.length - 1];
+    const nextCursor = rows.length === limit && lastRow ? String(lastRow[cursorCol]) : null;
 
     // Count without cursor filter
     const countConds: string[] = [];

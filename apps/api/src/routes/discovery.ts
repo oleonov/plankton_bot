@@ -406,6 +406,16 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
         maxDust: body.maxDustPositions ?? PROBE_DEFAULTS.maxDustPositions,
       };
 
+      if (!Number.isFinite(caps.maxOpenValue) || caps.maxOpenValue < 1) {
+        throw new ApiError(400, "maxOpenValueUsdc must be >= 1", "INVALID_CAPS");
+      }
+      if (!Number.isInteger(caps.maxMarkets) || caps.maxMarkets < 1) {
+        throw new ApiError(400, "maxActiveMarkets must be integer >= 1", "INVALID_CAPS");
+      }
+      if (!Number.isInteger(caps.maxDust) || caps.maxDust < 0) {
+        throw new ApiError(400, "maxDustPositions must be integer >= 0", "INVALID_CAPS");
+      }
+
       // Control DB transaction: all control-side inserts are atomic
       const materializeControl = controlDb.transaction(() => {
         // Read current status before updating (for audit trail)
