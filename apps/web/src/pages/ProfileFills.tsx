@@ -3,6 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { useProfileFills, useFamilies } from "../api/hooks.ts";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
+import { formatTimestamp } from "../utils/format.ts";
 
 export function ProfileFills() {
   const { profileId } = useParams<{ profileId: string }>();
@@ -76,7 +77,7 @@ export function ProfileFills() {
               <td>{f.size.toFixed(2)}</td>
               <td>${f.sizeUsdc.toFixed(2)}</td>
               <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                {new Date(f.filledAt).toLocaleTimeString()}
+                {formatTimestamp(f.filledAt)}
               </td>
             </tr>
           ))}

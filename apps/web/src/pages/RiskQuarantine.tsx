@@ -3,6 +3,7 @@ import { useFamilies, useRiskEvents } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { FamilyActions } from "../components/FamilyActions.tsx";
 import { Pagination } from "../components/Pagination.tsx";
+import { formatTimestamp } from "../utils/format.ts";
 
 export function RiskQuarantine() {
   const { data: families } = useFamilies();
@@ -111,7 +112,7 @@ export function RiskQuarantine() {
           {riskEvents?.items.map((e) => (
             <tr key={e.id}>
               <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                {new Date(e.createdAt).toLocaleTimeString()}
+                {formatTimestamp(e.createdAt)}
               </td>
               <td>{e.eventType}</td>
               <td>

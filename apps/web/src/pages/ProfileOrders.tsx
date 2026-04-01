@@ -4,7 +4,7 @@ import { useProfileOrders, useFamilies } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
-import { formatTimeLeft } from "../utils/format.ts";
+import { formatTimeLeft, formatTimestamp } from "../utils/format.ts";
 
 export function ProfileOrders() {
   const { profileId } = useParams<{ profileId: string }>();
@@ -103,7 +103,7 @@ export function ProfileOrders() {
                 </td>
                 <td style={{ color: ends.color, fontSize: 12 }}>{ends.text}</td>
                 <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
-                  {new Date(o.updatedAt).toLocaleTimeString()}
+                  {formatTimestamp(o.updatedAt)}
                 </td>
               </tr>
             );

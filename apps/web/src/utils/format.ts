@@ -38,6 +38,39 @@ export function formatAge(openedAt: string): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
+const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * Smart timestamp for trading tables.
+ * Today:      "14:38"
+ * This year:  "14:38, 31 Mar"
+ * Other year: "14:38, 31 Mar 2025"
+ */
+export function formatTimestamp(iso: string | null): string {
+  if (!iso) return "\u2014";
+  const date = new Date(parseUtc(iso));
+  if (Number.isNaN(date.getTime())) return "\u2014";
+
+  const now = new Date();
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  const time = `${hh}:${mm}`;
+
+  const isToday =
+    date.getDate() === now.getDate() &&
+    date.getMonth() === now.getMonth() &&
+    date.getFullYear() === now.getFullYear();
+
+  if (isToday) return time;
+
+  const day = date.getDate();
+  const month = SHORT_MONTHS[date.getMonth()]!;
+
+  if (date.getFullYear() === now.getFullYear()) return `${time}, ${day} ${month}`;
+
+  return `${time}, ${day} ${month} ${date.getFullYear()}`;
+}
+
 export function formatTimeLeft(endDate: string | null): { text: string; color: string } {
   if (!endDate) return { text: "\u2014", color: "var(--text-dim)" };
   const end = parseUtc(endDate);
