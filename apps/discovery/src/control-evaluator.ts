@@ -8,7 +8,7 @@
  */
 
 import type { Logger } from "pino";
-import type { DbConnection } from "@plankton/db";
+import { type DbConnection, withImmediate } from "@plankton/db";
 import type { FamilyCandidate, ValidationScorecard, FamilyDeployment } from "@plankton/domain";
 import type { FamilyId, ProfileId } from "@plankton/domain";
 
@@ -185,10 +185,15 @@ export class ControlEvaluator {
   run(): EvaluationStats {
     const now = new Date().toISOString();
     const candidates = this.candidateRepo.findAll();
-    const candidatesScored = this.scoreCandidates(candidates, now);
-    const proposalsCreated = this.evaluatePromotions();
-    this.log.info({ candidatesScored, proposalsCreated }, "control evaluation complete");
-    return { candidatesScored, proposalsCreated };
+
+    // Batch all writes in a single IMMEDIATE transaction to avoid
+    // SQLITE_BUSY lock-churn on shared control.db
+    return withImmediate(this.db, () => {
+      const candidatesScored = this.scoreCandidates(candidates, now);
+      const proposalsCreated = this.evaluatePromotions();
+      this.log.info({ candidatesScored, proposalsCreated }, "control evaluation complete");
+      return { candidatesScored, proposalsCreated };
+    });
   }
 
   // ─── Candidate scoring ──────────────────────────────────────────────
