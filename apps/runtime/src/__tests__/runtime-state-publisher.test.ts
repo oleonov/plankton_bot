@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { openDatabase, type DbConnection } from "@plankton/db";
@@ -146,6 +146,50 @@ describe("RuntimeStatePublisher", () => {
       expect(row["instance_id"]).toBe("inst-001");
 
       publisher.stopHeartbeatLoop();
+    });
+
+    it("first heartbeat SQLITE_BUSY is swallowed — startHeartbeatLoop does not throw", () => {
+      const busyError = new Error("database is locked") as Error & { code: string };
+      busyError.code = "SQLITE_BUSY";
+
+      const spy = vi.spyOn(publisher, "publishHeartbeat").mockImplementation(() => {
+        throw busyError;
+      });
+
+      // Should NOT throw — SQLITE_BUSY is swallowed on first heartbeat
+      expect(() => publisher.startHeartbeatLoop(60_000)).not.toThrow();
+      publisher.stopHeartbeatLoop();
+      spy.mockRestore();
+    });
+
+    it("interval heartbeat SQLITE_BUSY is swallowed — loop continues", () => {
+      vi.useFakeTimers();
+
+      const busyError = new Error("database is locked") as Error & { code: string };
+      busyError.code = "SQLITE_BUSY";
+
+      publisher.startHeartbeatLoop(1_000);
+
+      // Verify first heartbeat wrote normally
+      const row1 = conn.db
+        .prepare("SELECT * FROM service_heartbeats WHERE service_name = 'runtime'")
+        .get() as Record<string, unknown>;
+      expect(row1).toBeTruthy();
+
+      // Make next heartbeat throw SQLITE_BUSY
+      const spy = vi.spyOn(publisher, "publishHeartbeat").mockImplementation(() => {
+        throw busyError;
+      });
+
+      // Advance timer — interval fires, SQLITE_BUSY swallowed, no crash
+      expect(() => vi.advanceTimersByTime(1_000)).not.toThrow();
+
+      // Restore and advance again — heartbeat resumes
+      spy.mockRestore();
+      vi.advanceTimersByTime(1_000);
+
+      publisher.stopHeartbeatLoop();
+      vi.useRealTimers();
     });
   });
 });
