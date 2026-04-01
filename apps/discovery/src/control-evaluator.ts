@@ -184,22 +184,39 @@ export class ControlEvaluator {
 
   run(): EvaluationStats {
     const now = new Date().toISOString();
-    const candidates = this.candidateRepo.findAll();
 
-    // Batch all writes in a single IMMEDIATE transaction to avoid
-    // SQLITE_BUSY lock-churn on shared control.db
-    return withImmediate(this.db, () => {
-      const candidatesScored = this.scoreCandidates(candidates, now);
-      const proposalsCreated = this.evaluatePromotions();
-      this.log.info({ candidatesScored, proposalsCreated }, "control evaluation complete");
-      return { candidatesScored, proposalsCreated };
+    // Phase 1: Read + compute outside transaction (no write lock held)
+    const candidates = this.candidateRepo.findAll();
+    const scoreUpdates = this.computeScores(candidates, now);
+    const proposalInserts = this.computePromotions();
+
+    // Phase 2: Apply all writes in a single short IMMEDIATE transaction
+    const candidateRepo = this.candidateRepo;
+    const proposalRepo = this.proposalRepo;
+    withImmediate(this.db, (db) => {
+      for (const upd of scoreUpdates) {
+        candidateRepo.updateScores(upd.candidateId, upd.scores);
+      }
+      for (const ins of proposalInserts) {
+        proposalRepo.insert(ins.proposal);
+      }
     });
+
+    this.log.info(
+      { candidatesScored: scoreUpdates.length, proposalsCreated: proposalInserts.length },
+      "control evaluation complete",
+    );
+    return { candidatesScored: scoreUpdates.length, proposalsCreated: proposalInserts.length };
   }
 
-  // ─── Candidate scoring ──────────────────────────────────────────────
+  // ─── Candidate scoring (read + compute only) ──────────────────────
 
-  private scoreCandidates(candidates: FamilyCandidate[], now: string): number {
-    let scored = 0;
+  private computeScores(candidates: FamilyCandidate[], now: string) {
+    const updates: { candidateId: string; scores: {
+      recurrenceScore: number | null; recycleScore: number | null;
+      liveViabilityScore: number | null; toxicityPenalty: number | null;
+      gateRecommendation: string; recommendationReason: string | null; scoresUpdatedAt: string;
+    } }[] = [];
     for (const cand of candidates) {
       const recurrenceMetrics = queryRecurrenceMetrics(this.db, cand.candidateId);
       const recurrence = computeRecurrenceScore(recurrenceMetrics);
@@ -207,7 +224,6 @@ export class ControlEvaluator {
       const viabilityMetrics = queryLiveViabilityMetrics(this.db, cand.candidateId, cand.horizon);
       const liveViability = computeLiveViabilityScore(viabilityMetrics);
 
-      // Recycle/toxicity require trading data — read from pre-published scorecards
       let recycle = 0;
       let tailAdjustedPnl = 0;
       if (cand.matchedFamilyId) {
@@ -220,46 +236,45 @@ export class ControlEvaluator {
 
       const gate = computeGateRecommendation({ recurrence, recycle, liveViability, tailAdjustedPnl });
 
-      this.candidateRepo.updateScores(cand.candidateId, {
-        recurrenceScore: recurrence,
-        recycleScore: recycle > 0 ? recycle : null,
-        liveViabilityScore: liveViability,
-        toxicityPenalty: null,
-        gateRecommendation: gate,
-        recommendationReason: null,
-        scoresUpdatedAt: now,
+      updates.push({
+        candidateId: cand.candidateId,
+        scores: {
+          recurrenceScore: recurrence,
+          recycleScore: recycle > 0 ? recycle : null,
+          liveViabilityScore: liveViability,
+          toxicityPenalty: null,
+          gateRecommendation: gate,
+          recommendationReason: null,
+          scoresUpdatedAt: now,
+        },
       });
-      scored++;
     }
-    return scored;
+    return updates;
   }
 
-  // ─── Promotion evaluation ───────────────────────────────────────────
+  // ─── Promotion evaluation (read + compute only) ────────────────────
 
-  private evaluatePromotions(): number {
-    let created = 0;
+  private computePromotions() {
+    type ProposalInsert = Omit<import("@plankton/domain").PromotionProposal, "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy">;
+    const inserts: { proposal: ProposalInsert }[] = [];
     const profiles = this.getActiveProfiles();
 
     for (const profile of profiles) {
       const deployments = this.deploymentRepo.findEnabled(profile);
       for (const dep of deployments) {
-        const proposed = this.checkDeploymentPromotion(dep, profile);
-        if (proposed) created++;
+        const proposal = this.buildProposalIfEligible(dep, profile);
+        if (proposal) inserts.push(proposal);
       }
     }
-    return created;
+    return inserts;
   }
 
-  private checkDeploymentPromotion(dep: FamilyDeployment, profile: ProfileId): boolean {
-    if (this.proposalRepo.hasPending(dep.familyId, profile)) return false;
+  private buildProposalIfEligible(dep: FamilyDeployment, profile: ProfileId): { proposal: Omit<import("@plankton/domain").PromotionProposal, "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy"> } | null {
+    if (this.proposalRepo.hasPending(dep.familyId, profile)) return null;
 
     const scorecard = this.scorecardRepo.findLatest(dep.familyId, profile);
-    if (!scorecard) return false;
+    if (!scorecard) return null;
 
-    // repricingExits is not stored in the scorecard, but is baked into recycleScore
-    // (30% weight). If recycleScore >= 0.6, repricing exits were sufficient in the
-    // runtime's computation. Derive a floor from the scorecard's summary if available,
-    // otherwise infer from the recycle score meeting threshold.
     const repricingExits = this.extractRepricingExits(scorecard);
 
     const eligible = meetsPromotionThresholds({
@@ -270,35 +285,36 @@ export class ControlEvaluator {
       toxicity: scorecard.toxicityPenalty ?? 0,
       tailAdjustedPnl: scorecard.tailAdjustedPnl,
     });
-    if (!eligible) return false;
+    if (!eligible) return null;
 
     const currentState = dep.strategyStage;
-    if (currentState === "scaled" || currentState === "both-sided") return false;
-
-    this.proposalRepo.insert({
-      familyId: dep.familyId,
-      profile,
-      currentState: currentState as any,
-      proposedState: "scaled",
-      reason: `Auto: recycle=${(scorecard.recycleScore ?? 0).toFixed(2)}, toxicity=${(scorecard.toxicityPenalty ?? 0).toFixed(2)}, trades=${scorecard.tradeCount}`,
-      scoresSnapshot: JSON.stringify({
-        recurrence: scorecard.recurrenceScore,
-        recycle: scorecard.recycleScore,
-        liveViability: scorecard.liveViabilityScore,
-        toxicity: scorecard.toxicityPenalty,
-        tradeCount: scorecard.tradeCount,
-        marketCount: scorecard.marketCount,
-        tailAdjustedPnl: scorecard.tailAdjustedPnl,
-        evidenceStatus: scorecard.evidenceStatus,
-      }),
-      sourceScorecardId: scorecard.scorecardId,
-    });
+    if (currentState === "scaled" || currentState === "both-sided") return null;
 
     this.log.info(
       { familyId: String(dep.familyId), profile, scorecardId: String(scorecard.scorecardId) },
       "promotion proposed from control evaluator",
     );
-    return true;
+
+    return {
+      proposal: {
+        familyId: dep.familyId,
+        profile,
+        currentState: currentState as any,
+        proposedState: "scaled" as const,
+        reason: `Auto: recycle=${(scorecard.recycleScore ?? 0).toFixed(2)}, toxicity=${(scorecard.toxicityPenalty ?? 0).toFixed(2)}, trades=${scorecard.tradeCount}`,
+        scoresSnapshot: JSON.stringify({
+          recurrence: scorecard.recurrenceScore,
+          recycle: scorecard.recycleScore,
+          liveViability: scorecard.liveViabilityScore,
+          toxicity: scorecard.toxicityPenalty,
+          tradeCount: scorecard.tradeCount,
+          marketCount: scorecard.marketCount,
+          tailAdjustedPnl: scorecard.tailAdjustedPnl,
+          evidenceStatus: scorecard.evidenceStatus,
+        }),
+        sourceScorecardId: scorecard.scorecardId,
+      },
+    };
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────
