@@ -120,7 +120,7 @@ export class SqliteInventoryLotRepository implements InventoryLotRepository {
       }
 
       return result;
-    })();
+    }).immediate();
   }
 
   settleAll(positionId: PositionId): void {

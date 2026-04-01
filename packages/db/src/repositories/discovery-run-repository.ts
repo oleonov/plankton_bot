@@ -83,7 +83,7 @@ export class SqliteDiscoveryRunRepository implements DiscoveryRunRepository {
       return rowToRun(
         this.db.prepare("SELECT * FROM discovery_runs WHERE id = ?").get(queued.id) as RunRow,
       );
-    })();
+    }).immediate();
   }
 
   heartbeat(id: number): void {
