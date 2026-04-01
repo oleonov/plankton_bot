@@ -89,10 +89,14 @@ export class RuntimeStatePublisher {
   startHeartbeatLoop(intervalMs: number): void {
     this.publishHeartbeat("ready_paused");
     this.heartbeatTimer = setInterval(() => {
-      const state = this.db
-        .prepare("SELECT runtime_status FROM runtime_control_state WHERE id = 1")
-        .get() as { runtime_status: string } | undefined;
-      this.publishHeartbeat(state?.runtime_status ?? "unknown");
+      try {
+        const state = this.db
+          .prepare("SELECT runtime_status FROM runtime_control_state WHERE id = 1")
+          .get() as { runtime_status: string } | undefined;
+        this.publishHeartbeat(state?.runtime_status ?? "unknown");
+      } catch {
+        // SQLITE_BUSY is expected under contention — skip this heartbeat, retry next interval
+      }
     }, intervalMs);
   }
 
