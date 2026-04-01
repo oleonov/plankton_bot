@@ -48,9 +48,7 @@ describe("dynamic slug filter after rules_reload", () => {
   });
 
   it("returns false when no families have slug patterns", () => {
-    const families: MinimalFamilyIdentity[] = [
-      makeFamilyIdentity({ slugPattern: null }),
-    ];
+    const families: MinimalFamilyIdentity[] = [makeFamilyIdentity({ slugPattern: null })];
     const rulesManager = { getAllFamilies: () => families };
 
     const slugFilter = (slug: string) => {

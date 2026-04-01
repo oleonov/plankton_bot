@@ -63,11 +63,11 @@ function makeMockLoaded(): LoadedFamilyRules {
           entry: {
             entryMode: "probe-first",
             minEntryPrice: 0.03,
-            maxEntryPrice: 0.20,
+            maxEntryPrice: 0.2,
             maxInitialNotionalUsdc: 5.0,
             allowHighPriceOneShot: false,
-            highPriceThreshold: 0.20,
-            requireProvenFamilyAbovePrice: 0.20,
+            highPriceThreshold: 0.2,
+            requireProvenFamilyAbovePrice: 0.2,
             preferredEntryBand: "0.05-0.20",
             maxProbeCountPerMarket: 1,
             entryCooldownSeconds: 30,
@@ -163,7 +163,9 @@ describe("bootstrap-import", () => {
 
   it("creates family_catalog entries", () => {
     bootstrapImport(db, loaded);
-    const rows = db.prepare("SELECT family_id, family_key, regime FROM family_catalog").all() as Array<{
+    const rows = db
+      .prepare("SELECT family_id, family_key, regime FROM family_catalog")
+      .all() as Array<{
       family_id: string;
       family_key: string;
       regime: string;
@@ -176,10 +178,9 @@ describe("bootstrap-import", () => {
 
   it("creates family_rules entries with all columns", () => {
     bootstrapImport(db, loaded);
-    const row = db.prepare("SELECT * FROM family_rules WHERE family_id = ?").get("test-family:generic:daily") as Record<
-      string,
-      unknown
-    >;
+    const row = db
+      .prepare("SELECT * FROM family_rules WHERE family_id = ?")
+      .get("test-family:generic:daily") as Record<string, unknown>;
     expect(row).toBeDefined();
     expect(row.enabled).toBe(1);
     expect(row.action).toBe("trade");
@@ -191,7 +192,9 @@ describe("bootstrap-import", () => {
     expect(row.allow_two_sided).toBe(0);
     expect(row.max_open_value_usdc).toBe(45.0);
     expect(row.stale_tail_prune_enabled).toBe(1);
-    expect(JSON.parse(row.active_windows_utc as string)).toEqual([{ start: "14:00", end: "21:00" }]);
+    expect(JSON.parse(row.active_windows_utc as string)).toEqual([
+      { start: "14:00", end: "21:00" },
+    ]);
     expect(JSON.parse(row.reduced_windows_utc as string)).toEqual([]);
     expect(row.weekday_bias).toBe("preferred");
     expect(row.weekend_mode).toBe("normal");
@@ -200,7 +203,9 @@ describe("bootstrap-import", () => {
   it("creates family_deployments (sim/paper enabled, live-lite disabled)", () => {
     bootstrapImport(db, loaded);
     const rows = db
-      .prepare("SELECT profile, enabled FROM family_deployments WHERE family_id = ? ORDER BY profile")
+      .prepare(
+        "SELECT profile, enabled FROM family_deployments WHERE family_id = ? ORDER BY profile",
+      )
       .all("test-family:generic:daily") as Array<{ profile: string; enabled: number }>;
 
     expect(rows).toEqual([
@@ -212,7 +217,10 @@ describe("bootstrap-import", () => {
 
   it("creates runtime_control_state with desired_profile='simulation'", () => {
     bootstrapImport(db, loaded);
-    const row = db.prepare("SELECT * FROM runtime_control_state WHERE id = 1").get() as Record<string, unknown>;
+    const row = db.prepare("SELECT * FROM runtime_control_state WHERE id = 1").get() as Record<
+      string,
+      unknown
+    >;
     expect(row).toBeDefined();
     expect(row.desired_profile).toBe("simulation");
     expect(row.paused).toBe(1);

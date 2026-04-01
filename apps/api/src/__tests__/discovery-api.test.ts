@@ -69,7 +69,12 @@ beforeAll(async () => {
       PRIMARY KEY (family_id, profile)
     )
   `);
-  app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
+  app = await buildServer({
+    config: testConfig(),
+    controlDb: conn.db,
+    ledgerDb: conn.db,
+    ledgerPool: stubLedgerPool(),
+  });
 });
 
 afterAll(async () => {
@@ -87,7 +92,15 @@ describe("GET /discovery/status", () => {
     db.prepare(
       `INSERT INTO discovery_runs (trigger_type, status, requested_by, finished_at, stats_json)
        VALUES ('schedule', 'succeeded', 'worker', datetime('now'), ?)`,
-    ).run(JSON.stringify({ marketsFound: 50, clustersCreated: 8, candidatesUpserted: 3, matched: 2, pruned: 1 }));
+    ).run(
+      JSON.stringify({
+        marketsFound: 50,
+        clustersCreated: 8,
+        candidatesUpserted: 3,
+        matched: 2,
+        pruned: 1,
+      }),
+    );
 
     const res = await app.inject({
       method: "GET",
@@ -251,7 +264,9 @@ describe("POST /discovery/candidates/:id/accept", () => {
 
     // Verify family_deployments created for all profiles
     const deps = db
-      .prepare("SELECT profile, enabled FROM family_deployments WHERE family_id = 'cand-accept-1' ORDER BY profile")
+      .prepare(
+        "SELECT profile, enabled FROM family_deployments WHERE family_id = 'cand-accept-1' ORDER BY profile",
+      )
       .all() as { profile: string; enabled: number }[];
     expect(deps).toHaveLength(3);
     expect(deps.find((d: any) => d.profile === "paper")!.enabled).toBe(1);
@@ -560,7 +575,14 @@ describe("GET /discovery/candidates pagination", () => {
     const now = new Date().toISOString();
 
     // Helper: seed with explicit recommendation, confidence, status
-    const seed = (id: string, status: string, rec: string, conf: string, recScore: number, viab: number) => {
+    const seed = (
+      id: string,
+      status: string,
+      rec: string,
+      conf: string,
+      recScore: number,
+      viab: number,
+    ) => {
       db.prepare(
         `INSERT INTO family_candidates
            (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
@@ -574,12 +596,12 @@ describe("GET /discovery/candidates pagination", () => {
 
     // Mix of statuses, recommendations, confidences
     seed("d-scaled-high", "discovered", "scaled-candidate", "high", 0.9, 0.9); // should be 1st
-    seed("d-probe-high", "discovered", "probe-candidate", "high", 0.9, 0.9);   // 2nd
-    seed("d-probe-med", "discovered", "probe-candidate", "medium", 0.9, 0.9);  // 3rd
-    seed("d-monitor-high", "discovered", "monitor", "high", 0.8, 0.8);         // 4th
-    seed("d-pending-high", "discovered", "pending", "high", 0.0, 0.0);         // 5th (pending before ignore)
-    seed("d-ignore-high", "discovered", "ignore", "high", 0.5, 0.5);           // 6th
-    seed("r-scaled-high", "reviewed", "scaled-candidate", "high", 0.9, 0.9);   // 7th (reviewed after all discovered)
+    seed("d-probe-high", "discovered", "probe-candidate", "high", 0.9, 0.9); // 2nd
+    seed("d-probe-med", "discovered", "probe-candidate", "medium", 0.9, 0.9); // 3rd
+    seed("d-monitor-high", "discovered", "monitor", "high", 0.8, 0.8); // 4th
+    seed("d-pending-high", "discovered", "pending", "high", 0.0, 0.0); // 5th (pending before ignore)
+    seed("d-ignore-high", "discovered", "ignore", "high", 0.5, 0.5); // 6th
+    seed("r-scaled-high", "reviewed", "scaled-candidate", "high", 0.9, 0.9); // 7th (reviewed after all discovered)
 
     const res = await app.inject({
       method: "GET",

@@ -49,21 +49,23 @@ export function EvidenceSection({
         onClick={() => setExpanded(!expanded)}
       >
         {expanded ? "\u25BC" : "\u25B6"} Evidence
-        {evidence.promotionState && (
-          <Badge value={evidence.promotionState} />
-        )}
-        {evidence.probeSubstate && (
-          <ProbeSubstateBadge substate={evidence.probeSubstate} />
-        )}
+        {evidence.promotionState && <Badge value={evidence.promotionState} />}
+        {evidence.probeSubstate && <ProbeSubstateBadge substate={evidence.probeSubstate} />}
       </div>
       {expanded && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
           <div>
             <EvidenceStat label="Trades" value={evidence.localTradeCount} />
             <EvidenceStat label="Markets" value={evidence.localMarketCount} />
-            <EvidenceStat label="Realized PnL (FIFO)" value={fmtUsd(evidence.localRealizedPnlFifo)} />
+            <EvidenceStat
+              label="Realized PnL (FIFO)"
+              value={fmtUsd(evidence.localRealizedPnlFifo)}
+            />
             <EvidenceStat label="Tail-Adj PnL" value={fmtUsd(evidence.tailAdjustedPnl)} />
-            <EvidenceStat label="Evidence Score" value={evidence.evidenceScore?.toFixed(2) ?? null} />
+            <EvidenceStat
+              label="Evidence Score"
+              value={evidence.evidenceScore?.toFixed(2) ?? null}
+            />
             <EvidenceStat label="Repricing Exits" value={evidence.repricingExitCount} />
             {showReset && (
               <div style={{ marginTop: 8 }}>

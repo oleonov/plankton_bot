@@ -33,10 +33,7 @@ const RE_TEMPORAL_SUFFIX = new RegExp(
 );
 
 /** Trailing dated segment: -march-28, -march-28-2026 */
-const RE_TRAILING_DATE = new RegExp(
-  `-(?:${MONTH_NAMES})-\\d{1,2}(?:-\\d{4})?$`,
-  "i",
-);
+const RE_TRAILING_DATE = new RegExp(`-(?:${MONTH_NAMES})-\\d{1,2}(?:-\\d{4})?$`, "i");
 
 /** Trailing ISO date: -2026-03-28 */
 const RE_TRAILING_ISO = /-\d{4}-\d{2}-\d{2}$/;

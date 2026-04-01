@@ -11,10 +11,13 @@ export const auditRoutes: FastifyPluginAsync<AuditOpts> = async (app, opts) => {
 
   // ── GET /audit ───────────────────────────────────────────────────────
   app.get("/audit", async (request) => {
-    const { limit = "50", cursor, type, profile, familyId } = request.query as Record<
-      string,
-      string | undefined
-    >;
+    const {
+      limit = "50",
+      cursor,
+      type,
+      profile,
+      familyId,
+    } = request.query as Record<string, string | undefined>;
     const lim = Math.min(Number(limit) || 50, 200);
 
     let where = "WHERE 1=1";

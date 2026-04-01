@@ -59,14 +59,24 @@ export class SwitchDriver {
       if (isTransientError(err) && this.transientErrorCount < MAX_TRANSIENT_ERRORS) {
         this.transientErrorCount++;
         this.log.warn(
-          { switchId: request.switchId, state: request.state, attempt: this.transientErrorCount, err },
+          {
+            switchId: request.switchId,
+            state: request.state,
+            attempt: this.transientErrorCount,
+            err,
+          },
           "transient Docker/proxy error, will retry",
         );
         return; // don't fail — retry on next tick
       }
 
       this.log.error(
-        { switchId: request.switchId, state: request.state, transientAttempts: this.transientErrorCount, err },
+        {
+          switchId: request.switchId,
+          state: request.state,
+          transientAttempts: this.transientErrorCount,
+          err,
+        },
         "switch tick failed permanently",
       );
       this.transientErrorCount = 0;
@@ -166,7 +176,11 @@ export class SwitchDriver {
     if (state?.runtimeStatus === "failed") {
       this.log.warn({ switchId: req.switchId }, "runtime preflight failed during switch");
       this.transitionTo(req.switchId, req.state, SwitchState.Failed);
-      this.switchRepo.updateState(req.switchId, SwitchState.Failed, "runtime startup preflight failed");
+      this.switchRepo.updateState(
+        req.switchId,
+        SwitchState.Failed,
+        "runtime startup preflight failed",
+      );
       return;
     }
 
@@ -174,7 +188,11 @@ export class SwitchDriver {
     if (!(await this.container.isRunning()) && state?.runtimeStatus !== "ready_paused") {
       this.log.warn({ switchId: req.switchId }, "runtime container died during startup");
       this.transitionTo(req.switchId, req.state, SwitchState.Failed);
-      this.switchRepo.updateState(req.switchId, SwitchState.Failed, "runtime container exited during startup");
+      this.switchRepo.updateState(
+        req.switchId,
+        SwitchState.Failed,
+        "runtime container exited during startup",
+      );
       return;
     }
 
@@ -203,7 +221,12 @@ export class SwitchDriver {
 
   private transitionAndUpdate(
     req: SwitchRequest,
-    newState: typeof SwitchState.Pausing | typeof SwitchState.Stopping | typeof SwitchState.PreparingTarget | typeof SwitchState.StartingTarget | typeof SwitchState.ReadyPaused,
+    newState:
+      | typeof SwitchState.Pausing
+      | typeof SwitchState.Stopping
+      | typeof SwitchState.PreparingTarget
+      | typeof SwitchState.StartingTarget
+      | typeof SwitchState.ReadyPaused,
   ): void {
     this.transitionTo(req.switchId, req.state, newState);
     this.switchRepo.updateState(req.switchId, newState);
@@ -213,11 +236,7 @@ export class SwitchDriver {
     );
   }
 
-  private transitionTo(
-    switchId: string,
-    from: string,
-    to: string,
-  ): void {
+  private transitionTo(switchId: string, from: string, to: string): void {
     this.transitionRepo.insert({
       entityType: "switch_request",
       entityId: switchId,

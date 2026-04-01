@@ -161,7 +161,9 @@ describe("SqliteFamilyEvidenceRepository", () => {
     const ev = repo.getEvidence(familyId);
     // Score columns are added by migration 007; verify via raw SQL
     const row = conn.db
-      .prepare("SELECT recurrence_score, recycle_score, scores_updated_at FROM family_evidence WHERE family_id = ?")
+      .prepare(
+        "SELECT recurrence_score, recycle_score, scores_updated_at FROM family_evidence WHERE family_id = ?",
+      )
       .get("fam-1") as Record<string, unknown>;
     expect(row.recurrence_score).toBe(0.8);
     expect(row.recycle_score).toBe(0.6);

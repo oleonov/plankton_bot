@@ -13,7 +13,11 @@ async function main(): Promise<void> {
   logger.info({ dbPath: controlDbPath }, "CLI scan starting");
   const conn = bootstrapControlDb(controlDbPath);
   try {
-    const service = new ScanService({ db: conn.db, log: logger, gateway: createDiscoveryGateway() });
+    const service = new ScanService({
+      db: conn.db,
+      log: logger,
+      gateway: createDiscoveryGateway(),
+    });
     const stats = await service.run();
     logger.info(stats, "Scan complete");
   } finally {

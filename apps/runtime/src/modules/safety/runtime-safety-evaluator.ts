@@ -79,9 +79,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     ];
 
     this.timer = setInterval(() => {
-      this.evaluate().catch((err) =>
-        this.log.error({ err }, "safety evaluation failed"),
-      );
+      this.evaluate().catch((err) => this.log.error({ err }, "safety evaluation failed"));
     }, this.intervalMs);
 
     await this.evaluate();

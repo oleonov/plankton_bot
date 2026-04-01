@@ -74,16 +74,13 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
   });
 
   // ── GET /profiles/:profileId/settings ────────────────────────────────
-  app.get<{ Params: { profileId: string } }>(
-    "/profiles/:profileId/settings",
-    async (request) => {
-      const { profileId } = request.params;
-      const settings = controlDb
-        .prepare("SELECT * FROM profile_settings WHERE profile_id = ?")
-        .get(profileId);
-      return ok(settings ?? null);
-    },
-  );
+  app.get<{ Params: { profileId: string } }>("/profiles/:profileId/settings", async (request) => {
+    const { profileId } = request.params;
+    const settings = controlDb
+      .prepare("SELECT * FROM profile_settings WHERE profile_id = ?")
+      .get(profileId);
+    return ok(settings ?? null);
+  });
 
   // ── GET /control/overview ────────────────────────────────────────────
   app.get("/control/overview", async () => {
@@ -176,8 +173,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .prepare(`SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT ?`)
       .all(...params) as Record<string, unknown>[];
 
-    const nextCursor =
-      rows.length === limit ? (rows[rows.length - 1]!.created_at as string) : null;
+    const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.created_at as string) : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(ledger, tokenIds);
@@ -271,8 +267,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .prepare(`SELECT * FROM fills ${where} ORDER BY filled_at DESC LIMIT ?`)
       .all(...params) as Record<string, unknown>[];
 
-    const nextCursor =
-      rows.length === limit ? (rows[rows.length - 1]!.filled_at as string) : null;
+    const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.filled_at as string) : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(ledger, tokenIds);

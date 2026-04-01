@@ -53,7 +53,9 @@ async function main(): Promise<void> {
   const ledgerPool = new LedgerPool(controlDbPath);
 
   // eslint-disable-next-line no-console
-  console.log(`databases opened — control: ${controlDbPath}, ledger: ${ledgerDbPath} (profile: ${activeProfile})`);
+  console.log(
+    `databases opened — control: ${controlDbPath}, ledger: ${ledgerDbPath} (profile: ${activeProfile})`,
+  );
 
   const app = await buildServer({
     config,

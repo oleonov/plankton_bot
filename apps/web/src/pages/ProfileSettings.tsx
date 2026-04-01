@@ -8,7 +8,11 @@ function SettingsFormInner({
   settings,
   profileId,
 }: {
-  settings: { initial_balance_usdc?: number | null; envelope_json?: string | null; risk_caps_json?: string | null };
+  settings: {
+    initial_balance_usdc?: number | null;
+    envelope_json?: string | null;
+    risk_caps_json?: string | null;
+  };
   profileId: string;
 }) {
   const update = useUpdateProfileSettings(profileId);
@@ -61,11 +65,7 @@ function SettingsFormInner({
         />
       </div>
       <div>
-        <button
-          className="btn-success"
-          onClick={handleSave}
-          disabled={update.isPending}
-        >
+        <button className="btn-success" onClick={handleSave} disabled={update.isPending}>
           {update.isPending ? "Saving..." : "Save Settings"}
         </button>
         {feedback && (

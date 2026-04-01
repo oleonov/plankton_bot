@@ -173,19 +173,28 @@ describe("SqliteFamilyCandidateRepository", () => {
     });
 
     it("does not delete matched candidates even if old", () => {
-      repo.upsert({ ...lowValueTail("match-1", "2026-01-01T00:00:00Z"), matchedFamilyId: "fam-1" as any });
+      repo.upsert({
+        ...lowValueTail("match-1", "2026-01-01T00:00:00Z"),
+        matchedFamilyId: "fam-1" as any,
+      });
       const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
       expect(deleted).toBe(0);
     });
 
     it("does not delete medium/high confidence candidates", () => {
-      repo.upsert({ ...lowValueTail("med-1", "2026-01-01T00:00:00Z"), patternConfidence: "medium" });
+      repo.upsert({
+        ...lowValueTail("med-1", "2026-01-01T00:00:00Z"),
+        patternConfidence: "medium",
+      });
       const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
       expect(deleted).toBe(0);
     });
 
     it("does not delete candidates with non-ignore recommendation", () => {
-      repo.upsert({ ...lowValueTail("green-1", "2026-01-01T00:00:00Z"), gateRecommendation: "green" });
+      repo.upsert({
+        ...lowValueTail("green-1", "2026-01-01T00:00:00Z"),
+        gateRecommendation: "green",
+      });
       const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
       expect(deleted).toBe(0);
     });
@@ -193,10 +202,12 @@ describe("SqliteFamilyCandidateRepository", () => {
     it("does not delete candidate with pending proposal", () => {
       repo.upsert(lowValueTail("prop-1", "2026-01-01T00:00:00Z"));
       // Insert a pending proposal referencing the candidate_id as family_id
-      conn.db.prepare(
-        `INSERT INTO promotion_proposals (family_id, current_state, proposed_state, reason, scores_snapshot, status)
+      conn.db
+        .prepare(
+          `INSERT INTO promotion_proposals (family_id, current_state, proposed_state, reason, scores_snapshot, status)
          VALUES ('prop-1', 'probe-only', 'scaled', 'test', '{}', 'pending')`,
-      ).run();
+        )
+        .run();
       const deleted = repo.deleteStaleLowValueTail("2026-03-28T00:00:00Z");
       expect(deleted).toBe(0);
     });

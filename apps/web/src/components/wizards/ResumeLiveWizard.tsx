@@ -47,10 +47,18 @@ export function ResumeLiveWizard({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <WizardPanel title="Resume Live" steps={STEPS} currentStep={step} onClose={onClose} footer={footer}>
+    <WizardPanel
+      title="Resume Live"
+      steps={STEPS}
+      currentStep={step}
+      onClose={onClose}
+      footer={footer}
+    >
       {step === 0 && (
         <div style={{ fontSize: 12 }}>
-          <div className="label" style={{ marginBottom: 8 }}>Preflight Report</div>
+          <div className="label" style={{ marginBottom: 8 }}>
+            Preflight Report
+          </div>
           <div className="profile-stat">
             <span className="label">Profile</span>
             <span>{profile?.display_name ?? currentId}</span>
@@ -75,7 +83,9 @@ export function ResumeLiveWizard({ onClose }: { onClose: () => void }) {
       )}
       {step === 1 && (
         <div style={{ fontSize: 12 }}>
-          <div className="label" style={{ marginBottom: 8 }}>Envelope Caps</div>
+          <div className="label" style={{ marginBottom: 8 }}>
+            Envelope Caps
+          </div>
           {envelope ? (
             Object.entries(envelope).map(([k, v]) => (
               <div key={k} className="profile-stat">

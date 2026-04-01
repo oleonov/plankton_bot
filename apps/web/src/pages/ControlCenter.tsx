@@ -19,12 +19,17 @@ function ProfileCard({
   isCurrent: boolean;
   runtimePaused: boolean;
 }) {
-  const profileStatus = isCurrent
-    ? runtimePaused ? "paused" : "running"
-    : "stopped";
+  const profileStatus = isCurrent ? (runtimePaused ? "paused" : "running") : "stopped";
   return (
     <div className={`profile-card ${isCurrent ? "current" : ""}`}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: 8,
+        }}
+      >
         <h3>{profile.display_name}</h3>
         <Badge value={profileStatus} type="status" />
       </div>
@@ -78,7 +83,9 @@ export function ControlCenter() {
       </div>
 
       <div className="card" style={{ marginTop: 16 }}>
-        <div className="label" style={{ marginBottom: 8 }}>Quick Actions</div>
+        <div className="label" style={{ marginBottom: 8 }}>
+          Quick Actions
+        </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button className="btn-success" onClick={() => setWizard("switch")}>
             Switch Profile

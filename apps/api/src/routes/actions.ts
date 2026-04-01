@@ -67,41 +67,65 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
   }
 
   // ── POST /actions/family/:familyId/promote ─────────────────────────────
-  app.post<{ Params: { familyId: string }; Body: { reason?: string; maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number } }>(
-    "/actions/family/:familyId/promote",
-    async (request) => {
-      const { familyId } = request.params;
-      const exists = opts.db
-        .prepare("SELECT 1 FROM family_catalog WHERE family_id = ?")
-        .get(familyId);
-      if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+  app.post<{
+    Params: { familyId: string };
+    Body: {
+      reason?: string;
+      maxOpenValueUsdc?: number;
+      maxActiveMarkets?: number;
+      maxDustPositions?: number;
+    };
+  }>("/actions/family/:familyId/promote", async (request) => {
+    const { familyId } = request.params;
+    const exists = opts.db
+      .prepare("SELECT 1 FROM family_catalog WHERE family_id = ?")
+      .get(familyId);
+    if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
 
-      const actor = getActor(request);
-      const body = (request.body ?? {}) as { reason?: string; maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number };
+    const actor = getActor(request);
+    const body = (request.body ?? {}) as {
+      reason?: string;
+      maxOpenValueUsdc?: number;
+      maxActiveMarkets?: number;
+      maxDustPositions?: number;
+    };
 
-      // Encode caps in reason JSON so command-poller can use them
-      const caps = {
-        maxOpenValueUsdc: body.maxOpenValueUsdc,
-        maxActiveMarkets: body.maxActiveMarkets,
-        maxDustPositions: body.maxDustPositions,
-      };
-      const hasCaps = caps.maxOpenValueUsdc != null || caps.maxActiveMarkets != null || caps.maxDustPositions != null;
-      if (hasCaps) {
-        if (caps.maxOpenValueUsdc != null && (!Number.isFinite(caps.maxOpenValueUsdc) || caps.maxOpenValueUsdc < 1)) {
-          throw new ApiError(400, "maxOpenValueUsdc must be >= 1", "INVALID_CAPS");
-        }
-        if (caps.maxActiveMarkets != null && (!Number.isInteger(caps.maxActiveMarkets) || caps.maxActiveMarkets < 1)) {
-          throw new ApiError(400, "maxActiveMarkets must be integer >= 1", "INVALID_CAPS");
-        }
-        if (caps.maxDustPositions != null && (!Number.isInteger(caps.maxDustPositions) || caps.maxDustPositions < 0)) {
-          throw new ApiError(400, "maxDustPositions must be integer >= 0", "INVALID_CAPS");
-        }
+    // Encode caps in reason JSON so command-poller can use them
+    const caps = {
+      maxOpenValueUsdc: body.maxOpenValueUsdc,
+      maxActiveMarkets: body.maxActiveMarkets,
+      maxDustPositions: body.maxDustPositions,
+    };
+    const hasCaps =
+      caps.maxOpenValueUsdc != null ||
+      caps.maxActiveMarkets != null ||
+      caps.maxDustPositions != null;
+    if (hasCaps) {
+      if (
+        caps.maxOpenValueUsdc != null &&
+        (!Number.isFinite(caps.maxOpenValueUsdc) || caps.maxOpenValueUsdc < 1)
+      ) {
+        throw new ApiError(400, "maxOpenValueUsdc must be >= 1", "INVALID_CAPS");
       }
-      const reason = hasCaps
-        ? JSON.stringify({ reason: body.reason ?? "operator approved", caps })
-        : body.reason ?? null;
+      if (
+        caps.maxActiveMarkets != null &&
+        (!Number.isInteger(caps.maxActiveMarkets) || caps.maxActiveMarkets < 1)
+      ) {
+        throw new ApiError(400, "maxActiveMarkets must be integer >= 1", "INVALID_CAPS");
+      }
+      if (
+        caps.maxDustPositions != null &&
+        (!Number.isInteger(caps.maxDustPositions) || caps.maxDustPositions < 0)
+      ) {
+        throw new ApiError(400, "maxDustPositions must be integer >= 0", "INVALID_CAPS");
+      }
+    }
+    const reason = hasCaps
+      ? JSON.stringify({ reason: body.reason ?? "operator approved", caps })
+      : (body.reason ?? null);
 
-      const result = opts.db.transaction(() => {
+    const result = opts.db
+      .transaction(() => {
         const info = opts.db
           .prepare(
             `UPDATE promotion_proposals
@@ -125,24 +149,18 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
           )
           .get(familyId) as { id: number };
 
-        const commandId = insertCommand(
-          opts.db,
-          "family_promote_scaled",
-          familyId,
-          reason,
-          actor,
-        );
+        const commandId = insertCommand(opts.db, "family_promote_scaled", familyId, reason, actor);
 
         opts.db
           .prepare("UPDATE promotion_proposals SET applied_command_id = ? WHERE id = ?")
           .run(commandId, proposal.id);
 
         return { commandId, proposalId: proposal.id };
-      }).immediate();
+      })
+      .immediate();
 
-      return ok(result);
-    },
-  );
+    return ok(result);
+  });
 
   // ── POST /actions/family/:familyId/reset-to-probe ─────────────────────
   app.post<{ Params: { familyId: string }; Body: { reason?: string } }>(
@@ -156,7 +174,13 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
 
       const body = (request.body ?? {}) as { reason?: string };
       const actor = getActor(request);
-      const id = insertCommand(opts.db, "family_reset_to_probe", familyId, body.reason ?? null, actor);
+      const id = insertCommand(
+        opts.db,
+        "family_reset_to_probe",
+        familyId,
+        body.reason ?? null,
+        actor,
+      );
       return ok({ commandId: id, status: "enqueued" });
     },
   );
@@ -177,7 +201,9 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
       const db = opts.db;
 
       // Precheck 1: target profile exists
-      const profileExists = db.prepare("SELECT 1 FROM profiles WHERE profile_id = ?").get(toProfile);
+      const profileExists = db
+        .prepare("SELECT 1 FROM profiles WHERE profile_id = ?")
+        .get(toProfile);
       if (!profileExists) {
         throw new ApiError(404, `profile '${toProfile}' not found`, "PROFILE_NOT_FOUND");
       }

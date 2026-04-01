@@ -1,5 +1,4 @@
-const clamp = (v: number, min: number, max: number): number =>
-  Math.min(Math.max(v, min), max);
+const clamp = (v: number, min: number, max: number): number => Math.min(Math.max(v, min), max);
 
 const weightedSum = (components: readonly [number, number][]): number =>
   components.reduce((sum, [value, weight]) => sum + value * weight, 0);
@@ -17,9 +16,7 @@ export function computeRecurrenceScore(input: {
   const observationSpan = clamp(input.spanDays / 30, 0, 1);
   const presenceRatio = input.totalDays > 0 ? input.presenceDays / input.totalDays : 0;
   const cadenceStability =
-    input.cadenceMean > 0
-      ? 1 - clamp(input.cadenceStddev / input.cadenceMean, 0, 2) / 2
-      : 0;
+    input.cadenceMean > 0 ? 1 - clamp(input.cadenceStddev / input.cadenceMean, 0, 2) / 2 : 0;
   const slugDiversity = clamp(input.distinctConditions / 20, 0, 1);
 
   return weightedSum([
@@ -43,9 +40,7 @@ export function computeRecycleScore(input: {
   const marketBreadth = clamp(input.distinctMarkets / 10, 0, 1);
   const tailAdjustedPnlSign = input.tailAdjustedPnl > 0 ? 1.0 : 0.0;
   const recycleExitRatio =
-    input.totalNonSettlementClosed > 0
-      ? input.repricingExits / input.totalNonSettlementClosed
-      : 0;
+    input.totalNonSettlementClosed > 0 ? input.repricingExits / input.totalNonSettlementClosed : 0;
 
   return weightedSum([
     [tradeDensity, 0.2],

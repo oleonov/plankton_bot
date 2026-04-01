@@ -1,5 +1,15 @@
-import type { RuntimeModule, ValidationScorecard, ProfileId, ExchangeGateway } from "@plankton/domain";
-import { createScorecardId, createFamilyId, computeRecycleScore, computeToxicityPenalty } from "@plankton/domain";
+import type {
+  RuntimeModule,
+  ValidationScorecard,
+  ProfileId,
+  ExchangeGateway,
+} from "@plankton/domain";
+import {
+  createScorecardId,
+  createFamilyId,
+  computeRecycleScore,
+  computeToxicityPenalty,
+} from "@plankton/domain";
 import { SqliteValidationScorecardRepository, withImmediate } from "@plankton/db";
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";

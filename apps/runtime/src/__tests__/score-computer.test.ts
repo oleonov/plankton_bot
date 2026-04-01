@@ -23,11 +23,7 @@ function seedCandidate(db: import("better-sqlite3").Database) {
   `);
 }
 
-function seedObservations(
-  db: import("better-sqlite3").Database,
-  dates: string[],
-  marketCount = 3,
-) {
+function seedObservations(db: import("better-sqlite3").Database, dates: string[], marketCount = 3) {
   for (const d of dates) {
     db.exec(`
       INSERT INTO candidate_observations (candidate_id, active_market_count, cluster_volume_24h, observed_at)

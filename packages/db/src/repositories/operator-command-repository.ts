@@ -29,7 +29,10 @@ function rowToCommand(row: CommandRow): OperatorCommand {
   };
 }
 
-type InsertCommand = Omit<OperatorCommand, "id" | "status" | "appliedAt" | "initiatorType" | "initiator"> &
+type InsertCommand = Omit<
+  OperatorCommand,
+  "id" | "status" | "appliedAt" | "initiatorType" | "initiator"
+> &
   Partial<Pick<OperatorCommand, "initiatorType" | "initiator">>;
 
 export class SqliteOperatorCommandRepository implements OperatorCommandRepository {

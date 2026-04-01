@@ -37,10 +37,21 @@ function TransitionTimeline({ familyId }: { familyId: string }) {
           {transitions.map((t) => (
             <tr key={t.id}>
               <td>{formatAgo(t.createdAt)}</td>
-              <td><Badge value={t.fromState} /></td>
-              <td><Badge value={t.toState} /></td>
+              <td>
+                <Badge value={t.fromState} />
+              </td>
+              <td>
+                <Badge value={t.toState} />
+              </td>
               <td>{t.triggerType}</td>
-              <td style={{ maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <td
+                style={{
+                  maxWidth: 200,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {t.reason}
               </td>
             </tr>

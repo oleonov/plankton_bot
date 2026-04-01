@@ -20,7 +20,9 @@ function AuditRow({ entry }: { entry: AuditEntryDTO }) {
   return (
     <div className="audit-row">
       <span>{formatAgo(entry.created_at)}</span>
-      <span><Badge value={entry.entity_type} /></span>
+      <span>
+        <Badge value={entry.entity_type} />
+      </span>
       <span style={{ color: "var(--blue)" }}>{entry.entity_id}</span>
       <span>
         {entry.from_state} &rarr; {entry.to_state}
@@ -30,7 +32,9 @@ function AuditRow({ entry }: { entry: AuditEntryDTO }) {
           </span>
         )}
       </span>
-      <span><TriggerBadge trigger={entry.trigger_type} /></span>
+      <span>
+        <TriggerBadge trigger={entry.trigger_type} />
+      </span>
       <span>{entry.initiator}</span>
     </div>
   );
@@ -60,7 +64,13 @@ export function Audit() {
       <div className="filter-bar">
         <label>
           Type:
-          <select value={typeFilter} onChange={(e) => { setTypeFilter(e.target.value); setCursor(undefined); }}>
+          <select
+            value={typeFilter}
+            onChange={(e) => {
+              setTypeFilter(e.target.value);
+              setCursor(undefined);
+            }}
+          >
             <option value="">All</option>
             <option value="system">System</option>
             <option value="operator">Operator</option>
@@ -69,10 +79,18 @@ export function Audit() {
         </label>
         <label>
           Profile:
-          <select value={profileFilter} onChange={(e) => { setProfileFilter(e.target.value); setCursor(undefined); }}>
+          <select
+            value={profileFilter}
+            onChange={(e) => {
+              setProfileFilter(e.target.value);
+              setCursor(undefined);
+            }}
+          >
             <option value="">All</option>
             {profiles.map((p) => (
-              <option key={p.profile_id} value={p.profile_id}>{p.display_name}</option>
+              <option key={p.profile_id} value={p.profile_id}>
+                {p.display_name}
+              </option>
             ))}
           </select>
         </label>
@@ -80,7 +98,10 @@ export function Audit() {
           Family:
           <input
             value={familySearch}
-            onChange={(e) => { setFamilySearch(e.target.value); setCursor(undefined); }}
+            onChange={(e) => {
+              setFamilySearch(e.target.value);
+              setCursor(undefined);
+            }}
             placeholder="family ID..."
             style={{ width: 140 }}
           />
@@ -90,7 +111,9 @@ export function Audit() {
       {isLoading ? (
         <div style={{ padding: 16, fontSize: 12 }}>Loading...</div>
       ) : entries.length === 0 ? (
-        <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>No audit entries found</div>
+        <div style={{ padding: 16, color: "var(--text-dim)", fontSize: 12 }}>
+          No audit entries found
+        </div>
       ) : (
         <>
           <div className="audit-row header">

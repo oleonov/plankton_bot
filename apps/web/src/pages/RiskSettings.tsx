@@ -11,7 +11,11 @@ interface RiskCaps {
 
 function parseRiskCaps(json: string | null): RiskCaps {
   if (!json) return {};
-  try { return JSON.parse(json) as RiskCaps; } catch { return {}; }
+  try {
+    return JSON.parse(json) as RiskCaps;
+  } catch {
+    return {};
+  }
 }
 
 function RiskForm({ profileId }: { profileId: string }) {
@@ -20,10 +24,19 @@ function RiskForm({ profileId }: { profileId: string }) {
 
   if (!detail) return <div style={{ fontSize: 12, padding: 16 }}>Loading...</div>;
 
-  return <RiskFormInner key={dataUpdatedAt} riskCapsJson={detail.settings?.risk_caps_json ?? null} update={update} />;
+  return (
+    <RiskFormInner
+      key={dataUpdatedAt}
+      riskCapsJson={detail.settings?.risk_caps_json ?? null}
+      update={update}
+    />
+  );
 }
 
-function RiskFormInner({ riskCapsJson, update }: {
+function RiskFormInner({
+  riskCapsJson,
+  update,
+}: {
   riskCapsJson: string | null;
   update: ReturnType<typeof useUpdateProfileSettings>;
 }) {
@@ -49,30 +62,59 @@ function RiskFormInner({ riskCapsJson, update }: {
       <div className="settings-form">
         <div className="form-field">
           <label>Daily Loss Cap (USDC)</label>
-          <input type="number" value={dailyLossCap} onChange={(e) => setDailyLossCap(e.target.value)} placeholder="No limit" />
+          <input
+            type="number"
+            value={dailyLossCap}
+            onChange={(e) => setDailyLossCap(e.target.value)}
+            placeholder="No limit"
+          />
         </div>
         <div className="form-field">
           <label>Daily Notional Cap (USDC)</label>
-          <input type="number" value={dailyNotionalCap} onChange={(e) => setDailyNotionalCap(e.target.value)} placeholder="No limit" />
+          <input
+            type="number"
+            value={dailyNotionalCap}
+            onChange={(e) => setDailyNotionalCap(e.target.value)}
+            placeholder="No limit"
+          />
         </div>
         <div className="form-field">
           <label>Max New Markets / Day</label>
-          <input type="number" value={maxNewMarkets} onChange={(e) => setMaxNewMarkets(e.target.value)} placeholder="No limit" />
+          <input
+            type="number"
+            value={maxNewMarkets}
+            onChange={(e) => setMaxNewMarkets(e.target.value)}
+            placeholder="No limit"
+          />
         </div>
         <div className="form-field">
           <label>Max Open Families</label>
-          <input type="number" value={maxFamilies} onChange={(e) => setMaxFamilies(e.target.value)} placeholder="No limit" />
+          <input
+            type="number"
+            value={maxFamilies}
+            onChange={(e) => setMaxFamilies(e.target.value)}
+            placeholder="No limit"
+          />
         </div>
         <div className="form-field">
           <label>Max Total Exposure (USDC)</label>
-          <input type="number" value={maxExposure} onChange={(e) => setMaxExposure(e.target.value)} placeholder="No limit" />
+          <input
+            type="number"
+            value={maxExposure}
+            onChange={(e) => setMaxExposure(e.target.value)}
+            placeholder="No limit"
+          />
         </div>
         <div>
           <button className="btn-success" onClick={handleSave} disabled={update.isPending}>
             {update.isPending ? "Saving..." : "Save"}
           </button>
-          {update.isSuccess && <span style={{ marginLeft: 8, color: "var(--green)", fontSize: 11 }}>Saved</span>}
-          {update.isError && <span style={{ marginLeft: 8, color: "var(--red)", fontSize: 11 }}>Error</span>}
+          {update.isSuccess && (
+            <span style={{ marginLeft: 8, color: "var(--green)", fontSize: 11 }}>Saved</span>
+          )}
+          {update.isError && (
+            <span style={{ marginLeft: 8, color: "var(--red)", fontSize: 11 }}>Error</span>
+          )}
         </div>
       </div>
     </div>

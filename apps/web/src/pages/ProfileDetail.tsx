@@ -85,7 +85,12 @@ export function ProfileDetail() {
   const { data, isLoading } = useProfileDetail(profileId ?? null);
   const [tab, setTab] = useState<"summary" | "families">("summary");
 
-  if (isLoading || !data) return <div className="page" style={{ fontSize: 12 }}>Loading...</div>;
+  if (isLoading || !data)
+    return (
+      <div className="page" style={{ fontSize: 12 }}>
+        Loading...
+      </div>
+    );
 
   return (
     <div className="page">

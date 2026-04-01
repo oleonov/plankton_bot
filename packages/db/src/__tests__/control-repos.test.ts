@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { createFamilyId, createScorecardId, createSwitchId, createReportId, createImportId } from "@plankton/domain";
+import {
+  createFamilyId,
+  createScorecardId,
+  createSwitchId,
+  createReportId,
+  createImportId,
+} from "@plankton/domain";
 import type {
   Profile,
   ProfileSettings,
@@ -339,9 +345,11 @@ describe("SqliteSwitchRequestRepository", () => {
   it("save + findById round-trip", () => {
     const repo = new SqliteSwitchRequestRepository(db);
     // Need a second profile for the switch
-    db.prepare(
-      "INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)",
-    ).run("paper", "Paper", NOW);
+    db.prepare("INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)").run(
+      "paper",
+      "Paper",
+      NOW,
+    );
 
     const request: SwitchRequest = {
       switchId: createSwitchId("sw-1"),
@@ -364,9 +372,11 @@ describe("SqliteSwitchRequestRepository", () => {
 
   it("findActive returns non-terminal requests", () => {
     const repo = new SqliteSwitchRequestRepository(db);
-    db.prepare(
-      "INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)",
-    ).run("paper", "Paper", NOW);
+    db.prepare("INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)").run(
+      "paper",
+      "Paper",
+      NOW,
+    );
 
     repo.save({
       switchId: createSwitchId("sw-active"),
@@ -388,9 +398,11 @@ describe("SqliteSwitchRequestRepository", () => {
 
   it("updateState transitions state", () => {
     const repo = new SqliteSwitchRequestRepository(db);
-    db.prepare(
-      "INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)",
-    ).run("paper", "Paper", NOW);
+    db.prepare("INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)").run(
+      "paper",
+      "Paper",
+      NOW,
+    );
 
     repo.save({
       switchId: createSwitchId("sw-2"),

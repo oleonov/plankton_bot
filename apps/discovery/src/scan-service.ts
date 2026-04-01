@@ -1,6 +1,11 @@
 import type { Logger } from "pino";
 import type { DbConnection } from "@plankton/db";
-import type { MarketDiscoveryGateway, DiscoveryScanStats, FamilyCandidate, CandidateObservationMarket } from "@plankton/domain";
+import type {
+  MarketDiscoveryGateway,
+  DiscoveryScanStats,
+  FamilyCandidate,
+  CandidateObservationMarket,
+} from "@plankton/domain";
 import {
   SqliteFamilyCandidateRepository,
   SqliteCandidateObservationRepository,
@@ -123,7 +128,10 @@ export class ScanService {
     familyIdSet: Set<string>,
     now: string,
   ): FamilyCandidate {
-    const category = inferCategory(cluster.markets.map((m) => m.slug), []);
+    const category = inferCategory(
+      cluster.markets.map((m) => m.slug),
+      [],
+    );
     const strategyProfile = inferStrategyProfile(cluster.regime, cluster.cadence);
     const matchedFamilyId = familyIdSet.has(createFamilyId(cluster.candidateId))
       ? createFamilyId(cluster.candidateId)
@@ -174,7 +182,10 @@ export class ScanService {
     ).toISOString();
     const lowValueObsPruned = observationRepo.pruneLowValueTail(lowValueObsCutoff);
     if (lowValueObsPruned > 0) {
-      log.info({ pruned: lowValueObsPruned, olderThan: lowValueObsCutoff }, "Pruned low-value tail observations");
+      log.info(
+        { pruned: lowValueObsPruned, olderThan: lowValueObsCutoff },
+        "Pruned low-value tail observations",
+      );
     }
 
     // 2. Aggressive prune: stale low-value tail candidate rows (3d retention)
@@ -208,7 +219,10 @@ export class ScanService {
       )
       .run();
     if (cooldownResult.changes > 0) {
-      log.info({ reEntered: cooldownResult.changes }, "Re-entered rejected candidates past cooldown");
+      log.info(
+        { reEntered: cooldownResult.changes },
+        "Re-entered rejected candidates past cooldown",
+      );
     }
 
     return lowValueObsPruned + lowValueCandDeleted + pruned + staleDeleted.changes;

@@ -9,7 +9,17 @@ import type {
   DeploymentStage,
   OperatorMode,
 } from "./enums.js";
-import type { FamilyId, FillId, OrderId, PositionId, TokenId, ScorecardId, SwitchId, ReportId, ImportId } from "./ids.js";
+import type {
+  FamilyId,
+  FillId,
+  OrderId,
+  PositionId,
+  TokenId,
+  ScorecardId,
+  SwitchId,
+  ReportId,
+  ImportId,
+} from "./ids.js";
 import type {
   FamilyEvidence,
   FamilyIdentity,
@@ -390,7 +400,9 @@ export interface PromotionProposal {
 // ─── PromotionProposalRepository ────────────────────────────────────────
 
 export interface PromotionProposalRepository {
-  insert(proposal: Omit<PromotionProposal, "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy">): number;
+  insert(
+    proposal: Omit<PromotionProposal, "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy">,
+  ): number;
   findPending(): PromotionProposal[];
   findByFamily(familyId: FamilyId): PromotionProposal[];
   hasPending(familyId: FamilyId, profile?: ProfileId | null): boolean;
@@ -523,7 +535,12 @@ export interface FamilyDeploymentRepository {
   findByProfile(profile: ProfileId): FamilyDeployment[];
   findEnabled(profile: ProfileId): FamilyDeployment[];
   save(deployment: FamilyDeployment): void;
-  updateOperatorMode(familyId: FamilyId, profile: ProfileId, mode: OperatorMode, reason: string | null): void;
+  updateOperatorMode(
+    familyId: FamilyId,
+    profile: ProfileId,
+    mode: OperatorMode,
+    reason: string | null,
+  ): void;
   updateDeploymentStage(familyId: FamilyId, profile: ProfileId, stage: DeploymentStage): void;
 }
 

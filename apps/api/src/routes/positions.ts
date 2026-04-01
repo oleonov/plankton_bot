@@ -103,14 +103,18 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     const resMap = buildResolutionMap(opts.db, conditionIds);
 
     const lastRow = rows[rows.length - 1];
-    const nextCursor = rows.length === limit && lastRow
-      ? `${String(lastRow[sortCol])}::${String(lastRow.position_id)}`
-      : null;
+    const nextCursor =
+      rows.length === limit && lastRow
+        ? `${String(lastRow[sortCol])}::${String(lastRow.position_id)}`
+        : null;
 
     // Count without cursor filter
     const countConds: string[] = [];
     const countPrms: unknown[] = [];
-    if (family_id) { countConds.push("family_id = ?"); countPrms.push(family_id); }
+    if (family_id) {
+      countConds.push("family_id = ?");
+      countPrms.push(family_id);
+    }
     if (dust === "true") {
       countConds.push("status = 'dust'");
     } else if (status) {
@@ -119,7 +123,11 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       countPrms.push(...statuses);
     }
     const cw = countConds.length > 0 ? `WHERE ${countConds.join(" AND ")}` : "";
-    const totalCount = (opts.db.prepare(`SELECT COUNT(*) as cnt FROM positions ${cw}`).get(...countPrms) as { cnt: number }).cnt;
+    const totalCount = (
+      opts.db.prepare(`SELECT COUNT(*) as cnt FROM positions ${cw}`).get(...countPrms) as {
+        cnt: number;
+      }
+    ).cnt;
 
     return ok({
       items: rows.map((r) => {

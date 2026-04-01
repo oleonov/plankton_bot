@@ -34,9 +34,7 @@ export function getGammaTimeoutMs(): number {
 
 export function getControlDbPath(): string {
   const root = getRepoRoot();
-  const raw =
-    process.env["CONTROL_DB_PATH"] ??
-    "./apps/runtime/data/control.db";
+  const raw = process.env["CONTROL_DB_PATH"] ?? "./apps/runtime/data/control.db";
   return resolve(root, raw);
 }
 

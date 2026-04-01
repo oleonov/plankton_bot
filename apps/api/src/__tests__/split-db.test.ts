@@ -99,7 +99,12 @@ beforeAll(async () => {
     VALUES ('fill-1', 'ord-1', 'tok-1', 'fam-1', 'buy', 0.5, 100, 50, 0.01, '2026-03-14T00:00:00Z', 0);
   `);
 
-  app = await buildServer({ config: testConfig(), controlDb: cdb, ledgerDb: ldb, ledgerPool: stubLedgerPool() });
+  app = await buildServer({
+    config: testConfig(),
+    controlDb: cdb,
+    ledgerDb: ldb,
+    ledgerPool: stubLedgerPool(),
+  });
 });
 
 afterAll(async () => {
@@ -132,7 +137,11 @@ describe("API against real split schemas", () => {
   });
 
   it("GET /families/:id/positions succeeds (ledger: positions)", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/v1/families/fam-1/positions", headers: auth() });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/families/fam-1/positions",
+      headers: auth(),
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(true);
@@ -155,7 +164,11 @@ describe("API against real split schemas", () => {
   });
 
   it("GET /discovery/status succeeds (control-only)", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/v1/discovery/status", headers: auth() });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/status",
+      headers: auth(),
+    });
     expect(res.statusCode).toBe(200);
   });
 
@@ -186,7 +199,9 @@ describe("API against real split schemas", () => {
 
     // Update control.db to point to paper as current profile
     controlConn.db
-      .prepare("UPDATE runtime_control_state SET current_profile = 'paper', updated_at = datetime('now') WHERE id = 1")
+      .prepare(
+        "UPDATE runtime_control_state SET current_profile = 'paper', updated_at = datetime('now') WHERE id = 1",
+      )
       .run();
 
     // Create a real LedgerPool that finds the paper ledger
@@ -217,7 +232,9 @@ describe("API against real split schemas", () => {
 
     // Restore control state for other tests
     controlConn.db
-      .prepare("UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1")
+      .prepare(
+        "UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1",
+      )
       .run();
   });
 
@@ -238,7 +255,9 @@ describe("API against real split schemas", () => {
 
     // Switch to paper
     controlConn.db
-      .prepare("UPDATE runtime_control_state SET current_profile = 'paper', updated_at = datetime('now') WHERE id = 1")
+      .prepare(
+        "UPDATE runtime_control_state SET current_profile = 'paper', updated_at = datetime('now') WHERE id = 1",
+      )
       .run();
 
     const { LedgerPool } = await import("../ledger-pool.js");
@@ -269,7 +288,9 @@ describe("API against real split schemas", () => {
 
     // Restore
     controlConn.db
-      .prepare("UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1")
+      .prepare(
+        "UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1",
+      )
       .run();
   });
 });

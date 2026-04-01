@@ -64,7 +64,11 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
       >
         {accept.isPending ? "Approving..." : "Approve"}
       </button>
-      <button className="btn-danger" onClick={() => setRejectConfirmOpen(true)} disabled={reject.isPending}>
+      <button
+        className="btn-danger"
+        onClick={() => setRejectConfirmOpen(true)}
+        disabled={reject.isPending}
+      >
         {reject.isPending ? "Rejecting..." : "Reject"}
       </button>
       <ConfirmDialog
@@ -85,7 +89,10 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
         open={rejectConfirmOpen && !reject.isPending}
         title={`Reject ${candidate.familyKey}?`}
         description="This candidate will be hidden for 7 days (cooldown period)."
-        onConfirm={() => { setRejectConfirmOpen(false); reject.mutate(undefined); }}
+        onConfirm={() => {
+          setRejectConfirmOpen(false);
+          reject.mutate(undefined);
+        }}
         onCancel={() => setRejectConfirmOpen(false)}
       />
     </span>
@@ -131,7 +138,9 @@ function CandidateTable({
             <td>{c.regime}</td>
             <td>{c.horizon}</td>
             {c.scoresUpdatedAt === null ? (
-              <td colSpan={2}><ScoresPendingBadge /></td>
+              <td colSpan={2}>
+                <ScoresPendingBadge />
+              </td>
             ) : (
               <>
                 <ScoreCell value={c.recurrenceScore} color="var(--blue)" />
@@ -187,7 +196,13 @@ export function Discovery() {
       <div className="filter-bar">
         <label>
           Status:
-          <select value={statusFilter} onChange={(e) => { setStatusFilter(e.target.value); setCursor(undefined); }}>
+          <select
+            value={statusFilter}
+            onChange={(e) => {
+              setStatusFilter(e.target.value);
+              setCursor(undefined);
+            }}
+          >
             <option value="">All</option>
             <option value="discovered">Discovered</option>
             <option value="reviewed">Reviewed</option>
@@ -197,7 +212,13 @@ export function Discovery() {
         </label>
         <label>
           Recommendation:
-          <select value={recFilter} onChange={(e) => { setRecFilter(e.target.value); setCursor(undefined); }}>
+          <select
+            value={recFilter}
+            onChange={(e) => {
+              setRecFilter(e.target.value);
+              setCursor(undefined);
+            }}
+          >
             <option value="">All</option>
             <option value="ignore">Ignore</option>
             <option value="monitor">Monitor</option>
@@ -207,7 +228,13 @@ export function Discovery() {
         </label>
         <label>
           Confidence:
-          <select value={confFilter} onChange={(e) => { setConfFilter(e.target.value); setCursor(undefined); }}>
+          <select
+            value={confFilter}
+            onChange={(e) => {
+              setConfFilter(e.target.value);
+              setCursor(undefined);
+            }}
+          >
             <option value="">All</option>
             <option value="high">High</option>
             <option value="medium">Medium</option>
@@ -216,7 +243,13 @@ export function Discovery() {
         </label>
         <label>
           Cadence:
-          <select value={cadenceFilter} onChange={(e) => { setCadenceFilter(e.target.value); setCursor(undefined); }}>
+          <select
+            value={cadenceFilter}
+            onChange={(e) => {
+              setCadenceFilter(e.target.value);
+              setCursor(undefined);
+            }}
+          >
             <option value="">All</option>
             <option value="daily">Daily</option>
             <option value="weekly">Weekly</option>

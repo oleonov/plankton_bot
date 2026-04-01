@@ -212,11 +212,18 @@ export class ControlEvaluator {
   // ─── Candidate scoring (read + compute only) ──────────────────────
 
   private computeScores(candidates: FamilyCandidate[], now: string) {
-    const updates: { candidateId: string; scores: {
-      recurrenceScore: number | null; recycleScore: number | null;
-      liveViabilityScore: number | null; toxicityPenalty: number | null;
-      gateRecommendation: string; recommendationReason: string | null; scoresUpdatedAt: string;
-    } }[] = [];
+    const updates: {
+      candidateId: string;
+      scores: {
+        recurrenceScore: number | null;
+        recycleScore: number | null;
+        liveViabilityScore: number | null;
+        toxicityPenalty: number | null;
+        gateRecommendation: string;
+        recommendationReason: string | null;
+        scoresUpdatedAt: string;
+      };
+    }[] = [];
     for (const cand of candidates) {
       const recurrenceMetrics = queryRecurrenceMetrics(this.db, cand.candidateId);
       const recurrence = computeRecurrenceScore(recurrenceMetrics);
@@ -234,7 +241,12 @@ export class ControlEvaluator {
         }
       }
 
-      const gate = computeGateRecommendation({ recurrence, recycle, liveViability, tailAdjustedPnl });
+      const gate = computeGateRecommendation({
+        recurrence,
+        recycle,
+        liveViability,
+        tailAdjustedPnl,
+      });
 
       updates.push({
         candidateId: cand.candidateId,
@@ -255,7 +267,10 @@ export class ControlEvaluator {
   // ─── Promotion evaluation (read + compute only) ────────────────────
 
   private computePromotions() {
-    type ProposalInsert = Omit<import("@plankton/domain").PromotionProposal, "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy">;
+    type ProposalInsert = Omit<
+      import("@plankton/domain").PromotionProposal,
+      "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy"
+    >;
     const inserts: { proposal: ProposalInsert }[] = [];
     const profiles = this.getActiveProfiles();
 
@@ -269,7 +284,15 @@ export class ControlEvaluator {
     return inserts;
   }
 
-  private buildProposalIfEligible(dep: FamilyDeployment, profile: ProfileId): { proposal: Omit<import("@plankton/domain").PromotionProposal, "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy"> } | null {
+  private buildProposalIfEligible(
+    dep: FamilyDeployment,
+    profile: ProfileId,
+  ): {
+    proposal: Omit<
+      import("@plankton/domain").PromotionProposal,
+      "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy"
+    >;
+  } | null {
     if (this.proposalRepo.hasPending(dep.familyId, profile)) return null;
 
     const scorecard = this.scorecardRepo.findLatest(dep.familyId, profile);
@@ -340,9 +363,9 @@ export class ControlEvaluator {
   }
 
   private getActiveProfiles(): ProfileId[] {
-    const rows = this.db
-      .prepare("SELECT profile_id FROM profiles")
-      .all() as { profile_id: string }[];
+    const rows = this.db.prepare("SELECT profile_id FROM profiles").all() as {
+      profile_id: string;
+    }[];
     return rows.map((r) => r.profile_id as ProfileId);
   }
 }

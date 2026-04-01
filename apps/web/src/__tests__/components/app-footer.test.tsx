@@ -13,7 +13,13 @@ describe("AppFooter", () => {
   it("renders version and sha when deploy metadata exists", async () => {
     server.use(
       http.get("/api/v1/health", () =>
-        ok({ status: "ok", uptime: 100, sha: "abc1234def", deployVersion: 42, deployedAt: "2026-04-01T12:00:00Z" }),
+        ok({
+          status: "ok",
+          uptime: 100,
+          sha: "abc1234def",
+          deployVersion: 42,
+          deployedAt: "2026-04-01T12:00:00Z",
+        }),
       ),
     );
 
@@ -55,7 +61,13 @@ describe("AppFooter", () => {
   it("shows deployedAt in title tooltip", async () => {
     server.use(
       http.get("/api/v1/health", () =>
-        ok({ status: "ok", uptime: 100, sha: "abc1234", deployVersion: 5, deployedAt: "2026-04-01T14:30:00Z" }),
+        ok({
+          status: "ok",
+          uptime: 100,
+          sha: "abc1234",
+          deployVersion: 5,
+          deployedAt: "2026-04-01T14:30:00Z",
+        }),
       ),
     );
 

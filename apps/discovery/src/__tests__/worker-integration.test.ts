@@ -92,9 +92,7 @@ describe("Manual trigger deduplication", () => {
     expect(active!.status).toBe("queued");
 
     // Worker code path: check active before enqueue
-    expect(() => repo.enqueue("manual", "operator")).toThrow(
-      "Active discovery run already exists",
-    );
+    expect(() => repo.enqueue("manual", "operator")).toThrow("Active discovery run already exists");
   });
 
   it("does not duplicate when scan already running", () => {
@@ -104,9 +102,7 @@ describe("Manual trigger deduplication", () => {
     const active = repo.findActive();
     expect(active!.status).toBe("running");
 
-    expect(() => repo.enqueue("manual", "operator")).toThrow(
-      "Active discovery run already exists",
-    );
+    expect(() => repo.enqueue("manual", "operator")).toThrow("Active discovery run already exists");
   });
 
   it("manual enqueue succeeds after previous completes", () => {

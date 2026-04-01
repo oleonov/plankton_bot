@@ -8,14 +8,25 @@ const TEST_API_KEY = "test-key-pagination";
 
 function testConfig(): AppConfig {
   return {
-    runtimeMode: "simulation", logLevel: "error", dbPath: "", familyRulesPath: "",
-    marketDataPollIntervalMs: 30_000, marketDataStaleThresholdMs: 120_000,
-    strategyScanIntervalMs: 5_000, fillPollIntervalMs: 5_000,
-    executionMaxConcurrency: 4, polyApiKey: undefined, polyApiSecret: undefined,
-    polyPassphrase: undefined, polyPrivateKey: undefined,
-    planktonApiKey: TEST_API_KEY, planktonApiPort: 0,
-    planktonAuthUsername: undefined, planktonAuthPassword: undefined,
-    planktonSessionSecret: undefined, trustProxy: false,
+    runtimeMode: "simulation",
+    logLevel: "error",
+    dbPath: "",
+    familyRulesPath: "",
+    marketDataPollIntervalMs: 30_000,
+    marketDataStaleThresholdMs: 120_000,
+    strategyScanIntervalMs: 5_000,
+    fillPollIntervalMs: 5_000,
+    executionMaxConcurrency: 4,
+    polyApiKey: undefined,
+    polyApiSecret: undefined,
+    polyPassphrase: undefined,
+    polyPrivateKey: undefined,
+    planktonApiKey: TEST_API_KEY,
+    planktonApiPort: 0,
+    planktonAuthUsername: undefined,
+    planktonAuthPassword: undefined,
+    planktonSessionSecret: undefined,
+    trustProxy: false,
   };
 }
 
@@ -48,7 +59,12 @@ beforeAll(async () => {
     ).run(s.id, s.tok, s.cost, s.ts, s.ts);
   }
 
-  app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
+  app = await buildServer({
+    config: testConfig(),
+    controlDb: conn.db,
+    ledgerDb: conn.db,
+    ledgerPool: stubLedgerPool(),
+  });
 });
 
 afterAll(async () => {

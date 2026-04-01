@@ -1,7 +1,13 @@
 import type Database from "better-sqlite3";
 import type { PreflightReportRepository, PreflightReport } from "@plankton/domain";
 import { createReportId, createSwitchId } from "@plankton/domain";
-import type { ReportId, SwitchId, ProfileId, PreflightKind, PreflightStatus } from "@plankton/domain";
+import type {
+  ReportId,
+  SwitchId,
+  ProfileId,
+  PreflightKind,
+  PreflightStatus,
+} from "@plankton/domain";
 
 export class SqlitePreflightReportRepository implements PreflightReportRepository {
   constructor(private readonly db: Database.Database) {}
@@ -44,16 +50,16 @@ export class SqlitePreflightReportRepository implements PreflightReportRepositor
 
   findBySwitchRequest(switchId: SwitchId): PreflightReport[] {
     const rows = this.db
-      .prepare("SELECT * FROM preflight_reports WHERE switch_request_id = ? ORDER BY created_at DESC")
+      .prepare(
+        "SELECT * FROM preflight_reports WHERE switch_request_id = ? ORDER BY created_at DESC",
+      )
       .all(switchId) as Record<string, unknown>[];
     return rows.map(rowToReport);
   }
 
   findLatestByProfile(profile: ProfileId): PreflightReport | null {
     const row = this.db
-      .prepare(
-        "SELECT * FROM preflight_reports WHERE profile = ? ORDER BY created_at DESC LIMIT 1",
-      )
+      .prepare("SELECT * FROM preflight_reports WHERE profile = ? ORDER BY created_at DESC LIMIT 1")
       .get(profile) as Record<string, unknown> | undefined;
     return row ? rowToReport(row) : null;
   }
@@ -62,9 +68,7 @@ export class SqlitePreflightReportRepository implements PreflightReportRepositor
 function rowToReport(row: Record<string, unknown>): PreflightReport {
   return {
     reportId: createReportId(row.report_id as string),
-    switchRequestId: row.switch_request_id
-      ? createSwitchId(row.switch_request_id as string)
-      : null,
+    switchRequestId: row.switch_request_id ? createSwitchId(row.switch_request_id as string) : null,
     profile: row.profile as ProfileId,
     kind: row.kind as PreflightKind,
     status: row.status as PreflightStatus,

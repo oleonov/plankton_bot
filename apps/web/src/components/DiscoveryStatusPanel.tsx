@@ -51,12 +51,8 @@ export function DiscoveryStatusPanel() {
         fontSize: 12,
       }}
     >
-      {offline && (
-        <span style={{ color: "var(--red)", fontWeight: 700 }}>Worker offline</span>
-      )}
-      {failed && (
-        <span style={{ color: "var(--orange)", fontWeight: 700 }}>Last scan failed</span>
-      )}
+      {offline && <span style={{ color: "var(--red)", fontWeight: 700 }}>Worker offline</span>}
+      {failed && <span style={{ color: "var(--orange)", fontWeight: 700 }}>Last scan failed</span>}
       <span>
         <b>Last scan:</b> {lastSuccessLabel(status)}
       </span>

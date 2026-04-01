@@ -191,7 +191,9 @@ describe("SqliteDiscoveryRunRepository", () => {
 
     // Backdate heartbeat to simulate staleness
     conn.db
-      .prepare("UPDATE discovery_runs SET heartbeat_at = datetime('now', '-600 seconds') WHERE id = 1")
+      .prepare(
+        "UPDATE discovery_runs SET heartbeat_at = datetime('now', '-600 seconds') WHERE id = 1",
+      )
       .run();
 
     const count = repo.failStale(300_000); // 5 min threshold

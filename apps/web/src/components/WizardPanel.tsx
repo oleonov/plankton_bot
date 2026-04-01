@@ -8,17 +8,12 @@ interface WizardPanelProps {
 }
 
 function StepDot({ index, currentStep }: { index: number; currentStep: number }) {
-  const cls =
-    index < currentStep ? "completed" : index === currentStep ? "active" : "";
-  return (
-    <div className={`wizard-step-dot ${cls}`}>{index + 1}</div>
-  );
+  const cls = index < currentStep ? "completed" : index === currentStep ? "active" : "";
+  return <div className={`wizard-step-dot ${cls}`}>{index + 1}</div>;
 }
 
 function StepLine({ index, currentStep }: { index: number; currentStep: number }) {
-  return (
-    <div className={`wizard-step-line ${index < currentStep ? "completed" : ""}`} />
-  );
+  return <div className={`wizard-step-line ${index < currentStep ? "completed" : ""}`} />;
 }
 
 export function WizardPanel({
@@ -46,7 +41,14 @@ export function WizardPanel({
             </span>
           ))}
         </div>
-        <div style={{ padding: "0 20px", fontSize: 11, color: "var(--text-muted)", textAlign: "center" }}>
+        <div
+          style={{
+            padding: "0 20px",
+            fontSize: 11,
+            color: "var(--text-muted)",
+            textAlign: "center",
+          }}
+        >
           {steps[currentStep]}
         </div>
         <div className="wizard-content">{children}</div>

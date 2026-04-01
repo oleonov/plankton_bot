@@ -20,11 +20,7 @@ export interface ImportResult {
 
 // ── Shared INSERT helpers (reuses bootstrap-import column order) ─────────
 
-function insertCatalogRow(
-  stmt: Database.Statement,
-  family: FamilyConfig,
-  now: string,
-): void {
+function insertCatalogRow(stmt: Database.Statement, family: FamilyConfig, now: string): void {
   const id = family.identity;
   stmt.run(
     id.familyId,
@@ -44,27 +40,65 @@ function insertCatalogRow(
 
 function bindRulesParams(family: FamilyConfig, now: string): unknown[] {
   const { rules: r } = family;
-  const { universe: u, entry: e, scaleIn: s, exit: x, twoSided: t, tailSuppression: ts, session: ss } = r;
+  const {
+    universe: u,
+    entry: e,
+    scaleIn: s,
+    exit: x,
+    twoSided: t,
+    tailSuppression: ts,
+    session: ss,
+  } = r;
   return [
     family.identity.familyId,
-    u.enabled ? 1 : 0, u.action, u.priorityRank, u.allowWeekends ? 1 : 0, u.sessionMode,
-    e.entryMode, e.minEntryPrice, e.maxEntryPrice, e.maxInitialNotionalUsdc,
-    e.allowHighPriceOneShot ? 1 : 0, e.highPriceThreshold, e.requireProvenFamilyAbovePrice,
-    e.preferredEntryBand ?? null, e.maxProbeCountPerMarket ?? null, e.entryCooldownSeconds ?? null,
-    e.maxNewMarketsPerSession ?? null, e.probeSizeUsdc, e.addSizeUsdc,
-    s.scaleMode, s.defaultMaxBuysPerLeg, s.heavyMaxBuysPerLeg,
-    s.allowHeavyCampaigns ? 1 : 0, s.requirePositiveRecycleHistoryForScale ? 1 : 0,
-    x.exitMode, x.primaryProfitModel, x.allowRunnerExtension ? 1 : 0, x.preferFastRecycle ? 1 : 0,
-    x.resolutionHoldingAllowed ? 1 : 0, x.resolutionBufferMinutes,
-    x.targetRoiBandLow ?? null, x.targetRoiBandHigh ?? null,
-    x.maxUnmovedHoldHours ?? null, x.maxTailHoldHours ?? null,
-    t.allowTwoSided ? 1 : 0, t.twoSidedMode, t.minActivityForTwoSided ?? null,
-    ts.maxOpenValueUsdc, ts.maxActiveMarkets, ts.maxDustPositions,
-    ts.tailQuarantineThresholdUsdc, ts.tailQuarantineThresholdRatio,
-    ts.staleTailPruneEnabled ? 1 : 0, ts.thresholdCleanupRequired ? 1 : 0,
+    u.enabled ? 1 : 0,
+    u.action,
+    u.priorityRank,
+    u.allowWeekends ? 1 : 0,
+    u.sessionMode,
+    e.entryMode,
+    e.minEntryPrice,
+    e.maxEntryPrice,
+    e.maxInitialNotionalUsdc,
+    e.allowHighPriceOneShot ? 1 : 0,
+    e.highPriceThreshold,
+    e.requireProvenFamilyAbovePrice,
+    e.preferredEntryBand ?? null,
+    e.maxProbeCountPerMarket ?? null,
+    e.entryCooldownSeconds ?? null,
+    e.maxNewMarketsPerSession ?? null,
+    e.probeSizeUsdc,
+    e.addSizeUsdc,
+    s.scaleMode,
+    s.defaultMaxBuysPerLeg,
+    s.heavyMaxBuysPerLeg,
+    s.allowHeavyCampaigns ? 1 : 0,
+    s.requirePositiveRecycleHistoryForScale ? 1 : 0,
+    x.exitMode,
+    x.primaryProfitModel,
+    x.allowRunnerExtension ? 1 : 0,
+    x.preferFastRecycle ? 1 : 0,
+    x.resolutionHoldingAllowed ? 1 : 0,
+    x.resolutionBufferMinutes,
+    x.targetRoiBandLow ?? null,
+    x.targetRoiBandHigh ?? null,
+    x.maxUnmovedHoldHours ?? null,
+    x.maxTailHoldHours ?? null,
+    t.allowTwoSided ? 1 : 0,
+    t.twoSidedMode,
+    t.minActivityForTwoSided ?? null,
+    ts.maxOpenValueUsdc,
+    ts.maxActiveMarkets,
+    ts.maxDustPositions,
+    ts.tailQuarantineThresholdUsdc,
+    ts.tailQuarantineThresholdRatio,
+    ts.staleTailPruneEnabled ? 1 : 0,
+    ts.thresholdCleanupRequired ? 1 : 0,
     ts.autoSettleResolvedMarkets ? 1 : 0,
-    JSON.stringify(ss.activeWindowsUtc), JSON.stringify(ss.reducedWindowsUtc),
-    ss.weekdayBias, ss.weekendMode,
+    JSON.stringify(ss.activeWindowsUtc),
+    JSON.stringify(ss.reducedWindowsUtc),
+    ss.weekdayBias,
+    ss.weekendMode,
     now,
   ];
 }
@@ -137,8 +171,14 @@ const RULES_UPDATE_SQL = `
 function familyFingerprint(family: FamilyConfig): string {
   const id = family.identity;
   const catalogFields = [
-    id.primaryCategory, id.regime, id.horizon, id.cadence,
-    id.strategyProfile, id.topicKey ?? null, id.slugPattern ?? null, id.notes ?? null,
+    id.primaryCategory,
+    id.regime,
+    id.horizon,
+    id.cadence,
+    id.strategyProfile,
+    id.topicKey ?? null,
+    id.slugPattern ?? null,
+    id.notes ?? null,
   ];
   // Reuse bindRulesParams with a dummy timestamp (stripped before comparison)
   const rulesFields = bindRulesParams(family, "");
@@ -153,29 +193,65 @@ function dbFamilyFingerprint(
   rules: Record<string, unknown>,
 ): string {
   const catalogFields = [
-    catalog["primary_category"], catalog["regime"], catalog["horizon"], catalog["cadence"],
-    catalog["strategy_profile"], catalog["topic_key"] ?? null, catalog["slug_pattern"] ?? null,
+    catalog["primary_category"],
+    catalog["regime"],
+    catalog["horizon"],
+    catalog["cadence"],
+    catalog["strategy_profile"],
+    catalog["topic_key"] ?? null,
+    catalog["slug_pattern"] ?? null,
     catalog["notes"] ?? null,
   ];
   const r = rules;
   const rulesCore = [
-    r["enabled"] ? 1 : 0, r["action"], r["priority_rank"], r["allow_weekends"] ? 1 : 0, r["session_mode"],
-    r["entry_mode"], r["min_entry_price"], r["max_entry_price"], r["max_initial_notional_usdc"],
-    r["allow_high_price_one_shot"] ? 1 : 0, r["high_price_threshold"], r["require_proven_family_above_price"],
-    r["preferred_entry_band"] ?? null, r["max_probe_count_per_market"] ?? null, r["entry_cooldown_seconds"] ?? null,
-    r["max_new_markets_per_session"] ?? null, r["probe_size_usdc"], r["add_size_usdc"],
-    r["scale_mode"], r["default_max_buys_per_leg"], r["heavy_max_buys_per_leg"],
-    r["allow_heavy_campaigns"] ? 1 : 0, r["require_positive_recycle_history_for_scale"] ? 1 : 0,
-    r["exit_mode"], r["primary_profit_model"], r["allow_runner_extension"] ? 1 : 0, r["prefer_fast_recycle"] ? 1 : 0,
-    r["resolution_holding_allowed"] ? 1 : 0, r["resolution_buffer_minutes"],
-    r["target_roi_band_low"] ?? null, r["target_roi_band_high"] ?? null,
-    r["max_unmoved_hold_hours"] ?? null, r["max_tail_hold_hours"] ?? null,
-    r["allow_two_sided"] ? 1 : 0, r["two_sided_mode"], r["min_activity_for_two_sided"] ?? null,
-    r["max_open_value_usdc"], r["max_active_markets"], r["max_dust_positions"],
-    r["tail_quarantine_threshold_usdc"], r["tail_quarantine_threshold_ratio"],
-    r["stale_tail_prune_enabled"] ? 1 : 0, r["threshold_cleanup_required"] ? 1 : 0,
+    r["enabled"] ? 1 : 0,
+    r["action"],
+    r["priority_rank"],
+    r["allow_weekends"] ? 1 : 0,
+    r["session_mode"],
+    r["entry_mode"],
+    r["min_entry_price"],
+    r["max_entry_price"],
+    r["max_initial_notional_usdc"],
+    r["allow_high_price_one_shot"] ? 1 : 0,
+    r["high_price_threshold"],
+    r["require_proven_family_above_price"],
+    r["preferred_entry_band"] ?? null,
+    r["max_probe_count_per_market"] ?? null,
+    r["entry_cooldown_seconds"] ?? null,
+    r["max_new_markets_per_session"] ?? null,
+    r["probe_size_usdc"],
+    r["add_size_usdc"],
+    r["scale_mode"],
+    r["default_max_buys_per_leg"],
+    r["heavy_max_buys_per_leg"],
+    r["allow_heavy_campaigns"] ? 1 : 0,
+    r["require_positive_recycle_history_for_scale"] ? 1 : 0,
+    r["exit_mode"],
+    r["primary_profit_model"],
+    r["allow_runner_extension"] ? 1 : 0,
+    r["prefer_fast_recycle"] ? 1 : 0,
+    r["resolution_holding_allowed"] ? 1 : 0,
+    r["resolution_buffer_minutes"],
+    r["target_roi_band_low"] ?? null,
+    r["target_roi_band_high"] ?? null,
+    r["max_unmoved_hold_hours"] ?? null,
+    r["max_tail_hold_hours"] ?? null,
+    r["allow_two_sided"] ? 1 : 0,
+    r["two_sided_mode"],
+    r["min_activity_for_two_sided"] ?? null,
+    r["max_open_value_usdc"],
+    r["max_active_markets"],
+    r["max_dust_positions"],
+    r["tail_quarantine_threshold_usdc"],
+    r["tail_quarantine_threshold_ratio"],
+    r["stale_tail_prune_enabled"] ? 1 : 0,
+    r["threshold_cleanup_required"] ? 1 : 0,
     r["auto_settle_resolved_markets"] ? 1 : 0,
-    r["active_windows_utc"], r["reduced_windows_utc"], r["weekday_bias"], r["weekend_mode"],
+    r["active_windows_utc"],
+    r["reduced_windows_utc"],
+    r["weekday_bias"],
+    r["weekend_mode"],
   ];
   return JSON.stringify([...catalogFields, ...rulesCore]);
 }
@@ -193,12 +269,8 @@ function diffAndApply(
     unchanged: [],
   };
 
-  const getCatalog = db.prepare(
-    "SELECT * FROM family_catalog WHERE family_id = ?",
-  );
-  const getRules = db.prepare(
-    "SELECT * FROM family_rules WHERE family_id = ?",
-  );
+  const getCatalog = db.prepare("SELECT * FROM family_catalog WHERE family_id = ?");
+  const getRules = db.prepare("SELECT * FROM family_rules WHERE family_id = ?");
   const getMeta = db.prepare(
     "SELECT last_operator_edit_at FROM family_config_meta WHERE family_id = ?",
   );
@@ -300,9 +372,16 @@ function diffAndApply(
     const family = familyMap.get(fid)!;
     const id = family.identity;
     updateCatalog.run(
-      id.primaryCategory, id.regime, id.horizon, id.cadence,
-      id.strategyProfile, id.topicKey ?? null, id.slugPattern ?? null, id.notes ?? null,
-      now, fid,
+      id.primaryCategory,
+      id.regime,
+      id.horizon,
+      id.cadence,
+      id.strategyProfile,
+      id.topicKey ?? null,
+      id.slugPattern ?? null,
+      id.notes ?? null,
+      now,
+      fid,
     );
     // updateRules: params without family_id prefix, then family_id at the end for WHERE
     const rulesParams = bindRulesParams(family, now);
@@ -313,12 +392,14 @@ function diffAndApply(
 
   // Record the import
   const importId = createImportId(randomUUID());
-  db.prepare(`
+  db.prepare(
+    `
     INSERT INTO config_imports (
       import_id, source_checksum, families_added, families_updated,
       families_skipped, families_unchanged, result_json, imported_at, imported_by
     ) VALUES (?, 'api_import', ?, ?, ?, ?, ?, ?, 'api')
-  `).run(
+  `,
+  ).run(
     importId,
     result.added.length,
     result.updated.length,
@@ -358,7 +439,11 @@ export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) =>
       : db.transaction(() => diffAndApply(db, loaded.families, false))();
 
     if (result.conflicts.length > 0) {
-      throw new ApiError(409, `family_key mismatch for: ${result.conflicts.join(", ")}`, "FAMILY_KEY_CONFLICT");
+      throw new ApiError(
+        409,
+        `family_key mismatch for: ${result.conflicts.join(", ")}`,
+        "FAMILY_KEY_CONFLICT",
+      );
     }
 
     return ok({ ...result, dryRun, familyCount: loaded.families.length });
@@ -373,9 +458,10 @@ export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) =>
         .prepare("SELECT * FROM family_catalog ORDER BY family_id")
         .all() as Record<string, unknown>[];
 
-      const rules = db
-        .prepare("SELECT * FROM family_rules ORDER BY family_id")
-        .all() as Record<string, unknown>[];
+      const rules = db.prepare("SELECT * FROM family_rules ORDER BY family_id").all() as Record<
+        string,
+        unknown
+      >[];
 
       const rulesMap = new Map(rules.map((r) => [r["family_id"] as string, r]));
 
@@ -404,7 +490,9 @@ export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) =>
     // JSON: full control snapshot
     const catalog = db.prepare("SELECT * FROM family_catalog ORDER BY family_id").all();
     const rules = db.prepare("SELECT * FROM family_rules ORDER BY family_id").all();
-    const deployments = db.prepare("SELECT * FROM family_deployments ORDER BY family_id, profile").all();
+    const deployments = db
+      .prepare("SELECT * FROM family_deployments ORDER BY family_id, profile")
+      .all();
     const profiles = db.prepare("SELECT * FROM profiles ORDER BY profile_id").all();
 
     return ok({ catalog, rules, deployments, profiles });

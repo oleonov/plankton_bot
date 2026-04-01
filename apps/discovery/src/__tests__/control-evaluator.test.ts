@@ -16,31 +16,48 @@ const NOW = "2026-03-30T12:00:00.000Z";
 const silentLogger = pino({ level: "silent" });
 
 function seedProfile(conn: DbConnection): void {
-  conn.db.prepare(
-    "INSERT INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, ?, ?)",
-  ).run(PROFILE_SIM, "Simulation", "Sim profile", NOW);
+  conn.db
+    .prepare(
+      "INSERT INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .run(PROFILE_SIM, "Simulation", "Sim profile", NOW);
 }
 
 function seedFamily(conn: DbConnection): void {
-  conn.db.prepare(
-    `INSERT INTO family_catalog
+  conn.db
+    .prepare(
+      `INSERT INTO family_catalog
      (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(FAMILY_1, "test-family", "crypto", "threshold", "daily", "ad-hoc", "scalp", NOW, NOW);
+    )
+    .run(FAMILY_1, "test-family", "crypto", "threshold", "daily", "ad-hoc", "scalp", NOW, NOW);
 }
 
 function seedCandidate(conn: DbConnection, matched: boolean = false): void {
-  conn.db.prepare(
-    `INSERT INTO family_candidates
+  conn.db
+    .prepare(
+      `INSERT INTO family_candidates
      (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
       primary_category, strategy_profile, active_market_count, cluster_volume_24h,
       status, first_seen_at, last_seen_at, matched_family_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    CANDIDATE_ID, "test-family", "threshold", "daily", "ad-hoc", "medium",
-    "crypto", "scalp", 5, 30000,
-    "discovered", NOW, NOW, matched ? String(FAMILY_1) : null,
-  );
+    )
+    .run(
+      CANDIDATE_ID,
+      "test-family",
+      "threshold",
+      "daily",
+      "ad-hoc",
+      "medium",
+      "crypto",
+      "scalp",
+      5,
+      30000,
+      "discovered",
+      NOW,
+      NOW,
+      matched ? String(FAMILY_1) : null,
+    );
 }
 
 function seedObservations(conn: DbConnection): void {
@@ -67,18 +84,24 @@ function seedObservations(conn: DbConnection): void {
   for (let i = 0; i < dates.length; i++) {
     insertObs.run(CANDIDATE_ID, 3 + i, 25000 + i * 1000, "2026-04-01T00:00:00Z", dates[i]);
     insertMarket.run(
-      CANDIDATE_ID, dates[i]!, `cond-${i}`, `slug-${i}`,
-      "2026-04-01T00:00:00Z", 10000 + i * 500,
+      CANDIDATE_ID,
+      dates[i]!,
+      `cond-${i}`,
+      `slug-${i}`,
+      "2026-04-01T00:00:00Z",
+      10000 + i * 500,
     );
   }
 }
 
 function seedDeployment(conn: DbConnection, stage: string = "probe-only"): void {
-  conn.db.prepare(
-    `INSERT INTO family_deployments
+  conn.db
+    .prepare(
+      `INSERT INTO family_deployments
      (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
      VALUES (?, ?, 1, 'active', ?, 'live-probe', 1, ?, ?)`,
-  ).run(FAMILY_1, PROFILE_SIM, stage, NOW, NOW);
+    )
+    .run(FAMILY_1, PROFILE_SIM, stage, NOW, NOW);
 }
 
 function seedScorecard(
@@ -101,24 +124,34 @@ function seedScorecard(
   };
   const vals = { ...defaults, ...overrides };
 
-  conn.db.prepare(
-    `INSERT INTO family_validation_scorecards
+  conn.db
+    .prepare(
+      `INSERT INTO family_validation_scorecards
      (scorecard_id, family_id, profile, evidence_status, evidence_score,
       recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
       trade_count, market_count, realized_pnl, tail_adjusted_pnl,
       both_sided_eligible, heavy_campaign_eligible, validated_at)
      VALUES (?, ?, ?, 'confirmed', 0.8, 0.6, ?, 0.5, ?, ?, ?, 10.0, ?, 0, 0, ?)`,
-  ).run(
-    scorecardId, FAMILY_1, PROFILE_SIM,
-    vals.recycleScore, vals.toxicityPenalty,
-    vals.tradeCount, vals.marketCount, vals.tailAdjustedPnl, NOW,
-  );
+    )
+    .run(
+      scorecardId,
+      FAMILY_1,
+      PROFILE_SIM,
+      vals.recycleScore,
+      vals.toxicityPenalty,
+      vals.tradeCount,
+      vals.marketCount,
+      vals.tailAdjustedPnl,
+      NOW,
+    );
 
-  conn.db.prepare(
-    `INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
+  conn.db
+    .prepare(
+      `INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
      VALUES (?, ?, ?)
      ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id`,
-  ).run(FAMILY_1, PROFILE_SIM, scorecardId);
+    )
+    .run(FAMILY_1, PROFILE_SIM, scorecardId);
 
   return scorecardId;
 }
@@ -273,14 +306,16 @@ describe("ControlEvaluator", () => {
   describe("atomicity", () => {
     it("run() writes all scores in a single transaction", () => {
       seedCandidate(conn);
-      conn.db.prepare(
-        `INSERT INTO family_candidates
+      conn.db
+        .prepare(
+          `INSERT INTO family_candidates
          (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
           primary_category, strategy_profile, active_market_count,
           cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at)
          VALUES ('cand-2', 'test-family-2', 'threshold', 'daily', 'ad-hoc', 'high',
                  'crypto', 'scalp', 3, 500, 'pending', 'discovered', ?, ?)`,
-      ).run(NOW, NOW);
+        )
+        .run(NOW, NOW);
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
       const stats = evaluator.run();
@@ -298,14 +333,16 @@ describe("ControlEvaluator", () => {
 
     it("rolls back all score updates if write phase fails mid-way", () => {
       seedCandidate(conn);
-      conn.db.prepare(
-        `INSERT INTO family_candidates
+      conn.db
+        .prepare(
+          `INSERT INTO family_candidates
          (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
           primary_category, strategy_profile, active_market_count,
           cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at)
          VALUES ('cand-bomb', 'bomb-family', 'threshold', 'daily', 'ad-hoc', 'high',
                  'crypto', 'scalp', 3, 500, 'pending', 'discovered', ?, ?)`,
-      ).run(NOW, NOW);
+        )
+        .run(NOW, NOW);
 
       // Install trigger that explodes on the second updateScores write
       conn.db.exec(`

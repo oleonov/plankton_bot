@@ -169,10 +169,7 @@ async function main(): Promise<void> {
   const initialBalanceUsdc = settingsRow?.initial_balance_usdc ?? 1000;
 
   if (runtimeMode !== "live-lite") {
-    log.info(
-      { initialBalanceUsdc, runtimeMode },
-      "simulated exchange balance configured",
-    );
+    log.info({ initialBalanceUsdc, runtimeMode }, "simulated exchange balance configured");
   }
 
   // 5. Seed family catalog + ensure baseline runtime state
@@ -309,7 +306,9 @@ async function main(): Promise<void> {
     }
     // Derive allowlist from enabled family_deployments for live-lite
     const deployedFamilies = controlConn.db
-      .prepare("SELECT family_id FROM family_deployments WHERE profile = 'live-lite' AND enabled = 1")
+      .prepare(
+        "SELECT family_id FROM family_deployments WHERE profile = 'live-lite' AND enabled = 1",
+      )
       .all() as { family_id: string }[];
     return {
       familyAllowlist: deployedFamilies.map((f) => f.family_id),
@@ -939,7 +938,10 @@ async function main(): Promise<void> {
       log.info({ ageMs: intentResult.ageMs }, "resume intent found — auto-resuming");
       setPausedAndPersist(false);
     } else if (intentResult.action === "stay_paused") {
-      log.warn({ reason: intentResult.reason, ageMs: intentResult.ageMs }, "resume intent skipped — staying paused");
+      log.warn(
+        { reason: intentResult.reason, ageMs: intentResult.ageMs },
+        "resume intent skipped — staying paused",
+      );
     } else {
       log.info({ mode: runtimeMode }, "runtime started PAUSED — no resume intent");
     }

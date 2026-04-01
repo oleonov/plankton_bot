@@ -159,15 +159,12 @@ function mapRow(row: RawRow): FamilyRuleBundle {
     defaultMaxBuysPerLeg: row.default_max_buys_per_leg,
     heavyMaxBuysPerLeg: row.heavy_max_buys_per_leg,
     allowHeavyCampaigns: bool(row.allow_heavy_campaigns),
-    requirePositiveRecycleHistoryForScale: bool(
-      row.require_positive_recycle_history_for_scale,
-    ),
+    requirePositiveRecycleHistoryForScale: bool(row.require_positive_recycle_history_for_scale),
   };
 
   const exit: ExitRules = {
     exitMode: row.exit_mode as ExitRules["exitMode"],
-    primaryProfitModel:
-      row.primary_profit_model as ExitRules["primaryProfitModel"],
+    primaryProfitModel: row.primary_profit_model as ExitRules["primaryProfitModel"],
     allowRunnerExtension: bool(row.allow_runner_extension),
     preferFastRecycle: bool(row.prefer_fast_recycle),
     resolutionHoldingAllowed: bool(row.resolution_holding_allowed),
@@ -241,9 +238,7 @@ export class DbFamilyRulesProvider implements FamilyRulesProvider {
   }
 
   getRulesForRegime(regime: Regime): FamilyRuleBundle[] {
-    return [...this.ensureCache().values()].filter(
-      (b) => b.identity.regime === regime,
-    );
+    return [...this.ensureCache().values()].filter((b) => b.identity.regime === regime);
   }
 
   private ensureCache(): Map<string, FamilyRuleBundle> {

@@ -130,8 +130,22 @@ describe("SqliteCandidateObservationRepository", () => {
   it("countDistinctConditions counts unique conditions", () => {
     const ts = "2026-01-01T12:00:00Z";
     repo.insertMarkets([
-      { candidateId: "cand-1", observedAt: ts, conditionId: "cond-a", slug: "s1", endDate: null, volume24h: null },
-      { candidateId: "cand-1", observedAt: ts, conditionId: "cond-b", slug: "s2", endDate: null, volume24h: null },
+      {
+        candidateId: "cand-1",
+        observedAt: ts,
+        conditionId: "cond-a",
+        slug: "s1",
+        endDate: null,
+        volume24h: null,
+      },
+      {
+        candidateId: "cand-1",
+        observedAt: ts,
+        conditionId: "cond-b",
+        slug: "s2",
+        endDate: null,
+        volume24h: null,
+      },
     ]);
     // Same condition at different observation time
     repo.insertMarkets([
@@ -154,9 +168,30 @@ describe("SqliteCandidateObservationRepository", () => {
     // cand-1 is already: discovered, ignore, low=medium → NOT low-value (medium confidence)
     // Create a true low-value tail candidate
     candidateRepo.upsert({ ...makeCandidate("lv-1"), patternConfidence: "low" });
-    repo.insertObservation({ candidateId: "lv-1", activeMarketCount: 1, clusterVolume24h: 100, nearestEndDate: null, observedAt: "2026-01-01T00:00:00Z" });
-    repo.insertMarkets([{ candidateId: "lv-1", observedAt: "2026-01-01T00:00:00Z", conditionId: "c1", slug: "s1", endDate: null, volume24h: null }]);
-    repo.insertObservation({ candidateId: "lv-1", activeMarketCount: 2, clusterVolume24h: 200, nearestEndDate: null, observedAt: "2026-03-30T00:00:00Z" });
+    repo.insertObservation({
+      candidateId: "lv-1",
+      activeMarketCount: 1,
+      clusterVolume24h: 100,
+      nearestEndDate: null,
+      observedAt: "2026-01-01T00:00:00Z",
+    });
+    repo.insertMarkets([
+      {
+        candidateId: "lv-1",
+        observedAt: "2026-01-01T00:00:00Z",
+        conditionId: "c1",
+        slug: "s1",
+        endDate: null,
+        volume24h: null,
+      },
+    ]);
+    repo.insertObservation({
+      candidateId: "lv-1",
+      activeMarketCount: 2,
+      clusterVolume24h: 200,
+      nearestEndDate: null,
+      observedAt: "2026-03-30T00:00:00Z",
+    });
 
     const pruned = repo.pruneLowValueTail("2026-03-29T00:00:00Z");
     expect(pruned).toBe(1); // old observation deleted
@@ -166,7 +201,13 @@ describe("SqliteCandidateObservationRepository", () => {
 
   it("pruneLowValueTail does not prune recent observations", () => {
     candidateRepo.upsert({ ...makeCandidate("lv-2"), patternConfidence: "low" });
-    repo.insertObservation({ candidateId: "lv-2", activeMarketCount: 1, clusterVolume24h: 100, nearestEndDate: null, observedAt: "2026-03-31T00:00:00Z" });
+    repo.insertObservation({
+      candidateId: "lv-2",
+      activeMarketCount: 1,
+      clusterVolume24h: 100,
+      nearestEndDate: null,
+      observedAt: "2026-03-31T00:00:00Z",
+    });
 
     const pruned = repo.pruneLowValueTail("2026-03-30T00:00:00Z");
     expect(pruned).toBe(0);
@@ -174,24 +215,54 @@ describe("SqliteCandidateObservationRepository", () => {
   });
 
   it("pruneLowValueTail does not prune reviewed candidates", () => {
-    candidateRepo.upsert({ ...makeCandidate("rev-1"), patternConfidence: "low", status: "reviewed" });
-    repo.insertObservation({ candidateId: "rev-1", activeMarketCount: 1, clusterVolume24h: 100, nearestEndDate: null, observedAt: "2026-01-01T00:00:00Z" });
+    candidateRepo.upsert({
+      ...makeCandidate("rev-1"),
+      patternConfidence: "low",
+      status: "reviewed",
+    });
+    repo.insertObservation({
+      candidateId: "rev-1",
+      activeMarketCount: 1,
+      clusterVolume24h: 100,
+      nearestEndDate: null,
+      observedAt: "2026-01-01T00:00:00Z",
+    });
 
     const pruned = repo.pruneLowValueTail("2026-03-30T00:00:00Z");
     expect(pruned).toBe(0);
   });
 
   it("pruneLowValueTail does not prune materialized candidates", () => {
-    candidateRepo.upsert({ ...makeCandidate("mat-1"), patternConfidence: "low", status: "materialized" });
-    repo.insertObservation({ candidateId: "mat-1", activeMarketCount: 1, clusterVolume24h: 100, nearestEndDate: null, observedAt: "2026-01-01T00:00:00Z" });
+    candidateRepo.upsert({
+      ...makeCandidate("mat-1"),
+      patternConfidence: "low",
+      status: "materialized",
+    });
+    repo.insertObservation({
+      candidateId: "mat-1",
+      activeMarketCount: 1,
+      clusterVolume24h: 100,
+      nearestEndDate: null,
+      observedAt: "2026-01-01T00:00:00Z",
+    });
 
     const pruned = repo.pruneLowValueTail("2026-03-30T00:00:00Z");
     expect(pruned).toBe(0);
   });
 
   it("pruneLowValueTail does not prune matched candidates", () => {
-    candidateRepo.upsert({ ...makeCandidate("match-1"), patternConfidence: "low", matchedFamilyId: "fam-1" as any });
-    repo.insertObservation({ candidateId: "match-1", activeMarketCount: 1, clusterVolume24h: 100, nearestEndDate: null, observedAt: "2026-01-01T00:00:00Z" });
+    candidateRepo.upsert({
+      ...makeCandidate("match-1"),
+      patternConfidence: "low",
+      matchedFamilyId: "fam-1" as any,
+    });
+    repo.insertObservation({
+      candidateId: "match-1",
+      activeMarketCount: 1,
+      clusterVolume24h: 100,
+      nearestEndDate: null,
+      observedAt: "2026-01-01T00:00:00Z",
+    });
 
     const pruned = repo.pruneLowValueTail("2026-03-30T00:00:00Z");
     expect(pruned).toBe(0);
@@ -199,7 +270,13 @@ describe("SqliteCandidateObservationRepository", () => {
 
   it("pruneLowValueTail does not prune medium/high confidence candidates", () => {
     // cand-1 is medium confidence — should be protected
-    repo.insertObservation({ candidateId: "cand-1", activeMarketCount: 1, clusterVolume24h: 100, nearestEndDate: null, observedAt: "2026-01-01T00:00:00Z" });
+    repo.insertObservation({
+      candidateId: "cand-1",
+      activeMarketCount: 1,
+      clusterVolume24h: 100,
+      nearestEndDate: null,
+      observedAt: "2026-01-01T00:00:00Z",
+    });
 
     const pruned = repo.pruneLowValueTail("2026-03-30T00:00:00Z");
     expect(pruned).toBe(0);

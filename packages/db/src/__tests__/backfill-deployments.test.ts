@@ -19,10 +19,16 @@ afterEach(() => {
 
 function seedProfiles(c: DbConnection): void {
   const now = new Date().toISOString();
-  for (const [id, name] of [["simulation", "Simulation"], ["paper", "Paper"], ["live-lite", "Live-Lite"]]) {
-    c.db.prepare(
-      "INSERT OR IGNORE INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, '', ?)",
-    ).run(id, name, now);
+  for (const [id, name] of [
+    ["simulation", "Simulation"],
+    ["paper", "Paper"],
+    ["live-lite", "Live-Lite"],
+  ]) {
+    c.db
+      .prepare(
+        "INSERT OR IGNORE INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, '', ?)",
+      )
+      .run(id, name, now);
   }
 }
 
@@ -33,18 +39,22 @@ describe("backfillDeployments", () => {
     seedProfiles(conn);
 
     // Insert a family into catalog WITHOUT deployments (simulates pre-fix accept)
-    conn.db.prepare(
-      `INSERT INTO family_catalog
+    conn.db
+      .prepare(
+        `INSERT INTO family_catalog
          (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, created_at, updated_at)
        VALUES ('orphan-fam', 'orphan-key', 'crypto', 'threshold', 'daily', 'ad-hoc', 'scalp', datetime('now'), datetime('now'))`,
-    ).run();
+      )
+      .run();
 
     // Close and re-bootstrap — backfill should run
     conn.close();
     conn = bootstrapControlDb(dbPath);
 
     const deps = conn.db
-      .prepare("SELECT profile, enabled FROM family_deployments WHERE family_id = 'orphan-fam' ORDER BY profile")
+      .prepare(
+        "SELECT profile, enabled FROM family_deployments WHERE family_id = 'orphan-fam' ORDER BY profile",
+      )
       .all() as { profile: string; enabled: number }[];
 
     expect(deps).toHaveLength(3);
@@ -58,11 +68,13 @@ describe("backfillDeployments", () => {
     conn = bootstrapControlDb(dbPath);
     seedProfiles(conn);
 
-    conn.db.prepare(
-      `INSERT INTO family_catalog
+    conn.db
+      .prepare(
+        `INSERT INTO family_catalog
          (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, created_at, updated_at)
        VALUES ('dup-fam', 'dup-key', 'crypto', 'threshold', 'daily', 'ad-hoc', 'scalp', datetime('now'), datetime('now'))`,
-    ).run();
+      )
+      .run();
 
     conn.close();
     conn = bootstrapControlDb(dbPath); // first backfill
@@ -82,25 +94,31 @@ describe("backfillDeployments", () => {
     seedProfiles(conn);
 
     // Insert family with only 1 of 3 deployments (simulates interrupted bootstrap)
-    conn.db.prepare(
-      `INSERT INTO family_catalog
+    conn.db
+      .prepare(
+        `INSERT INTO family_catalog
          (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, created_at, updated_at)
        VALUES ('partial-fam', 'partial-key', 'crypto', 'threshold', 'daily', 'ad-hoc', 'scalp', datetime('now'), datetime('now'))`,
-    ).run();
-    conn.db.prepare(
-      `INSERT INTO family_deployments (family_id, profile, enabled) VALUES ('partial-fam', 'paper', 1)`,
-    ).run();
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT INTO family_deployments (family_id, profile, enabled) VALUES ('partial-fam', 'paper', 1)`,
+      )
+      .run();
 
     conn.close();
     conn = bootstrapControlDb(dbPath); // backfill should add missing sim + live-lite
 
     const deps = conn.db
-      .prepare("SELECT profile, enabled FROM family_deployments WHERE family_id = 'partial-fam' ORDER BY profile")
+      .prepare(
+        "SELECT profile, enabled FROM family_deployments WHERE family_id = 'partial-fam' ORDER BY profile",
+      )
       .all() as { profile: string; enabled: number }[];
 
     expect(deps).toHaveLength(3);
-    expect(deps.find((d) => d.profile === "paper")?.enabled).toBe(1);       // existing — untouched
-    expect(deps.find((d) => d.profile === "simulation")?.enabled).toBe(1);  // backfilled
-    expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(0);   // backfilled
+    expect(deps.find((d) => d.profile === "paper")?.enabled).toBe(1); // existing — untouched
+    expect(deps.find((d) => d.profile === "simulation")?.enabled).toBe(1); // backfilled
+    expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(0); // backfilled
   });
 });

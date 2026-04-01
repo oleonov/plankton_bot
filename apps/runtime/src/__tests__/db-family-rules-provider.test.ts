@@ -179,12 +179,8 @@ describe("DbFamilyRulesProvider", () => {
     expect(rules.tailSuppression.autoSettleResolvedMarkets).toBe(true);
 
     // session
-    expect(rules.session.activeWindowsUtc).toEqual([
-      { start: "08:00", end: "20:00" },
-    ]);
-    expect(rules.session.reducedWindowsUtc).toEqual([
-      { start: "20:00", end: "23:00" },
-    ]);
+    expect(rules.session.activeWindowsUtc).toEqual([{ start: "08:00", end: "20:00" }]);
+    expect(rules.session.reducedWindowsUtc).toEqual([{ start: "20:00", end: "23:00" }]);
     expect(rules.session.weekdayBias).toBe("preferred");
     expect(rules.session.weekendMode).toBe("reduced");
 
@@ -214,9 +210,7 @@ describe("DbFamilyRulesProvider", () => {
     expect(provider.getAllFamilies()).toHaveLength(1);
 
     // Disable the deployment after initial load
-    db.exec(
-      `UPDATE family_deployments SET enabled = 0 WHERE family_id = 'fam-001'`,
-    );
+    db.exec(`UPDATE family_deployments SET enabled = 0 WHERE family_id = 'fam-001'`);
 
     // Still cached
     expect(provider.getAllFamilies()).toHaveLength(1);

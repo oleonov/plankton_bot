@@ -1,9 +1,5 @@
 import type Database from "better-sqlite3";
-import type {
-  DiscoveryRun,
-  DiscoveryRunRepository,
-  DiscoveryScanStats,
-} from "@plankton/domain";
+import type { DiscoveryRun, DiscoveryRunRepository, DiscoveryScanStats } from "@plankton/domain";
 
 interface RunRow {
   id: number;
@@ -64,26 +60,28 @@ export class SqliteDiscoveryRunRepository implements DiscoveryRunRepository {
   }
 
   claim(workerId: string): DiscoveryRun | null {
-    return this.db.transaction(() => {
-      const queued = this.db
-        .prepare(
-          "SELECT id FROM discovery_runs WHERE status = 'queued' ORDER BY requested_at ASC LIMIT 1",
-        )
-        .get() as { id: number } | undefined;
-      if (!queued) return null;
+    return this.db
+      .transaction(() => {
+        const queued = this.db
+          .prepare(
+            "SELECT id FROM discovery_runs WHERE status = 'queued' ORDER BY requested_at ASC LIMIT 1",
+          )
+          .get() as { id: number } | undefined;
+        if (!queued) return null;
 
-      this.db
-        .prepare(
-          `UPDATE discovery_runs
+        this.db
+          .prepare(
+            `UPDATE discovery_runs
            SET status = 'running', worker_id = ?, started_at = datetime('now'), heartbeat_at = datetime('now')
            WHERE id = ?`,
-        )
-        .run(workerId, queued.id);
+          )
+          .run(workerId, queued.id);
 
-      return rowToRun(
-        this.db.prepare("SELECT * FROM discovery_runs WHERE id = ?").get(queued.id) as RunRow,
-      );
-    }).immediate();
+        return rowToRun(
+          this.db.prepare("SELECT * FROM discovery_runs WHERE id = ?").get(queued.id) as RunRow,
+        );
+      })
+      .immediate();
   }
 
   heartbeat(id: number): void {
@@ -123,9 +121,7 @@ export class SqliteDiscoveryRunRepository implements DiscoveryRunRepository {
 
   findLastSuccessful(): DiscoveryRun | null {
     const row = this.db
-      .prepare(
-        "SELECT * FROM discovery_runs WHERE status = 'succeeded' ORDER BY id DESC LIMIT 1",
-      )
+      .prepare("SELECT * FROM discovery_runs WHERE status = 'succeeded' ORDER BY id DESC LIMIT 1")
       .get() as RunRow | undefined;
     return row ? rowToRun(row) : null;
   }

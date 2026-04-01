@@ -43,11 +43,11 @@ describe("Evidence engine deployed family scoring", () => {
 
     // Seed FK parent and family_evidence row
     conn.db
-      .prepare("INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .prepare(
+        "INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      )
       .run(String(FAM_ID), "deployed-fam", "crypto", "threshold", "daily", "daily", "scalp");
-    conn.db
-      .prepare("INSERT INTO family_evidence (family_id) VALUES (?)")
-      .run(String(FAM_ID));
+    conn.db.prepare("INSERT INTO family_evidence (family_id) VALUES (?)").run(String(FAM_ID));
 
     const mockSc: ScoreComputer = {
       computeRecurrenceMetrics: vi.fn().mockReturnValue({

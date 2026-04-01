@@ -37,9 +37,7 @@ function rowToState(row: Row): FamilyProfileRuntimeState {
   };
 }
 
-export class SqliteFamilyProfileRuntimeStateRepository
-  implements FamilyProfileRuntimeStateRepository
-{
+export class SqliteFamilyProfileRuntimeStateRepository implements FamilyProfileRuntimeStateRepository {
   constructor(private readonly db: Database.Database) {}
 
   get(familyId: FamilyId): FamilyProfileRuntimeState | null {
@@ -91,9 +89,7 @@ export class SqliteFamilyProfileRuntimeStateRepository
   }
 
   findAll(): FamilyProfileRuntimeState[] {
-    const rows = this.db
-      .prepare(`SELECT * FROM family_profile_runtime_state`)
-      .all() as Row[];
+    const rows = this.db.prepare(`SELECT * FROM family_profile_runtime_state`).all() as Row[];
     return rows.map(rowToState);
   }
 }

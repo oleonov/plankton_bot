@@ -67,9 +67,7 @@ export class FamilyEvidenceEngine implements RuntimeModule {
     ];
 
     this.timer = setInterval(() => {
-      this.recompute().catch((err) =>
-        this.log.error({ err }, "evidence recompute failed"),
-      );
+      this.recompute().catch((err) => this.log.error({ err }, "evidence recompute failed"));
     }, this.intervalMs);
 
     await this.recompute();

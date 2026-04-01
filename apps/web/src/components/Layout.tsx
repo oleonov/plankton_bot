@@ -92,11 +92,21 @@ export function Layout() {
         <span style={{ fontWeight: 700, color: "var(--blue)", fontSize: 15, marginRight: 12 }}>
           PLANKTON
         </span>
-        <NavLink className="nav-link" to="/overview">Overview</NavLink>
-        <NavLink className="nav-link" to="/positions">Positions</NavLink>
-        <NavLink className="nav-link" to="/orders">Orders/Fills</NavLink>
-        <NavLink className="nav-link" to="/families">Families</NavLink>
-        <NavLink className="nav-link" to="/risk">Risk</NavLink>
+        <NavLink className="nav-link" to="/overview">
+          Overview
+        </NavLink>
+        <NavLink className="nav-link" to="/positions">
+          Positions
+        </NavLink>
+        <NavLink className="nav-link" to="/orders">
+          Orders/Fills
+        </NavLink>
+        <NavLink className="nav-link" to="/families">
+          Families
+        </NavLink>
+        <NavLink className="nav-link" to="/risk">
+          Risk
+        </NavLink>
         <NavLink className="nav-link" to="/discovery">
           Discovery
           <ProposalBadge />

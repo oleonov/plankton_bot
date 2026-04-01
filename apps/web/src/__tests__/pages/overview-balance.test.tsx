@@ -40,7 +40,13 @@ describe("Overview Balance Card", () => {
           ...mockStatus,
           runtimeMode: "live-lite",
           walletBalanceUsdc: 487,
-          liveLite: { maxOpenValueUsdc: 100, maxFamilies: 5, maxActiveMarkets: 10, maxOrderUsdc: 10, familyAllowlist: [] },
+          liveLite: {
+            maxOpenValueUsdc: 100,
+            maxFamilies: 5,
+            maxActiveMarkets: 10,
+            maxOrderUsdc: 10,
+            familyAllowlist: [],
+          },
         }),
       ),
     );

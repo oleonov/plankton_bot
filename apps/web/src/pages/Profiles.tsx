@@ -7,14 +7,35 @@ import type { ProfileDTO, DeployedFamilyDTO } from "../api/types.ts";
 function SummaryTab({ profile }: { profile: ProfileDTO }) {
   return (
     <div style={{ fontSize: 12 }}>
-      <div className="profile-stat"><span className="label">Exposure</span><span>${profile.total_exposure_usdc?.toFixed(2) ?? "0.00"}</span></div>
-      <div className="profile-stat"><span className="label">Balance</span><span>${profile.balance_usdc?.toFixed(2) ?? "0.00"}</span></div>
-      <div className="profile-stat"><span className="label">Positions</span><span>{profile.open_positions ?? 0}</span></div>
-      <div className="profile-stat"><span className="label">Open Orders</span><span>{profile.open_orders ?? 0}</span></div>
-      <div className="profile-stat"><span className="label">Preflight Status</span><span>{profile.last_preflight_status ?? "n/a"}</span></div>
-      <div className="profile-stat"><span className="label">Last Run</span><span>{formatAgo(profile.last_run_at)}</span></div>
+      <div className="profile-stat">
+        <span className="label">Exposure</span>
+        <span>${profile.total_exposure_usdc?.toFixed(2) ?? "0.00"}</span>
+      </div>
+      <div className="profile-stat">
+        <span className="label">Balance</span>
+        <span>${profile.balance_usdc?.toFixed(2) ?? "0.00"}</span>
+      </div>
+      <div className="profile-stat">
+        <span className="label">Positions</span>
+        <span>{profile.open_positions ?? 0}</span>
+      </div>
+      <div className="profile-stat">
+        <span className="label">Open Orders</span>
+        <span>{profile.open_orders ?? 0}</span>
+      </div>
+      <div className="profile-stat">
+        <span className="label">Preflight Status</span>
+        <span>{profile.last_preflight_status ?? "n/a"}</span>
+      </div>
+      <div className="profile-stat">
+        <span className="label">Last Run</span>
+        <span>{formatAgo(profile.last_run_at)}</span>
+      </div>
       {profile.description && (
-        <div className="profile-stat"><span className="label">Description</span><span>{profile.description}</span></div>
+        <div className="profile-stat">
+          <span className="label">Description</span>
+          <span>{profile.description}</span>
+        </div>
       )}
     </div>
   );
@@ -42,9 +63,15 @@ function FamiliesTab({ families }: { families: DeployedFamilyDTO[] }) {
             <td style={{ color: "var(--blue)" }}>{f.family_key}</td>
             <td>{f.primary_category}</td>
             <td>{f.regime}</td>
-            <td><Badge value={f.operator_mode} type="mode" /></td>
-            <td><Badge value={f.strategy_stage} /></td>
-            <td><Badge value={f.deployment_stage} /></td>
+            <td>
+              <Badge value={f.operator_mode} type="mode" />
+            </td>
+            <td>
+              <Badge value={f.strategy_stage} />
+            </td>
+            <td>
+              <Badge value={f.deployment_stage} />
+            </td>
           </tr>
         ))}
       </tbody>
@@ -61,10 +88,16 @@ function ProfileContent({ profileId }: { profileId: string }) {
   return (
     <div className="card">
       <div className="tab-bar">
-        <div className={`tab ${tab === "summary" ? "active" : ""}`} onClick={() => setTab("summary")}>
+        <div
+          className={`tab ${tab === "summary" ? "active" : ""}`}
+          onClick={() => setTab("summary")}
+        >
           Summary
         </div>
-        <div className={`tab ${tab === "families" ? "active" : ""}`} onClick={() => setTab("families")}>
+        <div
+          className={`tab ${tab === "families" ? "active" : ""}`}
+          onClick={() => setTab("families")}
+        >
           Deployed Families ({data.deployedFamilies.length})
         </div>
       </div>
@@ -74,7 +107,11 @@ function ProfileContent({ profileId }: { profileId: string }) {
   );
 }
 
-function profileStatus(profileId: string, currentProfile: string | null, runtimeStatus: string): string {
+function profileStatus(
+  profileId: string,
+  currentProfile: string | null,
+  runtimeStatus: string,
+): string {
   if (profileId !== currentProfile) return "stopped";
   // runtime_status: stopped | starting | ready_paused | running | stopping | failed
   if (runtimeStatus === "running") return "running";
@@ -104,7 +141,14 @@ export function Profiles() {
             onClick={() => setSelectedId(p.profile_id)}
           >
             {p.display_name}
-            <Badge value={profileStatus(p.profile_id, currentProfile, data?.runtimeState?.runtime_status ?? "stopped")} type="status" />
+            <Badge
+              value={profileStatus(
+                p.profile_id,
+                currentProfile,
+                data?.runtimeState?.runtime_status ?? "stopped",
+              )}
+              type="status"
+            />
           </button>
         ))}
       </div>

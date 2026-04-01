@@ -66,7 +66,7 @@ function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
     quarantineReason: null,
     effectiveMode: null,
     derivedModeReason: null,
-        firstNegativeTailAt: null,
+    firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
     ...overrides,
   };

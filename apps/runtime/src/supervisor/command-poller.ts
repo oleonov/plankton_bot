@@ -28,7 +28,10 @@ export interface PatternRebuilder {
 /** Minimal interface for the DB family rules repository (overwrite on reset / promote). */
 export interface FamilyRulesDbWriter {
   overwriteRules(familyId: import("@plankton/domain").FamilyId, rulesJson: string): void;
-  updateToScaledDefaults(familyId: import("@plankton/domain").FamilyId, caps?: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number }): void;
+  updateToScaledDefaults(
+    familyId: import("@plankton/domain").FamilyId,
+    caps?: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number },
+  ): void;
 }
 
 export interface CommandPollerDeps {
@@ -106,8 +109,8 @@ export class CommandPoller implements RuntimeModule {
     try {
       // Capture previous lifecycle state BEFORE applying changes (needed for transitions)
       const previousPromotionState = cmd.targetId
-        ? this.deps.familyEvidenceRepo?.getEvidence(createFamilyId(cmd.targetId))
-            ?.promotionState ?? "unknown"
+        ? (this.deps.familyEvidenceRepo?.getEvidence(createFamilyId(cmd.targetId))
+            ?.promotionState ?? "unknown")
         : "unknown";
 
       switch (cmd.action) {
@@ -270,7 +273,9 @@ export class CommandPoller implements RuntimeModule {
     }
 
     // Parse optional caps from reason JSON (set by promote API)
-    let caps: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number } | undefined;
+    let caps:
+      | { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number }
+      | undefined;
     if (cmd.reason) {
       try {
         const parsed = JSON.parse(cmd.reason) as { caps?: typeof caps };

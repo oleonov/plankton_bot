@@ -67,7 +67,11 @@ describe("Profiles", () => {
           ok: true,
           data: {
             ...mockProfiles,
-            runtimeState: { current_profile: "paper", desired_profile: "paper", runtime_status: "stopped" },
+            runtimeState: {
+              current_profile: "paper",
+              desired_profile: "paper",
+              runtime_status: "stopped",
+            },
           },
           error: null,
           ts: new Date().toISOString(),

@@ -17,13 +17,13 @@ import {
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import { createFamilyId } from "@plankton/domain";
-import type {
-  FamilyIdentity,
-  OperatorActionType,
-  RuntimeEventMap,
-} from "@plankton/domain";
+import type { FamilyIdentity, OperatorActionType, RuntimeEventMap } from "@plankton/domain";
 import { CommandPoller } from "../supervisor/command-poller.js";
-import type { ReloadableRules, PatternRebuilder, FamilyRulesDbWriter } from "../supervisor/command-poller.js";
+import type {
+  ReloadableRules,
+  PatternRebuilder,
+  FamilyRulesDbWriter,
+} from "../supervisor/command-poller.js";
 
 const log = pino({ level: "silent" });
 
@@ -67,7 +67,7 @@ function seedFamily(familyId: string): void {
     quarantineReason: null,
     effectiveMode: null,
     derivedModeReason: null,
-        firstNegativeTailAt: null,
+    firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
   });
 }
@@ -124,7 +124,9 @@ afterEach(() => {
 });
 
 describe("CommandPoller", () => {
-  function createPoller(extra?: Partial<ConstructorParameters<typeof CommandPoller>[0]>): CommandPoller {
+  function createPoller(
+    extra?: Partial<ConstructorParameters<typeof CommandPoller>[0]>,
+  ): CommandPoller {
     return new CommandPoller({
       commandRepo: cmdRepo,
       actionRepo,
@@ -393,7 +395,9 @@ describe("CommandPoller", () => {
 
       // Verify family_rules were updated to scaled defaults
       const rulesRow = conn.db
-        .prepare("SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions, default_max_buys_per_leg FROM family_rules WHERE family_id = ?")
+        .prepare(
+          "SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions, default_max_buys_per_leg FROM family_rules WHERE family_id = ?",
+        )
         .get("fam-1") as Record<string, unknown>;
       expect(rulesRow.scale_mode).toBe("confirm-only");
       expect(rulesRow.max_open_value_usdc).toBe(50.0);
@@ -431,7 +435,10 @@ describe("CommandPoller", () => {
       const normalizationModule: PatternRebuilder = { rebuildPatterns: vi.fn() };
       const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
       const transitionRepo = new SqliteStateTransitionRepository(conn.db);
-      const dbWriter: FamilyRulesDbWriter = { overwriteRules: vi.fn(), updateToScaledDefaults: vi.fn() };
+      const dbWriter: FamilyRulesDbWriter = {
+        overwriteRules: vi.fn(),
+        updateToScaledDefaults: vi.fn(),
+      };
 
       insertCommand("family_reset_to_probe", "fam-1", "resetting");
       const poller = createPoller({
@@ -464,7 +471,10 @@ describe("CommandPoller", () => {
     it("rejects when no snapshot exists", async () => {
       seedFamily("fam-1");
       const snapshotRepo = new SqliteFamilyRulesSnapshotRepository(conn.db);
-      const dbWriter: FamilyRulesDbWriter = { overwriteRules: vi.fn(), updateToScaledDefaults: vi.fn() };
+      const dbWriter: FamilyRulesDbWriter = {
+        overwriteRules: vi.fn(),
+        updateToScaledDefaults: vi.fn(),
+      };
 
       insertCommand("family_reset_to_probe", "fam-1", "resetting");
       const poller = createPoller({
@@ -629,7 +639,10 @@ describe("CommandPoller", () => {
 
       const rulesManager: ReloadableRules = { reload: vi.fn() };
       const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
-      const dbWriter: FamilyRulesDbWriter = { overwriteRules: vi.fn(), updateToScaledDefaults: vi.fn() };
+      const dbWriter: FamilyRulesDbWriter = {
+        overwriteRules: vi.fn(),
+        updateToScaledDefaults: vi.fn(),
+      };
 
       insertCommand("family_reset_to_probe", "fam-1", "resetting");
       const poller = createPoller({

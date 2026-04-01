@@ -51,8 +51,16 @@ afterEach(() => {
 describe("ScanService", () => {
   it("returns correct stats for discovered markets", async () => {
     const markets = [
-      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000", endDate: "2026-03-28T12:00:00Z" }),
-      makeClobMarket({ conditionId: "c2", slug: "bitcoin-above-100000", endDate: "2026-03-28T14:00:00Z" }),
+      makeClobMarket({
+        conditionId: "c1",
+        slug: "bitcoin-above-95000",
+        endDate: "2026-03-28T12:00:00Z",
+      }),
+      makeClobMarket({
+        conditionId: "c2",
+        slug: "bitcoin-above-100000",
+        endDate: "2026-03-28T14:00:00Z",
+      }),
       makeClobMarket({ conditionId: "c3", slug: "ethereum-above-4000" }),
     ];
 
@@ -72,9 +80,7 @@ describe("ScanService", () => {
   });
 
   it("calls onProgress during scan", async () => {
-    const markets = [
-      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000" }),
-    ];
+    const markets = [makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000" })];
     const onProgress = vi.fn();
 
     const service = new ScanService({
@@ -107,18 +113,16 @@ describe("ScanService", () => {
   });
 
   it("preserves firstSeenAt on subsequent scans", async () => {
-    const markets = [
-      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000" }),
-    ];
+    const markets = [makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000" })];
     const gateway = makeGateway(markets);
 
     // First scan
     await new ScanService({ db: conn.db, log: silentLogger, gateway }).run();
 
     // Capture the firstSeenAt from DB
-    const row1 = conn.db
-      .prepare("SELECT first_seen_at FROM family_candidates LIMIT 1")
-      .get() as { first_seen_at: string };
+    const row1 = conn.db.prepare("SELECT first_seen_at FROM family_candidates LIMIT 1").get() as {
+      first_seen_at: string;
+    };
 
     // Advance clock by 1s so observation timestamps don't collide with unique constraint
     vi.useFakeTimers({ now: Date.now() + 1_000 });
@@ -128,9 +132,9 @@ describe("ScanService", () => {
       vi.useRealTimers();
     }
 
-    const row2 = conn.db
-      .prepare("SELECT first_seen_at FROM family_candidates LIMIT 1")
-      .get() as { first_seen_at: string };
+    const row2 = conn.db.prepare("SELECT first_seen_at FROM family_candidates LIMIT 1").get() as {
+      first_seen_at: string;
+    };
 
     expect(row2.first_seen_at).toBe(row1.first_seen_at);
   });
@@ -165,10 +169,18 @@ describe("ScanService", () => {
 
   it("handles multi-page discovery correctly", async () => {
     const page1 = [
-      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000", endDate: "2026-03-28T12:00:00Z" }),
+      makeClobMarket({
+        conditionId: "c1",
+        slug: "bitcoin-above-95000",
+        endDate: "2026-03-28T12:00:00Z",
+      }),
     ];
     const page2 = [
-      makeClobMarket({ conditionId: "c2", slug: "bitcoin-above-100000", endDate: "2026-03-28T14:00:00Z" }),
+      makeClobMarket({
+        conditionId: "c2",
+        slug: "bitcoin-above-100000",
+        endDate: "2026-03-28T14:00:00Z",
+      }),
       makeClobMarket({ conditionId: "c3", slug: "ethereum-above-4000" }),
     ];
 
@@ -203,7 +215,8 @@ describe("ScanService", () => {
     const candidateId = "bitcoin-above:threshold:deadline";
 
     // Pre-seed as if evaluator already scored this candidate
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO family_candidates
         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
          primary_category, strategy_profile, gate_recommendation, status,
@@ -213,18 +226,29 @@ describe("ScanService", () => {
               'crypto', 'scalp', 'ignore', 'discovered',
               NULL, 0.3, 0.1, '2026-03-30T00:00:00Z',
               '2026-03-30T00:00:00Z', '2026-03-30T00:00:00Z')
-    `).run(candidateId);
+    `,
+    ).run(candidateId);
 
     // Run a scan that rediscovers the same market
     const markets = [
-      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000", endDate: "2026-04-01T00:00:00Z" }),
+      makeClobMarket({
+        conditionId: "c1",
+        slug: "bitcoin-above-95000",
+        endDate: "2026-04-01T00:00:00Z",
+      }),
     ];
-    const service = new ScanService({ db: conn.db, log: silentLogger, gateway: makeGateway(markets) });
+    const service = new ScanService({
+      db: conn.db,
+      log: silentLogger,
+      gateway: makeGateway(markets),
+    });
     await service.run();
 
     // Verify scores and gate_recommendation were NOT reset to pending/null
     const row = db
-      .prepare("SELECT gate_recommendation, recurrence_score, live_viability_score, scores_updated_at FROM family_candidates WHERE candidate_id = ?")
+      .prepare(
+        "SELECT gate_recommendation, recurrence_score, live_viability_score, scores_updated_at FROM family_candidates WHERE candidate_id = ?",
+      )
       .get(candidateId) as Record<string, unknown>;
 
     expect(row.gate_recommendation).toBe("ignore");
@@ -238,7 +262,8 @@ describe("ScanService", () => {
     const recent = new Date().toISOString(); // recent enough to survive generic date prune
 
     // 1. Low-value tail, stale (should be pruned by low-value tail pruning)
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO family_candidates
         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
          primary_category, strategy_profile, gate_recommendation, status,
@@ -246,18 +271,24 @@ describe("ScanService", () => {
       VALUES ('lv-stale', 'lv-key', 'generic', 'ad-hoc', 'ad-hoc', 'low',
               'other', 'scalp', 'ignore', 'discovered',
               NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
-    `).run();
-    db.prepare(`
+    `,
+    ).run();
+    db.prepare(
+      `
       INSERT INTO candidate_observations (candidate_id, active_market_count, cluster_volume_24h, observed_at)
       VALUES ('lv-stale', 1, 100, '2026-01-01T00:00:00Z')
-    `).run();
-    db.prepare(`
+    `,
+    ).run();
+    db.prepare(
+      `
       INSERT INTO candidate_observation_markets (candidate_id, observed_at, condition_id, slug)
       VALUES ('lv-stale', '2026-01-01T00:00:00Z', 'c1', 's1')
-    `).run();
+    `,
+    ).run();
 
     // 2. Protected: reviewed with recent observations (survives both low-value and date prune)
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO family_candidates
         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
          primary_category, strategy_profile, gate_recommendation, status,
@@ -265,14 +296,18 @@ describe("ScanService", () => {
       VALUES ('reviewed-old', 'rev-key', 'generic', 'ad-hoc', 'ad-hoc', 'low',
               'other', 'scalp', 'ignore', 'reviewed',
               NULL, '2026-01-01T00:00:00Z', ?)
-    `).run(recent);
-    db.prepare(`
+    `,
+    ).run(recent);
+    db.prepare(
+      `
       INSERT INTO candidate_observations (candidate_id, active_market_count, cluster_volume_24h, observed_at)
       VALUES ('reviewed-old', 1, 100, ?)
-    `).run(recent);
+    `,
+    ).run(recent);
 
     // 3. Protected: matched with recent last_seen (survives candidate prune)
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO family_candidates
         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
          primary_category, strategy_profile, gate_recommendation, status,
@@ -280,7 +315,8 @@ describe("ScanService", () => {
       VALUES ('matched-old', 'match-key', 'generic', 'ad-hoc', 'ad-hoc', 'low',
               'other', 'scalp', 'ignore', 'discovered',
               'fam-1', '2026-01-01T00:00:00Z', ?)
-    `).run(recent);
+    `,
+    ).run(recent);
 
     // Run a scan (with empty market list) which triggers pruneAndCooldown
     const gateway = makeGateway([]);
@@ -294,10 +330,18 @@ describe("ScanService", () => {
       db.prepare("SELECT 1 FROM family_candidates WHERE candidate_id = 'lv-stale'").get(),
     ).toBeUndefined();
     expect(
-      db.prepare("SELECT COUNT(*) as cnt FROM candidate_observations WHERE candidate_id = 'lv-stale'").get(),
+      db
+        .prepare(
+          "SELECT COUNT(*) as cnt FROM candidate_observations WHERE candidate_id = 'lv-stale'",
+        )
+        .get(),
     ).toEqual({ cnt: 0 });
     expect(
-      db.prepare("SELECT COUNT(*) as cnt FROM candidate_observation_markets WHERE candidate_id = 'lv-stale'").get(),
+      db
+        .prepare(
+          "SELECT COUNT(*) as cnt FROM candidate_observation_markets WHERE candidate_id = 'lv-stale'",
+        )
+        .get(),
     ).toEqual({ cnt: 0 });
 
     // Protected: reviewed candidate + observations preserved
@@ -305,7 +349,13 @@ describe("ScanService", () => {
       db.prepare("SELECT 1 FROM family_candidates WHERE candidate_id = 'reviewed-old'").get(),
     ).toBeDefined();
     expect(
-      (db.prepare("SELECT COUNT(*) as cnt FROM candidate_observations WHERE candidate_id = 'reviewed-old'").get() as { cnt: number }).cnt,
+      (
+        db
+          .prepare(
+            "SELECT COUNT(*) as cnt FROM candidate_observations WHERE candidate_id = 'reviewed-old'",
+          )
+          .get() as { cnt: number }
+      ).cnt,
     ).toBe(1);
 
     // Protected: matched candidate preserved

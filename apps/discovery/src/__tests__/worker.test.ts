@@ -35,7 +35,9 @@ describe("Worker queue patterns", () => {
 
       // Backdate heartbeat to simulate crash
       conn.db
-        .prepare("UPDATE discovery_runs SET heartbeat_at = datetime('now', '-600 seconds') WHERE id = 1")
+        .prepare(
+          "UPDATE discovery_runs SET heartbeat_at = datetime('now', '-600 seconds') WHERE id = 1",
+        )
         .run();
 
       const recovered = repo.failStale(120_000); // 2 min threshold
@@ -60,7 +62,9 @@ describe("Worker queue patterns", () => {
       repo.claim("worker-1");
 
       conn.db
-        .prepare("UPDATE discovery_runs SET heartbeat_at = datetime('now', '-600 seconds') WHERE id = 1")
+        .prepare(
+          "UPDATE discovery_runs SET heartbeat_at = datetime('now', '-600 seconds') WHERE id = 1",
+        )
         .run();
       repo.failStale(120_000);
 
@@ -73,13 +77,17 @@ describe("Worker queue patterns", () => {
   describe("scheduler does not duplicate when active exists", () => {
     it("throws when enqueuing while queued run exists", () => {
       repo.enqueue("schedule", "worker");
-      expect(() => repo.enqueue("schedule", "worker")).toThrow("Active discovery run already exists");
+      expect(() => repo.enqueue("schedule", "worker")).toThrow(
+        "Active discovery run already exists",
+      );
     });
 
     it("throws when enqueuing while running run exists", () => {
       repo.enqueue("startup", "worker");
       repo.claim("worker-1");
-      expect(() => repo.enqueue("schedule", "worker")).toThrow("Active discovery run already exists");
+      expect(() => repo.enqueue("schedule", "worker")).toThrow(
+        "Active discovery run already exists",
+      );
     });
 
     it("allows enqueue after run succeeds", () => {

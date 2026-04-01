@@ -45,9 +45,12 @@ export function useBuildInfo() {
   return useQuery({
     queryKey: ["build-info"],
     queryFn: () =>
-      apiFetch<{ status: string; sha: string | null; deployVersion: number | null; deployedAt: string | null }>(
-        "/api/v1/health",
-      ),
+      apiFetch<{
+        status: string;
+        sha: string | null;
+        deployVersion: number | null;
+        deployedAt: string | null;
+      }>("/api/v1/health"),
     staleTime: 5 * 60_000, // cache 5 min — rarely changes
   });
 }
@@ -265,7 +268,9 @@ interface CandidateFilters {
   cadence?: string;
 }
 
-export function useCandidates(filters: CandidateFilters & { cursor?: string; limit?: number } = {}) {
+export function useCandidates(
+  filters: CandidateFilters & { cursor?: string; limit?: number } = {},
+) {
   return useQuery({
     queryKey: ["discovery", "candidates", filters],
     queryFn: () =>
@@ -294,8 +299,7 @@ export function useCandidateTransitions(candidateId: string | null) {
 export function useCandidateDetail(candidateId: string | null) {
   return useQuery({
     queryKey: ["discovery", "candidates", candidateId],
-    queryFn: () =>
-      apiFetch<CandidateDetailDTO>(`/api/v1/discovery/candidates/${candidateId}`),
+    queryFn: () => apiFetch<CandidateDetailDTO>(`/api/v1/discovery/candidates/${candidateId}`),
     enabled: !!candidateId,
   });
 }
@@ -321,9 +325,7 @@ export function useTriggerScan() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: () =>
-      apiPost<{ runId: number; status: string; alreadyActive: boolean }>(
-        "/api/v1/discovery/scan",
-      ),
+      apiPost<{ runId: number; status: string; alreadyActive: boolean }>("/api/v1/discovery/scan"),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["discovery"] }),
   });
 }
@@ -335,14 +337,14 @@ export function useProposals() {
   });
 }
 
-export function useCandidateAction(
-  candidateId: string,
-  action: "review" | "accept" | "reject",
-) {
+export function useCandidateAction(candidateId: string, action: "review" | "accept" | "reject") {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body?: Record<string, unknown> | { maxOpenValueUsdc: number; maxActiveMarkets: number; maxDustPositions: number }) =>
-      apiPost(`/api/v1/discovery/candidates/${candidateId}/${action}`, body),
+    mutationFn: (
+      body?:
+        | Record<string, unknown>
+        | { maxOpenValueUsdc: number; maxActiveMarkets: number; maxDustPositions: number },
+    ) => apiPost(`/api/v1/discovery/candidates/${candidateId}/${action}`, body),
     onSuccess: async () => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["discovery", "candidates"] }),
@@ -355,8 +357,12 @@ export function useCandidateAction(
 export function usePromoteFamily(familyId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body?: { reason?: string; maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number }) =>
-      apiPost(`/api/v1/actions/family/${familyId}/promote`, body),
+    mutationFn: (body?: {
+      reason?: string;
+      maxOpenValueUsdc?: number;
+      maxActiveMarkets?: number;
+      maxDustPositions?: number;
+    }) => apiPost(`/api/v1/actions/family/${familyId}/promote`, body),
     onSuccess: async () => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["families", "proposals"] }),
@@ -449,10 +455,7 @@ export function useUpdateProfileSettings(profileId: string) {
 
 // ─── Profile-scoped ledger hooks ──────────────────────────────────────
 
-export function useProfileOrders(
-  profileId: string | undefined,
-  filters: OrderFilters = {},
-) {
+export function useProfileOrders(profileId: string | undefined, filters: OrderFilters = {}) {
   return useQuery({
     queryKey: ["profiles", profileId, "orders", filters],
     queryFn: () =>
@@ -468,10 +471,7 @@ export function useProfileOrders(
   });
 }
 
-export function useProfilePositions(
-  profileId: string | undefined,
-  filters: PositionFilters = {},
-) {
+export function useProfilePositions(profileId: string | undefined, filters: PositionFilters = {}) {
   return useQuery({
     queryKey: ["profiles", profileId, "positions", filters],
     queryFn: () =>
@@ -487,10 +487,7 @@ export function useProfilePositions(
   });
 }
 
-export function useProfileFills(
-  profileId: string | undefined,
-  filters: FillFilters = {},
-) {
+export function useProfileFills(profileId: string | undefined, filters: FillFilters = {}) {
   return useQuery({
     queryKey: ["profiles", profileId, "fills", filters],
     queryFn: () =>

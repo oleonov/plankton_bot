@@ -102,7 +102,7 @@ describe("SqliteFamilyRulesDbRepository", () => {
     // Rules - entry
     expect(cfg.rules.entry.entryMode).toBe("probe-first");
     expect(cfg.rules.entry.minEntryPrice).toBe(0.05);
-    expect(cfg.rules.entry.maxEntryPrice).toBe(0.50);
+    expect(cfg.rules.entry.maxEntryPrice).toBe(0.5);
 
     // Rules - session (JSON parsed)
     expect(cfg.rules.session.activeWindowsUtc).toHaveLength(1);
@@ -134,8 +134,8 @@ describe("SqliteFamilyRulesDbRepository", () => {
         maxEntryPrice: 1,
         maxInitialNotionalUsdc: 5,
         allowHighPriceOneShot: false,
-        highPriceThreshold: 0.20,
-        requireProvenFamilyAbovePrice: 0.20,
+        highPriceThreshold: 0.2,
+        requireProvenFamilyAbovePrice: 0.2,
         scaleMode: "disabled",
         defaultMaxBuysPerLeg: 3,
         heavyMaxBuysPerLeg: 6,

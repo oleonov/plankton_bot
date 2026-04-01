@@ -55,7 +55,13 @@ export function ResetLedgerWizard({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <WizardPanel title="Reset Ledger" steps={STEPS} currentStep={step} onClose={onClose} footer={footer}>
+    <WizardPanel
+      title="Reset Ledger"
+      steps={STEPS}
+      currentStep={step}
+      onClose={onClose}
+      footer={footer}
+    >
       {step === 0 && (
         <div className="radio-group">
           {profiles.map((p) => {
@@ -88,8 +94,18 @@ export function ResetLedgerWizard({ onClose }: { onClose: () => void }) {
       )}
       {step === 1 && targetProfile && (
         <div style={{ fontSize: 12 }}>
-          <div className="label" style={{ marginBottom: 8 }}>Impact Summary</div>
-          <div style={{ padding: 12, background: "var(--red-bg)", borderRadius: 4, color: "#ef9a9a", marginBottom: 12 }}>
+          <div className="label" style={{ marginBottom: 8 }}>
+            Impact Summary
+          </div>
+          <div
+            style={{
+              padding: 12,
+              background: "var(--red-bg)",
+              borderRadius: 4,
+              color: "#ef9a9a",
+              marginBottom: 12,
+            }}
+          >
             The following data will be permanently deleted:
           </div>
           <div className="profile-stat">

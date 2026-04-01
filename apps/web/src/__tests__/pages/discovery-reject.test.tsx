@@ -50,7 +50,9 @@ describe("Discovery reject confirmation", () => {
     await user.click(rejectBtn);
 
     expect(screen.getByText("Reject btc-above-50k?")).toBeInTheDocument();
-    expect(screen.getByText("This candidate will be hidden for 7 days (cooldown period).")).toBeInTheDocument();
+    expect(
+      screen.getByText("This candidate will be hidden for 7 days (cooldown period)."),
+    ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
 

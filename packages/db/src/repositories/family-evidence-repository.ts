@@ -1,5 +1,10 @@
 import type Database from "better-sqlite3";
-import type { FamilyEvidenceRepository, FamilyEvidence, FamilyId, PromotionState } from "@plankton/domain";
+import type {
+  FamilyEvidenceRepository,
+  FamilyEvidence,
+  FamilyId,
+  PromotionState,
+} from "@plankton/domain";
 import { createFamilyId } from "@plankton/domain";
 import type { EvidenceStatus } from "@plankton/domain";
 

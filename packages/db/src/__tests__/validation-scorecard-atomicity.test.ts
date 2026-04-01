@@ -37,14 +37,16 @@ let conn: DbConnection;
 
 beforeEach(() => {
   conn = bootstrapControlDb(":memory:");
-  conn.db.prepare(
-    "INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)",
-  ).run(PROFILE, "Simulation", NOW);
-  conn.db.prepare(
-    `INSERT INTO family_catalog
+  conn.db
+    .prepare("INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)")
+    .run(PROFILE, "Simulation", NOW);
+  conn.db
+    .prepare(
+      `INSERT INTO family_catalog
      (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(FAMILY, "atomicity-family", "crypto", "threshold", "daily", "ad-hoc", "scalp", NOW, NOW);
+    )
+    .run(FAMILY, "atomicity-family", "crypto", "threshold", "daily", "ad-hoc", "scalp", NOW, NOW);
 });
 
 afterEach(() => {
@@ -64,7 +66,9 @@ describe("SqliteValidationScorecardRepository atomicity", () => {
     expect(inScorecard?.scorecard_id).toBe("sc-atom-1");
 
     const inLatest = conn.db
-      .prepare("SELECT scorecard_id FROM family_validation_latest WHERE family_id = ? AND profile = ?")
+      .prepare(
+        "SELECT scorecard_id FROM family_validation_latest WHERE family_id = ? AND profile = ?",
+      )
       .get(FAMILY, PROFILE) as { scorecard_id: string } | undefined;
     expect(inLatest?.scorecard_id).toBe("sc-atom-1");
   });
@@ -93,7 +97,9 @@ describe("SqliteValidationScorecardRepository atomicity", () => {
     repo.save({ ...makeScorecard("sc-atom-3b", 95), validatedAt: "2026-03-31T11:00:00.000Z" });
 
     const inLatest = conn.db
-      .prepare("SELECT scorecard_id FROM family_validation_latest WHERE family_id = ? AND profile = ?")
+      .prepare(
+        "SELECT scorecard_id FROM family_validation_latest WHERE family_id = ? AND profile = ?",
+      )
       .get(FAMILY, PROFILE) as { scorecard_id: string } | undefined;
     expect(inLatest?.scorecard_id).toBe("sc-atom-3b");
 

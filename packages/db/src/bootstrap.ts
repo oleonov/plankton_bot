@@ -34,9 +34,9 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
  * Idempotent — INSERT OR IGNORE skips existing rows. Wrapped in transaction for atomicity.
  */
 function backfillDeployments(db: import("better-sqlite3").Database): void {
-  const families = db
-    .prepare("SELECT family_id FROM family_catalog")
-    .all() as { family_id: string }[];
+  const families = db.prepare("SELECT family_id FROM family_catalog").all() as {
+    family_id: string;
+  }[];
 
   if (families.length === 0) return;
 
@@ -63,7 +63,12 @@ function backfillDeployments(db: import("better-sqlite3").Database): void {
 }
 
 /** ALTER TABLE ADD COLUMN, ignoring "duplicate column" errors. */
-function safeAddColumn(db: import("better-sqlite3").Database, table: string, column: string, type: string): void {
+function safeAddColumn(
+  db: import("better-sqlite3").Database,
+  table: string,
+  column: string,
+  type: string,
+): void {
   try {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
   } catch (err) {

@@ -33,7 +33,9 @@ function createControlDb(): DbConnection {
     .prepare("INSERT INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper')")
     .run();
   conn.db
-    .prepare("INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES ('paper', 1000)")
+    .prepare(
+      "INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES ('paper', 1000)",
+    )
     .run();
   // Seed family_catalog entry (FK target for rollups and scorecards)
   conn.db
@@ -89,7 +91,9 @@ describe("ProfileRuntimePublisher atomicity", () => {
     await publisher.publish();
 
     const rollup = controlConn.db
-      .prepare("SELECT * FROM family_profile_rollups WHERE family_id = 'fam-1' AND profile = 'paper'")
+      .prepare(
+        "SELECT * FROM family_profile_rollups WHERE family_id = 'fam-1' AND profile = 'paper'",
+      )
       .get() as Record<string, unknown> | undefined;
     expect(rollup).toBeDefined();
     expect(rollup!["open_value_usdc"]).toBe(25.0);
@@ -107,7 +111,9 @@ describe("ProfileRuntimePublisher atomicity", () => {
     expect(scorecards.length).toBe(1);
 
     const latest = controlConn.db
-      .prepare("SELECT * FROM family_validation_latest WHERE family_id = 'fam-1' AND profile = 'paper'")
+      .prepare(
+        "SELECT * FROM family_validation_latest WHERE family_id = 'fam-1' AND profile = 'paper'",
+      )
       .get() as Record<string, unknown> | undefined;
     expect(latest).toBeDefined();
   });
@@ -121,7 +127,9 @@ describe("ProfileRuntimePublisher atomicity", () => {
 
     // Rollups should NOT have been persisted (transaction rolled back)
     const rollup = controlConn.db
-      .prepare("SELECT * FROM family_profile_rollups WHERE family_id = 'fam-1' AND profile = 'paper'")
+      .prepare(
+        "SELECT * FROM family_profile_rollups WHERE family_id = 'fam-1' AND profile = 'paper'",
+      )
       .get();
     expect(rollup).toBeUndefined();
 

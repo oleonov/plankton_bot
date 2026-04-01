@@ -121,12 +121,12 @@ const CONF_RANK = `CASE pattern_confidence
 const ORDER_BY = `${STATUS_RANK}, ${REC_RANK}, ${CONF_RANK}, ${SCORE_EXPR} DESC, last_seen_at DESC, candidate_id ASC`;
 
 interface CursorData {
-  sr: number;  // status rank
-  rr: number;  // recommendation rank
-  cr: number;  // confidence rank
-  sc: number;  // score (positive, not negated)
-  ls: string;  // last_seen_at ISO string (full precision)
-  id: string;  // candidate_id
+  sr: number; // status rank
+  rr: number; // recommendation rank
+  cr: number; // confidence rank
+  sc: number; // score (positive, not negated)
+  ls: string; // last_seen_at ISO string (full precision)
+  id: string; // candidate_id
 }
 
 function encodeCursor(row: CandidateRow): string {
@@ -152,7 +152,8 @@ function decodeCursor(raw: string): CursorData | null {
       typeof data.sc !== "number" ||
       typeof data.ls !== "string" ||
       typeof data.id !== "string"
-    ) return null;
+    )
+      return null;
     return data;
   } catch {
     return null;
@@ -180,42 +181,72 @@ function buildKeysetClause(c: CursorData): { sql: string; params: unknown[] } {
   )`;
   const params = [
     c.sr,
-    c.sr, c.rr,
-    c.sr, c.rr, c.cr,
-    c.sr, c.rr, c.cr, c.sc,
-    c.sr, c.rr, c.cr, c.sc, c.ls,
-    c.sr, c.rr, c.cr, c.sc, c.ls, c.id,
+    c.sr,
+    c.rr,
+    c.sr,
+    c.rr,
+    c.cr,
+    c.sr,
+    c.rr,
+    c.cr,
+    c.sc,
+    c.sr,
+    c.rr,
+    c.cr,
+    c.sc,
+    c.ls,
+    c.sr,
+    c.rr,
+    c.cr,
+    c.sc,
+    c.ls,
+    c.id,
   ];
   return { sql, params };
 }
 
 function statusRank(s: string): number {
   switch (s) {
-    case "discovered": return 0;
-    case "reviewed": return 1;
-    case "materialized": return 2;
-    case "deployed": return 3;
-    case "rejected": return 4;
-    default: return 5;
+    case "discovered":
+      return 0;
+    case "reviewed":
+      return 1;
+    case "materialized":
+      return 2;
+    case "deployed":
+      return 3;
+    case "rejected":
+      return 4;
+    default:
+      return 5;
   }
 }
 
 function recRank(r: string): number {
   switch (r) {
-    case "scaled-candidate": return 0;
-    case "probe-candidate": return 1;
-    case "monitor": return 2;
-    case "pending": return 3;
-    case "ignore": return 4;
-    default: return 5;
+    case "scaled-candidate":
+      return 0;
+    case "probe-candidate":
+      return 1;
+    case "monitor":
+      return 2;
+    case "pending":
+      return 3;
+    case "ignore":
+      return 4;
+    default:
+      return 5;
   }
 }
 
 function confRank(c: string): number {
   switch (c) {
-    case "high": return 0;
-    case "medium": return 1;
-    default: return 2;
+    case "high":
+      return 0;
+    case "medium":
+      return 1;
+    default:
+      return 2;
   }
 }
 
@@ -239,9 +270,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       .get() as { ts: string | null } | undefined;
     const heartbeatAt = heartbeatRow?.ts ?? null;
     const workerState =
-      heartbeatAt && Date.now() - new Date(heartbeatAt).getTime() < 90_000
-        ? "healthy"
-        : "offline";
+      heartbeatAt && Date.now() - new Date(heartbeatAt).getTime() < 90_000 ? "healthy" : "offline";
 
     return ok({
       lastRun: formatRun(lastRun),
@@ -393,52 +422,61 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
   );
 
   // ── POST /discovery/candidates/:candidateId/accept ─────────────────────
-  app.post<{ Params: { candidateId: string }; Body: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number } }>(
-    "/discovery/candidates/:candidateId/accept",
-    async (request) => {
-      const row = getCandidate(db, request.params.candidateId);
-      const familyId = row.candidate_id;
-      const now = new Date().toISOString();
-      const body = (request.body ?? {}) as { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number };
-      const caps = {
-        maxOpenValue: body.maxOpenValueUsdc ?? PROBE_DEFAULTS.maxOpenValueUsdc,
-        maxMarkets: body.maxActiveMarkets ?? PROBE_DEFAULTS.maxActiveMarkets,
-        maxDust: body.maxDustPositions ?? PROBE_DEFAULTS.maxDustPositions,
-      };
+  app.post<{
+    Params: { candidateId: string };
+    Body: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number };
+  }>("/discovery/candidates/:candidateId/accept", async (request) => {
+    const row = getCandidate(db, request.params.candidateId);
+    const familyId = row.candidate_id;
+    const now = new Date().toISOString();
+    const body = (request.body ?? {}) as {
+      maxOpenValueUsdc?: number;
+      maxActiveMarkets?: number;
+      maxDustPositions?: number;
+    };
+    const caps = {
+      maxOpenValue: body.maxOpenValueUsdc ?? PROBE_DEFAULTS.maxOpenValueUsdc,
+      maxMarkets: body.maxActiveMarkets ?? PROBE_DEFAULTS.maxActiveMarkets,
+      maxDust: body.maxDustPositions ?? PROBE_DEFAULTS.maxDustPositions,
+    };
 
-      if (!Number.isFinite(caps.maxOpenValue) || caps.maxOpenValue < 1) {
-        throw new ApiError(400, "maxOpenValueUsdc must be >= 1", "INVALID_CAPS");
-      }
-      if (!Number.isInteger(caps.maxMarkets) || caps.maxMarkets < 1) {
-        throw new ApiError(400, "maxActiveMarkets must be integer >= 1", "INVALID_CAPS");
-      }
-      if (!Number.isInteger(caps.maxDust) || caps.maxDust < 0) {
-        throw new ApiError(400, "maxDustPositions must be integer >= 0", "INVALID_CAPS");
-      }
+    if (!Number.isFinite(caps.maxOpenValue) || caps.maxOpenValue < 1) {
+      throw new ApiError(400, "maxOpenValueUsdc must be >= 1", "INVALID_CAPS");
+    }
+    if (!Number.isInteger(caps.maxMarkets) || caps.maxMarkets < 1) {
+      throw new ApiError(400, "maxActiveMarkets must be integer >= 1", "INVALID_CAPS");
+    }
+    if (!Number.isInteger(caps.maxDust) || caps.maxDust < 0) {
+      throw new ApiError(400, "maxDustPositions must be integer >= 0", "INVALID_CAPS");
+    }
 
-      // Control DB transaction: all control-side inserts are atomic
-      const materializeControl = controlDb.transaction(() => {
-        // Read current status before updating (for audit trail)
-        const current = controlDb.prepare(
-          "SELECT status FROM family_candidates WHERE candidate_id = ?",
-        ).get(row.candidate_id) as { status: string } | undefined;
-        const fromStatus = current?.status ?? "unknown";
+    // Control DB transaction: all control-side inserts are atomic
+    const materializeControl = controlDb.transaction(() => {
+      // Read current status before updating (for audit trail)
+      const current = controlDb
+        .prepare("SELECT status FROM family_candidates WHERE candidate_id = ?")
+        .get(row.candidate_id) as { status: string } | undefined;
+      const fromStatus = current?.status ?? "unknown";
 
-        // Atomically guard + update candidate status (race-safe)
-        const result = controlDb.prepare(
+      // Atomically guard + update candidate status (race-safe)
+      const result = controlDb
+        .prepare(
           `UPDATE family_candidates
            SET status = 'materialized', materialized_at = ?
            WHERE candidate_id = ? AND status IN ('discovered', 'reviewed')`,
-        ).run(now, row.candidate_id);
-        if (result.changes === 0) return false;
+        )
+        .run(now, row.candidate_id);
+      if (result.changes === 0) return false;
 
-        // 1. INSERT family_catalog
-        controlDb.prepare(
+      // 1. INSERT family_catalog
+      controlDb
+        .prepare(
           `INSERT INTO family_catalog
              (family_id, family_key, primary_category, regime, horizon, cadence,
               strategy_profile, slug_pattern, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
+        )
+        .run(
           familyId,
           row.family_key,
           row.primary_category,
@@ -451,91 +489,102 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           now,
         );
 
-        // 2. INSERT family_rules with probe-only defaults (overridable via request body)
-        controlDb.prepare(
+      // 2. INSERT family_rules with probe-only defaults (overridable via request body)
+      controlDb
+        .prepare(
           `INSERT INTO family_rules
              (family_id, enabled, action, entry_mode, scale_mode, exit_mode,
               allow_heavy_campaigns, max_open_value_usdc, max_active_markets,
               max_dust_positions, updated_at)
            VALUES (?, 1, 'trade', 'probe-first', 'disabled', 'repricing-sell',
                    0, ?, ?, ?, ?)`,
-        ).run(familyId, caps.maxOpenValue, caps.maxMarkets, caps.maxDust, now);
+        )
+        .run(familyId, caps.maxOpenValue, caps.maxMarkets, caps.maxDust, now);
 
-        // 3. INSERT family_deployments for sim + paper (enabled), live-lite (disabled)
-        const insertDep = controlDb.prepare(
-          `INSERT INTO family_deployments
+      // 3. INSERT family_deployments for sim + paper (enabled), live-lite (disabled)
+      const insertDep = controlDb.prepare(
+        `INSERT INTO family_deployments
              (family_id, profile, enabled, operator_mode, strategy_stage,
               deployment_stage, priority, created_at, updated_at)
            VALUES (?, ?, ?, 'active', 'probe-only', 'disabled', 999, ?, ?)`,
-        );
-        insertDep.run(familyId, "simulation", 1, now, now);
-        insertDep.run(familyId, "paper", 1, now, now);
-        insertDep.run(familyId, "live-lite", 0, now, now);
+      );
+      insertDep.run(familyId, "simulation", 1, now, now);
+      insertDep.run(familyId, "paper", 1, now, now);
+      insertDep.run(familyId, "live-lite", 0, now, now);
 
-        // 4. INSERT family_evidence with zeros + probe warming-up substate
-        controlDb.prepare(
+      // 4. INSERT family_evidence with zeros + probe warming-up substate
+      controlDb
+        .prepare(
           "INSERT INTO family_evidence (family_id, probe_substate, updated_at) VALUES (?, 'warming-up', ?)",
-        ).run(familyId, now);
+        )
+        .run(familyId, now);
 
-        // 5. INSERT family_rules_snapshot
-        const rulesRow = controlDb
-          .prepare("SELECT * FROM family_rules WHERE family_id = ?")
-          .get(familyId) as Record<string, unknown>;
-        controlDb.prepare(
+      // 5. INSERT family_rules_snapshot
+      const rulesRow = controlDb
+        .prepare("SELECT * FROM family_rules WHERE family_id = ?")
+        .get(familyId) as Record<string, unknown>;
+      controlDb
+        .prepare(
           `INSERT INTO family_rules_snapshot (family_id, snapshot, reason, captured_at)
            VALUES (?, ?, 'probe-baseline', ?)`,
-        ).run(familyId, JSON.stringify(rulesRow), now);
+        )
+        .run(familyId, JSON.stringify(rulesRow), now);
 
-        // 6. INSERT operator_commands (rules_reload, deduped)
-        const pending = controlDb
+      // 6. INSERT operator_commands (rules_reload, deduped)
+      const pending = controlDb
+        .prepare(
+          "SELECT 1 FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending' LIMIT 1",
+        )
+        .get();
+      if (!pending) {
+        controlDb
           .prepare(
-            "SELECT 1 FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending' LIMIT 1",
-          )
-          .get();
-        if (!pending) {
-          controlDb.prepare(
             `INSERT INTO operator_commands
                (action, target_id, reason, status, initiator_type, created_at)
              VALUES ('rules_reload', NULL, ?, 'pending', 'system', ?)`,
-          ).run(`materialized candidate ${familyId}`, now);
-        }
+          )
+          .run(`materialized candidate ${familyId}`, now);
+      }
 
-        // 7. INSERT state_transitions
-        controlDb.prepare(
+      // 7. INSERT state_transitions
+      controlDb
+        .prepare(
           `INSERT INTO state_transitions
              (entity_type, entity_id, from_state, to_state, trigger_type, initiator, reason)
            VALUES ('candidate', ?, ?, 'materialized', 'operator', 'api', ?)`,
-        ).run(row.candidate_id, fromStatus, `accepted via API`);
+        )
+        .run(row.candidate_id, fromStatus, `accepted via API`);
 
-        return true;
-      });
+      return true;
+    });
 
-      const applied = materializeControl();
-      if (!applied) {
-        throw new ApiError(
-          409,
-          `candidate was concurrently modified (no longer 'reviewed')`,
-          "CONCURRENT_MODIFICATION",
-        );
-      }
+    const applied = materializeControl();
+    if (!applied) {
+      throw new ApiError(
+        409,
+        `candidate was concurrently modified (no longer 'reviewed')`,
+        "CONCURRENT_MODIFICATION",
+      );
+    }
 
-      // Ledger DB: insert family_runtime_state baseline (separate DB, not transactional with control)
-      ledgerDb.prepare(
+    // Ledger DB: insert family_runtime_state baseline (separate DB, not transactional with control)
+    ledgerDb
+      .prepare(
         `INSERT INTO family_runtime_state
            (family_id, runtime_mode, open_value_usdc, open_position_count,
             open_dust_count, active_market_count, current_tail_cost_usdc,
             tail_adjusted_pnl_live, effective_mode, derived_mode_reason, updated_at)
          VALUES (?, 'active', 0, 0, 0, 0, 0, 0, 'active',
                  'baseline: zero exposure, probe-only gated by entry rules', ?)`,
-      ).run(familyId, now);
+      )
+      .run(familyId, now);
 
-      return ok({
-        ...toCandidateDto(row),
-        status: "materialized",
-        materializedAt: now,
-      });
-    },
-  );
+    return ok({
+      ...toCandidateDto(row),
+      status: "materialized",
+      materializedAt: now,
+    });
+  });
 
   // ── GET /discovery/candidates/:candidateId/transitions ────────────────
   app.get<{ Params: { candidateId: string } }>(

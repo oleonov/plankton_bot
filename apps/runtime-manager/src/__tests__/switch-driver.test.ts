@@ -19,8 +19,15 @@ const NOW = "2026-03-30T12:00:00.000Z";
 // Relative path from this test to the DB package schemas
 const SCHEMA_PATH = join(
   import.meta.dirname,
-  "..", "..", "..", "..",
-  "packages", "db", "src", "schemas", "control.sql",
+  "..",
+  "..",
+  "..",
+  "..",
+  "packages",
+  "db",
+  "src",
+  "schemas",
+  "control.sql",
 );
 
 function createControlDb(): Database.Database {
@@ -80,15 +87,7 @@ describe("SwitchDriver", () => {
     transitionRepo = new SqliteStateTransitionRepository(db);
     container = new MockContainerControl();
 
-    driver = new SwitchDriver(
-      db,
-      switchRepo,
-      controlRepo,
-      transitionRepo,
-      container,
-      30,
-      nullLog,
-    );
+    driver = new SwitchDriver(db, switchRepo, controlRepo, transitionRepo, container, 30, nullLog);
 
     switchId = createSwitchId("switch-001");
   });

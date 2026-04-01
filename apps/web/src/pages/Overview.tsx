@@ -57,19 +57,17 @@ function BalanceCard({ status }: { status: import("../api/types.ts").StatusData 
   const topBalance = isLive ? status.walletBalanceUsdc : status.balanceUsdc;
 
   // If-close-all: top balance + current value of open positions
-  const ifCloseAll = topBalance != null
-    ? topBalance + status.totalCurrentValueUsdc
-    : null;
+  const ifCloseAll = topBalance != null ? topBalance + status.totalCurrentValueUsdc : null;
 
   // Invested vs cap
   const invested = status.totalOpenValueUsdc;
-  const cap = isLive
-    ? status.liveLite?.maxOpenValueUsdc
-    : status.initialBalanceUsdc;
+  const cap = isLive ? status.liveLite?.maxOpenValueUsdc : status.initialBalanceUsdc;
 
   return (
     <div className={`card ${isLive ? "card-accent-green" : ""}`}>
-      <div className="label" style={isLive ? undefined : dim}>Balance</div>
+      <div className="label" style={isLive ? undefined : dim}>
+        Balance
+      </div>
       <div className="value-lg" style={isLive ? { color: "var(--green)" } : dim}>
         {topBalance != null ? `$${topBalance.toFixed(0)}` : "—"}
       </div>

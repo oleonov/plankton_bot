@@ -15,9 +15,21 @@ const PROFILES: Array<{
   displayName: string;
   description: string;
 }> = [
-  { profileId: ProfileId.Simulation, displayName: "Simulation", description: "In-memory simulated execution" },
-  { profileId: ProfileId.Paper, displayName: "Paper", description: "Live market data, simulated orders" },
-  { profileId: ProfileId.LiveLite, displayName: "Live-Lite", description: "Real orders with envelope caps" },
+  {
+    profileId: ProfileId.Simulation,
+    displayName: "Simulation",
+    description: "In-memory simulated execution",
+  },
+  {
+    profileId: ProfileId.Paper,
+    displayName: "Paper",
+    description: "Live market data, simulated orders",
+  },
+  {
+    profileId: ProfileId.LiveLite,
+    displayName: "Live-Lite",
+    description: "Real orders with envelope caps",
+  },
 ];
 
 export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules): void {
@@ -108,19 +120,23 @@ export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules
     }
 
     // 4. Runtime control state
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO runtime_control_state (
         id, desired_profile, paused, runtime_status, schema_version, updated_at
       ) VALUES (1, ?, 1, 'stopped', 1, ?)
-    `).run(ProfileId.Simulation, now);
+    `,
+    ).run(ProfileId.Simulation, now);
 
     // 5. Config imports record
-    db.prepare(`
+    db.prepare(
+      `
       INSERT INTO config_imports (
         import_id, source_checksum, families_added, families_updated,
         families_skipped, families_unchanged, imported_at, imported_by
       ) VALUES (?, 'bootstrap', ?, 0, 0, 0, ?, 'bootstrap')
-    `).run(importId, loaded.families.length, now);
+    `,
+    ).run(importId, loaded.families.length, now);
   });
 
   tx();
@@ -134,34 +150,81 @@ function insertFamily(
   now: string,
 ): void {
   const { identity: id, rules } = family;
-  const { universe: u, entry: e, scaleIn: s, exit: x, twoSided: t, tailSuppression: ts, session: ss } = rules;
+  const {
+    universe: u,
+    entry: e,
+    scaleIn: s,
+    exit: x,
+    twoSided: t,
+    tailSuppression: ts,
+    session: ss,
+  } = rules;
 
   insertCatalog.run(
-    id.familyId, id.familyKey, id.primaryCategory, id.regime, id.horizon, id.cadence,
-    id.strategyProfile, id.topicKey ?? null, id.slugPattern ?? null, id.notes ?? null,
-    now, now,
+    id.familyId,
+    id.familyKey,
+    id.primaryCategory,
+    id.regime,
+    id.horizon,
+    id.cadence,
+    id.strategyProfile,
+    id.topicKey ?? null,
+    id.slugPattern ?? null,
+    id.notes ?? null,
+    now,
+    now,
   );
 
   insertRules.run(
     id.familyId,
-    u.enabled ? 1 : 0, u.action, u.priorityRank, u.allowWeekends ? 1 : 0, u.sessionMode,
-    e.entryMode, e.minEntryPrice, e.maxEntryPrice, e.maxInitialNotionalUsdc,
-    e.allowHighPriceOneShot ? 1 : 0, e.highPriceThreshold, e.requireProvenFamilyAbovePrice,
-    e.preferredEntryBand ?? null, e.maxProbeCountPerMarket ?? null, e.entryCooldownSeconds ?? null,
-    e.maxNewMarketsPerSession ?? null, e.probeSizeUsdc, e.addSizeUsdc,
-    s.scaleMode, s.defaultMaxBuysPerLeg, s.heavyMaxBuysPerLeg,
-    s.allowHeavyCampaigns ? 1 : 0, s.requirePositiveRecycleHistoryForScale ? 1 : 0,
-    x.exitMode, x.primaryProfitModel, x.allowRunnerExtension ? 1 : 0, x.preferFastRecycle ? 1 : 0,
-    x.resolutionHoldingAllowed ? 1 : 0, x.resolutionBufferMinutes,
-    x.targetRoiBandLow ?? null, x.targetRoiBandHigh ?? null,
-    x.maxUnmovedHoldHours ?? null, x.maxTailHoldHours ?? null,
-    t.allowTwoSided ? 1 : 0, t.twoSidedMode, t.minActivityForTwoSided ?? null,
-    ts.maxOpenValueUsdc, ts.maxActiveMarkets, ts.maxDustPositions,
-    ts.tailQuarantineThresholdUsdc, ts.tailQuarantineThresholdRatio,
-    ts.staleTailPruneEnabled ? 1 : 0, ts.thresholdCleanupRequired ? 1 : 0,
+    u.enabled ? 1 : 0,
+    u.action,
+    u.priorityRank,
+    u.allowWeekends ? 1 : 0,
+    u.sessionMode,
+    e.entryMode,
+    e.minEntryPrice,
+    e.maxEntryPrice,
+    e.maxInitialNotionalUsdc,
+    e.allowHighPriceOneShot ? 1 : 0,
+    e.highPriceThreshold,
+    e.requireProvenFamilyAbovePrice,
+    e.preferredEntryBand ?? null,
+    e.maxProbeCountPerMarket ?? null,
+    e.entryCooldownSeconds ?? null,
+    e.maxNewMarketsPerSession ?? null,
+    e.probeSizeUsdc,
+    e.addSizeUsdc,
+    s.scaleMode,
+    s.defaultMaxBuysPerLeg,
+    s.heavyMaxBuysPerLeg,
+    s.allowHeavyCampaigns ? 1 : 0,
+    s.requirePositiveRecycleHistoryForScale ? 1 : 0,
+    x.exitMode,
+    x.primaryProfitModel,
+    x.allowRunnerExtension ? 1 : 0,
+    x.preferFastRecycle ? 1 : 0,
+    x.resolutionHoldingAllowed ? 1 : 0,
+    x.resolutionBufferMinutes,
+    x.targetRoiBandLow ?? null,
+    x.targetRoiBandHigh ?? null,
+    x.maxUnmovedHoldHours ?? null,
+    x.maxTailHoldHours ?? null,
+    t.allowTwoSided ? 1 : 0,
+    t.twoSidedMode,
+    t.minActivityForTwoSided ?? null,
+    ts.maxOpenValueUsdc,
+    ts.maxActiveMarkets,
+    ts.maxDustPositions,
+    ts.tailQuarantineThresholdUsdc,
+    ts.tailQuarantineThresholdRatio,
+    ts.staleTailPruneEnabled ? 1 : 0,
+    ts.thresholdCleanupRequired ? 1 : 0,
     ts.autoSettleResolvedMarkets ? 1 : 0,
-    JSON.stringify(ss.activeWindowsUtc), JSON.stringify(ss.reducedWindowsUtc),
-    ss.weekdayBias, ss.weekendMode,
+    JSON.stringify(ss.activeWindowsUtc),
+    JSON.stringify(ss.reducedWindowsUtc),
+    ss.weekdayBias,
+    ss.weekendMode,
     now,
   );
 

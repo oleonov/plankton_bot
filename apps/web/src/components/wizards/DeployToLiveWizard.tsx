@@ -56,10 +56,18 @@ export function DeployToLiveWizard({
   );
 
   return (
-    <WizardPanel title={`Deploy ${familyKey}`} steps={STEPS} currentStep={step} onClose={onClose} footer={footer}>
+    <WizardPanel
+      title={`Deploy ${familyKey}`}
+      steps={STEPS}
+      currentStep={step}
+      onClose={onClose}
+      footer={footer}
+    >
       {step === 0 && (
         <div style={{ fontSize: 12 }}>
-          <div className="label" style={{ marginBottom: 8 }}>Validation Scores</div>
+          <div className="label" style={{ marginBottom: 8 }}>
+            Validation Scores
+          </div>
           {evidence ? (
             <>
               <ScoreRow label="Evidence Score" value={evidence.evidenceScore} />
@@ -68,7 +76,9 @@ export function DeployToLiveWizard({
               <ScoreRow label="Toxicity Penalty" value={evidence.toxicityPenalty} />
               <div className="profile-stat">
                 <span className="label">Promotion State</span>
-                <span>{evidence.promotionState ? <Badge value={evidence.promotionState} /> : "n/a"}</span>
+                <span>
+                  {evidence.promotionState ? <Badge value={evidence.promotionState} /> : "n/a"}
+                </span>
               </div>
               <div className="profile-stat">
                 <span className="label">Tail-Adj PnL</span>
@@ -86,7 +96,11 @@ export function DeployToLiveWizard({
             className={`radio-option ${stage === "live-probe" ? "selected" : ""}`}
             onClick={() => setStage("live-probe")}
           >
-            <input type="radio" checked={stage === "live-probe"} onChange={() => setStage("live-probe")} />
+            <input
+              type="radio"
+              checked={stage === "live-probe"}
+              onChange={() => setStage("live-probe")}
+            />
             <div>
               <div>Live Probe</div>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
@@ -98,7 +112,11 @@ export function DeployToLiveWizard({
             className={`radio-option ${stage === "live-scaled" ? "selected" : ""}`}
             onClick={() => setStage("live-scaled")}
           >
-            <input type="radio" checked={stage === "live-scaled"} onChange={() => setStage("live-scaled")} />
+            <input
+              type="radio"
+              checked={stage === "live-scaled"}
+              onChange={() => setStage("live-scaled")}
+            />
             <div>
               <div>Live Scaled</div>
               <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
@@ -110,14 +128,18 @@ export function DeployToLiveWizard({
       )}
       {step === 2 && (
         <div style={{ fontSize: 12 }}>
-          <div className="label" style={{ marginBottom: 8 }}>Deployment Summary</div>
+          <div className="label" style={{ marginBottom: 8 }}>
+            Deployment Summary
+          </div>
           <div className="profile-stat">
             <span className="label">Family</span>
             <span style={{ color: "var(--blue)" }}>{familyKey}</span>
           </div>
           <div className="profile-stat">
             <span className="label">Stage</span>
-            <span><Badge value={stage} /></span>
+            <span>
+              <Badge value={stage} />
+            </span>
           </div>
           {deployMutation.isError && (
             <div style={{ marginTop: 12, color: "var(--red)" }}>

@@ -33,9 +33,20 @@ function CandidateTransitions({ transitions }: { transitions: TransitionDTO[] })
           {transitions.map((t) => (
             <tr key={t.id}>
               <td>{formatAgo(t.createdAt)}</td>
-              <td><Badge value={t.fromState} /></td>
-              <td><Badge value={t.toState} /></td>
-              <td style={{ maxWidth: 140, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <td>
+                <Badge value={t.fromState} />
+              </td>
+              <td>
+                <Badge value={t.toState} />
+              </td>
+              <td
+                style={{
+                  maxWidth: 140,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {t.reason}
               </td>
             </tr>
@@ -91,7 +102,9 @@ export function CandidateDetail({
             </div>
           )}
           <div style={{ margin: "12px 0" }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginBottom: 6 }}>
+            <div
+              style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", marginBottom: 6 }}
+            >
               Scores
             </div>
             <ScoreBars
@@ -109,7 +122,21 @@ export function CandidateDetail({
   );
 }
 
-function IdentitySection({ data }: { data: { familyKey: string; regime: string; horizon: string; cadence: string; patternConfidence: string; slugPattern: string | null; matchedFamilyId: string | null; gateRecommendation: string; status: string } }) {
+function IdentitySection({
+  data,
+}: {
+  data: {
+    familyKey: string;
+    regime: string;
+    horizon: string;
+    cadence: string;
+    patternConfidence: string;
+    slugPattern: string | null;
+    matchedFamilyId: string | null;
+    gateRecommendation: string;
+    status: string;
+  };
+}) {
   return (
     <div style={{ background: "var(--bg-base)", borderRadius: 4, padding: 10, marginBottom: 12 }}>
       <DetailField label="Family Key" value={data.familyKey} />
@@ -127,7 +154,16 @@ function IdentitySection({ data }: { data: { familyKey: string; regime: string; 
   );
 }
 
-function ObservationList({ observations }: { observations: Array<{ id: number; activeMarketCount: number; clusterVolume24h: number; observedAt: string }> }) {
+function ObservationList({
+  observations,
+}: {
+  observations: Array<{
+    id: number;
+    activeMarketCount: number;
+    clusterVolume24h: number;
+    observedAt: string;
+  }>;
+}) {
   if (observations.length === 0) {
     return <div style={{ color: "var(--text-dim)", fontSize: 11 }}>No observations</div>;
   }

@@ -132,9 +132,7 @@ export class ScoreComputer {
       .get(familyId) as { v: number } | undefined;
 
     const tailRow = this.db
-      .prepare(
-        `SELECT tail_adjusted_pnl_live AS v FROM family_runtime_state WHERE family_id = ?`,
-      )
+      .prepare(`SELECT tail_adjusted_pnl_live AS v FROM family_runtime_state WHERE family_id = ?`)
       .get(familyId) as { v: number } | undefined;
 
     // Repricing exits: positions closed via repricing-exit that had positive PnL
@@ -173,9 +171,7 @@ export class ScoreComputer {
         `SELECT active_market_count, cluster_volume_24h
          FROM family_candidates WHERE candidate_id = ?`,
       )
-      .get(candidateId) as
-      | { active_market_count: number; cluster_volume_24h: number }
-      | undefined;
+      .get(candidateId) as { active_market_count: number; cluster_volume_24h: number } | undefined;
 
     if (!candidateRow) {
       return { activeMarketCount: 0, healthyEndDateFraction: 0, clusterVolume24h: 0 };
@@ -264,9 +260,7 @@ export class ScoreComputer {
       .get(familyId, staleCutoff) as { v: number } | undefined;
 
     const totalOpenRow = this.db
-      .prepare(
-        `SELECT COUNT(*) AS v FROM positions WHERE family_id = ? AND status = 'open'`,
-      )
+      .prepare(`SELECT COUNT(*) AS v FROM positions WHERE family_id = ? AND status = 'open'`)
       .get(familyId) as { v: number } | undefined;
 
     return {

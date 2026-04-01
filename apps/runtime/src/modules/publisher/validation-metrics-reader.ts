@@ -60,9 +60,7 @@ export class ValidationMetricsReader {
   readFamilyMetrics(familyIds: string[]): FamilyMetrics[] {
     if (familyIds.length === 0) return [];
 
-    const stmt = this.ledgerDb.prepare(
-      "SELECT * FROM family_runtime_state WHERE family_id = ?",
-    );
+    const stmt = this.ledgerDb.prepare("SELECT * FROM family_runtime_state WHERE family_id = ?");
 
     return familyIds.map((fid) => {
       const row = stmt.get(fid) as Record<string, unknown> | undefined;
@@ -77,7 +75,10 @@ export class ValidationMetricsReader {
         tailCostUsdc: Number(row.current_tail_cost_usdc ?? 0),
         tailAdjustedPnl: Number(row.tail_adjusted_pnl_live ?? 0),
         effectiveMode: (row.effective_mode as string) ?? null,
-        lastTradeAt: maxTimestamp(row.last_entry_ts as string | null, row.last_exit_ts as string | null),
+        lastTradeAt: maxTimestamp(
+          row.last_entry_ts as string | null,
+          row.last_exit_ts as string | null,
+        ),
       };
     });
   }
@@ -94,9 +95,7 @@ export class ValidationMetricsReader {
       .get() as { cnt: number };
 
     const exposure = this.ledgerDb
-      .prepare(
-        "SELECT COALESCE(SUM(open_value_usdc), 0) as total FROM family_runtime_state",
-      )
+      .prepare("SELECT COALESCE(SUM(open_value_usdc), 0) as total FROM family_runtime_state")
       .get() as { total: number };
 
     return {
@@ -109,9 +108,7 @@ export class ValidationMetricsReader {
   /** Sum of realized PnL from all positions (closed + dust). */
   readRealizedPnl(): number {
     const row = this.ledgerDb
-      .prepare(
-        "SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions",
-      )
+      .prepare("SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions")
       .get() as { total: number };
     return row.total;
   }

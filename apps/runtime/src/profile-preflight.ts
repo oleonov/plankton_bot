@@ -34,9 +34,7 @@ export function runProfilePreflight(opts: {
   }
 
   const familyCount = opts.controlDb
-    .prepare(
-      "SELECT COUNT(*) as cnt FROM family_deployments WHERE profile = ? AND enabled = 1",
-    )
+    .prepare("SELECT COUNT(*) as cnt FROM family_deployments WHERE profile = ? AND enabled = 1")
     .get(opts.profile) as { cnt: number };
   info.deployedFamilies = familyCount.cnt;
 
@@ -46,11 +44,7 @@ export function runProfilePreflight(opts: {
   info.openPositions = posCount.cnt;
 
   const status =
-    blockers.length > 0
-      ? "failed"
-      : warnings.length > 0
-        ? "passed_with_warnings"
-        : "passed";
+    blockers.length > 0 ? "failed" : warnings.length > 0 ? "passed_with_warnings" : "passed";
 
   return { status, blockers, warnings, info };
 }
@@ -116,9 +110,7 @@ function runLiveLiteChecks(
 
   // Active markets count
   const activeMarkets = db
-    .prepare(
-      "SELECT COUNT(DISTINCT token_id) as cnt FROM positions WHERE status = 'open'",
-    )
+    .prepare("SELECT COUNT(DISTINCT token_id) as cnt FROM positions WHERE status = 'open'")
     .get() as { cnt: number };
   if (activeMarkets.cnt > envelope.maxActiveMarkets) {
     blockers.push({

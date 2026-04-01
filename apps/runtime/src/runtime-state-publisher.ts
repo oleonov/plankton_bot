@@ -102,7 +102,11 @@ export class RuntimeStatePublisher {
     try {
       this.publishHeartbeat(status);
     } catch (err: unknown) {
-      if (err instanceof Error && "code" in err && (err as { code: string }).code === "SQLITE_BUSY") {
+      if (
+        err instanceof Error &&
+        "code" in err &&
+        (err as { code: string }).code === "SQLITE_BUSY"
+      ) {
         return; // contention — skip, retry next interval
       }
       throw err; // unexpected error — propagate
@@ -114,7 +118,11 @@ export class RuntimeStatePublisher {
     try {
       return (this.db.prepare(sql).get() as T) ?? null;
     } catch (err: unknown) {
-      if (err instanceof Error && "code" in err && (err as { code: string }).code === "SQLITE_BUSY") {
+      if (
+        err instanceof Error &&
+        "code" in err &&
+        (err as { code: string }).code === "SQLITE_BUSY"
+      ) {
         return null;
       }
       throw err;

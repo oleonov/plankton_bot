@@ -27,9 +27,7 @@ function rowToProposal(row: ProposalRow): PromotionProposal {
     proposedState: row.proposed_state as PromotionState,
     reason: row.reason,
     scoresSnapshot: row.scores_snapshot,
-    sourceScorecardId: row.source_scorecard_id
-      ? createScorecardId(row.source_scorecard_id)
-      : null,
+    sourceScorecardId: row.source_scorecard_id ? createScorecardId(row.source_scorecard_id) : null,
     status: row.status,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
@@ -72,9 +70,7 @@ export class SqlitePromotionProposalRepository implements PromotionProposalRepos
 
   findByFamily(familyId: FamilyId): PromotionProposal[] {
     const rows = this.db
-      .prepare(
-        "SELECT * FROM promotion_proposals WHERE family_id = ? ORDER BY created_at DESC",
-      )
+      .prepare("SELECT * FROM promotion_proposals WHERE family_id = ? ORDER BY created_at DESC")
       .all(familyId) as ProposalRow[];
     return rows.map(rowToProposal);
   }

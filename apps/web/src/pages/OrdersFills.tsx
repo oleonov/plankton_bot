@@ -109,15 +109,60 @@ export function OrdersFills() {
           <table>
             <thead>
               <tr>
-                <SortTh label="Order" sortKey="orderId" sort={orderSort.sort} onToggle={orderSort.toggle} />
-                <SortTh label="Market" sortKey="market" sort={orderSort.sort} onToggle={orderSort.toggle} />
-                <SortTh label="Family" sortKey="family" sort={orderSort.sort} onToggle={orderSort.toggle} />
-                <SortTh label="Side" sortKey="side" sort={orderSort.sort} onToggle={orderSort.toggle} />
-                <SortTh label="Price" sortKey="price" sort={orderSort.sort} onToggle={orderSort.toggle} />
-                <SortTh label="Size" sortKey="size" sort={orderSort.sort} onToggle={orderSort.toggle} />
-                <SortTh label="Status" sortKey="status" sort={orderSort.sort} onToggle={orderSort.toggle} />
-                <SortTh label="Ends" sortKey="ends" sort={orderSort.sort} onToggle={orderSort.toggle} />
-                <SortTh label="Updated" sortKey="updated" sort={orderSort.sort} onToggle={orderSort.toggle} />
+                <SortTh
+                  label="Order"
+                  sortKey="orderId"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
+                  label="Market"
+                  sortKey="market"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
+                  label="Family"
+                  sortKey="family"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
+                  label="Side"
+                  sortKey="side"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
+                  label="Price"
+                  sortKey="price"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
+                  label="Size"
+                  sortKey="size"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
+                  label="Status"
+                  sortKey="status"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
+                  label="Ends"
+                  sortKey="ends"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
+                  label="Updated"
+                  sortKey="updated"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
               </tr>
             </thead>
             <tbody>
@@ -164,14 +209,54 @@ export function OrdersFills() {
           <table>
             <thead>
               <tr>
-                <SortTh label="Fill" sortKey="fillId" sort={fillSort.sort} onToggle={fillSort.toggle} />
-                <SortTh label="Market" sortKey="market" sort={fillSort.sort} onToggle={fillSort.toggle} />
-                <SortTh label="Family" sortKey="family" sort={fillSort.sort} onToggle={fillSort.toggle} />
-                <SortTh label="Side" sortKey="side" sort={fillSort.sort} onToggle={fillSort.toggle} />
-                <SortTh label="Price" sortKey="price" sort={fillSort.sort} onToggle={fillSort.toggle} />
-                <SortTh label="Size" sortKey="size" sort={fillSort.sort} onToggle={fillSort.toggle} />
-                <SortTh label="USDC" sortKey="usdc" sort={fillSort.sort} onToggle={fillSort.toggle} />
-                <SortTh label="Filled At" sortKey="filledAt" sort={fillSort.sort} onToggle={fillSort.toggle} />
+                <SortTh
+                  label="Fill"
+                  sortKey="fillId"
+                  sort={fillSort.sort}
+                  onToggle={fillSort.toggle}
+                />
+                <SortTh
+                  label="Market"
+                  sortKey="market"
+                  sort={fillSort.sort}
+                  onToggle={fillSort.toggle}
+                />
+                <SortTh
+                  label="Family"
+                  sortKey="family"
+                  sort={fillSort.sort}
+                  onToggle={fillSort.toggle}
+                />
+                <SortTh
+                  label="Side"
+                  sortKey="side"
+                  sort={fillSort.sort}
+                  onToggle={fillSort.toggle}
+                />
+                <SortTh
+                  label="Price"
+                  sortKey="price"
+                  sort={fillSort.sort}
+                  onToggle={fillSort.toggle}
+                />
+                <SortTh
+                  label="Size"
+                  sortKey="size"
+                  sort={fillSort.sort}
+                  onToggle={fillSort.toggle}
+                />
+                <SortTh
+                  label="USDC"
+                  sortKey="usdc"
+                  sort={fillSort.sort}
+                  onToggle={fillSort.toggle}
+                />
+                <SortTh
+                  label="Filled At"
+                  sortKey="filledAt"
+                  sort={fillSort.sort}
+                  onToggle={fillSort.toggle}
+                />
               </tr>
             </thead>
             <tbody>

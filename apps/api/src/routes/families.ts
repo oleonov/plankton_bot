@@ -186,54 +186,51 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   });
 
   // ── GET /families/:familyId/evidence ───────────────────────────────────
-  app.get<{ Params: { familyId: string } }>(
-    "/families/:familyId/evidence",
-    async (request) => {
-      const { familyId } = request.params;
-      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
-      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-      const row = controlDb
-        .prepare("SELECT * FROM family_evidence WHERE family_id = ?")
-        .get(familyId) as Record<string, unknown> | undefined;
-      if (!row) return ok(null);
+  app.get<{ Params: { familyId: string } }>("/families/:familyId/evidence", async (request) => {
+    const { familyId } = request.params;
+    const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+    if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+    const row = controlDb
+      .prepare("SELECT * FROM family_evidence WHERE family_id = ?")
+      .get(familyId) as Record<string, unknown> | undefined;
+    if (!row) return ok(null);
 
-      const repricingExitCount = (row.repricing_exit_count as number) ?? 0;
-      const blockers = getPromotionBlockers({
-        repricingExits: repricingExitCount,
-        distinctMarkets: (row.local_market_count as number) ?? 0,
-        tradeCount: (row.local_trade_count as number) ?? 0,
-        recycleScore: (row.recycle_score as number) ?? 0,
-        toxicity: (row.toxicity_penalty as number) ?? 0,
-        tailAdjustedPnl: (row.tail_adjusted_pnl as number) ?? 0,
-      });
+    const repricingExitCount = (row.repricing_exit_count as number) ?? 0;
+    const blockers = getPromotionBlockers({
+      repricingExits: repricingExitCount,
+      distinctMarkets: (row.local_market_count as number) ?? 0,
+      tradeCount: (row.local_trade_count as number) ?? 0,
+      recycleScore: (row.recycle_score as number) ?? 0,
+      toxicity: (row.toxicity_penalty as number) ?? 0,
+      tailAdjustedPnl: (row.tail_adjusted_pnl as number) ?? 0,
+    });
 
-      return ok({
-        familyId: row.family_id,
-        evidenceStatus: row.evidence_status,
-        evidenceScore: row.evidence_score,
-        promotionState: row.promotion_state,
-        localTradeCount: row.local_trade_count,
-        localMarketCount: row.local_market_count,
-        localRealizedPnlFifo: row.local_realized_pnl_fifo,
-        openTailCostUsdc: row.open_tail_cost_usdc,
-        tailAdjustedPnl: row.tail_adjusted_pnl,
-        remoteClosedRealizedPnl: row.remote_closed_realized_pnl ?? null,
-        openPositionCount: row.open_position_count ?? null,
-        openDustCount: row.open_dust_count ?? null,
-        bothSidedEligible: Boolean(row.both_sided_eligible),
-        heavyCampaignEligible: Boolean(row.heavy_campaign_eligible),
-        activeWindowEdgeScore: row.active_window_edge_score ?? null,
-        recurrenceScore: row.recurrence_score ?? null,
-        recycleScore: row.recycle_score ?? null,
-        liveViabilityScore: row.live_viability_score ?? null,
-        toxicityPenalty: row.toxicity_penalty ?? null,
-        lastValidatedAt: row.last_validated_at ?? null,
-        probeSubstate: (row.probe_substate as string) ?? null,
-        repricingExitCount,
-        promotionBlockers: blockers,
-      });
-    },
-  );
+    return ok({
+      familyId: row.family_id,
+      evidenceStatus: row.evidence_status,
+      evidenceScore: row.evidence_score,
+      promotionState: row.promotion_state,
+      localTradeCount: row.local_trade_count,
+      localMarketCount: row.local_market_count,
+      localRealizedPnlFifo: row.local_realized_pnl_fifo,
+      openTailCostUsdc: row.open_tail_cost_usdc,
+      tailAdjustedPnl: row.tail_adjusted_pnl,
+      remoteClosedRealizedPnl: row.remote_closed_realized_pnl ?? null,
+      openPositionCount: row.open_position_count ?? null,
+      openDustCount: row.open_dust_count ?? null,
+      bothSidedEligible: Boolean(row.both_sided_eligible),
+      heavyCampaignEligible: Boolean(row.heavy_campaign_eligible),
+      activeWindowEdgeScore: row.active_window_edge_score ?? null,
+      recurrenceScore: row.recurrence_score ?? null,
+      recycleScore: row.recycle_score ?? null,
+      liveViabilityScore: row.live_viability_score ?? null,
+      toxicityPenalty: row.toxicity_penalty ?? null,
+      lastValidatedAt: row.last_validated_at ?? null,
+      probeSubstate: (row.probe_substate as string) ?? null,
+      repricingExitCount,
+      promotionBlockers: blockers,
+    });
+  });
 
   // ── GET /families/recent-demotions ─────────────────────────────────────
   app.get("/families/recent-demotions", async () => {
@@ -264,101 +261,86 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   });
 
   // ── GET /families/:familyId/transitions ────────────────────────────────
-  app.get<{ Params: { familyId: string } }>(
-    "/families/:familyId/transitions",
-    async (request) => {
-      const { familyId } = request.params;
-      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
-      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-      const rows = controlDb
-        .prepare(
-          `SELECT * FROM state_transitions
+  app.get<{ Params: { familyId: string } }>("/families/:familyId/transitions", async (request) => {
+    const { familyId } = request.params;
+    const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+    if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+    const rows = controlDb
+      .prepare(
+        `SELECT * FROM state_transitions
            WHERE entity_type = 'family' AND entity_id = ?
            ORDER BY created_at DESC, id DESC`,
-        )
-        .all(familyId) as Array<Record<string, unknown>>;
-      return ok(
-        rows.map((r) => ({
-          id: r.id,
-          entityType: r.entity_type,
-          entityId: r.entity_id,
-          fromState: r.from_state,
-          toState: r.to_state,
-          triggerType: r.trigger_type,
-          initiator: r.initiator,
-          reason: r.reason,
-          scoresSnapshot: r.scores_snapshot,
-          createdAt: r.created_at,
-        })),
-      );
-    },
-  );
+      )
+      .all(familyId) as Array<Record<string, unknown>>;
+    return ok(
+      rows.map((r) => ({
+        id: r.id,
+        entityType: r.entity_type,
+        entityId: r.entity_id,
+        fromState: r.from_state,
+        toState: r.to_state,
+        triggerType: r.trigger_type,
+        initiator: r.initiator,
+        reason: r.reason,
+        scoresSnapshot: r.scores_snapshot,
+        createdAt: r.created_at,
+      })),
+    );
+  });
 
   // ── GET /families/:familyId/scorecards ─────────────────────────────────
-  app.get<{ Params: { familyId: string } }>(
-    "/families/:familyId/scorecards",
-    async (request) => {
-      const { familyId } = request.params;
-      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
-      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-      const rows = controlDb
-        .prepare(
-          "SELECT * FROM family_validation_scorecards WHERE family_id = ? ORDER BY validated_at DESC LIMIT 50",
-        )
-        .all(familyId);
-      return ok(rows);
-    },
-  );
+  app.get<{ Params: { familyId: string } }>("/families/:familyId/scorecards", async (request) => {
+    const { familyId } = request.params;
+    const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+    if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+    const rows = controlDb
+      .prepare(
+        "SELECT * FROM family_validation_scorecards WHERE family_id = ? ORDER BY validated_at DESC LIMIT 50",
+      )
+      .all(familyId);
+    return ok(rows);
+  });
 
   // ── GET /families/:familyId/deployments ──────────────────────────────
-  app.get<{ Params: { familyId: string } }>(
-    "/families/:familyId/deployments",
-    async (request) => {
-      const { familyId } = request.params;
-      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
-      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-      const rows = controlDb
-        .prepare(
-          `SELECT fd.*, p.display_name as profile_name
+  app.get<{ Params: { familyId: string } }>("/families/:familyId/deployments", async (request) => {
+    const { familyId } = request.params;
+    const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+    if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+    const rows = controlDb
+      .prepare(
+        `SELECT fd.*, p.display_name as profile_name
            FROM family_deployments fd
            JOIN profiles p ON fd.profile = p.profile_id
            WHERE fd.family_id = ?
            ORDER BY p.profile_id`,
-        )
-        .all(familyId);
-      return ok(rows);
-    },
-  );
+      )
+      .all(familyId);
+    return ok(rows);
+  });
 
   // ── GET /families/:familyId/rollups ──────────────────────────────────
-  app.get<{ Params: { familyId: string } }>(
-    "/families/:familyId/rollups",
-    async (request) => {
-      const { familyId } = request.params;
-      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
-      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-      const rows = controlDb
-        .prepare("SELECT * FROM family_profile_rollups WHERE family_id = ? ORDER BY profile")
-        .all(familyId);
-      return ok(rows);
-    },
-  );
+  app.get<{ Params: { familyId: string } }>("/families/:familyId/rollups", async (request) => {
+    const { familyId } = request.params;
+    const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+    if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+    const rows = controlDb
+      .prepare("SELECT * FROM family_profile_rollups WHERE family_id = ? ORDER BY profile")
+      .all(familyId);
+    return ok(rows);
+  });
 
   // ── GET /families/:familyId/audit ────────────────────────────────────
-  app.get<{ Params: { familyId: string } }>(
-    "/families/:familyId/audit",
-    async (request) => {
-      const { familyId } = request.params;
-      const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
-      if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-      const rows = controlDb
-        .prepare(
-          "SELECT * FROM state_transitions WHERE entity_id = ? ORDER BY created_at DESC LIMIT 100",
-        )
-        .all(familyId);
-      return ok(rows);
-    },
-  );
+  app.get<{ Params: { familyId: string } }>("/families/:familyId/audit", async (request) => {
+    const { familyId } = request.params;
+    const catalog = getCatalog.get(familyId) as FamilyCatalogRow | undefined;
+    if (!catalog) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+    const rows = controlDb
+      .prepare(
+        "SELECT * FROM state_transitions WHERE entity_id = ? ORDER BY created_at DESC LIMIT 100",
+      )
+      .all(familyId);
+    return ok(rows);
+  });
 
   // ── GET /families/:familyId/rules-snapshots ──────────────────────────
   app.get<{ Params: { familyId: string } }>(
@@ -379,9 +361,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   // ── GET /families/proposals ────────────────────────────────────────────
   app.get("/families/proposals", async () => {
     const rows = controlDb
-      .prepare(
-        "SELECT * FROM promotion_proposals WHERE status = 'pending' ORDER BY created_at ASC",
-      )
+      .prepare("SELECT * FROM promotion_proposals WHERE status = 'pending' ORDER BY created_at ASC")
       .all() as Array<Record<string, unknown>>;
     return ok(rows.map(toProposalDto));
   });
@@ -391,9 +371,9 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     "/families/proposals/:proposalId/dismiss",
     async (request) => {
       const id = Number(request.params.proposalId);
-      const row = controlDb
-        .prepare("SELECT * FROM promotion_proposals WHERE id = ?")
-        .get(id) as Record<string, unknown> | undefined;
+      const row = controlDb.prepare("SELECT * FROM promotion_proposals WHERE id = ?").get(id) as
+        | Record<string, unknown>
+        | undefined;
       if (!row) throw new ApiError(404, `proposal ${id} not found`, "PROPOSAL_NOT_FOUND");
       if (row.status !== "pending") {
         throw new ApiError(

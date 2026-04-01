@@ -35,9 +35,7 @@ const mockSnapshots = [
 ];
 
 function setupMockData() {
-  server.use(
-    http.get("/api/v1/metrics/trading-activity", () => ok({ items: mockSnapshots })),
-  );
+  server.use(http.get("/api/v1/metrics/trading-activity", () => ok({ items: mockSnapshots })));
 }
 
 describe("TradingActivityPanel", () => {
@@ -53,9 +51,7 @@ describe("TradingActivityPanel", () => {
   });
 
   it("shows empty state when no data", async () => {
-    server.use(
-      http.get("/api/v1/metrics/trading-activity", () => ok({ items: [] })),
-    );
+    server.use(http.get("/api/v1/metrics/trading-activity", () => ok({ items: [] })));
     renderWithProviders(<TradingActivityPanel />);
 
     await screen.findByText("No activity data yet");

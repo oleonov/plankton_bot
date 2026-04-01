@@ -7,9 +7,9 @@ export class SqliteRuntimeControlStateRepository implements RuntimeControlStateR
   constructor(private readonly db: Database.Database) {}
 
   get(): RuntimeControlState | null {
-    const row = this.db
-      .prepare("SELECT * FROM runtime_control_state WHERE id = 1")
-      .get() as Record<string, unknown> | undefined;
+    const row = this.db.prepare("SELECT * FROM runtime_control_state WHERE id = 1").get() as
+      | Record<string, unknown>
+      | undefined;
     return row ? rowToState(row) : null;
   }
 
@@ -49,9 +49,7 @@ function rowToState(row: Record<string, unknown>): RuntimeControlState {
   return {
     currentProfile: (row.current_profile as ProfileId) ?? null,
     desiredProfile: (row.desired_profile as ProfileId) ?? null,
-    currentSwitchId: row.current_switch_id
-      ? createSwitchId(row.current_switch_id as string)
-      : null,
+    currentSwitchId: row.current_switch_id ? createSwitchId(row.current_switch_id as string) : null,
     currentRunId: (row.current_run_id as string) ?? null,
     currentInstanceId: (row.current_instance_id as string) ?? null,
     runtimeStatus: row.runtime_status as RuntimeStatus,

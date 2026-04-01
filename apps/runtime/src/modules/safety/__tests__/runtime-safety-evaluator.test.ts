@@ -2,7 +2,13 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RuntimeSafetyEvaluator } from "../runtime-safety-evaluator.js";
 import type { SafetyEvaluatorDeps } from "../runtime-safety-evaluator.js";
 import type { FamilyIdentity, FamilyState, FamilyDeployment } from "@plankton/domain";
-import { OperatorMode, StrategyStage, DeploymentStage, type ProfileId, type FamilyId } from "@plankton/domain";
+import {
+  OperatorMode,
+  StrategyStage,
+  DeploymentStage,
+  type ProfileId,
+  type FamilyId,
+} from "@plankton/domain";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

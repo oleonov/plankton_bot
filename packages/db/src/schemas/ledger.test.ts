@@ -54,7 +54,9 @@ describe("ledger.db schema", () => {
   });
 
   it("family_profile_runtime_state has no runtime_mode column", () => {
-    const cols = db.prepare("PRAGMA table_info(family_profile_runtime_state)").all() as { name: string }[];
+    const cols = db.prepare("PRAGMA table_info(family_profile_runtime_state)").all() as {
+      name: string;
+    }[];
     const names = cols.map((c) => c.name);
     expect(names).toContain("open_value_usdc");
     expect(names).toContain("effective_mode");

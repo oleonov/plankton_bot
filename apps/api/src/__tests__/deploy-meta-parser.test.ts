@@ -53,7 +53,11 @@ describe("deploy-meta.json parser (python3)", () => {
   });
 
   afterAll(() => {
-    try { execSync(`rm -rf "${tmpDir}"`); } catch { /* ignore */ }
+    try {
+      execSync(`rm -rf "${tmpDir}"`);
+    } catch {
+      /* ignore */
+    }
   });
 
   it("returns 0 for missing file (first deploy)", () => {
@@ -63,7 +67,10 @@ describe("deploy-meta.json parser (python3)", () => {
   });
 
   it("returns current version from valid file", () => {
-    const p = writeMetaFile("valid.json", JSON.stringify({ deployVersion: 42, sha: "abc", deployedAt: "2026-04-01T12:00:00Z" }));
+    const p = writeMetaFile(
+      "valid.json",
+      JSON.stringify({ deployVersion: 42, sha: "abc", deployedAt: "2026-04-01T12:00:00Z" }),
+    );
     const result = runParser(p);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("42");

@@ -273,12 +273,13 @@ export function buildStatusSnapshot(
   }
 
   const totalRealizedPnl = (
-    db.prepare("SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions").get() as { total: number }
+    db.prepare("SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions").get() as {
+      total: number;
+    }
   ).total;
 
-  const balanceUsdc = initialBalanceUsdc != null
-    ? initialBalanceUsdc - totalExposure.total + totalRealizedPnl
-    : null;
+  const balanceUsdc =
+    initialBalanceUsdc != null ? initialBalanceUsdc - totalExposure.total + totalRealizedPnl : null;
 
   // Wallet balance from exchange (live-lite only, written by runtime publisher)
   let walletBalanceUsdc: number | null = null;

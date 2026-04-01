@@ -9,7 +9,13 @@ function snap(
   rejected: number,
   capturedAt: string,
 ): TradingActivitySnapshot {
-  return { tradingState, signalsProduced: produced, signalsApproved: approved, signalsRejected: rejected, capturedAt };
+  return {
+    tradingState,
+    signalsProduced: produced,
+    signalsApproved: approved,
+    signalsRejected: rejected,
+    capturedAt,
+  };
 }
 
 describe("aggregateSnapshots", () => {
@@ -53,9 +59,21 @@ describe("collapseStates", () => {
     ];
     const result = collapseStates(snapshots);
     expect(result).toHaveLength(3);
-    expect(result[0]).toEqual({ state: "ACTIVELY_TRADING", startAt: "2026-03-31T10:00:00Z", endAt: "2026-03-31T10:10:00Z" });
-    expect(result[1]).toEqual({ state: "ALIVE_BUT_BLOCKED", startAt: "2026-03-31T10:20:00Z", endAt: "2026-03-31T10:30:00Z" });
-    expect(result[2]).toEqual({ state: "ACTIVELY_TRADING", startAt: "2026-03-31T10:40:00Z", endAt: "2026-03-31T10:40:00Z" });
+    expect(result[0]).toEqual({
+      state: "ACTIVELY_TRADING",
+      startAt: "2026-03-31T10:00:00Z",
+      endAt: "2026-03-31T10:10:00Z",
+    });
+    expect(result[1]).toEqual({
+      state: "ALIVE_BUT_BLOCKED",
+      startAt: "2026-03-31T10:20:00Z",
+      endAt: "2026-03-31T10:30:00Z",
+    });
+    expect(result[2]).toEqual({
+      state: "ACTIVELY_TRADING",
+      startAt: "2026-03-31T10:40:00Z",
+      endAt: "2026-03-31T10:40:00Z",
+    });
   });
 
   it("returns empty for empty input", () => {

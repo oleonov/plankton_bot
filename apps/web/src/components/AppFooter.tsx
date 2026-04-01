@@ -3,7 +3,8 @@ import { useBuildInfo } from "../api/hooks.ts";
 export function AppFooter() {
   const { data } = useBuildInfo();
 
-  const version = data?.deployVersion != null ? `v${String(data.deployVersion).padStart(3, "0")}` : null;
+  const version =
+    data?.deployVersion != null ? `v${String(data.deployVersion).padStart(3, "0")}` : null;
   const sha = data?.sha?.slice(0, 7) ?? null;
 
   if (!version && !sha) return null;

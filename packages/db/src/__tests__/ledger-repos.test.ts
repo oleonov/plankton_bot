@@ -7,16 +7,9 @@ import { createFamilyId } from "@plankton/domain";
 import type { FamilyProfileRuntimeState } from "@plankton/domain";
 import { SqliteFamilyProfileRuntimeStateRepository } from "../repositories/family-profile-runtime-state-repository.js";
 
-const schemaPath = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "schemas",
-  "ledger.sql",
-);
+const schemaPath = join(dirname(fileURLToPath(import.meta.url)), "..", "schemas", "ledger.sql");
 
-function makeState(
-  overrides?: Partial<FamilyProfileRuntimeState>,
-): FamilyProfileRuntimeState {
+function makeState(overrides?: Partial<FamilyProfileRuntimeState>): FamilyProfileRuntimeState {
   return {
     familyId: createFamilyId("fam-1"),
     openValueUsdc: 100,

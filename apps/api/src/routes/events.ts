@@ -59,10 +59,7 @@ const CATEGORY_TO_EVENTS: Record<string, string[]> = {
   transitions: ["transitions"],
 };
 
-function takeSnapshot(
-  controlDb: Database.Database,
-  ledgerDb: Database.Database,
-): ChangeSnapshot {
+function takeSnapshot(controlDb: Database.Database, ledgerDb: Database.Database): ChangeSnapshot {
   // Ledger tables
   const pos = ledgerDb.prepare("SELECT MAX(updated_at) as ts FROM positions").get() as {
     ts: string | null;
@@ -93,9 +90,7 @@ function takeSnapshot(
     .prepare("SELECT MAX(applied_at) as ts FROM operator_commands WHERE status = 'applied'")
     .get() as { ts: string | null };
   const discoveryRunTs = controlDb
-    .prepare(
-      "SELECT MAX(COALESCE(finished_at, started_at, requested_at)) FROM discovery_runs",
-    )
+    .prepare("SELECT MAX(COALESCE(finished_at, started_at, requested_at)) FROM discovery_runs")
     .pluck()
     .get() as string | null;
   const candidateMaxTs = controlDb

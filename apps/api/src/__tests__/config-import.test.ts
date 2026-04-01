@@ -85,7 +85,9 @@ families:
 `;
 
 function makeTwoFamilyYaml(secondId: string, secondKey: string): string {
-  return FAMILY_YAML + `
+  return (
+    FAMILY_YAML +
+    `
   - family_id: "${secondId}"
     identity:
       family_key: "${secondKey}"
@@ -152,7 +154,8 @@ function makeTwoFamilyYaml(secondId: string, secondKey: string): string {
         reduced_windows_utc: []
         weekday_bias: "normal"
         weekend_mode: "reduced"
-`;
+`
+  );
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -209,7 +212,12 @@ beforeAll(async () => {
     VALUES (1, 'simulation', 1, 'stopped', 1, datetime('now'));
   `);
 
-  app = await buildServer({ config: testConfig(), controlDb: db, ledgerDb: ledgerConn.db, ledgerPool: stubLedgerPool() });
+  app = await buildServer({
+    config: testConfig(),
+    controlDb: db,
+    ledgerDb: ledgerConn.db,
+    ledgerPool: stubLedgerPool(),
+  });
 });
 
 afterAll(async () => {

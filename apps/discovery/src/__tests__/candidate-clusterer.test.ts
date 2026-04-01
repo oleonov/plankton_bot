@@ -93,19 +93,13 @@ describe("inferRegime", () => {
 describe("inferHorizon", () => {
   it("returns intraday-4h when end dates are within 8 hours", () => {
     const base = new Date("2026-03-28T12:00:00Z").getTime();
-    const dates = [
-      new Date(base).toISOString(),
-      new Date(base + 4 * 3600000).toISOString(),
-    ];
+    const dates = [new Date(base).toISOString(), new Date(base + 4 * 3600000).toISOString()];
     expect(inferHorizon(dates)).toBe("intraday-4h");
   });
 
   it("returns daily when spread is within 3 days", () => {
     const base = new Date("2026-03-28T12:00:00Z").getTime();
-    const dates = [
-      new Date(base).toISOString(),
-      new Date(base + 48 * 3600000).toISOString(),
-    ];
+    const dates = [new Date(base).toISOString(), new Date(base + 48 * 3600000).toISOString()];
     expect(inferHorizon(dates)).toBe("daily");
   });
 
@@ -159,7 +153,9 @@ describe("generateSlugPattern", () => {
 
 // ─── clusterMarkets ─────────────────────────────────────────────────────────
 
-function makeClobMarket(overrides: Partial<ClobMarket> & { slug: string; conditionId: string }): ClobMarket {
+function makeClobMarket(
+  overrides: Partial<ClobMarket> & { slug: string; conditionId: string },
+): ClobMarket {
   return {
     tokens: [],
     question: overrides.slug,
@@ -175,9 +171,21 @@ function makeClobMarket(overrides: Partial<ClobMarket> & { slug: string; conditi
 describe("clusterMarkets", () => {
   it("groups markets by normalized slug", () => {
     const markets = [
-      makeClobMarket({ conditionId: "c1", slug: "bitcoin-above-95000", endDate: "2026-03-28T12:00:00Z" }),
-      makeClobMarket({ conditionId: "c2", slug: "bitcoin-above-100000", endDate: "2026-03-28T14:00:00Z" }),
-      makeClobMarket({ conditionId: "c3", slug: "bitcoin-above-105000", endDate: "2026-03-28T16:00:00Z" }),
+      makeClobMarket({
+        conditionId: "c1",
+        slug: "bitcoin-above-95000",
+        endDate: "2026-03-28T12:00:00Z",
+      }),
+      makeClobMarket({
+        conditionId: "c2",
+        slug: "bitcoin-above-100000",
+        endDate: "2026-03-28T14:00:00Z",
+      }),
+      makeClobMarket({
+        conditionId: "c3",
+        slug: "bitcoin-above-105000",
+        endDate: "2026-03-28T16:00:00Z",
+      }),
     ];
 
     const clusters = clusterMarkets(markets);

@@ -85,42 +85,44 @@ export class SqliteInventoryLotRepository implements InventoryLotRepository {
   }
 
   consumeFifo(positionId: PositionId, size: number): { lot: InventoryLot; consumed: number }[] {
-    return this.db.transaction(() => {
-      const openLots = this.db
-        .prepare(
-          `SELECT * FROM inventory_lots
+    return this.db
+      .transaction(() => {
+        const openLots = this.db
+          .prepare(
+            `SELECT * FROM inventory_lots
            WHERE position_id = ? AND remaining_size > 0
            ORDER BY created_at ASC`,
-        )
-        .all(positionId) as LotRow[];
+          )
+          .all(positionId) as LotRow[];
 
-      const totalAvailable = openLots.reduce((sum, r) => sum + r.remaining_size, 0);
-      if (totalAvailable < size) {
-        throw new Error(`Insufficient inventory: requested ${size}, available ${totalAvailable}`);
-      }
+        const totalAvailable = openLots.reduce((sum, r) => sum + r.remaining_size, 0);
+        if (totalAvailable < size) {
+          throw new Error(`Insufficient inventory: requested ${size}, available ${totalAvailable}`);
+        }
 
-      const updateStmt = this.db.prepare(
-        `UPDATE inventory_lots SET remaining_size = remaining_size - ? WHERE lot_id = ?`,
-      );
+        const updateStmt = this.db.prepare(
+          `UPDATE inventory_lots SET remaining_size = remaining_size - ? WHERE lot_id = ?`,
+        );
 
-      const result: { lot: InventoryLot; consumed: number }[] = [];
-      let remaining = size;
+        const result: { lot: InventoryLot; consumed: number }[] = [];
+        let remaining = size;
 
-      for (const row of openLots) {
-        if (remaining <= 0) break;
-        const consumed = Math.min(row.remaining_size, remaining);
-        updateStmt.run(consumed, row.lot_id);
-        remaining -= consumed;
+        for (const row of openLots) {
+          if (remaining <= 0) break;
+          const consumed = Math.min(row.remaining_size, remaining);
+          updateStmt.run(consumed, row.lot_id);
+          remaining -= consumed;
 
-        // Re-read to return the updated lot
-        const updatedRow = this.db
-          .prepare(`SELECT * FROM inventory_lots WHERE lot_id = ?`)
-          .get(row.lot_id) as LotRow;
-        result.push({ lot: rowToLot(updatedRow), consumed });
-      }
+          // Re-read to return the updated lot
+          const updatedRow = this.db
+            .prepare(`SELECT * FROM inventory_lots WHERE lot_id = ?`)
+            .get(row.lot_id) as LotRow;
+          result.push({ lot: rowToLot(updatedRow), consumed });
+        }
 
-      return result;
-    }).immediate();
+        return result;
+      })
+      .immediate();
   }
 
   settleAll(positionId: PositionId): void {

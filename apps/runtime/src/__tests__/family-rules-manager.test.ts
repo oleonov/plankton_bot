@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { createFamilyId } from "@plankton/domain";
 import type { FamilyConfig } from "@plankton/config";
-import {
-  ReloadableFamilyRulesManager,
-  type DbFamilyRulesReader,
-} from "../family-rules-manager.js";
+import { ReloadableFamilyRulesManager, type DbFamilyRulesReader } from "../family-rules-manager.js";
 
-function makeFamilyConfig(familyId: string, overrides?: Partial<{ familyKey: string }>): FamilyConfig {
+function makeFamilyConfig(
+  familyId: string,
+  overrides?: Partial<{ familyKey: string }>,
+): FamilyConfig {
   return {
     identity: {
       familyId,

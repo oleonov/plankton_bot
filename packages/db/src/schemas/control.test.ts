@@ -52,36 +52,58 @@ describe("control.db schema", () => {
   });
 
   it("enforces family_deployments FK to profiles", () => {
-    db.prepare("INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')").run();
-    db.prepare("INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type) VALUES ('fam1', 'key1', 'cat', 'binary', 'weekly', 'recurring', 'standard', 'yaml_import')").run();
+    db.prepare(
+      "INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')",
+    ).run();
+    db.prepare(
+      "INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type) VALUES ('fam1', 'key1', 'cat', 'binary', 'weekly', 'recurring', 'standard', 'yaml_import')",
+    ).run();
 
     // Valid FK
     expect(() => {
-      db.prepare("INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')").run();
+      db.prepare(
+        "INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')",
+      ).run();
     }).not.toThrow();
 
     // Invalid FK
     expect(() => {
-      db.prepare("INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'nonexistent')").run();
+      db.prepare(
+        "INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'nonexistent')",
+      ).run();
     }).toThrow(/FOREIGN KEY/);
   });
 
   it("enforces runtime_control_state singleton", () => {
-    db.prepare("INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')").run();
-    db.prepare("INSERT INTO runtime_control_state (id, desired_profile) VALUES (1, 'simulation')").run();
+    db.prepare(
+      "INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')",
+    ).run();
+    db.prepare(
+      "INSERT INTO runtime_control_state (id, desired_profile) VALUES (1, 'simulation')",
+    ).run();
 
     expect(() => {
-      db.prepare("INSERT INTO runtime_control_state (id, desired_profile) VALUES (2, 'simulation')").run();
+      db.prepare(
+        "INSERT INTO runtime_control_state (id, desired_profile) VALUES (2, 'simulation')",
+      ).run();
     }).toThrow(); // CHECK constraint: id = 1
   });
 
   it("enforces family_deployments PK uniqueness", () => {
-    db.prepare("INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')").run();
-    db.prepare("INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type) VALUES ('fam1', 'key1', 'cat', 'binary', 'weekly', 'recurring', 'standard', 'yaml_import')").run();
-    db.prepare("INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')").run();
+    db.prepare(
+      "INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')",
+    ).run();
+    db.prepare(
+      "INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type) VALUES ('fam1', 'key1', 'cat', 'binary', 'weekly', 'recurring', 'standard', 'yaml_import')",
+    ).run();
+    db.prepare(
+      "INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')",
+    ).run();
 
     expect(() => {
-      db.prepare("INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')").run();
+      db.prepare(
+        "INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')",
+      ).run();
     }).toThrow(/UNIQUE/);
   });
 });

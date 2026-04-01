@@ -1,5 +1,9 @@
 import type Database from "better-sqlite3";
-import type { FamilyRulesSnapshotRepository, FamilyRulesSnapshot, FamilyId } from "@plankton/domain";
+import type {
+  FamilyRulesSnapshotRepository,
+  FamilyRulesSnapshot,
+  FamilyId,
+} from "@plankton/domain";
 import { createFamilyId } from "@plankton/domain";
 
 interface SnapshotRow {

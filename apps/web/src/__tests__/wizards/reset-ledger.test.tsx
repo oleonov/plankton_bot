@@ -31,9 +31,7 @@ describe("ResetLedgerWizard", () => {
 
   it("step 3: button disabled until RESET typed", async () => {
     const user = userEvent.setup();
-    server.use(
-      http.post("/api/v1/actions/ledger/:profileId/reset", () => ok({ status: "reset" })),
-    );
+    server.use(http.post("/api/v1/actions/ledger/:profileId/reset", () => ok({ status: "reset" })));
     renderWizard();
 
     await screen.findByText("Paper");

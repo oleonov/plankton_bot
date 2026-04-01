@@ -81,7 +81,12 @@ beforeAll(async () => {
     VALUES (1, 'simulation', 'simulation', 'running', 0, 1, datetime('now'));
   `);
 
-  app = await buildServer({ config: testConfig(), controlDb: db, ledgerDb: db, ledgerPool: stubLedgerPool() });
+  app = await buildServer({
+    config: testConfig(),
+    controlDb: db,
+    ledgerDb: db,
+    ledgerPool: stubLedgerPool(),
+  });
 });
 
 afterAll(async () => {

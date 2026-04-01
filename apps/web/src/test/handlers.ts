@@ -72,7 +72,7 @@ export const mockStatus = {
   totalOpenValueUsdc: 32.06,
   totalTailCostUsdc: 32.06,
   initialBalanceUsdc: 100,
-  balanceUsdc: 69.70,
+  balanceUsdc: 69.7,
   walletBalanceUsdc: null,
   totalCurrentValueUsdc: 15.87,
   totalRealizedPnl: 1.76,
@@ -144,12 +144,8 @@ export const handlers = [
     if (params.profileId === "paper") return ok(mockProfileDetail);
     return ok({ ...mockProfileDetail, profile: mockProfiles.profiles[0] });
   }),
-  http.get("/api/v1/profiles/:profileId/settings", () =>
-    ok(mockProfileDetail.settings),
-  ),
-  http.put("/api/v1/profiles/:profileId/settings", () =>
-    ok(mockProfileDetail.settings),
-  ),
+  http.get("/api/v1/profiles/:profileId/settings", () => ok(mockProfileDetail.settings)),
+  http.put("/api/v1/profiles/:profileId/settings", () => ok(mockProfileDetail.settings)),
   http.get("/api/v1/control/overview", () => ok(mockControlOverview)),
   http.get("/api/v1/families", () => ok([])),
   http.get("/api/v1/families/proposals", () => ok([])),

@@ -67,12 +67,18 @@ export function CapsEditor({
               value={input[key]}
               onChange={(e) => setInput((c) => ({ ...c, [key]: e.target.value }))}
               style={{
-                width: "100%", padding: "4px 6px", fontSize: 12,
-                background: "var(--bg)", borderRadius: 4, color: "var(--text)",
+                width: "100%",
+                padding: "4px 6px",
+                fontSize: 12,
+                background: "var(--bg)",
+                borderRadius: 4,
+                color: "var(--text)",
                 border: error ? "1px solid var(--red)" : "1px solid var(--border)",
               }}
             />
-            {error && <div style={{ color: "var(--red)", fontSize: 10, marginTop: 2 }}>{error}</div>}
+            {error && (
+              <div style={{ color: "var(--red)", fontSize: 10, marginTop: 2 }}>{error}</div>
+            )}
           </label>
         );
       })}

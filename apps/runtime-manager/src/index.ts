@@ -17,8 +17,7 @@ function main(): void {
   const controlDbPath = process.env["CONTROL_DB_PATH"];
   if (!controlDbPath) throw new Error("CONTROL_DB_PATH required");
 
-  const managedContainer =
-    process.env["MANAGED_CONTAINER"] ?? "plankton-plankton-runtime-1";
+  const managedContainer = process.env["MANAGED_CONTAINER"] ?? "plankton-plankton-runtime-1";
   const pollIntervalMs = Number(process.env["POLL_INTERVAL_MS"]) || 3000;
   const restartTimeoutS = Number(process.env["RESTART_TIMEOUT_S"]) || 30;
 
@@ -41,10 +40,7 @@ function main(): void {
     log,
   );
 
-  log.info(
-    { controlDbPath, managedContainer, pollIntervalMs },
-    "runtime manager starting",
-  );
+  log.info({ controlDbPath, managedContainer, pollIntervalMs }, "runtime manager starting");
 
   driver.recover();
 

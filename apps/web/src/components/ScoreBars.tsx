@@ -8,7 +8,9 @@ function ScoreBar({ label, value, color }: Score) {
   const pct = value != null ? Math.round(value * 100) : 0;
   return (
     <div style={{ marginBottom: 4 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 2 }}>
+      <div
+        style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 2 }}
+      >
         <span style={{ color: "var(--text-muted)" }}>{label}</span>
         <span style={{ color }}>{value != null ? value.toFixed(2) : "\u2014"}</span>
       </div>

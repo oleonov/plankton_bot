@@ -21,7 +21,9 @@ function RadioOption({
       <div>
         <div>{label}</div>
         {description && (
-          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>{description}</div>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+            {description}
+          </div>
         )}
       </div>
     </div>
@@ -79,7 +81,13 @@ export function SwitchProfileWizard({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <WizardPanel title="Switch Profile" steps={STEPS} currentStep={step} onClose={onClose} footer={footer}>
+    <WizardPanel
+      title="Switch Profile"
+      steps={STEPS}
+      currentStep={step}
+      onClose={onClose}
+      footer={footer}
+    >
       {step === 0 && (
         <div className="radio-group">
           {profiles.map((p) => (
@@ -92,7 +100,9 @@ export function SwitchProfileWizard({ onClose }: { onClose: () => void }) {
             />
           ))}
           {profiles.length === 0 && (
-            <div style={{ color: "var(--text-dim)", fontSize: 12 }}>No other profiles available</div>
+            <div style={{ color: "var(--text-dim)", fontSize: 12 }}>
+              No other profiles available
+            </div>
           )}
         </div>
       )}
@@ -114,7 +124,9 @@ export function SwitchProfileWizard({ onClose }: { onClose: () => void }) {
       )}
       {step === 2 && (
         <div style={{ fontSize: 13 }}>
-          <div className="label" style={{ marginBottom: 8 }}>Switch Summary</div>
+          <div className="label" style={{ marginBottom: 8 }}>
+            Switch Summary
+          </div>
           <div className="profile-stat">
             <span className="label">From</span>
             <span>{current ?? "none"}</span>
@@ -128,7 +140,16 @@ export function SwitchProfileWizard({ onClose }: { onClose: () => void }) {
             <span>{resetPolicy === "preserve" ? "Preserve data" : "Archive & reset"}</span>
           </div>
           {resetPolicy === "archive-reset" && (
-            <div style={{ marginTop: 12, padding: 10, background: "var(--red-bg)", borderRadius: 4, fontSize: 12, color: "#ef9a9a" }}>
+            <div
+              style={{
+                marginTop: 12,
+                padding: 10,
+                background: "var(--red-bg)",
+                borderRadius: 4,
+                fontSize: 12,
+                color: "#ef9a9a",
+              }}
+            >
               Warning: Archive & reset will clear all ledger data in the target profile.
             </div>
           )}

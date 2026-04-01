@@ -7,8 +7,15 @@ const CATEGORY_RULES: Array<{ keywords: string[]; category: string }> = [
   { keywords: ["temperature", "weather", "rain", "snow"], category: "weather" },
   {
     keywords: [
-      "trump", "biden", "election", "president", "congress",
-      "governor", "senator", "parliament", "prime-minister",
+      "trump",
+      "biden",
+      "election",
+      "president",
+      "congress",
+      "governor",
+      "senator",
+      "parliament",
+      "prime-minister",
     ],
     category: "politics",
   },
@@ -18,8 +25,15 @@ const CATEGORY_RULES: Array<{ keywords: string[]; category: string }> = [
   },
   {
     keywords: [
-      "nba", "nfl", "soccer", "mlb", "premier-league",
-      "nhl", "uefa", "playoffs", "champion",
+      "nba",
+      "nfl",
+      "soccer",
+      "mlb",
+      "premier-league",
+      "nhl",
+      "uefa",
+      "playoffs",
+      "champion",
     ],
     category: "sports",
   },
@@ -48,10 +62,7 @@ export function inferStrategyProfile(regime: string, cadence: string): string {
   if (regime === "threshold" && (cadence === "daily-dated" || cadence === "intraday-4h")) {
     return "inventory-recycle";
   }
-  if (
-    (regime === "succession" || regime === "geopolitics") &&
-    cadence === "ad-hoc"
-  ) {
+  if ((regime === "succession" || regime === "geopolitics") && cadence === "ad-hoc") {
     return "event-driven";
   }
   if (regime === "directional-updown" && cadence === "intraday-4h") {

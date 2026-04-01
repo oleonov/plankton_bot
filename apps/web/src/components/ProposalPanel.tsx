@@ -21,7 +21,18 @@ function parseScores(snapshot: string | null) {
   }
 }
 
-function ProposalRow({ proposal }: { proposal: { id: number; familyId: string; currentState: string; proposedState: string; reason: string; scoresSnapshot: string | null } }) {
+function ProposalRow({
+  proposal,
+}: {
+  proposal: {
+    id: number;
+    familyId: string;
+    currentState: string;
+    proposedState: string;
+    reason: string;
+    scoresSnapshot: string | null;
+  };
+}) {
   const promote = usePromoteFamily(proposal.familyId);
   const dismiss = useDismissProposal(proposal.id);
   const { data: statusData } = useStatus();

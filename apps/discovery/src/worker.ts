@@ -31,8 +31,7 @@ async function main(): Promise<void> {
   // Initial scan if no recent success
   const lastSuccess = runRepo.findLastSuccessful();
   const needsInitial =
-    !lastSuccess ||
-    Date.now() - new Date(lastSuccess.finishedAt!).getTime() > SCHEDULE_INTERVAL_MS;
+    !lastSuccess || Date.now() - new Date(lastSuccess.finishedAt!).getTime() > SCHEDULE_INTERVAL_MS;
   if (needsInitial) {
     try {
       runRepo.enqueue("startup", "worker");

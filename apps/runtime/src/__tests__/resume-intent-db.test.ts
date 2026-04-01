@@ -33,9 +33,9 @@ function createControlDb(): DbConnection {
 }
 
 function setIntent(conn: DbConnection, isoTimestamp: string) {
-  conn.db.prepare("UPDATE runtime_control_state SET resume_intent_at = ? WHERE id = 1").run(
-    isoTimestamp,
-  );
+  conn.db
+    .prepare("UPDATE runtime_control_state SET resume_intent_at = ? WHERE id = 1")
+    .run(isoTimestamp);
 }
 
 function getIntent(conn: DbConnection): string | null {

@@ -92,7 +92,12 @@ beforeAll(async () => {
     VALUES ('cond-1', 'YES', '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z', 'gamma-api', 'detected');
   `);
 
-  app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
+  app = await buildServer({
+    config: testConfig(),
+    controlDb: conn.db,
+    ledgerDb: conn.db,
+    ledgerPool: stubLedgerPool(),
+  });
 });
 
 afterAll(async () => {
@@ -1096,7 +1101,9 @@ describe("POST /actions/family/:familyId/promote", () => {
 
     // Verify proposal status changed
     const proposal = conn.db
-      .prepare("SELECT status FROM promotion_proposals WHERE family_id = 'fam-1' AND status = 'approved'")
+      .prepare(
+        "SELECT status FROM promotion_proposals WHERE family_id = 'fam-1' AND status = 'approved'",
+      )
       .get() as { status: string } | undefined;
     expect(proposal?.status).toBe("approved");
 

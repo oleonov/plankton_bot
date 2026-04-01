@@ -51,9 +51,7 @@ const envSchema = z
     }
 
     if (data.RUNTIME_MODE === "live-lite") {
-      for (const field of [
-        "POLY_PRIVATE_KEY",
-      ] as const) {
+      for (const field of ["POLY_PRIVATE_KEY"] as const) {
         if (!data[field]) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
@@ -70,7 +68,6 @@ const envSchema = z
           message: "POLY_PRIVATE_KEY must be a 0x-prefixed 32-byte hex private key",
         });
       }
-
     }
   });
 

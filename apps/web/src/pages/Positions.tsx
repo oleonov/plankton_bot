@@ -42,7 +42,13 @@ export function Positions() {
       <div className="filter-bar">
         <span style={{ fontWeight: 700 }}>Positions</span>
         <span style={{ color: "var(--text-muted)" }}>({totalCount})</span>
-        <select value={familyId} onChange={(e) => { setFamilyId(e.target.value); resetPagination(); }}>
+        <select
+          value={familyId}
+          onChange={(e) => {
+            setFamilyId(e.target.value);
+            resetPagination();
+          }}
+        >
           <option value="">All families</option>
           {families?.map((f) => (
             <option key={f.familyId} value={f.familyId}>
@@ -50,7 +56,13 @@ export function Positions() {
             </option>
           ))}
         </select>
-        <select value={status} onChange={(e) => { setStatus(e.target.value); resetPagination(); }}>
+        <select
+          value={status}
+          onChange={(e) => {
+            setStatus(e.target.value);
+            resetPagination();
+          }}
+        >
           <option value="">All statuses</option>
           <option value="open">Open</option>
           <option value="dust">Dust</option>
@@ -60,11 +72,20 @@ export function Positions() {
           <input
             type="checkbox"
             checked={dustOnly}
-            onChange={(e) => { setDustOnly(e.target.checked); resetPagination(); }}
+            onChange={(e) => {
+              setDustOnly(e.target.checked);
+              resetPagination();
+            }}
           />
           Dust only
         </label>
-        <select value={sort} onChange={(e) => { setSort(e.target.value); resetPagination(); }}>
+        <select
+          value={sort}
+          onChange={(e) => {
+            setSort(e.target.value);
+            resetPagination();
+          }}
+        >
           <option value="">Default sort</option>
           <option value="tail_cost">Tail cost desc</option>
         </select>

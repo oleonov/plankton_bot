@@ -33,9 +33,7 @@ describe("ControlCenter", () => {
   });
 
   it("shows Resume button when paused", async () => {
-    server.use(
-      http.get("/api/v1/status", () => ok({ ...mockStatus, paused: true })),
-    );
+    server.use(http.get("/api/v1/status", () => ok({ ...mockStatus, paused: true })));
     renderWithProviders(<ControlCenter />);
 
     expect(await screen.findByText("Resume")).toBeInTheDocument();

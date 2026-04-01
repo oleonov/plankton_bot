@@ -93,7 +93,9 @@ describe("RuntimeStatePublisher", () => {
     expect(row["instance_id"]).toBe("inst-001");
     expect(row["profile"]).toBe("paper");
     expect(row["run_id"]).toBe("run-123");
-    expect(JSON.parse(row["status_json"] as string)).toEqual(expect.objectContaining({ status: "running" }));
+    expect(JSON.parse(row["status_json"] as string)).toEqual(
+      expect.objectContaining({ status: "running" }),
+    );
   });
 
   it("multiple heartbeats update same row (upsert, not insert)", () => {

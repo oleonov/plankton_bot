@@ -19,10 +19,14 @@ function createControlDb(): DbConnection {
     .prepare("INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)")
     .run(PROFILE, "Paper");
   conn.db
-    .prepare("INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .prepare(
+      "INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
     .run(FAMILY_A, "alpha", "crypto", "binary", "short", "recurring", "scalp");
   conn.db
-    .prepare("INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .prepare(
+      "INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
     .run(FAMILY_B, "beta", "crypto", "binary", "short", "recurring", "scalp");
   return conn;
 }
@@ -233,7 +237,7 @@ describe("ProfileRuntimePublisher", () => {
       log,
       intervalMs: 999_999,
       exchangeGateway: {
-        getBalances: async () => [{ asset: "USDC", available: 487.50, locked: 0 }],
+        getBalances: async () => [{ asset: "USDC", available: 487.5, locked: 0 }],
       } as any,
     });
 
@@ -274,7 +278,9 @@ describe("ProfileRuntimePublisher", () => {
       log,
       intervalMs: 999_999,
       exchangeGateway: {
-        getBalances: async () => { throw new Error("network timeout"); },
+        getBalances: async () => {
+          throw new Error("network timeout");
+        },
       } as any,
     });
 

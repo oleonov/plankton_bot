@@ -8,14 +8,25 @@ const TEST_API_KEY = "test-key-caps";
 
 function testConfig(): AppConfig {
   return {
-    runtimeMode: "simulation", logLevel: "error", dbPath: "", familyRulesPath: "",
-    marketDataPollIntervalMs: 30_000, marketDataStaleThresholdMs: 120_000,
-    strategyScanIntervalMs: 5_000, fillPollIntervalMs: 5_000,
-    executionMaxConcurrency: 4, polyApiKey: undefined, polyApiSecret: undefined,
-    polyPassphrase: undefined, polyPrivateKey: undefined,
-    planktonApiKey: TEST_API_KEY, planktonApiPort: 0,
-    planktonAuthUsername: undefined, planktonAuthPassword: undefined,
-    planktonSessionSecret: undefined, trustProxy: false,
+    runtimeMode: "simulation",
+    logLevel: "error",
+    dbPath: "",
+    familyRulesPath: "",
+    marketDataPollIntervalMs: 30_000,
+    marketDataStaleThresholdMs: 120_000,
+    strategyScanIntervalMs: 5_000,
+    fillPollIntervalMs: 5_000,
+    executionMaxConcurrency: 4,
+    polyApiKey: undefined,
+    polyApiSecret: undefined,
+    polyPassphrase: undefined,
+    polyPrivateKey: undefined,
+    planktonApiKey: TEST_API_KEY,
+    planktonApiPort: 0,
+    planktonAuthUsername: undefined,
+    planktonAuthPassword: undefined,
+    planktonSessionSecret: undefined,
+    trustProxy: false,
   };
 }
 
@@ -64,7 +75,12 @@ beforeAll(async () => {
      VALUES ('fam-caps', 'probe-only', 'scaled', 'test', '{}', 'pending')`,
   ).run();
 
-  app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
+  app = await buildServer({
+    config: testConfig(),
+    controlDb: conn.db,
+    ledgerDb: conn.db,
+    ledgerPool: stubLedgerPool(),
+  });
 });
 
 afterAll(async () => {
@@ -129,15 +145,23 @@ describe("accept caps validation", () => {
 
     // Verify caps were written to family_rules
     const rules = conn.db
-      .prepare("SELECT max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules WHERE family_id = 'caps-test-1'")
-      .get() as { max_open_value_usdc: number; max_active_markets: number; max_dust_positions: number };
+      .prepare(
+        "SELECT max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules WHERE family_id = 'caps-test-1'",
+      )
+      .get() as {
+      max_open_value_usdc: number;
+      max_active_markets: number;
+      max_dust_positions: number;
+    };
     expect(rules.max_open_value_usdc).toBe(25);
     expect(rules.max_active_markets).toBe(4);
     expect(rules.max_dust_positions).toBe(3);
 
     // Verify family_deployments were created for all profiles
     const deployments = conn.db
-      .prepare("SELECT profile, enabled FROM family_deployments WHERE family_id = 'caps-test-1' ORDER BY profile")
+      .prepare(
+        "SELECT profile, enabled FROM family_deployments WHERE family_id = 'caps-test-1' ORDER BY profile",
+      )
       .all() as { profile: string; enabled: number }[];
     expect(deployments).toHaveLength(3);
     expect(deployments.find((d) => d.profile === "paper")?.enabled).toBe(1);
@@ -179,7 +203,9 @@ describe("promote caps validation", () => {
 
     // Caps are encoded in the command reason as JSON
     const cmd = conn.db
-      .prepare("SELECT reason FROM operator_commands WHERE action = 'family_promote_scaled' AND target_id = 'fam-caps'")
+      .prepare(
+        "SELECT reason FROM operator_commands WHERE action = 'family_promote_scaled' AND target_id = 'fam-caps'",
+      )
       .get() as { reason: string };
     const parsed = JSON.parse(cmd.reason);
     expect(parsed.caps.maxOpenValueUsdc).toBe(75);
@@ -189,10 +215,12 @@ describe("promote caps validation", () => {
 
   it("accepts promote without caps (uses defaults)", async () => {
     // Re-seed a pending proposal
-    conn.db.prepare(
-      `INSERT INTO promotion_proposals (family_id, current_state, proposed_state, reason, scores_snapshot, status)
+    conn.db
+      .prepare(
+        `INSERT INTO promotion_proposals (family_id, current_state, proposed_state, reason, scores_snapshot, status)
        VALUES ('fam-caps', 'probe-only', 'scaled', 'test2', '{}', 'pending')`,
-    ).run();
+      )
+      .run();
 
     const res = await app.inject({
       method: "POST",
@@ -204,7 +232,9 @@ describe("promote caps validation", () => {
 
     // Reason is plain text, no caps JSON
     const cmd = conn.db
-      .prepare("SELECT reason FROM operator_commands WHERE action = 'family_promote_scaled' AND target_id = 'fam-caps' ORDER BY id DESC LIMIT 1")
+      .prepare(
+        "SELECT reason FROM operator_commands WHERE action = 'family_promote_scaled' AND target_id = 'fam-caps' ORDER BY id DESC LIMIT 1",
+      )
       .get() as { reason: string | null };
     // No caps → reason is null or plain string
     expect(cmd.reason).toBeNull();
