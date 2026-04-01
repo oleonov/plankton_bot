@@ -1062,3 +1062,42 @@ describe("GET /metrics/pnl-series", () => {
     expect(json(res).ok).toBe(true);
   });
 });
+
+// ─── Promote proposal ───────────────────────────────────────────────
+
+describe("POST /actions/family/:familyId/promote", () => {
+  it("approves a pending proposal and enqueues a command", async () => {
+    // Seed a pending proposal for fam-1
+    conn.db.exec(`
+      INSERT OR IGNORE INTO promotion_proposals
+        (family_id, current_state, proposed_state, reason, scores_snapshot, status)
+      VALUES ('fam-1', 'probe-only', 'scaled', 'evidence passed', '{}', 'pending')
+    `);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/family/fam-1/promote",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: JSON.stringify({ reason: "manual approve" }),
+    });
+
+    const body = json(res);
+    expect(res.statusCode).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.data.commandId).toBeDefined();
+    expect(body.data.proposalId).toBeDefined();
+
+    // Verify proposal status changed
+    const proposal = conn.db
+      .prepare("SELECT status FROM promotion_proposals WHERE family_id = 'fam-1' AND status = 'approved'")
+      .get() as { status: string } | undefined;
+    expect(proposal?.status).toBe("approved");
+
+    // Verify command was enqueued
+    const cmd = conn.db
+      .prepare("SELECT action, target_id FROM operator_commands WHERE id = ?")
+      .get(body.data.commandId) as { action: string; target_id: string };
+    expect(cmd.action).toBe("family_promote_scaled");
+    expect(cmd.target_id).toBe("fam-1");
+  });
+});

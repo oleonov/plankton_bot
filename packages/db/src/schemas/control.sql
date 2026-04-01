@@ -315,8 +315,7 @@ CREATE TABLE IF NOT EXISTS discovery_runs (
 CREATE INDEX IF NOT EXISTS idx_discovery_runs_status ON discovery_runs(status);
 
 -- ═══════════ PROMOTION PROPOSALS ═══════════
--- From 008_discovery_new_tables.sql + extended: profile, source_scorecard_id
--- Dropped: applied_command_id FK (operator_commands not transferred)
+-- From 008_discovery_new_tables.sql + extended: profile, source_scorecard_id, applied_command_id
 
 CREATE TABLE IF NOT EXISTS promotion_proposals (
   id                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -327,6 +326,7 @@ CREATE TABLE IF NOT EXISTS promotion_proposals (
   reason              TEXT NOT NULL,
   scores_snapshot     TEXT NOT NULL,
   source_scorecard_id TEXT REFERENCES family_validation_scorecards(scorecard_id),
+  applied_command_id  INTEGER REFERENCES operator_commands(id),
   status              TEXT NOT NULL DEFAULT 'pending',
   created_at          TEXT NOT NULL DEFAULT (datetime('now')),
   resolved_at         TEXT,

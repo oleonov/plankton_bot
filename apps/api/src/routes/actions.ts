@@ -114,7 +114,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
           .run(commandId, proposal.id);
 
         return { commandId, proposalId: proposal.id };
-      })();
+      }).immediate();
 
       return ok(result);
     },

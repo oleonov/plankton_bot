@@ -19,6 +19,7 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   // CREATE TABLE IF NOT EXISTS won't add new columns to existing tables.
   safeAddColumn(conn.db, "profile_summaries", "wallet_balance_usdc", "REAL");
   safeAddColumn(conn.db, "runtime_control_state", "resume_intent_at", "TEXT");
+  safeAddColumn(conn.db, "promotion_proposals", "applied_command_id", "INTEGER");
   return conn;
 }
 
