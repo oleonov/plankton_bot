@@ -28,7 +28,7 @@ export interface PatternRebuilder {
 /** Minimal interface for the DB family rules repository (overwrite on reset / promote). */
 export interface FamilyRulesDbWriter {
   overwriteRules(familyId: import("@plankton/domain").FamilyId, rulesJson: string): void;
-  updateToScaledDefaults(familyId: import("@plankton/domain").FamilyId): void;
+  updateToScaledDefaults(familyId: import("@plankton/domain").FamilyId, caps?: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number }): void;
 }
 
 export interface CommandPollerDeps {
@@ -268,7 +268,18 @@ export class CommandPoller implements RuntimeModule {
     if (!this.deps.familyRulesDbWriter) {
       throw new Error("family_promote_scaled requires familyRulesDbWriter dep");
     }
-    this.deps.familyRulesDbWriter.updateToScaledDefaults(familyId);
+
+    // Parse optional caps from reason JSON (set by promote API)
+    let caps: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number } | undefined;
+    if (cmd.reason) {
+      try {
+        const parsed = JSON.parse(cmd.reason) as { caps?: typeof caps };
+        caps = parsed.caps;
+      } catch {
+        // reason is plain text, not JSON — use defaults
+      }
+    }
+    this.deps.familyRulesDbWriter.updateToScaledDefaults(familyId, caps);
 
     // Reload rules to pick up the DB changes
     this.deps.rulesManager?.reload();

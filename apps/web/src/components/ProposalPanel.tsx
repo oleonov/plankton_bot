@@ -1,8 +1,10 @@
 import { useState } from "react";
 import { useProposals, usePromoteFamily, useDismissProposal, useStatus } from "../api/hooks.ts";
+import { SCALED_DEFAULTS } from "@plankton/domain";
 import { ScoreBars } from "./ScoreBars.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { ConfirmAction } from "./ConfirmAction.tsx";
+import { CapsEditor, useCapsEditor } from "./CapsEditor.tsx";
 
 function parseScores(snapshot: string | null) {
   if (!snapshot) return { recurrence: null, recycle: null, liveViability: null, toxicity: null };
@@ -26,6 +28,7 @@ function ProposalRow({ proposal }: { proposal: { id: number; familyId: string; c
   const [confirmOpen, setConfirmOpen] = useState(false);
   const scores = parseScores(proposal.scoresSnapshot);
   const runtimeMode = statusData?.runtimeMode;
+  const caps = useCapsEditor(SCALED_DEFAULTS);
 
   return (
     <div
@@ -60,13 +63,15 @@ function ProposalRow({ proposal }: { proposal: { id: number; familyId: string; c
           title={`Promote ${proposal.familyId}?`}
           description={`${proposal.currentState} -> ${proposal.proposedState}: ${proposal.reason}`}
           runtimeMode={runtimeMode}
-          caps="Scaled caps: $50 max, 5 markets, 3 dust"
+          disableConfirm={caps.hasErrors}
           onConfirm={() => {
             setConfirmOpen(false);
-            promote.mutate(undefined);
+            promote.mutate(caps.values);
           }}
           onCancel={() => setConfirmOpen(false)}
-        />
+        >
+          <CapsEditor input={caps.input} setInput={caps.setInput} />
+        </ConfirmDialog>
         <ConfirmAction
           label="Dismiss"
           confirmText={`Dismiss proposal?`}

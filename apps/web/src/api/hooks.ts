@@ -328,7 +328,7 @@ export function useCandidateAction(
 ) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body?: Record<string, unknown>) =>
+    mutationFn: (body?: Record<string, unknown> | { maxOpenValueUsdc: number; maxActiveMarkets: number; maxDustPositions: number }) =>
       apiPost(`/api/v1/discovery/candidates/${candidateId}/${action}`, body),
     onSuccess: async () => {
       await Promise.all([
@@ -342,8 +342,8 @@ export function useCandidateAction(
 export function usePromoteFamily(familyId: string) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (reason?: string) =>
-      apiPost(`/api/v1/actions/family/${familyId}/promote`, { reason }),
+    mutationFn: (body?: { reason?: string; maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number }) =>
+      apiPost(`/api/v1/actions/family/${familyId}/promote`, body),
     onSuccess: async () => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["families", "proposals"] }),

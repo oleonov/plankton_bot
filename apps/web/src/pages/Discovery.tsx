@@ -5,6 +5,7 @@ import { ProposalPanel } from "../components/ProposalPanel.tsx";
 import { DiscoveryStatusPanel } from "../components/DiscoveryStatusPanel.tsx";
 import { CandidateDetail } from "../components/CandidateDetail.tsx";
 import { ConfirmDialog } from "../components/ConfirmDialog.tsx";
+import { CapsEditor, useCapsEditor } from "../components/CapsEditor.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
@@ -42,42 +43,44 @@ function ScoresPendingBadge() {
 }
 
 function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
-  const review = useCandidateAction(candidate.candidateId, "review");
   const accept = useCandidateAction(candidate.candidateId, "accept");
   const reject = useCandidateAction(candidate.candidateId, "reject");
   const { data: statusData } = useStatus();
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [reviewConfirmOpen, setReviewConfirmOpen] = useState(false);
   const [rejectConfirmOpen, setRejectConfirmOpen] = useState(false);
-  const [capsInput, setCapsInput] = useState({
-    maxOpenValueUsdc: String(PROBE_DEFAULTS.maxOpenValueUsdc),
-    maxActiveMarkets: String(PROBE_DEFAULTS.maxActiveMarkets),
-    maxDustPositions: String(PROBE_DEFAULTS.maxDustPositions),
-  });
+  const caps = useCapsEditor(PROBE_DEFAULTS);
 
   const runtimeMode = statusData?.runtimeMode;
+  const canApprove = candidate.status === "discovered" || candidate.status === "reviewed";
 
-  function validateCap(value: string, min: number): string | null {
-    if (value.trim() === "") return "Required";
-    const n = Number(value);
-    if (Number.isNaN(n)) return "Must be a number";
-    if (!Number.isFinite(n)) return "Invalid";
-    if (n < min) return `Min ${min}`;
-    if (n !== Math.floor(n) && min >= 1) return "Must be whole number";
-    return null;
-  }
+  if (!canApprove) return null;
 
-  const capsFields = [
-    { key: "maxOpenValueUsdc" as const, label: "Max Open $", min: 1, error: validateCap(capsInput.maxOpenValueUsdc, 1) },
-    { key: "maxActiveMarkets" as const, label: "Max Markets", min: 1, error: validateCap(capsInput.maxActiveMarkets, 1) },
-    { key: "maxDustPositions" as const, label: "Max Dust", min: 0, error: validateCap(capsInput.maxDustPositions, 0) },
-  ];
-
-  const rejectButton = (
-    <>
+  return (
+    <span style={{ display: "inline-flex", gap: 4 }}>
+      <button
+        className="btn-success"
+        onClick={() => setConfirmOpen(true)}
+        disabled={accept.isPending}
+      >
+        {accept.isPending ? "Approving..." : "Approve"}
+      </button>
       <button className="btn-danger" onClick={() => setRejectConfirmOpen(true)} disabled={reject.isPending}>
         {reject.isPending ? "Rejecting..." : "Reject"}
       </button>
+      <ConfirmDialog
+        open={confirmOpen && !accept.isPending}
+        title={`Approve ${candidate.familyKey}?`}
+        description="This will materialize the candidate as a probe-only family."
+        runtimeMode={runtimeMode}
+        disableConfirm={caps.hasErrors}
+        onConfirm={() => {
+          setConfirmOpen(false);
+          accept.mutate(caps.values);
+        }}
+        onCancel={() => setConfirmOpen(false)}
+      >
+        <CapsEditor input={caps.input} setInput={caps.setInput} />
+      </ConfirmDialog>
       <ConfirmDialog
         open={rejectConfirmOpen && !reject.isPending}
         title={`Reject ${candidate.familyKey}?`}
@@ -85,74 +88,6 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
         onConfirm={() => { setRejectConfirmOpen(false); reject.mutate(undefined); }}
         onCancel={() => setRejectConfirmOpen(false)}
       />
-    </>
-  );
-
-  return (
-    <span style={{ display: "inline-flex", gap: 4 }}>
-      {candidate.status === "discovered" && (
-        <>
-          <button className="btn-success" onClick={() => setReviewConfirmOpen(true)} disabled={review.isPending}>
-            {review.isPending ? "Reviewing..." : "Review"}
-          </button>
-          <ConfirmDialog
-            open={reviewConfirmOpen && !review.isPending}
-            title={`Review ${candidate.familyKey}?`}
-            description="This will move the candidate to reviewed status for further evaluation."
-            onConfirm={() => { setReviewConfirmOpen(false); review.mutate(undefined); }}
-            onCancel={() => setReviewConfirmOpen(false)}
-          />
-          {rejectButton}
-        </>
-      )}
-      {candidate.status === "reviewed" && (
-        <>
-          <button
-            className="btn-success"
-            onClick={() => setConfirmOpen(true)}
-            disabled={accept.isPending}
-          >
-            {accept.isPending ? "Accepting..." : "Accept"}
-          </button>
-          {rejectButton}
-          <ConfirmDialog
-            open={confirmOpen && !accept.isPending}
-            title={`Accept ${candidate.familyKey}?`}
-            description="This will materialize the candidate as a probe-only family."
-            runtimeMode={runtimeMode}
-            disableConfirm={capsFields.some((f) => f.error)}
-            onConfirm={() => {
-              setConfirmOpen(false);
-              accept.mutate({
-                maxOpenValueUsdc: Number(capsInput.maxOpenValueUsdc),
-                maxActiveMarkets: Number(capsInput.maxActiveMarkets),
-                maxDustPositions: Number(capsInput.maxDustPositions),
-              });
-            }}
-            onCancel={() => setConfirmOpen(false)}
-          >
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 12 }}>
-              {capsFields.map(({ key, label, error }) => (
-                <label key={key} style={{ fontSize: 11 }}>
-                  <div style={{ color: "var(--text-muted)", marginBottom: 2 }}>{label}</div>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    value={capsInput[key]}
-                    onChange={(e) => setCapsInput((c) => ({ ...c, [key]: e.target.value }))}
-                    style={{
-                      width: "100%", padding: "4px 6px", fontSize: 12,
-                      background: "var(--bg)", borderRadius: 4, color: "var(--text)",
-                      border: error ? "1px solid var(--red)" : "1px solid var(--border)",
-                    }}
-                  />
-                  {error && <div style={{ color: "var(--red)", fontSize: 10, marginTop: 2 }}>{error}</div>}
-                </label>
-              ))}
-            </div>
-          </ConfirmDialog>
-        </>
-      )}
     </span>
   );
 }

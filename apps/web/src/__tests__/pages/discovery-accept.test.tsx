@@ -10,7 +10,7 @@ function ok<T>(data: T) {
   return HttpResponse.json({ ok: true, data, error: null, ts: new Date().toISOString() });
 }
 
-const reviewedCandidate = {
+const discoveredCandidate = {
   candidateId: "cand-1",
   familyKey: "btc-above-50k",
   regime: "threshold",
@@ -22,28 +22,28 @@ const reviewedCandidate = {
   lastSeenAt: "2026-03-31T00:00:00Z",
   scoresUpdatedAt: "2026-03-31T00:00:00Z",
   materializedAt: null,
-  status: "reviewed",
+  status: "discovered",
 };
 
-function setupReviewedCandidate() {
+function setupCandidate() {
   server.use(
     http.get("/api/v1/discovery/candidates", () =>
-      ok({ items: [{ ...reviewedCandidate }], nextCursor: null }),
+      ok({ items: [{ ...discoveredCandidate }], nextCursor: null }),
     ),
   );
 }
 
 describe("Discovery Accept dialog with caps", () => {
   it("shows editable cap fields with defaults", async () => {
-    setupReviewedCandidate();
+    setupCandidate();
     const user = userEvent.setup();
     renderWithProviders(<Discovery />);
 
-    const acceptBtn = await screen.findByRole("button", { name: "Accept" });
+    const acceptBtn = await screen.findByRole("button", { name: "Approve" });
     await user.click(acceptBtn);
 
     // Dialog opens with default values
-    expect(screen.getByText("Accept btc-above-50k?")).toBeInTheDocument();
+    expect(screen.getByText("Approve btc-above-50k?")).toBeInTheDocument();
     const inputs = screen.getAllByRole("textbox");
     expect(inputs).toHaveLength(3);
     // Defaults from PROBE_DEFAULTS: 10, 3, 2
@@ -53,11 +53,11 @@ describe("Discovery Accept dialog with caps", () => {
   });
 
   it("shows error and disables Confirm for non-numeric input", async () => {
-    setupReviewedCandidate();
+    setupCandidate();
     const user = userEvent.setup();
     renderWithProviders(<Discovery />);
 
-    const acceptBtn = await screen.findByRole("button", { name: "Accept" });
+    const acceptBtn = await screen.findByRole("button", { name: "Approve" });
     await user.click(acceptBtn);
 
     const inputs = screen.getAllByRole("textbox");
@@ -70,11 +70,11 @@ describe("Discovery Accept dialog with caps", () => {
   });
 
   it("shows error for empty input", async () => {
-    setupReviewedCandidate();
+    setupCandidate();
     const user = userEvent.setup();
     renderWithProviders(<Discovery />);
 
-    const acceptBtn = await screen.findByRole("button", { name: "Accept" });
+    const acceptBtn = await screen.findByRole("button", { name: "Approve" });
     await user.click(acceptBtn);
 
     const inputs = screen.getAllByRole("textbox");
@@ -85,11 +85,11 @@ describe("Discovery Accept dialog with caps", () => {
   });
 
   it("shows error for value below minimum", async () => {
-    setupReviewedCandidate();
+    setupCandidate();
     const user = userEvent.setup();
     renderWithProviders(<Discovery />);
 
-    const acceptBtn = await screen.findByRole("button", { name: "Accept" });
+    const acceptBtn = await screen.findByRole("button", { name: "Approve" });
     await user.click(acceptBtn);
 
     const inputs = screen.getAllByRole("textbox");
@@ -101,20 +101,20 @@ describe("Discovery Accept dialog with caps", () => {
   });
 
   it("sends custom caps to API on confirm", async () => {
-    setupReviewedCandidate();
+    setupCandidate();
     const acceptHandler = vi.fn();
     server.use(
       http.post("/api/v1/discovery/candidates/cand-1/accept", async ({ request }) => {
         const body = await request.json();
         acceptHandler(body);
-        return ok({ ...reviewedCandidate, status: "materialized" });
+        return ok({ ...discoveredCandidate, status: "materialized" });
       }),
     );
 
     const user = userEvent.setup();
     renderWithProviders(<Discovery />);
 
-    const acceptBtn = await screen.findByRole("button", { name: "Accept" });
+    const acceptBtn = await screen.findByRole("button", { name: "Approve" });
     await user.click(acceptBtn);
 
     // Change Max Open from 10 to 20
@@ -137,11 +137,11 @@ describe("Discovery Accept dialog with caps", () => {
   });
 
   it("enables Confirm when error is fixed", async () => {
-    setupReviewedCandidate();
+    setupCandidate();
     const user = userEvent.setup();
     renderWithProviders(<Discovery />);
 
-    const acceptBtn = await screen.findByRole("button", { name: "Accept" });
+    const acceptBtn = await screen.findByRole("button", { name: "Approve" });
     await user.click(acceptBtn);
 
     const inputs = screen.getAllByRole("textbox");

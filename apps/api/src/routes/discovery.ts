@@ -408,11 +408,17 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
 
       // Control DB transaction: all control-side inserts are atomic
       const materializeControl = controlDb.transaction(() => {
+        // Read current status before updating (for audit trail)
+        const current = controlDb.prepare(
+          "SELECT status FROM family_candidates WHERE candidate_id = ?",
+        ).get(row.candidate_id) as { status: string } | undefined;
+        const fromStatus = current?.status ?? "unknown";
+
         // Atomically guard + update candidate status (race-safe)
         const result = controlDb.prepare(
           `UPDATE family_candidates
            SET status = 'materialized', materialized_at = ?
-           WHERE candidate_id = ? AND status = 'reviewed'`,
+           WHERE candidate_id = ? AND status IN ('discovered', 'reviewed')`,
         ).run(now, row.candidate_id);
         if (result.changes === 0) return false;
 
@@ -477,8 +483,8 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
         controlDb.prepare(
           `INSERT INTO state_transitions
              (entity_type, entity_id, from_state, to_state, trigger_type, initiator, reason)
-           VALUES ('candidate', ?, 'reviewed', 'materialized', 'operator', 'api', ?)`,
-        ).run(row.candidate_id, `accepted via API`);
+           VALUES ('candidate', ?, ?, 'materialized', 'operator', 'api', ?)`,
+        ).run(row.candidate_id, fromStatus, `accepted via API`);
 
         return true;
       });

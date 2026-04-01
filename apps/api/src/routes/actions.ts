@@ -67,7 +67,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
   }
 
   // ── POST /actions/family/:familyId/promote ─────────────────────────────
-  app.post<{ Params: { familyId: string }; Body: { reason?: string } }>(
+  app.post<{ Params: { familyId: string }; Body: { reason?: string; maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number } }>(
     "/actions/family/:familyId/promote",
     async (request) => {
       const { familyId } = request.params;
@@ -77,6 +77,19 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
       if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
 
       const actor = getActor(request);
+      const body = (request.body ?? {}) as { reason?: string; maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number };
+
+      // Encode caps in reason JSON so command-poller can use them
+      const caps = {
+        maxOpenValueUsdc: body.maxOpenValueUsdc,
+        maxActiveMarkets: body.maxActiveMarkets,
+        maxDustPositions: body.maxDustPositions,
+      };
+      const hasCaps = caps.maxOpenValueUsdc != null || caps.maxActiveMarkets != null || caps.maxDustPositions != null;
+      const reason = hasCaps
+        ? JSON.stringify({ reason: body.reason ?? "operator approved", caps })
+        : body.reason ?? null;
+
       const result = opts.db.transaction(() => {
         const info = opts.db
           .prepare(
@@ -105,7 +118,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
           opts.db,
           "family_promote_scaled",
           familyId,
-          (request.body as { reason?: string })?.reason ?? null,
+          reason,
           actor,
         );
 

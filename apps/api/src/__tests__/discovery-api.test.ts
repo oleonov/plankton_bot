@@ -238,7 +238,7 @@ describe("POST /discovery/candidates/:id/accept", () => {
     expect(cmd).toBeDefined();
   });
 
-  it("returns 409 for non-reviewed candidate", async () => {
+  it("returns 409 for rejected candidate", async () => {
     const db = conn.db;
     const now = new Date().toISOString();
 
@@ -247,13 +247,13 @@ describe("POST /discovery/candidates/:id/accept", () => {
          (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
           primary_category, strategy_profile, active_market_count,
           cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at)
-       VALUES ('cand-disc-only', 'test-disc-key', 'standard', 'daily', 'daily', 'low',
-               'crypto', 'scalp', 2, 1000, 'ignore', 'discovered', ?, ?)`,
+       VALUES ('cand-rejected', 'test-rejected-key', 'standard', 'daily', 'daily', 'low',
+               'crypto', 'scalp', 2, 1000, 'ignore', 'rejected', ?, ?)`,
     ).run(now, now);
 
     const res = await app.inject({
       method: "POST",
-      url: "/api/v1/discovery/candidates/cand-disc-only/accept",
+      url: "/api/v1/discovery/candidates/cand-rejected/accept",
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {},
     });
