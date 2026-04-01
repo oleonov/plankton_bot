@@ -18,6 +18,7 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   // Schema evolution: add columns that may be missing in existing DBs.
   // CREATE TABLE IF NOT EXISTS won't add new columns to existing tables.
   safeAddColumn(conn.db, "profile_summaries", "wallet_balance_usdc", "REAL");
+  safeAddColumn(conn.db, "runtime_control_state", "resume_intent_at", "TEXT");
   return conn;
 }
 

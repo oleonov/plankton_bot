@@ -84,6 +84,7 @@ import { ScoreComputer } from "./modules/evidence/score-computer.js";
 import { RuntimeSafetyEvaluator } from "./modules/safety/runtime-safety-evaluator.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
+import { evaluateResumeIntent } from "./resume-intent.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -866,6 +867,14 @@ async function main(): Promise<void> {
     "startup preflight complete",
   );
 
+  // Read and clear resume intent early — one-shot guarantee regardless of startup outcome
+  const intentRow = controlConn.db
+    .prepare("SELECT resume_intent_at, desired_profile FROM runtime_control_state WHERE id = 1")
+    .get() as { resume_intent_at: string | null; desired_profile: string | null } | undefined;
+  controlConn.db
+    .prepare("UPDATE runtime_control_state SET resume_intent_at = NULL WHERE id = 1")
+    .run();
+
   if (preflightResult.status === "failed") {
     for (const b of preflightResult.blockers) {
       log.warn({ blocker: b }, "startup preflight blocker");
@@ -902,12 +911,8 @@ async function main(): Promise<void> {
   try {
     await supervisor.start();
 
-    // Safety: always start paused. Operator must explicitly resume via dashboard.
+    // Start paused, then check for deploy resume intent
     setPausedAndPersist(true);
-    log.info(
-      { mode: runtimeMode },
-      "runtime started PAUSED — operator must resume via dashboard",
-    );
 
     // Publish runtime state to control.db for cross-service visibility
     const instanceId = randomUUID();
@@ -920,6 +925,24 @@ async function main(): Promise<void> {
     statePublisherRef.current = statePublisher;
     statePublisher.publishStartup();
     statePublisher.startHeartbeatLoop(15_000);
+
+    // Evaluate resume intent (read+cleared earlier, before preflight exit paths)
+    const intentResult = evaluateResumeIntent({
+      intentAt: intentRow?.resume_intent_at ?? null,
+      nowMs: Date.now(),
+      hasActiveSwitch: !!activeSwitchRow,
+      desiredProfile: intentRow?.desired_profile ?? null,
+      activeProfile,
+    });
+
+    if (intentResult.action === "resume") {
+      log.info({ ageMs: intentResult.ageMs }, "resume intent found — auto-resuming");
+      setPausedAndPersist(false);
+    } else if (intentResult.action === "stay_paused") {
+      log.warn({ reason: intentResult.reason, ageMs: intentResult.ageMs }, "resume intent skipped — staying paused");
+    } else {
+      log.info({ mode: runtimeMode }, "runtime started PAUSED — no resume intent");
+    }
 
     log.info({ phase: supervisor.getPhase(), paused: supervisor.isPaused() }, "runtime ready");
   } catch (err) {

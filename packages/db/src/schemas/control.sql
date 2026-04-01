@@ -352,6 +352,7 @@ CREATE TABLE IF NOT EXISTS runtime_control_state (
   current_instance_id TEXT,
   runtime_status      TEXT NOT NULL DEFAULT 'stopped',  -- stopped | starting | ready_paused | running | stopping | failed
   paused              INTEGER NOT NULL DEFAULT 1,
+  resume_intent_at    TEXT,             -- one-shot deploy resume intent (ISO timestamp, NULL = no intent)
   schema_version      INTEGER NOT NULL DEFAULT 1,
   updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );

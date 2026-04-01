@@ -52,27 +52,26 @@ scp docker-compose.yml ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}/
 scp .env.production ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}/.env.production
 scp config/family_rules.yaml ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}/config/
 
-# Step 4: Capture current bot state before deploy
+# Step 4: Capture current bot state and write resume intent if running
 echo -e "\n${GREEN}[4/6] Capturing current bot state...${NC}"
 API_KEY=$(grep '^PLANKTON_API_KEY=' .env.production | cut -d'=' -f2-)
 API_BASE="https://bot.example.com"
-WAS_RUNNING="unknown"
+CONTROL_DB="${SERVER_PATH}/data/control.db"
 if [ -n "$API_KEY" ]; then
     STATUS_JSON=$(curl -sf -H "Authorization: Bearer ${API_KEY}" "${API_BASE}/api/v1/status" 2>/dev/null || echo "")
     if [ -n "$STATUS_JSON" ]; then
         PAUSED=$(echo "$STATUS_JSON" | grep -o '"paused":[a-z]*' | cut -d: -f2)
         if [ "$PAUSED" = "false" ]; then
-            WAS_RUNNING="true"
-            echo "Bot was RUNNING — will resume after deploy"
+            echo "Bot was RUNNING — writing resume intent to control.db"
+            ssh ${SERVER_USER}@${SERVER_HOST} "sqlite3 ${CONTROL_DB} \"UPDATE runtime_control_state SET resume_intent_at = datetime('now') WHERE id = 1\""
         else
-            WAS_RUNNING="false"
-            echo "Bot was PAUSED — will stay paused after deploy"
+            echo "Bot was PAUSED — no resume intent"
         fi
     else
-        echo -e "${YELLOW}Could not reach API — will not auto-resume${NC}"
+        echo -e "${YELLOW}Could not reach API — no resume intent${NC}"
     fi
 else
-    echo -e "${YELLOW}No PLANKTON_API_KEY — will not auto-resume${NC}"
+    echo -e "${YELLOW}No PLANKTON_API_KEY — no resume intent${NC}"
 fi
 
 # Step 5: Load image and start containers
@@ -97,27 +96,6 @@ docker image prune -f
 echo "Container status:"
 docker-compose --env-file .env.production ps
 ENDSSH
-
-# Restore bot state if it was running before deploy
-if [ "$WAS_RUNNING" = "true" ]; then
-    echo -e "\n${GREEN}Restoring bot state — resuming...${NC}"
-    # Wait for API to become healthy
-    for i in 1 2 3 4 5; do
-        HEALTH=$(curl -sf -H "Authorization: Bearer ${API_KEY}" "${API_BASE}/api/v1/status" 2>/dev/null || echo "")
-        if [ -n "$HEALTH" ]; then break; fi
-        echo "Waiting for API to come up... (attempt $i/5)"
-        sleep 3
-    done
-    RESUME_RESP=$(curl -sf -X POST "${API_BASE}/api/v1/actions/resume" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer ${API_KEY}" \
-        -d '{"reason": "post-deploy auto-resume"}' 2>/dev/null || echo "")
-    if [ -n "$RESUME_RESP" ]; then
-        echo "Resume command sent"
-    else
-        echo -e "${YELLOW}WARNING: Could not resume — do it manually${NC}"
-    fi
-fi
 
 # Step 6: Cleanup local archive
 echo -e "\n${GREEN}[6/6] Cleaning up local files...${NC}"
