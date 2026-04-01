@@ -4,6 +4,7 @@ import { useProposals } from "../api/hooks.ts";
 import { StatusBar } from "./StatusBar.tsx";
 import { AlertStrip } from "./AlertStrip.tsx";
 import { DemotionAlertStrip } from "./DemotionAlertStrip.tsx";
+import { AppFooter } from "./AppFooter.tsx";
 
 function ProposalBadge() {
   const { data: proposals } = useProposals();
@@ -128,6 +129,7 @@ export function Layout() {
       <div style={{ flex: 1, overflowY: "auto" }}>
         <Outlet />
       </div>
+      <AppFooter />
     </div>
   );
 }

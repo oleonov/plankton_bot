@@ -159,11 +159,16 @@ describe("auth", () => {
 // ─── Health ─────────────────────────────────────────────────────────
 
 describe("GET /health", () => {
-  it("returns ok envelope", async () => {
+  it("returns ok envelope with deploy metadata fields", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/health" });
     const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.status).toBe("ok");
+    expect(body.data.uptime).toBeTypeOf("number");
+    // Without deploy-meta.json, fields are null but present
+    expect("sha" in body.data).toBe(true);
+    expect("deployVersion" in body.data).toBe(true);
+    expect("deployedAt" in body.data).toBe(true);
     expect(body.ts).toBeDefined();
   });
 });

@@ -102,8 +102,67 @@ echo "Container status:"
 docker-compose --env-file .env.production ps
 ENDSSH
 
-# Step 6: Cleanup local archive
-echo -e "\n${GREEN}[6/6] Cleaning up local files...${NC}"
+# Step 6: Health check + update deploy metadata
+echo -e "\n${GREEN}[6/7] Verifying deploy and updating version...${NC}"
+DEPLOY_OK=false
+for i in 1 2 3 4 5 6; do
+    HEALTH=$(curl -sf -H "Authorization: Bearer ${API_KEY}" "${API_BASE}/api/v1/health" 2>/dev/null || echo "")
+    if echo "$HEALTH" | grep -q '"ok":true'; then
+        DEPLOY_OK=true
+        break
+    fi
+    echo "Waiting for API health... (attempt $i/6)"
+    sleep 5
+done
+
+if [ "$DEPLOY_OK" = "true" ]; then
+    DEPLOY_META="${SERVER_PATH}/config/deploy-meta.json"
+
+    # Read current deploy version — || true prevents set -e from killing the script
+    PREV_VERSION=$(ssh ${SERVER_USER}@${SERVER_HOST} "python3 -c \"
+import json, sys
+try:
+    with open('${DEPLOY_META}') as f:
+        v = json.load(f).get('deployVersion', 0)
+        if not isinstance(v, int) or v < 0:
+            sys.exit(1)
+        print(v)
+except FileNotFoundError:
+    print(0)
+except Exception:
+    sys.exit(1)
+\"" 2>/dev/null) || true
+
+    if [ -z "$PREV_VERSION" ]; then
+        echo -e "${YELLOW}WARNING: deploy-meta.json is corrupt or unreadable — version NOT incremented${NC}"
+        echo -e "${YELLOW}Fix manually: ssh ${SERVER_USER}@${SERVER_HOST} 'cat ${DEPLOY_META}'${NC}"
+        PREV_VERSION=""
+    fi
+
+    if [ -z "$PREV_VERSION" ]; then
+        echo "Skipping deploy version update (metadata unreadable)"
+    else
+
+    NEXT_VERSION=$((PREV_VERSION + 1))
+    DEPLOYED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Atomic write: temp file → mv (prevents truncated/corrupt metadata)
+    ssh ${SERVER_USER}@${SERVER_HOST} "cat > ${DEPLOY_META}.tmp && mv ${DEPLOY_META}.tmp ${DEPLOY_META}" << METAEOF
+{
+  "deployVersion": ${NEXT_VERSION},
+  "sha": "${GIT_SHA}",
+  "deployedAt": "${DEPLOYED_AT}"
+}
+METAEOF
+    echo "Deploy version: v$(printf '%03d' ${NEXT_VERSION}) · ${GIT_SHA} · ${DEPLOYED_AT}"
+
+    fi # end of PREV_VERSION check
+else
+    echo -e "${YELLOW}WARNING: Health check failed — deploy version NOT incremented${NC}"
+fi
+
+# Step 7: Cleanup local archive
+echo -e "\n${GREEN}[7/7] Cleaning up local files...${NC}"
 rm /tmp/${IMAGE_NAME}.tar.gz
 
 echo -e "\n${GREEN}=== Deployment complete! ===${NC}"

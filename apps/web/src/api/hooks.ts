@@ -39,6 +39,19 @@ function withParams(
   return qs ? `${base}?${qs}` : base;
 }
 
+// ─── Build Info ─────────────────────────────────────────────────
+
+export function useBuildInfo() {
+  return useQuery({
+    queryKey: ["build-info"],
+    queryFn: () =>
+      apiFetch<{ status: string; sha: string | null; deployVersion: number | null; deployedAt: string | null }>(
+        "/api/v1/health",
+      ),
+    staleTime: 5 * 60_000, // cache 5 min — rarely changes
+  });
+}
+
 // ─── Status ─────────────────────────────────────────────────────
 
 export function useStatus() {
