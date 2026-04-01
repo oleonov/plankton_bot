@@ -56,7 +56,7 @@ scp config/family_rules.yaml ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}/config
 echo -e "\n${GREEN}[4/6] Capturing current bot state...${NC}"
 API_KEY=$(grep '^PLANKTON_API_KEY=' .env.production | cut -d'=' -f2-)
 API_BASE="https://bot.example.com"
-CONTROL_DB="${SERVER_PATH}/data/control.db"
+CONTROL_DB="/var/lib/docker/volumes/plankton-data/_data/control.db"
 if [ -n "$API_KEY" ]; then
     STATUS_JSON=$(curl -sf -H "Authorization: Bearer ${API_KEY}" "${API_BASE}/api/v1/status" 2>/dev/null || echo "")
     if [ -n "$STATUS_JSON" ]; then
