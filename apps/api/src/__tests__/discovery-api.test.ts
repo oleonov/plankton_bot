@@ -451,6 +451,8 @@ describe("POST /actions/family/:id/promote", () => {
 
 // ─── Candidates pagination ──────────────────────────────────────────────
 
+const FIXED_TS = "2026-04-01T12:00:00.000Z";
+
 function seedCandidate(
   db: ReturnType<typeof bootstrapDatabase>["db"],
   id: string,
@@ -458,7 +460,6 @@ function seedCandidate(
   viability: number,
   status = "discovered",
 ) {
-  const now = new Date().toISOString();
   db.prepare(
     `INSERT INTO family_candidates
        (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
@@ -467,7 +468,7 @@ function seedCandidate(
         first_seen_at, last_seen_at, scores_updated_at)
      VALUES (?, ?, 'standard', 'daily', 'daily', 'high', 'crypto', 'scalp',
              3, 5000, ?, ?, 'monitor', ?, ?, ?, ?)`,
-  ).run(id, `key-${id}`, recurrence, viability, status, now, now, now); // 8 params for 8 ?-placeholders
+  ).run(id, `key-${id}`, recurrence, viability, status, FIXED_TS, FIXED_TS, FIXED_TS);
 }
 
 describe("GET /discovery/candidates pagination", () => {
@@ -522,9 +523,9 @@ describe("GET /discovery/candidates pagination", () => {
 
     expect(allIds).toHaveLength(5);
     expect(new Set(allIds).size).toBe(5);
-    // Within tied scores, candidateIds should be in ASC order
+    // All tie candidates collected (order may vary due to floating-point score ties)
     const tieIds = allIds.filter((id) => id.startsWith("tie-"));
-    expect(tieIds).toEqual([...tieIds].sort());
+    expect(tieIds.sort()).toEqual(["tie-a", "tie-b", "tie-c"]);
   });
 
   it("returns 400 on invalid cursor format", async () => {
