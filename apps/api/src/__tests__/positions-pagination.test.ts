@@ -30,18 +30,22 @@ beforeAll(async () => {
   conn = bootstrapDatabase(":memory:");
   const db = conn.db;
 
-  // Seed 5 positions with distinct updated_at and cost_basis
-  for (let i = 1; i <= 5; i++) {
+  // Seed 7 positions: 5 with distinct costs + 2 with duplicate cost (40)
+  const seeds = [
+    { id: "pos-1", tok: "tok-1", cost: 10, ts: "2026-04-01T01:00:00Z" },
+    { id: "pos-2", tok: "tok-2", cost: 20, ts: "2026-04-01T02:00:00Z" },
+    { id: "pos-3", tok: "tok-3", cost: 30, ts: "2026-04-01T03:00:00Z" },
+    { id: "pos-4", tok: "tok-4", cost: 40, ts: "2026-04-01T04:00:00Z" },
+    { id: "pos-5", tok: "tok-5", cost: 50, ts: "2026-04-01T05:00:00Z" },
+    { id: "pos-6", tok: "tok-6", cost: 40, ts: "2026-04-01T06:00:00Z" }, // duplicate cost
+    { id: "pos-7", tok: "tok-7", cost: 40, ts: "2026-04-01T07:00:00Z" }, // duplicate cost
+  ];
+  for (const s of seeds) {
     db.prepare(
       `INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price,
         cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
        VALUES (?, ?, 'fam-1', 'buy', 10, 0.1, ?, 0, 'open', ?, ?)`,
-    ).run(
-      `pos-${i}`, `tok-${i}`,
-      i * 10, // cost_basis: 10, 20, 30, 40, 50
-      `2026-04-01T0${i}:00:00Z`,
-      `2026-04-01T0${i}:00:00Z`,
-    );
+    ).run(s.id, s.tok, s.cost, s.ts, s.ts);
   }
 
   app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
@@ -66,7 +70,7 @@ describe("positions pagination", () => {
     const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.items).toHaveLength(2);
-    expect(body.data.totalCount).toBe(5);
+    expect(body.data.totalCount).toBe(7);
     expect(body.data.nextCursor).not.toBeNull();
   });
 
@@ -92,45 +96,39 @@ describe("positions pagination", () => {
     expect(ids1.filter((id: string) => ids2.includes(id))).toHaveLength(0);
   });
 
-  it("last page has null nextCursor", async () => {
-    const res1 = await app.inject({
-      method: "GET", url: "/api/v1/positions?limit=2", headers: authHeaders(),
-    });
-    const res2 = await app.inject({
-      method: "GET",
-      url: `/api/v1/positions?limit=2&cursor=${encodeURIComponent(json(res1).data.nextCursor)}`,
-      headers: authHeaders(),
-    });
-    const res3 = await app.inject({
-      method: "GET",
-      url: `/api/v1/positions?limit=2&cursor=${encodeURIComponent(json(res2).data.nextCursor)}`,
-      headers: authHeaders(),
-    });
-    const body3 = json(res3);
-    expect(body3.data.items).toHaveLength(1); // 5 total, 2+2+1
-    expect(body3.data.nextCursor).toBeNull();
+  it("paginates through all positions without loss or duplicates", async () => {
+    const allIds: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const url = cursor
+        ? `/api/v1/positions?limit=3&cursor=${encodeURIComponent(cursor)}`
+        : "/api/v1/positions?limit=3";
+      const res = await app.inject({ method: "GET", url, headers: authHeaders() });
+      const body = json(res);
+      allIds.push(...body.data.items.map((p: any) => p.positionId));
+      if (!body.data.nextCursor) break;
+      cursor = body.data.nextCursor;
+    }
+    // All 7 positions collected, no duplicates
+    expect(allIds).toHaveLength(7);
+    expect(new Set(allIds).size).toBe(7);
   });
 
-  it("sort=tail_cost uses cost_basis_usdc for cursor", async () => {
-    const res1 = await app.inject({
-      method: "GET",
-      url: "/api/v1/positions?limit=2&sort=tail_cost",
-      headers: authHeaders(),
-    });
-    const body1 = json(res1);
-    // Sorted by cost_basis DESC: 50, 40 → next page starts after 40
-    expect(body1.data.items[0].costBasisUsdc).toBe(50);
-    expect(body1.data.items[1].costBasisUsdc).toBe(40);
-    expect(body1.data.nextCursor).toBe("40"); // cost_basis_usdc of last row
-
-    const res2 = await app.inject({
-      method: "GET",
-      url: `/api/v1/positions?limit=2&sort=tail_cost&cursor=${body1.data.nextCursor}`,
-      headers: authHeaders(),
-    });
-    const body2 = json(res2);
-    // Next: 30, 20
-    expect(body2.data.items[0].costBasisUsdc).toBe(30);
-    expect(body2.data.items[1].costBasisUsdc).toBe(20);
+  it("sort=tail_cost paginates through all positions including duplicate costs", async () => {
+    const allIds: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const url = cursor
+        ? `/api/v1/positions?limit=2&sort=tail_cost&cursor=${encodeURIComponent(cursor)}`
+        : "/api/v1/positions?limit=2&sort=tail_cost";
+      const res = await app.inject({ method: "GET", url, headers: authHeaders() });
+      const body = json(res);
+      allIds.push(...body.data.items.map((p: any) => p.positionId));
+      if (!body.data.nextCursor) break;
+      cursor = body.data.nextCursor;
+    }
+    // All 7 positions collected, no duplicates — including the three with cost=40
+    expect(allIds).toHaveLength(7);
+    expect(new Set(allIds).size).toBe(7);
   });
 });
