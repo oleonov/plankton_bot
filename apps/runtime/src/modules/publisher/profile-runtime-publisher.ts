@@ -1,6 +1,6 @@
 import type { RuntimeModule, ValidationScorecard, ProfileId, ExchangeGateway } from "@plankton/domain";
 import { createScorecardId, createFamilyId, computeRecycleScore, computeToxicityPenalty } from "@plankton/domain";
-import { SqliteValidationScorecardRepository } from "@plankton/db";
+import { SqliteValidationScorecardRepository, withImmediate } from "@plankton/db";
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
@@ -20,13 +20,11 @@ export interface ProfileRuntimePublisherDeps {
 export class ProfileRuntimePublisher implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly reader: ValidationMetricsReader;
-  private readonly scorecardRepo: SqliteValidationScorecardRepository;
   private readonly deps: ProfileRuntimePublisherDeps & { intervalMs: number };
 
   constructor(deps: ProfileRuntimePublisherDeps) {
     this.deps = { intervalMs: 60_000, ...deps };
     this.reader = new ValidationMetricsReader(deps.ledgerDb);
-    this.scorecardRepo = new SqliteValidationScorecardRepository(deps.controlDb);
   }
 
   async start(): Promise<void> {
@@ -49,48 +47,51 @@ export class ProfileRuntimePublisher implements RuntimeModule {
 
   async publish(): Promise<void> {
     const familyIds = this.deps.deployedFamilyIds();
+
+    // Phase 1: Read all data OUTSIDE the transaction (no contention)
     const familyMetrics = this.reader.readFamilyMetrics(familyIds);
     const profileMetrics = this.reader.readProfileMetrics();
-
-    const upsertRollup = this.deps.controlDb.prepare(`
-      INSERT INTO family_profile_rollups
-        (family_id, profile, open_value_usdc, open_positions, active_markets,
-         realized_pnl, tail_cost_usdc, tail_adjusted_pnl, effective_mode, last_trade_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-      ON CONFLICT(family_id, profile) DO UPDATE SET
-        open_value_usdc   = excluded.open_value_usdc,
-        open_positions    = excluded.open_positions,
-        active_markets    = excluded.active_markets,
-        realized_pnl      = excluded.realized_pnl,
-        tail_cost_usdc    = excluded.tail_cost_usdc,
-        tail_adjusted_pnl = excluded.tail_adjusted_pnl,
-        effective_mode    = excluded.effective_mode,
-        last_trade_at     = excluded.last_trade_at,
-        updated_at        = excluded.updated_at
-    `);
-
-    for (const fm of familyMetrics) {
-      upsertRollup.run(
-        fm.familyId,
-        this.deps.profile,
-        fm.openValueUsdc,
-        fm.openPositions,
-        fm.activeMarkets,
-        fm.realizedPnl,
-        fm.tailCostUsdc,
-        fm.tailAdjustedPnl,
-        fm.effectiveMode,
-        fm.lastTradeAt,
-      );
-    }
-
     const balanceUsdc = this.computeBalance(profileMetrics.totalExposureUsdc);
     const paused = this.deps.getPaused();
     const lastPreflightStatus = this.readLastPreflightStatus();
     const walletBalanceUsdc = await this.fetchWalletBalance();
+    const scorecards = this.buildScorecards(familyIds);
 
-    this.deps.controlDb
-      .prepare(
+    // Phase 2: Write everything INSIDE a single immediate transaction
+    withImmediate(this.deps.controlDb, (db) => {
+      const upsertRollup = db.prepare(`
+        INSERT INTO family_profile_rollups
+          (family_id, profile, open_value_usdc, open_positions, active_markets,
+           realized_pnl, tail_cost_usdc, tail_adjusted_pnl, effective_mode, last_trade_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(family_id, profile) DO UPDATE SET
+          open_value_usdc   = excluded.open_value_usdc,
+          open_positions    = excluded.open_positions,
+          active_markets    = excluded.active_markets,
+          realized_pnl      = excluded.realized_pnl,
+          tail_cost_usdc    = excluded.tail_cost_usdc,
+          tail_adjusted_pnl = excluded.tail_adjusted_pnl,
+          effective_mode    = excluded.effective_mode,
+          last_trade_at     = excluded.last_trade_at,
+          updated_at        = excluded.updated_at
+      `);
+
+      for (const fm of familyMetrics) {
+        upsertRollup.run(
+          fm.familyId,
+          this.deps.profile,
+          fm.openValueUsdc,
+          fm.openPositions,
+          fm.activeMarkets,
+          fm.realizedPnl,
+          fm.tailCostUsdc,
+          fm.tailAdjustedPnl,
+          fm.effectiveMode,
+          fm.lastTradeAt,
+        );
+      }
+
+      db.prepare(
         `INSERT INTO profile_summaries
            (profile_id, paused, last_run_at, open_orders, open_positions,
             total_exposure_usdc, balance_usdc, wallet_balance_usdc, last_preflight_status, updated_at)
@@ -105,8 +106,7 @@ export class ProfileRuntimePublisher implements RuntimeModule {
            wallet_balance_usdc  = COALESCE(excluded.wallet_balance_usdc, profile_summaries.wallet_balance_usdc),
            last_preflight_status = excluded.last_preflight_status,
            updated_at           = excluded.updated_at`,
-      )
-      .run(
+      ).run(
         this.deps.profile,
         paused ? 1 : 0,
         profileMetrics.openOrders,
@@ -117,7 +117,18 @@ export class ProfileRuntimePublisher implements RuntimeModule {
         lastPreflightStatus,
       );
 
-    this.publishScorecards(familyIds);
+      const txScorecardRepo = new SqliteValidationScorecardRepository(db);
+      for (const scorecard of scorecards) {
+        try {
+          txScorecardRepo.save(scorecard);
+        } catch (err: unknown) {
+          // (family_id, profile, validated_at) UNIQUE constraint can fire when
+          // two publish cycles land within the same millisecond — safe to skip
+          const msg = err instanceof Error ? err.message : "";
+          if (!msg.includes("UNIQUE constraint failed")) throw err;
+        }
+      }
+    });
 
     this.deps.log.debug(
       { families: familyMetrics.length, profile: this.deps.profile },
@@ -155,10 +166,10 @@ export class ProfileRuntimePublisher implements RuntimeModule {
     }
   }
 
-  private publishScorecards(familyIds: string[]): void {
+  private buildScorecards(familyIds: string[]): ValidationScorecard[] {
     const profile = this.deps.profile as ProfileId;
 
-    for (const fid of familyIds) {
+    return familyIds.map((fid) => {
       const trade = this.reader.readTradeMetrics(fid);
       const toxMetrics = this.reader.readToxicityMetrics(fid);
 
@@ -182,15 +193,15 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       });
 
       const evidenceScore = Math.max(0, recycleScore - toxicityPenalty);
-      const scorecard: ValidationScorecard = {
+      return {
         scorecardId: createScorecardId(`sc-${randomUUID()}`),
         familyId: createFamilyId(fid),
         profile,
         evidenceStatus: trade.tradeCount > 0 ? "partial" : "unknown",
         evidenceScore,
-        recurrenceScore: null, // requires candidate observations (control DB)
+        recurrenceScore: null,
         recycleScore,
-        liveViabilityScore: null, // requires candidate observations (control DB)
+        liveViabilityScore: null,
         toxicityPenalty,
         tradeCount: trade.tradeCount,
         marketCount: trade.distinctMarkets,
@@ -201,16 +212,7 @@ export class ProfileRuntimePublisher implements RuntimeModule {
         activeWindowEdgeScore: null,
         summaryJson: null,
         validatedAt: new Date().toISOString(),
-      };
-
-      try {
-        this.scorecardRepo.save(scorecard);
-      } catch (err: unknown) {
-        // (family_id, profile, validated_at) UNIQUE constraint can fire when
-        // two publish cycles land within the same millisecond — safe to skip
-        const msg = err instanceof Error ? err.message : "";
-        if (!msg.includes("UNIQUE constraint failed")) throw err;
-      }
-    }
+      } satisfies ValidationScorecard;
+    });
   }
 }
