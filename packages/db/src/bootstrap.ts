@@ -20,7 +20,37 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "profile_summaries", "wallet_balance_usdc", "REAL");
   safeAddColumn(conn.db, "runtime_control_state", "resume_intent_at", "TEXT");
   safeAddColumn(conn.db, "promotion_proposals", "applied_command_id", "INTEGER");
+
+  // Backfill: ensure every family_catalog entry has family_deployments rows.
+  // Fixes families materialized before the accept endpoint was updated to create deployments.
+  backfillDeployments(conn.db);
+
   return conn;
+}
+
+/** Backfill family_deployments for catalog entries that have none. Idempotent. */
+function backfillDeployments(db: import("better-sqlite3").Database): void {
+  const missing = db
+    .prepare(
+      `SELECT family_id FROM family_catalog
+       WHERE family_id NOT IN (SELECT DISTINCT family_id FROM family_deployments)`,
+    )
+    .all() as { family_id: string }[];
+
+  if (missing.length === 0) return;
+
+  const insert = db.prepare(
+    `INSERT OR IGNORE INTO family_deployments
+       (family_id, profile, enabled, operator_mode, strategy_stage,
+        deployment_stage, priority, created_at, updated_at)
+     VALUES (?, ?, ?, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'))`,
+  );
+
+  for (const { family_id } of missing) {
+    insert.run(family_id, "simulation", 1);
+    insert.run(family_id, "paper", 1);
+    insert.run(family_id, "live-lite", 0);
+  }
 }
 
 /** ALTER TABLE ADD COLUMN, ignoring "duplicate column" errors. */
