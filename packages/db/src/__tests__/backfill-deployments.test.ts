@@ -76,28 +76,31 @@ describe("backfillDeployments", () => {
     expect(count.cnt).toBe(3); // not 6
   });
 
-  it("leaves existing deployments untouched", () => {
+  it("repairs partially filled families — adds missing profiles", () => {
     const dbPath = path.join(tmpDir, "control.db");
     conn = bootstrapControlDb(dbPath);
     seedProfiles(conn);
 
-    // Insert family with deployments already
+    // Insert family with only 1 of 3 deployments (simulates interrupted bootstrap)
     conn.db.prepare(
       `INSERT INTO family_catalog
          (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, created_at, updated_at)
-       VALUES ('existing-fam', 'existing-key', 'crypto', 'threshold', 'daily', 'ad-hoc', 'scalp', datetime('now'), datetime('now'))`,
+       VALUES ('partial-fam', 'partial-key', 'crypto', 'threshold', 'daily', 'ad-hoc', 'scalp', datetime('now'), datetime('now'))`,
     ).run();
     conn.db.prepare(
-      `INSERT INTO family_deployments (family_id, profile, enabled) VALUES ('existing-fam', 'paper', 1)`,
+      `INSERT INTO family_deployments (family_id, profile, enabled) VALUES ('partial-fam', 'paper', 1)`,
     ).run();
 
     conn.close();
-    conn = bootstrapControlDb(dbPath); // backfill should skip this family
+    conn = bootstrapControlDb(dbPath); // backfill should add missing sim + live-lite
 
-    const count = conn.db
-      .prepare("SELECT COUNT(*) as cnt FROM family_deployments WHERE family_id = 'existing-fam'")
-      .get() as { cnt: number };
+    const deps = conn.db
+      .prepare("SELECT profile, enabled FROM family_deployments WHERE family_id = 'partial-fam' ORDER BY profile")
+      .all() as { profile: string; enabled: number }[];
 
-    expect(count.cnt).toBe(1); // not 3 — existing family already had deployment
+    expect(deps).toHaveLength(3);
+    expect(deps.find((d) => d.profile === "paper")?.enabled).toBe(1);       // existing — untouched
+    expect(deps.find((d) => d.profile === "simulation")?.enabled).toBe(1);  // backfilled
+    expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(0);   // backfilled
   });
 });

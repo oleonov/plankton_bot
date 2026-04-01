@@ -28,16 +28,23 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   return conn;
 }
 
-/** Backfill family_deployments for catalog entries that have none. Idempotent. */
+/**
+ * Repair family_deployments: ensure every (family_id, profile) pair exists.
+ * Handles both fully missing families AND partially filled ones (e.g. interrupted bootstrap).
+ * Idempotent — INSERT OR IGNORE skips existing rows. Wrapped in transaction for atomicity.
+ */
 function backfillDeployments(db: import("better-sqlite3").Database): void {
-  const missing = db
-    .prepare(
-      `SELECT family_id FROM family_catalog
-       WHERE family_id NOT IN (SELECT DISTINCT family_id FROM family_deployments)`,
-    )
+  const families = db
+    .prepare("SELECT family_id FROM family_catalog")
     .all() as { family_id: string }[];
 
-  if (missing.length === 0) return;
+  if (families.length === 0) return;
+
+  const profiles = [
+    { profile: "simulation", enabled: 1 },
+    { profile: "paper", enabled: 1 },
+    { profile: "live-lite", enabled: 0 },
+  ];
 
   const insert = db.prepare(
     `INSERT OR IGNORE INTO family_deployments
@@ -46,11 +53,13 @@ function backfillDeployments(db: import("better-sqlite3").Database): void {
      VALUES (?, ?, ?, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'))`,
   );
 
-  for (const { family_id } of missing) {
-    insert.run(family_id, "simulation", 1);
-    insert.run(family_id, "paper", 1);
-    insert.run(family_id, "live-lite", 0);
-  }
+  db.transaction(() => {
+    for (const { family_id } of families) {
+      for (const { profile, enabled } of profiles) {
+        insert.run(family_id, profile, enabled);
+      }
+    }
+  })();
 }
 
 /** ALTER TABLE ADD COLUMN, ignoring "duplicate column" errors. */
