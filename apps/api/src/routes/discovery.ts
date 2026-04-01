@@ -461,12 +461,23 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
                    0, ?, ?, ?, ?)`,
         ).run(familyId, caps.maxOpenValue, caps.maxMarkets, caps.maxDust, now);
 
-        // 3. INSERT family_evidence with zeros + probe warming-up substate
+        // 3. INSERT family_deployments for sim + paper (enabled), live-lite (disabled)
+        const insertDep = controlDb.prepare(
+          `INSERT INTO family_deployments
+             (family_id, profile, enabled, operator_mode, strategy_stage,
+              deployment_stage, priority, created_at, updated_at)
+           VALUES (?, ?, ?, 'active', 'probe-only', 'disabled', 999, ?, ?)`,
+        );
+        insertDep.run(familyId, "simulation", 1, now, now);
+        insertDep.run(familyId, "paper", 1, now, now);
+        insertDep.run(familyId, "live-lite", 0, now, now);
+
+        // 4. INSERT family_evidence with zeros + probe warming-up substate
         controlDb.prepare(
           "INSERT INTO family_evidence (family_id, probe_substate, updated_at) VALUES (?, 'warming-up', ?)",
         ).run(familyId, now);
 
-        // 4. INSERT family_rules_snapshot
+        // 5. INSERT family_rules_snapshot
         const rulesRow = controlDb
           .prepare("SELECT * FROM family_rules WHERE family_id = ?")
           .get(familyId) as Record<string, unknown>;
@@ -475,7 +486,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
            VALUES (?, ?, 'probe-baseline', ?)`,
         ).run(familyId, JSON.stringify(rulesRow), now);
 
-        // 5. INSERT operator_commands (rules_reload, deduped)
+        // 6. INSERT operator_commands (rules_reload, deduped)
         const pending = controlDb
           .prepare(
             "SELECT 1 FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending' LIMIT 1",
@@ -489,7 +500,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           ).run(`materialized candidate ${familyId}`, now);
         }
 
-        // 6. INSERT state_transitions
+        // 7. INSERT state_transitions
         controlDb.prepare(
           `INSERT INTO state_transitions
              (entity_type, entity_id, from_state, to_state, trigger_type, initiator, reason)

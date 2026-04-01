@@ -29,6 +29,15 @@ let app: Awaited<ReturnType<typeof buildServer>>;
 beforeAll(async () => {
   conn = bootstrapDatabase(":memory:");
   const db = conn.db;
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS family_deployments (
+      family_id TEXT NOT NULL, profile TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+      operator_mode TEXT NOT NULL DEFAULT 'active', strategy_stage TEXT NOT NULL DEFAULT 'probe-only',
+      deployment_stage TEXT NOT NULL DEFAULT 'disabled', priority INTEGER NOT NULL DEFAULT 999,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (family_id, profile)
+    )
+  `);
   const now = new Date().toISOString();
 
   // Seed candidate for accept tests
@@ -125,6 +134,15 @@ describe("accept caps validation", () => {
     expect(rules.max_open_value_usdc).toBe(25);
     expect(rules.max_active_markets).toBe(4);
     expect(rules.max_dust_positions).toBe(3);
+
+    // Verify family_deployments were created for all profiles
+    const deployments = conn.db
+      .prepare("SELECT profile, enabled FROM family_deployments WHERE family_id = 'caps-test-1' ORDER BY profile")
+      .all() as { profile: string; enabled: number }[];
+    expect(deployments).toHaveLength(3);
+    expect(deployments.find((d) => d.profile === "paper")?.enabled).toBe(1);
+    expect(deployments.find((d) => d.profile === "simulation")?.enabled).toBe(1);
+    expect(deployments.find((d) => d.profile === "live-lite")?.enabled).toBe(0);
   });
 });
 

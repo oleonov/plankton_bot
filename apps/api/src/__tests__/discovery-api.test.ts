@@ -55,6 +55,18 @@ beforeAll(async () => {
       last_heartbeat_at TEXT NOT NULL,
       status_json       TEXT,
       PRIMARY KEY (service_name, instance_id)
+    );
+    CREATE TABLE IF NOT EXISTS family_deployments (
+      family_id         TEXT NOT NULL,
+      profile           TEXT NOT NULL,
+      enabled           INTEGER NOT NULL DEFAULT 1,
+      operator_mode     TEXT NOT NULL DEFAULT 'active',
+      strategy_stage    TEXT NOT NULL DEFAULT 'probe-only',
+      deployment_stage  TEXT NOT NULL DEFAULT 'disabled',
+      priority          INTEGER NOT NULL DEFAULT 999,
+      created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (family_id, profile)
     )
   `);
   app = await buildServer({ config: testConfig(), controlDb: conn.db, ledgerDb: conn.db, ledgerPool: stubLedgerPool() });
@@ -236,6 +248,15 @@ describe("POST /discovery/candidates/:id/accept", () => {
       )
       .get() as Record<string, unknown>;
     expect(cmd).toBeDefined();
+
+    // Verify family_deployments created for all profiles
+    const deps = db
+      .prepare("SELECT profile, enabled FROM family_deployments WHERE family_id = 'cand-accept-1' ORDER BY profile")
+      .all() as { profile: string; enabled: number }[];
+    expect(deps).toHaveLength(3);
+    expect(deps.find((d: any) => d.profile === "paper")!.enabled).toBe(1);
+    expect(deps.find((d: any) => d.profile === "simulation")!.enabled).toBe(1);
+    expect(deps.find((d: any) => d.profile === "live-lite")!.enabled).toBe(0);
   });
 
   it("returns 409 for rejected candidate", async () => {
