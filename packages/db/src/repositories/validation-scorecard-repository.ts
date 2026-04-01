@@ -3,13 +3,14 @@ import type { ValidationScorecardRepository, ValidationScorecard } from "@plankt
 import type { FamilyId } from "@plankton/domain";
 import { createScorecardId } from "@plankton/domain";
 import type { ProfileId, EvidenceStatus } from "@plankton/domain";
+import { withImmediate } from "../immediate-transaction.js";
 
 export class SqliteValidationScorecardRepository implements ValidationScorecardRepository {
   constructor(private readonly db: Database.Database) {}
 
   save(scorecard: ValidationScorecard): void {
-    this.db
-      .prepare(
+    withImmediate(this.db, (db) => {
+      db.prepare(
         `INSERT INTO family_validation_scorecards
          (scorecard_id, family_id, profile, evidence_status, evidence_score,
           recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
@@ -33,8 +34,7 @@ export class SqliteValidationScorecardRepository implements ValidationScorecardR
            active_window_edge_score = excluded.active_window_edge_score,
            summary_json = excluded.summary_json,
            validated_at = excluded.validated_at`,
-      )
-      .run(
+      ).run(
         scorecard.scorecardId,
         scorecard.familyId,
         scorecard.profile,
@@ -55,15 +55,13 @@ export class SqliteValidationScorecardRepository implements ValidationScorecardR
         scorecard.validatedAt,
       );
 
-    // Update materialized latest view
-    this.db
-      .prepare(
+      db.prepare(
         `INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
          VALUES (?, ?, ?)
          ON CONFLICT(family_id, profile) DO UPDATE SET
            scorecard_id = excluded.scorecard_id`,
-      )
-      .run(scorecard.familyId, scorecard.profile, scorecard.scorecardId);
+      ).run(scorecard.familyId, scorecard.profile, scorecard.scorecardId);
+    });
   }
 
   findLatest(familyId: FamilyId, profile: ProfileId): ValidationScorecard | null {
