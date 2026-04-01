@@ -454,7 +454,7 @@ describe("families", () => {
 // ─── Positions with filters ─────────────────────────────────────────
 
 describe("positions", () => {
-  it("GET /positions returns open+dust by default", async () => {
+  it("GET /positions returns all statuses by default", async () => {
     const res = await app.inject({
       method: "GET",
       url: "/api/v1/positions",
@@ -462,7 +462,9 @@ describe("positions", () => {
     });
     const body = json(res);
     expect(body.ok).toBe(true);
-    expect(body.data.length).toBe(2); // open + dust
+    expect(body.data.items.length).toBe(2); // open + dust (only 2 seeded)
+    expect(body.data.totalCount).toBe(2);
+    expect(body.data.nextCursor).toBeNull(); // no more pages
   });
 
   it("GET /positions?family_id= filters by family", async () => {
@@ -471,7 +473,7 @@ describe("positions", () => {
       url: "/api/v1/positions?family_id=fam-1",
       headers: authHeaders(),
     });
-    expect(json(res).data.length).toBe(2);
+    expect(json(res).data.items.length).toBe(2);
   });
 
   it("GET /positions?dust=true returns only dust positions", async () => {
@@ -481,8 +483,8 @@ describe("positions", () => {
       headers: authHeaders(),
     });
     const body = json(res);
-    expect(body.data.length).toBe(1);
-    expect(body.data[0].status).toBe("dust");
+    expect(body.data.items.length).toBe(1);
+    expect(body.data.items[0].status).toBe("dust");
   });
 
   it("GET /positions?status=open returns only open", async () => {
@@ -492,8 +494,8 @@ describe("positions", () => {
       headers: authHeaders(),
     });
     const body = json(res);
-    expect(body.data.length).toBe(1);
-    expect(body.data[0].status).toBe("open");
+    expect(body.data.items.length).toBe(1);
+    expect(body.data.items[0].status).toBe("open");
   });
 
   it("GET /positions/:id returns single position", async () => {
@@ -521,12 +523,12 @@ describe("positions", () => {
       headers: authHeaders(),
     });
     const body = json(res);
-    const pos = body.data.find((p: any) => p.tokenId === "tok-1");
+    const pos = body.data.items.find((p: any) => p.tokenId === "tok-1");
     expect(pos.resolution).toBe("YES");
     expect(pos.resolutionStatus).toBe("detected");
 
     // tok-2 has no market row, so no resolution info
-    const dust = body.data.find((p: any) => p.tokenId === "tok-2");
+    const dust = body.data.items.find((p: any) => p.tokenId === "tok-2");
     expect(dust.resolution).toBeNull();
     expect(dust.resolutionStatus).toBeNull();
   });
@@ -660,7 +662,7 @@ describe("market metadata enrichment", () => {
       url: "/api/v1/positions",
       headers: authHeaders(),
     });
-    const enriched = json(res).data.find((p: any) => p.tokenId === "tok-1");
+    const enriched = json(res).data.items.find((p: any) => p.tokenId === "tok-1");
     expect(enriched.slug).toBe("will-btc-hit-100k");
     expect(enriched.question).toBe("Will BTC hit 100k?");
     expect(enriched.outcome).toBe("Yes");
@@ -685,7 +687,7 @@ describe("market metadata enrichment", () => {
       headers: authHeaders(),
     });
     // tok-2 (pos-dust) has no market row
-    const dust = json(res).data.find((p: any) => p.tokenId === "tok-2");
+    const dust = json(res).data.items.find((p: any) => p.tokenId === "tok-2");
     expect(dust.slug).toBeNull();
     expect(dust.question).toBeNull();
     expect(dust.outcome).toBeNull();

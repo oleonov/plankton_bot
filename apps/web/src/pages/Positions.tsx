@@ -1,29 +1,48 @@
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import { usePositions, useFamilies } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
+import { Pagination } from "../components/Pagination.tsx";
 import { formatAge, formatTimeLeft } from "../utils/format.ts";
+
+const PAGE_SIZE = 50;
 
 export function Positions() {
   const [familyId, setFamilyId] = useState("");
   const [dustOnly, setDustOnly] = useState(false);
   const [status, setStatus] = useState("");
   const [sort, setSort] = useState("");
+  const [cursor, setCursor] = useState<string | undefined>();
+  const [cursorStack, setCursorStack] = useState<string[]>([]);
 
-  const { data: positions, isLoading } = usePositions({
+  const resetPagination = useCallback(() => {
+    setCursor(undefined);
+    setCursorStack([]);
+  }, []);
+
+  const { data, isLoading } = usePositions({
     familyId: familyId || undefined,
     dust: dustOnly || undefined,
     status: status || undefined,
     sort: sort || undefined,
+    limit: PAGE_SIZE,
+    cursor,
   });
+
+  const positions = data?.items;
+  const totalCount = data?.totalCount ?? 0;
   const { data: families } = useFamilies();
+
+  const pageStart = cursorStack.length * PAGE_SIZE + 1;
+  const pageEnd = pageStart + (positions?.length ?? 0) - 1;
+  const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
 
   return (
     <div className="page">
       <div className="filter-bar">
         <span style={{ fontWeight: 700 }}>Positions</span>
-        <span style={{ color: "var(--text-muted)" }}>({positions?.length ?? 0})</span>
-        <select value={familyId} onChange={(e) => setFamilyId(e.target.value)}>
+        <span style={{ color: "var(--text-muted)" }}>({totalCount})</span>
+        <select value={familyId} onChange={(e) => { setFamilyId(e.target.value); resetPagination(); }}>
           <option value="">All families</option>
           {families?.map((f) => (
             <option key={f.familyId} value={f.familyId}>
@@ -31,7 +50,7 @@ export function Positions() {
             </option>
           ))}
         </select>
-        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+        <select value={status} onChange={(e) => { setStatus(e.target.value); resetPagination(); }}>
           <option value="">All statuses</option>
           <option value="open">Open</option>
           <option value="dust">Dust</option>
@@ -41,11 +60,11 @@ export function Positions() {
           <input
             type="checkbox"
             checked={dustOnly}
-            onChange={(e) => setDustOnly(e.target.checked)}
+            onChange={(e) => { setDustOnly(e.target.checked); resetPagination(); }}
           />
           Dust only
         </label>
-        <select value={sort} onChange={(e) => setSort(e.target.value)}>
+        <select value={sort} onChange={(e) => { setSort(e.target.value); resetPagination(); }}>
           <option value="">Default sort</option>
           <option value="tail_cost">Tail cost desc</option>
         </select>
@@ -117,6 +136,22 @@ export function Positions() {
           </tbody>
         </table>
       )}
+
+      <Pagination
+        nextCursor={data?.nextCursor ?? null}
+        onNext={(next) => {
+          if (cursor) setCursorStack((s) => [...s, cursor]);
+          else setCursorStack([]);
+          setCursor(next);
+        }}
+        hasPrev={cursorStack.length > 0}
+        onPrev={() => {
+          const prev = cursorStack[cursorStack.length - 1];
+          setCursorStack((s) => s.slice(0, -1));
+          setCursor(prev ?? undefined);
+        }}
+        pageInfo={pageInfo}
+      />
     </div>
   );
 }

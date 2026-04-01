@@ -40,13 +40,16 @@ interface PositionQuery {
   dust?: string;
   status?: string;
   sort?: string;
+  limit?: string;
+  cursor?: string;
 }
 
 export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts) => {
   const getById = opts.db.prepare("SELECT * FROM positions WHERE position_id = ?");
 
   app.get<{ Querystring: PositionQuery }>("/positions", async (request) => {
-    const { family_id, dust, status, sort } = request.query;
+    const { family_id, dust, status, sort, cursor } = request.query;
+    const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
 
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -62,9 +65,12 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       const statuses = status.split(",").map((s) => s.trim());
       conditions.push(`status IN (${statuses.map(() => "?").join(",")})`);
       params.push(...statuses);
-    } else {
-      // Default: show open and dust
-      conditions.push("status IN ('open','dust')");
+    }
+    // No default filter — return all statuses when not specified
+
+    if (cursor) {
+      conditions.push("updated_at < ?");
+      params.push(cursor);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -72,8 +78,8 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       sort === "tail_cost" ? "ORDER BY cost_basis_usdc DESC" : "ORDER BY updated_at DESC";
 
     const rows = opts.db
-      .prepare(`SELECT * FROM positions ${where} ${orderBy}`)
-      .all(...params) as Record<string, unknown>[];
+      .prepare(`SELECT * FROM positions ${where} ${orderBy} LIMIT ?`)
+      .all(...params, limit) as Record<string, unknown>[];
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(opts.db, tokenIds);
@@ -82,13 +88,31 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       .filter(Boolean) as string[];
     const resMap = buildResolutionMap(opts.db, conditionIds);
 
-    return ok(
-      rows.map((r) => {
+    const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.updated_at as string) : null;
+
+    // Count without cursor filter
+    const countConds: string[] = [];
+    const countPrms: unknown[] = [];
+    if (family_id) { countConds.push("family_id = ?"); countPrms.push(family_id); }
+    if (dust === "true") {
+      countConds.push("status = 'dust'");
+    } else if (status) {
+      const statuses = status.split(",").map((s) => s.trim());
+      countConds.push(`status IN (${statuses.map(() => "?").join(",")})`);
+      countPrms.push(...statuses);
+    }
+    const cw = countConds.length > 0 ? `WHERE ${countConds.join(" AND ")}` : "";
+    const totalCount = (opts.db.prepare(`SELECT COUNT(*) as cnt FROM positions ${cw}`).get(...countPrms) as { cnt: number }).cnt;
+
+    return ok({
+      items: rows.map((r) => {
         const meta = getMetaOrEmpty(metaMap, r.token_id as string);
         const res = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
         return toDto(r, meta, res);
       }),
-    );
+      nextCursor,
+      totalCount,
+    });
   });
 
   app.get<{ Params: { positionId: string } }>("/positions/:positionId", async (request) => {

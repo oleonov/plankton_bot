@@ -91,18 +91,22 @@ interface PositionFilters {
   dust?: boolean;
   status?: string;
   sort?: string;
+  limit?: number;
+  cursor?: string;
 }
 
 export function usePositions(filters: PositionFilters = {}) {
   return useQuery({
     queryKey: ["positions", filters],
     queryFn: () =>
-      apiFetch<PositionDTO[]>(
+      apiFetch<Paginated<PositionDTO> & { totalCount: number }>(
         withParams("/api/v1/positions", {
           family_id: filters.familyId,
           dust: filters.dust || undefined,
           status: filters.status,
           sort: filters.sort,
+          limit: filters.limit,
+          cursor: filters.cursor,
         }),
       ),
   });
