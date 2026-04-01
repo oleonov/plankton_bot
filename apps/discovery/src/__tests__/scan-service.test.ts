@@ -233,12 +233,11 @@ describe("ScanService", () => {
     expect(row.scores_updated_at).toBe("2026-03-30T00:00:00Z");
   });
 
-  it.todo("pruneAndCooldown prunes low-value tail but preserves protected candidates — pre-existing failure: generic prune() deletes reviewed observations by date");
-  it.skip("pruneAndCooldown prunes low-value tail but preserves protected candidates", async () => {
-    // Seed mixed candidates directly in DB
+  it("pruneAndCooldown prunes low-value tail but preserves protected candidates", async () => {
     const db = conn.db;
+    const recent = new Date().toISOString(); // recent enough to survive generic date prune
 
-    // 1. Low-value tail, stale (should be pruned)
+    // 1. Low-value tail, stale (should be pruned by low-value tail pruning)
     db.prepare(`
       INSERT INTO family_candidates
         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
@@ -257,7 +256,7 @@ describe("ScanService", () => {
       VALUES ('lv-stale', '2026-01-01T00:00:00Z', 'c1', 's1')
     `).run();
 
-    // 2. Protected: reviewed, old (should survive)
+    // 2. Protected: reviewed with recent observations (survives both low-value and date prune)
     db.prepare(`
       INSERT INTO family_candidates
         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
@@ -265,14 +264,14 @@ describe("ScanService", () => {
          matched_family_id, first_seen_at, last_seen_at)
       VALUES ('reviewed-old', 'rev-key', 'generic', 'ad-hoc', 'ad-hoc', 'low',
               'other', 'scalp', 'ignore', 'reviewed',
-              NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
-    `).run();
+              NULL, '2026-01-01T00:00:00Z', ?)
+    `).run(recent);
     db.prepare(`
       INSERT INTO candidate_observations (candidate_id, active_market_count, cluster_volume_24h, observed_at)
-      VALUES ('reviewed-old', 1, 100, '2026-01-01T00:00:00Z')
-    `).run();
+      VALUES ('reviewed-old', 1, 100, ?)
+    `).run(recent);
 
-    // 3. Protected: matched, old (should survive)
+    // 3. Protected: matched with recent last_seen (survives candidate prune)
     db.prepare(`
       INSERT INTO family_candidates
         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
@@ -280,8 +279,8 @@ describe("ScanService", () => {
          matched_family_id, first_seen_at, last_seen_at)
       VALUES ('matched-old', 'match-key', 'generic', 'ad-hoc', 'ad-hoc', 'low',
               'other', 'scalp', 'ignore', 'discovered',
-              'fam-1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')
-    `).run();
+              'fam-1', '2026-01-01T00:00:00Z', ?)
+    `).run(recent);
 
     // Run a scan (with empty market list) which triggers pruneAndCooldown
     const gateway = makeGateway([]);
