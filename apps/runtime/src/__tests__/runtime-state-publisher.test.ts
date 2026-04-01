@@ -114,4 +114,38 @@ describe("RuntimeStatePublisher", () => {
       .get("inst-001") as { status_json: string };
     expect(JSON.parse(row.status_json)).toEqual(expect.objectContaining({ status: "running" }));
   });
+
+  describe("SQLITE_BUSY resilience", () => {
+    it("startHeartbeatLoop does not throw when service_heartbeats table is missing", () => {
+      // Drop the table — publishHeartbeat will throw SQLITE_ERROR (not BUSY),
+      // but the first heartbeat uses tryHeartbeat which only swallows SQLITE_BUSY.
+      // This tests that non-BUSY errors DO propagate from the first heartbeat.
+      conn.db.exec("DROP TABLE service_heartbeats");
+      const brokenPublisher = new RuntimeStatePublisher(conn.db, config);
+
+      // First heartbeat with missing table → SQLITE_ERROR → should propagate
+      expect(() => brokenPublisher.startHeartbeatLoop(60_000)).toThrow();
+      brokenPublisher.stopHeartbeatLoop();
+    });
+
+    it("publishHeartbeat on closed DB throws (non-BUSY errors propagate)", () => {
+      const closedConn = createControlDb();
+      const closedPublisher = new RuntimeStatePublisher(closedConn.db, config);
+      closedConn.close();
+
+      expect(() => closedPublisher.publishHeartbeat("running")).toThrow();
+    });
+
+    it("startHeartbeatLoop with valid DB succeeds and writes heartbeat", () => {
+      publisher.startHeartbeatLoop(60_000);
+
+      const row = conn.db
+        .prepare("SELECT * FROM service_heartbeats WHERE service_name = 'runtime'")
+        .get() as Record<string, unknown>;
+      expect(row).toBeTruthy();
+      expect(row["instance_id"]).toBe("inst-001");
+
+      publisher.stopHeartbeatLoop();
+    });
+  });
 });

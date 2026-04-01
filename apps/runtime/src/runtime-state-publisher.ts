@@ -87,17 +87,38 @@ export class RuntimeStatePublisher {
   }
 
   startHeartbeatLoop(intervalMs: number): void {
-    this.publishHeartbeat("ready_paused");
+    // First heartbeat is best-effort — SQLITE_BUSY at startup is not fatal
+    this.tryHeartbeat("ready_paused");
     this.heartbeatTimer = setInterval(() => {
-      try {
-        const state = this.db
-          .prepare("SELECT runtime_status FROM runtime_control_state WHERE id = 1")
-          .get() as { runtime_status: string } | undefined;
-        this.publishHeartbeat(state?.runtime_status ?? "unknown");
-      } catch {
-        // SQLITE_BUSY is expected under contention — skip this heartbeat, retry next interval
-      }
+      const state = this.tryQuery<{ runtime_status: string }>(
+        "SELECT runtime_status FROM runtime_control_state WHERE id = 1",
+      );
+      this.tryHeartbeat(state?.runtime_status ?? "unknown");
     }, intervalMs);
+  }
+
+  /** Attempt a heartbeat write, swallowing only SQLITE_BUSY. */
+  private tryHeartbeat(status: string): void {
+    try {
+      this.publishHeartbeat(status);
+    } catch (err: unknown) {
+      if (err instanceof Error && "code" in err && (err as { code: string }).code === "SQLITE_BUSY") {
+        return; // contention — skip, retry next interval
+      }
+      throw err; // unexpected error — propagate
+    }
+  }
+
+  /** Attempt a read query, returning null on SQLITE_BUSY. */
+  private tryQuery<T>(sql: string): T | null {
+    try {
+      return (this.db.prepare(sql).get() as T) ?? null;
+    } catch (err: unknown) {
+      if (err instanceof Error && "code" in err && (err as { code: string }).code === "SQLITE_BUSY") {
+        return null;
+      }
+      throw err;
+    }
   }
 
   stopHeartbeatLoop(): void {
