@@ -195,6 +195,9 @@ importers:
 
   apps/web:
     dependencies:
+      '@plankton/domain':
+        specifier: workspace:^
+        version: link:../../packages/domain
       '@tanstack/react-query':
         specifier: ^5.60.0
         version: 5.90.21(react@18.3.1)

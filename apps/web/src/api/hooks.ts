@@ -328,8 +328,8 @@ export function useCandidateAction(
 ) {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () =>
-      apiPost(`/api/v1/discovery/candidates/${candidateId}/${action}`),
+    mutationFn: (body?: Record<string, unknown>) =>
+      apiPost(`/api/v1/discovery/candidates/${candidateId}/${action}`, body),
     onSuccess: async () => {
       await Promise.all([
         qc.invalidateQueries({ queryKey: ["discovery", "candidates"] }),

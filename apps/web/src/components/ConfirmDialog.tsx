@@ -4,6 +4,8 @@ interface ConfirmDialogProps {
   description: string;
   runtimeMode?: string;
   caps?: string;
+  children?: React.ReactNode;
+  disableConfirm?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -14,6 +16,8 @@ export function ConfirmDialog({
   description,
   runtimeMode,
   caps,
+  children,
+  disableConfirm,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -68,11 +72,12 @@ export function ConfirmDialog({
         {caps && (
           <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 12 }}>{caps}</div>
         )}
+        {children}
         <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
           <button className="btn-secondary" onClick={onCancel}>
             Cancel
           </button>
-          <button className={confirmBtnClass} onClick={onConfirm}>
+          <button className={confirmBtnClass} onClick={onConfirm} disabled={disableConfirm}>
             Confirm
           </button>
         </div>

@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import type { DiscoveryRun } from "@plankton/domain";
+import { type DiscoveryRun, PROBE_DEFAULTS } from "@plankton/domain";
 import { SqliteDiscoveryRunRepository } from "@plankton/db";
 import { ok, ApiError } from "../errors.js";
 
@@ -393,12 +393,18 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
   );
 
   // ── POST /discovery/candidates/:candidateId/accept ─────────────────────
-  app.post<{ Params: { candidateId: string } }>(
+  app.post<{ Params: { candidateId: string }; Body: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number } }>(
     "/discovery/candidates/:candidateId/accept",
     async (request) => {
       const row = getCandidate(db, request.params.candidateId);
       const familyId = row.candidate_id;
       const now = new Date().toISOString();
+      const body = (request.body ?? {}) as { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number };
+      const caps = {
+        maxOpenValue: body.maxOpenValueUsdc ?? PROBE_DEFAULTS.maxOpenValueUsdc,
+        maxMarkets: body.maxActiveMarkets ?? PROBE_DEFAULTS.maxActiveMarkets,
+        maxDust: body.maxDustPositions ?? PROBE_DEFAULTS.maxDustPositions,
+      };
 
       // Control DB transaction: all control-side inserts are atomic
       const materializeControl = controlDb.transaction(() => {
@@ -429,15 +435,15 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           now,
         );
 
-        // 2. INSERT family_rules with probe-only defaults
+        // 2. INSERT family_rules with probe-only defaults (overridable via request body)
         controlDb.prepare(
           `INSERT INTO family_rules
              (family_id, enabled, action, entry_mode, scale_mode, exit_mode,
               allow_heavy_campaigns, max_open_value_usdc, max_active_markets,
               max_dust_positions, updated_at)
            VALUES (?, 1, 'trade', 'probe-first', 'disabled', 'repricing-sell',
-                   0, 10.0, 3, 2, ?)`,
-        ).run(familyId, now);
+                   0, ?, ?, ?, ?)`,
+        ).run(familyId, caps.maxOpenValue, caps.maxMarkets, caps.maxDust, now);
 
         // 3. INSERT family_evidence with zeros + probe warming-up substate
         controlDb.prepare(
