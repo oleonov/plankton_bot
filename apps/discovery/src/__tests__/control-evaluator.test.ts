@@ -271,10 +271,8 @@ describe("ControlEvaluator", () => {
   });
 
   describe("atomicity", () => {
-    it("run() writes all scores atomically — partial failure rolls back all", () => {
+    it("run() writes all scores in a single transaction", () => {
       seedCandidate(conn);
-
-      // Seed a second candidate
       conn.db.prepare(
         `INSERT INTO family_candidates
          (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
@@ -284,23 +282,56 @@ describe("ControlEvaluator", () => {
                  'crypto', 'scalp', 3, 500, 'pending', 'discovered', ?, ?)`,
       ).run(NOW, NOW);
 
-      // Drop scores columns to force a failure mid-loop
-      // (can't easily force, so just verify both are scored in a single call)
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
       const stats = evaluator.run();
-
       expect(stats.candidatesScored).toBe(2);
 
-      // Verify both updated
       const c1 = conn.db
         .prepare("SELECT scores_updated_at FROM family_candidates WHERE candidate_id = ?")
         .get(CANDIDATE_ID) as { scores_updated_at: string | null };
       const c2 = conn.db
         .prepare("SELECT scores_updated_at FROM family_candidates WHERE candidate_id = ?")
         .get("cand-2") as { scores_updated_at: string | null };
-
       expect(c1.scores_updated_at).not.toBeNull();
       expect(c2.scores_updated_at).not.toBeNull();
+    });
+
+    it("rolls back all score updates if write phase fails mid-way", () => {
+      seedCandidate(conn);
+      conn.db.prepare(
+        `INSERT INTO family_candidates
+         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+          primary_category, strategy_profile, active_market_count,
+          cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at)
+         VALUES ('cand-bomb', 'bomb-family', 'threshold', 'daily', 'ad-hoc', 'high',
+                 'crypto', 'scalp', 3, 500, 'pending', 'discovered', ?, ?)`,
+      ).run(NOW, NOW);
+
+      // Install trigger that explodes on the second updateScores write
+      conn.db.exec(`
+        CREATE TRIGGER IF NOT EXISTS bomb_on_cand_bomb
+        BEFORE UPDATE OF recurrence_score ON family_candidates
+        WHEN NEW.candidate_id = 'cand-bomb'
+        BEGIN
+          SELECT RAISE(ABORT, 'bomb triggered');
+        END
+      `);
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+      expect(() => evaluator.run()).toThrow("bomb triggered");
+
+      // Neither candidate should have updated scores — transaction rolled back
+      const c1 = conn.db
+        .prepare("SELECT scores_updated_at FROM family_candidates WHERE candidate_id = ?")
+        .get(CANDIDATE_ID) as { scores_updated_at: string | null };
+      const cBomb = conn.db
+        .prepare("SELECT scores_updated_at FROM family_candidates WHERE candidate_id = ?")
+        .get("cand-bomb") as { scores_updated_at: string | null };
+      expect(c1.scores_updated_at).toBeNull();
+      expect(cBomb.scores_updated_at).toBeNull();
+
+      // Cleanup trigger
+      conn.db.exec("DROP TRIGGER IF EXISTS bomb_on_cand_bomb");
     });
   });
 });
