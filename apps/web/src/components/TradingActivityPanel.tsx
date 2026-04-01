@@ -94,8 +94,10 @@ function SignalBars({ buckets }: { buckets: { signalsProduced: number; signalsAp
   );
 }
 
+let persistedRangeIdx = 0;
+
 export function TradingActivityPanel() {
-  const [rangeIdx, setRangeIdx] = useState(2); // default 14d
+  const [rangeIdx, setRangeIdx] = useState(persistedRangeIdx);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 60_000);
@@ -134,7 +136,7 @@ export function TradingActivityPanel() {
               key={opt.label}
               className={i === rangeIdx ? "btn-success" : "btn-secondary"}
               style={{ padding: "2px 8px", fontSize: 10 }}
-              onClick={() => setRangeIdx(i)}
+              onClick={() => { persistedRangeIdx = i; setRangeIdx(i); }}
             >
               {opt.label}
             </button>

@@ -68,21 +68,14 @@ describe("TradingActivityPanel", () => {
 
     await screen.findByText("Trading Activity");
 
-    const btn24h = screen.getByRole("button", { name: "24h" });
-    const btn14d = screen.getByRole("button", { name: "14d" });
-
-    expect(btn14d.className).toContain("btn-success");
-    expect(btn24h.className).toContain("btn-secondary");
-
-    await user.click(btn24h);
-    // Wait for data to reload after range change
-    await screen.findByText("Trading Activity");
+    // Default is 24h
     expect(screen.getByRole("button", { name: "24h" }).className).toContain("btn-success");
     expect(screen.getByRole("button", { name: "14d" }).className).toContain("btn-secondary");
 
     await user.click(screen.getByRole("button", { name: "7d" }));
     await screen.findByText("Trading Activity");
     expect(screen.getByRole("button", { name: "7d" }).className).toContain("btn-success");
+    expect(screen.getByRole("button", { name: "24h" }).className).toContain("btn-secondary");
   });
 
   it("renders SVG elements for state band and bars", async () => {
