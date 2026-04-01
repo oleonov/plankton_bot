@@ -79,8 +79,8 @@ else
     echo -e "${YELLOW}No PLANKTON_API_KEY — no resume intent${NC}"
 fi
 
-# Step 5: Load image and start containers
-echo -e "\n${GREEN}[5/6] Loading image and starting containers on server...${NC}"
+# Step 5: Load image and replace containers (atomic swap — no separate down)
+echo -e "\n${GREEN}[5/6] Loading image and replacing containers on server...${NC}"
 ssh ${SERVER_USER}@${SERVER_HOST} << ENDSSH
 set -e
 echo "Loading Docker image..."
@@ -88,11 +88,11 @@ docker load < /tmp/${IMAGE_NAME}.tar.gz
 
 cd ${SERVER_PATH}
 
-echo "Stopping existing containers..."
-docker-compose --env-file .env.production down 2>/dev/null || true
-
-echo "Starting containers..."
-docker-compose --env-file .env.production up -d
+# docker-compose up -d with --force-recreate replaces containers in-place.
+# No separate "down" step — if the script dies after load but before up,
+# the old containers keep running with the old image.
+echo "Replacing containers (force-recreate)..."
+docker-compose --env-file .env.production up -d --force-recreate
 
 echo "Cleaning up..."
 rm /tmp/${IMAGE_NAME}.tar.gz
