@@ -63,7 +63,12 @@ if [ -n "$API_KEY" ]; then
         PAUSED=$(echo "$STATUS_JSON" | grep -o '"paused":[a-z]*' | cut -d: -f2)
         if [ "$PAUSED" = "false" ]; then
             echo "Bot was RUNNING — writing resume intent to control.db"
-            ssh ${SERVER_USER}@${SERVER_HOST} "sqlite3 ${CONTROL_DB} \"UPDATE runtime_control_state SET resume_intent_at = datetime('now') WHERE id = 1\""
+            INTENT_RESULT=$(ssh ${SERVER_USER}@${SERVER_HOST} "sqlite3 ${CONTROL_DB} \"UPDATE runtime_control_state SET resume_intent_at = datetime('now') WHERE id = 1; SELECT resume_intent_at FROM runtime_control_state WHERE id = 1;\"" 2>/dev/null || echo "FAILED")
+            if [ "$INTENT_RESULT" = "FAILED" ] || [ -z "$INTENT_RESULT" ]; then
+                echo -e "${YELLOW}WARNING: Failed to write resume intent — bot will start paused${NC}"
+            else
+                echo "Resume intent written: ${INTENT_RESULT}"
+            fi
         else
             echo "Bot was PAUSED — no resume intent"
         fi
