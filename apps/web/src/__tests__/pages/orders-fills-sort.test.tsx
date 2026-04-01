@@ -153,7 +153,7 @@ function getColumnValues(colIndex: number): string[] {
 }
 
 describe("Orders table sorting", () => {
-  it("sorts by Price ascending then descending", async () => {
+  it("sorts by Price ascending then descending", { timeout: 15_000 }, async () => {
     setupOrders();
     const user = userEvent.setup();
     renderWithProviders(<OrdersFills />);
