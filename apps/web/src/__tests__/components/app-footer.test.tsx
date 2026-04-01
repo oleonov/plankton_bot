@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "../../test/server.ts";
 import { renderWithProviders } from "../../test/test-utils.tsx";
@@ -53,9 +53,10 @@ describe("AppFooter", () => {
 
     renderWithProviders(<AppFooter />);
 
-    // Wait for query to settle, then verify no footer
-    await new Promise((r) => setTimeout(r, 100));
-    expect(screen.queryByRole("contentinfo")).not.toBeInTheDocument();
+    // Wait for query to settle, then verify no footer rendered
+    await waitFor(() => {
+      expect(screen.queryByRole("contentinfo")).not.toBeInTheDocument();
+    });
   });
 
   it("shows deployedAt in title tooltip", async () => {

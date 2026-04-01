@@ -1,5 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { writeFileSync, existsSync, unlinkSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getGammaTimeoutMs, getControlDbPath, loadDiscoveryEnv } from "../gateway-factory.js";
+
+function getRepoRoot(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 10; i++) {
+    if (existsSync(resolve(dir, "pnpm-workspace.yaml"))) return dir;
+    dir = dirname(dir);
+  }
+  return process.cwd();
+}
 
 const ENV_KEYS = ["GAMMA_TIMEOUT_MS", "CONTROL_DB_PATH", "DB_PATH", "RUNTIME_MODE"] as const;
 
@@ -55,15 +67,40 @@ describe("getControlDbPath", () => {
 });
 
 describe("loadDiscoveryEnv", () => {
-  it("loads vars from root .env if present, does not crash if absent", () => {
-    for (const key of ENV_KEYS) delete process.env[key];
+  const root = getRepoRoot();
+  const testEnvPath = resolve(root, ".env.test-discovery");
+  // Use a temp file to avoid polluting real .env
+  // loadDiscoveryEnv reads from root .env — we create it if missing, clean up after
 
-    // Should not throw regardless of whether .env exists (e.g. CI)
-    expect(() => loadDiscoveryEnv()).not.toThrow();
+  it("loads vars from .env file at repo root", () => {
+    const realEnvPath = resolve(root, ".env");
+    const realEnvExists = existsSync(realEnvPath);
+    const backupContent = realEnvExists ? undefined : null;
 
-    const mode = process.env["RUNTIME_MODE"];
-    if (mode) {
-      expect(["simulation", "paper", "live-lite"]).toContain(mode);
+    // If no .env exists (CI), create a temporary one
+    if (!realEnvExists) {
+      writeFileSync(
+        realEnvPath,
+        "RUNTIME_MODE=simulation\nDB_PATH=./apps/runtime/data/plankton-sim.db\n",
+      );
+    }
+
+    try {
+      for (const key of ENV_KEYS) delete process.env[key];
+      loadDiscoveryEnv();
+
+      // Verify .env was actually loaded — RUNTIME_MODE must be set
+      expect(process.env["RUNTIME_MODE"]).toBeDefined();
+      expect(["simulation", "paper", "live-lite"]).toContain(process.env["RUNTIME_MODE"]);
+    } finally {
+      // Only remove if we created it
+      if (backupContent === null) {
+        try {
+          unlinkSync(realEnvPath);
+        } catch {
+          /* ignore */
+        }
+      }
     }
   });
 
