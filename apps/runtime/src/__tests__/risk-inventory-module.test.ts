@@ -86,7 +86,10 @@ function makeTailRules(overrides?: Record<string, unknown>) {
   };
 }
 
-function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBundle {
+function makeRuleBundle(
+  tailOverrides?: Record<string, unknown>,
+  identityOverrides?: Partial<FamilyRuleBundle["identity"]>,
+): FamilyRuleBundle {
   return {
     identity: {
       familyId: FAM_ID,
@@ -99,6 +102,7 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
       topicKey: "btc",
       slugPattern: "btc*",
       notes: null,
+      ...identityOverrides,
     },
     evidence: {
       familyId: FAM_ID,
@@ -645,6 +649,7 @@ describe("RiskInventoryModule", () => {
       price: 0.5,
       size: 10,
       sizeUsdc: 5,
+      liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
       timestamp: Date.now(),
@@ -696,6 +701,7 @@ describe("RiskInventoryModule", () => {
       price: 0.6,
       size: 10,
       sizeUsdc: 6,
+      liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
       timestamp: Date.now(),
@@ -769,6 +775,7 @@ describe("RiskInventoryModule", () => {
       price: 0.6,
       size: 5,
       sizeUsdc: 3,
+      liquidityRole: "unknown",
       fee: 0.01,
       familyId: FAM_ID,
       timestamp: Date.now(),
@@ -840,6 +847,7 @@ describe("RiskInventoryModule", () => {
       price: 0.6,
       size: 10,
       sizeUsdc: 6,
+      liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
       timestamp: Date.now(),
@@ -874,6 +882,7 @@ describe("RiskInventoryModule", () => {
       price: 0.5,
       size: 10,
       sizeUsdc: 5,
+      liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
       timestamp: Date.now(),
@@ -901,6 +910,7 @@ describe("RiskInventoryModule", () => {
       price: 0.5,
       size: 10,
       sizeUsdc: 5,
+      liquidityRole: "unknown",
       fee: 0.01,
       timestamp: Date.now(),
     });
@@ -924,6 +934,7 @@ describe("RiskInventoryModule", () => {
       price: 0.5,
       size: 10,
       sizeUsdc: 5,
+      liquidityRole: "unknown",
       fee: 0.01,
       timestamp: Date.now(),
     });
@@ -998,7 +1009,124 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  it("rejects fee-enabled entry families in live-lite EOA mode", async () => {
+    rulesProvider = createMockRulesProvider(
+      makeRuleBundle(undefined, {
+        primaryCategory: "crypto",
+        feeTier: "fee-enabled",
+        liveWalletRequirement: "relayer-required",
+        requiresPostOnlyForLive: true,
+      }),
+    );
+    const liveLiteGuard = new LiveLiteGuard({
+      familyAllowlist: ["fam-btc"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 500,
+      maxOrderUsdc: 50,
+      maxActiveMarkets: 3,
+      walletMode: "eoa",
+      minOrderUsdc: 3,
+    });
+    mod = createModule(liveLiteGuard);
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("live-post-only-required");
+    expect(rejected[0].reason).toContain("live-eoa-fee-enabled-family-rejected");
+
+    await mod.stop();
+  });
+
+  it("approves fee-enabled entry families in live-lite relayer mode when post-only is available", async () => {
+    rulesProvider = createMockRulesProvider(
+      makeRuleBundle(undefined, {
+        primaryCategory: "crypto",
+        feeTier: "fee-enabled",
+        liveWalletRequirement: "relayer-required",
+        requiresPostOnlyForLive: true,
+      }),
+    );
+    const liveLiteGuard = new LiveLiteGuard({
+      familyAllowlist: ["fam-btc"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 500,
+      maxOrderUsdc: 50,
+      maxActiveMarkets: 3,
+      walletMode: "relayer",
+      minOrderUsdc: 2,
+    });
+    mod = createModule(liveLiteGuard);
+    await mod.start();
+
+    const approved: any[] = [];
+    const rejected: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", { signal: makeSignal() });
+
+    expect(rejected).toHaveLength(0);
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("rejects live-lite entry below the configured minimum order size", async () => {
+    rulesProvider = createMockRulesProvider(
+      makeRuleBundle(undefined, {
+        primaryCategory: "geopolitics",
+        feeTier: "fee-free",
+        liveWalletRequirement: "eoa-ok",
+        requiresPostOnlyForLive: false,
+      }),
+    );
+    const liveLiteGuard = new LiveLiteGuard({
+      familyAllowlist: ["fam-btc"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 500,
+      maxOrderUsdc: 50,
+      maxActiveMarkets: 3,
+      walletMode: "eoa",
+      minOrderUsdc: 3,
+    });
+    mod = createModule(liveLiteGuard);
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ suggestedSizeUsdc: 2.5, suggestedSize: 5 }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("live-min-order-usdc-rejected");
+
+    await mod.stop();
+  });
+
   it("approves signal for allowlisted family in live-lite mode", async () => {
+    rulesProvider = createMockRulesProvider(
+      makeRuleBundle(undefined, {
+        primaryCategory: "geopolitics",
+        feeTier: "fee-free",
+        liveWalletRequirement: "eoa-ok",
+        requiresPostOnlyForLive: false,
+      }),
+    );
     const liveLiteGuard = new LiveLiteGuard({
       familyAllowlist: ["fam-btc"],
       maxFamilies: 2,
@@ -1023,6 +1151,14 @@ describe("RiskInventoryModule", () => {
 
   it("rejects entry signal when live-lite open value cap would be exceeded", async () => {
     familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ openValueUsdc: 490 }));
+    rulesProvider = createMockRulesProvider(
+      makeRuleBundle(undefined, {
+        primaryCategory: "geopolitics",
+        feeTier: "fee-free",
+        liveWalletRequirement: "eoa-ok",
+        requiresPostOnlyForLive: false,
+      }),
+    );
     const liveLiteGuard = new LiveLiteGuard({
       familyAllowlist: ["fam-btc"],
       maxFamilies: 2,
@@ -1049,6 +1185,14 @@ describe("RiskInventoryModule", () => {
   it("rejects entry for new market when live-lite active markets cap would be exceeded", async () => {
     familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 3 }));
     positionRepo = createMockPositionRepo(null); // no existing position → new market
+    rulesProvider = createMockRulesProvider(
+      makeRuleBundle(undefined, {
+        primaryCategory: "geopolitics",
+        feeTier: "fee-free",
+        liveWalletRequirement: "eoa-ok",
+        requiresPostOnlyForLive: false,
+      }),
+    );
     const liveLiteGuard = new LiveLiteGuard({
       familyAllowlist: ["fam-btc"],
       maxFamilies: 2,
@@ -1123,6 +1267,7 @@ describe("RiskInventoryModule", () => {
       price: 0.6,
       size: 5,
       sizeUsdc: 3,
+      liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
       timestamp: Date.now(),
@@ -1872,6 +2017,7 @@ describe("RiskInventoryModule", () => {
         tokenId: TOK_ID,
         side: "buy" as const,
         sizeUsdc: 2.5,
+        liquidityRole: "unknown" as const,
         fee: 0,
         familyId: FAM_ID,
         timestamp: Date.now(),

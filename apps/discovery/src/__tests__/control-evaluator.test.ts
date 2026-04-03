@@ -112,6 +112,7 @@ function seedScorecard(
     tradeCount: number;
     marketCount: number;
     tailAdjustedPnl: number;
+    summaryJson: string | null;
   }>,
 ): string {
   const scorecardId = `sc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -121,6 +122,27 @@ function seedScorecard(
     tradeCount: 30,
     marketCount: 8,
     tailAdjustedPnl: 5.0,
+    summaryJson: JSON.stringify({
+      repricingExits: 3,
+      executionTelemetry24h: {
+        totalFills: 12,
+        volumeUsdc: 25,
+        makerFills: 12,
+        takerFills: 0,
+        unknownFills: 0,
+        makerRatio: 1,
+        takerRatio: 0,
+        explicitFeesUsdc: 0,
+        feeLeakageRatio: 0,
+        lastFillAt: NOW,
+      },
+      executionCanary24h: {
+        required: true,
+        eligible: true,
+        minTotalFills: 10,
+        blockers: [],
+      },
+    }),
   };
   const vals = { ...defaults, ...overrides };
 
@@ -130,8 +152,8 @@ function seedScorecard(
      (scorecard_id, family_id, profile, evidence_status, evidence_score,
       recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
       trade_count, market_count, realized_pnl, tail_adjusted_pnl,
-      both_sided_eligible, heavy_campaign_eligible, validated_at)
-     VALUES (?, ?, ?, 'confirmed', 0.8, 0.6, ?, 0.5, ?, ?, ?, 10.0, ?, 0, 0, ?)`,
+      both_sided_eligible, heavy_campaign_eligible, summary_json, validated_at)
+     VALUES (?, ?, ?, 'confirmed', 0.8, 0.6, ?, 0.5, ?, ?, ?, 10.0, ?, 0, 0, ?, ?)`,
     )
     .run(
       scorecardId,
@@ -142,6 +164,7 @@ function seedScorecard(
       vals.tradeCount,
       vals.marketCount,
       vals.tailAdjustedPnl,
+      vals.summaryJson,
       NOW,
     );
 
@@ -273,6 +296,42 @@ describe("ControlEvaluator", () => {
         tradeCount: 5,
         marketCount: 2,
         tailAdjustedPnl: -1.0,
+      });
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+      const stats = evaluator.run();
+
+      expect(stats.proposalsCreated).toBe(0);
+    });
+
+    it("does not propose when execution canary fails for fee-enabled families", () => {
+      seedCandidate(conn);
+      seedDeployment(conn, "probe-only");
+      seedScorecard(conn, {
+        summaryJson: JSON.stringify({
+          repricingExits: 3,
+          executionTelemetry24h: {
+            totalFills: 12,
+            volumeUsdc: 18,
+            makerFills: 10,
+            takerFills: 2,
+            unknownFills: 0,
+            makerRatio: 10 / 12,
+            takerRatio: 2 / 12,
+            explicitFeesUsdc: 0.1,
+            feeLeakageRatio: 0.0055,
+            lastFillAt: NOW,
+          },
+          executionCanary24h: {
+            required: true,
+            eligible: false,
+            minTotalFills: 10,
+            blockers: [
+              { metric: "Taker fills", current: 2, required: 0, passed: false },
+              { metric: "Explicit fees (USDC)", current: 0.1, required: 0, passed: false },
+            ],
+          },
+        }),
       });
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });

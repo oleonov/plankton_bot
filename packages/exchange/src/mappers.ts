@@ -14,6 +14,7 @@ import type {
   PriceLevel,
   TokenId,
   OrderSide,
+  LiquidityRole,
 } from "@plankton/domain";
 import { createTokenId } from "@plankton/domain";
 
@@ -28,6 +29,13 @@ export function toDomainSide(sdkSide: string): OrderSide {
 
 export function toSdkSide(side: OrderSide): "BUY" | "SELL" {
   return side === "buy" ? "BUY" : "SELL";
+}
+
+function toDomainLiquidityRole(value: unknown): LiquidityRole {
+  const upper = typeof value === "string" ? value.toUpperCase() : "";
+  if (upper === "MAKER") return "maker";
+  if (upper === "TAKER") return "taker";
+  return "unknown";
 }
 
 // ─── TickSize mapping ────────────────────────────────────────────────────
@@ -94,6 +102,7 @@ export function mapTrade(raw: Record<string, unknown>): ExchangeFill {
     side: toDomainSide(String(raw.side ?? "BUY")),
     price,
     size,
+    liquidityRole: toDomainLiquidityRole(raw.trader_side),
     fee,
     timestamp: raw.match_time ? new Date(String(raw.match_time)).getTime() : Date.now(),
   };

@@ -10,6 +10,7 @@ function makeFamilyConfig(overrides: {
     | "price-range"
     | "directional-updown"
     | "social-activity"
+    | "succession"
     | "geopolitics"
     | "generic"
     | "tournament"
@@ -28,6 +29,9 @@ function makeFamilyConfig(overrides: {
       horizon: "short",
       cadence: "daily",
       strategyProfile: "scalp",
+      feeTier: null,
+      liveWalletRequirement: null,
+      requiresPostOnlyForLive: null,
       topicKey: null,
       slugPattern: null,
       notes: null,

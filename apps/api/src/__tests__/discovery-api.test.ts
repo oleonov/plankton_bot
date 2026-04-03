@@ -67,8 +67,37 @@ beforeAll(async () => {
       created_at        TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (family_id, profile)
+    );
+    CREATE TABLE IF NOT EXISTS family_validation_scorecards (
+      scorecard_id TEXT PRIMARY KEY,
+      family_id TEXT NOT NULL,
+      profile TEXT NOT NULL,
+      evidence_status TEXT NOT NULL DEFAULT 'unknown',
+      evidence_score REAL NOT NULL DEFAULT 0,
+      recurrence_score REAL,
+      recycle_score REAL,
+      live_viability_score REAL,
+      toxicity_penalty REAL,
+      trade_count INTEGER NOT NULL DEFAULT 0,
+      market_count INTEGER NOT NULL DEFAULT 0,
+      realized_pnl REAL NOT NULL DEFAULT 0,
+      tail_adjusted_pnl REAL NOT NULL DEFAULT 0,
+      both_sided_eligible INTEGER NOT NULL DEFAULT 0,
+      heavy_campaign_eligible INTEGER NOT NULL DEFAULT 0,
+      active_window_edge_score REAL,
+      summary_json TEXT,
+      validated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS family_validation_latest (
+      family_id TEXT NOT NULL,
+      profile TEXT NOT NULL,
+      scorecard_id TEXT NOT NULL,
+      PRIMARY KEY (family_id, profile)
     )
   `);
+  conn.db.exec(`ALTER TABLE family_catalog ADD COLUMN fee_tier TEXT`);
+  conn.db.exec(`ALTER TABLE family_catalog ADD COLUMN live_wallet_requirement TEXT`);
+  conn.db.exec(`ALTER TABLE family_catalog ADD COLUMN requires_post_only_for_live INTEGER`);
   app = await buildServer({
     config: testConfig(),
     controlDb: conn.db,
@@ -376,6 +405,58 @@ describe("GET /families/:familyId/evidence", () => {
     const allPassed = body.data.promotionBlockers.every((b: any) => b.passed);
     expect(allPassed).toBe(true);
   });
+
+  it("returns execution canary status for fee-enabled families", async () => {
+    const db = conn.db;
+    const familyId = "fam-ev-canary";
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+       VALUES (?, 'ev-canary-key', 'crypto', 'standard', 'daily', 'daily', 'scalp')`,
+    ).run(familyId);
+
+    db.prepare(
+      `INSERT INTO family_evidence
+         (family_id, evidence_status, evidence_score, promotion_state,
+          local_trade_count, local_market_count, local_realized_pnl_fifo,
+          open_tail_cost_usdc, tail_adjusted_pnl, both_sided_eligible,
+          heavy_campaign_eligible, repricing_exit_count, recycle_score,
+          toxicity_penalty, updated_at)
+       VALUES (?, 'confirmed', 1, 'probe-only', 25, 6, 10.0, 2.0, 5.0, 0, 0,
+               4, 0.7, 0.1, ?)`,
+    ).run(familyId, now);
+
+    db.prepare(
+      `INSERT INTO orders
+         (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at)
+       VALUES ('ord-ev-canary', 'co-ev-canary', 'tok-ev-canary', ?, 'buy', 'GTC', 0.4, 20, 8.1, 'filled', 'run-1', ?, ?)`,
+    ).run(familyId, now, now);
+
+    db.exec(`
+      INSERT INTO fills
+        (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
+      VALUES
+        ('fill-ev-canary-1', 'ord-ev-canary', 'tok-ev-canary', '${familyId}', 'buy', 0.4, 10, 4, 'maker', 0, '${now}', 0),
+        ('fill-ev-canary-2', 'ord-ev-canary', 'tok-ev-canary', '${familyId}', 'buy', 0.41, 10, 4.1, 'taker', 0.09, '${now}', 0);
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: `/api/v1/families/${familyId}/evidence`,
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.data.executionCanary24h).toBeDefined();
+    expect(body.data.executionCanary24h.required).toBe(true);
+    expect(body.data.executionCanary24h.eligible).toBe(false);
+    expect(body.data.executionCanary24h.blockers.some((b: any) => b.metric === "Taker fills")).toBe(
+      true,
+    );
+  });
 });
 
 // ─── Promote ─────────────────────────────────────────────────────────────
@@ -399,6 +480,27 @@ describe("POST /actions/family/:id/promote", () => {
          (family_id, current_state, proposed_state, reason, scores_snapshot, status, created_at)
        VALUES (?, 'probe-only', 'scaled', 'auto-promo', '{}', 'pending', ?)`,
     ).run(familyId, now);
+    db.prepare(
+      `INSERT INTO family_validation_scorecards
+         (scorecard_id, family_id, profile, evidence_status, evidence_score,
+          recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
+          trade_count, market_count, realized_pnl, tail_adjusted_pnl,
+          both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
+          summary_json, validated_at)
+       VALUES (
+         'sc-disc-promote-ok', ?, 'simulation', 'confirmed', 0.9,
+         0.7, 0.7, 0.6, 0.1,
+         25, 7, 5, 4,
+         0, 0, NULL,
+         '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":24,"makerFills":12,"takerFills":0,"unknownFills":0,"makerRatio":1,"takerRatio":0,"explicitFeesUsdc":0,"feeLeakageRatio":0,"lastFillAt":"${now}"},"executionCanary24h":{"required":true,"eligible":true,"minTotalFills":10,"blockers":[]}}',
+         ?
+       )`,
+    ).run(familyId, now);
+    db.prepare(
+      `INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
+       VALUES (?, 'simulation', 'sc-disc-promote-ok')
+       ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id`,
+    ).run(familyId);
 
     const res = await app.inject({
       method: "POST",
@@ -427,6 +529,54 @@ describe("POST /actions/family/:id/promote", () => {
     expect(cmd.action).toBe("family_promote_scaled");
     expect(cmd.target_id).toBe(familyId);
     expect(cmd.status).toBe("pending");
+  });
+
+  it("returns 409 when execution canary blocks promotion", async () => {
+    const db = conn.db;
+    const familyId = "fam-promote-blocked";
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+       VALUES (?, 'blocked-key', 'crypto', 'standard', 'daily', 'daily', 'scalp')`,
+    ).run(familyId);
+    db.prepare(
+      `INSERT INTO promotion_proposals
+         (family_id, current_state, proposed_state, reason, scores_snapshot, status, created_at)
+       VALUES (?, 'probe-only', 'scaled', 'auto-promo', '{}', 'pending', ?)`,
+    ).run(familyId, now);
+    db.prepare(
+      `INSERT INTO family_validation_scorecards
+         (scorecard_id, family_id, profile, evidence_status, evidence_score,
+          recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
+          trade_count, market_count, realized_pnl, tail_adjusted_pnl,
+          both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
+          summary_json, validated_at)
+       VALUES (
+         'sc-disc-promote-block', ?, 'simulation', 'confirmed', 0.7,
+         0.6, 0.6, 0.5, 0.1,
+         25, 7, 4, 3,
+         0, 0, NULL,
+         '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":18,"makerFills":10,"takerFills":2,"unknownFills":0,"makerRatio":0.8333,"takerRatio":0.1667,"explicitFeesUsdc":0.11,"feeLeakageRatio":0.0061,"lastFillAt":"${now}"},"executionCanary24h":{"required":true,"eligible":false,"minTotalFills":10,"blockers":[{"metric":"Taker fills","current":2,"required":0,"passed":false},{"metric":"Explicit fees (USDC)","current":0.11,"required":0,"passed":false}]}}',
+         ?
+       )`,
+    ).run(familyId, now);
+    db.prepare(
+      `INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
+       VALUES (?, 'simulation', 'sc-disc-promote-block')
+       ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id`,
+    ).run(familyId);
+
+    const res = await app.inject({
+      method: "POST",
+      url: `/api/v1/actions/family/${familyId}/promote`,
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(json(res).error.code).toBe("PROMOTION_BLOCKED_BY_EXECUTION_CANARY");
   });
 
   it("returns 409 when no pending proposal", async () => {

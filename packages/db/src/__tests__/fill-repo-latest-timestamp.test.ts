@@ -39,6 +39,7 @@ describe("SqliteFillRepository.getLatestTimestamp", () => {
       price: 0.5,
       size: 10,
       sizeUsdc: 5,
+      liquidityRole: "unknown",
       fee: 0,
       filledAt: "2026-03-19T10:00:00.000Z",
     };

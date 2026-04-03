@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import type { LedgerPool } from "../ledger-pool.js";
+import { computeExecutionTelemetry } from "../execution-telemetry.js";
 import { ok } from "../errors.js";
 
 interface StatusOpts {
@@ -303,6 +304,13 @@ export function buildStatusSnapshot(
       .get() as { total: number }
   ).total;
 
+  const executionTelemetry24h = {
+    windowHours: 24,
+    ...computeExecutionTelemetry(db, {
+      sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    }),
+  };
+
   return {
     runtimeMode,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
@@ -326,6 +334,7 @@ export function buildStatusSnapshot(
     reconciliationDriftDetected,
     tradingState,
     signalActivity,
+    executionTelemetry24h,
     ...(marketDataPoll ? { marketDataPoll } : {}),
   };
 }

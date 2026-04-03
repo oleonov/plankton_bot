@@ -1635,6 +1635,135 @@ describe("StrategyModule", () => {
       expect(cmd.source).toBe("strategy");
     });
 
+    it("uses maker-safe post-only pricing for fee-enabled relayer families", async () => {
+      mod = new StrategyModule({
+        bus,
+        rulesProvider: createMockRulesProvider(
+          makeBundle({
+            identity: {
+              primaryCategory: "crypto",
+              feeTier: "fee-enabled",
+              liveWalletRequirement: "relayer-required",
+              requiresPostOnlyForLive: true,
+            },
+          }),
+        ),
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        liveLiteGuard: new LiveLiteGuard({
+          familyAllowlist: ["fam-btc"],
+          maxFamilies: 2,
+          maxOpenValueUsdc: 500,
+          maxOrderUsdc: 50,
+          maxActiveMarkets: 3,
+          walletMode: "relayer",
+          minOrderUsdc: 2,
+        }),
+      });
+
+      await mod.start();
+
+      const market = makeNormalizedMarket({ bestBid: 0.03, bestAsk: 0.04, midPrice: 0.035 });
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const orderRequests: Array<{ command: import("@plankton/domain").PlaceOrderCommand }> = [];
+      bus.subscribe("PlaceOrderRequested", async (p) => {
+        orderRequests.push(p);
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: {
+          signalId: "sig-bridge-maker-1",
+          familyId: FAM_ID,
+          tokenId: TOK_ID,
+          side: "buy",
+          suggestedPrice: 0.035,
+          suggestedSize: 100,
+          suggestedSizeUsdc: 3.5,
+          reason: "probe-entry",
+          strategyTick: Date.now(),
+          sequenceInTick: 0,
+          generatedAt: new Date().toISOString(),
+        },
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      expect(orderRequests).toHaveLength(1);
+      expect(orderRequests[0]!.command.postOnly).toBe(true);
+      expect(orderRequests[0]!.command.price).toBe(0.03);
+    });
+
+    it("skips fee-enabled relayer orders when the book cannot support a maker-safe price", async () => {
+      mod = new StrategyModule({
+        bus,
+        rulesProvider: createMockRulesProvider(
+          makeBundle({
+            identity: {
+              primaryCategory: "crypto",
+              feeTier: "fee-enabled",
+              liveWalletRequirement: "relayer-required",
+              requiresPostOnlyForLive: true,
+            },
+          }),
+        ),
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        liveLiteGuard: new LiveLiteGuard({
+          familyAllowlist: ["fam-btc"],
+          maxFamilies: 2,
+          maxOpenValueUsdc: 500,
+          maxOrderUsdc: 50,
+          maxActiveMarkets: 3,
+          walletMode: "relayer",
+          minOrderUsdc: 2,
+        }),
+      });
+
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ bestBid: 0.04, bestAsk: 0.04, midPrice: 0.04 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const orderRequests: unknown[] = [];
+      bus.subscribe("PlaceOrderRequested", async (p) => {
+        orderRequests.push(p);
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: {
+          signalId: "sig-bridge-maker-locked",
+          familyId: FAM_ID,
+          tokenId: TOK_ID,
+          side: "buy",
+          suggestedPrice: 0.04,
+          suggestedSize: 100,
+          suggestedSizeUsdc: 4,
+          reason: "probe-entry",
+          strategyTick: Date.now(),
+          sequenceInTick: 0,
+          generatedAt: new Date().toISOString(),
+        },
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      expect(orderRequests).toHaveLength(0);
+    });
+
     it("skips approved signal when market not in cache", async () => {
       await mod.start();
       // No market cache seeded

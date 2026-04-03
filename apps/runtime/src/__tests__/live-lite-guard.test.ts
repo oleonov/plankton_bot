@@ -32,6 +32,11 @@ describe("LiveLiteGuard", () => {
     it("isActive returns false", () => {
       expect(guard.isActive).toBe(false);
     });
+
+    it("has no wallet mode or min order", () => {
+      expect(guard.getWalletMode()).toBeNull();
+      expect(guard.getMinOrderUsdc()).toBeNull();
+    });
   });
 
   describe("when config is present (live-lite mode)", () => {
@@ -71,6 +76,92 @@ describe("LiveLiteGuard", () => {
 
     it("allows active markets within cap", () => {
       expect(guard.wouldExceedActiveMarketsCap(1, 1)).toBe(false); // 1+1=2, at cap
+    });
+
+    it("defaults wallet mode to EOA with a $3 minimum order", () => {
+      expect(guard.getWalletMode()).toBe("eoa");
+      expect(guard.getMinOrderUsdc()).toBe(3);
+      expect(guard.isOrderAboveMin(2.99)).toBe(false);
+      expect(guard.isOrderAboveMin(3)).toBe(true);
+    });
+
+    it("rejects fee-enabled entry families in EOA mode", () => {
+      expect(
+        guard.getFamilyPolicyRejections({
+          identity: {
+            primaryCategory: "crypto",
+            feeTier: null,
+            liveWalletRequirement: null,
+            requiresPostOnlyForLive: null,
+          },
+          isEntry: true,
+          orderNotionalUsdc: 5,
+        }),
+      ).toEqual(["live-post-only-required", "live-eoa-fee-enabled-family-rejected"]);
+    });
+
+    it("does not apply live policy rejections to exits", () => {
+      expect(
+        guard.getFamilyPolicyRejections({
+          identity: {
+            primaryCategory: "crypto",
+            feeTier: null,
+            liveWalletRequirement: null,
+            requiresPostOnlyForLive: null,
+          },
+          isEntry: false,
+          orderNotionalUsdc: 1,
+        }),
+      ).toEqual([]);
+    });
+  });
+
+  describe("when custom wallet settings are present", () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-a"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 50,
+      maxOrderUsdc: 10,
+      maxActiveMarkets: 2,
+      walletMode: "relayer",
+      minOrderUsdc: 2,
+    });
+
+    it("uses configured wallet mode and min order", () => {
+      expect(guard.getWalletMode()).toBe("relayer");
+      expect(guard.getMinOrderUsdc()).toBe(2);
+      expect(guard.supportsPostOnlyFamilies()).toBe(true);
+    });
+
+    it("allows post-only-required families when execution confirms post-only support", () => {
+      expect(
+        guard.getFamilyPolicyRejections({
+          identity: {
+            primaryCategory: "crypto",
+            feeTier: null,
+            liveWalletRequirement: null,
+            requiresPostOnlyForLive: null,
+          },
+          isEntry: true,
+          orderNotionalUsdc: 2.5,
+          hasPostOnlySupport: true,
+        }),
+      ).toEqual([]);
+    });
+
+    it("rejects buy orders below the configured minimum", () => {
+      expect(
+        guard.getFamilyPolicyRejections({
+          identity: {
+            primaryCategory: "geopolitics",
+            feeTier: null,
+            liveWalletRequirement: null,
+            requiresPostOnlyForLive: null,
+          },
+          isEntry: true,
+          orderNotionalUsdc: 1.5,
+        }),
+      ).toEqual(["live-min-order-usdc-rejected"]);
     });
   });
 });

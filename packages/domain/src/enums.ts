@@ -22,6 +22,26 @@ export const StrategyProfile = {
 } as const;
 export type StrategyProfile = (typeof StrategyProfile)[keyof typeof StrategyProfile];
 
+export const FeeTier = {
+  FeeFree: "fee-free",
+  FeeEnabled: "fee-enabled",
+  Unknown: "unknown",
+} as const;
+export type FeeTier = (typeof FeeTier)[keyof typeof FeeTier];
+
+export const LiveWalletRequirement = {
+  EoaOk: "eoa-ok",
+  RelayerRequired: "relayer-required",
+} as const;
+export type LiveWalletRequirement =
+  (typeof LiveWalletRequirement)[keyof typeof LiveWalletRequirement];
+
+export const WalletMode = {
+  Eoa: "eoa",
+  Relayer: "relayer",
+} as const;
+export type WalletMode = (typeof WalletMode)[keyof typeof WalletMode];
+
 // ─── Evidence / Promotion ─────────────────────────────────────────────────────
 
 export const EvidenceStatus = {
@@ -148,6 +168,13 @@ export const OrderStatus = {
 } as const;
 export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
 
+export const LiquidityRole = {
+  Maker: "maker",
+  Taker: "taker",
+  Unknown: "unknown",
+} as const;
+export type LiquidityRole = (typeof LiquidityRole)[keyof typeof LiquidityRole];
+
 // ─── Position ─────────────────────────────────────────────────────────────────
 
 export const PositionStatus = {
@@ -235,6 +262,7 @@ export const ExchangeErrorCode = {
   RuntimePaused: "RUNTIME_PAUSED",
   LiveLiteAllowlist: "LIVE_LITE_ALLOWLIST",
   LiveLiteOrderCap: "LIVE_LITE_ORDER_CAP",
+  LivePolicyBlocked: "LIVE_POLICY_BLOCKED",
   MarketInactive: "MARKET_INACTIVE",
   Unknown: "UNKNOWN",
 } as const;

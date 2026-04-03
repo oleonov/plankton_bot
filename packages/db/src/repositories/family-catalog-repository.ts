@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { FamilyIdentity, FamilyId } from "@plankton/domain";
 import { createFamilyId } from "@plankton/domain";
-import type { Regime, StrategyProfile } from "@plankton/domain";
+import type { Regime, StrategyProfile, FeeTier, LiveWalletRequirement } from "@plankton/domain";
 
 /**
  * Persistence for the family_catalog table.
@@ -18,9 +18,10 @@ export class SqliteFamilyCatalogRepository {
       .prepare(
         `INSERT INTO family_catalog
            (family_id, family_key, primary_category, regime, horizon,
-            cadence, strategy_profile, topic_key, slug_pattern, notes,
+            cadence, strategy_profile, fee_tier, live_wallet_requirement,
+            requires_post_only_for_live, topic_key, slug_pattern, notes,
             updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(family_id) DO UPDATE SET
            family_key = excluded.family_key,
            primary_category = excluded.primary_category,
@@ -28,6 +29,9 @@ export class SqliteFamilyCatalogRepository {
            horizon = excluded.horizon,
            cadence = excluded.cadence,
            strategy_profile = excluded.strategy_profile,
+           fee_tier = excluded.fee_tier,
+           live_wallet_requirement = excluded.live_wallet_requirement,
+           requires_post_only_for_live = excluded.requires_post_only_for_live,
            topic_key = excluded.topic_key,
            slug_pattern = excluded.slug_pattern,
            notes = excluded.notes,
@@ -41,6 +45,9 @@ export class SqliteFamilyCatalogRepository {
         identity.horizon,
         identity.cadence,
         identity.strategyProfile,
+        identity.feeTier ?? "unknown",
+        identity.liveWalletRequirement ?? "relayer-required",
+        identity.requiresPostOnlyForLive ? 1 : 0,
         identity.topicKey,
         identity.slugPattern,
         identity.notes,
@@ -77,6 +84,10 @@ export class SqliteFamilyCatalogRepository {
       horizon: row.horizon as string,
       cadence: row.cadence as string,
       strategyProfile: row.strategy_profile as StrategyProfile,
+      feeTier: (row.fee_tier as FeeTier) ?? null,
+      liveWalletRequirement: (row.live_wallet_requirement as LiveWalletRequirement) ?? null,
+      requiresPostOnlyForLive:
+        row.requires_post_only_for_live == null ? null : row.requires_post_only_for_live === 1,
       topicKey: (row.topic_key as string) ?? null,
       slugPattern: (row.slug_pattern as string) ?? null,
       notes: (row.notes as string) ?? null,

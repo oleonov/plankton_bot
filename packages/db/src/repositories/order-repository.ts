@@ -17,13 +17,14 @@ export class SqliteOrderRepository implements OrderRepository {
     this.db
       .prepare(
         `INSERT INTO orders
-         (order_id, client_order_id, token_id, family_id, side, order_type,
+         (order_id, client_order_id, token_id, family_id, side, order_type, post_only,
           price, size, size_usdc, status, exchange_order_id, signal_id,
           signal_reason, bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
+           post_only = excluded.post_only,
            size = excluded.size,
            size_usdc = excluded.size_usdc,
            updated_at = excluded.updated_at`,
@@ -35,6 +36,7 @@ export class SqliteOrderRepository implements OrderRepository {
         order.familyId,
         order.side,
         order.orderType,
+        order.postOnly === true ? 1 : 0,
         order.price,
         order.size,
         order.sizeUsdc,
@@ -105,6 +107,7 @@ export class SqliteOrderRepository implements OrderRepository {
       familyId: createFamilyId(row.family_id as string),
       side: row.side as OrderSide,
       orderType: row.order_type as OrderType,
+      postOnly: row.post_only === 1,
       price: row.price as number,
       size: row.size as number,
       sizeUsdc: row.size_usdc as number,

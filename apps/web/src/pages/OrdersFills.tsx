@@ -191,7 +191,10 @@ export function OrdersFills() {
                     <td>${o.price.toFixed(4)}</td>
                     <td>{o.size.toFixed(2)}</td>
                     <td>
-                      <Badge value={o.status} />
+                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                        <Badge value={o.status} />
+                        {o.postOnly ? <Badge value="post-only" /> : null}
+                      </div>
                     </td>
                     <td style={{ color: ends.color, fontSize: 12 }}>{ends.text}</td>
                     <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
@@ -251,6 +254,7 @@ export function OrdersFills() {
                   sort={fillSort.sort}
                   onToggle={fillSort.toggle}
                 />
+                <th>Exec</th>
                 <SortTh
                   label="Filled At"
                   sortKey="filledAt"
@@ -283,6 +287,14 @@ export function OrdersFills() {
                   <td>${f.price.toFixed(4)}</td>
                   <td>{f.size.toFixed(2)}</td>
                   <td>${f.sizeUsdc.toFixed(2)}</td>
+                  <td>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      <Badge value={f.liquidityRole ?? "unknown"} />
+                      <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                        fee ${(f.explicitFeeUsdc ?? f.fee).toFixed(3)}
+                      </span>
+                    </div>
+                  </td>
                   <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
                     {formatTimestamp(f.filledAt)}
                   </td>

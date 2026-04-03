@@ -81,6 +81,7 @@ export class RiskGateImpl implements RiskGate {
   async evaluate(signal: Signal): Promise<RiskDecision> {
     const passed: string[] = [];
     const rejected: string[] = [];
+    const isEntry = isEntrySignal(signal);
 
     // Live-lite allowlist check (Layer 2)
     if (
@@ -103,6 +104,20 @@ export class RiskGateImpl implements RiskGate {
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("family_exists_and_enabled");
+
+    if (this.liveLiteGuard?.isActive) {
+      const policyRejected = this.liveLiteGuard.getFamilyPolicyRejections({
+        identity: bundle.identity,
+        isEntry,
+        orderNotionalUsdc: signal.suggestedSizeUsdc,
+        hasPostOnlySupport: this.liveLiteGuard.supportsPostOnlyFamilies(),
+      });
+      if (policyRejected.length > 0) {
+        rejected.push(...policyRejected);
+        return this.decision(signal, false, rejected, passed);
+      }
+      passed.push("live_lite_policy_ok");
+    }
 
     // 2. Family runtime mode
     const familyState = this.familyStateRepo.get(signal.familyId);
@@ -132,7 +147,7 @@ export class RiskGateImpl implements RiskGate {
 
     // In-flight limiter (B2.2) — entry signals only
     if (
-      isEntrySignal(signal) &&
+      isEntry &&
       this.getInFlightCount &&
       this.getInFlightCount(signal.familyId) >= this.maxConcurrentOrdersPerFamily
     ) {
@@ -142,7 +157,7 @@ export class RiskGateImpl implements RiskGate {
     passed.push("in_flight_limit_ok");
 
     // For exit/reduce signals, skip exposure checks — they reduce risk
-    if (!isEntrySignal(signal)) {
+    if (!isEntry) {
       passed.push("exit_signal_bypass_exposure_checks");
       return this.decision(signal, true, rejected, passed);
     }

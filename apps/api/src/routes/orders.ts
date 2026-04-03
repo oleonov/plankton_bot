@@ -16,6 +16,7 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     familyId: row.family_id,
     side: row.side,
     orderType: row.order_type,
+    postOnly: row.post_only === 1,
     price: row.price,
     size: row.size,
     sizeUsdc: row.size_usdc,

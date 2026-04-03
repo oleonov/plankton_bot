@@ -15,6 +15,7 @@ import type {
   RuntimeModule,
   EventBus,
   ExchangeGateway,
+  FamilyRulesProvider,
   MarketRepository,
   OrderRepository,
   FillRepository,
@@ -25,7 +26,7 @@ import type {
   BotRunId,
   RuntimeControl,
 } from "@plankton/domain";
-import { createOrderId } from "@plankton/domain";
+import { createOrderId, ExchangeErrorCode, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
@@ -41,6 +42,7 @@ export interface ExecutionModuleDeps {
   botRunId: BotRunId;
   runtimeControl?: RuntimeControl | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
+  rulesProvider?: FamilyRulesProvider | undefined;
   runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
   maxConcurrency?: number | undefined;
 }
@@ -139,9 +141,42 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    const notional = cmd.price * cmd.size;
+
+    if (this.deps.liveLiteGuard?.isActive && this.deps.rulesProvider) {
+      const bundle = this.deps.rulesProvider.getRule(cmd.familyId);
+      if (bundle) {
+        const liveTradingPolicy = resolveFamilyLiveTradingPolicy(bundle.identity);
+        const policyRejected = this.deps.liveLiteGuard.getFamilyPolicyRejections({
+          identity: bundle.identity,
+          isEntry: cmd.side === "buy",
+          orderNotionalUsdc: notional,
+          hasPostOnlySupport: cmd.postOnly === true,
+        });
+        if (cmd.side !== "buy" && liveTradingPolicy.requiresPostOnlyForLive && !cmd.postOnly) {
+          policyRejected.unshift("live-post-only-required");
+        }
+        if (policyRejected.length > 0) {
+          const reason = policyRejected.join("; ");
+          this.log.warn(
+            { commandId: cmd.commandId, familyId: cmd.familyId, reason },
+            "order rejected — blocked by live trading policy",
+          );
+          await this.deps.bus.publish("OrderRejected", {
+            commandId: cmd.commandId,
+            clientOrderId: cmd.clientOrderId,
+            reason,
+            errorCode: ExchangeErrorCode.LivePolicyBlocked,
+            familyId: cmd.familyId,
+            timestamp: Date.now(),
+          });
+          return;
+        }
+      }
+    }
+
     // Live-lite order cap check (Layer 5)
     if (this.deps.liveLiteGuard?.isActive) {
-      const notional = cmd.price * cmd.size;
       if (!this.deps.liveLiteGuard.isOrderWithinCap(notional)) {
         this.log.warn(
           { commandId: cmd.commandId, notional },
@@ -244,6 +279,7 @@ export class ExecutionModule implements RuntimeModule {
       side: cmd.side,
       size: cmd.size,
       price: cmd.price,
+      ...(cmd.postOnly ? { postOnly: true } : {}),
       orderType: cmd.orderType,
       tickSize: cmd.tickSize,
       negRisk: cmd.negRisk,
@@ -375,6 +411,7 @@ export class ExecutionModule implements RuntimeModule {
       familyId: cmd.familyId,
       side: cmd.side,
       orderType: cmd.orderType,
+      postOnly: cmd.postOnly === true,
       price: cmd.price,
       size: cmd.size,
       sizeUsdc: cmd.size * cmd.price,

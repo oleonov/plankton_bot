@@ -8,6 +8,8 @@ import { LiveMarketDataGateway, buildTokenIdBatches } from "../live/market-data-
 function createMockClient() {
   return {
     createAndPostOrder: vi.fn(),
+    createOrder: vi.fn(),
+    postOrder: vi.fn(),
     cancelOrder: vi.fn(),
     cancelAll: vi.fn(),
     getOpenOrders: vi.fn(),
@@ -53,6 +55,30 @@ describe("LiveExchangeGateway", () => {
     expect(userOrder.side).toBe("BUY");
     expect(options.tickSize).toBe("0.01");
     expect(options.negRisk).toBe(false);
+  });
+
+  it("placeOrder uses signed-order post path for post-only orders", async () => {
+    const signedOrder = { id: "signed-order" };
+    client.createOrder.mockResolvedValue(signedOrder);
+    client.postOrder.mockResolvedValue({ orderID: "live-ord-post-only" });
+
+    const result = await gw.placeOrder({
+      clientOrderId: "cloid-post-only",
+      tokenId: createTokenId("tok-1"),
+      side: "buy",
+      size: 100,
+      price: 0.49,
+      postOnly: true,
+      orderType: "GTC",
+      tickSize: 0.01,
+      negRisk: false,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.orderId).toBe("live-ord-post-only");
+    expect(client.createAndPostOrder).not.toHaveBeenCalled();
+    expect(client.createOrder).toHaveBeenCalledOnce();
+    expect(client.postOrder).toHaveBeenCalledWith(signedOrder, "GTC", true);
   });
 
   it("placeOrder returns error result on SDK failure", async () => {

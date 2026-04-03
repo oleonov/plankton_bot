@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS profile_settings (
   initial_balance_usdc REAL,
   envelope_json        TEXT,
   risk_caps_json       TEXT,
+  wallet_mode          TEXT,
+  min_order_usdc       REAL,
+  relayer_json         TEXT,
   updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -45,6 +48,9 @@ CREATE TABLE IF NOT EXISTS family_catalog (
   horizon           TEXT NOT NULL,
   cadence           TEXT NOT NULL,
   strategy_profile  TEXT NOT NULL,
+  fee_tier          TEXT NOT NULL DEFAULT 'unknown',
+  live_wallet_requirement TEXT NOT NULL DEFAULT 'relayer-required',
+  requires_post_only_for_live INTEGER NOT NULL DEFAULT 1,
   source_type       TEXT NOT NULL DEFAULT 'yaml_import',
   origin_checksum   TEXT,
   topic_key         TEXT,

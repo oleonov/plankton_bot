@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { LoadedFamilyRules } from "@plankton/config";
 import type { FamilyConfig } from "@plankton/config";
-import { createImportId } from "@plankton/domain";
+import { createImportId, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import { ProfileId } from "@plankton/domain";
 
 export function needsBootstrap(db: Database.Database): boolean {
@@ -47,19 +47,22 @@ export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules
 
     // 2. Profile settings (sim/paper get initialBalanceUsdc, live-lite gets null)
     const insertSettings = db.prepare(
-      "INSERT INTO profile_settings (profile_id, initial_balance_usdc, updated_at) VALUES (?, ?, ?)",
+      `INSERT INTO profile_settings
+         (profile_id, initial_balance_usdc, wallet_mode, min_order_usdc, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
     );
-    insertSettings.run(ProfileId.Simulation, loaded.global.initialBalanceUsdc, now);
-    insertSettings.run(ProfileId.Paper, loaded.global.initialBalanceUsdc, now);
-    insertSettings.run(ProfileId.LiveLite, null, now);
+    insertSettings.run(ProfileId.Simulation, loaded.global.initialBalanceUsdc, null, null, now);
+    insertSettings.run(ProfileId.Paper, loaded.global.initialBalanceUsdc, null, null, now);
+    insertSettings.run(ProfileId.LiveLite, null, "eoa", 3, now);
 
     // 3. Families
     const insertCatalog = db.prepare(`
       INSERT INTO family_catalog (
         family_id, family_key, primary_category, regime, horizon, cadence,
-        strategy_profile, source_type, topic_key, slug_pattern, notes,
+        strategy_profile, fee_tier, live_wallet_requirement, requires_post_only_for_live,
+        source_type, topic_key, slug_pattern, notes,
         created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'yaml_import', ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'yaml_import', ?, ?, ?, ?, ?)
     `);
 
     const insertRules = db.prepare(`
@@ -150,6 +153,12 @@ function insertFamily(
   now: string,
 ): void {
   const { identity: id, rules } = family;
+  const livePolicy = resolveFamilyLiveTradingPolicy({
+    primaryCategory: id.primaryCategory,
+    feeTier: id.feeTier ?? null,
+    liveWalletRequirement: id.liveWalletRequirement ?? null,
+    requiresPostOnlyForLive: id.requiresPostOnlyForLive ?? null,
+  });
   const {
     universe: u,
     entry: e,
@@ -168,6 +177,9 @@ function insertFamily(
     id.horizon,
     id.cadence,
     id.strategyProfile,
+    livePolicy.feeTier,
+    livePolicy.liveWalletRequirement,
+    livePolicy.requiresPostOnlyForLive ? 1 : 0,
     id.topicKey ?? null,
     id.slugPattern ?? null,
     id.notes ?? null,

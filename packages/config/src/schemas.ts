@@ -22,6 +22,9 @@ const strategyProfileSchema = z.enum([
   "restricted",
 ]);
 
+const feeTierSchema = z.enum(["fee-free", "fee-enabled", "unknown"]);
+const liveWalletRequirementSchema = z.enum(["eoa-ok", "relayer-required"]);
+
 const evidenceStatusSchema = z.enum(["confirmed", "partial", "weak", "unknown"]);
 
 const promotionStateSchema = z.enum([
@@ -69,6 +72,9 @@ export const identityYamlSchema = z.object({
   topic_key: z.string().nullable().optional().default(null),
   slug_pattern: z.string().nullable().optional().default(null),
   notes: z.string().nullable().optional().default(null),
+  fee_tier: feeTierSchema.nullable().optional().default(null),
+  live_wallet_requirement: liveWalletRequirementSchema.nullable().optional().default(null),
+  requires_post_only_for_live: z.boolean().nullable().optional().default(null),
 });
 
 export const evidenceYamlSchema = z.object({

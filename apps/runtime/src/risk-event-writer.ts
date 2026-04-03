@@ -11,6 +11,11 @@ const FAMILY_MODE_EVENTS: Record<string, string> = {
   family_activate: "family_activated",
 };
 
+const DEMOTION_EVENTS: Record<string, string> = {
+  quarantine: "family_quarantined",
+  "reduce-only": "family_reduce_only",
+};
+
 export class RiskEventWriter {
   private readonly cooldown = new Map<string, number>();
 
@@ -48,7 +53,15 @@ export class RiskEventWriter {
     targetFamilyId: FamilyId | null,
     commandDbId: number,
     reason: string | null,
+    initiatorType: "operator" | "system" = "operator",
   ): void {
+    if (
+      initiatorType === "system" &&
+      (action === "family_quarantine" || action === "family_reduce_only")
+    ) {
+      return;
+    }
+
     const eventType = FAMILY_MODE_EVENTS[action];
     if (!eventType || !targetFamilyId) return;
 
@@ -56,6 +69,27 @@ export class RiskEventWriter {
       eventType,
       familyId: targetFamilyId,
       payload: { commandDbId, reason },
+    });
+  }
+
+  onFamilyDemotionApplied(
+    familyId: FamilyId,
+    previousState: string,
+    newState: string,
+    reason: string,
+  ): void {
+    const eventType = DEMOTION_EVENTS[newState];
+    if (!eventType) return;
+
+    this.repo.insert({
+      eventType,
+      familyId,
+      payload: {
+        previousState,
+        newState,
+        reason,
+        source: "system",
+      },
     });
   }
 

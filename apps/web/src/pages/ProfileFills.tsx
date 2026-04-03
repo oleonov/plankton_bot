@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useProfileFills, useFamilies } from "../api/hooks.ts";
+import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
 import { formatTimestamp } from "../utils/format.ts";
@@ -49,6 +50,7 @@ export function ProfileFills() {
             <th>Price</th>
             <th>Size</th>
             <th>USDC</th>
+            <th>Exec</th>
             <th>Filled At</th>
           </tr>
         </thead>
@@ -76,6 +78,14 @@ export function ProfileFills() {
               <td>${f.price.toFixed(4)}</td>
               <td>{f.size.toFixed(2)}</td>
               <td>${f.sizeUsdc.toFixed(2)}</td>
+              <td>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                  <Badge value={f.liquidityRole ?? "unknown"} />
+                  <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+                    fee ${(f.explicitFeeUsdc ?? f.fee).toFixed(3)}
+                  </span>
+                </div>
+              </td>
               <td style={{ fontSize: 11, color: "var(--text-dim)" }}>
                 {formatTimestamp(f.filledAt)}
               </td>

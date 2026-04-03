@@ -11,6 +11,17 @@ describe("normalizeReasonCode", () => {
       "live_lite_active_markets_cap",
     );
     expect(normalizeReasonCode("live-lite-allowlist-rejected")).toBe("live_lite_allowlist");
+    expect(normalizeReasonCode("live-post-only-required")).toBe("live_post_only_required");
+    expect(normalizeReasonCode("live-min-order-usdc-rejected")).toBe("live_min_order_usdc");
+    expect(normalizeReasonCode("live-eoa-fee-enabled-family-rejected")).toBe(
+      "live_eoa_fee_enabled_family",
+    );
+  });
+
+  it("maps the first recognized reason from multi-reason rejections", () => {
+    expect(
+      normalizeReasonCode("live-post-only-required; live-eoa-fee-enabled-family-rejected"),
+    ).toBe("live_post_only_required");
   });
 
   it("maps dynamic open-value reason", () => {

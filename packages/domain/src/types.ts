@@ -15,6 +15,9 @@ import type {
 import type {
   Regime,
   StrategyProfile,
+  FeeTier,
+  LiveWalletRequirement,
+  WalletMode,
   EvidenceStatus,
   PromotionState,
   Action,
@@ -30,6 +33,7 @@ import type {
   OrderSide,
   OrderType,
   OrderStatus,
+  LiquidityRole,
   PositionStatus,
   SignalReason,
   OperatorActionType,
@@ -117,6 +121,9 @@ export interface FamilyIdentity {
   topicKey: string | null;
   slugPattern: string | null;
   notes: string | null;
+  feeTier?: FeeTier | null;
+  liveWalletRequirement?: LiveWalletRequirement | null;
+  requiresPostOnlyForLive?: boolean | null;
 }
 
 // ─── Family — Evidence layer ──────────────────────────────────────────────────
@@ -305,6 +312,7 @@ export interface Order {
   familyId: FamilyId;
   side: OrderSide;
   orderType: OrderType;
+  postOnly?: boolean;
   price: number;
   size: number; // shares
   sizeUsdc: number; // notional
@@ -330,6 +338,7 @@ export interface Fill {
   price: number;
   size: number; // shares executed
   sizeUsdc: number; // notional (= size × price)
+  liquidityRole: LiquidityRole;
   fee: number;
   filledAt: string; // ISO timestamp
 }
@@ -465,6 +474,9 @@ export interface ProfileSettings {
   initialBalanceUsdc: number | null;
   envelopeJson: string | null;
   riskCapsJson: string | null;
+  walletMode?: WalletMode | null;
+  minOrderUsdc?: number | null;
+  relayerJson?: string | null;
   updatedAt: string;
 }
 

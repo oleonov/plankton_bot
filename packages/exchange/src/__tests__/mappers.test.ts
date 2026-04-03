@@ -84,6 +84,7 @@ describe("mapTrade", () => {
       side: "SELL",
       size: "50",
       price: "0.60",
+      trader_side: "TAKER",
       fee_rate_bps: "200",
       match_time: "2026-01-15T12:00:00Z",
     });
@@ -95,6 +96,7 @@ describe("mapTrade", () => {
     expect(fill.side).toBe("sell");
     expect(fill.size).toBe(50);
     expect(fill.price).toBe(0.6);
+    expect(fill.liquidityRole).toBe("taker");
     // fee = 50 * 0.60 * (200/10000) = 0.60
     expect(fill.fee).toBeCloseTo(0.6);
   });
@@ -107,6 +109,18 @@ describe("mapTrade", () => {
     });
     expect(fill.orderId).toBe("ord-2");
     expect(fill.clientOrderId).toBe("");
+    expect(fill.liquidityRole).toBe("unknown");
+  });
+
+  it("maps trader_side=MAKER to maker liquidity role", () => {
+    const fill = mapTrade({
+      id: "fill-maker",
+      taker_order_id: "ord-maker",
+      side: "BUY",
+      trader_side: "MAKER",
+    });
+
+    expect(fill.liquidityRole).toBe("maker");
   });
 });
 

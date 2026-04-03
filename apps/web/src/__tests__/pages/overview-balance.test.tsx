@@ -72,6 +72,77 @@ describe("Overview Balance Card", () => {
     );
 
     renderWithProviders(<Overview />);
-    expect(await screen.findByText("—")).toBeInTheDocument();
+    expect((await screen.findAllByText("—")).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("shows 24h execution quality telemetry", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          executionTelemetry24h: {
+            windowHours: 24,
+            totalFills: 6,
+            volumeUsdc: 24,
+            makerFills: 4,
+            takerFills: 2,
+            unknownFills: 0,
+            makerRatio: 4 / 6,
+            takerRatio: 2 / 6,
+            explicitFeesUsdc: 0.48,
+            feeLeakageRatio: 0.02,
+            lastFillAt: new Date().toISOString(),
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    expect(await screen.findByText("Execution Quality")).toBeInTheDocument();
+    expect(screen.getByText("67%")).toBeInTheDocument();
+    expect(screen.getByText(/4 maker.*2 taker.*0 unknown/)).toBeInTheDocument();
+    expect(screen.getByText(/\$0\.480 fees.*2\.00% leakage/)).toBeInTheDocument();
+  });
+
+  it("shows canary watch summary for families with taker leakage", async () => {
+    server.use(
+      http.get("/api/v1/metrics/families", () =>
+        ok([
+          {
+            familyId: "fam-1",
+            familyKey: "bitcoin-above",
+            feeTier: "fee-enabled",
+            requiresPostOnlyForLive: true,
+            runtimeMode: "active",
+            openValueUsdc: 12,
+            openPositionCount: 2,
+            tailAdjustedPnlLive: 1.5,
+            quarantineReason: null,
+            effectiveMode: "active",
+            derivedModeReason: null,
+            executionTelemetry24h: {
+              windowHours: 24,
+              totalFills: 4,
+              volumeUsdc: 18,
+              makerFills: 2,
+              takerFills: 2,
+              unknownFills: 0,
+              makerRatio: 0.5,
+              takerRatio: 0.5,
+              explicitFeesUsdc: 0.12,
+              feeLeakageRatio: 0.0066666667,
+              lastFillAt: new Date().toISOString(),
+            },
+            updatedAt: new Date().toISOString(),
+          },
+        ]),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    expect(await screen.findByText(/Watch: bitcoin-above/i)).toBeInTheDocument();
+    expect(screen.getByText(/2 taker.*\$0\.120 fees/)).toBeInTheDocument();
   });
 });

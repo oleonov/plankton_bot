@@ -47,8 +47,37 @@ beforeAll(async () => {
       deployment_stage TEXT NOT NULL DEFAULT 'disabled', priority INTEGER NOT NULL DEFAULT 999,
       created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (family_id, profile)
+    );
+    CREATE TABLE IF NOT EXISTS family_validation_scorecards (
+      scorecard_id TEXT PRIMARY KEY,
+      family_id TEXT NOT NULL,
+      profile TEXT NOT NULL,
+      evidence_status TEXT NOT NULL DEFAULT 'unknown',
+      evidence_score REAL NOT NULL DEFAULT 0,
+      recurrence_score REAL,
+      recycle_score REAL,
+      live_viability_score REAL,
+      toxicity_penalty REAL,
+      trade_count INTEGER NOT NULL DEFAULT 0,
+      market_count INTEGER NOT NULL DEFAULT 0,
+      realized_pnl REAL NOT NULL DEFAULT 0,
+      tail_adjusted_pnl REAL NOT NULL DEFAULT 0,
+      both_sided_eligible INTEGER NOT NULL DEFAULT 0,
+      heavy_campaign_eligible INTEGER NOT NULL DEFAULT 0,
+      active_window_edge_score REAL,
+      summary_json TEXT,
+      validated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS family_validation_latest (
+      family_id TEXT NOT NULL,
+      profile TEXT NOT NULL,
+      scorecard_id TEXT NOT NULL,
+      PRIMARY KEY (family_id, profile)
     )
   `);
+  db.exec(`ALTER TABLE family_catalog ADD COLUMN fee_tier TEXT`);
+  db.exec(`ALTER TABLE family_catalog ADD COLUMN live_wallet_requirement TEXT`);
+  db.exec(`ALTER TABLE family_catalog ADD COLUMN requires_post_only_for_live INTEGER`);
   const now = new Date().toISOString();
 
   // Seed candidate for accept tests
@@ -73,6 +102,27 @@ beforeAll(async () => {
   db.prepare(
     `INSERT INTO promotion_proposals (family_id, current_state, proposed_state, reason, scores_snapshot, status)
      VALUES ('fam-caps', 'probe-only', 'scaled', 'test', '{}', 'pending')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO family_validation_scorecards
+       (scorecard_id, family_id, profile, evidence_status, evidence_score,
+        recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
+        trade_count, market_count, realized_pnl, tail_adjusted_pnl,
+        both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
+        summary_json, validated_at)
+     VALUES (
+       'sc-fam-caps', 'fam-caps', 'simulation', 'confirmed', 0.9,
+       0.7, 0.7, 0.6, 0.1,
+       25, 7, 5, 4,
+       0, 0, NULL,
+       '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":24,"makerFills":12,"takerFills":0,"unknownFills":0,"makerRatio":1,"takerRatio":0,"explicitFeesUsdc":0,"feeLeakageRatio":0,"lastFillAt":"2026-04-03T00:00:00.000Z"},"executionCanary24h":{"required":true,"eligible":true,"minTotalFills":10,"blockers":[]}}',
+       '2026-04-03T00:00:00.000Z'
+     )`,
+  ).run();
+  db.prepare(
+    `INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
+     VALUES ('fam-caps', 'simulation', 'sc-fam-caps')
+     ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id`,
   ).run();
 
   app = await buildServer({

@@ -45,6 +45,7 @@ function makeFill(overrides?: Partial<Fill>): Fill {
     price: 0.55,
     size: 50,
     sizeUsdc: 27.5,
+    liquidityRole: "unknown",
     fee: 0.01,
     filledAt: "2026-01-01T00:00:00.000Z",
     ...overrides,
@@ -74,6 +75,7 @@ describe("SqliteFillRepository", () => {
     expect(found[0]!.orderId).toBe("ord-1");
     expect(found[0]!.price).toBe(0.55);
     expect(found[0]!.size).toBe(50);
+    expect(found[0]!.liquidityRole).toBe("unknown");
     expect(found[0]!.fee).toBe(0.01);
   });
 

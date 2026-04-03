@@ -12,23 +12,41 @@ export function liveLitePreflight(
 ): PreflightResult {
   const violations: string[] = [];
 
+  const positionsQuery =
+    envelope.familyAllowlist.length > 0
+      ? {
+          sql: `SELECT DISTINCT family_id FROM positions WHERE status = 'open' AND family_id NOT IN (${envelope.familyAllowlist.map(() => "?").join(",")})`,
+          params: envelope.familyAllowlist,
+        }
+      : {
+          sql: "SELECT DISTINCT family_id FROM positions WHERE status = 'open'",
+          params: [] as string[],
+        };
+
   // 1. Open positions with familyId not in allowlist
   const positionsOutside = db
-    .prepare(
-      `SELECT DISTINCT family_id FROM positions WHERE status = 'open' AND family_id NOT IN (${envelope.familyAllowlist.map(() => "?").join(",")})`,
-    )
-    .all(...envelope.familyAllowlist) as { family_id: string }[];
+    .prepare(positionsQuery.sql)
+    .all(...positionsQuery.params) as { family_id: string }[];
 
   for (const row of positionsOutside) {
     violations.push(`open position with non-allowlisted family: ${row.family_id}`);
   }
 
+  const ordersQuery =
+    envelope.familyAllowlist.length > 0
+      ? {
+          sql: `SELECT DISTINCT family_id FROM orders WHERE status IN ('open','pending','partially-filled') AND family_id NOT IN (${envelope.familyAllowlist.map(() => "?").join(",")})`,
+          params: envelope.familyAllowlist,
+        }
+      : {
+          sql: "SELECT DISTINCT family_id FROM orders WHERE status IN ('open','pending','partially-filled')",
+          params: [] as string[],
+        };
+
   // 2. Open orders with familyId not in allowlist
   const ordersOutside = db
-    .prepare(
-      `SELECT DISTINCT family_id FROM orders WHERE status IN ('open','pending','partially-filled') AND family_id NOT IN (${envelope.familyAllowlist.map(() => "?").join(",")})`,
-    )
-    .all(...envelope.familyAllowlist) as { family_id: string }[];
+    .prepare(ordersQuery.sql)
+    .all(...ordersQuery.params) as { family_id: string }[];
 
   for (const row of ordersOutside) {
     violations.push(`open order with non-allowlisted family: ${row.family_id}`);

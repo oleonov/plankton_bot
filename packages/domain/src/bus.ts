@@ -25,6 +25,7 @@ import type {
 import type {
   OrderSide,
   OrderType,
+  LiquidityRole,
   OperatorActionType,
   ExchangeErrorCode,
   RuntimePhase,
@@ -146,6 +147,7 @@ export interface RuntimeEventMap {
     readonly size: number;
     /** USDC notional (= size × price). */
     readonly sizeUsdc: number;
+    readonly liquidityRole: LiquidityRole;
     readonly fee: number;
     readonly familyId: FamilyId;
     readonly timestamp: number;

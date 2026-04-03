@@ -33,6 +33,8 @@ export interface PlaceOrderCommand {
   readonly size: number;
   /** Limit price in [0, 1] range for binary markets. */
   readonly price: number;
+  /** When true, the order must rest on the book and never cross as taker. */
+  readonly postOnly?: boolean;
   readonly orderType: OrderType;
   /** Minimum price increment for this token — required by Polymarket CLOB order signing. */
   readonly tickSize: number;

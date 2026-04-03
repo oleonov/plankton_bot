@@ -93,6 +93,7 @@ export function RiskQuarantine() {
         >
           <option value="">All types</option>
           <option value="family_quarantined">Quarantined</option>
+          <option value="family_reduce_only">Reduce-only</option>
           <option value="max_exposure_breach">Exposure Breach</option>
           <option value="stale_signal">Stale Signal</option>
           <option value="reconciliation_drift">Recon Drift</option>

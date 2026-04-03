@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RuntimeSafetyEvaluator } from "../runtime-safety-evaluator.js";
 import type { SafetyEvaluatorDeps } from "../runtime-safety-evaluator.js";
-import type { FamilyIdentity, FamilyState, FamilyDeployment } from "@plankton/domain";
+import type { FamilyIdentity, FamilyState, FamilyDeployment, FamilyEvidence } from "@plankton/domain";
 import {
   OperatorMode,
+  ProfileId,
   StrategyStage,
   DeploymentStage,
-  type ProfileId,
   type FamilyId,
 } from "@plankton/domain";
 
@@ -71,6 +71,34 @@ function makeFamilyState(overrides: Partial<FamilyState> = {}): FamilyState {
   };
 }
 
+function makeFamilyEvidence(overrides: Partial<FamilyEvidence> = {}): FamilyEvidence {
+  return {
+    familyId: FAMILY_A,
+    evidenceStatus: "partial",
+    evidenceScore: 0,
+    promotionState: "scaled",
+    localTradeCount: 0,
+    localMarketCount: 0,
+    localRealizedPnlFifo: 0,
+    openTailCostUsdc: 0,
+    tailAdjustedPnl: 0,
+    remoteClosedRealizedPnl: null,
+    openPositionCount: 0,
+    openDustCount: 0,
+    bothSidedEligible: false,
+    heavyCampaignEligible: false,
+    activeWindowEdgeScore: null,
+    recurrenceScore: null,
+    recycleScore: null,
+    liveViabilityScore: null,
+    toxicityPenalty: null,
+    lastValidatedAt: null,
+    probeSubstate: null,
+    repricingExitCount: 0,
+    ...overrides,
+  };
+}
+
 function createMockDeps(overrides: Partial<SafetyEvaluatorDeps> = {}): SafetyEvaluatorDeps {
   return {
     bus: {
@@ -105,6 +133,20 @@ function createMockDeps(overrides: Partial<SafetyEvaluatorDeps> = {}): SafetyEva
         totalNonSettlementClosed: 1,
       })),
     } as unknown as SafetyEvaluatorDeps["scoreComputer"],
+    executionTelemetryReader: {
+      readExecutionTelemetry: vi.fn(() => ({
+        totalFills: 12,
+        volumeUsdc: 24,
+        makerFills: 12,
+        takerFills: 0,
+        unknownFills: 0,
+        makerRatio: 1,
+        takerRatio: 0,
+        explicitFeesUsdc: 0,
+        feeLeakageRatio: 0,
+        lastFillAt: new Date().toISOString(),
+      })),
+    },
     deploymentRepo: {
       find: vi.fn(() => makeDeployment()),
       updateOperatorMode: vi.fn(),
@@ -124,6 +166,12 @@ function createMockDeps(overrides: Partial<SafetyEvaluatorDeps> = {}): SafetyEva
       findAll: vi.fn(() => []),
       findByMode: vi.fn(() => []),
       findQuarantined: vi.fn(() => []),
+    },
+    familyEvidenceRepo: {
+      updateScores: vi.fn(),
+      updatePromotionState: vi.fn(),
+      updateProbeSubstate: vi.fn(),
+      getEvidence: vi.fn(() => makeFamilyEvidence()),
     },
     rulesProvider: {
       getAllFamilies: vi.fn(() => [makeFamilyIdentity()]),
@@ -177,9 +225,16 @@ describe("RuntimeSafetyEvaluator", () => {
       OperatorMode.ReduceOnly,
       expect.stringContaining("Auto-demotion: toxicity"),
     );
+    expect(deps.familyStateRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ runtimeMode: "reduce-only" }),
+    );
+    expect(deps.familyEvidenceRepo.updatePromotionState).toHaveBeenCalledWith(
+      FAMILY_A,
+      "reduce-only",
+    );
     expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
-        entityType: "family_deployment",
+        entityType: "family",
         entityId: String(FAMILY_A),
         toState: OperatorMode.ReduceOnly,
         triggerType: "system",
@@ -265,6 +320,9 @@ describe("RuntimeSafetyEvaluator", () => {
     vi.mocked(deps.deploymentRepo.find).mockReturnValue(
       makeDeployment({ operatorMode: OperatorMode.ReduceOnly }),
     );
+    vi.mocked(deps.familyEvidenceRepo.getEvidence).mockReturnValue(
+      makeFamilyEvidence({ promotionState: "reduce-only" }),
+    );
 
     vi.mocked(deps.scoreComputer.computeToxicityMetrics).mockReturnValue({
       dustCount: 10,
@@ -309,6 +367,109 @@ describe("RuntimeSafetyEvaluator", () => {
       staleCount: 2,
       totalOpen: 5,
     });
+
+    await evaluator.evaluate();
+
+    expect(deps.deploymentRepo.updateOperatorMode).not.toHaveBeenCalled();
+  });
+
+  it("auto-freezes live fee-enabled family on execution canary leakage", async () => {
+    deps = createMockDeps({
+      activeProfile: ProfileId.LiveLite,
+      executionTelemetryReader: {
+        readExecutionTelemetry: vi.fn(() => ({
+          totalFills: 12,
+          volumeUsdc: 20,
+          makerFills: 10,
+          takerFills: 2,
+          unknownFills: 0,
+          makerRatio: 10 / 12,
+          takerRatio: 2 / 12,
+          explicitFeesUsdc: 0.11,
+          feeLeakageRatio: 0.0055,
+          lastFillAt: new Date().toISOString(),
+        })),
+      },
+    });
+    evaluator = new RuntimeSafetyEvaluator(deps);
+
+    await evaluator.evaluate();
+
+    expect(deps.deploymentRepo.updateOperatorMode).toHaveBeenCalledWith(
+      FAMILY_A,
+      ProfileId.LiveLite,
+      OperatorMode.ReduceOnly,
+      expect.stringContaining("execution canary breach"),
+    );
+    expect(deps.familyStateRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ runtimeMode: "reduce-only" }),
+    );
+    expect(deps.familyEvidenceRepo.updatePromotionState).toHaveBeenCalledWith(
+      FAMILY_A,
+      "reduce-only",
+    );
+    expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entityType: "family",
+        fromState: "scaled",
+        toState: "reduce-only",
+        triggerType: "system",
+      }),
+    );
+    expect(deps.bus.publish).toHaveBeenCalledWith(
+      "FamilyDemotionApplied",
+      expect.objectContaining({
+        familyId: FAMILY_A,
+        previousState: "scaled",
+        newState: "reduce-only",
+      }),
+    );
+  });
+
+  it("does not auto-freeze live family for insufficient canary sample alone", async () => {
+    deps = createMockDeps({
+      activeProfile: ProfileId.LiveLite,
+      executionTelemetryReader: {
+        readExecutionTelemetry: vi.fn(() => ({
+          totalFills: 5,
+          volumeUsdc: 10,
+          makerFills: 5,
+          takerFills: 0,
+          unknownFills: 0,
+          makerRatio: 1,
+          takerRatio: 0,
+          explicitFeesUsdc: 0,
+          feeLeakageRatio: 0,
+          lastFillAt: new Date().toISOString(),
+        })),
+      },
+    });
+    evaluator = new RuntimeSafetyEvaluator(deps);
+
+    await evaluator.evaluate();
+
+    expect(deps.deploymentRepo.updateOperatorMode).not.toHaveBeenCalled();
+  });
+
+  it("ignores execution canary outside live-lite", async () => {
+    deps = createMockDeps({
+      activeProfile: ProfileId.Paper,
+      executionTelemetryReader: {
+        readExecutionTelemetry: vi.fn(() => ({
+          totalFills: 12,
+          volumeUsdc: 18,
+          makerFills: 8,
+          takerFills: 4,
+          unknownFills: 0,
+          makerRatio: 8 / 12,
+          takerRatio: 4 / 12,
+          explicitFeesUsdc: 0.2,
+          feeLeakageRatio: 0.0111,
+          lastFillAt: new Date().toISOString(),
+        })),
+      },
+    });
+    evaluator = new RuntimeSafetyEvaluator(deps);
 
     await evaluator.evaluate();
 

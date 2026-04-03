@@ -59,6 +59,7 @@ describe("SqliteOrderRepository", () => {
     expect(found!.familyId).toBe("fam-1");
     expect(found!.side).toBe("buy");
     expect(found!.orderType).toBe("GTC");
+    expect(found!.postOnly).toBe(false);
     expect(found!.price).toBe(0.55);
     expect(found!.size).toBe(100);
     expect(found!.sizeUsdc).toBe(55);
@@ -184,6 +185,13 @@ describe("SqliteOrderRepository", () => {
 
     const found = repo.findById(createOrderId("ord-1"));
     expect(found!.signalReason).toBe("repricing-exit");
+  });
+
+  it("persists and retrieves postOnly", () => {
+    repo.save(makeOrder({ postOnly: true }));
+
+    const found = repo.findById(createOrderId("ord-1"));
+    expect(found!.postOnly).toBe(true);
   });
 
   it("signalReason defaults to null", () => {

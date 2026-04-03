@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { FillRepository, Fill } from "@plankton/domain";
-import type { OrderId, TokenId, FillId, OrderSide } from "@plankton/domain";
+import type { OrderId, TokenId, FillId, OrderSide, LiquidityRole } from "@plankton/domain";
 import { createFillId, createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
 
 export class SqliteFillRepository implements FillRepository {
@@ -11,8 +11,8 @@ export class SqliteFillRepository implements FillRepository {
       .prepare(
         `INSERT INTO fills
          (fill_id, order_id, token_id, family_id, side, price, size,
-          size_usdc, fee, filled_at, reconciled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+          size_usdc, liquidity_role, fee, filled_at, reconciled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       )
       .run(
         fill.fillId,
@@ -23,6 +23,7 @@ export class SqliteFillRepository implements FillRepository {
         fill.price,
         fill.size,
         fill.sizeUsdc,
+        fill.liquidityRole,
         fill.fee,
         fill.filledAt,
       );
@@ -91,6 +92,7 @@ export class SqliteFillRepository implements FillRepository {
       price: row.price as number,
       size: row.size as number,
       sizeUsdc: row.size_usdc as number,
+      liquidityRole: row.liquidity_role as LiquidityRole,
       fee: row.fee as number,
       filledAt: row.filled_at as string,
     };

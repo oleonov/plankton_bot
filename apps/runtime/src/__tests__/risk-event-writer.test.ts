@@ -80,6 +80,53 @@ describe("RiskEventWriter", () => {
 
       expect(repo.insert).not.toHaveBeenCalled();
     });
+
+    it("skips system demotion commands to avoid duplicate risk events", () => {
+      writer.onOperatorCommand(
+        "family_reduce_only",
+        createFamilyId("fam-1"),
+        1,
+        "auto-demotion",
+        "system",
+      );
+
+      expect(repo.insert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("onFamilyDemotionApplied", () => {
+    it("writes system family demotions as risk events", () => {
+      writer.onFamilyDemotionApplied(
+        createFamilyId("fam-1"),
+        "scaled",
+        "reduce-only",
+        "Auto-demotion: execution canary breach",
+      );
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+      expect(repo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventType: "family_reduce_only",
+          familyId: createFamilyId("fam-1"),
+          payload: expect.objectContaining({
+            previousState: "scaled",
+            newState: "reduce-only",
+            source: "system",
+          }),
+        }),
+      );
+    });
+
+    it("ignores non-demotion states", () => {
+      writer.onFamilyDemotionApplied(
+        createFamilyId("fam-1"),
+        "probe-only",
+        "active",
+        "recovered",
+      );
+
+      expect(repo.insert).not.toHaveBeenCalled();
+    });
   });
 
   describe("onReconciliationDrift", () => {

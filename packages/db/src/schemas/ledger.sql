@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS orders (
   family_id          TEXT NOT NULL,
   side               TEXT NOT NULL,
   order_type         TEXT NOT NULL,
+  post_only          INTEGER NOT NULL DEFAULT 0,
   price              REAL NOT NULL,
   size               REAL NOT NULL,
   size_usdc          REAL NOT NULL,
@@ -88,6 +89,7 @@ CREATE TABLE IF NOT EXISTS fills (
   price        REAL NOT NULL,
   size         REAL NOT NULL,
   size_usdc    REAL NOT NULL,
+  liquidity_role TEXT NOT NULL DEFAULT 'unknown',
   fee          REAL NOT NULL DEFAULT 0,
   reconciled   INTEGER NOT NULL DEFAULT 0,
   filled_at    TEXT NOT NULL DEFAULT (datetime('now'))

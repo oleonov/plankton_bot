@@ -1,6 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { getPromotionBlockers } from "@plankton/domain";
+import { evaluateExecutionCanaryGate, getPromotionBlockers } from "@plankton/domain";
+import {
+  computeExecutionTelemetryByFamily,
+  computeExecutionTelemetryForFamily,
+  emptyExecutionTelemetry,
+} from "../execution-telemetry.js";
 import { ok, ApiError } from "../errors.js";
 import { getActor } from "../auth.js";
 
@@ -17,6 +22,9 @@ interface FamilyCatalogRow {
   horizon: string;
   cadence: string;
   strategy_profile: string;
+  fee_tier: string | null;
+  live_wallet_requirement: string | null;
+  requires_post_only_for_live: number | null;
   topic_key: string | null;
   slug_pattern: string | null;
   notes: string | null;
@@ -51,6 +59,7 @@ function toFamilyDto(
   caps: FamilyCaps | null,
   promotionState?: string | null,
   probeSubstate?: string | null,
+  executionTelemetry24h?: ReturnType<typeof emptyExecutionTelemetry>,
 ) {
   return {
     familyId: catalog.family_id,
@@ -60,8 +69,16 @@ function toFamilyDto(
     horizon: catalog.horizon,
     cadence: catalog.cadence,
     strategyProfile: catalog.strategy_profile,
+    feeTier: catalog.fee_tier ?? null,
+    liveWalletRequirement: catalog.live_wallet_requirement ?? null,
+    requiresPostOnlyForLive:
+      catalog.requires_post_only_for_live == null ? null : catalog.requires_post_only_for_live === 1,
     promotionState: promotionState ?? null,
     probeSubstate: probeSubstate ?? null,
+    executionTelemetry24h: {
+      windowHours: 24,
+      ...(executionTelemetry24h ?? emptyExecutionTelemetry()),
+    },
     state: state
       ? {
           runtimeMode: state.runtime_mode,
@@ -125,6 +142,9 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   app.get("/families", async () => {
     const catalogs = listCatalog.all() as FamilyCatalogRow[];
     const states = listState.all() as FamilyStateRow[];
+    const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
+      sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    });
     const stateMap = new Map(states.map((s) => [s.family_id, s]));
     const capsRows = listCaps.all() as Array<{
       family_id: string;
@@ -148,6 +168,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           capsMap.get(c.family_id) ?? null,
           promoMap.get(c.family_id),
           substateMap.get(c.family_id),
+          executionMap24h.get(c.family_id),
         ),
       ),
     );
@@ -166,7 +187,19 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           max_dust_positions: number;
         }
       | undefined;
-    return ok(toFamilyDto(catalog, state, capsRow ? toCaps(capsRow) : null));
+    const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
+      sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    });
+    return ok(
+      toFamilyDto(
+        catalog,
+        state,
+        capsRow ? toCaps(capsRow) : null,
+        undefined,
+        undefined,
+        executionMap24h.get(familyId),
+      ),
+    );
   });
 
   app.get<{ Params: { familyId: string } }>("/families/:familyId/positions", async (request) => {
@@ -204,6 +237,21 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       toxicity: (row.toxicity_penalty as number) ?? 0,
       tailAdjustedPnl: (row.tail_adjusted_pnl as number) ?? 0,
     });
+    const executionTelemetry24h = computeExecutionTelemetryForFamily(ledgerDb, familyId, {
+      sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const executionCanary24h = evaluateExecutionCanaryGate({
+      primaryCategory: catalog.primary_category,
+      feeTier: catalog.fee_tier as import("@plankton/domain").FeeTier | null,
+      liveWalletRequirement: catalog.live_wallet_requirement as
+        | import("@plankton/domain").LiveWalletRequirement
+        | null,
+      requiresPostOnlyForLive:
+        catalog.requires_post_only_for_live == null
+          ? null
+          : catalog.requires_post_only_for_live === 1,
+      executionTelemetry: executionTelemetry24h,
+    });
 
     return ok({
       familyId: row.family_id,
@@ -229,6 +277,13 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       probeSubstate: (row.probe_substate as string) ?? null,
       repricingExitCount,
       promotionBlockers: blockers,
+      executionCanary24h: {
+        windowHours: 24,
+        required: executionCanary24h.required,
+        eligible: executionCanary24h.eligible,
+        minTotalFills: executionCanary24h.minTotalFills,
+        blockers: executionCanary24h.blockers,
+      },
     });
   });
 
@@ -435,6 +490,7 @@ function toOrderDto(row: Record<string, unknown>) {
     familyId: row.family_id,
     side: row.side,
     orderType: row.order_type,
+    postOnly: row.post_only === 1,
     price: row.price,
     size: row.size,
     sizeUsdc: row.size_usdc,

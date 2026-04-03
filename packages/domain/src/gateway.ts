@@ -12,7 +12,7 @@
  */
 
 import type { TokenId } from "./ids.js";
-import type { OrderSide, OrderType, ExchangeErrorCode } from "./enums.js";
+import type { OrderSide, OrderType, ExchangeErrorCode, LiquidityRole } from "./enums.js";
 import type { OrderBookSnapshot } from "./types.js";
 
 // ─── Market catalog types ─────────────────────────────────────────────────
@@ -47,6 +47,8 @@ export interface PlaceOrderParams {
   readonly size: number;
   /** Limit price in [0, 1] range for binary markets. */
   readonly price: number;
+  /** When true, the order must rest on the book and never cross as taker. */
+  readonly postOnly?: boolean;
   readonly orderType: OrderType;
   /** Minimum price increment — required by Polymarket CLOB order signing. */
   readonly tickSize: number;
@@ -83,6 +85,7 @@ export interface ExchangeFill {
   readonly side: OrderSide;
   readonly price: number;
   readonly size: number;
+  readonly liquidityRole: LiquidityRole;
   readonly fee: number;
   /** Unix milliseconds. */
   readonly timestamp: number;

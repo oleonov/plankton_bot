@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
+import { resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import {
   familyYamlSchema,
   familyRulesFileSchema,
@@ -38,9 +39,23 @@ function transformFamily(validated: { family_id: string; [k: string]: unknown })
   const now = new Date().toISOString();
 
   const transformed = transformKeys(validated) as Record<string, Record<string, unknown>>;
+  const identity = transformed["identity"]!;
+  const livePolicy = resolveFamilyLiveTradingPolicy({
+    primaryCategory: String(identity["primaryCategory"] ?? ""),
+    feeTier: (identity["feeTier"] as "fee-free" | "fee-enabled" | "unknown" | null | undefined) ??
+      null,
+    liveWalletRequirement:
+      (identity["liveWalletRequirement"] as "eoa-ok" | "relayer-required" | null | undefined) ??
+      null,
+    requiresPostOnlyForLive:
+      (identity["requiresPostOnlyForLive"] as boolean | null | undefined) ?? null,
+  });
 
   // Inject familyId into sub-objects
-  transformed["identity"]!["familyId"] = familyId;
+  identity["familyId"] = familyId;
+  identity["feeTier"] = livePolicy.feeTier;
+  identity["liveWalletRequirement"] = livePolicy.liveWalletRequirement;
+  identity["requiresPostOnlyForLive"] = livePolicy.requiresPostOnlyForLive;
   transformed["evidence"]!["familyId"] = familyId;
   transformed["rules"]!["familyId"] = familyId;
 

@@ -39,6 +39,50 @@ function seedProfile(controlDb: DbConnection["db"], profile: string): void {
     .run(profile, profile);
 }
 
+function seedProfileSettings(
+  controlDb: DbConnection["db"],
+  profile: string,
+  settings: { relayerJson?: string | null } = {},
+): void {
+  controlDb
+    .prepare(
+      `INSERT INTO profile_settings (profile_id, relayer_json)
+       VALUES (?, ?)
+       ON CONFLICT(profile_id) DO UPDATE SET relayer_json = excluded.relayer_json`,
+    )
+    .run(profile, settings.relayerJson ?? null);
+}
+
+function seedLiveFamily(
+  controlDb: DbConnection["db"],
+  opts: {
+    familyId: string;
+    primaryCategory: string;
+    feeTier?: string;
+    liveWalletRequirement?: string;
+    requiresPostOnlyForLive?: boolean;
+  },
+): void {
+  controlDb
+    .prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile,
+          fee_tier, live_wallet_requirement, requires_post_only_for_live)
+       VALUES (?, ?, ?, 'generic', 'short', 'daily', 'scalp', ?, ?, ?)`,
+    )
+    .run(
+      opts.familyId,
+      opts.familyId,
+      opts.primaryCategory,
+      opts.feeTier ?? "unknown",
+      opts.liveWalletRequirement ?? "relayer-required",
+      opts.requiresPostOnlyForLive === undefined ? 1 : opts.requiresPostOnlyForLive ? 1 : 0,
+    );
+  controlDb
+    .prepare("INSERT INTO family_deployments (family_id, profile, enabled) VALUES (?, 'live-lite', 1)")
+    .run(opts.familyId);
+}
+
 describe("runProfilePreflight", () => {
   let controlConn: DbConnection;
   let ledgerConn: DbConnection;
@@ -87,6 +131,164 @@ describe("runProfilePreflight", () => {
     });
     expect(result.status).toBe("passed");
     expect(result.blockers).toHaveLength(0);
+  });
+
+  it("live-lite fails when enabled live families exceed maxFamilies", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-a",
+      primaryCategory: "geopolitics",
+      feeTier: "fee-free",
+      liveWalletRequirement: "eoa-ok",
+      requiresPostOnlyForLive: false,
+    });
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-b",
+      primaryCategory: "geopolitics",
+      feeTier: "fee-free",
+      liveWalletRequirement: "eoa-ok",
+      requiresPostOnlyForLive: false,
+    });
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-c",
+      primaryCategory: "geopolitics",
+      feeTier: "fee-free",
+      liveWalletRequirement: "eoa-ok",
+      requiresPostOnlyForLive: false,
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: ENVELOPE,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.blockers.some((b) => b.code === "LIVE_MAX_FAMILIES_EXCEEDED")).toBe(true);
+  });
+
+  it("live-lite fails when EOA mode enables a fee-enabled family", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-crypto",
+      primaryCategory: "crypto",
+      feeTier: "fee-enabled",
+      liveWalletRequirement: "relayer-required",
+      requiresPostOnlyForLive: true,
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: ENVELOPE,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.blockers.some((b) => b.code === "LIVE_EOA_FEE_ENABLED_FAMILY")).toBe(true);
+    expect(result.blockers.some((b) => b.code === "LIVE_POST_ONLY_REQUIRED")).toBe(true);
+  });
+
+  it("live-lite fails when EOA min_order_usdc is below the phase-1 floor", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-geo",
+      primaryCategory: "geopolitics",
+      feeTier: "fee-free",
+      liveWalletRequirement: "eoa-ok",
+      requiresPostOnlyForLive: false,
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: { ...ENVELOPE, minOrderUsdc: 2.5 },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.blockers.some((b) => b.code === "LIVE_MIN_ORDER_TOO_LOW")).toBe(true);
+  });
+
+  it("live-lite relayer mode passes with valid relayer_json and fee-free families", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedProfileSettings(controlConn.db, "live-lite", {
+      relayerJson: JSON.stringify({
+        walletType: "proxy",
+        funderAddress: "0x1111111111111111111111111111111111111111",
+      }),
+    });
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-geo",
+      primaryCategory: "geopolitics",
+      feeTier: "fee-free",
+      liveWalletRequirement: "eoa-ok",
+      requiresPostOnlyForLive: false,
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 2 },
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.blockers).toHaveLength(0);
+  });
+
+  it("live-lite relayer mode passes with valid relayer_json and fee-enabled families", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedProfileSettings(controlConn.db, "live-lite", {
+      relayerJson: JSON.stringify({
+        walletType: "proxy",
+        funderAddress: "0x1111111111111111111111111111111111111111",
+      }),
+    });
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-crypto",
+      primaryCategory: "crypto",
+      feeTier: "fee-enabled",
+      liveWalletRequirement: "relayer-required",
+      requiresPostOnlyForLive: true,
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 2 },
+    });
+
+    expect(result.status).toBe("passed");
+    expect(result.blockers).toHaveLength(0);
+  });
+
+  it("live-lite relayer mode fails when relayer_json is invalid", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedProfileSettings(controlConn.db, "live-lite", {
+      relayerJson: JSON.stringify({
+        walletType: "proxy",
+      }),
+    });
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-geo",
+      primaryCategory: "geopolitics",
+      feeTier: "fee-free",
+      liveWalletRequirement: "eoa-ok",
+      requiresPostOnlyForLive: false,
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 2 },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.blockers.some((b) => b.code === "LIVE_RELAYER_CONFIG_INVALID")).toBe(true);
   });
 
   it("live-lite fails with EXPOSURE_EXCEEDS_CAP when exposure over cap", () => {

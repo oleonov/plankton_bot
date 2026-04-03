@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import {
+  emptyExecutionTelemetrySnapshot,
+  evaluateExecutionCanaryGate,
+  parseValidationScorecardSummary,
+} from "@plankton/domain";
 import { ok, ApiError } from "../errors.js";
 import { getActor } from "../auth.js";
 
@@ -23,6 +28,69 @@ function insertCommand(
     )
     .run(action, targetId, reason, actor, new Date().toISOString());
   return Number(info.lastInsertRowid);
+}
+
+function formatExecutionCanaryBlockers(blockers: Array<{ metric: string; current: number }>): string {
+  return blockers
+    .map((blocker) => {
+      if (blocker.metric === "24h fills") return `${blocker.current} fills`;
+      if (blocker.metric === "Maker ratio %") return `${blocker.current}% maker`;
+      if (blocker.metric === "Explicit fees (USDC)") return `$${blocker.current} fees`;
+      if (blocker.metric === "Fee leakage %") return `${blocker.current}% leakage`;
+      return `${blocker.current} ${blocker.metric.toLowerCase()}`;
+    })
+    .join(", ");
+}
+
+function assertPromotionExecutionCanary(
+  db: Database.Database,
+  familyId: string,
+  profile: string | null | undefined,
+): void {
+  const family = db
+    .prepare(
+      `SELECT *
+       FROM family_catalog
+       WHERE family_id = ?`,
+    )
+    .get(familyId) as Record<string, unknown> | undefined;
+  if (!family) {
+    throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
+  }
+
+  const scorecard = db
+    .prepare(
+      `SELECT summary_json
+       FROM family_validation_scorecards
+       WHERE family_id = ? AND (? IS NULL OR profile = ?)
+       ORDER BY validated_at DESC
+       LIMIT 1`,
+    )
+    .get(familyId, profile ?? null, profile ?? null) as { summary_json: string | null } | undefined;
+  const summary = parseValidationScorecardSummary(scorecard?.summary_json ?? null);
+  const executionCanary = evaluateExecutionCanaryGate({
+    primaryCategory: String(family.primary_category ?? "other"),
+    feeTier: (family.fee_tier as import("@plankton/domain").FeeTier | null | undefined) ?? null,
+    liveWalletRequirement: (family.live_wallet_requirement as
+      | import("@plankton/domain").LiveWalletRequirement
+      | null
+      | undefined) ?? null,
+    requiresPostOnlyForLive:
+      family.requires_post_only_for_live == null ? null : family.requires_post_only_for_live === 1,
+    executionTelemetry: summary?.executionTelemetry24h ?? emptyExecutionTelemetrySnapshot(),
+  });
+
+  if (!executionCanary.required || executionCanary.eligible) return;
+
+  const failed = executionCanary.blockers.filter((blocker) => !blocker.passed);
+  const detail = formatExecutionCanaryBlockers(
+    failed.map((blocker) => ({ metric: blocker.metric, current: blocker.current })),
+  );
+  throw new ApiError(
+    409,
+    `promotion blocked by execution canary: ${detail}`,
+    "PROMOTION_BLOCKED_BY_EXECUTION_CANARY",
+  );
 }
 
 export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) => {
@@ -126,14 +194,16 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
 
     const result = opts.db
       .transaction(() => {
-        const info = opts.db
+        const proposal = opts.db
           .prepare(
-            `UPDATE promotion_proposals
-             SET status = 'approved', resolved_at = datetime('now'), resolved_by = ?
-             WHERE family_id = ? AND status = 'pending'`,
+            `SELECT id, profile
+             FROM promotion_proposals
+             WHERE family_id = ? AND status = 'pending'
+             ORDER BY created_at DESC
+             LIMIT 1`,
           )
-          .run(actor, familyId);
-        if (info.changes === 0) {
+          .get(familyId) as { id: number; profile: string | null } | undefined;
+        if (!proposal) {
           throw new ApiError(
             409,
             `no pending promotion proposal for family ${familyId}`,
@@ -141,13 +211,22 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
           );
         }
 
-        const proposal = opts.db
+        assertPromotionExecutionCanary(opts.db, familyId, proposal.profile);
+
+        const info = opts.db
           .prepare(
-            `SELECT id FROM promotion_proposals
-             WHERE family_id = ? AND status = 'approved'
-             ORDER BY resolved_at DESC LIMIT 1`,
+            `UPDATE promotion_proposals
+             SET status = 'approved', resolved_at = datetime('now'), resolved_by = ?
+             WHERE id = ? AND status = 'pending'`,
           )
-          .get(familyId) as { id: number };
+          .run(actor, proposal.id);
+        if (info.changes === 0) {
+          throw new ApiError(
+            409,
+            `no pending promotion proposal for family ${familyId}`,
+            "NO_PENDING_PROPOSAL",
+          );
+        }
 
         const commandId = insertCommand(opts.db, "family_promote_scaled", familyId, reason, actor);
 

@@ -6,6 +6,20 @@ export interface ApiEnvelope<T> {
   ts: string;
 }
 
+export interface ExecutionTelemetryWindow {
+  windowHours: number;
+  totalFills: number;
+  volumeUsdc: number;
+  makerFills: number;
+  takerFills: number;
+  unknownFills: number;
+  makerRatio: number | null;
+  takerRatio: number | null;
+  explicitFeesUsdc: number;
+  feeLeakageRatio: number | null;
+  lastFillAt: string | null;
+}
+
 /** GET /status */
 export interface StatusData {
   runtimeMode: string;
@@ -32,6 +46,8 @@ export interface StatusData {
     maxOpenValueUsdc: number;
     maxOrderUsdc: number;
     maxActiveMarkets: number;
+    walletMode?: "eoa" | "relayer";
+    minOrderUsdc?: number | null;
   };
   reconciliationDriftDetected: boolean;
   marketDataPoll?: { active: boolean; page: number };
@@ -51,13 +67,22 @@ export interface StatusData {
     blockedByWindowLast10m?: number;
     topBlockingLayer?: string | null;
   };
+  executionTelemetry24h?: ExecutionTelemetryWindow;
 }
 
 /** GET /metrics */
 export interface MetricsData {
   positions: Record<string, number>;
   orders: Record<string, number>;
-  fills: { count: number; volumeUsdc: number };
+  fills: {
+    count: number;
+    volumeUsdc: number;
+    makerCount?: number;
+    takerCount?: number;
+    unknownCount?: number;
+    explicitFeesUsdc?: number;
+    feeLeakageRatio?: number | null;
+  };
   totalRealizedPnl: number;
 }
 
@@ -79,6 +104,9 @@ export interface TradingActivitySnapshot {
 /** GET /metrics/families item */
 export interface FamilyMetric {
   familyId: string;
+  familyKey: string;
+  feeTier?: string | null;
+  requiresPostOnlyForLive?: boolean | null;
   runtimeMode: string;
   openValueUsdc: number;
   openPositionCount: number;
@@ -86,6 +114,7 @@ export interface FamilyMetric {
   quarantineReason: string | null;
   effectiveMode: string | null;
   derivedModeReason: string | null;
+  executionTelemetry24h?: ExecutionTelemetryWindow;
   updatedAt: string;
 }
 
@@ -122,6 +151,7 @@ export interface OrderDTO {
   familyId: string;
   side: string;
   orderType: string;
+  postOnly?: boolean;
   price: number;
   size: number;
   sizeUsdc: number;
@@ -146,6 +176,8 @@ export interface FillDTO {
   price: number;
   size: number;
   sizeUsdc: number;
+  liquidityRole?: "maker" | "taker" | "unknown";
+  explicitFeeUsdc?: number;
   fee: number;
   filledAt: string;
   slug: string | null;
@@ -165,8 +197,12 @@ export interface FamilyDTO {
   horizon: string;
   cadence: string;
   strategyProfile: string;
+  feeTier?: string | null;
+  liveWalletRequirement?: string | null;
+  requiresPostOnlyForLive?: boolean | null;
   promotionState: string | null;
   probeSubstate: string | null;
+  executionTelemetry24h?: ExecutionTelemetryWindow;
   state: {
     runtimeMode: string;
     openValueUsdc: number;
@@ -297,6 +333,14 @@ export interface PromotionBlockerDTO {
   passed: boolean;
 }
 
+export interface ExecutionCanaryDTO {
+  windowHours: number;
+  required: boolean;
+  eligible: boolean;
+  minTotalFills: number;
+  blockers: PromotionBlockerDTO[];
+}
+
 /** GET /families/:id/evidence */
 export interface FamilyEvidenceDTO {
   familyId: string;
@@ -322,6 +366,7 @@ export interface FamilyEvidenceDTO {
   probeSubstate: string | null;
   repricingExitCount: number;
   promotionBlockers?: PromotionBlockerDTO[];
+  executionCanary24h?: ExecutionCanaryDTO;
 }
 
 /** GET /families/:id/transitions item */
@@ -375,6 +420,9 @@ export interface ProfileSettingsDTO {
   initial_balance_usdc: number | null;
   envelope_json: string | null;
   risk_caps_json: string | null;
+  wallet_mode?: "eoa" | "relayer" | null;
+  min_order_usdc?: number | null;
+  relayer_json?: string | null;
   updated_at: string;
 }
 
@@ -388,6 +436,9 @@ export interface DeployedFamilyDTO {
   family_key: string;
   primary_category: string;
   regime: string;
+  fee_tier?: string | null;
+  live_wallet_requirement?: string | null;
+  requires_post_only_for_live?: number | null;
 }
 
 /** GET /audit item */

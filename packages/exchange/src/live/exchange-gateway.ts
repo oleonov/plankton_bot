@@ -47,7 +47,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
         negRisk: params.negRisk,
       };
 
-      const result = await this.client.createAndPostOrder(userOrder, options, params.orderType);
+      const result = params.postOnly
+        ? await this.postMakerOnlyOrder(userOrder, options, params.orderType)
+        : await this.client.createAndPostOrder(userOrder, options, params.orderType);
       const orderId = result?.orderID ?? result?.id ?? "";
 
       return { success: true, orderId: String(orderId) };
@@ -55,6 +57,12 @@ export class LiveExchangeGateway implements ExchangeGateway {
       const { code, message } = classifyError(err);
       return { success: false, errorCode: code, errorMessage: message };
     }
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async postMakerOnlyOrder(userOrder: Record<string, unknown>, options: any, orderType: string) {
+    const signedOrder = await this.client.createOrder(userOrder, options);
+    return this.client.postOrder(signedOrder, orderType, true);
   }
 
   async cancelOrder(params: CancelOrderParams): Promise<CancelOrderResult> {

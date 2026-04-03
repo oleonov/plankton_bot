@@ -1,10 +1,16 @@
 import type { PromotionBlockerDTO } from "../api/types.ts";
 
-export function PromotionBlockers({ blockers }: { blockers: PromotionBlockerDTO[] }) {
+export function PromotionBlockers({
+  blockers,
+  title = "Promotion Checklist",
+}: {
+  blockers: PromotionBlockerDTO[];
+  title?: string;
+}) {
   return (
     <div style={{ marginTop: 8 }}>
       <div style={{ fontSize: 10, fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }}>
-        Promotion Checklist
+        {title}
       </div>
       {blockers.map((b) => (
         <div key={b.metric} style={{ fontSize: 11, display: "flex", gap: 6, marginBottom: 2 }}>

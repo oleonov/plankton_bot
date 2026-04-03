@@ -83,6 +83,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
         side: params.side,
         price: params.price,
         size: params.size,
+        liquidityRole: "unknown",
         fee,
         timestamp: now,
       };
@@ -210,6 +211,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
       side: order.side,
       price: order.price,
       size,
+      liquidityRole: "unknown",
       fee,
       timestamp: Date.now(),
     };

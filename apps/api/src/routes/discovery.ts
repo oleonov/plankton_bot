@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { type DiscoveryRun, PROBE_DEFAULTS } from "@plankton/domain";
+import { type DiscoveryRun, PROBE_DEFAULTS, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import { SqliteDiscoveryRunRepository } from "@plankton/db";
 import { ok, ApiError } from "../errors.js";
 
@@ -469,12 +469,16 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       if (result.changes === 0) return false;
 
       // 1. INSERT family_catalog
+      const policy = resolveFamilyLiveTradingPolicy({
+        primaryCategory: row.primary_category,
+      });
       controlDb
         .prepare(
           `INSERT INTO family_catalog
              (family_id, family_key, primary_category, regime, horizon, cadence,
-              strategy_profile, slug_pattern, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              strategy_profile, fee_tier, live_wallet_requirement,
+              requires_post_only_for_live, slug_pattern, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           familyId,
@@ -484,6 +488,9 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           row.horizon,
           row.cadence,
           row.strategy_profile,
+          policy.feeTier,
+          policy.liveWalletRequirement,
+          policy.requiresPostOnlyForLive ? 1 : 0,
           row.slug_pattern,
           now,
           now,

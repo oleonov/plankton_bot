@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { createImportId, ProfileId } from "@plankton/domain";
+import { createImportId, ProfileId, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import { parseFamilyRulesYaml, type FamilyConfig } from "@plankton/config";
 import { stringify as yamlStringify } from "yaml";
 import { ok, ApiError } from "../errors.js";
@@ -22,6 +22,12 @@ export interface ImportResult {
 
 function insertCatalogRow(stmt: Database.Statement, family: FamilyConfig, now: string): void {
   const id = family.identity;
+  const policy = resolveFamilyLiveTradingPolicy({
+    primaryCategory: id.primaryCategory,
+    feeTier: id.feeTier ?? null,
+    liveWalletRequirement: id.liveWalletRequirement ?? null,
+    requiresPostOnlyForLive: id.requiresPostOnlyForLive ?? null,
+  });
   stmt.run(
     id.familyId,
     id.familyKey,
@@ -30,6 +36,9 @@ function insertCatalogRow(stmt: Database.Statement, family: FamilyConfig, now: s
     id.horizon,
     id.cadence,
     id.strategyProfile,
+    policy.feeTier,
+    policy.liveWalletRequirement,
+    policy.requiresPostOnlyForLive ? 1 : 0,
     id.topicKey ?? null,
     id.slugPattern ?? null,
     id.notes ?? null,
@@ -176,6 +185,9 @@ function familyFingerprint(family: FamilyConfig): string {
     id.horizon,
     id.cadence,
     id.strategyProfile,
+    id.feeTier ?? null,
+    id.liveWalletRequirement ?? null,
+    id.requiresPostOnlyForLive ?? null,
     id.topicKey ?? null,
     id.slugPattern ?? null,
     id.notes ?? null,
@@ -198,6 +210,11 @@ function dbFamilyFingerprint(
     catalog["horizon"],
     catalog["cadence"],
     catalog["strategy_profile"],
+    catalog["fee_tier"] ?? null,
+    catalog["live_wallet_requirement"] ?? null,
+    catalog["requires_post_only_for_live"] == null
+      ? null
+      : (catalog["requires_post_only_for_live"] ? 1 : 0),
     catalog["topic_key"] ?? null,
     catalog["slug_pattern"] ?? null,
     catalog["notes"] ?? null,
@@ -323,9 +340,10 @@ function diffAndApply(
   const insertCatalog = db.prepare(`
     INSERT INTO family_catalog (
       family_id, family_key, primary_category, regime, horizon, cadence,
-      strategy_profile, source_type, topic_key, slug_pattern, notes,
+      strategy_profile, fee_tier, live_wallet_requirement, requires_post_only_for_live,
+      source_type, topic_key, slug_pattern, notes,
       created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'yaml_import', ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'yaml_import', ?, ?, ?, ?, ?)
   `);
   const insertRules = db.prepare(RULES_INSERT_SQL);
   const updateRules = db.prepare(RULES_UPDATE_SQL);
@@ -350,7 +368,8 @@ function diffAndApply(
   const updateCatalog = db.prepare(`
     UPDATE family_catalog SET
       primary_category = ?, regime = ?, horizon = ?, cadence = ?,
-      strategy_profile = ?, topic_key = ?, slug_pattern = ?, notes = ?,
+      strategy_profile = ?, fee_tier = ?, live_wallet_requirement = ?,
+      requires_post_only_for_live = ?, topic_key = ?, slug_pattern = ?, notes = ?,
       updated_at = ?
     WHERE family_id = ?
   `);
@@ -371,12 +390,21 @@ function diffAndApply(
   for (const fid of result.updated) {
     const family = familyMap.get(fid)!;
     const id = family.identity;
+    const policy = resolveFamilyLiveTradingPolicy({
+      primaryCategory: id.primaryCategory,
+      feeTier: id.feeTier ?? null,
+      liveWalletRequirement: id.liveWalletRequirement ?? null,
+      requiresPostOnlyForLive: id.requiresPostOnlyForLive ?? null,
+    });
     updateCatalog.run(
       id.primaryCategory,
       id.regime,
       id.horizon,
       id.cadence,
       id.strategyProfile,
+      policy.feeTier,
+      policy.liveWalletRequirement,
+      policy.requiresPostOnlyForLive ? 1 : 0,
       id.topicKey ?? null,
       id.slugPattern ?? null,
       id.notes ?? null,
@@ -474,6 +502,12 @@ export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) =>
           horizon: f["horizon"],
           cadence: f["cadence"],
           strategy_profile: f["strategy_profile"],
+          fee_tier: f["fee_tier"] ?? null,
+          live_wallet_requirement: f["live_wallet_requirement"] ?? null,
+          requires_post_only_for_live:
+            f["requires_post_only_for_live"] == null
+              ? null
+              : Boolean(f["requires_post_only_for_live"]),
           topic_key: f["topic_key"] ?? null,
           slug_pattern: f["slug_pattern"] ?? null,
           notes: f["notes"] ?? null,

@@ -128,6 +128,7 @@ describe("FillPollerModule", () => {
       side: "buy",
       price: 0.5,
       size: 10,
+      liquidityRole: "unknown",
       fee: 0,
       timestamp: fillTs,
     };

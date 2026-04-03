@@ -19,6 +19,7 @@ const orders = {
       familyId: "fam-btc",
       side: "buy",
       orderType: "limit",
+      postOnly: true,
       price: 0.07,
       size: 57,
       sizeUsdc: 4,
@@ -39,6 +40,7 @@ const orders = {
       familyId: "fam-eth",
       side: "sell",
       orderType: "limit",
+      postOnly: false,
       price: 0.22,
       size: 88,
       sizeUsdc: 19,
@@ -59,6 +61,7 @@ const orders = {
       familyId: "fam-sol",
       side: "buy",
       orderType: "limit",
+      postOnly: false,
       price: 0.13,
       size: 248,
       sizeUsdc: 32,
@@ -87,6 +90,8 @@ const fills = {
       price: 0.07,
       size: 57,
       sizeUsdc: 4,
+      liquidityRole: "maker",
+      explicitFeeUsdc: 0,
       fee: 0,
       filledAt: "2026-03-31T14:35:00Z",
       slug: null,
@@ -105,6 +110,8 @@ const fills = {
       price: 0.22,
       size: 88,
       sizeUsdc: 19,
+      liquidityRole: "taker",
+      explicitFeeUsdc: 0.19,
       fee: 0,
       filledAt: "2026-03-31T14:44:00Z",
       slug: null,
@@ -123,6 +130,8 @@ const fills = {
       price: 0.04,
       size: 28,
       sizeUsdc: 1,
+      liquidityRole: "unknown",
+      explicitFeeUsdc: 0,
       fee: 0,
       filledAt: "2026-03-31T14:00:00Z",
       slug: null,
@@ -228,5 +237,18 @@ describe("Fills table sorting", () => {
     await user.click(screen.getByText("Price"));
     const prices = getColumnValues(4);
     expect(prices).toEqual(["$0.0400", "$0.0700", "$0.2200"]);
+  });
+
+  it("renders liquidity role and explicit fee telemetry", async () => {
+    setupFills();
+    const user = userEvent.setup();
+    renderWithProviders(<OrdersFills />);
+
+    await user.click(screen.getByText("Fills"));
+    await screen.findByText("Bitcoin above 60k");
+
+    expect(screen.getByText("maker")).toBeInTheDocument();
+    expect(screen.getByText("taker")).toBeInTheDocument();
+    expect(screen.getByText("fee $0.190")).toBeInTheDocument();
   });
 });

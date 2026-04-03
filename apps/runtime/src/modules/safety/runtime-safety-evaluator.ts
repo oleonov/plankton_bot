@@ -1,7 +1,7 @@
 /**
  * RuntimeSafetyEvaluator -- RuntimeModule that periodically evaluates
- * deployed families for toxicity-based demotion. Writes directly to
- * family_deployments.operator_mode and state_transitions (control DB).
+ * deployed families for toxicity-based demotion and execution canary freezes.
+ * Syncs control-plane deployment mode with runtime_state and family_evidence.
  *
  * Extracted from FamilyEvidenceEngine to separate scoring (evidence)
  * from safety enforcement (this module).
@@ -10,14 +10,21 @@
 import type { EventBus, RuntimeModule } from "@plankton/domain";
 import type {
   FamilyDeploymentRepository,
+  FamilyEvidenceRepository,
   FamilyStateRepository,
   FamilyRulesProvider,
   StateTransitionRepository,
 } from "@plankton/domain";
-import { computeToxicityPenalty, OperatorMode } from "@plankton/domain";
-import type { ProfileId, FamilyId } from "@plankton/domain";
+import {
+  computeToxicityPenalty,
+  evaluateExecutionCanaryGate,
+  OperatorMode,
+  ProfileId,
+} from "@plankton/domain";
+import type { FamilyId, FamilyIdentity, RuntimeMode } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { ScoreComputer } from "../evidence/score-computer.js";
+import type { ValidationMetricsReader } from "../publisher/validation-metrics-reader.js";
 
 const DEFAULT_EVAL_INTERVAL_MS = 3_600_000; // 1 hour
 const TOXICITY_DEMOTION_THRESHOLD = 0.6;
@@ -33,9 +40,11 @@ export interface SafetyEvaluatorDeps {
   bus: EventBus;
   log: Logger;
   scoreComputer: ScoreComputer;
+  executionTelemetryReader: Pick<ValidationMetricsReader, "readExecutionTelemetry">;
   deploymentRepo: FamilyDeploymentRepository;
   stateTransitionRepo: StateTransitionRepository;
   familyStateRepo: FamilyStateRepository;
+  familyEvidenceRepo: FamilyEvidenceRepository;
   rulesProvider: FamilyRulesProvider;
   activeProfile: ProfileId;
   evalIntervalMs?: number;
@@ -45,9 +54,11 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
   private readonly bus: EventBus;
   private readonly log: Logger;
   private readonly sc: ScoreComputer;
+  private readonly executionTelemetryReader: Pick<ValidationMetricsReader, "readExecutionTelemetry">;
   private readonly deploymentRepo: FamilyDeploymentRepository;
   private readonly stateTransitionRepo: StateTransitionRepository;
   private readonly familyStateRepo: FamilyStateRepository;
+  private readonly familyEvidenceRepo: FamilyEvidenceRepository;
   private readonly rulesProvider: FamilyRulesProvider;
   private readonly activeProfile: ProfileId;
   private readonly intervalMs: number;
@@ -62,9 +73,11 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     this.bus = deps.bus;
     this.log = deps.log;
     this.sc = deps.scoreComputer;
+    this.executionTelemetryReader = deps.executionTelemetryReader;
     this.deploymentRepo = deps.deploymentRepo;
     this.stateTransitionRepo = deps.stateTransitionRepo;
     this.familyStateRepo = deps.familyStateRepo;
+    this.familyEvidenceRepo = deps.familyEvidenceRepo;
     this.rulesProvider = deps.rulesProvider;
     this.activeProfile = deps.activeProfile;
     this.intervalMs = deps.evalIntervalMs ?? DEFAULT_EVAL_INTERVAL_MS;
@@ -114,11 +127,9 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
 
       const recycleMetrics = this.sc.computeRecycleMetrics(familyIdStr);
 
-      this.checkDemotion(familyId, {
+      await this.checkDemotion(identity, {
         toxicity,
         tailAdjustedPnl: recycleMetrics.tailAdjustedPnl,
-        horizon: identity.horizon,
-        regime: identity.regime,
       });
     }
 
@@ -127,15 +138,14 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
 
   // ─── Demotion logic ─────────────────────────────────────────────────────
 
-  private checkDemotion(
-    familyId: FamilyId,
+  private async checkDemotion(
+    identity: FamilyIdentity,
     metrics: {
       toxicity: number;
       tailAdjustedPnl: number;
-      horizon: string;
-      regime: string;
     },
-  ): void {
+  ): Promise<void> {
+    const familyId = identity.familyId;
     const deployment = this.deploymentRepo.find(familyId, this.activeProfile);
     const currentMode = deployment?.operatorMode ?? OperatorMode.Active;
 
@@ -144,9 +154,9 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     // Already reduce-only -- only escalate to quarantine
     if (currentMode === OperatorMode.ReduceOnly) {
       if (metrics.toxicity > 0.8) {
-        this.applyDemotion(
+        await this.applyDemotion(
           familyId,
-          currentMode,
+          "reduce-only",
           OperatorMode.Quarantine,
           `escalation from reduce-only: severe toxicity ${metrics.toxicity.toFixed(2)}`,
         );
@@ -155,10 +165,10 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     }
 
     // Threshold regime: immediate quarantine on negative tail (HR12)
-    if (metrics.regime === "threshold" && metrics.tailAdjustedPnl < 0) {
-      this.applyDemotion(
+    if (identity.regime === "threshold" && metrics.tailAdjustedPnl < 0) {
+      await this.applyDemotion(
         familyId,
-        currentMode,
+        "active",
         OperatorMode.Quarantine,
         `threshold regime, negative tail ${metrics.tailAdjustedPnl.toFixed(2)} (HR12)`,
       );
@@ -167,9 +177,9 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
 
     // Toxicity > 0.8: quarantine
     if (metrics.toxicity > 0.8) {
-      this.applyDemotion(
+      await this.applyDemotion(
         familyId,
-        currentMode,
+        "active",
         OperatorMode.Quarantine,
         `severe toxicity ${metrics.toxicity.toFixed(2)}`,
       );
@@ -178,24 +188,46 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
 
     // Toxicity > 0.6: reduce-only
     if (metrics.toxicity > TOXICITY_DEMOTION_THRESHOLD) {
-      this.applyDemotion(
+      await this.applyDemotion(
         familyId,
-        currentMode,
+        "active",
         OperatorMode.ReduceOnly,
         `toxicity ${metrics.toxicity.toFixed(2)}`,
       );
       return;
     }
 
+    if (this.activeProfile === ProfileId.LiveLite) {
+      const executionCanary = evaluateExecutionCanaryGate({
+        primaryCategory: identity.primaryCategory,
+        feeTier: identity.feeTier ?? null,
+        liveWalletRequirement: identity.liveWalletRequirement ?? null,
+        requiresPostOnlyForLive: identity.requiresPostOnlyForLive ?? null,
+        executionTelemetry: this.executionTelemetryReader.readExecutionTelemetry(String(familyId)),
+      });
+      if (this.shouldAutoFreezeForExecutionCanary(executionCanary)) {
+        await this.applyDemotion(
+          familyId,
+          "active",
+          OperatorMode.ReduceOnly,
+          this.formatExecutionCanaryReason(executionCanary),
+        );
+        return;
+      }
+    }
+
     // Horizon-aware negative tail window
-    this.checkNegativeTailWindow(familyId, currentMode, metrics);
+    await this.checkNegativeTailWindow(familyId, "active", {
+      tailAdjustedPnl: metrics.tailAdjustedPnl,
+      horizon: identity.horizon,
+    });
   }
 
-  private checkNegativeTailWindow(
+  private async checkNegativeTailWindow(
     familyId: FamilyId,
     currentMode: string,
     metrics: { tailAdjustedPnl: number; horizon: string },
-  ): void {
+  ): Promise<void> {
     const familyIdStr = String(familyId);
 
     if (metrics.tailAdjustedPnl < 0) {
@@ -220,7 +252,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
       const windowHours = windowDays * 24;
 
       if (elapsedHours >= windowHours) {
-        this.applyDemotion(
+        await this.applyDemotion(
           familyId,
           currentMode,
           OperatorMode.ReduceOnly,
@@ -243,10 +275,15 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
 
   private applyDemotion(
     familyId: FamilyId,
-    fromMode: string,
+    fallbackFromState: string,
     toMode: typeof OperatorMode.ReduceOnly | typeof OperatorMode.Quarantine,
     reason: string,
-  ): void {
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    const runtimeMode: RuntimeMode =
+      toMode === OperatorMode.Quarantine ? "quarantine" : "reduce-only";
+    const previousState = this.familyEvidenceRepo.getEvidence(familyId)?.promotionState ?? fallbackFromState;
+
     this.deploymentRepo.updateOperatorMode(
       familyId,
       this.activeProfile,
@@ -254,11 +291,24 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
       `Auto-demotion: ${reason}`,
     );
 
+    const familyState = this.familyStateRepo.get(familyId);
+    if (familyState) {
+      this.familyStateRepo.save({
+        ...familyState,
+        runtimeMode,
+        quarantineReason: runtimeMode === "quarantine" ? `Auto-demotion: ${reason}` : null,
+        updatedAt: now,
+      });
+    }
+
+    this.familyEvidenceRepo.updatePromotionState(familyId, runtimeMode);
+    this.familyEvidenceRepo.updateProbeSubstate(familyId, null);
+
     this.stateTransitionRepo.insert({
-      entityType: "family_deployment",
+      entityType: "family",
       entityId: String(familyId),
-      fromState: fromMode,
-      toState: toMode,
+      fromState: previousState,
+      toState: runtimeMode,
       triggerType: "system",
       initiator: "safety-evaluator",
       reason: `Auto-demotion: ${reason}`,
@@ -266,8 +316,49 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     });
 
     this.log.warn(
-      { familyId: String(familyId), fromMode, toMode, reason },
+      { familyId: String(familyId), fromMode: previousState, toMode: runtimeMode, reason },
       "safety demotion applied",
     );
+
+    return this.bus.publish("FamilyDemotionApplied", {
+      familyId,
+      previousState,
+      newState: runtimeMode,
+      reason: `Auto-demotion: ${reason}`,
+      timestamp: Date.now(),
+    });
+  }
+
+  private shouldAutoFreezeForExecutionCanary(executionCanary: {
+    required: boolean;
+    eligible: boolean;
+    blockers: Array<{ metric: string; current: number; passed: boolean }>;
+  }): boolean {
+    if (!executionCanary.required || executionCanary.eligible) return false;
+    return executionCanary.blockers.some(
+      (blocker) =>
+        !blocker.passed &&
+        blocker.metric !== "24h fills" &&
+        blocker.metric !== "Maker ratio %",
+    );
+  }
+
+  private formatExecutionCanaryReason(executionCanary: {
+    blockers: Array<{ metric: string; current: number; passed: boolean }>;
+  }): string {
+    const failures = executionCanary.blockers.filter(
+      (blocker) =>
+        !blocker.passed &&
+        blocker.metric !== "24h fills" &&
+        blocker.metric !== "Maker ratio %",
+    );
+    const summary = failures
+      .map((blocker) => {
+        if (blocker.metric === "Explicit fees (USDC)") return `$${blocker.current} fees`;
+        if (blocker.metric === "Fee leakage %") return `${blocker.current}% leakage`;
+        return `${blocker.current} ${blocker.metric.toLowerCase()}`;
+      })
+      .join(", ");
+    return `execution canary breach (${summary})`;
   }
 }

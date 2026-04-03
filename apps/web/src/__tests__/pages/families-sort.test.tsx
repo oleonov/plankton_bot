@@ -21,6 +21,19 @@ const families = [
     strategyProfile: "generic",
     promotionState: "probe-only",
     probeSubstate: null,
+    executionTelemetry24h: {
+      windowHours: 24,
+      totalFills: 5,
+      volumeUsdc: 12,
+      makerFills: 4,
+      takerFills: 1,
+      unknownFills: 0,
+      makerRatio: 0.8,
+      takerRatio: 0.2,
+      explicitFeesUsdc: 0.12,
+      feeLeakageRatio: 0.01,
+      lastFillAt: "2026-03-31T00:00:00Z",
+    },
     state: {
       runtimeMode: "active",
       openValueUsdc: 50,
@@ -45,6 +58,19 @@ const families = [
     strategyProfile: "generic",
     promotionState: "scaled",
     probeSubstate: null,
+    executionTelemetry24h: {
+      windowHours: 24,
+      totalFills: 0,
+      volumeUsdc: 0,
+      makerFills: 0,
+      takerFills: 0,
+      unknownFills: 0,
+      makerRatio: null,
+      takerRatio: null,
+      explicitFeesUsdc: 0,
+      feeLeakageRatio: null,
+      lastFillAt: null,
+    },
     state: {
       runtimeMode: "active",
       openValueUsdc: 20,
@@ -69,6 +95,19 @@ const families = [
     strategyProfile: "generic",
     promotionState: "probe-only",
     probeSubstate: null,
+    executionTelemetry24h: {
+      windowHours: 24,
+      totalFills: 2,
+      volumeUsdc: 3,
+      makerFills: 0,
+      takerFills: 2,
+      unknownFills: 0,
+      makerRatio: 0,
+      takerRatio: 1,
+      explicitFeesUsdc: 0.15,
+      feeLeakageRatio: 0.05,
+      lastFillAt: "2026-03-31T00:00:00Z",
+    },
     state: {
       runtimeMode: "quarantine",
       openValueUsdc: 0,
@@ -85,8 +124,16 @@ const families = [
   },
 ];
 
-function setup() {
-  server.use(http.get("/api/v1/families", () => ok(families)));
+function setup(evidenceByFamily: Record<string, { [key: string]: unknown } | null> = {}) {
+  server.use(
+    http.get("/api/v1/families", () => ok(families)),
+    http.get("/api/v1/families/:familyId/transitions", () => ok([])),
+    http.get("/api/v1/families/:familyId/positions", () => ok([])),
+    http.get("/api/v1/families/:familyId/orders", () => ok({ items: [], nextCursor: null })),
+    http.get("/api/v1/families/:familyId/evidence", ({ params }) =>
+      ok(evidenceByFamily[String(params.familyId)] ?? null),
+    ),
+  );
 }
 
 function getFamilyKeys(): string[] {
@@ -159,5 +206,76 @@ describe("Families table sorting", () => {
 
     await user.click(screen.getByText(/Markets/));
     expect(screen.getByText(/Markets \u25BC/)).toBeInTheDocument();
+  });
+
+  it("renders per-family execution telemetry in list and expanded detail", async () => {
+    setup();
+    const user = userEvent.setup();
+    renderWithProviders(<Families />);
+
+    await screen.findByText(/alpha/);
+
+    expect(screen.getByText("80% maker")).toBeInTheDocument();
+    expect(screen.getByText(/1 taker.*\$0\.120/)).toBeInTheDocument();
+
+    await user.click(screen.getByText(/alpha/));
+
+    expect(await screen.findByText("Execution (24h)")).toBeInTheDocument();
+    expect(screen.getByText(/4 maker \/ 1 taker \/ 0 unknown/)).toBeInTheDocument();
+    expect(screen.getByText(/fees \$0\.120/)).toBeInTheDocument();
+    expect(screen.getByText(/leakage 1\.00%/)).toBeInTheDocument();
+  });
+
+  it("renders execution canary blockers inside evidence detail", async () => {
+    setup({
+      "fam-1": {
+        familyId: "fam-1",
+        evidenceStatus: "confirmed",
+        evidenceScore: 0.8,
+        promotionState: "probe-only",
+        localTradeCount: 25,
+        localMarketCount: 6,
+        localRealizedPnlFifo: 4,
+        openTailCostUsdc: 1,
+        tailAdjustedPnl: 3,
+        remoteClosedRealizedPnl: null,
+        openPositionCount: 1,
+        openDustCount: 0,
+        bothSidedEligible: false,
+        heavyCampaignEligible: false,
+        activeWindowEdgeScore: null,
+        recurrenceScore: 0.6,
+        recycleScore: 0.7,
+        liveViabilityScore: 0.5,
+        toxicityPenalty: 0.1,
+        lastValidatedAt: "2026-03-31T00:00:00Z",
+        probeSubstate: null,
+        repricingExitCount: 3,
+        promotionBlockers: [],
+        executionCanary24h: {
+          windowHours: 24,
+          required: true,
+          eligible: false,
+          minTotalFills: 10,
+          blockers: [
+            { metric: "24h fills", current: 5, required: 10, passed: false },
+            { metric: "Taker fills", current: 1, required: 0, passed: false },
+            { metric: "Explicit fees (USDC)", current: 0.12, required: 0, passed: false },
+          ],
+        },
+      },
+    });
+    const user = userEvent.setup();
+    renderWithProviders(<Families />);
+
+    await screen.findByText(/alpha/);
+    await user.click(screen.getByText(/alpha/));
+    await user.click(screen.getByText(/Evidence/));
+
+    expect(await screen.findByText("Execution Canary (24h)")).toBeInTheDocument();
+    expect(screen.getByText(/Execution Canary:/)).toBeInTheDocument();
+    expect(screen.getByText("blocked")).toBeInTheDocument();
+    expect(screen.getByText(/24h fills/)).toBeInTheDocument();
+    expect(screen.getByText(/Taker fills/)).toBeInTheDocument();
   });
 });

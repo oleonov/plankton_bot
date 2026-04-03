@@ -41,6 +41,7 @@ export function EvidenceSection({
   const showReset =
     evidence.promotionState === "scaled" || evidence.promotionState === "reduce-only";
   const isProbeOnly = evidence.promotionState === "probe-only";
+  const executionCanary = evidence.executionCanary24h;
 
   return (
     <div style={{ marginBottom: 12 }}>
@@ -67,6 +68,19 @@ export function EvidenceSection({
               value={evidence.evidenceScore?.toFixed(2) ?? null}
             />
             <EvidenceStat label="Repricing Exits" value={evidence.repricingExitCount} />
+            {executionCanary?.required && (
+              <>
+                <EvidenceStat
+                  label="Execution Canary"
+                  value={executionCanary.eligible ? "pass" : "blocked"}
+                />
+                <EvidenceStat label="Canary Window" value={`${executionCanary.windowHours}h`} />
+                <EvidenceStat
+                  label="Min Fills"
+                  value={executionCanary.minTotalFills}
+                />
+              </>
+            )}
             {showReset && (
               <div style={{ marginTop: 8 }}>
                 <ConfirmAction
@@ -81,6 +95,12 @@ export function EvidenceSection({
             )}
             {isProbeOnly && evidence.promotionBlockers && (
               <PromotionBlockers blockers={evidence.promotionBlockers} />
+            )}
+            {executionCanary?.required && (
+              <PromotionBlockers
+                blockers={executionCanary.blockers}
+                title={`Execution Canary (${executionCanary.windowHours}h)`}
+              />
             )}
           </div>
           <ScoreBars

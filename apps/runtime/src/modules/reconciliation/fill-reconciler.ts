@@ -96,6 +96,7 @@ export async function importExchangeFills(
       price: ef.price,
       size: ef.size,
       sizeUsdc,
+      liquidityRole: ef.liquidityRole,
       fee: ef.fee,
       filledAt: new Date(ef.timestamp).toISOString(),
     };
@@ -135,6 +136,7 @@ export async function importExchangeFills(
       price: ef.price,
       size: ef.size,
       sizeUsdc,
+      liquidityRole: ef.liquidityRole,
       fee: ef.fee,
       familyId,
       timestamp: ef.timestamp,

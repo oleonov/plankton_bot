@@ -430,6 +430,12 @@ describe("ProfileRuntimePublisher", () => {
     expect(card.evidence_status).toBe("partial");
     expect(card.tail_adjusted_pnl).toBe(5.0);
     expect(card.recycle_score).toBeGreaterThan(0);
+    const summary = JSON.parse(String(card.summary_json));
+    expect(summary.repricingExits).toBe(0);
+    expect(summary.executionTelemetry24h.totalFills).toBe(2);
+    expect(summary.executionTelemetry24h.explicitFeesUsdc).toBe(0.02);
+    expect(summary.executionCanary24h.required).toBe(true);
+    expect(summary.executionCanary24h.eligible).toBe(false);
   });
 
   it("empty families list produces no scorecard rows", async () => {

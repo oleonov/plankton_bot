@@ -18,6 +18,8 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     price: row.price,
     size: row.size,
     sizeUsdc: row.size_usdc,
+    liquidityRole: row.liquidity_role,
+    explicitFeeUsdc: row.fee,
     fee: row.fee,
     filledAt: row.filled_at,
     slug: meta.slug,

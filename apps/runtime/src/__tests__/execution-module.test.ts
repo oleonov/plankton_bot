@@ -20,6 +20,7 @@ import type {
   FillRepository,
   PlaceOrderCommand,
   CancelOrderCommand,
+  FamilyRulesProvider,
   TokenId,
   ClientOrderId,
   Order,
@@ -119,6 +120,32 @@ function createMockFillRepo(): FillRepository {
     markReconciled: vi.fn(),
     getLatestTimestamp: vi.fn().mockReturnValue(null),
   };
+}
+
+function createMockRulesProvider(identityOverrides: Record<string, unknown> = {}): FamilyRulesProvider {
+  return {
+    getRule: vi.fn().mockReturnValue({
+      identity: {
+        familyId: createFamilyId("fam-1"),
+        familyKey: "fam-1",
+        primaryCategory: "geopolitics",
+        regime: "generic",
+        horizon: "short",
+        cadence: "daily",
+        strategyProfile: "scalp",
+        topicKey: null,
+        slugPattern: null,
+        notes: null,
+        feeTier: null,
+        liveWalletRequirement: null,
+        requiresPostOnlyForLive: null,
+        ...identityOverrides,
+      },
+    }),
+    isEnabled: vi.fn().mockReturnValue(true),
+    getAllFamilies: vi.fn().mockReturnValue([]),
+    getRulesForRegime: vi.fn().mockReturnValue([]),
+  } as FamilyRulesProvider;
 }
 
 const silentLog = {
@@ -373,6 +400,7 @@ describe("ExecutionModule", () => {
       side: "buy",
       price: 0.5,
       size: 10,
+      liquidityRole: "unknown",
       fee: 0,
       timestamp: Date.now(),
     };
@@ -444,6 +472,7 @@ describe("ExecutionModule", () => {
       side: "buy",
       price: 0.5,
       size: 4, // partial: 4 of 10
+      liquidityRole: "unknown",
       fee: 0,
       timestamp: Date.now(),
     };
@@ -499,6 +528,7 @@ describe("ExecutionModule", () => {
       side: "buy",
       price: 0.5,
       size: 6,
+      liquidityRole: "unknown",
       fee: 0,
       timestamp: Date.now(),
     };
@@ -510,6 +540,7 @@ describe("ExecutionModule", () => {
       side: "buy",
       price: 0.5,
       size: 4,
+      liquidityRole: "unknown",
       fee: 0,
       timestamp: Date.now(),
     };
@@ -706,6 +737,195 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
+  it("rejects fee-enabled buy orders in live-lite EOA mode before gateway call", async () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-1"],
+      maxFamilies: 10,
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+      walletMode: "eoa",
+      minOrderUsdc: 3,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      rulesProvider: createMockRulesProvider({
+        primaryCategory: "crypto",
+        feeTier: "fee-enabled",
+        liveWalletRequirement: "relayer-required",
+        requiresPostOnlyForLive: true,
+      }),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
+    expect(rejected[0].reason).toContain("live-post-only-required");
+    expect(rejected[0].reason).toContain("live-eoa-fee-enabled-family-rejected");
+
+    await guardedMod.stop();
+  });
+
+  it("passes post-only relayer orders for fee-enabled families to the gateway", async () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-1"],
+      maxFamilies: 10,
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+      walletMode: "relayer",
+      minOrderUsdc: 2,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      rulesProvider: createMockRulesProvider({
+        primaryCategory: "crypto",
+        feeTier: "fee-enabled",
+        liveWalletRequirement: "relayer-required",
+        requiresPostOnlyForLive: true,
+      }),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ postOnly: true }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      postOnly: true,
+      orderType: "GTC",
+    });
+
+    await guardedMod.stop();
+  });
+
+  it("rejects relayer fee-enabled orders that are missing post-only execution", async () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-1"],
+      maxFamilies: 10,
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+      walletMode: "relayer",
+      minOrderUsdc: 2,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      rulesProvider: createMockRulesProvider({
+        primaryCategory: "crypto",
+        feeTier: "fee-enabled",
+        liveWalletRequirement: "relayer-required",
+        requiresPostOnlyForLive: true,
+      }),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
+    expect(rejected[0].reason).toBe("live-post-only-required");
+
+    await guardedMod.stop();
+  });
+
+  it("rejects live-lite buy orders below min_order_usdc before gateway call", async () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-1"],
+      maxFamilies: 10,
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+      walletMode: "eoa",
+      minOrderUsdc: 3,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      rulesProvider: createMockRulesProvider({
+        primaryCategory: "geopolitics",
+        feeTier: "fee-free",
+        liveWalletRequirement: "eoa-ok",
+        requiresPostOnlyForLive: false,
+      }),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 0.5, size: 5 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
+    expect(rejected[0].reason).toContain("live-min-order-usdc-rejected");
+
+    await guardedMod.stop();
+  });
+
   // ─── Market inactive guard ──────────────────────────────────────────
 
   it("rejects order when market is inactive (resolved/deactivated)", async () => {
@@ -769,6 +989,7 @@ describe("ExecutionModule", () => {
       side: "buy",
       price: 0.5,
       size: 10,
+      liquidityRole: "unknown",
       fee: 0,
       timestamp: Date.now(),
     };

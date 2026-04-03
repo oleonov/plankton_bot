@@ -27,10 +27,30 @@ interface EventRule {
   summary: (familyId: string | null, payload: Record<string, unknown>) => string;
 }
 
+function summarizeFamilyModeEvent(
+  familyId: string | null,
+  payload: Record<string, unknown>,
+  targetState: string,
+): string {
+  if (payload.source === "system") {
+    const previousState =
+      typeof payload.previousState === "string" && payload.previousState.length > 0
+        ? `${payload.previousState} -> `
+        : "";
+    return `${familyId ?? "unknown"} auto-demoted ${previousState}${targetState}: ${payload.reason ?? "no reason"}`;
+  }
+
+  if (targetState === "quarantine") {
+    return `${familyId ?? "unknown"} quarantined: ${payload.reason ?? "no reason"}`;
+  }
+
+  return `${familyId ?? "unknown"} set to ${targetState}: ${payload.reason ?? "no reason"}`;
+}
+
 const EVENT_RULES: Record<string, EventRule> = {
   family_quarantined: {
     severity: "critical",
-    summary: (fid, p) => `${fid ?? "unknown"} quarantined: ${p.reason ?? "no reason"}`,
+    summary: (fid, p) => summarizeFamilyModeEvent(fid, p, "quarantine"),
   },
   max_exposure_breach: {
     severity: "critical",
@@ -56,7 +76,7 @@ const EVENT_RULES: Record<string, EventRule> = {
   },
   family_reduce_only: {
     severity: "warning",
-    summary: (fid, p) => `${fid ?? "unknown"} set to reduce-only: ${p.reason ?? "no reason"}`,
+    summary: (fid, p) => summarizeFamilyModeEvent(fid, p, "reduce-only"),
   },
   family_activated: {
     severity: "info",

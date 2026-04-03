@@ -124,6 +124,7 @@ function makeExchangeFill(overrides?: Partial<ExchangeFill>): ExchangeFill {
     side: "buy",
     price: 0.5,
     size: 10,
+    liquidityRole: "unknown",
     fee: 0.01,
     timestamp: Date.now(),
     ...overrides,

@@ -46,6 +46,33 @@ beforeAll(async () => {
 
   const db = conn.db;
   db.exec(`
+    CREATE TABLE IF NOT EXISTS family_validation_scorecards (
+      scorecard_id TEXT PRIMARY KEY,
+      family_id TEXT NOT NULL,
+      profile TEXT NOT NULL,
+      evidence_status TEXT NOT NULL DEFAULT 'unknown',
+      evidence_score REAL NOT NULL DEFAULT 0,
+      recurrence_score REAL,
+      recycle_score REAL,
+      live_viability_score REAL,
+      toxicity_penalty REAL,
+      trade_count INTEGER NOT NULL DEFAULT 0,
+      market_count INTEGER NOT NULL DEFAULT 0,
+      realized_pnl REAL NOT NULL DEFAULT 0,
+      tail_adjusted_pnl REAL NOT NULL DEFAULT 0,
+      both_sided_eligible INTEGER NOT NULL DEFAULT 0,
+      heavy_campaign_eligible INTEGER NOT NULL DEFAULT 0,
+      active_window_edge_score REAL,
+      summary_json TEXT,
+      validated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE TABLE IF NOT EXISTS family_validation_latest (
+      family_id TEXT NOT NULL,
+      profile TEXT NOT NULL,
+      scorecard_id TEXT NOT NULL,
+      PRIMARY KEY (family_id, profile)
+    );
+
     INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
     VALUES ('fam-1', 'test-family', 'politics', 'standard', 'medium', 'daily', 'v1');
 
@@ -215,6 +242,21 @@ describe("GET /status", () => {
     expect(body.data.runtimeMode).toBe("simulation");
   });
 
+  it("orders include postOnly execution metadata", async () => {
+    conn.db.prepare("UPDATE orders SET post_only = 1 WHERE order_id = 'ord-1'").run();
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/orders",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+
+    expect(body.ok).toBe(true);
+    const updatedOrder = body.data.items.find((item: { orderId: string }) => item.orderId === "ord-1");
+    expect(updatedOrder?.postOnly).toBe(true);
+  });
+
   it("paused reflects runtime_paused metric", async () => {
     // No runtime_paused metric yet → paused=false
     const res1 = await app.inject({
@@ -376,6 +418,39 @@ describe("GET /status", () => {
     expect(["NO_SIGNALS", "PAUSED"]).toContain(body.data.tradingState);
   });
 
+  it("status includes 24h execution telemetry from recent fills", async () => {
+    const now = new Date().toISOString();
+    try {
+      conn.db.exec(`
+        INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
+        VALUES ('fill-maker-24h', 'ord-1', 'tok-1', 'fam-1', 'buy', 0.5, 20, 10, 'maker', 0, '${now}', 0);
+
+        INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
+        VALUES ('fill-taker-24h', 'ord-2', 'tok-1', 'fam-1', 'sell', 0.5, 10, 5, 'taker', 0.25, '${now}', 0);
+      `);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/status",
+        headers: authHeaders(),
+      });
+      const telemetry = json(res).data.executionTelemetry24h;
+
+      expect(telemetry.windowHours).toBe(24);
+      expect(telemetry.totalFills).toBe(2);
+      expect(telemetry.makerFills).toBe(1);
+      expect(telemetry.takerFills).toBe(1);
+      expect(telemetry.unknownFills).toBe(0);
+      expect(telemetry.explicitFeesUsdc).toBe(0.25);
+      expect(telemetry.makerRatio).toBe(0.5);
+      expect(telemetry.feeLeakageRatio).toBeCloseTo(0.25 / 15, 6);
+    } finally {
+      conn.db.exec(
+        "DELETE FROM fills WHERE fill_id IN ('fill-maker-24h', 'fill-taker-24h')",
+      );
+    }
+  });
+
   it("returns ACTIVELY_TRADING when entry signals approved", async () => {
     conn.db.exec(`
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
@@ -419,6 +494,28 @@ describe("families", () => {
     });
   });
 
+  it("GET /families includes per-family execution telemetry for recent fills", async () => {
+    const now = new Date().toISOString();
+    try {
+      conn.db.exec(`
+        INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
+        VALUES ('fill-family-maker-24h', 'ord-1', 'tok-1', 'fam-1', 'buy', 0.5, 20, 10, 'maker', 0, '${now}', 0);
+      `);
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/families",
+        headers: authHeaders(),
+      });
+      const body = json(res);
+      expect(body.data[0].executionTelemetry24h.totalFills).toBe(1);
+      expect(body.data[0].executionTelemetry24h.makerFills).toBe(1);
+      expect(body.data[0].executionTelemetry24h.explicitFeesUsdc).toBe(0);
+    } finally {
+      conn.db.exec("DELETE FROM fills WHERE fill_id = 'fill-family-maker-24h'");
+    }
+  });
+
   it("GET /families/:id returns detail", async () => {
     const res = await app.inject({
       method: "GET",
@@ -426,6 +523,7 @@ describe("families", () => {
       headers: authHeaders(),
     });
     expect(json(res).data.familyId).toBe("fam-1");
+    expect(json(res).data.executionTelemetry24h).toBeDefined();
   });
 
   it("GET /families/:id returns 404 with error object", async () => {
@@ -602,6 +700,8 @@ describe("fills", () => {
     const body = json(res);
     expect(body.ok).toBe(true);
     expect(body.data.items.length).toBeGreaterThanOrEqual(1);
+    expect(body.data.items[0].explicitFeeUsdc).toBe(0.01);
+    expect(body.data.items[0].liquidityRole).toBe("unknown");
   });
 
   it("GET /fills?family_id= filters by family", async () => {
@@ -720,17 +820,34 @@ describe("metrics", () => {
     expect(body.data.positions).toBeDefined();
     expect(body.data.orders).toBeDefined();
     expect(body.data.fills).toBeDefined();
+    expect(body.data.fills.explicitFeesUsdc).toBeDefined();
+    expect(body.data.fills.makerCount).toBeDefined();
+    expect(body.data.fills.takerCount).toBeDefined();
   });
 
   it("GET /metrics/families returns per-family metrics", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/metrics/families",
-      headers: authHeaders(),
-    });
-    const body = json(res);
-    expect(body.data).toHaveLength(1);
-    expect(body.data[0].familyId).toBe("fam-1");
+    const fillId = "fill-family-metrics-24h";
+    conn.db.exec(`
+      INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
+      VALUES ('${fillId}', 'ord-2', 'tok-1', 'fam-1', 'sell', 0.55, 20, 11, 'taker', 0.12, '${new Date().toISOString()}', 0);
+    `);
+
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/families",
+        headers: authHeaders(),
+      });
+      const body = json(res);
+      expect(body.data).toHaveLength(1);
+      expect(body.data[0].familyId).toBe("fam-1");
+      expect(body.data[0].familyKey).toBe("test-family");
+      expect(body.data[0].executionTelemetry24h.totalFills).toBe(1);
+      expect(body.data[0].executionTelemetry24h.takerFills).toBe(1);
+      expect(body.data[0].executionTelemetry24h.explicitFeesUsdc).toBe(0.12);
+    } finally {
+      conn.db.prepare("DELETE FROM fills WHERE fill_id = ?").run(fillId);
+    }
   });
 });
 
@@ -943,6 +1060,27 @@ describe("GET /risk-events", () => {
     expect(body.data.items[0].summary).toContain("reduce-only");
   });
 
+  it("normalizes system family demotion events with previous state", async () => {
+    conn.db.exec(`
+      INSERT INTO risk_events (event_type, family_id, payload, created_at)
+      VALUES (
+        'family_reduce_only',
+        'fam-1',
+        '{"reason":"Auto-demotion: execution canary breach","source":"system","previousState":"scaled","newState":"reduce-only"}',
+        '2026-03-22T12:00:01Z'
+      )
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/risk-events",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    expect(body.data.items[0].summary).toContain("auto-demoted");
+    expect(body.data.items[0].summary).toContain("scaled -> reduce-only");
+  });
+
   it("normalizes family_activated events", async () => {
     conn.db.exec(`
       INSERT INTO risk_events (event_type, family_id, payload, created_at)
@@ -1079,6 +1217,27 @@ describe("GET /metrics/pnl-series", () => {
 
 describe("POST /actions/family/:familyId/promote", () => {
   it("approves a pending proposal and enqueues a command", async () => {
+    const now = new Date().toISOString();
+    conn.db.exec(`
+      INSERT INTO family_validation_scorecards
+        (scorecard_id, family_id, profile, evidence_status, evidence_score,
+         recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
+         trade_count, market_count, realized_pnl, tail_adjusted_pnl,
+         both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
+         summary_json, validated_at)
+      VALUES (
+        'sc-promote-ok', 'fam-1', 'simulation', 'confirmed', 0.9,
+        0.7, 0.7, 0.6, 0.1,
+        30, 8, 10, 5,
+        0, 0, NULL,
+        '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":24,"makerFills":12,"takerFills":0,"unknownFills":0,"makerRatio":1,"takerRatio":0,"explicitFeesUsdc":0,"feeLeakageRatio":0,"lastFillAt":"${now}"},"executionCanary24h":{"required":true,"eligible":true,"minTotalFills":10,"blockers":[]}}',
+        '${now}'
+      );
+      INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
+      VALUES ('fam-1', 'simulation', 'sc-promote-ok')
+      ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id;
+    `);
+
     // Seed a pending proposal for fam-1
     conn.db.exec(`
       INSERT OR IGNORE INTO promotion_proposals
@@ -1113,5 +1272,43 @@ describe("POST /actions/family/:familyId/promote", () => {
       .get(body.data.commandId) as { action: string; target_id: string };
     expect(cmd.action).toBe("family_promote_scaled");
     expect(cmd.target_id).toBe("fam-1");
+  });
+
+  it("blocks promote when execution canary fails", async () => {
+    const now = new Date().toISOString();
+    conn.db.exec(`
+      INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+      VALUES ('fam-canary-block', 'canary-block', 'crypto', 'standard', 'daily', 'daily', 'v1');
+      INSERT INTO family_validation_scorecards
+        (scorecard_id, family_id, profile, evidence_status, evidence_score,
+         recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
+         trade_count, market_count, realized_pnl, tail_adjusted_pnl,
+         both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
+         summary_json, validated_at)
+      VALUES (
+        'sc-promote-block', 'fam-canary-block', 'simulation', 'confirmed', 0.7,
+        0.6, 0.6, 0.5, 0.1,
+        25, 7, 4, 3,
+        0, 0, NULL,
+        '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":20,"makerFills":10,"takerFills":2,"unknownFills":0,"makerRatio":0.8333,"takerRatio":0.1667,"explicitFeesUsdc":0.12,"feeLeakageRatio":0.006,"lastFillAt":"${now}"},"executionCanary24h":{"required":true,"eligible":false,"minTotalFills":10,"blockers":[{"metric":"Taker fills","current":2,"required":0,"passed":false},{"metric":"Explicit fees (USDC)","current":0.12,"required":0,"passed":false}]}}',
+        '${now}'
+      );
+      INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
+      VALUES ('fam-canary-block', 'simulation', 'sc-promote-block')
+      ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id;
+      INSERT INTO promotion_proposals
+        (family_id, current_state, proposed_state, reason, scores_snapshot, status)
+      VALUES ('fam-canary-block', 'probe-only', 'scaled', 'execution pending', '{}', 'pending');
+    `);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/family/fam-canary-block/promote",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: JSON.stringify({}),
+    });
+
+    expect(res.statusCode).toBe(409);
+    expect(json(res).error.code).toBe("PROMOTION_BLOCKED_BY_EXECUTION_CANARY");
   });
 });

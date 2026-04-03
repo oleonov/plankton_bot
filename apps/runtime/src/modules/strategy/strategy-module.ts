@@ -68,7 +68,12 @@ export class StrategyModule implements RuntimeModule {
     this.log = deps.log.child({ module: "strategy" });
     this.buyTracker = createBuyTracker();
     this.sessionTracker = createSessionTracker();
-    this.bridge = new SignalToOrderBridge({ bus: deps.bus, log: this.log });
+    this.bridge = new SignalToOrderBridge({
+      bus: deps.bus,
+      log: this.log,
+      rulesProvider: deps.rulesProvider,
+      liveLiteGuard: deps.liveLiteGuard,
+    });
   }
 
   async start(): Promise<void> {

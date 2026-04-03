@@ -14,6 +14,12 @@ import { formatAgo } from "../utils/format.ts";
 import { useSort, sortItems } from "../utils/useSort.ts";
 import type { FamilyDTO } from "../api/types.ts";
 
+function formatExecMakerPct(family: FamilyDTO): string {
+  const ratio = family.executionTelemetry24h?.makerRatio;
+  if (ratio == null) return "\u2014";
+  return `${Math.round(ratio * 100)}% maker`;
+}
+
 function TransitionTimeline({ familyId }: { familyId: string }) {
   const { data: transitions } = useFamilyTransitions(familyId);
   if (!transitions || transitions.length === 0) return null;
@@ -62,16 +68,40 @@ function TransitionTimeline({ familyId }: { familyId: string }) {
   );
 }
 
-function FamilyDetail({ familyId }: { familyId: string }) {
+function FamilyDetail({ family }: { family: FamilyDTO }) {
+  const familyId = family.familyId;
   const { data: positions } = useFamilyPositions(familyId);
   const { data: orders } = useFamilyOrders(familyId);
   const { data: evidence } = useFamilyEvidence(familyId);
+  const execution = family.executionTelemetry24h;
+  const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
+  const leakagePct =
+    execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
 
   return (
     <tr>
-      <td colSpan={9} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
+      <td colSpan={10} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
         {evidence && <EvidenceSection evidence={evidence} familyId={familyId} />}
         <TransitionTimeline familyId={familyId} />
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}>
+            Execution (24h)
+          </div>
+          {execution && execution.totalFills > 0 ? (
+            <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 11 }}>
+              <span style={{ color: "var(--blue)", fontWeight: 700 }}>{makerPct}% maker</span>
+              <span>
+                {execution.makerFills} maker / {execution.takerFills} taker / {execution.unknownFills} unknown
+              </span>
+              <span>vol ${execution.volumeUsdc.toFixed(2)}</span>
+              <span>fees ${execution.explicitFeesUsdc.toFixed(3)}</span>
+              <span>leakage {leakagePct?.toFixed(2) ?? "0.00"}%</span>
+              <span>last fill {formatAgo(execution.lastFillAt)}</span>
+            </div>
+          ) : (
+            <div style={{ color: "var(--text-dim)", fontSize: 11 }}>No fills in the last 24h</div>
+          )}
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
           <div>
             <div
@@ -139,7 +169,10 @@ function FamilyDetail({ familyId }: { familyId: string }) {
                       <td>{o.size.toFixed(2)}</td>
                       <td>${o.price.toFixed(4)}</td>
                       <td>
-                        <Badge value={o.status} />
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                          <Badge value={o.status} />
+                          {o.postOnly ? <Badge value="post-only" /> : null}
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -170,6 +203,7 @@ const familyAccessors: Record<string, (f: FamilyDTO) => string | number | null> 
   markets: (f) => f.state?.activeMarketCount ?? 0,
   tailCost: (f) => f.state?.currentTailCostUsdc ?? 0,
   tailAdjPnl: (f) => f.state?.tailAdjustedPnlLive ?? 0,
+  execMaker: (f) => f.executionTelemetry24h?.makerRatio ?? -1,
 };
 
 export function Families() {
@@ -195,6 +229,7 @@ export function Families() {
             <SortTh label="Markets" sortKey="markets" sort={sort} onToggle={toggle} />
             <SortTh label="Tail Cost" sortKey="tailCost" sort={sort} onToggle={toggle} />
             <SortTh label="Tail-Adj PnL" sortKey="tailAdjPnl" sort={sort} onToggle={toggle} />
+            <SortTh label="Exec 24h" sortKey="execMaker" sort={sort} onToggle={toggle} />
             <th>Actions</th>
           </tr>
         </thead>
@@ -287,11 +322,26 @@ export function Families() {
                     {(f.state?.tailAdjustedPnlLive ?? 0) >= 0 ? "+" : ""}$
                     {(f.state?.tailAdjustedPnlLive ?? 0).toFixed(2)}
                   </td>
+                  <td>
+                    {f.executionTelemetry24h && f.executionTelemetry24h.totalFills > 0 ? (
+                      <div>
+                        <div style={{ fontWeight: 700, color: "var(--blue)" }}>
+                          {formatExecMakerPct(f)}
+                        </div>
+                        <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                          {f.executionTelemetry24h.takerFills} taker · $
+                          {f.executionTelemetry24h.explicitFeesUsdc.toFixed(3)}
+                        </div>
+                      </div>
+                    ) : (
+                      <span style={{ color: "var(--text-dim)" }}>&mdash;</span>
+                    )}
+                  </td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <FamilyActions familyId={f.familyId} mode={operatorMode} />
                   </td>
                 </tr>
-                {isExpanded && <FamilyDetail familyId={f.familyId} />}
+                {isExpanded && <FamilyDetail family={f} />}
               </Fragment>
             );
           })}

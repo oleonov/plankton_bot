@@ -9,6 +9,7 @@ import {
   createFamilyId,
   computeRecycleScore,
   computeToxicityPenalty,
+  evaluateExecutionCanaryGate,
 } from "@plankton/domain";
 import { SqliteValidationScorecardRepository, withImmediate } from "@plankton/db";
 import type Database from "better-sqlite3";
@@ -178,10 +179,24 @@ export class ProfileRuntimePublisher implements RuntimeModule {
 
   private buildScorecards(familyIds: string[]): ValidationScorecard[] {
     const profile = this.deps.profile as ProfileId;
+    const familyPolicyStmt = this.deps.controlDb.prepare(
+      `SELECT primary_category, fee_tier, live_wallet_requirement, requires_post_only_for_live
+       FROM family_catalog
+       WHERE family_id = ?`,
+    );
 
     return familyIds.map((fid) => {
       const trade = this.reader.readTradeMetrics(fid);
+      const executionTelemetry = this.reader.readExecutionTelemetry(fid);
       const toxMetrics = this.reader.readToxicityMetrics(fid);
+      const familyPolicy = familyPolicyStmt.get(fid) as
+        | {
+            primary_category: string;
+            fee_tier: string | null;
+            live_wallet_requirement: string | null;
+            requires_post_only_for_live: number | null;
+          }
+        | undefined;
 
       const recycleScore = computeRecycleScore({
         tradeCount: trade.tradeCount,
@@ -203,6 +218,22 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       });
 
       const evidenceScore = Math.max(0, recycleScore - toxicityPenalty);
+      const executionCanary = evaluateExecutionCanaryGate({
+        primaryCategory: familyPolicy?.primary_category ?? "other",
+        feeTier: (familyPolicy?.fee_tier as
+          | import("@plankton/domain").FeeTier
+          | null
+          | undefined) ?? null,
+        liveWalletRequirement: (familyPolicy?.live_wallet_requirement as
+          | import("@plankton/domain").LiveWalletRequirement
+          | null
+          | undefined) ?? null,
+        requiresPostOnlyForLive:
+          familyPolicy?.requires_post_only_for_live == null
+            ? null
+            : familyPolicy.requires_post_only_for_live === 1,
+        executionTelemetry,
+      });
       return {
         scorecardId: createScorecardId(`sc-${randomUUID()}`),
         familyId: createFamilyId(fid),
@@ -220,7 +251,11 @@ export class ProfileRuntimePublisher implements RuntimeModule {
         bothSidedEligible: false,
         heavyCampaignEligible: false,
         activeWindowEdgeScore: null,
-        summaryJson: null,
+        summaryJson: JSON.stringify({
+          repricingExits: trade.repricingExits,
+          executionTelemetry24h: executionTelemetry,
+          executionCanary24h: executionCanary,
+        }),
         validatedAt: new Date().toISOString(),
       } satisfies ValidationScorecard;
     });

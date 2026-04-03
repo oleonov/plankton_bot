@@ -62,7 +62,8 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .prepare(
         `SELECT fd.family_id, fd.enabled, fd.operator_mode, fd.strategy_stage,
                 fd.deployment_stage, fd.priority,
-                fc.family_key, fc.primary_category, fc.regime
+                fc.family_key, fc.primary_category, fc.regime,
+                fc.fee_tier, fc.live_wallet_requirement, fc.requires_post_only_for_live
          FROM family_deployments fd
          JOIN family_catalog fc ON fd.family_id = fc.family_id
          WHERE fd.profile = ?
@@ -281,19 +282,44 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
   // ── PUT /profiles/:profileId/settings ────────────────────────────────
   app.put<{
     Params: { profileId: string };
-    Body: { initialBalanceUsdc?: number; envelopeJson?: string; riskCapsJson?: string };
+    Body: {
+      initialBalanceUsdc?: number;
+      envelopeJson?: string;
+      riskCapsJson?: string;
+      walletMode?: "eoa" | "relayer";
+      minOrderUsdc?: number;
+      relayerJson?: string;
+    };
   }>("/profiles/:profileId/settings", async (request) => {
     const { profileId } = request.params;
     const body = request.body ?? {};
 
+    if (
+      body.walletMode !== undefined &&
+      body.walletMode !== "eoa" &&
+      body.walletMode !== "relayer"
+    ) {
+      throw new ApiError(400, "walletMode must be 'eoa' or 'relayer'", "INVALID_WALLET_MODE");
+    }
+    if (
+      body.minOrderUsdc !== undefined &&
+      (!Number.isFinite(body.minOrderUsdc) || body.minOrderUsdc <= 0)
+    ) {
+      throw new ApiError(400, "minOrderUsdc must be > 0", "INVALID_MIN_ORDER");
+    }
+
     controlDb
       .prepare(
-        `INSERT INTO profile_settings (profile_id, initial_balance_usdc, envelope_json, risk_caps_json, updated_at)
-         VALUES (?, ?, ?, ?, datetime('now'))
+        `INSERT INTO profile_settings
+           (profile_id, initial_balance_usdc, envelope_json, risk_caps_json, wallet_mode, min_order_usdc, relayer_json, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
          ON CONFLICT(profile_id) DO UPDATE SET
            initial_balance_usdc = COALESCE(excluded.initial_balance_usdc, profile_settings.initial_balance_usdc),
            envelope_json = COALESCE(excluded.envelope_json, profile_settings.envelope_json),
            risk_caps_json = COALESCE(excluded.risk_caps_json, profile_settings.risk_caps_json),
+           wallet_mode = COALESCE(excluded.wallet_mode, profile_settings.wallet_mode),
+           min_order_usdc = COALESCE(excluded.min_order_usdc, profile_settings.min_order_usdc),
+           relayer_json = COALESCE(excluded.relayer_json, profile_settings.relayer_json),
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -301,6 +327,9 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         body.initialBalanceUsdc ?? null,
         body.envelopeJson ?? null,
         body.riskCapsJson ?? null,
+        body.walletMode ?? null,
+        body.minOrderUsdc ?? null,
+        body.relayerJson ?? null,
       );
 
     const updated = controlDb

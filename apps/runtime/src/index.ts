@@ -83,8 +83,10 @@ import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";
 import { ScoreComputer } from "./modules/evidence/score-computer.js";
 import { RuntimeSafetyEvaluator } from "./modules/safety/runtime-safety-evaluator.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
+import { ValidationMetricsReader } from "./modules/publisher/validation-metrics-reader.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
+import { createPolymarketClient } from "./polymarket-client-factory.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -164,8 +166,20 @@ async function main(): Promise<void> {
 
   // Read initial balance from profile_settings (control.db) instead of YAML
   const settingsRow = controlConn.db
-    .prepare("SELECT initial_balance_usdc FROM profile_settings WHERE profile_id = ?")
-    .get(activeProfile) as { initial_balance_usdc: number | null } | undefined;
+    .prepare(
+      `SELECT initial_balance_usdc, envelope_json, wallet_mode, min_order_usdc, relayer_json
+         FROM profile_settings
+        WHERE profile_id = ?`,
+    )
+    .get(activeProfile) as
+    | {
+        initial_balance_usdc: number | null;
+        envelope_json: string | null;
+        wallet_mode: "eoa" | "relayer" | null;
+        min_order_usdc: number | null;
+        relayer_json: string | null;
+      }
+    | undefined;
   const initialBalanceUsdc = settingsRow?.initial_balance_usdc ?? 1000;
 
   if (runtimeMode !== "live-lite") {
@@ -250,23 +264,63 @@ async function main(): Promise<void> {
     }
   }
 
+  // Build live-lite envelope from control.db profile_settings (replaces env vars)
+  const liveLiteConfig = (() => {
+    if (runtimeMode !== "live-lite") return undefined;
+    let envelope: Record<string, unknown> = {};
+    if (settingsRow?.envelope_json) {
+      try {
+        envelope = JSON.parse(settingsRow.envelope_json) as Record<string, unknown>;
+      } catch (err) {
+        log.warn({ err }, "live-lite profile_settings.envelope_json is invalid — using default caps");
+      }
+    } else {
+      log.warn("live-lite profile_settings.envelope_json is empty — using default caps");
+    }
+    // Derive allowlist from enabled family_deployments for live-lite
+    const deployedFamilies = controlConn.db
+      .prepare(
+        "SELECT family_id FROM family_deployments WHERE profile = 'live-lite' AND enabled = 1",
+      )
+      .all() as { family_id: string }[];
+    const minOrderUsdc = settingsRow?.min_order_usdc;
+    return {
+      familyAllowlist: deployedFamilies.map((f) => f.family_id),
+      maxFamilies: Number(envelope.maxFamilies ?? 10),
+      maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
+      maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
+      maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
+      walletMode: settingsRow?.wallet_mode ?? "eoa",
+      ...(typeof minOrderUsdc === "number" && Number.isFinite(minOrderUsdc)
+        ? { minOrderUsdc }
+        : {}),
+    };
+  })();
+  const liveLiteGuard = new LiveLiteGuard(liveLiteConfig);
+
   // 7b. Create gateways via factory
   let polyClient: unknown;
+  let relayerConfig: { walletType: string; funderAddress: string } | null = null;
   if (runtimeMode === "paper" || runtimeMode === "live-lite") {
-    const { ClobClient } = await import("@polymarket/clob-client");
-    const CLOB_HOST = "https://clob.polymarket.com";
-    const POLYGON_CHAIN_ID = 137;
-
-    if (runtimeMode === "paper") {
-      polyClient = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID);
-    } else {
-      const { Wallet } = await import("ethers");
-      const signer = new Wallet(config.polyPrivateKey!);
-      polyClient = new ClobClient(CLOB_HOST, POLYGON_CHAIN_ID, signer, {
-        key: config.polyApiKey!,
-        secret: config.polyApiSecret!,
-        passphrase: config.polyPassphrase!,
+    try {
+      const builtClient = await createPolymarketClient({
+        runtimeMode,
+        config,
+        walletMode: liveLiteGuard.getWalletMode(),
+        relayerJson: settingsRow?.relayer_json ?? null,
       });
+      polyClient = builtClient.client;
+      relayerConfig = builtClient.relayerConfig
+        ? {
+            walletType: builtClient.relayerConfig.walletType,
+            funderAddress: builtClient.relayerConfig.funderAddress,
+          }
+        : null;
+    } catch (err) {
+      log.fatal({ err }, "Polymarket client initialization failed");
+      controlConn.close();
+      ledgerConn.close();
+      process.exit(1);
     }
   }
 
@@ -292,33 +346,15 @@ async function main(): Promise<void> {
       initialBalanceUsdc,
     });
   log.info({ mode: modeLabel }, "gateways created");
-
-  // Build live-lite envelope from control.db profile_settings (replaces env vars)
-  const liveLiteConfig = (() => {
-    if (runtimeMode !== "live-lite") return undefined;
-    const settings = controlConn.db
-      .prepare("SELECT envelope_json FROM profile_settings WHERE profile_id = 'live-lite'")
-      .get() as { envelope_json: string | null } | undefined;
-    const envelope = settings?.envelope_json ? JSON.parse(settings.envelope_json) : null;
-    if (!envelope) {
-      log.warn("live-lite profile_settings.envelope_json is empty — using permissive defaults");
-      return undefined;
-    }
-    // Derive allowlist from enabled family_deployments for live-lite
-    const deployedFamilies = controlConn.db
-      .prepare(
-        "SELECT family_id FROM family_deployments WHERE profile = 'live-lite' AND enabled = 1",
-      )
-      .all() as { family_id: string }[];
-    return {
-      familyAllowlist: deployedFamilies.map((f) => f.family_id),
-      maxFamilies: Number(envelope.maxFamilies ?? 10),
-      maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
-      maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
-      maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
-    };
-  })();
-  const liveLiteGuard = new LiveLiteGuard(liveLiteConfig);
+  if (runtimeMode === "live-lite") {
+    log.info(
+      {
+        walletMode: liveLiteGuard.getWalletMode(),
+        ...(relayerConfig ? { relayer: relayerConfig } : {}),
+      },
+      "live wallet path configured",
+    );
+  }
 
   // 7c. Create bot run ID (needed by market-data and execution modules)
   const botRunId = createBotRunId(`run-${Date.now()}`);
@@ -395,6 +431,7 @@ async function main(): Promise<void> {
     marketRepo: repos.market,
     orderRepo: repos.order,
     fillRepo: repos.fill,
+    rulesProvider,
     log,
     botRunId,
     runtimeControl,
@@ -517,6 +554,7 @@ async function main(): Promise<void> {
 
   // 7l2. Family evidence engine — periodic ledger-side scoring for deployed families
   const scoreComputer = new ScoreComputer(ledgerConn.db, controlConn.db);
+  const validationMetricsReader = new ValidationMetricsReader(ledgerConn.db);
   const evidenceEngine = new FamilyEvidenceEngine({
     bus,
     log,
@@ -531,9 +569,11 @@ async function main(): Promise<void> {
     bus,
     log,
     scoreComputer,
+    executionTelemetryReader: validationMetricsReader,
     deploymentRepo,
     stateTransitionRepo: repos.stateTransition,
     familyStateRepo: repos.familyState,
+    familyEvidenceRepo: repos.familyEvidence,
     rulesProvider,
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });
@@ -611,7 +651,22 @@ async function main(): Promise<void> {
   });
 
   bus.subscribe("OperatorCommandApplied", async (ev) => {
-    riskEventWriter.onOperatorCommand(ev.action, ev.targetFamilyId, ev.commandDbId, ev.reason);
+    riskEventWriter.onOperatorCommand(
+      ev.action,
+      ev.targetFamilyId,
+      ev.commandDbId,
+      ev.reason,
+      ev.initiatorType,
+    );
+  });
+
+  bus.subscribe("FamilyDemotionApplied", async (ev) => {
+    riskEventWriter.onFamilyDemotionApplied(
+      ev.familyId,
+      ev.previousState,
+      ev.newState,
+      ev.reason,
+    );
   });
 
   bus.subscribe("ReconciliationDriftDetected", async ({ details, severity, timestamp }) => {
@@ -899,11 +954,27 @@ async function main(): Promise<void> {
 
   // Persist live-lite envelope for API consumption
   if (liveLiteConfig) {
+    const liveLiteStatus = {
+      ...liveLiteConfig,
+      walletMode: liveLiteGuard.getWalletMode(),
+      minOrderUsdc: liveLiteGuard.getMinOrderUsdc(),
+      ...(relayerConfig ? { relayer: relayerConfig } : {}),
+    };
     ledgerConn.db
       .prepare(
         "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
       )
-      .run("live_lite_envelope", JSON.stringify(liveLiteConfig), new Date().toISOString());
+      .run("live_lite_envelope", JSON.stringify(liveLiteStatus), new Date().toISOString());
+  }
+
+  if (runtimeMode === "live-lite" && liveLiteGuard.getWalletMode() === "relayer") {
+    const balances = await exchangeGateway.getBalances();
+    if (balances.length === 0) {
+      log.fatal("live-lite relayer auth check failed — exchange returned no balances");
+      controlConn.close();
+      ledgerConn.close();
+      process.exit(1);
+    }
   }
 
   // 11. Start

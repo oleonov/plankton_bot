@@ -15,18 +15,22 @@
 
 import type {
   EventBus,
+  FamilyRulesProvider,
   NormalizedMarket,
   RuntimeEventMap,
   PlaceOrderCommand,
 } from "@plankton/domain";
-import { createCommandId } from "@plankton/domain";
+import { createCommandId, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import { buildClientOrderId } from "@plankton/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
+import type { LiveLiteGuard } from "../../live-lite-guard.js";
 
 export interface SignalToOrderBridgeDeps {
   bus: EventBus;
   log: Logger;
+  rulesProvider: FamilyRulesProvider;
+  liveLiteGuard?: LiveLiteGuard | undefined;
 }
 
 export class SignalToOrderBridge {
@@ -78,6 +82,23 @@ export class SignalToOrderBridge {
       sequenceInTick: signal.sequenceInTick,
     });
 
+    const executionTerms = this.resolveExecutionTerms(signal, market);
+    if (!executionTerms) {
+      this.log.warn(
+        {
+          signalId: signal.signalId,
+          familyId: signal.familyId,
+          tokenId: signal.tokenId,
+          side: signal.side,
+          suggestedPrice: signal.suggestedPrice,
+          bestBid: market.bestBid,
+          bestAsk: market.bestAsk,
+        },
+        "approved signal skipped — unable to derive maker-safe post-only price",
+      );
+      return;
+    }
+
     const cmd: PlaceOrderCommand = {
       type: "PlaceOrderCommand",
       commandId: createCommandId(randomUUID()),
@@ -86,7 +107,8 @@ export class SignalToOrderBridge {
       tokenId: signal.tokenId,
       side: signal.side,
       size: signal.suggestedSize,
-      price: signal.suggestedPrice,
+      price: executionTerms.price,
+      ...(executionTerms.postOnly ? { postOnly: true } : {}),
       orderType: "GTC",
       tickSize: market.tickSize,
       negRisk: market.negRisk,
@@ -105,4 +127,82 @@ export class SignalToOrderBridge {
       timestamp: Date.now(),
     });
   }
+
+  private resolveExecutionTerms(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+  ): { price: number; postOnly?: boolean } | null {
+    if (this.deps.liveLiteGuard?.getWalletMode() !== "relayer") {
+      return { price: signal.suggestedPrice };
+    }
+
+    const bundle = this.deps.rulesProvider.getRule(signal.familyId);
+    if (!bundle) {
+      return { price: signal.suggestedPrice };
+    }
+
+    const policy = resolveFamilyLiveTradingPolicy(bundle.identity);
+    if (!policy.requiresPostOnlyForLive) {
+      return { price: signal.suggestedPrice };
+    }
+
+    const makerOnlyPrice = resolveMakerOnlyPrice({
+      side: signal.side,
+      suggestedPrice: signal.suggestedPrice,
+      market,
+    });
+    if (makerOnlyPrice == null) {
+      return null;
+    }
+
+    return { price: makerOnlyPrice, postOnly: true };
+  }
+}
+
+function resolveMakerOnlyPrice(opts: {
+  side: "buy" | "sell";
+  suggestedPrice: number;
+  market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "tickSize">;
+}): number | null {
+  const { side, suggestedPrice, market } = opts;
+  const { bestBid, bestAsk, tickSize } = market;
+
+  if (side === "buy") {
+    const makerCeiling = bestBid ?? (bestAsk != null ? bestAsk - tickSize : null);
+    if (makerCeiling == null) return null;
+    const price = roundDownToTick(Math.min(suggestedPrice, makerCeiling), tickSize);
+    if ((bestAsk != null && price >= bestAsk - 1e-9) || !isValidLimitPrice(price, tickSize)) {
+      return null;
+    }
+    return price;
+  }
+
+  const makerFloor = bestAsk ?? (bestBid != null ? bestBid + tickSize : null);
+  if (makerFloor == null) return null;
+  const price = roundUpToTick(Math.max(suggestedPrice, makerFloor), tickSize);
+  if ((bestBid != null && price <= bestBid + 1e-9) || !isValidLimitPrice(price, tickSize)) {
+    return null;
+  }
+  return price;
+}
+
+function roundDownToTick(value: number, tickSize: number): number {
+  const precision = getTickPrecision(tickSize);
+  const units = Math.floor((value + 1e-9) / tickSize);
+  return Number((units * tickSize).toFixed(precision));
+}
+
+function roundUpToTick(value: number, tickSize: number): number {
+  const precision = getTickPrecision(tickSize);
+  const units = Math.ceil((value - 1e-9) / tickSize);
+  return Number((units * tickSize).toFixed(precision));
+}
+
+function getTickPrecision(tickSize: number): number {
+  const [, decimals = ""] = tickSize.toString().split(".");
+  return decimals.length;
+}
+
+function isValidLimitPrice(price: number, tickSize: number): boolean {
+  return price >= tickSize - 1e-9 && price <= 1 - tickSize + 1e-9;
 }

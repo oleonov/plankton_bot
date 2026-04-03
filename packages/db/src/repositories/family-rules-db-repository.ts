@@ -24,7 +24,8 @@ export class SqliteFamilyRulesDbRepository {
       .prepare(
         `SELECT
            c.family_id, c.family_key, c.primary_category, c.regime, c.horizon,
-           c.cadence, c.strategy_profile, c.topic_key, c.slug_pattern, c.notes,
+           c.cadence, c.strategy_profile, c.fee_tier, c.live_wallet_requirement,
+           c.requires_post_only_for_live, c.topic_key, c.slug_pattern, c.notes,
            e.evidence_status, e.evidence_score, e.promotion_state,
            e.local_trade_count, e.local_market_count, e.local_realized_pnl_fifo,
            e.open_tail_cost_usdc, e.tail_adjusted_pnl,
@@ -154,6 +155,10 @@ export class SqliteFamilyRulesDbRepository {
         horizon: row.horizon as string,
         cadence: row.cadence as string,
         strategyProfile: row.strategy_profile as string,
+        feeTier: (row.fee_tier as string) ?? null,
+        liveWalletRequirement: (row.live_wallet_requirement as string) ?? null,
+        requiresPostOnlyForLive:
+          row.requires_post_only_for_live == null ? null : Boolean(row.requires_post_only_for_live),
         topicKey: (row.topic_key as string) ?? null,
         slugPattern: (row.slug_pattern as string) ?? null,
         notes: (row.notes as string) ?? null,

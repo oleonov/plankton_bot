@@ -81,6 +81,19 @@ export const mockStatus = {
   reconciliationDriftDetected: false,
   tradingState: "ACTIVELY_TRADING",
   signalActivity: null,
+  executionTelemetry24h: {
+    windowHours: 24,
+    totalFills: 0,
+    volumeUsdc: 0,
+    makerFills: 0,
+    takerFills: 0,
+    unknownFills: 0,
+    makerRatio: null,
+    takerRatio: null,
+    explicitFeesUsdc: 0,
+    feeLeakageRatio: null,
+    lastFillAt: null,
+  },
 };
 
 export const mockControlOverview = {
@@ -151,7 +164,20 @@ export const handlers = [
   http.get("/api/v1/families/proposals", () => ok([])),
   http.get("/api/v1/families/recent-demotions", () => ok([])),
   http.get("/api/v1/metrics", () =>
-    ok({ positions: {}, orders: {}, fills: { count: 0, volumeUsdc: 0 }, totalRealizedPnl: 0 }),
+    ok({
+      positions: {},
+      orders: {},
+      fills: {
+        count: 0,
+        volumeUsdc: 0,
+        makerCount: 0,
+        takerCount: 0,
+        unknownCount: 0,
+        explicitFeesUsdc: 0,
+        feeLeakageRatio: null,
+      },
+      totalRealizedPnl: 0,
+    }),
   ),
   http.get("/api/v1/metrics/pnl-series", () => ok({ items: [] })),
   http.get("/api/v1/metrics/families", () => ok([])),

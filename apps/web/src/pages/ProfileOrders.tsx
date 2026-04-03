@@ -99,7 +99,10 @@ export function ProfileOrders() {
                 <td>${o.price.toFixed(4)}</td>
                 <td>{o.size.toFixed(2)}</td>
                 <td>
-                  <Badge value={o.status} />
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <Badge value={o.status} />
+                    {o.postOnly ? <Badge value="post-only" /> : null}
+                  </div>
                 </td>
                 <td style={{ color: ends.color, fontSize: 12 }}>{ends.text}</td>
                 <td style={{ fontSize: 11, color: "var(--text-dim)" }}>

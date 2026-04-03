@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import type { FamilyMetric } from "../api/types.ts";
 import {
   useStatus,
   useMetrics,
@@ -49,6 +50,39 @@ function tradingStateLabel(state?: string): string {
   }
 }
 
+function getExecutionWatchFamilies(familyMetrics: FamilyMetric[]): FamilyMetric[] {
+  return familyMetrics
+    .filter((family) => {
+      const execution = family.executionTelemetry24h;
+      if (!execution || execution.totalFills === 0) return false;
+      return (
+        execution.takerFills > 0 ||
+        execution.unknownFills > 0 ||
+        (execution.feeLeakageRatio ?? 0) > 0
+      );
+    })
+    .sort((left, right) => {
+      const leftExecution = left.executionTelemetry24h;
+      const rightExecution = right.executionTelemetry24h;
+      const feeDelta =
+        (rightExecution?.explicitFeesUsdc ?? 0) - (leftExecution?.explicitFeesUsdc ?? 0);
+      if (feeDelta !== 0) return feeDelta;
+      const takerDelta = (rightExecution?.takerFills ?? 0) - (leftExecution?.takerFills ?? 0);
+      if (takerDelta !== 0) return takerDelta;
+      return left.familyKey.localeCompare(right.familyKey);
+    });
+}
+
+function formatExecutionWatch(metric: FamilyMetric): string {
+  const execution = metric.executionTelemetry24h;
+  if (!execution) return metric.familyKey;
+  const parts: string[] = [];
+  if (execution.takerFills > 0) parts.push(`${execution.takerFills} taker`);
+  if (execution.unknownFills > 0) parts.push(`${execution.unknownFills} unknown`);
+  if (execution.explicitFeesUsdc > 0) parts.push(`$${execution.explicitFeesUsdc.toFixed(3)} fees`);
+  return `${metric.familyKey} · ${parts.join(" · ")}`;
+}
+
 function BalanceCard({ status }: { status: import("../api/types.ts").StatusData }) {
   const isLive = status.runtimeMode === "live-lite";
   const dim = { color: "var(--text-dim)" };
@@ -96,6 +130,13 @@ export function Overview() {
   const reduceOnlyCount = familyMetrics?.filter((f) => f.runtimeMode === "reduce-only").length ?? 0;
   const activeCount = familyMetrics?.filter((f) => f.runtimeMode === "active").length ?? 0;
   const tailAdjPnl = metrics.totalRealizedPnl - status.totalTailCostUsdc;
+  const execution = status.executionTelemetry24h;
+  const executionWatch = familyMetrics ? getExecutionWatchFamilies(familyMetrics) : [];
+  const topExecutionWatch = executionWatch[0];
+  const makerPct =
+    execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
+  const leakagePct =
+    execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
 
   return (
     <div className="page">
@@ -150,6 +191,11 @@ export function Overview() {
               {status.liveLite.familyAllowlist.length} family)
             </span>
             <span>Max: {status.liveLite.maxFamilies} family</span>
+            <span>Wallet: {(status.liveLite.walletMode ?? "eoa").toUpperCase()}</span>
+            <span>
+              Min order: $
+              {status.liveLite.minOrderUsdc != null ? status.liveLite.minOrderUsdc.toFixed(2) : "—"}
+            </span>
             <span>
               Caps: ${status.liveLite.maxOpenValueUsdc} total / ${status.liveLite.maxOrderUsdc} per
               order / {status.liveLite.maxActiveMarkets} markets
@@ -159,7 +205,7 @@ export function Overview() {
       )}
 
       {/* Tail Risk + Financial */}
-      <div className="grid-3" style={{ marginBottom: 16 }}>
+      <div className="grid-4" style={{ marginBottom: 16 }}>
         <div
           className="card"
           style={{ border: "1px solid var(--orange)", borderLeft: "3px solid var(--orange)" }}
@@ -206,6 +252,34 @@ export function Overview() {
           </div>
           <div className="value-sm">
             {metrics.fills.count} fills &middot; vol ${metrics.fills.volumeUsdc.toFixed(0)}
+          </div>
+        </div>
+        <div className="card card-accent-blue">
+          <div className="label">Execution Quality</div>
+          <div className="value-lg text-blue">
+            {makerPct != null ? `${makerPct}%` : "—"}
+          </div>
+          <div className="value-sm">
+            {execution && execution.totalFills > 0
+              ? `${execution.makerFills} maker · ${execution.takerFills} taker · ${execution.unknownFills} unknown`
+              : "No fills in 24h"}
+          </div>
+          <div className="value-sm">
+            {execution && execution.totalFills > 0
+              ? `$${execution.explicitFeesUsdc.toFixed(3)} fees · ${leakagePct?.toFixed(2) ?? "0.00"}% leakage`
+              : "Awaiting execution telemetry"}
+          </div>
+          <div
+            className="value-sm"
+            style={{
+              color: topExecutionWatch ? "var(--orange)" : "var(--text-dim)",
+            }}
+          >
+            {familyMetrics == null
+              ? "Loading family telemetry"
+              : topExecutionWatch
+                ? `Watch: ${formatExecutionWatch(topExecutionWatch)}${executionWatch.length > 1 ? ` · +${executionWatch.length - 1} more` : ""}`
+                : "All families clean in 24h"}
           </div>
         </div>
       </div>

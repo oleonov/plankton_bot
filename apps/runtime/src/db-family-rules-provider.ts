@@ -31,6 +31,9 @@ interface RawRow {
   horizon: string;
   cadence: string;
   strategy_profile: string;
+  fee_tier: string | null;
+  live_wallet_requirement: string | null;
+  requires_post_only_for_live: number | null;
   topic_key: string | null;
   slug_pattern: string | null;
   notes: string | null;
@@ -102,6 +105,7 @@ const LOAD_SQL = `
   SELECT
     c.family_id, c.family_key, c.primary_category, c.regime,
     c.horizon, c.cadence, c.strategy_profile,
+    c.fee_tier, c.live_wallet_requirement, c.requires_post_only_for_live,
     c.topic_key, c.slug_pattern, c.notes,
     r.*
   FROM family_deployments d
@@ -125,6 +129,11 @@ function mapRow(row: RawRow): FamilyRuleBundle {
     horizon: row.horizon,
     cadence: row.cadence,
     strategyProfile: row.strategy_profile as FamilyIdentity["strategyProfile"],
+    feeTier: (row.fee_tier as FamilyIdentity["feeTier"]) ?? null,
+    liveWalletRequirement:
+      (row.live_wallet_requirement as FamilyIdentity["liveWalletRequirement"]) ?? null,
+    requiresPostOnlyForLive:
+      row.requires_post_only_for_live == null ? null : bool(row.requires_post_only_for_live),
     topicKey: row.topic_key,
     slugPattern: row.slug_pattern,
     notes: row.notes,

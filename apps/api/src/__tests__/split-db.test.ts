@@ -125,6 +125,7 @@ describe("API against real split schemas", () => {
     const body = res.json();
     expect(body.ok).toBe(true);
     expect(body.data.runtimeMode).toBe("simulation");
+    expect(body.data.executionTelemetry24h).toBeDefined();
   });
 
   it("GET /families succeeds (control: catalog + rules + evidence; ledger: positions, orders)", async () => {
@@ -134,6 +135,7 @@ describe("API against real split schemas", () => {
     expect(body.ok).toBe(true);
     expect(body.data.length).toBeGreaterThanOrEqual(1);
     expect(body.data[0].familyId).toBe("fam-1");
+    expect(body.data[0].executionTelemetry24h).toBeDefined();
   });
 
   it("GET /families/:id/positions succeeds (ledger: positions)", async () => {
@@ -161,6 +163,28 @@ describe("API against real split schemas", () => {
   it("GET /fills succeeds (ledger-only)", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/fills", headers: auth() });
     expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data.items[0].explicitFeeUsdc).toBe(0.01);
+    expect(body.data.items[0].liquidityRole).toBe("unknown");
+  });
+
+  it("GET /metrics succeeds with execution telemetry aggregates", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/v1/metrics", headers: auth() });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.data.fills.explicitFeesUsdc).toBe(0.01);
+    expect(body.data.fills.unknownCount).toBe(1);
+  });
+
+  it("GET /metrics/families includes family metadata and execution telemetry", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/v1/metrics/families", headers: auth() });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data[0].familyId).toBe("fam-1");
+    expect(body.data[0].familyKey).toBe("test-family");
+    expect(body.data[0].executionTelemetry24h).toBeDefined();
+    expect(body.data[0].executionTelemetry24h.windowHours).toBe(24);
   });
 
   it("GET /discovery/status succeeds (control-only)", async () => {

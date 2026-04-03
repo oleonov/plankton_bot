@@ -19,6 +19,9 @@ import {
   computeGateRecommendation,
   meetsPromotionThresholds,
   isWithinHealthWindow,
+  emptyExecutionTelemetrySnapshot,
+  evaluateExecutionCanaryGate,
+  parseValidationScorecardSummary,
 } from "@plankton/domain";
 import {
   SqliteFamilyCandidateRepository,
@@ -297,6 +300,46 @@ export class ControlEvaluator {
 
     const scorecard = this.scorecardRepo.findLatest(dep.familyId, profile);
     if (!scorecard) return null;
+    const familyPolicy = this.db
+      .prepare(
+        `SELECT primary_category, fee_tier, live_wallet_requirement, requires_post_only_for_live
+         FROM family_catalog
+         WHERE family_id = ?`,
+      )
+      .get(dep.familyId) as
+      | {
+          primary_category: string;
+          fee_tier: string | null;
+          live_wallet_requirement: string | null;
+          requires_post_only_for_live: number | null;
+        }
+      | undefined;
+    const scorecardSummary = parseValidationScorecardSummary(scorecard.summaryJson);
+    const executionCanary = evaluateExecutionCanaryGate({
+      primaryCategory: familyPolicy?.primary_category ?? "other",
+      feeTier: (familyPolicy?.fee_tier as import("@plankton/domain").FeeTier | null | undefined) ?? null,
+      liveWalletRequirement: (familyPolicy?.live_wallet_requirement as
+        | import("@plankton/domain").LiveWalletRequirement
+        | null
+        | undefined) ?? null,
+      requiresPostOnlyForLive:
+        familyPolicy?.requires_post_only_for_live == null
+          ? null
+          : familyPolicy.requires_post_only_for_live === 1,
+      executionTelemetry:
+        scorecardSummary?.executionTelemetry24h ?? emptyExecutionTelemetrySnapshot(),
+    });
+    if (executionCanary.required && !executionCanary.eligible) {
+      this.log.info(
+        {
+          familyId: String(dep.familyId),
+          profile,
+          blockers: executionCanary.blockers.filter((blocker) => !blocker.passed),
+        },
+        "promotion blocked by execution canary",
+      );
+      return null;
+    }
 
     const repricingExits = this.extractRepricingExits(scorecard);
 
@@ -334,6 +377,7 @@ export class ControlEvaluator {
           marketCount: scorecard.marketCount,
           tailAdjustedPnl: scorecard.tailAdjustedPnl,
           evidenceStatus: scorecard.evidenceStatus,
+          executionCanary24h: executionCanary,
         }),
         sourceScorecardId: scorecard.scorecardId,
       },

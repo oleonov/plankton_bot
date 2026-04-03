@@ -12,6 +12,9 @@ function SettingsFormInner({
     initial_balance_usdc?: number | null;
     envelope_json?: string | null;
     risk_caps_json?: string | null;
+    wallet_mode?: "eoa" | "relayer" | null;
+    min_order_usdc?: number | null;
+    relayer_json?: string | null;
   };
   profileId: string;
 }) {
@@ -20,6 +23,11 @@ function SettingsFormInner({
   const [balance, setBalance] = useState(settings.initial_balance_usdc?.toString() ?? "");
   const [envelope, setEnvelope] = useState(settings.envelope_json ?? "");
   const [riskCaps, setRiskCaps] = useState(settings.risk_caps_json ?? "");
+  const [walletMode, setWalletMode] = useState<"eoa" | "relayer">(
+    settings.wallet_mode ?? "eoa",
+  );
+  const [minOrderUsdc, setMinOrderUsdc] = useState(settings.min_order_usdc?.toString() ?? "");
+  const [relayerJson, setRelayerJson] = useState(settings.relayer_json ?? "");
   const [feedback, setFeedback] = useState<FeedbackState>(null);
 
   function handleSave() {
@@ -29,6 +37,9 @@ function SettingsFormInner({
         initialBalanceUsdc: balance ? Number(balance) : undefined,
         envelopeJson: envelope || undefined,
         riskCapsJson: riskCaps || undefined,
+        walletMode,
+        minOrderUsdc: minOrderUsdc ? Number(minOrderUsdc) : undefined,
+        relayerJson: relayerJson || undefined,
       },
       {
         onSuccess: () => setFeedback({ type: "success", message: "Settings saved" }),
@@ -62,6 +73,31 @@ function SettingsFormInner({
           value={riskCaps}
           onChange={(e) => setRiskCaps(e.target.value)}
           placeholder='{"maxDrawdownUsdc": 100, ...}'
+        />
+      </div>
+      <div className="form-field">
+        <label>Wallet Mode</label>
+        <select value={walletMode} onChange={(e) => setWalletMode(e.target.value as "eoa" | "relayer")}>
+          <option value="eoa">EOA</option>
+          <option value="relayer">Relayer</option>
+        </select>
+      </div>
+      <div className="form-field">
+        <label>Min Order (USDC)</label>
+        <input
+          type="number"
+          step="0.01"
+          value={minOrderUsdc}
+          onChange={(e) => setMinOrderUsdc(e.target.value)}
+          placeholder={walletMode === "eoa" ? "3.00" : "2.00"}
+        />
+      </div>
+      <div className="form-field">
+        <label>Relayer JSON</label>
+        <input
+          value={relayerJson}
+          onChange={(e) => setRelayerJson(e.target.value)}
+          placeholder='{"endpoint":"https://...","account":"..."}'
         />
       </div>
       <div>

@@ -445,6 +445,9 @@ export function useUpdateProfileSettings(profileId: string) {
       initialBalanceUsdc?: number;
       envelopeJson?: string;
       riskCapsJson?: string;
+      walletMode?: "eoa" | "relayer";
+      minOrderUsdc?: number;
+      relayerJson?: string;
     }) => apiPut<ProfileSettingsDTO>(`/api/v1/profiles/${profileId}/settings`, body),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["profiles"] });
