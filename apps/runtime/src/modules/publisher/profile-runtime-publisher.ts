@@ -11,7 +11,11 @@ import {
   computeToxicityPenalty,
   evaluateExecutionCanaryGate,
 } from "@plankton/domain";
-import { readFamilyLiveness, SqliteValidationScorecardRepository, withImmediate } from "@plankton/db";
+import {
+  readFamilyLiveness,
+  SqliteValidationScorecardRepository,
+  withImmediate,
+} from "@plankton/db";
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
@@ -64,9 +68,7 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       (familyId) => familyLiveness.get(familyId)?.liveness === "active",
     );
 
-    this.deps.setLiveActiveFamilyAllowlist?.(
-      activeFamilyIds.length > 0 ? activeFamilyIds : null,
-    );
+    this.deps.setLiveActiveFamilyAllowlist?.(activeFamilyIds.length > 0 ? activeFamilyIds : null);
 
     // Phase 1: Read all data OUTSIDE the transaction (no contention)
     const familyMetrics = this.reader.readFamilyMetrics(familyIds);

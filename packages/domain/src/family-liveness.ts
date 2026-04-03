@@ -16,9 +16,7 @@ export function deriveFamilyLiveness(metrics: FamilyLivenessMetrics): FamilyLive
   return "unseen";
 }
 
-export function toFamilyLivenessSnapshot(
-  metrics: FamilyLivenessMetrics,
-): FamilyLivenessSnapshot {
+export function toFamilyLivenessSnapshot(metrics: FamilyLivenessMetrics): FamilyLivenessSnapshot {
   return {
     ...metrics,
     liveness: deriveFamilyLiveness(metrics),
