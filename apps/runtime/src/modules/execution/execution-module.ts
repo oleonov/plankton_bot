@@ -330,8 +330,8 @@ export class ExecutionModule implements RuntimeModule {
     }
 
     // Order accepted
-    const orderId = createOrderId(result.orderId!);
-    const order = this.buildOrder(cmd, "open", result.orderId!);
+    const orderId = createOrderId(result.orderId);
+    const order = this.buildOrder(cmd, "open", result.orderId);
     this.deps.orderRepo.save(order);
 
     this.log.info({ commandId: cmd.commandId, orderId: result.orderId }, "order placed");
