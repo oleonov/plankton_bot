@@ -122,7 +122,9 @@ function createMockFillRepo(): FillRepository {
   };
 }
 
-function createMockRulesProvider(identityOverrides: Record<string, unknown> = {}): FamilyRulesProvider {
+function createMockRulesProvider(
+  identityOverrides: Record<string, unknown> = {},
+): FamilyRulesProvider {
   return {
     getRule: vi.fn().mockReturnValue({
       identity: {

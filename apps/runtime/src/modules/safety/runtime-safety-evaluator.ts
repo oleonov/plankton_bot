@@ -54,7 +54,10 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
   private readonly bus: EventBus;
   private readonly log: Logger;
   private readonly sc: ScoreComputer;
-  private readonly executionTelemetryReader: Pick<ValidationMetricsReader, "readExecutionTelemetry">;
+  private readonly executionTelemetryReader: Pick<
+    ValidationMetricsReader,
+    "readExecutionTelemetry"
+  >;
   private readonly deploymentRepo: FamilyDeploymentRepository;
   private readonly stateTransitionRepo: StateTransitionRepository;
   private readonly familyStateRepo: FamilyStateRepository;
@@ -282,7 +285,8 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     const now = new Date().toISOString();
     const runtimeMode: RuntimeMode =
       toMode === OperatorMode.Quarantine ? "quarantine" : "reduce-only";
-    const previousState = this.familyEvidenceRepo.getEvidence(familyId)?.promotionState ?? fallbackFromState;
+    const previousState =
+      this.familyEvidenceRepo.getEvidence(familyId)?.promotionState ?? fallbackFromState;
 
     this.deploymentRepo.updateOperatorMode(
       familyId,
@@ -337,9 +341,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     if (!executionCanary.required || executionCanary.eligible) return false;
     return executionCanary.blockers.some(
       (blocker) =>
-        !blocker.passed &&
-        blocker.metric !== "24h fills" &&
-        blocker.metric !== "Maker ratio %",
+        !blocker.passed && blocker.metric !== "24h fills" && blocker.metric !== "Maker ratio %",
     );
   }
 
@@ -348,9 +350,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
   }): string {
     const failures = executionCanary.blockers.filter(
       (blocker) =>
-        !blocker.passed &&
-        blocker.metric !== "24h fills" &&
-        blocker.metric !== "Maker ratio %",
+        !blocker.passed && blocker.metric !== "24h fills" && blocker.metric !== "Maker ratio %",
     );
     const summary = failures
       .map((blocker) => {

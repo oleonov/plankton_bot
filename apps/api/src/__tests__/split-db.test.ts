@@ -177,7 +177,11 @@ describe("API against real split schemas", () => {
   });
 
   it("GET /metrics/families includes family metadata and execution telemetry", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/v1/metrics/families", headers: auth() });
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/families",
+      headers: auth(),
+    });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(true);

@@ -79,7 +79,9 @@ function seedLiveFamily(
       opts.requiresPostOnlyForLive === undefined ? 1 : opts.requiresPostOnlyForLive ? 1 : 0,
     );
   controlDb
-    .prepare("INSERT INTO family_deployments (family_id, profile, enabled) VALUES (?, 'live-lite', 1)")
+    .prepare(
+      "INSERT INTO family_deployments (family_id, profile, enabled) VALUES (?, 'live-lite', 1)",
+    )
     .run(opts.familyId);
 }
 

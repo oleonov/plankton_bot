@@ -75,10 +75,7 @@ export function EvidenceSection({
                   value={executionCanary.eligible ? "pass" : "blocked"}
                 />
                 <EvidenceStat label="Canary Window" value={`${executionCanary.windowHours}h`} />
-                <EvidenceStat
-                  label="Min Fills"
-                  value={executionCanary.minTotalFills}
-                />
+                <EvidenceStat label="Min Fills" value={executionCanary.minTotalFills} />
               </>
             )}
             {showReset && (

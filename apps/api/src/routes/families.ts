@@ -72,7 +72,9 @@ function toFamilyDto(
     feeTier: catalog.fee_tier ?? null,
     liveWalletRequirement: catalog.live_wallet_requirement ?? null,
     requiresPostOnlyForLive:
-      catalog.requires_post_only_for_live == null ? null : catalog.requires_post_only_for_live === 1,
+      catalog.requires_post_only_for_live == null
+        ? null
+        : catalog.requires_post_only_for_live === 1,
     promotionState: promotionState ?? null,
     probeSubstate: probeSubstate ?? null,
     executionTelemetry24h: {

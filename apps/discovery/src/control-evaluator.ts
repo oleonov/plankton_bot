@@ -317,11 +317,13 @@ export class ControlEvaluator {
     const scorecardSummary = parseValidationScorecardSummary(scorecard.summaryJson);
     const executionCanary = evaluateExecutionCanaryGate({
       primaryCategory: familyPolicy?.primary_category ?? "other",
-      feeTier: (familyPolicy?.fee_tier as import("@plankton/domain").FeeTier | null | undefined) ?? null,
-      liveWalletRequirement: (familyPolicy?.live_wallet_requirement as
-        | import("@plankton/domain").LiveWalletRequirement
-        | null
-        | undefined) ?? null,
+      feeTier:
+        (familyPolicy?.fee_tier as import("@plankton/domain").FeeTier | null | undefined) ?? null,
+      liveWalletRequirement:
+        (familyPolicy?.live_wallet_requirement as
+          | import("@plankton/domain").LiveWalletRequirement
+          | null
+          | undefined) ?? null,
       requiresPostOnlyForLive:
         familyPolicy?.requires_post_only_for_live == null
           ? null

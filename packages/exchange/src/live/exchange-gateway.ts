@@ -60,7 +60,11 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private async postMakerOnlyOrder(userOrder: Record<string, unknown>, options: any, orderType: string) {
+  private async postMakerOnlyOrder(
+    userOrder: Record<string, unknown>,
+    options: any,
+    orderType: string,
+  ) {
     const signedOrder = await this.client.createOrder(userOrder, options);
     return this.client.postOrder(signedOrder, orderType, true);
   }

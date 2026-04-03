@@ -118,12 +118,7 @@ describe("RiskEventWriter", () => {
     });
 
     it("ignores non-demotion states", () => {
-      writer.onFamilyDemotionApplied(
-        createFamilyId("fam-1"),
-        "probe-only",
-        "active",
-        "recovered",
-      );
+      writer.onFamilyDemotionApplied(createFamilyId("fam-1"), "probe-only", "active", "recovered");
 
       expect(repo.insert).not.toHaveBeenCalled();
     });

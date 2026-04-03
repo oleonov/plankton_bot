@@ -75,8 +75,7 @@ function FamilyDetail({ family }: { family: FamilyDTO }) {
   const { data: evidence } = useFamilyEvidence(familyId);
   const execution = family.executionTelemetry24h;
   const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
-  const leakagePct =
-    execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
+  const leakagePct = execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
 
   return (
     <tr>
@@ -84,14 +83,17 @@ function FamilyDetail({ family }: { family: FamilyDTO }) {
         {evidence && <EvidenceSection evidence={evidence} familyId={familyId} />}
         <TransitionTimeline familyId={familyId} />
         <div style={{ marginBottom: 12 }}>
-          <div style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}>
+          <div
+            style={{ fontWeight: 700, fontSize: 11, marginBottom: 6, color: "var(--text-muted)" }}
+          >
             Execution (24h)
           </div>
           {execution && execution.totalFills > 0 ? (
             <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontSize: 11 }}>
               <span style={{ color: "var(--blue)", fontWeight: 700 }}>{makerPct}% maker</span>
               <span>
-                {execution.makerFills} maker / {execution.takerFills} taker / {execution.unknownFills} unknown
+                {execution.makerFills} maker / {execution.takerFills} taker /{" "}
+                {execution.unknownFills} unknown
               </span>
               <span>vol ${execution.volumeUsdc.toFixed(2)}</span>
               <span>fees ${execution.explicitFeesUsdc.toFixed(3)}</span>
@@ -169,7 +171,14 @@ function FamilyDetail({ family }: { family: FamilyDTO }) {
                       <td>{o.size.toFixed(2)}</td>
                       <td>${o.price.toFixed(4)}</td>
                       <td>
-                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: 6,
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                          }}
+                        >
                           <Badge value={o.status} />
                           {o.postOnly ? <Badge value="post-only" /> : null}
                         </div>

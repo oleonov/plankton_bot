@@ -272,7 +272,10 @@ async function main(): Promise<void> {
       try {
         envelope = JSON.parse(settingsRow.envelope_json) as Record<string, unknown>;
       } catch (err) {
-        log.warn({ err }, "live-lite profile_settings.envelope_json is invalid — using default caps");
+        log.warn(
+          { err },
+          "live-lite profile_settings.envelope_json is invalid — using default caps",
+        );
       }
     } else {
       log.warn("live-lite profile_settings.envelope_json is empty — using default caps");
@@ -661,12 +664,7 @@ async function main(): Promise<void> {
   });
 
   bus.subscribe("FamilyDemotionApplied", async (ev) => {
-    riskEventWriter.onFamilyDemotionApplied(
-      ev.familyId,
-      ev.previousState,
-      ev.newState,
-      ev.reason,
-    );
+    riskEventWriter.onFamilyDemotionApplied(ev.familyId, ev.previousState, ev.newState, ev.reason);
   });
 
   bus.subscribe("ReconciliationDriftDetected", async ({ details, severity, timestamp }) => {

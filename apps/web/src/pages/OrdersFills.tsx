@@ -191,7 +191,9 @@ export function OrdersFills() {
                     <td>${o.price.toFixed(4)}</td>
                     <td>{o.size.toFixed(2)}</td>
                     <td>
-                      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                      <div
+                        style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
+                      >
                         <Badge value={o.status} />
                         {o.postOnly ? <Badge value="post-only" /> : null}
                       </div>
@@ -288,7 +290,9 @@ export function OrdersFills() {
                   <td>{f.size.toFixed(2)}</td>
                   <td>${f.sizeUsdc.toFixed(2)}</td>
                   <td>
-                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <div
+                      style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
+                    >
                       <Badge value={f.liquidityRole ?? "unknown"} />
                       <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
                         fee ${(f.explicitFeeUsdc ?? f.fee).toFixed(3)}

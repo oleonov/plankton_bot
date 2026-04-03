@@ -1,8 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  parseRelayerConfigJson,
-  resolveRelayerSignatureType,
-} from "../relayer-config.js";
+import { parseRelayerConfigJson, resolveRelayerSignatureType } from "../relayer-config.js";
 
 describe("parseRelayerConfigJson", () => {
   it("parses proxy relayer config with local builder creds", () => {

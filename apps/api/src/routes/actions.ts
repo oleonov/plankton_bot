@@ -30,7 +30,9 @@ function insertCommand(
   return Number(info.lastInsertRowid);
 }
 
-function formatExecutionCanaryBlockers(blockers: Array<{ metric: string; current: number }>): string {
+function formatExecutionCanaryBlockers(
+  blockers: Array<{ metric: string; current: number }>,
+): string {
   return blockers
     .map((blocker) => {
       if (blocker.metric === "24h fills") return `${blocker.current} fills`;
@@ -71,10 +73,11 @@ function assertPromotionExecutionCanary(
   const executionCanary = evaluateExecutionCanaryGate({
     primaryCategory: String(family.primary_category ?? "other"),
     feeTier: (family.fee_tier as import("@plankton/domain").FeeTier | null | undefined) ?? null,
-    liveWalletRequirement: (family.live_wallet_requirement as
-      | import("@plankton/domain").LiveWalletRequirement
-      | null
-      | undefined) ?? null,
+    liveWalletRequirement:
+      (family.live_wallet_requirement as
+        | import("@plankton/domain").LiveWalletRequirement
+        | null
+        | undefined) ?? null,
     requiresPostOnlyForLive:
       family.requires_post_only_for_live == null ? null : family.requires_post_only_for_live === 1,
     executionTelemetry: summary?.executionTelemetry24h ?? emptyExecutionTelemetrySnapshot(),

@@ -111,10 +111,12 @@ function backfillLiveProfileSettings(db: import("better-sqlite3").Database): voi
 function backfillFamilyLivePolicy(db: import("better-sqlite3").Database): void {
   let rows: Array<{ family_id: string; primary_category: string; fee_tier: string | null }>;
   try {
-    rows = db.prepare(
-      `SELECT family_id, primary_category, fee_tier
+    rows = db
+      .prepare(
+        `SELECT family_id, primary_category, fee_tier
        FROM family_catalog`,
-    ).all() as Array<{ family_id: string; primary_category: string; fee_tier: string | null }>;
+      )
+      .all() as Array<{ family_id: string; primary_category: string; fee_tier: string | null }>;
   } catch {
     return;
   }

@@ -54,9 +54,9 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
       sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     });
-    const catalogRows = controlDb
-      .prepare("SELECT * FROM family_catalog")
-      .all() as Array<Record<string, unknown>>;
+    const catalogRows = controlDb.prepare("SELECT * FROM family_catalog").all() as Array<
+      Record<string, unknown>
+    >;
     const catalogMap = new Map(catalogRows.map((row) => [row.family_id, row]));
     const rows = ledgerDb
       .prepare(

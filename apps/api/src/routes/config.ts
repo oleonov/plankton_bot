@@ -220,7 +220,9 @@ function dbFamilyFingerprint(
     catalog["live_wallet_requirement"] ?? null,
     catalog["requires_post_only_for_live"] == null
       ? null
-      : (catalog["requires_post_only_for_live"] ? 1 : 0),
+      : catalog["requires_post_only_for_live"]
+        ? 1
+        : 0,
     catalog["topic_key"] ?? null,
     catalog["slug_pattern"] ?? null,
     catalog["notes"] ?? null,

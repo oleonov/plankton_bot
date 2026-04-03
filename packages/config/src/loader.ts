@@ -42,8 +42,8 @@ function transformFamily(validated: { family_id: string; [k: string]: unknown })
   const identity = transformed["identity"]!;
   const livePolicy = resolveFamilyLiveTradingPolicy({
     primaryCategory: String(identity["primaryCategory"] ?? ""),
-    feeTier: (identity["feeTier"] as "fee-free" | "fee-enabled" | "unknown" | null | undefined) ??
-      null,
+    feeTier:
+      (identity["feeTier"] as "fee-free" | "fee-enabled" | "unknown" | null | undefined) ?? null,
     liveWalletRequirement:
       (identity["liveWalletRequirement"] as "eoa-ok" | "relayer-required" | null | undefined) ??
       null,

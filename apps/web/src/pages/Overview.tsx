@@ -133,10 +133,8 @@ export function Overview() {
   const execution = status.executionTelemetry24h;
   const executionWatch = familyMetrics ? getExecutionWatchFamilies(familyMetrics) : [];
   const topExecutionWatch = executionWatch[0];
-  const makerPct =
-    execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
-  const leakagePct =
-    execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
+  const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
+  const leakagePct = execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
 
   return (
     <div className="page">
@@ -256,9 +254,7 @@ export function Overview() {
         </div>
         <div className="card card-accent-blue">
           <div className="label">Execution Quality</div>
-          <div className="value-lg text-blue">
-            {makerPct != null ? `${makerPct}%` : "—"}
-          </div>
+          <div className="value-lg text-blue">{makerPct != null ? `${makerPct}%` : "—"}</div>
           <div className="value-sm">
             {execution && execution.totalFills > 0
               ? `${execution.makerFills} maker · ${execution.takerFills} taker · ${execution.unknownFills} unknown`

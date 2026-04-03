@@ -79,12 +79,12 @@ function runLiveLiteChecks(
         ORDER BY fd.priority, fd.family_id`,
     )
     .all() as Array<{
-      family_id: string;
-      primary_category: string;
-      fee_tier: string | null;
-      live_wallet_requirement: string | null;
-      requires_post_only_for_live: number | null;
-    }>;
+    family_id: string;
+    primary_category: string;
+    fee_tier: string | null;
+    live_wallet_requirement: string | null;
+    requires_post_only_for_live: number | null;
+  }>;
 
   if (liveLiteGuard.wouldExceedFamilyCount(enabledFamilies.length)) {
     blockers.push({
@@ -154,9 +154,9 @@ function runLiveLiteChecks(
           sql: "SELECT DISTINCT family_id FROM positions WHERE status = 'open'",
           params: [] as string[],
         };
-  const outsidePositions = db
-    .prepare(positionsQuery.sql)
-    .all(...positionsQuery.params) as { family_id: string }[];
+  const outsidePositions = db.prepare(positionsQuery.sql).all(...positionsQuery.params) as {
+    family_id: string;
+  }[];
   for (const row of outsidePositions) {
     blockers.push({
       code: "NON_ALLOWLISTED_POSITION",

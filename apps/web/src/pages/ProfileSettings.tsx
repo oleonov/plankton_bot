@@ -23,9 +23,7 @@ function SettingsFormInner({
   const [balance, setBalance] = useState(settings.initial_balance_usdc?.toString() ?? "");
   const [envelope, setEnvelope] = useState(settings.envelope_json ?? "");
   const [riskCaps, setRiskCaps] = useState(settings.risk_caps_json ?? "");
-  const [walletMode, setWalletMode] = useState<"eoa" | "relayer">(
-    settings.wallet_mode ?? "eoa",
-  );
+  const [walletMode, setWalletMode] = useState<"eoa" | "relayer">(settings.wallet_mode ?? "eoa");
   const [minOrderUsdc, setMinOrderUsdc] = useState(settings.min_order_usdc?.toString() ?? "");
   const [relayerJson, setRelayerJson] = useState(settings.relayer_json ?? "");
   const [feedback, setFeedback] = useState<FeedbackState>(null);
@@ -77,7 +75,10 @@ function SettingsFormInner({
       </div>
       <div className="form-field">
         <label>Wallet Mode</label>
-        <select value={walletMode} onChange={(e) => setWalletMode(e.target.value as "eoa" | "relayer")}>
+        <select
+          value={walletMode}
+          onChange={(e) => setWalletMode(e.target.value as "eoa" | "relayer")}
+        >
           <option value="eoa">EOA</option>
           <option value="relayer">Relayer</option>
         </select>

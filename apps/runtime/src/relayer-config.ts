@@ -87,7 +87,9 @@ function parseBuilderConfig(value: unknown, errors: string[]): RelayerBuilderCon
   return undefined;
 }
 
-export function parseRelayerConfigJson(relayerJson: string | null | undefined): ParsedRelayerConfig {
+export function parseRelayerConfigJson(
+  relayerJson: string | null | undefined,
+): ParsedRelayerConfig {
   if (!relayerJson || relayerJson.trim().length === 0) {
     return { ok: false, errors: ["relayer_json is required when wallet_mode=relayer"] };
   }

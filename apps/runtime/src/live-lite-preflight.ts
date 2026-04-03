@@ -24,9 +24,9 @@ export function liveLitePreflight(
         };
 
   // 1. Open positions with familyId not in allowlist
-  const positionsOutside = db
-    .prepare(positionsQuery.sql)
-    .all(...positionsQuery.params) as { family_id: string }[];
+  const positionsOutside = db.prepare(positionsQuery.sql).all(...positionsQuery.params) as {
+    family_id: string;
+  }[];
 
   for (const row of positionsOutside) {
     violations.push(`open position with non-allowlisted family: ${row.family_id}`);
@@ -44,9 +44,9 @@ export function liveLitePreflight(
         };
 
   // 2. Open orders with familyId not in allowlist
-  const ordersOutside = db
-    .prepare(ordersQuery.sql)
-    .all(...ordersQuery.params) as { family_id: string }[];
+  const ordersOutside = db.prepare(ordersQuery.sql).all(...ordersQuery.params) as {
+    family_id: string;
+  }[];
 
   for (const row of ordersOutside) {
     violations.push(`open order with non-allowlisted family: ${row.family_id}`);

@@ -253,7 +253,9 @@ describe("GET /status", () => {
     const body = json(res);
 
     expect(body.ok).toBe(true);
-    const updatedOrder = body.data.items.find((item: { orderId: string }) => item.orderId === "ord-1");
+    const updatedOrder = body.data.items.find(
+      (item: { orderId: string }) => item.orderId === "ord-1",
+    );
     expect(updatedOrder?.postOnly).toBe(true);
   });
 
@@ -445,9 +447,7 @@ describe("GET /status", () => {
       expect(telemetry.makerRatio).toBe(0.5);
       expect(telemetry.feeLeakageRatio).toBeCloseTo(0.25 / 15, 6);
     } finally {
-      conn.db.exec(
-        "DELETE FROM fills WHERE fill_id IN ('fill-maker-24h', 'fill-taker-24h')",
-      );
+      conn.db.exec("DELETE FROM fills WHERE fill_id IN ('fill-maker-24h', 'fill-taker-24h')");
     }
   });
 
