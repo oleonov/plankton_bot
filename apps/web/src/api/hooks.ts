@@ -25,6 +25,7 @@ import type {
   SwitchResponse,
   ControlOverviewDTO,
   TradingActivitySnapshot,
+  FamilyListResponse,
 } from "./types.ts";
 
 function withParams(
@@ -181,7 +182,20 @@ export function useFills(filters: FillFilters = {}) {
 export function useFamilies() {
   return useQuery({
     queryKey: ["families"],
-    queryFn: () => apiFetch<FamilyDTO[]>("/api/v1/families"),
+    queryFn: async () => {
+      const res = await apiFetch<FamilyListResponse>("/api/v1/families");
+      return res.items;
+    },
+  });
+}
+
+export function useFamiliesScoped(scope: "profile" | "all") {
+  return useQuery({
+    queryKey: ["families-scoped", scope],
+    queryFn: () =>
+      apiFetch<FamilyListResponse>(
+        withParams("/api/v1/families", { scope }),
+      ),
   });
 }
 

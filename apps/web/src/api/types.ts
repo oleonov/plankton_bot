@@ -220,6 +220,23 @@ export interface FamilyDTO {
     maxActiveMarkets: number;
     maxDustPositions: number;
   } | null;
+  deployment: {
+    enabled: boolean;
+    operatorMode: string;
+    deploymentStage: string;
+    priority: number;
+  } | null;
+}
+
+export interface FamilyListMeta {
+  scope: "profile" | "all";
+  profile: string | null;
+  totalCatalogCount: number;
+}
+
+export interface FamilyListResponse {
+  items: FamilyDTO[];
+  meta: FamilyListMeta;
 }
 
 /** GET /risk-events item */
