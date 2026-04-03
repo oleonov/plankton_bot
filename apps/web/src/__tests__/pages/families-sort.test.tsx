@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { screen, within } from "@testing-library/react";
+import { fireEvent, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "../../test/server.ts";
@@ -146,10 +146,15 @@ function getFamilyKeys(): string[] {
     .filter(Boolean);
 }
 
+function getSortHeader(label: string): HTMLElement {
+  return screen.getByRole("columnheader", {
+    name: new RegExp(`^${label}(?: [\\u25B2\\u25BC])?$`),
+  });
+}
+
 describe("Families table sorting", () => {
   it("sorts by Tail Cost ascending then descending", async () => {
     setup();
-    const user = userEvent.setup();
     renderWithProviders(<Families />);
 
     await screen.findByText(/alpha/);
@@ -158,36 +163,34 @@ describe("Families table sorting", () => {
     expect(getFamilyKeys()).toEqual(["alpha", "beta", "gamma"]);
 
     // Click Tail Cost → asc (0, 5, 10)
-    await user.click(screen.getByText("Tail Cost"));
+    fireEvent.click(getSortHeader("Tail Cost"));
     expect(getFamilyKeys()).toEqual(["gamma", "beta", "alpha"]);
 
     // Click again → desc (10, 5, 0)
-    await user.click(screen.getByText(/Tail Cost/));
+    fireEvent.click(getSortHeader("Tail Cost"));
     expect(getFamilyKeys()).toEqual(["alpha", "beta", "gamma"]);
   });
 
   it("sorts by Tail-Adj PnL ascending", async () => {
     setup();
-    const user = userEvent.setup();
     renderWithProviders(<Families />);
 
     await screen.findByText(/alpha/);
 
     // Click Tail-Adj PnL → asc (-5, -2, 8)
-    await user.click(screen.getByText("Tail-Adj PnL"));
+    fireEvent.click(getSortHeader("Tail-Adj PnL"));
     expect(getFamilyKeys()).toEqual(["gamma", "alpha", "beta"]);
   });
 
   it("third click resets to original order", async () => {
     setup();
-    const user = userEvent.setup();
     renderWithProviders(<Families />);
 
     await screen.findByText(/alpha/);
 
-    await user.click(screen.getByText("Positions"));
-    await user.click(screen.getByText(/Positions/));
-    await user.click(screen.getByText(/Positions/));
+    fireEvent.click(getSortHeader("Positions"));
+    fireEvent.click(getSortHeader("Positions"));
+    fireEvent.click(getSortHeader("Positions"));
 
     // Back to original
     expect(getFamilyKeys()).toEqual(["alpha", "beta", "gamma"]);
@@ -195,16 +198,14 @@ describe("Families table sorting", () => {
 
   it("shows sort indicator on active column", async () => {
     setup();
-    const user = userEvent.setup();
     renderWithProviders(<Families />);
 
     await screen.findByText(/alpha/);
 
-    const header = screen.getByText("Markets");
-    await user.click(header);
+    fireEvent.click(getSortHeader("Markets"));
     expect(screen.getByText(/Markets \u25B2/)).toBeInTheDocument();
 
-    await user.click(screen.getByText(/Markets/));
+    fireEvent.click(getSortHeader("Markets"));
     expect(screen.getByText(/Markets \u25BC/)).toBeInTheDocument();
   });
 
