@@ -105,6 +105,9 @@ describe("SqliteProfileSettingsRepository", () => {
       initialBalanceUsdc: 10000,
       envelopeJson: '{"max": 500}',
       riskCapsJson: null,
+      walletMode: null,
+      minOrderUsdc: null,
+      relayerJson: null,
       updatedAt: NOW,
     };
     repo.save(settings);

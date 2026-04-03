@@ -7,6 +7,20 @@ import { runMigrations } from "./migrations/runner.js";
 export function bootstrapDatabase(dbPath: string): DbConnection {
   const conn = openDatabase(dbPath);
   runMigrations(conn.db);
+  safeAddColumn(conn.db, "family_catalog", "fee_tier", "TEXT NOT NULL DEFAULT 'unknown'");
+  safeAddColumn(
+    conn.db,
+    "family_catalog",
+    "live_wallet_requirement",
+    "TEXT NOT NULL DEFAULT 'relayer-required'",
+  );
+  safeAddColumn(
+    conn.db,
+    "family_catalog",
+    "requires_post_only_for_live",
+    "INTEGER NOT NULL DEFAULT 1",
+  );
+  backfillFamilyLivePolicy(conn.db);
   return conn;
 }
 
@@ -140,7 +154,8 @@ function safeAddColumn(
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "";
-    if (!msg.includes("duplicate column")) throw err;
+    if (msg.includes("duplicate column") || msg.includes("no such table")) return;
+    throw err;
   }
 }
 

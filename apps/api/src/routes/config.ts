@@ -179,15 +179,21 @@ const RULES_UPDATE_SQL = `
 /** Build a deterministic fingerprint of catalog + rules for change detection. */
 function familyFingerprint(family: FamilyConfig): string {
   const id = family.identity;
+  const policy = resolveFamilyLiveTradingPolicy({
+    primaryCategory: id.primaryCategory,
+    feeTier: id.feeTier ?? null,
+    liveWalletRequirement: id.liveWalletRequirement ?? null,
+    requiresPostOnlyForLive: id.requiresPostOnlyForLive ?? null,
+  });
   const catalogFields = [
     id.primaryCategory,
     id.regime,
     id.horizon,
     id.cadence,
     id.strategyProfile,
-    id.feeTier ?? null,
-    id.liveWalletRequirement ?? null,
-    id.requiresPostOnlyForLive ?? null,
+    policy.feeTier,
+    policy.liveWalletRequirement,
+    policy.requiresPostOnlyForLive ? 1 : 0,
     id.topicKey ?? null,
     id.slugPattern ?? null,
     id.notes ?? null,

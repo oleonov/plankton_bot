@@ -75,9 +75,6 @@ beforeAll(async () => {
       PRIMARY KEY (family_id, profile)
     )
   `);
-  db.exec(`ALTER TABLE family_catalog ADD COLUMN fee_tier TEXT`);
-  db.exec(`ALTER TABLE family_catalog ADD COLUMN live_wallet_requirement TEXT`);
-  db.exec(`ALTER TABLE family_catalog ADD COLUMN requires_post_only_for_live INTEGER`);
   const now = new Date().toISOString();
 
   // Seed candidate for accept tests

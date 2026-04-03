@@ -95,9 +95,6 @@ beforeAll(async () => {
       PRIMARY KEY (family_id, profile)
     )
   `);
-  conn.db.exec(`ALTER TABLE family_catalog ADD COLUMN fee_tier TEXT`);
-  conn.db.exec(`ALTER TABLE family_catalog ADD COLUMN live_wallet_requirement TEXT`);
-  conn.db.exec(`ALTER TABLE family_catalog ADD COLUMN requires_post_only_for_live INTEGER`);
   app = await buildServer({
     config: testConfig(),
     controlDb: conn.db,
