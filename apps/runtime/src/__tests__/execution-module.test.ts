@@ -287,6 +287,34 @@ describe("ExecutionModule", () => {
     await mod.stop();
   });
 
+  it("treats gateway success without order id as rejection", async () => {
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: true,
+      orderId: "",
+    });
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].errorCode).toBe("UNKNOWN");
+    expect(rejected[0].reason).toContain("without order id");
+
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
+    expect(savedOrder.status).toBe("rejected");
+    expect(savedOrder.exchangeOrderId).toBeNull();
+
+    await mod.stop();
+  });
+
   // ─── Deduplication ────────────────────────────────────────────────
 
   it("skips duplicate commandId (idempotency)", async () => {

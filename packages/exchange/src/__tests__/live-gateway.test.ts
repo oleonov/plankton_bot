@@ -99,6 +99,25 @@ describe("LiveExchangeGateway", () => {
     expect(result.errorCode).toBe("INSUFFICIENT_BALANCE");
   });
 
+  it("placeOrder rejects empty SDK success payload without order id", async () => {
+    client.createAndPostOrder.mockResolvedValue({});
+
+    const result = await gw.placeOrder({
+      clientOrderId: "cloid-1",
+      tokenId: createTokenId("tok-1"),
+      side: "buy",
+      size: 100,
+      price: 0.5,
+      orderType: "GTC",
+      tickSize: 0.01,
+      negRisk: false,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.errorCode).toBe("UNKNOWN");
+    expect(result.errorMessage).toContain("no order id");
+  });
+
   it("cancelOrder calls SDK cancelOrder", async () => {
     client.cancelOrder.mockResolvedValue({});
 

@@ -57,9 +57,16 @@ export class LiveExchangeGateway implements ExchangeGateway {
       const result = params.postOnly
         ? await this.postMakerOnlyOrder(userOrder, options, params.orderType)
         : await this.client.createAndPostOrder(userOrder, options, params.orderType);
-      const orderId = result?.orderID ?? result?.id ?? "";
+      const orderId = extractOrderId(result);
+      if (!orderId) {
+        return {
+          success: false,
+          errorCode: "UNKNOWN",
+          errorMessage: "exchange returned no order id",
+        };
+      }
 
-      return { success: true, orderId: String(orderId) };
+      return { success: true, orderId };
     } catch (err) {
       const { code, message } = classifyError(err);
       return { success: false, errorCode: code, errorMessage: message };
@@ -167,4 +174,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
 function extractArray(raw: any): Array<Record<string, unknown>> {
   if (Array.isArray(raw)) return raw;
   return raw?.data ?? raw?.orders ?? raw?.trades ?? [];
+}
+
+function extractOrderId(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+
+  const candidate = Reflect.get(raw, "orderID") ?? Reflect.get(raw, "id");
+  if (typeof candidate !== "string") return null;
+
+  const orderId = candidate.trim();
+  return orderId.length > 0 ? orderId : null;
 }

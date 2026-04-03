@@ -309,6 +309,26 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    if (!result.orderId || result.orderId.trim().length === 0) {
+      this.log.error(
+        { commandId: cmd.commandId },
+        "gateway reported success without order id -- treating as rejection",
+      );
+
+      const rejectedOrder = this.buildOrder(cmd, "rejected", null);
+      this.deps.orderRepo.save(rejectedOrder);
+
+      await this.deps.bus.publish("OrderRejected", {
+        commandId: cmd.commandId,
+        clientOrderId: cmd.clientOrderId,
+        reason: "gateway returned success without order id",
+        errorCode: ExchangeErrorCode.Unknown,
+        familyId: cmd.familyId,
+        timestamp: now,
+      });
+      return;
+    }
+
     // Order accepted
     const orderId = createOrderId(result.orderId!);
     const order = this.buildOrder(cmd, "open", result.orderId!);
