@@ -92,6 +92,37 @@ export class SqlitePromotionProposalRepository implements PromotionProposalRepos
     return row !== undefined;
   }
 
+  hasDismissedSince(familyId: FamilyId, cutoffIso: string, profile?: ProfileId | null): boolean {
+    if (profile != null) {
+      const row = this.db
+        .prepare(
+          `SELECT 1
+           FROM promotion_proposals
+           WHERE family_id = ?
+             AND profile = ?
+             AND status = 'dismissed'
+             AND resolved_at IS NOT NULL
+             AND julianday(resolved_at) >= julianday(?)
+           LIMIT 1`,
+        )
+        .get(familyId, profile, cutoffIso);
+      return row !== undefined;
+    }
+
+    const row = this.db
+      .prepare(
+        `SELECT 1
+         FROM promotion_proposals
+         WHERE family_id = ?
+           AND status = 'dismissed'
+           AND resolved_at IS NOT NULL
+           AND julianday(resolved_at) >= julianday(?)
+         LIMIT 1`,
+      )
+      .get(familyId, cutoffIso);
+    return row !== undefined;
+  }
+
   resolve(id: number, status: string, resolvedBy: string): void {
     this.db
       .prepare(

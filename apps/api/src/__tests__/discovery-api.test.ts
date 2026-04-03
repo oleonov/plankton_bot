@@ -540,8 +540,8 @@ describe("POST /actions/family/:id/promote", () => {
     ).run(familyId);
     db.prepare(
       `INSERT INTO promotion_proposals
-         (family_id, current_state, proposed_state, reason, scores_snapshot, status, created_at)
-       VALUES (?, 'probe-only', 'scaled', 'auto-promo', '{}', 'pending', ?)`,
+         (family_id, profile, current_state, proposed_state, reason, scores_snapshot, status, created_at)
+       VALUES (?, 'live-lite', 'probe-only', 'scaled', 'auto-promo', '{}', 'pending', ?)`,
     ).run(familyId, now);
     db.prepare(
       `INSERT INTO family_validation_scorecards
@@ -551,7 +551,7 @@ describe("POST /actions/family/:id/promote", () => {
           both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
           summary_json, validated_at)
        VALUES (
-         'sc-disc-promote-block', ?, 'simulation', 'confirmed', 0.7,
+         'sc-disc-promote-block', ?, 'live-lite', 'confirmed', 0.7,
          0.6, 0.6, 0.5, 0.1,
          25, 7, 4, 3,
          0, 0, NULL,
@@ -561,7 +561,7 @@ describe("POST /actions/family/:id/promote", () => {
     ).run(familyId, now);
     db.prepare(
       `INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
-       VALUES (?, 'simulation', 'sc-disc-promote-block')
+       VALUES (?, 'live-lite', 'sc-disc-promote-block')
        ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id`,
     ).run(familyId);
 

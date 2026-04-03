@@ -4,6 +4,7 @@ import type Database from "better-sqlite3";
 import {
   emptyExecutionTelemetrySnapshot,
   evaluateExecutionCanaryGate,
+  isPromotionBlockedByExecutionCanary,
   parseValidationScorecardSummary,
 } from "@plankton/domain";
 import { ok, ApiError } from "../errors.js";
@@ -83,7 +84,14 @@ function assertPromotionExecutionCanary(
     executionTelemetry: summary?.executionTelemetry24h ?? emptyExecutionTelemetrySnapshot(),
   });
 
-  if (!executionCanary.required || executionCanary.eligible) return;
+  if (
+    !isPromotionBlockedByExecutionCanary(
+      profile as import("@plankton/domain").ProfileId,
+      executionCanary,
+    )
+  ) {
+    return;
+  }
 
   const failed = executionCanary.blockers.filter((blocker) => !blocker.passed);
   const detail = formatExecutionCanaryBlockers(

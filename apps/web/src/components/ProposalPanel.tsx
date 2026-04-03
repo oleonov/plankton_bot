@@ -6,7 +6,8 @@ import {
   useStatus,
   useFamilyEvidence,
 } from "../api/hooks.ts";
-import { SCALED_DEFAULTS } from "@plankton/domain";
+import { SCALED_DEFAULTS, isPromotionBlockedByExecutionCanary } from "@plankton/domain";
+import type { ProfileId } from "@plankton/domain";
 import { ScoreBars } from "./ScoreBars.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { ConfirmAction } from "./ConfirmAction.tsx";
@@ -34,6 +35,7 @@ function ProposalRow({
   proposal: {
     id: number;
     familyId: string;
+    profile: string | null;
     currentState: string;
     proposedState: string;
     reason: string;
@@ -49,7 +51,11 @@ function ProposalRow({
   const runtimeMode = statusData?.runtimeMode;
   const caps = useCapsEditor(SCALED_DEFAULTS);
   const executionCanary = evidence?.executionCanary24h;
-  const approvalBlocked = executionCanary?.required === true && executionCanary.eligible === false;
+  const hasExecutionWarning =
+    executionCanary?.required === true && executionCanary.eligible === false;
+  const approvalBlocked =
+    executionCanary != null &&
+    isPromotionBlockedByExecutionCanary(proposal.profile as ProfileId | null, executionCanary);
 
   return (
     <div
@@ -69,10 +75,10 @@ function ProposalRow({
         <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
           {proposal.reason}
         </div>
-        {approvalBlocked && executionCanary ? (
+        {hasExecutionWarning && executionCanary ? (
           <PromotionBlockers
             blockers={executionCanary.blockers}
-            title={`Approve Blocked (${executionCanary.windowHours}h execution canary)`}
+            title={`${approvalBlocked ? "Approve Blocked" : "Execution Warning"} (${executionCanary.windowHours}h execution canary)`}
           />
         ) : null}
         {promote.isError ? (

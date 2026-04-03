@@ -1,3 +1,5 @@
+import { ProfileId } from "./enums.js";
+import type { ProfileId as RuntimeProfileId } from "./enums.js";
 import { resolveFamilyLiveTradingPolicy } from "./live-trading-policy.js";
 import type { FamilyLiveTradingPolicyInput } from "./live-trading-policy.js";
 import type { PromotionBlocker } from "./promotion-blockers.js";
@@ -34,6 +36,23 @@ export interface ValidationScorecardSummary {
 export interface EvaluateExecutionCanaryGateInput extends FamilyLiveTradingPolicyInput {
   executionTelemetry: ExecutionTelemetrySnapshot;
   minTotalFills?: number;
+}
+
+export function shouldEnforcePromotionExecutionCanary(
+  profile: RuntimeProfileId | null | undefined,
+): boolean {
+  return profile === ProfileId.LiveLite;
+}
+
+export function isPromotionBlockedByExecutionCanary(
+  profile: RuntimeProfileId | null | undefined,
+  executionCanary: ExecutionCanaryGate,
+): boolean {
+  return (
+    shouldEnforcePromotionExecutionCanary(profile) &&
+    executionCanary.required &&
+    !executionCanary.eligible
+  );
 }
 
 export function emptyExecutionTelemetrySnapshot(): ExecutionTelemetrySnapshot {

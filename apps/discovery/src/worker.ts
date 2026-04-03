@@ -4,9 +4,11 @@ import { bootstrapControlDb, SqliteDiscoveryRunRepository } from "@plankton/db";
 import { ScanService } from "./scan-service.js";
 import { ControlEvaluator } from "./control-evaluator.js";
 import { loadDiscoveryEnv, getControlDbPath, createDiscoveryGateway } from "./gateway-factory.js";
+import {
+  DISCOVERY_SCAN_INTERVAL_MS,
+  PROMOTION_EVALUATION_INTERVAL_MS,
+} from "./promotion-policy.js";
 
-const SCHEDULE_INTERVAL_MS = 60 * 60 * 1000;
-const EVAL_INTERVAL_MS = 60 * 60 * 1000; // 1 hour, offset from scan
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const STALE_THRESHOLD_MS = 2 * 60_000;
 const POLL_INTERVAL_MS = 5_000;
@@ -31,7 +33,8 @@ async function main(): Promise<void> {
   // Initial scan if no recent success
   const lastSuccess = runRepo.findLastSuccessful();
   const needsInitial =
-    !lastSuccess || Date.now() - new Date(lastSuccess.finishedAt!).getTime() > SCHEDULE_INTERVAL_MS;
+    !lastSuccess ||
+    Date.now() - new Date(lastSuccess.finishedAt!).getTime() > DISCOVERY_SCAN_INTERVAL_MS;
   if (needsInitial) {
     try {
       runRepo.enqueue("startup", "worker");
@@ -64,7 +67,7 @@ async function main(): Promise<void> {
     } catch {
       /* active run already exists */
     }
-  }, SCHEDULE_INTERVAL_MS);
+  }, DISCOVERY_SCAN_INTERVAL_MS);
 
   // Periodic stale check — catches runs orphaned by deploy restarts
   const staleCheckTimer = setInterval(() => {
@@ -86,7 +89,7 @@ async function main(): Promise<void> {
 
   // Run initial evaluation, then on a timer
   runEvaluation();
-  const evalTimer = setInterval(runEvaluation, EVAL_INTERVAL_MS);
+  const evalTimer = setInterval(runEvaluation, PROMOTION_EVALUATION_INTERVAL_MS);
 
   // Poll loop
   let executing = false;
@@ -148,7 +151,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 
-  logger.info("Worker running. Poll 5s, scan schedule 1h, eval 1h, idle heartbeat 30s.");
+  logger.info("Worker running. Poll 5s, scan schedule 1h, promotion eval 5m, idle heartbeat 30s.");
 }
 
 main().catch((err) => {

@@ -3,24 +3,31 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { createFamilyId } from "@plankton/domain";
+import { createFamilyId, ProfileId as Profiles } from "@plankton/domain";
 import type { ProfileId } from "@plankton/domain";
 import { bootstrapControlDb, type DbConnection } from "@plankton/db";
 import { ControlEvaluator } from "../control-evaluator.js";
+import { DISMISSED_PROPOSAL_COOLDOWN_MS } from "../promotion-policy.js";
 
 const PROFILE_SIM = "simulation" as ProfileId;
+const PROFILE_PAPER = Profiles.Paper;
+const PROFILE_LIVE = Profiles.LiveLite;
 const FAMILY_1 = createFamilyId("fam-1");
 const CANDIDATE_ID = "cand-fam-1";
 const NOW = "2026-03-30T12:00:00.000Z";
 
 const silentLogger = pino({ level: "silent" });
 
-function seedProfile(conn: DbConnection): void {
+function seedProfile(
+  conn: DbConnection,
+  profileId: ProfileId = PROFILE_SIM,
+  displayName: string = "Simulation",
+): void {
   conn.db
     .prepare(
       "INSERT INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, ?, ?)",
     )
-    .run(PROFILE_SIM, "Simulation", "Sim profile", NOW);
+    .run(profileId, displayName, `${displayName} profile`, NOW);
 }
 
 function seedFamily(conn: DbConnection): void {
@@ -94,14 +101,18 @@ function seedObservations(conn: DbConnection): void {
   }
 }
 
-function seedDeployment(conn: DbConnection, stage: string = "probe-only"): void {
+function seedDeployment(
+  conn: DbConnection,
+  stage: string = "probe-only",
+  profile: ProfileId = PROFILE_SIM,
+): void {
   conn.db
     .prepare(
       `INSERT INTO family_deployments
      (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
      VALUES (?, ?, 1, 'active', ?, 'live-probe', 1, ?, ?)`,
     )
-    .run(FAMILY_1, PROFILE_SIM, stage, NOW, NOW);
+    .run(FAMILY_1, profile, stage, NOW, NOW);
 }
 
 function seedScorecard(
@@ -114,6 +125,7 @@ function seedScorecard(
     tailAdjustedPnl: number;
     summaryJson: string | null;
   }>,
+  profile: ProfileId = PROFILE_SIM,
 ): string {
   const scorecardId = `sc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const defaults = {
@@ -158,7 +170,7 @@ function seedScorecard(
     .run(
       scorecardId,
       FAMILY_1,
-      PROFILE_SIM,
+      profile,
       vals.recycleScore,
       vals.toxicityPenalty,
       vals.tradeCount,
@@ -174,7 +186,7 @@ function seedScorecard(
      VALUES (?, ?, ?)
      ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id`,
     )
-    .run(FAMILY_1, PROFILE_SIM, scorecardId);
+    .run(FAMILY_1, profile, scorecardId);
 
   return scorecardId;
 }
@@ -304,35 +316,81 @@ describe("ControlEvaluator", () => {
       expect(stats.proposalsCreated).toBe(0);
     });
 
-    it("does not propose when execution canary fails for fee-enabled families", () => {
+    it("still proposes in paper mode when execution canary fails", () => {
       seedCandidate(conn);
-      seedDeployment(conn, "probe-only");
-      seedScorecard(conn, {
-        summaryJson: JSON.stringify({
-          repricingExits: 3,
-          executionTelemetry24h: {
-            totalFills: 12,
-            volumeUsdc: 18,
-            makerFills: 10,
-            takerFills: 2,
-            unknownFills: 0,
-            makerRatio: 10 / 12,
-            takerRatio: 2 / 12,
-            explicitFeesUsdc: 0.1,
-            feeLeakageRatio: 0.0055,
-            lastFillAt: NOW,
-          },
-          executionCanary24h: {
-            required: true,
-            eligible: false,
-            minTotalFills: 10,
-            blockers: [
-              { metric: "Taker fills", current: 2, required: 0, passed: false },
-              { metric: "Explicit fees (USDC)", current: 0.1, required: 0, passed: false },
-            ],
-          },
-        }),
-      });
+      seedProfile(conn, PROFILE_PAPER, "Paper");
+      seedDeployment(conn, "probe-only", PROFILE_PAPER);
+      seedScorecard(
+        conn,
+        {
+          summaryJson: JSON.stringify({
+            repricingExits: 3,
+            executionTelemetry24h: {
+              totalFills: 12,
+              volumeUsdc: 18,
+              makerFills: 10,
+              takerFills: 2,
+              unknownFills: 0,
+              makerRatio: 10 / 12,
+              takerRatio: 2 / 12,
+              explicitFeesUsdc: 0.1,
+              feeLeakageRatio: 0.0055,
+              lastFillAt: NOW,
+            },
+            executionCanary24h: {
+              required: true,
+              eligible: false,
+              minTotalFills: 10,
+              blockers: [
+                { metric: "Taker fills", current: 2, required: 0, passed: false },
+                { metric: "Explicit fees (USDC)", current: 0.1, required: 0, passed: false },
+              ],
+            },
+          }),
+        },
+        PROFILE_PAPER,
+      );
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+      const stats = evaluator.run();
+
+      expect(stats.proposalsCreated).toBe(1);
+    });
+
+    it("does not propose in live-lite when execution canary fails", () => {
+      seedCandidate(conn);
+      seedProfile(conn, PROFILE_LIVE, "Live-Lite");
+      seedDeployment(conn, "probe-only", PROFILE_LIVE);
+      seedScorecard(
+        conn,
+        {
+          summaryJson: JSON.stringify({
+            repricingExits: 3,
+            executionTelemetry24h: {
+              totalFills: 12,
+              volumeUsdc: 18,
+              makerFills: 10,
+              takerFills: 2,
+              unknownFills: 0,
+              makerRatio: 10 / 12,
+              takerRatio: 2 / 12,
+              explicitFeesUsdc: 0.1,
+              feeLeakageRatio: 0.0055,
+              lastFillAt: NOW,
+            },
+            executionCanary24h: {
+              required: true,
+              eligible: false,
+              minTotalFills: 10,
+              blockers: [
+                { metric: "Taker fills", current: 2, required: 0, passed: false },
+                { metric: "Explicit fees (USDC)", current: 0.1, required: 0, passed: false },
+              ],
+            },
+          }),
+        },
+        PROFILE_LIVE,
+      );
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
       const stats = evaluator.run();
@@ -359,6 +417,47 @@ describe("ControlEvaluator", () => {
       const stats = evaluator.run();
 
       expect(stats.proposalsCreated).toBe(0);
+    });
+
+    it("suppresses recently dismissed proposals until cooldown expires", () => {
+      seedProfile(conn, PROFILE_PAPER, "Paper");
+      seedDeployment(conn, "probe-only", PROFILE_PAPER);
+      seedScorecard(conn, undefined, PROFILE_PAPER);
+
+      const firstRun = new ControlEvaluator({
+        db: conn.db,
+        log: silentLogger,
+        now: () => new Date("2026-03-30T12:00:00.000Z"),
+        dismissCooldownMs: DISMISSED_PROPOSAL_COOLDOWN_MS,
+      });
+      expect(firstRun.run().proposalsCreated).toBe(1);
+
+      const proposal = conn.db
+        .prepare("SELECT id FROM promotion_proposals WHERE family_id = ? AND profile = ?")
+        .get(FAMILY_1, PROFILE_PAPER) as { id: number };
+      conn.db
+        .prepare(
+          `UPDATE promotion_proposals
+           SET status = 'dismissed', resolved_at = ?, resolved_by = 'operator'
+           WHERE id = ?`,
+        )
+        .run("2026-03-30T12:05:00.000Z", proposal.id);
+
+      const withinCooldown = new ControlEvaluator({
+        db: conn.db,
+        log: silentLogger,
+        now: () => new Date("2026-03-30T12:30:00.000Z"),
+        dismissCooldownMs: DISMISSED_PROPOSAL_COOLDOWN_MS,
+      });
+      expect(withinCooldown.run().proposalsCreated).toBe(0);
+
+      const afterCooldown = new ControlEvaluator({
+        db: conn.db,
+        log: silentLogger,
+        now: () => new Date("2026-03-30T13:10:00.000Z"),
+        dismissCooldownMs: DISMISSED_PROPOSAL_COOLDOWN_MS,
+      });
+      expect(afterCooldown.run().proposalsCreated).toBe(1);
     });
   });
 

@@ -20,6 +20,7 @@ function fail(status: number, code: string, message: string) {
 const proposal = {
   id: 11,
   familyId: "btc-updown-4h:directional-updown:intraday-4h",
+  profile: "live-lite",
   currentState: "probe-only",
   proposedState: "scaled",
   reason: "Auto: recycle=0.87, toxicity=0.00, trades=37",
@@ -84,6 +85,54 @@ describe("ProposalPanel", () => {
     expect(screen.getByRole("button", { name: "Blocked" })).toBeDisabled();
     expect(screen.getByText("Maker ratio %")).toBeInTheDocument();
     expect(screen.getByText("Unknown fills")).toBeInTheDocument();
+  });
+
+  it("keeps approve enabled in paper mode while surfacing execution warnings", async () => {
+    setupProposalPanel({
+      familyId: proposal.familyId,
+      evidenceStatus: "confirmed",
+      evidenceScore: 0.8,
+      promotionState: "probe-only",
+      localTradeCount: 37,
+      localMarketCount: 6,
+      localRealizedPnlFifo: 4,
+      openTailCostUsdc: 1,
+      tailAdjustedPnl: 3,
+      remoteClosedRealizedPnl: null,
+      openPositionCount: 1,
+      openDustCount: 0,
+      bothSidedEligible: false,
+      heavyCampaignEligible: false,
+      activeWindowEdgeScore: null,
+      recurrenceScore: 0.6,
+      recycleScore: 0.87,
+      liveViabilityScore: 0.5,
+      toxicityPenalty: 0,
+      lastValidatedAt: "2026-04-03T04:02:59.525Z",
+      probeSubstate: null,
+      repricingExitCount: 12,
+      promotionBlockers: [],
+      executionCanary24h: {
+        windowHours: 24,
+        required: true,
+        eligible: false,
+        minTotalFills: 10,
+        blockers: [
+          { metric: "24h fills", current: 12, required: 10, passed: true },
+          { metric: "Maker ratio %", current: 0, required: 100, passed: false },
+          { metric: "Unknown fills", current: 12, required: 0, passed: false },
+        ],
+      },
+    });
+    server.use(
+      http.get("/api/v1/families/proposals", () => ok([{ ...proposal, profile: "paper" }])),
+    );
+
+    renderWithProviders(<ProposalPanel />);
+
+    expect(await screen.findByText(proposal.familyId)).toBeInTheDocument();
+    expect(await screen.findByText("Execution Warning (24h execution canary)")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
   });
 
   it("shows backend error after confirm instead of failing silently", async () => {

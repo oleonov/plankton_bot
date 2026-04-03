@@ -1274,7 +1274,7 @@ describe("POST /actions/family/:familyId/promote", () => {
     expect(cmd.target_id).toBe("fam-1");
   });
 
-  it("blocks promote when execution canary fails", async () => {
+  it("blocks live-lite promote when execution canary fails", async () => {
     const now = new Date().toISOString();
     conn.db.exec(`
       INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
@@ -1286,7 +1286,7 @@ describe("POST /actions/family/:familyId/promote", () => {
          both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
          summary_json, validated_at)
       VALUES (
-        'sc-promote-block', 'fam-canary-block', 'simulation', 'confirmed', 0.7,
+        'sc-promote-block', 'fam-canary-block', 'live-lite', 'confirmed', 0.7,
         0.6, 0.6, 0.5, 0.1,
         25, 7, 4, 3,
         0, 0, NULL,
@@ -1294,11 +1294,11 @@ describe("POST /actions/family/:familyId/promote", () => {
         '${now}'
       );
       INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
-      VALUES ('fam-canary-block', 'simulation', 'sc-promote-block')
+      VALUES ('fam-canary-block', 'live-lite', 'sc-promote-block')
       ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id;
       INSERT INTO promotion_proposals
-        (family_id, current_state, proposed_state, reason, scores_snapshot, status)
-      VALUES ('fam-canary-block', 'probe-only', 'scaled', 'execution pending', '{}', 'pending');
+        (family_id, profile, current_state, proposed_state, reason, scores_snapshot, status)
+      VALUES ('fam-canary-block', 'live-lite', 'probe-only', 'scaled', 'execution pending', '{}', 'pending');
     `);
 
     const res = await app.inject({
@@ -1310,5 +1310,49 @@ describe("POST /actions/family/:familyId/promote", () => {
 
     expect(res.statusCode).toBe(409);
     expect(json(res).error.code).toBe("PROMOTION_BLOCKED_BY_EXECUTION_CANARY");
+  });
+
+  it("allows paper promote while execution canary is still warning-only", async () => {
+    const now = new Date().toISOString();
+    conn.db.exec(`
+      INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
+      VALUES ('fam-canary-paper', 'canary-paper', 'crypto', 'standard', 'daily', 'daily', 'v1');
+      INSERT INTO family_validation_scorecards
+        (scorecard_id, family_id, profile, evidence_status, evidence_score,
+         recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
+         trade_count, market_count, realized_pnl, tail_adjusted_pnl,
+         both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
+         summary_json, validated_at)
+      VALUES (
+        'sc-promote-paper', 'fam-canary-paper', 'paper', 'confirmed', 0.7,
+        0.6, 0.6, 0.5, 0.1,
+        25, 7, 4, 3,
+        0, 0, NULL,
+        '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":20,"makerFills":0,"takerFills":0,"unknownFills":12,"makerRatio":0,"takerRatio":0,"explicitFeesUsdc":0,"feeLeakageRatio":0,"lastFillAt":"${now}"},"executionCanary24h":{"required":true,"eligible":false,"minTotalFills":10,"blockers":[{"metric":"Maker ratio %","current":0,"required":100,"passed":false},{"metric":"Unknown fills","current":12,"required":0,"passed":false}]}}',
+        '${now}'
+      );
+      INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
+      VALUES ('fam-canary-paper', 'paper', 'sc-promote-paper')
+      ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id;
+      INSERT INTO promotion_proposals
+        (family_id, profile, current_state, proposed_state, reason, scores_snapshot, status)
+      VALUES ('fam-canary-paper', 'paper', 'probe-only', 'scaled', 'execution pending', '{}', 'pending');
+    `);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/actions/family/fam-canary-paper/promote",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: JSON.stringify({}),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(json(res).data.commandId).toBeTypeOf("number");
+    const proposal = conn.db
+      .prepare(
+        "SELECT status FROM promotion_proposals WHERE family_id = 'fam-canary-paper' AND profile = 'paper'",
+      )
+      .get() as { status: string } | undefined;
+    expect(proposal?.status).toBe("approved");
   });
 });

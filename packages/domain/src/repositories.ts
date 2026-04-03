@@ -406,6 +406,7 @@ export interface PromotionProposalRepository {
   findPending(): PromotionProposal[];
   findByFamily(familyId: FamilyId): PromotionProposal[];
   hasPending(familyId: FamilyId, profile?: ProfileId | null): boolean;
+  hasDismissedSince(familyId: FamilyId, cutoffIso: string, profile?: ProfileId | null): boolean;
   resolve(id: number, status: string, resolvedBy: string): void;
 }
 

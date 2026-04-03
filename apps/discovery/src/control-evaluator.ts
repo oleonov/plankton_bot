@@ -21,6 +21,7 @@ import {
   isWithinHealthWindow,
   emptyExecutionTelemetrySnapshot,
   evaluateExecutionCanaryGate,
+  isPromotionBlockedByExecutionCanary,
   parseValidationScorecardSummary,
 } from "@plankton/domain";
 import {
@@ -29,6 +30,7 @@ import {
   SqliteValidationScorecardRepository,
   SqliteFamilyDeploymentRepository,
 } from "@plankton/db";
+import { DISMISSED_PROPOSAL_COOLDOWN_MS, recentDismissalCutoffIso } from "./promotion-policy.js";
 
 // ─── Metric helpers (ported from ScoreComputer, adapted for control.db) ────
 
@@ -161,6 +163,8 @@ function queryLiveViabilityMetrics(
 export interface ControlEvaluatorDeps {
   db: Database;
   log: Logger;
+  now?: () => Date;
+  dismissCooldownMs?: number;
 }
 
 export interface EvaluationStats {
@@ -175,6 +179,8 @@ export class ControlEvaluator {
   private readonly proposalRepo: SqlitePromotionProposalRepository;
   private readonly scorecardRepo: SqliteValidationScorecardRepository;
   private readonly deploymentRepo: SqliteFamilyDeploymentRepository;
+  private readonly now: () => Date;
+  private readonly dismissCooldownMs: number;
 
   constructor(deps: ControlEvaluatorDeps) {
     this.db = deps.db;
@@ -183,15 +189,18 @@ export class ControlEvaluator {
     this.proposalRepo = new SqlitePromotionProposalRepository(deps.db);
     this.scorecardRepo = new SqliteValidationScorecardRepository(deps.db);
     this.deploymentRepo = new SqliteFamilyDeploymentRepository(deps.db);
+    this.now = deps.now ?? (() => new Date());
+    this.dismissCooldownMs = deps.dismissCooldownMs ?? DISMISSED_PROPOSAL_COOLDOWN_MS;
   }
 
   run(): EvaluationStats {
-    const now = new Date().toISOString();
+    const now = this.now();
+    const nowIso = now.toISOString();
 
     // Phase 1: Read + compute outside transaction (no write lock held)
     const candidates = this.candidateRepo.findAll();
-    const scoreUpdates = this.computeScores(candidates, now);
-    const proposalInserts = this.computePromotions();
+    const scoreUpdates = this.computeScores(candidates, nowIso);
+    const proposalInserts = this.computePromotions(now);
 
     // Phase 2: Apply all writes in a single short IMMEDIATE transaction
     const candidateRepo = this.candidateRepo;
@@ -269,7 +278,7 @@ export class ControlEvaluator {
 
   // ─── Promotion evaluation (read + compute only) ────────────────────
 
-  private computePromotions() {
+  private computePromotions(now: Date) {
     type ProposalInsert = Omit<
       import("@plankton/domain").PromotionProposal,
       "id" | "status" | "createdAt" | "resolvedAt" | "resolvedBy"
@@ -280,7 +289,7 @@ export class ControlEvaluator {
     for (const profile of profiles) {
       const deployments = this.deploymentRepo.findEnabled(profile);
       for (const dep of deployments) {
-        const proposal = this.buildProposalIfEligible(dep, profile);
+        const proposal = this.buildProposalIfEligible(dep, profile, now);
         if (proposal) inserts.push(proposal);
       }
     }
@@ -290,6 +299,7 @@ export class ControlEvaluator {
   private buildProposalIfEligible(
     dep: FamilyDeployment,
     profile: ProfileId,
+    now: Date,
   ): {
     proposal: Omit<
       import("@plankton/domain").PromotionProposal,
@@ -297,6 +307,20 @@ export class ControlEvaluator {
     >;
   } | null {
     if (this.proposalRepo.hasPending(dep.familyId, profile)) return null;
+    if (
+      this.dismissCooldownMs > 0 &&
+      this.proposalRepo.hasDismissedSince(
+        dep.familyId,
+        recentDismissalCutoffIso(now, this.dismissCooldownMs),
+        profile,
+      )
+    ) {
+      this.log.debug(
+        { familyId: String(dep.familyId), profile, dismissCooldownMs: this.dismissCooldownMs },
+        "promotion suppressed by recent dismissal cooldown",
+      );
+      return null;
+    }
 
     const scorecard = this.scorecardRepo.findLatest(dep.familyId, profile);
     if (!scorecard) return null;
@@ -331,7 +355,7 @@ export class ControlEvaluator {
       executionTelemetry:
         scorecardSummary?.executionTelemetry24h ?? emptyExecutionTelemetrySnapshot(),
     });
-    if (executionCanary.required && !executionCanary.eligible) {
+    if (isPromotionBlockedByExecutionCanary(profile, executionCanary)) {
       this.log.info(
         {
           familyId: String(dep.familyId),

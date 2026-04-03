@@ -3,8 +3,11 @@ import {
   DEFAULT_EXECUTION_CANARY_MIN_TOTAL_FILLS,
   emptyExecutionTelemetrySnapshot,
   evaluateExecutionCanaryGate,
+  isPromotionBlockedByExecutionCanary,
   parseValidationScorecardSummary,
+  shouldEnforcePromotionExecutionCanary,
 } from "./execution-canary.js";
+import { ProfileId } from "./enums.js";
 
 describe("evaluateExecutionCanaryGate", () => {
   it("does not require canary gating for fee-free families", () => {
@@ -85,5 +88,31 @@ describe("parseValidationScorecardSummary", () => {
 
     expect(parsed?.repricingExits).toBe(3);
     expect(parsed?.executionCanary24h?.required).toBe(true);
+  });
+});
+
+describe("promotion execution canary enforcement", () => {
+  it("enforces hard blocking only for live-lite promotions", () => {
+    const gate = evaluateExecutionCanaryGate({
+      primaryCategory: "crypto",
+      executionTelemetry: {
+        totalFills: 12,
+        volumeUsdc: 20,
+        makerFills: 0,
+        takerFills: 0,
+        unknownFills: 12,
+        makerRatio: 0,
+        takerRatio: 0,
+        explicitFeesUsdc: 0,
+        feeLeakageRatio: 0,
+        lastFillAt: "2026-04-03T00:00:00Z",
+      },
+    });
+
+    expect(shouldEnforcePromotionExecutionCanary(ProfileId.Paper)).toBe(false);
+    expect(shouldEnforcePromotionExecutionCanary(ProfileId.Simulation)).toBe(false);
+    expect(shouldEnforcePromotionExecutionCanary(ProfileId.LiveLite)).toBe(true);
+    expect(isPromotionBlockedByExecutionCanary(ProfileId.Paper, gate)).toBe(false);
+    expect(isPromotionBlockedByExecutionCanary(ProfileId.LiveLite, gate)).toBe(true);
   });
 });

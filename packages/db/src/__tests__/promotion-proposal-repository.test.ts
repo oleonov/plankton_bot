@@ -5,7 +5,7 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqlitePromotionProposalRepository } from "../repositories/promotion-proposal-repository.js";
-import { createFamilyId } from "@plankton/domain";
+import { createFamilyId, ProfileId } from "@plankton/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -172,5 +172,35 @@ describe("SqlitePromotionProposalRepository", () => {
       sourceScorecardId: null,
     });
     expect(id2).toBe(2);
+  });
+
+  it("tracks recent dismissals within a cutoff window", () => {
+    const id = repo.insert({
+      familyId,
+      currentState: "probe-only",
+      proposedState: "scaled",
+      reason: "dismiss me",
+      scoresSnapshot: "{}",
+      profile: ProfileId.Paper,
+      sourceScorecardId: null,
+    });
+
+    conn.db
+      .prepare(
+        `UPDATE promotion_proposals
+         SET status = 'dismissed', resolved_at = ?, resolved_by = 'operator'
+         WHERE id = ?`,
+      )
+      .run("2026-04-03T00:00:00.000Z", id);
+
+    expect(repo.hasDismissedSince(familyId, "2026-04-02T23:00:00.000Z", ProfileId.Paper)).toBe(
+      true,
+    );
+    expect(repo.hasDismissedSince(familyId, "2026-04-03T00:30:00.000Z", ProfileId.Paper)).toBe(
+      false,
+    );
+    expect(repo.hasDismissedSince(familyId, "2026-04-02T23:00:00.000Z", ProfileId.LiveLite)).toBe(
+      false,
+    );
   });
 });

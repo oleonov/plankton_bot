@@ -315,6 +315,7 @@ export interface DiscoveryStatusDTO {
 export interface ProposalDTO {
   id: number;
   familyId: string;
+  profile: string | null;
   currentState: string;
   proposedState: string;
   reason: string;

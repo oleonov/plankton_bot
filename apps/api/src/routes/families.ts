@@ -473,6 +473,7 @@ function toProposalDto(row: Record<string, unknown>) {
   return {
     id: row.id,
     familyId: row.family_id,
+    profile: row.profile,
     currentState: row.current_state,
     proposedState: row.proposed_state,
     reason: row.reason,
