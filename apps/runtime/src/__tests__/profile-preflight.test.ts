@@ -233,7 +233,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
-      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 2 },
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 1 },
     });
 
     expect(result.status).toBe("passed");
@@ -260,7 +260,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
-      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 2 },
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 1 },
     });
 
     expect(result.status).toBe("passed");
@@ -286,11 +286,38 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
-      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 2 },
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 1 },
     });
 
     expect(result.status).toBe("failed");
     expect(result.blockers.some((b) => b.code === "LIVE_RELAYER_CONFIG_INVALID")).toBe(true);
+  });
+
+  it("live-lite relayer mode fails when min_order_usdc is below the relayer floor", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedProfileSettings(controlConn.db, "live-lite", {
+      relayerJson: JSON.stringify({
+        walletType: "proxy",
+        funderAddress: "0x1111111111111111111111111111111111111111",
+      }),
+    });
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-geo",
+      primaryCategory: "geopolitics",
+      feeTier: "fee-free",
+      liveWalletRequirement: "eoa-ok",
+      requiresPostOnlyForLive: false,
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.75 },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.blockers.some((b) => b.code === "LIVE_MIN_ORDER_TOO_LOW")).toBe(true);
   });
 
   it("live-lite fails with EXPOSURE_EXCEEDS_CAP when exposure over cap", () => {

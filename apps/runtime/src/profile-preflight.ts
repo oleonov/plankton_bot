@@ -101,10 +101,10 @@ function runLiveLiteChecks(
   }
 
   if (walletMode === "relayer") {
-    if (minOrderUsdc == null || minOrderUsdc < 2) {
+    if (minOrderUsdc == null || minOrderUsdc < 1) {
       blockers.push({
         code: "LIVE_MIN_ORDER_TOO_LOW",
-        message: `live-lite relayer mode requires min_order_usdc >= 2.00 (current ${minOrderUsdc ?? "unset"})`,
+        message: `live-lite relayer mode requires min_order_usdc >= 1.00 (current ${minOrderUsdc ?? "unset"})`,
       });
     }
 
