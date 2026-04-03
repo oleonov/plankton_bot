@@ -558,6 +558,31 @@ describe("families", () => {
     });
     expect(json(res).data.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("GET /families?scope=profile falls back to scope=all on monolithic DB", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/families?scope=profile",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    expect(res.statusCode).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.data.meta.scope).toBe("all");
+    expect(body.data.meta.profile).toBeNull();
+    expect(body.data.items).toHaveLength(1);
+  });
+
+  it("GET /families/:id returns deployment=null on monolithic DB", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/families/fam-1",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    expect(res.statusCode).toBe(200);
+    expect(body.data.deployment).toBeNull();
+  });
 });
 
 // ─── Positions with filters ─────────────────────────────────────────

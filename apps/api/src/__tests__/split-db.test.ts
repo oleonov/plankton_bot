@@ -341,6 +341,37 @@ describe("API against real split schemas", () => {
       .run();
   });
 
+  it("GET /families?scope=all includes disabled family with deployment.enabled=false", async () => {
+    controlConn.db.exec(`
+      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
+      VALUES ('fam-disabled-all', 'disabled-all-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
+      VALUES ('fam-disabled-all', 'simulation', 0, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+    `);
+
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/families?scope=all",
+        headers: auth(),
+      });
+      const body = res.json();
+      const disabled = body.data.items.find((f: any) => f.familyId === "fam-disabled-all");
+      expect(disabled).toBeDefined();
+      expect(disabled.deployment).toEqual({
+        enabled: false,
+        operatorMode: "active",
+        deploymentStage: "disabled",
+        priority: 999,
+      });
+    } finally {
+      controlConn.db.exec(`
+        DELETE FROM family_deployments WHERE family_id = 'fam-disabled-all';
+        DELETE FROM family_catalog WHERE family_id = 'fam-disabled-all';
+      `);
+    }
+  });
+
   it("SSE /events reads from active profile's ledger after switch", async () => {
     // Create a paper ledger with a distinct position
     const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));

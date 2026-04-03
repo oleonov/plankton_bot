@@ -341,4 +341,87 @@ describe("Families scope toggle", () => {
     const btn = screen.getByText("Current Profile");
     expect(btn).toBeDisabled();
   });
+
+  it("toggles to All Families and dims non-enabled rows with disabled badge", async () => {
+    const profileFamilies = [
+      {
+        ...families[0]!,
+        deployment: {
+          enabled: true,
+          operatorMode: "active",
+          deploymentStage: "live",
+          priority: 1,
+        },
+      },
+    ];
+    const allFamilies = [
+      ...profileFamilies,
+      {
+        ...families[1]!,
+        deployment: {
+          enabled: false,
+          operatorMode: "active",
+          deploymentStage: "disabled",
+          priority: 999,
+        },
+      },
+    ];
+
+    const scopesSeen: string[] = [];
+    server.use(
+      http.get("/api/v1/families", ({ request }) => {
+        const url = new URL(request.url);
+        const scope = url.searchParams.get("scope") ?? "none";
+        scopesSeen.push(scope);
+        if (scope === "all") {
+          return ok({
+            items: allFamilies,
+            meta: {
+              scope: "all",
+              profile: "live-lite",
+              totalCatalogCount: allFamilies.length,
+            },
+          });
+        }
+        return ok({
+          items: profileFamilies,
+          meta: {
+            scope: "profile",
+            profile: "live-lite",
+            totalCatalogCount: allFamilies.length,
+          },
+        });
+      }),
+      http.get("/api/v1/families/:familyId/transitions", () => ok([])),
+      http.get("/api/v1/families/:familyId/positions", () => ok([])),
+      http.get("/api/v1/families/:familyId/orders", () =>
+        ok({ items: [], nextCursor: null }),
+      ),
+      http.get("/api/v1/families/:familyId/evidence", () => ok(null)),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(<Families />);
+
+    // Profile view: only alpha visible
+    await screen.findByText(/alpha/);
+    expect(screen.queryByText(/beta/)).not.toBeInTheDocument();
+
+    // Switch to All Families
+    await user.click(screen.getByText("All Families"));
+    await screen.findByText(/beta/);
+
+    // Verify the toggle actually sent scope=all
+    expect(scopesSeen).toContain("all");
+
+    // Disabled badge should appear for beta
+    const badges = document.querySelectorAll(".badge");
+    const disabledBadge = Array.from(badges).find((b) => b.textContent === "disabled");
+    expect(disabledBadge).toBeTruthy();
+
+    // Dimmed row: beta's row should have opacity 0.45
+    const rows = document.querySelectorAll("tbody > tr");
+    const betaRow = Array.from(rows).find((r) => r.textContent?.includes("beta"));
+    expect(betaRow).toBeTruthy();
+    expect((betaRow as HTMLElement).style.opacity).toBe("0.45");
+  });
 });
