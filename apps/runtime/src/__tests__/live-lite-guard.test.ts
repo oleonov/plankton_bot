@@ -164,4 +164,42 @@ describe("LiveLiteGuard", () => {
       ).toEqual(["live-min-order-usdc-rejected"]);
     });
   });
+
+  describe("when relayer mode uses the default minimum", () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-a"],
+      maxFamilies: 2,
+      maxOpenValueUsdc: 50,
+      maxOrderUsdc: 10,
+      maxActiveMarkets: 2,
+      walletMode: "relayer",
+    });
+
+    it("defaults the relayer floor to $1", () => {
+      expect(guard.getMinOrderUsdc()).toBe(1);
+      expect(guard.isOrderAboveMin(0.99)).toBe(false);
+      expect(guard.isOrderAboveMin(1)).toBe(true);
+    });
+  });
+
+  describe("when a dynamic family allowlist is active", () => {
+    const guard = new LiveLiteGuard(LIVE_LITE_CONFIG);
+
+    it("prefers the dynamic allowlist over the configured one", () => {
+      guard.setDynamicFamilyAllowlist(["fam-b"]);
+
+      expect(guard.getConfiguredFamilyAllowlist()).toEqual(["fam-a", "fam-b"]);
+      expect(guard.getEffectiveFamilyAllowlist()).toEqual(["fam-b"]);
+      expect(guard.isFamilyAllowed("fam-a")).toBe(false);
+      expect(guard.isFamilyAllowed("fam-b")).toBe(true);
+    });
+
+    it("falls back to the configured allowlist when cleared", () => {
+      guard.setDynamicFamilyAllowlist(["fam-b"]);
+      guard.setDynamicFamilyAllowlist(null);
+
+      expect(guard.getEffectiveFamilyAllowlist()).toEqual(["fam-a", "fam-b"]);
+      expect(guard.isFamilyAllowed("fam-a")).toBe(true);
+    });
+  });
 });

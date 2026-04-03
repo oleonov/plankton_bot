@@ -20,6 +20,8 @@ export interface ExecutionTelemetryWindow {
   lastFillAt: string | null;
 }
 
+export type FamilyLiveness = "active" | "dormant" | "unseen";
+
 /** GET /status */
 export interface StatusData {
   runtimeMode: string;
@@ -202,6 +204,7 @@ export interface FamilyDTO {
   requiresPostOnlyForLive?: boolean | null;
   promotionState: string | null;
   probeSubstate: string | null;
+  liveness?: FamilyLiveness;
   executionTelemetry24h?: ExecutionTelemetryWindow;
   state: {
     runtimeMode: string;

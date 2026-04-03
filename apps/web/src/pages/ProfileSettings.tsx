@@ -90,7 +90,7 @@ function SettingsFormInner({
           step="0.01"
           value={minOrderUsdc}
           onChange={(e) => setMinOrderUsdc(e.target.value)}
-          placeholder={walletMode === "eoa" ? "3.00" : "2.00"}
+          placeholder={walletMode === "eoa" ? "3.00" : "1.00"}
         />
       </div>
       <div className="form-field">

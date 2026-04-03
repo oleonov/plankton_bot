@@ -99,8 +99,8 @@ function backfillLiveProfileSettings(db: import("better-sqlite3").Database): voi
   try {
     db.prepare(
       `UPDATE profile_settings
-       SET wallet_mode = COALESCE(wallet_mode, 'eoa'),
-           min_order_usdc = COALESCE(min_order_usdc, 3)
+       SET wallet_mode = COALESCE(wallet_mode, 'relayer'),
+           min_order_usdc = COALESCE(min_order_usdc, 1)
        WHERE profile_id = 'live-lite'`,
     ).run();
   } catch {

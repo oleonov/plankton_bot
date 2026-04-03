@@ -107,8 +107,8 @@ beforeAll(async () => {
     INSERT INTO bot_runs (run_id, mode, started_at)
     VALUES ('run-1', 'simulation', '2026-03-14T00:00:00Z');
 
-    INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
-    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
+    INSERT INTO markets (token_id, condition_id, slug, question, outcome, family_id, family_key, active, tick_size, neg_risk, end_date, created_at, updated_at)
+    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 'fam-1', 'test-family', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
 
     INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
     VALUES ('market_data_source', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
@@ -517,6 +517,17 @@ describe("families", () => {
     }
   });
 
+  it("GET /families includes derived liveness", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/families",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.items[0].liveness).toBe("active");
+  });
+
   it("GET /families/:id returns detail", async () => {
     const res = await app.inject({
       method: "GET",
@@ -525,6 +536,7 @@ describe("families", () => {
     });
     expect(json(res).data.familyId).toBe("fam-1");
     expect(json(res).data.executionTelemetry24h).toBeDefined();
+    expect(json(res).data.liveness).toBe("active");
   });
 
   it("GET /families/:id returns 404 with error object", async () => {

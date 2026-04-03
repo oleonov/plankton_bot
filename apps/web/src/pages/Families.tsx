@@ -20,6 +20,10 @@ function formatExecMakerPct(family: FamilyDTO): string {
   return `${Math.round(ratio * 100)}% maker`;
 }
 
+function isLiveFamily(family: FamilyDTO): boolean {
+  return (family.liveness ?? "unseen") === "active";
+}
+
 function TransitionTimeline({ familyId }: { familyId: string }) {
   const { data: transitions } = useFamilyTransitions(familyId);
   if (!transitions || transitions.length === 0) return null;
@@ -317,6 +321,9 @@ export function Families() {
                     ...(operatorMode === "quarantine"
                       ? { background: "rgba(239,83,80,0.06)" }
                       : undefined),
+                    ...(effectiveScope === "profile" && !isLiveFamily(f)
+                      ? { opacity: 0.6 }
+                      : undefined),
                     ...(effectiveScope === "all" && meta?.profile != null && !f.deployment?.enabled
                       ? { opacity: 0.45 }
                       : undefined),
@@ -324,7 +331,11 @@ export function Families() {
                   onClick={() => setExpanded(isExpanded ? null : f.familyId)}
                 >
                   <td style={{ cursor: "pointer", color: "var(--blue)" }}>
-                    {isExpanded ? "\u25BC" : "\u25B6"} {f.familyKey}
+                    {isExpanded ? "\u25BC" : "\u25B6"}{" "}
+                    <span data-family-key={f.familyKey}>{f.familyKey}</span>
+                    <span style={{ marginLeft: 8 }}>
+                      <Badge value={f.liveness ?? "unseen"} type="liveness" />
+                    </span>
                   </td>
                   <td>
                     <Badge value={operatorMode} type="mode" />

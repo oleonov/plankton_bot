@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
+import type { FamilyDTO } from "../../api/types.ts";
 import { server } from "../../test/server.ts";
 import { renderWithProviders } from "../../test/test-utils.tsx";
 import { Families } from "../../pages/Families.tsx";
@@ -10,7 +11,7 @@ function ok<T>(data: T) {
   return HttpResponse.json({ ok: true, data, error: null, ts: new Date().toISOString() });
 }
 
-const families = [
+const families: FamilyDTO[] = [
   {
     familyId: "fam-1",
     familyKey: "alpha",
@@ -21,6 +22,7 @@ const families = [
     strategyProfile: "generic",
     promotionState: "probe-only",
     probeSubstate: null,
+    liveness: "active",
     executionTelemetry24h: {
       windowHours: 24,
       totalFills: 5,
@@ -59,6 +61,7 @@ const families = [
     strategyProfile: "generic",
     promotionState: "scaled",
     probeSubstate: null,
+    liveness: "dormant",
     executionTelemetry24h: {
       windowHours: 24,
       totalFills: 0,
@@ -97,6 +100,7 @@ const families = [
     strategyProfile: "generic",
     promotionState: "probe-only",
     probeSubstate: null,
+    liveness: "unseen",
     executionTelemetry24h: {
       windowHours: 24,
       totalFills: 2,
@@ -148,8 +152,8 @@ function getFamilyKeys(): string[] {
   const rows = Array.from(document.querySelectorAll("tbody > tr"));
   return rows
     .map((row) => {
-      const cell = row.querySelector("td");
-      return cell?.textContent?.replace(/[▶▼]\s*/, "") ?? "";
+      const key = row.querySelector("[data-family-key]");
+      return key?.textContent ?? "";
     })
     .filter(Boolean);
 }
@@ -421,5 +425,45 @@ describe("Families scope toggle", () => {
     const betaRow = Array.from(rows).find((r) => r.textContent?.includes("beta"));
     expect(betaRow).toBeTruthy();
     expect((betaRow as HTMLElement).style.opacity).toBe("0.45");
+  });
+
+  it("shows liveness badges and dims non-active families in current profile view", async () => {
+    scopeSetup({
+      items: [
+        {
+          ...families[0]!,
+          liveness: "active",
+          deployment: {
+            enabled: true,
+            operatorMode: "active",
+            deploymentStage: "live",
+            priority: 1,
+          },
+        },
+        {
+          ...families[1]!,
+          liveness: "dormant",
+          deployment: {
+            enabled: true,
+            operatorMode: "active",
+            deploymentStage: "live",
+            priority: 2,
+          },
+        },
+      ],
+      scope: "profile",
+      profile: "live-lite",
+      totalCatalogCount: 47,
+    });
+    renderWithProviders(<Families />);
+
+    await screen.findByText(/alpha/);
+    expect(screen.getAllByText("active").length).toBeGreaterThan(0);
+    expect(screen.getByText("dormant")).toBeInTheDocument();
+
+    const rows = document.querySelectorAll("tbody > tr");
+    const betaRow = Array.from(rows).find((r) => r.textContent?.includes("beta"));
+    expect(betaRow).toBeTruthy();
+    expect((betaRow as HTMLElement).style.opacity).toBe("0.6");
   });
 });

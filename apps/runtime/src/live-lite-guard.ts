@@ -16,6 +16,7 @@ export interface LiveLiteConfig {
 
 export class LiveLiteGuard {
   readonly isActive: boolean;
+  private dynamicFamilyAllowlist: string[] | null = null;
 
   constructor(private readonly config: LiveLiteConfig | undefined) {
     this.isActive = config !== undefined;
@@ -23,7 +24,22 @@ export class LiveLiteGuard {
 
   isFamilyAllowed(familyId: string): boolean {
     if (!this.config) return true;
-    return this.config.familyAllowlist.includes(familyId);
+    return this.getEffectiveFamilyAllowlist().includes(familyId);
+  }
+
+  setDynamicFamilyAllowlist(familyIds: string[] | null): void {
+    if (!this.config) return;
+    this.dynamicFamilyAllowlist =
+      familyIds && familyIds.length > 0 ? Array.from(new Set(familyIds)) : null;
+  }
+
+  getConfiguredFamilyAllowlist(): string[] {
+    return this.config?.familyAllowlist ?? [];
+  }
+
+  getEffectiveFamilyAllowlist(): string[] {
+    if (!this.config) return [];
+    return this.dynamicFamilyAllowlist ?? this.config.familyAllowlist;
   }
 
   isOrderWithinCap(notional: number): boolean {
@@ -54,7 +70,7 @@ export class LiveLiteGuard {
   getMinOrderUsdc(): number | null {
     if (!this.config) return null;
     if (this.config.minOrderUsdc != null) return this.config.minOrderUsdc;
-    return this.getWalletMode() === "relayer" ? 2 : 3;
+    return this.getWalletMode() === "relayer" ? 1 : 3;
   }
 
   supportsPostOnlyFamilies(): boolean {

@@ -590,6 +590,12 @@ async function main(): Promise<void> {
     getPaused: () => supervisorRef.current.isPaused(),
     log,
     intervalMs: 60_000,
+    ...(runtimeMode === "live-lite"
+      ? {
+          setLiveActiveFamilyAllowlist: (familyIds: string[] | null) =>
+            liveLiteGuard.setDynamicFamilyAllowlist(familyIds),
+        }
+      : {}),
     ...(runtimeMode === "live-lite" ? { exchangeGateway } : {}),
   });
 

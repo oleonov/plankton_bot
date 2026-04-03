@@ -38,3 +38,4 @@ export { SqliteConfigImportRepository } from "./repositories/config-import-repos
 export { SqliteFamilyConfigMetaRepository } from "./repositories/family-config-meta-repository.js";
 export { SqliteFamilyProfileRollupRepository } from "./repositories/family-profile-rollup-repository.js";
 export { withImmediate } from "./immediate-transaction.js";
+export { readFamilyLiveness } from "./family-liveness.js";

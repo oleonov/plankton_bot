@@ -53,7 +53,7 @@ export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules
     );
     insertSettings.run(ProfileId.Simulation, loaded.global.initialBalanceUsdc, null, null, now);
     insertSettings.run(ProfileId.Paper, loaded.global.initialBalanceUsdc, null, null, now);
-    insertSettings.run(ProfileId.LiveLite, null, "eoa", 3, now);
+    insertSettings.run(ProfileId.LiveLite, null, "relayer", 1, now);
 
     // 3. Families
     const insertCatalog = db.prepare(`

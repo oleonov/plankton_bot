@@ -26,14 +26,27 @@ const SEVERITY_STYLES: Record<string, string> = {
   info: "badge-blue",
 };
 
+const LIVENESS_STYLES: Record<string, string> = {
+  active: "badge-green",
+  dormant: "badge-orange",
+  unseen: "badge-blue",
+};
+
 export function Badge({
   value,
   type = "status",
 }: {
   value: string;
-  type?: "mode" | "status" | "severity";
+  type?: "mode" | "status" | "severity" | "liveness";
 }) {
-  const map = type === "mode" ? MODE_STYLES : type === "severity" ? SEVERITY_STYLES : STATUS_STYLES;
+  const map =
+    type === "mode"
+      ? MODE_STYLES
+      : type === "severity"
+        ? SEVERITY_STYLES
+        : type === "liveness"
+          ? LIVENESS_STYLES
+          : STATUS_STYLES;
   const cls = map[value] ?? "badge-blue";
   return <span className={`badge ${cls}`}>{value}</span>;
 }

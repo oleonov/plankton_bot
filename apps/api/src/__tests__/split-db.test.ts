@@ -86,8 +86,8 @@ beforeAll(async () => {
     INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
     VALUES ('execution_mode', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
 
-    INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
-    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
+    INSERT INTO markets (token_id, condition_id, slug, question, outcome, family_id, family_key, active, tick_size, neg_risk, end_date, created_at, updated_at)
+    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 'fam-1', 'test-family', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
 
     INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
       current_value_usdc, realized_pnl, status, opened_at, updated_at)
@@ -139,6 +139,7 @@ describe("API against real split schemas", () => {
     expect(body.data.items.length).toBeGreaterThanOrEqual(1);
     expect(body.data.items[0].familyId).toBe("fam-1");
     expect(body.data.items[0].executionTelemetry24h).toBeDefined();
+    expect(body.data.items[0].liveness).toBe("active");
   });
 
   it("GET /families returns uniform wrapper with items and meta", async () => {
@@ -211,6 +212,7 @@ describe("API against real split schemas", () => {
       deploymentStage: "disabled",
       priority: 999,
     });
+    expect(body.data.liveness).toBe("active");
   });
 
   it("GET /families/:id/positions succeeds (ledger: positions)", async () => {

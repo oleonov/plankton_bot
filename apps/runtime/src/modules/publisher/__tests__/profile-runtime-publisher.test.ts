@@ -343,6 +343,56 @@ describe("ProfileRuntimePublisher", () => {
     expect(alpha.last_trade_at).toBeNull();
   });
 
+  it("publishes active live families when markets are active", async () => {
+    const activeFamilyIds: Array<string[] | null> = [];
+    const livePublisher = new ProfileRuntimePublisher({
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db,
+      profile: PROFILE,
+      deployedFamilyIds: () => familyIds,
+      getPaused: () => false,
+      log,
+      intervalMs: 999_999,
+      setLiveActiveFamilyAllowlist: (ids) => activeFamilyIds.push(ids),
+    });
+
+    ledgerConn.db.exec(`
+      INSERT INTO markets
+        (token_id, condition_id, slug, question, outcome, family_id, active, tick_size, neg_risk, created_at, updated_at)
+      VALUES
+        ('tok-a', 'cond-a', 'slug-a', 'Q', 'YES', 'fam-alpha', 1, 0.01, 0, datetime('now'), datetime('now')),
+        ('tok-b', 'cond-b', 'slug-b', 'Q', 'YES', 'fam-beta', 0, 0.01, 0, datetime('now'), datetime('now'))
+    `);
+
+    await livePublisher.publish();
+
+    expect(activeFamilyIds).toEqual([["fam-alpha"]]);
+  });
+
+  it("clears the dynamic live family filter when no active markets remain", async () => {
+    const activeFamilyIds: Array<string[] | null> = [];
+    const livePublisher = new ProfileRuntimePublisher({
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db,
+      profile: PROFILE,
+      deployedFamilyIds: () => familyIds,
+      getPaused: () => false,
+      log,
+      intervalMs: 999_999,
+      setLiveActiveFamilyAllowlist: (ids) => activeFamilyIds.push(ids),
+    });
+
+    ledgerConn.db.exec(`
+      INSERT INTO markets
+        (token_id, condition_id, slug, question, outcome, family_id, active, tick_size, neg_risk, created_at, updated_at)
+      VALUES ('tok-b', 'cond-b', 'slug-b', 'Q', 'YES', 'fam-beta', 0, 0.01, 0, datetime('now'), datetime('now'))
+    `);
+
+    await livePublisher.publish();
+
+    expect(activeFamilyIds).toEqual([null]);
+  });
+
   // ─── Scorecard tests ───────────────────────────────────────────────────
 
   function getScorecards(): Array<Record<string, unknown>> {

@@ -11,7 +11,7 @@ import {
   computeToxicityPenalty,
   evaluateExecutionCanaryGate,
 } from "@plankton/domain";
-import { SqliteValidationScorecardRepository, withImmediate } from "@plankton/db";
+import { readFamilyLiveness, SqliteValidationScorecardRepository, withImmediate } from "@plankton/db";
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
@@ -26,6 +26,7 @@ export interface ProfileRuntimePublisherDeps {
   log: Logger;
   intervalMs?: number;
   exchangeGateway?: ExchangeGateway;
+  setLiveActiveFamilyAllowlist?: (familyIds: string[] | null) => void;
 }
 
 export class ProfileRuntimePublisher implements RuntimeModule {
@@ -58,6 +59,14 @@ export class ProfileRuntimePublisher implements RuntimeModule {
 
   async publish(): Promise<void> {
     const familyIds = this.deps.deployedFamilyIds();
+    const familyLiveness = readFamilyLiveness(this.deps.ledgerDb, familyIds);
+    const activeFamilyIds = familyIds.filter(
+      (familyId) => familyLiveness.get(familyId)?.liveness === "active",
+    );
+
+    this.deps.setLiveActiveFamilyAllowlist?.(
+      activeFamilyIds.length > 0 ? activeFamilyIds : null,
+    );
 
     // Phase 1: Read all data OUTSIDE the transaction (no contention)
     const familyMetrics = this.reader.readFamilyMetrics(familyIds);
@@ -142,7 +151,11 @@ export class ProfileRuntimePublisher implements RuntimeModule {
     });
 
     this.deps.log.debug(
-      { families: familyMetrics.length, profile: this.deps.profile },
+      {
+        families: familyMetrics.length,
+        profile: this.deps.profile,
+        activeFamilies: activeFamilyIds.length,
+      },
       "profile runtime rollups published",
     );
   }

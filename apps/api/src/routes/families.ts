@@ -1,6 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { evaluateExecutionCanaryGate, getPromotionBlockers } from "@plankton/domain";
+import { readFamilyLiveness } from "@plankton/db";
 import {
   computeExecutionTelemetryByFamily,
   computeExecutionTelemetryForFamily,
@@ -69,6 +70,7 @@ function toFamilyDto(
   probeSubstate?: string | null,
   executionTelemetry24h?: ReturnType<typeof emptyExecutionTelemetry>,
   deployment?: FamilyDeploymentRow | null,
+  liveness?: import("@plankton/domain").FamilyLiveness,
 ) {
   return {
     familyId: catalog.family_id,
@@ -86,6 +88,7 @@ function toFamilyDto(
         : catalog.requires_post_only_for_live === 1,
     promotionState: promotionState ?? null,
     probeSubstate: probeSubstate ?? null,
+    liveness: liveness ?? "unseen",
     executionTelemetry24h: {
       windowHours: 24,
       ...(executionTelemetry24h ?? emptyExecutionTelemetry()),
@@ -206,6 +209,10 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
 
     const states = listState.all() as FamilyStateRow[];
     const stateMap = new Map(states.map((s) => [s.family_id, s]));
+    const livenessMap = readFamilyLiveness(
+      ledgerDb,
+      catalogs.map((catalog) => catalog.family_id),
+    );
     const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
       sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     });
@@ -234,6 +241,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           substateMap.get(c.family_id),
           executionMap24h.get(c.family_id),
           deploymentMap.get(c.family_id) ?? null,
+          livenessMap.get(c.family_id)?.liveness,
         ),
       ),
       meta: {
@@ -260,6 +268,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
       sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     });
+    const liveness = readFamilyLiveness(ledgerDb, [familyId]).get(familyId)?.liveness;
     const currentProfile = getProfile
       ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ??
         null)
@@ -277,6 +286,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
         undefined,
         executionMap24h.get(familyId),
         deploymentRow ?? null,
+        liveness,
       ),
     );
   });
