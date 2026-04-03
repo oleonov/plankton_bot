@@ -184,18 +184,18 @@ describe("mapOrderBook", () => {
 });
 
 describe("mapBalance", () => {
-  it("maps SDK balance to domain ExchangeBalance", () => {
-    const balance = mapBalance({ balance: "1500.50", allowance: "2000" });
+  it("normalizes atomic units to human-readable USDC", () => {
+    const balance = mapBalance({ balance: "8995487", allowance: "2000000000" });
     expect(balance.asset).toBe("USDC");
-    expect(balance.available).toBe(1500.5);
+    expect(balance.available).toBeCloseTo(8.995487, 6);
     // locked is always 0 — SDK doesn't provide real locked collateral info;
     // actual locked amount is computed by reconciliation from open orders
     expect(balance.locked).toBe(0);
   });
 
   it("reports zero locked regardless of allowance", () => {
-    const balance = mapBalance({ balance: "1000", allowance: "500" });
-    expect(balance.available).toBe(1000);
+    const balance = mapBalance({ balance: "1000000", allowance: "500000" });
+    expect(balance.available).toBe(1);
     expect(balance.locked).toBe(0);
   });
 });

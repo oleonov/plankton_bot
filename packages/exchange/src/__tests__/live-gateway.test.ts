@@ -161,13 +161,16 @@ describe("LiveExchangeGateway", () => {
     expect(fills[0]!.price).toBe(0.55);
   });
 
-  it("getBalances maps SDK response", async () => {
-    client.getBalanceAllowance.mockResolvedValue({ balance: "500", allowance: "1000" });
+  it("getBalances normalizes atomic units to human-readable USDC", async () => {
+    client.getBalanceAllowance.mockResolvedValue({ balance: "8995487", allowance: "1000000000" });
 
     const balances = await gw.getBalances();
     expect(balances).toHaveLength(1);
     expect(balances[0]!.asset).toBe("USDC");
-    expect(balances[0]!.available).toBe(500);
+    expect(balances[0]!.available).toBeCloseTo(8.995487, 6);
+    expect(client.getBalanceAllowance).toHaveBeenCalledWith({
+      asset_type: "COLLATERAL",
+    });
   });
 
   it("getOpenOrders returns empty array on SDK failure", async () => {
@@ -194,8 +197,8 @@ describe("LiveExchangeGateway", () => {
     expect(balances).toEqual([]);
   });
 
-  it("getPositionBalance returns balance from SDK", async () => {
-    client.getBalanceAllowance.mockResolvedValue({ balance: "42" });
+  it("getPositionBalance normalizes atomic units to human-readable", async () => {
+    client.getBalanceAllowance.mockResolvedValue({ balance: "42000000" });
     const balance = await gw.getPositionBalance(createTokenId("tok-1"));
     expect(balance).toBe(42);
     expect(client.getBalanceAllowance).toHaveBeenCalledWith({

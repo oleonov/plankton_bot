@@ -17,7 +17,14 @@ import type {
   TokenId,
 } from "@plankton/domain";
 import { classifyError } from "../errors.js";
-import { mapOpenOrder, mapTrade, mapBalance, toSdkSide, toSdkTickSize } from "../mappers.js";
+import {
+  mapOpenOrder,
+  mapTrade,
+  mapBalance,
+  toSdkSide,
+  toSdkTickSize,
+  ATOMIC_UNIT_DIVISOR,
+} from "../mappers.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -122,7 +129,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   async getBalances(): Promise<ExchangeBalance[]> {
     try {
-      const raw = await this.client.getBalanceAllowance();
+      const raw = await this.client.getBalanceAllowance({
+        asset_type: "COLLATERAL",
+      });
       return [mapBalance(raw as Record<string, unknown>)];
     } catch {
       return [];
@@ -134,7 +143,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       asset_type: "CONDITIONAL",
       token_id: String(tokenId),
     });
-    return Number(raw?.balance ?? 0);
+    return Number(raw?.balance ?? 0) / ATOMIC_UNIT_DIVISOR;
   }
 
   async healthCheck(): Promise<{ ok: boolean; latencyMs: number }> {

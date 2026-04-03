@@ -231,14 +231,17 @@ export function mapGammaPricing(raw: Record<string, unknown>): GammaPricing {
 
 // ─── Balance mapping ─────────────────────────────────────────────────────
 
+/** Polymarket CLOB SDK returns balances in atomic units (6 decimals for USDC / conditional tokens). */
+export const ATOMIC_UNIT_DIVISOR = 1e6;
+
 export function mapBalance(raw: Record<string, unknown>): ExchangeBalance {
-  const balance = Number(raw.balance ?? 0);
+  const rawBalance = Number(raw.balance ?? 0);
   // SDK returns balance + allowance but neither represents locked collateral.
   // Actual locked amount requires summing open order exposure — done by reconciliation,
   // not by the gateway mapper. We report 0 here to avoid fabricating data.
   return {
     asset: "USDC",
-    available: balance,
+    available: rawBalance / ATOMIC_UNIT_DIVISOR,
     locked: 0,
   };
 }
