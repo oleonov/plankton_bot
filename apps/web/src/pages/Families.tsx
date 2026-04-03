@@ -240,7 +240,14 @@ export function Families() {
     <div className="page">
       <div className="page-title">Families</div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <div style={{ display: "inline-flex", borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" }}>
+        <div
+          style={{
+            display: "inline-flex",
+            borderRadius: 6,
+            overflow: "hidden",
+            border: "1px solid var(--border)",
+          }}
+        >
           <button
             onClick={() => setScope("profile")}
             disabled={meta?.profile == null}
@@ -326,9 +333,7 @@ export function Families() {
                         {f.deployment.deploymentStage}
                       </span>
                     )}
-                    {f.deployment && !f.deployment.enabled && (
-                      <Badge value="disabled" />
-                    )}
+                    {f.deployment && !f.deployment.enabled && <Badge value="disabled" />}
                     {f.state?.effectiveMode && f.state.effectiveMode !== operatorMode && (
                       <div style={{ fontSize: 10, color: "var(--orange)", marginTop: 2 }}>
                         eff: {displayMode}

@@ -8,7 +8,6 @@ import type {
   PositionDTO,
   OrderDTO,
   FillDTO,
-  FamilyDTO,
   FamilyEvidenceDTO,
   TransitionDTO,
   RiskEventDTO,
@@ -192,10 +191,7 @@ export function useFamilies() {
 export function useFamiliesScoped(scope: "profile" | "all") {
   return useQuery({
     queryKey: ["families-scoped", scope],
-    queryFn: () =>
-      apiFetch<FamilyListResponse>(
-        withParams("/api/v1/families", { scope }),
-      ),
+    queryFn: () => apiFetch<FamilyListResponse>(withParams("/api/v1/families", { scope })),
   });
 }
 

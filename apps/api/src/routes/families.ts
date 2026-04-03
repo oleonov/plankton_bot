@@ -177,20 +177,16 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   const getDeployment = safePrepare(
     "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE family_id = ? AND profile = ?",
   );
-  const getProfile = safePrepare(
-    "SELECT current_profile FROM runtime_control_state WHERE id = 1",
-  );
+  const getProfile = safePrepare("SELECT current_profile FROM runtime_control_state WHERE id = 1");
 
   app.get<{ Querystring: { scope?: string } }>("/families", async (request) => {
     const currentProfile = getProfile
       ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ??
-          null)
+        null)
       : null;
     const requestedScope = request.query.scope;
     const effectiveScope =
-      requestedScope === "profile" && currentProfile && listEnabledDeployments
-        ? "profile"
-        : "all";
+      requestedScope === "profile" && currentProfile && listEnabledDeployments ? "profile" : "all";
 
     const allCatalogs = listCatalog.all() as FamilyCatalogRow[];
     const totalCatalogCount = allCatalogs.length;
@@ -265,7 +261,8 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     });
     const currentProfile = getProfile
-      ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ?? null)
+      ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ??
+        null)
       : null;
     const deploymentRow =
       currentProfile && getDeployment

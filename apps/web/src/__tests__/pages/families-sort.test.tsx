@@ -316,7 +316,12 @@ describe("Families scope toggle", () => {
   }
 
   it("shows count with profile context in profile scope", async () => {
-    scopeSetup({ items: [families[0]!], scope: "profile", profile: "live-lite", totalCatalogCount: 47 });
+    scopeSetup({
+      items: [families[0]!],
+      scope: "profile",
+      profile: "live-lite",
+      totalCatalogCount: 47,
+    });
     renderWithProviders(<Families />);
     await screen.findByText(/alpha/);
     expect(screen.getByText("1 of 47 families (live-lite)")).toBeInTheDocument();
