@@ -286,3 +286,54 @@ describe("Families table sorting", () => {
     expect(screen.getByText(/Taker fills/)).toBeInTheDocument();
   });
 });
+
+describe("Families scope toggle", () => {
+  function scopeSetup(
+    overrides: {
+      items?: typeof families;
+      scope?: "profile" | "all";
+      profile?: string | null;
+      totalCatalogCount?: number;
+    } = {},
+  ) {
+    const items = overrides.items ?? families;
+    server.use(
+      http.get("/api/v1/families", () =>
+        ok({
+          items,
+          meta: {
+            scope: overrides.scope ?? "all",
+            profile: overrides.profile ?? null,
+            totalCatalogCount: overrides.totalCatalogCount ?? items.length,
+          },
+        }),
+      ),
+      http.get("/api/v1/families/:familyId/transitions", () => ok([])),
+      http.get("/api/v1/families/:familyId/positions", () => ok([])),
+      http.get("/api/v1/families/:familyId/orders", () => ok({ items: [], nextCursor: null })),
+      http.get("/api/v1/families/:familyId/evidence", () => ok(null)),
+    );
+  }
+
+  it("shows count with profile context in profile scope", async () => {
+    scopeSetup({ items: [families[0]!], scope: "profile", profile: "live-lite", totalCatalogCount: 47 });
+    renderWithProviders(<Families />);
+    await screen.findByText(/alpha/);
+    expect(screen.getByText("1 of 47 families (live-lite)")).toBeInTheDocument();
+  });
+
+  it("shows plain count when scope=all", async () => {
+    scopeSetup({ scope: "all", profile: null });
+    renderWithProviders(<Families />);
+    await screen.findByText(/alpha/);
+    expect(screen.getByText("3 families")).toBeInTheDocument();
+  });
+
+  it("disables Current Profile button when no profile available", async () => {
+    scopeSetup({ scope: "all", profile: null });
+    renderWithProviders(<Families />);
+    await screen.findByText(/alpha/);
+    const btn = screen.getByText("Current Profile");
+    expect(btn).toBeDisabled();
+  });
+});
