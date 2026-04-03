@@ -1,10 +1,17 @@
 import { useState } from "react";
-import { useProposals, usePromoteFamily, useDismissProposal, useStatus } from "../api/hooks.ts";
+import {
+  useProposals,
+  usePromoteFamily,
+  useDismissProposal,
+  useStatus,
+  useFamilyEvidence,
+} from "../api/hooks.ts";
 import { SCALED_DEFAULTS } from "@plankton/domain";
 import { ScoreBars } from "./ScoreBars.tsx";
 import { ConfirmDialog } from "./ConfirmDialog.tsx";
 import { ConfirmAction } from "./ConfirmAction.tsx";
 import { CapsEditor, useCapsEditor } from "./CapsEditor.tsx";
+import { PromotionBlockers } from "./PromotionBlockers.tsx";
 
 function parseScores(snapshot: string | null) {
   if (!snapshot) return { recurrence: null, recycle: null, liveViability: null, toxicity: null };
@@ -36,10 +43,13 @@ function ProposalRow({
   const promote = usePromoteFamily(proposal.familyId);
   const dismiss = useDismissProposal(proposal.id);
   const { data: statusData } = useStatus();
+  const { data: evidence } = useFamilyEvidence(proposal.familyId);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const scores = parseScores(proposal.scoresSnapshot);
   const runtimeMode = statusData?.runtimeMode;
   const caps = useCapsEditor(SCALED_DEFAULTS);
+  const executionCanary = evidence?.executionCanary24h;
+  const approvalBlocked = executionCanary?.required === true && executionCanary.eligible === false;
 
   return (
     <div
@@ -59,18 +69,29 @@ function ProposalRow({
         <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
           {proposal.reason}
         </div>
+        {approvalBlocked && executionCanary ? (
+          <PromotionBlockers
+            blockers={executionCanary.blockers}
+            title={`Approve Blocked (${executionCanary.windowHours}h execution canary)`}
+          />
+        ) : null}
+        {promote.isError ? (
+          <div style={{ marginTop: 6, fontSize: 11, color: "var(--red)" }}>
+            Error: {promote.error.message}
+          </div>
+        ) : null}
       </div>
       <ScoreBars {...scores} />
       <div style={{ display: "flex", gap: 4 }}>
         <button
           className="btn-success"
           onClick={() => setConfirmOpen(true)}
-          disabled={promote.isPending}
+          disabled={promote.isPending || approvalBlocked}
         >
-          Approve
+          {approvalBlocked ? "Blocked" : "Approve"}
         </button>
         <ConfirmDialog
-          open={confirmOpen}
+          open={confirmOpen && !approvalBlocked}
           title={`Promote ${proposal.familyId}?`}
           description={`${proposal.currentState} -> ${proposal.proposedState}: ${proposal.reason}`}
           runtimeMode={runtimeMode}
