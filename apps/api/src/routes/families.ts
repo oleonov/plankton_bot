@@ -174,6 +174,9 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   const listEnabledDeployments = safePrepare(
     "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE profile = ? AND enabled = 1",
   );
+  const getDeployment = safePrepare(
+    "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE family_id = ? AND profile = ?",
+  );
   const getProfile = safePrepare(
     "SELECT current_profile FROM runtime_control_state WHERE id = 1",
   );
@@ -261,6 +264,13 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
       sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     });
+    const currentProfile = getProfile
+      ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ?? null)
+      : null;
+    const deploymentRow =
+      currentProfile && getDeployment
+        ? (getDeployment.get(familyId, currentProfile) as FamilyDeploymentRow | undefined)
+        : undefined;
     return ok(
       toFamilyDto(
         catalog,
@@ -269,6 +279,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
         undefined,
         undefined,
         executionMap24h.get(familyId),
+        deploymentRow ?? null,
       ),
     );
   });

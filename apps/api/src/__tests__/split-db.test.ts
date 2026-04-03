@@ -197,6 +197,22 @@ describe("API against real split schemas", () => {
     }
   });
 
+  it("GET /families/:id includes deployment metadata for current profile", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/families/fam-1",
+      headers: auth(),
+    });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.deployment).toEqual({
+      enabled: true,
+      operatorMode: "active",
+      deploymentStage: "disabled",
+      priority: 999,
+    });
+  });
+
   it("GET /families/:id/positions succeeds (ledger: positions)", async () => {
     const res = await app.inject({
       method: "GET",
