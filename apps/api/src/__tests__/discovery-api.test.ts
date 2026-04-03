@@ -93,6 +93,15 @@ beforeAll(async () => {
       profile TEXT NOT NULL,
       scorecard_id TEXT NOT NULL,
       PRIMARY KEY (family_id, profile)
+    );
+    CREATE TABLE IF NOT EXISTS runtime_control_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      current_profile TEXT,
+      desired_profile TEXT,
+      paused INTEGER NOT NULL DEFAULT 1,
+      runtime_status TEXT NOT NULL DEFAULT 'stopped',
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
   app = await buildServer({
@@ -227,6 +236,18 @@ describe("POST /discovery/candidates/:id/accept", () => {
   it("materializes candidate and enqueues rules_reload", async () => {
     const db = conn.db;
     const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO runtime_control_state
+         (id, current_profile, desired_profile, paused, runtime_status, schema_version, updated_at)
+       VALUES (1, 'live-lite', 'live-lite', 1, 'ready_paused', 1, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         current_profile = excluded.current_profile,
+         desired_profile = excluded.desired_profile,
+         paused = excluded.paused,
+         runtime_status = excluded.runtime_status,
+         schema_version = excluded.schema_version,
+         updated_at = excluded.updated_at`,
+    ).run(now);
 
     // Seed a candidate with status='reviewed'
     db.prepare(
@@ -258,6 +279,7 @@ describe("POST /discovery/candidates/:id/accept", () => {
       .get("cand-accept-1") as Record<string, unknown>;
     expect(catalog).toBeDefined();
     expect(catalog.family_key).toBe("test-accept-key");
+    expect(catalog.source_type).toBe("discovery");
 
     // Verify family_rules row exists with probe-only defaults
     const rules = db
@@ -291,13 +313,14 @@ describe("POST /discovery/candidates/:id/accept", () => {
     // Verify family_deployments created for all profiles
     const deps = db
       .prepare(
-        "SELECT profile, enabled FROM family_deployments WHERE family_id = 'cand-accept-1' ORDER BY profile",
+        "SELECT profile, enabled, deployment_stage FROM family_deployments WHERE family_id = 'cand-accept-1' ORDER BY profile",
       )
-      .all() as { profile: string; enabled: number }[];
+      .all() as { profile: string; enabled: number; deployment_stage: string }[];
     expect(deps).toHaveLength(3);
     expect(deps.find((d: any) => d.profile === "paper")!.enabled).toBe(1);
     expect(deps.find((d: any) => d.profile === "simulation")!.enabled).toBe(1);
-    expect(deps.find((d: any) => d.profile === "live-lite")!.enabled).toBe(0);
+    expect(deps.find((d: any) => d.profile === "live-lite")!.enabled).toBe(1);
+    expect(deps.find((d: any) => d.profile === "live-lite")!.deployment_stage).toBe("live-probe");
   });
 
   it("returns 409 for rejected candidate", async () => {

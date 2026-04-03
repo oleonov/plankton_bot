@@ -52,6 +52,62 @@ describe("Discovery Accept dialog with caps", () => {
     expect((inputs[2] as HTMLInputElement).value).toBe("2");
   });
 
+  it("explains that live-lite approve adds the family to the live profile", async () => {
+    setupCandidate();
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          runtimeMode: "live-lite",
+          uptimeSeconds: 1,
+          paused: true,
+          lastReconciliationAt: null,
+          marketDataStale: false,
+          marketDataLastUpdateAt: null,
+          activeFamilyCount: 0,
+          openOrderCount: 0,
+          openPositionCount: 0,
+          totalOpenValueUsdc: 0,
+          totalTailCostUsdc: 0,
+          initialBalanceUsdc: null,
+          balanceUsdc: null,
+          walletBalanceUsdc: null,
+          totalCurrentValueUsdc: 0,
+          totalRealizedPnl: 0,
+          marketDataSource: "live",
+          executionMode: "live",
+          reconciliationDriftDetected: false,
+          tradingState: "PAUSED",
+          signalActivity: null,
+          executionTelemetry24h: {
+            windowHours: 24,
+            totalFills: 0,
+            volumeUsdc: 0,
+            makerFills: 0,
+            takerFills: 0,
+            unknownFills: 0,
+            makerRatio: null,
+            takerRatio: null,
+            explicitFeesUsdc: 0,
+            feeLeakageRatio: null,
+            lastFillAt: null,
+          },
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<Discovery />);
+
+    const acceptBtn = await screen.findByRole("button", { name: "Approve" });
+    await user.click(acceptBtn);
+
+    expect(
+      screen.getByText(
+        "This will materialize the candidate and add it to live-lite as a probe-only family. The bot will decide whether to trade it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
   it("shows error and disables Confirm for non-numeric input", async () => {
     setupCandidate();
     const user = userEvent.setup();

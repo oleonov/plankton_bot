@@ -2,7 +2,11 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { LoadedFamilyRules } from "@plankton/config";
 import type { FamilyConfig } from "@plankton/config";
-import { createImportId, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
+import {
+  createImportId,
+  resolveFamilyDeploymentSeed,
+  resolveFamilyLiveTradingPolicy,
+} from "@plankton/domain";
 import { ProfileId } from "@plankton/domain";
 
 export function needsBootstrap(db: Database.Database): boolean {
@@ -109,7 +113,7 @@ export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules
       INSERT INTO family_deployments (
         family_id, profile, enabled, operator_mode, strategy_stage,
         deployment_stage, priority, created_at, updated_at
-      ) VALUES (?, ?, ?, 'active', 'probe-only', 'disabled', 999, ?, ?)
+      ) VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, ?, ?)
     `);
 
     // Legacy compat: family_evidence baseline (repos and API routes still read this table)
@@ -240,8 +244,18 @@ function insertFamily(
     now,
   );
 
-  // sim + paper enabled, live-lite disabled
-  insertDeployment.run(id.familyId, ProfileId.Simulation, 1, now, now);
-  insertDeployment.run(id.familyId, ProfileId.Paper, 1, now, now);
-  insertDeployment.run(id.familyId, ProfileId.LiveLite, 0, now, now);
+  for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
+    const seed = resolveFamilyDeploymentSeed({
+      profile,
+      sourceType: "yaml_import",
+    });
+    insertDeployment.run(
+      id.familyId,
+      profile,
+      seed.enabled ? 1 : 0,
+      seed.deploymentStage,
+      now,
+      now,
+    );
+  }
 }

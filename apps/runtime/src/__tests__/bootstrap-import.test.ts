@@ -200,18 +200,22 @@ describe("bootstrap-import", () => {
     expect(row.weekend_mode).toBe("normal");
   });
 
-  it("creates family_deployments (sim/paper enabled, live-lite disabled)", () => {
+  it("creates family_deployments (sim/paper enabled, live-lite probe-enabled)", () => {
     bootstrapImport(db, loaded);
     const rows = db
       .prepare(
-        "SELECT profile, enabled FROM family_deployments WHERE family_id = ? ORDER BY profile",
+        "SELECT profile, enabled, deployment_stage FROM family_deployments WHERE family_id = ? ORDER BY profile",
       )
-      .all("test-family:generic:daily") as Array<{ profile: string; enabled: number }>;
+      .all("test-family:generic:daily") as Array<{
+      profile: string;
+      enabled: number;
+      deployment_stage: string;
+    }>;
 
     expect(rows).toEqual([
-      { profile: "live-lite", enabled: 0 },
-      { profile: "paper", enabled: 1 },
-      { profile: "simulation", enabled: 1 },
+      { profile: "live-lite", enabled: 1, deployment_stage: "live-probe" },
+      { profile: "paper", enabled: 1, deployment_stage: "disabled" },
+      { profile: "simulation", enabled: 1, deployment_stage: "disabled" },
     ]);
   });
 

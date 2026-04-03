@@ -55,6 +55,11 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
 
   if (!canApprove) return null;
 
+  const approveDescription =
+    runtimeMode === "live-lite"
+      ? "This will materialize the candidate and add it to live-lite as a probe-only family. The bot will decide whether to trade it."
+      : "This will materialize the candidate as a probe-only family.";
+
   return (
     <span style={{ display: "inline-flex", gap: 4 }}>
       <button
@@ -74,7 +79,7 @@ function CandidateActions({ candidate }: { candidate: CandidateDTO }) {
       <ConfirmDialog
         open={confirmOpen && !accept.isPending}
         title={`Approve ${candidate.familyKey}?`}
-        description="This will materialize the candidate as a probe-only family."
+        description={approveDescription}
         runtimeMode={runtimeMode}
         disableConfirm={caps.hasErrors}
         onConfirm={() => {

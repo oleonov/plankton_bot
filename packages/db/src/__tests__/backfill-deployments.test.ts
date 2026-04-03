@@ -38,7 +38,8 @@ describe("backfillDeployments", () => {
     conn = bootstrapControlDb(dbPath);
     seedProfiles(conn);
 
-    // Insert a family into catalog WITHOUT deployments (simulates pre-fix accept)
+    // Insert a family into catalog WITHOUT deployments. control.sql defaults
+    // source_type to yaml_import, so live-lite is seeded as live-probe too.
     conn.db
       .prepare(
         `INSERT INTO family_catalog
@@ -60,7 +61,33 @@ describe("backfillDeployments", () => {
     expect(deps).toHaveLength(3);
     expect(deps.find((d) => d.profile === "paper")?.enabled).toBe(1);
     expect(deps.find((d) => d.profile === "simulation")?.enabled).toBe(1);
-    expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(0);
+    expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(1);
+  });
+
+  it("enables yaml-import families for live-lite when backfilling missing deployments", () => {
+    const dbPath = path.join(tmpDir, "control.db");
+    conn = bootstrapControlDb(dbPath);
+    seedProfiles(conn);
+
+    conn.db
+      .prepare(
+        `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type, created_at, updated_at)
+       VALUES ('yaml-fam', 'yaml-key', 'crypto', 'threshold', 'daily', 'ad-hoc', 'scalp', 'yaml_import', datetime('now'), datetime('now'))`,
+      )
+      .run();
+
+    conn.close();
+    conn = bootstrapControlDb(dbPath);
+
+    const live = conn.db
+      .prepare(
+        "SELECT enabled, deployment_stage FROM family_deployments WHERE family_id = 'yaml-fam' AND profile = 'live-lite'",
+      )
+      .get() as { enabled: number; deployment_stage: string };
+
+    expect(live.enabled).toBe(1);
+    expect(live.deployment_stage).toBe("live-probe");
   });
 
   it("does not duplicate deployments on repeated bootstrap", () => {
@@ -93,7 +120,8 @@ describe("backfillDeployments", () => {
     conn = bootstrapControlDb(dbPath);
     seedProfiles(conn);
 
-    // Insert family with only 1 of 3 deployments (simulates interrupted bootstrap)
+    // Insert family with only 1 of 3 deployments (simulates interrupted bootstrap).
+    // Missing profiles inherit yaml_import defaults from family_catalog.
     conn.db
       .prepare(
         `INSERT INTO family_catalog
@@ -119,6 +147,6 @@ describe("backfillDeployments", () => {
     expect(deps).toHaveLength(3);
     expect(deps.find((d) => d.profile === "paper")?.enabled).toBe(1); // existing — untouched
     expect(deps.find((d) => d.profile === "simulation")?.enabled).toBe(1); // backfilled
-    expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(0); // backfilled
+    expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(1); // backfilled
   });
 });

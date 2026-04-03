@@ -73,6 +73,15 @@ beforeAll(async () => {
       profile TEXT NOT NULL,
       scorecard_id TEXT NOT NULL,
       PRIMARY KEY (family_id, profile)
+    );
+    CREATE TABLE IF NOT EXISTS runtime_control_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      current_profile TEXT,
+      desired_profile TEXT,
+      paused INTEGER NOT NULL DEFAULT 1,
+      runtime_status TEXT NOT NULL DEFAULT 'stopped',
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
   const now = new Date().toISOString();
@@ -182,6 +191,21 @@ describe("accept caps validation", () => {
   });
 
   it("accepts valid custom caps", async () => {
+    conn.db
+      .prepare(
+        `INSERT INTO runtime_control_state
+           (id, current_profile, desired_profile, paused, runtime_status, schema_version, updated_at)
+         VALUES (1, 'live-lite', 'live-lite', 1, 'ready_paused', 1, datetime('now'))
+         ON CONFLICT(id) DO UPDATE SET
+           current_profile = excluded.current_profile,
+           desired_profile = excluded.desired_profile,
+           paused = excluded.paused,
+           runtime_status = excluded.runtime_status,
+           schema_version = excluded.schema_version,
+           updated_at = excluded.updated_at`,
+      )
+      .run();
+
     const res = await app.inject({
       method: "POST",
       url: "/api/v1/discovery/candidates/caps-test-1/accept",
@@ -213,7 +237,7 @@ describe("accept caps validation", () => {
     expect(deployments).toHaveLength(3);
     expect(deployments.find((d) => d.profile === "paper")?.enabled).toBe(1);
     expect(deployments.find((d) => d.profile === "simulation")?.enabled).toBe(1);
-    expect(deployments.find((d) => d.profile === "live-lite")?.enabled).toBe(0);
+    expect(deployments.find((d) => d.profile === "live-lite")?.enabled).toBe(1);
   });
 });
 

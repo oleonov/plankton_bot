@@ -2,7 +2,9 @@ import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import {
   type DiscoveryRun,
+  ProfileId,
   PROBE_DEFAULTS,
+  resolveFamilyDeploymentSeed,
   resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
 import { SqliteDiscoveryRunRepository } from "@plankton/db";
@@ -88,6 +90,23 @@ function getCandidate(db: Database.Database, candidateId: string): CandidateRow 
     .get(candidateId) as CandidateRow | undefined;
   if (!row) throw new ApiError(404, `candidate ${candidateId} not found`, "CANDIDATE_NOT_FOUND");
   return row;
+}
+
+function getCurrentOrDesiredProfile(
+  db: Database.Database,
+): import("@plankton/domain").ProfileId | null {
+  try {
+    const row = db
+      .prepare("SELECT current_profile, desired_profile FROM runtime_control_state WHERE id = 1")
+      .get() as { current_profile: string | null; desired_profile: string | null } | undefined;
+    return (row?.current_profile ?? row?.desired_profile ?? null) as
+      | import("@plankton/domain").ProfileId
+      | null;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("no such table")) return null;
+    throw err;
+  }
 }
 
 function formatRun(run: DiscoveryRun | null) {
@@ -433,6 +452,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
     const row = getCandidate(db, request.params.candidateId);
     const familyId = row.candidate_id;
     const now = new Date().toISOString();
+    const currentProfile = getCurrentOrDesiredProfile(controlDb);
     const body = (request.body ?? {}) as {
       maxOpenValueUsdc?: number;
       maxActiveMarkets?: number;
@@ -481,8 +501,8 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           `INSERT INTO family_catalog
              (family_id, family_key, primary_category, regime, horizon, cadence,
               strategy_profile, fee_tier, live_wallet_requirement,
-              requires_post_only_for_live, slug_pattern, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              requires_post_only_for_live, source_type, slug_pattern, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovery', ?, ?, ?)`,
         )
         .run(
           familyId,
@@ -512,16 +532,22 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
         )
         .run(familyId, caps.maxOpenValue, caps.maxMarkets, caps.maxDust, now);
 
-      // 3. INSERT family_deployments for sim + paper (enabled), live-lite (disabled)
+      // 3. INSERT family_deployments. In live-lite operation, newly approved
+      // families enter the current profile as probe-only; the bot still decides
+      // whether any signal is strong enough to trade them.
       const insertDep = controlDb.prepare(
         `INSERT INTO family_deployments
              (family_id, profile, enabled, operator_mode, strategy_stage,
               deployment_stage, priority, created_at, updated_at)
-           VALUES (?, ?, ?, 'active', 'probe-only', 'disabled', 999, ?, ?)`,
+           VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, ?, ?)`,
       );
-      insertDep.run(familyId, "simulation", 1, now, now);
-      insertDep.run(familyId, "paper", 1, now, now);
-      insertDep.run(familyId, "live-lite", 0, now, now);
+      for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
+        const seed = resolveFamilyDeploymentSeed({
+          profile,
+          currentProfile,
+        });
+        insertDep.run(familyId, profile, seed.enabled ? 1 : 0, seed.deploymentStage, now, now);
+      }
 
       // 4. INSERT family_evidence with zeros + probe warming-up substate
       controlDb

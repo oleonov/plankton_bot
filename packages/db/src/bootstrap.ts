@@ -1,12 +1,18 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { resolveFamilyLiveTradingPolicy } from "@plankton/domain";
+import {
+  ProfileId,
+  resolveFamilyDeploymentSeed,
+  resolveFamilyLiveTradingPolicy,
+} from "@plankton/domain";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
 import { runMigrations } from "./migrations/runner.js";
 
 export function bootstrapDatabase(dbPath: string): DbConnection {
   const conn = openDatabase(dbPath);
   runMigrations(conn.db);
+  safeAddColumn(conn.db, "family_catalog", "source_type", "TEXT NOT NULL DEFAULT 'yaml_import'");
+  safeAddColumn(conn.db, "family_catalog", "origin_checksum", "TEXT");
   safeAddColumn(conn.db, "family_catalog", "fee_tier", "TEXT NOT NULL DEFAULT 'unknown'");
   safeAddColumn(
     conn.db,
@@ -38,6 +44,8 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "profile_settings", "wallet_mode", "TEXT");
   safeAddColumn(conn.db, "profile_settings", "min_order_usdc", "REAL");
   safeAddColumn(conn.db, "profile_settings", "relayer_json", "TEXT");
+  safeAddColumn(conn.db, "family_catalog", "source_type", "TEXT NOT NULL DEFAULT 'yaml_import'");
+  safeAddColumn(conn.db, "family_catalog", "origin_checksum", "TEXT");
   safeAddColumn(conn.db, "family_catalog", "fee_tier", "TEXT NOT NULL DEFAULT 'unknown'");
   safeAddColumn(
     conn.db,
@@ -67,29 +75,28 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
  * Idempotent — INSERT OR IGNORE skips existing rows. Wrapped in transaction for atomicity.
  */
 function backfillDeployments(db: import("better-sqlite3").Database): void {
-  const families = db.prepare("SELECT family_id FROM family_catalog").all() as {
+  const families = db.prepare("SELECT family_id, source_type FROM family_catalog").all() as {
     family_id: string;
+    source_type: string | null;
   }[];
 
   if (families.length === 0) return;
-
-  const profiles = [
-    { profile: "simulation", enabled: 1 },
-    { profile: "paper", enabled: 1 },
-    { profile: "live-lite", enabled: 0 },
-  ];
 
   const insert = db.prepare(
     `INSERT OR IGNORE INTO family_deployments
        (family_id, profile, enabled, operator_mode, strategy_stage,
         deployment_stage, priority, created_at, updated_at)
-     VALUES (?, ?, ?, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'))`,
+     VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, datetime('now'), datetime('now'))`,
   );
 
   db.transaction(() => {
-    for (const { family_id } of families) {
-      for (const { profile, enabled } of profiles) {
-        insert.run(family_id, profile, enabled);
+    for (const { family_id, source_type } of families) {
+      for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
+        const seed = resolveFamilyDeploymentSeed({
+          profile,
+          sourceType: source_type,
+        });
+        insert.run(family_id, profile, seed.enabled ? 1 : 0, seed.deploymentStage);
       }
     }
   })();

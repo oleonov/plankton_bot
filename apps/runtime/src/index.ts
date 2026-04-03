@@ -87,6 +87,7 @@ import { ValidationMetricsReader } from "./modules/publisher/validation-metrics-
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient } from "./polymarket-client-factory.js";
+import { resolveLiveLiteMaxFamilies } from "./live-lite-envelope.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -289,7 +290,7 @@ async function main(): Promise<void> {
     const minOrderUsdc = settingsRow?.min_order_usdc;
     return {
       familyAllowlist: deployedFamilies.map((f) => f.family_id),
-      maxFamilies: Number(envelope.maxFamilies ?? 10),
+      maxFamilies: resolveLiveLiteMaxFamilies(envelope, deployedFamilies.length),
       maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
       maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
       maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),

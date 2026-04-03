@@ -261,6 +261,12 @@ describe("POST /config/import", () => {
       .prepare("SELECT * FROM family_deployments WHERE family_id = ?")
       .all("test-fam:generic:daily") as Record<string, unknown>[];
     expect(deployments).toHaveLength(3);
+    expect(
+      deployments.find((d) => d["profile"] === "live-lite") as Record<string, unknown>,
+    ).toMatchObject({
+      enabled: 1,
+      deployment_stage: "live-probe",
+    });
 
     const importRecord = conn.db
       .prepare("SELECT * FROM config_imports WHERE imported_by = 'api'")
