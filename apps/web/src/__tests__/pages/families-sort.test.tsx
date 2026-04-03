@@ -394,9 +394,7 @@ describe("Families scope toggle", () => {
       }),
       http.get("/api/v1/families/:familyId/transitions", () => ok([])),
       http.get("/api/v1/families/:familyId/positions", () => ok([])),
-      http.get("/api/v1/families/:familyId/orders", () =>
-        ok({ items: [], nextCursor: null }),
-      ),
+      http.get("/api/v1/families/:familyId/orders", () => ok({ items: [], nextCursor: null })),
       http.get("/api/v1/families/:familyId/evidence", () => ok(null)),
     );
     const user = userEvent.setup();
