@@ -60,10 +60,6 @@ ARG GIT_SHA=unknown
 ENV NODE_ENV=production
 LABEL org.opencontainers.image.revision="$GIT_SHA"
 
-# Install wget for healthcheck
-RUN apt-get update && apt-get install -y --no-install-recommends wget && \
-    rm -rf /var/lib/apt/lists/*
-
 # Non-root user
 RUN groupadd --system --gid 1001 plankton && \
     useradd --system --uid 1001 --gid plankton plankton
