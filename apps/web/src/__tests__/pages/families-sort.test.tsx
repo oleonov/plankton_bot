@@ -47,6 +47,7 @@ const families = [
       derivedModeReason: null,
     },
     caps: { maxOpenValueUsdc: 100, maxActiveMarkets: 10, maxDustPositions: 5 },
+    deployment: null,
   },
   {
     familyId: "fam-2",
@@ -84,6 +85,7 @@ const families = [
       derivedModeReason: null,
     },
     caps: { maxOpenValueUsdc: 100, maxActiveMarkets: 10, maxDustPositions: 5 },
+    deployment: null,
   },
   {
     familyId: "fam-3",
@@ -121,12 +123,18 @@ const families = [
       derivedModeReason: null,
     },
     caps: { maxOpenValueUsdc: 100, maxActiveMarkets: 10, maxDustPositions: 5 },
+    deployment: null,
   },
 ];
 
 function setup(evidenceByFamily: Record<string, { [key: string]: unknown } | null> = {}) {
   server.use(
-    http.get("/api/v1/families", () => ok(families)),
+    http.get("/api/v1/families", () =>
+      ok({
+        items: families,
+        meta: { scope: "all" as const, profile: null, totalCatalogCount: families.length },
+      }),
+    ),
     http.get("/api/v1/families/:familyId/transitions", () => ok([])),
     http.get("/api/v1/families/:familyId/positions", () => ok([])),
     http.get("/api/v1/families/:familyId/orders", () => ok({ items: [], nextCursor: null })),

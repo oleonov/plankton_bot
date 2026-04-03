@@ -160,7 +160,9 @@ export const handlers = [
   http.get("/api/v1/profiles/:profileId/settings", () => ok(mockProfileDetail.settings)),
   http.put("/api/v1/profiles/:profileId/settings", () => ok(mockProfileDetail.settings)),
   http.get("/api/v1/control/overview", () => ok(mockControlOverview)),
-  http.get("/api/v1/families", () => ok([])),
+  http.get("/api/v1/families", () =>
+    ok({ items: [], meta: { scope: "all", profile: null, totalCatalogCount: 0 } }),
+  ),
   http.get("/api/v1/families/proposals", () => ok([])),
   http.get("/api/v1/families/recent-demotions", () => ok([])),
   http.get("/api/v1/metrics", () =>

@@ -1,6 +1,6 @@
 import { useState, Fragment } from "react";
 import {
-  useFamilies,
+  useFamiliesScoped,
   useFamilyPositions,
   useFamilyOrders,
   useFamilyEvidence,
@@ -216,17 +216,73 @@ const familyAccessors: Record<string, (f: FamilyDTO) => string | number | null> 
 };
 
 export function Families() {
-  const { data: families, isLoading } = useFamilies();
+  const [scope, setScope] = useState<"profile" | "all">("profile");
+  const { data, isLoading } = useFamiliesScoped(scope);
+  const families = data?.items ?? [];
+  const meta = data?.meta ?? null;
   const [expanded, setExpanded] = useState<string | null>(null);
   const { sort, toggle } = useSort();
 
+  // If API returned "all" despite requesting "profile" (no active profile),
+  // sync the toggle to match
+  const effectiveScope = meta?.scope ?? "all";
+
   if (isLoading) return <div className="page">Loading...</div>;
 
-  const sorted = sortItems(families ?? [], sort, familyAccessors);
+  const sorted =
+    effectiveScope === "profile" && !sort
+      ? [...families].sort(
+          (a, b) => (a.deployment?.priority ?? 999) - (b.deployment?.priority ?? 999),
+        )
+      : sortItems(families, sort, familyAccessors);
 
   return (
     <div className="page">
       <div className="page-title">Families</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+        <div style={{ display: "inline-flex", borderRadius: 6, overflow: "hidden", border: "1px solid var(--border)" }}>
+          <button
+            onClick={() => setScope("profile")}
+            disabled={meta?.profile == null}
+            style={{
+              padding: "4px 12px",
+              fontSize: 12,
+              fontWeight: effectiveScope === "profile" ? 700 : 400,
+              background: effectiveScope === "profile" ? "var(--blue)" : "transparent",
+              color: effectiveScope === "profile" ? "#fff" : "var(--text)",
+              border: "none",
+              cursor: meta?.profile == null ? "not-allowed" : "pointer",
+              opacity: meta?.profile == null ? 0.4 : 1,
+            }}
+          >
+            Current Profile
+          </button>
+          <button
+            onClick={() => setScope("all")}
+            style={{
+              padding: "4px 12px",
+              fontSize: 12,
+              fontWeight: effectiveScope === "all" ? 700 : 400,
+              background: effectiveScope === "all" ? "var(--blue)" : "transparent",
+              color: effectiveScope === "all" ? "#fff" : "var(--text)",
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            All Families
+          </button>
+        </div>
+        {meta && (
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+            {families.length}
+            {effectiveScope === "profile" && meta.totalCatalogCount > families.length
+              ? ` of ${meta.totalCatalogCount}`
+              : ""}{" "}
+            families
+            {meta.profile ? ` (${meta.profile})` : ""}
+          </span>
+        )}
+      </div>
       <table>
         <thead>
           <tr>
@@ -250,11 +306,14 @@ export function Families() {
             return (
               <Fragment key={f.familyId}>
                 <tr
-                  style={
-                    operatorMode === "quarantine"
+                  style={{
+                    ...(operatorMode === "quarantine"
                       ? { background: "rgba(239,83,80,0.06)" }
-                      : undefined
-                  }
+                      : undefined),
+                    ...(effectiveScope === "all" && meta?.profile != null && !f.deployment?.enabled
+                      ? { opacity: 0.45 }
+                      : undefined),
+                  }}
                   onClick={() => setExpanded(isExpanded ? null : f.familyId)}
                 >
                   <td style={{ cursor: "pointer", color: "var(--blue)" }}>
@@ -262,6 +321,14 @@ export function Families() {
                   </td>
                   <td>
                     <Badge value={operatorMode} type="mode" />
+                    {f.deployment && f.deployment.deploymentStage !== "live" && (
+                      <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: 4 }}>
+                        {f.deployment.deploymentStage}
+                      </span>
+                    )}
+                    {f.deployment && !f.deployment.enabled && (
+                      <Badge value="disabled" />
+                    )}
                     {f.state?.effectiveMode && f.state.effectiveMode !== operatorMode && (
                       <div style={{ fontSize: 10, color: "var(--orange)", marginTop: 2 }}>
                         eff: {displayMode}
