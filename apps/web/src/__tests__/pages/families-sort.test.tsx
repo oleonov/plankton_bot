@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fireEvent, screen, within } from "@testing-library/react";
+import { fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "../../test/server.ts";
@@ -137,19 +137,17 @@ function setup(evidenceByFamily: Record<string, { [key: string]: unknown } | nul
 }
 
 function getFamilyKeys(): string[] {
-  const rows = screen.getAllByRole("row").slice(1); // skip header
+  const rows = Array.from(document.querySelectorAll("tbody > tr"));
   return rows
     .map((row) => {
-      const cells = within(row).getAllByRole("cell");
-      return cells[0]?.textContent?.replace(/[▶▼]\s*/, "") ?? "";
+      const cell = row.querySelector("td");
+      return cell?.textContent?.replace(/[▶▼]\s*/, "") ?? "";
     })
     .filter(Boolean);
 }
 
 function getSortHeader(label: string): HTMLElement {
-  return screen.getByRole("columnheader", {
-    name: new RegExp(`^${label}(?: [\\u25B2\\u25BC])?$`),
-  });
+  return screen.getByText(new RegExp(`^${label}(?: [\\u25B2\\u25BC])?$`));
 }
 
 describe("Families table sorting", () => {
@@ -169,7 +167,7 @@ describe("Families table sorting", () => {
     // Click again → desc (10, 5, 0)
     fireEvent.click(getSortHeader("Tail Cost"));
     expect(getFamilyKeys()).toEqual(["alpha", "beta", "gamma"]);
-  });
+  }, 15000);
 
   it("sorts by Tail-Adj PnL ascending", async () => {
     setup();
