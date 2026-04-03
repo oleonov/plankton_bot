@@ -67,6 +67,9 @@ beforeAll(async () => {
     INSERT INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
     INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused)
     VALUES (1, 'simulation', 'simulation', 'running', 0);
+
+    INSERT INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
+    VALUES ('fam-1', 'simulation', 1, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
   `);
 
   // Ledger: runtime state, positions, orders, bot_runs, metrics, markets
@@ -133,9 +136,65 @@ describe("API against real split schemas", () => {
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(true);
-    expect(body.data.length).toBeGreaterThanOrEqual(1);
-    expect(body.data[0].familyId).toBe("fam-1");
-    expect(body.data[0].executionTelemetry24h).toBeDefined();
+    expect(body.data.items.length).toBeGreaterThanOrEqual(1);
+    expect(body.data.items[0].familyId).toBe("fam-1");
+    expect(body.data.items[0].executionTelemetry24h).toBeDefined();
+  });
+
+  it("GET /families returns uniform wrapper with items and meta", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/v1/families", headers: auth() });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.items).toBeDefined();
+    expect(body.data.meta).toBeDefined();
+    expect(body.data.meta.scope).toBe("all");
+    expect(body.data.items.length).toBeGreaterThanOrEqual(1);
+    expect(body.data.items[0].deployment).not.toBeNull();
+  });
+
+  it("GET /families?scope=profile filters to enabled=1 families for current profile", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/families?scope=profile",
+      headers: auth(),
+    });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.meta.scope).toBe("profile");
+    expect(body.data.meta.profile).toBe("simulation");
+    expect(body.data.meta.totalCatalogCount).toBeGreaterThanOrEqual(1);
+    expect(body.data.items).toHaveLength(body.data.meta.totalCatalogCount);
+    expect(body.data.items[0].deployment).toEqual({
+      enabled: true,
+      operatorMode: "active",
+      deploymentStage: "disabled",
+      priority: 999,
+    });
+  });
+
+  it("GET /families?scope=profile excludes disabled families", async () => {
+    controlConn.db.exec(`
+      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
+      VALUES ('fam-disabled', 'disabled-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
+      VALUES ('fam-disabled', 'simulation', 0, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+    `);
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/families?scope=profile",
+        headers: auth(),
+      });
+      const body = res.json();
+      const ids = body.data.items.map((f: any) => f.familyId);
+      expect(ids).not.toContain("fam-disabled");
+      expect(body.data.meta.totalCatalogCount).toBeGreaterThan(body.data.items.length);
+    } finally {
+      controlConn.db.exec(`
+        DELETE FROM family_deployments WHERE family_id = 'fam-disabled';
+        DELETE FROM family_catalog WHERE family_id = 'fam-disabled';
+      `);
+    }
   });
 
   it("GET /families/:id/positions succeeds (ledger: positions)", async () => {

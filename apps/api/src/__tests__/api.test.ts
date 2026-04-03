@@ -474,10 +474,11 @@ describe("families", () => {
     });
     const body = json(res);
     expect(body.ok).toBe(true);
-    expect(body.data).toHaveLength(1);
-    expect(body.data[0].familyId).toBe("fam-1");
-    expect(body.data[0].state).toBeDefined();
-    expect(body.data[0].state.runtimeMode).toBe("active");
+    expect(body.data.meta.scope).toBe("all");
+    expect(body.data.items).toHaveLength(1);
+    expect(body.data.items[0].familyId).toBe("fam-1");
+    expect(body.data.items[0].state).toBeDefined();
+    expect(body.data.items[0].state.runtimeMode).toBe("active");
   });
 
   it("GET /families includes caps from family_rules", async () => {
@@ -487,7 +488,7 @@ describe("families", () => {
       headers: authHeaders(),
     });
     const body = json(res);
-    expect(body.data[0].caps).toEqual({
+    expect(body.data.items[0].caps).toEqual({
       maxOpenValueUsdc: 50,
       maxActiveMarkets: 5,
       maxDustPositions: 3,
@@ -508,9 +509,9 @@ describe("families", () => {
         headers: authHeaders(),
       });
       const body = json(res);
-      expect(body.data[0].executionTelemetry24h.totalFills).toBe(1);
-      expect(body.data[0].executionTelemetry24h.makerFills).toBe(1);
-      expect(body.data[0].executionTelemetry24h.explicitFeesUsdc).toBe(0);
+      expect(body.data.items[0].executionTelemetry24h.totalFills).toBe(1);
+      expect(body.data.items[0].executionTelemetry24h.makerFills).toBe(1);
+      expect(body.data.items[0].executionTelemetry24h.explicitFeesUsdc).toBe(0);
     } finally {
       conn.db.exec("DELETE FROM fills WHERE fill_id = 'fill-family-maker-24h'");
     }

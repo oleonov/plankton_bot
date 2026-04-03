@@ -53,6 +53,14 @@ interface FamilyCaps {
   maxDustPositions: number;
 }
 
+interface FamilyDeploymentRow {
+  family_id: string;
+  enabled: number;
+  operator_mode: string;
+  deployment_stage: string;
+  priority: number;
+}
+
 function toFamilyDto(
   catalog: FamilyCatalogRow,
   state: FamilyStateRow | undefined,
@@ -60,6 +68,7 @@ function toFamilyDto(
   promotionState?: string | null,
   probeSubstate?: string | null,
   executionTelemetry24h?: ReturnType<typeof emptyExecutionTelemetry>,
+  deployment?: FamilyDeploymentRow | null,
 ) {
   return {
     familyId: catalog.family_id,
@@ -99,11 +108,29 @@ function toFamilyDto(
         }
       : null,
     caps,
+    deployment: deployment
+      ? {
+          enabled: deployment.enabled === 1,
+          operatorMode: deployment.operator_mode,
+          deploymentStage: deployment.deployment_stage,
+          priority: deployment.priority,
+        }
+      : null,
   };
 }
 
 export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) => {
   const { controlDb, ledgerDb } = opts;
+
+  function safePrepare(sql: string) {
+    try {
+      return controlDb.prepare(sql);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.includes("no such table")) return null;
+      throw err;
+    }
+  }
 
   // Control DB: catalog, rules, evidence
   const listCatalog = controlDb.prepare("SELECT * FROM family_catalog");
@@ -141,13 +168,48 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     "SELECT family_id, promotion_state, probe_substate FROM family_evidence",
   );
 
-  app.get("/families", async () => {
-    const catalogs = listCatalog.all() as FamilyCatalogRow[];
+  const listDeployments = safePrepare(
+    "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE profile = ?",
+  );
+  const listEnabledDeployments = safePrepare(
+    "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE profile = ? AND enabled = 1",
+  );
+  const getProfile = safePrepare(
+    "SELECT current_profile FROM runtime_control_state WHERE id = 1",
+  );
+
+  app.get<{ Querystring: { scope?: string } }>("/families", async (request) => {
+    const currentProfile = getProfile
+      ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ??
+          null)
+      : null;
+    const requestedScope = request.query.scope;
+    const effectiveScope =
+      requestedScope === "profile" && currentProfile && listEnabledDeployments
+        ? "profile"
+        : "all";
+
+    const allCatalogs = listCatalog.all() as FamilyCatalogRow[];
+    const totalCatalogCount = allCatalogs.length;
+
+    const deploymentRows =
+      currentProfile && listDeployments
+        ? effectiveScope === "profile"
+          ? (listEnabledDeployments!.all(currentProfile) as FamilyDeploymentRow[])
+          : (listDeployments.all(currentProfile) as FamilyDeploymentRow[])
+        : [];
+    const deploymentMap = new Map(deploymentRows.map((d) => [d.family_id, d]));
+
+    const catalogs =
+      effectiveScope === "profile"
+        ? allCatalogs.filter((c) => deploymentMap.has(c.family_id))
+        : allCatalogs;
+
     const states = listState.all() as FamilyStateRow[];
+    const stateMap = new Map(states.map((s) => [s.family_id, s]));
     const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
       sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     });
-    const stateMap = new Map(states.map((s) => [s.family_id, s]));
     const capsRows = listCaps.all() as Array<{
       family_id: string;
       max_open_value_usdc: number;
@@ -162,8 +224,9 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     }>;
     const promoMap = new Map(evidenceRows.map((r) => [r.family_id, r.promotion_state]));
     const substateMap = new Map(evidenceRows.map((r) => [r.family_id, r.probe_substate]));
-    return ok(
-      catalogs.map((c) =>
+
+    return ok({
+      items: catalogs.map((c) =>
         toFamilyDto(
           c,
           stateMap.get(c.family_id),
@@ -171,9 +234,15 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           promoMap.get(c.family_id),
           substateMap.get(c.family_id),
           executionMap24h.get(c.family_id),
+          deploymentMap.get(c.family_id) ?? null,
         ),
       ),
-    );
+      meta: {
+        scope: effectiveScope,
+        profile: currentProfile,
+        totalCatalogCount,
+      },
+    });
   });
 
   app.get<{ Params: { familyId: string } }>("/families/:familyId", async (request) => {
