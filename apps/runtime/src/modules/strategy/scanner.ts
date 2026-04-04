@@ -523,35 +523,43 @@ export function scan(
 
       // ─── Spray entry (runs before probe, uses separate cooldown) ──
       const entryPolicy = resolveFamilyEntryPolicy(bundle.identity, bundle.evidence);
-      const gc = deps.globalConfig;
-      const sprayKey = `${market.familyId}|${market.tokenId}`;
-      if (
-        entryPolicy === "spray-first" &&
-        gc?.spraySizeUsdc &&
-        gc.spraySizeUsdc > 0 &&
-        sprayMarketsThisTick < (gc.sprayMaxMarketsPerTick ?? 10) &&
-        !sprayFamilyEmitted.has(sprayKey) &&
-        sprayPositionsRemaining > 0 &&
-        sprayBudgetRemaining > gc.spraySizeUsdc * sizeMult
-      ) {
-        const spraySignal = evaluateSprayEntry(
-          market,
-          bundle,
-          midPrice,
-          tickTs,
-          nextSeq,
-          gc.spraySizeUsdc,
-          sizeMult,
-        );
-        if (spraySignal) {
-          signals.push(spraySignal);
-          sprayMarketsThisTick++;
-          sprayFamilyEmitted.add(sprayKey);
-          sprayPositionsRemaining--;
-          sprayBudgetRemaining -= spraySignal.suggestedSizeUsdc;
-          // Spray does NOT set familyEntryEmitted — conviction entries still work
-          continue; // spray emitted, skip probe for this market
+
+      if (entryPolicy === "spray-first") {
+        // Spray-first families: try spray, or skip entirely. Never fall through to probe.
+        const gc = deps.globalConfig;
+        const sprayKey = `${market.familyId}|${market.tokenId}`;
+        if (
+          gc?.spraySizeUsdc &&
+          gc.spraySizeUsdc > 0 &&
+          sprayMarketsThisTick < (gc.sprayMaxMarketsPerTick ?? 10) &&
+          !sprayFamilyEmitted.has(sprayKey) &&
+          sprayPositionsRemaining > 0 &&
+          sprayBudgetRemaining > gc.spraySizeUsdc * sizeMult
+        ) {
+          const spraySignal = evaluateSprayEntry(
+            market,
+            bundle,
+            midPrice,
+            tickTs,
+            nextSeq,
+            gc.spraySizeUsdc,
+            sizeMult,
+          );
+          if (spraySignal) {
+            signals.push(spraySignal);
+            sprayMarketsThisTick++;
+            sprayFamilyEmitted.add(sprayKey);
+            sprayPositionsRemaining--;
+            sprayBudgetRemaining -= spraySignal.suggestedSizeUsdc;
+            // Cross-tick dedup: mark token as probed so next tick won't re-spray
+            if (sessionTracker) {
+              sessionTracker.incrementProbeCount(String(market.tokenId));
+              sessionTracker.recordNewMarket(String(market.familyId), String(market.tokenId));
+            }
+          }
         }
+        // spray-first families never fall through to probe
+        continue;
       }
 
       // ─── Two-sided overlay (P1-5) ────────────────────────────

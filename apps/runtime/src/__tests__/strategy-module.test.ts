@@ -3760,7 +3760,7 @@ describe("StrategyModule", () => {
         spraySizeUsdc: 0.15,
         sprayMaxMarketsPerTick: 10,
         sprayCooldownSeconds: 5,
-        sprayBudgetUsdc: 0.20,
+        sprayBudgetUsdc: 0.2,
         sprayMaxTotalPositions: 30,
       };
 
@@ -3796,9 +3796,8 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      // Spray blocked by budget → falls through to probe-entry
-      const spraySignals = signals.filter((s) => s.signal.reason === "spray-entry");
-      expect(spraySignals).toHaveLength(0);
+      // Spray blocked by budget — spray-first family is skipped entirely (no probe fallthrough)
+      expect(signals).toHaveLength(0);
     });
 
     it("increments on new spray position, decrements on close", async () => {
@@ -3807,7 +3806,7 @@ describe("StrategyModule", () => {
         spraySizeUsdc: 0.15,
         sprayMaxMarketsPerTick: 10,
         sprayCooldownSeconds: 5,
-        sprayBudgetUsdc: 0.30,
+        sprayBudgetUsdc: 0.3,
         sprayMaxTotalPositions: 1,
       };
 
@@ -3855,10 +3854,8 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      // Spray blocked → falls through to probe-entry
-      const spraySignals = signals.filter((s) => s.signal.reason === "spray-entry");
-      expect(spraySignals).toHaveLength(0);
-      expect(signals[0]!.signal.reason).toBe("probe-entry");
+      // Spray blocked — spray-first family is skipped entirely (no probe fallthrough)
+      expect(signals).toHaveLength(0);
 
       // Close the spray position → decrement
       signals.length = 0;

@@ -216,12 +216,9 @@ export class StrategyModule implements RuntimeModule {
       return;
     }
 
-    // Track new open spray positions (dedup via has() check)
-    if (
-      position.entryStyle === "spray" &&
-      position.status === "open" &&
-      !this.sprayTracker.has(posId)
-    ) {
+    // Track open spray positions — always update exposure (not just on first see)
+    // because scale-in grows costBasisUsdc. Map.set overwrites, so this is safe.
+    if (position.entryStyle === "spray" && position.status === "open") {
       this.sprayTracker.trackPosition(posId, position.costBasisUsdc);
     }
 

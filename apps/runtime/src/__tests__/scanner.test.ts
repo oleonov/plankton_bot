@@ -462,9 +462,8 @@ describe("scan() spray integration", () => {
     const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
     expect(spraySignals).toHaveLength(2);
 
-    // Remaining markets should still produce probe-entry signals
-    const probeSignals = result.signals.filter((s) => s.reason === "probe-entry");
-    expect(probeSignals).toHaveLength(3);
+    // Remaining spray-first markets are skipped entirely (no fallthrough to probe)
+    expect(result.signals).toHaveLength(2);
   });
 
   it("does NOT generate spray when globalConfig is absent", () => {
@@ -486,9 +485,8 @@ describe("scan() spray integration", () => {
       tickTs,
     );
 
-    // Without globalConfig, spray is disabled — falls through to probe-entry
-    expect(result.signals).toHaveLength(1);
-    expect(result.signals[0]!.reason).toBe("probe-entry");
+    // Without globalConfig, spray is disabled — spray-first family is skipped entirely
+    expect(result.signals).toHaveLength(0);
   });
 });
 
@@ -645,7 +643,7 @@ describe("SprayTracker", () => {
     expect(tracker.getExposureUsdc()).toBe(0);
 
     tracker.trackPosition("pos-1", 0.15);
-    tracker.trackPosition("pos-2", 0.20);
+    tracker.trackPosition("pos-2", 0.2);
 
     expect(tracker.getPositionCount()).toBe(2);
     expect(tracker.getExposureUsdc()).toBeCloseTo(0.35);
@@ -655,17 +653,17 @@ describe("SprayTracker", () => {
 
     tracker.removePosition("pos-1");
     expect(tracker.getPositionCount()).toBe(1);
-    expect(tracker.getExposureUsdc()).toBeCloseTo(0.20);
+    expect(tracker.getExposureUsdc()).toBeCloseTo(0.2);
     expect(tracker.has("pos-1")).toBe(false);
   });
 
   it("deduplicates — tracking same positionId twice overwrites cost basis", () => {
     const tracker = createSprayTracker();
     tracker.trackPosition("pos-1", 0.15);
-    tracker.trackPosition("pos-1", 0.30);
+    tracker.trackPosition("pos-1", 0.3);
 
     expect(tracker.getPositionCount()).toBe(1);
-    expect(tracker.getExposureUsdc()).toBeCloseTo(0.30);
+    expect(tracker.getExposureUsdc()).toBeCloseTo(0.3);
   });
 
   it("removing non-existent position is a no-op", () => {
@@ -708,10 +706,8 @@ describe("scan() spray cap enforcement", () => {
       tickTs,
     );
 
-    // Spray blocked by position cap → falls through to probe-entry
-    const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
-    expect(spraySignals).toHaveLength(0);
-    expect(result.signals[0]!.reason).toBe("probe-entry");
+    // Spray blocked by position cap — spray-first family is skipped entirely
+    expect(result.signals).toHaveLength(0);
   });
 
   it("blocks spray when sprayBudgetUsdc cap reached", () => {
@@ -742,10 +738,8 @@ describe("scan() spray cap enforcement", () => {
       tickTs,
     );
 
-    // Spray blocked by budget cap → falls through to probe-entry
-    const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
-    expect(spraySignals).toHaveLength(0);
-    expect(result.signals[0]!.reason).toBe("probe-entry");
+    // Spray blocked by budget cap — spray-first family is skipped entirely
+    expect(result.signals).toHaveLength(0);
   });
 
   it("allows spray when under both caps", () => {
@@ -769,7 +763,7 @@ describe("scan() spray cap enforcement", () => {
         familyStateRepo,
         log,
         globalConfig,
-        spraySnapshot: { positionCount: 2, exposureUsdc: 0.30 },
+        spraySnapshot: { positionCount: 2, exposureUsdc: 0.3 },
       },
       createBuyTracker(),
       tickTs,
@@ -799,7 +793,7 @@ describe("scan() spray cap enforcement", () => {
     const log = createMockLogger();
     // Budget allows only 2 sprays at 0.09 each (sizeMult 0.6 × 0.15 = 0.09)
     const globalConfig = makeGlobalConfig({
-      sprayBudgetUsdc: 0.20,
+      sprayBudgetUsdc: 0.2,
       sprayMaxMarketsPerTick: 10,
       sprayMaxTotalPositions: 30,
     });
@@ -828,8 +822,7 @@ describe("scan() spray cap enforcement", () => {
     const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
     // Only 2 sprays fit in the budget (0.09 + 0.09 = 0.18 < 0.20)
     expect(spraySignals).toHaveLength(2);
-    // Third market falls through to probe-entry
-    const probeSignals = result.signals.filter((s) => s.reason === "probe-entry");
-    expect(probeSignals).toHaveLength(1);
+    // Third market is skipped entirely (spray-first never falls through to probe)
+    expect(result.signals).toHaveLength(2);
   });
 });
