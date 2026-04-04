@@ -194,6 +194,27 @@ describe("autoAcceptAndPromote", () => {
       expect(result.promoted).toBe(0);
     });
 
+    it("skips family with legacy NULL-profile pending proposal", async () => {
+      seedRuntimeControlState(PROFILE);
+      seedPromotionProposal("fam-1", PROFILE, "pending");
+      // Seed a legacy proposal with NULL profile (pre-migration 012)
+      conn.db
+        .prepare(
+          `INSERT INTO promotion_proposals
+           (family_id, profile, current_state, proposed_state, reason, scores_snapshot, status, created_at)
+           VALUES ('fam-1', NULL, 'probe-only', 'scaled', 'legacy', '{}', 'pending', datetime('now'))`,
+        )
+        .run();
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      // Should skip: NULL-profile proposal makes this family unsafe for auto-promote
+      expect(result.promoted).toBe(0);
+    });
+
     it("skips family with pending promote command", async () => {
       seedRuntimeControlState(PROFILE);
       seedPromotionProposal("fam-1", PROFILE, "pending");
