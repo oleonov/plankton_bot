@@ -75,10 +75,19 @@ export async function importExchangeFills(
       continue;
     }
 
-    const localOrder = orderRepo.findByClientOrderId(ef.clientOrderId);
+    let localOrder = orderRepo.findByClientOrderId(ef.clientOrderId);
+    if (!localOrder && ef.orderId) {
+      localOrder = orderRepo.findByExchangeOrderId(ef.orderId);
+      if (localOrder) {
+        log.info(
+          { fillId: ef.fillId, exchangeOrderId: ef.orderId },
+          "fill matched via exchangeOrderId fallback",
+        );
+      }
+    }
     if (!localOrder) {
       skipped++;
-      const msg = `fill ${ef.fillId} has no matching local order (clientOrderId: ${ef.clientOrderId}) — skipped`;
+      const msg = `fill ${ef.fillId} has no matching local order (clientOrderId: ${ef.clientOrderId}, orderId: ${ef.orderId}) — skipped`;
       details.push(msg);
       log.warn({ fillId: ef.fillId }, msg);
       continue;

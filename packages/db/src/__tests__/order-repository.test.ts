@@ -201,6 +201,21 @@ describe("SqliteOrderRepository", () => {
     expect(found!.signalReason).toBeNull();
   });
 
+  it("findByExchangeOrderId returns order when exchange_order_id matches", () => {
+    repo.save(makeOrder());
+    repo.updateStatus(createOrderId("ord-1"), "open", "exch-abc");
+
+    const found = repo.findByExchangeOrderId("exch-abc");
+    expect(found).not.toBeNull();
+    expect(found!.orderId).toBe("ord-1");
+    expect(found!.exchangeOrderId).toBe("exch-abc");
+  });
+
+  it("findByExchangeOrderId returns null when not found", () => {
+    const result = repo.findByExchangeOrderId("nonexistent-exchange-id");
+    expect(result).toBeNull();
+  });
+
   it("findById returns null for unknown id", () => {
     expect(repo.findById(createOrderId("nonexistent"))).toBeNull();
   });

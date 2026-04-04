@@ -75,6 +75,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_family ON orders(family_id);
 CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token_id);
 CREATE INDEX IF NOT EXISTS idx_orders_client_oid ON orders(client_order_id);
+CREATE INDEX IF NOT EXISTS idx_orders_exchange_oid ON orders(exchange_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_bot_run ON orders(bot_run_id);
 
 -- ═══════════ FILLS ═══════════

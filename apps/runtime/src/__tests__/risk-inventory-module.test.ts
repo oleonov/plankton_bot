@@ -234,6 +234,7 @@ function createMockOrderRepo(order?: Order | null): OrderRepository {
     save: vi.fn(),
     findById: vi.fn().mockReturnValue(order ?? null),
     findByClientOrderId: vi.fn().mockReturnValue(null),
+    findByExchangeOrderId: vi.fn().mockReturnValue(null),
     findOpen: vi.fn().mockReturnValue([]),
     findByTokenId: vi.fn().mockReturnValue([]),
     updateStatus: vi.fn(),

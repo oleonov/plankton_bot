@@ -64,6 +64,13 @@ export class SqliteOrderRepository implements OrderRepository {
     return row ? this.rowToOrder(row) : null;
   }
 
+  findByExchangeOrderId(exchangeOrderId: string): Order | null {
+    const row = this.db
+      .prepare("SELECT * FROM orders WHERE exchange_order_id = ?")
+      .get(exchangeOrderId) as Record<string, unknown> | undefined;
+    return row ? this.rowToOrder(row) : null;
+  }
+
   findOpen(): Order[] {
     const rows = this.db
       .prepare("SELECT * FROM orders WHERE status IN ('pending', 'open', 'partially-filled')")

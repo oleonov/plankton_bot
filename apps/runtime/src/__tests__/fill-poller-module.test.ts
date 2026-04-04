@@ -56,6 +56,7 @@ function createMockOrderRepo(): OrderRepository {
       familyId: createFamilyId("fam-1"),
       size: 10,
     }),
+    findByExchangeOrderId: vi.fn().mockReturnValue(null),
     findOpen: vi.fn().mockReturnValue([]),
     findByTokenId: vi.fn().mockReturnValue([]),
     updateStatus: vi.fn(),

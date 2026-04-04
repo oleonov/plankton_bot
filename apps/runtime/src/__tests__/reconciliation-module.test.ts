@@ -49,6 +49,7 @@ function createMockOrderRepo(): OrderRepository {
     save: vi.fn(),
     findById: vi.fn().mockReturnValue(null),
     findByClientOrderId: vi.fn().mockReturnValue(null),
+    findByExchangeOrderId: vi.fn().mockReturnValue(null),
     findOpen: vi.fn().mockReturnValue([]),
     findByTokenId: vi.fn().mockReturnValue([]),
     updateStatus: vi.fn(),
@@ -313,6 +314,58 @@ describe("ReconciliationModule", () => {
       gateway.getFills = vi.fn().mockResolvedValue([exFill]);
       fillRepo.exists = vi.fn().mockReturnValue(false);
       orderRepo.findByClientOrderId = vi.fn().mockReturnValue(null);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(null);
+
+      const result = await mod.runReconciliation();
+
+      expect(result.missingFills).toBe(0);
+      expect(result.details.some((d) => d.includes("no matching local order"))).toBe(true);
+    });
+
+    it("matches fill via exchangeOrderId fallback when clientOrderId misses", async () => {
+      const exFill = makeExchangeFill({
+        fillId: "fill-fallback",
+        clientOrderId: "",
+        orderId: "ex-ord-1",
+      });
+      gateway.getFills = vi.fn().mockResolvedValue([exFill]);
+      fillRepo.exists = vi.fn().mockReturnValue(false);
+
+      const local = makeLocalOrder();
+      orderRepo.findByClientOrderId = vi.fn().mockReturnValue(null);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(local);
+
+      const result = await mod.runReconciliation();
+
+      expect(result.missingFills).toBe(1);
+      expect(fillRepo.save).toHaveBeenCalledTimes(1);
+      expect(orderRepo.findByExchangeOrderId).toHaveBeenCalledWith("ex-ord-1");
+    });
+
+    it("uses primary clientOrderId path when it matches (regression)", async () => {
+      const exFill = makeExchangeFill({ fillId: "fill-primary" });
+      gateway.getFills = vi.fn().mockResolvedValue([exFill]);
+      fillRepo.exists = vi.fn().mockReturnValue(false);
+
+      const local = makeLocalOrder();
+      orderRepo.findByClientOrderId = vi.fn().mockReturnValue(local);
+
+      const result = await mod.runReconciliation();
+
+      expect(result.missingFills).toBe(1);
+      expect(orderRepo.findByExchangeOrderId).not.toHaveBeenCalled();
+    });
+
+    it("skips fill when both clientOrderId and exchangeOrderId miss", async () => {
+      const exFill = makeExchangeFill({
+        fillId: "fill-double-miss",
+        clientOrderId: "",
+        orderId: "ex-unknown",
+      });
+      gateway.getFills = vi.fn().mockResolvedValue([exFill]);
+      fillRepo.exists = vi.fn().mockReturnValue(false);
+      orderRepo.findByClientOrderId = vi.fn().mockReturnValue(null);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(null);
 
       const result = await mod.runReconciliation();
 
