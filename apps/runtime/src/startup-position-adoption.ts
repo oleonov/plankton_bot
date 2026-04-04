@@ -106,7 +106,9 @@ export async function runStartupPositionAdoption(
     const timestamp = normalizeFillTimestamp(fill.timestamp);
     if (timestamp === null) {
       result.skippedInvalidTimestamp++;
-      result.details.push(`fill ${fill.fillId} skipped — invalid timestamp ${String(fill.timestamp)}`);
+      result.details.push(
+        `fill ${fill.fillId} skipped — invalid timestamp ${String(fill.timestamp)}`,
+      );
       log.warn(
         { fillId: fill.fillId, rawTimestamp: fill.timestamp },
         "startup adoption skipped — invalid fill timestamp",
