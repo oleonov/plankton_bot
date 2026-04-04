@@ -1,11 +1,15 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import type { LedgerPool } from "../ledger-pool.js";
 import { ok } from "../errors.js";
 import type { MarketMeta } from "../enrich-market.js";
 import { buildMarketMetaMap, getMetaOrEmpty } from "../enrich-market.js";
+import { resolveActiveLedger } from "./status.js";
 
 interface FillOpts {
   db: Database.Database;
+  controlDb?: Database.Database;
+  ledgerPool?: LedgerPool;
 }
 
 export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
@@ -40,6 +44,7 @@ interface FillQuery {
 
 export const fillRoutes: FastifyPluginAsync<FillOpts> = async (app, opts) => {
   app.get<{ Querystring: FillQuery }>("/fills", async (request) => {
+    const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
     const { family_id, cursor, since } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
 
@@ -64,14 +69,14 @@ export const fillRoutes: FastifyPluginAsync<FillOpts> = async (app, opts) => {
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     params.push(limit);
 
-    const rows = opts.db
+    const rows = db
       .prepare(`SELECT * FROM fills ${where} ORDER BY filled_at DESC LIMIT ?`)
       .all(...params) as Record<string, unknown>[];
 
     const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.filled_at as string) : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
-    const metaMap = buildMarketMetaMap(opts.db, tokenIds);
+    const metaMap = buildMarketMetaMap(db, tokenIds);
 
     return ok({
       items: rows.map((r) => toDto(r, getMetaOrEmpty(metaMap, r.token_id as string))),

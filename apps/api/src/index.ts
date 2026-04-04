@@ -42,19 +42,26 @@ async function main(): Promise<void> {
     process.env["CONTROL_DB_PATH"] ?? config.dbPath.replace(/[^/]+\.db$/, "control.db");
   const controlConn = bootstrapControlDb(controlDbPath);
 
-  // Read desired profile from control DB to determine ledger path
+  // Prefer current_profile for startup-fixed ledger fallback. If runtime has not
+  // published one yet, fall back to desired_profile.
   const profileRow = controlConn.db
-    .prepare("SELECT desired_profile FROM runtime_control_state WHERE id = 1")
-    .get() as { desired_profile: string } | undefined;
-  const activeProfile = profileRow?.desired_profile ?? "simulation";
-  const ledgerDbPath = controlDbPath.replace("control.db", `ledger-${activeProfile}.db`);
+    .prepare("SELECT desired_profile, current_profile FROM runtime_control_state WHERE id = 1")
+    .get() as { desired_profile: string | null; current_profile: string | null } | undefined;
+  const startupLedgerProfile =
+    profileRow?.current_profile ??
+    profileRow?.desired_profile ??
+    config.runtimeMode ??
+    "simulation";
+  const ledgerDbPath = controlDbPath.replace("control.db", `ledger-${startupLedgerProfile}.db`);
   const ledgerConn = bootstrapLedgerDb(ledgerDbPath);
 
   const ledgerPool = new LedgerPool(controlDbPath);
 
   // eslint-disable-next-line no-console
   console.log(
-    `databases opened — control: ${controlDbPath}, ledger: ${ledgerDbPath} (profile: ${activeProfile})`,
+    `databases opened — control: ${controlDbPath}, ledger: ${ledgerDbPath} ` +
+      `(env: ${config.runtimeMode}, desired: ${profileRow?.desired_profile ?? "null"}, ` +
+      `current: ${profileRow?.current_profile ?? "null"}, startup-ledger: ${startupLedgerProfile})`,
   );
 
   const app = await buildServer({

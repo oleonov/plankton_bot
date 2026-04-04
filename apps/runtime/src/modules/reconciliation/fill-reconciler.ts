@@ -19,9 +19,12 @@ import type {
   ExchangeFill,
   OrderId,
   ClientOrderId,
+  Order,
 } from "@plankton/domain";
 import { createFillId, createOrderId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+
+const loggedOrphanFillIds = new Set<string>();
 
 // ─── Shared fill import (DRY) ─────────────────────────────────────────────
 
@@ -36,6 +39,77 @@ export interface ImportFillsResult {
   imported: number;
   skipped: number;
   details: string[];
+}
+
+export function findLocalOrderForExchangeFill(
+  orderRepo: Pick<OrderRepository, "findByClientOrderId" | "findByExchangeOrderId">,
+  fill: ExchangeFill,
+  log: Logger,
+): Order | null {
+  let localOrder = orderRepo.findByClientOrderId(fill.clientOrderId);
+  if (!localOrder && fill.orderId) {
+    localOrder = orderRepo.findByExchangeOrderId(fill.orderId);
+    if (localOrder) {
+      log.info(
+        { fillId: fill.fillId, exchangeOrderId: fill.orderId },
+        "fill matched via exchangeOrderId fallback",
+      );
+    }
+  }
+  return localOrder;
+}
+
+export function buildLocalFillFromExchangeFill(
+  fill: ExchangeFill,
+  localOrder: Pick<Order, "orderId" | "familyId" | "signalReason">,
+): {
+  fill: Fill;
+  fillId: FillId;
+  orderId: OrderId;
+  sizeUsdc: number;
+  familyId: FamilyId;
+  signalReason: string | null;
+} {
+  const fillId = createFillId(fill.fillId);
+  const sizeUsdc = fill.size * fill.price;
+
+  return {
+    fill: {
+      fillId,
+      orderId: localOrder.orderId,
+      tokenId: fill.tokenId,
+      familyId: localOrder.familyId,
+      side: fill.side,
+      price: fill.price,
+      size: fill.size,
+      sizeUsdc,
+      liquidityRole: fill.liquidityRole,
+      fee: fill.fee,
+      filledAt: new Date(fill.timestamp).toISOString(),
+    },
+    fillId,
+    orderId: localOrder.orderId,
+    sizeUsdc,
+    familyId: localOrder.familyId,
+    signalReason: localOrder.signalReason ?? null,
+  };
+}
+
+export function updateOrderStatusFromPersistedFills(
+  orderRepo: Pick<OrderRepository, "findById" | "updateStatus">,
+  fillRepo: Pick<FillRepository, "findByOrderId">,
+  orderId: OrderId,
+): void {
+  const allFills = fillRepo.findByOrderId(orderId);
+  const cumulativeFilled = allFills.reduce((sum, fill) => sum + fill.size, 0);
+  const localOrder = orderRepo.findById(orderId);
+  if (!localOrder) return;
+
+  if (cumulativeFilled >= localOrder.size) {
+    orderRepo.updateStatus(orderId, "filled");
+  } else if (cumulativeFilled > 0) {
+    orderRepo.updateStatus(orderId, "partially-filled");
+  }
 }
 
 /**
@@ -76,51 +150,32 @@ export async function importExchangeFills(
       continue;
     }
 
-    let localOrder = orderRepo.findByClientOrderId(ef.clientOrderId);
-    if (!localOrder && ef.orderId) {
-      localOrder = orderRepo.findByExchangeOrderId(ef.orderId);
-      if (localOrder) {
-        log.info(
-          { fillId: ef.fillId, exchangeOrderId: ef.orderId },
-          "fill matched via exchangeOrderId fallback",
-        );
-      }
-    }
+    const localOrder = findLocalOrderForExchangeFill(orderRepo, ef, log);
     if (!localOrder) {
       skipped++;
       const msg = `fill ${ef.fillId} has no matching local order (clientOrderId: ${ef.clientOrderId}, orderId: ${ef.orderId}) — skipped`;
       details.push(msg);
-      log.warn({ fillId: ef.fillId }, msg);
+      if (!loggedOrphanFillIds.has(ef.fillId)) {
+        loggedOrphanFillIds.add(ef.fillId);
+        log.warn({ fillId: ef.fillId }, msg);
+      } else {
+        log.debug({ fillId: ef.fillId }, "orphan fill already logged — suppressing repeat warning");
+      }
       continue;
     }
 
-    const sizeUsdc = ef.size * ef.price;
-    const orderId = createOrderId(ef.orderId);
+    const resolved = buildLocalFillFromExchangeFill(ef, localOrder);
 
-    const fill: Fill = {
-      fillId,
-      orderId,
-      tokenId: ef.tokenId,
-      familyId: localOrder.familyId,
-      side: ef.side,
-      price: ef.price,
-      size: ef.size,
-      sizeUsdc,
-      liquidityRole: ef.liquidityRole,
-      fee: ef.fee,
-      filledAt: new Date(ef.timestamp).toISOString(),
-    };
-
-    fillRepo.save(fill);
+    fillRepo.save(resolved.fill);
     imported++;
-    ordersWithNewFills.add(ef.orderId);
+    ordersWithNewFills.add(String(resolved.orderId));
     savedFills.push({
       ef,
-      fillId,
-      orderId,
-      sizeUsdc,
-      familyId: localOrder.familyId,
-      signalReason: localOrder.signalReason ?? null,
+      fillId: resolved.fillId,
+      orderId: resolved.orderId,
+      sizeUsdc: resolved.sizeUsdc,
+      familyId: resolved.familyId,
+      signalReason: resolved.signalReason,
     });
 
     const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size})`;
@@ -130,16 +185,7 @@ export async function importExchangeFills(
 
   // Phase 2: Update order statuses (before publishing events so handlers see terminal status)
   for (const oid of ordersWithNewFills) {
-    const orderId = createOrderId(oid);
-    const allFills = fillRepo.findByOrderId(orderId);
-    const cumulativeFilled = allFills.reduce((sum, f) => sum + f.size, 0);
-    const localOrder = orderRepo.findById(orderId);
-    if (!localOrder) continue;
-    if (cumulativeFilled >= localOrder.size) {
-      orderRepo.updateStatus(orderId, "filled");
-    } else if (cumulativeFilled > 0) {
-      orderRepo.updateStatus(orderId, "partially-filled");
-    }
+    updateOrderStatusFromPersistedFills(orderRepo, fillRepo, createOrderId(oid));
   }
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)

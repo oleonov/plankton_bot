@@ -79,6 +79,7 @@ import { RiskEventWriter } from "./risk-event-writer.js";
 import { DbFamilyRulesProvider } from "./db-family-rules-provider.js";
 import { needsBootstrap, bootstrapImport } from "./bootstrap-import.js";
 import { resolveActiveProfile } from "./profile-boot.js";
+import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";
 import { ScoreComputer } from "./modules/evidence/score-computer.js";
 import { RuntimeSafetyEvaluator } from "./modules/safety/runtime-safety-evaluator.js";
@@ -129,11 +130,29 @@ async function main(): Promise<void> {
 
   // 2c. Resolve active profile from control.db (falls back to RUNTIME_MODE env)
   type RuntimeMode = "simulation" | "paper" | "live-lite";
-  const { profile: activeProfile, runtimeMode } = resolveActiveProfile(
-    controlConn.db,
-    config.runtimeMode,
-  ) as { profile: string; runtimeMode: RuntimeMode };
-  log.info({ activeProfile, runtimeMode }, "active profile resolved");
+  const resolvedProfile = resolveActiveProfile(controlConn.db, config.runtimeMode);
+  const activeProfile = resolvedProfile.profile;
+  const runtimeMode = resolvedProfile.runtimeMode as RuntimeMode;
+  const { desiredProfile, currentProfile } = resolvedProfile;
+  log.info(
+    {
+      envMode: config.runtimeMode,
+      desiredProfile,
+      currentProfile,
+      activeProfile,
+      runtimeMode,
+    },
+    "active profile resolved",
+  );
+  if (desiredProfile && config.runtimeMode !== desiredProfile) {
+    log.warn(
+      {
+        envMode: config.runtimeMode,
+        desiredProfile,
+      },
+      "env runtime mode differs from desired profile",
+    );
+  }
 
   // 2d. Open ledger DB scoped to active profile
   const ledgerDbPath = controlDbPath.replace("control.db", `ledger-${activeProfile}.db`);
@@ -915,6 +934,33 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
   // 10. Profile-aware preflight — runs for ALL profiles before supervisor.start()
+  const startupScan = await marketScannerModule.scanOrThrow();
+  log.info(startupScan, "blocking startup market scan complete");
+
+  const startupAdoption = await runStartupPositionAdoption({
+    gateway: exchangeGateway,
+    marketRepo: repos.market,
+    orderRepo: repos.order,
+    fillRepo: repos.fill,
+    positionRepo: repos.position,
+    inventoryLotRepo: repos.inventoryLot,
+    familyStateRepo: repos.familyState,
+    rulesProvider,
+    log,
+    db: ledgerConn.db,
+    botRunId,
+  });
+  log.info(startupAdoption, "startup position adoption complete");
+  ledgerConn.db
+    .prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('startup_adoption', ?, ?, ?)",
+    )
+    .run(
+      startupAdoption.positionsCreated,
+      JSON.stringify(startupAdoption),
+      new Date().toISOString(),
+    );
+
   if (liveLiteConfig) {
     log.info("running pre-supervisor reconciliation for live-lite preflight");
     await reconciliationModule.runReconciliation();

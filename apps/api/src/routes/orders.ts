@@ -1,11 +1,15 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import type { LedgerPool } from "../ledger-pool.js";
 import { ok, ApiError } from "../errors.js";
 import type { MarketMeta } from "../enrich-market.js";
 import { buildMarketMetaMap, getMetaOrEmpty } from "../enrich-market.js";
+import { resolveActiveLedger } from "./status.js";
 
 interface OrderOpts {
   db: Database.Database;
+  controlDb?: Database.Database;
+  ledgerPool?: LedgerPool;
 }
 
 export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
@@ -41,9 +45,8 @@ interface OrderQuery {
 }
 
 export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
-  const getById = opts.db.prepare("SELECT * FROM orders WHERE order_id = ?");
-
   app.get<{ Querystring: OrderQuery }>("/orders", async (request) => {
+    const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
     const { status, family_id, cursor } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
 
@@ -69,14 +72,14 @@ export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
     params.push(limit);
 
-    const rows = opts.db
+    const rows = db
       .prepare(`SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT ?`)
       .all(...params) as Record<string, unknown>[];
 
     const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.created_at as string) : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
-    const metaMap = buildMarketMetaMap(opts.db, tokenIds);
+    const metaMap = buildMarketMetaMap(db, tokenIds);
 
     return ok({
       items: rows.map((r) => toDto(r, getMetaOrEmpty(metaMap, r.token_id as string))),
@@ -85,10 +88,12 @@ export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
   });
 
   app.get<{ Params: { orderId: string } }>("/orders/:orderId", async (request) => {
+    const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
+    const getById = db.prepare("SELECT * FROM orders WHERE order_id = ?");
     const row = getById.get(request.params.orderId) as Record<string, unknown> | undefined;
     if (!row)
       throw new ApiError(404, `order ${request.params.orderId} not found`, "ORDER_NOT_FOUND");
-    const metaMap = buildMarketMetaMap(opts.db, [row.token_id as string]);
+    const metaMap = buildMarketMetaMap(db, [row.token_id as string]);
     return ok(toDto(row, getMetaOrEmpty(metaMap, row.token_id as string)));
   });
 };

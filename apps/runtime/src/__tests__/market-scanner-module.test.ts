@@ -181,6 +181,14 @@ describe("MarketScannerModule", () => {
     expect(marketRepo.save).not.toHaveBeenCalled();
   });
 
+  it("scanOrThrow() propagates discovery failures for blocking startup use", async () => {
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("Gamma API unreachable"),
+    );
+
+    await expect(mod.scanOrThrow()).rejects.toThrow("Gamma API unreachable");
+  });
+
   it("healthCheck() returns not-ok before first scan", async () => {
     const h = await mod.healthCheck();
     expect(h.ok).toBe(false);

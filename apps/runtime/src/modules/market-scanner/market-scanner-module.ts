@@ -36,6 +36,14 @@ interface CompiledFamily {
   regex: RegExp;
 }
 
+export interface MarketScanResult {
+  discoveredCount: number;
+  matchedCount: number;
+  deactivatedCount: number;
+  familyCount: number;
+  durationMs: number;
+}
+
 export class MarketScannerModule implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
   private scanning = false;
@@ -80,7 +88,20 @@ export class MarketScannerModule implements RuntimeModule {
 
   /** Exposed for testing -- in production driven by the interval timer. */
   async scan(): Promise<void> {
-    if (this.scanning) return;
+    await this.runScan(false);
+  }
+
+  /** Blocking startup helper — throws on discovery failures. */
+  async scanOrThrow(): Promise<MarketScanResult> {
+    const result = await this.runScan(true);
+    if (!result) {
+      throw new Error("market scan skipped unexpectedly");
+    }
+    return result;
+  }
+
+  private async runScan(throwOnError: boolean): Promise<MarketScanResult | null> {
+    if (this.scanning) return null;
     this.scanning = true;
     const startMs = Date.now();
 
@@ -140,6 +161,13 @@ export class MarketScannerModule implements RuntimeModule {
 
       this.lastSuccessfulScanMs = Date.now();
       const durationMs = this.lastSuccessfulScanMs - startMs;
+      const result: MarketScanResult = {
+        discoveredCount,
+        matchedCount,
+        deactivatedCount,
+        familyCount: families.length,
+        durationMs,
+      };
 
       this.log.info(
         {
@@ -151,8 +179,13 @@ export class MarketScannerModule implements RuntimeModule {
         },
         "scan cycle complete",
       );
+      return result;
     } catch (err) {
       this.log.error({ err }, "scan cycle failed");
+      if (throwOnError) {
+        throw err;
+      }
+      return null;
     } finally {
       this.scanning = false;
     }

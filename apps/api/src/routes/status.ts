@@ -9,6 +9,7 @@ interface StatusOpts {
   controlDb?: Database.Database;
   ledgerPool?: LedgerPool;
   marketDataStaleThresholdMs?: number;
+  envMode?: string | undefined;
 }
 
 const startedAt = Date.now();
@@ -145,6 +146,7 @@ export function buildStatusSnapshot(
   staleThresholdMs: number,
   profileOverride?: string | null,
   controlDb?: Database.Database,
+  envMode?: string,
 ): Record<string, unknown> {
   const openOrders = db
     .prepare(
@@ -311,8 +313,40 @@ export function buildStatusSnapshot(
     }),
   };
 
+  let desiredProfile: string | null = null;
+  let currentProfile: string | null = null;
+  if (controlDb) {
+    try {
+      const runtimeControl = controlDb
+        .prepare("SELECT desired_profile, current_profile FROM runtime_control_state WHERE id = 1")
+        .get() as { desired_profile: string | null; current_profile: string | null } | undefined;
+      desiredProfile = runtimeControl?.desired_profile ?? null;
+      currentProfile = runtimeControl?.current_profile ?? null;
+    } catch {
+      // Legacy/test DBs may not have runtime_control_state.
+    }
+  }
+
+  const startupAdoptionRow = db
+    .prepare(
+      "SELECT value, labels, captured_at FROM runtime_metrics WHERE metric_name = 'startup_adoption' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { value: number; labels: string | null; captured_at: string } | undefined;
+  const startupAdoption =
+    startupAdoptionRow?.labels != null
+      ? {
+          ...(JSON.parse(startupAdoptionRow.labels) as Record<string, unknown>),
+          positionsCreated: startupAdoptionRow.value,
+          capturedAt: startupAdoptionRow.captured_at,
+        }
+      : null;
+
   return {
     runtimeMode,
+    envMode: envMode ?? null,
+    desiredProfile,
+    currentProfile,
+    ledgerProfile: profileOverride ?? runtimeMode,
     uptimeSeconds: Math.floor((Date.now() - startedAt) / 1000),
     paused,
     lastReconciliationAt: lastRecon?.ts ?? null,
@@ -328,13 +362,18 @@ export function buildStatusSnapshot(
     walletBalanceUsdc,
     totalCurrentValueUsdc,
     totalRealizedPnl,
-    marketDataSource: mdSource ? JSON.parse(mdSource.labels).value : "simulation",
-    executionMode: execMode ? JSON.parse(execMode.labels).value : "simulation",
+    marketDataSource: mdSource
+      ? ((JSON.parse(mdSource.labels) as { value?: string }).value ?? "simulation")
+      : "simulation",
+    executionMode: execMode
+      ? ((JSON.parse(execMode.labels) as { value?: string }).value ?? "simulation")
+      : "simulation",
     liveLite: envelopeRow ? JSON.parse(envelopeRow.labels) : undefined,
     reconciliationDriftDetected,
     tradingState,
     signalActivity,
     executionTelemetry24h,
+    startupAdoption,
     ...(marketDataPoll ? { marketDataPoll } : {}),
   };
 }
@@ -346,6 +385,6 @@ export const statusRoutes: FastifyPluginAsync<StatusOpts> = async (app, opts) =>
 
   app.get("/status", async () => {
     const { db, profile } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
-    return ok(buildStatusSnapshot(db, staleMs, profile, opts.controlDb));
+    return ok(buildStatusSnapshot(db, staleMs, profile, opts.controlDb, opts.envMode));
   });
 };

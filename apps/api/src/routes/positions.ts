@@ -1,12 +1,16 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import type { LedgerPool } from "../ledger-pool.js";
 import { ok, ApiError } from "../errors.js";
 import type { MarketMeta } from "../enrich-market.js";
 import { buildMarketMetaMap, getMetaOrEmpty, buildResolutionMap } from "../enrich-market.js";
 import type { ResolutionInfo } from "../enrich-market.js";
+import { resolveActiveLedger } from "./status.js";
 
 interface PositionOpts {
   db: Database.Database;
+  controlDb?: Database.Database;
+  ledgerPool?: LedgerPool;
 }
 
 export function toDto(row: Record<string, unknown>, meta: MarketMeta, resInfo?: ResolutionInfo) {
@@ -45,9 +49,8 @@ interface PositionQuery {
 }
 
 export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts) => {
-  const getById = opts.db.prepare("SELECT * FROM positions WHERE position_id = ?");
-
   app.get<{ Querystring: PositionQuery }>("/positions", async (request) => {
+    const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
     const { family_id, dust, status, sort, cursor } = request.query;
     const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
 
@@ -91,12 +94,12 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    const rows = opts.db
+    const rows = db
       .prepare(`SELECT * FROM positions ${where} ${orderBy} LIMIT ?`)
       .all(...params, limit) as Record<string, unknown>[];
 
     const tokenIds = rows.map((r) => r.token_id as string);
-    const metaMap = buildMarketMetaMap(opts.db, tokenIds);
+    const metaMap = buildMarketMetaMap(db, tokenIds);
     const conditionIds = [...metaMap.values()]
       .map((m) => m.conditionId)
       .filter(Boolean) as string[];
@@ -124,7 +127,7 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     }
     const cw = countConds.length > 0 ? `WHERE ${countConds.join(" AND ")}` : "";
     const totalCount = (
-      opts.db.prepare(`SELECT COUNT(*) as cnt FROM positions ${cw}`).get(...countPrms) as {
+      db.prepare(`SELECT COUNT(*) as cnt FROM positions ${cw}`).get(...countPrms) as {
         cnt: number;
       }
     ).cnt;
@@ -141,6 +144,8 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
   });
 
   app.get<{ Params: { positionId: string } }>("/positions/:positionId", async (request) => {
+    const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
+    const getById = db.prepare("SELECT * FROM positions WHERE position_id = ?");
     const row = getById.get(request.params.positionId) as Record<string, unknown> | undefined;
     if (!row)
       throw new ApiError(
@@ -148,10 +153,10 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
         `position ${request.params.positionId} not found`,
         "POSITION_NOT_FOUND",
       );
-    const metaMap = buildMarketMetaMap(opts.db, [row.token_id as string]);
+    const metaMap = buildMarketMetaMap(db, [row.token_id as string]);
     const meta = getMetaOrEmpty(metaMap, row.token_id as string);
     const conditionIds = meta.conditionId ? [meta.conditionId] : [];
-    const resMap = buildResolutionMap(opts.db, conditionIds);
+    const resMap = buildResolutionMap(db, conditionIds);
     const resInfo = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
     return ok(toDto(row, meta, resInfo));
   });

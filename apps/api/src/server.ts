@@ -98,10 +98,26 @@ export async function buildServer(deps: ServerDeps) {
     controlDb: deps.controlDb,
     ledgerPool: deps.ledgerPool,
     marketDataStaleThresholdMs: staleMs,
+    envMode: deps.config.runtimeMode,
   });
-  await app.register(positionRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
-  await app.register(orderRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
-  await app.register(fillRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(positionRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+  });
+  await app.register(orderRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+  });
+  await app.register(fillRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+  });
   await app.register(eventsRoutes, {
     prefix: "/api/v1",
     controlDb: deps.controlDb,
