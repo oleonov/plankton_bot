@@ -225,6 +225,11 @@ export const familyYamlSchema = z
 
 const globalYamlSchema = z.object({
   initial_balance_usdc: z.number().positive().max(1_000_000).default(10_000),
+  spray_size_usdc: z.number().nonnegative().max(100).default(0.15),
+  spray_max_markets_per_tick: z.number().int().nonnegative().max(100).default(10),
+  spray_cooldown_seconds: z.number().nonnegative().max(3600).default(5),
+  spray_budget_usdc: z.number().nonnegative().max(100_000).default(50),
+  spray_max_total_positions: z.number().int().nonnegative().max(1000).default(30),
 });
 
 export type GlobalYaml = z.infer<typeof globalYamlSchema>;
@@ -274,4 +279,9 @@ export interface FamilyConfig {
 
 export interface GlobalConfig {
   initialBalanceUsdc: number;
+  spraySizeUsdc: number;
+  sprayMaxMarketsPerTick: number;
+  sprayCooldownSeconds: number;
+  sprayBudgetUsdc: number;
+  sprayMaxTotalPositions: number;
 }

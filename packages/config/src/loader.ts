@@ -119,7 +119,14 @@ export function parseFamilyRulesYaml(content: string, source = "input"): LoadedF
       );
     }
     return {
-      global: { initialBalanceUsdc: 10_000 },
+      global: {
+        initialBalanceUsdc: 10_000,
+        spraySizeUsdc: 0.15,
+        sprayMaxMarketsPerTick: 10,
+        sprayCooldownSeconds: 5,
+        sprayBudgetUsdc: 50,
+        sprayMaxTotalPositions: 30,
+      },
       families: [parseSingleFamily(doc, 0)],
     };
   }

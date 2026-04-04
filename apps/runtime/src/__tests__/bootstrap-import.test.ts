@@ -18,7 +18,14 @@ function createControlDb(): DbConnection {
 
 function makeMockLoaded(): LoadedFamilyRules {
   return {
-    global: { initialBalanceUsdc: 100 },
+    global: {
+      initialBalanceUsdc: 100,
+      spraySizeUsdc: 0.15,
+      sprayMaxMarketsPerTick: 10,
+      sprayCooldownSeconds: 5,
+      sprayBudgetUsdc: 50,
+      sprayMaxTotalPositions: 30,
+    },
     families: [
       {
         identity: {

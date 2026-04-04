@@ -187,6 +187,7 @@ export type PositionStatus = (typeof PositionStatus)[keyof typeof PositionStatus
 // ─── Signal ───────────────────────────────────────────────────────────────────
 
 export const SignalReason = {
+  SprayEntry: "spray-entry",
   ProbeEntry: "probe-entry",
   ConfirmScale: "confirm-scale",
   ScaleIn: "scale-in",
@@ -203,6 +204,7 @@ export type SignalReason = (typeof SignalReason)[keyof typeof SignalReason];
 
 /** Signal reasons that represent entries (new exposure). */
 export const ENTRY_REASONS: ReadonlySet<string> = new Set([
+  SignalReason.SprayEntry,
   SignalReason.ProbeEntry,
   SignalReason.ConfirmScale,
   SignalReason.ScaleIn,
