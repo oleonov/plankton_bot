@@ -89,11 +89,7 @@ function seedPromotionProposal(
     .run(familyId, profile, status, NOW);
 }
 
-function seedOperatorCommand(
-  action: string,
-  targetId: string,
-  status: string = "pending",
-): void {
+function seedOperatorCommand(action: string, targetId: string, status: string = "pending"): void {
   conn.db
     .prepare(
       `INSERT INTO operator_commands (action, target_id, reason, status, created_at)

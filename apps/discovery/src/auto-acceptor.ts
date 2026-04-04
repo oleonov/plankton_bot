@@ -89,14 +89,11 @@ export async function autoAcceptAndPromote(
   let promoted = 0;
   for (const f of familiesToPromote) {
     try {
-      const res = await fetch(
-        `${config.apiBaseUrl}/api/v1/actions/family/${f.family_id}/promote`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ reason: "auto-promote: promotion thresholds met" }),
-        },
-      );
+      const res = await fetch(`${config.apiBaseUrl}/api/v1/actions/family/${f.family_id}/promote`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ reason: "auto-promote: promotion thresholds met" }),
+      });
       if (res.ok) {
         promoted++;
         log.info({ familyId: f.family_id, profile: currentProfile }, "auto-promoted");

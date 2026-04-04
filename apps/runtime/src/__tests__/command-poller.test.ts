@@ -471,10 +471,7 @@ describe("CommandPoller", () => {
 
       await poller.poll();
 
-      expect(mockDeploymentUpdater.find).toHaveBeenCalledWith(
-        createFamilyId("fam-1"),
-        "paper",
-      );
+      expect(mockDeploymentUpdater.find).toHaveBeenCalledWith(createFamilyId("fam-1"), "paper");
       expect(mockDeploymentUpdater.save).toHaveBeenCalledOnce();
       expect(savedDeployments).toHaveLength(1);
       expect(savedDeployments[0]!.strategyStage).toBe("scaled");
