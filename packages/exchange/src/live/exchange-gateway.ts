@@ -20,6 +20,7 @@ import { classifyError } from "../errors.js";
 import {
   mapOpenOrder,
   mapTrade,
+  mapTradeToPersonalFills,
   mapBalance,
   toSdkSide,
   toSdkTickSize,
@@ -29,14 +30,18 @@ import {
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
   client: unknown;
+  /** Wallet/funder address used to extract personal fills from trade rows. */
+  traderAddress?: string | null;
 }
 
 export class LiveExchangeGateway implements ExchangeGateway {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
+  private readonly traderAddress: string | null;
 
   constructor(config: LiveExchangeConfig) {
     this.client = config.client;
+    this.traderAddress = config.traderAddress?.trim().toLowerCase() ?? null;
   }
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -128,7 +133,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
       const raw = await this.client.getTrades({
         after: Math.floor(sinceMs / 1000).toString(),
       });
-      return extractArray(raw).map((t: Record<string, unknown>) => mapTrade(t));
+      return extractArray(raw).flatMap((trade: Record<string, unknown>) =>
+        this.traderAddress ? mapTradeToPersonalFills(trade, this.traderAddress) : [mapTrade(trade)],
+      );
     } catch {
       return [];
     }

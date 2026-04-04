@@ -11,7 +11,12 @@ import {
 import {
   createBotRunId,
   createFamilyId,
+  createFillId,
+  createLotId,
+  createOrderId,
+  createPositionId,
   createTokenId,
+  type ClientOrderId,
   type ExchangeFill,
   type FamilyRulesProvider,
 } from "@plankton/domain";
@@ -159,7 +164,7 @@ describe("runStartupPositionAdoption", () => {
     expect(familyState?.openValueUsdc).toBe(4);
   });
 
-  it("is idempotent across repeated startups", async () => {
+  it("rebuilds the same startup-adopted state across repeated startups", async () => {
     const conn = bootstrapLedgerDb(":memory:");
     connections.push(conn);
 
@@ -204,8 +209,9 @@ describe("runStartupPositionAdoption", () => {
     });
 
     expect(first.appliedFills).toBe(1);
-    expect(second.appliedFills).toBe(0);
-    expect(second.alreadyKnownFills).toBe(1);
+    expect(second.cleanedSyntheticOrders).toBe(1);
+    expect(second.cleanedSyntheticFills).toBe(1);
+    expect(second.appliedFills).toBe(1);
     expect(positionRepo.findOpen()).toHaveLength(1);
     expect(fillRepo.findByTokenId(TOKEN_ID)).toHaveLength(1);
   });
@@ -276,5 +282,115 @@ describe("runStartupPositionAdoption", () => {
     expect(result.skippedInvalidTimestamp).toBe(1);
     expect(positionRepo.findOpen()).toHaveLength(0);
     expect(fillRepo.findByTokenId(TOKEN_ID)).toHaveLength(0);
+  });
+
+  it("cleans previous startup-adoption artifacts before rebuilding corrected positions", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+
+    const marketRepo = new SqliteMarketRepository(conn.db);
+    const orderRepo = new SqliteOrderRepository(conn.db);
+    const fillRepo = new SqliteFillRepository(conn.db);
+    const positionRepo = new SqlitePositionRepository(conn.db);
+    const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
+    seedMarket(marketRepo);
+    seedFamilyState(familyStateRepo);
+
+    orderRepo.save({
+      orderId: createOrderId("bad-order"),
+      clientOrderId: "adopt-bad" as ClientOrderId,
+      tokenId: TOKEN_ID,
+      familyId: FAMILY_ID,
+      side: "buy",
+      orderType: "GTC",
+      postOnly: false,
+      price: 0.9,
+      size: 334.37188,
+      sizeUsdc: 300.934692,
+      status: "filled",
+      exchangeOrderId: "bad-order",
+      signalId: null,
+      signalReason: "startup-adoption",
+      botRunId: createBotRunId("bad-run"),
+      createdAt: "2026-04-05T00:00:00Z",
+      updatedAt: "2026-04-05T00:00:00Z",
+    });
+    fillRepo.save({
+      fillId: createFillId("bad-fill"),
+      orderId: createOrderId("bad-order"),
+      tokenId: TOKEN_ID,
+      familyId: FAMILY_ID,
+      side: "buy",
+      price: 0.9,
+      size: 334.37188,
+      sizeUsdc: 300.934692,
+      liquidityRole: "maker",
+      fee: 0,
+      filledAt: "2026-04-05T00:00:00Z",
+    });
+    positionRepo.save({
+      positionId: createPositionId("bad-position"),
+      tokenId: TOKEN_ID,
+      familyId: FAMILY_ID,
+      side: "buy",
+      size: 334.37188,
+      avgEntryPrice: 0.9,
+      costBasisUsdc: 300.934692,
+      currentValueUsdc: 255.79,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: "probe",
+      openedAt: "2026-04-05T00:00:00Z",
+      closedAt: null,
+      updatedAt: "2026-04-05T00:00:00Z",
+    });
+    inventoryLotRepo.save({
+      lotId: createLotId("bad-lot"),
+      positionId: createPositionId("bad-position"),
+      tokenId: TOKEN_ID,
+      familyId: FAMILY_ID,
+      side: "buy",
+      size: 334.37188,
+      remainingSize: 334.37188,
+      entryPrice: 0.9,
+      costUsdc: 300.934692,
+      fillId: createFillId("bad-fill"),
+      createdAt: "2026-04-05T00:00:00Z",
+    });
+
+    const result = await runStartupPositionAdoption({
+      gateway: {
+        getFills: vi.fn().mockResolvedValue([
+          makeExchangeFill({
+            fillId: "good-fill",
+            orderId: "good-order",
+            clientOrderId: "",
+            size: 43.47,
+            price: 0.11,
+          }),
+        ]),
+      },
+      marketRepo,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo,
+      familyStateRepo,
+      rulesProvider: createRulesProvider(),
+      log: silentLog,
+      db: conn.db,
+      botRunId: createBotRunId("run-1"),
+    });
+
+    expect(result.cleanedSyntheticOrders).toBe(1);
+    expect(result.cleanedSyntheticFills).toBe(1);
+    expect(result.appliedFills).toBe(1);
+
+    const position = positionRepo.findByTokenId(TOKEN_ID);
+    expect(position).not.toBeNull();
+    expect(position?.size).toBeCloseTo(43.47, 6);
+    expect(position?.avgEntryPrice).toBeCloseTo(0.11, 6);
+    expect(position?.costBasisUsdc).toBeCloseTo(4.7817, 6);
   });
 });

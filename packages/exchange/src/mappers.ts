@@ -62,6 +62,41 @@ function toUnixMs(value: unknown, fallbackMs = Date.now()): number {
   return fallbackMs;
 }
 
+function sameAddress(left: unknown, right: string): boolean {
+  return typeof left === "string" && left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+function buildExchangeFill(input: {
+  fillId: string;
+  orderId: string;
+  clientOrderId?: string;
+  tokenId: string;
+  side: string;
+  price: unknown;
+  size: unknown;
+  feeRateBps: unknown;
+  liquidityRole: LiquidityRole;
+  timestamp: unknown;
+}): ExchangeFill {
+  const price = Number(input.price ?? 0);
+  const size = Number(input.size ?? 0);
+  const feeRateBps = Number(input.feeRateBps ?? 0);
+  const fee = size * price * (feeRateBps / 10_000);
+
+  return {
+    fillId: input.fillId,
+    orderId: input.orderId,
+    clientOrderId: input.clientOrderId ?? "",
+    tokenId: createTokenId(input.tokenId),
+    side: toDomainSide(input.side),
+    price,
+    size,
+    liquidityRole: input.liquidityRole,
+    fee,
+    timestamp: toUnixMs(input.timestamp),
+  };
+}
+
 // ─── TickSize mapping ────────────────────────────────────────────────────
 
 export function toSdkTickSize(tickSize: number): string {
@@ -113,23 +148,54 @@ export function mapOpenOrder(raw: Record<string, unknown>): ExchangeOrder {
 // ─── Fill / Trade mapping ────────────────────────────────────────────────
 
 export function mapTrade(raw: Record<string, unknown>): ExchangeFill {
-  const price = Number(raw.price ?? 0);
-  const size = Number(raw.size ?? 0);
-  const feeRateBps = Number(raw.fee_rate_bps ?? 0);
-  const fee = size * price * (feeRateBps / 10_000);
-
-  return {
+  return buildExchangeFill({
     fillId: String(raw.id ?? ""),
     orderId: String(raw.taker_order_id ?? ""),
     clientOrderId: String(raw.client_order_id ?? ""),
-    tokenId: createTokenId(String(raw.asset_id ?? "")),
-    side: toDomainSide(String(raw.side ?? "BUY")),
-    price,
-    size,
+    tokenId: String(raw.asset_id ?? ""),
+    side: String(raw.side ?? "BUY"),
+    price: raw.price,
+    size: raw.size,
+    feeRateBps: raw.fee_rate_bps,
     liquidityRole: toDomainLiquidityRole(raw.trader_side),
-    fee,
-    timestamp: toUnixMs(raw.match_time),
-  };
+    timestamp: raw.match_time,
+  });
+}
+
+export function mapTradeToPersonalFills(
+  raw: Record<string, unknown>,
+  traderAddress: string,
+): ExchangeFill[] {
+  const fills: ExchangeFill[] = [];
+  const traderSide = typeof raw.trader_side === "string" ? raw.trader_side.toUpperCase() : "";
+
+  // For our taker fills, the top-level trade fields describe our side/asset directly.
+  if (traderSide === "TAKER" && sameAddress(raw.maker_address, traderAddress)) {
+    fills.push(mapTrade(raw));
+  }
+
+  // For our maker fills, our personal leg lives inside maker_orders[].
+  const makerOrders = Array.isArray(raw.maker_orders)
+    ? (raw.maker_orders as Array<Record<string, unknown>>)
+    : [];
+  makerOrders.forEach((makerOrder, index) => {
+    if (!sameAddress(makerOrder.maker_address, traderAddress)) return;
+    fills.push(
+      buildExchangeFill({
+        fillId: `${String(raw.id ?? "")}#maker:${index}`,
+        orderId: String(makerOrder.order_id ?? ""),
+        tokenId: String(makerOrder.asset_id ?? ""),
+        side: String(makerOrder.side ?? "BUY"),
+        price: makerOrder.price,
+        size: makerOrder.matched_amount,
+        feeRateBps: makerOrder.fee_rate_bps,
+        liquidityRole: "maker",
+        timestamp: raw.match_time,
+      }),
+    );
+  });
+
+  return fills;
 }
 
 // ─── Market mapping ──────────────────────────────────────────────────────

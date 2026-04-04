@@ -5,6 +5,7 @@ import {
   toSdkTickSize,
   mapOpenOrder,
   mapTrade,
+  mapTradeToPersonalFills,
   mapMarket,
   mapOrderBook,
   mapBalance,
@@ -135,6 +136,84 @@ describe("mapTrade", () => {
 
     expect(fill.timestamp).toBeGreaterThanOrEqual(before);
     expect(fill.timestamp).toBeLessThanOrEqual(after);
+  });
+
+  it("extracts our taker trade from the top-level trade row", () => {
+    const fills = mapTradeToPersonalFills(
+      {
+        id: "trade-top",
+        taker_order_id: "ord-top",
+        asset_id: "tok-yes",
+        side: "BUY",
+        size: "43.5",
+        price: "0.11",
+        fee_rate_bps: "1000",
+        match_time: "2026-04-05T00:00:00Z",
+        maker_address: "0xabc",
+        trader_side: "TAKER",
+      },
+      "0xAbC",
+    );
+
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({
+      fillId: "trade-top",
+      orderId: "ord-top",
+      tokenId: "tok-yes",
+      side: "buy",
+      size: 43.5,
+      price: 0.11,
+      liquidityRole: "taker",
+    });
+  });
+
+  it("extracts our maker fills from nested maker_orders instead of the top-level row", () => {
+    const fills = mapTradeToPersonalFills(
+      {
+        id: "trade-maker",
+        taker_order_id: "ord-foreign",
+        asset_id: "tok-foreign-no",
+        side: "BUY",
+        size: "334.37",
+        price: "0.90",
+        fee_rate_bps: "1000",
+        match_time: "2026-04-05T00:00:00Z",
+        maker_address: "0xforeign",
+        trader_side: "MAKER",
+        maker_orders: [
+          {
+            order_id: "ord-ours",
+            maker_address: "0xOurS",
+            asset_id: "tok-our-yes",
+            side: "BUY",
+            matched_amount: "43.47",
+            price: "0.11",
+            fee_rate_bps: "1000",
+          },
+          {
+            order_id: "ord-other",
+            maker_address: "0xother",
+            asset_id: "tok-other",
+            side: "SELL",
+            matched_amount: "999",
+            price: "0.99",
+            fee_rate_bps: "1000",
+          },
+        ],
+      },
+      "0xours",
+    );
+
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toMatchObject({
+      fillId: "trade-maker#maker:0",
+      orderId: "ord-ours",
+      tokenId: "tok-our-yes",
+      side: "buy",
+      size: 43.47,
+      price: 0.11,
+      liquidityRole: "maker",
+    });
   });
 });
 

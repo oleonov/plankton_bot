@@ -40,6 +40,7 @@ export { classifyError } from "./errors.js";
 export {
   mapOpenOrder,
   mapTrade,
+  mapTradeToPersonalFills,
   mapMarket,
   mapOrderBook,
   mapBalance,

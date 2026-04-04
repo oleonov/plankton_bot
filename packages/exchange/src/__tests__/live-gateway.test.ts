@@ -180,6 +180,53 @@ describe("LiveExchangeGateway", () => {
     expect(fills[0]!.price).toBe(0.55);
   });
 
+  it("getFills extracts only personal legs when traderAddress is configured", async () => {
+    gw = new LiveExchangeGateway({ client, traderAddress: "0xours" });
+    client.getTrades.mockResolvedValue([
+      {
+        id: "trade-maker",
+        taker_order_id: "ord-foreign",
+        asset_id: "tok-foreign-no",
+        side: "BUY",
+        size: "334.37",
+        price: "0.90",
+        fee_rate_bps: "1000",
+        match_time: "2026-04-05T00:00:00Z",
+        maker_address: "0xforeign",
+        trader_side: "MAKER",
+        maker_orders: [
+          {
+            order_id: "ord-ours",
+            maker_address: "0xours",
+            asset_id: "tok-our-yes",
+            side: "BUY",
+            matched_amount: "43.47",
+            price: "0.11",
+            fee_rate_bps: "1000",
+          },
+        ],
+      },
+      {
+        id: "trade-taker",
+        taker_order_id: "ord-taker",
+        asset_id: "tok-our-no",
+        side: "SELL",
+        size: "5",
+        price: "0.25",
+        fee_rate_bps: "1000",
+        match_time: "2026-04-05T00:00:00Z",
+        maker_address: "0xours",
+        trader_side: "TAKER",
+      },
+    ]);
+
+    const fills = await gw.getFills(0);
+
+    expect(fills).toHaveLength(2);
+    expect(fills.map((fill) => fill.orderId)).toEqual(["ord-ours", "ord-taker"]);
+    expect(fills.map((fill) => fill.tokenId)).toEqual(["tok-our-yes", "tok-our-no"]);
+  });
+
   it("getBalances normalizes atomic units to human-readable USDC", async () => {
     client.getBalanceAllowance.mockResolvedValue({ balance: "8995487", allowance: "1000000000" });
 

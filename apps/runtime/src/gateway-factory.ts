@@ -13,6 +13,7 @@ import {
 export interface CreateGatewaysInput {
   runtimeMode: "simulation" | "paper" | "live-lite";
   polyClient?: unknown;
+  traderAddress?: string | undefined;
   /** Optional slug filter passed to live market data gateway. */
   slugFilter?: ((slug: string) => boolean) | undefined;
   /** Initial USDC balance for simulation/paper exchange gateway. Ignored in live-lite. */
@@ -28,7 +29,7 @@ export interface CreateGatewaysResult {
 }
 
 export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult {
-  const { runtimeMode, polyClient, slugFilter, initialBalanceUsdc } = input;
+  const { runtimeMode, polyClient, traderAddress, slugFilter, initialBalanceUsdc } = input;
 
   if (runtimeMode === "simulation") {
     return {
@@ -59,9 +60,13 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
   }
 
   // live-lite
+  const liveExchangeConfig = {
+    client: polyClient,
+    ...(traderAddress ? { traderAddress } : {}),
+  };
   return {
     marketDataGateway: new LiveMarketDataGateway({ client: polyClient, slugFilter }),
-    exchangeGateway: new LiveExchangeGateway({ client: polyClient }),
+    exchangeGateway: new LiveExchangeGateway(liveExchangeConfig),
     modeLabel: "live-lite",
     marketDataSource: "live",
     executionMode: "live",

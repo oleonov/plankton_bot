@@ -29,7 +29,7 @@ describe("createPolymarketClient", () => {
   });
 
   it("creates an EOA live-lite client with signer and API creds", async () => {
-    const signer = { kind: "wallet" };
+    const signer = { kind: "wallet", address: "0x2222222222222222222222222222222222222222" };
     const createWallet = vi.fn().mockReturnValue(signer);
     const createClobClient = vi.fn().mockReturnValue({ mode: "eoa-client" });
 
@@ -47,6 +47,7 @@ describe("createPolymarketClient", () => {
 
     expect(result.client).toEqual({ mode: "eoa-client" });
     expect(result.relayerConfig).toBeNull();
+    expect(result.traderAddress).toBe("0x2222222222222222222222222222222222222222");
     expect(createWallet).toHaveBeenCalledWith(baseConfig.polyPrivateKey);
     expect(createClobClient).toHaveBeenCalledWith("https://clob.polymarket.com", 137, signer, {
       key: "poly-key",
@@ -56,7 +57,7 @@ describe("createPolymarketClient", () => {
   });
 
   it("creates a relayer live-lite client with signatureType, funder and builder config", async () => {
-    const signer = { kind: "wallet" };
+    const signer = { kind: "wallet", address: "0x2222222222222222222222222222222222222222" };
     const builderConfig = { kind: "builder-config" };
     const createWallet = vi.fn().mockReturnValue(signer);
     const createClobClient = vi.fn().mockReturnValue({ mode: "relayer-client" });
@@ -95,6 +96,7 @@ describe("createPolymarketClient", () => {
         passphrase: "builder-passphrase",
       },
     });
+    expect(result.traderAddress).toBe("0x1111111111111111111111111111111111111111");
     expect(createBuilderConfig).toHaveBeenCalledWith({
       localBuilderCreds: {
         key: "builder-key",

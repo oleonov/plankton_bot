@@ -10,7 +10,7 @@ import {
 } from "../api/hooks.ts";
 import { PnlChart } from "../components/PnlChart.tsx";
 import { TradingActivityPanel } from "../components/TradingActivityPanel.tsx";
-import { formatAgo } from "../utils/format.ts";
+import { formatAgo, formatUsd } from "../utils/format.ts";
 
 function tradingStateColor(state?: string): string {
   switch (state) {
@@ -103,13 +103,15 @@ function BalanceCard({ status }: { status: import("../api/types.ts").StatusData 
         Balance
       </div>
       <div className="value-lg" style={isLive ? { color: "var(--green)" } : dim}>
-        {topBalance != null ? `$${topBalance.toFixed(0)}` : "—"}
+        {formatUsd(topBalance)}
       </div>
       <div className="value-sm" style={dim}>
-        {ifCloseAll != null ? `$${ifCloseAll.toFixed(0)} if close all` : ""}
+        {ifCloseAll != null ? `${formatUsd(ifCloseAll)} if close all` : ""}
       </div>
       <div className="value-sm" style={dim}>
-        ${invested.toFixed(0)} / ${cap?.toFixed(0) ?? "?"} {isLive ? "cap" : ""} invested
+        {cap != null
+          ? `${formatUsd(invested)} cost basis / ${formatUsd(cap)} ${isLive ? "cap" : "initial"}`
+          : `${formatUsd(invested)} cost basis`}
       </div>
     </div>
   );
@@ -236,8 +238,8 @@ export function Overview() {
           </div>
         </div>
         <div className="card card-accent-orange">
-          <div className="label">Open Value</div>
-          <div className="value-lg text-orange">${status.totalOpenValueUsdc.toFixed(0)}</div>
+          <div className="label">Current Value</div>
+          <div className="value-lg text-orange">{formatUsd(status.totalCurrentValueUsdc)}</div>
           <div className="value-sm">across {status.openPositionCount} positions</div>
         </div>
         <div className="card card-accent-green">

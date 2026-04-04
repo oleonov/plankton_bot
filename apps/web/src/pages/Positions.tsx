@@ -7,6 +7,14 @@ import { formatAge, formatTimeLeft } from "../utils/format.ts";
 
 const PAGE_SIZE = 50;
 
+function getPositionTotalPnl(position: {
+  costBasisUsdc: number;
+  currentValueUsdc: number | null;
+  realizedPnl: number;
+}): number {
+  return position.realizedPnl + ((position.currentValueUsdc ?? 0) - position.costBasisUsdc);
+}
+
 export function Positions() {
   const [familyId, setFamilyId] = useState("");
   const [dustOnly, setDustOnly] = useState(false);
@@ -114,6 +122,7 @@ export function Positions() {
           <tbody>
             {positions?.map((p) => {
               const ends = formatTimeLeft(p.endDate);
+              const totalPnl = getPositionTotalPnl(p);
               return (
                 <tr
                   key={p.positionId}
@@ -137,8 +146,8 @@ export function Positions() {
                   <td>
                     {p.currentValueUsdc != null ? `$${p.currentValueUsdc.toFixed(2)}` : "\u2014"}
                   </td>
-                  <td style={{ color: p.realizedPnl >= 0 ? "var(--green)" : "var(--red)" }}>
-                    {p.realizedPnl >= 0 ? "+" : ""}${p.realizedPnl.toFixed(2)}
+                  <td style={{ color: totalPnl >= 0 ? "var(--green)" : "var(--red)" }}>
+                    {totalPnl >= 0 ? "+" : ""}${totalPnl.toFixed(2)}
                   </td>
                   <td>
                     <Badge value={p.status} />

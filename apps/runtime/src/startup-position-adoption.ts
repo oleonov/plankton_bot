@@ -12,8 +12,9 @@ import type {
   PositionRepository,
   InventoryLotRepository,
   ClientOrderId,
+  FamilyId,
 } from "@plankton/domain";
-import { createFillId, createOrderId } from "@plankton/domain";
+import { createFamilyId, createFillId, createOrderId } from "@plankton/domain";
 import type { Logger } from "./logger.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
 import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
@@ -44,6 +45,9 @@ export interface StartupPositionAdoptionResult {
   adoptedOrphanFills: number;
   syntheticOrdersCreated: number;
   positionsCreated: number;
+  cleanedSyntheticOrders: number;
+  cleanedSyntheticFills: number;
+  cleanedSyntheticTokens: number;
   skippedInvalidTimestamp: number;
   skippedNoMarket: number;
   skippedNoFamily: number;
@@ -70,7 +74,15 @@ interface SyntheticOrderSeed {
   createdAt: string;
 }
 
+interface StartupAdoptionCleanupResult {
+  orderIds: string[];
+  fillIds: string[];
+  tokenIds: string[];
+  familyIds: FamilyId[];
+}
+
 const SYNTHETIC_SIGNAL_REASON = "startup-adoption";
+const DUST_THRESHOLD_USDC = 0.5;
 
 export async function runStartupPositionAdoption(
   deps: StartupPositionAdoptionDeps,
@@ -94,12 +106,22 @@ export async function runStartupPositionAdoption(
     adoptedOrphanFills: 0,
     syntheticOrdersCreated: 0,
     positionsCreated: 0,
+    cleanedSyntheticOrders: 0,
+    cleanedSyntheticFills: 0,
+    cleanedSyntheticTokens: 0,
     skippedInvalidTimestamp: 0,
     skippedNoMarket: 0,
     skippedNoFamily: 0,
     skippedInventoryDrift: 0,
     details: [],
   };
+  const familiesToRecompute = new Set<string>();
+
+  const cleanup = cleanupPriorStartupAdoptionArtifacts(deps);
+  result.cleanedSyntheticOrders = cleanup.orderIds.length;
+  result.cleanedSyntheticFills = cleanup.fillIds.length;
+  result.cleanedSyntheticTokens = cleanup.tokenIds.length;
+  cleanup.familyIds.forEach((familyId) => familiesToRecompute.add(String(familyId)));
 
   const fills: ExchangeFill[] = [];
   for (const fill of rawFills) {
@@ -214,9 +236,9 @@ export async function runStartupPositionAdoption(
           timestamp: pending.fill.timestamp,
         });
         deps.fillRepo.markReconciled([resolved.fillId]);
-        exposure.recompute(localOrder.familyId, pending.fill.side === "buy");
       })();
 
+      familiesToRecompute.add(String(localOrder.familyId));
       result.appliedFills++;
       if (!pending.localOrder) {
         result.adoptedOrphanFills++;
@@ -240,8 +262,165 @@ export async function runStartupPositionAdoption(
     }
   }
 
+  for (const familyId of familiesToRecompute) {
+    exposure.recompute(createFamilyId(familyId), true, false);
+  }
+
   result.syntheticOrdersCreated = syntheticOrders.size;
   return result;
+}
+
+function cleanupPriorStartupAdoptionArtifacts(
+  deps: StartupPositionAdoptionDeps,
+): StartupAdoptionCleanupResult {
+  const rows = deps.db
+    .prepare(
+      `SELECT DISTINCT
+         o.order_id AS order_id,
+         f.fill_id AS fill_id,
+         f.token_id AS token_id,
+         f.family_id AS family_id
+       FROM orders o
+       LEFT JOIN fills f ON f.order_id = o.order_id
+       WHERE o.signal_reason = ?`,
+    )
+    .all(SYNTHETIC_SIGNAL_REASON) as Array<{
+    order_id: string;
+    fill_id: string | null;
+    token_id: string | null;
+    family_id: string | null;
+  }>;
+
+  const orderIds = [...new Set(rows.map((row) => row.order_id))];
+  const fillIds = [...new Set(rows.map((row) => row.fill_id).filter(Boolean))] as string[];
+  const tokenIds = [...new Set(rows.map((row) => row.token_id).filter(Boolean))] as string[];
+  const familyIds = [...new Set(rows.map((row) => row.family_id).filter(Boolean))].map((familyId) =>
+    createFamilyId(familyId as string),
+  );
+
+  if (orderIds.length === 0) {
+    return { orderIds, fillIds, tokenIds, familyIds };
+  }
+
+  deps.db.transaction(() => {
+    deleteWhereIn(deps.db, "pnl_ledger", "fill_id", fillIds);
+    deleteWhereIn(deps.db, "inventory_lots", "fill_id", fillIds);
+    deleteWhereIn(deps.db, "fills", "fill_id", fillIds);
+    deleteWhereIn(deps.db, "orders", "order_id", orderIds);
+
+    for (const tokenId of tokenIds) {
+      rebuildTokenPosition(deps.db, tokenId);
+    }
+  })();
+
+  deps.log.info(
+    {
+      cleanedSyntheticOrders: orderIds.length,
+      cleanedSyntheticFills: fillIds.length,
+      cleanedSyntheticTokens: tokenIds.length,
+    },
+    "cleared prior startup adoption artifacts before recovery",
+  );
+
+  return { orderIds, fillIds, tokenIds, familyIds };
+}
+
+function deleteWhereIn(
+  db: Database.Database,
+  table: string,
+  column: string,
+  values: string[],
+): void {
+  if (values.length === 0) return;
+  const placeholders = values.map(() => "?").join(", ");
+  db.prepare(`DELETE FROM ${table} WHERE ${column} IN (${placeholders})`).run(...values);
+}
+
+function rebuildTokenPosition(db: Database.Database, tokenId: string): void {
+  const openRows = db
+    .prepare(
+      `SELECT position_id, entry_style, opened_at
+       FROM positions
+       WHERE token_id = ? AND status != 'closed'
+       ORDER BY opened_at DESC`,
+    )
+    .all(tokenId) as Array<{
+    position_id: string;
+    entry_style: "spray" | "probe" | null;
+    opened_at: string;
+  }>;
+
+  const remainingLots = db
+    .prepare(
+      `SELECT position_id, family_id, remaining_size, entry_price, created_at
+       FROM inventory_lots
+       WHERE token_id = ? AND remaining_size > 0
+       ORDER BY created_at ASC`,
+    )
+    .all(tokenId) as Array<{
+    position_id: string;
+    family_id: string;
+    remaining_size: number;
+    entry_price: number;
+    created_at: string;
+  }>;
+
+  if (remainingLots.length === 0) {
+    db.prepare(`DELETE FROM positions WHERE token_id = ? AND status != 'closed'`).run(tokenId);
+    return;
+  }
+
+  const activePositionId = remainingLots[0]!.position_id;
+  const totalSize = remainingLots.reduce((sum, lot) => sum + lot.remaining_size, 0);
+  const totalCost = remainingLots.reduce(
+    (sum, lot) => sum + lot.remaining_size * lot.entry_price,
+    0,
+  );
+  const avgEntryPrice = totalSize > 0 ? totalCost / totalSize : 0;
+  const realizedRow = db
+    .prepare(`SELECT COALESCE(SUM(delta), 0) AS total FROM pnl_ledger WHERE position_id = ?`)
+    .get(activePositionId) as { total: number } | undefined;
+  const activeRow = openRows.find((row) => row.position_id === activePositionId);
+  const entryStyle = activeRow?.entry_style ?? null;
+  const openedAt = activeRow?.opened_at ?? remainingLots[0]!.created_at;
+  const status = totalCost < DUST_THRESHOLD_USDC ? "dust" : "open";
+  const familyId = remainingLots[0]!.family_id;
+  const now = new Date().toISOString();
+
+  db.prepare(
+    `UPDATE positions
+     SET family_id = ?,
+         side = 'buy',
+         size = ?,
+         avg_entry_price = ?,
+         cost_basis_usdc = ?,
+         current_value_usdc = ?,
+         realized_pnl = ?,
+         status = ?,
+         entry_style = ?,
+         opened_at = ?,
+         closed_at = NULL,
+         updated_at = ?
+     WHERE position_id = ?`,
+  ).run(
+    familyId,
+    totalSize,
+    avgEntryPrice,
+    totalCost,
+    totalCost,
+    realizedRow?.total ?? 0,
+    status,
+    entryStyle,
+    openedAt,
+    now,
+    activePositionId,
+  );
+
+  if (openRows.length > 1) {
+    db.prepare(
+      `DELETE FROM positions WHERE token_id = ? AND status != 'closed' AND position_id != ?`,
+    ).run(tokenId, activePositionId);
+  }
 }
 
 function resolveSyntheticOrder(

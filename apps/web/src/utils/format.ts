@@ -4,6 +4,10 @@ export function formatUptime(seconds: number): string {
   return `${h}h ${m}m`;
 }
 
+export function formatUsd(value: number | null | undefined, digits = 2): string {
+  return value == null ? "—" : `$${value.toFixed(digits)}`;
+}
+
 /** Parse a timestamp as UTC. SQLite's datetime() omits the Z suffix. */
 function parseUtc(ts: string): number {
   // Check if timestamp already has timezone info (Z, +HH:MM, or -HH:MM after time)

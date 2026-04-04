@@ -334,6 +334,7 @@ async function main(): Promise<void> {
   // 7b. Create gateways via factory
   let polyClient: unknown;
   let relayerConfig: { walletType: string; funderAddress: string } | null = null;
+  let traderAddress: string | undefined;
   if (runtimeMode === "paper" || runtimeMode === "live-lite") {
     try {
       const builtClient = await createPolymarketClient({
@@ -343,6 +344,7 @@ async function main(): Promise<void> {
         relayerJson: settingsRow?.relayer_json ?? null,
       });
       polyClient = builtClient.client;
+      traderAddress = builtClient.traderAddress ?? undefined;
       relayerConfig = builtClient.relayerConfig
         ? {
             walletType: builtClient.relayerConfig.walletType,
@@ -375,6 +377,7 @@ async function main(): Promise<void> {
     createGateways({
       runtimeMode,
       polyClient,
+      traderAddress,
       slugFilter,
       initialBalanceUsdc,
     });

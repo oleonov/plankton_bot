@@ -25,11 +25,18 @@ export interface PolymarketClientFactoryDeps {
 export interface PolymarketClientResult {
   client: unknown;
   relayerConfig: PolymarketRelayerConfig | null;
+  traderAddress: string | null;
 }
 
 function requireString(value: string | undefined, field: string): string {
   if (!value) throw new Error(`${field} is required for live Polymarket client setup`);
   return value;
+}
+
+function resolveWalletAddress(wallet: unknown): string | null {
+  if (!wallet || typeof wallet !== "object") return null;
+  const candidate = Reflect.get(wallet, "address");
+  return typeof candidate === "string" && candidate.trim().length > 0 ? candidate : null;
 }
 
 function createBuilderConfig(
@@ -79,6 +86,7 @@ export async function createPolymarketClient(
     return {
       client: deps.createClobClient!(host, chainId),
       relayerConfig: null,
+      traderAddress: null,
     };
   }
 
@@ -93,6 +101,7 @@ export async function createPolymarketClient(
     return {
       client: deps.createClobClient!(host, chainId, signer, creds),
       relayerConfig: null,
+      traderAddress: resolveWalletAddress(signer),
     };
   }
 
@@ -117,5 +126,6 @@ export async function createPolymarketClient(
       builderConfig,
     ),
     relayerConfig,
+    traderAddress: relayerConfig.funderAddress,
   };
 }

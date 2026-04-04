@@ -36,7 +36,7 @@ export class FamilyExposureCalculator {
    * Recompute family state from current positions and lots.
    * Returns the updated FamilyState (already persisted).
    */
-  recompute(familyId: FamilyId, isBuy: boolean): FamilyState {
+  recompute(familyId: FamilyId, isBuy: boolean, updateActivityTs = true): FamilyState {
     const existing = this.familyStateRepo.get(familyId);
     if (!existing) {
       this.log.warn({ familyId }, "no family state to recompute — skipping");
@@ -134,8 +134,8 @@ export class FamilyExposureCalculator {
       tailAdjustedPnlLive,
       effectiveMode,
       derivedModeReason,
-      lastEntryTs: isBuy ? now : existing.lastEntryTs,
-      lastExitTs: !isBuy ? now : existing.lastExitTs,
+      lastEntryTs: updateActivityTs && isBuy ? now : existing.lastEntryTs,
+      lastExitTs: updateActivityTs && !isBuy ? now : existing.lastExitTs,
       updatedAt: now,
     };
 

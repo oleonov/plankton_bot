@@ -15,22 +15,22 @@ describe("Overview Balance Card", () => {
     renderWithProviders(<Overview />);
 
     // mockStatus: balanceUsdc = 69.70, initialBalanceUsdc = 100
-    expect(await screen.findByText("$70")).toBeInTheDocument(); // rounded
-    expect(screen.getByText(/\$100/)).toBeInTheDocument(); // invested denominator
+    expect(await screen.findByText("$69.70")).toBeInTheDocument();
+    expect(screen.getByText(/\$100\.00/)).toBeInTheDocument();
   });
 
   it("shows if-close-all value", async () => {
     renderWithProviders(<Overview />);
 
-    // if close all = balanceUsdc (69.70) + totalCurrentValueUsdc (15.87) ≈ 86
-    expect(await screen.findByText(/86.*if close all/i)).toBeInTheDocument();
+    expect(await screen.findByText(/\$85\.57 if close all/i)).toBeInTheDocument();
   });
 
   it("shows invested / initial for paper mode", async () => {
     renderWithProviders(<Overview />);
 
-    // totalOpenValueUsdc = 32.06, initialBalanceUsdc = 100
-    expect(await screen.findByText(/\$32.*\/.*\$100.*invested/)).toBeInTheDocument();
+    expect(
+      await screen.findByText(/\$32\.06 cost basis \/ \$100\.00 initial/i),
+    ).toBeInTheDocument();
   });
 
   it("shows wallet balance for live-lite mode with green accent", async () => {
@@ -54,9 +54,8 @@ describe("Overview Balance Card", () => {
     renderWithProviders(<Overview />);
 
     // Wallet balance shown
-    expect(await screen.findByText("$487")).toBeInTheDocument();
-    // invested / cap
-    expect(screen.getByText(/\$32.*\/.*\$100.*cap.*invested/)).toBeInTheDocument();
+    expect(await screen.findByText("$487.00")).toBeInTheDocument();
+    expect(screen.getByText(/\$32\.06 cost basis \/ \$100\.00 cap/i)).toBeInTheDocument();
   });
 
   it("shows dash when balance is null", async () => {
