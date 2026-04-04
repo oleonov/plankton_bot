@@ -22,7 +22,7 @@ const _origLookup: any = dns.lookup;
 
 import { randomUUID } from "node:crypto";
 import process from "node:process";
-import { loadEnv, loadFamilyRulesYaml } from "@plankton/config";
+import { loadEnv, loadFamilyRulesYaml, type GlobalConfig } from "@plankton/config";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
   bootstrapControlDb,
@@ -115,6 +115,16 @@ async function main(): Promise<void> {
     const loaded = loadFamilyRulesYaml(config.familyRulesPath);
     bootstrapImport(controlConn.db, loaded);
     log.info("control.db bootstrapped from YAML");
+  }
+
+  // 2b-2. Load global config from YAML (spray sizing, budget caps, etc.)
+  // Global config lives in YAML only — not persisted to DB.
+  let globalConfig: GlobalConfig | undefined;
+  try {
+    const yamlGlobal = loadFamilyRulesYaml(config.familyRulesPath);
+    globalConfig = yamlGlobal.global;
+  } catch {
+    log.warn("failed to load global config from YAML — spray features disabled");
   }
 
   // 2c. Resolve active profile from control.db (falls back to RUNTIME_MODE env)
@@ -468,6 +478,7 @@ async function main(): Promise<void> {
     scanIntervalMs: config.strategyScanIntervalMs,
     runtimeControl,
     liveLiteGuard,
+    globalConfig,
   });
 
   // 7i. Reconciliation module

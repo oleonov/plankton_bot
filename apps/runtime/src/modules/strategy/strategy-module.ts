@@ -27,6 +27,7 @@ import type {
   RuntimeEventMap,
   RuntimeControl,
 } from "@plankton/domain";
+import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import {
@@ -47,6 +48,7 @@ export interface StrategyModuleDeps {
   scanIntervalMs: number;
   runtimeControl?: RuntimeControl | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
+  globalConfig?: GlobalConfig | undefined;
 }
 
 export class StrategyModule implements RuntimeModule {
@@ -134,6 +136,7 @@ export class StrategyModule implements RuntimeModule {
           positionRepo: this.deps.positionRepo,
           familyStateRepo: this.deps.familyStateRepo,
           log: this.log,
+          globalConfig: this.deps.globalConfig,
         },
         this.buyTracker,
         tickTs,

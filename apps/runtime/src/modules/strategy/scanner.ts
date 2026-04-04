@@ -28,11 +28,13 @@ import {
   type Signal,
   type Position,
   type FamilyId,
+  type FamilyIdentity,
   type FamilyEvidence,
   type TokenId,
   type SignalReason,
   type ScaleInRules,
 } from "@plankton/domain";
+import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
 
 /** Context needed by the scanner to produce signals. */
@@ -41,6 +43,7 @@ export interface ScannerDeps {
   positionRepo: PositionRepository;
   familyStateRepo: FamilyStateRepository;
   log: Logger;
+  globalConfig?: GlobalConfig | undefined;
 }
 
 /** Tracks buy count per position for scale-in limiting. */
@@ -236,6 +239,71 @@ function evidenceSizeMultiplier(
   return Math.max(0.5, Math.min(1.5, mult));
 }
 
+// ─── Entry policy resolution ──────────────────────────────────────────────────
+
+export type EntryPolicy = "spray-first" | "probe-first" | "disabled";
+
+/**
+ * Auto-derive entry policy from family identity and evidence.
+ *
+ * Spray-first: unproven families that haven't been validated yet get micro-probes
+ * to discover tradeable markets before committing conviction-sized entries.
+ * Fee-enabled families skip spray (fees would eat the tiny position).
+ * Proven/scaled families go straight to probe-first.
+ */
+export function resolveFamilyEntryPolicy(
+  identity: FamilyIdentity,
+  evidence: FamilyEvidence | undefined,
+): EntryPolicy {
+  if (identity.strategyProfile === "restricted") return "disabled";
+  if (identity.feeTier === "fee-enabled") return "probe-first";
+  if (evidence?.promotionState === "scaled") return "probe-first";
+  if (evidence?.evidenceScore != null && evidence.evidenceScore > 50) return "probe-first";
+  return "spray-first";
+}
+
+// ─── Spray entry evaluation ───────────────────────────────────────────────────
+
+/**
+ * Generate a spray-entry signal for a market with no existing position.
+ *
+ * Spray entries are micro-probes (e.g. $0.15) to discover which markets are
+ * tradeable before committing conviction-sized entries. Uses globalConfig
+ * spray sizing, NOT per-family probe_size_usdc.
+ */
+export function evaluateSprayEntry(
+  market: NormalizedMarket,
+  bundle: FamilyRuleBundle,
+  midPrice: number,
+  tickTs: number,
+  nextSeq: (f: FamilyId, t: TokenId, s: string) => number,
+  spraySizeUsdc: number,
+  sizeMult: number,
+): Signal | null {
+  const entry = bundle.rules.entry;
+  if (entry.entryMode === "disabled") return null;
+  if (midPrice < entry.minEntryPrice || midPrice > entry.maxEntryPrice) return null;
+
+  const suggestedSizeUsdc = spraySizeUsdc * sizeMult;
+  const suggestedSize = suggestedSizeUsdc / midPrice;
+  if (suggestedSize < 0.01) return null;
+
+  const seq = nextSeq(market.familyId!, market.tokenId, "buy");
+  return {
+    signalId: nextSignalId(),
+    familyId: market.familyId!,
+    tokenId: market.tokenId,
+    side: "buy",
+    suggestedPrice: midPrice,
+    suggestedSize,
+    suggestedSizeUsdc,
+    reason: "spray-entry" as SignalReason,
+    strategyTick: tickTs,
+    sequenceInTick: seq,
+    generatedAt: new Date(tickTs).toISOString(),
+  };
+}
+
 /** Metadata about what the scanner blocked/produced in a single scan cycle. */
 export interface ScanResult {
   signals: Signal[];
@@ -292,6 +360,10 @@ export function scan(
   // markets in the same family would emit N probe-entries before any fill
   // updates lastEntryTs.
   const familyEntryEmitted = new Set<string>();
+
+  // Spray-specific tracking (separate from conviction entry dedup)
+  let sprayMarketsThisTick = 0;
+  const sprayFamilyEmitted = new Set<string>();
 
   for (const market of sorted) {
     // Only consider markets assigned to a family
@@ -411,6 +483,35 @@ export function scan(
           String(market.tokenId),
         );
         if (isNew && sessionTracker.getNewMarketCount(String(market.familyId)) >= maxNew) continue;
+      }
+
+      // ─── Spray entry (runs before probe, uses separate cooldown) ──
+      const entryPolicy = resolveFamilyEntryPolicy(bundle.identity, bundle.evidence);
+      const gc = deps.globalConfig;
+      const sprayKey = `${market.familyId}|${market.tokenId}`;
+      if (
+        entryPolicy === "spray-first" &&
+        gc?.spraySizeUsdc &&
+        gc.spraySizeUsdc > 0 &&
+        sprayMarketsThisTick < (gc.sprayMaxMarketsPerTick ?? 10) &&
+        !sprayFamilyEmitted.has(sprayKey)
+      ) {
+        const spraySignal = evaluateSprayEntry(
+          market,
+          bundle,
+          midPrice,
+          tickTs,
+          nextSeq,
+          gc.spraySizeUsdc,
+          sizeMult,
+        );
+        if (spraySignal) {
+          signals.push(spraySignal);
+          sprayMarketsThisTick++;
+          sprayFamilyEmitted.add(sprayKey);
+          // Spray does NOT set familyEntryEmitted — conviction entries still work
+          continue; // spray emitted, skip probe for this market
+        }
       }
 
       // ─── Two-sided overlay (P1-5) ────────────────────────────
