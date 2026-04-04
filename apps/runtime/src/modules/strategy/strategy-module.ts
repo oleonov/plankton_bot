@@ -30,6 +30,7 @@ import type {
 import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { ENTRY_REASONS } from "@plankton/domain";
 import {
   scan,
   createBuyTracker,
@@ -63,6 +64,8 @@ export class StrategyModule implements RuntimeModule {
   private readonly lastKnownSize = new Map<string, number>();
   /** Tokens with open spray positions — cross-tick dedup to prevent re-spraying. */
   private readonly sprayedTokens = new Set<string>();
+  /** Attempt-level entry cooldown: "familyId|tokenId" → epoch ms of last approved entry signal. */
+  private readonly lastAttemptTs = new Map<string, number>();
   private cachedMarkets: readonly NormalizedMarket[] = [];
   private unsubs: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -88,6 +91,12 @@ export class StrategyModule implements RuntimeModule {
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
+      this.deps.bus.subscribe("PlaceOrderRequested", async (p) => {
+        if (ENTRY_REASONS.has(p.command.signalReason ?? "")) {
+          const key = `${p.command.familyId}|${p.command.tokenId}`;
+          this.lastAttemptTs.set(key, p.timestamp);
+        }
+      }),
     );
     this.bridge.subscribe();
 
@@ -164,6 +173,7 @@ export class StrategyModule implements RuntimeModule {
             exposureUsdc: this.sprayTracker.getExposureUsdc(),
           },
           sprayedTokens: this.sprayedTokens,
+          lastAttemptTs: this.lastAttemptTs,
         },
         this.buyTracker,
         tickTs,

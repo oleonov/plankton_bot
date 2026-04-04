@@ -1059,3 +1059,211 @@ describe("spray cooldown", () => {
     expect(result.signals).toHaveLength(0);
   });
 });
+
+// ─── Tests: attempt-level cooldown tracker ────────────────────────────────
+
+describe("attempt-level cooldown", () => {
+  it("blocks entry when lastAttemptTs is within cooldown", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+
+    // Attempt was 10s ago, cooldown is 30s → blocked
+    const tickTs = new Date("2026-04-01T12:00:10Z").getTime();
+    const attemptTs = new Date("2026-04-01T12:00:00Z").getTime();
+    const lastAttemptTs = new Map<string, number>([[`${FAM_ID}|${TOK_ID}`, attemptTs]]);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, lastAttemptTs },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("allows entry when lastAttemptTs cooldown has elapsed", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+
+    // Attempt was 60s ago, cooldown is 30s → allowed
+    const tickTs = new Date("2026-04-01T12:01:00Z").getTime();
+    const attemptTs = new Date("2026-04-01T12:00:00Z").getTime();
+    const lastAttemptTs = new Map<string, number>([[`${FAM_ID}|${TOK_ID}`, attemptTs]]);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, lastAttemptTs },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("probe-entry");
+  });
+
+  it("attempt tracker takes precedence over persisted lastEntryTs", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+
+    // Persisted lastEntryTs: 10min ago (would allow entry)
+    // But attempt tracker: 5s ago (should block)
+    const tickTs = new Date("2026-04-01T12:10:05Z").getTime();
+    const attemptTs = new Date("2026-04-01T12:10:00Z").getTime();
+    const lastAttemptTs = new Map<string, number>([[`${FAM_ID}|${TOK_ID}`, attemptTs]]);
+
+    (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
+      familyId: FAM_ID,
+      runtimeMode: "active",
+      openValueUsdc: 0,
+      openPositionCount: 0,
+      openDustCount: 0,
+      activeMarketCount: 0,
+      currentTailCostUsdc: 0,
+      tailAdjustedPnlLive: 0,
+      lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
+      lastExitTs: null,
+      quarantineReason: null,
+      effectiveMode: null,
+      derivedModeReason: null,
+      firstNegativeTailAt: null,
+      updatedAt: new Date().toISOString(),
+    } satisfies FamilyState);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, lastAttemptTs },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("falls back to lastEntryTs when no attempt tracked for token", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+
+    // No attempt tracked, but lastEntryTs is 5s ago → blocked by fallback
+    const tickTs = new Date("2026-04-01T12:00:05Z").getTime();
+    const lastAttemptTs = new Map<string, number>(); // empty — no tracked attempts
+
+    (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
+      familyId: FAM_ID,
+      runtimeMode: "active",
+      openValueUsdc: 0,
+      openPositionCount: 0,
+      openDustCount: 0,
+      activeMarketCount: 0,
+      currentTailCostUsdc: 0,
+      tailAdjustedPnlLive: 0,
+      lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
+      lastExitTs: null,
+      quarantineReason: null,
+      effectiveMode: null,
+      derivedModeReason: null,
+      firstNegativeTailAt: null,
+      updatedAt: new Date().toISOString(),
+    } satisfies FamilyState);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, lastAttemptTs },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("spray-first uses sprayCooldownSeconds with attempt tracker", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig({ sprayCooldownSeconds: 5 });
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+
+    // Attempt was 3s ago, spray cooldown is 5s → blocked
+    const tickTs = new Date("2026-04-01T12:00:03Z").getTime();
+    const attemptTs = new Date("2026-04-01T12:00:00Z").getTime();
+    const lastAttemptTs = new Map<string, number>([[`${FAM_ID}|${TOK_ID}`, attemptTs]]);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig, lastAttemptTs },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("attempt cooldown is per family+token — different token is allowed", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    // Two tokens: TOK_ID has a recent attempt, TOK_ID_2 does not
+    const markets = [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.035 })];
+
+    const tickTs = new Date("2026-04-01T12:00:05Z").getTime();
+    const attemptTs = new Date("2026-04-01T12:00:00Z").getTime();
+    const lastAttemptTs = new Map<string, number>([
+      [`${FAM_ID}|${TOK_ID}`, attemptTs], // only TOK_ID is tracked
+    ]);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, lastAttemptTs },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    // TOK_ID_2 has no attempt tracked, and no persisted lastEntryTs → allowed
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.tokenId).toBe(TOK_ID_2);
+  });
+});

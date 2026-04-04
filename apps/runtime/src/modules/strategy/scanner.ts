@@ -47,6 +47,8 @@ export interface ScannerDeps {
   spraySnapshot?: { positionCount: number; exposureUsdc: number } | undefined;
   /** Tokens that already have spray positions — prevents re-spraying across ticks. */
   sprayedTokens?: ReadonlySet<string> | undefined;
+  /** Attempt-level cooldown: "familyId|tokenId" → epoch ms of last approved entry signal. */
+  lastAttemptTs?: ReadonlyMap<string, number> | undefined;
 }
 
 /** Tracks buy count per position for scale-in limiting. */
@@ -482,8 +484,15 @@ export function scan(
         : cooldownSec;
 
     if (effectiveCooldown) {
-      // Cross-tick: check persisted lastEntryTs
-      if (familyState?.lastEntryTs) {
+      // Attempt-level cooldown: blocks re-attempt on same family+token within cooldown.
+      // Fires on SignalApproved so unfilled/rejected orders still trigger cooldown.
+      const attemptKey = `${market.familyId}|${market.tokenId}`;
+      const lastAttempt = deps.lastAttemptTs?.get(attemptKey);
+      if (lastAttempt) {
+        const elapsed = (tickTs - lastAttempt) / 1000;
+        if (elapsed < effectiveCooldown) continue;
+      } else if (familyState?.lastEntryTs) {
+        // Fallback to persisted fill-based timestamp (covers cross-restart)
         const elapsed = (tickTs - new Date(familyState.lastEntryTs).getTime()) / 1000;
         if (elapsed < effectiveCooldown) continue;
       }

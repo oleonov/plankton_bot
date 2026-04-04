@@ -244,7 +244,13 @@ function createMockPositionRepo() {
     _setPosition(tokenId: TokenId, pos: Position) {
       positions.set(String(tokenId), pos);
     },
-  } satisfies PositionRepository & { _setPosition: (t: TokenId, p: Position) => void };
+    _removePosition(tokenId: TokenId) {
+      positions.delete(String(tokenId));
+    },
+  } satisfies PositionRepository & {
+    _setPosition: (t: TokenId, p: Position) => void;
+    _removePosition: (t: TokenId) => void;
+  };
 }
 
 function createMockFamilyStateRepo() {
@@ -2540,6 +2546,288 @@ describe("StrategyModule", () => {
 
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(1);
+    });
+  });
+
+  // ─── Attempt-level entry cooldown ───────────────────────────────────────
+
+  describe("attempt-level entry cooldown", () => {
+    it("records attempt timestamp on PlaceOrderRequested for entry reasons", async () => {
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      // First tick: no cooldown state → should emit a probe
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals).toHaveLength(1);
+      const firstSignal = signals[0]!.signal;
+      expect(firstSignal.reason).toBe("probe-entry");
+
+      // Simulate order being placed (attempt tracker records on PlaceOrderRequested)
+      await bus.publish("PlaceOrderRequested", {
+        command: {
+          type: "PlaceOrderCommand" as const,
+          commandId: "cmd-1" as any,
+          clientOrderId: "plk_test" as any,
+          source: "strategy" as const,
+          tokenId: firstSignal.tokenId,
+          side: firstSignal.side,
+          size: firstSignal.suggestedSize,
+          price: firstSignal.suggestedPrice,
+          orderType: "GTC" as const,
+          tickSize: 0.01,
+          negRisk: false,
+          familyId: firstSignal.familyId,
+          sequenceInTick: 0,
+          signalReason: firstSignal.reason,
+        },
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      // Second tick (immediately after): attempt tracker should block re-entry
+      signals.length = 0;
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals).toHaveLength(0);
+    });
+
+    it("does not set cooldown on SignalApproved alone — only PlaceOrderRequested triggers it", async () => {
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
+      // Create module WITHOUT calling bridge.subscribe() — so SignalApproved
+      // won't be converted to PlaceOrderRequested by the bridge
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      // Manually replicate start() without bridge to isolate the attempt tracker
+      (mod as any).unsubs.push(
+        bus.subscribe("NormalizedMarketUpdated", async (p: any) => {
+          (mod as any).cachedMarkets = p.markets;
+        }),
+        bus.subscribe("PositionUpdated", async (p: any) => {
+          (mod as any).handlePositionUpdated(p);
+        }),
+        bus.subscribe("PlaceOrderRequested", async (p: any) => {
+          if (ENTRY_REASONS.has(p.command.signalReason ?? "")) {
+            (mod as any).lastAttemptTs.set(
+              `${p.command.familyId}|${p.command.tokenId}`,
+              p.timestamp,
+            );
+          }
+        }),
+      );
+      (mod as any).started = true;
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      // Provide market data
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      // First tick → emits probe
+      await (mod as any).tick();
+      await bus.drain();
+      expect(signals).toHaveLength(1);
+
+      // Simulate: risk gate approves but bridge skips (no PlaceOrderRequested)
+      await bus.publish("SignalApproved", {
+        signal: signals[0]!.signal,
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+      // NOTE: no PlaceOrderRequested published — bridge skipped
+
+      // Second tick: should still emit probe — no cooldown was set
+      signals.length = 0;
+      await (mod as any).tick();
+      await bus.drain();
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.signal.reason).toBe("probe-entry");
+    });
+
+    it("does not record attempt timestamp for exit signals", async () => {
+      positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      // ROI = (0.04 - 0.03) / 0.03 = 33% → in exit band
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.04 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      // Simulate exit order being placed — should NOT trigger attempt cooldown
+      await bus.publish("PlaceOrderRequested", {
+        command: {
+          type: "PlaceOrderCommand" as const,
+          commandId: "cmd-exit" as any,
+          clientOrderId: "plk_exit" as any,
+          source: "strategy" as const,
+          tokenId: TOK_ID,
+          side: "sell",
+          size: 100,
+          price: 0.04,
+          orderType: "GTC" as const,
+          tickSize: 0.01,
+          negRisk: false,
+          familyId: FAM_ID,
+          sequenceInTick: 0,
+          signalReason: "repricing-exit",
+        },
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      // Remove the position so scanner sees no existing position (simulates closed)
+      positionRepo._removePosition(TOK_ID);
+
+      // Update markets with entry-eligible price
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      // Should still be able to enter — exit approval should not set attempt cooldown
+      await mod.tick();
+      await bus.drain();
+
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+    });
+
+    it("blocks different tokens in same family only if that specific token has attempt", async () => {
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      // First tick with TOK_ID → emits probe
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID, midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      // Simulate order placed for TOK_ID
+      await bus.publish("PlaceOrderRequested", {
+        command: {
+          type: "PlaceOrderCommand" as const,
+          commandId: "cmd-probe" as any,
+          clientOrderId: "plk_probe" as any,
+          source: "strategy" as const,
+          tokenId: TOK_ID,
+          side: "buy",
+          size: 166.67,
+          price: 0.03,
+          orderType: "GTC" as const,
+          tickSize: 0.01,
+          negRisk: false,
+          familyId: FAM_ID,
+          sequenceInTick: 0,
+          signalReason: "probe-entry",
+        },
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      // Now tick with TOK_ID_2 (different token, same family)
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      // TOK_ID_2 should be allowed — attempt tracker is per family+token,
+      // but intra-tick dedup is per family. Since this is a new tick, TOK_ID_2
+      // should NOT be blocked by attempt tracker (only TOK_ID is tracked).
+      // However, it may be blocked by intra-tick dedup if a signal was already
+      // emitted in this tick — but there shouldn't be one for the same family.
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
+      expect(probes[0]!.signal.tokenId).toBe(TOK_ID_2);
     });
   });
 
