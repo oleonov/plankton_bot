@@ -18,6 +18,7 @@ import type { GlobalConfig } from "@plankton/config";
 import {
   scan,
   createBuyTracker,
+  createSprayTracker,
   evaluateSprayEntry,
   resolveFamilyEntryPolicy,
   type EntryPolicy,
@@ -212,6 +213,7 @@ function createMockPositionRepo() {
     findDust: vi.fn(() => [...positions.values()].filter((p) => p.status === "dust")),
     findByFamily: vi.fn(() => [...positions.values()]),
     findAll: vi.fn(() => [...positions.values()]),
+    findOpenByEntryStyle: vi.fn(() => []),
   } satisfies PositionRepository;
 }
 
@@ -631,5 +633,203 @@ describe("spray → conviction escalation", () => {
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]!.reason).toBe("scale-in");
     expect(result.signals[0]!.suggestedSizeUsdc).toBe(4); // addSizeUsdc
+  });
+});
+
+// ─── Tests: SprayTracker ────────────────────────────────────────────────
+
+describe("SprayTracker", () => {
+  it("tracks and removes positions", () => {
+    const tracker = createSprayTracker();
+    expect(tracker.getPositionCount()).toBe(0);
+    expect(tracker.getExposureUsdc()).toBe(0);
+
+    tracker.trackPosition("pos-1", 0.15);
+    tracker.trackPosition("pos-2", 0.20);
+
+    expect(tracker.getPositionCount()).toBe(2);
+    expect(tracker.getExposureUsdc()).toBeCloseTo(0.35);
+    expect(tracker.has("pos-1")).toBe(true);
+    expect(tracker.has("pos-2")).toBe(true);
+    expect(tracker.has("pos-3")).toBe(false);
+
+    tracker.removePosition("pos-1");
+    expect(tracker.getPositionCount()).toBe(1);
+    expect(tracker.getExposureUsdc()).toBeCloseTo(0.20);
+    expect(tracker.has("pos-1")).toBe(false);
+  });
+
+  it("deduplicates — tracking same positionId twice overwrites cost basis", () => {
+    const tracker = createSprayTracker();
+    tracker.trackPosition("pos-1", 0.15);
+    tracker.trackPosition("pos-1", 0.30);
+
+    expect(tracker.getPositionCount()).toBe(1);
+    expect(tracker.getExposureUsdc()).toBeCloseTo(0.30);
+  });
+
+  it("removing non-existent position is a no-op", () => {
+    const tracker = createSprayTracker();
+    tracker.trackPosition("pos-1", 0.15);
+    tracker.removePosition("pos-nonexistent");
+
+    expect(tracker.getPositionCount()).toBe(1);
+    expect(tracker.getExposureUsdc()).toBeCloseTo(0.15);
+  });
+});
+
+// ─── Tests: scan() spray cap enforcement ────────────────────────────────
+
+describe("scan() spray cap enforcement", () => {
+  it("blocks spray when sprayMaxTotalPositions cap reached", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig({ sprayMaxTotalPositions: 5 });
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      {
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        globalConfig,
+        spraySnapshot: { positionCount: 5, exposureUsdc: 0.5 },
+      },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    // Spray blocked by position cap → falls through to probe-entry
+    const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
+    expect(spraySignals).toHaveLength(0);
+    expect(result.signals[0]!.reason).toBe("probe-entry");
+  });
+
+  it("blocks spray when sprayBudgetUsdc cap reached", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig({ sprayBudgetUsdc: 1, spraySizeUsdc: 0.15 });
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      {
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        globalConfig,
+        // Exposure already at budget limit (after sizeMult=0.6 → cost=0.09)
+        spraySnapshot: { positionCount: 0, exposureUsdc: 0.95 },
+      },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    // Spray blocked by budget cap → falls through to probe-entry
+    const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
+    expect(spraySignals).toHaveLength(0);
+    expect(result.signals[0]!.reason).toBe("probe-entry");
+  });
+
+  it("allows spray when under both caps", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      {
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        globalConfig,
+        spraySnapshot: { positionCount: 2, exposureUsdc: 0.30 },
+      },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("spray-entry");
+  });
+
+  it("decrements intra-tick budget as spray signals are emitted", () => {
+    const FAM_A = createFamilyId("fam-a");
+    const bundle = makeBundle({
+      identity: { familyId: FAM_A },
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      rules: { familyId: FAM_A },
+    });
+
+    const rulesProvider = {
+      getRule: vi.fn((_id: FamilyId) => bundle),
+      isEnabled: vi.fn((_id: FamilyId) => true),
+      getAllFamilies: vi.fn(() => [bundle.identity]),
+      getRulesForRegime: vi.fn(() => [bundle]),
+    } satisfies FamilyRulesProvider;
+
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    // Budget allows only 2 sprays at 0.09 each (sizeMult 0.6 × 0.15 = 0.09)
+    const globalConfig = makeGlobalConfig({
+      sprayBudgetUsdc: 0.20,
+      sprayMaxMarketsPerTick: 10,
+      sprayMaxTotalPositions: 30,
+    });
+
+    const tokens = [TOK_ID, TOK_ID_2, TOK_ID_3];
+    const markets = tokens.map((tokenId) =>
+      makeNormalizedMarket({ tokenId, familyId: FAM_A, midPrice: 0.035 }),
+    );
+
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      {
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        globalConfig,
+        spraySnapshot: { positionCount: 0, exposureUsdc: 0 },
+      },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
+    // Only 2 sprays fit in the budget (0.09 + 0.09 = 0.18 < 0.20)
+    expect(spraySignals).toHaveLength(2);
+    // Third market falls through to probe-entry
+    const probeSignals = result.signals.filter((s) => s.reason === "probe-entry");
+    expect(probeSignals).toHaveLength(1);
   });
 });

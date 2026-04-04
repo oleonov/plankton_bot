@@ -150,6 +150,9 @@ export interface PositionRepository {
 
   /** Return every position row, regardless of status. */
   findAll(): Position[];
+
+  /** Return all open positions with the given entry style (e.g. "spray"). */
+  findOpenByEntryStyle(entryStyle: string): Position[];
 }
 
 // ─── InventoryLotRepository ──────────────────────────────────────────────

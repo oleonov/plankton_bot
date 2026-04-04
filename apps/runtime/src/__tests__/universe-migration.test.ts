@@ -132,6 +132,7 @@ describe("migrateOrphanedPositions", () => {
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
     };
 
     const result = migrateOrphanedPositions({
@@ -162,6 +163,7 @@ describe("migrateOrphanedPositions", () => {
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
     };
 
     const result = migrateOrphanedPositions({
@@ -191,6 +193,7 @@ describe("migrateOrphanedPositions", () => {
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
     };
 
     const result = migrateOrphanedPositions({
@@ -215,6 +218,7 @@ describe("migrateOrphanedPositions", () => {
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
     };
 
     const result = migrateOrphanedPositions({
@@ -238,6 +242,7 @@ describe("migrateOrphanedPositions", () => {
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
     };
 
     const result = migrateOrphanedPositions({
@@ -283,6 +288,7 @@ describe("migrateOrphanedPositions", () => {
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
     };
     const marketRepo = {
       save: vi.fn(),
@@ -331,6 +337,7 @@ describe("migrateOrphanedPositions", () => {
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
     };
     const lotRepo = makeLotRepo([
       {
@@ -377,6 +384,7 @@ describe("migrateOrphanedPositions", () => {
       findOpen: vi.fn().mockReturnValue([]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
     };
     const lotRepo = makeLotRepo([
       {

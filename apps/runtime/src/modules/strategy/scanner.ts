@@ -44,6 +44,7 @@ export interface ScannerDeps {
   familyStateRepo: FamilyStateRepository;
   log: Logger;
   globalConfig?: GlobalConfig | undefined;
+  spraySnapshot?: { positionCount: number; exposureUsdc: number } | undefined;
 }
 
 /** Tracks buy count per position for scale-in limiting. */
@@ -79,6 +80,34 @@ export interface SessionTracker {
   getNewMarketCount(familyId: string): number;
   isKnownMarket(familyId: string, tokenId: string): boolean;
   recordNewMarket(familyId: string, tokenId: string): void;
+}
+
+/** Tracks open spray positions and total spray exposure for global cap enforcement. */
+export interface SprayTracker {
+  getPositionCount(): number;
+  getExposureUsdc(): number;
+  trackPosition(positionId: string, costBasisUsdc: number): void;
+  removePosition(positionId: string): void;
+  has(positionId: string): boolean;
+}
+
+export function createSprayTracker(): SprayTracker {
+  const positions = new Map<string, number>(); // positionId → costBasisUsdc
+  return {
+    getPositionCount: () => positions.size,
+    getExposureUsdc: () => {
+      let total = 0;
+      for (const cost of positions.values()) total += cost;
+      return total;
+    },
+    trackPosition: (positionId, costBasisUsdc) => {
+      positions.set(positionId, costBasisUsdc);
+    },
+    removePosition: (positionId) => {
+      positions.delete(positionId);
+    },
+    has: (positionId) => positions.has(positionId),
+  };
 }
 
 export function createSessionTracker(): SessionTracker {
@@ -365,6 +394,13 @@ export function scan(
   let sprayMarketsThisTick = 0;
   const sprayFamilyEmitted = new Set<string>();
 
+  // Global spray cap tracking — cumulative within this tick
+  const sprayPositionCount = deps.spraySnapshot?.positionCount ?? 0;
+  const sprayExposureUsdc = deps.spraySnapshot?.exposureUsdc ?? 0;
+  let sprayBudgetRemaining = (deps.globalConfig?.sprayBudgetUsdc ?? 50) - sprayExposureUsdc;
+  let sprayPositionsRemaining =
+    (deps.globalConfig?.sprayMaxTotalPositions ?? 30) - sprayPositionCount;
+
   for (const market of sorted) {
     // Only consider markets assigned to a family
     if (!market.familyId) continue;
@@ -494,7 +530,9 @@ export function scan(
         gc?.spraySizeUsdc &&
         gc.spraySizeUsdc > 0 &&
         sprayMarketsThisTick < (gc.sprayMaxMarketsPerTick ?? 10) &&
-        !sprayFamilyEmitted.has(sprayKey)
+        !sprayFamilyEmitted.has(sprayKey) &&
+        sprayPositionsRemaining > 0 &&
+        sprayBudgetRemaining > gc.spraySizeUsdc * sizeMult
       ) {
         const spraySignal = evaluateSprayEntry(
           market,
@@ -509,6 +547,8 @@ export function scan(
           signals.push(spraySignal);
           sprayMarketsThisTick++;
           sprayFamilyEmitted.add(sprayKey);
+          sprayPositionsRemaining--;
+          sprayBudgetRemaining -= spraySignal.suggestedSizeUsdc;
           // Spray does NOT set familyEntryEmitted — conviction entries still work
           continue; // spray emitted, skip probe for this market
         }

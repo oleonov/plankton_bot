@@ -82,6 +82,13 @@ export class SqlitePositionRepository implements PositionRepository {
     return rows.map((r) => this.rowToPosition(r));
   }
 
+  findOpenByEntryStyle(entryStyle: string): Position[] {
+    const rows = this.db
+      .prepare("SELECT * FROM positions WHERE status = 'open' AND entry_style = ?")
+      .all(entryStyle) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToPosition(r));
+  }
+
   private rowToPosition(row: Record<string, unknown>): Position {
     return {
       positionId: createPositionId(row.position_id as string),

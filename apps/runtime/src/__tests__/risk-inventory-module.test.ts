@@ -216,6 +216,7 @@ function createMockPositionRepo(position?: Position | null): PositionRepository 
     findOpen: vi.fn().mockReturnValue(position ? [position] : []),
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue(position ? [position] : []),
+    findOpenByEntryStyle: vi.fn().mockReturnValue([]),
   };
 }
 

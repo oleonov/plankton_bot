@@ -34,8 +34,10 @@ import {
   scan,
   createBuyTracker,
   createSessionTracker,
+  createSprayTracker,
   type BuyTracker,
   type SessionTracker,
+  type SprayTracker,
 } from "./scanner.js";
 import { SignalToOrderBridge } from "./signal-to-order.js";
 
@@ -55,6 +57,7 @@ export class StrategyModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly buyTracker: BuyTracker;
   private readonly sessionTracker: SessionTracker;
+  private readonly sprayTracker: SprayTracker;
   private readonly bridge: SignalToOrderBridge;
   /** Last-known size per position — used to distinguish buy-fill updates from sell-fill updates. */
   private readonly lastKnownSize = new Map<string, number>();
@@ -70,6 +73,7 @@ export class StrategyModule implements RuntimeModule {
     this.log = deps.log.child({ module: "strategy" });
     this.buyTracker = createBuyTracker();
     this.sessionTracker = createSessionTracker();
+    this.sprayTracker = createSprayTracker();
     this.bridge = new SignalToOrderBridge({
       bus: deps.bus,
       log: this.log,
@@ -84,6 +88,21 @@ export class StrategyModule implements RuntimeModule {
       this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
     );
     this.bridge.subscribe();
+
+    // Rehydrate spray tracker from persisted open spray positions
+    const openSprayPositions = this.deps.positionRepo.findOpenByEntryStyle("spray");
+    for (const pos of openSprayPositions) {
+      this.sprayTracker.trackPosition(String(pos.positionId), pos.costBasisUsdc);
+    }
+    if (openSprayPositions.length > 0) {
+      this.log.info(
+        {
+          sprayPositions: openSprayPositions.length,
+          sprayExposureUsdc: this.sprayTracker.getExposureUsdc(),
+        },
+        "rehydrated spray tracker",
+      );
+    }
 
     this.timer = setInterval(() => {
       this.tick().catch((err) => this.log.error({ err }, "strategy tick error"));
@@ -137,6 +156,10 @@ export class StrategyModule implements RuntimeModule {
           familyStateRepo: this.deps.familyStateRepo,
           log: this.log,
           globalConfig: this.deps.globalConfig,
+          spraySnapshot: {
+            positionCount: this.sprayTracker.getPositionCount(),
+            exposureUsdc: this.sprayTracker.getExposureUsdc(),
+          },
         },
         this.buyTracker,
         tickTs,
@@ -183,11 +206,23 @@ export class StrategyModule implements RuntimeModule {
     const { position } = payload;
     const posId = String(position.positionId);
 
-    // Clean up tracker when position is closed
+    // Clean up trackers when position is closed
     if (position.status === "closed") {
       this.buyTracker.removeBuyCount(posId);
       this.lastKnownSize.delete(posId);
+      if (position.entryStyle === "spray") {
+        this.sprayTracker.removePosition(posId);
+      }
       return;
+    }
+
+    // Track new open spray positions (dedup via has() check)
+    if (
+      position.entryStyle === "spray" &&
+      position.status === "open" &&
+      !this.sprayTracker.has(posId)
+    ) {
+      this.sprayTracker.trackPosition(posId, position.costBasisUsdc);
     }
 
     // Only increment buy count when position size increased (buy fill).

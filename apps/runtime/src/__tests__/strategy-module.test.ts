@@ -238,6 +238,9 @@ function createMockPositionRepo() {
     findDust: vi.fn(() => [...positions.values()].filter((p) => p.status === "dust")),
     findByFamily: vi.fn((_id: FamilyId) => [...positions.values()]),
     findAll: vi.fn(() => [...positions.values()]),
+    findOpenByEntryStyle: vi.fn((style: string) =>
+      [...positions.values()].filter((p) => p.status === "open" && p.entryStyle === style),
+    ),
     _setPosition(tokenId: TokenId, pos: Position) {
       positions.set(String(tokenId), pos);
     },
@@ -3730,6 +3733,158 @@ describe("StrategyModule", () => {
       expect(probes).toHaveLength(2);
       // Rank 1 (fam-low) must beat rank 2 (fam-btc) despite worse evidence
       expect(String(probes[0]!.signal.familyId)).toBe("fam-low");
+    });
+  });
+
+  // ─── SprayTracker integration ───────────────────────────────
+
+  describe("spray tracker", () => {
+    it("rehydrates spray positions on start", async () => {
+      const sprayPos = makePosition({
+        positionId: createPositionId("pos-spray"),
+        entryStyle: "spray",
+        costBasisUsdc: 0.15,
+        status: "open",
+      });
+      // Configure findOpenByEntryStyle to return the spray position
+      (positionRepo.findOpenByEntryStyle as ReturnType<typeof vi.fn>).mockReturnValue([sprayPos]);
+
+      // Use spray-first family + globalConfig with small budget to verify tracker works
+      const sprayBundle = makeBundle({
+        evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      });
+      rulesProvider = createMockRulesProvider(sprayBundle);
+
+      const globalConfig = {
+        initialBalanceUsdc: 10_000,
+        spraySizeUsdc: 0.15,
+        sprayMaxMarketsPerTick: 10,
+        sprayCooldownSeconds: 5,
+        sprayBudgetUsdc: 0.20,
+        sprayMaxTotalPositions: 30,
+      };
+
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        globalConfig,
+      });
+
+      await mod.start();
+
+      // Verify rehydration happened
+      expect(positionRepo.findOpenByEntryStyle).toHaveBeenCalledWith("spray");
+
+      // Feed a market and tick — budget is 0.20 with 0.15 already used.
+      // sizeMult for probe-only = 0.6, so spray cost = 0.15 * 0.6 = 0.09
+      // remaining = 0.20 - 0.15 = 0.05 < 0.09 → spray should be blocked
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.035 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      // Spray blocked by budget → falls through to probe-entry
+      const spraySignals = signals.filter((s) => s.signal.reason === "spray-entry");
+      expect(spraySignals).toHaveLength(0);
+    });
+
+    it("increments on new spray position, decrements on close", async () => {
+      const globalConfig = {
+        initialBalanceUsdc: 10_000,
+        spraySizeUsdc: 0.15,
+        sprayMaxMarketsPerTick: 10,
+        sprayCooldownSeconds: 5,
+        sprayBudgetUsdc: 0.30,
+        sprayMaxTotalPositions: 1,
+      };
+
+      const sprayBundle = makeBundle({
+        evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      });
+      rulesProvider = createMockRulesProvider(sprayBundle);
+
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        globalConfig,
+      });
+      await mod.start();
+
+      // Publish a new spray position open event
+      await bus.publish("PositionUpdated", {
+        position: makePosition({
+          positionId: createPositionId("pos-spray-a"),
+          tokenId: TOK_ID,
+          entryStyle: "spray",
+          costBasisUsdc: 0.15,
+          status: "open",
+          size: 5,
+        }),
+      });
+      await bus.drain();
+
+      // Now sprayPositionCount = 1, max = 1 → spray blocked for next market
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.035 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      // Spray blocked → falls through to probe-entry
+      const spraySignals = signals.filter((s) => s.signal.reason === "spray-entry");
+      expect(spraySignals).toHaveLength(0);
+      expect(signals[0]!.signal.reason).toBe("probe-entry");
+
+      // Close the spray position → decrement
+      signals.length = 0;
+      await bus.publish("PositionUpdated", {
+        position: makePosition({
+          positionId: createPositionId("pos-spray-a"),
+          tokenId: TOK_ID,
+          entryStyle: "spray",
+          costBasisUsdc: 0.15,
+          status: "closed",
+          size: 0,
+        }),
+      });
+      await bus.drain();
+
+      // Now sprayPositionCount = 0 → spray should be allowed again
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.035 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const spraySignals2 = signals.filter((s) => s.signal.reason === "spray-entry");
+      expect(spraySignals2).toHaveLength(1);
     });
   });
 });
