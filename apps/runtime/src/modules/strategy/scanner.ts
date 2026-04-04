@@ -45,6 +45,8 @@ export interface ScannerDeps {
   log: Logger;
   globalConfig?: GlobalConfig | undefined;
   spraySnapshot?: { positionCount: number; exposureUsdc: number } | undefined;
+  /** Tokens that already have spray positions — prevents re-spraying across ticks. */
+  sprayedTokens?: ReadonlySet<string> | undefined;
 }
 
 /** Tracks buy count per position for scale-in limiting. */
@@ -467,17 +469,30 @@ export function scan(
     const familyState = deps.familyStateRepo.get(market.familyId);
     const sizeMult = evidenceSizeMultiplier(bundle.evidence, familyState);
 
-    // Entry cooldown check (per-family) — skip entry/scale-in if cooldown not elapsed
+    // Compute entry policy once per market (used for cooldown + spray decisions)
+    const entryPolicy = existingPosition
+      ? null
+      : resolveFamilyEntryPolicy(bundle.identity, bundle.evidence);
+
+    // Entry cooldown — spray-first uses sprayCooldownSeconds, others use family cooldown
     const cooldownSec = bundle.rules.entry.entryCooldownSeconds;
-    if (cooldownSec) {
+    const effectiveCooldown =
+      entryPolicy === "spray-first" && deps.globalConfig
+        ? (deps.globalConfig.sprayCooldownSeconds ?? 5)
+        : cooldownSec;
+
+    if (effectiveCooldown) {
       // Cross-tick: check persisted lastEntryTs
       if (familyState?.lastEntryTs) {
         const elapsed = (tickTs - new Date(familyState.lastEntryTs).getTime()) / 1000;
-        if (elapsed < cooldownSec) continue;
+        if (elapsed < effectiveCooldown) continue;
       }
-      // Intra-tick: only one entry per family per scan cycle
-      const fKey = String(market.familyId);
-      if (familyEntryEmitted.has(fKey)) continue;
+      // Intra-tick: only one conviction entry per family per scan cycle.
+      // Spray-first families skip this — they carpet-bomb multiple tokens per tick.
+      if (entryPolicy !== "spray-first") {
+        const fKey = String(market.familyId);
+        if (familyEntryEmitted.has(fKey)) continue;
+      }
     }
 
     if (existingPosition && existingPosition.status === "open") {
@@ -500,7 +515,7 @@ export function scan(
           );
           if (scaleSignal) {
             signals.push(scaleSignal);
-            if (cooldownSec) familyEntryEmitted.add(String(market.familyId));
+            if (effectiveCooldown) familyEntryEmitted.add(String(market.familyId));
           }
         }
       }
@@ -522,12 +537,17 @@ export function scan(
       }
 
       // ─── Spray entry (runs before probe, uses separate cooldown) ──
-      const entryPolicy = resolveFamilyEntryPolicy(bundle.identity, bundle.evidence);
 
       if (entryPolicy === "spray-first") {
         // Spray-first families: try spray, or skip entirely. Never fall through to probe.
         const gc = deps.globalConfig;
         const sprayKey = `${market.familyId}|${market.tokenId}`;
+
+        // Cross-tick dedup: skip tokens that already have spray positions
+        if (deps.sprayedTokens?.has(String(market.tokenId))) {
+          continue;
+        }
+
         if (
           gc?.spraySizeUsdc &&
           gc.spraySizeUsdc > 0 &&
@@ -551,11 +571,6 @@ export function scan(
             sprayFamilyEmitted.add(sprayKey);
             sprayPositionsRemaining--;
             sprayBudgetRemaining -= spraySignal.suggestedSizeUsdc;
-            // Cross-tick dedup: mark token as probed so next tick won't re-spray
-            if (sessionTracker) {
-              sessionTracker.incrementProbeCount(String(market.tokenId));
-              sessionTracker.recordNewMarket(String(market.familyId), String(market.tokenId));
-            }
           }
         }
         // spray-first families never fall through to probe
@@ -581,7 +596,7 @@ export function scan(
         );
         if (twoSidedSignal) {
           signals.push(twoSidedSignal);
-          if (cooldownSec) familyEntryEmitted.add(String(market.familyId));
+          if (effectiveCooldown) familyEntryEmitted.add(String(market.familyId));
         }
       } else {
         // Probe entry — allowed in reduced mode (probes are low-risk)
@@ -596,7 +611,7 @@ export function scan(
         );
         if (probeSignal) {
           signals.push(probeSignal);
-          if (cooldownSec) familyEntryEmitted.add(String(market.familyId));
+          if (effectiveCooldown) familyEntryEmitted.add(String(market.familyId));
         }
       }
     }

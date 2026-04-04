@@ -3883,5 +3883,88 @@ describe("StrategyModule", () => {
       const spraySignals2 = signals.filter((s) => s.signal.reason === "spray-entry");
       expect(spraySignals2).toHaveLength(1);
     });
+
+    it("dust position removes spray tracking (same as closed)", async () => {
+      const globalConfig = {
+        initialBalanceUsdc: 10_000,
+        spraySizeUsdc: 0.15,
+        sprayMaxMarketsPerTick: 10,
+        sprayCooldownSeconds: 5,
+        sprayBudgetUsdc: 0.3,
+        sprayMaxTotalPositions: 1,
+      };
+
+      const sprayBundle = makeBundle({
+        evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      });
+      rulesProvider = createMockRulesProvider(sprayBundle);
+
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        globalConfig,
+      });
+      await mod.start();
+
+      // Create a spray position → tracker at capacity (max=1)
+      await bus.publish("PositionUpdated", {
+        position: makePosition({
+          positionId: createPositionId("pos-spray-dust"),
+          tokenId: TOK_ID,
+          entryStyle: "spray",
+          costBasisUsdc: 0.15,
+          status: "open",
+          size: 5,
+        }),
+      });
+      await bus.drain();
+
+      // Verify spray blocked at capacity
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.035 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals).toHaveLength(0);
+
+      // Transition to dust → should release spray tracking slot
+      signals.length = 0;
+      await bus.publish("PositionUpdated", {
+        position: makePosition({
+          positionId: createPositionId("pos-spray-dust"),
+          tokenId: TOK_ID,
+          entryStyle: "spray",
+          costBasisUsdc: 0.15,
+          status: "dust",
+          size: 0.001,
+        }),
+      });
+      await bus.drain();
+
+      // Now spray should be allowed again (capacity freed)
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.035 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+      await mod.tick();
+      await bus.drain();
+
+      const spraySignals = signals.filter((s) => s.signal.reason === "spray-entry");
+      expect(spraySignals).toHaveLength(1);
+    });
   });
 });

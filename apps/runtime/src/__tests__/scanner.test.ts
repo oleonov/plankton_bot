@@ -18,6 +18,7 @@ import type { GlobalConfig } from "@plankton/config";
 import {
   scan,
   createBuyTracker,
+  createSessionTracker,
   createSprayTracker,
   evaluateSprayEntry,
   resolveFamilyEntryPolicy,
@@ -824,5 +825,237 @@ describe("scan() spray cap enforcement", () => {
     expect(spraySignals).toHaveLength(2);
     // Third market is skipped entirely (spray-first never falls through to probe)
     expect(result.signals).toHaveLength(2);
+  });
+});
+
+// ─── Tests: spray session counter isolation ───────────────────────────────
+
+describe("spray session counter isolation", () => {
+  it("spray signal does NOT increment sessionTracker probe count", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+    const sessionTracker = createSessionTracker();
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+      sessionTracker,
+    );
+
+    // Spray signal emitted
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("spray-entry");
+
+    // Session tracker NOT incremented — only StrategyModule does that on fill
+    expect(sessionTracker.getProbeCount(String(TOK_ID))).toBe(0);
+    expect(sessionTracker.getNewMarketCount(String(FAM_ID))).toBe(0);
+  });
+});
+
+// ─── Tests: sprayedTokens cross-tick dedup ────────────────────────────────
+
+describe("sprayedTokens cross-tick dedup", () => {
+  it("blocks re-spray of tokens already in sprayedTokens set", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    // Token already sprayed
+    const sprayedTokens = new Set([String(TOK_ID)]);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig, sprayedTokens },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    // Spray blocked by sprayedTokens — spray-first family skipped entirely
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("allows spray for tokens NOT in sprayedTokens set", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    // Different token already sprayed, not TOK_ID
+    const sprayedTokens = new Set(["other-token"]);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig, sprayedTokens },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("spray-entry");
+  });
+});
+
+// ─── Tests: spray cooldown uses sprayCooldownSeconds ──────────────────────
+
+describe("spray cooldown", () => {
+  it("spray-first family uses sprayCooldownSeconds, not entryCooldownSeconds", () => {
+    // Family with 30s entry cooldown, but spray cooldown is 5s
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig({ sprayCooldownSeconds: 5 });
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+
+    // Last entry was 10 seconds ago — past spray cooldown (5s) but within entry cooldown (30s)
+    const tickTs = new Date("2026-04-01T12:00:10Z").getTime();
+    (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
+      familyId: FAM_ID,
+      runtimeMode: "active",
+      openValueUsdc: 0,
+      openPositionCount: 0,
+      openDustCount: 0,
+      activeMarketCount: 0,
+      currentTailCostUsdc: 0,
+      tailAdjustedPnlLive: 0,
+      lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
+      lastExitTs: null,
+      quarantineReason: null,
+      effectiveMode: null,
+      derivedModeReason: null,
+      firstNegativeTailAt: null,
+      updatedAt: new Date().toISOString(),
+    } satisfies FamilyState);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    // Should spray — 10s > 5s spray cooldown
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("spray-entry");
+  });
+
+  it("spray-first family blocked when within sprayCooldownSeconds", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig({ sprayCooldownSeconds: 5 });
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+
+    // Last entry was 3 seconds ago — within spray cooldown (5s)
+    const tickTs = new Date("2026-04-01T12:00:03Z").getTime();
+    (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
+      familyId: FAM_ID,
+      runtimeMode: "active",
+      openValueUsdc: 0,
+      openPositionCount: 0,
+      openDustCount: 0,
+      activeMarketCount: 0,
+      currentTailCostUsdc: 0,
+      tailAdjustedPnlLive: 0,
+      lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
+      lastExitTs: null,
+      quarantineReason: null,
+      effectiveMode: null,
+      derivedModeReason: null,
+      firstNegativeTailAt: null,
+      updatedAt: new Date().toISOString(),
+    } satisfies FamilyState);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    // Should be blocked — 3s < 5s spray cooldown
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("probe-first family still uses entryCooldownSeconds (not sprayCooldownSeconds)", () => {
+    // Proven family (probe-first), with 30s entry cooldown
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig({ sprayCooldownSeconds: 5 });
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+
+    // Last entry was 10 seconds ago — past spray cooldown but within entry cooldown (30s)
+    const tickTs = new Date("2026-04-01T12:00:10Z").getTime();
+    (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
+      familyId: FAM_ID,
+      runtimeMode: "active",
+      openValueUsdc: 0,
+      openPositionCount: 0,
+      openDustCount: 0,
+      activeMarketCount: 0,
+      currentTailCostUsdc: 0,
+      tailAdjustedPnlLive: 0,
+      lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
+      lastExitTs: null,
+      quarantineReason: null,
+      effectiveMode: null,
+      derivedModeReason: null,
+      firstNegativeTailAt: null,
+      updatedAt: new Date().toISOString(),
+    } satisfies FamilyState);
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    // Should be blocked — 10s < 30s entry cooldown for probe-first
+    expect(result.signals).toHaveLength(0);
   });
 });

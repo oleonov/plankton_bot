@@ -61,6 +61,8 @@ export class StrategyModule implements RuntimeModule {
   private readonly bridge: SignalToOrderBridge;
   /** Last-known size per position — used to distinguish buy-fill updates from sell-fill updates. */
   private readonly lastKnownSize = new Map<string, number>();
+  /** Tokens with open spray positions — cross-tick dedup to prevent re-spraying. */
+  private readonly sprayedTokens = new Set<string>();
   private cachedMarkets: readonly NormalizedMarket[] = [];
   private unsubs: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -89,10 +91,11 @@ export class StrategyModule implements RuntimeModule {
     );
     this.bridge.subscribe();
 
-    // Rehydrate spray tracker from persisted open spray positions
+    // Rehydrate spray tracker + sprayedTokens from persisted open spray positions
     const openSprayPositions = this.deps.positionRepo.findOpenByEntryStyle("spray");
     for (const pos of openSprayPositions) {
       this.sprayTracker.trackPosition(String(pos.positionId), pos.costBasisUsdc);
+      this.sprayedTokens.add(String(pos.tokenId));
     }
     if (openSprayPositions.length > 0) {
       this.log.info(
@@ -160,6 +163,7 @@ export class StrategyModule implements RuntimeModule {
             positionCount: this.sprayTracker.getPositionCount(),
             exposureUsdc: this.sprayTracker.getExposureUsdc(),
           },
+          sprayedTokens: this.sprayedTokens,
         },
         this.buyTracker,
         tickTs,
@@ -206,12 +210,13 @@ export class StrategyModule implements RuntimeModule {
     const { position } = payload;
     const posId = String(position.positionId);
 
-    // Clean up trackers when position is closed
-    if (position.status === "closed") {
+    // Clean up trackers when position is closed or dust (dust is effectively abandoned)
+    if (position.status === "closed" || position.status === "dust") {
       this.buyTracker.removeBuyCount(posId);
       this.lastKnownSize.delete(posId);
       if (position.entryStyle === "spray") {
         this.sprayTracker.removePosition(posId);
+        this.sprayedTokens.delete(String(position.tokenId));
       }
       return;
     }
@@ -220,6 +225,7 @@ export class StrategyModule implements RuntimeModule {
     // because scale-in grows costBasisUsdc. Map.set overwrites, so this is safe.
     if (position.entryStyle === "spray" && position.status === "open") {
       this.sprayTracker.trackPosition(posId, position.costBasisUsdc);
+      this.sprayedTokens.add(String(position.tokenId));
     }
 
     // Only increment buy count when position size increased (buy fill).
