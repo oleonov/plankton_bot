@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { bootstrapControlDb, SqliteDiscoveryRunRepository } from "@plankton/db";
 import { ScanService } from "./scan-service.js";
 import { ControlEvaluator } from "./control-evaluator.js";
+import type { AutoAcceptorConfig } from "./auto-acceptor.js";
 import { loadDiscoveryEnv, getControlDbPath, createDiscoveryGateway } from "./gateway-factory.js";
 import {
   DISCOVERY_SCAN_INTERVAL_MS,
@@ -76,15 +77,22 @@ async function main(): Promise<void> {
   }, STALE_THRESHOLD_MS); // check every 2 minutes
 
   // Control evaluator — scores candidates and proposes promotions
-  const controlEvaluator = new ControlEvaluator({ db: conn.db, log: logger });
+  const autoAcceptorConfig: AutoAcceptorConfig = {
+    apiBaseUrl: process.env.PLANKTON_API_URL ?? "http://localhost:3100",
+    apiKey: process.env.PLANKTON_API_KEY ?? "",
+    enabled: process.env.AUTO_APPROVE_ENABLED === "true",
+  };
+  const controlEvaluator = new ControlEvaluator({
+    db: conn.db,
+    log: logger,
+    autoAcceptorConfig,
+  });
 
   const runEvaluation = (): void => {
-    try {
-      controlEvaluator.run();
-    } catch (err) {
+    controlEvaluator.run().catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error({ error: msg }, "Control evaluation failed");
-    }
+    });
   };
 
   // Run initial evaluation, then on a timer

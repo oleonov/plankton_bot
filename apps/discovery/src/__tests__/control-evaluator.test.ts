@@ -208,12 +208,12 @@ afterEach(() => {
 
 describe("ControlEvaluator", () => {
   describe("candidate scoring", () => {
-    it("scores candidate based on observations", () => {
+    it("scores candidate based on observations", async () => {
       seedCandidate(conn);
       seedObservations(conn);
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      const stats = evaluator.run();
+      const stats = await evaluator.run();
 
       expect(stats.candidatesScored).toBe(1);
 
@@ -229,13 +229,13 @@ describe("ControlEvaluator", () => {
       expect(row.gate_recommendation).not.toBe("ignore");
     });
 
-    it("reads recycle score from published scorecard when candidate has matched family", () => {
+    it("reads recycle score from published scorecard when candidate has matched family", async () => {
       seedCandidate(conn, true);
       seedObservations(conn);
       seedScorecard(conn, { recycleScore: 0.8, tailAdjustedPnl: 10.0 });
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      evaluator.run();
+      await evaluator.run();
 
       const row = conn.db
         .prepare("SELECT * FROM family_candidates WHERE candidate_id = ?")
@@ -247,7 +247,7 @@ describe("ControlEvaluator", () => {
   });
 
   describe("promotion evaluation", () => {
-    it("creates promotion proposal when scorecard meets thresholds", () => {
+    it("creates promotion proposal when scorecard meets thresholds", async () => {
       seedCandidate(conn);
       seedDeployment(conn, "probe-only");
       seedScorecard(conn, {
@@ -259,7 +259,7 @@ describe("ControlEvaluator", () => {
       });
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      const stats = evaluator.run();
+      const stats = await evaluator.run();
 
       expect(stats.proposalsCreated).toBe(1);
 
@@ -274,7 +274,7 @@ describe("ControlEvaluator", () => {
       expect(proposals[0]!.source_scorecard_id).not.toBeNull();
     });
 
-    it("does not create duplicate proposals for same family+profile", () => {
+    it("does not create duplicate proposals for same family+profile", async () => {
       seedCandidate(conn);
       seedDeployment(conn, "probe-only");
       seedScorecard(conn, {
@@ -287,10 +287,10 @@ describe("ControlEvaluator", () => {
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
 
-      const stats1 = evaluator.run();
+      const stats1 = await evaluator.run();
       expect(stats1.proposalsCreated).toBe(1);
 
-      const stats2 = evaluator.run();
+      const stats2 = await evaluator.run();
       expect(stats2.proposalsCreated).toBe(0);
 
       const proposals = conn.db
@@ -299,7 +299,7 @@ describe("ControlEvaluator", () => {
       expect(proposals).toHaveLength(1);
     });
 
-    it("does not propose when scorecard below thresholds", () => {
+    it("does not propose when scorecard below thresholds", async () => {
       seedCandidate(conn);
       seedDeployment(conn, "probe-only");
       seedScorecard(conn, {
@@ -311,12 +311,12 @@ describe("ControlEvaluator", () => {
       });
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      const stats = evaluator.run();
+      const stats = await evaluator.run();
 
       expect(stats.proposalsCreated).toBe(0);
     });
 
-    it("still proposes in paper mode when execution canary fails", () => {
+    it("still proposes in paper mode when execution canary fails", async () => {
       seedCandidate(conn);
       seedProfile(conn, PROFILE_PAPER, "Paper");
       seedDeployment(conn, "probe-only", PROFILE_PAPER);
@@ -352,12 +352,12 @@ describe("ControlEvaluator", () => {
       );
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      const stats = evaluator.run();
+      const stats = await evaluator.run();
 
       expect(stats.proposalsCreated).toBe(1);
     });
 
-    it("does not propose in live-lite when execution canary fails", () => {
+    it("does not propose in live-lite when execution canary fails", async () => {
       seedCandidate(conn);
       seedProfile(conn, PROFILE_LIVE, "Live-Lite");
       seedDeployment(conn, "probe-only", PROFILE_LIVE);
@@ -393,33 +393,33 @@ describe("ControlEvaluator", () => {
       );
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      const stats = evaluator.run();
+      const stats = await evaluator.run();
 
       expect(stats.proposalsCreated).toBe(0);
     });
 
-    it("does not propose for already-scaled deployment", () => {
+    it("does not propose for already-scaled deployment", async () => {
       seedCandidate(conn);
       seedDeployment(conn, "scaled");
       seedScorecard(conn);
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      const stats = evaluator.run();
+      const stats = await evaluator.run();
 
       expect(stats.proposalsCreated).toBe(0);
     });
 
-    it("does not propose when no scorecard exists", () => {
+    it("does not propose when no scorecard exists", async () => {
       seedCandidate(conn);
       seedDeployment(conn, "probe-only");
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      const stats = evaluator.run();
+      const stats = await evaluator.run();
 
       expect(stats.proposalsCreated).toBe(0);
     });
 
-    it("suppresses recently dismissed proposals until cooldown expires", () => {
+    it("suppresses recently dismissed proposals until cooldown expires", async () => {
       seedProfile(conn, PROFILE_PAPER, "Paper");
       seedDeployment(conn, "probe-only", PROFILE_PAPER);
       seedScorecard(conn, undefined, PROFILE_PAPER);
@@ -430,7 +430,7 @@ describe("ControlEvaluator", () => {
         now: () => new Date("2026-03-30T12:00:00.000Z"),
         dismissCooldownMs: DISMISSED_PROPOSAL_COOLDOWN_MS,
       });
-      expect(firstRun.run().proposalsCreated).toBe(1);
+      expect((await firstRun.run()).proposalsCreated).toBe(1);
 
       const proposal = conn.db
         .prepare("SELECT id FROM promotion_proposals WHERE family_id = ? AND profile = ?")
@@ -449,7 +449,7 @@ describe("ControlEvaluator", () => {
         now: () => new Date("2026-03-30T12:30:00.000Z"),
         dismissCooldownMs: DISMISSED_PROPOSAL_COOLDOWN_MS,
       });
-      expect(withinCooldown.run().proposalsCreated).toBe(0);
+      expect((await withinCooldown.run()).proposalsCreated).toBe(0);
 
       const afterCooldown = new ControlEvaluator({
         db: conn.db,
@@ -457,12 +457,12 @@ describe("ControlEvaluator", () => {
         now: () => new Date("2026-03-30T13:10:00.000Z"),
         dismissCooldownMs: DISMISSED_PROPOSAL_COOLDOWN_MS,
       });
-      expect(afterCooldown.run().proposalsCreated).toBe(1);
+      expect((await afterCooldown.run()).proposalsCreated).toBe(1);
     });
   });
 
   describe("atomicity", () => {
-    it("run() writes all scores in a single transaction", () => {
+    it("run() writes all scores in a single transaction", async () => {
       seedCandidate(conn);
       conn.db
         .prepare(
@@ -476,7 +476,7 @@ describe("ControlEvaluator", () => {
         .run(NOW, NOW);
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      const stats = evaluator.run();
+      const stats = await evaluator.run();
       expect(stats.candidatesScored).toBe(2);
 
       const c1 = conn.db
@@ -489,7 +489,7 @@ describe("ControlEvaluator", () => {
       expect(c2.scores_updated_at).not.toBeNull();
     });
 
-    it("rolls back all score updates if write phase fails mid-way", () => {
+    it("rolls back all score updates if write phase fails mid-way", async () => {
       seedCandidate(conn);
       conn.db
         .prepare(
@@ -513,7 +513,7 @@ describe("ControlEvaluator", () => {
       `);
 
       const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
-      expect(() => evaluator.run()).toThrow("bomb triggered");
+      await expect(evaluator.run()).rejects.toThrow("bomb triggered");
 
       // Neither candidate should have updated scores — transaction rolled back
       const c1 = conn.db

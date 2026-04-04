@@ -31,6 +31,7 @@ import {
   SqliteFamilyDeploymentRepository,
 } from "@plankton/db";
 import { DISMISSED_PROPOSAL_COOLDOWN_MS, recentDismissalCutoffIso } from "./promotion-policy.js";
+import { type AutoAcceptorConfig, autoAcceptAndPromote } from "./auto-acceptor.js";
 
 // ─── Metric helpers (ported from ScoreComputer, adapted for control.db) ────
 
@@ -165,6 +166,7 @@ export interface ControlEvaluatorDeps {
   log: Logger;
   now?: () => Date;
   dismissCooldownMs?: number;
+  autoAcceptorConfig?: AutoAcceptorConfig;
 }
 
 export interface EvaluationStats {
@@ -181,6 +183,8 @@ export class ControlEvaluator {
   private readonly deploymentRepo: SqliteFamilyDeploymentRepository;
   private readonly now: () => Date;
   private readonly dismissCooldownMs: number;
+  private readonly autoAcceptorConfig: AutoAcceptorConfig | undefined;
+  private evaluating = false;
 
   constructor(deps: ControlEvaluatorDeps) {
     this.db = deps.db;
@@ -191,34 +195,50 @@ export class ControlEvaluator {
     this.deploymentRepo = new SqliteFamilyDeploymentRepository(deps.db);
     this.now = deps.now ?? (() => new Date());
     this.dismissCooldownMs = deps.dismissCooldownMs ?? DISMISSED_PROPOSAL_COOLDOWN_MS;
+    this.autoAcceptorConfig = deps.autoAcceptorConfig;
   }
 
-  run(): EvaluationStats {
-    const now = this.now();
-    const nowIso = now.toISOString();
+  async run(): Promise<EvaluationStats> {
+    if (this.evaluating) return { candidatesScored: 0, proposalsCreated: 0 };
+    this.evaluating = true;
+    try {
+      const now = this.now();
+      const nowIso = now.toISOString();
 
-    // Phase 1: Read + compute outside transaction (no write lock held)
-    const candidates = this.candidateRepo.findAll();
-    const scoreUpdates = this.computeScores(candidates, nowIso);
-    const proposalInserts = this.computePromotions(now);
+      // Phase 1: Read + compute outside transaction (no write lock held)
+      const candidates = this.candidateRepo.findAll();
+      const scoreUpdates = this.computeScores(candidates, nowIso);
+      const proposalInserts = this.computePromotions(now);
 
-    // Phase 2: Apply all writes in a single short IMMEDIATE transaction
-    const candidateRepo = this.candidateRepo;
-    const proposalRepo = this.proposalRepo;
-    withImmediate(this.db, (db) => {
-      for (const upd of scoreUpdates) {
-        candidateRepo.updateScores(upd.candidateId, upd.scores);
+      // Phase 2: Apply all writes in a single short IMMEDIATE transaction
+      const candidateRepo = this.candidateRepo;
+      const proposalRepo = this.proposalRepo;
+      withImmediate(this.db, (db) => {
+        for (const upd of scoreUpdates) {
+          candidateRepo.updateScores(upd.candidateId, upd.scores);
+        }
+        for (const ins of proposalInserts) {
+          proposalRepo.insert(ins.proposal);
+        }
+      });
+
+      this.log.info(
+        { candidatesScored: scoreUpdates.length, proposalsCreated: proposalInserts.length },
+        "control evaluation complete",
+      );
+
+      // Phase 3: Auto-accept + auto-promote via API
+      if (this.autoAcceptorConfig?.enabled) {
+        const result = await autoAcceptAndPromote(this.db, this.autoAcceptorConfig, this.log);
+        if (result.accepted > 0 || result.promoted > 0) {
+          this.log.info(result, "auto-accept/promote pass");
+        }
       }
-      for (const ins of proposalInserts) {
-        proposalRepo.insert(ins.proposal);
-      }
-    });
 
-    this.log.info(
-      { candidatesScored: scoreUpdates.length, proposalsCreated: proposalInserts.length },
-      "control evaluation complete",
-    );
-    return { candidatesScored: scoreUpdates.length, proposalsCreated: proposalInserts.length };
+      return { candidatesScored: scoreUpdates.length, proposalsCreated: proposalInserts.length };
+    } finally {
+      this.evaluating = false;
+    }
   }
 
   // ─── Candidate scoring (read + compute only) ──────────────────────
