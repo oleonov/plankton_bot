@@ -91,6 +91,7 @@ export class LiveLiteGuard {
     isEntry: boolean;
     orderNotionalUsdc: number;
     hasPostOnlySupport?: boolean;
+    signalReason?: string | null;
   }): string[] {
     if (!this.config || !opts.isEntry) return [];
 
@@ -111,7 +112,13 @@ export class LiveLiteGuard {
       );
     }
 
-    if (minOrderUsdc != null && opts.orderNotionalUsdc < minOrderUsdc) {
+    // Spray entries bypass minOrderUsdc — CLOB accepts sub-$1 orders,
+    // the $1 floor is our internal guard for conviction entries only
+    if (
+      minOrderUsdc != null &&
+      opts.orderNotionalUsdc < minOrderUsdc &&
+      opts.signalReason !== "spray-entry"
+    ) {
       rejected.push("live-min-order-usdc-rejected");
     }
 

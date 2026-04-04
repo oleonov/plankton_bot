@@ -468,6 +468,25 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  it("approves spray-entry signal in probe-only family", async () => {
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "probe-only" }));
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "spray-entry", suggestedSizeUsdc: 0.15 }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
   // ─── Signal rejection: exposure limits ────────────────────────────
 
   it("rejects entry when max open value exceeded", async () => {

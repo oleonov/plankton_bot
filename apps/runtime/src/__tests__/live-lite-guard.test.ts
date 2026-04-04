@@ -163,6 +163,40 @@ describe("LiveLiteGuard", () => {
         }),
       ).toEqual(["live-min-order-usdc-rejected"]);
     });
+
+    it("bypasses minOrderUsdc for spray-entry signals", () => {
+      expect(
+        guard.getFamilyPolicyRejections({
+          identity: {
+            primaryCategory: "geopolitics",
+            feeTier: null,
+            liveWalletRequirement: null,
+            requiresPostOnlyForLive: null,
+          },
+          isEntry: true,
+          orderNotionalUsdc: 0.15,
+          hasPostOnlySupport: true,
+          signalReason: "spray-entry",
+        }),
+      ).toEqual([]);
+    });
+
+    it("still rejects probe-entry below the configured minimum", () => {
+      expect(
+        guard.getFamilyPolicyRejections({
+          identity: {
+            primaryCategory: "geopolitics",
+            feeTier: null,
+            liveWalletRequirement: null,
+            requiresPostOnlyForLive: null,
+          },
+          isEntry: true,
+          orderNotionalUsdc: 0.15,
+          hasPostOnlySupport: true,
+          signalReason: "probe-entry",
+        }),
+      ).toEqual(["live-min-order-usdc-rejected"]);
+    });
   });
 
   describe("when relayer mode uses the default minimum", () => {

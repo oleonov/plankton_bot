@@ -152,6 +152,7 @@ export class ExecutionModule implements RuntimeModule {
           isEntry: cmd.side === "buy",
           orderNotionalUsdc: notional,
           hasPostOnlySupport: cmd.postOnly === true,
+          signalReason: cmd.signalReason,
         });
         if (cmd.side !== "buy" && liveTradingPolicy.requiresPostOnlyForLive && !cmd.postOnly) {
           policyRejected.unshift("live-post-only-required");
