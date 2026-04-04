@@ -67,6 +67,10 @@ export async function autoAcceptAndPromote(
     .get() as { current_profile: string | null } | undefined;
   const currentProfile = profileRow?.current_profile;
 
+  // Safety: only auto-promote families where the ONLY pending proposal is for
+  // current profile. Exclude families with NULL-profile legacy proposals or
+  // proposals in other profiles — the family-scoped /promote API would pick
+  // the wrong one.
   const familiesToPromote = currentProfile
     ? (db
         .prepare(
@@ -76,7 +80,7 @@ export async function autoAcceptAndPromote(
          AND pp.profile = ?
          AND pp.family_id NOT IN (
            SELECT family_id FROM promotion_proposals
-           WHERE status = 'pending' AND profile != ?
+           WHERE status = 'pending' AND (profile != ? OR profile IS NULL)
          )
          AND pp.family_id NOT IN (
            SELECT DISTINCT target_id FROM operator_commands

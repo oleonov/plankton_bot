@@ -78,7 +78,7 @@ async function main(): Promise<void> {
 
   // Control evaluator — scores candidates and proposes promotions
   const autoAcceptorConfig: AutoAcceptorConfig = {
-    apiBaseUrl: process.env.PLANKTON_API_URL ?? "http://localhost:3100",
+    apiBaseUrl: process.env.PLANKTON_API_URL ?? "http://plankton-api:3100",
     apiKey: process.env.PLANKTON_API_KEY ?? "",
     enabled: process.env.AUTO_APPROVE_ENABLED === "true",
   };
