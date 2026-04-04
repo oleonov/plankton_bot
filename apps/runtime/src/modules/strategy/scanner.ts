@@ -702,8 +702,11 @@ function evaluateScaleIn(
   const reason = resolveScaleStage(buyCount, scale);
   if (!reason) return null;
 
-  // Size: addSizeUsdc adjusted by evidence multiplier, capped by max notional
-  const suggestedSizeUsdc = Math.min(entry.addSizeUsdc * sizeMult, entry.maxInitialNotionalUsdc);
+  // Spray → conviction escalation: first scale-in after spray uses probe_size_usdc
+  const isSprayEscalation = position.entryStyle === "spray" && buyCount === 1;
+  const suggestedSizeUsdc = isSprayEscalation
+    ? Math.min(entry.probeSizeUsdc * sizeMult, entry.maxInitialNotionalUsdc)
+    : Math.min(entry.addSizeUsdc * sizeMult, entry.maxInitialNotionalUsdc);
   const suggestedSize = suggestedSizeUsdc / midPrice;
 
   return {

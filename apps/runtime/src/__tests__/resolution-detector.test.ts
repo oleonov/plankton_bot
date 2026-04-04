@@ -41,6 +41,7 @@ function makePosition(overrides?: Partial<Position>): Position {
     costBasisUsdc: 20,
     currentValueUsdc: 20,
     realizedPnl: 0,
+    entryStyle: null,
     buyCount: 1,
     closedAt: null,
     createdAt: "2025-12-01T00:00:00Z",

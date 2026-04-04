@@ -36,6 +36,7 @@ export interface FillEvent {
   size: number;
   sizeUsdc: number;
   fee: number;
+  signalReason: string | null;
   timestamp: number;
 }
 
@@ -89,6 +90,7 @@ export class InventoryHandler {
       currentValueUsdc: fill.sizeUsdc,
       realizedPnl: 0,
       status: "open",
+      entryStyle: fill.signalReason === "spray-entry" ? "spray" : "probe",
       openedAt: now,
       closedAt: null,
       updatedAt: now,

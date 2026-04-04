@@ -32,6 +32,7 @@ function makePosition(overrides?: Partial<Position>): Position {
     currentValueUsdc: 60,
     realizedPnl: 0,
     status: "open",
+    entryStyle: null,
     openedAt: new Date().toISOString(),
     closedAt: null,
     updatedAt: new Date().toISOString(),

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createTokenId, createFamilyId } from "@plankton/domain";
+import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
 import type {
   FamilyRulesProvider,
   FamilyRuleBundle,
@@ -323,15 +323,7 @@ describe("evaluateSprayEntry", () => {
     const market = makeNormalizedMarket({ midPrice: 0.005 });
     const bundle = makeBundle();
 
-    const signal = evaluateSprayEntry(
-      market,
-      bundle,
-      0.005,
-      Date.now(),
-      nextSeqStub,
-      0.15,
-      1.0,
-    );
+    const signal = evaluateSprayEntry(market, bundle, 0.005, Date.now(), nextSeqStub, 0.15, 1.0);
     expect(signal).toBeNull();
   });
 
@@ -339,15 +331,7 @@ describe("evaluateSprayEntry", () => {
     const market = makeNormalizedMarket({ midPrice: 0.06 });
     const bundle = makeBundle();
 
-    const signal = evaluateSprayEntry(
-      market,
-      bundle,
-      0.06,
-      Date.now(),
-      nextSeqStub,
-      0.15,
-      1.0,
-    );
+    const signal = evaluateSprayEntry(market, bundle, 0.06, Date.now(), nextSeqStub, 0.15, 1.0);
     expect(signal).toBeNull();
   });
 
@@ -357,15 +341,7 @@ describe("evaluateSprayEntry", () => {
       rules: { entry: { ...makeRules().entry, entryMode: "disabled" } },
     });
 
-    const signal = evaluateSprayEntry(
-      market,
-      bundle,
-      0.03,
-      Date.now(),
-      nextSeqStub,
-      0.15,
-      1.0,
-    );
+    const signal = evaluateSprayEntry(market, bundle, 0.03, Date.now(), nextSeqStub, 0.15, 1.0);
     expect(signal).toBeNull();
   });
 
@@ -373,15 +349,7 @@ describe("evaluateSprayEntry", () => {
     const market = makeNormalizedMarket({ midPrice: 0.03 });
     const bundle = makeBundle();
 
-    const signal = evaluateSprayEntry(
-      market,
-      bundle,
-      0.03,
-      Date.now(),
-      nextSeqStub,
-      0.15,
-      0.6,
-    );
+    const signal = evaluateSprayEntry(market, bundle, 0.03, Date.now(), nextSeqStub, 0.15, 0.6);
 
     expect(signal).not.toBeNull();
     expect(signal!.suggestedSizeUsdc).toBeCloseTo(0.15 * 0.6, 5);
@@ -392,15 +360,7 @@ describe("evaluateSprayEntry", () => {
     const bundle = makeBundle();
 
     // Very tiny spray with low multiplier → suggestedSize < 0.01
-    const signal = evaluateSprayEntry(
-      market,
-      bundle,
-      0.03,
-      Date.now(),
-      nextSeqStub,
-      0.0001,
-      1.0,
-    );
+    const signal = evaluateSprayEntry(market, bundle, 0.03, Date.now(), nextSeqStub, 0.0001, 1.0);
     expect(signal).toBeNull();
   });
 });
@@ -527,5 +487,149 @@ describe("scan() spray integration", () => {
     // Without globalConfig, spray is disabled — falls through to probe-entry
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]!.reason).toBe("probe-entry");
+  });
+});
+
+// ─── Spray → conviction escalation (evaluateScaleIn) ────────────────────
+
+describe("spray → conviction escalation", () => {
+  it("uses probeSizeUsdc for first scale-in on spray position (buyCount=1)", () => {
+    const bundle = makeBundle();
+    const rulesProvider = createMockRulesProvider(bundle);
+
+    // Existing spray position for the token
+    const sprayPos: import("@plankton/domain").Position = {
+      positionId: createPositionId("pos-spray"),
+      tokenId: TOK_ID,
+      familyId: FAM_ID,
+      side: "buy",
+      size: 5,
+      avgEntryPrice: 0.035,
+      costBasisUsdc: 0.175,
+      currentValueUsdc: 0.175,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: "spray",
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const positionRepo = createMockPositionRepo();
+    (positionRepo.findByTokenId as ReturnType<typeof vi.fn>).mockReturnValue(sprayPos);
+
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    // buyCount=1 means this is the first scale-in (confirm-scale stage)
+    const buyTracker = createBuyTracker();
+    buyTracker.incrementBuyCount(String(sprayPos.positionId)); // buyCount = 1
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log },
+      buyTracker,
+      tickTs,
+    );
+
+    // Should produce a confirm-scale signal with probeSizeUsdc (5) instead of addSizeUsdc (4)
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("confirm-scale");
+    expect(result.signals[0]!.suggestedSizeUsdc).toBe(5); // probeSizeUsdc, not addSizeUsdc
+  });
+
+  it("uses addSizeUsdc for scale-in on probe position (regression)", () => {
+    const bundle = makeBundle();
+    const rulesProvider = createMockRulesProvider(bundle);
+
+    // Existing probe position (normal entry)
+    const probePos: import("@plankton/domain").Position = {
+      positionId: createPositionId("pos-probe"),
+      tokenId: TOK_ID,
+      familyId: FAM_ID,
+      side: "buy",
+      size: 100,
+      avgEntryPrice: 0.035,
+      costBasisUsdc: 3.5,
+      currentValueUsdc: 3.5,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: "probe",
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const positionRepo = createMockPositionRepo();
+    (positionRepo.findByTokenId as ReturnType<typeof vi.fn>).mockReturnValue(probePos);
+
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const buyTracker = createBuyTracker();
+    buyTracker.incrementBuyCount(String(probePos.positionId)); // buyCount = 1
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log },
+      buyTracker,
+      tickTs,
+    );
+
+    // Should produce a confirm-scale signal with addSizeUsdc (4), NOT probeSizeUsdc
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("confirm-scale");
+    expect(result.signals[0]!.suggestedSizeUsdc).toBe(4); // addSizeUsdc
+  });
+
+  it("uses addSizeUsdc for spray position after buyCount > 1", () => {
+    const bundle = makeBundle();
+    const rulesProvider = createMockRulesProvider(bundle);
+
+    const sprayPos: import("@plankton/domain").Position = {
+      positionId: createPositionId("pos-spray2"),
+      tokenId: TOK_ID,
+      familyId: FAM_ID,
+      side: "buy",
+      size: 100,
+      avgEntryPrice: 0.035,
+      costBasisUsdc: 3.5,
+      currentValueUsdc: 3.5,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: "spray",
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const positionRepo = createMockPositionRepo();
+    (positionRepo.findByTokenId as ReturnType<typeof vi.fn>).mockReturnValue(sprayPos);
+
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    // buyCount=2 → past the escalation window
+    const buyTracker = createBuyTracker();
+    buyTracker.incrementBuyCount(String(sprayPos.positionId));
+    buyTracker.incrementBuyCount(String(sprayPos.positionId)); // buyCount = 2
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log },
+      buyTracker,
+      tickTs,
+    );
+
+    // buyCount=2 → scale-in stage, should use addSizeUsdc (4)
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("scale-in");
+    expect(result.signals[0]!.suggestedSizeUsdc).toBe(4); // addSizeUsdc
   });
 });

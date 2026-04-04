@@ -172,5 +172,6 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   const conn = openDatabaseWithSchema(dbPath, readSchema("ledger.sql"));
   safeAddColumn(conn.db, "orders", "post_only", "INTEGER NOT NULL DEFAULT 0");
   safeAddColumn(conn.db, "fills", "liquidity_role", "TEXT NOT NULL DEFAULT 'unknown'");
+  safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
   return conn;
 }

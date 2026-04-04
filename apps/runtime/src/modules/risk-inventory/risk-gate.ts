@@ -140,7 +140,11 @@ export class RiskGateImpl implements RiskGate {
       }
     }
 
-    if (mode === "probe-only" && signal.reason !== "probe-entry" && signal.reason !== "spray-entry") {
+    if (
+      mode === "probe-only" &&
+      signal.reason !== "probe-entry" &&
+      signal.reason !== "spray-entry"
+    ) {
       rejected.push(`family in probe-only mode — ${signal.reason} blocked`);
       return this.decision(signal, false, rejected, passed);
     }

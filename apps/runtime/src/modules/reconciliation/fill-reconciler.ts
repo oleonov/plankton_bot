@@ -64,6 +64,7 @@ export async function importExchangeFills(
     orderId: OrderId;
     sizeUsdc: number;
     familyId: FamilyId;
+    signalReason: string | null;
   }> = [];
 
   // Phase 1: Save fills to DB
@@ -113,7 +114,14 @@ export async function importExchangeFills(
     fillRepo.save(fill);
     imported++;
     ordersWithNewFills.add(ef.orderId);
-    savedFills.push({ ef, fillId, orderId, sizeUsdc, familyId: localOrder.familyId });
+    savedFills.push({
+      ef,
+      fillId,
+      orderId,
+      sizeUsdc,
+      familyId: localOrder.familyId,
+      signalReason: localOrder.signalReason ?? null,
+    });
 
     const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size})`;
     details.push(msg);
@@ -135,7 +143,7 @@ export async function importExchangeFills(
   }
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
-  for (const { ef, fillId, orderId, sizeUsdc, familyId } of savedFills) {
+  for (const { ef, fillId, orderId, sizeUsdc, familyId, signalReason } of savedFills) {
     await bus.publish("FillReceived", {
       fillId,
       orderId,
@@ -148,6 +156,7 @@ export async function importExchangeFills(
       liquidityRole: ef.liquidityRole,
       fee: ef.fee,
       familyId,
+      signalReason,
       timestamp: ef.timestamp,
     });
   }

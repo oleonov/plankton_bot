@@ -51,6 +51,7 @@ function makePosition(overrides?: Partial<Position>): Position {
     currentValueUsdc: null,
     realizedPnl: 0,
     status: "open",
+    entryStyle: null,
     openedAt: "2026-03-14T00:00:00Z",
     closedAt: null,
     updatedAt: "2026-03-14T00:00:00Z",

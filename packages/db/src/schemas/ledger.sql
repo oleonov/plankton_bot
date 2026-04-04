@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS positions (
   current_value_usdc REAL,
   realized_pnl       REAL NOT NULL DEFAULT 0,
   status             TEXT NOT NULL DEFAULT 'open',
+  entry_style        TEXT,
   opened_at          TEXT NOT NULL DEFAULT (datetime('now')),
   closed_at          TEXT,
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))

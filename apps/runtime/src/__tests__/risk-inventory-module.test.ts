@@ -542,6 +542,7 @@ describe("RiskInventoryModule", () => {
       currentValueUsdc: 5,
       realizedPnl: 0,
       status: "open",
+      entryStyle: null,
       openedAt: new Date().toISOString(),
       closedAt: null,
       updatedAt: new Date().toISOString(),
@@ -672,6 +673,7 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
+      signalReason: null,
       timestamp: Date.now(),
     });
 
@@ -692,6 +694,66 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  it("sets entryStyle='spray' on new position from spray-entry fill", async () => {
+    await mod.start();
+
+    const posUpdates: any[] = [];
+    bus.subscribe("PositionUpdated", async (p) => {
+      posUpdates.push(p);
+    });
+
+    await bus.publish("FillReceived", {
+      fillId: createFillId("fill-spray"),
+      orderId: createOrderId("ord-spray"),
+      clientOrderId: "plk_spray" as ClientOrderId,
+      tokenId: TOK_ID,
+      side: "buy" as const,
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      liquidityRole: "unknown",
+      fee: 0,
+      familyId: FAM_ID,
+      signalReason: "spray-entry",
+      timestamp: Date.now(),
+    });
+
+    expect(posUpdates).toHaveLength(1);
+    expect(posUpdates[0].position.entryStyle).toBe("spray");
+
+    await mod.stop();
+  });
+
+  it("sets entryStyle='probe' on new position from probe-entry fill", async () => {
+    await mod.start();
+
+    const posUpdates: any[] = [];
+    bus.subscribe("PositionUpdated", async (p) => {
+      posUpdates.push(p);
+    });
+
+    await bus.publish("FillReceived", {
+      fillId: createFillId("fill-probe"),
+      orderId: createOrderId("ord-probe"),
+      clientOrderId: "plk_probe" as ClientOrderId,
+      tokenId: TOK_ID,
+      side: "buy" as const,
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      liquidityRole: "unknown",
+      fee: 0,
+      familyId: FAM_ID,
+      signalReason: "probe-entry",
+      timestamp: Date.now(),
+    });
+
+    expect(posUpdates).toHaveLength(1);
+    expect(posUpdates[0].position.entryStyle).toBe("probe");
+
+    await mod.stop();
+  });
+
   it("scales into existing position on buy fill", async () => {
     const existingPos: Position = {
       positionId: createPositionId("pos-1"),
@@ -704,6 +766,7 @@ describe("RiskInventoryModule", () => {
       currentValueUsdc: 5,
       realizedPnl: 0,
       status: "open",
+      entryStyle: null,
       openedAt: new Date().toISOString(),
       closedAt: null,
       updatedAt: new Date().toISOString(),
@@ -724,6 +787,7 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
+      signalReason: null,
       timestamp: Date.now(),
     });
 
@@ -750,6 +814,7 @@ describe("RiskInventoryModule", () => {
       currentValueUsdc: 5,
       realizedPnl: 0,
       status: "open",
+      entryStyle: null,
       openedAt: new Date().toISOString(),
       closedAt: null,
       updatedAt: new Date().toISOString(),
@@ -798,6 +863,7 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0.01,
       familyId: FAM_ID,
+      signalReason: null,
       timestamp: Date.now(),
     });
 
@@ -826,6 +892,7 @@ describe("RiskInventoryModule", () => {
       currentValueUsdc: 5,
       realizedPnl: 0,
       status: "open",
+      entryStyle: null,
       openedAt: new Date().toISOString(),
       closedAt: null,
       updatedAt: new Date().toISOString(),
@@ -870,6 +937,7 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
+      signalReason: null,
       timestamp: Date.now(),
     });
 
@@ -905,6 +973,7 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
+      signalReason: null,
       timestamp: Date.now(),
     });
 
@@ -932,6 +1001,7 @@ describe("RiskInventoryModule", () => {
       sizeUsdc: 5,
       liquidityRole: "unknown",
       fee: 0.01,
+      signalReason: null,
       timestamp: Date.now(),
     });
 
@@ -956,6 +1026,7 @@ describe("RiskInventoryModule", () => {
       sizeUsdc: 5,
       liquidityRole: "unknown",
       fee: 0.01,
+      signalReason: null,
       timestamp: Date.now(),
     });
 
@@ -1290,6 +1361,7 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       familyId: FAM_ID,
+      signalReason: null,
       timestamp: Date.now(),
     });
 
@@ -1632,6 +1704,7 @@ describe("RiskInventoryModule", () => {
         currentValueUsdc: 5,
         realizedPnl: 0,
         status: "open",
+        entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
         updatedAt: new Date().toISOString(),
@@ -1690,6 +1763,7 @@ describe("RiskInventoryModule", () => {
         currentValueUsdc: 5,
         realizedPnl: 0,
         status: "open",
+        entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
         updatedAt: new Date().toISOString(),
@@ -1789,6 +1863,7 @@ describe("RiskInventoryModule", () => {
         currentValueUsdc: 5,
         realizedPnl: 0,
         status: "open",
+        entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
         updatedAt: new Date().toISOString(),
@@ -2040,6 +2115,7 @@ describe("RiskInventoryModule", () => {
         liquidityRole: "unknown" as const,
         fee: 0,
         familyId: FAM_ID,
+        signalReason: null as string | null,
         timestamp: Date.now(),
       };
       await bus.publish("FillReceived", {

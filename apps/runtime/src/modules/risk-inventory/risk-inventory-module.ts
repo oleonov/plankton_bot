@@ -268,6 +268,7 @@ export class RiskInventoryModule implements RuntimeModule {
         size: payload.size,
         sizeUsdc: payload.sizeUsdc,
         fee: payload.fee,
+        signalReason: payload.signalReason,
         timestamp: payload.timestamp,
       });
 

@@ -135,6 +135,7 @@ export interface FillReceived {
   readonly liquidityRole: LiquidityRole;
   readonly fee: number;
   readonly familyId: FamilyId;
+  readonly signalReason: string | null;
   readonly timestamp: number;
 }
 
