@@ -23,6 +23,7 @@ import type {
   ReloadableRules,
   PatternRebuilder,
   FamilyRulesDbWriter,
+  DeploymentUpdater,
 } from "../supervisor/command-poller.js";
 
 const log = pino({ level: "silent" });
@@ -412,6 +413,109 @@ describe("CommandPoller", () => {
 
       expect(rulesManager.reload).toHaveBeenCalledOnce();
       expect(normalizationModule.rebuildPatterns).toHaveBeenCalledOnce();
+    });
+
+    it("updates family_deployments.strategy_stage to scaled for activeProfile", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO family_rules (family_id, max_open_value_usdc, max_active_markets,
+             max_dust_positions, enabled, action, priority_rank, entry_mode,
+             max_initial_notional_usdc, tail_quarantine_threshold_usdc,
+             tail_quarantine_threshold_ratio, scale_mode, default_max_buys_per_leg,
+             allow_heavy_campaigns, require_positive_recycle_history_for_scale, updated_at)
+           VALUES ('fam-1', 10.0, 2, 1, 1, 'trade', 1, 'probe-first', 5.0, 100, 0.5,
+                   'disabled', 1, 0, 0, datetime('now'))`,
+        )
+        .run();
+
+      const rulesManager: ReloadableRules = { reload: vi.fn() };
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const { SqliteFamilyRulesDbRepository } = await import("@plankton/db");
+      const dbWriter = new SqliteFamilyRulesDbRepository(conn.db);
+
+      // Mock DeploymentUpdater that returns a probe-only deployment
+      const savedDeployments: import("@plankton/domain").FamilyDeployment[] = [];
+      const mockDeploymentUpdater: DeploymentUpdater = {
+        find: vi.fn().mockReturnValue({
+          familyId: createFamilyId("fam-1"),
+          profile: "paper",
+          enabled: true,
+          operatorMode: "active",
+          strategyStage: "probe-only",
+          probeSubstate: null,
+          deploymentStage: "disabled",
+          approvedSnapshotId: null,
+          approvedScorecardId: null,
+          operatorReason: null,
+          priority: 0,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }),
+        save: vi.fn((d: import("@plankton/domain").FamilyDeployment) => {
+          savedDeployments.push(d);
+        }),
+      };
+
+      insertCommand("family_promote_scaled", "fam-1", "promotion approved");
+      const poller = createPoller({
+        rulesManager,
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: new SqliteStateTransitionRepository(conn.db),
+        familyRulesDbWriter: dbWriter,
+        deploymentUpdater: mockDeploymentUpdater,
+        activeProfile: "paper",
+      });
+
+      await poller.poll();
+
+      expect(mockDeploymentUpdater.find).toHaveBeenCalledWith(
+        createFamilyId("fam-1"),
+        "paper",
+      );
+      expect(mockDeploymentUpdater.save).toHaveBeenCalledOnce();
+      expect(savedDeployments).toHaveLength(1);
+      expect(savedDeployments[0]!.strategyStage).toBe("scaled");
+    });
+
+    it("works without deploymentUpdater (backward compat)", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO family_rules (family_id, max_open_value_usdc, max_active_markets,
+             max_dust_positions, enabled, action, priority_rank, entry_mode,
+             max_initial_notional_usdc, tail_quarantine_threshold_usdc,
+             tail_quarantine_threshold_ratio, scale_mode, default_max_buys_per_leg,
+             allow_heavy_campaigns, require_positive_recycle_history_for_scale, updated_at)
+           VALUES ('fam-1', 10.0, 2, 1, 1, 'trade', 1, 'probe-first', 5.0, 100, 0.5,
+                   'disabled', 1, 0, 0, datetime('now'))`,
+        )
+        .run();
+
+      const rulesManager: ReloadableRules = { reload: vi.fn() };
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const { SqliteFamilyRulesDbRepository } = await import("@plankton/db");
+      const dbWriter = new SqliteFamilyRulesDbRepository(conn.db);
+
+      insertCommand("family_promote_scaled", "fam-1", "promotion approved");
+      // No deploymentUpdater or activeProfile — should still work
+      const poller = createPoller({
+        rulesManager,
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: new SqliteStateTransitionRepository(conn.db),
+        familyRulesDbWriter: dbWriter,
+      });
+
+      await poller.poll();
+
+      // Command should be applied successfully
+      expect(cmdRepo.getPending()).toHaveLength(0);
+      const state = familyStateRepo.get(createFamilyId("fam-1"));
+      expect(state!.runtimeMode).toBe("active");
     });
   });
 

@@ -11,6 +11,9 @@ import type {
   OperatorCommand,
   RuntimeMode,
   PromotionState,
+  FamilyId,
+  FamilyDeployment,
+  ProfileId,
 } from "@plankton/domain";
 import { createFamilyId } from "@plankton/domain";
 import type { Logger } from "../logger.js";
@@ -27,11 +30,17 @@ export interface PatternRebuilder {
 
 /** Minimal interface for the DB family rules repository (overwrite on reset / promote). */
 export interface FamilyRulesDbWriter {
-  overwriteRules(familyId: import("@plankton/domain").FamilyId, rulesJson: string): void;
+  overwriteRules(familyId: FamilyId, rulesJson: string): void;
   updateToScaledDefaults(
-    familyId: import("@plankton/domain").FamilyId,
+    familyId: FamilyId,
     caps?: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number },
   ): void;
+}
+
+/** Minimal interface for updating family_deployments strategy_stage. */
+export interface DeploymentUpdater {
+  find(familyId: FamilyId, profile: ProfileId): FamilyDeployment | null;
+  save(deployment: FamilyDeployment): void;
 }
 
 export interface CommandPollerDeps {
@@ -54,6 +63,8 @@ export interface CommandPollerDeps {
   familyCandidateRepo?: FamilyCandidateRepository;
   stateTransitionRepo?: StateTransitionRepository;
   familyRulesDbWriter?: FamilyRulesDbWriter;
+  deploymentUpdater?: DeploymentUpdater;
+  activeProfile?: ProfileId;
 }
 
 export class CommandPoller implements RuntimeModule {
@@ -317,6 +328,25 @@ export class CommandPoller implements RuntimeModule {
       reason: cmd.reason ?? "promote to scaled",
       scoresSnapshot: null,
     });
+
+    // Update deployment stage so ControlEvaluator stops re-proposing
+    if (this.deps.deploymentUpdater && this.deps.activeProfile) {
+      try {
+        const deployment = this.deps.deploymentUpdater.find(familyId, this.deps.activeProfile);
+        if (deployment) {
+          this.deps.deploymentUpdater.save({
+            ...deployment,
+            strategyStage: "scaled",
+            updatedAt: now,
+          });
+        }
+      } catch (err) {
+        this.log.warn(
+          { err, familyId: cmd.targetId },
+          "failed to update deployment strategy_stage",
+        );
+      }
+    }
 
     this.writeAudit(cmd, "family", cmd.targetId, now);
   }

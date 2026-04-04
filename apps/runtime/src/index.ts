@@ -427,6 +427,8 @@ async function main(): Promise<void> {
     familyCandidateRepo: repos.familyCandidate,
     stateTransitionRepo: repos.stateTransition,
     familyRulesDbWriter: new SqliteFamilyRulesDbRepository(controlConn.db),
+    deploymentUpdater: new SqliteFamilyDeploymentRepository(controlConn.db),
+    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });
 
   // 7f. Execution module
