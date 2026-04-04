@@ -44,6 +44,7 @@ export interface StartupPositionAdoptionResult {
   adoptedOrphanFills: number;
   syntheticOrdersCreated: number;
   positionsCreated: number;
+  skippedInvalidTimestamp: number;
   skippedNoMarket: number;
   skippedNoFamily: number;
   skippedInventoryDrift: number;
@@ -84,23 +85,40 @@ export async function runStartupPositionAdoption(
     deps.rulesProvider,
   );
 
-  const fills = [...(await deps.gateway.getFills(0))].sort((a, b) => {
-    if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
-    return a.fillId.localeCompare(b.fillId);
-  });
+  const rawFills = await deps.gateway.getFills(0);
 
   const result: StartupPositionAdoptionResult = {
-    scannedFills: fills.length,
+    scannedFills: rawFills.length,
     alreadyKnownFills: 0,
     appliedFills: 0,
     adoptedOrphanFills: 0,
     syntheticOrdersCreated: 0,
     positionsCreated: 0,
+    skippedInvalidTimestamp: 0,
     skippedNoMarket: 0,
     skippedNoFamily: 0,
     skippedInventoryDrift: 0,
     details: [],
   };
+
+  const fills: ExchangeFill[] = [];
+  for (const fill of rawFills) {
+    const timestamp = normalizeFillTimestamp(fill.timestamp);
+    if (timestamp === null) {
+      result.skippedInvalidTimestamp++;
+      result.details.push(`fill ${fill.fillId} skipped — invalid timestamp ${String(fill.timestamp)}`);
+      log.warn(
+        { fillId: fill.fillId, rawTimestamp: fill.timestamp },
+        "startup adoption skipped — invalid fill timestamp",
+      );
+      continue;
+    }
+    fills.push({ ...fill, timestamp });
+  }
+  fills.sort((a, b) => {
+    if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+    return a.fillId.localeCompare(b.fillId);
+  });
 
   const pendingFills: PendingFill[] = [];
   const syntheticSeeds = new Map<string, SyntheticOrderSeed>();
@@ -267,6 +285,13 @@ function resolveSyntheticOrder(
   deps.orderRepo.save(syntheticOrder);
   orders.set(orphanGroupKey, syntheticOrder);
   return syntheticOrder;
+}
+
+function normalizeFillTimestamp(timestamp: number): number | null {
+  if (!Number.isFinite(timestamp)) return null;
+  const abs = Math.abs(timestamp);
+  if (abs === 0) return 0;
+  return abs < 1_000_000_000_000 ? Math.trunc(timestamp * 1000) : Math.trunc(timestamp);
 }
 
 function buildOrphanGroupKey(fill: ExchangeFill): string {

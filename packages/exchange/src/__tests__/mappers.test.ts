@@ -122,6 +122,20 @@ describe("mapTrade", () => {
 
     expect(fill.liquidityRole).toBe("maker");
   });
+
+  it("falls back to a valid current timestamp when match_time is invalid", () => {
+    const before = Date.now();
+    const fill = mapTrade({
+      id: "fill-invalid-ts",
+      taker_order_id: "ord-invalid-ts",
+      side: "BUY",
+      match_time: "not-a-real-time",
+    });
+    const after = Date.now();
+
+    expect(fill.timestamp).toBeGreaterThanOrEqual(before);
+    expect(fill.timestamp).toBeLessThanOrEqual(after);
+  });
 });
 
 describe("mapMarket", () => {
@@ -180,6 +194,15 @@ describe("mapOrderBook", () => {
     expect(book.bids).toEqual([]);
     expect(book.bestBid).toBeNull();
     expect(book.midPrice).toBeNull();
+  });
+
+  it("normalizes numeric second timestamps into milliseconds", () => {
+    const tokenId = createTokenId("tok-1");
+    const book = mapOrderBook(tokenId, {
+      timestamp: "1712345678",
+    });
+
+    expect(book.timestamp).toBe(1712345678000);
   });
 });
 

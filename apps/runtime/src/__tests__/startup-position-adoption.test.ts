@@ -242,4 +242,39 @@ describe("runStartupPositionAdoption", () => {
     expect(result.skippedNoMarket).toBe(1);
     expect(positionRepo.findOpen()).toHaveLength(0);
   });
+
+  it("skips invalid-timestamp fills instead of crashing startup", async () => {
+    const conn = bootstrapLedgerDb(":memory:");
+    connections.push(conn);
+
+    const marketRepo = new SqliteMarketRepository(conn.db);
+    const orderRepo = new SqliteOrderRepository(conn.db);
+    const fillRepo = new SqliteFillRepository(conn.db);
+    const positionRepo = new SqlitePositionRepository(conn.db);
+    const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
+    seedMarket(marketRepo);
+    seedFamilyState(familyStateRepo);
+
+    const result = await runStartupPositionAdoption({
+      gateway: {
+        getFills: vi.fn().mockResolvedValue([makeExchangeFill({ timestamp: Number.NaN })]),
+      },
+      marketRepo,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      inventoryLotRepo,
+      familyStateRepo,
+      rulesProvider: createRulesProvider(),
+      log: silentLog,
+      db: conn.db,
+      botRunId: createBotRunId("run-1"),
+    });
+
+    expect(result.appliedFills).toBe(0);
+    expect(result.skippedInvalidTimestamp).toBe(1);
+    expect(positionRepo.findOpen()).toHaveLength(0);
+    expect(fillRepo.findByTokenId(TOKEN_ID)).toHaveLength(0);
+  });
 });

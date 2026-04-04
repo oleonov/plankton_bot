@@ -38,6 +38,30 @@ function toDomainLiquidityRole(value: unknown): LiquidityRole {
   return "unknown";
 }
 
+function normalizeEpochMs(value: number): number | null {
+  if (!Number.isFinite(value)) return null;
+  const abs = Math.abs(value);
+  if (abs === 0) return 0;
+  return abs < 1_000_000_000_000 ? Math.trunc(value * 1000) : Math.trunc(value);
+}
+
+function toUnixMs(value: unknown, fallbackMs = Date.now()): number {
+  if (typeof value === "number") {
+    return normalizeEpochMs(value) ?? fallbackMs;
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return fallbackMs;
+    const numeric = Number(trimmed);
+    if (Number.isFinite(numeric)) {
+      return normalizeEpochMs(numeric) ?? fallbackMs;
+    }
+    const parsed = Date.parse(trimmed);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return fallbackMs;
+}
+
 // ─── TickSize mapping ────────────────────────────────────────────────────
 
 export function toSdkTickSize(tickSize: number): string {
@@ -82,7 +106,7 @@ export function mapOpenOrder(raw: Record<string, unknown>): ExchangeOrder {
     sizeFilled: sizeMatched,
     sizeRemaining: originalSize - sizeMatched,
     status: mapOrderStatus(String(raw.status ?? "OPEN")),
-    createdAt: typeof raw.created_at === "number" ? raw.created_at : Date.now(),
+    createdAt: toUnixMs(raw.created_at),
   };
 }
 
@@ -104,7 +128,7 @@ export function mapTrade(raw: Record<string, unknown>): ExchangeFill {
     size,
     liquidityRole: toDomainLiquidityRole(raw.trader_side),
     fee,
-    timestamp: raw.match_time ? new Date(String(raw.match_time)).getTime() : Date.now(),
+    timestamp: toUnixMs(raw.match_time),
   };
 }
 
@@ -158,7 +182,7 @@ export function mapOrderBook(tokenId: TokenId, raw: Record<string, unknown>): Or
     bestAsk,
     midPrice,
     spread,
-    timestamp: raw.timestamp ? new Date(String(raw.timestamp)).getTime() : Date.now(),
+    timestamp: toUnixMs(raw.timestamp),
   };
 }
 
