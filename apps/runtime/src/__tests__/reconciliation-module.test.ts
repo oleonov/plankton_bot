@@ -339,9 +339,9 @@ describe("ReconciliationModule", () => {
       const result = await mod.runReconciliation();
 
       expect(result.clean).toBe(false);
-      expect(
-        result.details.some((d) => d.includes("stale exchange order cancel failed")),
-      ).toBe(true);
+      expect(result.details.some((d) => d.includes("stale exchange order cancel failed"))).toBe(
+        true,
+      );
     });
 
     it("locally-filled order on exchange is cancelled as stale", async () => {
