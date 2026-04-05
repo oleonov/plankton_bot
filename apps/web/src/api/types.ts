@@ -236,6 +236,8 @@ export interface FamilyListMeta {
   scope: "profile" | "all";
   profile: string | null;
   totalCatalogCount: number;
+  nextCursor: string | null;
+  hasMore: boolean;
 }
 
 export interface FamilyListResponse {

@@ -188,10 +188,21 @@ export function useFamilies() {
   });
 }
 
-export function useFamiliesScoped(scope: "profile" | "all") {
+export function useFamiliesScoped(
+  scope: "profile" | "all",
+  cursor?: string | null,
+  limit = 50,
+) {
   return useQuery({
-    queryKey: ["families-scoped", scope],
-    queryFn: () => apiFetch<FamilyListResponse>(withParams("/api/v1/families", { scope })),
+    queryKey: ["families-scoped", scope, cursor ?? "", limit],
+    queryFn: () =>
+      apiFetch<FamilyListResponse>(
+        withParams("/api/v1/families", {
+          scope,
+          cursor: cursor || undefined,
+          limit,
+        }),
+      ),
   });
 }
 

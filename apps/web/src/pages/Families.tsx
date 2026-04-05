@@ -1,4 +1,4 @@
-import { useState, Fragment } from "react";
+import { useState, useCallback, Fragment } from "react";
 import {
   useFamiliesScoped,
   useFamilyPositions,
@@ -9,6 +9,7 @@ import {
 import { Badge } from "../components/Badge.tsx";
 import { FamilyActions } from "../components/FamilyActions.tsx";
 import { EvidenceSection } from "../components/EvidenceSection.tsx";
+import { Pagination } from "../components/Pagination.tsx";
 import { SortTh } from "../components/SortTh.tsx";
 import { formatAgo } from "../utils/format.ts";
 import { useSort, sortItems } from "../utils/useSort.ts";
@@ -219,13 +220,22 @@ const familyAccessors: Record<string, (f: FamilyDTO) => string | number | null> 
   execMaker: (f) => f.executionTelemetry24h?.makerRatio ?? -1,
 };
 
+const PAGE_SIZE = 50;
+
 export function Families() {
   const [scope, setScope] = useState<"profile" | "all">("profile");
-  const { data, isLoading } = useFamiliesScoped(scope);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [cursorStack, setCursorStack] = useState<string[]>([]);
+  const { data, isLoading } = useFamiliesScoped(scope, cursor, PAGE_SIZE);
   const families = data?.items ?? [];
   const meta = data?.meta ?? null;
   const [expanded, setExpanded] = useState<string | null>(null);
   const { sort, toggle } = useSort();
+
+  const resetPagination = useCallback(() => {
+    setCursor(null);
+    setCursorStack([]);
+  }, []);
 
   // If API returned "all" despite requesting "profile" (no active profile),
   // sync the toggle to match
@@ -253,7 +263,10 @@ export function Families() {
           }}
         >
           <button
-            onClick={() => setScope("profile")}
+            onClick={() => {
+              setScope("profile");
+              resetPagination();
+            }}
             disabled={meta?.profile == null}
             style={{
               padding: "4px 12px",
@@ -269,7 +282,10 @@ export function Families() {
             Current Profile
           </button>
           <button
-            onClick={() => setScope("all")}
+            onClick={() => {
+              setScope("all");
+              resetPagination();
+            }}
             style={{
               padding: "4px 12px",
               fontSize: 12,
@@ -439,6 +455,24 @@ export function Families() {
           })}
         </tbody>
       </table>
+      <Pagination
+        nextCursor={meta?.nextCursor ?? null}
+        onNext={(next) => {
+          setCursorStack((s) => [...s, cursor ?? ""]);
+          setCursor(next);
+        }}
+        hasPrev={cursorStack.length > 0}
+        onPrev={() => {
+          const prev = cursorStack[cursorStack.length - 1];
+          setCursorStack((s) => s.slice(0, -1));
+          setCursor(prev || null);
+        }}
+        pageInfo={
+          meta && families.length > 0
+            ? `${cursorStack.length * PAGE_SIZE + 1}\u2013${cursorStack.length * PAGE_SIZE + families.length}${meta.totalCatalogCount > 0 ? ` of ${meta.totalCatalogCount}` : ""}`
+            : undefined
+        }
+      />
     </div>
   );
 }

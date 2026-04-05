@@ -182,75 +182,100 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   );
   const getProfile = safePrepare("SELECT current_profile FROM runtime_control_state WHERE id = 1");
 
-  app.get<{ Querystring: { scope?: string } }>("/families", async (request) => {
-    const currentProfile = getProfile
-      ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ??
-        null)
-      : null;
-    const requestedScope = request.query.scope;
-    const effectiveScope =
-      requestedScope === "profile" && currentProfile && listEnabledDeployments ? "profile" : "all";
+  app.get<{ Querystring: { scope?: string; limit?: string; cursor?: string } }>(
+    "/families",
+    async (request) => {
+      const currentProfile = getProfile
+        ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ??
+          null)
+        : null;
+      const requestedScope = request.query.scope;
+      const effectiveScope =
+        requestedScope === "profile" && currentProfile && listEnabledDeployments
+          ? "profile"
+          : "all";
 
-    const allCatalogs = listCatalog.all() as FamilyCatalogRow[];
-    const totalCatalogCount = allCatalogs.length;
+      const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
+      const cursorRaw = request.query.cursor;
+      const cursorKey = cursorRaw ? Buffer.from(cursorRaw, "base64").toString("utf-8") : null;
 
-    const deploymentRows =
-      currentProfile && listDeployments
-        ? effectiveScope === "profile"
-          ? (listEnabledDeployments!.all(currentProfile) as FamilyDeploymentRow[])
-          : (listDeployments.all(currentProfile) as FamilyDeploymentRow[])
-        : [];
-    const deploymentMap = new Map(deploymentRows.map((d) => [d.family_id, d]));
+      const allCatalogs = listCatalog.all() as FamilyCatalogRow[];
+      const totalCatalogCount = allCatalogs.length;
 
-    const catalogs =
-      effectiveScope === "profile"
-        ? allCatalogs.filter((c) => deploymentMap.has(c.family_id))
-        : allCatalogs;
+      const deploymentRows =
+        currentProfile && listDeployments
+          ? effectiveScope === "profile"
+            ? (listEnabledDeployments!.all(currentProfile) as FamilyDeploymentRow[])
+            : (listDeployments.all(currentProfile) as FamilyDeploymentRow[])
+          : [];
+      const deploymentMap = new Map(deploymentRows.map((d) => [d.family_id, d]));
 
-    const states = listState.all() as FamilyStateRow[];
-    const stateMap = new Map(states.map((s) => [s.family_id, s]));
-    const livenessMap = readFamilyLiveness(
-      ledgerDb,
-      catalogs.map((catalog) => catalog.family_id),
-    );
-    const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
-      sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-    });
-    const capsRows = listCaps.all() as Array<{
-      family_id: string;
-      max_open_value_usdc: number;
-      max_active_markets: number;
-      max_dust_positions: number;
-    }>;
-    const capsMap = new Map(capsRows.map((r) => [r.family_id, toCaps(r)]));
-    const evidenceRows = listEvidence.all() as Array<{
-      family_id: string;
-      promotion_state: string | null;
-      probe_substate: string | null;
-    }>;
-    const promoMap = new Map(evidenceRows.map((r) => [r.family_id, r.promotion_state]));
-    const substateMap = new Map(evidenceRows.map((r) => [r.family_id, r.probe_substate]));
+      const catalogs =
+        effectiveScope === "profile"
+          ? allCatalogs.filter((c) => deploymentMap.has(c.family_id))
+          : allCatalogs;
 
-    return ok({
-      items: catalogs.map((c) =>
-        toFamilyDto(
-          c,
-          stateMap.get(c.family_id),
-          capsMap.get(c.family_id) ?? null,
-          promoMap.get(c.family_id),
-          substateMap.get(c.family_id),
-          executionMap24h.get(c.family_id),
-          deploymentMap.get(c.family_id) ?? null,
-          livenessMap.get(c.family_id)?.liveness,
+      // Sort by family_key for stable cursor-based pagination
+      catalogs.sort((a, b) => a.family_key.localeCompare(b.family_key));
+
+      // Apply cursor: skip entries up to and including the cursor key
+      const startIdx = cursorKey
+        ? catalogs.findIndex((c) => c.family_key === cursorKey) + 1
+        : 0;
+      const page = catalogs.slice(startIdx, startIdx + limit);
+      const hasMore = startIdx + limit < catalogs.length;
+      const nextCursor =
+        hasMore && page.length > 0
+          ? Buffer.from(page[page.length - 1]!.family_key).toString("base64")
+          : null;
+
+      const states = listState.all() as FamilyStateRow[];
+      const stateMap = new Map(states.map((s) => [s.family_id, s]));
+      const livenessMap = readFamilyLiveness(
+        ledgerDb,
+        page.map((catalog) => catalog.family_id),
+      );
+      const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
+        sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      });
+      const capsRows = listCaps.all() as Array<{
+        family_id: string;
+        max_open_value_usdc: number;
+        max_active_markets: number;
+        max_dust_positions: number;
+      }>;
+      const capsMap = new Map(capsRows.map((r) => [r.family_id, toCaps(r)]));
+      const evidenceRows = listEvidence.all() as Array<{
+        family_id: string;
+        promotion_state: string | null;
+        probe_substate: string | null;
+      }>;
+      const promoMap = new Map(evidenceRows.map((r) => [r.family_id, r.promotion_state]));
+      const substateMap = new Map(evidenceRows.map((r) => [r.family_id, r.probe_substate]));
+
+      return ok({
+        items: page.map((c) =>
+          toFamilyDto(
+            c,
+            stateMap.get(c.family_id),
+            capsMap.get(c.family_id) ?? null,
+            promoMap.get(c.family_id),
+            substateMap.get(c.family_id),
+            executionMap24h.get(c.family_id),
+            deploymentMap.get(c.family_id) ?? null,
+            livenessMap.get(c.family_id)?.liveness,
+          ),
         ),
-      ),
-      meta: {
-        scope: effectiveScope,
-        profile: currentProfile,
-        totalCatalogCount,
-      },
-    });
-  });
+        meta: {
+          scope: effectiveScope,
+          profile: currentProfile,
+          totalCatalogCount,
+          nextCursor,
+          hasMore,
+        },
+      });
+    },
+  );
 
   app.get<{ Params: { familyId: string } }>("/families/:familyId", async (request) => {
     const { familyId } = request.params;
