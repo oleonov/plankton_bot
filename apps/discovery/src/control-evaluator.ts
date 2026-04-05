@@ -230,7 +230,7 @@ export class ControlEvaluator {
       // Phase 3: Auto-accept + auto-promote via API
       if (this.autoAcceptorConfig?.enabled) {
         const result = await autoAcceptAndPromote(this.db, this.autoAcceptorConfig, this.log);
-        if (result.accepted > 0 || result.promoted > 0) {
+        if (result.accepted > 0 || result.promoted > 0 || result.skippedAtCap > 0) {
           this.log.info(result, "auto-accept/promote pass");
         }
       }

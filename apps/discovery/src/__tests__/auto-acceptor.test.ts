@@ -29,6 +29,8 @@ function seedCandidate(
     status?: string;
     patternConfidence?: string;
     matchedFamilyId?: string | null;
+    recurrenceScore?: number | null;
+    liveViabilityScore?: number | null;
   } = {},
 ): void {
   conn.db
@@ -36,8 +38,9 @@ function seedCandidate(
       `INSERT INTO family_candidates
        (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
         primary_category, strategy_profile, active_market_count, cluster_volume_24h,
-        gate_recommendation, status, first_seen_at, last_seen_at, matched_family_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        gate_recommendation, status, first_seen_at, last_seen_at, matched_family_id,
+        recurrence_score, live_viability_score)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       candidateId,
@@ -55,6 +58,8 @@ function seedCandidate(
       NOW,
       NOW,
       opts.matchedFamilyId ?? null,
+      opts.recurrenceScore ?? null,
+      opts.liveViabilityScore ?? null,
     );
 }
 
@@ -73,6 +78,36 @@ function seedProfile(profileId: string = PROFILE): void {
       "INSERT OR IGNORE INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, ?, ?)",
     )
     .run(profileId, profileId, `${profileId} profile`, NOW);
+}
+
+function seedProfileSettings(profileId: string, envelopeJson: string): void {
+  conn.db
+    .prepare(
+      `INSERT OR REPLACE INTO profile_settings (profile_id, envelope_json, updated_at)
+       VALUES (?, ?, ?)`,
+    )
+    .run(profileId, envelopeJson, NOW);
+}
+
+function seedFamilyCatalogEntry(familyId: string): void {
+  conn.db
+    .prepare(
+      `INSERT OR IGNORE INTO family_catalog
+       (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile,
+        created_at, updated_at)
+       VALUES (?, ?, 'crypto', 'threshold', 'daily', 'ad-hoc', 'scalp', ?, ?)`,
+    )
+    .run(familyId, familyId, NOW, NOW);
+}
+
+function seedFamilyDeployment(familyId: string, profile: string, enabled: boolean): void {
+  seedFamilyCatalogEntry(familyId);
+  conn.db
+    .prepare(
+      `INSERT OR IGNORE INTO family_deployments (family_id, profile, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .run(familyId, profile, enabled ? 1 : 0, NOW, NOW);
 }
 
 function seedPromotionProposal(
@@ -162,6 +197,136 @@ describe("autoAcceptAndPromote", () => {
     });
   });
 
+  describe("per-pass limit", () => {
+    it("accepts at most 10 candidates per pass", async () => {
+      for (let i = 1; i <= 15; i++) {
+        seedCandidate(`cand-${String(i).padStart(2, "0")}`);
+      }
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      expect(result.accepted).toBe(10);
+      // Only 10 accept calls (no promote calls since no proposals seeded)
+      expect(mockFetch).toHaveBeenCalledTimes(10);
+    });
+
+    it("ranks scaled-candidate before probe-candidate", async () => {
+      seedCandidate("cand-probe", {
+        gateRecommendation: "probe-candidate",
+        patternConfidence: "high",
+        recurrenceScore: 1.0,
+        liveViabilityScore: 1.0,
+      });
+      seedCandidate("cand-scaled", {
+        gateRecommendation: "scaled-candidate",
+        patternConfidence: "medium",
+        recurrenceScore: 0.1,
+        liveViabilityScore: 0.1,
+      });
+
+      const acceptedIds: string[] = [];
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        const match = url.match(/candidates\/([^/]+)\/accept/);
+        if (match) acceptedIds.push(match[1]!);
+        return Promise.resolve({ ok: true, status: 200 });
+      });
+      vi.stubGlobal("fetch", mockFetch);
+
+      await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      // scaled-candidate should be accepted first regardless of lower scores
+      expect(acceptedIds[0]).toBe("cand-scaled");
+      expect(acceptedIds[1]).toBe("cand-probe");
+    });
+  });
+
+  describe("enabled-family cap", () => {
+    it("skips auto-accept when at maxFamilies cap", async () => {
+      seedRuntimeControlState(PROFILE);
+      seedProfileSettings(PROFILE, JSON.stringify({ maxFamilies: 2 }));
+
+      // Seed 2 enabled deployments to hit the cap
+      seedFamilyDeployment("fam-a", PROFILE, true);
+      seedFamilyDeployment("fam-b", PROFILE, true);
+
+      // Seed qualifying candidates
+      seedCandidate("cand-1");
+      seedCandidate("cand-2");
+      seedCandidate("cand-3");
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      expect(result.accepted).toBe(0);
+      expect(result.skippedAtCap).toBe(3);
+      // No accept calls should be made
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("accepts normally when under maxFamilies cap", async () => {
+      seedRuntimeControlState(PROFILE);
+      seedProfileSettings(PROFILE, JSON.stringify({ maxFamilies: 10 }));
+
+      // Only 2 enabled deployments, well under cap of 10
+      seedFamilyDeployment("fam-a", PROFILE, true);
+      seedFamilyDeployment("fam-b", PROFILE, true);
+
+      seedCandidate("cand-1");
+      seedCandidate("cand-2");
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      expect(result.accepted).toBe(2);
+      expect(result.skippedAtCap).toBe(0);
+    });
+
+    it("uses default maxFamilies (500) when no envelope_json", async () => {
+      seedRuntimeControlState(PROFILE);
+      // No profile_settings row → fallback to 500
+
+      seedCandidate("cand-1");
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      // Under the default cap of 500, should accept normally
+      expect(result.accepted).toBe(1);
+      expect(result.skippedAtCap).toBe(0);
+    });
+
+    it("still runs auto-promote when at cap", async () => {
+      seedRuntimeControlState(PROFILE);
+      seedProfileSettings(PROFILE, JSON.stringify({ maxFamilies: 1 }));
+      seedFamilyDeployment("fam-a", PROFILE, true);
+
+      // Seed a qualifying candidate (will be skipped)
+      seedCandidate("cand-1");
+
+      // Seed a promotion proposal (should still be processed)
+      seedFamilyCatalogEntry("fam-a");
+      seedPromotionProposal("fam-a", PROFILE, "pending");
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      expect(result.accepted).toBe(0);
+      expect(result.skippedAtCap).toBe(1);
+      expect(result.promoted).toBe(1);
+    });
+  });
+
   describe("auto-promote families", () => {
     it("promotes family with exclusive current-profile proposal", async () => {
       seedRuntimeControlState(PROFILE);
@@ -230,7 +395,7 @@ describe("autoAcceptAndPromote", () => {
   });
 
   describe("config and error handling", () => {
-    it("returns {0, 0} without any fetch calls when disabled", async () => {
+    it("returns zeros without any fetch calls when disabled", async () => {
       seedCandidate("cand-1");
       seedRuntimeControlState(PROFILE);
       seedPromotionProposal("fam-1", PROFILE, "pending");
@@ -244,7 +409,7 @@ describe("autoAcceptAndPromote", () => {
         silentLogger,
       );
 
-      expect(result).toEqual({ accepted: 0, promoted: 0 });
+      expect(result).toEqual({ accepted: 0, promoted: 0, skippedAtCap: 0 });
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
