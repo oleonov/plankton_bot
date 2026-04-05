@@ -195,7 +195,9 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           ? "profile"
           : "all";
 
-      const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
+      // limit=0 or absent → return all (backward compat for useFamilies() dropdown consumers)
+      const rawLimit = Number(request.query.limit) || 0;
+      const limit = rawLimit > 0 ? Math.min(rawLimit, 200) : 0;
       const cursorRaw = request.query.cursor;
       const cursorKey = cursorRaw ? Buffer.from(cursorRaw, "base64").toString("utf-8") : null;
 
@@ -211,11 +213,29 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           : [];
       const deploymentMap = new Map(deploymentRows.map((d) => [d.family_id, d]));
 
-      // SQL-level pagination: fetch only the page we need
+      // Pagination: limit=0 means return all (for dropdown consumers like useFamilies())
       let page: FamilyCatalogRow[];
       let hasMore: boolean;
 
-      if (effectiveScope === "profile") {
+      if (limit === 0) {
+        // No pagination — return all (backward compat)
+        if (effectiveScope === "profile") {
+          const deployedIds = [...deploymentMap.keys()];
+          page =
+            deployedIds.length === 0
+              ? []
+              : (controlDb
+                  .prepare(
+                    `SELECT * FROM family_catalog WHERE family_id IN (${deployedIds.map(() => "?").join(",")}) ORDER BY family_key`,
+                  )
+                  .all(...deployedIds) as FamilyCatalogRow[]);
+        } else {
+          page = controlDb
+            .prepare("SELECT * FROM family_catalog ORDER BY family_key")
+            .all() as FamilyCatalogRow[];
+        }
+        hasMore = false;
+      } else if (effectiveScope === "profile") {
         // Profile scope: filter by deployment, then paginate
         const deployedIds = [...deploymentMap.keys()];
         if (deployedIds.length === 0) {
