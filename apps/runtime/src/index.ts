@@ -476,6 +476,8 @@ async function main(): Promise<void> {
     liveLiteGuard,
     runtimeMode,
     maxConcurrency: config.executionMaxConcurrency,
+    controlDb: controlConn.db,
+    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });
 
   // 7g. Risk + Inventory module

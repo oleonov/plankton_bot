@@ -25,6 +25,7 @@ import type {
   OrderId,
   BotRunId,
   RuntimeControl,
+  ProfileId,
 } from "@plankton/domain";
 import { createOrderId, ExchangeErrorCode, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
@@ -45,6 +46,9 @@ export interface ExecutionModuleDeps {
   rulesProvider?: FamilyRulesProvider | undefined;
   runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
   maxConcurrency?: number | undefined;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  controlDb?: any;
+  activeProfile?: ProfileId | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -233,6 +237,38 @@ export class ExecutionModule implements RuntimeModule {
     this.processedCommandIds.add(cmd.commandId);
     this.processedCommandOrder.push(String(cmd.commandId));
     this.pruneProcessedCommandIds();
+
+    // Pre-flight wallet balance check for buy orders
+    if (cmd.side === "buy" && this.deps.controlDb && this.deps.activeProfile) {
+      const walletRow = this.deps.controlDb
+        .prepare("SELECT wallet_balance_usdc FROM profile_summaries WHERE profile_id = ?")
+        .get(this.deps.activeProfile) as { wallet_balance_usdc: number | null } | undefined;
+      const walletBalance = walletRow?.wallet_balance_usdc;
+      if (walletBalance != null) {
+        const openBuyUsdc = this.deps.orderRepo.sumOpenBuyNotional();
+        const availableBalance = walletBalance - openBuyUsdc;
+        if (availableBalance < notional) {
+          this.log.debug(
+            {
+              wallet: walletBalance,
+              openBuy: openBuyUsdc,
+              available: availableBalance,
+              order: notional,
+            },
+            "order skipped — insufficient wallet balance",
+          );
+          await this.deps.bus.publish("OrderRejected", {
+            commandId: cmd.commandId,
+            clientOrderId: cmd.clientOrderId,
+            reason: "insufficient wallet balance",
+            errorCode: ExchangeErrorCode.InsufficientBalance,
+            familyId: cmd.familyId,
+            timestamp: Date.now(),
+          });
+          return;
+        }
+      }
+    }
 
     if (this.queue) {
       this.queue.enqueue(cmd);

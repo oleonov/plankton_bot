@@ -106,6 +106,15 @@ export class SqliteOrderRepository implements OrderRepository {
     }
   }
 
+  sumOpenBuyNotional(): number {
+    const row = this.db
+      .prepare(
+        "SELECT COALESCE(SUM(size_usdc), 0) as total FROM orders WHERE status IN ('pending', 'open', 'partially-filled') AND side = 'buy'",
+      )
+      .get() as { total: number };
+    return row.total;
+  }
+
   private rowToOrder(row: Record<string, unknown>): Order {
     return {
       orderId: createOrderId(row.order_id as string),

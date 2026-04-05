@@ -53,6 +53,7 @@ function createMockOrderRepo(): OrderRepository {
     findOpen: vi.fn().mockReturnValue([]),
     findByTokenId: vi.fn().mockReturnValue([]),
     updateStatus: vi.fn(),
+    sumOpenBuyNotional: vi.fn().mockReturnValue(0),
   };
 }
 

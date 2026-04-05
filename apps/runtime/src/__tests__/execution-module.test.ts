@@ -107,6 +107,7 @@ function createMockOrderRepo(): OrderRepository {
     findOpen: vi.fn().mockReturnValue([]),
     findByTokenId: vi.fn().mockReturnValue([]),
     updateStatus: vi.fn(),
+    sumOpenBuyNotional: vi.fn().mockReturnValue(0),
   };
 }
 
@@ -1167,5 +1168,250 @@ describe("ExecutionModule", () => {
     expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
 
     await pausedMod.stop();
+  });
+
+  // ─── Wallet balance pre-flight ──────────────────────────────────
+
+  function createMockControlDb(walletBalance: number | null) {
+    return {
+      prepare: vi.fn().mockReturnValue({
+        get: vi.fn().mockReturnValue(
+          walletBalance != null ? { wallet_balance_usdc: walletBalance } : undefined,
+        ),
+      }),
+    };
+  }
+
+  it("rejects buy order when wallet balance is insufficient", async () => {
+    const controlDb = createMockControlDb(20);
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(15);
+
+    const balanceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+    });
+
+    await balanceMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    // price=0.5, size=20 → notional=10 > available=5
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 0.5, size: 20 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled(); // no rejected order row saved
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("insufficient wallet balance");
+    expect(rejected[0].errorCode).toBe("INSUFFICIENT_BALANCE");
+
+    await balanceMod.stop();
+  });
+
+  it("allows buy order when wallet balance is sufficient", async () => {
+    const controlDb = createMockControlDb(100);
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(10);
+
+    const balanceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+    });
+
+    await balanceMod.start();
+
+    // price=0.5, size=10 → notional=5 < available=90
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 0.5, size: 10 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await balanceMod.stop();
+  });
+
+  it("skips balance check when controlDb is not provided", async () => {
+    const noDeps = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    await noDeps.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await noDeps.stop();
+  });
+
+  it("skips balance check when profile_summaries row not found", async () => {
+    const controlDb = createMockControlDb(null);
+
+    const balanceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+    });
+
+    await balanceMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await balanceMod.stop();
+  });
+
+  it("skips balance check for sell orders", async () => {
+    const controlDb = createMockControlDb(1); // very low balance
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(0);
+
+    const balanceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+    });
+
+    await balanceMod.start();
+
+    // sell order with notional=5 > wallet=1, but should not be blocked
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.5, size: 10 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await balanceMod.stop();
+  });
+
+  it("dedup takes priority over balance check — duplicate commandId gets dedup skip, not balance rejection", async () => {
+    const controlDb = createMockControlDb(0); // zero balance — would fail balance check
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(0);
+
+    const balanceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+    });
+
+    await balanceMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    const cmd = makePlaceCmd({ price: 0.5, size: 20 });
+
+    // First attempt — rejected by balance check
+    await bus.publish("PlaceOrderRequested", { command: cmd, timestamp: Date.now() });
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("insufficient wallet balance");
+
+    // Second attempt with same commandId — should be dedup-skipped, NOT another balance rejection
+    rejected.length = 0;
+    await bus.publish("PlaceOrderRequested", { command: cmd, timestamp: Date.now() });
+    expect(rejected).toHaveLength(0); // dedup silently skips
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+
+    await balanceMod.stop();
+  });
+
+  it("semantic dedup takes priority over balance check — existing open order with same clientOrderId skips, not balance rejection", async () => {
+    const controlDb = createMockControlDb(0); // zero balance
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(0);
+
+    // Simulate existing open order with same clientOrderId
+    const cmd = makePlaceCmd({ price: 0.5, size: 20 });
+    (orderRepo.findByClientOrderId as ReturnType<typeof vi.fn>).mockReturnValueOnce({
+      orderId: "existing-ord",
+      clientOrderId: cmd.clientOrderId,
+      status: "open",
+    });
+
+    const balanceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+    });
+
+    await balanceMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", { command: cmd, timestamp: Date.now() });
+
+    // Should be semantic-dedup skipped, NOT balance rejection
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
+
+    await balanceMod.stop();
   });
 });

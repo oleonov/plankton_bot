@@ -219,4 +219,86 @@ describe("SqliteOrderRepository", () => {
   it("findById returns null for unknown id", () => {
     expect(repo.findById(createOrderId("nonexistent"))).toBeNull();
   });
+
+  // ─── sumOpenBuyNotional ────────────────────────────────────────────
+
+  it("sumOpenBuyNotional returns 0 when no orders exist", () => {
+    expect(repo.sumOpenBuyNotional()).toBe(0);
+  });
+
+  it("sumOpenBuyNotional sums only open buy orders", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o1"),
+        clientOrderId: "c1" as ClientOrderId,
+        side: "buy",
+        status: "pending",
+        sizeUsdc: 10,
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o2"),
+        clientOrderId: "c2" as ClientOrderId,
+        side: "buy",
+        status: "open",
+        sizeUsdc: 20,
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o3"),
+        clientOrderId: "c3" as ClientOrderId,
+        side: "buy",
+        status: "partially-filled",
+        sizeUsdc: 15,
+      }),
+    );
+
+    expect(repo.sumOpenBuyNotional()).toBe(45);
+  });
+
+  it("sumOpenBuyNotional excludes sell orders and non-open statuses", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o1"),
+        clientOrderId: "c1" as ClientOrderId,
+        side: "buy",
+        status: "open",
+        sizeUsdc: 10,
+      }),
+    );
+    // sell order — should be excluded
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o2"),
+        clientOrderId: "c2" as ClientOrderId,
+        side: "sell",
+        status: "open",
+        sizeUsdc: 50,
+      }),
+    );
+    // filled buy — should be excluded
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o3"),
+        clientOrderId: "c3" as ClientOrderId,
+        side: "buy",
+        status: "filled",
+        sizeUsdc: 100,
+      }),
+    );
+    // cancelled buy — should be excluded
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o4"),
+        clientOrderId: "c4" as ClientOrderId,
+        side: "buy",
+        status: "cancelled",
+        sizeUsdc: 200,
+      }),
+    );
+
+    expect(repo.sumOpenBuyNotional()).toBe(10);
+  });
 });

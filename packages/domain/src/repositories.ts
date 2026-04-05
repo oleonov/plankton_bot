@@ -100,6 +100,9 @@ export interface OrderRepository {
 
   /** Update the status (and optionally exchange_order_id) of an existing order. */
   updateStatus(id: OrderId, status: OrderStatus, exchangeOrderId?: string): void;
+
+  /** Sum the notional (size_usdc) of all open buy orders. */
+  sumOpenBuyNotional(): number;
 }
 
 // ─── FillRepository ──────────────────────────────────────────────────────
