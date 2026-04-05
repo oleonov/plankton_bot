@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { screen } from "@testing-library/react";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { screen, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { server } from "../../test/server.ts";
 import { renderWithProviders } from "../../test/test-utils.tsx";
@@ -11,6 +11,11 @@ function ok<T>(data: T) {
 }
 
 describe("Overview Balance Card", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
   it("shows virtual balance for paper mode", async () => {
     renderWithProviders(<Overview />);
 
@@ -143,5 +148,48 @@ describe("Overview Balance Card", () => {
 
     expect(await screen.findByText(/Watch: bitcoin-above/i)).toBeInTheDocument();
     expect(screen.getByText(/2 taker.*\$0\.120 fees/)).toBeInTheDocument();
+  });
+
+  it("shows last order placed by createdAt, not last status update", async () => {
+    vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-05T12:00:00Z").getTime());
+
+    server.use(
+      http.get("/api/v1/orders", () =>
+        ok({
+          items: [
+            {
+              orderId: "ord-1",
+              clientOrderId: "client-1",
+              tokenId: "tok-1",
+              familyId: "fam-1",
+              side: "buy",
+              orderType: "limit",
+              postOnly: true,
+              price: 0.1,
+              size: 10,
+              sizeUsdc: 1,
+              status: "filled",
+              exchangeOrderId: "exch-1",
+              createdAt: "2026-04-05T11:00:00Z",
+              updatedAt: "2026-04-05T11:59:00Z",
+              slug: "market-1",
+              eventSlug: "event-1",
+              question: "Question",
+              outcome: "YES",
+              conditionId: "cond-1",
+              endDate: null,
+            },
+          ],
+          nextCursor: null,
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const row = (await screen.findByText("Last order placed")).closest("tr");
+    expect(row).not.toBeNull();
+    expect(within(row!).getByText("1h ago")).toBeInTheDocument();
+    expect(within(row!).queryByText("1m ago")).not.toBeInTheDocument();
   });
 });

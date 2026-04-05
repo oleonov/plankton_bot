@@ -366,9 +366,9 @@ export function Overview() {
                 </td>
               </tr>
               <tr>
-                <td style={{ color: "var(--text-muted)" }}>Last order</td>
+                <td style={{ color: "var(--text-muted)" }}>Last order placed</td>
                 <td style={{ textAlign: "right" }}>
-                  {formatAgo(recentOrders?.items[0]?.updatedAt ?? null)}
+                  {formatAgo(recentOrders?.items[0]?.createdAt ?? null)}
                 </td>
               </tr>
               <tr>
