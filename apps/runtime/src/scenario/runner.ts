@@ -257,6 +257,7 @@ async function executeScenario(
     bus,
     orderRepo: repos.order,
     fillRepo: repos.fill,
+    marketRepo: repos.market,
     log,
     reconcileIntervalMs: 60_000,
   });

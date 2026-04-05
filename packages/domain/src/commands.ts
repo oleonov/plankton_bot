@@ -64,7 +64,9 @@ export interface CancelOrderCommand {
     | "operator"
     | "shutdown"
     | "reconciliation"
-    | "market_resolved";
+    | "market_resolved"
+    | "stale_entry_ttl"
+    | "stale_entry_enddate";
   readonly familyId: FamilyId;
 }
 

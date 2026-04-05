@@ -12,6 +12,7 @@ import type {
   ExchangeBalance,
   OrderRepository,
   FillRepository,
+  MarketRepository,
   TokenId,
   ClientOrderId,
   ReconciliationResult,
@@ -68,6 +69,19 @@ function createMockFillRepo(): FillRepository {
     findUnreconciled: vi.fn().mockReturnValue([]),
     markReconciled: vi.fn(),
     getLatestTimestamp: vi.fn().mockReturnValue(null),
+  };
+}
+
+function createMockMarketRepo(): MarketRepository {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue(null),
+    findByTokenIds: vi.fn().mockReturnValue([]),
+    findByConditionId: vi.fn().mockReturnValue([]),
+    findActive: vi.fn().mockReturnValue([]),
+    findByFamily: vi.fn().mockReturnValue([]),
+    findAll: vi.fn().mockReturnValue([]),
+    deactivate: vi.fn(),
   };
 }
 
@@ -141,6 +155,7 @@ describe("ReconciliationModule", () => {
   let bus: InProcessEventBus;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
+  let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let mod: ReconciliationModule;
 
   beforeEach(() => {
@@ -148,11 +163,13 @@ describe("ReconciliationModule", () => {
     bus = new InProcessEventBus();
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
+    marketRepo = createMockMarketRepo();
     mod = new ReconciliationModule({
       gateway,
       bus,
       orderRepo,
       fillRepo,
+      marketRepo,
       log: silentLog,
       reconcileIntervalMs: 60_000,
     });

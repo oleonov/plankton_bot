@@ -1,0 +1,135 @@
+/**
+ * Stale Entry Order Cleaner — cancels open buy entry orders that exceed
+ * a TTL or are too close to market endDate.
+ *
+ * Runs as part of each reconciliation pass. Publishes CancelOrderRequested
+ * for each stale order; the execution module handles the actual cancel.
+ *
+ * Anti-churn: an in-memory backoff map prevents re-cancelling the same
+ * order within CANCEL_BACKOFF_MS. Entries are evicted when the order
+ * leaves the open set.
+ */
+
+import type { OrderRepository, MarketRepository, EventBus } from "@plankton/domain";
+import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
+import type { Logger } from "../../logger.js";
+
+// Horizon-aware TTLs — reserved for v2. Currently all orders use DEFAULT_TTL_MS.
+export const HORIZON_TTL_MS: Record<string, number> = {
+  "intraday-4h": 45 * 60_000,
+  daily: 6 * 60 * 60_000,
+  deadline: 24 * 60 * 60_000,
+  "ad-hoc": 8 * 60 * 60_000,
+};
+export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
+export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
+export const CANCEL_BACKOFF_MS = 5 * 60_000; // 5 min retry backoff
+
+export interface StaleOrderCleanerDeps {
+  orderRepo: OrderRepository;
+  marketRepo: MarketRepository;
+  bus: EventBus;
+  log: Logger;
+}
+
+export interface StaleCleanResult {
+  staleTtlCancelled: number;
+  staleEndDateCancelled: number;
+}
+
+/**
+ * Scans open buy entry orders and publishes CancelOrderRequested for those
+ * that exceed the TTL or are within the endDate safety window.
+ *
+ * The backoff map is caller-owned so it persists across reconciliation passes
+ * within the same ReconciliationModule instance.
+ */
+export async function cleanStaleEntryOrders(
+  deps: StaleOrderCleanerDeps,
+  backoffMap: Map<string, number>,
+): Promise<StaleCleanResult> {
+  const { orderRepo, marketRepo, bus, log } = deps;
+  const now = Date.now();
+
+  const openOrders = orderRepo.findOpen();
+
+  // Only BUY orders with an entry signal reason
+  const entryBuys = openOrders.filter(
+    (o) => o.side === "buy" && o.signalReason != null && ENTRY_REASONS.has(o.signalReason),
+  );
+
+  // Evict backoff entries for orders no longer open
+  const openIds = new Set(openOrders.map((o) => String(o.orderId)));
+  for (const key of backoffMap.keys()) {
+    if (!openIds.has(key)) backoffMap.delete(key);
+  }
+
+  let staleTtlCancelled = 0;
+  let staleEndDateCancelled = 0;
+
+  for (const order of entryBuys) {
+    const ordKey = String(order.orderId);
+
+    // Anti-churn: skip if cancel was recently attempted
+    const lastAttempt = backoffMap.get(ordKey);
+    if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
+
+    const ageMs = now - new Date(order.createdAt).getTime();
+    const ttlMs = DEFAULT_TTL_MS; // v2: resolve per-horizon TTL
+
+    // Check TTL
+    if (ageMs > ttlMs) {
+      await publishCancel(bus, order, "stale_entry_ttl");
+      backoffMap.set(ordKey, now);
+      staleTtlCancelled++;
+      log.info(
+        { orderId: ordKey, ageMs, ttlMs, signalReason: order.signalReason },
+        "stale entry order — TTL exceeded",
+      );
+      continue;
+    }
+
+    // Check endDate proximity
+    const market = marketRepo.findByTokenId(order.tokenId);
+    if (market?.endDate) {
+      const endDateMs = new Date(market.endDate).getTime();
+      if (endDateMs - now < ENDDATE_SAFETY_WINDOW_MS) {
+        await publishCancel(bus, order, "stale_entry_enddate");
+        backoffMap.set(ordKey, now);
+        staleEndDateCancelled++;
+        log.info(
+          {
+            orderId: ordKey,
+            endDate: market.endDate,
+            windowMs: ENDDATE_SAFETY_WINDOW_MS,
+            signalReason: order.signalReason,
+          },
+          "stale entry order — within endDate safety window",
+        );
+        continue;
+      }
+    }
+  }
+
+  return { staleTtlCancelled, staleEndDateCancelled };
+}
+
+async function publishCancel(
+  bus: EventBus,
+  order: {
+    orderId: import("@plankton/domain").OrderId;
+    familyId: import("@plankton/domain").FamilyId;
+  },
+  reason: "stale_entry_ttl" | "stale_entry_enddate",
+): Promise<void> {
+  await bus.publish("CancelOrderRequested", {
+    command: {
+      type: "CancelOrderCommand" as const,
+      commandId: createCommandId(`stale-clean-${String(order.orderId)}-${Date.now()}`),
+      orderId: order.orderId,
+      reason,
+      familyId: order.familyId,
+    },
+    timestamp: Date.now(),
+  });
+}

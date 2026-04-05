@@ -21,17 +21,20 @@ import type {
   ExchangeGateway,
   OrderRepository,
   FillRepository,
+  MarketRepository,
   ReconciliationResult,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
+import { cleanStaleEntryOrders } from "./stale-order-cleaner.js";
 
 export interface ReconciliationModuleDeps {
   gateway: ExchangeGateway;
   bus: EventBus;
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
+  marketRepo: MarketRepository;
   log: Logger;
   reconcileIntervalMs: number;
 }
@@ -45,6 +48,7 @@ export class ReconciliationModule implements RuntimeModule {
   private runCount = 0;
   private lastRunAt: number | null = null;
   private lastResult: ReconciliationResult | null = null;
+  private readonly staleBackoffMap = new Map<string, number>();
 
   constructor(private readonly deps: ReconciliationModuleDeps) {
     this.log = deps.log.child({ module: "reconciliation" });
@@ -129,13 +133,32 @@ export class ReconciliationModule implements RuntimeModule {
       );
       allDetails.push(...fillResult.details);
 
-      // 3. Build result
+      // 3. Stale entry order cleanup
+      const staleResult = await cleanStaleEntryOrders(
+        {
+          orderRepo: this.deps.orderRepo,
+          marketRepo: this.deps.marketRepo,
+          bus: this.deps.bus,
+          log: this.log,
+        },
+        this.staleBackoffMap,
+      );
+      if (staleResult.staleTtlCancelled > 0) {
+        allDetails.push(`stale entry TTL cancels: ${staleResult.staleTtlCancelled}`);
+      }
+      if (staleResult.staleEndDateCancelled > 0) {
+        allDetails.push(`stale entry endDate cancels: ${staleResult.staleEndDateCancelled}`);
+      }
+
+      // 4. Build result
       const clean =
         orderResult.phantomsCancelled === 0 &&
         orderResult.unknownExchangeOrders === 0 &&
         fillResult.missingFillsImported === 0 &&
         orderResult.staleCancelled === 0 &&
-        orderResult.staleCancelFailed === 0;
+        orderResult.staleCancelFailed === 0 &&
+        staleResult.staleTtlCancelled === 0 &&
+        staleResult.staleEndDateCancelled === 0;
 
       const result: ReconciliationResult = {
         ranAt,
@@ -152,7 +175,7 @@ export class ReconciliationModule implements RuntimeModule {
       this.lastRunAt = ranAt;
       this.lastResult = result;
 
-      // 4. Publish events
+      // 5. Publish events
       if (!clean) {
         const severity =
           fillResult.missingFillsImported > 0 ? ("critical" as const) : ("warn" as const);
@@ -175,6 +198,8 @@ export class ReconciliationModule implements RuntimeModule {
           unknownOrders: orderResult.unknownExchangeOrders,
           staleCancelled: orderResult.staleCancelled,
           staleCancelFailed: orderResult.staleCancelFailed,
+          staleEntryTtl: staleResult.staleTtlCancelled,
+          staleEntryEndDate: staleResult.staleEndDateCancelled,
         },
         "reconciliation pass complete",
       );
