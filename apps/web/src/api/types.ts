@@ -70,6 +70,7 @@ export interface StatusData {
     topBlockingLayer?: string | null;
   };
   executionTelemetry24h?: ExecutionTelemetryWindow;
+  familyModeCounts?: Record<string, number> | null;
 }
 
 /** GET /metrics */

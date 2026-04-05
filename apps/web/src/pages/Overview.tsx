@@ -187,7 +187,18 @@ export function Overview() {
           </div>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
             <span>
-              Families: {status.liveLite.familyAllowlist.length} / {status.liveLite.maxFamilies} max
+              Families: {status.liveLite.familyAllowlist.length}
+              {status.familyModeCounts && (
+                <>
+                  {" "}
+                  (
+                  {Object.entries(status.familyModeCounts)
+                    .sort(([a], [b]) => a.localeCompare(b))
+                    .map(([mode, count]) => `${count} ${mode}`)
+                    .join(", ")}
+                  )
+                </>
+              )}
             </span>
             <span>Wallet: {(status.liveLite.walletMode ?? "eoa").toUpperCase()}</span>
             <span>

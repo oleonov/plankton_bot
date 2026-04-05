@@ -131,6 +131,16 @@ describe("API against real split schemas", () => {
     expect(body.data.executionTelemetry24h).toBeDefined();
   });
 
+  it("GET /status includes familyModeCounts breakdown for enabled families", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: auth() });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    // fam-1 is enabled for simulation profile and has runtime_mode='active' with no effective_mode
+    // so it should appear under the 'active' bucket
+    expect(body.data.familyModeCounts).toBeDefined();
+    expect(body.data.familyModeCounts).toEqual({ active: 1 });
+  });
+
   it("GET /families succeeds (control: catalog + rules + evidence; ledger: positions, orders)", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/families", headers: auth() });
     expect(res.statusCode).toBe(200);

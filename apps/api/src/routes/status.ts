@@ -327,6 +327,34 @@ export function buildStatusSnapshot(
     }
   }
 
+  // Family mode breakdown for current profile
+  let familyModeCounts: Record<string, number> | undefined;
+  if (controlDb) {
+    try {
+      const enabledFamilies = controlDb
+        .prepare("SELECT family_id FROM family_deployments WHERE profile = ? AND enabled = 1")
+        .all(runtimeMode) as Array<{ family_id: string }>;
+
+      const enabledIds = new Set(enabledFamilies.map((f) => f.family_id));
+
+      const allStates = db
+        .prepare(
+          "SELECT family_id, runtime_mode, effective_mode FROM family_runtime_state",
+        )
+        .all() as Array<{ family_id: string; runtime_mode: string; effective_mode: string | null }>;
+
+      const counts: Record<string, number> = {};
+      for (const s of allStates) {
+        if (!enabledIds.has(s.family_id)) continue;
+        const mode = s.effective_mode ?? s.runtime_mode;
+        counts[mode] = (counts[mode] ?? 0) + 1;
+      }
+      familyModeCounts = counts;
+    } catch {
+      // control DB may not have family_deployments in legacy/test setups
+    }
+  }
+
   const startupAdoptionRow = db
     .prepare(
       "SELECT value, labels, captured_at FROM runtime_metrics WHERE metric_name = 'startup_adoption' ORDER BY captured_at DESC LIMIT 1",
@@ -374,6 +402,7 @@ export function buildStatusSnapshot(
     signalActivity,
     executionTelemetry24h,
     startupAdoption,
+    ...(familyModeCounts !== undefined ? { familyModeCounts } : {}),
     ...(marketDataPoll ? { marketDataPoll } : {}),
   };
 }
