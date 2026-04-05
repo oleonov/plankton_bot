@@ -14,14 +14,16 @@ import type {
   FamilyStateRepository,
   FamilyRulesProvider,
   StateTransitionRepository,
+  StateTransition,
 } from "@plankton/domain";
 import {
   computeToxicityPenalty,
   evaluateExecutionCanaryGate,
   OperatorMode,
   ProfileId,
+  PromotionState,
 } from "@plankton/domain";
-import type { FamilyId, FamilyIdentity, RuntimeMode } from "@plankton/domain";
+import type { FamilyId, FamilyIdentity, FamilyState, RuntimeMode } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { ScoreComputer } from "../evidence/score-computer.js";
 import type { ValidationMetricsReader } from "../publisher/validation-metrics-reader.js";
@@ -71,6 +73,8 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
   private lastEvalAt: string | null = null;
   /** Tracks wall-clock ISO timestamp when tail first went negative per family. */
   private firstNegativeTailAt = new Map<string, string>();
+  /** Consecutive clean evaluation passes per family (for auto-recovery hysteresis). */
+  private readonly consecutiveCleanCounts = new Map<string, number>();
 
   constructor(deps: SafetyEvaluatorDeps) {
     this.bus = deps.bus;
@@ -134,6 +138,8 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
         toxicity,
         tailAdjustedPnl: recycleMetrics.tailAdjustedPnl,
       });
+
+      await this.checkRecovery(familyId, toxicity, recycleMetrics.tailAdjustedPnl);
     }
 
     this.lastEvalAt = new Date().toISOString();
@@ -272,6 +278,84 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
         }
       }
     }
+  }
+
+  // ─── Auto-recovery from system-induced reduce-only ─────────────────────
+
+  private async checkRecovery(
+    familyId: FamilyId,
+    toxicity: number,
+    tailAdjustedPnl: number,
+  ): Promise<void> {
+    const familyState = this.familyStateRepo.get(familyId);
+    if (!familyState || familyState.runtimeMode !== "reduce-only") {
+      this.consecutiveCleanCounts.delete(String(familyId));
+      return;
+    }
+
+    const lastDemotion = this.stateTransitionRepo.findLastTransitionTo(
+      String(familyId),
+      "reduce-only",
+    );
+    if (!lastDemotion || lastDemotion.triggerType !== "system") return;
+
+    const demotionAgeMs = Date.now() - new Date(lastDemotion.createdAt).getTime();
+    if (demotionAgeMs < 24 * 60 * 60 * 1000) return;
+
+    const key = String(familyId);
+    if (toxicity >= 0.3 || tailAdjustedPnl < 0) {
+      this.consecutiveCleanCounts.delete(key);
+      return;
+    }
+
+    const cleanCount = (this.consecutiveCleanCounts.get(key) ?? 0) + 1;
+    this.consecutiveCleanCounts.set(key, cleanCount);
+    if (cleanCount < 2) return;
+
+    await this.applyRecovery(familyId, familyState, lastDemotion);
+  }
+
+  private async applyRecovery(
+    familyId: FamilyId,
+    state: FamilyState,
+    lastDemotion: StateTransition,
+  ): Promise<void> {
+    const previousPromotionState = lastDemotion.fromState as PromotionState;
+    const now = new Date().toISOString();
+
+    this.familyStateRepo.save({
+      ...state,
+      runtimeMode: "active",
+      quarantineReason: null,
+      updatedAt: now,
+    });
+
+    this.deploymentRepo.updateOperatorMode(
+      familyId,
+      this.activeProfile,
+      OperatorMode.Active,
+      "auto-recovery",
+    );
+
+    this.familyEvidenceRepo.updatePromotionState(familyId, previousPromotionState);
+
+    this.stateTransitionRepo.insert({
+      entityType: "family",
+      entityId: String(familyId),
+      fromState: "reduce-only",
+      toState: previousPromotionState,
+      triggerType: "system",
+      initiator: "safety-evaluator",
+      reason: "auto-recovery: metrics clean for 2+ consecutive passes",
+      scoresSnapshot: null,
+    });
+
+    this.consecutiveCleanCounts.delete(String(familyId));
+
+    this.log.info(
+      { familyId: String(familyId), previousState: previousPromotionState },
+      "auto-recovered family from reduce-only",
+    );
   }
 
   // ─── Write demotion to deployment + transition ──────────────────────────

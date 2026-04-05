@@ -6,6 +6,7 @@ import type {
   FamilyState,
   FamilyDeployment,
   FamilyEvidence,
+  StateTransition,
 } from "@plankton/domain";
 import {
   OperatorMode,
@@ -163,6 +164,7 @@ function createMockDeps(overrides: Partial<SafetyEvaluatorDeps> = {}): SafetyEva
     stateTransitionRepo: {
       insert: vi.fn(),
       findByEntity: vi.fn(() => []),
+      findLastTransitionTo: vi.fn(() => null),
       findRecent: vi.fn(() => []),
     },
     familyStateRepo: {
@@ -454,6 +456,273 @@ describe("RuntimeSafetyEvaluator", () => {
     await evaluator.evaluate();
 
     expect(deps.deploymentRepo.updateOperatorMode).not.toHaveBeenCalled();
+  });
+
+  // ─── Auto-recovery tests ─────────────────────────────────────────────────
+
+  function makeSystemDemotion(overrides: Partial<StateTransition> = {}): StateTransition {
+    return {
+      id: 1,
+      entityType: "family",
+      entityId: String(FAMILY_A),
+      fromState: "scaled",
+      toState: "reduce-only",
+      triggerType: "system",
+      initiator: "safety-evaluator",
+      reason: "Auto-demotion: toxicity 0.65",
+      scoresSnapshot: null,
+      createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString(), // 48h ago
+      ...overrides,
+    };
+  }
+
+  function setupRecoveryScenario(deps: SafetyEvaluatorDeps): void {
+    vi.mocked(deps.deploymentRepo.find).mockReturnValue(
+      makeDeployment({ operatorMode: OperatorMode.ReduceOnly }),
+    );
+    vi.mocked(deps.familyStateRepo.get).mockReturnValue(
+      makeFamilyState({ runtimeMode: "reduce-only" }),
+    );
+    // Clean metrics: low toxicity, positive tail
+    vi.mocked(deps.scoreComputer.computeToxicityMetrics).mockReturnValue({
+      dustCount: 0,
+      positionCount: 5,
+      tailCostUsdc: 0,
+      realizedPnlUsdc: 0,
+      reduceOnlyCount: 0,
+      weeksDeployed: 4,
+      staleCount: 0,
+      totalOpen: 5,
+    });
+    vi.mocked(deps.scoreComputer.computeRecycleMetrics).mockReturnValue({
+      tradeCount: 10,
+      distinctMarkets: 3,
+      tailAdjustedPnl: 5,
+      repricingExits: 2,
+      totalNonSettlementClosed: 1,
+    });
+  }
+
+  it("manual reduce-only does NOT auto-recover", async () => {
+    setupRecoveryScenario(deps);
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
+      makeSystemDemotion({ triggerType: "operator" }),
+    );
+
+    evaluator = new RuntimeSafetyEvaluator(deps);
+    await evaluator.evaluate();
+    await evaluator.evaluate();
+
+    expect(deps.familyEvidenceRepo.updatePromotionState).not.toHaveBeenCalledWith(
+      FAMILY_A,
+      "scaled",
+    );
+    expect(deps.log.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ previousState: "scaled" }),
+      "auto-recovered family from reduce-only",
+    );
+  });
+
+  it("system reduce-only auto-recovers after 2 consecutive clean passes", async () => {
+    setupRecoveryScenario(deps);
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
+      makeSystemDemotion(),
+    );
+
+    evaluator = new RuntimeSafetyEvaluator(deps);
+
+    // Pass 1: clean but not enough consecutive passes
+    await evaluator.evaluate();
+    expect(deps.log.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ previousState: "scaled" }),
+      "auto-recovered family from reduce-only",
+    );
+
+    // Pass 2: triggers recovery
+    await evaluator.evaluate();
+    expect(deps.familyStateRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ runtimeMode: "active", quarantineReason: null }),
+    );
+    expect(deps.deploymentRepo.updateOperatorMode).toHaveBeenCalledWith(
+      FAMILY_A,
+      PROFILE,
+      OperatorMode.Active,
+      "auto-recovery",
+    );
+    expect(deps.familyEvidenceRepo.updatePromotionState).toHaveBeenCalledWith(
+      FAMILY_A,
+      "scaled",
+    );
+    expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fromState: "reduce-only",
+        toState: "scaled",
+        triggerType: "system",
+        initiator: "safety-evaluator",
+        reason: "auto-recovery: metrics clean for 2+ consecutive passes",
+      }),
+    );
+    expect(deps.log.info).toHaveBeenCalledWith(
+      { familyId: String(FAMILY_A), previousState: "scaled" },
+      "auto-recovered family from reduce-only",
+    );
+  });
+
+  it("flapping prevented: clean pass 1 does NOT trigger recovery", async () => {
+    setupRecoveryScenario(deps);
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
+      makeSystemDemotion(),
+    );
+
+    evaluator = new RuntimeSafetyEvaluator(deps);
+    await evaluator.evaluate();
+
+    // Only 1 pass -- no recovery
+    expect(deps.deploymentRepo.updateOperatorMode).not.toHaveBeenCalledWith(
+      FAMILY_A,
+      PROFILE,
+      OperatorMode.Active,
+      "auto-recovery",
+    );
+  });
+
+  it("recovery restores promotionState from from_state of demotion", async () => {
+    setupRecoveryScenario(deps);
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
+      makeSystemDemotion({ fromState: "probe-only" }),
+    );
+
+    evaluator = new RuntimeSafetyEvaluator(deps);
+    await evaluator.evaluate();
+    await evaluator.evaluate();
+
+    expect(deps.familyEvidenceRepo.updatePromotionState).toHaveBeenCalledWith(
+      FAMILY_A,
+      "probe-only",
+    );
+    expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ toState: "probe-only" }),
+    );
+  });
+
+  it("quarantine does NOT auto-recover", async () => {
+    vi.mocked(deps.deploymentRepo.find).mockReturnValue(
+      makeDeployment({ operatorMode: OperatorMode.Quarantine }),
+    );
+    vi.mocked(deps.familyStateRepo.get).mockReturnValue(
+      makeFamilyState({ runtimeMode: "quarantine" }),
+    );
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
+      makeSystemDemotion({ toState: "quarantine" }),
+    );
+
+    evaluator = new RuntimeSafetyEvaluator(deps);
+    await evaluator.evaluate();
+    await evaluator.evaluate();
+
+    expect(deps.deploymentRepo.updateOperatorMode).not.toHaveBeenCalledWith(
+      FAMILY_A,
+      PROFILE,
+      OperatorMode.Active,
+      "auto-recovery",
+    );
+  });
+
+  it("cooldown enforced: system demotion < 24h ago does not recover", async () => {
+    setupRecoveryScenario(deps);
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
+      makeSystemDemotion({
+        createdAt: new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString(), // 12h ago
+      }),
+    );
+
+    evaluator = new RuntimeSafetyEvaluator(deps);
+    await evaluator.evaluate();
+    await evaluator.evaluate();
+
+    expect(deps.deploymentRepo.updateOperatorMode).not.toHaveBeenCalledWith(
+      FAMILY_A,
+      PROFILE,
+      OperatorMode.Active,
+      "auto-recovery",
+    );
+  });
+
+  it("metrics gate: toxicity >= 0.3 blocks recovery", async () => {
+    setupRecoveryScenario(deps);
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
+      makeSystemDemotion(),
+    );
+    // toxicity just at 0.3 threshold (dustCount=3, positionCount=7 gives ~0.3 ratio)
+    vi.mocked(deps.scoreComputer.computeToxicityMetrics).mockReturnValue({
+      dustCount: 4,
+      positionCount: 1,
+      tailCostUsdc: 5,
+      realizedPnlUsdc: -3,
+      reduceOnlyCount: 1,
+      weeksDeployed: 4,
+      staleCount: 2,
+      totalOpen: 5,
+    });
+
+    evaluator = new RuntimeSafetyEvaluator(deps);
+    await evaluator.evaluate();
+    await evaluator.evaluate();
+
+    expect(deps.deploymentRepo.updateOperatorMode).not.toHaveBeenCalledWith(
+      FAMILY_A,
+      PROFILE,
+      OperatorMode.Active,
+      "auto-recovery",
+    );
+  });
+
+  it("consecutive clean counter resets when metrics fail mid-streak", async () => {
+    setupRecoveryScenario(deps);
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
+      makeSystemDemotion(),
+    );
+
+    evaluator = new RuntimeSafetyEvaluator(deps);
+
+    // Pass 1: clean
+    await evaluator.evaluate();
+
+    // Pass 2: dirty -- negative tailAdjustedPnl resets counter
+    vi.mocked(deps.scoreComputer.computeRecycleMetrics).mockReturnValue({
+      tradeCount: 10,
+      distinctMarkets: 3,
+      tailAdjustedPnl: -1,
+      repricingExits: 2,
+      totalNonSettlementClosed: 1,
+    });
+    await evaluator.evaluate();
+
+    // Pass 3: clean again -- but counter was reset, so this is only pass 1
+    vi.mocked(deps.scoreComputer.computeRecycleMetrics).mockReturnValue({
+      tradeCount: 10,
+      distinctMarkets: 3,
+      tailAdjustedPnl: 5,
+      repricingExits: 2,
+      totalNonSettlementClosed: 1,
+    });
+    await evaluator.evaluate();
+
+    expect(deps.deploymentRepo.updateOperatorMode).not.toHaveBeenCalledWith(
+      FAMILY_A,
+      PROFILE,
+      OperatorMode.Active,
+      "auto-recovery",
+    );
+
+    // Pass 4: second consecutive clean -- now recovery triggers
+    await evaluator.evaluate();
+    expect(deps.deploymentRepo.updateOperatorMode).toHaveBeenCalledWith(
+      FAMILY_A,
+      PROFILE,
+      OperatorMode.Active,
+      "auto-recovery",
+    );
   });
 
   it("ignores execution canary outside live-lite", async () => {

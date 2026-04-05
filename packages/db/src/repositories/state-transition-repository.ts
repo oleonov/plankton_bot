@@ -52,6 +52,17 @@ export class SqliteStateTransitionRepository implements StateTransitionRepositor
       );
   }
 
+  findLastTransitionTo(familyId: string, toState: string): StateTransition | null {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM state_transitions
+         WHERE entity_type = 'family' AND entity_id = ? AND to_state = ?
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+      )
+      .get(familyId, toState) as TransitionRow | undefined;
+    return row ? rowToTransition(row) : null;
+  }
+
   findByEntity(entityType: string, entityId: string): StateTransition[] {
     const rows = this.db
       .prepare(

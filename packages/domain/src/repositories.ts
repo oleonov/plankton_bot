@@ -439,6 +439,7 @@ export interface StateTransition {
 export interface StateTransitionRepository {
   insert(transition: Omit<StateTransition, "id" | "createdAt">): void;
   findByEntity(entityType: string, entityId: string): StateTransition[];
+  findLastTransitionTo(familyId: string, toState: string): StateTransition | null;
   findRecent(limit: number): StateTransition[];
 }
 
