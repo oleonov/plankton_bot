@@ -187,10 +187,8 @@ export function Overview() {
           </div>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
             <span>
-              Allowlist: {status.liveLite.familyAllowlist.join(", ")} (
-              {status.liveLite.familyAllowlist.length} family)
+              Families: {status.liveLite.familyAllowlist.length} / {status.liveLite.maxFamilies} max
             </span>
-            <span>Max: {status.liveLite.maxFamilies} family</span>
             <span>Wallet: {(status.liveLite.walletMode ?? "eoa").toUpperCase()}</span>
             <span>
               Min order: $
