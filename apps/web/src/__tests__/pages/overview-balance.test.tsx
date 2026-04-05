@@ -150,6 +150,42 @@ describe("Overview Balance Card", () => {
     expect(screen.getByText(/2 taker.*\$0\.120 fees/)).toBeInTheDocument();
   });
 
+  it("uses enabled family mode breakdown for live-lite overview summary", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          runtimeMode: "live-lite",
+          activeFamilyCount: 422,
+          liveLite: {
+            maxOpenValueUsdc: 500,
+            maxFamilies: 100,
+            maxActiveMarkets: 10,
+            maxOrderUsdc: 25,
+            familyAllowlist: Array.from({ length: 12 }, (_, index) => `fam-${index}`),
+          },
+          familyModeCounts: {
+            active: 9,
+            "probe-only": 1,
+            "reduce-only": 2,
+            _disabled: 435,
+          },
+        }),
+      ),
+      http.get("/api/v1/metrics/families", () => ok([])),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const card = (await screen.findByText("Enabled Families")).closest(".card") as
+      | HTMLElement
+      | null;
+    expect(card).not.toBeNull();
+    expect(within(card!).getByText("12")).toBeInTheDocument();
+    expect(within(card!).getByText(/1 probe-only/)).toBeInTheDocument();
+    expect(within(card!).queryByText("422")).not.toBeInTheDocument();
+  });
+
   it("shows last order placed by createdAt, not last status update", async () => {
     vi.spyOn(Date, "now").mockReturnValue(new Date("2026-04-05T12:00:00Z").getTime());
 

@@ -83,6 +83,10 @@ function formatExecutionWatch(metric: FamilyMetric): string {
   return `${metric.familyKey} · ${parts.join(" · ")}`;
 }
 
+function getFamilyMode(metric: FamilyMetric): string {
+  return metric.effectiveMode ?? metric.runtimeMode;
+}
+
 function BalanceCard({ status }: { status: import("../api/types.ts").StatusData }) {
   const isLive = status.runtimeMode === "live-lite";
   const dim = { color: "var(--text-dim)" };
@@ -128,15 +132,30 @@ export function Overview() {
   if (!status || !metrics) return <div className="page">Loading...</div>;
 
   const dustCount = metrics.positions.dust ?? 0;
-  const quarantinedCount = familyMetrics?.filter((f) => f.runtimeMode === "quarantine").length ?? 0;
-  const reduceOnlyCount = familyMetrics?.filter((f) => f.runtimeMode === "reduce-only").length ?? 0;
-  const activeCount = familyMetrics?.filter((f) => f.runtimeMode === "active").length ?? 0;
+  const modeCounts = status.familyModeCounts ?? null;
+  const countFamiliesByMode = (mode: string): number =>
+    familyMetrics?.filter((family) => getFamilyMode(family) === mode).length ?? 0;
+  const activeCount = modeCounts?.active ?? countFamiliesByMode("active");
+  const probeOnlyCount = modeCounts?.["probe-only"] ?? countFamiliesByMode("probe-only");
+  const reduceOnlyCount = modeCounts?.["reduce-only"] ?? countFamiliesByMode("reduce-only");
+  const quarantinedCount = modeCounts?.quarantine ?? countFamiliesByMode("quarantine");
+  const enabledFamilyCount = modeCounts
+    ? Object.entries(modeCounts)
+        .filter(([mode]) => mode !== "_disabled")
+        .reduce((sum, [, count]) => sum + count, 0)
+    : (familyMetrics?.length ?? status.activeFamilyCount);
   const tailAdjPnl = metrics.totalRealizedPnl - status.totalTailCostUsdc;
   const execution = status.executionTelemetry24h;
   const executionWatch = familyMetrics ? getExecutionWatchFamilies(familyMetrics) : [];
   const topExecutionWatch = executionWatch[0];
   const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
   const leakagePct = execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
+  const familyCardSummary = [
+    probeOnlyCount > 0 ? `${probeOnlyCount} probe-only` : null,
+    quarantinedCount > 0 ? `${quarantinedCount} quarantined` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   return (
     <div className="page">
@@ -164,9 +183,9 @@ export function Overview() {
         </Link>
         <Link to="/families" style={{ textDecoration: "none" }}>
           <div className="card card-accent-purple" style={{ cursor: "pointer" }}>
-            <div className="label">Active Families</div>
-            <div className="value-lg text-purple">{status.activeFamilyCount}</div>
-            <div className="value-sm">{quarantinedCount} quarantined</div>
+            <div className="label">Enabled Families</div>
+            <div className="value-lg text-purple">{enabledFamilyCount}</div>
+            <div className="value-sm">{familyCardSummary || "\u00a0"}</div>
           </div>
         </Link>
       </div>
@@ -411,6 +430,12 @@ export function Overview() {
                 title={`${activeCount} active`}
               />
             )}
+            {probeOnlyCount > 0 && (
+              <div
+                style={{ flex: probeOnlyCount, background: "var(--blue, #42a5f5)" }}
+                title={`${probeOnlyCount} probe-only`}
+              />
+            )}
             {reduceOnlyCount > 0 && (
               <div
                 style={{ flex: reduceOnlyCount, background: "var(--orange)" }}
@@ -424,12 +449,26 @@ export function Overview() {
               />
             )}
           </div>
-          <div className="grid-3" style={{ marginTop: 10, fontSize: 12 }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+              gap: 8,
+              marginTop: 10,
+              fontSize: 12,
+            }}
+          >
             <div>
               <div style={{ fontSize: 20, fontWeight: 700, color: "var(--green)" }}>
                 {activeCount}
               </div>
               <div className="value-sm">active</div>
+            </div>
+            <div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--blue, #42a5f5)" }}>
+                {probeOnlyCount}
+              </div>
+              <div className="value-sm">probe-only</div>
             </div>
             <div>
               <div style={{ fontSize: 20, fontWeight: 700, color: "var(--orange)" }}>
