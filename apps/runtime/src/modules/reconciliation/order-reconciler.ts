@@ -23,6 +23,8 @@ export interface OrderReconcileResult {
   localOpenCount: number;
   phantomsCancelled: number;
   unknownExchangeOrders: number;
+  staleCancelled: number;
+  staleCancelFailed: number;
   details: string[];
 }
 
@@ -50,14 +52,45 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     }
   }
 
-  // Unknown exchange orders: on exchange but not local
+  // Unknown vs stale exchange orders
   let unknownExchangeOrders = 0;
+  let staleCancelled = 0;
+  let staleCancelFailed = 0;
+
   for (const ex of exchangeOrders) {
-    if (!localExchangeIds.has(ex.orderId)) {
+    if (localExchangeIds.has(ex.orderId)) continue; // locally open — normal
+
+    // Not in local open set. Check if it exists at all (any status).
+    const localOrder = orderRepo.findByExchangeOrderId(ex.orderId);
+
+    if (!localOrder) {
+      // Truly unknown — no local record at all
       unknownExchangeOrders++;
       const msg = `unknown exchange order: ${ex.orderId} (token: ${ex.tokenId}, side: ${ex.side})`;
       details.push(msg);
       log.warn({ exchangeOrderId: ex.orderId }, msg);
+      continue;
+    }
+
+    // Locally cancelled/filled but still on exchange — stale. Cancel it.
+    const result = await gateway.cancelOrder({ orderId: ex.orderId });
+    if (result.success) {
+      staleCancelled++;
+      const msg = `stale exchange order cancelled: ${ex.orderId} (local: ${localOrder.status})`;
+      details.push(msg);
+      log.info({ exchangeOrderId: ex.orderId, localStatus: localOrder.status }, msg);
+    } else {
+      staleCancelFailed++;
+      const msg = `stale exchange order cancel failed: ${ex.orderId} (${result.errorCode})`;
+      details.push(msg);
+      log.warn(
+        {
+          exchangeOrderId: ex.orderId,
+          localStatus: localOrder.status,
+          errorCode: result.errorCode,
+        },
+        msg,
+      );
     }
   }
 
@@ -66,6 +99,8 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     localOpenCount: localOrders.length,
     phantomsCancelled,
     unknownExchangeOrders,
+    staleCancelled,
+    staleCancelFailed,
     details,
   };
 }

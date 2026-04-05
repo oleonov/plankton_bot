@@ -129,7 +129,9 @@ export class ReconciliationModule implements RuntimeModule {
       const clean =
         orderResult.phantomsCancelled === 0 &&
         orderResult.unknownExchangeOrders === 0 &&
-        fillResult.missingFillsImported === 0;
+        fillResult.missingFillsImported === 0 &&
+        orderResult.staleCancelled === 0 &&
+        orderResult.staleCancelFailed === 0;
 
       const result: ReconciliationResult = {
         ranAt,
@@ -166,6 +168,8 @@ export class ReconciliationModule implements RuntimeModule {
           phantoms: orderResult.phantomsCancelled,
           missingFills: fillResult.missingFillsImported,
           unknownOrders: orderResult.unknownExchangeOrders,
+          staleCancelled: orderResult.staleCancelled,
+          staleCancelFailed: orderResult.staleCancelFailed,
         },
         "reconciliation pass complete",
       );
