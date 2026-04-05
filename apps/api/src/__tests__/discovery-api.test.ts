@@ -152,6 +152,114 @@ describe("GET /discovery/status", () => {
     // No heartbeat in test → worker is offline
     expect(body.data.workerState).toBe("offline");
   });
+
+  it("healthy when service_heartbeats is fresh and no active run", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM service_heartbeats").run();
+    db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+    db.prepare(
+      "INSERT INTO service_heartbeats (service_name, instance_id, last_heartbeat_at) VALUES ('discovery', 'inst-1', ?)",
+    ).run(new Date().toISOString());
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/status",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(json(res).data.workerState).toBe("healthy");
+  });
+
+  it("healthy when service_heartbeats is stale but active run has fresh heartbeat_at", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM service_heartbeats").run();
+    db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+
+    // Stale service heartbeat (2 minutes ago)
+    const staleTs = new Date(Date.now() - 120_000).toISOString();
+    db.prepare(
+      "INSERT INTO service_heartbeats (service_name, instance_id, last_heartbeat_at) VALUES ('discovery', 'inst-1', ?)",
+    ).run(staleTs);
+
+    // Active running run with fresh heartbeat
+    const freshTs = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO discovery_runs (trigger_type, status, requested_by, started_at, heartbeat_at)
+       VALUES ('schedule', 'running', 'worker', ?, ?)`,
+    ).run(freshTs, freshTs);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/status",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(json(res).data.workerState).toBe("healthy");
+  });
+
+  it("offline when service_heartbeats is stale and active run heartbeat_at is also stale", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM service_heartbeats").run();
+    db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+
+    const staleTs = new Date(Date.now() - 120_000).toISOString();
+    db.prepare(
+      "INSERT INTO service_heartbeats (service_name, instance_id, last_heartbeat_at) VALUES ('discovery', 'inst-1', ?)",
+    ).run(staleTs);
+    db.prepare(
+      `INSERT INTO discovery_runs (trigger_type, status, requested_by, started_at, heartbeat_at)
+       VALUES ('schedule', 'running', 'worker', ?, ?)`,
+    ).run(staleTs, staleTs);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/status",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(json(res).data.workerState).toBe("offline");
+  });
+
+  it("offline when active run is queued (heartbeat_at=null) and service heartbeat is stale", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM service_heartbeats").run();
+    db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+
+    const staleTs = new Date(Date.now() - 120_000).toISOString();
+    db.prepare(
+      "INSERT INTO service_heartbeats (service_name, instance_id, last_heartbeat_at) VALUES ('discovery', 'inst-1', ?)",
+    ).run(staleTs);
+    db.prepare(
+      "INSERT INTO discovery_runs (trigger_type, status, requested_by) VALUES ('manual', 'queued', 'operator')",
+    ).run();
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/status",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(json(res).data.workerState).toBe("offline");
+  });
+
+  it("offline when there are no heartbeats at all", async () => {
+    const db = conn.db;
+    db.prepare("DELETE FROM service_heartbeats").run();
+    db.prepare("DELETE FROM discovery_runs WHERE status IN ('queued', 'running')").run();
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/discovery/status",
+      headers: authHeaders(),
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(json(res).data.workerState).toBe("offline");
+  });
 });
 
 // ─── Scan trigger ───────────────────────────────────────────────────────

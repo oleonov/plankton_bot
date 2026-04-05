@@ -292,8 +292,13 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       )
       .get() as { ts: string | null } | undefined;
     const heartbeatAt = heartbeatRow?.ts ?? null;
+    // Combine service heartbeat + active run heartbeat — use most recent
+    let latestHeartbeatMs = heartbeatAt ? new Date(heartbeatAt).getTime() : 0;
+    if (activeRun?.heartbeatAt) {
+      latestHeartbeatMs = Math.max(latestHeartbeatMs, new Date(activeRun.heartbeatAt).getTime());
+    }
     const workerState =
-      heartbeatAt && Date.now() - new Date(heartbeatAt).getTime() < 90_000 ? "healthy" : "offline";
+      latestHeartbeatMs > 0 && Date.now() - latestHeartbeatMs < 90_000 ? "healthy" : "offline";
 
     return ok({
       lastRun: formatRun(lastRun),
