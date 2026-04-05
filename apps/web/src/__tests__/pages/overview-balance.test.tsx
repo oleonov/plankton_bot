@@ -177,13 +177,14 @@ describe("Overview Balance Card", () => {
 
     renderWithProviders(<Overview />);
 
-    const card = (await screen.findByText("Enabled Families")).closest(".card") as
-      | HTMLElement
-      | null;
-    expect(card).not.toBeNull();
-    expect(within(card!).getByText("12")).toBeInTheDocument();
-    expect(within(card!).getByText(/1 probe-only/)).toBeInTheDocument();
-    expect(within(card!).queryByText("422")).not.toBeInTheDocument();
+    const card = (await screen.findByText("Enabled Families")).closest(".card");
+    if (!(card instanceof HTMLElement)) {
+      throw new Error("expected Enabled Families card");
+    }
+    const familyCard: HTMLElement = card;
+    expect(within(familyCard).getByText("12")).toBeInTheDocument();
+    expect(within(familyCard).getByText(/1 probe-only/)).toBeInTheDocument();
+    expect(within(familyCard).queryByText("422")).not.toBeInTheDocument();
   });
 
   it("shows last order placed by createdAt, not last status update", async () => {
