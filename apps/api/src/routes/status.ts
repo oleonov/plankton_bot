@@ -14,6 +14,22 @@ interface StatusOpts {
 
 const startedAt = Date.now();
 
+interface LiveLiteStatus {
+  familyAllowlist: string[];
+  maxFamilies: number;
+  maxOpenValueUsdc: number;
+  maxOrderUsdc: number;
+  maxActiveMarkets: number;
+  walletMode?: string;
+  minOrderUsdc?: number | null;
+}
+
+function resolveLiveLiteMaxFamilies(envelope: Record<string, unknown>): number {
+  const configured = envelope.maxFamilies;
+  if (typeof configured === "number" && Number.isFinite(configured)) return configured;
+  return 100;
+}
+
 /**
  * Resolve the ledger DB for the currently active profile.
  * Falls back to the startup-fixed ledger if control.db or pool unavailable.
@@ -138,6 +154,72 @@ function computeTradingState(
   }
 
   return { tradingState, signalActivity };
+}
+
+function parseEnvelopeJson(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function buildLiveLiteStatus(
+  runtimeMode: string,
+  controlDb?: Database.Database,
+  envelopeLabels?: string,
+): LiveLiteStatus | undefined {
+  if (runtimeMode !== "live-lite") return undefined;
+
+  if (controlDb) {
+    try {
+      const settingsRow = controlDb
+        .prepare(
+          "SELECT envelope_json, wallet_mode, min_order_usdc FROM profile_settings WHERE profile_id = ?",
+        )
+        .get(runtimeMode) as
+        | {
+            envelope_json: string | null;
+            wallet_mode: string | null;
+            min_order_usdc: number | null;
+          }
+        | undefined;
+      const envelope = parseEnvelopeJson(settingsRow?.envelope_json);
+      const deploymentRows = controlDb
+        .prepare(
+          "SELECT family_id FROM family_deployments WHERE profile = ? AND enabled = 1 ORDER BY family_id ASC",
+        )
+        .all(runtimeMode) as Array<{ family_id: string }>;
+
+      const familyAllowlist = deploymentRows.map((row) => row.family_id);
+      const liveLiteStatus: LiveLiteStatus = {
+        familyAllowlist,
+        maxFamilies: resolveLiveLiteMaxFamilies(envelope),
+        maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
+        maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
+        maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
+        walletMode: settingsRow?.wallet_mode ?? "eoa",
+      };
+      if (
+        typeof settingsRow?.min_order_usdc === "number" &&
+        Number.isFinite(settingsRow.min_order_usdc)
+      ) {
+        liveLiteStatus.minOrderUsdc = settingsRow.min_order_usdc;
+      }
+      return liveLiteStatus;
+    } catch {
+      // Fall through to runtime metric snapshot for legacy/test setups.
+    }
+  }
+
+  if (!envelopeLabels) return undefined;
+  try {
+    return JSON.parse(envelopeLabels) as LiveLiteStatus;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Build the status snapshot — shared by GET /status and SSE status events. */
@@ -400,7 +482,7 @@ export function buildStatusSnapshot(
     executionMode: execMode
       ? ((JSON.parse(execMode.labels) as { value?: string }).value ?? "simulation")
       : "simulation",
-    liveLite: envelopeRow ? JSON.parse(envelopeRow.labels) : undefined,
+    liveLite: buildLiveLiteStatus(runtimeMode, controlDb, envelopeRow?.labels),
     reconciliationDriftDetected,
     tradingState,
     signalActivity,

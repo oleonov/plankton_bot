@@ -142,6 +142,65 @@ describe("API against real split schemas", () => {
     expect(body.data.familyModeCounts._disabled).toBeDefined();
   });
 
+  it("GET /status derives live-lite envelope from current control state, not stale runtime metric", async () => {
+    controlConn.db.exec(`
+      INSERT OR REPLACE INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live Lite');
+      INSERT OR REPLACE INTO profile_settings (profile_id, envelope_json, wallet_mode, min_order_usdc)
+      VALUES ('live-lite', '{"maxFamilies":100,"maxOpenValueUsdc":500,"maxOrderUsdc":25,"maxActiveMarkets":10}', 'relayer', 1);
+
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
+      VALUES ('fam-1', 'live-lite', 1, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
+      VALUES ('fam-disabled-live', 'disabled-live-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
+      VALUES ('fam-disabled-live', 'live-lite', 0, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+
+      UPDATE runtime_control_state
+      SET current_profile = 'live-lite', desired_profile = 'live-lite', updated_at = datetime('now')
+      WHERE id = 1;
+    `);
+
+    ledgerConn.db.exec(`
+      INSERT INTO bot_runs (run_id, mode, started_at)
+      VALUES ('run-live-lite-status', 'live-lite', '2026-03-16T00:00:00Z');
+
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('live_lite_envelope', 1, '{"familyAllowlist":["wrong-1","wrong-2","wrong-3"],"maxFamilies":421,"maxOpenValueUsdc":999,"maxOrderUsdc":999,"maxActiveMarkets":999,"walletMode":"eoa","minOrderUsdc":99}', '2026-03-16T00:00:00Z');
+    `);
+
+    try {
+      const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: auth() });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.runtimeMode).toBe("live-lite");
+      expect(body.data.liveLite).toEqual({
+        familyAllowlist: ["fam-1"],
+        maxFamilies: 100,
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 25,
+        maxActiveMarkets: 10,
+        walletMode: "relayer",
+        minOrderUsdc: 1,
+      });
+      expect(body.data.familyModeCounts._disabled).toBeGreaterThanOrEqual(1);
+    } finally {
+      controlConn.db.exec(`
+        UPDATE runtime_control_state
+        SET current_profile = 'simulation', desired_profile = 'simulation', updated_at = datetime('now')
+        WHERE id = 1;
+        DELETE FROM family_deployments WHERE profile = 'live-lite';
+        DELETE FROM family_catalog WHERE family_id = 'fam-disabled-live';
+        DELETE FROM profile_settings WHERE profile_id = 'live-lite';
+        DELETE FROM profiles WHERE profile_id = 'live-lite';
+      `);
+      ledgerConn.db.exec(`
+        DELETE FROM runtime_metrics WHERE metric_name = 'live_lite_envelope' AND captured_at = '2026-03-16T00:00:00Z';
+        DELETE FROM bot_runs WHERE run_id = 'run-live-lite-status';
+      `);
+    }
+  });
+
   it("GET /families succeeds (control: catalog + rules + evidence; ledger: positions, orders)", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/families", headers: auth() });
     expect(res.statusCode).toBe(200);
