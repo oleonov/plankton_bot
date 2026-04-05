@@ -100,6 +100,17 @@ function seedFamilyCatalogEntry(familyId: string): void {
     .run(familyId, familyId, NOW, NOW);
 }
 
+function seedFamilyRollup(familyId: string, profile: string, openPositions: number): void {
+  conn.db
+    .prepare(
+      `INSERT OR REPLACE INTO family_profile_rollups
+       (family_id, profile, open_positions, open_value_usdc, active_markets,
+        realized_pnl, tail_cost_usdc, tail_adjusted_pnl, updated_at)
+       VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?)`,
+    )
+    .run(familyId, profile, openPositions, openPositions * 5, NOW);
+}
+
 function seedFamilyDeployment(familyId: string, profile: string, enabled: boolean): void {
   seedFamilyCatalogEntry(familyId);
   conn.db
@@ -244,13 +255,15 @@ describe("autoAcceptAndPromote", () => {
   });
 
   describe("enabled-family cap", () => {
-    it("skips auto-accept when at maxFamilies cap", async () => {
+    it("skips auto-accept when at maxFamilies cap and all families have open positions", async () => {
       seedRuntimeControlState(PROFILE);
       seedProfileSettings(PROFILE, JSON.stringify({ maxFamilies: 2 }));
 
-      // Seed 2 enabled deployments to hit the cap
+      // Seed 2 enabled deployments with open positions (can't be rotated)
       seedFamilyDeployment("fam-a", PROFILE, true);
       seedFamilyDeployment("fam-b", PROFILE, true);
+      seedFamilyRollup("fam-a", PROFILE, 3);
+      seedFamilyRollup("fam-b", PROFILE, 2);
 
       // Seed qualifying candidates
       seedCandidate("cand-1");
@@ -264,7 +277,7 @@ describe("autoAcceptAndPromote", () => {
 
       expect(result.accepted).toBe(0);
       expect(result.skippedAtCap).toBe(3);
-      // No accept calls should be made
+      // No accept calls — all families have exposure, can't rotate
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
@@ -304,12 +317,13 @@ describe("autoAcceptAndPromote", () => {
       expect(result.skippedAtCap).toBe(0);
     });
 
-    it("still runs auto-promote when at cap", async () => {
+    it("still runs auto-promote when at cap with open positions", async () => {
       seedRuntimeControlState(PROFILE);
       seedProfileSettings(PROFILE, JSON.stringify({ maxFamilies: 1 }));
       seedFamilyDeployment("fam-a", PROFILE, true);
+      seedFamilyRollup("fam-a", PROFILE, 2); // has open positions, can't rotate
 
-      // Seed a qualifying candidate (will be skipped)
+      // Seed a qualifying candidate (will be skipped — can't rotate)
       seedCandidate("cand-1");
 
       // Seed a promotion proposal (should still be processed)
@@ -324,6 +338,60 @@ describe("autoAcceptAndPromote", () => {
       expect(result.accepted).toBe(0);
       expect(result.skippedAtCap).toBe(1);
       expect(result.promoted).toBe(1);
+    });
+  });
+
+  describe("rotation at cap", () => {
+    it("rotates weak families with zero exposure to free slots for new candidates", async () => {
+      seedRuntimeControlState(PROFILE);
+      seedProfileSettings(PROFILE, JSON.stringify({ maxFamilies: 2 }));
+
+      // 2 enabled families: one with positions (keep), one without (rotatable)
+      seedFamilyDeployment("fam-keep", PROFILE, true);
+      seedFamilyRollup("fam-keep", PROFILE, 3);
+      seedFamilyDeployment("fam-weak", PROFILE, true);
+      seedFamilyRollup("fam-weak", PROFILE, 0); // zero positions → rotatable
+
+      seedCandidate("cand-new");
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      // fam-weak should be disabled, cand-new accepted
+      expect(result.accepted).toBe(1);
+      expect(result.skippedAtCap).toBe(0);
+
+      // Verify fam-weak is now disabled
+      const weak = conn.db
+        .prepare("SELECT enabled FROM family_deployments WHERE family_id = ? AND profile = ?")
+        .get("fam-weak", PROFILE) as { enabled: number };
+      expect(weak.enabled).toBe(0);
+
+      // Verify rules_reload was enqueued
+      const reload = conn.db
+        .prepare("SELECT * FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending'")
+        .get();
+      expect(reload).toBeDefined();
+    });
+
+    it("does not rotate families with open positions", async () => {
+      seedRuntimeControlState(PROFILE);
+      seedProfileSettings(PROFILE, JSON.stringify({ maxFamilies: 1 }));
+
+      seedFamilyDeployment("fam-active", PROFILE, true);
+      seedFamilyRollup("fam-active", PROFILE, 5); // has positions
+
+      seedCandidate("cand-1");
+
+      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      vi.stubGlobal("fetch", mockFetch);
+
+      const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
+
+      expect(result.accepted).toBe(0);
+      expect(result.skippedAtCap).toBe(1);
     });
   });
 

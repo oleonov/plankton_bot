@@ -37,13 +37,25 @@ export async function autoAcceptAndPromote(
     const max = resolveMaxFamilies(db, currentProfile);
     availableSlots = Math.min(MAX_ACCEPT_PER_PASS, Math.max(0, max - enabled));
     if (availableSlots <= 0) {
-      const skippedAtCap = countQualifyingCandidates(db);
-      log.info(
-        { enabledCount: enabled, maxFamilies: max, skippedAtCap },
-        "at family cap, skipping auto-accept",
-      );
-      const promoted = await runAutoPromote(db, currentProfile, headers, config, log);
-      return { accepted: 0, promoted, skippedAtCap };
+      const qualifying = countQualifyingCandidates(db);
+      if (qualifying > 0) {
+        // At cap with qualifying candidates: try rotation to free slots
+        const freed = rotateWeakFamilies(db, currentProfile, Math.min(qualifying, MAX_ACCEPT_PER_PASS), log);
+        if (freed > 0) {
+          availableSlots = Math.min(freed, MAX_ACCEPT_PER_PASS);
+          log.info({ freed, availableSlots }, "rotated weak families to free slots");
+        } else {
+          log.info(
+            { enabledCount: enabled, maxFamilies: max, skippedAtCap: qualifying },
+            "at family cap, no rotatable families, skipping auto-accept",
+          );
+          const promoted = await runAutoPromote(db, currentProfile, headers, config, log);
+          return { accepted: 0, promoted, skippedAtCap: qualifying };
+        }
+      } else {
+        const promoted = await runAutoPromote(db, currentProfile, headers, config, log);
+        return { accepted: 0, promoted, skippedAtCap: 0 };
+      }
     }
   }
 
@@ -140,6 +152,61 @@ function countQualifyingCandidates(db: Database): number {
     )
     .get() as { cnt: number };
   return row.cnt;
+}
+
+/**
+ * Rotate weak families: disable enabled families with no open exposure,
+ * ranked by worst tail_adjusted_pnl. Uses family_profile_rollups (control DB)
+ * for position data — no ledger access needed.
+ * After disabling, enqueues rules_reload so runtime drops them from cached provider.
+ */
+function rotateWeakFamilies(
+  db: Database,
+  profile: string,
+  slotsNeeded: number,
+  log: Logger,
+): number {
+  // Find enabled families with zero open positions/value, ranked by worst performance
+  const candidates = db
+    .prepare(
+      `SELECT fd.family_id, COALESCE(r.tail_adjusted_pnl, 0) as pnl
+       FROM family_deployments fd
+       LEFT JOIN family_profile_rollups r ON fd.family_id = r.family_id AND r.profile = fd.profile
+       WHERE fd.profile = ? AND fd.enabled = 1
+         AND COALESCE(r.open_positions, 0) = 0
+         AND COALESCE(r.open_value_usdc, 0) = 0
+       ORDER BY COALESCE(r.tail_adjusted_pnl, 0) ASC
+       LIMIT ?`,
+    )
+    .all(profile, slotsNeeded) as Array<{ family_id: string; pnl: number }>;
+
+  if (candidates.length === 0) return 0;
+
+  const now = new Date().toISOString();
+  const disableStmt = db.prepare(
+    "UPDATE family_deployments SET enabled = 0, updated_at = ? WHERE family_id = ? AND profile = ?",
+  );
+
+  let disabled = 0;
+  for (const c of candidates) {
+    disableStmt.run(now, c.family_id, profile);
+    disabled++;
+    log.info({ familyId: c.family_id, pnl: c.pnl }, "rotated out weak family");
+  }
+
+  // Enqueue rules_reload so runtime refreshes cached rules provider
+  if (disabled > 0) {
+    try {
+      db.prepare(
+        `INSERT INTO operator_commands (action, reason, initiator_type, initiator, status, created_at)
+         VALUES ('rules_reload', ?, 'system', 'auto-rotation', 'pending', ?)`,
+      ).run(`rotated ${disabled} weak families`, now);
+    } catch {
+      // Dedup: pending rules_reload may already exist
+    }
+  }
+
+  return disabled;
 }
 
 /** Phase 2: auto-promote families with exclusive current-profile proposals */

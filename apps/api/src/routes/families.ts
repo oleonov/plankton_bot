@@ -135,8 +135,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     }
   }
 
-  // Control DB: catalog, rules, evidence
-  const listCatalog = controlDb.prepare("SELECT * FROM family_catalog");
+  // Control DB: rules, evidence
   const listCaps = controlDb.prepare(
     "SELECT family_id, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules",
   );
