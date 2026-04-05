@@ -209,6 +209,73 @@ describe("API against real split schemas", () => {
     }
   });
 
+  it("POST /actions/rotate-weak-families disables only families without open positions or open orders", async () => {
+    controlConn.db.exec(`
+      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
+      VALUES ('fam-weak', 'weak-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
+      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
+      VALUES ('fam-open-order', 'open-order-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
+
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
+      VALUES ('fam-weak', 'simulation', 1, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
+      VALUES ('fam-open-order', 'simulation', 1, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+
+      INSERT OR REPLACE INTO family_profile_rollups (family_id, profile, open_value_usdc, open_positions, tail_adjusted_pnl, updated_at)
+      VALUES ('fam-weak', 'simulation', 0, 0, -10, datetime('now'));
+      INSERT OR REPLACE INTO family_profile_rollups (family_id, profile, open_value_usdc, open_positions, tail_adjusted_pnl, updated_at)
+      VALUES ('fam-open-order', 'simulation', 0, 0, -20, datetime('now'));
+    `);
+    ledgerConn.db.exec(`
+      INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc,
+        status, exchange_order_id, bot_run_id, created_at, updated_at)
+      VALUES ('ord-open-rotate', 'plk_rotate', 'tok-rotate', 'fam-open-order', 'buy', 'GTC', 0.2, 10, 2, 'open', 'ex-rotate', 'run-1',
+        '2026-03-14T02:00:00Z', '2026-03-14T02:00:00Z');
+    `);
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/actions/rotate-weak-families",
+        headers: { ...auth(), "content-type": "application/json" },
+        payload: { profile: "simulation", slotsNeeded: 2 },
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.rotated).toBe(1);
+      expect(body.data.familyIds).toEqual(["fam-weak"]);
+
+      const famWeak = controlConn.db
+        .prepare(
+          "SELECT enabled FROM family_deployments WHERE family_id = 'fam-weak' AND profile = 'simulation'",
+        )
+        .get() as { enabled: number };
+      const famOpenOrder = controlConn.db
+        .prepare(
+          "SELECT enabled FROM family_deployments WHERE family_id = 'fam-open-order' AND profile = 'simulation'",
+        )
+        .get() as { enabled: number };
+      expect(famWeak.enabled).toBe(0);
+      expect(famOpenOrder.enabled).toBe(1);
+
+      const reload = controlConn.db
+        .prepare(
+          "SELECT COUNT(*) as cnt FROM operator_commands WHERE action = 'rules_reload' AND initiator = 'auto-rotation' AND status = 'pending'",
+        )
+        .get() as { cnt: number };
+      expect(reload.cnt).toBeGreaterThan(0);
+    } finally {
+      ledgerConn.db.exec(`DELETE FROM orders WHERE order_id = 'ord-open-rotate';`);
+      controlConn.db.exec(`
+        DELETE FROM operator_commands WHERE initiator = 'auto-rotation';
+        DELETE FROM family_profile_rollups WHERE family_id IN ('fam-weak', 'fam-open-order');
+        DELETE FROM family_deployments WHERE family_id IN ('fam-weak', 'fam-open-order');
+        DELETE FROM family_catalog WHERE family_id IN ('fam-weak', 'fam-open-order');
+      `);
+    }
+  });
+
   it("GET /families/:id includes deployment metadata for current profile", async () => {
     const res = await app.inject({
       method: "GET",

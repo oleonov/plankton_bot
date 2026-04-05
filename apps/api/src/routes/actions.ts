@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import type { LedgerPool } from "../ledger-pool.js";
 import {
   emptyExecutionTelemetrySnapshot,
   evaluateExecutionCanaryGate,
@@ -9,9 +10,13 @@ import {
 } from "@plankton/domain";
 import { ok, ApiError } from "../errors.js";
 import { getActor } from "../auth.js";
+import { resolveActiveLedger } from "./status.js";
 
 interface ActionOpts {
   db: Database.Database;
+  controlDb?: Database.Database;
+  ledgerDb?: Database.Database;
+  ledgerPool?: LedgerPool;
 }
 
 function insertCommand(
@@ -105,18 +110,21 @@ function assertPromotionExecutionCanary(
 }
 
 export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) => {
+  const controlDb = opts.controlDb ?? opts.db;
+  const fallbackLedgerDb = opts.ledgerDb ?? opts.db;
+
   // Global actions
   app.post<{ Body: { reason?: string } }>("/actions/pause", async (request) => {
     const body = (request.body ?? {}) as { reason?: string };
     const actor = getActor(request);
-    const id = insertCommand(opts.db, "pause", null, body.reason ?? null, actor);
+    const id = insertCommand(controlDb, "pause", null, body.reason ?? null, actor);
     return ok({ commandId: id, status: "enqueued" });
   });
 
   app.post<{ Body: { reason?: string } }>("/actions/resume", async (request) => {
     const body = (request.body ?? {}) as { reason?: string };
     const actor = getActor(request);
-    const id = insertCommand(opts.db, "resume", null, body.reason ?? null, actor);
+    const id = insertCommand(controlDb, "resume", null, body.reason ?? null, actor);
     return ok({ commandId: id, status: "enqueued" });
   });
 
@@ -132,18 +140,122 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
         const { familyId } = request.params;
 
         // Validate family exists
-        const exists = opts.db
+        const exists = controlDb
           .prepare("SELECT 1 FROM family_catalog WHERE family_id = ?")
           .get(familyId);
         if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
 
         const body = (request.body ?? {}) as { reason?: string };
         const actor = getActor(request);
-        const id = insertCommand(opts.db, action, familyId, body.reason ?? null, actor);
+        const id = insertCommand(controlDb, action, familyId, body.reason ?? null, actor);
         return ok({ commandId: id, status: "enqueued" });
       },
     );
   }
+
+  app.post<{
+    Body: { profile?: string; slotsNeeded?: number; reason?: string };
+  }>("/actions/rotate-weak-families", async (request) => {
+    const body = (request.body ?? {}) as {
+      profile?: string;
+      slotsNeeded?: number;
+      reason?: string;
+    };
+    const requestedProfile = body.profile?.trim() || null;
+    const slotsNeeded = Math.min(Math.max(Math.floor(body.slotsNeeded ?? 0), 0), 10);
+    if (slotsNeeded < 1) {
+      throw new ApiError(400, "slotsNeeded must be integer >= 1", "INVALID_SLOTS_NEEDED");
+    }
+
+    const currentProfile = (
+      controlDb.prepare("SELECT current_profile FROM runtime_control_state WHERE id = 1").get() as
+        | { current_profile: string | null }
+        | undefined
+    )?.current_profile;
+    const profile = requestedProfile ?? currentProfile;
+    if (!profile) {
+      throw new ApiError(409, "no active profile available for rotation", "NO_ACTIVE_PROFILE");
+    }
+
+    const activeLedger =
+      requestedProfile && opts.ledgerPool
+        ? (opts.ledgerPool.get(profile) ?? fallbackLedgerDb)
+        : resolveActiveLedger(fallbackLedgerDb, controlDb, opts.ledgerPool).db;
+
+    const openPositionFamilies = new Set(
+      (
+        activeLedger
+          .prepare("SELECT DISTINCT family_id FROM positions WHERE status = 'open'")
+          .all() as Array<{ family_id: string | null }>
+      )
+        .map((row) => row.family_id)
+        .filter(
+          (familyId): familyId is string => typeof familyId === "string" && familyId.length > 0,
+        ),
+    );
+
+    const openOrderFamilies = new Set(
+      (
+        activeLedger
+          .prepare(
+            "SELECT DISTINCT family_id FROM orders WHERE status IN ('pending', 'open', 'partially-filled')",
+          )
+          .all() as Array<{ family_id: string | null }>
+      )
+        .map((row) => row.family_id)
+        .filter(
+          (familyId): familyId is string => typeof familyId === "string" && familyId.length > 0,
+        ),
+    );
+
+    const rotatableCandidates = controlDb
+      .prepare(
+        `SELECT fd.family_id, COALESCE(r.tail_adjusted_pnl, 0) as pnl
+         FROM family_deployments fd
+         LEFT JOIN family_profile_rollups r
+           ON fd.family_id = r.family_id AND r.profile = fd.profile
+         WHERE fd.profile = ? AND fd.enabled = 1
+         ORDER BY COALESCE(r.tail_adjusted_pnl, 0) ASC, fd.family_id ASC`,
+      )
+      .all(profile) as Array<{ family_id: string; pnl: number }>;
+
+    const toDisable = rotatableCandidates
+      .filter((candidate) => {
+        return (
+          !openPositionFamilies.has(candidate.family_id) &&
+          !openOrderFamilies.has(candidate.family_id)
+        );
+      })
+      .slice(0, slotsNeeded);
+
+    const now = new Date().toISOString();
+    let commandId: number | null = null;
+    if (toDisable.length > 0) {
+      controlDb.transaction(() => {
+        const disableStmt = controlDb.prepare(
+          "UPDATE family_deployments SET enabled = 0, updated_at = ? WHERE family_id = ? AND profile = ?",
+        );
+        for (const candidate of toDisable) {
+          disableStmt.run(now, candidate.family_id, profile);
+        }
+        const info = controlDb
+          .prepare(
+            `INSERT INTO operator_commands
+               (action, reason, initiator_type, initiator, status, created_at, applied_at)
+             VALUES ('rules_reload', ?, 'system', 'auto-rotation', 'pending', ?, NULL)`,
+          )
+          .run(body.reason ?? `rotated ${toDisable.length} weak families`, now);
+        commandId = Number(info.lastInsertRowid);
+      })();
+    }
+
+    return ok({
+      profile,
+      rotated: toDisable.length,
+      familyIds: toDisable.map((candidate) => candidate.family_id),
+      commandId,
+    });
+  });
 
   // ── POST /actions/family/:familyId/promote ─────────────────────────────
   app.post<{
@@ -156,7 +268,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
     };
   }>("/actions/family/:familyId/promote", async (request) => {
     const { familyId } = request.params;
-    const exists = opts.db
+    const exists = controlDb
       .prepare("SELECT 1 FROM family_catalog WHERE family_id = ?")
       .get(familyId);
     if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
@@ -203,9 +315,9 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
       ? JSON.stringify({ reason: body.reason ?? "operator approved", caps })
       : (body.reason ?? null);
 
-    const result = opts.db
+    const result = controlDb
       .transaction(() => {
-        const proposal = opts.db
+        const proposal = controlDb
           .prepare(
             `SELECT id, profile
              FROM promotion_proposals
@@ -222,9 +334,9 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
           );
         }
 
-        assertPromotionExecutionCanary(opts.db, familyId, proposal.profile);
+        assertPromotionExecutionCanary(controlDb, familyId, proposal.profile);
 
-        const info = opts.db
+        const info = controlDb
           .prepare(
             `UPDATE promotion_proposals
              SET status = 'approved', resolved_at = datetime('now'), resolved_by = ?
@@ -239,9 +351,15 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
           );
         }
 
-        const commandId = insertCommand(opts.db, "family_promote_scaled", familyId, reason, actor);
+        const commandId = insertCommand(
+          controlDb,
+          "family_promote_scaled",
+          familyId,
+          reason,
+          actor,
+        );
 
-        opts.db
+        controlDb
           .prepare("UPDATE promotion_proposals SET applied_command_id = ? WHERE id = ?")
           .run(commandId, proposal.id);
 
@@ -257,7 +375,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
     "/actions/family/:familyId/reset-to-probe",
     async (request) => {
       const { familyId } = request.params;
-      const exists = opts.db
+      const exists = controlDb
         .prepare("SELECT 1 FROM family_catalog WHERE family_id = ?")
         .get(familyId);
       if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
@@ -265,7 +383,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
       const body = (request.body ?? {}) as { reason?: string };
       const actor = getActor(request);
       const id = insertCommand(
-        opts.db,
+        controlDb,
         "family_reset_to_probe",
         familyId,
         body.reason ?? null,
@@ -288,7 +406,7 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
 
       if (!toProfile) throw new ApiError(400, "toProfile is required", "MISSING_FIELD");
 
-      const db = opts.db;
+      const db = controlDb;
 
       // Precheck 1: target profile exists
       const profileExists = db

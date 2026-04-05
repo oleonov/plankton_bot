@@ -270,15 +270,34 @@ describe("autoAcceptAndPromote", () => {
       seedCandidate("cand-2");
       seedCandidate("cand-3");
 
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/actions/rotate-weak-families")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, data: { rotated: 0 } }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200 });
+      });
       vi.stubGlobal("fetch", mockFetch);
 
       const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
 
       expect(result.accepted).toBe(0);
       expect(result.skippedAtCap).toBe(3);
-      // No accept calls — all families have exposure, can't rotate
-      expect(mockFetch).not.toHaveBeenCalled();
+      expect(
+        mockFetch.mock.calls.some(
+          (call) =>
+            typeof call[0] === "string" && call[0].includes("/actions/rotate-weak-families"),
+        ),
+      ).toBe(true);
+      expect(
+        mockFetch.mock.calls.some(
+          (call) =>
+            typeof call[0] === "string" && call[0].includes("/api/v1/discovery/candidates/"),
+        ),
+      ).toBe(false);
     });
 
     it("accepts normally when under maxFamilies cap", async () => {
@@ -292,7 +311,16 @@ describe("autoAcceptAndPromote", () => {
       seedCandidate("cand-1");
       seedCandidate("cand-2");
 
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/actions/rotate-weak-families")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, data: { rotated: 0 } }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200 });
+      });
       vi.stubGlobal("fetch", mockFetch);
 
       const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
@@ -354,28 +382,35 @@ describe("autoAcceptAndPromote", () => {
 
       seedCandidate("cand-new");
 
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/actions/rotate-weak-families")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, data: { rotated: 1 } }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200 });
+      });
       vi.stubGlobal("fetch", mockFetch);
 
       const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
 
-      // fam-weak should be disabled, cand-new accepted
       expect(result.accepted).toBe(1);
       expect(result.skippedAtCap).toBe(0);
-
-      // Verify fam-weak is now disabled
-      const weak = conn.db
-        .prepare("SELECT enabled FROM family_deployments WHERE family_id = ? AND profile = ?")
-        .get("fam-weak", PROFILE) as { enabled: number };
-      expect(weak.enabled).toBe(0);
-
-      // Verify rules_reload was enqueued
-      const reload = conn.db
-        .prepare(
-          "SELECT * FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending'",
-        )
-        .get();
-      expect(reload).toBeDefined();
+      expect(
+        mockFetch.mock.calls.some(
+          (call) =>
+            typeof call[0] === "string" && call[0].includes("/actions/rotate-weak-families"),
+        ),
+      ).toBe(true);
+      expect(
+        mockFetch.mock.calls.some(
+          (call) =>
+            typeof call[0] === "string" &&
+            call[0].includes("/api/v1/discovery/candidates/cand-new/accept"),
+        ),
+      ).toBe(true);
     });
 
     it("does not rotate families with open positions", async () => {
@@ -387,7 +422,16 @@ describe("autoAcceptAndPromote", () => {
 
       seedCandidate("cand-1");
 
-      const mockFetch = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+      const mockFetch = vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/actions/rotate-weak-families")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ ok: true, data: { rotated: 0 } }),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200 });
+      });
       vi.stubGlobal("fetch", mockFetch);
 
       const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);

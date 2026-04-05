@@ -40,10 +40,11 @@ export async function autoAcceptAndPromote(
       const qualifying = countQualifyingCandidates(db);
       if (qualifying > 0) {
         // At cap with qualifying candidates: try rotation to free slots
-        const freed = rotateWeakFamilies(
-          db,
+        const freed = await rotateWeakFamilies(
           currentProfile,
           Math.min(qualifying, MAX_ACCEPT_PER_PASS),
+          headers,
+          config,
           log,
         );
         if (freed > 0) {
@@ -159,59 +160,34 @@ function countQualifyingCandidates(db: Database): number {
   return row.cnt;
 }
 
-/**
- * Rotate weak families: disable enabled families with no open exposure,
- * ranked by worst tail_adjusted_pnl. Uses family_profile_rollups (control DB)
- * for position data — no ledger access needed.
- * After disabling, enqueues rules_reload so runtime drops them from cached provider.
- */
-function rotateWeakFamilies(
-  db: Database,
+async function rotateWeakFamilies(
   profile: string,
   slotsNeeded: number,
+  headers: Record<string, string>,
+  config: AutoAcceptorConfig,
   log: Logger,
-): number {
-  // Find enabled families with zero open positions/value, ranked by worst performance
-  const candidates = db
-    .prepare(
-      `SELECT fd.family_id, COALESCE(r.tail_adjusted_pnl, 0) as pnl
-       FROM family_deployments fd
-       LEFT JOIN family_profile_rollups r ON fd.family_id = r.family_id AND r.profile = fd.profile
-       WHERE fd.profile = ? AND fd.enabled = 1
-         AND COALESCE(r.open_positions, 0) = 0
-         AND COALESCE(r.open_value_usdc, 0) = 0
-       ORDER BY COALESCE(r.tail_adjusted_pnl, 0) ASC
-       LIMIT ?`,
-    )
-    .all(profile, slotsNeeded) as Array<{ family_id: string; pnl: number }>;
-
-  if (candidates.length === 0) return 0;
-
-  const now = new Date().toISOString();
-  const disableStmt = db.prepare(
-    "UPDATE family_deployments SET enabled = 0, updated_at = ? WHERE family_id = ? AND profile = ?",
-  );
-
-  let disabled = 0;
-  for (const c of candidates) {
-    disableStmt.run(now, c.family_id, profile);
-    disabled++;
-    log.info({ familyId: c.family_id, pnl: c.pnl }, "rotated out weak family");
-  }
-
-  // Enqueue rules_reload so runtime refreshes cached rules provider
-  if (disabled > 0) {
-    try {
-      db.prepare(
-        `INSERT INTO operator_commands (action, reason, initiator_type, initiator, status, created_at)
-         VALUES ('rules_reload', ?, 'system', 'auto-rotation', 'pending', ?)`,
-      ).run(`rotated ${disabled} weak families`, now);
-    } catch {
-      // Dedup: pending rules_reload may already exist
+): Promise<number> {
+  try {
+    const res = await fetch(`${config.apiBaseUrl}/api/v1/actions/rotate-weak-families`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        profile,
+        slotsNeeded,
+        reason: `auto-rotation for profile ${profile}`,
+      }),
+    });
+    if (!res.ok) {
+      log.warn({ profile, slotsNeeded, status: res.status }, "auto-rotation request failed");
+      return 0;
     }
-  }
 
-  return disabled;
+    const body = (await res.json()) as { data?: { rotated?: number } };
+    return body.data?.rotated ?? 0;
+  } catch (err) {
+    log.warn({ profile, slotsNeeded, err }, "auto-rotation request errored");
+    return 0;
+  }
 }
 
 /** Phase 2: auto-promote families with exclusive current-profile proposals */

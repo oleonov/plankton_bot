@@ -88,7 +88,13 @@ export async function buildServer(deps: ServerDeps) {
   const staleMs = deps.config.marketDataStaleThresholdMs;
 
   // Control-only routes
-  await app.register(actionRoutes, { prefix: "/api/v1", db: deps.controlDb });
+  await app.register(actionRoutes, {
+    prefix: "/api/v1",
+    db: deps.controlDb,
+    controlDb: deps.controlDb,
+    ledgerDb: deps.ledgerDb,
+    ledgerPool: deps.ledgerPool,
+  });
   await app.register(configRoutes, { prefix: "/api/v1", controlDb: deps.controlDb });
 
   // Status — resolves active profile's ledger via pool for consistent snapshot
