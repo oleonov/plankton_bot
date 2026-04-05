@@ -882,4 +882,93 @@ describe("CommandPoller", () => {
       expect(demotionEvents).toHaveLength(0);
     });
   });
+
+  // ── state_transitions for all mode changes ──────────────────────────────
+
+  describe("state_transitions for all family mode changes", () => {
+    it("operator reduce-only writes state_transition with trigger_type=operator", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const transitionRepo = new SqliteStateTransitionRepository(conn.db);
+
+      insertCommand("family_reduce_only", "fam-1", "operator demotion", {
+        initiatorType: "operator",
+        initiator: "admin-user",
+      });
+      const poller = createPoller({
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: transitionRepo,
+      });
+
+      await poller.poll();
+
+      const transitions = transitionRepo.findByEntity("family", "fam-1");
+      expect(transitions).toHaveLength(1);
+      expect(transitions[0]!.fromState).toBe("probe-only");
+      expect(transitions[0]!.toState).toBe("reduce-only");
+      expect(transitions[0]!.triggerType).toBe("operator");
+      expect(transitions[0]!.initiator).toBe("admin-user");
+    });
+
+    it("operator activate writes state_transition", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const transitionRepo = new SqliteStateTransitionRepository(conn.db);
+
+      // First quarantine the family
+      insertCommand("family_quarantine", "fam-1", "tail exceeded", {
+        initiatorType: "system",
+        initiator: "evidence-engine",
+      });
+      const poller = createPoller({
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: transitionRepo,
+      });
+      await poller.poll();
+
+      // Then activate it via operator
+      insertCommand("family_activate", "fam-1", "operator reactivation", {
+        initiatorType: "operator",
+        initiator: "admin-user",
+      });
+      await poller.poll();
+
+      const transitions = transitionRepo.findByEntity("family", "fam-1");
+      expect(transitions).toHaveLength(2);
+      // findByEntity returns newest first (DESC), so activate is at index 0
+      expect(transitions[0]!.toState).toBe("active");
+      expect(transitions[0]!.triggerType).toBe("operator");
+      expect(transitions[0]!.initiator).toBe("admin-user");
+    });
+
+    it("system demotion still writes state_transition (no regression)", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const transitionRepo = new SqliteStateTransitionRepository(conn.db);
+
+      insertCommand("family_quarantine", "fam-1", "auto quarantine", {
+        initiatorType: "system",
+        initiator: "evidence-engine",
+      });
+      const poller = createPoller({
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: transitionRepo,
+      });
+
+      await poller.poll();
+
+      const transitions = transitionRepo.findByEntity("family", "fam-1");
+      expect(transitions).toHaveLength(1);
+      expect(transitions[0]!.fromState).toBe("probe-only");
+      expect(transitions[0]!.toState).toBe("quarantine");
+      expect(transitions[0]!.triggerType).toBe("system");
+      expect(transitions[0]!.initiator).toBe("evidence-engine");
+    });
+  });
 });

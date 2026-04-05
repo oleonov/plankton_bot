@@ -181,13 +181,19 @@ export class CommandPoller implements RuntimeModule {
         appliedAt: Date.now(),
       });
 
-      // System-initiated demotions: write state transition and publish event
+      // Write state transition for ALL family mode changes (system + operator)
       if (
-        cmd.initiatorType === "system" &&
         cmd.targetId &&
-        (cmd.action === "family_reduce_only" || cmd.action === "family_quarantine")
+        (cmd.action === "family_reduce_only" ||
+          cmd.action === "family_quarantine" ||
+          cmd.action === "family_activate")
       ) {
-        const newState = cmd.action === "family_reduce_only" ? "reduce-only" : "quarantine";
+        const newState =
+          cmd.action === "family_reduce_only"
+            ? "reduce-only"
+            : cmd.action === "family_quarantine"
+              ? "quarantine"
+              : "active";
 
         this.deps.stateTransitionRepo?.insert({
           entityType: "family",
@@ -196,17 +202,23 @@ export class CommandPoller implements RuntimeModule {
           toState: newState,
           triggerType: cmd.initiatorType,
           initiator: cmd.initiator ?? null,
-          reason: cmd.reason ?? "system demotion",
+          reason: cmd.reason ?? `${cmd.action} applied`,
           scoresSnapshot: null,
         });
 
-        await this.deps.bus.publish("FamilyDemotionApplied", {
-          familyId: createFamilyId(cmd.targetId),
-          previousState: previousPromotionState,
-          newState,
-          reason: cmd.reason ?? "system demotion",
-          timestamp: Date.now(),
-        });
+        // System-initiated demotions also publish FamilyDemotionApplied event
+        if (
+          cmd.initiatorType === "system" &&
+          (cmd.action === "family_reduce_only" || cmd.action === "family_quarantine")
+        ) {
+          await this.deps.bus.publish("FamilyDemotionApplied", {
+            familyId: createFamilyId(cmd.targetId),
+            previousState: previousPromotionState,
+            newState,
+            reason: cmd.reason ?? "system demotion",
+            timestamp: Date.now(),
+          });
+        }
       }
     } catch (err) {
       this.log.error({ id: cmd.id, action: cmd.action, err }, "command failed -- rejecting");
