@@ -30,18 +30,24 @@ export async function autoAcceptAndPromote(
 
   const currentProfile = resolveCurrentProfile(db);
 
-  // Phase 0: Check enabled-family cap for current profile
-  if (currentProfile && isAtFamilyCap(db, currentProfile)) {
-    const skippedAtCap = countQualifyingCandidates(db);
-    log.info(
-      { enabledCount: countEnabledFamilies(db, currentProfile), skippedAtCap },
-      "at family cap, skipping auto-accept",
-    );
-    const promoted = await runAutoPromote(db, currentProfile, headers, config, log);
-    return { accepted: 0, promoted, skippedAtCap };
+  // Phase 0: Compute available slots for auto-accept
+  let availableSlots = MAX_ACCEPT_PER_PASS;
+  if (currentProfile) {
+    const enabled = countEnabledFamilies(db, currentProfile);
+    const max = resolveMaxFamilies(db, currentProfile);
+    availableSlots = Math.min(MAX_ACCEPT_PER_PASS, Math.max(0, max - enabled));
+    if (availableSlots <= 0) {
+      const skippedAtCap = countQualifyingCandidates(db);
+      log.info(
+        { enabledCount: enabled, maxFamilies: max, skippedAtCap },
+        "at family cap, skipping auto-accept",
+      );
+      const promoted = await runAutoPromote(db, currentProfile, headers, config, log);
+      return { accepted: 0, promoted, skippedAtCap };
+    }
   }
 
-  // Phase 1: Auto-accept probe-candidates (top N per pass, ranked)
+  // Phase 1: Auto-accept probe-candidates (top N per pass, capped by available slots)
   const candidates = db
     .prepare(
       `SELECT candidate_id FROM family_candidates
@@ -55,7 +61,7 @@ export async function autoAcceptAndPromote(
          (COALESCE(recurrence_score, 0) * COALESCE(live_viability_score, 0)) DESC
        LIMIT ?`,
     )
-    .all(MAX_ACCEPT_PER_PASS) as Array<{ candidate_id: string }>;
+    .all(availableSlots) as Array<{ candidate_id: string }>;
 
   let accepted = 0;
   for (const c of candidates) {

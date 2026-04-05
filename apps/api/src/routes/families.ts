@@ -199,8 +199,9 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       const cursorRaw = request.query.cursor;
       const cursorKey = cursorRaw ? Buffer.from(cursorRaw, "base64").toString("utf-8") : null;
 
-      const allCatalogs = listCatalog.all() as FamilyCatalogRow[];
-      const totalCatalogCount = allCatalogs.length;
+      const totalCatalogCount = (
+        controlDb.prepare("SELECT COUNT(*) as cnt FROM family_catalog").get() as { cnt: number }
+      ).cnt;
 
       const deploymentRows =
         currentProfile && listDeployments
@@ -210,18 +211,44 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           : [];
       const deploymentMap = new Map(deploymentRows.map((d) => [d.family_id, d]));
 
-      const catalogs =
-        effectiveScope === "profile"
-          ? allCatalogs.filter((c) => deploymentMap.has(c.family_id))
-          : allCatalogs;
+      // SQL-level pagination: fetch only the page we need
+      let page: FamilyCatalogRow[];
+      let hasMore: boolean;
 
-      // Sort by family_key for stable cursor-based pagination
-      catalogs.sort((a, b) => a.family_key.localeCompare(b.family_key));
+      if (effectiveScope === "profile") {
+        // Profile scope: filter by deployment, then paginate
+        const deployedIds = [...deploymentMap.keys()];
+        if (deployedIds.length === 0) {
+          page = [];
+          hasMore = false;
+        } else {
+          const placeholders = deployedIds.map(() => "?").join(",");
+          const cursorClause = cursorKey ? `AND fc.family_key > ?` : "";
+          const params = cursorKey
+            ? [...deployedIds, cursorKey, limit + 1]
+            : [...deployedIds, limit + 1];
+          const rows = controlDb
+            .prepare(
+              `SELECT fc.* FROM family_catalog fc
+               WHERE fc.family_id IN (${placeholders}) ${cursorClause}
+               ORDER BY fc.family_key
+               LIMIT ?`,
+            )
+            .all(...params) as FamilyCatalogRow[];
+          hasMore = rows.length > limit;
+          page = rows.slice(0, limit);
+        }
+      } else {
+        // All scope: paginate directly
+        const cursorClause = cursorKey ? "WHERE family_key > ?" : "";
+        const params = cursorKey ? [cursorKey, limit + 1] : [limit + 1];
+        const rows = controlDb
+          .prepare(`SELECT * FROM family_catalog ${cursorClause} ORDER BY family_key LIMIT ?`)
+          .all(...params) as FamilyCatalogRow[];
+        hasMore = rows.length > limit;
+        page = rows.slice(0, limit);
+      }
 
-      // Apply cursor: skip entries up to and including the cursor key
-      const startIdx = cursorKey ? catalogs.findIndex((c) => c.family_key === cursorKey) + 1 : 0;
-      const page = catalogs.slice(startIdx, startIdx + limit);
-      const hasMore = startIdx + limit < catalogs.length;
       const nextCursor =
         hasMore && page.length > 0
           ? Buffer.from(page[page.length - 1]!.family_key).toString("base64")

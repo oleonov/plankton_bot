@@ -139,7 +139,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
         tailAdjustedPnl: recycleMetrics.tailAdjustedPnl,
       });
 
-      await this.checkRecovery(familyId, toxicity, recycleMetrics.tailAdjustedPnl);
+      await this.checkRecovery(familyId, identity, toxicity, recycleMetrics.tailAdjustedPnl);
     }
 
     this.lastEvalAt = new Date().toISOString();
@@ -284,6 +284,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
 
   private async checkRecovery(
     familyId: FamilyId,
+    identity: FamilyIdentity,
     toxicity: number,
     tailAdjustedPnl: number,
   ): Promise<void> {
@@ -303,9 +304,26 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     if (demotionAgeMs < 24 * 60 * 60 * 1000) return;
 
     const key = String(familyId);
+
+    // Metrics gate: toxicity, tail PnL, and execution canary must all be clean
     if (toxicity >= 0.3 || tailAdjustedPnl < 0) {
       this.consecutiveCleanCounts.delete(key);
       return;
+    }
+
+    // Execution canary must pass (live-lite only)
+    if (this.activeProfile === ProfileId.LiveLite) {
+      const canary = evaluateExecutionCanaryGate({
+        primaryCategory: identity.primaryCategory,
+        feeTier: identity.feeTier ?? null,
+        liveWalletRequirement: identity.liveWalletRequirement ?? null,
+        requiresPostOnlyForLive: identity.requiresPostOnlyForLive ?? null,
+        executionTelemetry: this.executionTelemetryReader.readExecutionTelemetry(String(familyId)),
+      });
+      if (this.shouldAutoFreezeForExecutionCanary(canary)) {
+        this.consecutiveCleanCounts.delete(key);
+        return;
+      }
     }
 
     const cleanCount = (this.consecutiveCleanCounts.get(key) ?? 0) + 1;
