@@ -371,7 +371,9 @@ describe("autoAcceptAndPromote", () => {
 
       // Verify rules_reload was enqueued
       const reload = conn.db
-        .prepare("SELECT * FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending'")
+        .prepare(
+          "SELECT * FROM operator_commands WHERE action = 'rules_reload' AND status = 'pending'",
+        )
         .get();
       expect(reload).toBeDefined();
     });

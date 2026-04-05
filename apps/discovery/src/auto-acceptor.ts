@@ -40,7 +40,12 @@ export async function autoAcceptAndPromote(
       const qualifying = countQualifyingCandidates(db);
       if (qualifying > 0) {
         // At cap with qualifying candidates: try rotation to free slots
-        const freed = rotateWeakFamilies(db, currentProfile, Math.min(qualifying, MAX_ACCEPT_PER_PASS), log);
+        const freed = rotateWeakFamilies(
+          db,
+          currentProfile,
+          Math.min(qualifying, MAX_ACCEPT_PER_PASS),
+          log,
+        );
         if (freed > 0) {
           availableSlots = Math.min(freed, MAX_ACCEPT_PER_PASS);
           log.info({ freed, availableSlots }, "rotated weak families to free slots");
