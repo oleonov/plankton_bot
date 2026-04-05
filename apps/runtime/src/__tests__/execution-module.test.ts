@@ -1175,9 +1175,11 @@ describe("ExecutionModule", () => {
   function createMockControlDb(walletBalance: number | null) {
     return {
       prepare: vi.fn().mockReturnValue({
-        get: vi.fn().mockReturnValue(
-          walletBalance != null ? { wallet_balance_usdc: walletBalance } : undefined,
-        ),
+        get: vi
+          .fn()
+          .mockReturnValue(
+            walletBalance != null ? { wallet_balance_usdc: walletBalance } : undefined,
+          ),
       }),
     };
   }
