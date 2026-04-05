@@ -288,9 +288,9 @@ describe("autoAcceptAndPromote", () => {
       expect(result.skippedAtCap).toBe(0);
     });
 
-    it("uses default maxFamilies (500) when no envelope_json", async () => {
+    it("uses default maxFamilies (100) when no envelope_json", async () => {
       seedRuntimeControlState(PROFILE);
-      // No profile_settings row → fallback to 500
+      // No profile_settings row → fallback to 100
 
       seedCandidate("cand-1");
 
@@ -299,7 +299,7 @@ describe("autoAcceptAndPromote", () => {
 
       const result = await autoAcceptAndPromote(conn.db, baseConfig(), silentLogger);
 
-      // Under the default cap of 500, should accept normally
+      // Under the default cap of 100, should accept normally
       expect(result.accepted).toBe(1);
       expect(result.skippedAtCap).toBe(0);
     });
