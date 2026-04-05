@@ -525,9 +525,7 @@ describe("RuntimeSafetyEvaluator", () => {
 
   it("system reduce-only auto-recovers after 2 consecutive clean passes", async () => {
     setupRecoveryScenario(deps);
-    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
-      makeSystemDemotion(),
-    );
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(makeSystemDemotion());
 
     evaluator = new RuntimeSafetyEvaluator(deps);
 
@@ -549,10 +547,7 @@ describe("RuntimeSafetyEvaluator", () => {
       OperatorMode.Active,
       "auto-recovery",
     );
-    expect(deps.familyEvidenceRepo.updatePromotionState).toHaveBeenCalledWith(
-      FAMILY_A,
-      "scaled",
-    );
+    expect(deps.familyEvidenceRepo.updatePromotionState).toHaveBeenCalledWith(FAMILY_A, "scaled");
     expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
         fromState: "reduce-only",
@@ -570,9 +565,7 @@ describe("RuntimeSafetyEvaluator", () => {
 
   it("flapping prevented: clean pass 1 does NOT trigger recovery", async () => {
     setupRecoveryScenario(deps);
-    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
-      makeSystemDemotion(),
-    );
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(makeSystemDemotion());
 
     evaluator = new RuntimeSafetyEvaluator(deps);
     await evaluator.evaluate();
@@ -650,9 +643,7 @@ describe("RuntimeSafetyEvaluator", () => {
 
   it("metrics gate: toxicity >= 0.3 blocks recovery", async () => {
     setupRecoveryScenario(deps);
-    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
-      makeSystemDemotion(),
-    );
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(makeSystemDemotion());
     // toxicity just at 0.3 threshold (dustCount=3, positionCount=7 gives ~0.3 ratio)
     vi.mocked(deps.scoreComputer.computeToxicityMetrics).mockReturnValue({
       dustCount: 4,
@@ -679,9 +670,7 @@ describe("RuntimeSafetyEvaluator", () => {
 
   it("consecutive clean counter resets when metrics fail mid-streak", async () => {
     setupRecoveryScenario(deps);
-    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(
-      makeSystemDemotion(),
-    );
+    vi.mocked(deps.stateTransitionRepo.findLastTransitionTo).mockReturnValue(makeSystemDemotion());
 
     evaluator = new RuntimeSafetyEvaluator(deps);
 

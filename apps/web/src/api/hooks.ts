@@ -188,11 +188,7 @@ export function useFamilies() {
   });
 }
 
-export function useFamiliesScoped(
-  scope: "profile" | "all",
-  cursor?: string | null,
-  limit = 50,
-) {
+export function useFamiliesScoped(scope: "profile" | "all", cursor?: string | null, limit = 50) {
   return useQuery({
     queryKey: ["families-scoped", scope, cursor ?? "", limit],
     queryFn: () =>

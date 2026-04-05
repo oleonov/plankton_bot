@@ -219,9 +219,7 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       catalogs.sort((a, b) => a.family_key.localeCompare(b.family_key));
 
       // Apply cursor: skip entries up to and including the cursor key
-      const startIdx = cursorKey
-        ? catalogs.findIndex((c) => c.family_key === cursorKey) + 1
-        : 0;
+      const startIdx = cursorKey ? catalogs.findIndex((c) => c.family_key === cursorKey) + 1 : 0;
       const page = catalogs.slice(startIdx, startIdx + limit);
       const hasMore = startIdx + limit < catalogs.length;
       const nextCursor =

@@ -338,9 +338,7 @@ export function buildStatusSnapshot(
       const enabledIds = new Set(enabledFamilies.map((f) => f.family_id));
 
       const allStates = db
-        .prepare(
-          "SELECT family_id, runtime_mode, effective_mode FROM family_runtime_state",
-        )
+        .prepare("SELECT family_id, runtime_mode, effective_mode FROM family_runtime_state")
         .all() as Array<{ family_id: string; runtime_mode: string; effective_mode: string | null }>;
 
       const counts: Record<string, number> = {};
