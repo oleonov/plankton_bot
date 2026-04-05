@@ -18,6 +18,7 @@ import type {
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
+import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -219,7 +220,12 @@ describe("ReconciliationModule", () => {
 
   describe("order reconciliation", () => {
     it("cancels phantom local orders not on exchange", async () => {
-      const local = makeLocalOrder({ exchangeOrderId: "ex-gone" });
+      const threeMinAgo = new Date(Date.now() - 180_000).toISOString();
+      const local = makeLocalOrder({
+        exchangeOrderId: "ex-gone",
+        createdAt: threeMinAgo,
+        updatedAt: threeMinAgo,
+      });
       orderRepo.findOpen = vi.fn().mockReturnValue([local]);
       // exchange returns empty — order is gone
       gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
@@ -267,6 +273,175 @@ describe("ReconciliationModule", () => {
 
       expect(result.openOrdersExchange).toBe(1);
       expect(result.openOrdersLocal).toBe(1);
+    });
+  });
+
+  // ─── Phantom grace period ──────────────────────────────────────────
+
+  describe("phantom grace period", () => {
+    it("fresh order within grace period is not cancelled", async () => {
+      const fresh = makeLocalOrder({
+        exchangeOrderId: "ex-fresh",
+        createdAt: new Date().toISOString(),
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([fresh]);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
+
+      const result = await reconcileOrders({
+        gateway,
+        orderRepo,
+        log: silentLog,
+        phantomGraceMs: 90_000,
+      });
+
+      expect(result.phantomsCancelled).toBe(0);
+      expect(result.phantomsSkippedGrace).toBe(1);
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+    });
+
+    it("old order beyond grace period is cancelled as phantom", async () => {
+      const twoMinAgo = new Date(Date.now() - 120_000).toISOString();
+      const old = makeLocalOrder({
+        exchangeOrderId: "ex-old",
+        createdAt: twoMinAgo,
+        updatedAt: twoMinAgo,
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([old]);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
+
+      const result = await reconcileOrders({
+        gateway,
+        orderRepo,
+        log: silentLog,
+        phantomGraceMs: 90_000,
+      });
+
+      expect(result.phantomsCancelled).toBe(1);
+      expect(result.phantomsSkippedGrace).toBe(0);
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(old.orderId, "cancelled");
+    });
+
+    it("stale exchange order is still auto-cancelled (regression)", async () => {
+      const cancelledLocal = makeLocalOrder({
+        exchangeOrderId: "ex-stale-regression",
+        status: "cancelled",
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([]);
+      gateway.getOpenOrders = vi
+        .fn()
+        .mockResolvedValue([makeExchangeOrder({ orderId: "ex-stale-regression" })]);
+      orderRepo.findByExchangeOrderId = vi.fn().mockReturnValue(cancelledLocal);
+      gateway.cancelOrder = vi.fn().mockResolvedValue({ success: true });
+
+      const result = await reconcileOrders({
+        gateway,
+        orderRepo,
+        log: silentLog,
+        phantomGraceMs: 90_000,
+      });
+
+      expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "ex-stale-regression" });
+      expect(result.staleCancelled).toBe(1);
+    });
+
+    it("two-pass: fresh order survives, then appears on exchange", async () => {
+      const fresh = makeLocalOrder({
+        exchangeOrderId: "ex-delayed",
+        createdAt: new Date().toISOString(),
+      });
+
+      // Pass 1: exchange empty, fresh order survives grace
+      orderRepo.findOpen = vi.fn().mockReturnValue([fresh]);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
+
+      const result1 = await reconcileOrders({
+        gateway,
+        orderRepo,
+        log: silentLog,
+        phantomGraceMs: 90_000,
+      });
+
+      expect(result1.phantomsCancelled).toBe(0);
+      expect(result1.phantomsSkippedGrace).toBe(1);
+      expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+
+      // Pass 2: exchange now returns the order — clean
+      orderRepo.findOpen = vi.fn().mockReturnValue([fresh]);
+      gateway.getOpenOrders = vi
+        .fn()
+        .mockResolvedValue([makeExchangeOrder({ orderId: "ex-delayed" })]);
+
+      const result2 = await reconcileOrders({
+        gateway,
+        orderRepo,
+        log: silentLog,
+        phantomGraceMs: 90_000,
+      });
+
+      expect(result2.phantomsCancelled).toBe(0);
+      expect(result2.phantomsSkippedGrace).toBe(0);
+    });
+
+    it("two-pass: old phantom absent from exchange is cancelled", async () => {
+      const twoMinAgo = new Date(Date.now() - 120_000).toISOString();
+      const old = makeLocalOrder({
+        exchangeOrderId: "ex-phantom-old",
+        createdAt: twoMinAgo,
+        updatedAt: twoMinAgo,
+      });
+
+      // Pass 1: absent from exchange, beyond grace → cancelled
+      orderRepo.findOpen = vi.fn().mockReturnValue([old]);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
+
+      const result = await reconcileOrders({
+        gateway,
+        orderRepo,
+        log: silentLog,
+        phantomGraceMs: 90_000,
+      });
+
+      expect(result.phantomsCancelled).toBe(1);
+      expect(result.phantomsSkippedGrace).toBe(0);
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(old.orderId, "cancelled");
+    });
+  });
+
+  // ─── Module-level grace period (computed from reconcileIntervalMs) ──
+
+  describe("module-level computed grace (2x interval + 30s)", () => {
+    it("order at 2 min age survives module-level grace (150s for 60s interval)", async () => {
+      // reconcileIntervalMs=60_000 → grace=150_000. Order at 120s < 150s → survives.
+      const twoMinAgo = new Date(Date.now() - 120_000).toISOString();
+      const local = makeLocalOrder({
+        exchangeOrderId: "ex-fresh-module",
+        createdAt: twoMinAgo,
+        updatedAt: twoMinAgo,
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([local]);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
+
+      const result = await mod.runReconciliation();
+
+      expect(result.phantomOrders).toBe(0);
+      expect(orderRepo.updateStatus).not.toHaveBeenCalledWith(local.orderId, "cancelled");
+    });
+
+    it("order at 3 min age is phantom-cancelled under module-level grace (150s)", async () => {
+      // 180s > 150s → phantom cancel
+      const threeMinAgo = new Date(Date.now() - 180_000).toISOString();
+      const local = makeLocalOrder({
+        exchangeOrderId: "ex-old-module",
+        createdAt: threeMinAgo,
+        updatedAt: threeMinAgo,
+      });
+      orderRepo.findOpen = vi.fn().mockReturnValue([local]);
+      gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
+
+      const result = await mod.runReconciliation();
+
+      expect(result.phantomOrders).toBe(1);
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(local.orderId, "cancelled");
     });
   });
 
@@ -537,7 +712,12 @@ describe("ReconciliationModule", () => {
     });
 
     it("publishes ReconciliationDriftDetected with severity=warn for phantom orders only", async () => {
-      const local = makeLocalOrder({ exchangeOrderId: "ex-gone" });
+      const threeMinAgo = new Date(Date.now() - 180_000).toISOString();
+      const local = makeLocalOrder({
+        exchangeOrderId: "ex-gone",
+        createdAt: threeMinAgo,
+        updatedAt: threeMinAgo,
+      });
       orderRepo.findOpen = vi.fn().mockReturnValue([local]);
       gateway.getOpenOrders = vi.fn().mockResolvedValue([]);
 

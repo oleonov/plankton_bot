@@ -16,6 +16,7 @@ export interface OrderReconcilerDeps {
   gateway: ExchangeGateway;
   orderRepo: OrderRepository;
   log: Logger;
+  phantomGraceMs?: number; // default: 90_000 (1.5× reconcile interval)
 }
 
 export interface OrderReconcileResult {
@@ -25,6 +26,7 @@ export interface OrderReconcileResult {
   unknownExchangeOrders: number;
   staleCancelled: number;
   staleCancelFailed: number;
+  phantomsSkippedGrace: number;
   details: string[];
 }
 
@@ -42,8 +44,21 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
 
   // Phantom orders: local open orders not on exchange
   let phantomsCancelled = 0;
+  let phantomsSkippedGrace = 0;
+  const graceMs = deps.phantomGraceMs ?? 90_000;
+
   for (const local of localOrders) {
     if (local.exchangeOrderId !== null && !exchangeOrderIds.has(local.exchangeOrderId)) {
+      const ageMs = Date.now() - new Date(local.createdAt).getTime();
+      if (ageMs < graceMs) {
+        phantomsSkippedGrace++;
+        log.debug(
+          { orderId: local.orderId, ageMs, graceMs },
+          "phantom candidate skipped — within grace period",
+        );
+        continue;
+      }
+
       orderRepo.updateStatus(local.orderId, "cancelled");
       phantomsCancelled++;
       const msg = `phantom order cancelled: ${local.orderId} (exchange: ${local.exchangeOrderId})`;
@@ -101,6 +116,7 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     unknownExchangeOrders,
     staleCancelled,
     staleCancelFailed,
+    phantomsSkippedGrace,
     details,
   };
 }

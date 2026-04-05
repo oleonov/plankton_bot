@@ -104,10 +104,14 @@ export class ReconciliationModule implements RuntimeModule {
       const allDetails: string[] = [];
 
       // 1. Order reconciliation
+      // Grace = 2 intervals + 30s buffer. Covers worst case: order placed right after
+      // pass N, still absent on pass N+1 (60s) and N+2 (120s), only phantom-cancel on N+3.
+      const graceMs = this.deps.reconcileIntervalMs * 2 + 30_000;
       const orderResult = await reconcileOrders({
         gateway: this.deps.gateway,
         orderRepo: this.deps.orderRepo,
         log: this.log,
+        phantomGraceMs: graceMs,
       });
       allDetails.push(...orderResult.details);
 
@@ -166,6 +170,7 @@ export class ReconciliationModule implements RuntimeModule {
           run: this.runCount,
           clean,
           phantoms: orderResult.phantomsCancelled,
+          phantomsSkippedGrace: orderResult.phantomsSkippedGrace,
           missingFills: fillResult.missingFillsImported,
           unknownOrders: orderResult.unknownExchangeOrders,
           staleCancelled: orderResult.staleCancelled,
