@@ -138,7 +138,8 @@ describe("API against real split schemas", () => {
     // fam-1 is enabled for simulation profile and has runtime_mode='active' with no effective_mode
     // so it should appear under the 'active' bucket
     expect(body.data.familyModeCounts).toBeDefined();
-    expect(body.data.familyModeCounts).toEqual({ active: 1 });
+    expect(body.data.familyModeCounts.active).toBe(1);
+    expect(body.data.familyModeCounts._disabled).toBeDefined();
   });
 
   it("GET /families succeeds (control: catalog + rules + evidence; ledger: positions, orders)", async () => {

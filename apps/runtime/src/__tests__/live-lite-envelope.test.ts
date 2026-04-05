@@ -6,11 +6,11 @@ describe("resolveLiveLiteMaxFamilies", () => {
     expect(resolveLiveLiteMaxFamilies({ maxFamilies: 7 }, 12)).toBe(7);
   });
 
-  it("defaults to deployed family count when it exceeds the legacy floor", () => {
-    expect(resolveLiveLiteMaxFamilies({}, 12)).toBe(12);
+  it("defaults to 100 when maxFamilies not configured", () => {
+    expect(resolveLiveLiteMaxFamilies({}, 12)).toBe(100);
   });
 
-  it("keeps the legacy floor when deployed family count is smaller", () => {
-    expect(resolveLiveLiteMaxFamilies({}, 3)).toBe(10);
+  it("defaults to 100 regardless of deployed count", () => {
+    expect(resolveLiveLiteMaxFamilies({}, 3)).toBe(100);
   });
 });

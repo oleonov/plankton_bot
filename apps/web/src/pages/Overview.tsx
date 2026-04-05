@@ -188,17 +188,26 @@ export function Overview() {
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
             <span>
               Families: {status.liveLite.familyAllowlist.length}
-              {status.familyModeCounts && (
-                <>
-                  {" "}
-                  (
-                  {Object.entries(status.familyModeCounts)
+              {status.familyModeCounts &&
+                (() => {
+                  const disabled = status.familyModeCounts._disabled ?? 0;
+                  const modes = Object.entries(status.familyModeCounts)
+                    .filter(([k]) => k !== "_disabled")
                     .sort(([a], [b]) => a.localeCompare(b))
                     .map(([mode, count]) => `${count} ${mode}`)
-                    .join(", ")}
-                  )
-                </>
-              )}
+                    .join(", ");
+                  return (
+                    <>
+                      {" "}
+                      ({modes})
+                      {disabled > 0 && (
+                        <span style={{ color: "var(--text-dim)", marginLeft: 8 }}>
+                          + {disabled} disabled
+                        </span>
+                      )}
+                    </>
+                  );
+                })()}
             </span>
             <span>Wallet: {(status.liveLite.walletMode ?? "eoa").toUpperCase()}</span>
             <span>

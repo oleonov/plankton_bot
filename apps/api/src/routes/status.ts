@@ -348,6 +348,12 @@ export function buildStatusSnapshot(
         counts[mode] = (counts[mode] ?? 0) + 1;
       }
       familyModeCounts = counts;
+
+      // Count disabled families for the profile
+      const disabledRow = controlDb
+        .prepare("SELECT COUNT(*) as cnt FROM family_deployments WHERE profile = ? AND enabled = 0")
+        .get(runtimeMode) as { cnt: number };
+      familyModeCounts._disabled = disabledRow.cnt;
     } catch {
       // control DB may not have family_deployments in legacy/test setups
     }

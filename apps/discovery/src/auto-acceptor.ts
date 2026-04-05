@@ -14,7 +14,7 @@ export interface AutoAcceptResult {
 }
 
 const MAX_ACCEPT_PER_PASS = 10;
-const DEFAULT_MAX_FAMILIES = 500;
+const DEFAULT_MAX_FAMILIES = 100;
 
 export async function autoAcceptAndPromote(
   db: Database,
