@@ -57,7 +57,9 @@ export class PositionSettler {
     candidate: ResolutionCandidate,
     resolution: DetectedResolution,
   ): SettledPosition | null {
-    const isWinner = candidate.outcome === resolution.resolution;
+    const isWinner = resolution.winnerTokenId
+      ? String(candidate.tokenId) === String(resolution.winnerTokenId)
+      : candidate.outcome === resolution.resolution;
     const settlementPrice = isWinner ? 1.0 : 0.0;
     const settlementPnl = (settlementPrice - position.avgEntryPrice) * position.size;
 
