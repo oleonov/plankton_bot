@@ -591,7 +591,7 @@ export function scan(
       // NO-outcome markets with two-sided enabled go through the two-sided
       // entry path instead of the standard probe path.
       const isTwoSidedCandidate =
-        market.outcome === "NO" &&
+        market.outcome.toUpperCase() === "NO" &&
         bundle.rules.twoSided.allowTwoSided &&
         bundle.rules.twoSided.twoSidedMode !== "disabled";
 
@@ -905,7 +905,7 @@ function evaluateTwoSidedEntry(
   if (ts.twoSidedMode === "disabled") return null;
 
   // Only for NO-outcome markets
-  if (market.outcome !== "NO") return null;
+  if (market.outcome.toUpperCase() !== "NO") return null;
 
   // Selective mode requires evidence of both-sided eligibility
   if (ts.twoSidedMode === "selective" && !bundle.evidence?.bothSidedEligible) return null;
