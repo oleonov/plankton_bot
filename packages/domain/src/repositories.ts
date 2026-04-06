@@ -244,7 +244,7 @@ export interface MarketResolutionRepository {
   /** Update resolution, resolved_at, and status for an existing record (e.g., unknown → YES). */
   updateResolution(
     conditionId: string,
-    resolution: "YES" | "NO",
+    resolution: string,
     resolvedAt: string,
     source: string,
   ): void;

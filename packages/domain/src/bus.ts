@@ -222,7 +222,7 @@ export interface RuntimeEventMap {
   MarketResolved: {
     readonly conditionId: string;
     readonly tokenIds: readonly TokenId[];
-    readonly resolution: "YES" | "NO" | "unknown";
+    readonly resolution: string;
     readonly resolvedAt: string;
     readonly source: string;
     readonly timestamp: number;
@@ -232,7 +232,7 @@ export interface RuntimeEventMap {
     readonly positionId: PositionId;
     readonly tokenId: TokenId;
     readonly familyId: FamilyId;
-    readonly resolution: "YES" | "NO" | "unknown";
+    readonly resolution: string;
     readonly settlementPrice: number;
     readonly realizedPnl: number;
     readonly size: number;
