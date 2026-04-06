@@ -243,9 +243,7 @@ async function main() {
       fixes.push({ tokenId, oldOutcome: "NO", newOutcome, conditionId: suspect.condition_id });
     }
 
-    const pairs = tokenIds
-      .map((id) => `${id.substring(0, 16)}...→${gammaMap.get(id)}`)
-      .join(", ");
+    const pairs = tokenIds.map((id) => `${id.substring(0, 16)}...→${gammaMap.get(id)}`).join(", ");
     log("Phase 3", `  ${suspect.condition_id.substring(0, 24)}...: ${pairs}`);
 
     await new Promise((r) => setTimeout(r, GAMMA_DELAY_MS));

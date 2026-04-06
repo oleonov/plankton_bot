@@ -107,7 +107,11 @@ export function parseTokenIds(rawPayload: Record<string, unknown>): string[] {
 /** Map inferResolution result + Gamma payload into a DetectedResolution. */
 function buildGammaResolution(
   conditionId: string,
-  info: { closedTime?: string | null; umaResolutionStatus: string | null; rawPayload: Record<string, unknown> },
+  info: {
+    closedTime?: string | null;
+    umaResolutionStatus: string | null;
+    rawPayload: Record<string, unknown>;
+  },
   candidates: ResolutionCandidate[],
 ): DetectedResolution {
   const inferred = inferResolution(info.umaResolutionStatus, info.rawPayload);

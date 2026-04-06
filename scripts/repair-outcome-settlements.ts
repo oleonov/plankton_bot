@@ -230,7 +230,10 @@ async function main() {
     const winner = await fetchWinnerFromGamma(slug);
     if (winner) {
       gammaWinners.set(conditionId, winner);
-      log("Phase 1", `  ${conditionId.substring(0, 20)}... (${slug}): winner=${winner.outcome} token=${winner.tokenId.substring(0, 20)}...`);
+      log(
+        "Phase 1",
+        `  ${conditionId.substring(0, 20)}... (${slug}): winner=${winner.outcome} token=${winner.tokenId.substring(0, 20)}...`,
+      );
     } else {
       log("Phase 1", `  ${conditionId.substring(0, 20)}... (${slug}): UNRESOLVED — skipping`);
     }
@@ -256,7 +259,10 @@ async function main() {
       .get(s.position_id) as PositionRow | undefined;
 
     if (!pos) {
-      log("Phase 1", `  WARNING: position ${s.position_id} not found for settlement ${s.settlement_id}`);
+      log(
+        "Phase 1",
+        `  WARNING: position ${s.position_id} not found for settlement ${s.settlement_id}`,
+      );
       continue;
     }
 
@@ -387,7 +393,10 @@ async function main() {
       exposure.activeOrderCount === 0
         ? "CLOSED-ONLY"
         : "LIVE-EXPOSURE";
-    log("Phase 2", `  ${familyId}: ${tier} (open=${exposure.openPositionCount}, dust=${exposure.openDustCount}, orders=${exposure.activeOrderCount})`);
+    log(
+      "Phase 2",
+      `  ${familyId}: ${tier} (open=${exposure.openPositionCount}, dust=${exposure.openDustCount}, orders=${exposure.activeOrderCount})`,
+    );
   }
 
   log("Phase 2", "Safety checks passed.\n");
@@ -469,9 +478,7 @@ async function main() {
   for (const familyId of affectedFamilyIds) {
     // Get earliest settlement date for this family from the ledger DB
     const earliest = ledgerDb
-      .prepare(
-        `SELECT MIN(settled_at) as min_ts FROM settlement_ledger WHERE family_id = ?`,
-      )
+      .prepare(`SELECT MIN(settled_at) as min_ts FROM settlement_ledger WHERE family_id = ?`)
       .get(familyId) as { min_ts: string | null };
 
     if (!earliest.min_ts) {
@@ -490,7 +497,10 @@ async function main() {
       )
       .run(familyId, earliest.min_ts);
 
-    log("Phase 5", `  ${familyId}: annotated ${result.changes} transition(s) since ${earliest.min_ts}`);
+    log(
+      "Phase 5",
+      `  ${familyId}: annotated ${result.changes} transition(s) since ${earliest.min_ts}`,
+    );
   }
 
   log("Phase 5", "Transition annotation complete.\n");
@@ -596,7 +606,10 @@ function resetClosedFamily(
     )
     .run(familyId);
 
-  log("Phase 4", `  ${familyId}: CLOSED-ONLY full reset (tail=$${currentTailCost.toFixed(2)}, pnl=$${tailAdjustedPnl.toFixed(2)})`);
+  log(
+    "Phase 4",
+    `  ${familyId}: CLOSED-ONLY full reset (tail=$${currentTailCost.toFixed(2)}, pnl=$${tailAdjustedPnl.toFixed(2)})`,
+  );
 }
 
 function resetLiveFamily(
@@ -637,7 +650,10 @@ function resetLiveFamily(
     )
     .run(tailAdjustedPnl, familyId);
 
-  log("Phase 4", `  ${familyId}: LIVE-EXPOSURE PnL-only reset (tail=$${currentTailCost.toFixed(2)}, pnl=$${tailAdjustedPnl.toFixed(2)})`);
+  log(
+    "Phase 4",
+    `  ${familyId}: LIVE-EXPOSURE PnL-only reset (tail=$${currentTailCost.toFixed(2)}, pnl=$${tailAdjustedPnl.toFixed(2)})`,
+  );
 }
 
 // ─── Dry-run plan printer ───────────────────────────────────────────────
@@ -667,7 +683,9 @@ function printPlan(
       exposure.openPositionCount === 0 &&
       exposure.openDustCount === 0 &&
       exposure.activeOrderCount === 0;
-    console.log(`  ${familyId}: ${isClosed ? "CLOSED-ONLY full reset" : "LIVE-EXPOSURE PnL-only reset"}`);
+    console.log(
+      `  ${familyId}: ${isClosed ? "CLOSED-ONLY full reset" : "LIVE-EXPOSURE PnL-only reset"}`,
+    );
   }
 
   console.log("\nPhase 5 — State transitions would be annotated for all affected families.");

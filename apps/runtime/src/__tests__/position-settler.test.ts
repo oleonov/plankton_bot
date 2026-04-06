@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
 import type { PositionRepository, InventoryLotRepository, Position } from "@plankton/domain";
-import type { DetectedResolution, ResolutionCandidate } from "../modules/resolution/resolution-detector.js";
+import type {
+  DetectedResolution,
+  ResolutionCandidate,
+} from "../modules/resolution/resolution-detector.js";
 import { PositionSettler } from "../modules/resolution/position-settler.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -152,8 +155,18 @@ describe("PositionSettler", () => {
     const POS_YES = createPositionId("pos-yes");
     const POS_NO = createPositionId("pos-no");
 
-    const posYes = makePosition({ positionId: POS_YES, tokenId: TOK_YES, avgEntryPrice: 0.3, size: 50 });
-    const posNo = makePosition({ positionId: POS_NO, tokenId: TOK_NO, avgEntryPrice: 0.7, size: 50 });
+    const posYes = makePosition({
+      positionId: POS_YES,
+      tokenId: TOK_YES,
+      avgEntryPrice: 0.3,
+      size: 50,
+    });
+    const posNo = makePosition({
+      positionId: POS_NO,
+      tokenId: TOK_NO,
+      avgEntryPrice: 0.7,
+      size: 50,
+    });
     const positionMap = new Map([
       ["tok-yes", posYes],
       ["tok-no", posNo],
@@ -168,10 +181,7 @@ describe("PositionSettler", () => {
       resolvedAt: "2026-01-01T01:00:00Z",
       source: "gamma-api",
       rawResponse: "{}",
-      candidates: [
-        makeCandidate(TOK_YES, "Yes", POS_YES),
-        makeCandidate(TOK_NO, "No", POS_NO),
-      ],
+      candidates: [makeCandidate(TOK_YES, "Yes", POS_YES), makeCandidate(TOK_NO, "No", POS_NO)],
     };
 
     const results = settler.settle(resolution);
@@ -188,7 +198,12 @@ describe("PositionSettler", () => {
     const TOK_YES = createTokenId("tok-yes-b");
     const POS_YES = createPositionId("pos-yes-b");
 
-    const posYes = makePosition({ positionId: POS_YES, tokenId: TOK_YES, avgEntryPrice: 0.4, size: 20 });
+    const posYes = makePosition({
+      positionId: POS_YES,
+      tokenId: TOK_YES,
+      avgEntryPrice: 0.4,
+      size: 20,
+    });
     const positionMap = new Map([["tok-yes-b", posYes]]);
     const positionRepo = createMockPositionRepo(positionMap);
     const settler = new PositionSettler(positionRepo, lotRepo, db as any);
