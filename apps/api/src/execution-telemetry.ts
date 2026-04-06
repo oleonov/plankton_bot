@@ -16,10 +16,10 @@ export function emptyExecutionTelemetry(): ExecutionTelemetrySnapshot {
   };
 }
 
-function buildWhere(options: {
-  sinceIso?: string;
-  familyIds?: string[];
-}): { where: string; params: unknown[] } {
+function buildWhere(options: { sinceIso?: string; familyIds?: string[] }): {
+  where: string;
+  params: unknown[];
+} {
   const conditions: string[] = [];
   const params: unknown[] = [];
 

@@ -69,9 +69,7 @@ function selectRowsByFamilyIds<T>(
 ): T[] {
   if (familyIds.length === 0) return [];
   const placeholders = familyIds.map(() => "?").join(",");
-  return db
-    .prepare(`${sqlPrefix} WHERE family_id IN (${placeholders})`)
-    .all(...familyIds) as T[];
+  return db.prepare(`${sqlPrefix} WHERE family_id IN (${placeholders})`).all(...familyIds) as T[];
 }
 
 function toFamilyDto(
@@ -203,15 +201,17 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     const deploymentMap = new Map(deploymentRows.map((d) => [d.family_id, d]));
     const items =
       effectiveScope === "profile"
-        ? ([...deploymentMap.keys()].length === 0
-            ? []
-            : (controlDb
-                .prepare(
-                  `SELECT family_id, family_key FROM family_catalog WHERE family_id IN (${[...deploymentMap.keys()]
-                    .map(() => "?")
-                    .join(",")}) ORDER BY family_key`,
-                )
-                .all(...deploymentMap.keys()) as Array<{ family_id: string; family_key: string }>))
+        ? [...deploymentMap.keys()].length === 0
+          ? []
+          : (controlDb
+              .prepare(
+                `SELECT family_id, family_key FROM family_catalog WHERE family_id IN (${[
+                  ...deploymentMap.keys(),
+                ]
+                  .map(() => "?")
+                  .join(",")}) ORDER BY family_key`,
+              )
+              .all(...deploymentMap.keys()) as Array<{ family_id: string; family_key: string }>)
         : (controlDb
             .prepare("SELECT family_id, family_key FROM family_catalog ORDER BY family_key")
             .all() as Array<{ family_id: string; family_key: string }>);

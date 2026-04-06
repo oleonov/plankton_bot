@@ -398,9 +398,9 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
     const countWhere = countClauses.length > 0 ? `WHERE ${countClauses.join(" AND ")}` : "";
     const totalCount = (
-      db.prepare(`SELECT COUNT(*) as cnt FROM family_candidates ${countWhere}`).get(
-        ...countParams,
-      ) as { cnt: number }
+      db
+        .prepare(`SELECT COUNT(*) as cnt FROM family_candidates ${countWhere}`)
+        .get(...countParams) as { cnt: number }
     ).cnt;
 
     if (pageRequested) {

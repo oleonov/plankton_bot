@@ -19,7 +19,15 @@ function buildPageItems(page: number, totalPages: number): Array<number | "ellip
   }
 
   if (page >= totalPages - 3) {
-    return [1, "ellipsis", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+    return [
+      1,
+      "ellipsis",
+      totalPages - 4,
+      totalPages - 3,
+      totalPages - 2,
+      totalPages - 1,
+      totalPages,
+    ];
   }
 
   return [1, "ellipsis", page - 1, page, page + 1, "ellipsis", totalPages];
@@ -59,7 +67,15 @@ export function Pagination(props: PaginationProps) {
         }}
       >
         {totalPages > 1 && (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              flexWrap: "wrap",
+              justifyContent: "center",
+            }}
+          >
             <button
               className="btn-secondary"
               onClick={() => onPageChange(page - 1)}
@@ -69,7 +85,10 @@ export function Pagination(props: PaginationProps) {
             </button>
             {pageItems.map((item, index) =>
               item === "ellipsis" ? (
-                <span key={`ellipsis-${index}`} style={{ color: "var(--text-muted)", padding: "0 4px" }}>
+                <span
+                  key={`ellipsis-${index}`}
+                  style={{ color: "var(--text-muted)", padding: "0 4px" }}
+                >
                   …
                 </span>
               ) : (

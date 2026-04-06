@@ -166,12 +166,7 @@ export function Positions() {
         </table>
       )}
 
-      <Pagination
-        page={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        pageInfo={pageInfo}
-      />
+      <Pagination page={page} totalPages={totalPages} onPageChange={setPage} pageInfo={pageInfo} />
     </div>
   );
 }

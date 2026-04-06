@@ -71,9 +71,9 @@ export const fillRoutes: FastifyPluginAsync<FillOpts> = async (app, opts) => {
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    const countRow = db
-      .prepare(`SELECT COUNT(*) as cnt FROM fills ${where}`)
-      .get(...params) as { cnt: number };
+    const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM fills ${where}`).get(...params) as {
+      cnt: number;
+    };
     const totalCount = countRow.cnt;
 
     const offset = pageRequested ? (page - 1) * limit : 0;
@@ -86,9 +86,7 @@ export const fillRoutes: FastifyPluginAsync<FillOpts> = async (app, opts) => {
       .all(...queryParams) as Record<string, unknown>[];
 
     const nextCursor =
-      !pageRequested && rows.length === limit
-        ? (rows[rows.length - 1]!.filled_at as string)
-        : null;
+      !pageRequested && rows.length === limit ? (rows[rows.length - 1]!.filled_at as string) : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(db, tokenIds);

@@ -44,9 +44,9 @@ export const auditRoutes: FastifyPluginAsync<AuditOpts> = async (app, opts) => {
     }
 
     const totalCount = (
-      controlDb.prepare(
-        `SELECT COUNT(*) as cnt FROM state_transitions t ${where}`,
-      ).get(...params) as { cnt: number }
+      controlDb
+        .prepare(`SELECT COUNT(*) as cnt FROM state_transitions t ${where}`)
+        .get(...params) as { cnt: number }
     ).cnt;
 
     const queryParams = [...params, pageRequested ? lim : lim + 1];

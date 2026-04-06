@@ -98,12 +98,7 @@ export function ProfileFills() {
           ))}
         </tbody>
       </table>
-      <Pagination
-        page={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        pageInfo={pageInfo}
-      />
+      <Pagination page={page} totalPages={totalPages} onPageChange={setPage} pageInfo={pageInfo} />
     </div>
   );
 }

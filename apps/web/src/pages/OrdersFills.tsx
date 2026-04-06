@@ -45,7 +45,9 @@ export function OrdersFills() {
       ? { status: orderStatus || undefined, familyId: familyId || undefined, limit: 50, page }
       : {},
   );
-  const fills = useFills(tab === "fills" ? { familyId: familyId || undefined, limit: 50, page } : {});
+  const fills = useFills(
+    tab === "fills" ? { familyId: familyId || undefined, limit: 50, page } : {},
+  );
   const activeData = tab === "orders" ? orders.data : fills.data;
   const totalCount = activeData?.totalCount ?? 0;
   const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;

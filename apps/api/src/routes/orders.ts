@@ -74,9 +74,9 @@ export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    const countRow = db
-      .prepare(`SELECT COUNT(*) as cnt FROM orders ${where}`)
-      .get(...params) as { cnt: number };
+    const countRow = db.prepare(`SELECT COUNT(*) as cnt FROM orders ${where}`).get(...params) as {
+      cnt: number;
+    };
     const totalCount = countRow.cnt;
 
     const offset = pageRequested ? (page - 1) * limit : 0;

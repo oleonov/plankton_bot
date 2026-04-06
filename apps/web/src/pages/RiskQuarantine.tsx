@@ -24,11 +24,10 @@ export function RiskQuarantine() {
   const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
   const totalPages = riskEvents?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
 
-  const attentionFamilies =
-    (familiesResponse?.items ?? []).filter((f) => {
-      const em = f.state?.effectiveMode ?? f.state?.runtimeMode;
-      return em === "quarantine" || em === "reduce-only" || em === "probe-only";
-    });
+  const attentionFamilies = (familiesResponse?.items ?? []).filter((f) => {
+    const em = f.state?.effectiveMode ?? f.state?.runtimeMode;
+    return em === "quarantine" || em === "reduce-only" || em === "probe-only";
+  });
 
   return (
     <div className="page">
@@ -131,12 +130,7 @@ export function RiskQuarantine() {
           ))}
         </tbody>
       </table>
-      <Pagination
-        page={page}
-        totalPages={totalPages}
-        onPageChange={setPage}
-        pageInfo={pageInfo}
-      />
+      <Pagination page={page} totalPages={totalPages} onPageChange={setPage} pageInfo={pageInfo} />
     </div>
   );
 }

@@ -132,20 +132,20 @@ const families: FamilyDTO[] = [
 ];
 
 function setup(evidenceByFamily: Record<string, { [key: string]: unknown } | null> = {}) {
-    server.use(
-      http.get("/api/v1/families", () =>
-        ok({
-          items: families,
-          meta: {
-            scope: "all" as const,
-            profile: null,
-            totalCount: families.length,
-            totalCatalogCount: families.length,
-            hasMore: false,
-            nextCursor: null,
-          },
-        }),
-      ),
+  server.use(
+    http.get("/api/v1/families", () =>
+      ok({
+        items: families,
+        meta: {
+          scope: "all" as const,
+          profile: null,
+          totalCount: families.length,
+          totalCatalogCount: families.length,
+          hasMore: false,
+          nextCursor: null,
+        },
+      }),
+    ),
     http.get("/api/v1/families/:familyId/transitions", () => ok([])),
     http.get("/api/v1/families/:familyId/positions", () => ok([])),
     http.get("/api/v1/families/:familyId/orders", () => ok({ items: [], nextCursor: null })),

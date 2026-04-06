@@ -144,7 +144,13 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
 
   app.get<{
     Params: { profileId: string };
-    Querystring: { status?: string; family_id?: string; limit?: string; cursor?: string; page?: string };
+    Querystring: {
+      status?: string;
+      family_id?: string;
+      limit?: string;
+      cursor?: string;
+      page?: string;
+    };
   }>("/profiles/:profileId/orders", async (request) => {
     const ledger = requireLedger(request.params.profileId);
     const { status, family_id, cursor } = request.query;
@@ -172,7 +178,9 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
     const totalCount = (
-      ledger.prepare(`SELECT COUNT(*) as cnt FROM orders ${where}`).get(...params) as { cnt: number }
+      ledger.prepare(`SELECT COUNT(*) as cnt FROM orders ${where}`).get(...params) as {
+        cnt: number;
+      }
     ).cnt;
 
     const offset = pageRequested ? (page - 1) * limit : 0;
@@ -256,7 +264,13 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
 
   app.get<{
     Params: { profileId: string };
-    Querystring: { family_id?: string; since?: string; limit?: string; cursor?: string; page?: string };
+    Querystring: {
+      family_id?: string;
+      since?: string;
+      limit?: string;
+      cursor?: string;
+      page?: string;
+    };
   }>("/profiles/:profileId/fills", async (request) => {
     const ledger = requireLedger(request.params.profileId);
     const { family_id, since, cursor } = request.query;
@@ -296,9 +310,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .all(...queryParams) as Record<string, unknown>[];
 
     const nextCursor =
-      !pageRequested && rows.length === limit
-        ? (rows[rows.length - 1]!.filled_at as string)
-        : null;
+      !pageRequested && rows.length === limit ? (rows[rows.length - 1]!.filled_at as string) : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(ledger, tokenIds);

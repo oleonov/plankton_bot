@@ -53,7 +53,11 @@ describe("AlertStrip", () => {
                 updatedAt: new Date().toISOString(),
               },
               caps: null,
-              deployment: { enabled: false, operatorMode: "quarantine", deploymentStage: "disabled" },
+              deployment: {
+                enabled: false,
+                operatorMode: "quarantine",
+                deploymentStage: "disabled",
+              },
             },
           ],
           meta: { scope: "all", profile: "live-lite", totalCatalogCount: 1, hasMore: false },
@@ -104,13 +108,20 @@ describe("AlertStrip", () => {
                   updatedAt: new Date().toISOString(),
                 },
                 caps: null,
-                deployment: { enabled: true, operatorMode: "quarantine", deploymentStage: "live-probe" },
+                deployment: {
+                  enabled: true,
+                  operatorMode: "quarantine",
+                  deploymentStage: "live-probe",
+                },
               },
             ],
             meta: { scope: "profile", profile: "live-lite", totalCatalogCount: 1, hasMore: false },
           });
         }
-        return ok({ items: [], meta: { scope: "all", profile: "live-lite", totalCatalogCount: 1, hasMore: false } });
+        return ok({
+          items: [],
+          meta: { scope: "all", profile: "live-lite", totalCatalogCount: 1, hasMore: false },
+        });
       }),
     );
 

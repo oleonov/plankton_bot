@@ -164,7 +164,14 @@ export const handlers = [
   http.get("/api/v1/families", () =>
     ok({
       items: [],
-      meta: { scope: "all", profile: null, totalCount: 0, totalCatalogCount: 0, hasMore: false, nextCursor: null },
+      meta: {
+        scope: "all",
+        profile: null,
+        totalCount: 0,
+        totalCatalogCount: 0,
+        hasMore: false,
+        nextCursor: null,
+      },
     }),
   ),
   http.get("/api/v1/families/proposals", () => ok([])),
@@ -192,7 +199,9 @@ export const handlers = [
   http.get("/api/v1/discovery/status", () =>
     ok({ lastRun: null, lastSuccessfulRun: null, activeRun: null, workerState: "healthy" }),
   ),
-  http.get("/api/v1/discovery/candidates", () => ok({ items: [], nextCursor: null, totalCount: 0 })),
+  http.get("/api/v1/discovery/candidates", () =>
+    ok({ items: [], nextCursor: null, totalCount: 0 }),
+  ),
   http.get("/api/v1/discovery/runs", () => ok([])),
   http.get("/api/v1/positions", () => ok({ items: [], nextCursor: null, totalCount: 0 })),
   http.get("/api/v1/orders", () => ok({ items: [], nextCursor: null, totalCount: 0 })),
