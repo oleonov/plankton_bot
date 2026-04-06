@@ -35,6 +35,7 @@ export interface ProfileRuntimePublisherDeps {
 
 export class ProfileRuntimePublisher implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private lastSnapshotAt: number | null = null;
   private readonly reader: ValidationMetricsReader;
   private readonly deps: ProfileRuntimePublisherDeps & { intervalMs: number };
 
@@ -152,6 +153,8 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       }
     });
 
+    this.writeEquitySnapshotIfDue(walletBalanceUsdc, balanceUsdc, profileMetrics);
+
     this.deps.log.debug(
       {
         families: familyMetrics.length,
@@ -190,6 +193,64 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       this.deps.log.warn({ err }, "failed to fetch wallet balance — keeping last known");
       return null;
     }
+  }
+
+  private writeEquitySnapshotIfDue(
+    walletBalanceUsdc: number | null,
+    balanceUsdc: number | null,
+    profileMetrics: { totalExposureUsdc: number },
+  ): void {
+    const now = Date.now();
+    if (this.lastSnapshotAt && now - this.lastSnapshotAt < 5 * 60_000) return;
+
+    // Mark-to-market position value (NOT cost basis)
+    const positionValue = (
+      this.deps.ledgerDb
+        .prepare(
+          "SELECT COALESCE(SUM(current_value_usdc), 0) as total FROM positions WHERE status = 'open'",
+        )
+        .get() as { total: number }
+    ).total;
+
+    const isLiveLite = this.deps.profile === "live-lite";
+
+    if (isLiveLite && walletBalanceUsdc == null) {
+      this.deps.log.debug("skipping equity snapshot — wallet balance unavailable");
+      return;
+    }
+    if (!isLiveLite && balanceUsdc == null) {
+      this.deps.log.debug("skipping equity snapshot — balance unavailable");
+      return;
+    }
+
+    const equity = isLiveLite
+      ? walletBalanceUsdc! + positionValue
+      : balanceUsdc! + positionValue;
+
+    const realizedPnl = this.reader.readRealizedPnl();
+
+    this.deps.ledgerDb
+      .prepare(
+        `INSERT INTO portfolio_snapshots
+          (profile, equity_usdc, wallet_usdc, position_value_usdc,
+           realized_pnl_usdc, open_value_usdc, captured_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        this.deps.profile,
+        equity,
+        walletBalanceUsdc ?? null,
+        positionValue,
+        realizedPnl,
+        profileMetrics.totalExposureUsdc,
+        new Date().toISOString(),
+      );
+    this.lastSnapshotAt = now;
+
+    // Prune old snapshots
+    this.deps.ledgerDb
+      .prepare("DELETE FROM portfolio_snapshots WHERE captured_at < datetime('now', '-90 days')")
+      .run();
   }
 
   private buildScorecards(familyIds: string[]): ValidationScorecard[] {

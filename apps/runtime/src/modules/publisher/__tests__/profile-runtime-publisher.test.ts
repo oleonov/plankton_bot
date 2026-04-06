@@ -495,4 +495,189 @@ describe("ProfileRuntimePublisher", () => {
 
     expect(getScorecards()).toHaveLength(0);
   });
+
+  // ─── Portfolio snapshot tests ──────────────────────────────────────────
+
+  function getSnapshots(): Array<Record<string, unknown>> {
+    return ledgerConn.db
+      .prepare("SELECT * FROM portfolio_snapshots ORDER BY id")
+      .all() as Array<Record<string, unknown>>;
+  }
+
+  it("snapshot writes equity = wallet + mark-to-market position value (live-lite)", async () => {
+    controlConn.db
+      .prepare("INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES (?, ?)")
+      .run("live-lite", "Live-Lite");
+    const liveLitePublisher = new ProfileRuntimePublisher({
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db,
+      profile: "live-lite",
+      deployedFamilyIds: () => familyIds,
+      getPaused: () => false,
+      log,
+      intervalMs: 999_999,
+      exchangeGateway: {
+        getBalances: async () => [{ asset: "USDC", available: 200, locked: 0 }],
+      } as any,
+    });
+
+    seedFamilyState(ledgerConn, FAMILY_A, { open_value_usdc: 30 });
+    // Seed an open position with current_value_usdc (mark-to-market)
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO positions (position_id, token_id, family_id, side, status, current_value_usdc)
+         VALUES ('p-mtm', 't1', ?, 'buy', 'open', 50.0)`,
+      )
+      .run(FAMILY_A);
+
+    await liveLitePublisher.publish();
+
+    const snaps = getSnapshots();
+    expect(snaps).toHaveLength(1);
+    // equity = wallet (200) + mark-to-market position value (50) = 250
+    expect(snaps[0]!.equity_usdc).toBeCloseTo(250, 1);
+    expect(snaps[0]!.wallet_usdc).toBeCloseTo(200, 1);
+    expect(snaps[0]!.position_value_usdc).toBeCloseTo(50, 1);
+  });
+
+  it("snapshot writes equity = balance + mark-to-market position value (paper/sim)", async () => {
+    // Seed initial balance in profile_settings so computeBalance returns non-null
+    controlConn.db
+      .prepare("INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES (?, ?)")
+      .run(PROFILE, 500);
+
+    seedFamilyState(ledgerConn, FAMILY_A, { open_value_usdc: 40 });
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO positions (position_id, token_id, family_id, side, status, current_value_usdc)
+         VALUES ('p-mtm2', 't1', ?, 'buy', 'open', 75.0)`,
+      )
+      .run(FAMILY_A);
+
+    await publisher.publish();
+
+    const snaps = getSnapshots();
+    expect(snaps).toHaveLength(1);
+    // balance = 500 (initial) - 40 (exposure) + 0 (realized PnL) = 460
+    // equity = balance (460) + position_value (75) = 535
+    expect(snaps[0]!.equity_usdc).toBeCloseTo(535, 1);
+    expect(snaps[0]!.wallet_usdc).toBeNull();
+    expect(snaps[0]!.position_value_usdc).toBeCloseTo(75, 1);
+  });
+
+  it("snapshot uses SUM(current_value_usdc), NOT open_value_usdc", async () => {
+    controlConn.db
+      .prepare("INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES (?, ?)")
+      .run(PROFILE, 1000);
+
+    // open_value_usdc in family_runtime_state is cost basis — should NOT appear in position_value
+    seedFamilyState(ledgerConn, FAMILY_A, { open_value_usdc: 999 });
+
+    // Two positions with different current_value_usdc
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO positions (position_id, token_id, family_id, side, status, current_value_usdc)
+         VALUES ('p-a', 't1', ?, 'buy', 'open', 10.0)`,
+      )
+      .run(FAMILY_A);
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO positions (position_id, token_id, family_id, side, status, current_value_usdc)
+         VALUES ('p-b', 't2', ?, 'buy', 'open', 20.0)`,
+      )
+      .run(FAMILY_A);
+    // Closed position should be excluded
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO positions (position_id, token_id, family_id, side, status, current_value_usdc)
+         VALUES ('p-c', 't3', ?, 'buy', 'closed', 500.0)`,
+      )
+      .run(FAMILY_A);
+
+    await publisher.publish();
+
+    const snaps = getSnapshots();
+    expect(snaps).toHaveLength(1);
+    // position_value = SUM(current_value_usdc WHERE status='open') = 10 + 20 = 30
+    expect(snaps[0]!.position_value_usdc).toBeCloseTo(30, 1);
+  });
+
+  it("snapshot writes only every 5 min", async () => {
+    controlConn.db
+      .prepare("INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES (?, ?)")
+      .run(PROFILE, 100);
+
+    seedFamilyState(ledgerConn, FAMILY_A);
+
+    await publisher.publish();
+    expect(getSnapshots()).toHaveLength(1);
+
+    // Second publish immediately — should NOT produce another snapshot
+    await publisher.publish();
+    expect(getSnapshots()).toHaveLength(1);
+
+    // Hack the internal timestamp to simulate 5 min elapsed
+    (publisher as any).lastSnapshotAt = Date.now() - 5 * 60_000;
+
+    await publisher.publish();
+    expect(getSnapshots()).toHaveLength(2);
+  });
+
+  it("wallet null skips snapshot for live-lite", async () => {
+    controlConn.db
+      .prepare("INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES (?, ?)")
+      .run("live-lite", "Live-Lite");
+    const liveLitePublisher = new ProfileRuntimePublisher({
+      controlDb: controlConn.db,
+      ledgerDb: ledgerConn.db,
+      profile: "live-lite",
+      deployedFamilyIds: () => familyIds,
+      getPaused: () => false,
+      log,
+      intervalMs: 999_999,
+      // No exchangeGateway → walletBalanceUsdc = null
+    });
+
+    seedFamilyState(ledgerConn, FAMILY_A);
+
+    await liveLitePublisher.publish();
+
+    expect(getSnapshots()).toHaveLength(0);
+  });
+
+  it("balance null skips snapshot for paper/sim", async () => {
+    // No profile_settings row → computeBalance returns null
+    seedFamilyState(ledgerConn, FAMILY_A);
+
+    await publisher.publish();
+
+    expect(getSnapshots()).toHaveLength(0);
+  });
+
+  it("old snapshots are pruned (>90 days)", async () => {
+    controlConn.db
+      .prepare("INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES (?, ?)")
+      .run(PROFILE, 100);
+
+    seedFamilyState(ledgerConn, FAMILY_A);
+
+    // Insert an old snapshot manually
+    ledgerConn.db
+      .prepare(
+        `INSERT INTO portfolio_snapshots
+          (profile, equity_usdc, wallet_usdc, position_value_usdc, realized_pnl_usdc, open_value_usdc, captured_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?)`,
+      )
+      .run(PROFILE, 100, 0, 0, 0, "2025-01-01T00:00:00.000Z");
+
+    expect(getSnapshots()).toHaveLength(1);
+
+    // Publish should insert a new snapshot and prune the old one
+    await publisher.publish();
+
+    const snaps = getSnapshots();
+    expect(snaps).toHaveLength(1);
+    // The remaining snapshot should be the new one, not the old one from 2025-01-01
+    expect(snaps[0]!.captured_at).not.toBe("2025-01-01T00:00:00.000Z");
+  });
 });
