@@ -139,7 +139,7 @@ function AreaChart({ points, onHover, hoverLabel }: AreaChartProps) {
           style={{
             position: "absolute",
             top: 8,
-            left: PAD.left,
+            right: 10,
             zIndex: 1,
             fontSize: 12,
             color: "var(--text-dim)",
@@ -383,6 +383,7 @@ export function PortfolioChart() {
                 fontWeight: interval === i ? 700 : 400,
                 background: interval === i ? "var(--blue)" : "transparent",
                 color: interval === i ? "#fff" : "var(--text-muted)",
+                cursor: "pointer",
               }}
             >
               {i.toUpperCase()}

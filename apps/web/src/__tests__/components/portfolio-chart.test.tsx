@@ -180,6 +180,7 @@ describe("PortfolioChart", () => {
     await waitFor(() => {
       expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$0.00");
       expect(screen.getByTestId("hover-label")).toBeInTheDocument();
+      expect(screen.getByTestId("hover-label")).toHaveStyle({ right: "10px" });
     });
 
     // Mouse leave reverts to latest value
@@ -268,5 +269,36 @@ describe("PortfolioChart", () => {
     await waitFor(() => {
       expect(screen.getByTestId("chart-subtitle").textContent).toContain("Since");
     });
+  });
+
+  it("keeps 1w and 1m portfolio intervals available while history is still collecting", async () => {
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", () =>
+        ok({
+          ...mockPortfolioSeries,
+          interval: "1w",
+          historyStart: "2026-04-06T09:25:00Z",
+          coverageComplete: false,
+        }),
+      ),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-subtitle").textContent).toContain("Since");
+    });
+
+    const interval1w = screen.getByTestId("interval-1w");
+    const interval1m = screen.getByTestId("interval-1m");
+    const intervalAll = screen.getByTestId("interval-all");
+
+    expect(interval1w).not.toBeDisabled();
+    expect(interval1m).not.toBeDisabled();
+    expect(intervalAll).not.toBeDisabled();
+
+    fireEvent.click(interval1m);
+    expect(screen.getByTestId("interval-1m")).toHaveStyle({ fontWeight: 700 });
   });
 });
