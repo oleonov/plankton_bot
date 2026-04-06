@@ -38,6 +38,7 @@ function makeDetectedResolution(overrides?: Partial<DetectedResolution>): Detect
   return {
     conditionId: CONDITION,
     resolution: "YES",
+    winnerTokenId: TOK_YES,
     resolvedAt: "2026-01-15T00:00:00Z",
     source: "gamma-api",
     rawResponse: "{}",
@@ -1150,7 +1151,7 @@ describe("ResolutionModule", () => {
       },
     ]);
 
-    // Mock: Gamma returns resolved market with outcomePrices
+    // Mock: Gamma returns resolved market with outcomePrices and clobTokenIds
     (gammaClient.getMarketBySlug as any).mockResolvedValue({
       closed: true,
       umaResolutionStatus: null,
@@ -1158,6 +1159,7 @@ describe("ResolutionModule", () => {
       rawPayload: {
         outcomePrices: '["1","0"]',
         outcomes: '["Yes","No"]',
+        clobTokenIds: `["${String(TOK_YES)}","${String(TOK_NO)}"]`,
       },
     });
 
@@ -1203,10 +1205,10 @@ describe("ResolutionModule", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     await mod.stop();
 
-    // Verify resolution was updated
+    // Verify resolution was updated (outcome comes from Gamma payload as-is: "Yes")
     expect(resolutionRepo.updateResolution as any).toHaveBeenCalledWith(
       CONDITION,
-      "YES",
+      "Yes",
       "2026-01-15T00:00:00Z",
       "gamma-api",
     );
