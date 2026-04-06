@@ -386,6 +386,45 @@ describe("ResolutionDetector", () => {
     expect(String(results[0]!.winnerTokenId)).toBe("tok-up");
   });
 
+  it("uses tokens[].token_id as winnerTokenId when clobTokenIds are absent", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          tokens: [
+            { token_id: "tok-up-direct", outcome: "Up", winner: true },
+            { token_id: "tok-down-direct", outcome: "Down", winner: false },
+          ],
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("Up");
+    expect(String(results[0]!.winnerTokenId)).toBe("tok-up-direct");
+  });
+
+  it("falls back to outcomes[] when winner token row lacks an outcome label", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          tokens: [
+            { token_id: "tok-up-direct", winner: true },
+            { token_id: "tok-down-direct", outcome: "Down", winner: false },
+          ],
+          outcomes: '["Up", "Down"]',
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("Up");
+    expect(String(results[0]!.winnerTokenId)).toBe("tok-up-direct");
+  });
+
   it("infers Down winner from outcomePrices", async () => {
     (gammaClient.getMarketBySlug as any).mockResolvedValue(
       makeGammaInfo({

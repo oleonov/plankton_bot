@@ -41,7 +41,7 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
 
   updateResolution(
     conditionId: string,
-    resolution: "YES" | "NO",
+    resolution: string,
     resolvedAt: string,
     source: string,
   ): void {
@@ -63,7 +63,7 @@ export class SqliteMarketResolutionRepository implements MarketResolutionReposit
   private rowToResolution(row: Record<string, unknown>): MarketResolution {
     return {
       conditionId: row.condition_id as string,
-      resolution: row.resolution as "YES" | "NO" | "unknown",
+      resolution: row.resolution as string,
       resolvedAt: row.resolved_at as string,
       detectedAt: row.detected_at as string,
       source: row.source as MarketResolution["source"],

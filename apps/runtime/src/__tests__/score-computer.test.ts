@@ -388,6 +388,43 @@ describe("ScoreComputer", () => {
       conn.close();
     });
 
+    it("counts reduce-only transitions for the active profile only", () => {
+      const conn = freshDb();
+      seedFamily(conn.db);
+      conn.db.exec(`
+        INSERT INTO state_transitions (
+          entity_type, entity_id, profile, from_state, to_state, trigger_type, reason
+        ) VALUES
+          ('family', '${FAMILY_ID}', 'live-lite', 'active', 'reduce-only', 'system', 'live demotion'),
+          ('family', '${FAMILY_ID}', 'paper', 'active', 'reduce-only', 'system', 'paper demotion'),
+          ('family', '${FAMILY_ID}', 'live-lite', 'active', 'reduce-only', 'system', 'live demotion again')
+      `);
+
+      const sc = new ScoreComputer(conn.db, conn.db, "live-lite");
+      const m = sc.computeToxicityMetrics(FAMILY_ID);
+
+      expect(m.reduceOnlyCount).toBe(2);
+      conn.close();
+    });
+
+    it("falls back to legacy NULL-profile reduce-only transitions when scoped rows are absent", () => {
+      const conn = freshDb();
+      seedFamily(conn.db);
+      conn.db.exec(`
+        INSERT INTO state_transitions (
+          entity_type, entity_id, profile, from_state, to_state, trigger_type, reason
+        ) VALUES
+          ('family', '${FAMILY_ID}', NULL, 'active', 'reduce-only', 'system', 'legacy demotion'),
+          ('family', '${FAMILY_ID}', 'paper', 'active', 'reduce-only', 'system', 'paper demotion')
+      `);
+
+      const sc = new ScoreComputer(conn.db, conn.db, "live-lite");
+      const m = sc.computeToxicityMetrics(FAMILY_ID);
+
+      expect(m.reduceOnlyCount).toBe(1);
+      conn.close();
+    });
+
     it("computes weeks deployed from family_catalog created_at", () => {
       const conn = freshDb();
       seedFamily(conn.db);

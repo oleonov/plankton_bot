@@ -31,6 +31,10 @@ import { inferResolution, parseTokenIds } from "./resolution-detector.js";
 import type { PositionSettler } from "./position-settler.js";
 import type { Logger } from "../../logger.js";
 
+function normalizeOutcomeLabel(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 export interface ResolutionModuleDeps {
   detector: ResolutionDetector;
   settler: PositionSettler;
@@ -350,8 +354,9 @@ export class ResolutionModule implements RuntimeModule {
 
       const resolution = inferred.outcome;
       const clobTokenIds = parseTokenIds(info.rawPayload);
-      const winnerTokenId =
-        inferred.winnerIndex >= 0 && clobTokenIds[inferred.winnerIndex]
+      const winnerTokenId = inferred.winnerTokenId
+        ? inferred.winnerTokenId
+        : inferred.winnerIndex >= 0 && clobTokenIds[inferred.winnerIndex]
           ? clobTokenIds[inferred.winnerIndex]!
           : null;
 
@@ -384,7 +389,7 @@ export class ResolutionModule implements RuntimeModule {
             const remainingSize = openLots.reduce((sum, l) => sum + l.remainingSize, 0);
             const isWinner = winnerTokenId
               ? String(market.tokenId) === winnerTokenId
-              : market.outcome === resolution;
+              : normalizeOutcomeLabel(market.outcome) === normalizeOutcomeLabel(resolution);
             const settlementPrice = isWinner ? 1.0 : 0.0;
             const settlementPnl = (settlementPrice - pos.avgEntryPrice) * remainingSize;
 

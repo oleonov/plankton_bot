@@ -297,6 +297,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     const lastDemotion = this.stateTransitionRepo.findLastTransitionTo(
       String(familyId),
       "reduce-only",
+      this.activeProfile,
     );
     if (!lastDemotion || lastDemotion.triggerType !== "system") return;
 
@@ -360,6 +361,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     this.stateTransitionRepo.insert({
       entityType: "family",
       entityId: String(familyId),
+      profile: this.activeProfile,
       fromState: "reduce-only",
       toState: previousPromotionState,
       triggerType: "system",
@@ -413,6 +415,7 @@ export class RuntimeSafetyEvaluator implements RuntimeModule {
     this.stateTransitionRepo.insert({
       entityType: "family",
       entityId: String(familyId),
+      profile: this.activeProfile,
       fromState: previousState,
       toState: runtimeMode,
       triggerType: "system",

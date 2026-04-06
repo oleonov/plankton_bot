@@ -35,17 +35,38 @@ export interface DetectedResolution {
   candidates: ResolutionCandidate[];
 }
 
+function parseOutcomes(rawPayload: Record<string, unknown>): string[] {
+  const rawOutcomes = rawPayload.outcomes;
+  if (!rawOutcomes) return [];
+  try {
+    const outcomes = typeof rawOutcomes === "string" ? JSON.parse(rawOutcomes) : rawOutcomes;
+    return Array.isArray(outcomes) ? outcomes.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Exported for use by resolution recovery path. */
 export function inferResolution(
   umaStatus: string | null,
   rawPayload: Record<string, unknown>,
-): { outcome: string; winnerIndex: number } | "unknown" {
+): { outcome: string; winnerIndex: number; winnerTokenId: string | null } | "unknown" {
   // 1. tokens array with winner flag (some Gamma endpoints)
   const tokens = rawPayload.tokens as Array<Record<string, unknown>> | undefined;
   if (tokens && Array.isArray(tokens)) {
+    const outcomes = parseOutcomes(rawPayload);
     for (let i = 0; i < tokens.length; i++) {
       if (tokens[i]!.winner === true) {
-        return { outcome: String(tokens[i]!.outcome ?? ""), winnerIndex: i };
+        const directOutcome =
+          typeof tokens[i]!.outcome === "string" && String(tokens[i]!.outcome).trim() !== ""
+            ? String(tokens[i]!.outcome)
+            : null;
+        return {
+          outcome: directOutcome ?? outcomes[i] ?? "",
+          winnerIndex: i,
+          winnerTokenId:
+            typeof tokens[i]!.token_id === "string" ? String(tokens[i]!.token_id) : null,
+        };
       }
     }
   }
@@ -59,7 +80,7 @@ export function inferResolution(
     const outcome = (rawPayload.resolutionOutcome ?? rawPayload.resolution_outcome) as
       | string
       | undefined;
-    if (outcome) return { outcome: String(outcome), winnerIndex: -1 };
+    if (outcome) return { outcome: String(outcome), winnerIndex: -1, winnerTokenId: null };
   }
 
   return "unknown";
@@ -67,7 +88,7 @@ export function inferResolution(
 
 function inferFromOutcomePrices(
   rawPayload: Record<string, unknown>,
-): { outcome: string; winnerIndex: number } | null {
+): { outcome: string; winnerIndex: number; winnerTokenId: string | null } | null {
   const rawOutcomes = rawPayload.outcomes;
   const rawPrices = rawPayload.outcomePrices;
   if (!rawOutcomes || !rawPrices) return null;
@@ -82,7 +103,7 @@ function inferFromOutcomePrices(
 
     for (let i = 0; i < outcomes.length; i++) {
       if (Number(prices[i]) === 1) {
-        return { outcome: String(outcomes[i]), winnerIndex: i };
+        return { outcome: String(outcomes[i]), winnerIndex: i, winnerTokenId: null };
       }
     }
   } catch {
@@ -116,14 +137,29 @@ function buildGammaResolution(
 ): DetectedResolution {
   const inferred = inferResolution(info.umaResolutionStatus, info.rawPayload);
   const clobTokenIds = parseTokenIds(info.rawPayload);
+  const outcomes = parseOutcomes(info.rawPayload);
   const winnerTokenId =
-    inferred !== "unknown" && inferred.winnerIndex >= 0 && clobTokenIds[inferred.winnerIndex]
-      ? createTokenId(clobTokenIds[inferred.winnerIndex]!)
-      : null;
+    inferred !== "unknown" && inferred.winnerTokenId
+      ? createTokenId(inferred.winnerTokenId)
+      : inferred !== "unknown" && inferred.winnerIndex >= 0 && clobTokenIds[inferred.winnerIndex]
+        ? createTokenId(clobTokenIds[inferred.winnerIndex]!)
+        : null;
+  const resolutionOutcome =
+    inferred === "unknown"
+      ? "unknown"
+      : inferred.outcome.trim() !== ""
+        ? inferred.outcome
+        : winnerTokenId
+          ? (candidates.find((candidate) => String(candidate.tokenId) === String(winnerTokenId))
+              ?.outcome ??
+            (inferred.winnerIndex >= 0 ? (outcomes[inferred.winnerIndex] ?? "unknown") : "unknown"))
+          : inferred.winnerIndex >= 0
+            ? (outcomes[inferred.winnerIndex] ?? "unknown")
+            : "unknown";
 
   return {
     conditionId,
-    resolution: inferred === "unknown" ? "unknown" : inferred.outcome,
+    resolution: resolutionOutcome,
     winnerTokenId,
     resolvedAt: info.closedTime ?? new Date().toISOString(),
     source: "gamma-api",

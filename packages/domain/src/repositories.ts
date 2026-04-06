@@ -425,6 +425,7 @@ export interface StateTransition {
   id: number;
   entityType: string;
   entityId: string;
+  profile: ProfileId | null;
   fromState: string;
   toState: string;
   triggerType: string;
@@ -439,7 +440,11 @@ export interface StateTransition {
 export interface StateTransitionRepository {
   insert(transition: Omit<StateTransition, "id" | "createdAt">): void;
   findByEntity(entityType: string, entityId: string): StateTransition[];
-  findLastTransitionTo(familyId: string, toState: string): StateTransition | null;
+  findLastTransitionTo(
+    familyId: string,
+    toState: string,
+    profile?: ProfileId | null,
+  ): StateTransition | null;
   findRecent(limit: number): StateTransition[];
 }
 

@@ -106,7 +106,7 @@ export class SqliteMarketRepository implements MarketRepository {
       slug: row.slug as string,
       eventSlug: (row.event_slug as string) ?? null,
       question: row.question as string,
-      outcome: row.outcome as "YES" | "NO",
+      outcome: row.outcome as string,
       familyId: row.family_id ? createFamilyId(row.family_id as string) : null,
       familyKey: (row.family_key as string) ?? null,
       regime: (row.regime as Regime) ?? null,

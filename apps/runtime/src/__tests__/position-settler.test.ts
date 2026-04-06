@@ -225,4 +225,35 @@ describe("PositionSettler", () => {
     // PnL: (1.0 - 0.4) * 20 = 12
     expect(results[0]!.realizedPnl).toBeCloseTo(12.0, 5);
   });
+
+  it("matches outcome labels case-insensitively when winnerTokenId is null", () => {
+    const TOK_UP_CASE = createTokenId("tok-up-case");
+    const POS_UP_CASE = createPositionId("pos-up-case");
+
+    const posUp = makePosition({
+      positionId: POS_UP_CASE,
+      tokenId: TOK_UP_CASE,
+      avgEntryPrice: 0.25,
+      size: 10,
+    });
+    const positionMap = new Map([["tok-up-case", posUp]]);
+    const positionRepo = createMockPositionRepo(positionMap);
+    const settler = new PositionSettler(positionRepo, lotRepo, db as any);
+
+    const resolution: DetectedResolution = {
+      conditionId: CONDITION,
+      resolution: "up",
+      winnerTokenId: null,
+      resolvedAt: "2026-01-01T01:00:00Z",
+      source: "gamma-delisted",
+      rawResponse: null,
+      candidates: [makeCandidate(TOK_UP_CASE, " Up ", POS_UP_CASE)],
+    };
+
+    const results = settler.settle(resolution);
+
+    expect(results).toHaveLength(1);
+    expect(results[0]!.settlementPrice).toBe(1.0);
+    expect(results[0]!.realizedPnl).toBeCloseTo(7.5, 5);
+  });
 });
