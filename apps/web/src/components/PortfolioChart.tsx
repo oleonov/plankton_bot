@@ -200,29 +200,34 @@ function AreaChart({ points, onHover }: AreaChartProps) {
       />
 
       {/* Crosshair line + dot on hover */}
-      {hoverIdx != null && points[hoverIdx] && (
-        <g>
-          <line
-            x1={x(hoverIdx)}
-            y1={PAD.top}
-            x2={x(hoverIdx)}
-            y2={PAD.top + plotH}
-            stroke="var(--text-dim)"
-            strokeWidth={1}
-            strokeDasharray="3,3"
-            style={{ pointerEvents: "none" }}
-          />
-          <circle
-            cx={x(hoverIdx)}
-            cy={y(points[hoverIdx]!.value)}
-            r={4}
-            fill="var(--blue)"
-            stroke="#fff"
-            strokeWidth={2}
-            style={{ pointerEvents: "none" }}
-          />
-        </g>
-      )}
+      {hoverIdx != null &&
+        (() => {
+          const hp = points[hoverIdx];
+          if (!hp) return null;
+          return (
+            <g>
+              <line
+                x1={x(hoverIdx)}
+                y1={PAD.top}
+                x2={x(hoverIdx)}
+                y2={PAD.top + plotH}
+                stroke="var(--text-dim)"
+                strokeWidth={1}
+                strokeDasharray="3,3"
+                style={{ pointerEvents: "none" }}
+              />
+              <circle
+                cx={x(hoverIdx)}
+                cy={y(hp.value)}
+                r={4}
+                fill="var(--blue)"
+                stroke="#fff"
+                strokeWidth={2}
+                style={{ pointerEvents: "none" }}
+              />
+            </g>
+          );
+        })()}
     </svg>
   );
 }
@@ -240,10 +245,6 @@ export function PortfolioChart() {
   useEffect(() => {
     safeSetItem("portfolio-interval", interval);
   }, [interval]);
-
-  useEffect(() => {
-    setHoveredPoint(null);
-  }, [mode, interval]);
 
   const points =
     mode === "portfolio"
@@ -280,7 +281,10 @@ export function PortfolioChart() {
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
             <button
               data-testid="mode-portfolio"
-              onClick={() => setMode("portfolio")}
+              onClick={() => {
+                setMode("portfolio");
+                setHoveredPoint(null);
+              }}
               style={{
                 ...tabBase,
                 fontWeight: mode === "portfolio" ? 700 : 400,
@@ -292,7 +296,10 @@ export function PortfolioChart() {
             </button>
             <button
               data-testid="mode-realized"
-              onClick={() => setMode("realized")}
+              onClick={() => {
+                setMode("realized");
+                setHoveredPoint(null);
+              }}
               style={{
                 ...tabBase,
                 fontWeight: mode === "realized" ? 700 : 400,
@@ -329,7 +336,10 @@ export function PortfolioChart() {
             <button
               key={i}
               data-testid={`interval-${i}`}
-              onClick={() => setIntervalState(i)}
+              onClick={() => {
+                setIntervalState(i);
+                setHoveredPoint(null);
+              }}
               style={{
                 ...tabBase,
                 fontWeight: interval === i ? 700 : 400,
