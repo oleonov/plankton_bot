@@ -147,7 +147,8 @@ describe("ResolutionDetector", () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]!.source).toBe("gamma-api");
-    expect(results[0]!.resolution).toBe("YES");
+    expect(results[0]!.resolution).toBe("Yes");
+    expect(results[0]!.winnerTokenId).toBeNull();
     expect(gammaClient.getMarketById as any).toHaveBeenCalledWith(CONDITION);
   });
 
@@ -200,6 +201,7 @@ describe("ResolutionDetector", () => {
     expect(results).toHaveLength(1);
     expect(results[0]!.source).toBe("gamma-delisted");
     expect(results[0]!.resolution).toBe("unknown");
+    expect(results[0]!.winnerTokenId).toBeNull();
   });
 
   // ─── Normal resolution flow ─────────────────────────────────────────────
@@ -210,7 +212,8 @@ describe("ResolutionDetector", () => {
     const results = await detector.detect(0);
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.resolution).toBe("YES");
+    expect(results[0]!.resolution).toBe("Yes");
+    expect(results[0]!.winnerTokenId).toBeNull();
     expect(results[0]!.source).toBe("gamma-api");
     expect(results[0]!.conditionId).toBe(CONDITION);
   });
@@ -270,7 +273,7 @@ describe("ResolutionDetector", () => {
 
   // ─── Resolution inference from outcomePrices ────────────────────────
 
-  it("infers YES resolution from outcomePrices field", async () => {
+  it("infers Yes resolution from outcomePrices field", async () => {
     // Gamma /markets/slug/ returns outcomes and outcomePrices as stringified arrays
     (gammaClient.getMarketBySlug as any).mockResolvedValue(
       makeGammaInfo({
@@ -284,10 +287,11 @@ describe("ResolutionDetector", () => {
     const results = await detector.detect(0);
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.resolution).toBe("YES");
+    expect(results[0]!.resolution).toBe("Yes");
+    expect(results[0]!.winnerTokenId).toBeNull();
   });
 
-  it("infers NO resolution from outcomePrices field", async () => {
+  it("infers No resolution from outcomePrices field", async () => {
     (gammaClient.getMarketBySlug as any).mockResolvedValue(
       makeGammaInfo({
         rawPayload: {
@@ -300,7 +304,8 @@ describe("ResolutionDetector", () => {
     const results = await detector.detect(0);
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.resolution).toBe("NO");
+    expect(results[0]!.resolution).toBe("No");
+    expect(results[0]!.winnerTokenId).toBeNull();
   });
 
   it("returns unknown when outcomePrices has no winner (no price=1)", async () => {
@@ -318,6 +323,7 @@ describe("ResolutionDetector", () => {
 
     expect(results).toHaveLength(1);
     expect(results[0]!.resolution).toBe("unknown");
+    expect(results[0]!.winnerTokenId).toBeNull();
   });
 
   it("prefers tokens.winner over outcomePrices when both present", async () => {
@@ -337,7 +343,8 @@ describe("ResolutionDetector", () => {
     const results = await detector.detect(0);
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.resolution).toBe("YES"); // tokens.winner takes priority
+    expect(results[0]!.resolution).toBe("Yes"); // tokens.winner takes priority
+    expect(results[0]!.winnerTokenId).toBeNull();
   });
 
   it("handles numeric outcomePrices (non-stringified JSON array)", async () => {
@@ -354,6 +361,64 @@ describe("ResolutionDetector", () => {
     const results = await detector.detect(0);
 
     expect(results).toHaveLength(1);
-    expect(results[0]!.resolution).toBe("YES");
+    expect(results[0]!.resolution).toBe("Yes");
+    expect(results[0]!.winnerTokenId).toBeNull();
+  });
+
+  // ─── Non-binary outcome resolution ──────────────────────────────────
+
+  it("infers Up winner from tokens[].winner flag", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          tokens: [
+            { outcome: "Up", winner: true },
+            { outcome: "Down", winner: false },
+          ],
+          clobTokenIds: '["tok-up", "tok-down"]',
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("Up");
+    expect(String(results[0]!.winnerTokenId)).toBe("tok-up");
+  });
+
+  it("infers Down winner from outcomePrices", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          outcomes: '["Up", "Down"]',
+          outcomePrices: '["0", "1"]',
+          clobTokenIds: '["tok-up", "tok-down"]',
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("Down");
+    expect(String(results[0]!.winnerTokenId)).toBe("tok-down");
+  });
+
+  it("binary Yes/No still works with winnerTokenId — regression", async () => {
+    (gammaClient.getMarketBySlug as any).mockResolvedValue(
+      makeGammaInfo({
+        rawPayload: {
+          tokens: [
+            { outcome: "Yes", winner: true },
+            { outcome: "No", winner: false },
+          ],
+          clobTokenIds: '["tok-yes", "tok-no"]',
+        },
+      }),
+    );
+
+    const results = await detector.detect(0);
+    expect(results).toHaveLength(1);
+    expect(results[0]!.resolution).toBe("Yes");
+    expect(String(results[0]!.winnerTokenId)).toBe("tok-yes");
   });
 });
