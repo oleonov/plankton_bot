@@ -235,14 +235,23 @@ export interface FamilyDTO {
 export interface FamilyListMeta {
   scope: "profile" | "all";
   profile: string | null;
+  totalCount: number;
   totalCatalogCount: number;
   nextCursor: string | null;
   hasMore: boolean;
+  page?: number;
+  pageSize?: number;
+  totalPages?: number;
 }
 
 export interface FamilyListResponse {
   items: FamilyDTO[];
   meta: FamilyListMeta;
+}
+
+export interface FamilyOptionDTO {
+  familyId: string;
+  familyKey: string;
 }
 
 /** GET /risk-events item */
@@ -259,6 +268,10 @@ export interface RiskEventDTO {
 export interface Paginated<T> {
   items: T[];
   nextCursor: string | null;
+  totalCount?: number;
+  page?: number;
+  pageSize?: number;
+  totalPages?: number;
 }
 
 /** GET /discovery/candidates item */

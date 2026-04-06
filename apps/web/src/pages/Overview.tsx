@@ -139,11 +139,16 @@ export function Overview() {
   const probeOnlyCount = modeCounts?.["probe-only"] ?? countFamiliesByMode("probe-only");
   const reduceOnlyCount = modeCounts?.["reduce-only"] ?? countFamiliesByMode("reduce-only");
   const quarantinedCount = modeCounts?.quarantine ?? countFamiliesByMode("quarantine");
-  const enabledFamilyCount = modeCounts
+  const countedEnabledFamilies = modeCounts
     ? Object.entries(modeCounts)
         .filter(([mode]) => mode !== "_disabled")
         .reduce((sum, [, count]) => sum + count, 0)
-    : (familyMetrics?.length ?? status.activeFamilyCount);
+    : null;
+  const enabledFamilyCount =
+    status.liveLite?.familyAllowlist.length ??
+    countedEnabledFamilies ??
+    familyMetrics?.length ??
+    status.activeFamilyCount;
   const tailAdjPnl = metrics.totalRealizedPnl - status.totalTailCostUsdc;
   const execution = status.executionTelemetry24h;
   const executionWatch = familyMetrics ? getExecutionWatchFamilies(familyMetrics) : [];

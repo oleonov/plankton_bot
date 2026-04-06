@@ -224,22 +224,21 @@ const PAGE_SIZE = 50;
 
 export function Families() {
   const [scope, setScope] = useState<"profile" | "all">("profile");
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [cursorStack, setCursorStack] = useState<string[]>([]);
-  const { data, isLoading } = useFamiliesScoped(scope, cursor, PAGE_SIZE);
+  const [page, setPage] = useState(1);
+  const { data, isLoading } = useFamiliesScoped(scope, page, PAGE_SIZE);
   const families = data?.items ?? [];
   const meta = data?.meta ?? null;
   const [expanded, setExpanded] = useState<string | null>(null);
   const { sort, toggle } = useSort();
 
   const resetPagination = useCallback(() => {
-    setCursor(null);
-    setCursorStack([]);
+    setPage(1);
   }, []);
 
   // If API returned "all" despite requesting "profile" (no active profile),
   // sync the toggle to match
   const effectiveScope = meta?.scope ?? "all";
+  const scopeTotalCount = meta?.totalCount ?? families.length;
 
   if (isLoading) return <div className="page">Loading...</div>;
 
@@ -301,11 +300,7 @@ export function Families() {
         </div>
         {meta && (
           <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
-            {families.length}
-            {effectiveScope === "profile" && meta.totalCatalogCount > families.length
-              ? ` of ${meta.totalCatalogCount}`
-              : ""}{" "}
-            families
+            {scopeTotalCount} families
             {meta.profile ? ` (${meta.profile})` : ""}
           </span>
         )}
@@ -456,20 +451,12 @@ export function Families() {
         </tbody>
       </table>
       <Pagination
-        nextCursor={meta?.nextCursor ?? null}
-        onNext={(next) => {
-          setCursorStack((s) => [...s, cursor ?? ""]);
-          setCursor(next);
-        }}
-        hasPrev={cursorStack.length > 0}
-        onPrev={() => {
-          const prev = cursorStack[cursorStack.length - 1];
-          setCursorStack((s) => s.slice(0, -1));
-          setCursor(prev || null);
-        }}
+        page={page}
+        totalPages={meta?.totalPages ?? Math.max(1, Math.ceil(scopeTotalCount / PAGE_SIZE))}
+        onPageChange={setPage}
         pageInfo={
           meta && families.length > 0
-            ? `${cursorStack.length * PAGE_SIZE + 1}\u2013${cursorStack.length * PAGE_SIZE + families.length}${meta.totalCatalogCount > 0 ? ` of ${meta.totalCatalogCount}` : ""}`
+            ? `${(page - 1) * PAGE_SIZE + 1}\u2013${(page - 1) * PAGE_SIZE + families.length} of ${scopeTotalCount}`
             : undefined
         }
       />

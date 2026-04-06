@@ -144,11 +144,13 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
 
   app.get<{
     Params: { profileId: string };
-    Querystring: { status?: string; family_id?: string; limit?: string; cursor?: string };
+    Querystring: { status?: string; family_id?: string; limit?: string; cursor?: string; page?: string };
   }>("/profiles/:profileId/orders", async (request) => {
     const ledger = requireLedger(request.params.profileId);
     const { status, family_id, cursor } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
+    const page = Math.max(Number(request.query.page) || 1, 1);
+    const pageRequested = request.query.page != null;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -162,19 +164,30 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       conditions.push("family_id = ?");
       params.push(family_id);
     }
-    if (cursor) {
+    if (!pageRequested && cursor) {
       conditions.push("created_at < ?");
       params.push(cursor);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    params.push(limit);
+
+    const totalCount = (
+      ledger.prepare(`SELECT COUNT(*) as cnt FROM orders ${where}`).get(...params) as { cnt: number }
+    ).cnt;
+
+    const offset = pageRequested ? (page - 1) * limit : 0;
+    const queryParams = [...params, limit];
+    const offsetClause = pageRequested ? " OFFSET ?" : "";
+    if (pageRequested) queryParams.push(offset);
 
     const rows = ledger
-      .prepare(`SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT ?`)
-      .all(...params) as Record<string, unknown>[];
+      .prepare(`SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT ?${offsetClause}`)
+      .all(...queryParams) as Record<string, unknown>[];
 
-    const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.created_at as string) : null;
+    const nextCursor =
+      !pageRequested && rows.length === limit
+        ? (rows[rows.length - 1]!.created_at as string)
+        : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(ledger, tokenIds);
@@ -182,6 +195,10 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     return ok({
       items: rows.map((r) => orderToDto(r, getMetaOrEmpty(metaMap, r.token_id as string))),
       nextCursor,
+      totalCount,
+      page: pageRequested ? page : undefined,
+      pageSize: pageRequested ? limit : undefined,
+      totalPages: pageRequested ? Math.max(1, Math.ceil(totalCount / limit)) : undefined,
     });
   });
 
@@ -239,11 +256,13 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
 
   app.get<{
     Params: { profileId: string };
-    Querystring: { family_id?: string; since?: string; limit?: string; cursor?: string };
+    Querystring: { family_id?: string; since?: string; limit?: string; cursor?: string; page?: string };
   }>("/profiles/:profileId/fills", async (request) => {
     const ledger = requireLedger(request.params.profileId);
     const { family_id, since, cursor } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
+    const page = Math.max(Number(request.query.page) || 1, 1);
+    const pageRequested = request.query.page != null;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -256,19 +275,30 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       conditions.push("filled_at >= ?");
       params.push(since);
     }
-    if (cursor) {
+    if (!pageRequested && cursor) {
       conditions.push("filled_at < ?");
       params.push(cursor);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    params.push(limit);
+
+    const totalCount = (
+      ledger.prepare(`SELECT COUNT(*) as cnt FROM fills ${where}`).get(...params) as { cnt: number }
+    ).cnt;
+
+    const offset = pageRequested ? (page - 1) * limit : 0;
+    const queryParams = [...params, limit];
+    const offsetClause = pageRequested ? " OFFSET ?" : "";
+    if (pageRequested) queryParams.push(offset);
 
     const rows = ledger
-      .prepare(`SELECT * FROM fills ${where} ORDER BY filled_at DESC LIMIT ?`)
-      .all(...params) as Record<string, unknown>[];
+      .prepare(`SELECT * FROM fills ${where} ORDER BY filled_at DESC LIMIT ?${offsetClause}`)
+      .all(...queryParams) as Record<string, unknown>[];
 
-    const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.filled_at as string) : null;
+    const nextCursor =
+      !pageRequested && rows.length === limit
+        ? (rows[rows.length - 1]!.filled_at as string)
+        : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(ledger, tokenIds);
@@ -276,6 +306,10 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     return ok({
       items: rows.map((r) => fillToDto(r, getMetaOrEmpty(metaMap, r.token_id as string))),
       nextCursor,
+      totalCount,
+      page: pageRequested ? page : undefined,
+      pageSize: pageRequested ? limit : undefined,
+      totalPages: pageRequested ? Math.max(1, Math.ceil(totalCount / limit)) : undefined,
     });
   });
 

@@ -35,19 +35,23 @@ export function OrdersFills() {
   const [tab, setTab] = useState<"orders" | "fills">("orders");
   const [familyId, setFamilyId] = useState("");
   const [orderStatus, setOrderStatus] = useState("");
-  const [cursor, setCursor] = useState<string | undefined>();
+  const [page, setPage] = useState(1);
   const orderSort = useSort();
   const fillSort = useSort();
 
   const { data: families } = useFamilies();
   const orders = useOrders(
     tab === "orders"
-      ? { status: orderStatus || undefined, familyId: familyId || undefined, limit: 50, cursor }
+      ? { status: orderStatus || undefined, familyId: familyId || undefined, limit: 50, page }
       : {},
   );
-  const fills = useFills(
-    tab === "fills" ? { familyId: familyId || undefined, limit: 50, cursor } : {},
-  );
+  const fills = useFills(tab === "fills" ? { familyId: familyId || undefined, limit: 50, page } : {});
+  const activeData = tab === "orders" ? orders.data : fills.data;
+  const totalCount = activeData?.totalCount ?? 0;
+  const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
+  const pageEnd = pageStart + ((activeData?.items.length ?? 0) - 1);
+  const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
+  const totalPages = activeData?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
 
   return (
     <div className="page">
@@ -56,7 +60,7 @@ export function OrdersFills() {
           className={`tab ${tab === "orders" ? "active" : ""}`}
           onClick={() => {
             setTab("orders");
-            setCursor(undefined);
+            setPage(1);
           }}
         >
           Orders
@@ -65,7 +69,7 @@ export function OrdersFills() {
           className={`tab ${tab === "fills" ? "active" : ""}`}
           onClick={() => {
             setTab("fills");
-            setCursor(undefined);
+            setPage(1);
           }}
         >
           Fills
@@ -77,7 +81,7 @@ export function OrdersFills() {
           value={familyId}
           onChange={(e) => {
             setFamilyId(e.target.value);
-            setCursor(undefined);
+            setPage(1);
           }}
         >
           <option value="">All families</option>
@@ -92,7 +96,7 @@ export function OrdersFills() {
             value={orderStatus}
             onChange={(e) => {
               setOrderStatus(e.target.value);
-              setCursor(undefined);
+              setPage(1);
             }}
           >
             <option value="">All statuses</option>
@@ -207,7 +211,12 @@ export function OrdersFills() {
               })}
             </tbody>
           </table>
-          <Pagination nextCursor={orders.data?.nextCursor ?? null} onNext={setCursor} />
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            onPageChange={setPage}
+            pageInfo={pageInfo}
+          />
         </>
       ) : (
         <>
@@ -306,7 +315,12 @@ export function OrdersFills() {
               ))}
             </tbody>
           </table>
-          <Pagination nextCursor={fills.data?.nextCursor ?? null} onNext={setCursor} />
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            onPageChange={setPage}
+            pageInfo={pageInfo}
+          />
         </>
       )}
     </div>

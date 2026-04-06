@@ -179,17 +179,22 @@ export function Discovery() {
   const [confFilter, setConfFilter] = useState<string>("");
   const [cadenceFilter, setCadenceFilter] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [cursor, setCursor] = useState<string | undefined>();
+  const [page, setPage] = useState(1);
 
   const { data, isLoading } = useCandidates({
     status: statusFilter || undefined,
     recommendation: recFilter || undefined,
     confidence: confFilter || undefined,
     cadence: cadenceFilter || undefined,
-    cursor,
+    page,
   });
   const candidates = data?.items;
   const { data: status } = useDiscoveryStatus();
+  const totalCount = data?.totalCount ?? 0;
+  const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
+  const pageEnd = pageStart + ((candidates?.length ?? 0) - 1);
+  const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
+  const totalPages = data?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
 
   if (isLoading) return <div className="page">Loading...</div>;
 
@@ -205,7 +210,7 @@ export function Discovery() {
             value={statusFilter}
             onChange={(e) => {
               setStatusFilter(e.target.value);
-              setCursor(undefined);
+              setPage(1);
             }}
           >
             <option value="">All</option>
@@ -221,7 +226,7 @@ export function Discovery() {
             value={recFilter}
             onChange={(e) => {
               setRecFilter(e.target.value);
-              setCursor(undefined);
+              setPage(1);
             }}
           >
             <option value="">All</option>
@@ -237,7 +242,7 @@ export function Discovery() {
             value={confFilter}
             onChange={(e) => {
               setConfFilter(e.target.value);
-              setCursor(undefined);
+              setPage(1);
             }}
           >
             <option value="">All</option>
@@ -252,7 +257,7 @@ export function Discovery() {
             value={cadenceFilter}
             onChange={(e) => {
               setCadenceFilter(e.target.value);
-              setCursor(undefined);
+              setPage(1);
             }}
           >
             <option value="">All</option>
@@ -276,7 +281,12 @@ export function Discovery() {
       ) : (
         <>
           <CandidateTable candidates={candidates!} onSelect={setSelectedId} />
-          <Pagination nextCursor={data?.nextCursor ?? null} onNext={setCursor} />
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            onPageChange={setPage}
+            pageInfo={pageInfo}
+          />
         </>
       )}
       {selectedId && (

@@ -20,12 +20,10 @@ export function Positions() {
   const [dustOnly, setDustOnly] = useState(false);
   const [status, setStatus] = useState("");
   const [sort, setSort] = useState("");
-  const [cursor, setCursor] = useState<string | undefined>();
-  const [cursorStack, setCursorStack] = useState<string[]>([]);
+  const [page, setPage] = useState(1);
 
   const resetPagination = useCallback(() => {
-    setCursor(undefined);
-    setCursorStack([]);
+    setPage(1);
   }, []);
 
   const { data, isLoading } = usePositions({
@@ -34,16 +32,17 @@ export function Positions() {
     status: status || undefined,
     sort: sort || undefined,
     limit: PAGE_SIZE,
-    cursor,
+    page,
   });
 
   const positions = data?.items;
   const totalCount = data?.totalCount ?? 0;
   const { data: families } = useFamilies();
 
-  const pageStart = cursorStack.length * PAGE_SIZE + 1;
+  const pageStart = totalCount > 0 ? (page - 1) * PAGE_SIZE + 1 : 0;
   const pageEnd = pageStart + (positions?.length ?? 0) - 1;
   const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
+  const totalPages = data?.totalPages ?? Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
 
   return (
     <div className="page">
@@ -168,17 +167,9 @@ export function Positions() {
       )}
 
       <Pagination
-        nextCursor={data?.nextCursor ?? null}
-        onNext={(next) => {
-          setCursorStack((s) => [...s, cursor ?? ""]);
-          setCursor(next);
-        }}
-        hasPrev={cursorStack.length > 0}
-        onPrev={() => {
-          const prev = cursorStack[cursorStack.length - 1];
-          setCursorStack((s) => s.slice(0, -1));
-          setCursor(prev || undefined);
-        }}
+        page={page}
+        totalPages={totalPages}
+        onPageChange={setPage}
         pageInfo={pageInfo}
       />
     </div>

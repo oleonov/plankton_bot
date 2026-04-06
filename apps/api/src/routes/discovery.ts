@@ -349,32 +349,45 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       recommendation?: string;
       limit?: string;
       cursor?: string;
+      page?: string;
     };
   }>("/discovery/candidates", async (request) => {
     const { status, confidence, cadence, recommendation, cursor } = request.query;
     const rawLimit = parseInt(request.query.limit ?? "50", 10);
     const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 50, 200);
+    const page = Math.max(Number(request.query.page) || 1, 1);
+    const pageRequested = request.query.page != null;
 
     const clauses: string[] = [];
     const params: unknown[] = [];
+    const countClauses: string[] = [];
+    const countParams: unknown[] = [];
 
     if (status) {
       clauses.push("status = ?");
       params.push(status);
+      countClauses.push("status = ?");
+      countParams.push(status);
     }
     if (confidence) {
       clauses.push("pattern_confidence = ?");
       params.push(confidence);
+      countClauses.push("pattern_confidence = ?");
+      countParams.push(confidence);
     }
     if (cadence) {
       clauses.push("cadence = ?");
       params.push(cadence);
+      countClauses.push("cadence = ?");
+      countParams.push(cadence);
     }
     if (recommendation) {
       clauses.push("gate_recommendation = ?");
       params.push(recommendation);
+      countClauses.push("gate_recommendation = ?");
+      countParams.push(recommendation);
     }
-    if (cursor) {
+    if (!pageRequested && cursor) {
       const parsed = decodeCursor(cursor);
       if (!parsed) throw new ApiError(400, "invalid cursor format", "INVALID_CURSOR");
       const keyset = buildKeysetClause(parsed);
@@ -383,6 +396,32 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
     }
 
     const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const countWhere = countClauses.length > 0 ? `WHERE ${countClauses.join(" AND ")}` : "";
+    const totalCount = (
+      db.prepare(`SELECT COUNT(*) as cnt FROM family_candidates ${countWhere}`).get(
+        ...countParams,
+      ) as { cnt: number }
+    ).cnt;
+
+    if (pageRequested) {
+      const offset = (page - 1) * limit;
+      const rows = db
+        .prepare(
+          `SELECT * FROM family_candidates ${where}
+           ORDER BY ${ORDER_BY}
+           LIMIT ? OFFSET ?`,
+        )
+        .all(...params, limit, offset) as CandidateRow[];
+      return ok({
+        items: rows.map(toCandidateDto),
+        nextCursor: null,
+        totalCount,
+        page,
+        pageSize: limit,
+        totalPages: Math.max(1, Math.ceil(totalCount / limit)),
+      });
+    }
+
     const sql = `SELECT * FROM family_candidates ${where}
       ORDER BY ${ORDER_BY}
       LIMIT ?`;
@@ -395,7 +434,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
     const last = rows[rows.length - 1];
     const nextCursor = hasMore && last ? encodeCursor(last) : null;
 
-    return ok({ items: rows.map(toCandidateDto), nextCursor });
+    return ok({ items: rows.map(toCandidateDto), nextCursor, totalCount });
   });
 
   // ── GET /discovery/candidates/:candidateId ─────────────────────────────

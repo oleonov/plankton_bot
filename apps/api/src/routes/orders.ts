@@ -42,6 +42,7 @@ interface OrderQuery {
   family_id?: string;
   limit?: string;
   cursor?: string;
+  page?: string;
 }
 
 export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
@@ -49,6 +50,8 @@ export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
     const { status, family_id, cursor } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
+    const page = Math.max(Number(request.query.page) || 1, 1);
+    const pageRequested = request.query.page != null;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -64,19 +67,31 @@ export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
       params.push(family_id);
     }
 
-    if (cursor) {
+    if (!pageRequested && cursor) {
       conditions.push("created_at < ?");
       params.push(cursor);
     }
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    params.push(limit);
+
+    const countRow = db
+      .prepare(`SELECT COUNT(*) as cnt FROM orders ${where}`)
+      .get(...params) as { cnt: number };
+    const totalCount = countRow.cnt;
+
+    const offset = pageRequested ? (page - 1) * limit : 0;
+    const queryParams = [...params, limit];
+    const offsetClause = pageRequested ? " OFFSET ?" : "";
+    if (pageRequested) queryParams.push(offset);
 
     const rows = db
-      .prepare(`SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT ?`)
-      .all(...params) as Record<string, unknown>[];
+      .prepare(`SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT ?${offsetClause}`)
+      .all(...queryParams) as Record<string, unknown>[];
 
-    const nextCursor = rows.length === limit ? (rows[rows.length - 1]!.created_at as string) : null;
+    const nextCursor =
+      !pageRequested && rows.length === limit
+        ? (rows[rows.length - 1]!.created_at as string)
+        : null;
 
     const tokenIds = rows.map((r) => r.token_id as string);
     const metaMap = buildMarketMetaMap(db, tokenIds);
@@ -84,6 +99,10 @@ export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
     return ok({
       items: rows.map((r) => toDto(r, getMetaOrEmpty(metaMap, r.token_id as string))),
       nextCursor,
+      totalCount,
+      page: pageRequested ? page : undefined,
+      pageSize: pageRequested ? limit : undefined,
+      totalPages: pageRequested ? Math.max(1, Math.ceil(totalCount / limit)) : undefined,
     });
   });
 

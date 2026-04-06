@@ -10,15 +10,20 @@ export function ProfileOrders() {
   const { profileId } = useParams<{ profileId: string }>();
   const [familyId, setFamilyId] = useState("");
   const [orderStatus, setOrderStatus] = useState("");
-  const [cursor, setCursor] = useState<string | undefined>();
+  const [page, setPage] = useState(1);
 
   const { data: families } = useFamilies();
   const orders = useProfileOrders(profileId, {
     status: orderStatus || undefined,
     familyId: familyId || undefined,
     limit: 50,
-    cursor,
+    page,
   });
+  const totalCount = orders.data?.totalCount ?? 0;
+  const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
+  const pageEnd = pageStart + ((orders.data?.items.length ?? 0) - 1);
+  const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
+  const totalPages = orders.data?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
 
   return (
     <div className="page">
@@ -34,7 +39,7 @@ export function ProfileOrders() {
           value={familyId}
           onChange={(e) => {
             setFamilyId(e.target.value);
-            setCursor(undefined);
+            setPage(1);
           }}
         >
           <option value="">All families</option>
@@ -48,7 +53,7 @@ export function ProfileOrders() {
           value={orderStatus}
           onChange={(e) => {
             setOrderStatus(e.target.value);
-            setCursor(undefined);
+            setPage(1);
           }}
         >
           <option value="">All statuses</option>
@@ -113,7 +118,12 @@ export function ProfileOrders() {
           })}
         </tbody>
       </table>
-      <Pagination nextCursor={orders.data?.nextCursor ?? null} onNext={setCursor} />
+      <Pagination
+        page={page}
+        totalPages={totalPages}
+        onPageChange={setPage}
+        pageInfo={pageInfo}
+      />
     </div>
   );
 }

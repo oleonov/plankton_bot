@@ -3,7 +3,7 @@ import { useFamiliesScoped, useStatus } from "../api/hooks.ts";
 import { useSSEState } from "../api/sse.tsx";
 
 export function AlertStrip() {
-  const { data: familiesResponse } = useFamiliesScoped("profile", null, 200);
+  const { data: familiesResponse } = useFamiliesScoped("profile", 1, 200);
   const { data: status } = useStatus();
   const sseState = useSSEState();
   const families = familiesResponse?.items ?? [];

@@ -46,6 +46,7 @@ interface PositionQuery {
   sort?: string;
   limit?: string;
   cursor?: string;
+  page?: string;
 }
 
 export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts) => {
@@ -53,6 +54,8 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
     const { family_id, dust, status, sort, cursor } = request.query;
     const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
+    const page = Math.max(Number(request.query.page) || 1, 1);
+    const pageRequested = request.query.page != null;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
@@ -78,7 +81,7 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       : "ORDER BY updated_at DESC, position_id DESC";
 
     // Compound cursor: "sortValue::positionId" — handles ties
-    if (cursor) {
+    if (!pageRequested && cursor) {
       const sep = cursor.indexOf("::");
       if (sep > 0) {
         const cursorVal = cursor.slice(0, sep);
@@ -94,24 +97,7 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
 
-    const rows = db
-      .prepare(`SELECT * FROM positions ${where} ${orderBy} LIMIT ?`)
-      .all(...params, limit) as Record<string, unknown>[];
-
-    const tokenIds = rows.map((r) => r.token_id as string);
-    const metaMap = buildMarketMetaMap(db, tokenIds);
-    const conditionIds = [...metaMap.values()]
-      .map((m) => m.conditionId)
-      .filter(Boolean) as string[];
-    const resMap = buildResolutionMap(opts.db, conditionIds);
-
-    const lastRow = rows[rows.length - 1];
-    const nextCursor =
-      rows.length === limit && lastRow
-        ? `${String(lastRow[sortCol])}::${String(lastRow.position_id)}`
-        : null;
-
-    // Count without cursor filter
+    // Count without cursor/page filter
     const countConds: string[] = [];
     const countPrms: unknown[] = [];
     if (family_id) {
@@ -132,6 +118,28 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       }
     ).cnt;
 
+    const offset = pageRequested ? (page - 1) * limit : 0;
+    const queryParams = [...params, limit];
+    const offsetClause = pageRequested ? " OFFSET ?" : "";
+    if (pageRequested) queryParams.push(offset);
+
+    const rows = db
+      .prepare(`SELECT * FROM positions ${where} ${orderBy} LIMIT ?${offsetClause}`)
+      .all(...queryParams) as Record<string, unknown>[];
+
+    const tokenIds = rows.map((r) => r.token_id as string);
+    const metaMap = buildMarketMetaMap(db, tokenIds);
+    const conditionIds = [...metaMap.values()]
+      .map((m) => m.conditionId)
+      .filter(Boolean) as string[];
+    const resMap = buildResolutionMap(opts.db, conditionIds);
+
+    const lastRow = rows[rows.length - 1];
+    const nextCursor =
+      !pageRequested && rows.length === limit && lastRow
+        ? `${String(lastRow[sortCol])}::${String(lastRow.position_id)}`
+        : null;
+
     return ok({
       items: rows.map((r) => {
         const meta = getMetaOrEmpty(metaMap, r.token_id as string);
@@ -140,6 +148,9 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       }),
       nextCursor,
       totalCount,
+      page: pageRequested ? page : undefined,
+      pageSize: pageRequested ? limit : undefined,
+      totalPages: pageRequested ? Math.max(1, Math.ceil(totalCount / limit)) : undefined,
     });
   });
 

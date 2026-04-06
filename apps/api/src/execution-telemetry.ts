@@ -16,9 +16,25 @@ export function emptyExecutionTelemetry(): ExecutionTelemetrySnapshot {
   };
 }
 
-function buildWhere(sinceIso?: string): { where: string; params: unknown[] } {
-  if (!sinceIso) return { where: "", params: [] };
-  return { where: "WHERE filled_at >= ?", params: [sinceIso] };
+function buildWhere(options: {
+  sinceIso?: string;
+  familyIds?: string[];
+}): { where: string; params: unknown[] } {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (options.sinceIso) {
+    conditions.push("filled_at >= ?");
+    params.push(options.sinceIso);
+  }
+
+  if (options.familyIds && options.familyIds.length > 0) {
+    conditions.push(`family_id IN (${options.familyIds.map(() => "?").join(",")})`);
+    params.push(...options.familyIds);
+  }
+
+  if (conditions.length === 0) return { where: "", params: [] };
+  return { where: `WHERE ${conditions.join(" AND ")}`, params };
 }
 
 function toExecutionTelemetry(row: {
@@ -55,7 +71,7 @@ export function computeExecutionTelemetry(
   db: Database.Database,
   options: { sinceIso?: string } = {},
 ): ExecutionTelemetrySnapshot {
-  const { where, params } = buildWhere(options.sinceIso);
+  const { where, params } = buildWhere(options);
   const row = db
     .prepare(
       `SELECT
@@ -84,9 +100,13 @@ export function computeExecutionTelemetry(
 
 export function computeExecutionTelemetryByFamily(
   db: Database.Database,
-  options: { sinceIso?: string } = {},
+  options: { sinceIso?: string; familyIds?: string[] } = {},
 ): Map<string, ExecutionTelemetrySnapshot> {
-  const { where, params } = buildWhere(options.sinceIso);
+  if (options.familyIds && options.familyIds.length === 0) {
+    return new Map();
+  }
+
+  const { where, params } = buildWhere(options);
   const rows = db
     .prepare(
       `SELECT

@@ -25,6 +25,7 @@ import type {
   ControlOverviewDTO,
   TradingActivitySnapshot,
   FamilyListResponse,
+  FamilyOptionDTO,
 } from "./types.ts";
 
 function withParams(
@@ -109,6 +110,7 @@ interface PositionFilters {
   sort?: string;
   limit?: number;
   cursor?: string;
+  page?: number;
 }
 
 export function usePositions(filters: PositionFilters = {}) {
@@ -123,6 +125,7 @@ export function usePositions(filters: PositionFilters = {}) {
           sort: filters.sort,
           limit: filters.limit,
           cursor: filters.cursor,
+          page: filters.page,
         }),
       ),
   });
@@ -135,6 +138,7 @@ interface OrderFilters {
   familyId?: string;
   limit?: number;
   cursor?: string;
+  page?: number;
 }
 
 export function useOrders(filters: OrderFilters = {}) {
@@ -147,6 +151,7 @@ export function useOrders(filters: OrderFilters = {}) {
           family_id: filters.familyId,
           limit: filters.limit,
           cursor: filters.cursor,
+          page: filters.page,
         }),
       ),
   });
@@ -159,6 +164,7 @@ interface FillFilters {
   since?: string;
   limit?: number;
   cursor?: string;
+  page?: number;
 }
 
 export function useFills(filters: FillFilters = {}) {
@@ -171,6 +177,7 @@ export function useFills(filters: FillFilters = {}) {
           since: filters.since,
           limit: filters.limit,
           cursor: filters.cursor,
+          page: filters.page,
         }),
       ),
   });
@@ -180,21 +187,27 @@ export function useFills(filters: FillFilters = {}) {
 
 export function useFamilies() {
   return useQuery({
-    queryKey: ["families"],
+    queryKey: ["family-options"],
     queryFn: async () => {
-      const res = await apiFetch<FamilyListResponse>("/api/v1/families");
+      const res = await apiFetch<{ items: FamilyOptionDTO[] }>("/api/v1/families/options");
       return res.items;
     },
   });
 }
 
-export function useFamiliesScoped(scope: "profile" | "all", cursor?: string | null, limit = 50) {
+export function useFamiliesScoped(
+  scope: "profile" | "all",
+  page = 1,
+  limit = 50,
+  cursor?: string | null,
+) {
   return useQuery({
-    queryKey: ["families-scoped", scope, cursor ?? "", limit],
+    queryKey: ["families-scoped", scope, page, limit, cursor ?? ""],
     queryFn: () =>
       apiFetch<FamilyListResponse>(
         withParams("/api/v1/families", {
           scope,
+          page,
           cursor: cursor || undefined,
           limit,
         }),
@@ -225,6 +238,7 @@ interface RiskEventFilters {
   eventType?: string;
   limit?: number;
   cursor?: string;
+  page?: number;
 }
 
 export function useRiskEvents(filters: RiskEventFilters = {}) {
@@ -237,6 +251,7 @@ export function useRiskEvents(filters: RiskEventFilters = {}) {
           event_type: filters.eventType,
           limit: filters.limit,
           cursor: filters.cursor,
+          page: filters.page,
         }),
       ),
   });
@@ -286,7 +301,7 @@ interface CandidateFilters {
 }
 
 export function useCandidates(
-  filters: CandidateFilters & { cursor?: string; limit?: number } = {},
+  filters: CandidateFilters & { cursor?: string; limit?: number; page?: number } = {},
 ) {
   return useQuery({
     queryKey: ["discovery", "candidates", filters],
@@ -299,6 +314,7 @@ export function useCandidates(
           cadence: filters.cadence,
           limit: filters.limit ?? 50,
           cursor: filters.cursor,
+          page: filters.page,
         }),
       ),
   });
@@ -485,6 +501,7 @@ export function useProfileOrders(profileId: string | undefined, filters: OrderFi
           family_id: filters.familyId,
           limit: filters.limit,
           cursor: filters.cursor,
+          page: filters.page,
         }),
       ),
     enabled: !!profileId,
@@ -517,6 +534,7 @@ export function useProfileFills(profileId: string | undefined, filters: FillFilt
           since: filters.since,
           limit: filters.limit,
           cursor: filters.cursor,
+          page: filters.page,
         }),
       ),
     enabled: !!profileId,
@@ -538,6 +556,7 @@ export function useControlOverview() {
 interface AuditFilters {
   limit?: number;
   cursor?: string;
+  page?: number;
   type?: string;
   profile?: string;
   familyId?: string;
@@ -551,6 +570,7 @@ export function useAudit(filters: AuditFilters = {}) {
         withParams("/api/v1/audit", {
           limit: filters.limit,
           cursor: filters.cursor,
+          page: filters.page,
           type: filters.type,
           profile: filters.profile,
           familyId: filters.familyId,

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useFamilies, useRiskEvents } from "../api/hooks.ts";
+import { useFamilies, useFamiliesScoped, useRiskEvents } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { FamilyActions } from "../components/FamilyActions.tsx";
 import { Pagination } from "../components/Pagination.tsx";
@@ -7,22 +7,28 @@ import { formatTimestamp } from "../utils/format.ts";
 
 export function RiskQuarantine() {
   const { data: families } = useFamilies();
+  const { data: familiesResponse } = useFamiliesScoped("profile", 1, 200);
   const [eventFamily, setEventFamily] = useState("");
   const [eventType, setEventType] = useState("");
-  const [cursor, setCursor] = useState<string | undefined>();
+  const [page, setPage] = useState(1);
 
   const { data: riskEvents } = useRiskEvents({
     familyId: eventFamily || undefined,
     eventType: eventType || undefined,
     limit: 50,
-    cursor,
+    page,
   });
+  const totalCount = riskEvents?.totalCount ?? 0;
+  const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
+  const pageEnd = pageStart + ((riskEvents?.items.length ?? 0) - 1);
+  const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
+  const totalPages = riskEvents?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
 
   const attentionFamilies =
-    families?.filter((f) => {
+    (familiesResponse?.items ?? []).filter((f) => {
       const em = f.state?.effectiveMode ?? f.state?.runtimeMode;
       return em === "quarantine" || em === "reduce-only" || em === "probe-only";
-    }) ?? [];
+    });
 
   return (
     <div className="page">
@@ -74,7 +80,7 @@ export function RiskQuarantine() {
           value={eventFamily}
           onChange={(e) => {
             setEventFamily(e.target.value);
-            setCursor(undefined);
+            setPage(1);
           }}
         >
           <option value="">All families</option>
@@ -88,7 +94,7 @@ export function RiskQuarantine() {
           value={eventType}
           onChange={(e) => {
             setEventType(e.target.value);
-            setCursor(undefined);
+            setPage(1);
           }}
         >
           <option value="">All types</option>
@@ -125,7 +131,12 @@ export function RiskQuarantine() {
           ))}
         </tbody>
       </table>
-      <Pagination nextCursor={riskEvents?.nextCursor ?? null} onNext={setCursor} />
+      <Pagination
+        page={page}
+        totalPages={totalPages}
+        onPageChange={setPage}
+        pageInfo={pageInfo}
+      />
     </div>
   );
 }

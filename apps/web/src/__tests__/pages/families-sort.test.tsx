@@ -132,13 +132,20 @@ const families: FamilyDTO[] = [
 ];
 
 function setup(evidenceByFamily: Record<string, { [key: string]: unknown } | null> = {}) {
-  server.use(
-    http.get("/api/v1/families", () =>
-      ok({
-        items: families,
-        meta: { scope: "all" as const, profile: null, totalCatalogCount: families.length },
-      }),
-    ),
+    server.use(
+      http.get("/api/v1/families", () =>
+        ok({
+          items: families,
+          meta: {
+            scope: "all" as const,
+            profile: null,
+            totalCount: families.length,
+            totalCatalogCount: families.length,
+            hasMore: false,
+            nextCursor: null,
+          },
+        }),
+      ),
     http.get("/api/v1/families/:familyId/transitions", () => ok([])),
     http.get("/api/v1/families/:familyId/positions", () => ok([])),
     http.get("/api/v1/families/:familyId/orders", () => ok({ items: [], nextCursor: null })),
@@ -308,7 +315,10 @@ describe("Families scope toggle", () => {
           meta: {
             scope: overrides.scope ?? "all",
             profile: overrides.profile ?? null,
+            totalCount: items.length,
             totalCatalogCount: overrides.totalCatalogCount ?? items.length,
+            hasMore: false,
+            nextCursor: null,
           },
         }),
       ),
@@ -328,7 +338,7 @@ describe("Families scope toggle", () => {
     });
     renderWithProviders(<Families />);
     await screen.findByText(/alpha/);
-    expect(screen.getByText("1 of 47 families (live-lite)")).toBeInTheDocument();
+    expect(screen.getByText("1 families (live-lite)")).toBeInTheDocument();
   });
 
   it("shows plain count when scope=all", async () => {
@@ -383,7 +393,10 @@ describe("Families scope toggle", () => {
             meta: {
               scope: "all",
               profile: "live-lite",
+              totalCount: allFamilies.length,
               totalCatalogCount: allFamilies.length,
+              hasMore: false,
+              nextCursor: null,
             },
           });
         }
@@ -392,7 +405,10 @@ describe("Families scope toggle", () => {
           meta: {
             scope: "profile",
             profile: "live-lite",
+            totalCount: profileFamilies.length,
             totalCatalogCount: allFamilies.length,
+            hasMore: false,
+            nextCursor: null,
           },
         });
       }),

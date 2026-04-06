@@ -62,6 +62,18 @@ interface FamilyDeploymentRow {
   priority: number;
 }
 
+function selectRowsByFamilyIds<T>(
+  db: Database.Database,
+  sqlPrefix: string,
+  familyIds: string[],
+): T[] {
+  if (familyIds.length === 0) return [];
+  const placeholders = familyIds.map(() => "?").join(",");
+  return db
+    .prepare(`${sqlPrefix} WHERE family_id IN (${placeholders})`)
+    .all(...familyIds) as T[];
+}
+
 function toFamilyDto(
   catalog: FamilyCatalogRow,
   state: FamilyStateRow | undefined,
@@ -136,16 +148,12 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   }
 
   // Control DB: rules, evidence
-  const listCaps = controlDb.prepare(
-    "SELECT family_id, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules",
-  );
   const getCatalog = controlDb.prepare("SELECT * FROM family_catalog WHERE family_id = ?");
   const getCaps = controlDb.prepare(
     "SELECT family_id, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules WHERE family_id = ?",
   );
 
   // Ledger DB: runtime state, positions, orders
-  const listState = ledgerDb.prepare("SELECT * FROM family_runtime_state");
   const getState = ledgerDb.prepare("SELECT * FROM family_runtime_state WHERE family_id = ?");
   const getPositions = ledgerDb.prepare(
     "SELECT * FROM positions WHERE family_id = ? ORDER BY updated_at DESC",
@@ -166,10 +174,6 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     };
   }
 
-  const listEvidence = controlDb.prepare(
-    "SELECT family_id, promotion_state, probe_substate FROM family_evidence",
-  );
-
   const listDeployments = safePrepare(
     "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE profile = ?",
   );
@@ -181,7 +185,47 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   );
   const getProfile = safePrepare("SELECT current_profile FROM runtime_control_state WHERE id = 1");
 
-  app.get<{ Querystring: { scope?: string; limit?: string; cursor?: string } }>(
+  app.get<{ Querystring: { scope?: string } }>("/families/options", async (request) => {
+    const currentProfile = getProfile
+      ? ((getProfile.get() as { current_profile: string | null } | undefined)?.current_profile ??
+        null)
+      : null;
+    const requestedScope = request.query.scope;
+    const effectiveScope =
+      requestedScope === "profile" && currentProfile && listEnabledDeployments ? "profile" : "all";
+
+    const deploymentRows =
+      currentProfile && listDeployments
+        ? effectiveScope === "profile"
+          ? (listEnabledDeployments!.all(currentProfile) as FamilyDeploymentRow[])
+          : (listDeployments.all(currentProfile) as FamilyDeploymentRow[])
+        : [];
+    const deploymentMap = new Map(deploymentRows.map((d) => [d.family_id, d]));
+    const items =
+      effectiveScope === "profile"
+        ? ([...deploymentMap.keys()].length === 0
+            ? []
+            : (controlDb
+                .prepare(
+                  `SELECT family_id, family_key FROM family_catalog WHERE family_id IN (${[...deploymentMap.keys()]
+                    .map(() => "?")
+                    .join(",")}) ORDER BY family_key`,
+                )
+                .all(...deploymentMap.keys()) as Array<{ family_id: string; family_key: string }>))
+        : (controlDb
+            .prepare("SELECT family_id, family_key FROM family_catalog ORDER BY family_key")
+            .all() as Array<{ family_id: string; family_key: string }>);
+
+    return ok({
+      items: items.map((item) => ({
+        familyId: item.family_id,
+        familyKey: item.family_key,
+      })),
+      meta: { scope: effectiveScope, profile: currentProfile },
+    });
+  });
+
+  app.get<{ Querystring: { scope?: string; limit?: string; cursor?: string; page?: string } }>(
     "/families",
     async (request) => {
       const currentProfile = getProfile
@@ -194,9 +238,16 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           ? "profile"
           : "all";
 
-      // limit=0 or absent → return all (backward compat for useFamilies() dropdown consumers)
-      const rawLimit = Number(request.query.limit) || 0;
-      const limit = rawLimit > 0 ? Math.min(rawLimit, 200) : 0;
+      const pageRequested = request.query.page != null;
+      const rawPage = Math.max(Number(request.query.page) || 1, 1);
+      // limit=0 or absent → return all (backward compat for legacy consumers)
+      const parsedLimit = Number(request.query.limit);
+      const rawLimit = Number.isFinite(parsedLimit) ? parsedLimit : 0;
+      const limit = pageRequested
+        ? Math.min(Math.max(rawLimit || 50, 1), 200)
+        : rawLimit > 0
+          ? Math.min(rawLimit, 200)
+          : 0;
       const cursorRaw = request.query.cursor;
       const cursorKey = cursorRaw ? Buffer.from(cursorRaw, "base64").toString("utf-8") : null;
 
@@ -211,12 +262,36 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
             : (listDeployments.all(currentProfile) as FamilyDeploymentRow[])
           : [];
       const deploymentMap = new Map(deploymentRows.map((d) => [d.family_id, d]));
+      const totalCount = effectiveScope === "profile" ? deploymentMap.size : totalCatalogCount;
 
       // Pagination: limit=0 means return all (for dropdown consumers like useFamilies())
       let page: FamilyCatalogRow[];
       let hasMore: boolean;
 
-      if (limit === 0) {
+      if (pageRequested) {
+        const offset = (rawPage - 1) * limit;
+        if (effectiveScope === "profile") {
+          const deployedIds = [...deploymentMap.keys()];
+          if (deployedIds.length === 0) {
+            page = [];
+          } else {
+            const placeholders = deployedIds.map(() => "?").join(",");
+            page = controlDb
+              .prepare(
+                `SELECT fc.* FROM family_catalog fc
+                 WHERE fc.family_id IN (${placeholders})
+                 ORDER BY fc.family_key
+                 LIMIT ? OFFSET ?`,
+              )
+              .all(...deployedIds, limit, offset) as FamilyCatalogRow[];
+          }
+        } else {
+          page = controlDb
+            .prepare("SELECT * FROM family_catalog ORDER BY family_key LIMIT ? OFFSET ?")
+            .all(limit, offset) as FamilyCatalogRow[];
+        }
+        hasMore = offset + page.length < totalCount;
+      } else if (limit === 0) {
         // No pagination — return all (backward compat)
         if (effectiveScope === "profile") {
           const deployedIds = [...deploymentMap.keys()];
@@ -273,27 +348,38 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
           ? Buffer.from(page[page.length - 1]!.family_key).toString("base64")
           : null;
 
-      const states = listState.all() as FamilyStateRow[];
-      const stateMap = new Map(states.map((s) => [s.family_id, s]));
-      const livenessMap = readFamilyLiveness(
+      const pageFamilyIds = page.map((catalog) => catalog.family_id);
+      const states = selectRowsByFamilyIds<FamilyStateRow>(
         ledgerDb,
-        page.map((catalog) => catalog.family_id),
+        "SELECT * FROM family_runtime_state",
+        pageFamilyIds,
       );
+      const stateMap = new Map(states.map((s) => [s.family_id, s]));
+      const livenessMap = readFamilyLiveness(ledgerDb, pageFamilyIds);
       const executionMap24h = computeExecutionTelemetryByFamily(ledgerDb, {
         sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+        familyIds: pageFamilyIds,
       });
-      const capsRows = listCaps.all() as Array<{
+      const capsRows = selectRowsByFamilyIds<{
         family_id: string;
         max_open_value_usdc: number;
         max_active_markets: number;
         max_dust_positions: number;
-      }>;
+      }>(
+        controlDb,
+        "SELECT family_id, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules",
+        pageFamilyIds,
+      );
       const capsMap = new Map(capsRows.map((r) => [r.family_id, toCaps(r)]));
-      const evidenceRows = listEvidence.all() as Array<{
+      const evidenceRows = selectRowsByFamilyIds<{
         family_id: string;
         promotion_state: string | null;
         probe_substate: string | null;
-      }>;
+      }>(
+        controlDb,
+        "SELECT family_id, promotion_state, probe_substate FROM family_evidence",
+        pageFamilyIds,
+      );
       const promoMap = new Map(evidenceRows.map((r) => [r.family_id, r.promotion_state]));
       const substateMap = new Map(evidenceRows.map((r) => [r.family_id, r.probe_substate]));
 
@@ -313,9 +399,13 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
         meta: {
           scope: effectiveScope,
           profile: currentProfile,
+          totalCount,
           totalCatalogCount,
           nextCursor,
           hasMore,
+          page: pageRequested ? rawPage : undefined,
+          pageSize: pageRequested ? limit : undefined,
+          totalPages: pageRequested ? Math.max(1, Math.ceil(totalCount / limit)) : undefined,
         },
       });
     },

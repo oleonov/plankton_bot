@@ -45,18 +45,23 @@ export function Audit() {
   const [typeFilter, setTypeFilter] = useState("");
   const [profileFilter, setProfileFilter] = useState("");
   const [familySearch, setFamilySearch] = useState("");
-  const [cursor, setCursor] = useState<string | undefined>();
+  const [page, setPage] = useState(1);
 
   const { data, isLoading } = useAudit({
     type: typeFilter || undefined,
     profile: profileFilter || undefined,
     familyId: familySearch || undefined,
-    cursor,
+    page,
     limit: 50,
   });
 
   const profiles = profilesData?.profiles ?? [];
   const entries = data?.items ?? [];
+  const totalCount = data?.totalCount ?? 0;
+  const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
+  const pageEnd = pageStart + (entries.length - 1);
+  const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
+  const totalPages = data?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
 
   return (
     <div className="page">
@@ -68,7 +73,7 @@ export function Audit() {
             value={typeFilter}
             onChange={(e) => {
               setTypeFilter(e.target.value);
-              setCursor(undefined);
+              setPage(1);
             }}
           >
             <option value="">All</option>
@@ -83,7 +88,7 @@ export function Audit() {
             value={profileFilter}
             onChange={(e) => {
               setProfileFilter(e.target.value);
-              setCursor(undefined);
+              setPage(1);
             }}
           >
             <option value="">All</option>
@@ -100,7 +105,7 @@ export function Audit() {
             value={familySearch}
             onChange={(e) => {
               setFamilySearch(e.target.value);
-              setCursor(undefined);
+              setPage(1);
             }}
             placeholder="family ID..."
             style={{ width: 140 }}
@@ -127,7 +132,12 @@ export function Audit() {
           {entries.map((e) => (
             <AuditRow key={e.id} entry={e} />
           ))}
-          <Pagination nextCursor={data?.nextCursor ?? null} onNext={setCursor} />
+          <Pagination
+            page={page}
+            totalPages={totalPages}
+            onPageChange={setPage}
+            pageInfo={pageInfo}
+          />
         </>
       )}
     </div>

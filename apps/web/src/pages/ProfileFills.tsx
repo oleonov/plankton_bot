@@ -9,10 +9,15 @@ import { formatTimestamp } from "../utils/format.ts";
 export function ProfileFills() {
   const { profileId } = useParams<{ profileId: string }>();
   const [familyId, setFamilyId] = useState("");
-  const [cursor, setCursor] = useState<string | undefined>();
+  const [page, setPage] = useState(1);
 
   const { data: families } = useFamilies();
-  const fills = useProfileFills(profileId, { familyId: familyId || undefined, limit: 50, cursor });
+  const fills = useProfileFills(profileId, { familyId: familyId || undefined, limit: 50, page });
+  const totalCount = fills.data?.totalCount ?? 0;
+  const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
+  const pageEnd = pageStart + ((fills.data?.items.length ?? 0) - 1);
+  const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
+  const totalPages = fills.data?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
 
   return (
     <div className="page">
@@ -28,7 +33,7 @@ export function ProfileFills() {
           value={familyId}
           onChange={(e) => {
             setFamilyId(e.target.value);
-            setCursor(undefined);
+            setPage(1);
           }}
         >
           <option value="">All families</option>
@@ -93,7 +98,12 @@ export function ProfileFills() {
           ))}
         </tbody>
       </table>
-      <Pagination nextCursor={fills.data?.nextCursor ?? null} onNext={setCursor} />
+      <Pagination
+        page={page}
+        totalPages={totalPages}
+        onPageChange={setPage}
+        pageInfo={pageInfo}
+      />
     </div>
   );
 }
