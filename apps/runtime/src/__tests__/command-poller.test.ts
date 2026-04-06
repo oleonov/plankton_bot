@@ -384,6 +384,7 @@ describe("CommandPoller", () => {
         familyEvidenceRepo: evidenceRepo,
         stateTransitionRepo: transitionRepo,
         familyRulesDbWriter: dbWriter,
+        activeProfile: "paper",
       });
 
       await poller.poll();
@@ -410,6 +411,7 @@ describe("CommandPoller", () => {
       expect(transitions).toHaveLength(1);
       expect(transitions[0]!.fromState).toBe("probe-only");
       expect(transitions[0]!.toState).toBe("scaled");
+      expect(transitions[0]!.profile).toBe("paper");
 
       expect(rulesManager.reload).toHaveBeenCalledOnce();
       expect(normalizationModule.rebuildPatterns).toHaveBeenCalledOnce();
@@ -549,6 +551,7 @@ describe("CommandPoller", () => {
         stateTransitionRepo: transitionRepo,
         familyRulesSnapshotRepo: snapshotRepo,
         familyRulesDbWriter: dbWriter,
+        activeProfile: "paper",
       });
 
       await poller.poll();
@@ -566,6 +569,7 @@ describe("CommandPoller", () => {
       expect(transitions).toHaveLength(1);
       expect(transitions[0]!.fromState).toBe("probe-only");
       expect(transitions[0]!.toState).toBe("probe-only");
+      expect(transitions[0]!.profile).toBe("paper");
       expect(transitions[0]!.scoresSnapshot).toBe(rulesJson);
     });
 
@@ -844,6 +848,7 @@ describe("CommandPoller", () => {
       const poller = createPoller({
         familyEvidenceRepo: evidenceRepo,
         stateTransitionRepo: transitionRepo,
+        activeProfile: "paper",
       });
 
       await poller.poll();
@@ -900,6 +905,7 @@ describe("CommandPoller", () => {
       const poller = createPoller({
         familyEvidenceRepo: evidenceRepo,
         stateTransitionRepo: transitionRepo,
+        activeProfile: "paper",
       });
 
       await poller.poll();
@@ -910,6 +916,7 @@ describe("CommandPoller", () => {
       expect(transitions[0]!.toState).toBe("reduce-only");
       expect(transitions[0]!.triggerType).toBe("operator");
       expect(transitions[0]!.initiator).toBe("admin-user");
+      expect(transitions[0]!.profile).toBe("paper");
     });
 
     it("operator activate writes state_transition", async () => {
@@ -927,6 +934,7 @@ describe("CommandPoller", () => {
       const poller = createPoller({
         familyEvidenceRepo: evidenceRepo,
         stateTransitionRepo: transitionRepo,
+        activeProfile: "paper",
       });
       await poller.poll();
 
@@ -943,6 +951,7 @@ describe("CommandPoller", () => {
       expect(transitions[0]!.toState).toBe("active");
       expect(transitions[0]!.triggerType).toBe("operator");
       expect(transitions[0]!.initiator).toBe("admin-user");
+      expect(transitions[0]!.profile).toBe("paper");
     });
 
     it("system demotion still writes state_transition (no regression)", async () => {
@@ -959,6 +968,7 @@ describe("CommandPoller", () => {
       const poller = createPoller({
         familyEvidenceRepo: evidenceRepo,
         stateTransitionRepo: transitionRepo,
+        activeProfile: "paper",
       });
 
       await poller.poll();
@@ -969,6 +979,7 @@ describe("CommandPoller", () => {
       expect(transitions[0]!.toState).toBe("quarantine");
       expect(transitions[0]!.triggerType).toBe("system");
       expect(transitions[0]!.initiator).toBe("evidence-engine");
+      expect(transitions[0]!.profile).toBe("paper");
     });
   });
 });

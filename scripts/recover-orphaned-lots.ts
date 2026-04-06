@@ -43,7 +43,7 @@ interface OrphanedPosition {
 }
 
 interface GammaResolution {
-  resolution: "YES" | "NO" | "unknown";
+  resolution: string;
   closedTime: string | null;
 }
 
@@ -68,8 +68,7 @@ async function fetchResolution(slug: string): Promise<GammaResolution> {
         if (Array.isArray(outcomes) && Array.isArray(prices)) {
           for (let i = 0; i < outcomes.length; i++) {
             if (Number(prices[i]) === 1) {
-              const winner =
-                String(outcomes[i]).toUpperCase() === "YES" ? ("YES" as const) : ("NO" as const);
+              const winner = String(outcomes[i]);
               return {
                 resolution: winner,
                 closedTime: (raw.closedTime as string) ?? null,

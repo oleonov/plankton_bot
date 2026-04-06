@@ -38,6 +38,7 @@ function makeDetectedResolution(overrides?: Partial<DetectedResolution>): Detect
   return {
     conditionId: CONDITION,
     resolution: "YES",
+    winnerTokenId: TOK_YES,
     resolvedAt: "2026-01-15T00:00:00Z",
     source: "gamma-api",
     rawResponse: "{}",
@@ -1150,7 +1151,7 @@ describe("ResolutionModule", () => {
       },
     ]);
 
-    // Mock: Gamma returns resolved market with outcomePrices
+    // Mock: Gamma returns resolved market with outcomePrices and clobTokenIds
     (gammaClient.getMarketBySlug as any).mockResolvedValue({
       closed: true,
       umaResolutionStatus: null,
@@ -1158,6 +1159,7 @@ describe("ResolutionModule", () => {
       rawPayload: {
         outcomePrices: '["1","0"]',
         outcomes: '["Yes","No"]',
+        clobTokenIds: `["${String(TOK_YES)}","${String(TOK_NO)}"]`,
       },
     });
 
@@ -1203,10 +1205,10 @@ describe("ResolutionModule", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     await mod.stop();
 
-    // Verify resolution was updated
+    // Verify resolution was updated (outcome comes from Gamma payload as-is: "Yes")
     expect(resolutionRepo.updateResolution as any).toHaveBeenCalledWith(
       CONDITION,
-      "YES",
+      "Yes",
       "2026-01-15T00:00:00Z",
       "gamma-api",
     );
@@ -1226,6 +1228,86 @@ describe("ResolutionModule", () => {
 
     // Verify exposure was recomputed
     expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM, false);
+  });
+
+  it("recoverUnresolved matches outcome labels case-insensitively when winnerTokenId is unavailable", async () => {
+    (resolutionRepo.findAll as any).mockReturnValue([
+      {
+        conditionId: CONDITION,
+        resolution: "unknown",
+        resolvedAt: "2026-01-15T00:00:00Z",
+        detectedAt: "2026-01-15T01:00:00Z",
+        source: "gamma-delisted",
+        rawResponse: null,
+        status: "detected",
+      },
+    ]);
+
+    (marketRepo.findByConditionId as any).mockReturnValue([
+      {
+        tokenId: TOK_YES,
+        conditionId: CONDITION,
+        slug: "will-x-happen",
+        outcome: " Yes ",
+        familyId: FAM,
+      },
+    ]);
+
+    (gammaClient.getMarketBySlug as any).mockResolvedValue({
+      closed: true,
+      umaResolutionStatus: null,
+      closedTime: "2026-01-15T00:00:00Z",
+      rawPayload: {
+        outcomePrices: '["1","0"]',
+        outcomes: '["yes","no"]',
+      },
+    });
+
+    (positionRepo.findByFamily as any).mockReturnValue([
+      {
+        positionId: POS,
+        tokenId: TOK_YES,
+        familyId: FAM,
+        side: "BUY",
+        size: 0,
+        avgEntryPrice: 0.3,
+        costBasisUsdc: 30,
+        currentValueUsdc: 0,
+        realizedPnl: 0,
+        status: "closed",
+        openedAt: "2026-01-10T00:00:00Z",
+        closedAt: "2026-01-14T00:00:00Z",
+        updatedAt: "2026-01-14T00:00:00Z",
+      },
+    ]);
+
+    (lotRepo.findOpen as any).mockReturnValue([
+      {
+        lotId: "lot-1",
+        positionId: POS,
+        tokenId: TOK_YES,
+        familyId: FAM,
+        side: "BUY",
+        size: 10,
+        remainingSize: 10,
+        entryPrice: 0.3,
+        costUsdc: 3,
+        fillId: "fill-1",
+        createdAt: "2026-01-10T00:00:00Z",
+      },
+    ]);
+
+    await mod.start();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await mod.stop();
+
+    expect(positionRepo.save as any).toHaveBeenCalledWith(
+      expect.objectContaining({
+        positionId: POS,
+        realizedPnl: 7,
+        currentValueUsdc: 0,
+      }),
+    );
   });
 
   it("recoverUnresolved skips when Gamma still returns unknown", async () => {

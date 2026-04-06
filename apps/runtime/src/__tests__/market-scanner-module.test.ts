@@ -244,8 +244,8 @@ describe("MarketScannerModule", () => {
     await mod.scan();
 
     const calls = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls;
-    expect((calls[0]![0] as Market).outcome).toBe("YES");
-    expect((calls[1]![0] as Market).outcome).toBe("NO");
+    expect((calls[0]![0] as Market).outcome).toBe("Yes");
+    expect((calls[1]![0] as Market).outcome).toBe("No");
   });
 
   it("scan() skips families without slugPattern", async () => {

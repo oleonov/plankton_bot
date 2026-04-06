@@ -5,7 +5,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { isWithinHealthWindow } from "@plankton/domain";
+import { isWithinHealthWindow, type ProfileId } from "@plankton/domain";
 
 // ─── Metric interfaces ──────────────────────────────────────────────────
 
@@ -64,11 +64,14 @@ function computeGapStats(sortedDates: string[]): { mean: number; stddev: number 
 
 export class ScoreComputer {
   private readonly controlDb: Database.Database | null;
+  private readonly activeProfile: ProfileId | null;
   constructor(
     private readonly db: Database.Database,
     controlDb?: Database.Database,
+    activeProfile?: ProfileId | null,
   ) {
     this.controlDb = controlDb ?? null;
+    this.activeProfile = activeProfile ?? null;
   }
 
   computeRecurrenceMetrics(candidateId: string): RecurrenceMetrics {
@@ -235,9 +238,26 @@ export class ScoreComputer {
           .prepare(
             `SELECT COUNT(*) AS v FROM state_transitions
              WHERE entity_type = 'family' AND entity_id = ?
-             AND to_state IN ('reduce-only', 'ReduceOnly')`,
+             AND to_state IN ('reduce-only', 'ReduceOnly')
+             AND (
+               ? IS NULL
+               OR profile = ?
+               OR (
+                 profile IS NULL
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM state_transitions st2
+                   WHERE st2.entity_type = 'family'
+                     AND st2.entity_id = ?
+                     AND st2.to_state IN ('reduce-only', 'ReduceOnly')
+                     AND st2.profile = ?
+                 )
+               )
+             )`,
           )
-          .get(familyId) as { v: number } | undefined)
+          .get(familyId, this.activeProfile, this.activeProfile, familyId, this.activeProfile) as
+          | { v: number }
+          | undefined)
       : undefined;
 
     const catalogRow = ctrlDb

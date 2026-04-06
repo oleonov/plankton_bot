@@ -198,6 +198,7 @@ export class CommandPoller implements RuntimeModule {
         this.deps.stateTransitionRepo?.insert({
           entityType: "family",
           entityId: cmd.targetId,
+          profile: this.deps.activeProfile ?? null,
           fromState: previousPromotionState,
           toState: newState,
           triggerType: cmd.initiatorType,
@@ -333,6 +334,7 @@ export class CommandPoller implements RuntimeModule {
     this.deps.stateTransitionRepo?.insert({
       entityType: "family",
       entityId: cmd.targetId,
+      profile: this.deps.activeProfile ?? null,
       fromState: prevPromotionState,
       toState: "scaled",
       triggerType: cmd.initiatorType,
@@ -414,6 +416,7 @@ export class CommandPoller implements RuntimeModule {
     this.deps.stateTransitionRepo?.insert({
       entityType: "family",
       entityId: cmd.targetId,
+      profile: this.deps.activeProfile ?? null,
       fromState: prevPromotionState,
       toState: "probe-only",
       triggerType: cmd.initiatorType,

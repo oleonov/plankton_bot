@@ -131,7 +131,7 @@ export class MarketScannerModule implements RuntimeModule {
               slug: clobMarket.slug,
               eventSlug: clobMarket.eventSlug ?? null,
               question: clobMarket.question,
-              outcome: token.outcome.toUpperCase() === "YES" ? "YES" : "NO",
+              outcome: token.outcome,
               familyId: family.familyId,
               familyKey: family.familyKey,
               regime: family.regime,

@@ -53,6 +53,7 @@ describe("SqliteStateTransitionRepository", () => {
     repo.insert({
       entityType: "family",
       entityId: "fam-1",
+      profile: "paper",
       fromState: "probe-only",
       toState: "scaled",
       triggerType: "operator",
@@ -65,6 +66,7 @@ describe("SqliteStateTransitionRepository", () => {
     expect(transitions).toHaveLength(1);
     expect(transitions[0]!.entityType).toBe("family");
     expect(transitions[0]!.entityId).toBe("fam-1");
+    expect(transitions[0]!.profile).toBe("paper");
     expect(transitions[0]!.fromState).toBe("probe-only");
     expect(transitions[0]!.toState).toBe("scaled");
     expect(transitions[0]!.triggerType).toBe("operator");
@@ -78,6 +80,7 @@ describe("SqliteStateTransitionRepository", () => {
     repo.insert({
       entityType: "family",
       entityId: "fam-1",
+      profile: "paper",
       fromState: "a",
       toState: "b",
       triggerType: "system",
@@ -88,6 +91,7 @@ describe("SqliteStateTransitionRepository", () => {
     repo.insert({
       entityType: "candidate",
       entityId: "cand-1",
+      profile: null,
       fromState: "c",
       toState: "d",
       triggerType: "system",
@@ -107,6 +111,7 @@ describe("SqliteStateTransitionRepository", () => {
       repo.insert({
         entityType: "family",
         entityId: `fam-${i}`,
+        profile: "paper",
         fromState: "a",
         toState: "b",
         triggerType: "system",
@@ -120,6 +125,67 @@ describe("SqliteStateTransitionRepository", () => {
     expect(recent).toHaveLength(3);
     // Newest by id (autoincrement) since created_at ties
     expect(recent[0]!.entityId).toBe("fam-4");
+  });
+
+  it("findLastTransitionTo can scope by profile", () => {
+    repo.insert({
+      entityType: "family",
+      entityId: "fam-1",
+      profile: "paper",
+      fromState: "probe-only",
+      toState: "reduce-only",
+      triggerType: "system",
+      initiator: "paper-worker",
+      reason: "paper demotion",
+      scoresSnapshot: null,
+    });
+    repo.insert({
+      entityType: "family",
+      entityId: "fam-1",
+      profile: "live-lite",
+      fromState: "scaled",
+      toState: "reduce-only",
+      triggerType: "system",
+      initiator: "live-worker",
+      reason: "live demotion",
+      scoresSnapshot: null,
+    });
+
+    const paperTransition = repo.findLastTransitionTo("fam-1", "reduce-only", "paper");
+    const liveTransition = repo.findLastTransitionTo("fam-1", "reduce-only", "live-lite");
+
+    expect(paperTransition?.initiator).toBe("paper-worker");
+    expect(liveTransition?.initiator).toBe("live-worker");
+  });
+
+  it("findLastTransitionTo falls back to legacy NULL-profile row when scoped row is absent", () => {
+    conn.db.exec(`
+      INSERT INTO state_transitions (
+        entity_type, entity_id, profile, from_state, to_state, trigger_type, initiator, reason
+      ) VALUES (
+        'family', 'fam-legacy', NULL, 'probe-only', 'reduce-only', 'system', 'legacy-worker', 'legacy demotion'
+      )
+    `);
+
+    const transition = repo.findLastTransitionTo("fam-legacy", "reduce-only", "live-lite");
+
+    expect(transition?.initiator).toBe("legacy-worker");
+    expect(transition?.profile).toBeNull();
+  });
+
+  it("findLastTransitionTo prefers scoped row over legacy NULL-profile row", () => {
+    conn.db.exec(`
+      INSERT INTO state_transitions (
+        entity_type, entity_id, profile, from_state, to_state, trigger_type, initiator, reason
+      ) VALUES
+        ('family', 'fam-prefer', NULL, 'probe-only', 'reduce-only', 'system', 'legacy-worker', 'legacy demotion'),
+        ('family', 'fam-prefer', 'live-lite', 'probe-only', 'reduce-only', 'system', 'live-worker', 'live demotion')
+    `);
+
+    const transition = repo.findLastTransitionTo("fam-prefer", "reduce-only", "live-lite");
+
+    expect(transition?.initiator).toBe("live-worker");
+    expect(transition?.profile).toBe("live-lite");
   });
 });
 

@@ -297,7 +297,7 @@ async function executeScenario(
         slug: clobMarket.slug,
         eventSlug: clobMarket.eventSlug ?? null,
         question: clobMarket.question,
-        outcome: token.outcome.toUpperCase() === "YES" ? "YES" : "NO",
+        outcome: token.outcome,
         familyId: matched?.identity.familyId ?? null,
         familyKey: matched?.identity.familyKey ?? null,
         regime: matched?.identity.regime ?? null,

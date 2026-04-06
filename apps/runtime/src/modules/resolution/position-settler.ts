@@ -14,6 +14,10 @@ import type { DetectedResolution, ResolutionCandidate } from "./resolution-detec
 
 export type SettledPosition = RuntimeEventMap["PositionSettled"];
 
+function normalizeOutcomeLabel(value: string): string {
+  return value.trim().toLowerCase();
+}
+
 export class PositionSettler {
   private readonly db: Database.Database;
   private readonly settlementInsert: Database.Statement;
@@ -57,7 +61,9 @@ export class PositionSettler {
     candidate: ResolutionCandidate,
     resolution: DetectedResolution,
   ): SettledPosition | null {
-    const isWinner = candidate.outcome === resolution.resolution;
+    const isWinner = resolution.winnerTokenId
+      ? String(candidate.tokenId) === String(resolution.winnerTokenId)
+      : normalizeOutcomeLabel(candidate.outcome) === normalizeOutcomeLabel(resolution.resolution);
     const settlementPrice = isWinner ? 1.0 : 0.0;
     const settlementPnl = (settlementPrice - position.avgEntryPrice) * position.size;
 

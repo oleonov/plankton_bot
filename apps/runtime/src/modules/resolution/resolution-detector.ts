@@ -3,13 +3,14 @@
  * then queries Gamma API to confirm resolution status.
  */
 
-import type {
-  PositionRepository,
-  MarketRepository,
-  MarketResolutionRepository,
-  TokenId,
-  FamilyId,
-  PositionId,
+import {
+  createTokenId,
+  type PositionRepository,
+  type MarketRepository,
+  type MarketResolutionRepository,
+  type TokenId,
+  type FamilyId,
+  type PositionId,
 } from "@plankton/domain";
 import type { GammaResolutionClient } from "@plankton/exchange";
 import type { Logger } from "../../logger.js";
@@ -18,7 +19,7 @@ export interface ResolutionCandidate {
   tokenId: TokenId;
   conditionId: string;
   slug: string;
-  outcome: "YES" | "NO";
+  outcome: string;
   endDate: string;
   positionId: PositionId;
   familyId: FamilyId;
@@ -26,44 +27,68 @@ export interface ResolutionCandidate {
 
 export interface DetectedResolution {
   conditionId: string;
-  resolution: "YES" | "NO" | "unknown";
+  resolution: string;
+  winnerTokenId: TokenId | null;
   resolvedAt: string;
   source: "gamma-api" | "gamma-delisted";
   rawResponse: string | null;
   candidates: ResolutionCandidate[];
 }
 
+function parseOutcomes(rawPayload: Record<string, unknown>): string[] {
+  const rawOutcomes = rawPayload.outcomes;
+  if (!rawOutcomes) return [];
+  try {
+    const outcomes = typeof rawOutcomes === "string" ? JSON.parse(rawOutcomes) : rawOutcomes;
+    return Array.isArray(outcomes) ? outcomes.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Exported for use by resolution recovery path. */
 export function inferResolution(
   umaStatus: string | null,
   rawPayload: Record<string, unknown>,
-): "YES" | "NO" | "unknown" {
+): { outcome: string; winnerIndex: number; winnerTokenId: string | null } | "unknown" {
   // 1. tokens array with winner flag (some Gamma endpoints)
   const tokens = rawPayload.tokens as Array<Record<string, unknown>> | undefined;
   if (tokens && Array.isArray(tokens)) {
-    for (const t of tokens) {
-      if (t.winner === true) {
-        return (t.outcome as string)?.toUpperCase() === "YES" ? "YES" : "NO";
+    const outcomes = parseOutcomes(rawPayload);
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i]!.winner === true) {
+        const directOutcome =
+          typeof tokens[i]!.outcome === "string" && String(tokens[i]!.outcome).trim() !== ""
+            ? String(tokens[i]!.outcome)
+            : null;
+        return {
+          outcome: directOutcome ?? outcomes[i] ?? "",
+          winnerIndex: i,
+          winnerTokenId:
+            typeof tokens[i]!.token_id === "string" ? String(tokens[i]!.token_id) : null,
+        };
       }
     }
   }
 
   // 2. outcomePrices + outcomes (Gamma /markets/slug/ endpoint).
-  const winner = inferFromOutcomePrices(rawPayload);
-  if (winner) return winner;
+  const result = inferFromOutcomePrices(rawPayload);
+  if (result) return result;
 
   // 3. Fallback: uma resolved but winner not determinable from above
   if (umaStatus === "resolved") {
     const outcome = (rawPayload.resolutionOutcome ?? rawPayload.resolution_outcome) as
       | string
       | undefined;
-    if (outcome) return outcome.toUpperCase() === "YES" ? "YES" : "NO";
+    if (outcome) return { outcome: String(outcome), winnerIndex: -1, winnerTokenId: null };
   }
 
   return "unknown";
 }
 
-function inferFromOutcomePrices(rawPayload: Record<string, unknown>): "YES" | "NO" | null {
+function inferFromOutcomePrices(
+  rawPayload: Record<string, unknown>,
+): { outcome: string; winnerIndex: number; winnerTokenId: string | null } | null {
   const rawOutcomes = rawPayload.outcomes;
   const rawPrices = rawPayload.outcomePrices;
   if (!rawOutcomes || !rawPrices) return null;
@@ -78,7 +103,7 @@ function inferFromOutcomePrices(rawPayload: Record<string, unknown>): "YES" | "N
 
     for (let i = 0; i < outcomes.length; i++) {
       if (Number(prices[i]) === 1) {
-        return String(outcomes[i]).toUpperCase() === "YES" ? "YES" : "NO";
+        return { outcome: String(outcomes[i]), winnerIndex: i, winnerTokenId: null };
       }
     }
   } catch {
@@ -86,6 +111,61 @@ function inferFromOutcomePrices(rawPayload: Record<string, unknown>): "YES" | "N
   }
 
   return null;
+}
+
+/** Parse clobTokenIds from a Gamma API payload. Exported for resolution-module recovery. */
+export function parseTokenIds(rawPayload: Record<string, unknown>): string[] {
+  const raw = rawPayload.clobTokenIds;
+  if (!raw) return [];
+  try {
+    const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(arr) ? arr.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Map inferResolution result + Gamma payload into a DetectedResolution. */
+function buildGammaResolution(
+  conditionId: string,
+  info: {
+    closedTime?: string | null;
+    umaResolutionStatus: string | null;
+    rawPayload: Record<string, unknown>;
+  },
+  candidates: ResolutionCandidate[],
+): DetectedResolution {
+  const inferred = inferResolution(info.umaResolutionStatus, info.rawPayload);
+  const clobTokenIds = parseTokenIds(info.rawPayload);
+  const outcomes = parseOutcomes(info.rawPayload);
+  const winnerTokenId =
+    inferred !== "unknown" && inferred.winnerTokenId
+      ? createTokenId(inferred.winnerTokenId)
+      : inferred !== "unknown" && inferred.winnerIndex >= 0 && clobTokenIds[inferred.winnerIndex]
+        ? createTokenId(clobTokenIds[inferred.winnerIndex]!)
+        : null;
+  const resolutionOutcome =
+    inferred === "unknown"
+      ? "unknown"
+      : inferred.outcome.trim() !== ""
+        ? inferred.outcome
+        : winnerTokenId
+          ? (candidates.find((candidate) => String(candidate.tokenId) === String(winnerTokenId))
+              ?.outcome ??
+            (inferred.winnerIndex >= 0 ? (outcomes[inferred.winnerIndex] ?? "unknown") : "unknown"))
+          : inferred.winnerIndex >= 0
+            ? (outcomes[inferred.winnerIndex] ?? "unknown")
+            : "unknown";
+
+  return {
+    conditionId,
+    resolution: resolutionOutcome,
+    winnerTokenId,
+    resolvedAt: info.closedTime ?? new Date().toISOString(),
+    source: "gamma-api",
+    rawResponse: JSON.stringify(info.rawPayload),
+    candidates,
+  };
 }
 
 export class ResolutionDetector {
@@ -181,15 +261,7 @@ export class ResolutionDetector {
         return null;
       }
 
-      const resolution = inferResolution(info.umaResolutionStatus, info.rawPayload);
-      return {
-        conditionId,
-        resolution,
-        resolvedAt: info.closedTime ?? new Date().toISOString(),
-        source: "gamma-api",
-        rawResponse: JSON.stringify(info.rawPayload),
-        candidates,
-      };
+      return buildGammaResolution(conditionId, info, candidates);
     }
 
     // Slug not found — try conditionId as fallback before declaring delisted.
@@ -209,15 +281,7 @@ export class ResolutionDetector {
         return null;
       }
 
-      const resolution = inferResolution(idInfo.umaResolutionStatus, idInfo.rawPayload);
-      return {
-        conditionId,
-        resolution,
-        resolvedAt: idInfo.closedTime ?? new Date().toISOString(),
-        source: "gamma-api",
-        rawResponse: JSON.stringify(idInfo.rawPayload),
-        candidates,
-      };
+      return buildGammaResolution(conditionId, idInfo, candidates);
     }
 
     // Both slug and ID lookups returned not-found — market genuinely delisted.
@@ -229,6 +293,7 @@ export class ResolutionDetector {
     return {
       conditionId,
       resolution: "unknown",
+      winnerTokenId: null,
       resolvedAt: candidates[0]!.endDate,
       source: "gamma-delisted",
       rawResponse: null,

@@ -243,6 +243,7 @@ describe("RuntimeSafetyEvaluator", () => {
       expect.objectContaining({
         entityType: "family",
         entityId: String(FAMILY_A),
+        profile: PROFILE,
         toState: OperatorMode.ReduceOnly,
         triggerType: "system",
         initiator: "safety-evaluator",
@@ -352,6 +353,7 @@ describe("RuntimeSafetyEvaluator", () => {
     );
     expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
+        profile: PROFILE,
         fromState: OperatorMode.ReduceOnly,
         toState: OperatorMode.Quarantine,
       }),
@@ -418,6 +420,7 @@ describe("RuntimeSafetyEvaluator", () => {
     expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
         entityType: "family",
+        profile: ProfileId.LiveLite,
         fromState: "scaled",
         toState: "reduce-only",
         triggerType: "system",
@@ -465,6 +468,7 @@ describe("RuntimeSafetyEvaluator", () => {
       id: 1,
       entityType: "family",
       entityId: String(FAMILY_A),
+      profile: PROFILE,
       fromState: "scaled",
       toState: "reduce-only",
       triggerType: "system",
@@ -550,6 +554,7 @@ describe("RuntimeSafetyEvaluator", () => {
     expect(deps.familyEvidenceRepo.updatePromotionState).toHaveBeenCalledWith(FAMILY_A, "scaled");
     expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
       expect.objectContaining({
+        profile: PROFILE,
         fromState: "reduce-only",
         toState: "scaled",
         triggerType: "system",
@@ -594,7 +599,7 @@ describe("RuntimeSafetyEvaluator", () => {
       "probe-only",
     );
     expect(deps.stateTransitionRepo.insert).toHaveBeenCalledWith(
-      expect.objectContaining({ toState: "probe-only" }),
+      expect.objectContaining({ profile: PROFILE, toState: "probe-only" }),
     );
   });
 

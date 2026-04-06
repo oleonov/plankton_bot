@@ -65,7 +65,7 @@ export interface Market {
   slug: string;
   eventSlug: string | null;
   question: string;
-  outcome: "YES" | "NO";
+  outcome: string;
   familyId: FamilyId | null;
   familyKey: string | null;
   regime: Regime | null;
@@ -419,7 +419,7 @@ export interface NormalizedMarket {
   slug: string;
   eventSlug: string | null;
   question: string;
-  outcome: "YES" | "NO";
+  outcome: string;
   familyId: FamilyId | null;
   familyKey: string | null;
   regime: Regime | null;
@@ -440,7 +440,7 @@ export interface NormalizedMarket {
 
 export interface MarketResolution {
   conditionId: string;
-  resolution: "YES" | "NO" | "unknown";
+  resolution: string;
   resolvedAt: string; // ISO timestamp
   detectedAt: string; // ISO timestamp
   source: "gamma-api" | "gamma-delisted" | "manual";
