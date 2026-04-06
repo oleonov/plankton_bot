@@ -144,4 +144,22 @@ describe("PortfolioChart", () => {
       expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
     });
   });
+
+  it("portfolio chart plots P/L relative to baseline, not absolute equity", async () => {
+    // Verify the chart headline shows P/L (5.42), not absolute equity (105.42)
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", () => ok(mockPortfolioSeries)),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    await waitFor(() => {
+      const pnlEl = screen.getByTestId("pnl-value");
+      // Should show +$5.42 (P/L), NOT +$105.42 (absolute equity)
+      expect(pnlEl.textContent).toContain("5.42");
+      expect(pnlEl.textContent).not.toContain("105");
+      expect(pnlEl.textContent).not.toContain("100");
+    });
+  });
 });

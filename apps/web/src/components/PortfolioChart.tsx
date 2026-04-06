@@ -39,9 +39,9 @@ interface ChartPoint {
   label: string;
 }
 
-function portfolioToChartPoints(items: PortfolioDataPoint[]): ChartPoint[] {
+function portfolioToChartPoints(items: PortfolioDataPoint[], baseline: number): ChartPoint[] {
   return items.map((d) => ({
-    value: d.equityUsdc,
+    value: d.equityUsdc - baseline,
     label: d.capturedAt.slice(5, 16).replace("T", " "),
   }));
 }
@@ -175,7 +175,7 @@ export function PortfolioChart() {
 
   const points =
     mode === "portfolio"
-      ? portfolioToChartPoints(portfolio?.items ?? [])
+      ? portfolioToChartPoints(portfolio?.items ?? [], portfolio?.baseline ?? 0)
       : pnlToChartPoints(pnlData?.items ?? []);
 
   const pnl =
