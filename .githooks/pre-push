@@ -1,0 +1,49 @@
+#!/bin/sh
+set -eu
+
+cd "$(git rev-parse --show-toplevel)"
+
+prettier_patterns='
+*.cjs
+*.css
+*.html
+*.js
+*.json
+*.jsx
+*.md
+*.mjs
+*.ts
+*.tsx
+*.yaml
+*.yml
+'
+
+upstream_ref=""
+if git rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+  upstream_ref="$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}')"
+fi
+
+if [ -n "$upstream_ref" ]; then
+  changed_files="$(git diff --name-only --diff-filter=ACMRTUXB "${upstream_ref}...HEAD")"
+else
+  changed_files="$(git diff --cached --name-only --diff-filter=ACMRTUXB)"
+fi
+
+files_to_check=""
+for file in $changed_files; do
+  case "$file" in
+    *.cjs|*.css|*.html|*.js|*.json|*.jsx|*.md|*.mjs|*.ts|*.tsx|*.yaml|*.yml)
+      if [ -f "$file" ]; then
+        files_to_check="${files_to_check}
+$file"
+      fi
+      ;;
+  esac
+done
+
+if [ -z "${files_to_check#"${files_to_check%%[![:space:]]*}"}" ]; then
+  exit 0
+fi
+
+echo "pre-push: running prettier --check on changed tracked files"
+printf '%s\n' "$files_to_check" | sed '/^$/d' | xargs pnpm exec prettier --check --ignore-unknown
