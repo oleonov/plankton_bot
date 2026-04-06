@@ -193,6 +193,9 @@ export const handlers = [
     }),
   ),
   http.get("/api/v1/metrics/pnl-series", () => ok({ items: [] })),
+  http.get("/api/v1/metrics/portfolio-series", () =>
+    ok({ items: [], baseline: 100, currentEquity: 100, portfolioPnl: 0, interval: "1d" }),
+  ),
   http.get("/api/v1/metrics/families", () => ok([])),
   http.get("/api/v1/audit", () => ok({ ...mockAudit, totalCount: mockAudit.items.length })),
   http.get("/api/v1/risk-events", () => ok({ items: [], nextCursor: null, totalCount: 0 })),

@@ -4,6 +4,7 @@ import type {
   StatusData,
   MetricsData,
   PnlDataPoint,
+  PortfolioSeriesResponse,
   FamilyMetric,
   PositionDTO,
   OrderDTO,
@@ -80,6 +81,17 @@ export function usePnlSeries(days = 14) {
   return useQuery({
     queryKey: ["pnl-series", days],
     queryFn: () => apiFetch<{ items: PnlDataPoint[] }>(`/api/v1/metrics/pnl-series?days=${days}`),
+  });
+}
+
+export function usePortfolioSeries(interval: string) {
+  return useQuery({
+    queryKey: ["portfolio-series", interval],
+    queryFn: () =>
+      apiFetch<PortfolioSeriesResponse>(
+        withParams("/api/v1/metrics/portfolio-series", { interval }),
+      ),
+    refetchInterval: 60_000,
   });
 }
 

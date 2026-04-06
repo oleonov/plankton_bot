@@ -223,9 +223,7 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       return;
     }
 
-    const equity = isLiveLite
-      ? walletBalanceUsdc! + positionValue
-      : balanceUsdc! + positionValue;
+    const equity = isLiveLite ? walletBalanceUsdc! + positionValue : balanceUsdc! + positionValue;
 
     const realizedPnl = this.reader.readRealizedPnl();
 

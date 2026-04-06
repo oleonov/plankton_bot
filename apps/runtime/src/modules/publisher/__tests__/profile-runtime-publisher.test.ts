@@ -499,9 +499,9 @@ describe("ProfileRuntimePublisher", () => {
   // ─── Portfolio snapshot tests ──────────────────────────────────────────
 
   function getSnapshots(): Array<Record<string, unknown>> {
-    return ledgerConn.db
-      .prepare("SELECT * FROM portfolio_snapshots ORDER BY id")
-      .all() as Array<Record<string, unknown>>;
+    return ledgerConn.db.prepare("SELECT * FROM portfolio_snapshots ORDER BY id").all() as Array<
+      Record<string, unknown>
+    >;
   }
 
   it("snapshot writes equity = wallet + mark-to-market position value (live-lite)", async () => {

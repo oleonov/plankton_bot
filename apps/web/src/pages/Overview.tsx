@@ -1,14 +1,7 @@
 import { Link } from "react-router-dom";
 import type { FamilyMetric } from "../api/types.ts";
-import {
-  useStatus,
-  useMetrics,
-  usePnlSeries,
-  useMetricsFamilies,
-  useFills,
-  useOrders,
-} from "../api/hooks.ts";
-import { PnlChart } from "../components/PnlChart.tsx";
+import { useStatus, useMetrics, useMetricsFamilies, useFills, useOrders } from "../api/hooks.ts";
+import { PortfolioChart } from "../components/PortfolioChart.tsx";
 import { TradingActivityPanel } from "../components/TradingActivityPanel.tsx";
 import { formatAgo, formatUsd } from "../utils/format.ts";
 
@@ -124,7 +117,6 @@ function BalanceCard({ status }: { status: import("../api/types.ts").StatusData 
 export function Overview() {
   const { data: status } = useStatus();
   const { data: metrics } = useMetrics();
-  const { data: pnlData } = usePnlSeries();
   const { data: familyMetrics } = useMetricsFamilies();
   const { data: recentFills } = useFills({ limit: 1 });
   const { data: recentOrders } = useOrders({ limit: 1 });
@@ -387,9 +379,9 @@ export function Overview() {
         </div>
       )}
 
-      {/* PnL Chart + Trading Activity side by side */}
+      {/* Portfolio Chart + Trading Activity side by side */}
       <div className="grid-2" style={{ marginBottom: 16 }}>
-        <PnlChart data={pnlData?.items ?? []} tailCostUsdc={status.totalTailCostUsdc} />
+        <PortfolioChart />
         <TradingActivityPanel />
       </div>
 

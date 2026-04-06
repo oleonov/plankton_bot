@@ -95,6 +95,22 @@ export interface PnlDataPoint {
   realizedPnl: number;
 }
 
+/** GET /metrics/portfolio-series */
+export interface PortfolioDataPoint {
+  equityUsdc: number;
+  realizedPnlUsdc: number;
+  positionValueUsdc: number;
+  capturedAt: string;
+}
+
+export interface PortfolioSeriesResponse {
+  items: PortfolioDataPoint[];
+  baseline: number;
+  currentEquity: number;
+  portfolioPnl: number;
+  interval: string;
+}
+
 /** GET /metrics/trading-activity item */
 export interface TradingActivitySnapshot {
   tradingState: string;
