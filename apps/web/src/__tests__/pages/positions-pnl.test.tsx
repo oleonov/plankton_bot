@@ -49,4 +49,44 @@ describe("Positions page", () => {
 
     expect(await screen.findByText("+$3.00")).toBeInTheDocument();
   });
+
+  it("shows realized pnl only for closed positions", async () => {
+    server.use(
+      http.get("/api/v1/positions", () =>
+        ok({
+          items: [
+            {
+              positionId: "pos-closed",
+              tokenId: "tok-closed",
+              familyId: "fam-closed",
+              side: "buy",
+              size: 0,
+              avgEntryPrice: 0.02,
+              costBasisUsdc: 1.64,
+              currentValueUsdc: 0,
+              realizedPnl: 81.77,
+              status: "closed",
+              openedAt: "2026-04-05T00:00:00Z",
+              closedAt: "2026-04-06T00:00:00Z",
+              updatedAt: "2026-04-06T00:00:00Z",
+              slug: "market-closed",
+              eventSlug: "event-closed",
+              question: "Bitcoin Up or Down?",
+              outcome: "Up",
+              conditionId: "cond-closed",
+              endDate: "2026-04-06T00:00:00Z",
+              resolution: "Down",
+              resolutionStatus: "settled",
+            },
+          ],
+          nextCursor: null,
+          totalCount: 1,
+        }),
+      ),
+    );
+
+    renderWithProviders(<Positions />);
+
+    expect(await screen.findByText("+$81.77")).toBeInTheDocument();
+  });
 });

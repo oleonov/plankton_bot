@@ -11,7 +11,11 @@ function getPositionTotalPnl(position: {
   costBasisUsdc: number;
   currentValueUsdc: number | null;
   realizedPnl: number;
+  status: string;
 }): number {
+  if (position.status === "closed") {
+    return position.realizedPnl;
+  }
   return position.realizedPnl + ((position.currentValueUsdc ?? 0) - position.costBasisUsdc);
 }
 
