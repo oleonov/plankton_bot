@@ -91,13 +91,13 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
     const itemQuery =
       rawCount <= maxRawPoints
         ? db.prepare(
-            `SELECT equity_usdc, realized_pnl_usdc, position_value_usdc, captured_at
+            `SELECT equity_usdc, realized_pnl_usdc, position_value_usdc, open_value_usdc, captured_at
              FROM portfolio_snapshots
              WHERE profile = ? AND captured_at >= datetime('now', ?)
              ORDER BY captured_at ASC`,
           )
         : db.prepare(
-            `SELECT ps.equity_usdc, ps.realized_pnl_usdc, ps.position_value_usdc, ps.captured_at
+            `SELECT ps.equity_usdc, ps.realized_pnl_usdc, ps.position_value_usdc, ps.open_value_usdc, ps.captured_at
              FROM portfolio_snapshots ps
              INNER JOIN (
                SELECT MAX(id) as max_id
@@ -116,12 +116,14 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
             equity_usdc: number;
             realized_pnl_usdc: number;
             position_value_usdc: number;
+            open_value_usdc: number;
             captured_at: string;
           }>)
         : (itemQuery.all(effectiveProfile, since, bucket) as Array<{
             equity_usdc: number;
             realized_pnl_usdc: number;
             position_value_usdc: number;
+            open_value_usdc: number;
             captured_at: string;
           }>);
 
@@ -160,7 +162,7 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
       historyStart <= effectiveCoverageStart;
 
     const baseline =
-      interval !== "1d" && !coverageComplete && hasInitialBalance
+      !coverageComplete && hasInitialBalance
         ? initialBalance
         : (baselineRow?.equity_usdc ?? initialBalance);
     const currentEquity = items.length > 0 ? items[items.length - 1]!.equity_usdc : baseline;
@@ -170,6 +172,7 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
         equityUsdc: p.equity_usdc,
         realizedPnlUsdc: p.realized_pnl_usdc,
         positionValueUsdc: p.position_value_usdc,
+        openValueUsdc: p.open_value_usdc,
         capturedAt: p.captured_at,
       })),
       baseline,

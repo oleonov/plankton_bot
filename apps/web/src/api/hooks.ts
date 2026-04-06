@@ -81,6 +81,7 @@ export function usePnlSeries(days = 14) {
   return useQuery({
     queryKey: ["pnl-series", days],
     queryFn: () => apiFetch<{ items: PnlDataPoint[] }>(`/api/v1/metrics/pnl-series?days=${days}`),
+    placeholderData: (previousData) => previousData,
   });
 }
 
@@ -92,6 +93,7 @@ export function usePortfolioSeries(interval: string) {
         withParams("/api/v1/metrics/portfolio-series", { interval }),
       ),
     refetchInterval: 60_000,
+    placeholderData: (previousData) => previousData,
   });
 }
 

@@ -100,6 +100,7 @@ export interface PortfolioDataPoint {
   equityUsdc: number;
   realizedPnlUsdc: number;
   positionValueUsdc: number;
+  openValueUsdc: number;
   capturedAt: string;
 }
 

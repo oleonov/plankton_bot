@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { usePortfolioSeries, usePnlSeries } from "../api/hooks.ts";
-import type { PortfolioDataPoint, PnlDataPoint } from "../api/types.ts";
-import { formatTimestamp } from "../utils/format.ts";
+import type { PortfolioSeriesResponse, PnlDataPoint } from "../api/types.ts";
 
 function safeGetItem(key: string): string | null {
   try {
@@ -47,8 +46,9 @@ interface ChartPoint {
   label: string;
 }
 
-function portfolioToChartPoints(items: PortfolioDataPoint[], baseline: number): ChartPoint[] {
-  return items.map((d) => ({
+function portfolioToChartPoints(series: PortfolioSeriesResponse | undefined): ChartPoint[] {
+  const baseline = series?.baseline ?? 0;
+  return (series?.items ?? []).map((d) => ({
     value: d.equityUsdc - baseline,
     label: d.capturedAt.slice(5, 16).replace("T", " "),
   }));
@@ -102,7 +102,17 @@ function AreaChart({ points, onHover, hoverLabel }: AreaChartProps) {
 
   if (points.length === 0) {
     return (
-      <div style={{ textAlign: "center", padding: 40, color: "var(--text-dim)" }}>No data yet</div>
+      <div
+        style={{
+          minHeight: HEIGHT,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          color: "var(--text-dim)",
+        }}
+      >
+        No data yet
+      </div>
     );
   }
 
@@ -132,7 +142,7 @@ function AreaChart({ points, onHover, hoverLabel }: AreaChartProps) {
   const yStep = rangeY / yTicks;
 
   return (
-    <div style={{ position: "relative" }}>
+    <div data-testid="portfolio-chart-shell" style={{ position: "relative", minHeight: HEIGHT }}>
       {hoverLabel && (
         <div
           data-testid="hover-label"
@@ -154,7 +164,7 @@ function AreaChart({ points, onHover, hoverLabel }: AreaChartProps) {
         width="100%"
         viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
         preserveAspectRatio="xMidYMid meet"
-        style={{ display: "block", cursor: "crosshair" }}
+        style={{ display: "block", width: "100%", height: HEIGHT, cursor: "crosshair" }}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
       >
@@ -280,26 +290,19 @@ export function PortfolioChart() {
 
   const points =
     mode === "portfolio"
-      ? portfolioToChartPoints(portfolio?.items ?? [], portfolio?.baseline ?? 0)
+      ? portfolioToChartPoints(portfolio)
       : pnlToChartPoints(pnlData?.items ?? []);
 
   const latestPnl =
     mode === "portfolio"
-      ? (portfolio?.portfolioPnl ?? null)
+      ? (portfolio?.portfolioPnl ?? 0)
       : pnlData?.items.length
         ? (pnlData.items[pnlData.items.length - 1]?.realizedPnl ?? 0)
         : 0;
 
   const displayPnl = hoveredPoint ? hoveredPoint.value : latestPnl;
   const hoverLabel = hoveredPoint ? hoveredPoint.label : null;
-  const subtitle =
-    mode === "portfolio"
-      ? portfolio?.coverageComplete
-        ? INTERVAL_LABELS[interval]
-        : portfolio?.historyStart
-          ? `Since ${formatTimestamp(portfolio.historyStart)}`
-          : "Collecting history"
-      : INTERVAL_LABELS[interval];
+  const subtitle = INTERVAL_LABELS[interval];
 
   const handleHover = useCallback((point: ChartPoint | null) => {
     setHoveredPoint(point);

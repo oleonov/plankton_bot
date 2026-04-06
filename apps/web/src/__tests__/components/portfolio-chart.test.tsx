@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { screen, fireEvent, waitFor } from "@testing-library/react";
-import { http, HttpResponse } from "msw";
+import { delay, http, HttpResponse } from "msw";
 import { PortfolioChart } from "../../components/PortfolioChart.tsx";
 import { renderWithProviders } from "../../test/test-utils.tsx";
 import { server } from "../../test/server.ts";
@@ -12,15 +12,17 @@ function ok<T>(data: T) {
 const mockPortfolioSeries = {
   items: [
     {
-      equityUsdc: 100,
+      equityUsdc: 102,
       realizedPnlUsdc: 0,
-      positionValueUsdc: 0,
+      positionValueUsdc: 12,
+      openValueUsdc: 10,
       capturedAt: "2026-04-04T10:00:00Z",
     },
     {
       equityUsdc: 105.42,
       realizedPnlUsdc: 3.42,
-      positionValueUsdc: 2,
+      positionValueUsdc: 15,
+      openValueUsdc: 10,
       capturedAt: "2026-04-04T11:00:00Z",
     },
   ],
@@ -174,11 +176,11 @@ describe("PortfolioChart", () => {
         y: 0,
         toJSON: () => {},
       }) as DOMRect;
-    // clientX near left edge → first data point (equity 100, baseline 100 → P/L $0.00)
+    // clientX near left edge → first data point (equity 102 - baseline 100 = P/L $2.00)
     fireEvent.mouseMove(svg, { clientX: 60, clientY: 50 });
 
     await waitFor(() => {
-      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$0.00");
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$2.00");
       expect(screen.getByTestId("hover-label")).toBeInTheDocument();
       expect(screen.getByTestId("hover-label")).toHaveStyle({ right: "10px" });
     });
@@ -220,7 +222,7 @@ describe("PortfolioChart", () => {
     fireEvent.mouseMove(svg, { clientX: 60, clientY: 50 });
 
     await waitFor(() => {
-      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$0.00");
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$2.00");
     });
 
     // Switch to Realized without leaving SVG — hover should clear
@@ -232,7 +234,7 @@ describe("PortfolioChart", () => {
     });
   });
 
-  it("headline shows P/L relative to baseline, not absolute equity", async () => {
+  it("headline uses API portfolioPnl, not holdings-only P/L", async () => {
     server.use(
       http.get("/api/v1/metrics/portfolio-series", () => ok(mockPortfolioSeries)),
       http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
@@ -242,14 +244,15 @@ describe("PortfolioChart", () => {
 
     await waitFor(() => {
       const pnlEl = screen.getByTestId("pnl-value");
-      // Should show +$5.42 (P/L), NOT +$105.42 (absolute equity)
+      // Should show API portfolioPnl +$5.42, NOT holdings-only +$5.00 or raw equity
       expect(pnlEl.textContent).toContain("5.42");
+      expect(pnlEl.textContent).not.toContain("5.00");
       expect(pnlEl.textContent).not.toContain("105");
       expect(pnlEl.textContent).not.toContain("100");
     });
   });
 
-  it("shows tracking subtitle when longer interval history is incomplete", async () => {
+  it("keeps fixed interval subtitle even when longer history is incomplete", async () => {
     server.use(
       http.get("/api/v1/metrics/portfolio-series", () =>
         ok({
@@ -267,7 +270,7 @@ describe("PortfolioChart", () => {
     fireEvent.click(await screen.findByTestId("interval-1w"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("chart-subtitle").textContent).toContain("Since");
+      expect(screen.getByTestId("chart-subtitle")).toHaveTextContent("Past Week");
     });
   });
 
@@ -287,7 +290,7 @@ describe("PortfolioChart", () => {
     renderWithProviders(<PortfolioChart />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("chart-subtitle").textContent).toContain("Since");
+      expect(screen.getByTestId("chart-subtitle")).toHaveTextContent("Past Day");
     });
 
     const interval1w = screen.getByTestId("interval-1w");
@@ -300,5 +303,71 @@ describe("PortfolioChart", () => {
 
     fireEvent.click(interval1m);
     expect(screen.getByTestId("interval-1m")).toHaveStyle({ fontWeight: 700 });
+  });
+
+  it("keeps the previous chart visible while switching intervals", async () => {
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", async ({ request }) => {
+        const url = new URL(request.url);
+        const interval = url.searchParams.get("interval");
+        if (interval === "1w") {
+          await delay(100);
+          return ok({
+            ...mockPortfolioSeries,
+            items: [
+              {
+                equityUsdc: 110,
+                realizedPnlUsdc: 0,
+                positionValueUsdc: 20,
+                openValueUsdc: 10,
+                capturedAt: "2026-04-01T10:00:00Z",
+              },
+            ],
+            currentEquity: 110,
+            portfolioPnl: 10,
+            interval: "1w",
+          });
+        }
+        return ok(mockPortfolioSeries);
+      }),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
+    });
+
+    fireEvent.click(screen.getByTestId("interval-1w"));
+
+    expect(screen.queryByText("No data yet")).not.toBeInTheDocument();
+    expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$10.00");
+      expect(screen.getByTestId("chart-subtitle")).toHaveTextContent("Past Week");
+    });
+  });
+
+  it("keeps a fixed chart shell height while data refetches", async () => {
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", async ({ request }) => {
+        const url = new URL(request.url);
+        if (url.searchParams.get("interval") === "1w") {
+          await delay(100);
+        }
+        return ok(mockPortfolioSeries);
+      }),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    const shell = await screen.findByTestId("portfolio-chart-shell");
+    expect(shell).toHaveStyle({ minHeight: "200px" });
+
+    fireEvent.click(screen.getByTestId("interval-1w"));
+    expect(shell).toHaveStyle({ minHeight: "200px" });
   });
 });

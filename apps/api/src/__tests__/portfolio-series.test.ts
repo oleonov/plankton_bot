@@ -75,6 +75,7 @@ function insertSnapshot(
   equityUsdc: number,
   realizedPnlUsdc: number,
   positionValueUsdc: number,
+  openValueUsdc: number,
   capturedAt: string,
 ) {
   conn.db
@@ -82,7 +83,7 @@ function insertSnapshot(
       `INSERT INTO portfolio_snapshots (profile, equity_usdc, realized_pnl_usdc, position_value_usdc, open_value_usdc, captured_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(profile, equityUsdc, realizedPnlUsdc, positionValueUsdc, positionValueUsdc, capturedAt);
+    .run(profile, equityUsdc, realizedPnlUsdc, positionValueUsdc, openValueUsdc, capturedAt);
 }
 
 function minutesAgo(m: number): string {
@@ -112,9 +113,9 @@ describe("GET /metrics/portfolio-series", () => {
     const t2 = minutesAgo(28); // same 5-min bucket as t1 if they round the same
     const t3 = minutesAgo(10);
 
-    insertSnapshot("simulation", 100, 0, 50, t1);
-    insertSnapshot("simulation", 102, 1, 52, t2); // should replace t1 in same bucket
-    insertSnapshot("simulation", 110, 5, 60, t3);
+    insertSnapshot("simulation", 100, 0, 50, 40, t1);
+    insertSnapshot("simulation", 102, 1, 52, 40, t2); // should replace t1 in same bucket
+    insertSnapshot("simulation", 110, 5, 60, 40, t3);
 
     const res = await app.inject({
       method: "GET",
@@ -133,12 +134,29 @@ describe("GET /metrics/portfolio-series", () => {
     expect(last.equityUsdc).toBe(110);
     expect(last.realizedPnlUsdc).toBe(5);
     expect(last.positionValueUsdc).toBe(60);
+    expect(last.openValueUsdc).toBe(40);
+  });
+
+  it("returns openValueUsdc so the UI can chart holdings P/L instead of wallet equity", async () => {
+    insertSnapshot("simulation", 100, 0, 12, 10, minutesAgo(30));
+    insertSnapshot("simulation", 105, 1, 15, 10, minutesAgo(5));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=1d",
+      headers: auth(),
+    });
+    const body = res.json();
+
+    expect(body.ok).toBe(true);
+    expect(body.data.items[0].openValueUsdc).toBe(10);
+    expect(body.data.items[1].positionValueUsdc - body.data.items[1].openValueUsdc).toBe(5);
   });
 
   it("baseline is the first raw snapshot in the window", async () => {
-    insertSnapshot("simulation", 100, 0, 50, minutesAgo(60));
-    insertSnapshot("simulation", 120, 10, 70, minutesAgo(30));
-    insertSnapshot("simulation", 130, 15, 80, minutesAgo(5));
+    insertSnapshot("simulation", 100, 0, 50, 40, minutesAgo(60));
+    insertSnapshot("simulation", 120, 10, 70, 40, minutesAgo(30));
+    insertSnapshot("simulation", 130, 15, 80, 40, minutesAgo(5));
 
     const res = await app.inject({
       method: "GET",
@@ -152,8 +170,8 @@ describe("GET /metrics/portfolio-series", () => {
   });
 
   it("portfolioPnl equals currentEquity minus baseline", async () => {
-    insertSnapshot("simulation", 100, 0, 50, minutesAgo(60));
-    insertSnapshot("simulation", 125, 12, 75, minutesAgo(5));
+    insertSnapshot("simulation", 100, 0, 50, 40, minutesAgo(60));
+    insertSnapshot("simulation", 125, 12, 75, 40, minutesAgo(5));
 
     const res = await app.inject({
       method: "GET",
@@ -170,7 +188,7 @@ describe("GET /metrics/portfolio-series", () => {
   it("different intervals use different bucket sizes", async () => {
     // Seed snapshots every 10 minutes for the past 2 hours
     for (let i = 120; i >= 0; i -= 10) {
-      insertSnapshot("simulation", 100 + i, i, 50 + i, minutesAgo(i));
+      insertSnapshot("simulation", 100 + i, i, 50 + i, 40, minutesAgo(i));
     }
 
     const res1d = await app.inject({
@@ -194,9 +212,9 @@ describe("GET /metrics/portfolio-series", () => {
   });
 
   it("uses raw snapshots for long intervals when history is still sparse", async () => {
-    insertSnapshot("simulation", 100, 0, 50, minutesAgo(60));
-    insertSnapshot("simulation", 103, 2, 53, minutesAgo(40));
-    insertSnapshot("simulation", 107, 4, 57, minutesAgo(20));
+    insertSnapshot("simulation", 100, 0, 50, 40, minutesAgo(60));
+    insertSnapshot("simulation", 103, 2, 53, 40, minutesAgo(40));
+    insertSnapshot("simulation", 107, 4, 57, 40, minutesAgo(20));
 
     const res = await app.inject({
       method: "GET",
@@ -238,6 +256,36 @@ describe("GET /metrics/portfolio-series", () => {
     }
   });
 
+  it("uses initial balance as baseline for 1d when coverage is incomplete", async () => {
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc)
+         VALUES ('simulation', 10000)`,
+      )
+      .run();
+
+    try {
+      insertSnapshot("simulation", 10020, 10, 20, 15, minutesAgo(30));
+      insertSnapshot("simulation", 10025, 12, 25, 15, minutesAgo(5));
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1d",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.coverageComplete).toBe(false);
+      expect(body.data.baseline).toBe(10000);
+      expect(body.data.currentEquity).toBe(10025);
+      expect(body.data.portfolioPnl).toBe(25);
+      expect(body.data.historyStart).toBeTruthy();
+    } finally {
+      conn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'simulation'").run();
+    }
+  });
+
   it("uses initial balance as baseline for longer intervals when coverage is incomplete", async () => {
     conn.db
       .prepare(
@@ -247,8 +295,8 @@ describe("GET /metrics/portfolio-series", () => {
       .run();
 
     try {
-      insertSnapshot("simulation", 10020, 10, 20, minutesAgo(30));
-      insertSnapshot("simulation", 10025, 12, 25, minutesAgo(5));
+      insertSnapshot("simulation", 10020, 10, 20, 15, minutesAgo(30));
+      insertSnapshot("simulation", 10025, 12, 25, 15, minutesAgo(5));
 
       const res = await app.inject({
         method: "GET",
@@ -283,8 +331,8 @@ describe("GET /metrics/portfolio-series", () => {
       .run();
 
     try {
-      insertSnapshot("simulation", 10010, 5, 10, minutesAgo(30));
-      insertSnapshot("simulation", 10025, 12, 25, minutesAgo(5));
+      insertSnapshot("simulation", 10010, 5, 10, 8, minutesAgo(30));
+      insertSnapshot("simulation", 10025, 12, 25, 8, minutesAgo(5));
 
       const res = await app.inject({
         method: "GET",
@@ -304,8 +352,8 @@ describe("GET /metrics/portfolio-series", () => {
 
   it("filters snapshots by the current profile", async () => {
     // Insert snapshots for simulation and paper profiles
-    insertSnapshot("simulation", 100, 0, 50, minutesAgo(30));
-    insertSnapshot("paper", 200, 10, 150, minutesAgo(30));
+    insertSnapshot("simulation", 100, 0, 50, 40, minutesAgo(30));
+    insertSnapshot("paper", 200, 10, 150, 120, minutesAgo(30));
 
     const res = await app.inject({
       method: "GET",
@@ -320,7 +368,7 @@ describe("GET /metrics/portfolio-series", () => {
   });
 
   it("defaults to 1d interval for unknown values", async () => {
-    insertSnapshot("simulation", 100, 0, 50, minutesAgo(30));
+    insertSnapshot("simulation", 100, 0, 50, 40, minutesAgo(30));
 
     const res = await app.inject({
       method: "GET",
