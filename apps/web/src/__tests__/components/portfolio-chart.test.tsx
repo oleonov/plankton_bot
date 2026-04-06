@@ -28,6 +28,8 @@ const mockPortfolioSeries = {
   currentEquity: 105.42,
   portfolioPnl: 5.42,
   interval: "1d",
+  historyStart: "2026-04-04T10:00:00Z",
+  coverageComplete: true,
 };
 
 const mockPnlSeries = {
@@ -72,6 +74,7 @@ describe("PortfolioChart", () => {
 
     await waitFor(() => {
       expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
+      expect(screen.getByTestId("chart-subtitle")).toHaveTextContent("Past Day");
     });
   });
 
@@ -242,6 +245,28 @@ describe("PortfolioChart", () => {
       expect(pnlEl.textContent).toContain("5.42");
       expect(pnlEl.textContent).not.toContain("105");
       expect(pnlEl.textContent).not.toContain("100");
+    });
+  });
+
+  it("shows tracking subtitle when longer interval history is incomplete", async () => {
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", () =>
+        ok({
+          ...mockPortfolioSeries,
+          interval: "1w",
+          historyStart: "2026-04-04T10:00:00Z",
+          coverageComplete: false,
+        }),
+      ),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    fireEvent.click(await screen.findByTestId("interval-1w"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chart-subtitle").textContent).toContain("Since");
     });
   });
 });

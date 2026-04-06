@@ -109,6 +109,8 @@ export interface PortfolioSeriesResponse {
   currentEquity: number;
   portfolioPnl: number;
   interval: string;
+  historyStart: string | null;
+  coverageComplete: boolean;
 }
 
 /** GET /metrics/trading-activity item */

@@ -42,6 +42,12 @@ beforeAll(async () => {
   conn = bootstrapDatabase(":memory:");
   // Monolithic bootstrap lacks control-only tables; create for fallback test
   conn.db.exec(`
+    CREATE TABLE IF NOT EXISTS profiles (
+      profile_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS profile_settings (
       profile_id           TEXT PRIMARY KEY,
       initial_balance_usdc REAL
@@ -187,6 +193,25 @@ describe("GET /metrics/portfolio-series", () => {
     expect(body1d.data.items.length).toBeGreaterThanOrEqual(body1w.data.items.length);
   });
 
+  it("uses raw snapshots for long intervals when history is still sparse", async () => {
+    insertSnapshot("simulation", 100, 0, 50, minutesAgo(60));
+    insertSnapshot("simulation", 103, 2, 53, minutesAgo(40));
+    insertSnapshot("simulation", 107, 4, 57, minutesAgo(20));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=1m",
+      headers: auth(),
+    });
+    const body = res.json();
+
+    expect(body.ok).toBe(true);
+    expect(body.data.items).toHaveLength(3);
+    expect(body.data.items[0].equityUsdc).toBe(100);
+    expect(body.data.items[1].equityUsdc).toBe(103);
+    expect(body.data.items[2].equityUsdc).toBe(107);
+  });
+
   it("falls back to initial_balance_usdc when no snapshots exist", async () => {
     // Seed profile_settings with an initial balance
     conn.db
@@ -208,6 +233,70 @@ describe("GET /metrics/portfolio-series", () => {
       expect(body.data.baseline).toBe(10000);
       expect(body.data.currentEquity).toBe(10000);
       expect(body.data.portfolioPnl).toBe(0);
+    } finally {
+      conn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'simulation'").run();
+    }
+  });
+
+  it("uses initial balance as baseline for longer intervals when coverage is incomplete", async () => {
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc)
+         VALUES ('simulation', 10000)`,
+      )
+      .run();
+
+    try {
+      insertSnapshot("simulation", 10020, 10, 20, minutesAgo(30));
+      insertSnapshot("simulation", 10025, 12, 25, minutesAgo(5));
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1w",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.coverageComplete).toBe(false);
+      expect(body.data.baseline).toBe(10000);
+      expect(body.data.currentEquity).toBe(10025);
+      expect(body.data.portfolioPnl).toBe(25);
+      expect(body.data.historyStart).toBeTruthy();
+    } finally {
+      conn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'simulation'").run();
+    }
+  });
+
+  it("marks ALL as incomplete when the profile is older than snapshot history", async () => {
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('simulation', 'Simulation', datetime('now', '-30 days'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc)
+         VALUES ('simulation', 10000)`,
+      )
+      .run();
+
+    try {
+      insertSnapshot("simulation", 10010, 5, 10, minutesAgo(30));
+      insertSnapshot("simulation", 10025, 12, 25, minutesAgo(5));
+
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=all",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.coverageComplete).toBe(false);
+      expect(body.data.baseline).toBe(10000);
+      expect(body.data.portfolioPnl).toBe(25);
     } finally {
       conn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'simulation'").run();
     }
@@ -240,8 +329,7 @@ describe("GET /metrics/portfolio-series", () => {
     });
     const body = res.json();
     expect(body.ok).toBe(true);
-    // Falls back to "-1 day" window and 5-min buckets
-    expect(body.data.interval).toBe("invalid");
+    expect(body.data.interval).toBe("1d");
     expect(body.data.items).toHaveLength(1);
   });
 });

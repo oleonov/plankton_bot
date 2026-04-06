@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { usePortfolioSeries, usePnlSeries } from "../api/hooks.ts";
 import type { PortfolioDataPoint, PnlDataPoint } from "../api/types.ts";
+import { formatTimestamp } from "../utils/format.ts";
 
 function safeGetItem(key: string): string | null {
   try {
@@ -30,6 +31,13 @@ const INTERVAL_TO_DAYS: Record<Interval, number> = {
   "1w": 7,
   "1m": 30,
   all: 90,
+};
+
+const INTERVAL_LABELS: Record<Interval, string> = {
+  "1d": "Past Day",
+  "1w": "Past Week",
+  "1m": "Past Month",
+  all: "All-Time",
 };
 
 type ChartMode = "portfolio" | "realized";
@@ -64,9 +72,10 @@ const tabBase: React.CSSProperties = {
 interface AreaChartProps {
   points: ChartPoint[];
   onHover?: (point: ChartPoint | null, index: number | null) => void;
+  hoverLabel?: string | null;
 }
 
-function AreaChart({ points, onHover }: AreaChartProps) {
+function AreaChart({ points, onHover, hoverLabel }: AreaChartProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
@@ -123,112 +132,135 @@ function AreaChart({ points, onHover }: AreaChartProps) {
   const yStep = rangeY / yTicks;
 
   return (
-    <svg
-      ref={svgRef}
-      width="100%"
-      viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
-      preserveAspectRatio="xMidYMid meet"
-      style={{ display: "block", cursor: "crosshair" }}
-      onMouseMove={handleMouseMove}
-      onMouseLeave={handleMouseLeave}
-    >
-      <defs>
-        <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="var(--blue)" stopOpacity={0.3} />
-          <stop offset="100%" stopColor="var(--blue)" stopOpacity={0.02} />
-        </linearGradient>
-      </defs>
+    <div style={{ position: "relative" }}>
+      {hoverLabel && (
+        <div
+          data-testid="hover-label"
+          style={{
+            position: "absolute",
+            top: 8,
+            left: PAD.left,
+            zIndex: 1,
+            fontSize: 12,
+            color: "var(--text-dim)",
+            pointerEvents: "none",
+          }}
+        >
+          {hoverLabel}
+        </div>
+      )}
+      <svg
+        ref={svgRef}
+        width="100%"
+        viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+        preserveAspectRatio="xMidYMid meet"
+        style={{ display: "block", cursor: "crosshair" }}
+        onMouseMove={handleMouseMove}
+        onMouseLeave={handleMouseLeave}
+      >
+        <defs>
+          <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--blue)" stopOpacity={0.3} />
+            <stop offset="100%" stopColor="var(--blue)" stopOpacity={0.02} />
+          </linearGradient>
+        </defs>
 
-      {/* Grid lines + Y labels */}
-      {Array.from({ length: yTicks + 1 }, (_, i) => {
-        const val = minY + i * yStep;
-        return (
-          <g key={i}>
-            <line
-              x1={PAD.left}
-              y1={y(val)}
-              x2={WIDTH - PAD.right}
-              y2={y(val)}
-              stroke="var(--border)"
-              strokeWidth={0.5}
-            />
+        {/* Grid lines + Y labels */}
+        {Array.from({ length: yTicks + 1 }, (_, i) => {
+          const val = minY + i * yStep;
+          return (
+            <g key={i}>
+              <line
+                x1={PAD.left}
+                y1={y(val)}
+                x2={WIDTH - PAD.right}
+                y2={y(val)}
+                stroke="var(--border)"
+                strokeWidth={0.5}
+              />
+              <text
+                x={PAD.left - 8}
+                y={y(val) + 3}
+                textAnchor="end"
+                fill="var(--text-dim)"
+                fontSize={9}
+              >
+                ${val.toFixed(0)}
+              </text>
+            </g>
+          );
+        })}
+
+        {/* X-axis labels */}
+        {points.map((p, i) => {
+          if (
+            points.length > 10 &&
+            i % Math.ceil(points.length / 7) !== 0 &&
+            i !== points.length - 1
+          ) {
+            return null;
+          }
+          return (
             <text
-              x={PAD.left - 8}
-              y={y(val) + 3}
-              textAnchor="end"
+              key={`${p.label}-${i}`}
+              x={x(i)}
+              y={HEIGHT - 5}
+              textAnchor="middle"
               fill="var(--text-dim)"
               fontSize={9}
             >
-              ${val.toFixed(0)}
+              {p.label}
             </text>
-          </g>
-        );
-      })}
-
-      {/* X-axis labels */}
-      {points.map((p, i) => {
-        if (points.length > 10 && i % Math.ceil(points.length / 7) !== 0 && i !== points.length - 1)
-          return null;
-        return (
-          <text
-            key={`${p.label}-${i}`}
-            x={x(i)}
-            y={HEIGHT - 5}
-            textAnchor="middle"
-            fill="var(--text-dim)"
-            fontSize={9}
-          >
-            {p.label}
-          </text>
-        );
-      })}
-
-      {/* Area fill */}
-      <path d={areaPath} fill="url(#equityGradient)" />
-
-      {/* Line */}
-      <path d={linePath} fill="none" stroke="var(--blue)" strokeWidth={2} />
-
-      {/* Invisible overlay to capture mouse events across full chart area */}
-      <rect
-        x={PAD.left}
-        y={PAD.top}
-        width={plotW}
-        height={plotH}
-        fill="transparent"
-        style={{ pointerEvents: "all" }}
-      />
-
-      {/* Crosshair line + dot on hover */}
-      {hoverIdx != null &&
-        (() => {
-          const hp = points[hoverIdx];
-          if (!hp) return null;
-          return (
-            <g>
-              <line
-                x1={x(hoverIdx)}
-                y1={PAD.top}
-                x2={x(hoverIdx)}
-                y2={PAD.top + plotH}
-                stroke="var(--text-dim)"
-                strokeWidth={1}
-                strokeDasharray="3,3"
-                style={{ pointerEvents: "none" }}
-              />
-              <circle
-                cx={x(hoverIdx)}
-                cy={y(hp.value)}
-                r={4}
-                fill="var(--blue)"
-                stroke="#fff"
-                strokeWidth={2}
-                style={{ pointerEvents: "none" }}
-              />
-            </g>
           );
-        })()}
-    </svg>
+        })}
+
+        {/* Area fill */}
+        <path d={areaPath} fill="url(#equityGradient)" />
+
+        {/* Line */}
+        <path d={linePath} fill="none" stroke="var(--blue)" strokeWidth={2} />
+
+        {/* Invisible overlay to capture mouse events across full chart area */}
+        <rect
+          x={PAD.left}
+          y={PAD.top}
+          width={plotW}
+          height={plotH}
+          fill="transparent"
+          style={{ pointerEvents: "all" }}
+        />
+
+        {/* Crosshair line + dot on hover */}
+        {hoverIdx != null &&
+          (() => {
+            const hp = points[hoverIdx];
+            if (!hp) return null;
+            return (
+              <g>
+                <line
+                  x1={x(hoverIdx)}
+                  y1={PAD.top}
+                  x2={x(hoverIdx)}
+                  y2={PAD.top + plotH}
+                  stroke="var(--text-dim)"
+                  strokeWidth={1}
+                  strokeDasharray="3,3"
+                  style={{ pointerEvents: "none" }}
+                />
+                <circle
+                  cx={x(hoverIdx)}
+                  cy={y(hp.value)}
+                  r={4}
+                  fill="var(--blue)"
+                  stroke="#fff"
+                  strokeWidth={2}
+                  style={{ pointerEvents: "none" }}
+                />
+              </g>
+            );
+          })()}
+      </svg>
+    </div>
   );
 }
 
@@ -259,7 +291,15 @@ export function PortfolioChart() {
         : 0;
 
   const displayPnl = hoveredPoint ? hoveredPoint.value : latestPnl;
-  const displayLabel = hoveredPoint ? hoveredPoint.label : null;
+  const hoverLabel = hoveredPoint ? hoveredPoint.label : null;
+  const subtitle =
+    mode === "portfolio"
+      ? portfolio?.coverageComplete
+        ? INTERVAL_LABELS[interval]
+        : portfolio?.historyStart
+          ? `Since ${formatTimestamp(portfolio.historyStart)}`
+          : "Collecting history"
+      : INTERVAL_LABELS[interval];
 
   const handleHover = useCallback((point: ChartPoint | null) => {
     setHoveredPoint(point);
@@ -320,14 +360,12 @@ export function PortfolioChart() {
           >
             {(displayPnl ?? 0) >= 0 ? "+" : "-"}${Math.abs(displayPnl ?? 0).toFixed(2)}
           </div>
-          {displayLabel && (
-            <div
-              data-testid="hover-label"
-              style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}
-            >
-              {displayLabel}
-            </div>
-          )}
+          <div
+            data-testid="chart-subtitle"
+            style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 4 }}
+          >
+            {subtitle}
+          </div>
         </div>
 
         {/* Right: interval tabs */}
@@ -354,7 +392,7 @@ export function PortfolioChart() {
       </div>
 
       {/* Chart */}
-      <AreaChart points={points} onHover={handleHover} />
+      <AreaChart points={points} onHover={handleHover} hoverLabel={hoverLabel} />
     </div>
   );
 }
