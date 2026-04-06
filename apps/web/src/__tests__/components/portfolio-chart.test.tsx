@@ -145,8 +145,7 @@ describe("PortfolioChart", () => {
     });
   });
 
-  it("portfolio chart plots P/L relative to baseline, not absolute equity", async () => {
-    // Verify the chart headline shows P/L (5.42), not absolute equity (105.42)
+  it("headline shows P/L relative to baseline, not absolute equity", async () => {
     server.use(
       http.get("/api/v1/metrics/portfolio-series", () => ok(mockPortfolioSeries)),
       http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
