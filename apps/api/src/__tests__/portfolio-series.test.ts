@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import { bootstrapDatabase } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
@@ -50,8 +50,15 @@ beforeAll(async () => {
 
     CREATE TABLE IF NOT EXISTS profile_settings (
       profile_id           TEXT PRIMARY KEY,
-      initial_balance_usdc REAL
-    )
+      initial_balance_usdc REAL,
+      relayer_json         TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS runtime_control_state (
+      id INTEGER PRIMARY KEY,
+      current_profile TEXT,
+      desired_profile TEXT
+    );
   `);
   app = await buildServer({
     config: testConfig(),
@@ -68,6 +75,14 @@ afterAll(async () => {
 
 beforeEach(() => {
   conn.db.prepare("DELETE FROM portfolio_snapshots").run();
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  conn.db.prepare("DELETE FROM runtime_control_state").run();
+  conn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'live-lite'").run();
+  conn.db.prepare("DELETE FROM profiles WHERE profile_id = 'live-lite'").run();
+  conn.db.prepare("DELETE FROM portfolio_snapshots WHERE profile = 'live-lite'").run();
 });
 
 function insertSnapshot(
@@ -283,6 +298,197 @@ describe("GET /metrics/portfolio-series", () => {
       expect(body.data.historyStart).toBeTruthy();
     } finally {
       conn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'simulation'").run();
+    }
+  });
+
+  it("falls back to defaultInitialBalanceUsdc when profile_settings balance is null", async () => {
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', datetime('now', '-7 days'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS runtime_control_state (
+           id INTEGER PRIMARY KEY,
+           current_profile TEXT,
+           desired_profile TEXT
+         )`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc)
+         VALUES ('live-lite', NULL)`,
+      )
+      .run();
+
+    insertSnapshot("live-lite", 77.5, 0, 5, 40, minutesAgo(30));
+    insertSnapshot("live-lite", 76.6, 0, 4, 40, minutesAgo(5));
+
+    const fallbackApp = await buildServer({
+      config: testConfig(),
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
+      defaultInitialBalanceUsdc: 100,
+    });
+
+    try {
+      const res = await fallbackApp.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1d",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.coverageComplete).toBe(false);
+      expect(body.data.baseline).toBe(100);
+      expect(body.data.currentEquity).toBe(76.6);
+      expect(body.data.portfolioPnl).toBeCloseTo(-23.4, 6);
+    } finally {
+      await fallbackApp.close();
+    }
+  });
+
+  it("uses Polymarket user-pnl-api for live-lite when relayer funderAddress is configured", async () => {
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', datetime('now', '-7 days'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS runtime_control_state (
+           id INTEGER PRIMARY KEY,
+           current_profile TEXT,
+           desired_profile TEXT
+         )`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc, relayer_json)
+         VALUES ('live-lite', NULL, ?)`,
+      )
+      .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          { t: 1775397600, p: -17.634018 },
+          { t: 1775466000, p: -39.677334 },
+        ],
+      } as Response),
+    );
+
+    const liveLiteApp = await buildServer({
+      config: testConfig(),
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
+      defaultInitialBalanceUsdc: 100,
+    });
+
+    try {
+      const res = await liveLiteApp.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1d",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.baseline).toBe(0);
+      expect(body.data.currentEquity).toBeCloseTo(-39.677334, 6);
+      expect(body.data.portfolioPnl).toBeCloseTo(-39.677334, 6);
+      expect(body.data.coverageComplete).toBe(true);
+      expect(body.data.items).toHaveLength(2);
+      expect(body.data.items[0].capturedAt).toBe(new Date(1775397600 * 1000).toISOString());
+    } finally {
+      await liveLiteApp.close();
+    }
+  });
+
+  it("falls back to local snapshots when Polymarket user-pnl-api is unavailable", async () => {
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', datetime('now', '-7 days'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS runtime_control_state (
+           id INTEGER PRIMARY KEY,
+           current_profile TEXT,
+           desired_profile TEXT
+         )`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc, relayer_json)
+         VALUES ('live-lite', NULL, ?)`,
+      )
+      .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+    insertSnapshot("live-lite", 77.5, 0, 5, 40, minutesAgo(30));
+    insertSnapshot("live-lite", 76.6, 0, 4, 40, minutesAgo(5));
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: false,
+        json: async () => [],
+      } as Response),
+    );
+
+    const fallbackApp = await buildServer({
+      config: testConfig(),
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
+      defaultInitialBalanceUsdc: 100,
+    });
+
+    try {
+      const res = await fallbackApp.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1d",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.baseline).toBe(100);
+      expect(body.data.currentEquity).toBe(76.6);
+      expect(body.data.portfolioPnl).toBeCloseTo(-23.4, 6);
+      expect(body.data.coverageComplete).toBe(false);
+    } finally {
+      await fallbackApp.close();
     }
   });
 

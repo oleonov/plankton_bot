@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { openDatabase, type DbConnection } from "@plankton/db";
-import { needsBootstrap, bootstrapImport } from "../bootstrap-import.js";
+import {
+  needsBootstrap,
+  bootstrapImport,
+  syncProfileInitialBalances,
+} from "../bootstrap-import.js";
 import type { LoadedFamilyRules } from "@plankton/config";
 
 const CONTROL_SQL = readFileSync(
@@ -162,10 +166,40 @@ describe("bootstrap-import", () => {
       .all() as Array<{ profile_id: string; initial_balance_usdc: number | null }>;
 
     expect(rows).toEqual([
-      { profile_id: "live-lite", initial_balance_usdc: null },
+      { profile_id: "live-lite", initial_balance_usdc: 100 },
       { profile_id: "paper", initial_balance_usdc: 100 },
       { profile_id: "simulation", initial_balance_usdc: 100 },
     ]);
+  });
+
+  it("fills missing initial balances for existing profile_settings rows", () => {
+    bootstrapImport(db, loaded);
+    db.prepare(
+      "UPDATE profile_settings SET initial_balance_usdc = NULL WHERE profile_id = 'live-lite'",
+    ).run();
+
+    syncProfileInitialBalances(db, 100);
+
+    const row = db
+      .prepare("SELECT initial_balance_usdc FROM profile_settings WHERE profile_id = 'live-lite'")
+      .get() as { initial_balance_usdc: number | null };
+
+    expect(row.initial_balance_usdc).toBe(100);
+  });
+
+  it("does not overwrite explicit non-null balances", () => {
+    bootstrapImport(db, loaded);
+    db.prepare(
+      "UPDATE profile_settings SET initial_balance_usdc = 250 WHERE profile_id = 'live-lite'",
+    ).run();
+
+    syncProfileInitialBalances(db, 100);
+
+    const row = db
+      .prepare("SELECT initial_balance_usdc FROM profile_settings WHERE profile_id = 'live-lite'")
+      .get() as { initial_balance_usdc: number | null };
+
+    expect(row.initial_balance_usdc).toBe(250);
   });
 
   it("creates family_catalog entries", () => {

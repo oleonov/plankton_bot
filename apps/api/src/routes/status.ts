@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import type { LedgerPool } from "../ledger-pool.js";
 import { computeExecutionTelemetry } from "../execution-telemetry.js";
 import { ok } from "../errors.js";
+import { resolveInitialBalanceUsdc } from "../initial-balance.js";
 
 interface StatusOpts {
   db: Database.Database;
@@ -10,6 +11,7 @@ interface StatusOpts {
   ledgerPool?: LedgerPool;
   marketDataStaleThresholdMs?: number;
   envMode?: string | undefined;
+  defaultInitialBalanceUsdc?: number | null | undefined;
 }
 
 const startedAt = Date.now();
@@ -229,6 +231,7 @@ export function buildStatusSnapshot(
   profileOverride?: string | null,
   controlDb?: Database.Database,
   envMode?: string,
+  defaultInitialBalanceUsdc?: number | null,
 ): Record<string, unknown> {
   const openOrders = db
     .prepare(
@@ -345,17 +348,11 @@ export function buildStatusSnapshot(
   }
 
   // Balance: initial balance from profile_settings, realized PnL from ledger
-  let initialBalanceUsdc: number | null = null;
-  if (controlDb && runtimeMode) {
-    try {
-      const settingsRow = controlDb
-        .prepare("SELECT initial_balance_usdc FROM profile_settings WHERE profile_id = ?")
-        .get(runtimeMode) as { initial_balance_usdc: number | null } | undefined;
-      initialBalanceUsdc = settingsRow?.initial_balance_usdc ?? null;
-    } catch {
-      // Table may not exist in legacy DBs
-    }
-  }
+  const initialBalanceUsdc = resolveInitialBalanceUsdc(
+    controlDb,
+    runtimeMode,
+    defaultInitialBalanceUsdc,
+  );
 
   const totalRealizedPnl = (
     db.prepare("SELECT COALESCE(SUM(realized_pnl), 0) as total FROM positions").get() as {
@@ -500,6 +497,15 @@ export const statusRoutes: FastifyPluginAsync<StatusOpts> = async (app, opts) =>
 
   app.get("/status", async () => {
     const { db, profile } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
-    return ok(buildStatusSnapshot(db, staleMs, profile, opts.controlDb, opts.envMode));
+    return ok(
+      buildStatusSnapshot(
+        db,
+        staleMs,
+        profile,
+        opts.controlDb,
+        opts.envMode,
+        opts.defaultInitialBalanceUsdc,
+      ),
+    );
   });
 };

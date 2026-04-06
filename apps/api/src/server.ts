@@ -39,6 +39,7 @@ export interface ServerDeps {
   controlDb: Database.Database;
   ledgerDb: Database.Database;
   ledgerPool: LedgerPool;
+  defaultInitialBalanceUsdc?: number | null | undefined;
 }
 
 export async function buildServer(deps: ServerDeps) {
@@ -106,6 +107,7 @@ export async function buildServer(deps: ServerDeps) {
     ledgerPool: deps.ledgerPool,
     marketDataStaleThresholdMs: staleMs,
     envMode: deps.config.runtimeMode,
+    defaultInitialBalanceUsdc: deps.defaultInitialBalanceUsdc,
   });
   await app.register(positionRoutes, {
     prefix: "/api/v1",
@@ -138,6 +140,7 @@ export async function buildServer(deps: ServerDeps) {
     prefix: "/api/v1",
     db: deps.ledgerDb,
     controlDb: deps.controlDb,
+    defaultInitialBalanceUsdc: deps.defaultInitialBalanceUsdc,
   });
   await app.register(tradingActivityRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
 

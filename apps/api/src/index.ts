@@ -9,7 +9,7 @@
  */
 
 import process from "node:process";
-import { loadEnv } from "@plankton/config";
+import { loadEnv, loadFamilyRulesYaml } from "@plankton/config";
 import { bootstrapControlDb, bootstrapLedgerDb } from "@plankton/db";
 import { buildServer } from "./server.js";
 import { LedgerPool } from "./ledger-pool.js";
@@ -41,6 +41,13 @@ async function main(): Promise<void> {
   const controlDbPath =
     process.env["CONTROL_DB_PATH"] ?? config.dbPath.replace(/[^/]+\.db$/, "control.db");
   const controlConn = bootstrapControlDb(controlDbPath);
+  let defaultInitialBalanceUsdc: number | null = null;
+  try {
+    defaultInitialBalanceUsdc = loadFamilyRulesYaml(config.familyRulesPath).global
+      .initialBalanceUsdc;
+  } catch {
+    // Keep null — API can still serve from profile_settings only.
+  }
 
   // Prefer current_profile for startup-fixed ledger fallback. If runtime has not
   // published one yet, fall back to desired_profile.
@@ -69,6 +76,7 @@ async function main(): Promise<void> {
     controlDb: controlConn.db,
     ledgerDb: ledgerConn.db,
     ledgerPool,
+    defaultInitialBalanceUsdc,
   });
 
   const port = config.planktonApiPort;

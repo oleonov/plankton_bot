@@ -1,14 +1,92 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { ok } from "../errors.js";
+import { resolveInitialBalanceUsdc } from "../initial-balance.js";
 
 interface PortfolioSeriesOpts {
   db: Database.Database;
   controlDb?: Database.Database;
+  defaultInitialBalanceUsdc?: number | null | undefined;
+}
+
+type ExternalPnlPoint = { t: number; p: number };
+
+function resolveLiveLiteFunderAddress(
+  controlDb: Database.Database | undefined,
+  profileId: string,
+): string | null {
+  if (!controlDb) return null;
+  try {
+    const row = controlDb
+      .prepare("SELECT relayer_json FROM profile_settings WHERE profile_id = ?")
+      .get(profileId) as { relayer_json: string | null } | undefined;
+    if (!row?.relayer_json) return null;
+    const parsed = JSON.parse(row.relayer_json) as Record<string, unknown>;
+    const funder = parsed["funderAddress"] ?? parsed["funder"] ?? parsed["profileAddress"] ?? null;
+    return typeof funder === "string" && /^0x[a-fA-F0-9]{40}$/.test(funder) ? funder : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchExternalPortfolioSeries(
+  funderAddress: string,
+  interval: "1d" | "1w" | "1m" | "all",
+): Promise<{
+  items: Array<{
+    equityUsdc: number;
+    realizedPnlUsdc: number;
+    positionValueUsdc: number;
+    openValueUsdc: number;
+    capturedAt: string;
+  }>;
+  baseline: number;
+  currentEquity: number;
+  portfolioPnl: number;
+  historyStart: string | null;
+  coverageComplete: boolean;
+} | null> {
+  const fidelityMap: Record<typeof interval, string> = {
+    "1d": "1h",
+    "1w": "3h",
+    "1m": "1d",
+    all: "1d",
+  };
+  const url = new URL("https://user-pnl-api.polymarket.com/user-pnl");
+  url.searchParams.set("user_address", funderAddress);
+  url.searchParams.set("interval", interval);
+  url.searchParams.set("fidelity", fidelityMap[interval]);
+
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = (await res.json()) as ExternalPnlPoint[];
+    if (!Array.isArray(data) || data.length === 0) return null;
+
+    const items = data.map((point) => ({
+      equityUsdc: point.p,
+      realizedPnlUsdc: 0,
+      positionValueUsdc: 0,
+      openValueUsdc: 0,
+      capturedAt: new Date(point.t * 1000).toISOString(),
+    }));
+    const latest = items[items.length - 1] ?? null;
+
+    return {
+      items,
+      baseline: 0,
+      currentEquity: latest?.equityUsdc ?? 0,
+      portfolioPnl: latest?.equityUsdc ?? 0,
+      historyStart: items[0]?.capturedAt ?? null,
+      coverageComplete: true,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = async (app, opts) => {
-  const { db, controlDb } = opts;
+  const { db, controlDb, defaultInitialBalanceUsdc } = opts;
 
   app.get<{ Querystring: { interval?: string } }>("/metrics/portfolio-series", async (request) => {
     const requestedInterval = request.query.interval ?? "1d";
@@ -33,6 +111,19 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
       }
     }
     const effectiveProfile = profile ?? "simulation";
+
+    if (effectiveProfile === "live-lite") {
+      const funderAddress = resolveLiveLiteFunderAddress(controlDb, effectiveProfile);
+      if (funderAddress) {
+        const external = await fetchExternalPortfolioSeries(funderAddress, interval);
+        if (external) {
+          return ok({
+            ...external,
+            interval,
+          });
+        }
+      }
+    }
 
     // Rolling windows with downsampling
     const bucketMinutes: Record<string, number> = {
@@ -137,17 +228,8 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
       .get(effectiveProfile, since) as { equity_usdc: number } | undefined;
 
     // Initial balance from profile_settings
-    let initialBalance = 0;
-    if (controlDb) {
-      try {
-        const settingsRow = controlDb
-          .prepare("SELECT initial_balance_usdc FROM profile_settings WHERE profile_id = ?")
-          .get(effectiveProfile) as { initial_balance_usdc: number | null } | undefined;
-        initialBalance = settingsRow?.initial_balance_usdc ?? 0;
-      } catch {
-        /* legacy DBs without profile_settings */
-      }
-    }
+    const initialBalance =
+      resolveInitialBalanceUsdc(controlDb, effectiveProfile, defaultInitialBalanceUsdc) ?? 0;
 
     const hasInitialBalance = initialBalance > 0;
     const effectiveCoverageStart =

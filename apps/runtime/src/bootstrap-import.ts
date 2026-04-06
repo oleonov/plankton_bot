@@ -49,7 +49,7 @@ export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules
       insertProfile.run(p.profileId, p.displayName, p.description, now);
     }
 
-    // 2. Profile settings (sim/paper get initialBalanceUsdc, live-lite gets null)
+    // 2. Profile settings
     const insertSettings = db.prepare(
       `INSERT INTO profile_settings
          (profile_id, initial_balance_usdc, wallet_mode, min_order_usdc, updated_at)
@@ -57,7 +57,7 @@ export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules
     );
     insertSettings.run(ProfileId.Simulation, loaded.global.initialBalanceUsdc, null, null, now);
     insertSettings.run(ProfileId.Paper, loaded.global.initialBalanceUsdc, null, null, now);
-    insertSettings.run(ProfileId.LiveLite, null, "relayer", 1, now);
+    insertSettings.run(ProfileId.LiveLite, loaded.global.initialBalanceUsdc, "relayer", 1, now);
 
     // 3. Families
     const insertCatalog = db.prepare(`
@@ -144,6 +144,31 @@ export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules
       ) VALUES (?, 'bootstrap', ?, 0, 0, 0, ?, 'bootstrap')
     `,
     ).run(importId, loaded.families.length, now);
+  });
+
+  tx();
+}
+
+export function syncProfileInitialBalances(
+  db: Database.Database,
+  initialBalanceUsdc: number,
+): void {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    const upsert = db.prepare(
+      `INSERT INTO profile_settings
+         (profile_id, initial_balance_usdc, wallet_mode, min_order_usdc, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(profile_id) DO UPDATE SET
+         initial_balance_usdc = COALESCE(profile_settings.initial_balance_usdc, excluded.initial_balance_usdc),
+         wallet_mode = COALESCE(profile_settings.wallet_mode, excluded.wallet_mode),
+         min_order_usdc = COALESCE(profile_settings.min_order_usdc, excluded.min_order_usdc),
+         updated_at = excluded.updated_at`,
+    );
+
+    upsert.run(ProfileId.Simulation, initialBalanceUsdc, null, null, now);
+    upsert.run(ProfileId.Paper, initialBalanceUsdc, null, null, now);
+    upsert.run(ProfileId.LiveLite, initialBalanceUsdc, "relayer", 1, now);
   });
 
   tx();
