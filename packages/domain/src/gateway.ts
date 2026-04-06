@@ -146,6 +146,7 @@ export interface MarketDataGateway {
         bestBid: number | null;
         bestAsk: number | null;
         lastTradePrice: number | null;
+        minOrderSize?: number | null;
       }
     >
   >;

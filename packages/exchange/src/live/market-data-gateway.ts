@@ -10,6 +10,8 @@ import type { MarketDataGateway, ClobMarket, OrderBookSnapshot, TokenId } from "
 import { mapMarket, mapOrderBook, parseStringOrArray } from "../mappers.js";
 
 const GAMMA_PRICING_BASE_URL = "https://gamma-api.polymarket.com/markets";
+const CLOB_ORDER_BOOKS_URL = "https://clob.polymarket.com/books";
+const BOOKS_BATCH_SIZE = 200;
 
 // Transport-safety threshold to avoid 414 URI Too Large.
 // Most HTTP servers/proxies accept up to 8KB; 3500 is conservative.
@@ -71,6 +73,15 @@ export interface LiveMarketDataConfig {
    * the full 40k+ catalog down to the relevant subset.
    */
   slugFilter?: ((slug: string) => boolean) | undefined;
+}
+
+function chunkItems<T>(items: readonly T[], chunkSize: number): T[][] {
+  if (items.length === 0) return [];
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
 }
 
 /** Sentinel cursor returned by the Polymarket CLOB when no more pages exist. */
@@ -147,16 +158,27 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     }
   }
 
-  async getMarketPricing(
-    tokenIds: string[],
-  ): Promise<
-    Map<string, { bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null }>
+  async getMarketPricing(tokenIds: string[]): Promise<
+    Map<
+      string,
+      {
+        bestBid: number | null;
+        bestAsk: number | null;
+        lastTradePrice: number | null;
+        minOrderSize?: number | null;
+      }
+    >
   > {
     if (tokenIds.length === 0) return new Map();
 
     const result = new Map<
       string,
-      { bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null }
+      {
+        bestBid: number | null;
+        bestAsk: number | null;
+        lastTradePrice: number | null;
+        minOrderSize?: number | null;
+      }
     >();
 
     const batches = buildTokenIdBatches(GAMMA_PRICING_BASE_URL, tokenIds, MAX_URL_LENGTH);
@@ -172,6 +194,8 @@ export class LiveMarketDataGateway implements MarketDataGateway {
       this.extractPricing(data, result);
     }
 
+    await this.enrichMinOrderSizes(tokenIds, result);
+
     return result;
   }
 
@@ -179,7 +203,12 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     data: Array<Record<string, unknown>>,
     result: Map<
       string,
-      { bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null }
+      {
+        bestBid: number | null;
+        bestAsk: number | null;
+        lastTradePrice: number | null;
+        minOrderSize?: number | null;
+      }
     >,
   ): void {
     for (const raw of data) {
@@ -210,7 +239,69 @@ export class LiveMarketDataGateway implements MarketDataGateway {
               ? outcomePrice
               : null;
 
-        result.set(tokenId, { bestBid, bestAsk, lastTradePrice });
+        result.set(tokenId, {
+          bestBid,
+          bestAsk,
+          lastTradePrice,
+          minOrderSize: result.get(tokenId)?.minOrderSize ?? null,
+        });
+      }
+    }
+  }
+
+  private async enrichMinOrderSizes(
+    tokenIds: readonly string[],
+    result: Map<
+      string,
+      {
+        bestBid: number | null;
+        bestAsk: number | null;
+        lastTradePrice: number | null;
+        minOrderSize?: number | null;
+      }
+    >,
+  ): Promise<void> {
+    const batches = chunkItems(tokenIds, BOOKS_BATCH_SIZE);
+    for (const batch of batches) {
+      const response = await this.withTimeout(
+        fetch(CLOB_ORDER_BOOKS_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(batch.map((tokenId) => ({ token_id: tokenId }))),
+        }),
+        15_000,
+      );
+      if (!response.ok) {
+        throw new Error(`CLOB books request failed: ${response.status} ${response.statusText}`);
+      }
+
+      const books = (await response.json()) as Array<Record<string, unknown>>;
+      for (const raw of books) {
+        const tokenId =
+          typeof raw.asset_id === "string"
+            ? raw.asset_id
+            : typeof raw.token_id === "string"
+              ? raw.token_id
+              : null;
+        if (!tokenId) continue;
+
+        const parsedMinOrderSize =
+          raw.min_order_size != null
+            ? Number(raw.min_order_size)
+            : raw.minOrderSize != null
+              ? Number(raw.minOrderSize)
+              : null;
+        const minOrderSize =
+          parsedMinOrderSize !== null && Number.isFinite(parsedMinOrderSize)
+            ? parsedMinOrderSize
+            : null;
+        const current = result.get(tokenId) ?? {
+          bestBid: null,
+          bestAsk: null,
+          lastTradePrice: null,
+          minOrderSize: null,
+        };
+        result.set(tokenId, { ...current, minOrderSize });
       }
     }
   }

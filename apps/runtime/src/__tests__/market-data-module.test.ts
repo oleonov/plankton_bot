@@ -121,17 +121,24 @@ describe("MarketDataModule", () => {
 
     const pricingMap = new Map<
       string,
-      { bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null }
+      {
+        bestBid: number | null;
+        bestAsk: number | null;
+        lastTradePrice: number | null;
+        minOrderSize?: number | null;
+      }
     >();
     pricingMap.set("tok-yes", {
       bestBid: 0.45,
       bestAsk: 0.55,
       lastTradePrice: 0.5,
+      minOrderSize: 5,
     });
     pricingMap.set("tok-no", {
       bestBid: 0.4,
       bestAsk: 0.6,
       lastTradePrice: 0.5,
+      minOrderSize: 1,
     });
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(pricingMap);
 
@@ -148,8 +155,10 @@ describe("MarketDataModule", () => {
     expect(received[0]![0]!.bestBid).toBe(0.45);
     expect(received[0]![0]!.bestAsk).toBe(0.55);
     expect(received[0]![0]!.midPrice).toBe(0.5);
+    expect(received[0]![0]!.minOrderSize).toBe(5);
     expect(received[0]![0]!.outcome).toBe("YES");
     expect(received[0]![0]!.familyId).toBe("fam-btc");
+    expect(received[0]![1]!.minOrderSize).toBe(1);
     expect(received[0]![1]!.outcome).toBe("NO");
   });
 

@@ -476,18 +476,28 @@ describe("LiveMarketDataGateway", () => {
 
   it("getMarketPricing constructs URL with repeated clob_token_ids params", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve([
-          {
-            clobTokenIds: ["tok-a", "tok-b"],
-            outcomePrices: "[0.45,0.55]",
-            bestBid: 0.44,
-            bestAsk: 0.46,
-          },
-        ]),
-    });
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              clobTokenIds: ["tok-a", "tok-b"],
+              outcomePrices: "[0.45,0.55]",
+              bestBid: 0.44,
+              bestAsk: 0.46,
+            },
+          ]),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { asset_id: "tok-a", min_order_size: "5" },
+            { asset_id: "tok-b", min_order_size: "1" },
+          ]),
+      });
 
     try {
       await gw.getMarketPricing(["tok-a", "tok-b"]);
@@ -495,6 +505,9 @@ describe("LiveMarketDataGateway", () => {
       const calledUrl = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0]![0] as string;
       expect(calledUrl).toContain("clob_token_ids=tok-a&clob_token_ids=tok-b");
       expect(calledUrl).toContain("gamma-api.polymarket.com/markets");
+      expect((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[1]![0]).toBe(
+        "https://clob.polymarket.com/books",
+      );
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -502,25 +515,37 @@ describe("LiveMarketDataGateway", () => {
 
   it("getMarketPricing extracts pricing when Gamma returns stringified clobTokenIds and outcomePrices", async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () =>
-        Promise.resolve([
-          {
-            clobTokenIds: '["tok-a", "tok-b"]',
-            outcomePrices: '["0.45", "0.55"]',
-            bestBid: 0.44,
-            bestAsk: 0.46,
-            lastTradePrice: 0.45,
-          },
-        ]),
-    });
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              clobTokenIds: '["tok-a", "tok-b"]',
+              outcomePrices: '["0.45", "0.55"]',
+              bestBid: 0.44,
+              bestAsk: 0.46,
+              lastTradePrice: 0.45,
+            },
+          ]),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            { asset_id: "tok-a", min_order_size: "5" },
+            { asset_id: "tok-b", min_order_size: "1" },
+          ]),
+      });
 
     try {
       const result = await gw.getMarketPricing(["tok-a"]);
       expect(result.size).toBe(2);
       expect(result.get("tok-a")!.bestBid).toBe(0.44);
       expect(result.get("tok-b")!.bestBid).toBe(0.55);
+      expect(result.get("tok-a")!.minOrderSize).toBe(5);
+      expect(result.get("tok-b")!.minOrderSize).toBe(1);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -540,8 +565,9 @@ describe("LiveMarketDataGateway", () => {
       await gw.getMarketPricing(tokenIds);
 
       // With 77-char IDs + "clob_token_ids=" overhead, each batch should stay under 3500 chars
-      expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
-      for (const call of fetchMock.mock.calls) {
+      const gammaCalls = fetchMock.mock.calls.filter((call) => typeof call[0] === "string");
+      expect(gammaCalls.length).toBeGreaterThan(1);
+      for (const call of gammaCalls) {
         expect((call[0] as string).length).toBeLessThanOrEqual(3500);
       }
     } finally {
@@ -565,6 +591,29 @@ describe("LiveMarketDataGateway", () => {
     try {
       await expect(gw.getMarketPricing(["tok-1"])).rejects.toThrow(
         "Gamma pricing request failed: 500",
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("getMarketPricing throws when CLOB books request fails", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () => Promise.resolve([]),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        statusText: "Service Unavailable",
+      });
+
+    try {
+      await expect(gw.getMarketPricing(["tok-1"])).rejects.toThrow(
+        "CLOB books request failed: 503",
       );
     } finally {
       globalThis.fetch = originalFetch;

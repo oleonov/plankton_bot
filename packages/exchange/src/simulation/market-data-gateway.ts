@@ -29,6 +29,7 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
         bestAsk: null,
         midPrice: null,
         spread: null,
+        minOrderSize: null,
         timestamp: Date.now(),
       }
     );
@@ -38,14 +39,25 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
     return this.tickSizes.get(tokenId) ?? 0.01;
   }
 
-  async getMarketPricing(
-    tokenIds: string[],
-  ): Promise<
-    Map<string, { bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null }>
+  async getMarketPricing(tokenIds: string[]): Promise<
+    Map<
+      string,
+      {
+        bestBid: number | null;
+        bestAsk: number | null;
+        lastTradePrice: number | null;
+        minOrderSize?: number | null;
+      }
+    >
   > {
     const result = new Map<
       string,
-      { bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null }
+      {
+        bestBid: number | null;
+        bestAsk: number | null;
+        lastTradePrice: number | null;
+        minOrderSize?: number | null;
+      }
     >();
     for (const tokenId of tokenIds) {
       const book = this.orderBooks.get(tokenId);
@@ -53,6 +65,7 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
         bestBid: book?.bestBid ?? null,
         bestAsk: book?.bestAsk ?? null,
         lastTradePrice: null,
+        minOrderSize: book?.minOrderSize ?? null,
       });
     }
     return result;
@@ -87,6 +100,7 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
       bestAsk,
       midPrice,
       spread,
+      minOrderSize: null,
       timestamp: Date.now(),
     });
   }

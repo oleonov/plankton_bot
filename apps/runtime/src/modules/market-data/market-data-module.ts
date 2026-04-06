@@ -138,6 +138,7 @@ export class MarketDataModule implements RuntimeModule {
           bestAsk,
           midPrice,
           spread,
+          minOrderSize: pricing?.minOrderSize ?? null,
           snapshotTs: now,
         });
       }

@@ -256,6 +256,7 @@ describe("mapOrderBook", () => {
         { price: "0.49", size: "200" },
       ],
       asks: [{ price: "0.52", size: "150" }],
+      min_order_size: "5",
     });
 
     expect(book.tokenId).toBe("tok-1");
@@ -266,6 +267,7 @@ describe("mapOrderBook", () => {
     expect(book.bestAsk).toBe(0.52);
     expect(book.midPrice).toBe(0.51);
     expect(book.spread).toBeCloseTo(0.02);
+    expect(book.minOrderSize).toBe(5);
   });
 
   it("handles empty order book", () => {

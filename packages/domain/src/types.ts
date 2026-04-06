@@ -93,6 +93,7 @@ export interface OrderBookSnapshot {
   bestAsk: number | null;
   midPrice: number | null;
   spread: number | null;
+  minOrderSize?: number | null;
   timestamp: number; // unix ms
 }
 
@@ -431,6 +432,7 @@ export interface NormalizedMarket {
   bestAsk: number | null;
   midPrice: number | null;
   spread: number | null;
+  minOrderSize?: number | null;
   snapshotTs: number; // unix ms when pricing was captured
 }
 

@@ -366,6 +366,23 @@ describe("evaluateSprayEntry", () => {
     const signal = evaluateSprayEntry(market, bundle, 0.03, Date.now(), nextSeqStub, 0.0001, 1.0);
     expect(signal).toBeNull();
   });
+
+  it("returns null when suggested shares are below market minOrderSize", () => {
+    const market = makeNormalizedMarket({ midPrice: 0.04, minOrderSize: 5 });
+    const bundle = makeBundle();
+
+    const signal = evaluateSprayEntry(market, bundle, 0.04, Date.now(), nextSeqStub, 0.15, 1.0);
+    expect(signal).toBeNull();
+  });
+
+  it("allows spray when suggested shares meet market minOrderSize", () => {
+    const market = makeNormalizedMarket({ midPrice: 0.02, minOrderSize: 5 });
+    const bundle = makeBundle();
+
+    const signal = evaluateSprayEntry(market, bundle, 0.02, Date.now(), nextSeqStub, 0.15, 1.0);
+    expect(signal).not.toBeNull();
+    expect(signal!.suggestedSize).toBeCloseTo(7.5, 5);
+  });
 });
 
 // ─── Tests: scan() with spray integration ───────────��───────────────────

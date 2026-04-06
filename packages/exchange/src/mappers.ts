@@ -234,6 +234,14 @@ function mapLevels(levels: unknown): PriceLevel[] {
 export function mapOrderBook(tokenId: TokenId, raw: Record<string, unknown>): OrderBookSnapshot {
   const bids = mapLevels(raw.bids);
   const asks = mapLevels(raw.asks);
+  const parsedMinOrderSize =
+    raw.min_order_size != null
+      ? Number(raw.min_order_size)
+      : raw.minOrderSize != null
+        ? Number(raw.minOrderSize)
+        : null;
+  const minOrderSize =
+    parsedMinOrderSize !== null && Number.isFinite(parsedMinOrderSize) ? parsedMinOrderSize : null;
 
   const bestBid = bids.length > 0 ? bids[0]!.price : null;
   const bestAsk = asks.length > 0 ? asks[0]!.price : null;
@@ -248,6 +256,7 @@ export function mapOrderBook(tokenId: TokenId, raw: Record<string, unknown>): Or
     bestAsk,
     midPrice,
     spread,
+    minOrderSize,
     timestamp: toUnixMs(raw.timestamp),
   };
 }

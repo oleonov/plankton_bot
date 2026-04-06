@@ -320,6 +320,7 @@ export function evaluateSprayEntry(
   const suggestedSizeUsdc = spraySizeUsdc * sizeMult;
   const suggestedSize = suggestedSizeUsdc / midPrice;
   if (suggestedSize < 0.01) return null;
+  if (market.minOrderSize != null && suggestedSize < market.minOrderSize) return null;
 
   const seq = nextSeq(market.familyId!, market.tokenId, "buy");
   return {
