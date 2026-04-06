@@ -11,6 +11,25 @@ interface PortfolioSeriesOpts {
 
 type ExternalPnlPoint = { t: number; p: number };
 
+const EXTERNAL_FIDELITY_MAP: Record<"1d" | "1w" | "1m" | "all", string> = {
+  "1d": "1h",
+  "1w": "3h",
+  "1m": "1d",
+  all: "1d",
+};
+
+const EXTERNAL_FIDELITY_MS: Record<string, number> = {
+  "1h": 60 * 60 * 1000,
+  "3h": 3 * 60 * 60 * 1000,
+  "1d": 24 * 60 * 60 * 1000,
+};
+
+const INTERVAL_WINDOW_MS: Partial<Record<"1d" | "1w" | "1m" | "all", number>> = {
+  "1d": 24 * 60 * 60 * 1000,
+  "1w": 7 * 24 * 60 * 60 * 1000,
+  "1m": 30 * 24 * 60 * 60 * 1000,
+};
+
 function resolveLiveLiteFunderAddress(
   controlDb: Database.Database | undefined,
   profileId: string,
@@ -46,16 +65,11 @@ async function fetchExternalPortfolioSeries(
   historyStart: string | null;
   coverageComplete: boolean;
 } | null> {
-  const fidelityMap: Record<typeof interval, string> = {
-    "1d": "1h",
-    "1w": "3h",
-    "1m": "1d",
-    all: "1d",
-  };
   const url = new URL("https://user-pnl-api.polymarket.com/user-pnl");
   url.searchParams.set("user_address", funderAddress);
   url.searchParams.set("interval", interval);
-  url.searchParams.set("fidelity", fidelityMap[interval]);
+  const fidelity = EXTERNAL_FIDELITY_MAP[interval];
+  url.searchParams.set("fidelity", fidelity);
 
   try {
     const res = await fetch(url);
@@ -70,15 +84,26 @@ async function fetchExternalPortfolioSeries(
       openValueUsdc: 0,
       capturedAt: new Date(point.t * 1000).toISOString(),
     }));
+    const firstPoint = items[0] ?? null;
     const latest = items[items.length - 1] ?? null;
+    const intervalWindowMs = INTERVAL_WINDOW_MS[interval] ?? null;
+    const fidelityMs = EXTERNAL_FIDELITY_MS[fidelity] ?? 0;
+    const firstPointMs = firstPoint ? Date.parse(firstPoint.capturedAt) : NaN;
+    const windowStartMs =
+      intervalWindowMs != null ? Date.now() - intervalWindowMs : Number.NEGATIVE_INFINITY;
+    const coverageComplete =
+      interval !== "all" &&
+      Number.isFinite(firstPointMs) &&
+      firstPointMs - windowStartMs <= fidelityMs;
+    const baseline = coverageComplete ? (firstPoint?.equityUsdc ?? 0) : 0;
 
     return {
       items,
-      baseline: 0,
+      baseline,
       currentEquity: latest?.equityUsdc ?? 0,
-      portfolioPnl: latest?.equityUsdc ?? 0,
+      portfolioPnl: (latest?.equityUsdc ?? baseline) - baseline,
       historyStart: items[0]?.capturedAt ?? null,
-      coverageComplete: true,
+      coverageComplete,
     };
   } catch {
     return null;

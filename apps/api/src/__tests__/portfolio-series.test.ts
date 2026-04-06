@@ -360,6 +360,9 @@ describe("GET /metrics/portfolio-series", () => {
   });
 
   it("uses Polymarket user-pnl-api for live-lite when relayer funderAddress is configured", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-06T12:00:00Z"));
+
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
@@ -393,8 +396,8 @@ describe("GET /metrics/portfolio-series", () => {
       vi.fn().mockResolvedValue({
         ok: true,
         json: async () => [
-          { t: 1775397600, p: -17.634018 },
-          { t: 1775466000, p: -39.677334 },
+          { t: Date.parse("2026-04-05T12:30:00Z") / 1000, p: -17.731754 },
+          { t: Date.parse("2026-04-06T11:30:00Z") / 1000, p: -43.41244 },
         ],
       } as Response),
     );
@@ -416,13 +419,84 @@ describe("GET /metrics/portfolio-series", () => {
       const body = res.json();
 
       expect(body.ok).toBe(true);
-      expect(body.data.baseline).toBe(0);
-      expect(body.data.currentEquity).toBeCloseTo(-39.677334, 6);
-      expect(body.data.portfolioPnl).toBeCloseTo(-39.677334, 6);
+      expect(body.data.baseline).toBeCloseTo(-17.731754, 6);
+      expect(body.data.currentEquity).toBeCloseTo(-43.41244, 6);
+      expect(body.data.portfolioPnl).toBeCloseTo(-25.680686, 6);
       expect(body.data.coverageComplete).toBe(true);
       expect(body.data.items).toHaveLength(2);
-      expect(body.data.items[0].capturedAt).toBe(new Date(1775397600 * 1000).toISOString());
+      expect(body.data.items[0].capturedAt).toBe("2026-04-05T12:30:00.000Z");
     } finally {
+      vi.useRealTimers();
+      await liveLiteApp.close();
+    }
+  });
+
+  it("keeps zero baseline for external series when account history does not cover the full interval", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-06T12:00:00Z"));
+
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', datetime('now', '-3 days'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS runtime_control_state (
+           id INTEGER PRIMARY KEY,
+           current_profile TEXT,
+           desired_profile TEXT
+         )`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc, relayer_json)
+         VALUES ('live-lite', NULL, ?)`,
+      )
+      .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          { t: Date.parse("2026-04-03T12:00:00Z") / 1000, p: -1 },
+          { t: Date.parse("2026-04-06T12:00:00Z") / 1000, p: -43.41244 },
+        ],
+      } as Response),
+    );
+
+    const liveLiteApp = await buildServer({
+      config: testConfig(),
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
+      defaultInitialBalanceUsdc: 100,
+    });
+
+    try {
+      const res = await liveLiteApp.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1w",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.baseline).toBe(0);
+      expect(body.data.currentEquity).toBeCloseTo(-43.41244, 6);
+      expect(body.data.portfolioPnl).toBeCloseTo(-43.41244, 6);
+      expect(body.data.coverageComplete).toBe(false);
+    } finally {
+      vi.useRealTimers();
       await liveLiteApp.close();
     }
   });
