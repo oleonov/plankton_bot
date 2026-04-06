@@ -171,6 +171,7 @@ describe("SwitchDriver", () => {
       "starting_target->ready_paused",
       "ready_paused->completed",
     ]);
+    expect(transitions.every((t) => t.profile === null)).toBe(true);
   });
 
   it("recover() logs in-flight switch without changing state", () => {

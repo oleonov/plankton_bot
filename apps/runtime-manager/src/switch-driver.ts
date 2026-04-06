@@ -240,6 +240,7 @@ export class SwitchDriver {
     this.transitionRepo.insert({
       entityType: "switch_request",
       entityId: switchId,
+      profile: null,
       fromState: from,
       toState: to,
       triggerType: "runtime_manager",
