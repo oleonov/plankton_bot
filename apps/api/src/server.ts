@@ -27,6 +27,7 @@ import { actionRoutes } from "./routes/actions.js";
 import { eventsRoutes } from "./routes/events.js";
 import { riskEventsRoutes } from "./routes/risk-events.js";
 import { pnlSeriesRoutes } from "./routes/pnl-series.js";
+import { portfolioSeriesRoutes } from "./routes/portfolio-series.js";
 import { tradingActivityRoutes } from "./routes/trading-activity.js";
 import { discoveryRoutes } from "./routes/discovery.js";
 import { configRoutes } from "./routes/config.js";
@@ -133,6 +134,11 @@ export async function buildServer(deps: ServerDeps) {
   });
   await app.register(riskEventsRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
   await app.register(pnlSeriesRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(portfolioSeriesRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    controlDb: deps.controlDb,
+  });
   await app.register(tradingActivityRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
 
   // Mixed routes — pass both

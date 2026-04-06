@@ -1,0 +1,247 @@
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { bootstrapDatabase } from "@plankton/db";
+import type { DbConnection } from "@plankton/db";
+import type { AppConfig } from "@plankton/config";
+import { buildServer } from "../server.js";
+import { stubLedgerPool } from "./test-helpers.js";
+
+const TEST_API_KEY = "test-key-portfolio-series";
+
+function testConfig(): AppConfig {
+  return {
+    runtimeMode: "simulation",
+    logLevel: "error",
+    dbPath: "",
+    familyRulesPath: "",
+    marketDataPollIntervalMs: 30_000,
+    marketDataStaleThresholdMs: 120_000,
+    strategyScanIntervalMs: 5_000,
+    fillPollIntervalMs: 5_000,
+    executionMaxConcurrency: 4,
+    polyApiKey: undefined,
+    polyApiSecret: undefined,
+    polyPassphrase: undefined,
+    polyPrivateKey: undefined,
+    planktonApiKey: TEST_API_KEY,
+    planktonApiPort: 0,
+    planktonAuthUsername: undefined,
+    planktonAuthPassword: undefined,
+    planktonSessionSecret: undefined,
+    trustProxy: false,
+  };
+}
+
+function auth() {
+  return { authorization: `Bearer ${TEST_API_KEY}` };
+}
+
+let conn: DbConnection;
+let app: Awaited<ReturnType<typeof buildServer>>;
+
+beforeAll(async () => {
+  conn = bootstrapDatabase(":memory:");
+  // Monolithic bootstrap lacks control-only tables; create for fallback test
+  conn.db.exec(`
+    CREATE TABLE IF NOT EXISTS profile_settings (
+      profile_id           TEXT PRIMARY KEY,
+      initial_balance_usdc REAL
+    )
+  `);
+  app = await buildServer({
+    config: testConfig(),
+    controlDb: conn.db,
+    ledgerDb: conn.db,
+    ledgerPool: stubLedgerPool(),
+  });
+});
+
+afterAll(async () => {
+  await app.close();
+  conn.close();
+});
+
+beforeEach(() => {
+  conn.db.prepare("DELETE FROM portfolio_snapshots").run();
+});
+
+function insertSnapshot(
+  profile: string,
+  equityUsdc: number,
+  realizedPnlUsdc: number,
+  positionValueUsdc: number,
+  capturedAt: string,
+) {
+  conn.db
+    .prepare(
+      `INSERT INTO portfolio_snapshots (profile, equity_usdc, realized_pnl_usdc, position_value_usdc, open_value_usdc, captured_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(profile, equityUsdc, realizedPnlUsdc, positionValueUsdc, positionValueUsdc, capturedAt);
+}
+
+function minutesAgo(m: number): string {
+  return new Date(Date.now() - m * 60 * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
+describe("GET /metrics/portfolio-series", () => {
+  it("returns empty items and zero baseline when no snapshots exist", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series",
+      headers: auth(),
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.items).toHaveLength(0);
+    expect(body.data.baseline).toBe(0);
+    expect(body.data.currentEquity).toBe(0);
+    expect(body.data.portfolioPnl).toBe(0);
+    expect(body.data.interval).toBe("1d");
+  });
+
+  it("returns correct items with downsampled points", async () => {
+    // Insert snapshots at different times, two within the same 5-minute bucket
+    const t1 = minutesAgo(30);
+    const t2 = minutesAgo(28); // same 5-min bucket as t1 if they round the same
+    const t3 = minutesAgo(10);
+
+    insertSnapshot("simulation", 100, 0, 50, t1);
+    insertSnapshot("simulation", 102, 1, 52, t2); // should replace t1 in same bucket
+    insertSnapshot("simulation", 110, 5, 60, t3);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=1d",
+      headers: auth(),
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    // Downsampling keeps the last snapshot per bucket (MAX(id))
+    // t1 and t2 are 2 minutes apart — may or may not be same bucket depending
+    // on exact minute boundaries, but we always get at least 2 distinct buckets
+    expect(body.data.items.length).toBeGreaterThanOrEqual(2);
+    // Last item should be the most recent snapshot
+    const last = body.data.items[body.data.items.length - 1];
+    expect(last.equityUsdc).toBe(110);
+    expect(last.realizedPnlUsdc).toBe(5);
+    expect(last.positionValueUsdc).toBe(60);
+  });
+
+  it("baseline is the first raw snapshot in the window", async () => {
+    insertSnapshot("simulation", 100, 0, 50, minutesAgo(60));
+    insertSnapshot("simulation", 120, 10, 70, minutesAgo(30));
+    insertSnapshot("simulation", 130, 15, 80, minutesAgo(5));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=1d",
+      headers: auth(),
+    });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    // Baseline should be the first snapshot's equity (100)
+    expect(body.data.baseline).toBe(100);
+  });
+
+  it("portfolioPnl equals currentEquity minus baseline", async () => {
+    insertSnapshot("simulation", 100, 0, 50, minutesAgo(60));
+    insertSnapshot("simulation", 125, 12, 75, minutesAgo(5));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=1d",
+      headers: auth(),
+    });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.currentEquity).toBe(125);
+    expect(body.data.baseline).toBe(100);
+    expect(body.data.portfolioPnl).toBe(25);
+  });
+
+  it("different intervals use different bucket sizes", async () => {
+    // Seed snapshots every 10 minutes for the past 2 hours
+    for (let i = 120; i >= 0; i -= 10) {
+      insertSnapshot("simulation", 100 + i, i, 50 + i, minutesAgo(i));
+    }
+
+    const res1d = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=1d",
+      headers: auth(),
+    });
+    const res1w = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=1w",
+      headers: auth(),
+    });
+
+    const body1d = res1d.json();
+    const body1w = res1w.json();
+
+    // 1d uses 5-minute buckets, 1w uses 15-minute buckets
+    // With 13 snapshots every 10 min, 5-min buckets yield ~13 points,
+    // 15-min buckets yield fewer (each bucket covers 15 min)
+    expect(body1d.data.items.length).toBeGreaterThanOrEqual(body1w.data.items.length);
+  });
+
+  it("falls back to initial_balance_usdc when no snapshots exist", async () => {
+    // Seed profile_settings with an initial balance
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc)
+         VALUES ('simulation', 10000)`,
+      )
+      .run();
+
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1d",
+        headers: auth(),
+      });
+      const body = res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.items).toHaveLength(0);
+      expect(body.data.baseline).toBe(10000);
+      expect(body.data.currentEquity).toBe(10000);
+      expect(body.data.portfolioPnl).toBe(0);
+    } finally {
+      conn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'simulation'").run();
+    }
+  });
+
+  it("filters snapshots by the current profile", async () => {
+    // Insert snapshots for simulation and paper profiles
+    insertSnapshot("simulation", 100, 0, 50, minutesAgo(30));
+    insertSnapshot("paper", 200, 10, 150, minutesAgo(30));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=1d",
+      headers: auth(),
+    });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    // Default profile is simulation, so paper data should be excluded
+    expect(body.data.items).toHaveLength(1);
+    expect(body.data.items[0].equityUsdc).toBe(100);
+  });
+
+  it("defaults to 1d interval for unknown values", async () => {
+    insertSnapshot("simulation", 100, 0, 50, minutesAgo(30));
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/portfolio-series?interval=invalid",
+      headers: auth(),
+    });
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    // Falls back to "-1 day" window and 5-min buckets
+    expect(body.data.interval).toBe("invalid");
+    expect(body.data.items).toHaveLength(1);
+  });
+});
