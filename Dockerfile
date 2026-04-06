@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy package manifests for all workspaces (for cache-efficient installs)
 # ⚠️  Update this list when adding new workspace packages
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY scripts/install-git-hooks.mjs scripts/install-git-hooks.mjs
 COPY apps/api/package.json apps/api/package.json
 COPY apps/runtime/package.json apps/runtime/package.json
 COPY apps/discovery/package.json apps/discovery/package.json
