@@ -53,7 +53,7 @@ export function Pagination(props: PaginationProps) {
     typeof props.onPageChange === "function"
   ) {
     const { page, totalPages, onPageChange, pageInfo } = props;
-    if (totalPages <= 1 && !pageInfo) return null;
+    if (totalPages < 1 && !pageInfo) return null;
 
     const pageItems = buildPageItems(page, totalPages);
     return (
@@ -66,51 +66,49 @@ export function Pagination(props: PaginationProps) {
           gap: 8,
         }}
       >
-        {totalPages > 1 && (
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 8,
-              flexWrap: "wrap",
-              justifyContent: "center",
-            }}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
+            justifyContent: "center",
+          }}
+        >
+          <button
+            className="btn-secondary"
+            onClick={() => onPageChange(page - 1)}
+            disabled={page <= 1}
           >
-            <button
-              className="btn-secondary"
-              onClick={() => onPageChange(page - 1)}
-              disabled={page <= 1}
-            >
-              &larr;
-            </button>
-            {pageItems.map((item, index) =>
-              item === "ellipsis" ? (
-                <span
-                  key={`ellipsis-${index}`}
-                  style={{ color: "var(--text-muted)", padding: "0 4px" }}
-                >
-                  …
-                </span>
-              ) : (
-                <button
-                  key={item}
-                  style={buttonStyle(item === page)}
-                  onClick={() => item !== page && onPageChange(item)}
-                  disabled={item === page}
-                >
-                  {item}
-                </button>
-              ),
-            )}
-            <button
-              className="btn-secondary"
-              onClick={() => onPageChange(page + 1)}
-              disabled={page >= totalPages}
-            >
-              &rarr;
-            </button>
-          </div>
-        )}
+            &larr;
+          </button>
+          {pageItems.map((item, index) =>
+            item === "ellipsis" ? (
+              <span
+                key={`ellipsis-${index}`}
+                style={{ color: "var(--text-muted)", padding: "0 4px" }}
+              >
+                …
+              </span>
+            ) : (
+              <button
+                key={item}
+                style={buttonStyle(item === page)}
+                onClick={() => item !== page && onPageChange(item)}
+                disabled={item === page}
+              >
+                {item}
+              </button>
+            ),
+          )}
+          <button
+            className="btn-secondary"
+            onClick={() => onPageChange(page + 1)}
+            disabled={page >= totalPages}
+          >
+            &rarr;
+          </button>
+        </div>
         {pageInfo && <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{pageInfo}</span>}
       </div>
     );
