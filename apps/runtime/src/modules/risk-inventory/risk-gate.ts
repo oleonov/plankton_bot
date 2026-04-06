@@ -24,12 +24,15 @@ import {
   type FamilyStateRepository,
   type FamilyState,
   type PositionRepository,
+  type OrderRepository,
   type FamilyId,
+  type TokenId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 
 type DerivedFamilyMode = "active" | "probe-only" | "reduce-only";
+const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
 
 /**
  * Derive a family's effective trading mode from tail health metrics.
@@ -67,14 +70,26 @@ function isEntrySignal(signal: Signal): boolean {
   return signal.side === "buy" && ENTRY_REASONS.has(signal.reason);
 }
 
+function isProbeLikeEntrySignal(signal: Signal): boolean {
+  return signal.reason === "probe-entry" || signal.reason === "spray-entry";
+}
+
+function hasOpenBuyOrderForToken(orderRepo: OrderRepository, tokenId: TokenId): boolean {
+  return orderRepo
+    .findByTokenId(tokenId)
+    .some((order) => order.side === "buy" && OPEN_ORDER_STATUSES.has(order.status));
+}
+
 export class RiskGateImpl implements RiskGate {
   constructor(
     private readonly rulesProvider: FamilyRulesProvider,
     private readonly familyStateRepo: FamilyStateRepository,
     private readonly positionRepo: PositionRepository,
+    private readonly orderRepo: OrderRepository,
     private readonly log: Logger,
     private readonly liveLiteGuard?: LiveLiteGuard,
     private readonly getInFlightCount?: (familyId: FamilyId) => number,
+    private readonly getTokenInFlightCount?: (tokenId: TokenId) => number,
     private readonly maxConcurrentOrdersPerFamily: number = 2,
   ) {}
 
@@ -160,6 +175,18 @@ export class RiskGateImpl implements RiskGate {
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("in_flight_limit_ok");
+
+    if (isEntry && isProbeLikeEntrySignal(signal)) {
+      if (hasOpenBuyOrderForToken(this.orderRepo, signal.tokenId)) {
+        rejected.push("probe token already has open buy order");
+        return this.decision(signal, false, rejected, passed);
+      }
+      if (this.getTokenInFlightCount && this.getTokenInFlightCount(signal.tokenId) >= 1) {
+        rejected.push("probe-token-in-flight-limit");
+        return this.decision(signal, false, rejected, passed);
+      }
+      passed.push("probe_token_limit_ok");
+    }
 
     // For exit/reduce signals, skip exposure checks — they reduce risk
     if (!isEntry) {

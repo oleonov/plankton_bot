@@ -4,6 +4,7 @@ import { normalizeReasonCode } from "../risk-event-codes.js";
 describe("normalizeReasonCode", () => {
   it("maps static reason strings verbatim", () => {
     expect(normalizeReasonCode("family-in-flight-limit")).toBe("family_in_flight_limit");
+    expect(normalizeReasonCode("probe-token-in-flight-limit")).toBe("probe_token_in_flight_limit");
     expect(normalizeReasonCode("live-lite-open-value-cap-exceeded")).toBe(
       "live_lite_open_value_cap",
     );
@@ -77,6 +78,12 @@ describe("normalizeReasonCode", () => {
   it("maps operator reduce-only mode", () => {
     expect(normalizeReasonCode("family in reduce-only mode — entry blocked")).toBe(
       "operator_reduce_only",
+    );
+  });
+
+  it("maps probe token open-order blocker", () => {
+    expect(normalizeReasonCode("probe token already has open buy order")).toBe(
+      "probe_token_open_buy_order",
     );
   });
 

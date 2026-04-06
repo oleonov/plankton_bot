@@ -8,6 +8,7 @@
 
 const STATIC_CODES: Record<string, string> = {
   "family-in-flight-limit": "family_in_flight_limit",
+  "probe-token-in-flight-limit": "probe_token_in_flight_limit",
   "live-lite-open-value-cap-exceeded": "live_lite_open_value_cap",
   "live-lite-active-markets-cap-exceeded": "live_lite_active_markets_cap",
   "live-lite-allowlist-rejected": "live_lite_allowlist",
@@ -26,6 +27,7 @@ const PREFIX_CODES: [string, string][] = [
   ["family in derived reduce-only", "derived_reduce_only"],
   ["family in reduce-only mode", "operator_reduce_only"],
   ["family in probe-only mode", "operator_probe_only"],
+  ["probe token already has open buy order", "probe_token_open_buy_order"],
   ["requirePositiveRecycleHistoryForScale", "require_positive_recycle"],
   ["family in derived probe-only", "derived_probe_only"],
   ["not found in rules", "family_not_found"],

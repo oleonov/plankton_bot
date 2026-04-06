@@ -2027,7 +2027,10 @@ describe("RiskInventoryModule", () => {
   // ─── Per-family in-flight limiter (B2.2) ──────────────────────────
 
   describe("per-family in-flight limiter", () => {
-    function makePlaceOrderRequested(familyId: FamilyId = FAM_ID) {
+    function makePlaceOrderRequested(
+      familyId: FamilyId = FAM_ID,
+      signalReason: string | null = null,
+    ) {
       return {
         command: {
           type: "PlaceOrderCommand" as const,
@@ -2043,7 +2046,7 @@ describe("RiskInventoryModule", () => {
           negRisk: false,
           familyId,
           sequenceInTick: 0,
-          signalReason: null,
+          signalReason,
         },
         timestamp: Date.now(),
       };
@@ -2058,7 +2061,7 @@ describe("RiskInventoryModule", () => {
       });
 
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
-      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
       await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
 
       expect(rejected).toHaveLength(1);
@@ -2075,7 +2078,7 @@ describe("RiskInventoryModule", () => {
         approved.push(p);
       });
 
-      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
       await bus.publish("OrderRejected", {
         commandId: createCommandId("cmd-1"),
@@ -2176,6 +2179,126 @@ describe("RiskInventoryModule", () => {
       });
 
       expect(approved).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    it("rejects a second probe-entry for the same token while a probe order is already in flight", async () => {
+      await mod.start();
+
+      const rejected: any[] = [];
+      bus.subscribe("SignalRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
+
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toContain("probe-token-in-flight-limit");
+
+      await mod.stop();
+    });
+
+    it("allows a probe-entry on a different token while another probe is in flight for the family", async () => {
+      await mod.start();
+
+      const approved: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("SignalProduced", {
+        signal: makeSignal({
+          tokenId: createTokenId("tok-no"),
+          signalId: "sig-other-token",
+          reason: "probe-entry",
+        }),
+      });
+
+      expect(approved).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    it("allows a new probe-entry on the same token after the prior probe order fully fills", async () => {
+      await mod.start();
+
+      const approved: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
+
+      const orderId = createOrderId("ord-probe");
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue({
+        orderId,
+        familyId: FAM_ID,
+        status: "filled",
+        signalReason: "probe-entry",
+      });
+
+      await bus.publish("FillReceived", {
+        fillId: createFillId("fill-probe"),
+        orderId,
+        clientOrderId: "plk_test" as ClientOrderId,
+        tokenId: TOK_ID,
+        side: "buy",
+        price: 0.5,
+        size: 10,
+        sizeUsdc: 5,
+        liquidityRole: "unknown",
+        fee: 0,
+        familyId: FAM_ID,
+        signalReason: "probe-entry",
+        timestamp: Date.now(),
+      });
+
+      await bus.publish("SignalProduced", {
+        signal: makeSignal({ reason: "probe-entry", signalId: "sig-after-fill" }),
+      });
+
+      expect(approved).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    it("rejects probe-entry when the token already has an open buy order", async () => {
+      orderRepo = createMockOrderRepo();
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([
+        {
+          orderId: createOrderId("ord-open"),
+          clientOrderId: "plk_open" as ClientOrderId,
+          tokenId: TOK_ID,
+          familyId: FAM_ID,
+          side: "buy",
+          orderType: "GTC",
+          postOnly: true,
+          price: 0.5,
+          size: 10,
+          sizeUsdc: 5,
+          status: "open",
+          exchangeOrderId: "ex-open" as any,
+          signalId: null,
+          signalReason: "probe-entry",
+          botRunId: "run-1" as any,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        } satisfies Order,
+      ]);
+      mod = createModule();
+      await mod.start();
+
+      const rejected: any[] = [];
+      bus.subscribe("SignalRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
+
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toContain("probe token already has open buy order");
 
       await mod.stop();
     });

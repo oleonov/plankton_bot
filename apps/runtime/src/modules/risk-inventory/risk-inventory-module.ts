@@ -84,6 +84,10 @@ export class RiskInventoryModule implements RuntimeModule {
 
   /** Per-family in-flight order counter (B2.2). */
   private readonly familyInFlight = new Map<string, number>();
+  /** Probe-like entry orders in-flight per token to avoid duplicate probes on one market. */
+  private readonly tokenProbeInFlight = new Map<string, number>();
+  /** Probe-like commands awaiting placement/rejection resolution. */
+  private readonly pendingProbeCommands = new Map<string, string>();
 
   /** Orders already decremented from in-flight (prevents double-decrement on multi-fill orders). */
   private readonly inFlightDecremented = new Set<string>();
@@ -94,9 +98,11 @@ export class RiskInventoryModule implements RuntimeModule {
       deps.rulesProvider,
       deps.familyStateRepo,
       deps.positionRepo,
+      deps.orderRepo,
       this.log,
       deps.liveLiteGuard,
       (fid) => this.getInFlightCount(fid),
+      (tid) => this.getTokenInFlightCount(tid),
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,
@@ -119,15 +125,21 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFill(p)),
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("PlaceOrderRequested", (p) => {
-        this.incrementInFlight(p.command.familyId);
+        this.incrementInFlight(p.command);
+        return Promise.resolve();
+      }),
+      this.deps.bus.subscribe("OrderPlaced", (p) => {
+        this.pendingProbeCommands.delete(String(p.commandId));
         return Promise.resolve();
       }),
       this.deps.bus.subscribe("OrderRejected", (p) => {
         this.decrementInFlight(p.familyId);
+        this.decrementProbeInFlightForRejectedCommand(p.commandId, p.clientOrderId);
         return Promise.resolve();
       }),
       this.deps.bus.subscribe("OrderCancelled", (p) => {
         this.decrementInFlight(p.familyId);
+        this.decrementProbeInFlightForCancelledOrder(p.orderId);
         return Promise.resolve();
       }),
     );
@@ -188,9 +200,14 @@ export class RiskInventoryModule implements RuntimeModule {
 
   // ─── In-flight counter helpers (B2.2) ────────────────────────────
 
-  private incrementInFlight(familyId: FamilyId): void {
-    const fid = String(familyId);
+  private incrementInFlight(command: RuntimeEventMap["PlaceOrderRequested"]["command"]): void {
+    const fid = String(command.familyId);
     this.familyInFlight.set(fid, (this.familyInFlight.get(fid) ?? 0) + 1);
+    if (this.isProbeLikeSignalReason(command.signalReason)) {
+      const tokenKey = String(command.tokenId);
+      this.tokenProbeInFlight.set(tokenKey, (this.tokenProbeInFlight.get(tokenKey) ?? 0) + 1);
+      this.pendingProbeCommands.set(String(command.commandId), tokenKey);
+    }
   }
 
   private decrementInFlight(familyId: FamilyId): void {
@@ -200,6 +217,48 @@ export class RiskInventoryModule implements RuntimeModule {
 
   private getInFlightCount(familyId: FamilyId): number {
     return this.familyInFlight.get(String(familyId)) ?? 0;
+  }
+
+  private getTokenInFlightCount(tokenId: RuntimeEventMap["FillReceived"]["tokenId"]): number {
+    return this.tokenProbeInFlight.get(String(tokenId)) ?? 0;
+  }
+
+  private isProbeLikeSignalReason(signalReason: string | null): boolean {
+    return signalReason === "probe-entry" || signalReason === "spray-entry";
+  }
+
+  private decrementTokenProbeInFlight(tokenKey: string | null): void {
+    if (!tokenKey) return;
+    this.tokenProbeInFlight.set(
+      tokenKey,
+      Math.max(0, (this.tokenProbeInFlight.get(tokenKey) ?? 0) - 1),
+    );
+  }
+
+  private decrementProbeInFlightForRejectedCommand(
+    commandId: RuntimeEventMap["OrderRejected"]["commandId"],
+    clientOrderId: RuntimeEventMap["OrderRejected"]["clientOrderId"],
+  ): void {
+    const commandKey = String(commandId);
+    const tokenKey = this.pendingProbeCommands.get(commandKey);
+    if (tokenKey) {
+      this.pendingProbeCommands.delete(commandKey);
+      this.decrementTokenProbeInFlight(tokenKey);
+      return;
+    }
+    const order = this.deps.orderRepo.findByClientOrderId(clientOrderId);
+    if (order && this.isProbeLikeSignalReason(order.signalReason)) {
+      this.decrementTokenProbeInFlight(String(order.tokenId));
+    }
+  }
+
+  private decrementProbeInFlightForCancelledOrder(
+    orderId: RuntimeEventMap["OrderCancelled"]["orderId"],
+  ): void {
+    const order = this.deps.orderRepo.findById(orderId);
+    if (order && this.isProbeLikeSignalReason(order.signalReason)) {
+      this.decrementTokenProbeInFlight(String(order.tokenId));
+    }
   }
 
   // ─── Signal evaluation ────────────────────────────────────────────
@@ -292,6 +351,9 @@ export class RiskInventoryModule implements RuntimeModule {
       if (order && order.status === "filled" && !this.inFlightDecremented.has(oid)) {
         this.inFlightDecremented.add(oid);
         this.decrementInFlight(payload.familyId);
+        if (this.isProbeLikeSignalReason(order.signalReason)) {
+          this.decrementTokenProbeInFlight(String(payload.tokenId));
+        }
       }
     } catch (err) {
       this.log.error(
