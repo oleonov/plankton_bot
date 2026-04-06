@@ -145,6 +145,89 @@ describe("PortfolioChart", () => {
     });
   });
 
+  it("hovering chart updates headline P/L and shows date label", async () => {
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", () => ok(mockPortfolioSeries)),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
+    });
+
+    // Hover over the SVG — jsdom getBoundingClientRect returns zeros, so mock it
+    const svg = document.querySelector("svg")!;
+    svg.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        right: 700,
+        bottom: 200,
+        width: 700,
+        height: 200,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      }) as DOMRect;
+    // clientX near left edge → first data point (equity 100, baseline 100 → P/L $0.00)
+    fireEvent.mouseMove(svg, { clientX: 60, clientY: 50 });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$0.00");
+      expect(screen.getByTestId("hover-label")).toBeInTheDocument();
+    });
+
+    // Mouse leave reverts to latest value
+    fireEvent.mouseLeave(svg);
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
+      expect(screen.queryByTestId("hover-label")).not.toBeInTheDocument();
+    });
+  });
+
+  it("switching mode clears stale hover state", async () => {
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", () => ok(mockPortfolioSeries)),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
+    });
+
+    // Hover first data point
+    const svg = document.querySelector("svg")!;
+    svg.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        right: 700,
+        bottom: 200,
+        width: 700,
+        height: 200,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      }) as DOMRect;
+    fireEvent.mouseMove(svg, { clientX: 60, clientY: 50 });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$0.00");
+    });
+
+    // Switch to Realized without leaving SVG — hover should clear
+    fireEvent.click(screen.getByTestId("mode-realized"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("-$17.63");
+      expect(screen.queryByTestId("hover-label")).not.toBeInTheDocument();
+    });
+  });
+
   it("headline shows P/L relative to baseline, not absolute equity", async () => {
     server.use(
       http.get("/api/v1/metrics/portfolio-series", () => ok(mockPortfolioSeries)),

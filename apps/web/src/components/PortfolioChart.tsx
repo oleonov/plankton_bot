@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { usePortfolioSeries, usePnlSeries } from "../api/hooks.ts";
 import type { PortfolioDataPoint, PnlDataPoint } from "../api/types.ts";
 
@@ -61,7 +61,36 @@ const tabBase: React.CSSProperties = {
   cursor: "pointer",
 };
 
-function AreaChart({ points }: { points: ChartPoint[] }) {
+interface AreaChartProps {
+  points: ChartPoint[];
+  onHover?: (point: ChartPoint | null, index: number | null) => void;
+}
+
+function AreaChart({ points, onHover }: AreaChartProps) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  const handleMouseMove = useCallback(
+    (e: React.MouseEvent<SVGSVGElement>) => {
+      if (points.length === 0 || !svgRef.current) return;
+      const svg = svgRef.current;
+      const rect = svg.getBoundingClientRect();
+      const svgX = ((e.clientX - rect.left) / rect.width) * WIDTH;
+
+      const plotW = WIDTH - PAD.left - PAD.right;
+      const ratio = Math.max(0, Math.min(1, (svgX - PAD.left) / plotW));
+      const idx = Math.round(ratio * (points.length - 1));
+      setHoverIdx(idx);
+      onHover?.(points[idx] ?? null, idx);
+    },
+    [onHover, points],
+  );
+
+  const handleMouseLeave = useCallback(() => {
+    setHoverIdx(null);
+    onHover?.(null, null);
+  }, [onHover]);
+
   if (points.length === 0) {
     return (
       <div style={{ textAlign: "center", padding: 40, color: "var(--text-dim)" }}>No data yet</div>
@@ -95,10 +124,13 @@ function AreaChart({ points }: { points: ChartPoint[] }) {
 
   return (
     <svg
+      ref={svgRef}
       width="100%"
       viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
       preserveAspectRatio="xMidYMid meet"
-      style={{ display: "block" }}
+      style={{ display: "block", cursor: "crosshair" }}
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
     >
       <defs>
         <linearGradient id="equityGradient" x1="0" y1="0" x2="0" y2="1">
@@ -156,6 +188,41 @@ function AreaChart({ points }: { points: ChartPoint[] }) {
 
       {/* Line */}
       <path d={linePath} fill="none" stroke="var(--blue)" strokeWidth={2} />
+
+      {/* Invisible overlay to capture mouse events across full chart area */}
+      <rect
+        x={PAD.left}
+        y={PAD.top}
+        width={plotW}
+        height={plotH}
+        fill="transparent"
+        style={{ pointerEvents: "all" }}
+      />
+
+      {/* Crosshair line + dot on hover */}
+      {hoverIdx != null && points[hoverIdx] && (
+        <g>
+          <line
+            x1={x(hoverIdx)}
+            y1={PAD.top}
+            x2={x(hoverIdx)}
+            y2={PAD.top + plotH}
+            stroke="var(--text-dim)"
+            strokeWidth={1}
+            strokeDasharray="3,3"
+            style={{ pointerEvents: "none" }}
+          />
+          <circle
+            cx={x(hoverIdx)}
+            cy={y(points[hoverIdx]!.value)}
+            r={4}
+            fill="var(--blue)"
+            stroke="#fff"
+            strokeWidth={2}
+            style={{ pointerEvents: "none" }}
+          />
+        </g>
+      )}
     </svg>
   );
 }
@@ -165,6 +232,7 @@ export function PortfolioChart() {
     () => (safeGetItem("portfolio-interval") as Interval) ?? "1d",
   );
   const [mode, setMode] = useState<ChartMode>("portfolio");
+  const [hoveredPoint, setHoveredPoint] = useState<ChartPoint | null>(null);
 
   const { data: portfolio } = usePortfolioSeries(interval);
   const { data: pnlData } = usePnlSeries(INTERVAL_TO_DAYS[interval]);
@@ -173,17 +241,28 @@ export function PortfolioChart() {
     safeSetItem("portfolio-interval", interval);
   }, [interval]);
 
+  useEffect(() => {
+    setHoveredPoint(null);
+  }, [mode, interval]);
+
   const points =
     mode === "portfolio"
       ? portfolioToChartPoints(portfolio?.items ?? [], portfolio?.baseline ?? 0)
       : pnlToChartPoints(pnlData?.items ?? []);
 
-  const pnl =
+  const latestPnl =
     mode === "portfolio"
       ? (portfolio?.portfolioPnl ?? null)
       : pnlData?.items.length
         ? (pnlData.items[pnlData.items.length - 1]?.realizedPnl ?? 0)
         : 0;
+
+  const displayPnl = hoveredPoint ? hoveredPoint.value : latestPnl;
+  const displayLabel = hoveredPoint ? hoveredPoint.label : null;
+
+  const handleHover = useCallback((point: ChartPoint | null) => {
+    setHoveredPoint(point);
+  }, []);
 
   return (
     <div className="card">
@@ -229,11 +308,19 @@ export function PortfolioChart() {
             style={{
               fontSize: 28,
               fontWeight: 700,
-              color: (pnl ?? 0) >= 0 ? "var(--green)" : "var(--red)",
+              color: (displayPnl ?? 0) >= 0 ? "var(--green)" : "var(--red)",
             }}
           >
-            {(pnl ?? 0) >= 0 ? "+" : "-"}${Math.abs(pnl ?? 0).toFixed(2)}
+            {(displayPnl ?? 0) >= 0 ? "+" : "-"}${Math.abs(displayPnl ?? 0).toFixed(2)}
           </div>
+          {displayLabel && (
+            <div
+              data-testid="hover-label"
+              style={{ fontSize: 12, color: "var(--text-dim)", marginTop: 2 }}
+            >
+              {displayLabel}
+            </div>
+          )}
         </div>
 
         {/* Right: interval tabs */}
@@ -257,7 +344,7 @@ export function PortfolioChart() {
       </div>
 
       {/* Chart */}
-      <AreaChart points={points} />
+      <AreaChart points={points} onHover={handleHover} />
     </div>
   );
 }
