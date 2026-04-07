@@ -611,5 +611,60 @@ describe("ControlEvaluator", () => {
         (evaluator as any).rescoring = false;
       }
     });
+
+    it("recomputeScores does not re-update candidates whose scores are unchanged", async () => {
+      seedCandidate(conn);
+      seedObservations(conn);
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+
+      // First pass: scores are written.
+      await evaluator.recomputeScores();
+      const firstUpdatedAt = (
+        conn.db
+          .prepare("SELECT scores_updated_at FROM family_candidates WHERE candidate_id = ?")
+          .get(CANDIDATE_ID) as { scores_updated_at: string }
+      ).scores_updated_at;
+
+      // Second pass with no observation changes: scores_updated_at must
+      // not move forward (we skipped the UPDATE).
+      await new Promise((r) => setTimeout(r, 5));
+      await evaluator.recomputeScores();
+      const secondUpdatedAt = (
+        conn.db
+          .prepare("SELECT scores_updated_at FROM family_candidates WHERE candidate_id = ?")
+          .get(CANDIDATE_ID) as { scores_updated_at: string }
+      ).scores_updated_at;
+
+      expect(secondUpdatedAt).toBe(firstUpdatedAt);
+    });
+
+    it("recomputeScores skips low-value tail (ignore + low + unmatched + discovered)", async () => {
+      // Seed: one scorable candidate (default seedCandidate) + one tail candidate.
+      seedCandidate(conn);
+      seedObservations(conn);
+      conn.db
+        .prepare(
+          `INSERT INTO family_candidates
+           (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+            primary_category, strategy_profile, active_market_count, cluster_volume_24h,
+            status, first_seen_at, last_seen_at, gate_recommendation, matched_family_id)
+           VALUES ('tail-cand', 'tail-key', 'threshold', 'daily', 'ad-hoc', 'low',
+                   'crypto', 'scalp', 1, 0, 'discovered', ?, ?, 'ignore', NULL)`,
+        )
+        .run(NOW, NOW);
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+      const stats = await evaluator.recomputeScores();
+
+      // Only the scorable seed candidate is touched; tail is skipped entirely.
+      expect(stats.candidatesScored).toBe(1);
+      const tailScored = (
+        conn.db
+          .prepare("SELECT scores_updated_at FROM family_candidates WHERE candidate_id = ?")
+          .get("tail-cand") as { scores_updated_at: string | null }
+      ).scores_updated_at;
+      expect(tailScored).toBeNull();
+    });
   });
 });

@@ -33,6 +33,16 @@ import {
 import { DISMISSED_PROPOSAL_COOLDOWN_MS, recentDismissalCutoffIso } from "./promotion-policy.js";
 import { type AutoAcceptorConfig, autoAcceptAndPromote } from "./auto-acceptor.js";
 
+type ScoreUpdate = {
+  recurrenceScore: number | null;
+  recycleScore: number | null;
+  liveViabilityScore: number | null;
+  toxicityPenalty: number | null;
+  gateRecommendation: string;
+  recommendationReason: string | null;
+  scoresUpdatedAt: string;
+};
+
 // ─── Metric helpers (ported from ScoreComputer, adapted for control.db) ────
 
 interface RecurrenceMetrics {
@@ -214,8 +224,11 @@ export class ControlEvaluator {
     this.rescoring = true;
     try {
       const nowIso = this.now().toISOString();
-      const candidates = this.candidateRepo.findAll();
-      const scoreUpdates = this.computeScores(candidates, nowIso);
+      const scoreUpdates: Array<{ candidateId: string; scores: ScoreUpdate }> = [];
+      for (const cand of this.candidateRepo.iterateScorable()) {
+        const update = this.computeScoreForCandidate(cand, nowIso);
+        if (update) scoreUpdates.push(update);
+      }
 
       const candidateRepo = this.candidateRepo;
       withImmediate(this.db, () => {
@@ -270,57 +283,56 @@ export class ControlEvaluator {
 
   // ─── Candidate scoring (read + compute only) ──────────────────────
 
-  private computeScores(candidates: FamilyCandidate[], now: string) {
-    const updates: {
-      candidateId: string;
-      scores: {
-        recurrenceScore: number | null;
-        recycleScore: number | null;
-        liveViabilityScore: number | null;
-        toxicityPenalty: number | null;
-        gateRecommendation: string;
-        recommendationReason: string | null;
-        scoresUpdatedAt: string;
-      };
-    }[] = [];
-    for (const cand of candidates) {
-      const recurrenceMetrics = queryRecurrenceMetrics(this.db, cand.candidateId);
-      const recurrence = computeRecurrenceScore(recurrenceMetrics);
+  private computeScoreForCandidate(
+    cand: FamilyCandidate,
+    now: string,
+  ): { candidateId: string; scores: ScoreUpdate } | null {
+    const recurrenceMetrics = queryRecurrenceMetrics(this.db, cand.candidateId);
+    const recurrence = computeRecurrenceScore(recurrenceMetrics);
 
-      const viabilityMetrics = queryLiveViabilityMetrics(this.db, cand.candidateId, cand.horizon);
-      const liveViability = computeLiveViabilityScore(viabilityMetrics);
+    const viabilityMetrics = queryLiveViabilityMetrics(this.db, cand.candidateId, cand.horizon);
+    const liveViability = computeLiveViabilityScore(viabilityMetrics);
 
-      let recycle = 0;
-      let tailAdjustedPnl = 0;
-      if (cand.matchedFamilyId) {
-        const scorecard = this.findLatestScorecard(cand.matchedFamilyId);
-        if (scorecard) {
-          recycle = scorecard.recycleScore ?? 0;
-          tailAdjustedPnl = scorecard.tailAdjustedPnl;
-        }
+    let recycle = 0;
+    let tailAdjustedPnl = 0;
+    if (cand.matchedFamilyId) {
+      const scorecard = this.findLatestScorecard(cand.matchedFamilyId);
+      if (scorecard) {
+        recycle = scorecard.recycleScore ?? 0;
+        tailAdjustedPnl = scorecard.tailAdjustedPnl;
       }
-
-      const gate = computeGateRecommendation({
-        recurrence,
-        recycle,
-        liveViability,
-        tailAdjustedPnl,
-      });
-
-      updates.push({
-        candidateId: cand.candidateId,
-        scores: {
-          recurrenceScore: recurrence,
-          recycleScore: recycle > 0 ? recycle : null,
-          liveViabilityScore: liveViability,
-          toxicityPenalty: null,
-          gateRecommendation: gate,
-          recommendationReason: null,
-          scoresUpdatedAt: now,
-        },
-      });
     }
-    return updates;
+
+    const gate = computeGateRecommendation({
+      recurrence,
+      recycle,
+      liveViability,
+      tailAdjustedPnl,
+    });
+
+    const newRecycle = recycle > 0 ? recycle : null;
+    if (
+      cand.scoresUpdatedAt !== null &&
+      nearlyEqual(cand.recurrenceScore, recurrence) &&
+      nearlyEqual(cand.recycleScore, newRecycle) &&
+      nearlyEqual(cand.liveViabilityScore, liveViability) &&
+      cand.gateRecommendation === gate
+    ) {
+      return null;
+    }
+
+    return {
+      candidateId: cand.candidateId,
+      scores: {
+        recurrenceScore: recurrence,
+        recycleScore: newRecycle,
+        liveViabilityScore: liveViability,
+        toxicityPenalty: null,
+        gateRecommendation: gate,
+        recommendationReason: null,
+        scoresUpdatedAt: now,
+      },
+    };
   }
 
   // ─── Promotion evaluation (read + compute only) ────────────────────
@@ -485,4 +497,10 @@ export class ControlEvaluator {
     }[];
     return rows.map((r) => r.profile_id as ProfileId);
   }
+}
+
+function nearlyEqual(a: number | null, b: number | null, epsilon = 1e-6): boolean {
+  if (a === null && b === null) return true;
+  if (a === null || b === null) return false;
+  return Math.abs(a - b) < epsilon;
 }
