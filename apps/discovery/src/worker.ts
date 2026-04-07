@@ -8,6 +8,7 @@ import { loadDiscoveryEnv, getControlDbPath, createDiscoveryGateway } from "./ga
 import {
   DISCOVERY_SCAN_INTERVAL_MS,
   PROMOTION_EVALUATION_INTERVAL_MS,
+  SCORE_RECOMPUTE_FALLBACK_INTERVAL_MS,
 } from "./promotion-policy.js";
 
 const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -89,16 +90,64 @@ async function main(): Promise<void> {
     autoAcceptorConfig,
   });
 
-  const runEvaluation = (): void => {
-    controlEvaluator.run().catch((err) => {
+  const runRescore = (trigger: string): void => {
+    controlEvaluator.recomputeScores().catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.error({ error: msg }, "Control evaluation failed");
+      logger.error({ error: msg, trigger }, "Score recompute failed");
     });
   };
+  const runPromotionCheck = (): void => {
+    controlEvaluator.evaluatePromotions().catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error({ error: msg }, "Promotion evaluation failed");
+    });
+  };
+  const runFallbackIfStale = (): void => {
+    const lastCompleted = controlEvaluator.getLastRescoreCompletedAt();
+    const sinceMs = Date.now() - lastCompleted;
+    if (sinceMs >= SCORE_RECOMPUTE_FALLBACK_INTERVAL_MS) {
+      logger.warn({ sinceLastRescoreMs: sinceMs }, "rescore stale, triggering fallback");
+      runRescore("fallback-stale");
+    }
+  };
 
-  // Run initial evaluation, then on a timer
-  runEvaluation();
-  const evalTimer = setInterval(runEvaluation, PROMOTION_EVALUATION_INTERVAL_MS);
+  // Initial startup pass: rescore FIRST, then promotion check. Must be
+  // sequential-awaited, not fire-and-forget, because evaluatePromotions
+  // invokes autoAcceptAndPromote which reads family_candidates.gate_recommendation
+  // directly (see auto-acceptor.ts:69-82). If the rescore were launched
+  // fire-and-forget and later grew an await point (e.g. chunked processing),
+  // the promotion check would race against it and auto-accept would see
+  // stale gate values. Today recomputeScores happens to be fully synchronous
+  // so the ordering works by accident; this await makes the invariant explicit.
+  //
+  // A startup rescore FAILURE should not block the worker from running
+  // promotion checks (they still work off live scorecards), so errors
+  // are logged and swallowed.
+  try {
+    await controlEvaluator.recomputeScores();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error({ error: msg, trigger: "startup" }, "Startup rescore failed, continuing");
+  }
+  runPromotionCheck();
+
+  // Promotion check stays at 5 min — depends on scorecards which are
+  // written by the runtime process on its own cadence.
+  const promotionTimer = setInterval(runPromotionCheck, PROMOTION_EVALUATION_INTERVAL_MS);
+
+  // Fallback poller: checks every 5 min whether a rescore has happened
+  // within the fallback interval. Normal flow: executeScan() calls
+  // runRescore("scan-complete") on success, which updates
+  // controlEvaluator.lastRescoreCompletedAt and this poller becomes a
+  // no-op. The poller only fires a rescore when scans have been failing
+  // or skipped long enough that scores would otherwise grow stale.
+  //
+  // Critical: the getter returns the timestamp of the last ACTUAL
+  // recompute completion, not the last runRescore() call. A rescore
+  // that was dropped because the `rescoring` lock was held does NOT
+  // update lastRescoreCompletedAt, so the fallback poller still catches
+  // it on the next tick if the in-flight rescore eventually fails.
+  const rescoreFallbackTimer = setInterval(runFallbackIfStale, PROMOTION_EVALUATION_INTERVAL_MS);
 
   // Poll loop
   let executing = false;
@@ -127,6 +176,8 @@ async function main(): Promise<void> {
       const stats = await service.run();
       runRepo.succeed(run.id, stats);
       logger.info({ runId: run.id, ...stats }, "Scan succeeded");
+      // Scan refreshed observation data; recompute candidate scores.
+      runRescore("scan-complete");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       runRepo.fail(run.id, msg);
@@ -145,7 +196,8 @@ async function main(): Promise<void> {
     clearInterval(pollTimer);
     clearInterval(idleTimer);
     clearInterval(staleCheckTimer);
-    clearInterval(evalTimer);
+    clearInterval(promotionTimer);
+    clearInterval(rescoreFallbackTimer);
 
     const deadline = Date.now() + 5 * 60_000;
     while (executing && Date.now() < deadline) {
@@ -160,7 +212,9 @@ async function main(): Promise<void> {
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
 
-  logger.info("Worker running. Poll 5s, scan schedule 1h, promotion eval 5m, idle heartbeat 30s.");
+  logger.info(
+    "Worker running. Poll 5s, scan schedule 1h, promotion check 5m, score recompute on-scan + 1h fallback, idle heartbeat 30s.",
+  );
 }
 
 main().catch((err) => {
