@@ -8,6 +8,9 @@ services:
       - ./config:/app/config:ro
     restart: unless-stopped
     env_file: .env.production
+    mem_limit: 450m
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=384
 
   plankton-discovery:
     image: plankton:latest
@@ -20,6 +23,9 @@ services:
     depends_on:
       - plankton-runtime
     env_file: .env.production
+    mem_limit: 768m
+    environment:
+      - NODE_OPTIONS=--max-old-space-size=640
 
   plankton-api:
     image: plankton:latest
@@ -34,9 +40,11 @@ services:
     depends_on:
       - plankton-runtime
     env_file: .env.production
+    mem_limit: 256m
     environment:
       # Always behind nginx in production
       - TRUST_PROXY=true
+      - NODE_OPTIONS=--max-old-space-size=192
     healthcheck:
       test:
         [
@@ -93,12 +101,14 @@ services:
       docker-socket-proxy:
         condition: service_healthy
     env_file: .env.production
+    mem_limit: 192m
     environment:
       - CONTROL_DB_PATH=/app/apps/runtime/data/control.db
       - MANAGED_CONTAINER=plankton-plankton-runtime-1
       - POLL_INTERVAL_MS=3000
       - RESTART_TIMEOUT_S=30
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
+      - NODE_OPTIONS=--max-old-space-size=128
     networks:
       - default
       - manager-net
