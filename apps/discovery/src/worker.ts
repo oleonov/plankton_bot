@@ -15,9 +15,10 @@ const STALE_THRESHOLD_MS = 2 * 60_000;
 const POLL_INTERVAL_MS = 5_000;
 const IDLE_HEARTBEAT_MS = 30_000;
 
-const logger = pino({
-  transport: { target: "pino-pretty", options: { colorize: true } },
-});
+const isDev = process.env.NODE_ENV !== "production";
+const logger = pino(
+  isDev ? { transport: { target: "pino-pretty", options: { colorize: true } } } : {},
+);
 const workerId = randomUUID();
 
 async function main(): Promise<void> {

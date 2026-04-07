@@ -9,9 +9,10 @@ import {
 import { SwitchDriver } from "./switch-driver.js";
 import { DockerContainerControl } from "./container-control.js";
 
-const log = pino({
-  transport: { target: "pino-pretty", options: { colorize: true } },
-});
+const isDev = process.env.NODE_ENV !== "production";
+const log = pino(
+  isDev ? { transport: { target: "pino-pretty", options: { colorize: true } } } : {},
+);
 
 function main(): void {
   const controlDbPath = process.env["CONTROL_DB_PATH"];

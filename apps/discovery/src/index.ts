@@ -3,9 +3,10 @@ import { bootstrapControlDb } from "@plankton/db";
 import { ScanService } from "./scan-service.js";
 import { loadDiscoveryEnv, getControlDbPath, createDiscoveryGateway } from "./gateway-factory.js";
 
-const logger = pino({
-  transport: { target: "pino-pretty", options: { colorize: true } },
-});
+const isDev = process.env.NODE_ENV !== "production";
+const logger = pino(
+  isDev ? { transport: { target: "pino-pretty", options: { colorize: true } } } : {},
+);
 
 async function main(): Promise<void> {
   loadDiscoveryEnv();
