@@ -529,4 +529,87 @@ describe("ControlEvaluator", () => {
       conn.db.exec("DROP TRIGGER IF EXISTS bomb_on_cand_bomb");
     });
   });
+
+  describe("split cadence", () => {
+    it("recomputeScores updates scores without touching proposals", async () => {
+      seedCandidate(conn);
+      seedObservations(conn);
+      seedDeployment(conn);
+      seedScorecard(conn);
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+      const stats = await evaluator.recomputeScores();
+
+      expect(stats.candidatesScored).toBe(1);
+
+      const proposalCount = (
+        conn.db.prepare("SELECT COUNT(*) AS v FROM promotion_proposals").get() as { v: number }
+      ).v;
+      expect(proposalCount).toBe(0);
+    });
+
+    it("evaluatePromotions creates proposals without rescoring candidates", async () => {
+      seedCandidate(conn, true);
+      seedObservations(conn);
+      seedDeployment(conn);
+      seedScorecard(conn);
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+      const stats = await evaluator.evaluatePromotions();
+
+      expect(stats.proposalsCreated).toBeGreaterThanOrEqual(1);
+
+      const cand = conn.db
+        .prepare("SELECT scores_updated_at FROM family_candidates WHERE candidate_id = ?")
+        .get(CANDIDATE_ID) as { scores_updated_at: string | null };
+      expect(cand.scores_updated_at).toBeNull();
+    });
+
+    it("recomputeScores and evaluatePromotions use independent locks", async () => {
+      // Regression guard: a shared lock would silently drop the rescore
+      // call while evaluatePromotions is mid-await on autoAcceptAndPromote.
+      seedCandidate(conn, true);
+      seedObservations(conn);
+      seedDeployment(conn);
+      seedScorecard(conn);
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+      // Force the promoting lock on.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (evaluator as any).promoting = true;
+      try {
+        const stats = await evaluator.recomputeScores();
+        expect(stats.candidatesScored).toBe(1);
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (evaluator as any).promoting = false;
+      }
+    });
+
+    it("getLastRescoreCompletedAt advances only when recomputeScores actually runs", async () => {
+      seedCandidate(conn);
+      seedObservations(conn);
+
+      const evaluator = new ControlEvaluator({ db: conn.db, log: silentLogger });
+      expect(evaluator.getLastRescoreCompletedAt()).toBe(0);
+
+      const before = Date.now();
+      await evaluator.recomputeScores();
+      const afterReal = evaluator.getLastRescoreCompletedAt();
+      expect(afterReal).toBeGreaterThanOrEqual(before);
+
+      // Force the rescoring lock and call again — must not advance the
+      // timestamp, because no actual recompute happened.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (evaluator as any).rescoring = true;
+      try {
+        const stats = await evaluator.recomputeScores();
+        expect(stats.candidatesScored).toBe(0);
+        expect(evaluator.getLastRescoreCompletedAt()).toBe(afterReal);
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (evaluator as any).rescoring = false;
+      }
+    });
+  });
 });

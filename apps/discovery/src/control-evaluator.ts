@@ -184,7 +184,9 @@ export class ControlEvaluator {
   private readonly now: () => Date;
   private readonly dismissCooldownMs: number;
   private readonly autoAcceptorConfig: AutoAcceptorConfig | undefined;
-  private evaluating = false;
+  private rescoring = false;
+  private promoting = false;
+  private lastRescoreCompletedAt = 0;
 
   constructor(deps: ControlEvaluatorDeps) {
     this.db = deps.db;
@@ -199,35 +201,56 @@ export class ControlEvaluator {
   }
 
   async run(): Promise<EvaluationStats> {
-    if (this.evaluating) return { candidatesScored: 0, proposalsCreated: 0 };
-    this.evaluating = true;
-    try {
-      const now = this.now();
-      const nowIso = now.toISOString();
+    const scoreStats = await this.recomputeScores();
+    const promoStats = await this.evaluatePromotions();
+    return {
+      candidatesScored: scoreStats.candidatesScored,
+      proposalsCreated: promoStats.proposalsCreated,
+    };
+  }
 
-      // Phase 1: Read + compute outside transaction (no write lock held)
+  async recomputeScores(): Promise<{ candidatesScored: number }> {
+    if (this.rescoring) return { candidatesScored: 0 };
+    this.rescoring = true;
+    try {
+      const nowIso = this.now().toISOString();
       const candidates = this.candidateRepo.findAll();
       const scoreUpdates = this.computeScores(candidates, nowIso);
-      const proposalInserts = this.computePromotions(now);
 
-      // Phase 2: Apply all writes in a single short IMMEDIATE transaction
       const candidateRepo = this.candidateRepo;
-      const proposalRepo = this.proposalRepo;
-      withImmediate(this.db, (db) => {
+      withImmediate(this.db, () => {
         for (const upd of scoreUpdates) {
           candidateRepo.updateScores(upd.candidateId, upd.scores);
         }
+      });
+
+      this.lastRescoreCompletedAt = Date.now();
+      this.log.info({ candidatesScored: scoreUpdates.length }, "candidate rescore complete");
+      return { candidatesScored: scoreUpdates.length };
+    } finally {
+      this.rescoring = false;
+    }
+  }
+
+  async evaluatePromotions(): Promise<{ proposalsCreated: number }> {
+    if (this.promoting) return { proposalsCreated: 0 };
+    this.promoting = true;
+    try {
+      const now = this.now();
+      const proposalInserts = this.computePromotions(now);
+
+      const proposalRepo = this.proposalRepo;
+      withImmediate(this.db, () => {
         for (const ins of proposalInserts) {
           proposalRepo.insert(ins.proposal);
         }
       });
 
       this.log.info(
-        { candidatesScored: scoreUpdates.length, proposalsCreated: proposalInserts.length },
-        "control evaluation complete",
+        { proposalsCreated: proposalInserts.length },
+        "promotion evaluation complete",
       );
 
-      // Phase 3: Auto-accept + auto-promote via API
       if (this.autoAcceptorConfig?.enabled) {
         const result = await autoAcceptAndPromote(this.db, this.autoAcceptorConfig, this.log);
         if (result.accepted > 0 || result.promoted > 0 || result.skippedAtCap > 0) {
@@ -235,10 +258,14 @@ export class ControlEvaluator {
         }
       }
 
-      return { candidatesScored: scoreUpdates.length, proposalsCreated: proposalInserts.length };
+      return { proposalsCreated: proposalInserts.length };
     } finally {
-      this.evaluating = false;
+      this.promoting = false;
     }
+  }
+
+  getLastRescoreCompletedAt(): number {
+    return this.lastRescoreCompletedAt;
   }
 
   // ─── Candidate scoring (read + compute only) ──────────────────────
