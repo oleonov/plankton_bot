@@ -264,10 +264,7 @@ export class ControlEvaluator {
         }
       });
 
-      this.log.info(
-        { proposalsCreated: proposalInserts.length },
-        "promotion evaluation complete",
-      );
+      this.log.info({ proposalsCreated: proposalInserts.length }, "promotion evaluation complete");
 
       if (this.autoAcceptorConfig?.enabled) {
         const result = await autoAcceptAndPromote(this.db, this.autoAcceptorConfig, this.log);
