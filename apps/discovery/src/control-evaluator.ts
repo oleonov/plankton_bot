@@ -224,8 +224,10 @@ export class ControlEvaluator {
     this.rescoring = true;
     try {
       const nowIso = this.now().toISOString();
+      let candidatesVisited = 0;
       const scoreUpdates: Array<{ candidateId: string; scores: ScoreUpdate }> = [];
       for (const cand of this.candidateRepo.iterateScorable()) {
+        candidatesVisited++;
         const update = this.computeScoreForCandidate(cand, nowIso);
         if (update) scoreUpdates.push(update);
       }
@@ -238,7 +240,10 @@ export class ControlEvaluator {
       });
 
       this.lastRescoreCompletedAt = Date.now();
-      this.log.info({ candidatesScored: scoreUpdates.length }, "candidate rescore complete");
+      this.log.info(
+        { candidatesVisited, candidatesUpdated: scoreUpdates.length },
+        "candidate rescore complete",
+      );
       return { candidatesScored: scoreUpdates.length };
     } finally {
       this.rescoring = false;
