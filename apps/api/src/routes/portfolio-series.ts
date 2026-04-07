@@ -48,9 +48,25 @@ function resolveLiveLiteFunderAddress(
   }
 }
 
+function resolveProfileStart(
+  controlDb: Database.Database | undefined,
+  profileId: string,
+): string | null {
+  if (!controlDb) return null;
+  try {
+    const profileRow = controlDb
+      .prepare("SELECT created_at FROM profiles WHERE profile_id = ?")
+      .get(profileId) as { created_at: string | null } | undefined;
+    return profileRow?.created_at ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchExternalPortfolioSeries(
   funderAddress: string,
   interval: "1d" | "1w" | "1m" | "all",
+  profileStart: string | null,
 ): Promise<{
   items: Array<{
     equityUsdc: number;
@@ -88,13 +104,12 @@ async function fetchExternalPortfolioSeries(
     const latest = items[items.length - 1] ?? null;
     const intervalWindowMs = INTERVAL_WINDOW_MS[interval] ?? null;
     const fidelityMs = EXTERNAL_FIDELITY_MS[fidelity] ?? 0;
-    const firstPointMs = firstPoint ? Date.parse(firstPoint.capturedAt) : NaN;
     const windowStartMs =
       intervalWindowMs != null ? Date.now() - intervalWindowMs : Number.NEGATIVE_INFINITY;
+    const profileStartMs = profileStart ? Date.parse(profileStart) : NaN;
     const coverageComplete =
-      interval !== "all" &&
-      Number.isFinite(firstPointMs) &&
-      firstPointMs - windowStartMs <= fidelityMs;
+      interval === "all" ||
+      (Number.isFinite(profileStartMs) && profileStartMs - windowStartMs <= fidelityMs);
     const baseline = coverageComplete ? (firstPoint?.equityUsdc ?? 0) : 0;
 
     return {
@@ -139,8 +154,9 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
 
     if (effectiveProfile === "live-lite") {
       const funderAddress = resolveLiveLiteFunderAddress(controlDb, effectiveProfile);
+      const profileStart = resolveProfileStart(controlDb, effectiveProfile);
       if (funderAddress) {
-        const external = await fetchExternalPortfolioSeries(funderAddress, interval);
+        const external = await fetchExternalPortfolioSeries(funderAddress, interval, profileStart);
         if (external) {
           return ok({
             ...external,
@@ -183,17 +199,7 @@ export const portfolioSeriesRoutes: FastifyPluginAsync<PortfolioSeriesOpts> = as
       .get(effectiveProfile) as { captured_at: string } | undefined;
     const historyStart = historyStartRow?.captured_at ?? null;
 
-    let profileStart: string | null = null;
-    if (controlDb) {
-      try {
-        const profileRow = controlDb
-          .prepare("SELECT created_at FROM profiles WHERE profile_id = ?")
-          .get(effectiveProfile) as { created_at: string | null } | undefined;
-        profileStart = profileRow?.created_at ?? null;
-      } catch {
-        /* legacy/test setups without profiles row */
-      }
-    }
+    const profileStart = resolveProfileStart(controlDb, effectiveProfile);
 
     const rawCountRow = db
       .prepare(

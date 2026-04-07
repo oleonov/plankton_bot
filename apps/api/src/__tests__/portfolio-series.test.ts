@@ -431,6 +431,76 @@ describe("GET /metrics/portfolio-series", () => {
     }
   });
 
+  it("uses the first external 1d point as baseline when the profile is older than one day", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-07T01:29:00Z"));
+
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', datetime('now', '-4 days'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS runtime_control_state (
+           id INTEGER PRIMARY KEY,
+           current_profile TEXT,
+           desired_profile TEXT
+         )`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc, relayer_json)
+         VALUES ('live-lite', NULL, ?)`,
+      )
+      .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          { t: Date.parse("2026-04-06T03:00:00Z") / 1000, p: -30.735004 },
+          { t: Date.parse("2026-04-06T21:00:00Z") / 1000, p: -47.98143 },
+        ],
+      } as Response),
+    );
+
+    const liveLiteApp = await buildServer({
+      config: testConfig(),
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
+      defaultInitialBalanceUsdc: 100,
+    });
+
+    try {
+      const res = await liveLiteApp.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1d",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.baseline).toBeCloseTo(-30.735004, 6);
+      expect(body.data.currentEquity).toBeCloseTo(-47.98143, 6);
+      expect(body.data.portfolioPnl).toBeCloseTo(-17.246426, 6);
+      expect(body.data.coverageComplete).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await liveLiteApp.close();
+    }
+  });
+
   it("keeps zero baseline for external series when account history does not cover the full interval", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-06T12:00:00Z"));
