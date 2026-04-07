@@ -61,6 +61,7 @@ function makeExchangeFill(overrides?: Partial<ExchangeFill>): ExchangeFill {
     size: 10,
     liquidityRole: "unknown",
     fee: 0,
+    feeRateBps: 0,
     timestamp: Date.now(),
     ...overrides,
   };
@@ -327,6 +328,7 @@ describe("runStartupPositionAdoption", () => {
       sizeUsdc: 300.934692,
       liquidityRole: "maker",
       fee: 0,
+      feeRateBps: 0,
       filledAt: "2026-04-05T00:00:00Z",
     });
     positionRepo.save({

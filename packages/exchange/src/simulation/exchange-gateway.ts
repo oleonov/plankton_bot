@@ -85,6 +85,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
         size: params.size,
         liquidityRole: "unknown",
         fee,
+        feeRateBps: this.feeRate * 10_000,
         timestamp: now,
       };
       this.fills.push(fill);
@@ -213,6 +214,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
       size,
       liquidityRole: "unknown",
       fee,
+      feeRateBps: this.feeRate * 10_000,
       timestamp: Date.now(),
     };
     this.fills.push(fill);

@@ -14,6 +14,7 @@ import type {
   CancelOrderParams,
   PlaceOrderResult,
   CancelOrderResult,
+  FamilyRulesProvider,
 } from "@plankton/domain";
 
 function createMockGateway(): ExchangeGateway {
@@ -64,6 +65,15 @@ function createMockOrderRepo(): OrderRepository {
   };
 }
 
+function createMockRulesProvider(): FamilyRulesProvider {
+  return {
+    getRule: vi.fn().mockReturnValue(null),
+    isEnabled: vi.fn().mockReturnValue(true),
+    getAllFamilies: vi.fn().mockReturnValue([]),
+    getRulesForRegime: vi.fn().mockReturnValue([]),
+  };
+}
+
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -77,6 +87,7 @@ describe("FillPollerModule", () => {
   let gateway: ReturnType<typeof createMockGateway>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
+  let rulesProvider: FamilyRulesProvider;
   let bus: InProcessEventBus;
   let mod: FillPollerModule;
 
@@ -85,11 +96,13 @@ describe("FillPollerModule", () => {
     gateway = createMockGateway();
     fillRepo = createMockFillRepo();
     orderRepo = createMockOrderRepo();
+    rulesProvider = createMockRulesProvider();
     bus = new InProcessEventBus();
     mod = new FillPollerModule({
       gateway,
       fillRepo,
       orderRepo,
+      rulesProvider,
       bus,
       log: silentLog,
       pollIntervalMs: 5000,
@@ -132,6 +145,7 @@ describe("FillPollerModule", () => {
       size: 10,
       liquidityRole: "unknown",
       fee: 0,
+      feeRateBps: 0,
       timestamp: fillTs,
     };
     (gateway.getFills as any).mockResolvedValue([fill]);

@@ -11,8 +11,8 @@ export class SqliteFillRepository implements FillRepository {
       .prepare(
         `INSERT INTO fills
          (fill_id, order_id, token_id, family_id, side, price, size,
-          size_usdc, liquidity_role, fee, filled_at, reconciled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+          size_usdc, liquidity_role, fee, fee_rate_bps, filled_at, reconciled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       )
       .run(
         fill.fillId,
@@ -25,6 +25,7 @@ export class SqliteFillRepository implements FillRepository {
         fill.sizeUsdc,
         fill.liquidityRole,
         fill.fee,
+        fill.feeRateBps,
         fill.filledAt,
       );
   }
@@ -94,6 +95,7 @@ export class SqliteFillRepository implements FillRepository {
       sizeUsdc: row.size_usdc as number,
       liquidityRole: row.liquidity_role as LiquidityRole,
       fee: row.fee as number,
+      feeRateBps: (row.fee_rate_bps as number) ?? 0,
       filledAt: row.filled_at as string,
     };
   }

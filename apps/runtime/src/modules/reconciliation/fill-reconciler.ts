@@ -20,17 +20,27 @@ import type {
   OrderId,
   ClientOrderId,
   Order,
+  FamilyRulesProvider,
 } from "@plankton/domain";
 import { createFillId, createOrderId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 const loggedOrphanFillIds = new Set<string>();
 
+const CATEGORY_RATES: Record<string, number> = {
+  crypto: 0.072,
+  sports: 0.03,
+  finance: 0.04,
+  politics: 0.04,
+  geopolitics: 0,
+};
+
 // ─── Shared fill import (DRY) ─────────────────────────────────────────────
 
 export interface ImportFillsDeps {
   fillRepo: FillRepository;
   orderRepo: OrderRepository;
+  rulesProvider: FamilyRulesProvider;
   bus: EventBus;
   log: Logger;
 }
@@ -62,6 +72,7 @@ export function findLocalOrderForExchangeFill(
 export function buildLocalFillFromExchangeFill(
   fill: ExchangeFill,
   localOrder: Pick<Order, "orderId" | "familyId" | "signalReason">,
+  primaryCategory?: string,
 ): {
   fill: Fill;
   fillId: FillId;
@@ -72,6 +83,15 @@ export function buildLocalFillFromExchangeFill(
 } {
   const fillId = createFillId(fill.fillId);
   const sizeUsdc = fill.size * fill.price;
+
+  // Use category-based rate if available, otherwise fallback to the rate from the exchange
+  const category = primaryCategory?.toLowerCase();
+  const rate =
+    category && CATEGORY_RATES[category] !== undefined
+      ? CATEGORY_RATES[category]
+      : (fill.feeRateBps ?? 0) / 10_000;
+
+  const fee = fill.liquidityRole === "maker" ? 0 : fill.size * rate * fill.price * (1 - fill.price);
 
   return {
     fill: {
@@ -84,7 +104,8 @@ export function buildLocalFillFromExchangeFill(
       size: fill.size,
       sizeUsdc,
       liquidityRole: fill.liquidityRole,
-      fee: fill.fee,
+      fee,
+      feeRateBps: fill.feeRateBps,
       filledAt: new Date(fill.timestamp).toISOString(),
     },
     fillId,
@@ -123,7 +144,7 @@ export async function importExchangeFills(
   fills: ExchangeFill[],
   deps: ImportFillsDeps,
 ): Promise<ImportFillsResult> {
-  const { fillRepo, orderRepo, bus, log } = deps;
+  const { fillRepo, orderRepo, rulesProvider, bus, log } = deps;
   let imported = 0;
   let skipped = 0;
   const details: string[] = [];
@@ -164,7 +185,8 @@ export async function importExchangeFills(
       continue;
     }
 
-    const resolved = buildLocalFillFromExchangeFill(ef, localOrder);
+    const rule = rulesProvider.getRule(localOrder.familyId);
+    const resolved = buildLocalFillFromExchangeFill(ef, localOrder, rule?.identity.primaryCategory);
 
     fillRepo.save(resolved.fill);
     imported++;
@@ -178,7 +200,7 @@ export async function importExchangeFills(
       signalReason: resolved.signalReason,
     });
 
-    const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size})`;
+    const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size}, role: ${ef.liquidityRole}, fee: ${resolved.fill.fee.toFixed(6)})`;
     details.push(msg);
     log.info({ fillId: ef.fillId }, msg);
   }
@@ -190,6 +212,13 @@ export async function importExchangeFills(
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
   for (const { ef, fillId, orderId, sizeUsdc, familyId, signalReason } of savedFills) {
+    const rule = rulesProvider.getRule(familyId);
+    const resolved = buildLocalFillFromExchangeFill(
+      ef,
+      { orderId, familyId, signalReason },
+      rule?.identity.primaryCategory,
+    );
+
     await bus.publish("FillReceived", {
       fillId,
       orderId,
@@ -200,7 +229,8 @@ export async function importExchangeFills(
       size: ef.size,
       sizeUsdc,
       liquidityRole: ef.liquidityRole,
-      fee: ef.fee,
+      fee: resolved.fill.fee,
+      feeRateBps: ef.feeRateBps,
       familyId,
       signalReason,
       timestamp: ef.timestamp,
@@ -216,6 +246,7 @@ export interface FillReconcilerDeps {
   gateway: ExchangeGateway;
   fillRepo: FillRepository;
   orderRepo: OrderRepository;
+  rulesProvider: FamilyRulesProvider;
   bus: EventBus;
   log: Logger;
 }
@@ -230,14 +261,20 @@ export async function reconcileFills(
   deps: FillReconcilerDeps,
   sinceMs: number,
 ): Promise<FillReconcileResult> {
-  const { gateway, fillRepo, orderRepo, bus, log } = deps;
+  const { gateway, fillRepo, orderRepo, rulesProvider, bus, log } = deps;
 
   const exchangeFills = await gateway.getFills(sinceMs);
   if (exchangeFills.length === 0) {
     return { exchangeFillCount: 0, missingFillsImported: 0, details: [] };
   }
 
-  const result = await importExchangeFills(exchangeFills, { fillRepo, orderRepo, bus, log });
+  const result = await importExchangeFills(exchangeFills, {
+    fillRepo,
+    orderRepo,
+    rulesProvider,
+    bus,
+    log,
+  });
 
   return {
     exchangeFillCount: exchangeFills.length,

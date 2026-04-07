@@ -341,6 +341,7 @@ export interface Fill {
   sizeUsdc: number; // notional (= size × price)
   liquidityRole: LiquidityRole;
   fee: number;
+  feeRateBps: number;
   filledAt: string; // ISO timestamp
 }
 

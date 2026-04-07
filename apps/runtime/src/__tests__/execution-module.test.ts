@@ -169,6 +169,7 @@ describe("ExecutionModule", () => {
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
+  let rulesProvider: FamilyRulesProvider;
   let mod: ExecutionModule;
 
   beforeEach(() => {
@@ -177,12 +178,14 @@ describe("ExecutionModule", () => {
     marketRepo = createMockMarketRepo();
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
+    rulesProvider = createMockRulesProvider();
     mod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -434,6 +437,8 @@ describe("ExecutionModule", () => {
       size: 10,
       liquidityRole: "unknown",
       fee: 0,
+      feeRateBps: 0,
+
       timestamp: Date.now(),
     };
     (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([mockFill]);
@@ -506,6 +511,8 @@ describe("ExecutionModule", () => {
       size: 4, // partial: 4 of 10
       liquidityRole: "unknown",
       fee: 0,
+      feeRateBps: 0,
+
       timestamp: Date.now(),
     };
     (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([partialFill]);
@@ -562,6 +569,8 @@ describe("ExecutionModule", () => {
       size: 6,
       liquidityRole: "unknown",
       fee: 0,
+      feeRateBps: 0,
+
       timestamp: Date.now(),
     };
     const fill2: ExchangeFill = {
@@ -574,6 +583,8 @@ describe("ExecutionModule", () => {
       size: 4,
       liquidityRole: "unknown",
       fee: 0,
+      feeRateBps: 0,
+
       timestamp: Date.now(),
     };
     (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([fill1, fill2]);
@@ -704,6 +715,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -743,6 +755,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1007,6 +1020,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1023,6 +1037,8 @@ describe("ExecutionModule", () => {
       size: 10,
       liquidityRole: "unknown",
       fee: 0,
+      feeRateBps: 0,
+
       timestamp: Date.now(),
     };
     (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([mockFill]);
@@ -1053,6 +1069,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1087,6 +1104,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1137,6 +1155,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => true },
@@ -1194,6 +1213,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1233,6 +1253,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1260,6 +1281,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1286,6 +1308,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1315,6 +1338,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1345,6 +1369,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1393,6 +1418,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
+      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },

@@ -15,6 +15,7 @@ import type {
   MarketRepository,
   TokenId,
   ClientOrderId,
+  FamilyRulesProvider,
   ReconciliationResult,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
@@ -56,6 +57,15 @@ function createMockOrderRepo(): OrderRepository {
     findByTokenId: vi.fn().mockReturnValue([]),
     updateStatus: vi.fn(),
     sumOpenBuyNotional: vi.fn().mockReturnValue(0),
+  };
+}
+
+function createMockRulesProvider(): FamilyRulesProvider {
+  return {
+    getRule: vi.fn().mockReturnValue(null),
+    isEnabled: vi.fn().mockReturnValue(true),
+    getAllFamilies: vi.fn().mockReturnValue([]),
+    getRulesForRegime: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -143,6 +153,7 @@ function makeExchangeFill(overrides?: Partial<ExchangeFill>): ExchangeFill {
     size: 10,
     liquidityRole: "unknown",
     fee: 0.01,
+    feeRateBps: 0,
     timestamp: Date.now(),
     ...overrides,
   };
@@ -156,6 +167,7 @@ describe("ReconciliationModule", () => {
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
+  let rulesProvider: FamilyRulesProvider;
   let mod: ReconciliationModule;
 
   beforeEach(() => {
@@ -164,12 +176,14 @@ describe("ReconciliationModule", () => {
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
     marketRepo = createMockMarketRepo();
+    rulesProvider = createMockRulesProvider();
     mod = new ReconciliationModule({
       gateway,
       bus,
       orderRepo,
       fillRepo,
       marketRepo,
+      rulesProvider,
       log: silentLog,
       reconcileIntervalMs: 60_000,
     });

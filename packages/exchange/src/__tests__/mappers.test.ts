@@ -98,6 +98,7 @@ describe("mapTrade", () => {
     expect(fill.size).toBe(50);
     expect(fill.price).toBe(0.6);
     expect(fill.liquidityRole).toBe("taker");
+    expect(fill.feeRateBps).toBe(200);
     // fee = 50 * (200/10000) * 0.60 * (1 - 0.60) = 50 * 0.02 * 0.6 * 0.4 = 1 * 0.24 = 0.24
     expect(fill.fee).toBeCloseTo(0.24);
   });

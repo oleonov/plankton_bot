@@ -87,6 +87,7 @@ export interface ExchangeFill {
   readonly size: number;
   readonly liquidityRole: LiquidityRole;
   readonly fee: number;
+  readonly feeRateBps: number;
   /** Unix milliseconds. */
   readonly timestamp: number;
 }

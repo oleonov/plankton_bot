@@ -41,9 +41,9 @@ export interface ExecutionModuleDeps {
   fillRepo: FillRepository;
   log: Logger;
   botRunId: BotRunId;
+  rulesProvider: FamilyRulesProvider;
   runtimeControl?: RuntimeControl | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
-  rulesProvider?: FamilyRulesProvider | undefined;
   runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
   maxConcurrency?: number | undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -437,6 +437,7 @@ export class ExecutionModule implements RuntimeModule {
     await importExchangeFills(orderFills, {
       fillRepo: this.deps.fillRepo,
       orderRepo: this.deps.orderRepo,
+      rulesProvider: this.deps.rulesProvider,
       bus: this.deps.bus,
       log: this.log,
     });

@@ -21,6 +21,7 @@ import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposu
 import {
   buildLocalFillFromExchangeFill,
   findLocalOrderForExchangeFill,
+  importExchangeFills,
   updateOrderStatusFromPersistedFills,
 } from "./modules/reconciliation/fill-reconciler.js";
 
@@ -212,6 +213,8 @@ export async function runStartupPositionAdoption(
     pendingFills.push({ fill, localOrder: null, orphanGroupKey });
   }
 
+  const bus = { publish: async () => {} } as any;
+
   for (const pending of pendingFills) {
     const localOrder =
       pending.localOrder ??
@@ -219,24 +222,41 @@ export async function runStartupPositionAdoption(
     const existingPosition = deps.positionRepo.findByTokenId(pending.fill.tokenId);
 
     try {
-      deps.db.transaction(() => {
-        const resolved = buildLocalFillFromExchangeFill(pending.fill, localOrder);
-        deps.fillRepo.save(resolved.fill);
-        updateOrderStatusFromPersistedFills(deps.orderRepo, deps.fillRepo, localOrder.orderId);
-        inventory.applyFill({
-          fillId: resolved.fillId,
-          tokenId: pending.fill.tokenId,
-          familyId: localOrder.familyId,
-          side: pending.fill.side,
-          price: pending.fill.price,
-          size: pending.fill.size,
-          sizeUsdc: resolved.sizeUsdc,
-          fee: pending.fill.fee,
-          signalReason: localOrder.signalReason ?? SYNTHETIC_SIGNAL_REASON,
-          timestamp: pending.fill.timestamp,
-        });
-        deps.fillRepo.markReconciled([resolved.fillId]);
-      })();
+      // Use standard import logic so fee calculation matches exactly
+      const importResult = await importExchangeFills([pending.fill], {
+        fillRepo: deps.fillRepo,
+        orderRepo: deps.orderRepo,
+        rulesProvider: deps.rulesProvider,
+        bus,
+        log,
+      });
+
+      if (importResult.imported === 0) {
+        continue;
+      }
+
+      const fillId = createFillId(pending.fill.fillId);
+      const savedFill = deps.fillRepo
+        .findByOrderId(localOrder.orderId)
+        .find((f) => String(f.fillId) === String(fillId));
+
+      if (!savedFill) {
+        throw new Error(`fill ${pending.fill.fillId} not found after import`);
+      }
+
+      inventory.applyFill({
+        fillId: savedFill.fillId,
+        tokenId: pending.fill.tokenId,
+        familyId: localOrder.familyId,
+        side: pending.fill.side,
+        price: pending.fill.price,
+        size: pending.fill.size,
+        sizeUsdc: savedFill.sizeUsdc,
+        fee: savedFill.fee,
+        signalReason: localOrder.signalReason ?? SYNTHETIC_SIGNAL_REASON,
+        timestamp: pending.fill.timestamp,
+      });
+      deps.fillRepo.markReconciled([savedFill.fillId]);
 
       familiesToRecompute.add(String(localOrder.familyId));
       result.appliedFills++;

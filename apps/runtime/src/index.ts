@@ -515,6 +515,7 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     fillRepo: repos.fill,
     marketRepo: repos.market,
+    rulesProvider,
     log,
     reconcileIntervalMs: 60_000,
   });
@@ -588,6 +589,7 @@ async function main(): Promise<void> {
           gateway: exchangeGateway,
           fillRepo: repos.fill,
           orderRepo: repos.order,
+          rulesProvider,
           bus,
           log,
           pollIntervalMs: config.fillPollIntervalMs,

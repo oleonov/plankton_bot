@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS fills (
   size_usdc    REAL NOT NULL,
   liquidity_role TEXT NOT NULL DEFAULT 'unknown',
   fee          REAL NOT NULL DEFAULT 0,
+  fee_rate_bps REAL NOT NULL DEFAULT 0,
   reconciled   INTEGER NOT NULL DEFAULT 0,
   filled_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );

@@ -41,7 +41,8 @@ describe("SqliteFillRepository.getLatestTimestamp", () => {
       sizeUsdc: 5,
       liquidityRole: "unknown",
       fee: 0,
-      filledAt: "2026-03-19T10:00:00.000Z",
+      feeRateBps: 0,
+      filledAt: "2026-01-01T00:00:00Z",
     };
     repo.save(baseFill);
     repo.save({

@@ -1,7 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { importExchangeFills } from "../modules/reconciliation/fill-reconciler.js";
 import { createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
-import type { ExchangeFill, FillRepository, OrderRepository } from "@plankton/domain";
+import type {
+  ExchangeFill,
+  FillRepository,
+  OrderRepository,
+  FamilyRulesProvider,
+} from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 
 function createMockFillRepo(): FillRepository {
@@ -14,6 +19,15 @@ function createMockFillRepo(): FillRepository {
     findUnreconciled: vi.fn().mockReturnValue([]),
     markReconciled: vi.fn(),
     getLatestTimestamp: vi.fn().mockReturnValue(null),
+  };
+}
+
+function createMockRulesProvider(): FamilyRulesProvider {
+  return {
+    getRule: vi.fn().mockReturnValue(null),
+    isEnabled: vi.fn().mockReturnValue(true),
+    getAllFamilies: vi.fn().mockReturnValue([]),
+    getRulesForRegime: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -45,11 +59,13 @@ const silentLog = {
 describe("importExchangeFills", () => {
   let fillRepo: ReturnType<typeof createMockFillRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
+  let rulesProvider: ReturnType<typeof createMockRulesProvider>;
   let bus: InProcessEventBus;
 
   beforeEach(() => {
     fillRepo = createMockFillRepo();
     orderRepo = createMockOrderRepo();
+    rulesProvider = createMockRulesProvider();
     bus = new InProcessEventBus();
   });
 
@@ -65,6 +81,7 @@ describe("importExchangeFills", () => {
         size: 10,
         liquidityRole: "unknown",
         fee: 0,
+        feeRateBps: 0,
         timestamp: Date.now(),
       },
     ];
@@ -84,7 +101,13 @@ describe("importExchangeFills", () => {
       received.push(p);
     });
 
-    const result = await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
+    const result = await importExchangeFills(fills, {
+      fillRepo,
+      orderRepo,
+      rulesProvider,
+      bus,
+      log: silentLog,
+    });
 
     expect(result.imported).toBe(1);
     expect(result.skipped).toBe(0);
@@ -108,11 +131,18 @@ describe("importExchangeFills", () => {
         size: 10,
         liquidityRole: "unknown",
         fee: 0,
+        feeRateBps: 0,
         timestamp: Date.now(),
       },
     ];
 
-    const result = await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
+    const result = await importExchangeFills(fills, {
+      fillRepo,
+      orderRepo,
+      rulesProvider,
+      bus,
+      log: silentLog,
+    });
 
     expect(result.imported).toBe(0);
     expect(result.skipped).toBe(1);
@@ -133,11 +163,18 @@ describe("importExchangeFills", () => {
         size: 10,
         liquidityRole: "unknown",
         fee: 0,
+        feeRateBps: 0,
         timestamp: Date.now(),
       },
     ];
 
-    const result = await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
+    const result = await importExchangeFills(fills, {
+      fillRepo,
+      orderRepo,
+      rulesProvider,
+      bus,
+      log: silentLog,
+    });
 
     expect(result.imported).toBe(0);
     expect(result.skipped).toBe(1);
@@ -156,6 +193,7 @@ describe("importExchangeFills", () => {
         size: 4,
         liquidityRole: "unknown",
         fee: 0,
+        feeRateBps: 0,
         timestamp: Date.now(),
       },
     ];
@@ -169,7 +207,7 @@ describe("importExchangeFills", () => {
     (orderRepo.findById as any).mockReturnValue(localOrder);
     (fillRepo.findByOrderId as any).mockReturnValue([{ size: 4 }]);
 
-    await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
+    await importExchangeFills(fills, { fillRepo, orderRepo, rulesProvider, bus, log: silentLog });
 
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "partially-filled");
   });

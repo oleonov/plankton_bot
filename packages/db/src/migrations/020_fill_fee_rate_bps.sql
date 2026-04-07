@@ -1,0 +1,1 @@
+ALTER TABLE fills ADD COLUMN fee_rate_bps REAL NOT NULL DEFAULT 0;

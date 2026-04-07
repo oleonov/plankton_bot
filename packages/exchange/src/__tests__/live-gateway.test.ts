@@ -178,6 +178,8 @@ describe("LiveExchangeGateway", () => {
     expect(fills).toHaveLength(1);
     expect(fills[0]!.fillId).toBe("trade-1");
     expect(fills[0]!.price).toBe(0.55);
+    // fee = 50 * (100 / 10000) * 0.55 * (1 - 0.55) = 50 * 0.01 * 0.55 * 0.45 = 0.5 * 0.2475 = 0.12375
+    expect(fills[0]!.fee).toBeCloseTo(0.12375);
   });
 
   it("getFills extracts only personal legs when traderAddress is configured", async () => {

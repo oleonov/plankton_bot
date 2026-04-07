@@ -47,6 +47,7 @@ function makeFill(overrides?: Partial<Fill>): Fill {
     sizeUsdc: 27.5,
     liquidityRole: "unknown",
     fee: 0.01,
+    feeRateBps: 0,
     filledAt: "2026-01-01T00:00:00.000Z",
     ...overrides,
   };

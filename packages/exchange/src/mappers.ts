@@ -95,6 +95,7 @@ function buildExchangeFill(input: {
     size,
     liquidityRole: input.liquidityRole,
     fee,
+    feeRateBps,
     timestamp: toUnixMs(input.timestamp),
   };
 }

@@ -225,6 +225,7 @@ async function executeScenario(
     marketRepo: repos.market,
     orderRepo: repos.order,
     fillRepo: repos.fill,
+    rulesProvider,
     log,
     botRunId,
     runtimeControl,
@@ -258,6 +259,7 @@ async function executeScenario(
     orderRepo: repos.order,
     fillRepo: repos.fill,
     marketRepo: repos.market,
+    rulesProvider,
     log,
     reconcileIntervalMs: 60_000,
   });
