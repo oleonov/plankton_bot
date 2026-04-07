@@ -363,6 +363,7 @@ export interface FamilyCandidateRepository {
   findAll(): FamilyCandidate[];
   findByStatus(status: string): FamilyCandidate[];
   findUnscored(): FamilyCandidate[];
+  iterateScorable(): IterableIterator<FamilyCandidate>;
   updateStatus(candidateId: string, status: string): void;
   updateScores(
     candidateId: string,

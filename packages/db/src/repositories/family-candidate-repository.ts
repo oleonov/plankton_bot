@@ -151,6 +151,28 @@ export class SqliteFamilyCandidateRepository implements FamilyCandidateRepositor
     return rows.map(rowToCandidate);
   }
 
+  /**
+   * Stream candidates that are worth scoring. Excludes the
+   * "low-value tail" — discovered + gate=ignore + confidence=low + unmatched —
+   * which is also the cohort that ScanService.pruneAndCooldown deletes after
+   * 3d. Uses better-sqlite3 .iterate() so the full result set is never
+   * materialized into a JS array.
+   */
+  *iterateScorable(): IterableIterator<FamilyCandidate> {
+    const stmt = this.db.prepare(
+      `SELECT * FROM family_candidates
+       WHERE NOT (
+         status = 'discovered'
+         AND gate_recommendation = 'ignore'
+         AND pattern_confidence = 'low'
+         AND matched_family_id IS NULL
+       )`,
+    );
+    for (const row of stmt.iterate() as IterableIterator<CandidateRow>) {
+      yield rowToCandidate(row);
+    }
+  }
+
   updateStatus(candidateId: string, status: string): void {
     this.db
       .prepare("UPDATE family_candidates SET status = ? WHERE candidate_id = ?")

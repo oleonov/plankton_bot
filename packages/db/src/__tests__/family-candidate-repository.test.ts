@@ -212,4 +212,51 @@ describe("SqliteFamilyCandidateRepository", () => {
       expect(deleted).toBe(0);
     });
   });
+
+  describe("iterateScorable", () => {
+    it("yields all candidates except the discovered+ignore+low+unmatched tail", () => {
+      // Scorable: matched, OR review, OR high-confidence ignore — these
+      // either may produce a proposal or are kept by the prune logic
+      repo.upsert(
+        makeCandidate({
+          candidateId: "matched-1",
+          matchedFamilyId: "fam-1" as FamilyCandidate["matchedFamilyId"],
+          gateRecommendation: "promote",
+          patternConfidence: "high",
+        }),
+      );
+      repo.upsert(
+        makeCandidate({
+          candidateId: "review-1",
+          gateRecommendation: "review",
+          patternConfidence: "medium",
+        }),
+      );
+      repo.upsert(
+        makeCandidate({
+          candidateId: "high-conf-tail",
+          gateRecommendation: "ignore",
+          patternConfidence: "high",
+        }),
+      );
+      // Tail to skip: discovered + ignore + low + unmatched
+      repo.upsert(
+        makeCandidate({
+          candidateId: "tail-1",
+          gateRecommendation: "ignore",
+          patternConfidence: "low",
+        }),
+      );
+      repo.upsert(
+        makeCandidate({
+          candidateId: "tail-2",
+          gateRecommendation: "ignore",
+          patternConfidence: "low",
+        }),
+      );
+
+      const yielded = Array.from(repo.iterateScorable()).map((c) => c.candidateId);
+      expect(yielded.sort()).toEqual(["high-conf-tail", "matched-1", "review-1"]);
+    });
+  });
 });
