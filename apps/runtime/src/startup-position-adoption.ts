@@ -19,10 +19,8 @@ import type { Logger } from "./logger.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
 import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
 import {
-  buildLocalFillFromExchangeFill,
   findLocalOrderForExchangeFill,
   importExchangeFills,
-  updateOrderStatusFromPersistedFills,
 } from "./modules/reconciliation/fill-reconciler.js";
 
 export interface StartupPositionAdoptionDeps {
