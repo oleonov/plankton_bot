@@ -81,7 +81,9 @@ function buildExchangeFill(input: {
   const price = Number(input.price ?? 0);
   const size = Number(input.size ?? 0);
   const feeRateBps = Number(input.feeRateBps ?? 0);
-  const fee = size * price * (feeRateBps / 10_000);
+
+  const fee =
+    input.liquidityRole === "maker" ? 0 : size * (feeRateBps / 10_000) * price * (1 - price);
 
   return {
     fillId: input.fillId,

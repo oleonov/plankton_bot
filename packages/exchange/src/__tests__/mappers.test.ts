@@ -98,8 +98,8 @@ describe("mapTrade", () => {
     expect(fill.size).toBe(50);
     expect(fill.price).toBe(0.6);
     expect(fill.liquidityRole).toBe("taker");
-    // fee = 50 * 0.60 * (200/10000) = 0.60
-    expect(fill.fee).toBeCloseTo(0.6);
+    // fee = 50 * (200/10000) * 0.60 * (1 - 0.60) = 50 * 0.02 * 0.6 * 0.4 = 1 * 0.24 = 0.24
+    expect(fill.fee).toBeCloseTo(0.24);
   });
 
   it("clientOrderId defaults to empty when SDK omits it", () => {
@@ -122,6 +122,23 @@ describe("mapTrade", () => {
     });
 
     expect(fill.liquidityRole).toBe("maker");
+  });
+
+  it("maker fills have fee = 0 regardless of feeRateBps", () => {
+    const fill = mapTrade({
+      id: "fill-maker-zero",
+      taker_order_id: "ord-maker-zero",
+      asset_id: "tok-x",
+      side: "BUY",
+      size: "100",
+      price: "0.50",
+      trader_side: "MAKER",
+      fee_rate_bps: "1000",
+      match_time: "2026-04-07T00:00:00Z",
+    });
+
+    expect(fill.liquidityRole).toBe("maker");
+    expect(fill.fee).toBe(0);
   });
 
   it("falls back to a valid current timestamp when match_time is invalid", () => {
