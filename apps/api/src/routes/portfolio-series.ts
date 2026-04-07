@@ -107,10 +107,15 @@ async function fetchExternalPortfolioSeries(
     const windowStartMs =
       intervalWindowMs != null ? Date.now() - intervalWindowMs : Number.NEGATIVE_INFINITY;
     const profileStartMs = profileStart ? Date.parse(profileStart) : NaN;
-    const coverageComplete =
-      interval === "all" ||
-      (Number.isFinite(profileStartMs) && profileStartMs - windowStartMs <= fidelityMs);
-    const baseline = coverageComplete ? (firstPoint?.equityUsdc ?? 0) : 0;
+    // Only 1D uses a rolling baseline (delta over the last 24h).
+    // 1W/1M/ALL always show raw cumulative all-time PnL from Polymarket,
+    // matching how the endpoint itself represents `p` as cumulative.
+    const useRollingBaseline =
+      interval === "1d" &&
+      Number.isFinite(profileStartMs) &&
+      profileStartMs - windowStartMs <= fidelityMs;
+    const coverageComplete = interval === "all" || useRollingBaseline;
+    const baseline = useRollingBaseline ? (firstPoint?.equityUsdc ?? 0) : 0;
 
     return {
       items,

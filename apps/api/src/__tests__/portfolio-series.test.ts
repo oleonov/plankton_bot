@@ -501,6 +501,154 @@ describe("GET /metrics/portfolio-series", () => {
     }
   });
 
+  it("uses zero baseline for external ALL interval so headline shows full cumulative", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-07T02:00:00Z"));
+
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', datetime('now', '-3 days'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS runtime_control_state (
+           id INTEGER PRIMARY KEY,
+           current_profile TEXT,
+           desired_profile TEXT
+         )`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc, relayer_json)
+         VALUES ('live-lite', NULL, ?)`,
+      )
+      .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+
+    // Matches real Polymarket response for ALL interval — `p` is cumulative
+    // all-time PnL. Headline for ALL should show the raw latest value, NOT
+    // latest - firstPoint (which would hide the first $1 of loss).
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          { t: Date.parse("2026-04-04T00:00:00Z") / 1000, p: -1 },
+          { t: Date.parse("2026-04-05T00:00:00Z") / 1000, p: -7.103299 },
+          { t: Date.parse("2026-04-06T00:00:00Z") / 1000, p: -17.76856 },
+          { t: Date.parse("2026-04-07T00:00:00Z") / 1000, p: -48.15537 },
+          { t: Date.parse("2026-04-07T02:00:00Z") / 1000, p: -48.10861 },
+        ],
+      } as Response),
+    );
+
+    const liveLiteApp = await buildServer({
+      config: testConfig(),
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
+      defaultInitialBalanceUsdc: 100,
+    });
+
+    try {
+      const res = await liveLiteApp.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=all",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.baseline).toBe(0);
+      expect(body.data.currentEquity).toBeCloseTo(-48.10861, 6);
+      expect(body.data.portfolioPnl).toBeCloseTo(-48.10861, 6);
+      expect(body.data.coverageComplete).toBe(true);
+    } finally {
+      vi.useRealTimers();
+      await liveLiteApp.close();
+    }
+  });
+
+  it("uses zero baseline for external 1M interval even when profile covers the window", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-07T02:00:00Z"));
+
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
+         VALUES ('live-lite', 'Live-Lite', datetime('now', '-60 days'))`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `CREATE TABLE IF NOT EXISTS runtime_control_state (
+           id INTEGER PRIMARY KEY,
+           current_profile TEXT,
+           desired_profile TEXT
+         )`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO runtime_control_state (id, current_profile, desired_profile)
+         VALUES (1, 'live-lite', 'live-lite')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT OR REPLACE INTO profile_settings (profile_id, initial_balance_usdc, relayer_json)
+         VALUES ('live-lite', NULL, ?)`,
+      )
+      .run('{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+
+    // Profile is 60 days old — coverage WOULD be "complete" for 1M, but we
+    // still want to show raw cumulative all-time P/L for 1W/1M/ALL headline.
+    // Only 1D uses a rolling baseline.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => [
+          { t: Date.parse("2026-03-08T00:00:00Z") / 1000, p: -1 },
+          { t: Date.parse("2026-04-07T00:00:00Z") / 1000, p: -48.15537 },
+        ],
+      } as Response),
+    );
+
+    const liveLiteApp = await buildServer({
+      config: testConfig(),
+      controlDb: conn.db,
+      ledgerDb: conn.db,
+      ledgerPool: stubLedgerPool(),
+      defaultInitialBalanceUsdc: 100,
+    });
+
+    try {
+      const res = await liveLiteApp.inject({
+        method: "GET",
+        url: "/api/v1/metrics/portfolio-series?interval=1m",
+        headers: auth(),
+      });
+      const body = res.json();
+
+      expect(body.ok).toBe(true);
+      expect(body.data.baseline).toBe(0);
+      expect(body.data.portfolioPnl).toBeCloseTo(-48.15537, 6);
+      expect(body.data.coverageComplete).toBe(false);
+    } finally {
+      vi.useRealTimers();
+      await liveLiteApp.close();
+    }
+  });
+
   it("keeps zero baseline for external series when account history does not cover the full interval", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-06T12:00:00Z"));
