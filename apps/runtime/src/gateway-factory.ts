@@ -19,13 +19,15 @@ export interface CreateGatewaysInput {
   slugFilter?: ((slug: string) => boolean) | undefined;
   /** Initial USDC balance for simulation/paper exchange gateway. Ignored in live-lite. */
   initialBalanceUsdc?: number;
-  onInfraAlert?: ((alert: {
-    code: string;
-    severity: "warning" | "error";
-    source: string;
-    message: string;
-    details?: Record<string, unknown> | undefined;
-  }) => void) | undefined;
+  onInfraAlert?:
+    | ((alert: {
+        code: string;
+        severity: "warning" | "error";
+        source: string;
+        message: string;
+        details?: Record<string, unknown> | undefined;
+      }) => void)
+    | undefined;
 }
 
 export interface CreateGatewaysResult {
@@ -45,8 +47,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     slugFilter,
     initialBalanceUsdc,
     onInfraAlert,
-  } =
-    input;
+  } = input;
 
   if (runtimeMode === "simulation") {
     return {

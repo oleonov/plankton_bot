@@ -159,7 +159,9 @@ describe("AlertStrip", () => {
     renderWithProviders(<AlertStrip />);
 
     expect(
-      await screen.findByText(/Polygon RPC rate limited — settlement may stall until quota resets./i),
+      await screen.findByText(
+        /Polygon RPC rate limited — settlement may stall until quota resets./i,
+      ),
     ).toBeInTheDocument();
   });
 });

@@ -90,11 +90,7 @@ function createBuilderConfig(
     });
   }
 
-  if (
-    config.polyBuilderApiKey &&
-    config.polyBuilderSecret &&
-    config.polyBuilderPassphrase
-  ) {
+  if (config.polyBuilderApiKey && config.polyBuilderSecret && config.polyBuilderPassphrase) {
     return createConfig({
       localBuilderCreds: {
         key: config.polyBuilderApiKey,
@@ -214,13 +210,17 @@ async function createSettlementClient(
     return deps.createSettlementClient(config);
   }
 
-  const [{ RelayClient, RelayerTxType }, { createWalletClient, http, fallback }, { privateKeyToAccount }, { polygon }] =
-    await Promise.all([
-      import("@polymarket/builder-relayer-client"),
-      import("viem"),
-      import("viem/accounts"),
-      import("viem/chains"),
-    ]);
+  const [
+    { RelayClient, RelayerTxType },
+    { createWalletClient, http, fallback },
+    { privateKeyToAccount },
+    { polygon },
+  ] = await Promise.all([
+    import("@polymarket/builder-relayer-client"),
+    import("viem"),
+    import("viem/accounts"),
+    import("viem/chains"),
+  ]);
 
   const transport =
     config.rpcFallbackUrl && config.rpcFallbackUrl !== config.rpcUrl

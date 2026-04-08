@@ -348,9 +348,7 @@ describe("runProfilePreflight", () => {
     });
 
     expect(result.status).toBe("failed");
-    expect(
-      result.blockers.some((b) => b.code === "LIVE_RELAYER_BUILDER_AUTH_MISSING"),
-    ).toBe(true);
+    expect(result.blockers.some((b) => b.code === "LIVE_RELAYER_BUILDER_AUTH_MISSING")).toBe(true);
   });
 
   it("live-lite fails with EXPOSURE_EXCEEDS_CAP when exposure over cap", () => {

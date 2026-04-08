@@ -37,13 +37,15 @@ export interface LiveExchangeConfig {
   /** Wallet/funder address used to extract personal fills from trade rows. */
   traderAddress?: string | null;
   /** Optional callback used to surface infra-level settlement issues to runtime/UI. */
-  onInfraAlert?: ((alert: {
-    code: string;
-    severity: "warning" | "error";
-    source: string;
-    message: string;
-    details?: Record<string, unknown> | undefined;
-  }) => void) | undefined;
+  onInfraAlert?:
+    | ((alert: {
+        code: string;
+        severity: "warning" | "error";
+        source: string;
+        message: string;
+        details?: Record<string, unknown> | undefined;
+      }) => void)
+    | undefined;
 }
 
 const CTF_REDEEM_ABI = parseAbi([
@@ -310,15 +312,20 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   private getSettlementExecuteMethod():
-    | ((txns: Array<{ to: string; data: string; value: string }>, metadata?: string) => Promise<unknown>)
+    | ((
+        txns: Array<{ to: string; data: string; value: string }>,
+        metadata?: string,
+      ) => Promise<unknown>)
     | null {
     if (!this.settlementClient || typeof this.settlementClient !== "object") return null;
     const candidate = Reflect.get(this.settlementClient, "execute");
     return typeof candidate === "function"
-      ? (candidate as (
-          txns: Array<{ to: string; data: string; value: string }>,
-          metadata?: string,
-        ) => Promise<unknown>).bind(this.settlementClient)
+      ? (
+          candidate as (
+            txns: Array<{ to: string; data: string; value: string }>,
+            metadata?: string,
+          ) => Promise<unknown>
+        ).bind(this.settlementClient)
       : null;
   }
 
@@ -347,7 +354,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
     const chainId = this.getChainId();
     const contracts = getContractConfig(chainId);
-    const balances = await Promise.all(tokenIds.map((tokenId) => this.getRawPositionBalance(tokenId)));
+    const balances = await Promise.all(
+      tokenIds.map((tokenId) => this.getRawPositionBalance(tokenId)),
+    );
 
     if (balances.every((balance) => balance === 0n)) {
       return null;
@@ -499,15 +508,13 @@ function extractOrderId(raw: unknown): string | null {
   return orderId.length > 0 ? orderId : null;
 }
 
-function classifySettlementInfraAlert(error: unknown):
-  | {
-      code: string;
-      severity: "warning" | "error";
-      source: string;
-      message: string;
-      details?: Record<string, unknown> | undefined;
-    }
-  | null {
+function classifySettlementInfraAlert(error: unknown): {
+  code: string;
+  severity: "warning" | "error";
+  source: string;
+  message: string;
+  details?: Record<string, unknown> | undefined;
+} | null {
   const rawMessage = error instanceof Error ? error.message : String(error ?? "");
   const normalized = rawMessage.toLowerCase();
 

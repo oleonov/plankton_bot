@@ -87,10 +87,7 @@ import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-pub
 import { ValidationMetricsReader } from "./modules/publisher/validation-metrics-reader.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
-import {
-  createPolymarketClient,
-  type SettlementClientLike,
-} from "./polymarket-client-factory.js";
+import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { resolveLiveLiteMaxFamilies } from "./live-lite-envelope.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -361,8 +358,8 @@ async function main(): Promise<void> {
         polygonRpcUrl:
           (config as typeof config & { polygonRpcUrl?: string }).polygonRpcUrl ??
           "https://polygon-rpc.com",
-        polygonRpcFallbackUrl:
-          (config as typeof config & { polygonRpcFallbackUrl?: string }).polygonRpcFallbackUrl,
+        polygonRpcFallbackUrl: (config as typeof config & { polygonRpcFallbackUrl?: string })
+          .polygonRpcFallbackUrl,
       };
       const builtClient = await createPolymarketClient({
         runtimeMode,
@@ -387,15 +384,13 @@ async function main(): Promise<void> {
     }
   }
 
-  const recordInfraAlert = (
-    alert: {
-      code: string;
-      severity: "warning" | "error";
-      source: string;
-      message: string;
-      details?: Record<string, unknown> | undefined;
-    },
-  ): void => {
+  const recordInfraAlert = (alert: {
+    code: string;
+    severity: "warning" | "error";
+    source: string;
+    message: string;
+    details?: Record<string, unknown> | undefined;
+  }): void => {
     const now = new Date().toISOString();
     ledgerConn.db
       .prepare(

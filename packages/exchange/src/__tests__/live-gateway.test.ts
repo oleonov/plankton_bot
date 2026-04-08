@@ -416,7 +416,9 @@ describe("LiveExchangeGateway", () => {
     const settlementClient = {
       execute: vi
         .fn()
-        .mockRejectedValue(new Error('{"error":"request error","status":503,"data":"no healthy upstream"}')),
+        .mockRejectedValue(
+          new Error('{"error":"request error","status":503,"data":"no healthy upstream"}'),
+        ),
     };
     const onInfraAlert = vi.fn();
     client.getMarket.mockResolvedValue({
@@ -443,7 +445,9 @@ describe("LiveExchangeGateway", () => {
     const settlementClient = {
       execute: vi
         .fn()
-        .mockRejectedValue(new Error('{"error":"request error","status":429,"data":"exceeded its compute units"}')),
+        .mockRejectedValue(
+          new Error('{"error":"request error","status":429,"data":"exceeded its compute units"}'),
+        ),
     };
     const onInfraAlert = vi.fn();
     client.getMarket.mockResolvedValue({
