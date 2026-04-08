@@ -153,7 +153,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   async getPositionBalance(tokenId: TokenId): Promise<number> {
-    const raw = await (this.client as any).getBalanceAllowance({
+    const raw = await this.client.getBalanceAllowance({
       asset_type: "CONDITIONAL",
       token_id: String(tokenId),
     });
@@ -163,7 +163,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
   async redeemPositions(conditionIds: string[]): Promise<void> {
     for (const conditionId of conditionIds) {
       try {
-        await (this.client as any).postRedeem({ conditionId });
+        await this.client.postRedeem({ conditionId });
       } catch (e) {
         // Log but don't fail the batch
         console.error(`Failed to redeem ${conditionId}:`, e);
