@@ -67,7 +67,8 @@ import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-mod
 import { StrategyModule } from "./modules/strategy/strategy-module.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
-import { StalePruningModule } from "./modules/pruning/stale-pruning-module.js";
+import { InventoryManagerModule } from "./modules/inventory-auto-merge/inventory-manager-module.js";
+import { StalePruningModule } from "./modules/stale-pruning/stale-pruning-module.js";
 import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
 import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
 import { PositionSettler } from "./modules/resolution/position-settler.js";
@@ -623,6 +624,19 @@ async function main(): Promise<void> {
     checkIntervalMs: 10 * 60_000, // 10 minutes
   });
 
+  // 7k2. Inventory Auto-Merge (P3-1)
+  const inventoryManagerModule = new InventoryManagerModule({
+    bus,
+    gateway: exchangeGateway,
+    positionRepo: repos.position,
+    orderRepo: repos.order,
+    marketRepo: repos.market,
+    lotRepo: repos.lot,
+    db: ledgerConn.db,
+    log,
+    sweepIntervalMs: config.inventorySweepIntervalMs,
+  });
+
   // 7l. Fill poller module — fast-interval fill detection (paper/live-lite only;
   // simulation mode uses inline checkForFills after each placement)
   const fillPollerModule =
@@ -700,6 +714,7 @@ async function main(): Promise<void> {
     ["strategy", strategyModule],
     ["resolution", resolutionModule],
     ["stale-pruning", stalePruningModule],
+    ["inventory-manager", inventoryManagerModule],
     ...(fillPollerModule
       ? [["fill-poller", fillPollerModule] as [string, import("@plankton/domain").RuntimeModule]]
       : []),

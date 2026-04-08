@@ -32,6 +32,7 @@ describe("ledger.db schema", () => {
     expect(names).toContain("positions");
     expect(names).toContain("inventory_lots");
     expect(names).toContain("pnl_ledger");
+    expect(names).toContain("merge_ledger");
     expect(names).toContain("settlement_ledger");
     expect(names).toContain("market_resolutions");
     expect(names).toContain("bot_runs");

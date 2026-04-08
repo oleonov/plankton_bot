@@ -484,8 +484,8 @@ describe("LiveExchangeGateway", () => {
   it("mergePositions warns once and no-ops when the SDK has no merge API", async () => {
     const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
 
-    await expect(gw.mergePositions(["cond-1", "cond-2"])).resolves.toBeUndefined();
-    await expect(gw.mergePositions(["cond-3"])).resolves.toBeUndefined();
+    await expect(gw.mergePositions([{ conditionId: "cond-1", amount: 10 }, { conditionId: "cond-2", amount: 20 }])).resolves.toBeUndefined();
+    await expect(gw.mergePositions([{ conditionId: "cond-3", amount: 30 }])).resolves.toBeUndefined();
 
     expect(emitWarning).toHaveBeenCalledTimes(1);
     expect(emitWarning).toHaveBeenCalledWith(

@@ -192,7 +192,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     // No-op in simulation
   }
 
-  async mergePositions(_conditionIds: string[]): Promise<void> {
+  async mergePositions(_merges: { conditionId: string; amount: number }[]): Promise<void> {
     // No-op in simulation
   }
 

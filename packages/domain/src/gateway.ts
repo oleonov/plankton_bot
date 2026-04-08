@@ -223,7 +223,7 @@ export interface ExchangeGateway {
    * Merge opposing shares (YES + NO) into collateral (USDC).
    * Polymarket-specific: calls ConditionalTokens.merge().
    */
-  mergePositions(conditionIds: string[]): Promise<void>;
+  mergePositions(merges: { conditionId: string; amount: number }[]): Promise<void>;
 
   /** Validate connectivity and API credentials. */
   healthCheck(): Promise<{ readonly ok: boolean; readonly latencyMs: number }>;
