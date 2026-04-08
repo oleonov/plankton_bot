@@ -42,7 +42,13 @@ let newFeeSum = 0;
 for (const f of fills) {
   const newFee = computeCorrectFee(f);
   if (Math.abs((f.fee ?? 0) - newFee) > 1e-9) {
-    updates.push({ fill_id: f.fill_id, family_id: f.family_id, oldFee: f.fee, newFee, role: f.liquidity_role });
+    updates.push({
+      fill_id: f.fill_id,
+      family_id: f.family_id,
+      oldFee: f.fee,
+      newFee,
+      role: f.liquidity_role,
+    });
     oldFeeSum += f.fee ?? 0;
     newFeeSum += newFee;
   }
@@ -56,12 +62,12 @@ console.log(`old fee sum: ${oldFeeSum.toFixed(6)}`);
 console.log(`new fee sum: ${newFeeSum.toFixed(6)}`);
 
 if (updates.length > 0) {
-    const takerExample = updates.find(u => u.role === "taker");
-    if (takerExample) {
-        console.log("Example taker update:", takerExample);
-    } else {
-        console.log("No taker updates in the list.");
-    }
+  const takerExample = updates.find((u) => u.role === "taker");
+  if (takerExample) {
+    console.log("Example taker update:", takerExample);
+  } else {
+    console.log("No taker updates in the list.");
+  }
 }
 
 if (!apply) {

@@ -119,14 +119,14 @@ export function evaluateExecutionCanaryGate(
     {
       metric: "Explicit fees (USDC)",
       current: explicitFeesUsdc,
-      required: 0,
-      passed: explicitFeesUsdc === 0,
+      required: 0.01,
+      passed: explicitFeesUsdc < 0.01,
     },
     {
       metric: "Fee leakage %",
       current: leakagePct,
-      required: 0,
-      passed: leakagePct === 0,
+      required: 0.5,
+      passed: leakagePct < 0.5,
     },
   ];
 

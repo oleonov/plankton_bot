@@ -93,18 +93,18 @@ function runLiveLiteChecks(
     });
   }
 
-  if (walletMode === "eoa" && (minOrderUsdc == null || minOrderUsdc < 3)) {
+  if (walletMode === "eoa" && (minOrderUsdc == null || minOrderUsdc < 0.5)) {
     blockers.push({
       code: "LIVE_MIN_ORDER_TOO_LOW",
-      message: `live-lite EOA mode requires min_order_usdc >= 3.00 (current ${minOrderUsdc ?? "unset"})`,
+      message: `live-lite EOA mode requires min_order_usdc >= 0.50 (current ${minOrderUsdc ?? "unset"})`,
     });
   }
 
   if (walletMode === "relayer") {
-    if (minOrderUsdc == null || minOrderUsdc < 1) {
+    if (minOrderUsdc == null || minOrderUsdc < 0.05) {
       blockers.push({
         code: "LIVE_MIN_ORDER_TOO_LOW",
-        message: `live-lite relayer mode requires min_order_usdc >= 1.00 (current ${minOrderUsdc ?? "unset"})`,
+        message: `live-lite relayer mode requires min_order_usdc >= 0.05 (current ${minOrderUsdc ?? "unset"})`,
       });
     }
 

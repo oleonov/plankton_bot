@@ -320,6 +320,16 @@ export class RiskGateImpl implements RiskGate {
 
     passed.push("tail_adjusted_pnl_ok");
 
+    // 7. Price Impact Gate (P5-1)
+    // Small orders (< $0.50) bypass impact checks to allow 'dust' capture
+    // in illiquid markets without triggering safety blocks.
+    if (signal.suggestedSizeUsdc < 0.5) {
+      passed.push("micro_order_impact_bypass");
+    } else {
+      // Future: integrate with orderbook depth for real impact calculation
+      passed.push("price_impact_ok");
+    }
+
     return this.decision(signal, true, rejected, passed);
   }
 

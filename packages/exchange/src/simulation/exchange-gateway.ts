@@ -188,6 +188,14 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     return 0;
   }
 
+  async redeemPositions(_conditionIds: string[]): Promise<void> {
+    // No-op in simulation
+  }
+
+  async mergePositions(_conditionIds: string[]): Promise<void> {
+    // No-op in simulation
+  }
+
   async healthCheck(): Promise<{ ok: boolean; latencyMs: number }> {
     return { ok: true, latencyMs: 0 };
   }

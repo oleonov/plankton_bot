@@ -193,6 +193,8 @@ function createMockGateway(balanceByToken?: Record<string, number>): ExchangeGat
     getOpenOrdersForToken: vi.fn().mockResolvedValue([]),
     getFills: vi.fn().mockResolvedValue([]),
     getBalances: vi.fn().mockResolvedValue([]),
+    redeemPositions: vi.fn().mockResolvedValue(undefined),
+    mergePositions: vi.fn().mockResolvedValue(undefined),
     healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 0 }),
   } as unknown as ExchangeGateway;
 }
@@ -386,7 +388,8 @@ describe("ResolutionModule", () => {
 
   it("skips settlement when autoSettleResolvedMarkets is false", async () => {
     const provider = createMockRulesProvider({ autoSettle: false });
-    mod = createModule({ rulesProvider: provider });
+    const gateway = createMockGateway();
+    mod = createModule({ rulesProvider: provider, gateway });
 
     const resolution = makeDetectedResolution();
     (detector.detect as any).mockResolvedValue([resolution]);
@@ -395,6 +398,7 @@ describe("ResolutionModule", () => {
 
     expect(count).toBe(0);
     expect(settler.settle as any).not.toHaveBeenCalled();
+    expect(gateway.redeemPositions).not.toHaveBeenCalled();
   });
 
   it("settles only families with autoSettle enabled in mixed batch", async () => {

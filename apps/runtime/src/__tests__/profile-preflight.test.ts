@@ -206,7 +206,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
-      liveLiteConfig: { ...ENVELOPE, minOrderUsdc: 2.5 },
+      liveLiteConfig: { ...ENVELOPE, minOrderUsdc: 0.4 },
     });
 
     expect(result.status).toBe("failed");
@@ -233,7 +233,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
-      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 1 },
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
     });
 
     expect(result.status).toBe("passed");
@@ -260,7 +260,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
-      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 1 },
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
     });
 
     expect(result.status).toBe("passed");
@@ -286,7 +286,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
-      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 1 },
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
     });
 
     expect(result.status).toBe("failed");
@@ -313,7 +313,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
-      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.75 },
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.04 },
     });
 
     expect(result.status).toBe("failed");

@@ -304,7 +304,6 @@ export function resolveFamilyEntryPolicy(
  * and larger trades for expensive ones ($0.50 -> ~35% of base, $0.90 -> ~85%).
  */
 function scaleSizeByPrice(baseSizeUsdc: number, price: number): number {
-  if (process.env.NODE_ENV === "test") return baseSizeUsdc;
   const scalingMult = Math.pow(price, 1.5);
   return baseSizeUsdc * scalingMult;
 }

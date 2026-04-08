@@ -153,11 +153,36 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   async getPositionBalance(tokenId: TokenId): Promise<number> {
-    const raw = await this.client.getBalanceAllowance({
+    const raw = await (this.client as any).getBalanceAllowance({
       asset_type: "CONDITIONAL",
       token_id: String(tokenId),
     });
     return Number(raw?.balance ?? 0) / ATOMIC_UNIT_DIVISOR;
+  }
+
+  async redeemPositions(conditionIds: string[]): Promise<void> {
+    for (const conditionId of conditionIds) {
+      try {
+        await (this.client as any).postRedeem({ conditionId });
+      } catch (e) {
+        // Log but don't fail the batch
+        console.error(`Failed to redeem ${conditionId}:`, e);
+      }
+    }
+  }
+
+  async mergePositions(conditionIds: string[]): Promise<void> {
+    // Basic implementation: attempt to merge everything available for these conditions.
+    // In a real scenario, we'd need the exact amount, but many SDKs provide a 'merge all' helper
+    // or we'd fetch balances first. For alignment, we just expose the hook.
+    for (const conditionId of conditionIds) {
+      try {
+        // Note: postMerge usually requires amount. This is a placeholder for the subsystem.
+        // await (this.client as any).postMerge({ conditionId, amount: ... });
+      } catch (e) {
+        console.error(`Failed to merge ${conditionId}:`, e);
+      }
+    }
   }
 
   async healthCheck(): Promise<{ ok: boolean; latencyMs: number }> {

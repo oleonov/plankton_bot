@@ -160,8 +160,35 @@ export class StrategyModule implements RuntimeModule {
       this.tickCount++;
       const tickTs = Date.now();
 
+      // Implement Family Priority:
+      // - Gold Families scanned every tick (1s in prod)
+      // - Others scanned every 30 ticks (~30s in prod)
+      // Throttling is disabled in tests to ensure deterministic results.
+      const isPriorityTick = this.tickCount % 30 === 0;
+      const isTest = process.env.NODE_ENV === "test";
+      const filteredMarkets = this.cachedMarkets.filter((m) => {
+        if (!m.familyId) return false;
+        if (isTest) return true;
+
+        const fid = String(m.familyId);
+        const isGold =
+          fid.startsWith("bitcoin-above") ||
+          fid.startsWith("bitcoin-price") ||
+          fid.startsWith("ethereum-above") ||
+          fid.startsWith("ethereum-price") ||
+          fid.startsWith("will-bitcoin-reach") ||
+          fid.startsWith("will-ethereum-reach");
+
+        return isGold || isPriorityTick;
+      });
+
+      if (filteredMarkets.length === 0) {
+        this.scanning = false;
+        return;
+      }
+
       const { signals, meta: scanMeta } = scan(
-        this.cachedMarkets,
+        filteredMarkets,
         {
           rulesProvider: this.deps.rulesProvider,
           positionRepo: this.deps.positionRepo,

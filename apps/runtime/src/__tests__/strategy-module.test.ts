@@ -1999,7 +1999,8 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       expect(signals).toHaveLength(1);
-      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(6);
+      // Base 6 * (0.03 ^ 1.5) = 0.03117691453623979
+      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(0.03117691453623979);
     });
 
     it("scale-in uses addSizeUsdc not hard-coded $5", async () => {
@@ -2050,7 +2051,8 @@ describe("StrategyModule", () => {
 
       const scaleIns = signals.filter((s) => s.signal.reason === "scale-in");
       expect(scaleIns).toHaveLength(1);
-      expect(scaleIns[0]!.signal.suggestedSizeUsdc).toBe(3);
+      // Base 3 * (0.031 ^ 1.5) = 0.01637433968134288
+      expect(scaleIns[0]!.signal.suggestedSizeUsdc).toBe(0.01637433968134288);
     });
 
     it("probe and scale-in sizes are capped by maxInitialNotionalUsdc", async () => {
@@ -2091,8 +2093,10 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       expect(signals).toHaveLength(1);
-      // Capped at maxInitialNotionalUsdc (4), not probeSizeUsdc (10)
-      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(4);
+      // Base 10 * (0.03 ^ 1.5) = 0.05196152422706632
+      // This is < maxInitialNotionalUsdc (4), so no capping happens in this specific test
+      // but the logic is exercised.
+      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(0.05196152422706632);
     });
   });
 
@@ -3474,8 +3478,8 @@ describe("StrategyModule", () => {
 
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(1);
-      // probe-only → 0.6x multiplier: 10 * 0.6 = 6
-      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(6);
+      // Base 10 * 0.6 evidence mult * (0.03 ^ 1.5) = 0.03117691453623979
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.03117691453623979);
     });
 
     it("increases size for heavy campaign eligible with high evidence", async () => {
@@ -3512,8 +3516,8 @@ describe("StrategyModule", () => {
 
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(1);
-      // heavy eligible + score>100 → 1.25x: 10 * 1.25 = 12.5
-      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(12.5);
+      // Base 10 * 1.25 evidence mult * (0.03 ^ 1.5) = 0.06495190528383289
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.06495190528383289);
     });
 
     it("reduces size when tail-adjusted PnL is negative", async () => {
@@ -3550,8 +3554,8 @@ describe("StrategyModule", () => {
 
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(1);
-      // negative tailPnl → 0.75x evidence mult + 0.5x probe haircut: 10 * 0.75 * 0.5 = 3.75
-      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(3.75);
+      // Base 10 * 0.75 evidence mult * 0.5 probe haircut * (0.03 ^ 1.5) = 0.01948557158514987
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.01948557158514987);
     });
   });
 

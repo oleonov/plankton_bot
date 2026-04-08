@@ -25,9 +25,10 @@ ORDER BY updated_at DESC;
 ```
 
 For each row:
+
 - Confirm the family has genuinely-clean recent canary scorecards
   (`SELECT * FROM family_validation_scorecards WHERE family_id = ?
-    AND profile = 'live-lite' ORDER BY validated_at DESC LIMIT 1;`).
+AND profile = 'live-lite' ORDER BY validated_at DESC LIMIT 1;`).
 - If the scorecard's `executionTelemetry24h.explicitFeesUsdc` is 0
   AND `feeLeakageRatio` is 0, the demotion is stale.
 - Manually flip `operator_mode` back to `active` via the API action
@@ -57,6 +58,7 @@ ORDER BY validated_at DESC;
 ## 3. Success criteria
 
 Backfill is considered successful when:
+
 - `SELECT SUM(fee) FROM fills WHERE liquidity_role = 'maker'` returns 0
 - `SELECT SUM(fee) FROM fills WHERE liquidity_role = 'taker'` returns a
   small value consistent with the number of taker fills × `size × rate × p × (1-p)`

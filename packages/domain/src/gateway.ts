@@ -205,6 +205,19 @@ export interface ExchangeGateway {
    */
   getPositionBalance(tokenId: TokenId): Promise<number>;
 
+  /**
+   * Redeem winning shares for a list of markets (conditions).
+   * Polymarket-specific: typically calls FixedProductMarketMaker.redeem()
+   * or ClobClient.redeem().
+   */
+  redeemPositions(conditionIds: string[]): Promise<void>;
+
+  /**
+   * Merge opposing shares (YES + NO) into collateral (USDC).
+   * Polymarket-specific: calls ConditionalTokens.merge().
+   */
+  mergePositions(conditionIds: string[]): Promise<void>;
+
   /** Validate connectivity and API credentials. */
   healthCheck(): Promise<{ readonly ok: boolean; readonly latencyMs: number }>;
 }
