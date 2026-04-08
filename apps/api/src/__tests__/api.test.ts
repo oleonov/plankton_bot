@@ -451,6 +451,28 @@ describe("GET /status", () => {
     }
   });
 
+  it("status includes recent infra alerts deduped by code", async () => {
+    const now = new Date().toISOString();
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES
+        ('infra_alert', 1, '{"code":"POLYGON_RPC_RATE_LIMITED","severity":"error","source":"polygon-rpc","message":"Polygon RPC rate limited — settlement may stall until quota resets."}', '${now}'),
+        ('infra_alert', 1, '{"code":"POLYGON_RPC_RATE_LIMITED","severity":"error","source":"polygon-rpc","message":"Polygon RPC rate limited — settlement may stall until quota resets."}', '${new Date(Date.now() - 1000).toISOString()}'),
+        ('infra_alert', 1, '{"code":"POLYMARKET_RELAYER_UNAVAILABLE","severity":"warning","source":"polymarket-relayer","message":"Polymarket relayer unavailable — settlement will retry automatically."}', '${now}')
+    `);
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
+    const alerts = json(res).data.infraAlerts;
+
+    expect(alerts).toHaveLength(2);
+    expect(alerts.map((alert: { code: string }) => alert.code).sort()).toEqual([
+      "POLYGON_RPC_RATE_LIMITED",
+      "POLYMARKET_RELAYER_UNAVAILABLE",
+    ]);
+
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'infra_alert'`);
+  });
+
   it("returns ACTIVELY_TRADING when entry signals approved", async () => {
     conn.db.exec(`
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)

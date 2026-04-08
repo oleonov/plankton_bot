@@ -27,6 +27,7 @@ export function runProfilePreflight(opts: {
   ledgerDb: Database.Database;
   controlDb: Database.Database;
   liveLiteConfig?: LiveLiteConfig;
+  relayerBuilderAuthConfigured?: boolean;
 }): ProfilePreflightResult {
   const blockers: PreflightBlocker[] = [];
   const warnings: PreflightWarning[] = [];
@@ -36,7 +37,15 @@ export function runProfilePreflight(opts: {
     const liveLiteGuard = new LiveLiteGuard(opts.liveLiteConfig);
     info.walletMode = liveLiteGuard.getWalletMode();
     info.minOrderUsdc = liveLiteGuard.getMinOrderUsdc();
-    runLiveLiteChecks(opts.ledgerDb, opts.controlDb, opts.liveLiteConfig, blockers, warnings);
+    info.relayerBuilderAuthConfigured = opts.relayerBuilderAuthConfigured ?? false;
+    runLiveLiteChecks(
+      opts.ledgerDb,
+      opts.controlDb,
+      opts.liveLiteConfig,
+      opts.relayerBuilderAuthConfigured ?? false,
+      blockers,
+      warnings,
+    );
   }
 
   const familyCount = opts.controlDb
@@ -59,6 +68,7 @@ function runLiveLiteChecks(
   db: Database.Database,
   controlDb: Database.Database,
   envelope: LiveLiteConfig,
+  relayerBuilderAuthConfigured: boolean,
   blockers: PreflightBlocker[],
   warnings: PreflightWarning[],
 ): void {
@@ -113,6 +123,12 @@ function runLiveLiteChecks(
       blockers.push({
         code: "LIVE_RELAYER_CONFIG_INVALID",
         message: relayerConfig.errors.join("; "),
+      });
+    } else if (!relayerConfig.value?.builder && !relayerBuilderAuthConfigured) {
+      blockers.push({
+        code: "LIVE_RELAYER_BUILDER_AUTH_MISSING",
+        message:
+          "live-lite relayer mode requires builder auth: configure relayer_json.builder or POLY_BUILDER_API_KEY/POLY_BUILDER_SECRET/POLY_BUILDER_PASSPHRASE",
       });
     }
   }

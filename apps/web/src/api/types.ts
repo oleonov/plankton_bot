@@ -70,6 +70,14 @@ export interface StatusData {
     topBlockingLayer?: string | null;
   };
   executionTelemetry24h?: ExecutionTelemetryWindow;
+  infraAlerts?: Array<{
+    code: string;
+    severity: "warning" | "error";
+    source: string;
+    message: string;
+    details?: Record<string, unknown> | null;
+    lastSeenAt: string;
+  }>;
   familyModeCounts?: Record<string, number> | null;
 }
 

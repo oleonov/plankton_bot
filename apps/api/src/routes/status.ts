@@ -26,6 +26,17 @@ interface LiveLiteStatus {
   minOrderUsdc?: number | null;
 }
 
+interface InfraAlertStatusItem {
+  code: string;
+  severity: "warning" | "error";
+  source: string;
+  message: string;
+  details?: Record<string, unknown> | null;
+  lastSeenAt: string;
+}
+
+const INFRA_ALERT_LOOKBACK_MS = 60 * 60 * 1000;
+
 function resolveLiveLiteMaxFamilies(envelope: Record<string, unknown>): number {
   const configured = envelope.maxFamilies;
   if (typeof configured === "number" && Number.isFinite(configured)) return configured;
@@ -166,6 +177,49 @@ function parseEnvelopeJson(raw: string | null | undefined): Record<string, unkno
   } catch {
     return {};
   }
+}
+
+function readInfraAlerts(db: Database.Database): InfraAlertStatusItem[] {
+  const sinceIso = new Date(Date.now() - INFRA_ALERT_LOOKBACK_MS).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT labels, captured_at
+         FROM runtime_metrics
+        WHERE metric_name = 'infra_alert' AND captured_at >= ?
+        ORDER BY captured_at DESC
+        LIMIT 20`,
+    )
+    .all(sinceIso) as Array<{ labels: string | null; captured_at: string }>;
+
+  const deduped = new Map<string, InfraAlertStatusItem>();
+  for (const row of rows) {
+    if (!row.labels) continue;
+    try {
+      const parsed = JSON.parse(row.labels) as {
+        code?: string;
+        severity?: "warning" | "error";
+        source?: string;
+        message?: string;
+        details?: Record<string, unknown> | null;
+      };
+      const code = parsed.code?.trim();
+      const message = parsed.message?.trim();
+      const source = parsed.source?.trim();
+      if (!code || !message || !source || deduped.has(code)) continue;
+      deduped.set(code, {
+        code,
+        severity: parsed.severity === "warning" ? "warning" : "error",
+        source,
+        message,
+        details: parsed.details ?? null,
+        lastSeenAt: row.captured_at,
+      });
+    } catch {
+      // Ignore malformed alert payloads.
+    }
+  }
+
+  return [...deduped.values()];
 }
 
 function buildLiveLiteStatus(
@@ -451,6 +505,7 @@ export function buildStatusSnapshot(
           capturedAt: startupAdoptionRow.captured_at,
         }
       : null;
+  const infraAlerts = readInfraAlerts(db);
 
   return {
     runtimeMode,
@@ -485,6 +540,7 @@ export function buildStatusSnapshot(
     signalActivity,
     executionTelemetry24h,
     startupAdoption,
+    ...(infraAlerts.length > 0 ? { infraAlerts } : {}),
     ...(familyModeCounts !== undefined ? { familyModeCounts } : {}),
     ...(marketDataPoll ? { marketDataPoll } : {}),
   };

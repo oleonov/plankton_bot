@@ -194,6 +194,7 @@ function createMockGateway(balanceByToken?: Record<string, number>): ExchangeGat
     getFills: vi.fn().mockResolvedValue([]),
     getBalances: vi.fn().mockResolvedValue([]),
     redeemPositions: vi.fn().mockResolvedValue(undefined),
+    hasPendingRedeemSubmission: vi.fn().mockReturnValue(false),
     mergePositions: vi.fn().mockResolvedValue(undefined),
     healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 0 }),
   } as unknown as ExchangeGateway;
@@ -794,6 +795,24 @@ describe("ResolutionModule", () => {
     expect(settler.settle as any).toHaveBeenCalled();
   });
 
+  it("treats atomic dust balance as settled", async () => {
+    const gateway = createMockGateway({ "tok-yes": 0.000001 });
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution();
+    const settled = [makeSettledPosition()];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    const count = await mod.runCheck();
+
+    expect(count).toBe(1);
+    expect(settler.settle as any).toHaveBeenCalled();
+    expect(log.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "skipping settlement — on-chain token balance is non-zero",
+    );
+  });
+
   it("still deactivates markets and cancels orders when balance is non-zero", async () => {
     const gateway = createMockGateway({ "tok-yes": 100 });
     mod = createModule({ gateway });
@@ -829,6 +848,25 @@ describe("ResolutionModule", () => {
     await mod.runCheck();
 
     expect(events).toHaveLength(1);
+  });
+
+  it("defers settlement verification while redeem submission is still pending", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    (gateway.hasPendingRedeemSubmission as any).mockReturnValue(true);
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+
+    const count = await mod.runCheck();
+
+    expect(count).toBe(0);
+    expect(gateway.redeemPositions).toHaveBeenCalledWith([CONDITION]);
+    expect(gateway.getPositionBalance).not.toHaveBeenCalled();
+    expect(settler.settle as any).not.toHaveBeenCalled();
+    expect(log.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "skipping settlement — on-chain token balance is non-zero",
+    );
   });
 
   it("settles without balance check when no gateway is provided", async () => {

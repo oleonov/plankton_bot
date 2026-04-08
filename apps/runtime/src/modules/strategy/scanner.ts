@@ -300,12 +300,13 @@ export function resolveFamilyEntryPolicy(
 /**
  * Scale suggested size based on price to replicate PlanktonXD's "Dust" advantage.
  * Formula: Size = Base * (Price ^ 1.5)
- * This ensures micro-trades for cheap contracts ($0.001 -> negligible)
- * and larger trades for expensive ones ($0.50 -> ~35% of base, $0.90 -> ~85%).
+ * The result is guaranteed to be >= (price * minShares) AND >= $0.05 floor
+ * to satisfy both the exchange (Polymarket) and internal risk gates.
  */
-function scaleSizeByPrice(baseSizeUsdc: number, price: number): number {
-  const scalingMult = Math.pow(price, 1.5);
-  return baseSizeUsdc * scalingMult;
+function scaleSizeByPrice(baseSizeUsdc: number, price: number, minShares = 5): number {
+  const scaledSizeUsdc = baseSizeUsdc * Math.pow(price, 1.5);
+  const exchangeMinUsdc = price * minShares;
+  return Math.max(scaledSizeUsdc, exchangeMinUsdc, 0.05);
 }
 
 /**
@@ -329,7 +330,7 @@ export function evaluateSprayEntry(
   if (midPrice < entry.minEntryPrice || midPrice > entry.maxEntryPrice) return null;
 
   const baseSizeUsdc = spraySizeUsdc * sizeMult;
-  const suggestedSizeUsdc = scaleSizeByPrice(baseSizeUsdc, midPrice);
+  const suggestedSizeUsdc = scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5);
   const suggestedSize = suggestedSizeUsdc / midPrice;
   if (suggestedSize < 0.01) return null;
   if (market.minOrderSize != null && suggestedSize < market.minOrderSize) return null;
@@ -744,7 +745,7 @@ function evaluateProbeEntry(
   const probeHaircut = tailPnlNegative ? 0.5 : 1.0;
   const baseSizeUsdc = entry.probeSizeUsdc * sizeMult * probeHaircut;
   const suggestedSizeUsdc = Math.min(
-    scaleSizeByPrice(baseSizeUsdc, midPrice),
+    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5),
     entry.maxInitialNotionalUsdc,
   );
   const suggestedSize = suggestedSizeUsdc / midPrice;
@@ -795,7 +796,7 @@ function evaluateScaleIn(
     : entry.addSizeUsdc * sizeMult;
 
   const suggestedSizeUsdc = Math.min(
-    scaleSizeByPrice(baseSizeUsdc, midPrice),
+    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5),
     entry.maxInitialNotionalUsdc,
   );
   const suggestedSize = suggestedSizeUsdc / midPrice;
@@ -943,7 +944,7 @@ function evaluateTwoSidedEntry(
   // Size: use probe size with price-scaling and evidence multiplier
   const baseSizeUsdc = entry.probeSizeUsdc * sizeMult;
   const suggestedSizeUsdc = Math.min(
-    scaleSizeByPrice(baseSizeUsdc, midPrice),
+    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5),
     entry.maxInitialNotionalUsdc,
   );
   const suggestedSize = suggestedSizeUsdc / midPrice;

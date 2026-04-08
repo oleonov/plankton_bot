@@ -26,7 +26,11 @@ import type {
 import { createCommandId } from "@plankton/domain";
 import type { GammaResolutionClient } from "@plankton/exchange";
 import type { FamilyExposureCalculator } from "../risk-inventory/family-exposure.js";
-import type { ResolutionDetector, ResolutionCandidate } from "./resolution-detector.js";
+import type {
+  ResolutionDetector,
+  ResolutionCandidate,
+  DetectedResolution,
+} from "./resolution-detector.js";
 import { inferResolution, parseTokenIds } from "./resolution-detector.js";
 import type { PositionSettler } from "./position-settler.js";
 import type { Logger } from "../../logger.js";
@@ -34,6 +38,8 @@ import type { Logger } from "../../logger.js";
 function normalizeOutcomeLabel(value: string): string {
   return value.trim().toLowerCase();
 }
+
+const SETTLEMENT_BALANCE_DUST_THRESHOLD = 1 / 1_000_000;
 
 export interface ResolutionModuleDeps {
   detector: ResolutionDetector;
@@ -128,14 +134,7 @@ export class ResolutionModule implements RuntimeModule {
           );
 
           if (!isRetry) {
-            await this.deps.bus.publish("MarketResolved", {
-              conditionId: resolution.conditionId,
-              tokenIds: resolution.candidates.map((c) => c.tokenId),
-              resolution: resolution.resolution,
-              resolvedAt: resolution.resolvedAt,
-              source: resolution.source,
-              timestamp: Date.now(),
-            });
+            await this.publishMarketResolved(resolution);
           }
           continue;
         }
@@ -173,14 +172,7 @@ export class ResolutionModule implements RuntimeModule {
               await this.deps.gateway.redeemPositions([resolution.conditionId]);
             }
 
-            await this.deps.bus.publish("MarketResolved", {
-              conditionId: resolution.conditionId,
-              tokenIds: resolution.candidates.map((c) => c.tokenId),
-              resolution: resolution.resolution,
-              resolvedAt: resolution.resolvedAt,
-              source: resolution.source,
-              timestamp: Date.now(),
-            });
+            await this.publishMarketResolved(resolution);
           }
           continue;
         }
@@ -193,6 +185,17 @@ export class ResolutionModule implements RuntimeModule {
           // Replicate PlanktonXD Auto-Redeem: attempt to redeem winning shares
           // before checking balances.
           await this.deps.gateway.redeemPositions([resolution.conditionId]);
+
+          if (this.deps.gateway.hasPendingRedeemSubmission?.(resolution.conditionId) ?? false) {
+            this.deps.log.info(
+              { conditionId: resolution.conditionId },
+              "redeem submitted — deferring settlement verification until relayer confirms",
+            );
+            if (!isRetry) {
+              await this.publishMarketResolved(resolution);
+            }
+            continue;
+          }
 
           eligibleCandidates = await this.filterByZeroBalance(
             eligibleCandidates,
@@ -215,14 +218,7 @@ export class ResolutionModule implements RuntimeModule {
 
         // Publish events (EventBus.publish is async — must await)
         if (!isRetry) {
-          await this.deps.bus.publish("MarketResolved", {
-            conditionId: resolution.conditionId,
-            tokenIds: resolution.candidates.map((c) => c.tokenId),
-            resolution: resolution.resolution,
-            resolvedAt: resolution.resolvedAt,
-            source: resolution.source,
-            timestamp: Date.now(),
-          });
+          await this.publishMarketResolved(resolution);
         }
 
         for (const s of settled) {
@@ -263,9 +259,9 @@ export class ResolutionModule implements RuntimeModule {
   }
 
   /**
-   * Filter candidates to only those with zero on-chain token balance.
+   * Filter candidates to only those with near-zero on-chain token balance.
    * This ensures we only settle positions whose shares have been fully
-   * redeemed or sold, preventing premature ledger settlement.
+   * redeemed or sold, while tolerating atomic-unit dust after settlement.
    */
   private async filterByZeroBalance(
     candidates: ResolutionCandidate[],
@@ -285,7 +281,7 @@ export class ResolutionModule implements RuntimeModule {
         );
         continue;
       }
-      if (balance === 0) {
+      if (balance <= SETTLEMENT_BALANCE_DUST_THRESHOLD) {
         settled.push(candidate);
       } else {
         this.deps.log.warn(
@@ -296,6 +292,17 @@ export class ResolutionModule implements RuntimeModule {
     }
 
     return settled;
+  }
+
+  private async publishMarketResolved(resolution: DetectedResolution): Promise<void> {
+    await this.deps.bus.publish("MarketResolved", {
+      conditionId: resolution.conditionId,
+      tokenIds: resolution.candidates.map((c) => c.tokenId),
+      resolution: resolution.resolution,
+      resolvedAt: resolution.resolvedAt,
+      source: resolution.source,
+      timestamp: Date.now(),
+    });
   }
 
   /** Publish CancelOrderRequested for open/partially-filled/pending orders on a resolved token. */

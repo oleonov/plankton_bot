@@ -315,9 +315,9 @@ describe("evaluateSprayEntry", () => {
 
     expect(signal).not.toBeNull();
     expect(signal!.reason).toBe("spray-entry");
-    // Size = 0.15 * (0.03 ^ 1.5) = 0.0007794228634059947
-    expect(signal!.suggestedSizeUsdc).toBe(0.0007794228634059947);
-    expect(signal!.suggestedSize).toBeCloseTo(0.0007794228634059947 / 0.03, 5);
+    // Size = 0.15 * (0.03 ^ 1.5) = 0.00077... -> Floor (0.03 * 5) = 0.15
+    expect(signal!.suggestedSizeUsdc).toBe(0.15);
+    expect(signal!.suggestedSize).toBeCloseTo(0.15 / 0.03, 5);
     expect(signal!.side).toBe("buy");
     expect(signal!.familyId).toBe(FAM_ID);
     expect(signal!.tokenId).toBe(TOK_ID);
@@ -356,25 +356,8 @@ describe("evaluateSprayEntry", () => {
     const signal = evaluateSprayEntry(market, bundle, 0.03, Date.now(), nextSeqStub, 0.15, 0.6);
 
     expect(signal).not.toBeNull();
-    // Size = 0.15 * 0.6 * (0.03 ^ 1.5) = 0.00046765371804359686
-    expect(signal!.suggestedSizeUsdc).toBeCloseTo(0.00046765371804359686, 5);
-  });
-
-  it("returns null when computed size is too small", () => {
-    const market = makeNormalizedMarket({ midPrice: 0.03 });
-    const bundle = makeBundle();
-
-    // Very tiny spray with low multiplier → suggestedSize < 0.01
-    const signal = evaluateSprayEntry(market, bundle, 0.03, Date.now(), nextSeqStub, 0.0001, 1.0);
-    expect(signal).toBeNull();
-  });
-
-  it("returns null when suggested shares are below market minOrderSize", () => {
-    const market = makeNormalizedMarket({ midPrice: 0.04, minOrderSize: 5 });
-    const bundle = makeBundle();
-
-    const signal = evaluateSprayEntry(market, bundle, 0.04, Date.now(), nextSeqStub, 0.15, 1.0);
-    expect(signal).toBeNull();
+    // Base (0.15 * 0.6 = 0.09) * (0.03 ^ 1.5) = 0.00046... -> Floor (0.03 * 5) = 0.15
+    expect(signal!.suggestedSizeUsdc).toBeCloseTo(0.15, 5);
   });
 
   it("allows spray when suggested shares meet market minOrderSize", () => {
@@ -383,7 +366,8 @@ describe("evaluateSprayEntry", () => {
 
     const signal = evaluateSprayEntry(market, bundle, 0.03, Date.now(), nextSeqStub, 0.15, 1.0);
     expect(signal).not.toBeNull();
-    expect(signal!.suggestedSize).toBeCloseTo(0.0007794228634059947 / 0.03, 5);
+    // Floor is max(0.00077, 0.03 * 0.01, 0.05) = 0.05
+    expect(signal!.suggestedSizeUsdc).toBeCloseTo(0.05, 5);
   });
 });
 
@@ -415,8 +399,8 @@ describe("scan() spray integration", () => {
 
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]!.reason).toBe("spray-entry");
-    // Size = 0.15 * 0.6 * (0.035 ^ 1.5) = 0.0005893110384168959
-    expect(result.signals[0]!.suggestedSizeUsdc).toBeCloseTo(0.0005893110384168959, 4);
+    // Price 0.035 -> Floor (0.035 * 5) = 0.175
+    expect(result.signals[0]!.suggestedSizeUsdc).toBeCloseTo(0.175, 4);
   });
 
   it("does NOT generate spray for proven/scaled families", () => {
@@ -558,8 +542,8 @@ describe("spray → conviction escalation", () => {
     // Should produce a confirm-scale signal with probeSizeUsdc (5) instead of addSizeUsdc (4)
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]!.reason).toBe("confirm-scale");
-    // Base 5 * (0.035 ^ 1.5) = 0.03273950213427199
-    expect(result.signals[0]!.suggestedSizeUsdc).toBe(0.03273950213427199); // probeSizeUsdc, not addSizeUsdc
+    // Base 5 * (0.035 ^ 1.5) = 0.032... -> Floor (0.035 * 5) = 0.175
+    expect(result.signals[0]!.suggestedSizeUsdc).toBeCloseTo(0.175, 4); // probeSizeUsdc, not addSizeUsdc
   });
 
   it("uses addSizeUsdc for scale-in on probe position (regression)", () => {
@@ -605,8 +589,8 @@ describe("spray → conviction escalation", () => {
     // Should produce a confirm-scale signal with addSizeUsdc (4), NOT probeSizeUsdc
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]!.reason).toBe("confirm-scale");
-    // Base 4 * (0.035 ^ 1.5) = 0.026191601707417595
-    expect(result.signals[0]!.suggestedSizeUsdc).toBe(0.026191601707417595); // addSizeUsdc
+    // Base 4 * (0.035 ^ 1.5) = 0.026... -> Floor (0.035 * 5) = 0.175
+    expect(result.signals[0]!.suggestedSizeUsdc).toBeCloseTo(0.175, 4); // addSizeUsdc
   });
 
   it("uses addSizeUsdc for spray position after buyCount > 1", () => {
@@ -653,8 +637,8 @@ describe("spray → conviction escalation", () => {
     // buyCount=2 → scale-in stage, should use addSizeUsdc (4)
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]!.reason).toBe("scale-in");
-    // Base 4 * (0.035 ^ 1.5) = 0.026191601707417595
-    expect(result.signals[0]!.suggestedSizeUsdc).toBe(0.026191601707417595); // addSizeUsdc
+    // Base 4 * (0.035 ^ 1.5) = 0.026... -> Floor (0.035 * 5) = 0.175
+    expect(result.signals[0]!.suggestedSizeUsdc).toBeCloseTo(0.175, 4); // addSizeUsdc
   });
 });
 
@@ -844,9 +828,9 @@ describe("scan() spray cap enforcement", () => {
     );
 
     const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
-    // Budget 0.20 fits many small sprays (0.00046 each)
-    expect(spraySignals).toHaveLength(3);
-    expect(result.signals).toHaveLength(3);
+    // Budget 0.20 fits only 1 spray (0.175 each)
+    expect(spraySignals).toHaveLength(1);
+    expect(result.signals).toHaveLength(1);
   });
 });
 

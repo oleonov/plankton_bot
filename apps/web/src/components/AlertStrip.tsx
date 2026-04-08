@@ -18,6 +18,9 @@ export function AlertStrip() {
 
   if (status?.marketDataStale) alerts.push("Market data stale");
   if (sseState === "disconnected") alerts.push("SSE disconnected");
+  for (const alert of status?.infraAlerts ?? []) {
+    alerts.push(alert.message);
+  }
 
   if (alerts.length === 0) return null;
 

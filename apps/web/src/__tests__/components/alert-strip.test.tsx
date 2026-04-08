@@ -129,4 +129,37 @@ describe("AlertStrip", () => {
 
     expect(await screen.findByText(/1 families quarantined — alpha/i)).toBeInTheDocument();
   });
+
+  it("shows runtime infra alerts from status", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          marketDataStale: false,
+          infraAlerts: [
+            {
+              code: "POLYGON_RPC_RATE_LIMITED",
+              severity: "error",
+              source: "polygon-rpc",
+              message: "Polygon RPC rate limited — settlement may stall until quota resets.",
+              details: null,
+              lastSeenAt: new Date().toISOString(),
+            },
+          ],
+        }),
+      ),
+      http.get("/api/v1/families", () =>
+        ok({
+          items: [],
+          meta: { scope: "profile", profile: "live-lite", totalCatalogCount: 0, hasMore: false },
+        }),
+      ),
+    );
+
+    renderWithProviders(<AlertStrip />);
+
+    expect(
+      await screen.findByText(/Polygon RPC rate limited — settlement may stall until quota resets./i),
+    ).toBeInTheDocument();
+  });
 });

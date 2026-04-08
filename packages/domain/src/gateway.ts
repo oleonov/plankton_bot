@@ -213,6 +213,13 @@ export interface ExchangeGateway {
   redeemPositions(conditionIds: string[]): Promise<void>;
 
   /**
+   * Optional hint for asynchronous settlement paths (for example relayer-backed
+   * redeem submissions). When true, callers should defer immediate balance
+   * verification and retry on the next resolution tick.
+   */
+  hasPendingRedeemSubmission?(conditionId: string): boolean;
+
+  /**
    * Merge opposing shares (YES + NO) into collateral (USDC).
    * Polymarket-specific: calls ConditionalTokens.merge().
    */

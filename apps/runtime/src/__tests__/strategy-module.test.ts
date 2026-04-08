@@ -22,6 +22,8 @@ import { LiveLiteGuard } from "../live-lite-guard.js";
 // ─── Test helpers ────────────────────────────────────────────────────────
 
 const FAM_ID = createFamilyId("fam-btc");
+const GOLD_FAM_ID = createFamilyId("bitcoin-price:generic:daily");
+const GOLD_OTHER_FAM_ID = createFamilyId("ethereum-price:generic:daily");
 const TOK_ID = createTokenId("tok-yes");
 const TOK_ID_2 = createTokenId("tok-yes-2");
 
@@ -1847,9 +1849,8 @@ describe("StrategyModule", () => {
 
   describe("live-lite allowlist filter", () => {
     it("skips signals for non-allowlisted families in live-lite mode", async () => {
-      // "fam-other" is in allowlist, but market belongs to FAM_ID ("fam-btc")
       const liveLiteGuard = new LiveLiteGuard({
-        familyAllowlist: ["fam-other"],
+        familyAllowlist: [String(GOLD_OTHER_FAM_ID)],
         maxFamilies: 2,
         maxOpenValueUsdc: 500,
         maxOrderUsdc: 50,
@@ -1873,7 +1874,7 @@ describe("StrategyModule", () => {
       });
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        markets: [makeNormalizedMarket({ familyId: GOLD_FAM_ID, midPrice: 0.03 })],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -1881,11 +1882,11 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      // fam-btc is not in allowlist ["fam-other"] — all signals must be filtered
+      // Gold market is not in allowlist ["ethereum-price:generic:daily"] — all signals must be filtered
       expect(signals).toHaveLength(0);
     });
 
-    it("passes signals for allowlisted families in live-lite mode", async () => {
+    it("skips non-gold families even when they are allowlisted", async () => {
       const liveLiteGuard = new LiveLiteGuard({
         familyAllowlist: ["fam-btc"],
         maxFamilies: 2,
@@ -1906,8 +1907,12 @@ describe("StrategyModule", () => {
       await mod.start();
 
       const signals: unknown[] = [];
+      const scanTicks: unknown[] = [];
       bus.subscribe("SignalProduced", async (p) => {
         signals.push(p);
+      });
+      bus.subscribe("ScanTickCompleted", async (p) => {
+        scanTicks.push(p);
       });
 
       await bus.publish("NormalizedMarketUpdated", {
@@ -1919,7 +1924,44 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      // fam-btc IS in the allowlist — signal should pass through
+      expect(scanTicks).toHaveLength(0);
+      expect(signals).toHaveLength(0);
+    });
+
+    it("passes signals for allowlisted gold families in live-lite mode", async () => {
+      const liveLiteGuard = new LiveLiteGuard({
+        familyAllowlist: [String(GOLD_FAM_ID)],
+        maxFamilies: 2,
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 50,
+        maxActiveMarkets: 3,
+      });
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        liveLiteGuard,
+      });
+      await mod.start();
+
+      const signals: unknown[] = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ familyId: GOLD_FAM_ID, midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
       expect(signals).toHaveLength(1);
     });
   });
@@ -1999,8 +2041,8 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       expect(signals).toHaveLength(1);
-      // Base 6 * (0.03 ^ 1.5) = 0.03117691453623979
-      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(0.03117691453623979);
+      // Base 6 * (0.03 ^ 1.5) = 0.031... -> Floor (0.03 * 5) = 0.15
+      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(0.15);
     });
 
     it("scale-in uses addSizeUsdc not hard-coded $5", async () => {
@@ -2051,8 +2093,8 @@ describe("StrategyModule", () => {
 
       const scaleIns = signals.filter((s) => s.signal.reason === "scale-in");
       expect(scaleIns).toHaveLength(1);
-      // Base 3 * (0.031 ^ 1.5) = 0.01637433968134288
-      expect(scaleIns[0]!.signal.suggestedSizeUsdc).toBe(0.01637433968134288);
+      // Base 3 * (0.031 ^ 1.5) = 0.016... -> Floor (0.031 * 5) = 0.155
+      expect(scaleIns[0]!.signal.suggestedSizeUsdc).toBe(0.155);
     });
 
     it("probe and scale-in sizes are capped by maxInitialNotionalUsdc", async () => {
@@ -2093,10 +2135,10 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       expect(signals).toHaveLength(1);
-      // Base 10 * (0.03 ^ 1.5) = 0.05196152422706632
+      // Base 10 * (0.03 ^ 1.5) = 0.051... -> Floor (0.03 * 5) = 0.15
       // This is < maxInitialNotionalUsdc (4), so no capping happens in this specific test
       // but the logic is exercised.
-      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(0.05196152422706632);
+      expect(signals[0]!.signal.suggestedSizeUsdc).toBe(0.15);
     });
   });
 
@@ -3478,8 +3520,8 @@ describe("StrategyModule", () => {
 
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(1);
-      // Base 10 * 0.6 evidence mult * (0.03 ^ 1.5) = 0.03117691453623979
-      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.03117691453623979);
+      // Base 10 * 0.6 evidence mult * (0.03 ^ 1.5) = 0.031... -> Floor = 0.15
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.15);
     });
 
     it("increases size for heavy campaign eligible with high evidence", async () => {
@@ -3516,8 +3558,8 @@ describe("StrategyModule", () => {
 
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(1);
-      // Base 10 * 1.25 evidence mult * (0.03 ^ 1.5) = 0.06495190528383289
-      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.06495190528383289);
+      // Base 10 * 1.25 evidence mult * (0.03 ^ 1.5) = 0.064... -> Floor = 0.15
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.15);
     });
 
     it("reduces size when tail-adjusted PnL is negative", async () => {
@@ -3554,8 +3596,8 @@ describe("StrategyModule", () => {
 
       const probes = signals.filter((s) => s.signal.reason === "probe-entry");
       expect(probes).toHaveLength(1);
-      // Base 10 * 0.75 evidence mult * 0.5 probe haircut * (0.03 ^ 1.5) = 0.01948557158514987
-      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.01948557158514987);
+      // Base 10 * 0.75 evidence mult * 0.5 probe haircut * (0.03 ^ 1.5) = 0.019... -> Floor = 0.15
+      expect(probes[0]!.signal.suggestedSizeUsdc).toBe(0.15);
     });
   });
 

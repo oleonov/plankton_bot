@@ -87,7 +87,10 @@ import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-pub
 import { ValidationMetricsReader } from "./modules/publisher/validation-metrics-reader.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
-import { createPolymarketClient } from "./polymarket-client-factory.js";
+import {
+  createPolymarketClient,
+  type SettlementClientLike,
+} from "./polymarket-client-factory.js";
 import { resolveLiveLiteMaxFamilies } from "./live-lite-envelope.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
@@ -334,17 +337,41 @@ async function main(): Promise<void> {
 
   // 7b. Create gateways via factory
   let polyClient: unknown;
+  let settlementClient: SettlementClientLike | null = null;
   let relayerConfig: { walletType: string; funderAddress: string } | null = null;
   let traderAddress: string | undefined;
   if (runtimeMode === "paper" || runtimeMode === "live-lite") {
     try {
+      const configWithBuilder = config as typeof config & {
+        polyBuilderApiKey?: string;
+        polyBuilderSecret?: string;
+        polyBuilderPassphrase?: string;
+      };
+      const polymarketClientConfig = {
+        polyApiKey: config.polyApiKey,
+        polyApiSecret: config.polyApiSecret,
+        polyPassphrase: config.polyPassphrase,
+        polyBuilderApiKey: configWithBuilder.polyBuilderApiKey,
+        polyBuilderSecret: configWithBuilder.polyBuilderSecret,
+        polyBuilderPassphrase: configWithBuilder.polyBuilderPassphrase,
+        polyPrivateKey: config.polyPrivateKey,
+        polymarketRelayerUrl:
+          (config as typeof config & { polymarketRelayerUrl?: string }).polymarketRelayerUrl ??
+          "https://relayer-v2.polymarket.com",
+        polygonRpcUrl:
+          (config as typeof config & { polygonRpcUrl?: string }).polygonRpcUrl ??
+          "https://polygon-rpc.com",
+        polygonRpcFallbackUrl:
+          (config as typeof config & { polygonRpcFallbackUrl?: string }).polygonRpcFallbackUrl,
+      };
       const builtClient = await createPolymarketClient({
         runtimeMode,
-        config,
+        config: polymarketClientConfig,
         walletMode: liveLiteGuard.getWalletMode(),
         relayerJson: settingsRow?.relayer_json ?? null,
       });
       polyClient = builtClient.client;
+      settlementClient = builtClient.settlementClient;
       traderAddress = builtClient.traderAddress ?? undefined;
       relayerConfig = builtClient.relayerConfig
         ? {
@@ -359,6 +386,24 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   }
+
+  const recordInfraAlert = (
+    alert: {
+      code: string;
+      severity: "warning" | "error";
+      source: string;
+      message: string;
+      details?: Record<string, unknown> | undefined;
+    },
+  ): void => {
+    const now = new Date().toISOString();
+    ledgerConn.db
+      .prepare(
+        "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('infra_alert', 1, ?, ?)",
+      )
+      .run(JSON.stringify(alert), now);
+    log.warn({ alert }, "runtime infra alert recorded");
+  };
 
   // Build slug filter dynamically from rules manager so new families added via
   // rules_reload are picked up without restart.
@@ -378,9 +423,11 @@ async function main(): Promise<void> {
     createGateways({
       runtimeMode,
       polyClient,
+      settlementClient: settlementClient ?? undefined,
       traderAddress,
       slugFilter,
       initialBalanceUsdc,
+      onInfraAlert: runtimeMode === "live-lite" ? recordInfraAlert : undefined,
     });
   log.info({ mode: modeLabel }, "gateways created");
   if (runtimeMode === "live-lite") {
@@ -990,6 +1037,10 @@ async function main(): Promise<void> {
     profile: activeProfile,
     ledgerDb: ledgerConn.db,
     controlDb: controlConn.db,
+    relayerBuilderAuthConfigured:
+      !!(config as typeof config & { polyBuilderApiKey?: string }).polyBuilderApiKey &&
+      !!(config as typeof config & { polyBuilderSecret?: string }).polyBuilderSecret &&
+      !!(config as typeof config & { polyBuilderPassphrase?: string }).polyBuilderPassphrase,
     ...(liveLiteConfig ? { liveLiteConfig } : {}),
   });
   writePreflightReport(controlConn.db, activeProfile, preflightResult, activeSwitchRow?.switch_id);

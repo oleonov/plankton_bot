@@ -94,6 +94,7 @@ export const mockStatus = {
     feeLeakageRatio: null,
     lastFillAt: null,
   },
+  infraAlerts: [],
 };
 
 export const mockControlOverview = {

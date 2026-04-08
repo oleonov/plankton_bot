@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId } from "@plankton/domain";
 import { LiveExchangeGateway } from "../live/exchange-gateway.js";
 import { LiveMarketDataGateway, buildTokenIdBatches } from "../live/market-data-gateway.js";
@@ -7,6 +7,7 @@ import { LiveMarketDataGateway, buildTokenIdBatches } from "../live/market-data-
 
 function createMockClient() {
   return {
+    chainId: 137,
     createAndPostOrder: vi.fn(),
     createOrder: vi.fn(),
     postOrder: vi.fn(),
@@ -23,6 +24,12 @@ function createMockClient() {
   };
 }
 
+function createMockSettlementClient() {
+  return {
+    execute: vi.fn().mockResolvedValue({}),
+  };
+}
+
 describe("LiveExchangeGateway", () => {
   let client: ReturnType<typeof createMockClient>;
   let gw: LiveExchangeGateway;
@@ -30,6 +37,10 @@ describe("LiveExchangeGateway", () => {
   beforeEach(() => {
     client = createMockClient();
     gw = new LiveExchangeGateway({ client });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("placeOrder calls createAndPostOrder and returns success", async () => {
@@ -278,6 +289,205 @@ describe("LiveExchangeGateway", () => {
   it("getPositionBalance throws on SDK failure instead of returning 0", async () => {
     client.getBalanceAllowance.mockRejectedValue(new Error("Network error"));
     await expect(gw.getPositionBalance(createTokenId("tok-1"))).rejects.toThrow("Network error");
+  });
+
+  it("redeemPositions warns once and no-ops when the SDK has no redeem API", async () => {
+    const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+
+    await expect(gw.redeemPositions(["cond-1", "cond-2"])).resolves.toBeUndefined();
+    await expect(gw.redeemPositions(["cond-3"])).resolves.toBeUndefined();
+
+    expect(emitWarning).toHaveBeenCalledTimes(1);
+    expect(emitWarning).toHaveBeenCalledWith(
+      expect.stringContaining("redeemPositions skipped"),
+      expect.objectContaining({ code: "PLANKTON_REDEEM_UNSUPPORTED" }),
+    );
+  });
+
+  it("redeemPositions submits CTF redeem via settlement client for regular markets", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "0" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    await gw.redeemPositions([
+      "0x1111111111111111111111111111111111111111111111111111111111111111",
+    ]);
+
+    expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+    const [txs, metadata] = settlementClient.execute.mock.calls[0]!;
+    expect(metadata).toContain("redeem positions");
+    expect(txs).toHaveLength(1);
+    expect(txs[0]!.to).toBe("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045");
+    expect(txs[0]!.value).toBe("0");
+    expect(txs[0]!.data).toContain("0x");
+  });
+
+  it("redeemPositions submits neg-risk adapter redeem with raw token balances", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: true,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "111000000" })
+      .mockResolvedValueOnce({ balance: "0" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    await gw.redeemPositions([
+      "0x2222222222222222222222222222222222222222222222222222222222222222",
+    ]);
+
+    expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+    const [txs] = settlementClient.execute.mock.calls[0]!;
+    expect(txs).toHaveLength(1);
+    expect(txs[0]!.to).toBe("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296");
+    expect(txs[0]!.value).toBe("0");
+    expect(txs[0]!.data).toContain("0x");
+  });
+
+  it("redeemPositions skips relayer submission when no token balances remain", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "0" })
+      .mockResolvedValueOnce({ balance: "0" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    await gw.redeemPositions([
+      "0x3333333333333333333333333333333333333333333333333333333333333333",
+    ]);
+
+    expect(settlementClient.execute).not.toHaveBeenCalled();
+  });
+
+  it("redeemPositions marks a relayer submission as pending when confirmation is still async", async () => {
+    const settlementClient = {
+      execute: vi.fn().mockResolvedValue({}),
+    };
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0x6666666666666666666666666666666666666666666666666666666666666666";
+    await gw.redeemPositions([conditionId]);
+
+    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(true);
+  });
+
+  it("redeemPositions clears pending state when relayer confirmation resolves quickly", async () => {
+    const wait = vi.fn().mockResolvedValue({ state: "MINED" });
+    const settlementClient = {
+      execute: vi.fn().mockResolvedValue({ wait }),
+    };
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0x7777777777777777777777777777777777777777777777777777777777777777";
+    await gw.redeemPositions([conditionId]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(wait).toHaveBeenCalledTimes(1);
+    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
+  });
+
+  it("redeemPositions reports polygon rpc upstream failures as infra alerts", async () => {
+    const settlementClient = {
+      execute: vi
+        .fn()
+        .mockRejectedValue(new Error('{"error":"request error","status":503,"data":"no healthy upstream"}')),
+    };
+    const onInfraAlert = vi.fn();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient, onInfraAlert });
+
+    await gw.redeemPositions([
+      "0x4444444444444444444444444444444444444444444444444444444444444444",
+    ]);
+
+    expect(onInfraAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "POLYGON_RPC_UNAVAILABLE",
+        source: "polygon-rpc",
+      }),
+    );
+  });
+
+  it("redeemPositions reports rpc quota failures as rate-limit alerts", async () => {
+    const settlementClient = {
+      execute: vi
+        .fn()
+        .mockRejectedValue(new Error('{"error":"request error","status":429,"data":"exceeded its compute units"}')),
+    };
+    const onInfraAlert = vi.fn();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient, onInfraAlert });
+
+    await gw.redeemPositions([
+      "0x5555555555555555555555555555555555555555555555555555555555555555",
+    ]);
+
+    expect(onInfraAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "POLYGON_RPC_RATE_LIMITED",
+        source: "polygon-rpc",
+      }),
+    );
+  });
+
+  it("redeemPositions uses client postRedeem when available", async () => {
+    const postRedeem = vi.fn().mockResolvedValue(undefined);
+    Object.assign(client, { postRedeem });
+
+    await gw.redeemPositions(["cond-1", "cond-2"]);
+
+    expect(postRedeem).toHaveBeenCalledTimes(2);
+    expect(postRedeem).toHaveBeenNthCalledWith(1, { conditionId: "cond-1" });
+    expect(postRedeem).toHaveBeenNthCalledWith(2, { conditionId: "cond-2" });
+  });
+
+  it("mergePositions warns once and no-ops when the SDK has no merge API", async () => {
+    const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+
+    await expect(gw.mergePositions(["cond-1", "cond-2"])).resolves.toBeUndefined();
+    await expect(gw.mergePositions(["cond-3"])).resolves.toBeUndefined();
+
+    expect(emitWarning).toHaveBeenCalledTimes(1);
+    expect(emitWarning).toHaveBeenCalledWith(
+      expect.stringContaining("mergePositions skipped"),
+      expect.objectContaining({ code: "PLANKTON_MERGE_UNSUPPORTED" }),
+    );
   });
 
   it("healthCheck returns ok on success", async () => {

@@ -233,6 +233,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
+      relayerBuilderAuthConfigured: true,
       liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
     });
 
@@ -260,6 +261,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
+      relayerBuilderAuthConfigured: true,
       liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
     });
 
@@ -313,11 +315,42 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
+      relayerBuilderAuthConfigured: true,
       liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.04 },
     });
 
     expect(result.status).toBe("failed");
     expect(result.blockers.some((b) => b.code === "LIVE_MIN_ORDER_TOO_LOW")).toBe(true);
+  });
+
+  it("live-lite relayer mode fails when builder auth is missing", () => {
+    seedProfile(controlConn.db, "live-lite");
+    seedProfileSettings(controlConn.db, "live-lite", {
+      relayerJson: JSON.stringify({
+        walletType: "proxy",
+        funderAddress: "0x1111111111111111111111111111111111111111",
+      }),
+    });
+    seedLiveFamily(controlConn.db, {
+      familyId: "fam-geo",
+      primaryCategory: "geopolitics",
+      feeTier: "fee-free",
+      liveWalletRequirement: "eoa-ok",
+      requiresPostOnlyForLive: false,
+    });
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      relayerBuilderAuthConfigured: false,
+      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
+    });
+
+    expect(result.status).toBe("failed");
+    expect(
+      result.blockers.some((b) => b.code === "LIVE_RELAYER_BUILDER_AUTH_MISSING"),
+    ).toBe(true);
   });
 
   it("live-lite fails with EXPOSURE_EXCEEDS_CAP when exposure over cap", () => {

@@ -20,6 +20,7 @@ export function StatusBar() {
     ) : (
       <span style={{ color: "var(--red)" }}>&#10005; disconnected</span>
     );
+  const topInfraAlert = status.infraAlerts?.[0] ?? null;
 
   return (
     <div
@@ -70,6 +71,20 @@ export function StatusBar() {
       {status.reconciliationDriftDetected && (
         <span className="badge badge-red" style={{ fontWeight: 700 }}>
           RECON DRIFT
+        </span>
+      )}
+      {topInfraAlert && (
+        <span
+          className={topInfraAlert.severity === "error" ? "badge badge-red" : "badge badge-orange"}
+          style={{
+            maxWidth: 420,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={topInfraAlert.message}
+        >
+          {topInfraAlert.message}
         </span>
       )}
       {sseIndicator}

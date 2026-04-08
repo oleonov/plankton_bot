@@ -21,7 +21,13 @@ const envSchema = z
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
     POLY_PASSPHRASE: z.string().optional(),
+    POLY_BUILDER_API_KEY: z.string().optional(),
+    POLY_BUILDER_SECRET: z.string().optional(),
+    POLY_BUILDER_PASSPHRASE: z.string().optional(),
     POLY_PRIVATE_KEY: z.string().optional(),
+    POLYMARKET_RELAYER_URL: z.string().url().default("https://relayer-v2.polymarket.com"),
+    POLYGON_RPC_URL: z.string().url().default("https://polygon-rpc.com"),
+    POLYGON_RPC_FALLBACK_URL: z.string().url().optional(),
     PLANKTON_API_KEY: z.string().optional(),
     PLANKTON_API_PORT: z.coerce.number().int().positive().default(3100),
     // LIVE_LITE_* env vars removed — envelope caps now come from profile_settings in control.db
@@ -84,7 +90,13 @@ export interface AppConfig {
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
   polyPassphrase: string | undefined;
+  polyBuilderApiKey?: string | undefined;
+  polyBuilderSecret?: string | undefined;
+  polyBuilderPassphrase?: string | undefined;
   polyPrivateKey: string | undefined;
+  polymarketRelayerUrl?: string | undefined;
+  polygonRpcUrl?: string | undefined;
+  polygonRpcFallbackUrl?: string | undefined;
   planktonApiKey: string | undefined;
   planktonApiPort: number;
   planktonAuthUsername: string | undefined;
@@ -137,7 +149,13 @@ export function loadEnv(envPath?: string): AppConfig {
     polyApiKey: env.POLY_API_KEY,
     polyApiSecret: env.POLY_API_SECRET,
     polyPassphrase: env.POLY_PASSPHRASE,
+    polyBuilderApiKey: env.POLY_BUILDER_API_KEY,
+    polyBuilderSecret: env.POLY_BUILDER_SECRET,
+    polyBuilderPassphrase: env.POLY_BUILDER_PASSPHRASE,
     polyPrivateKey: env.POLY_PRIVATE_KEY,
+    polymarketRelayerUrl: env.POLYMARKET_RELAYER_URL,
+    polygonRpcUrl: env.POLYGON_RPC_URL,
+    polygonRpcFallbackUrl: env.POLYGON_RPC_FALLBACK_URL,
     planktonApiKey: env.PLANKTON_API_KEY,
     planktonApiPort: env.PLANKTON_API_PORT,
     planktonAuthUsername: env.PLANKTON_AUTH_USERNAME,

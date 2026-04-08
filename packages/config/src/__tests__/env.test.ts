@@ -25,7 +25,12 @@ const ALL_KEYS = [
   "POLY_API_KEY",
   "POLY_API_SECRET",
   "POLY_PASSPHRASE",
+  "POLY_BUILDER_API_KEY",
+  "POLY_BUILDER_SECRET",
+  "POLY_BUILDER_PASSPHRASE",
   "POLY_PRIVATE_KEY",
+  "POLYGON_RPC_URL",
+  "POLYGON_RPC_FALLBACK_URL",
   "PLANKTON_AUTH_USERNAME",
   "PLANKTON_AUTH_PASSWORD",
   "PLANKTON_SESSION_SECRET",
@@ -89,6 +94,11 @@ describe("loadEnv", () => {
       POLY_API_KEY: "key123",
       POLY_API_SECRET: "secret456",
       POLY_PASSPHRASE: "pass789",
+      POLY_BUILDER_API_KEY: "builder-key",
+      POLY_BUILDER_SECRET: "builder-secret",
+      POLY_BUILDER_PASSPHRASE: "builder-pass",
+      POLYGON_RPC_URL: "https://polygon-mainnet.g.alchemy.com/v2/test",
+      POLYGON_RPC_FALLBACK_URL: "https://polygon.drpc.org",
     });
 
     const config = loadEnv();
@@ -99,6 +109,11 @@ describe("loadEnv", () => {
     expect(config.polyApiKey).toBe("key123");
     expect(config.polyApiSecret).toBe("secret456");
     expect(config.polyPassphrase).toBe("pass789");
+    expect(config.polyBuilderApiKey).toBe("builder-key");
+    expect(config.polyBuilderSecret).toBe("builder-secret");
+    expect(config.polyBuilderPassphrase).toBe("builder-pass");
+    expect(config.polygonRpcUrl).toBe("https://polygon-mainnet.g.alchemy.com/v2/test");
+    expect(config.polygonRpcFallbackUrl).toBe("https://polygon.drpc.org");
   });
 
   it("BOOTSTRAP_FAMILY_RULES_PATH takes precedence over FAMILY_RULES_PATH", () => {

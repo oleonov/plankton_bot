@@ -18,10 +18,12 @@
     "@plankton/event-bus": "workspace:*",
     "@plankton/exchange": "workspace:*",
     "@plankton/family-rules": "workspace:*",
+    "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/builder-signing-sdk": "^0.0.8",
     "@polymarket/clob-client": "^4.0.0",
     "ethers": "^5.7.1",
-    "pino": "^9.6.0"
+    "pino": "^9.6.0",
+    "viem": "^2.47.10"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0"

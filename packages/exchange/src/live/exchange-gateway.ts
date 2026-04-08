@@ -5,6 +5,7 @@
  * to prevent SDK types from leaking into @plankton/domain consumers.
  */
 
+import { getContractConfig } from "@polymarket/clob-client";
 import type {
   ExchangeGateway,
   PlaceOrderParams,
@@ -16,6 +17,7 @@ import type {
   ExchangeBalance,
   TokenId,
 } from "@plankton/domain";
+import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
 import {
   mapOpenOrder,
@@ -30,18 +32,65 @@ import {
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
   client: unknown;
+  /** Optional relayer settlement client for on-chain redeem/merge actions. */
+  settlementClient?: unknown;
   /** Wallet/funder address used to extract personal fills from trade rows. */
   traderAddress?: string | null;
+  /** Optional callback used to surface infra-level settlement issues to runtime/UI. */
+  onInfraAlert?: ((alert: {
+    code: string;
+    severity: "warning" | "error";
+    source: string;
+    message: string;
+    details?: Record<string, unknown> | undefined;
+  }) => void) | undefined;
 }
+
+const CTF_REDEEM_ABI = parseAbi([
+  "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
+]);
+const NEG_RISK_REDEEM_ABI = parseAbi([
+  "function redeemPositions(bytes32 _conditionId, uint256[] _amounts)",
+]);
+const RECENT_SETTLEMENT_SUBMISSION_TTL_MS = 10 * 60 * 1000;
+const SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS = 15 * 1000;
+
+type SettlementTransaction = {
+  to: string;
+  data: `0x${string}`;
+  value: string;
+};
+
+type SettlementRequest = {
+  conditionId: string;
+  tx: SettlementTransaction;
+};
 
 export class LiveExchangeGateway implements ExchangeGateway {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private readonly settlementClient: any;
   private readonly traderAddress: string | null;
+  private readonly onInfraAlert:
+    | ((alert: {
+        code: string;
+        severity: "warning" | "error";
+        source: string;
+        message: string;
+        details?: Record<string, unknown> | undefined;
+      }) => void)
+    | null;
+  private warnedRedeemUnsupported = false;
+  private warnedMergeUnsupported = false;
+  private readonly recentRedeemSubmissions = new Map<string, number>();
+  private readonly recentInfraAlerts = new Map<string, number>();
 
   constructor(config: LiveExchangeConfig) {
     this.client = config.client;
+    this.settlementClient = config.settlementClient ?? null;
     this.traderAddress = config.traderAddress?.trim().toLowerCase() ?? null;
+    this.onInfraAlert = config.onInfraAlert ?? null;
   }
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -161,9 +210,50 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   async redeemPositions(conditionIds: string[]): Promise<void> {
+    const settlementExecute = this.getSettlementExecuteMethod();
+    if (settlementExecute) {
+      const requests = await this.buildRedeemRequests(conditionIds);
+      if (requests.length === 0) return;
+
+      try {
+        const response = await settlementExecute(
+          requests.map((request) => request.tx),
+          `redeem positions: ${requests.map((request) => request.conditionId).join(",")}`,
+        );
+        const submittedAt = Date.now();
+        for (const request of requests) {
+          this.recentRedeemSubmissions.set(request.conditionId, submittedAt);
+        }
+        this.observeSettlementExecution(response, requests);
+      } catch (e) {
+        this.reportInfraAlert(e);
+        console.error(
+          `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
+          e,
+        );
+      }
+      return;
+    }
+
+    const redeemOne = this.getClientMethod("postRedeem") ?? this.getClientMethod("redeem");
+    const redeemBatch = this.getClientMethod("redeemPositions");
+    if (!redeemOne && !redeemBatch) {
+      this.warnUnsupportedSettlement("redeem");
+      return;
+    }
+
+    if (redeemBatch) {
+      try {
+        await redeemBatch(conditionIds);
+      } catch (e) {
+        console.error(`Failed to redeem conditions ${conditionIds.join(",")}:`, e);
+      }
+      return;
+    }
+
     for (const conditionId of conditionIds) {
       try {
-        await this.client.postRedeem({ conditionId });
+        await redeemOne!({ conditionId });
       } catch (e) {
         // Log but don't fail the batch
         console.error(`Failed to redeem ${conditionId}:`, e);
@@ -171,14 +261,31 @@ export class LiveExchangeGateway implements ExchangeGateway {
     }
   }
 
+  hasPendingRedeemSubmission(conditionId: string): boolean {
+    return this.wasRedeemRecentlySubmitted(conditionId);
+  }
+
   async mergePositions(conditionIds: string[]): Promise<void> {
-    // Basic implementation: attempt to merge everything available for these conditions.
-    // In a real scenario, we'd need the exact amount, but many SDKs provide a 'merge all' helper
-    // or we'd fetch balances first. For alignment, we just expose the hook.
+    const mergeOne = this.getClientMethod("postMerge") ?? this.getClientMethod("merge");
+    const mergeBatch = this.getClientMethod("mergePositions");
+    if (!mergeOne && !mergeBatch) {
+      this.warnUnsupportedSettlement("merge");
+      return;
+    }
+
+    if (mergeBatch) {
+      try {
+        await mergeBatch(conditionIds);
+      } catch (e) {
+        console.error(`Failed to merge conditions ${conditionIds.join(",")}:`, e);
+      }
+      return;
+    }
+
     for (const conditionId of conditionIds) {
       try {
-        // Note: postMerge usually requires amount. This is a placeholder for the subsystem.
-        // await (this.client as any).postMerge({ conditionId, amount: ... });
+        // Some clients expose merge helpers that accept just the condition context.
+        await mergeOne!({ conditionId });
       } catch (e) {
         console.error(`Failed to merge ${conditionId}:`, e);
       }
@@ -193,6 +300,180 @@ export class LiveExchangeGateway implements ExchangeGateway {
     } catch {
       return { ok: false, latencyMs: Date.now() - start };
     }
+  }
+
+  private getClientMethod(name: string): ((arg: unknown) => Promise<unknown>) | null {
+    const candidate = Reflect.get(this.client, name);
+    return typeof candidate === "function"
+      ? (candidate as (arg: unknown) => Promise<unknown>).bind(this.client)
+      : null;
+  }
+
+  private getSettlementExecuteMethod():
+    | ((txns: Array<{ to: string; data: string; value: string }>, metadata?: string) => Promise<unknown>)
+    | null {
+    if (!this.settlementClient || typeof this.settlementClient !== "object") return null;
+    const candidate = Reflect.get(this.settlementClient, "execute");
+    return typeof candidate === "function"
+      ? (candidate as (
+          txns: Array<{ to: string; data: string; value: string }>,
+          metadata?: string,
+        ) => Promise<unknown>).bind(this.settlementClient)
+      : null;
+  }
+
+  private async buildRedeemRequests(conditionIds: string[]): Promise<SettlementRequest[]> {
+    const requests: SettlementRequest[] = [];
+    for (const conditionId of conditionIds) {
+      if (this.wasRedeemRecentlySubmitted(conditionId)) continue;
+      const request = await this.buildRedeemRequest(conditionId);
+      if (request) requests.push(request);
+    }
+    return requests;
+  }
+
+  private wasRedeemRecentlySubmitted(conditionId: string): boolean {
+    const lastSubmittedAt = this.recentRedeemSubmissions.get(conditionId);
+    if (!lastSubmittedAt) return false;
+    if (Date.now() - lastSubmittedAt < RECENT_SETTLEMENT_SUBMISSION_TTL_MS) return true;
+    this.recentRedeemSubmissions.delete(conditionId);
+    return false;
+  }
+
+  private async buildRedeemRequest(conditionId: string): Promise<SettlementRequest | null> {
+    const market = await this.client.getMarket(conditionId);
+    const tokenIds = this.extractMarketTokenIds(market);
+    if (tokenIds.length === 0) return null;
+
+    const chainId = this.getChainId();
+    const contracts = getContractConfig(chainId);
+    const balances = await Promise.all(tokenIds.map((tokenId) => this.getRawPositionBalance(tokenId)));
+
+    if (balances.every((balance) => balance === 0n)) {
+      return null;
+    }
+
+    const isNegRisk = this.extractNegRisk(market);
+    if (isNegRisk) {
+      const data = encodeFunctionData({
+        abi: NEG_RISK_REDEEM_ABI,
+        functionName: "redeemPositions",
+        args: [conditionId as `0x${string}`, balances],
+      });
+      return {
+        conditionId,
+        tx: {
+          to: contracts.negRiskAdapter,
+          data,
+          value: "0",
+        },
+      };
+    }
+
+    const indexSets = tokenIds.map((_, index) => 1n << BigInt(index));
+    const data = encodeFunctionData({
+      abi: CTF_REDEEM_ABI,
+      functionName: "redeemPositions",
+      args: [
+        contracts.collateral as `0x${string}`,
+        zeroHash,
+        conditionId as `0x${string}`,
+        indexSets,
+      ],
+    });
+
+    return {
+      conditionId,
+      tx: {
+        to: contracts.conditionalTokens,
+        data,
+        value: "0",
+      },
+    };
+  }
+
+  private extractMarketTokenIds(raw: unknown): string[] {
+    if (!raw || typeof raw !== "object") return [];
+    const tokens = Reflect.get(raw, "tokens");
+    if (!Array.isArray(tokens)) return [];
+    return tokens
+      .map((token) => {
+        if (!token || typeof token !== "object") return null;
+        const tokenId = Reflect.get(token, "token_id");
+        return typeof tokenId === "string" && tokenId.length > 0 ? tokenId : null;
+      })
+      .filter((tokenId): tokenId is string => tokenId !== null);
+  }
+
+  private extractNegRisk(raw: unknown): boolean {
+    if (!raw || typeof raw !== "object") return false;
+    const snakeCase = Reflect.get(raw, "neg_risk");
+    if (typeof snakeCase === "boolean") return snakeCase;
+    const camelCase = Reflect.get(raw, "negRisk");
+    return typeof camelCase === "boolean" ? camelCase : false;
+  }
+
+  private getChainId(): number {
+    const chainId = Reflect.get(this.client, "chainId");
+    return typeof chainId === "number" ? chainId : 137;
+  }
+
+  private async getRawPositionBalance(tokenId: string): Promise<bigint> {
+    const raw = await this.client.getBalanceAllowance({
+      asset_type: "CONDITIONAL",
+      token_id: tokenId,
+    });
+    const balance = Reflect.get(raw, "balance");
+    return typeof balance === "string" || typeof balance === "number" ? BigInt(balance) : 0n;
+  }
+
+  private observeSettlementExecution(response: unknown, requests: SettlementRequest[]): void {
+    if (!response || typeof response !== "object") return;
+    const waitForConfirmation = Reflect.get(response, "wait");
+    if (typeof waitForConfirmation !== "function") return;
+
+    const clearPending = () => {
+      for (const request of requests) {
+        this.recentRedeemSubmissions.delete(request.conditionId);
+      }
+    };
+
+    const confirmation = (waitForConfirmation as () => Promise<unknown>)
+      .call(response)
+      .then(clearPending, clearPending);
+
+    void Promise.race([confirmation, sleep(SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS)]).catch(() => {
+      // The full wait promise still clears pending state when it eventually resolves.
+    });
+  }
+
+  private warnUnsupportedSettlement(kind: "redeem" | "merge"): void {
+    if (kind === "redeem") {
+      if (this.warnedRedeemUnsupported) return;
+      this.warnedRedeemUnsupported = true;
+    } else {
+      if (this.warnedMergeUnsupported) return;
+      this.warnedMergeUnsupported = true;
+    }
+
+    process.emitWarning(
+      `LiveExchangeGateway ${kind}Positions skipped: installed @polymarket/clob-client does not expose a ${kind} API`,
+      {
+        code: kind === "redeem" ? "PLANKTON_REDEEM_UNSUPPORTED" : "PLANKTON_MERGE_UNSUPPORTED",
+      },
+    );
+  }
+
+  private reportInfraAlert(error: unknown): void {
+    if (!this.onInfraAlert) return;
+    const alert = classifySettlementInfraAlert(error);
+    if (!alert) return;
+
+    const lastRaisedAt = this.recentInfraAlerts.get(alert.code);
+    if (lastRaisedAt && Date.now() - lastRaisedAt < RECENT_SETTLEMENT_SUBMISSION_TTL_MS) return;
+
+    this.recentInfraAlerts.set(alert.code, Date.now());
+    this.onInfraAlert(alert);
   }
 }
 
@@ -216,4 +497,72 @@ function extractOrderId(raw: unknown): string | null {
 
   const orderId = candidate.trim();
   return orderId.length > 0 ? orderId : null;
+}
+
+function classifySettlementInfraAlert(error: unknown):
+  | {
+      code: string;
+      severity: "warning" | "error";
+      source: string;
+      message: string;
+      details?: Record<string, unknown> | undefined;
+    }
+  | null {
+  const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+  const normalized = rawMessage.toLowerCase();
+
+  if (
+    normalized.includes("429") ||
+    normalized.includes("rate limit") ||
+    normalized.includes("throughput limit") ||
+    normalized.includes("exceeded its compute units")
+  ) {
+    return {
+      code: "POLYGON_RPC_RATE_LIMITED",
+      severity: "error",
+      source: "polygon-rpc",
+      message: "Polygon RPC rate limited — settlement may stall until quota resets.",
+      details: { rawMessage },
+    };
+  }
+
+  if (
+    normalized.includes("503") ||
+    normalized.includes("no healthy upstream") ||
+    normalized.includes("http request failed")
+  ) {
+    return {
+      code: "POLYGON_RPC_UNAVAILABLE",
+      severity: "error",
+      source: "polygon-rpc",
+      message: "Polygon RPC unavailable — settlement retries are degraded.",
+      details: { rawMessage },
+    };
+  }
+
+  if (normalized.includes("401") || normalized.includes("invalid authorization")) {
+    return {
+      code: "POLYMARKET_RELAYER_AUTH",
+      severity: "error",
+      source: "polymarket-relayer",
+      message: "Polymarket relayer authorization failed — settlement submissions are blocked.",
+      details: { rawMessage },
+    };
+  }
+
+  if (normalized.includes("connection error") || normalized.includes("request error")) {
+    return {
+      code: "POLYMARKET_RELAYER_UNAVAILABLE",
+      severity: "warning",
+      source: "polymarket-relayer",
+      message: "Polymarket relayer unavailable — settlement will retry automatically.",
+      details: { rawMessage },
+    };
+  }
+
+  return null;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
