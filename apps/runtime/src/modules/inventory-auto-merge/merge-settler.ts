@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type {
   PositionRepository,
   InventoryLotRepository,
+  MergeLedgerRepository,
   Position,
   PositionId,
   FamilyId,
@@ -10,19 +11,14 @@ import type { MergeCandidate } from "./merge-candidate-service.js";
 
 export class MergeSettler {
   private readonly db: Database.Database;
-  private readonly mergeInsert: Database.Statement;
 
   constructor(
     private readonly positionRepo: PositionRepository,
     private readonly lotRepo: InventoryLotRepository,
+    private readonly mergeLedgerRepo: MergeLedgerRepository,
     db: Database.Database,
   ) {
     this.db = db;
-    this.mergeInsert = db.prepare(
-      `INSERT INTO merge_ledger
-         (merge_id, condition_id, family_id, merged_amount, spread_pnl, merged_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    );
   }
 
   applyMerge(candidate: MergeCandidate): void {
@@ -48,16 +44,14 @@ export class MergeSettler {
       const spreadPnl = candidate.mergeAmount - totalCost;
 
       // 4. Record in merge_ledger
-      const mergeId = `merge-${candidate.conditionId}-${Date.now()}`;
-      const mergedAt = new Date().toISOString();
-      this.mergeInsert.run(
-        mergeId,
-        candidate.conditionId,
-        String(candidate.familyId),
-        candidate.mergeAmount,
+      this.mergeLedgerRepo.save({
+        mergeId: `merge-${candidate.conditionId}-${Date.now()}`,
+        conditionId: candidate.conditionId,
+        familyId: String(candidate.familyId),
+        mergedAmount: candidate.mergeAmount,
         spreadPnl,
-        mergedAt,
-      );
+        mergedAt: new Date().toISOString(),
+      });
 
       // 5. Update positions
       this.updatePositionAfterMerge(yesPos, candidate.mergeAmount, yesCostBasis, spreadPnl / 2);

@@ -631,3 +631,27 @@ export interface FamilyProfileRuntimeState {
   firstNegativeTailAt: string | null;
   updatedAt: string;
 }
+
+export interface SettlementRecord {
+  settlementId: string;
+  conditionId: string;
+  positionId: string;
+  tokenId: string;
+  familyId: string;
+  resolution: string;
+  settlementPrice: number;
+  size: number;
+  delta: number;
+  settledAt: string;
+  createdAt?: string;
+}
+
+export interface MergeRecord {
+  mergeId: string;
+  conditionId: string;
+  familyId: string;
+  mergedAmount: number;
+  spreadPnl: number;
+  mergedAt: string;
+  createdAt?: string;
+}

@@ -17,6 +17,7 @@ describe("InventoryManagerModule", () => {
   let orderRepo: OrderRepository;
   let marketRepo: MarketRepository;
   let lotRepo: InventoryLotRepository;
+  let mergeLedgerRepo: MergeLedgerRepository;
   let db: any;
   let log: Logger;
   let mod: InventoryManagerModule;
@@ -32,6 +33,7 @@ describe("InventoryManagerModule", () => {
     orderRepo = { findByTokenId: vi.fn().mockReturnValue([]) } as any;
     marketRepo = { findByTokenId: vi.fn() } as any;
     lotRepo = { consumeFifo: vi.fn() } as any;
+    mergeLedgerRepo = { save: vi.fn(), findByFamily: vi.fn() } as any;
     db = { prepare: vi.fn().mockReturnValue({ run: vi.fn() }), transaction: vi.fn((cb) => cb) } as any;
     log = { info: vi.fn(), error: vi.fn() } as any;
 
@@ -42,6 +44,7 @@ describe("InventoryManagerModule", () => {
       orderRepo,
       marketRepo,
       lotRepo,
+      mergeLedgerRepo,
       db,
       log,
     });

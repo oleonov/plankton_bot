@@ -36,6 +36,7 @@ export { SqlitePreflightReportRepository } from "./repositories/preflight-report
 export { SqliteServiceHeartbeatRepository } from "./repositories/service-heartbeat-repository.js";
 export { SqliteConfigImportRepository } from "./repositories/config-import-repository.js";
 export { SqliteFamilyConfigMetaRepository } from "./repositories/family-config-meta-repository.js";
+export { SqliteMergeLedgerRepository } from "./repositories/merge-ledger-repository.js";
 export { SqliteFamilyProfileRollupRepository } from "./repositories/family-profile-rollup-repository.js";
 export { withImmediate } from "./immediate-transaction.js";
 export { readFamilyLiveness } from "./family-liveness.js";

@@ -18,6 +18,7 @@ export interface InventoryManagerDeps {
   orderRepo: OrderRepository;
   marketRepo: MarketRepository;
   lotRepo: InventoryLotRepository;
+  mergeLedgerRepo: MergeLedgerRepository;
   db: Database.Database;
   log: Logger;
   sweepIntervalMs?: number;
@@ -36,7 +37,12 @@ export class InventoryManagerModule {
       deps.orderRepo,
       deps.marketRepo,
     );
-    this.settler = new MergeSettler(deps.positionRepo, deps.lotRepo, deps.db);
+    this.settler = new MergeSettler(
+      deps.positionRepo,
+      deps.lotRepo,
+      deps.mergeLedgerRepo,
+      deps.db,
+    );
   }
 
   public async start(): Promise<void> {

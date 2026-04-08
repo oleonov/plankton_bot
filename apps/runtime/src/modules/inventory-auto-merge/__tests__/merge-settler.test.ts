@@ -10,6 +10,7 @@ import type { Database } from "better-sqlite3";
 describe("MergeSettler", () => {
   let positionRepo: PositionRepository;
   let lotRepo: InventoryLotRepository;
+  let mergeLedgerRepo: MergeLedgerRepository;
   let db: Database;
   let settler: MergeSettler;
 
@@ -21,11 +22,14 @@ describe("MergeSettler", () => {
     lotRepo = {
       consumeFifo: vi.fn(),
     } as any;
+    mergeLedgerRepo = {
+      save: vi.fn(),
+    } as any;
     db = {
       prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
       transaction: vi.fn((cb) => cb),
     } as any;
-    settler = new MergeSettler(positionRepo, lotRepo, db);
+    settler = new MergeSettler(positionRepo, lotRepo, mergeLedgerRepo, db);
   });
 
   it("applies merge correctly to both positions and lots", () => {
