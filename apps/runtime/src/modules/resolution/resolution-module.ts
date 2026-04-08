@@ -163,6 +163,16 @@ export class ResolutionModule implements RuntimeModule {
           this.deps.resolutionRepo.markSettled(resolution.conditionId);
 
           if (!isRetry) {
+            // Replicate PlanktonXD Auto-Redeem: only if at least one target family has autoSettle enabled.
+            const shouldRedeem = resolution.candidates.some((c) => {
+              const bundle = this.deps.rulesProvider.getRule(c.familyId);
+              return !bundle || bundle.rules.tailSuppression.autoSettleResolvedMarkets;
+            });
+
+            if (this.deps.gateway && shouldRedeem) {
+              await this.deps.gateway.redeemPositions([resolution.conditionId]);
+            }
+
             await this.deps.bus.publish("MarketResolved", {
               conditionId: resolution.conditionId,
               tokenIds: resolution.candidates.map((c) => c.tokenId),
@@ -180,6 +190,10 @@ export class ResolutionModule implements RuntimeModule {
         // already redeemed/sold) before allowing ledger settlement.
         const preFilterCount = eligibleCandidates.length;
         if (this.deps.gateway && eligibleCandidates.length > 0) {
+          // Replicate PlanktonXD Auto-Redeem: attempt to redeem winning shares
+          // before checking balances.
+          await this.deps.gateway.redeemPositions([resolution.conditionId]);
+
           eligibleCandidates = await this.filterByZeroBalance(
             eligibleCandidates,
             resolution.conditionId,

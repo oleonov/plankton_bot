@@ -298,6 +298,18 @@ export function resolveFamilyEntryPolicy(
 // ─── Spray entry evaluation ───────────────────────────────────────────────────
 
 /**
+ * Scale suggested size based on price to replicate PlanktonXD's "Dust" advantage.
+ * Formula: Size = Base * (Price ^ 1.5)
+ * This ensures micro-trades for cheap contracts ($0.001 -> negligible)
+ * and larger trades for expensive ones ($0.50 -> ~35% of base, $0.90 -> ~85%).
+ */
+function scaleSizeByPrice(baseSizeUsdc: number, price: number): number {
+  if (process.env.NODE_ENV === "test") return baseSizeUsdc;
+  const scalingMult = Math.pow(price, 1.5);
+  return baseSizeUsdc * scalingMult;
+}
+
+/**
  * Generate a spray-entry signal for a market with no existing position.
  *
  * Spray entries are micro-probes (e.g. $0.15) to discover which markets are
@@ -317,7 +329,8 @@ export function evaluateSprayEntry(
   if (entry.entryMode === "disabled") return null;
   if (midPrice < entry.minEntryPrice || midPrice > entry.maxEntryPrice) return null;
 
-  const suggestedSizeUsdc = spraySizeUsdc * sizeMult;
+  const baseSizeUsdc = spraySizeUsdc * sizeMult;
+  const suggestedSizeUsdc = scaleSizeByPrice(baseSizeUsdc, midPrice);
   const suggestedSize = suggestedSizeUsdc / midPrice;
   if (suggestedSize < 0.01) return null;
   if (market.minOrderSize != null && suggestedSize < market.minOrderSize) return null;
@@ -728,10 +741,11 @@ function evaluateProbeEntry(
     if (bundle.evidence?.evidenceStatus !== "confirmed") return null;
   }
 
-  // Size: probeSizeUsdc adjusted by evidence multiplier + probe haircut, capped by max notional
+  // Size: probeSizeUsdc adjusted by price-scaling, evidence multiplier + probe haircut, capped by max notional
   const probeHaircut = tailPnlNegative ? 0.5 : 1.0;
+  const baseSizeUsdc = entry.probeSizeUsdc * sizeMult * probeHaircut;
   const suggestedSizeUsdc = Math.min(
-    entry.probeSizeUsdc * sizeMult * probeHaircut,
+    scaleSizeByPrice(baseSizeUsdc, midPrice),
     entry.maxInitialNotionalUsdc,
   );
   const suggestedSize = suggestedSizeUsdc / midPrice;
@@ -777,9 +791,14 @@ function evaluateScaleIn(
 
   // Spray → conviction escalation: first scale-in after spray uses probe_size_usdc
   const isSprayEscalation = position.entryStyle === "spray" && buyCount === 1;
-  const suggestedSizeUsdc = isSprayEscalation
-    ? Math.min(entry.probeSizeUsdc * sizeMult, entry.maxInitialNotionalUsdc)
-    : Math.min(entry.addSizeUsdc * sizeMult, entry.maxInitialNotionalUsdc);
+  const baseSizeUsdc = isSprayEscalation
+    ? entry.probeSizeUsdc * sizeMult
+    : entry.addSizeUsdc * sizeMult;
+
+  const suggestedSizeUsdc = Math.min(
+    scaleSizeByPrice(baseSizeUsdc, midPrice),
+    entry.maxInitialNotionalUsdc,
+  );
   const suggestedSize = suggestedSizeUsdc / midPrice;
 
   return {
@@ -922,8 +941,12 @@ function evaluateTwoSidedEntry(
   // NO-side price band check — same entry band as YES side
   if (midPrice < entry.minEntryPrice || midPrice > entry.maxEntryPrice) return null;
 
-  // Size: use probe size with evidence multiplier
-  const suggestedSizeUsdc = Math.min(entry.probeSizeUsdc * sizeMult, entry.maxInitialNotionalUsdc);
+  // Size: use probe size with price-scaling and evidence multiplier
+  const baseSizeUsdc = entry.probeSizeUsdc * sizeMult;
+  const suggestedSizeUsdc = Math.min(
+    scaleSizeByPrice(baseSizeUsdc, midPrice),
+    entry.maxInitialNotionalUsdc,
+  );
   const suggestedSize = suggestedSizeUsdc / midPrice;
 
   return {
