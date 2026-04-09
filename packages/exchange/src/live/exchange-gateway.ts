@@ -253,6 +253,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         await redeemBatch(conditionIds);
       } catch (e) {
         console.error(`Failed to redeem conditions ${conditionIds.join(",")}:`, e);
+        throw e;
       }
       return;
     }
@@ -261,8 +262,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
       try {
         await redeemOne!({ conditionId });
       } catch (e) {
-        // Log but don't fail the batch
         console.error(`Failed to redeem ${conditionId}:`, e);
+        throw e;
       }
     }
   }
@@ -307,6 +308,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         await mergeBatch(merges.map((m) => m.conditionId));
       } catch (e) {
         console.error(`Failed to merge conditions ${merges.map((m) => m.conditionId).join(",")}:`, e);
+        throw e;
       }
       return;
     }
@@ -316,6 +318,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         await mergeOne!({ conditionId: merge.conditionId, amount: merge.amount });
       } catch (e) {
         console.error(`Failed to merge ${merge.conditionId}:`, e);
+        throw e;
       }
     }
   }

@@ -33,6 +33,7 @@ export class InventoryManagerModule implements RuntimeModule {
   private interval: NodeJS.Timeout | null = null;
   private isSweeping = false;
   private debounceTimer: NodeJS.Timeout | null = null;
+  private unsubs: Array<() => void> = [];
 
   constructor(private readonly deps: InventoryManagerDeps) {
     this.candidateService = new MergeCandidateService(
@@ -55,19 +56,25 @@ export class InventoryManagerModule implements RuntimeModule {
     this.deps.log.info({ intervalMs }, "inventory manager started");
 
     // Debounced reactive hints
-    this.deps.bus.subscribe("PositionUpdated", async () => {
-      this.debouncedSweep();
-    });
-    this.deps.bus.subscribe("FillReceived", async (payload) => {
-      if (payload.side === "buy") {
+    this.unsubs.push(
+      this.deps.bus.subscribe("PositionUpdated", async () => {
         this.debouncedSweep();
-      }
-    });
+      }),
+    );
+    this.unsubs.push(
+      this.deps.bus.subscribe("FillReceived", async (payload) => {
+        if (payload.side === "buy") {
+          this.debouncedSweep();
+        }
+      }),
+    );
   }
 
   public async stop(): Promise<void> {
     if (this.interval) clearInterval(this.interval);
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
+    for (const unsub of this.unsubs) unsub();
+    this.unsubs = [];
   }
 
   public async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
