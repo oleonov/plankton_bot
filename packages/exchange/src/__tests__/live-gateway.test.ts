@@ -531,6 +531,27 @@ describe("LiveExchangeGateway", () => {
     );
   });
 
+  it("mergePositions does not use batch fallback that drops merge amount", async () => {
+    const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
+    const mergeBatch = vi.fn().mockResolvedValue(undefined);
+    Object.assign(client as Record<string, unknown>, {
+      mergePositions: mergeBatch,
+    });
+
+    await expect(
+      gw.mergePositions([
+        { conditionId: "cond-1", amount: 10 },
+        { conditionId: "cond-2", amount: 20 },
+      ]),
+    ).resolves.toBeUndefined();
+
+    expect(mergeBatch).not.toHaveBeenCalled();
+    expect(emitWarning).toHaveBeenCalledWith(
+      expect.stringContaining("mergePositions skipped"),
+      expect.objectContaining({ code: "PLANKTON_MERGE_UNSUPPORTED" }),
+    );
+  });
+
   it("healthCheck returns ok on success", async () => {
     client.getOk.mockResolvedValue("OK");
     const health = await gw.healthCheck();

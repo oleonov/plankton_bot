@@ -297,22 +297,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
     // Fallback: use client merge if available
     const mergeOne = this.getClientMethod("postMerge") ?? this.getClientMethod("merge");
-    const mergeBatch = this.getClientMethod("mergePositions");
-    if (!mergeOne && !mergeBatch) {
+    if (!mergeOne) {
       this.warnUnsupportedSettlement("merge");
-      return;
-    }
-
-    if (mergeBatch) {
-      try {
-        await mergeBatch(merges.map((m) => m.conditionId));
-      } catch (e) {
-        console.error(
-          `Failed to merge conditions ${merges.map((m) => m.conditionId).join(",")}:`,
-          e,
-        );
-        throw e;
-      }
       return;
     }
 
