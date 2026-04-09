@@ -44,7 +44,9 @@ function createMockGateway(): ExchangeGateway {
     getBalances: vi.fn<() => Promise<ExchangeBalance[]>>().mockResolvedValue([]),
     getPositionBalance: vi.fn<(tokenId: TokenId) => Promise<number>>().mockResolvedValue(0),
     redeemPositions: vi.fn<(conditionIds: string[]) => Promise<void>>().mockResolvedValue(),
-    mergePositions: vi.fn<(conditionIds: string[]) => Promise<void>>().mockResolvedValue(),
+    mergePositions: vi
+      .fn<(merges: { conditionId: string; amount: number }[]) => Promise<void>>()
+      .mockResolvedValue(),
     healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
   };
 }

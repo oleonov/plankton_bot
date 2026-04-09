@@ -594,6 +594,23 @@ export interface SwitchRequestRepository {
   updateState(switchId: SwitchId, state: SwitchState, error?: string | null): void;
 }
 
+// ─── SettlementLedgerRepository ─────────────────────────────────────────
+
+export interface SettlementLedgerRepository {
+  save(settlement: import("./types.js").SettlementRecord): void;
+  findByFamily(familyId: FamilyId): import("./types.js").SettlementRecord[];
+}
+
+// ─── MergeLedgerRepository ──────────────────────────────────────────────
+
+export interface MergeLedgerRepository {
+  /** Record a completed inventory merge action. */
+  save(merge: import("./types.js").MergeRecord): void;
+
+  /** Find merge records for a specific family. */
+  findByFamily(familyId: FamilyId): import("./types.js").MergeRecord[];
+}
+
 // ─── PreflightReportRepository ──────────────────────────────────────────
 
 export interface PreflightReportRepository {

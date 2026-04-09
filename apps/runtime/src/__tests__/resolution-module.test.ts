@@ -195,7 +195,9 @@ function createMockGateway(balanceByToken?: Record<string, number>): ExchangeGat
     getBalances: vi.fn().mockResolvedValue([]),
     redeemPositions: vi.fn().mockResolvedValue(undefined),
     hasPendingRedeemSubmission: vi.fn().mockReturnValue(false),
-    mergePositions: vi.fn().mockResolvedValue(undefined),
+    mergePositions: vi
+      .fn<(merges: { conditionId: string; amount: number }[]) => Promise<void>>()
+      .mockResolvedValue(),
     healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 0 }),
   } as unknown as ExchangeGateway;
 }

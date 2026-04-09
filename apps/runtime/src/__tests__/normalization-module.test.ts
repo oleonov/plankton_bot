@@ -37,6 +37,7 @@ function makeNormalizedMarket(overrides?: Partial<NormalizedMarket>): Normalized
     eventSlug: null,
     question: "Will BTC go above 100k?",
     outcome: "YES",
+    outcomeIndex: 0,
     familyId: null,
     familyKey: null,
     regime: null,

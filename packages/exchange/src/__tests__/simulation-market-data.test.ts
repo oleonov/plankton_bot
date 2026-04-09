@@ -7,8 +7,8 @@ function makeMarket(overrides?: Partial<ClobMarket>): ClobMarket {
   return {
     conditionId: "cond-1",
     tokens: [
-      { tokenId: "tok-yes", outcome: "Yes" },
-      { tokenId: "tok-no", outcome: "No" },
+      { tokenId: "tok-yes", outcome: "Yes", outcomeIndex: 0 },
+      { tokenId: "tok-no", outcome: "No", outcomeIndex: 1 },
     ],
     question: "Will it rain?",
     slug: "will-it-rain",

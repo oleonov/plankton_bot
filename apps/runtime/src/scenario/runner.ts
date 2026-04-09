@@ -300,6 +300,7 @@ async function executeScenario(
         eventSlug: clobMarket.eventSlug ?? null,
         question: clobMarket.question,
         outcome: token.outcome,
+        outcomeIndex: token.outcomeIndex ?? null,
         familyId: matched?.identity.familyId ?? null,
         familyKey: matched?.identity.familyKey ?? null,
         regime: matched?.identity.regime ?? null,

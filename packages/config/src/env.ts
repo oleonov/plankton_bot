@@ -17,6 +17,7 @@ const envSchema = z
     MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().int().positive().default(120_000),
     STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
+    INVENTORY_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
     EXECUTION_MAX_CONCURRENCY: z.coerce.number().int().positive().default(4),
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
@@ -86,6 +87,7 @@ export interface AppConfig {
   marketDataStaleThresholdMs: number;
   strategyScanIntervalMs: number;
   fillPollIntervalMs: number;
+  inventorySweepIntervalMs?: number;
   executionMaxConcurrency: number;
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
@@ -145,6 +147,7 @@ export function loadEnv(envPath?: string): AppConfig {
     marketDataStaleThresholdMs: env.MARKET_DATA_STALE_THRESHOLD_MS,
     strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,
     fillPollIntervalMs: env.FILL_POLL_INTERVAL_MS,
+    inventorySweepIntervalMs: env.INVENTORY_SWEEP_INTERVAL_MS,
     executionMaxConcurrency: env.EXECUTION_MAX_CONCURRENCY,
     polyApiKey: env.POLY_API_KEY,
     polyApiSecret: env.POLY_API_SECRET,

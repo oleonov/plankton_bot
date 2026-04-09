@@ -51,6 +51,9 @@ export interface LiveExchangeConfig {
 const CTF_REDEEM_ABI = parseAbi([
   "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
 ]);
+const CTF_MERGE_ABI = parseAbi([
+  "function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets, uint256 amount)",
+]);
 const NEG_RISK_REDEEM_ABI = parseAbi([
   "function redeemPositions(bytes32 _conditionId, uint256[] _amounts)",
 ]);
@@ -226,13 +229,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
         for (const request of requests) {
           this.recentRedeemSubmissions.set(request.conditionId, submittedAt);
         }
-        this.observeSettlementExecution(response, requests);
+        await this.observeSettlementExecution(response, requests);
       } catch (e) {
         this.reportInfraAlert(e);
         console.error(
           `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
           e,
         );
+        throw e;
       }
       return;
     }
@@ -249,6 +253,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         await redeemBatch(conditionIds);
       } catch (e) {
         console.error(`Failed to redeem conditions ${conditionIds.join(",")}:`, e);
+        throw e;
       }
       return;
     }
@@ -257,8 +262,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
       try {
         await redeemOne!({ conditionId });
       } catch (e) {
-        // Log but don't fail the batch
         console.error(`Failed to redeem ${conditionId}:`, e);
+        throw e;
       }
     }
   }
@@ -267,7 +272,30 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return this.wasRedeemRecentlySubmitted(conditionId);
   }
 
-  async mergePositions(conditionIds: string[]): Promise<void> {
+  async mergePositions(merges: { conditionId: string; amount: number }[]): Promise<void> {
+    const settlementExecute = this.getSettlementExecuteMethod();
+    if (settlementExecute) {
+      const requests = await this.buildMergeRequests(merges);
+      if (requests.length === 0) return;
+
+      try {
+        const response = await settlementExecute(
+          requests.map((request) => request.tx),
+          `merge positions: ${requests.map((request) => request.conditionId).join(",")}`,
+        );
+        await this.observeSettlementExecution(response, requests);
+      } catch (e) {
+        this.reportInfraAlert(e);
+        console.error(
+          `Failed to submit relayer merge for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
+          e,
+        );
+        throw e;
+      }
+      return;
+    }
+
+    // Fallback: use client merge if available
     const mergeOne = this.getClientMethod("postMerge") ?? this.getClientMethod("merge");
     const mergeBatch = this.getClientMethod("mergePositions");
     if (!mergeOne && !mergeBatch) {
@@ -277,19 +305,23 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
     if (mergeBatch) {
       try {
-        await mergeBatch(conditionIds);
+        await mergeBatch(merges.map((m) => m.conditionId));
       } catch (e) {
-        console.error(`Failed to merge conditions ${conditionIds.join(",")}:`, e);
+        console.error(
+          `Failed to merge conditions ${merges.map((m) => m.conditionId).join(",")}:`,
+          e,
+        );
+        throw e;
       }
       return;
     }
 
-    for (const conditionId of conditionIds) {
+    for (const merge of merges) {
       try {
-        // Some clients expose merge helpers that accept just the condition context.
-        await mergeOne!({ conditionId });
+        await mergeOne!({ conditionId: merge.conditionId, amount: merge.amount });
       } catch (e) {
-        console.error(`Failed to merge ${conditionId}:`, e);
+        console.error(`Failed to merge ${merge.conditionId}:`, e);
+        throw e;
       }
     }
   }
@@ -327,6 +359,56 @@ export class LiveExchangeGateway implements ExchangeGateway {
           ) => Promise<unknown>
         ).bind(this.settlementClient)
       : null;
+  }
+
+  private async buildMergeRequests(
+    merges: { conditionId: string; amount: number }[],
+  ): Promise<SettlementRequest[]> {
+    const requests: SettlementRequest[] = [];
+    for (const merge of merges) {
+      try {
+        const request = await this.buildMergeRequest(merge.conditionId, merge.amount);
+        if (request) requests.push(request);
+      } catch (e) {
+        console.error(`Failed to build merge request for condition ${merge.conditionId}:`, e);
+      }
+    }
+    return requests;
+  }
+
+  private async buildMergeRequest(
+    conditionId: string,
+    amount: number,
+  ): Promise<SettlementRequest | null> {
+    const market = await this.client.getMarket(conditionId);
+    const tokenIds = this.extractMarketTokenIds(market);
+    if (tokenIds.length === 0) return null;
+
+    const chainId = this.getChainId();
+    const contracts = getContractConfig(chainId);
+
+    // Binary markets: YES/NO mapping assumed to be index 0 and 1
+    const indexSets = tokenIds.map((_, index) => 1n << BigInt(index));
+    const data = encodeFunctionData({
+      abi: CTF_MERGE_ABI,
+      functionName: "mergePositions",
+      args: [
+        contracts.collateral as `0x${string}`,
+        zeroHash,
+        conditionId as `0x${string}`,
+        indexSets,
+        BigInt(Math.floor(amount * ATOMIC_UNIT_DIVISOR)),
+      ],
+    });
+
+    return {
+      conditionId,
+      tx: {
+        to: contracts.conditionalTokens,
+        data,
+        value: "0",
+      },
+    };
   }
 
   private async buildRedeemRequests(conditionIds: string[]): Promise<SettlementRequest[]> {
@@ -436,7 +518,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return typeof balance === "string" || typeof balance === "number" ? BigInt(balance) : 0n;
   }
 
-  private observeSettlementExecution(response: unknown, requests: SettlementRequest[]): void {
+  private async observeSettlementExecution(
+    response: unknown,
+    requests: SettlementRequest[],
+  ): Promise<void> {
     if (!response || typeof response !== "object") return;
     const waitForConfirmation = Reflect.get(response, "wait");
     if (typeof waitForConfirmation !== "function") return;
@@ -447,13 +532,23 @@ export class LiveExchangeGateway implements ExchangeGateway {
       }
     };
 
-    const confirmation = (waitForConfirmation as () => Promise<unknown>)
-      .call(response)
-      .then(clearPending, clearPending);
+    try {
+      const confirmation = (waitForConfirmation as () => Promise<unknown>).call(response);
+      const result = await Promise.race([
+        confirmation,
+        sleep(SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS).then(() => {
+          throw new Error(
+            `Settlement confirmation timed out after ${SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS}ms`,
+          );
+        }),
+      ]);
 
-    void Promise.race([confirmation, sleep(SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS)]).catch(() => {
-      // The full wait promise still clears pending state when it eventually resolves.
-    });
+      if (!result) {
+        throw new Error("Settlement transaction failed or returned empty result");
+      }
+    } finally {
+      clearPending();
+    }
   }
 
   private warnUnsupportedSettlement(kind: "redeem" | "merge"): void {

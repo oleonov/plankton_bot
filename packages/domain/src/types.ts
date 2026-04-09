@@ -66,6 +66,7 @@ export interface Market {
   eventSlug: string | null;
   question: string;
   outcome: string;
+  outcomeIndex?: number | null;
   familyId: FamilyId | null;
   familyKey: string | null;
   regime: Regime | null;
@@ -421,6 +422,7 @@ export interface NormalizedMarket {
   eventSlug: string | null;
   question: string;
   outcome: string;
+  outcomeIndex?: number | null;
   familyId: FamilyId | null;
   familyKey: string | null;
   regime: Regime | null;
@@ -630,4 +632,28 @@ export interface FamilyProfileRuntimeState {
   derivedModeReason: string | null;
   firstNegativeTailAt: string | null;
   updatedAt: string;
+}
+
+export interface SettlementRecord {
+  settlementId: string;
+  conditionId: string;
+  positionId: string;
+  tokenId: string;
+  familyId: string;
+  resolution: string;
+  settlementPrice: number;
+  size: number;
+  delta: number;
+  settledAt: string;
+  createdAt?: string;
+}
+
+export interface MergeRecord {
+  mergeId: string;
+  conditionId: string;
+  familyId: string;
+  mergedAmount: number;
+  spreadPnl: number;
+  mergedAt: string;
+  createdAt?: string;
 }

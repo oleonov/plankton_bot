@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS markets (
   slug          TEXT NOT NULL,
   question      TEXT NOT NULL,
   outcome       TEXT NOT NULL,
+  outcome_index INTEGER,
   family_id     TEXT,
   family_key    TEXT,
   regime        TEXT,
@@ -310,3 +311,19 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
   captured_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_profile_ts ON portfolio_snapshots(profile, captured_at DESC);
+
+-- ═══════════ MERGE LEDGER ═══════════
+-- From 021_merge_ledger.sql
+
+CREATE TABLE IF NOT EXISTS merge_ledger (
+  merge_id       TEXT PRIMARY KEY,
+  condition_id   TEXT NOT NULL,
+  family_id      TEXT NOT NULL,
+  merged_amount  REAL NOT NULL,
+  spread_pnl     REAL NOT NULL,
+  merged_at      TEXT NOT NULL,
+  created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_merge_ledger_family ON merge_ledger(family_id);
+CREATE INDEX IF NOT EXISTS idx_merge_ledger_merged_at ON merge_ledger(merged_at);
