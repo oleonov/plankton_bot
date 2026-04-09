@@ -7,8 +7,9 @@ import type {
   OrderRepository,
   MarketRepository,
   InventoryLotRepository,
-  Logger,
+  MergeLedgerRepository,
 } from "@plankton/domain";
+import type { Logger } from "../../../logger.js";
 
 describe("InventoryManagerModule", () => {
   let bus: EventBus;
@@ -16,6 +17,7 @@ describe("InventoryManagerModule", () => {
   let positionRepo: PositionRepository;
   let orderRepo: OrderRepository;
   let marketRepo: MarketRepository;
+  let fillRepo: import("@plankton/domain").FillRepository;
   let lotRepo: InventoryLotRepository;
   let mergeLedgerRepo: MergeLedgerRepository;
   let db: any;
@@ -32,6 +34,7 @@ describe("InventoryManagerModule", () => {
     } as any;
     orderRepo = { findByTokenId: vi.fn().mockReturnValue([]) } as any;
     marketRepo = { findByTokenId: vi.fn() } as any;
+    fillRepo = { findByOrderId: vi.fn().mockReturnValue([]) } as any;
     lotRepo = { consumeFifo: vi.fn() } as any;
     mergeLedgerRepo = { save: vi.fn(), findByFamily: vi.fn() } as any;
     db = { prepare: vi.fn().mockReturnValue({ run: vi.fn() }), transaction: vi.fn((cb) => cb) } as any;
@@ -43,6 +46,7 @@ describe("InventoryManagerModule", () => {
       positionRepo,
       orderRepo,
       marketRepo,
+      fillRepo,
       lotRepo,
       mergeLedgerRepo,
       db,

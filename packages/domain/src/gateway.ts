@@ -23,6 +23,7 @@ export interface ClobMarket {
     readonly tokenId: string;
     /** "Yes" | "No" as returned by the Polymarket API. */
     readonly outcome: string;
+    readonly outcomeIndex?: number;
   }>;
   readonly question: string;
   readonly slug: string;

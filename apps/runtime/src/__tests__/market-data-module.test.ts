@@ -20,6 +20,7 @@ function makeTrackedMarket(overrides?: Partial<Market>): Market {
     eventSlug: null,
     question: "Will BTC hit 100k?",
     outcome: "YES",
+    outcomeIndex: 0,
     familyId: createFamilyId("fam-btc"),
     familyKey: "btc-above",
     regime: "threshold",

@@ -5,9 +5,11 @@ import type {
   OrderRepository,
   MarketRepository,
   InventoryLotRepository,
-  Logger,
+  MergeLedgerRepository,
+  RuntimeModule,
 } from "@plankton/domain";
 import type Database from "better-sqlite3";
+import type { Logger } from "../../logger.js";
 import { MergeCandidateService } from "./merge-candidate-service.js";
 import { MergeSettler } from "./merge-settler.js";
 
@@ -17,14 +19,15 @@ export interface InventoryManagerDeps {
   positionRepo: PositionRepository;
   orderRepo: OrderRepository;
   marketRepo: MarketRepository;
+  fillRepo: import("@plankton/domain").FillRepository;
   lotRepo: InventoryLotRepository;
   mergeLedgerRepo: MergeLedgerRepository;
   db: Database.Database;
   log: Logger;
-  sweepIntervalMs?: number;
+  sweepIntervalMs?: number | null | undefined;
 }
 
-export class InventoryManagerModule {
+export class InventoryManagerModule implements RuntimeModule {
   private readonly candidateService: MergeCandidateService;
   private readonly settler: MergeSettler;
   private interval: NodeJS.Timeout | null = null;
@@ -36,6 +39,7 @@ export class InventoryManagerModule {
       deps.positionRepo,
       deps.orderRepo,
       deps.marketRepo,
+      deps.fillRepo,
     );
     this.settler = new MergeSettler(
       deps.positionRepo,
@@ -47,24 +51,35 @@ export class InventoryManagerModule {
 
   public async start(): Promise<void> {
     const intervalMs = this.deps.sweepIntervalMs ?? 5 * 60 * 1000;
-    this.interval = setInterval(() => this.sweep(), intervalMs);
+    this.interval = setInterval(() => void this.sweep(), intervalMs);
     this.deps.log.info({ intervalMs }, "inventory manager started");
 
     // Debounced reactive hints
-    this.deps.bus.subscribe("PositionUpdated", () => this.debouncedSweep());
-    this.deps.bus.subscribe("FillReceived", (f) => {
-      if (f.fill.side === "buy") this.debouncedSweep();
+    this.deps.bus.subscribe("PositionUpdated", async () => {
+      this.debouncedSweep();
+    });
+    this.deps.bus.subscribe("FillReceived", async (payload) => {
+      if (payload.side === "buy") {
+        this.debouncedSweep();
+      }
     });
   }
 
-  public stop(): void {
+  public async stop(): Promise<void> {
     if (this.interval) clearInterval(this.interval);
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
   }
 
+  public async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
+    return {
+      ok: true,
+      detail: `last_sweep_active=${this.isSweeping}`,
+    };
+  }
+
   private debouncedSweep(): void {
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => this.sweep(), 5000); // 5s debounce
+    this.debounceTimer = setTimeout(() => void this.sweep(), 5000); // 5s debounce
   }
 
   public async sweep(): Promise<void> {

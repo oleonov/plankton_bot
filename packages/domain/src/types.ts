@@ -66,6 +66,7 @@ export interface Market {
   eventSlug: string | null;
   question: string;
   outcome: string;
+  outcomeIndex?: number | null;
   familyId: FamilyId | null;
   familyKey: string | null;
   regime: Regime | null;
@@ -421,6 +422,7 @@ export interface NormalizedMarket {
   eventSlug: string | null;
   question: string;
   outcome: string;
+  outcomeIndex?: number | null;
   familyId: FamilyId | null;
   familyKey: string | null;
   regime: Regime | null;

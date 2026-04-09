@@ -132,6 +132,7 @@ export class MarketScannerModule implements RuntimeModule {
               eventSlug: clobMarket.eventSlug ?? null,
               question: clobMarket.question,
               outcome: token.outcome,
+              outcomeIndex: token.outcomeIndex ?? null,
               familyId: family.familyId,
               familyKey: family.familyKey,
               regime: family.regime,

@@ -21,6 +21,7 @@ function makeMarket(overrides?: Partial<Market>): Market {
     eventSlug: null,
     question: "Will it rain?",
     outcome: "YES" as const,
+    outcomeIndex: 0,
     familyId: createFamilyId("fam-1"),
     familyKey: "rain-family",
     regime: "threshold",

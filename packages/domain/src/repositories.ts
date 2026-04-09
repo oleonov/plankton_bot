@@ -598,7 +598,7 @@ export interface SwitchRequestRepository {
 
 export interface SettlementLedgerRepository {
   save(settlement: import("./types.js").SettlementRecord): void;
-  findByFamily(familyId: import("./types.js").FamilyId): import("./types.js").SettlementRecord[];
+  findByFamily(familyId: FamilyId): import("./types.js").SettlementRecord[];
 }
 
 // ─── MergeLedgerRepository ──────────────────────────────────────────────
@@ -608,7 +608,7 @@ export interface MergeLedgerRepository {
   save(merge: import("./types.js").MergeRecord): void;
 
   /** Find merge records for a specific family. */
-  findByFamily(familyId: import("./types.js").FamilyId): import("./types.js").MergeRecord[];
+  findByFamily(familyId: FamilyId): import("./types.js").MergeRecord[];
 }
 
 // ─── PreflightReportRepository ──────────────────────────────────────────

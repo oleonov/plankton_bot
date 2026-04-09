@@ -87,7 +87,7 @@ export interface AppConfig {
   marketDataStaleThresholdMs: number;
   strategyScanIntervalMs: number;
   fillPollIntervalMs: number;
-  inventorySweepIntervalMs: number;
+  inventorySweepIntervalMs?: number;
   executionMaxConcurrency: number;
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;

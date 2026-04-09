@@ -205,9 +205,10 @@ export function mapTradeToPersonalFills(
 
 export function mapMarket(raw: Record<string, unknown>): ClobMarket {
   const tokens = Array.isArray(raw.tokens)
-    ? (raw.tokens as Array<Record<string, unknown>>).map((t) => ({
+    ? (raw.tokens as Array<Record<string, unknown>>).map((t, i) => ({
         tokenId: String(t.token_id ?? ""),
         outcome: String(t.outcome ?? ""),
+        outcomeIndex: i,
       }))
     : [];
 
@@ -302,6 +303,7 @@ export function mapGammaMarket(raw: Record<string, unknown>, eventSlug?: string)
   const tokens = clobTokenIds.map((tokenId, i) => ({
     tokenId,
     outcome: outcomes[i] ?? "",
+    outcomeIndex: i,
   }));
 
   return {

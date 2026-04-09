@@ -229,13 +229,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
         for (const request of requests) {
           this.recentRedeemSubmissions.set(request.conditionId, submittedAt);
         }
-        this.observeSettlementExecution(response, requests);
+        await this.observeSettlementExecution(response, requests);
       } catch (e) {
         this.reportInfraAlert(e);
         console.error(
           `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
           e,
         );
+        throw e;
       }
       return;
     }
@@ -281,14 +282,15 @@ export class LiveExchangeGateway implements ExchangeGateway {
           requests.map((request) => request.tx),
           `merge positions: ${requests.map((request) => request.conditionId).join(",")}`,
         );
-        this.observeSettlementExecution(response, requests);
-      } catch (e) {
+        await this.observeSettlementExecution(response, requests);
+        } catch (e) {
         this.reportInfraAlert(e);
         console.error(
           `Failed to submit relayer merge for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
           e,
         );
-      }
+        throw e;
+        }
       return;
     }
 
@@ -510,7 +512,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return typeof balance === "string" || typeof balance === "number" ? BigInt(balance) : 0n;
   }
 
-  private observeSettlementExecution(response: unknown, requests: SettlementRequest[]): void {
+  private async observeSettlementExecution(
+    response: unknown,
+    requests: SettlementRequest[],
+  ): Promise<void> {
     if (!response || typeof response !== "object") return;
     const waitForConfirmation = Reflect.get(response, "wait");
     if (typeof waitForConfirmation !== "function") return;
@@ -521,13 +526,21 @@ export class LiveExchangeGateway implements ExchangeGateway {
       }
     };
 
-    const confirmation = (waitForConfirmation as () => Promise<unknown>)
-      .call(response)
-      .then(clearPending, clearPending);
+    try {
+      const confirmation = (waitForConfirmation as () => Promise<unknown>).call(response);
+      const result = await Promise.race([
+        confirmation,
+        sleep(SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS).then(() => {
+          throw new Error(`Settlement confirmation timed out after ${SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS}ms`);
+        }),
+      ]);
 
-    void Promise.race([confirmation, sleep(SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS)]).catch(() => {
-      // The full wait promise still clears pending state when it eventually resolves.
-    });
+      if (!result) {
+        throw new Error("Settlement transaction failed or returned empty result");
+      }
+    } finally {
+      clearPending();
+    }
   }
 
   private warnUnsupportedSettlement(kind: "redeem" | "merge"): void {

@@ -2,6 +2,7 @@ import type {
   PositionRepository,
   OrderRepository,
   MarketRepository,
+  FillRepository,
   Position,
   TokenId,
   FamilyId,
@@ -23,6 +24,7 @@ export class MergeCandidateService {
     private readonly positionRepo: PositionRepository,
     private readonly orderRepo: OrderRepository,
     private readonly marketRepo: MarketRepository,
+    private readonly fillRepo: FillRepository,
   ) {}
 
   public findMergeCandidates(): MergeCandidate[] {
@@ -70,12 +72,28 @@ export class MergeCandidateService {
       const noOrders = this.orderRepo.findByTokenId(noPos.tokenId);
 
       const yesLocked = yesOrders
-        .filter((o) => o.side === "sell" && (o.status === "open" || o.status === "pending"))
-        .reduce((sum, o) => sum + o.size, 0);
+        .filter(
+          (o) =>
+            o.side === "sell" &&
+            (o.status === "open" || o.status === "pending" || o.status === "partially-filled"),
+        )
+        .reduce((sum, o) => {
+          const fills = this.fillRepo.findByOrderId(o.orderId);
+          const filledSize = fills.reduce((s, f) => s + f.size, 0);
+          return sum + Math.max(0, o.size - filledSize);
+        }, 0);
 
       const noLocked = noOrders
-        .filter((o) => o.side === "sell" && (o.status === "open" || o.status === "pending"))
-        .reduce((sum, o) => sum + o.size, 0);
+        .filter(
+          (o) =>
+            o.side === "sell" &&
+            (o.status === "open" || o.status === "pending" || o.status === "partially-filled"),
+        )
+        .reduce((sum, o) => {
+          const fills = this.fillRepo.findByOrderId(o.orderId);
+          const filledSize = fills.reduce((s, f) => s + f.size, 0);
+          return sum + Math.max(0, o.size - filledSize);
+        }, 0);
 
       const yesFree = yesPos.size - yesLocked;
       const noFree = noPos.size - noLocked;

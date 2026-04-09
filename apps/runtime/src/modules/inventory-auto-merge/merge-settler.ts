@@ -69,11 +69,14 @@ export class MergeSettler {
   ): void {
     const newSize = position.size - mergedSize;
     const isClosed = newSize <= 0.000001; // Handle precision
+    const newCostBasis = Math.max(0, position.costBasisUsdc - costBasisConsumed);
 
     this.positionRepo.save({
       ...position,
       size: isClosed ? 0 : newSize,
-      costBasisUsdc: Math.max(0, position.costBasisUsdc - costBasisConsumed),
+      avgEntryPrice: isClosed ? 0 : newCostBasis / newSize,
+      costBasisUsdc: newCostBasis,
+      currentValueUsdc: isClosed ? 0 : null, // Defer revaluation to next tick
       realizedPnl: position.realizedPnl + pnlShare,
       status: isClosed ? "closed" : position.status,
       closedAt: isClosed ? new Date().toISOString() : position.closedAt,

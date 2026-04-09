@@ -429,9 +429,11 @@ describe("LiveExchangeGateway", () => {
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
     gw = new LiveExchangeGateway({ client, settlementClient, onInfraAlert });
 
-    await gw.redeemPositions([
-      "0x4444444444444444444444444444444444444444444444444444444444444444",
-    ]);
+    await expect(
+      gw.redeemPositions([
+        "0x4444444444444444444444444444444444444444444444444444444444444444",
+      ]),
+    ).rejects.toThrow();
 
     expect(onInfraAlert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -458,9 +460,11 @@ describe("LiveExchangeGateway", () => {
     client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
     gw = new LiveExchangeGateway({ client, settlementClient, onInfraAlert });
 
-    await gw.redeemPositions([
-      "0x5555555555555555555555555555555555555555555555555555555555555555",
-    ]);
+    await expect(
+      gw.redeemPositions([
+        "0x5555555555555555555555555555555555555555555555555555555555555555",
+      ]),
+    ).rejects.toThrow();
 
     expect(onInfraAlert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -479,6 +483,29 @@ describe("LiveExchangeGateway", () => {
     expect(postRedeem).toHaveBeenCalledTimes(2);
     expect(postRedeem).toHaveBeenNthCalledWith(1, { conditionId: "cond-1" });
     expect(postRedeem).toHaveBeenNthCalledWith(2, { conditionId: "cond-2" });
+  });
+
+  it("mergePositions builds and executes on-chain merge transactions", async () => {
+    const settlementClient = createMockSettlementClient();
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    // Mock market tokens
+    client.getMarket.mockResolvedValue({
+      tokens: [
+        { outcome: "Yes", token_id: "tok-yes" },
+        { outcome: "No", token_id: "tok-no" },
+      ],
+    });
+
+    await gw.mergePositions([{ conditionId: "0x1111111111111111111111111111111111111111111111111111111111111111", amount: 10 }]);
+
+    expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+    const [txs, label] = settlementClient.execute.mock.calls[0] as [any[], string];
+    expect(label).toContain("merge positions: 0x1111111111111111111111111111111111111111111111111111111111111111");
+    expect(txs).toHaveLength(1);
+    // Verify encoded data roughly contains the amount (10 tokens -> 10 * 10^6 = 10000000)
+    // 10000000 decimal is 0x989680 hex.
+    expect(txs[0].data).toContain("989680");
   });
 
   it("mergePositions warns once and no-ops when the SDK has no merge API", async () => {

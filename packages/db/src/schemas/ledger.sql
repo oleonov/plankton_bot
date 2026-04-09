@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS markets (
   slug          TEXT NOT NULL,
   question      TEXT NOT NULL,
   outcome       TEXT NOT NULL,
+  outcome_index INTEGER,
   family_id     TEXT,
   family_key    TEXT,
   regime        TEXT,

@@ -3,6 +3,8 @@ import { MergeSettler } from "../merge-settler.js";
 import type {
   PositionRepository,
   InventoryLotRepository,
+  MergeLedgerRepository,
+  MarketRepository,
   Position,
 } from "@plankton/domain";
 import type { Database } from "better-sqlite3";
@@ -34,7 +36,7 @@ describe("MergeSettler", () => {
 
   it("applies merge correctly to both positions and lots", () => {
     const candidate = {
-      conditionId: "cond-1",
+      conditionId: "0x1111111111111111111111111111111111111111111111111111111111111111",
       familyId: "fam-1" as any,
       mergeAmount: 50,
       yesTokenId: "tok-yes" as any,
@@ -90,19 +92,23 @@ describe("MergeSettler", () => {
       positionId: "pos-yes",
       size: 50,
       costBasisUsdc: 20, // 40 - 20
+      avgEntryPrice: 0.4,
+      currentValueUsdc: null,
       realizedPnl: 0,
     }));
     expect(positionRepo.save).toHaveBeenCalledWith(expect.objectContaining({
       positionId: "pos-no",
       size: 30, // 80 - 50
       costBasisUsdc: 18, // 48 - 30
+      avgEntryPrice: 0.6,
+      currentValueUsdc: null,
       realizedPnl: 0,
     }));
   });
 
   it("handles profitable merge spread correctly", () => {
     const candidate = {
-      conditionId: "cond-1",
+      conditionId: "0x1111111111111111111111111111111111111111111111111111111111111111",
       familyId: "fam-1" as any,
       mergeAmount: 50,
       yesTokenId: "tok-yes" as any,

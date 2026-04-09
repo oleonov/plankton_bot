@@ -110,6 +110,7 @@ export class NormalizationModule implements RuntimeModule {
 
       enriched.push({
         ...market,
+        outcomeIndex: market.outcomeIndex ?? null,
         familyId: family?.familyId ?? null,
         familyKey: family?.familyKey ?? null,
         regime: family?.regime ?? null,
@@ -123,6 +124,7 @@ export class NormalizationModule implements RuntimeModule {
         eventSlug: market.eventSlug,
         question: market.question,
         outcome: market.outcome,
+        outcomeIndex: market.outcomeIndex ?? null,
         familyId: family?.familyId ?? null,
         familyKey: family?.familyKey ?? null,
         regime: family?.regime ?? null,
