@@ -304,7 +304,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
     for (const merge of merges) {
       try {
-        await mergeOne!({ conditionId: merge.conditionId, amount: merge.amount });
+        await mergeOne({ conditionId: merge.conditionId, amount: merge.amount });
       } catch (e) {
         console.error(`Failed to merge ${merge.conditionId}:`, e);
         throw e;
