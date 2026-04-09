@@ -11,6 +11,7 @@ import { InProcessEventBus } from "@plankton/event-bus";
 import {
   cleanStaleEntryOrders,
   CANCEL_BACKOFF_MS,
+  PROBE_LIKE_INTRADAY_TTL_MS,
 } from "../modules/reconciliation/stale-order-cleaner.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -161,6 +162,56 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(0);
     expect(result.staleEndDateCancelled).toBe(0);
     expect(cancelled).toHaveLength(0);
+  });
+
+  it("cancels stale intraday probe orders on a short leash", async () => {
+    const sixMinutesAgo = new Date(Date.now() - PROBE_LIKE_INTRADAY_TTL_MS - 60_000).toISOString();
+    const order = makeOrder({
+      createdAt: sixMinutesAgo,
+      signalReason: "probe-entry",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket({ horizon: "intraday-4h" }));
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
+  });
+
+  it("does not cancel fresh intraday probe orders before the short TTL", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
+    const order = makeOrder({
+      createdAt: twoMinutesAgo,
+      signalReason: "probe-entry",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket({ horizon: "intraday-4h" }));
+
+    const result = await run();
+
+    expect(result.staleTtlCancelled).toBe(0);
+  });
+
+  it("uses horizon TTL for conviction entries on intraday markets", async () => {
+    const tenMinutesAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    const order = makeOrder({
+      createdAt: tenMinutesAgo,
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket({ horizon: "intraday-4h" }));
+
+    const result = await run();
+
+    expect(result.staleTtlCancelled).toBe(0);
   });
 
   // ─── Side filtering ────────────────────────────────────────────────

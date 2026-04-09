@@ -10,11 +10,11 @@
  * leaves the open set.
  */
 
-import type { OrderRepository, MarketRepository, EventBus } from "@plankton/domain";
+import type { OrderRepository, MarketRepository, EventBus, Market, Order } from "@plankton/domain";
 import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
-// Horizon-aware TTLs — reserved for v2. Currently all orders use DEFAULT_TTL_MS.
+// Horizon-aware TTLs for conviction-style entry orders.
 export const HORIZON_TTL_MS: Record<string, number> = {
   "intraday-4h": 45 * 60_000,
   daily: 6 * 60 * 60_000,
@@ -22,6 +22,7 @@ export const HORIZON_TTL_MS: Record<string, number> = {
   "ad-hoc": 8 * 60 * 60_000,
 };
 export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
+export const PROBE_LIKE_INTRADAY_TTL_MS = 5 * 60_000;
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 5 * 60_000; // 5 min retry backoff
 
@@ -74,8 +75,9 @@ export async function cleanStaleEntryOrders(
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
 
+    const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();
-    const ttlMs = DEFAULT_TTL_MS; // v2: resolve per-horizon TTL
+    const ttlMs = resolveOrderTtlMs(order, market);
 
     // Check TTL
     if (ageMs > ttlMs) {
@@ -90,7 +92,6 @@ export async function cleanStaleEntryOrders(
     }
 
     // Check endDate proximity
-    const market = marketRepo.findByTokenId(order.tokenId);
     if (market?.endDate) {
       const endDateMs = new Date(market.endDate).getTime();
       if (endDateMs - now < ENDDATE_SAFETY_WINDOW_MS) {
@@ -112,6 +113,22 @@ export async function cleanStaleEntryOrders(
   }
 
   return { staleTtlCancelled, staleEndDateCancelled };
+}
+
+function resolveOrderTtlMs(order: Pick<Order, "signalReason">, market: Pick<Market, "horizon"> | null) {
+  const horizon = market?.horizon ?? null;
+  const horizonTtlMs = horizon != null ? (HORIZON_TTL_MS[horizon] ?? DEFAULT_TTL_MS) : DEFAULT_TTL_MS;
+
+  // Probe/spray orders on fast intraday families need a much shorter leash;
+  // otherwise two resting probes can monopolize the family's in-flight budget.
+  if (
+    horizon === "intraday-4h" &&
+    (order.signalReason === "probe-entry" || order.signalReason === "spray-entry")
+  ) {
+    return Math.min(horizonTtlMs, PROBE_LIKE_INTRADAY_TTL_MS);
+  }
+
+  return horizonTtlMs;
 }
 
 async function publishCancel(
