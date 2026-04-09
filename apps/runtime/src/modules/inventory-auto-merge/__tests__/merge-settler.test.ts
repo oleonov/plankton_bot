@@ -4,7 +4,6 @@ import type {
   PositionRepository,
   InventoryLotRepository,
   MergeLedgerRepository,
-  MarketRepository,
   Position,
 } from "@plankton/domain";
 import type { Database } from "better-sqlite3";

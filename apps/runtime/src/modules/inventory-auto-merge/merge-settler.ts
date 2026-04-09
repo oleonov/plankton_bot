@@ -4,8 +4,6 @@ import type {
   InventoryLotRepository,
   MergeLedgerRepository,
   Position,
-  PositionId,
-  FamilyId,
 } from "@plankton/domain";
 import type { MergeCandidate } from "./merge-candidate-service.js";
 
