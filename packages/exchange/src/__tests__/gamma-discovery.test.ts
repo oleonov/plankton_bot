@@ -120,7 +120,7 @@ describe("GammaMarketDiscoveryGateway", () => {
     expect(markets).toHaveLength(1);
     const m = markets[0]!;
     expect(m.conditionId).toBe("cond-btc");
-    expect(m.tokens).toEqual([{ tokenId: "tok-btc-yes", outcome: "Yes" }]);
+    expect(m.tokens).toEqual([{ tokenId: "tok-btc-yes", outcome: "Yes", outcomeIndex: 0 }]);
     expect(m.slug).toBe("bitcoin-above-100k");
     expect(m.negRisk).toBe(true);
     expect(m.tickSize).toBe(0.001);

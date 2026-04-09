@@ -359,9 +359,9 @@ describe("mapGammaMarket", () => {
     });
 
     expect(market.tokens).toEqual([
-      { tokenId: "a", outcome: "Yes" },
-      { tokenId: "b", outcome: "No" },
-      { tokenId: "c", outcome: "Maybe" },
+      { tokenId: "a", outcome: "Yes", outcomeIndex: 0 },
+      { tokenId: "b", outcome: "No", outcomeIndex: 1 },
+      { tokenId: "c", outcome: "Maybe", outcomeIndex: 2 },
     ]);
   });
 
