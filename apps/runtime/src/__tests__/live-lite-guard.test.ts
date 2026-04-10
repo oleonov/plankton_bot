@@ -130,6 +130,7 @@ describe("LiveLiteGuard", () => {
     it("uses configured wallet mode and min order", () => {
       expect(guard.getWalletMode()).toBe("relayer");
       expect(guard.getMinOrderUsdc()).toBe(2);
+      expect(guard.getMinEntryNotionalUsdc()).toBe(2);
       expect(guard.supportsPostOnlyFamilies()).toBe(true);
     });
 
@@ -164,7 +165,7 @@ describe("LiveLiteGuard", () => {
       ).toEqual(["live-min-order-usdc-rejected"]);
     });
 
-    it("bypasses minOrderUsdc for spray-entry signals", () => {
+    it("rejects spray-entry below the configured minimum", () => {
       expect(
         guard.getFamilyPolicyRejections({
           identity: {
@@ -178,7 +179,7 @@ describe("LiveLiteGuard", () => {
           hasPostOnlySupport: true,
           signalReason: "spray-entry",
         }),
-      ).toEqual([]);
+      ).toEqual(["live-min-order-usdc-rejected"]);
     });
 
     it("still rejects probe-entry below the configured minimum", () => {
@@ -211,8 +212,37 @@ describe("LiveLiteGuard", () => {
 
     it("defaults the relayer floor to $1", () => {
       expect(guard.getMinOrderUsdc()).toBe(1);
+      expect(guard.getMinEntryNotionalUsdc()).toBe(1);
       expect(guard.isOrderAboveMin(0.99)).toBe(false);
       expect(guard.isOrderAboveMin(1)).toBe(true);
+    });
+
+    it("keeps the marketable entry floor at $1 when the configured relayer minimum is lower", () => {
+      const lowConfiguredGuard = new LiveLiteGuard({
+        familyAllowlist: ["fam-a"],
+        maxFamilies: 2,
+        maxOpenValueUsdc: 50,
+        maxOrderUsdc: 10,
+        maxActiveMarkets: 2,
+        walletMode: "relayer",
+        minOrderUsdc: 0.05,
+      });
+
+      expect(lowConfiguredGuard.getMinOrderUsdc()).toBe(0.05);
+      expect(lowConfiguredGuard.getMinEntryNotionalUsdc()).toBe(1);
+      expect(
+        lowConfiguredGuard.getFamilyPolicyRejections({
+          identity: {
+            primaryCategory: "geopolitics",
+            feeTier: null,
+            liveWalletRequirement: null,
+            requiresPostOnlyForLive: null,
+          },
+          isEntry: true,
+          orderNotionalUsdc: 0.6,
+          signalReason: "spray-entry",
+        }),
+      ).toEqual(["live-min-order-usdc-rejected"]);
     });
   });
 

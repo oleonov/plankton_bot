@@ -370,6 +370,16 @@ describe("evaluateSprayEntry", () => {
     // Floor is max(0.00077, 0.03 * 0.01, 0.05) = 0.05
     expect(signal!.suggestedSizeUsdc).toBeCloseTo(0.05, 5);
   });
+
+  it("raises spray to the caller-provided live notional floor", () => {
+    const market = makeNormalizedMarket({ midPrice: 0.03, minOrderSize: 0.01 });
+    const bundle = makeBundle();
+
+    const signal = evaluateSprayEntry(market, bundle, 0.03, Date.now(), nextSeqStub, 0.15, 1.0, 1);
+
+    expect(signal).not.toBeNull();
+    expect(signal!.suggestedSizeUsdc).toBe(1);
+  });
 });
 
 // ─── Tests: scan() with spray integration ───────────��───────────────────
@@ -402,6 +412,27 @@ describe("scan() spray integration", () => {
     expect(result.signals[0]!.reason).toBe("spray-entry");
     // Price 0.035 -> Floor (0.035 * 5) = 0.175
     expect(result.signals[0]!.suggestedSizeUsdc).toBeCloseTo(0.175, 4);
+  });
+
+  it("uses minEntryNotionalUsdc for generated live entry signals", () => {
+    const bundle = makeBundle();
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const markets = [makeNormalizedMarket({ midPrice: 0.03 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, minEntryNotionalUsdc: 1 },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("probe-entry");
+    expect(result.signals[0]!.suggestedSizeUsdc).toBe(1);
   });
 
   it("does NOT generate spray for proven/scaled families", () => {

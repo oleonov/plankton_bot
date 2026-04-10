@@ -190,6 +190,7 @@ export class StrategyModule implements RuntimeModule {
           familyStateRepo: this.deps.familyStateRepo,
           log: this.log,
           globalConfig: this.deps.globalConfig,
+          minEntryNotionalUsdc: this.deps.liveLiteGuard?.getMinEntryNotionalUsdc() ?? undefined,
           spraySnapshot: {
             positionCount: this.sprayTracker.getPositionCount(),
             exposureUsdc: this.sprayTracker.getExposureUsdc(),

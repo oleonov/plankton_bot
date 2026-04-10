@@ -49,6 +49,8 @@ export interface ScannerDeps {
   sprayedTokens?: ReadonlySet<string> | undefined;
   /** Attempt-level cooldown: "familyId|tokenId" → epoch ms of last approved entry signal. */
   lastAttemptTs?: ReadonlyMap<string, number> | undefined;
+  /** Optional live execution floor for generated entry BUY notionals. */
+  minEntryNotionalUsdc?: number | undefined;
 }
 
 /** Tracks buy count per position for scale-in limiting. */
@@ -300,13 +302,28 @@ export function resolveFamilyEntryPolicy(
 /**
  * Scale suggested size based on price to replicate PlanktonXD's "Dust" advantage.
  * Formula: Size = Base * (Price ^ 1.5)
- * The result is guaranteed to be >= (price * minShares) AND >= $0.05 floor
- * to satisfy both the exchange (Polymarket) and internal risk gates.
+ * The result is guaranteed to be >= (price * minShares) and the caller's
+ * notional floor to satisfy both the exchange (Polymarket) and risk gates.
  */
-function scaleSizeByPrice(baseSizeUsdc: number, price: number, minShares = 5): number {
+function scaleSizeByPrice(
+  baseSizeUsdc: number,
+  price: number,
+  minShares = 5,
+  minNotionalUsdc = 0.05,
+): number {
   const scaledSizeUsdc = baseSizeUsdc * Math.pow(price, 1.5);
   const exchangeMinUsdc = price * minShares;
-  return Math.max(scaledSizeUsdc, exchangeMinUsdc, 0.05);
+  return Math.max(scaledSizeUsdc, exchangeMinUsdc, minNotionalUsdc);
+}
+
+function capEntryNotional(
+  suggestedSizeUsdc: number,
+  maxInitialNotionalUsdc: number,
+  minNotionalUsdc: number,
+): number | null {
+  const capped = Math.min(suggestedSizeUsdc, maxInitialNotionalUsdc);
+  if (capped + 1e-9 < minNotionalUsdc) return null;
+  return capped;
 }
 
 /**
@@ -324,13 +341,19 @@ export function evaluateSprayEntry(
   nextSeq: (f: FamilyId, t: TokenId, s: string) => number,
   spraySizeUsdc: number,
   sizeMult: number,
+  minNotionalUsdc = 0.05,
 ): Signal | null {
   const entry = bundle.rules.entry;
   if (entry.entryMode === "disabled") return null;
   if (midPrice < entry.minEntryPrice || midPrice > entry.maxEntryPrice) return null;
 
   const baseSizeUsdc = spraySizeUsdc * sizeMult;
-  const suggestedSizeUsdc = scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5);
+  const suggestedSizeUsdc = scaleSizeByPrice(
+    baseSizeUsdc,
+    midPrice,
+    market.minOrderSize ?? 5,
+    minNotionalUsdc,
+  );
   const suggestedSize = suggestedSizeUsdc / midPrice;
   if (suggestedSize < 0.01) return null;
   if (market.minOrderSize != null && suggestedSize < market.minOrderSize) return null;
@@ -418,6 +441,7 @@ export function scan(
   let sprayBudgetRemaining = (deps.globalConfig?.sprayBudgetUsdc ?? 50) - sprayExposureUsdc;
   let sprayPositionsRemaining =
     (deps.globalConfig?.sprayMaxTotalPositions ?? 30) - sprayPositionCount;
+  const minEntryNotionalUsdc = deps.minEntryNotionalUsdc ?? 0.05;
 
   for (const market of sorted) {
     // Only consider markets assigned to a family
@@ -535,6 +559,7 @@ export function scan(
             nextSeq,
             buyTracker,
             sizeMult,
+            minEntryNotionalUsdc,
           );
           if (scaleSignal) {
             signals.push(scaleSignal);
@@ -587,8 +612,9 @@ export function scan(
             nextSeq,
             gc.spraySizeUsdc,
             sizeMult,
+            minEntryNotionalUsdc,
           );
-          if (spraySignal) {
+          if (spraySignal && spraySignal.suggestedSizeUsdc <= sprayBudgetRemaining) {
             signals.push(spraySignal);
             sprayMarketsThisTick++;
             sprayFamilyEmitted.add(sprayKey);
@@ -616,6 +642,7 @@ export function scan(
           tickTs,
           nextSeq,
           sizeMult,
+          minEntryNotionalUsdc,
         );
         if (twoSidedSignal) {
           signals.push(twoSidedSignal);
@@ -631,6 +658,7 @@ export function scan(
           nextSeq,
           sizeMult,
           !!(familyState && familyState.tailAdjustedPnlLive < 0),
+          minEntryNotionalUsdc,
         );
         if (probeSignal) {
           signals.push(probeSignal);
@@ -724,6 +752,7 @@ function evaluateProbeEntry(
   nextSeq: (f: FamilyId, t: TokenId, s: string) => number,
   sizeMult: number = 1.0,
   tailPnlNegative: boolean = false,
+  minNotionalUsdc = 0.05,
 ): Signal | null {
   const entry = bundle.rules.entry;
 
@@ -744,10 +773,12 @@ function evaluateProbeEntry(
   // Size: probeSizeUsdc adjusted by price-scaling, evidence multiplier + probe haircut, capped by max notional
   const probeHaircut = tailPnlNegative ? 0.5 : 1.0;
   const baseSizeUsdc = entry.probeSizeUsdc * sizeMult * probeHaircut;
-  const suggestedSizeUsdc = Math.min(
-    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5),
+  const suggestedSizeUsdc = capEntryNotional(
+    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
+    minNotionalUsdc,
   );
+  if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;
 
   return {
@@ -774,6 +805,7 @@ function evaluateScaleIn(
   nextSeq: (f: FamilyId, t: TokenId, s: string) => number,
   buyTracker: BuyTracker,
   sizeMult: number = 1.0,
+  minNotionalUsdc = 0.05,
 ): Signal | null {
   const scale = bundle.rules.scaleIn;
   const entry = bundle.rules.entry;
@@ -795,10 +827,12 @@ function evaluateScaleIn(
     ? entry.probeSizeUsdc * sizeMult
     : entry.addSizeUsdc * sizeMult;
 
-  const suggestedSizeUsdc = Math.min(
-    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5),
+  const suggestedSizeUsdc = capEntryNotional(
+    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
+    minNotionalUsdc,
   );
+  if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;
 
   return {
@@ -918,6 +952,7 @@ function evaluateTwoSidedEntry(
   tickTs: number,
   nextSeq: (f: FamilyId, t: TokenId, s: string) => number,
   sizeMult: number = 1.0,
+  minNotionalUsdc = 0.05,
 ): Signal | null {
   const ts = bundle.rules.twoSided;
   if (!ts.allowTwoSided) return null;
@@ -943,10 +978,12 @@ function evaluateTwoSidedEntry(
 
   // Size: use probe size with price-scaling and evidence multiplier
   const baseSizeUsdc = entry.probeSizeUsdc * sizeMult;
-  const suggestedSizeUsdc = Math.min(
-    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5),
+  const suggestedSizeUsdc = capEntryNotional(
+    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
+    minNotionalUsdc,
   );
+  if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;
 
   return {

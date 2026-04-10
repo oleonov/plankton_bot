@@ -4,6 +4,8 @@ import {
   type WalletMode,
 } from "@plankton/domain";
 
+const CLOB_MARKETABLE_BUY_MIN_USDC = 1;
+
 export interface LiveLiteConfig {
   familyAllowlist: string[];
   maxFamilies: number;
@@ -83,6 +85,16 @@ export class LiveLiteGuard {
     return notionalUsdc >= minOrderUsdc;
   }
 
+  /**
+   * Current CLOB rejects marketable BUY orders below $1 even when relayer
+   * profile minimums are configured lower for dust experiments.
+   */
+  getMinEntryNotionalUsdc(): number | null {
+    if (!this.config) return null;
+    const minOrderUsdc = this.getMinOrderUsdc();
+    return Math.max(minOrderUsdc ?? 0, CLOB_MARKETABLE_BUY_MIN_USDC);
+  }
+
   getFamilyPolicyRejections(opts: {
     identity: Pick<
       FamilyIdentity,
@@ -96,7 +108,7 @@ export class LiveLiteGuard {
     if (!this.config || !opts.isEntry) return [];
 
     const walletMode = this.getWalletMode();
-    const minOrderUsdc = this.getMinOrderUsdc();
+    const minOrderUsdc = this.getMinEntryNotionalUsdc();
     const policy = resolveFamilyLiveTradingPolicy(opts.identity);
     const rejected: string[] = [];
 
@@ -112,13 +124,7 @@ export class LiveLiteGuard {
       );
     }
 
-    // Spray entries bypass minOrderUsdc — CLOB accepts sub-$1 orders,
-    // the $1 floor is our internal guard for conviction entries only
-    if (
-      minOrderUsdc != null &&
-      opts.orderNotionalUsdc < minOrderUsdc &&
-      opts.signalReason !== "spray-entry"
-    ) {
+    if (minOrderUsdc != null && opts.orderNotionalUsdc < minOrderUsdc) {
       rejected.push("live-min-order-usdc-rejected");
     }
 

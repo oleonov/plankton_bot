@@ -975,6 +975,54 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
+  it("rejects relayer buy entries below the CLOB marketable minimum before gateway call", async () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-1"],
+      maxFamilies: 10,
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+      walletMode: "relayer",
+      minOrderUsdc: 0.05,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      rulesProvider: createMockRulesProvider({
+        primaryCategory: "geopolitics",
+        feeTier: "fee-free",
+        liveWalletRequirement: "eoa-ok",
+        requiresPostOnlyForLive: false,
+      }),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 0.12, size: 5, signalReason: "spray-entry" }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
+    expect(rejected[0].reason).toContain("live-min-order-usdc-rejected");
+
+    await guardedMod.stop();
+  });
+
   // ─── Market inactive guard ──────────────────────────────────────────
 
   it("rejects order when market is inactive (resolved/deactivated)", async () => {
