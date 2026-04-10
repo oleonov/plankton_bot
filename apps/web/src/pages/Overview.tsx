@@ -76,6 +76,17 @@ function formatExecutionWatch(metric: FamilyMetric): string {
   return `${metric.familyKey} · ${parts.join(" · ")}`;
 }
 
+function formatExecutionRejects(rejects?: Record<string, number>): string | null {
+  if (!rejects) return null;
+  const entries = Object.entries(rejects).filter(([, count]) => count > 0);
+  if (entries.length === 0) return null;
+  return entries
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 2)
+    .map(([code, count]) => `${code}:${count}`)
+    .join(", ");
+}
+
 function getFamilyMode(metric: FamilyMetric): string {
   return metric.effectiveMode ?? metric.runtimeMode;
 }
@@ -355,6 +366,28 @@ export function Overview() {
                     exec {status.executionQueue.activeCount ?? 0} active /{" "}
                     {status.executionQueue.queueDepth ?? 0} queued /{" "}
                     {status.executionQueue.maxConcurrency ?? "∞"} max
+                    {" · "}
+                    reserved buy {formatUsd(status.executionQueue.reservedBuyUsdc ?? 0)}
+                    {status.executionQueue.freeUsdcForNewOrders != null && (
+                      <> / free {formatUsd(status.executionQueue.freeUsdcForNewOrders)}</>
+                    )}
+                    {(status.executionQueue.cancelReplacePendingCount ?? 0) > 0 && (
+                      <> · replace locks {status.executionQueue.cancelReplacePendingCount}</>
+                    )}
+                    {(status.executionQueue.internalReservationRejectsLast10m ?? 0) > 0 && (
+                      <>
+                        {" · "}
+                        reservation rejects{" "}
+                        {status.executionQueue.internalReservationRejectsLast10m}
+                      </>
+                    )}
+                    {formatExecutionRejects(status.executionQueue.gatewayRejectsLast10mByCode) && (
+                      <>
+                        {" · "}
+                        gateway rejects{" "}
+                        {formatExecutionRejects(status.executionQueue.gatewayRejectsLast10mByCode)}
+                      </>
+                    )}
                   </>
                 )}
               </span>

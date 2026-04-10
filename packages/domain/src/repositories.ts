@@ -117,6 +117,9 @@ export interface FillRepository {
   /** Return all fills associated with a given order. */
   findByOrderId(orderId: OrderId): Fill[];
 
+  /** Return all fills associated with any of the given orders. */
+  findByOrderIds?(orderIds: OrderId[]): Fill[];
+
   /** Return all fills for a specific outcome token. */
   findByTokenId(tokenId: TokenId): Fill[];
 

@@ -1,11 +1,12 @@
 import type { ExchangeErrorCode } from "@plankton/domain";
+import { sanitizeErrorMessage } from "./redaction.js";
 
 /**
  * Classify an unknown error into a domain ExchangeErrorCode.
  * Used by live adapters to map SDK/HTTP errors.
  */
 export function classifyError(err: unknown): { code: ExchangeErrorCode; message: string } {
-  const message = err instanceof Error ? err.message : String(err);
+  const message = sanitizeErrorMessage(err);
   const lower = message.toLowerCase();
 
   if (lower.includes("insufficient") || lower.includes("not enough")) {

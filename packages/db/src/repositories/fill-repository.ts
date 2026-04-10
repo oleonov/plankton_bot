@@ -4,6 +4,8 @@ import type { OrderId, TokenId, FillId, OrderSide, LiquidityRole } from "@plankt
 import { createFillId, createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
 
 export class SqliteFillRepository implements FillRepository {
+  private static readonly FIND_BY_ORDER_IDS_CHUNK_SIZE = 500;
+
   constructor(private readonly db: Database.Database) {}
 
   save(fill: Fill): void {
@@ -40,6 +42,29 @@ export class SqliteFillRepository implements FillRepository {
       string,
       unknown
     >[];
+    return rows.map((r) => this.rowToFill(r));
+  }
+
+  findByOrderIds(orderIds: OrderId[]): Fill[] {
+    if (orderIds.length === 0) return [];
+
+    const rows: Record<string, unknown>[] = [];
+    for (
+      let offset = 0;
+      offset < orderIds.length;
+      offset += SqliteFillRepository.FIND_BY_ORDER_IDS_CHUNK_SIZE
+    ) {
+      const chunk = orderIds.slice(
+        offset,
+        offset + SqliteFillRepository.FIND_BY_ORDER_IDS_CHUNK_SIZE,
+      );
+      const placeholders = chunk.map(() => "?").join(", ");
+      rows.push(
+        ...(this.db
+          .prepare(`SELECT * FROM fills WHERE order_id IN (${placeholders})`)
+          .all(...chunk) as Record<string, unknown>[]),
+      );
+    }
     return rows.map((r) => this.rowToFill(r));
   }
 

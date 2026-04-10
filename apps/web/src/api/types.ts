@@ -79,6 +79,12 @@ export interface StatusData {
     cancelCompleted?: number;
     avgPlaceLatencyMs?: number | null;
     avgCancelLatencyMs?: number | null;
+    reservedBuyUsdc?: number;
+    freeUsdcForNewOrders?: number | null;
+    reservedSellTokenCount?: number;
+    cancelReplacePendingCount?: number;
+    gatewayRejectsLast10mByCode?: Record<string, number>;
+    internalReservationRejectsLast10m?: number;
   } | null;
   executionTelemetry24h?: ExecutionTelemetryWindow;
   infraAlerts?: Array<{

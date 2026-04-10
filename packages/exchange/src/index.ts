@@ -37,6 +37,7 @@ export {
 
 // Shared utilities
 export { classifyError } from "./errors.js";
+export { redactSensitive, redactText, sanitizeErrorMessage, sanitizeLogArg } from "./redaction.js";
 export {
   mapOpenOrder,
   mapTrade,

@@ -5,6 +5,7 @@ import {
   createOrderId,
   createCommandId,
   createBotRunId,
+  createPositionId,
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -25,6 +26,8 @@ import type {
   ClientOrderId,
   Order,
   Fill,
+  Position,
+  PositionRepository,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
@@ -125,6 +128,38 @@ function createMockFillRepo(): FillRepository {
     findUnreconciled: vi.fn().mockReturnValue([]),
     markReconciled: vi.fn(),
     getLatestTimestamp: vi.fn().mockReturnValue(null),
+  };
+}
+
+function makePosition(overrides?: Partial<Position>): Position {
+  return {
+    positionId: createPositionId("pos-1"),
+    tokenId: createTokenId("tok-yes"),
+    familyId: createFamilyId("fam-1"),
+    side: "buy",
+    size: 10,
+    avgEntryPrice: 0.5,
+    costBasisUsdc: 5,
+    currentValueUsdc: 5,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: null,
+    openedAt: new Date().toISOString(),
+    closedAt: null,
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function createMockPositionRepo(position: Position | null = null): PositionRepository {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue(position),
+    findByFamily: vi.fn().mockReturnValue(position ? [position] : []),
+    findOpen: vi.fn().mockReturnValue(position?.status === "open" ? [position] : []),
+    findDust: vi.fn().mockReturnValue([]),
+    findAll: vi.fn().mockReturnValue(position ? [position] : []),
+    findOpenByEntryStyle: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -292,6 +327,34 @@ describe("ExecutionModule", () => {
     // Rejected order should still be persisted
     const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
     expect(savedOrder.status).toBe("rejected");
+
+    await mod.stop();
+  });
+
+  it("normalizes gateway balance and allowance rejects for diagnostics", async () => {
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: false,
+      errorCode: "INSUFFICIENT_BALANCE",
+      errorMessage: "not enough balance / allowance: balance: 43130000",
+    });
+
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd(),
+      timestamp: Date.now(),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("exchange-insufficient-balance-or-allowance");
+    expect(mod.getDiagnostics().gatewayRejectsLast10mByCode).toEqual({
+      INSUFFICIENT_BALANCE: 1,
+    });
 
     await mod.stop();
   });
@@ -701,6 +764,135 @@ describe("ExecutionModule", () => {
     expect(orderRepo.updateStatus).not.toHaveBeenCalled();
 
     await mod.stop();
+  });
+
+  // ─── Capital reservations ──────────────────────────────────────────
+
+  it("counts queued SELL orders as pending token reservations before gateway acceptance", async () => {
+    let resolvePlace: () => void;
+    const slowPlace = new Promise<PlaceOrderResult>((resolve) => {
+      resolvePlace = () => resolve({ success: true, orderId: "sim-ord-slow" });
+    });
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockReturnValueOnce(slowPlace);
+
+    const reserveMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      rulesProvider,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      maxConcurrency: 1,
+    });
+
+    await reserveMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-pending-1"),
+        side: "sell",
+        size: 8,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-pending-2"),
+        clientOrderId: "plk_sell_pending_2" as ClientOrderId,
+        side: "sell",
+        size: 3,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("reserved-token-limit");
+    expect(reserveMod.getDiagnostics()).toMatchObject({
+      reservedSellTokenCount: 1,
+      internalReservationRejectsLast10m: 1,
+    });
+
+    resolvePlace!();
+    await reserveMod.stop();
+  });
+
+  it("cancels an existing SELL before submitting the replacement order", async () => {
+    let cancelled = false;
+    const existingSell: Order = {
+      orderId: createOrderId("existing-sell"),
+      clientOrderId: "plk_existing_sell" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      familyId: createFamilyId("fam-1"),
+      side: "sell",
+      orderType: "GTC",
+      price: 0.55,
+      size: 5,
+      sizeUsdc: 2.75,
+      status: "open",
+      exchangeOrderId: "existing-sell",
+      signalId: null,
+      signalReason: "repricing-exit",
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    orderRepo.findByTokenId = vi.fn().mockImplementation(() => (cancelled ? [] : [existingSell]));
+    orderRepo.updateStatus = vi.fn().mockImplementation(() => {
+      cancelled = true;
+    });
+
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      rulesProvider,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    await replaceMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-replace-request"),
+        clientOrderId: "plk_sell_replace" as ClientOrderId,
+        side: "sell",
+        price: 0.5,
+        size: 5,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      clientOrderId: "plk_sell_replace",
+      side: "sell",
+      price: 0.5,
+    });
+    expect(rejected.some((event) => event.reason === "sell-replace-pending")).toBe(true);
+    expect(replaceMod.getDiagnostics().cancelReplacePendingCount).toBe(0);
+
+    await replaceMod.stop();
   });
 
   // ─── Live-lite allowlist ──────────────────────────────────────────
@@ -1305,9 +1497,23 @@ describe("ExecutionModule", () => {
     };
   }
 
-  it("rejects buy order when wallet balance is insufficient", async () => {
+  it("rejects buy order when wallet balance is insufficient after reserved BUY notional", async () => {
     const controlDb = createMockControlDb(20);
-    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(15);
+    orderRepo.findOpen = vi.fn().mockReturnValue([
+      {
+        ...makePlaceCmd(),
+        orderId: createOrderId("open-buy-1"),
+        status: "open",
+        size: 30,
+        price: 0.5,
+        sizeUsdc: 15,
+        exchangeOrderId: "open-buy-1",
+        signalId: null,
+        botRunId: BOT_RUN_ID,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      } as Order,
+    ]);
 
     const balanceMod = new ExecutionModule({
       gateway,
@@ -1330,7 +1536,7 @@ describe("ExecutionModule", () => {
       rejected.push(p);
     });
 
-    // price=0.5, size=20 → notional=10 > available=5
+    // price=0.5, size=20 → notional=10 > available=20 - 15 - 3% buffer
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd({ price: 0.5, size: 20 }),
       timestamp: Date.now(),
@@ -1339,7 +1545,7 @@ describe("ExecutionModule", () => {
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(orderRepo.save).not.toHaveBeenCalled(); // no rejected order row saved
     expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toBe("insufficient wallet balance");
+    expect(rejected[0].reason).toBe("reserved-usdc-limit");
     expect(rejected[0].errorCode).toBe("INSUFFICIENT_BALANCE");
 
     await balanceMod.stop();
@@ -1374,6 +1580,62 @@ describe("ExecutionModule", () => {
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
     await balanceMod.stop();
+  });
+
+  it("counts queued BUY orders as pending reservations before gateway acceptance", async () => {
+    const controlDb = createMockControlDb(11);
+    let resolvePlace: () => void;
+    const slowPlace = new Promise<PlaceOrderResult>((resolve) => {
+      resolvePlace = () => resolve({ success: true, orderId: "sim-ord-slow" });
+    });
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockReturnValueOnce(slowPlace);
+
+    const queuedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      rulesProvider,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      maxConcurrency: 1,
+    });
+
+    await queuedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ commandId: createCommandId("pending-1"), price: 0.5, size: 10 }),
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("pending-2"),
+        clientOrderId: "plk_pending_2" as ClientOrderId,
+        price: 0.5,
+        size: 12,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("reserved-usdc-limit");
+    expect(queuedMod.getDiagnostics()).toMatchObject({
+      reservedBuyUsdc: 5,
+      internalReservationRejectsLast10m: 1,
+    });
+
+    resolvePlace!();
+    await queuedMod.stop();
   });
 
   it("skips balance check when controlDb is not provided", async () => {
@@ -1491,7 +1753,7 @@ describe("ExecutionModule", () => {
     // First attempt — rejected by balance check
     await bus.publish("PlaceOrderRequested", { command: cmd, timestamp: Date.now() });
     expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toBe("insufficient wallet balance");
+    expect(rejected[0].reason).toBe("reserved-usdc-limit");
 
     // Second attempt with same commandId — should be dedup-skipped, NOT another balance rejection
     rejected.length = 0;

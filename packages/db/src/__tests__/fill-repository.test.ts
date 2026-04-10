@@ -104,6 +104,38 @@ describe("SqliteFillRepository", () => {
     expect(tokA[0]!.fillId).toBe("f1");
   });
 
+  it("findByOrderIds returns fills for all requested orders", () => {
+    insertOrder(conn.db, { order_id: "ord-A", client_order_id: "c-A", token_id: "tok-A" });
+    insertOrder(conn.db, { order_id: "ord-B", client_order_id: "c-B", token_id: "tok-B" });
+    insertOrder(conn.db, { order_id: "ord-C", client_order_id: "c-C", token_id: "tok-C" });
+
+    repo.save(
+      makeFill({
+        fillId: createFillId("f1"),
+        orderId: createOrderId("ord-A"),
+        tokenId: createTokenId("tok-A"),
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f2"),
+        orderId: createOrderId("ord-B"),
+        tokenId: createTokenId("tok-B"),
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f3"),
+        orderId: createOrderId("ord-C"),
+        tokenId: createTokenId("tok-C"),
+      }),
+    );
+
+    const fills = repo.findByOrderIds([createOrderId("ord-A"), createOrderId("ord-C")]);
+
+    expect(fills.map((fill) => fill.fillId).sort()).toEqual(["f1", "f3"]);
+  });
+
   it("findRecent returns newest first with limit", () => {
     insertOrder(conn.db);
 

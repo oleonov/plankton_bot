@@ -7,6 +7,31 @@ describe("classifyError", () => {
     expect(classifyError(new Error("not enough funds")).code).toBe("INSUFFICIENT_BALANCE");
   });
 
+  it("maps axios-like insufficient balance responses and redacts auth headers", () => {
+    const err = new Error("Request failed");
+    Object.assign(err, {
+      response: {
+        status: 400,
+        data: {
+          error: "not enough balance / allowance: balance: 43130000",
+        },
+      },
+      config: {
+        headers: {
+          POLY_API_KEY: "api-key-value",
+          POLY_BUILDER_SIGNATURE: "builder-signature-value",
+        },
+      },
+    });
+
+    const result = classifyError(err);
+
+    expect(result.code).toBe("INSUFFICIENT_BALANCE");
+    expect(result.message).toContain("not enough balance / allowance");
+    expect(result.message).not.toContain("api-key-value");
+    expect(result.message).not.toContain("builder-signature-value");
+  });
+
   it("maps invalid price", () => {
     expect(classifyError(new Error("invalid price")).code).toBe("INVALID_PRICE");
     expect(classifyError(new Error("Price must be between 0 and 1")).code).toBe("INVALID_PRICE");

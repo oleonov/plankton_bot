@@ -152,6 +152,9 @@ export class ReconciliationModule implements RuntimeModule {
       if (staleResult.staleEndDateCancelled > 0) {
         allDetails.push(`stale entry endDate cancels: ${staleResult.staleEndDateCancelled}`);
       }
+      if (staleResult.staleExitTtlCancelled > 0) {
+        allDetails.push(`stale exit TTL cancels: ${staleResult.staleExitTtlCancelled}`);
+      }
 
       // 4. Build result
       const clean =
@@ -161,7 +164,8 @@ export class ReconciliationModule implements RuntimeModule {
         orderResult.staleCancelled === 0 &&
         orderResult.staleCancelFailed === 0 &&
         staleResult.staleTtlCancelled === 0 &&
-        staleResult.staleEndDateCancelled === 0;
+        staleResult.staleEndDateCancelled === 0 &&
+        staleResult.staleExitTtlCancelled === 0;
 
       const result: ReconciliationResult = {
         ranAt,
@@ -203,6 +207,7 @@ export class ReconciliationModule implements RuntimeModule {
           staleCancelFailed: orderResult.staleCancelFailed,
           staleEntryTtl: staleResult.staleTtlCancelled,
           staleEntryEndDate: staleResult.staleEndDateCancelled,
+          staleExitTtl: staleResult.staleExitTtlCancelled,
         },
         "reconciliation pass complete",
       );

@@ -90,10 +90,13 @@ import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { resolveLiveLiteMaxFamilies } from "./live-lite-envelope.js";
+import { installConsoleRedaction } from "./console-redaction.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  installConsoleRedaction();
+
   // 1. Load config
   const config = loadEnv();
   const log = createLogger(config.logLevel, config.runtimeMode);
@@ -514,6 +517,7 @@ async function main(): Promise<void> {
     marketRepo: repos.market,
     orderRepo: repos.order,
     fillRepo: repos.fill,
+    positionRepo: repos.position,
     rulesProvider,
     log,
     botRunId,

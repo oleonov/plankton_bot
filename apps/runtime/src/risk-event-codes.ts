@@ -16,6 +16,14 @@ const STATIC_CODES: Record<string, string> = {
   "live-min-order-usdc-rejected": "live_min_order_usdc",
   "live-eoa-fee-enabled-family-rejected": "live_eoa_fee_enabled_family",
   "live-relayer-required-family-rejected": "live_relayer_required_family",
+  "reserved-usdc-limit": "reserved_usdc_limit",
+  "reserved-token-limit": "reserved_token_limit",
+  "pending-reservation-limit": "pending_reservation_limit",
+  "exchange-insufficient-balance-or-allowance": "exchange_insufficient_balance_or_allowance",
+  "sell-order-already-open": "sell_order_already_open",
+  "sell-replace-lock-active": "sell_replace_lock_active",
+  "sell-replace-lock-retry": "sell_replace_lock_retry",
+  "sell-replace-pending": "sell_replace_pending",
   "family in quarantine mode": "operator_quarantine",
 };
 

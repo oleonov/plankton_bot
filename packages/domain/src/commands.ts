@@ -66,7 +66,10 @@ export interface CancelOrderCommand {
     | "reconciliation"
     | "market_resolved"
     | "stale_entry_ttl"
-    | "stale_entry_enddate";
+    | "stale_entry_enddate"
+    | "stale_exit_ttl"
+    | "sell_replace_reprice"
+    | "sell_replace_retry";
   readonly familyId: FamilyId;
 }
 

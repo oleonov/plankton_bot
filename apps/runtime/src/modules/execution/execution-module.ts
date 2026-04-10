@@ -27,12 +27,23 @@ import type {
   RuntimeControl,
   ProfileId,
   TokenId,
+  PositionRepository,
 } from "@plankton/domain";
-import { createOrderId, ExchangeErrorCode, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
+import {
+  createCommandId,
+  createOrderId,
+  ExchangeErrorCode,
+  resolveFamilyLiveTradingPolicy,
+} from "@plankton/domain";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { ExecutionQueue } from "./execution-queue.js";
+import {
+  buildReservationSnapshot,
+  getReservedSellSize,
+  type PendingReservation,
+} from "./reservation-utils.js";
 
 export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
@@ -40,6 +51,7 @@ export interface ExecutionModuleDeps {
   marketRepo: MarketRepository;
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
+  positionRepo?: PositionRepository | undefined;
   log: Logger;
   botRunId: BotRunId;
   rulesProvider: FamilyRulesProvider;
@@ -54,9 +66,20 @@ export interface ExecutionModuleDeps {
 }
 
 export class ExecutionModule implements RuntimeModule {
+  private static readonly WALLET_BUFFER_RATIO = 0.03;
+  private static readonly MIN_WALLET_BUFFER_USDC = 0.25;
+  private static readonly SELL_REPLACE_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
+
   private readonly log: Logger;
   private readonly processedCommandIds = new Set<string>();
   private readonly processedCommandOrder: string[] = [];
+  private readonly pendingReservations = new Map<string, PendingReservation>();
+  private readonly sellReplaceLocks = new Map<
+    string,
+    { orderId: OrderId; command: PlaceOrderCommand; createdAt: number }
+  >();
+  private readonly gatewayRejects: Array<{ ts: number; code: string }> = [];
+  private readonly internalReservationRejects: number[] = [];
   private readonly queue: ExecutionQueue | null;
   private readonly acceptedCommandAt = new Map<string, number>();
   private placeCompleted = 0;
@@ -114,8 +137,16 @@ export class ExecutionModule implements RuntimeModule {
     cancelCompleted: number;
     avgPlaceLatencyMs: number | null;
     avgCancelLatencyMs: number | null;
+    reservedBuyUsdc: number;
+    freeUsdcForNewOrders: number | null;
+    reservedSellTokenCount: number;
+    cancelReplacePendingCount: number;
+    gatewayRejectsLast10mByCode: Record<string, number>;
+    internalReservationRejectsLast10m: number;
   } {
     const queue = this.queue?.diagnostics;
+    const reservations = this.getReservationSnapshot();
+    const walletBalance = this.getWalletBalanceUsdc();
     return {
       pendingCount: this.pendingCount,
       queueDepth: queue?.queueDepth ?? 0,
@@ -129,6 +160,22 @@ export class ExecutionModule implements RuntimeModule {
         this.cancelCompleted > 0
           ? Math.round(this.cancelLatencyTotalMs / this.cancelCompleted)
           : null,
+      reservedBuyUsdc: Number(reservations.reservedBuyUsdc.toFixed(6)),
+      freeUsdcForNewOrders:
+        walletBalance != null
+          ? Number(
+              Math.max(
+                0,
+                walletBalance -
+                  reservations.reservedBuyUsdc -
+                  this.getWalletBufferUsdc(walletBalance),
+              ).toFixed(6),
+            )
+          : null,
+      reservedSellTokenCount: reservations.reservedSellByToken.size,
+      cancelReplacePendingCount: this.sellReplaceLocks.size,
+      gatewayRejectsLast10mByCode: this.getGatewayRejectsLast10mByCode(),
+      internalReservationRejectsLast10m: this.getInternalReservationRejectsLast10m(),
     };
   }
 
@@ -272,38 +319,28 @@ export class ExecutionModule implements RuntimeModule {
     this.processedCommandOrder.push(String(cmd.commandId));
     this.pruneProcessedCommandIds();
 
-    // Pre-flight wallet balance check for buy orders
-    if (cmd.side === "buy" && this.deps.controlDb && this.deps.activeProfile) {
-      const walletRow = this.deps.controlDb
-        .prepare("SELECT wallet_balance_usdc FROM profile_summaries WHERE profile_id = ?")
-        .get(this.deps.activeProfile) as { wallet_balance_usdc: number | null } | undefined;
-      const walletBalance = walletRow?.wallet_balance_usdc;
-      if (walletBalance != null) {
-        const openBuyUsdc = this.deps.orderRepo.sumOpenBuyNotional();
-        const availableBalance = walletBalance - openBuyUsdc;
-        if (availableBalance < notional) {
-          this.log.debug(
-            {
-              wallet: walletBalance,
-              openBuy: openBuyUsdc,
-              available: availableBalance,
-              order: notional,
-            },
-            "order skipped — insufficient wallet balance",
-          );
-          await this.deps.bus.publish("OrderRejected", {
-            commandId: cmd.commandId,
-            clientOrderId: cmd.clientOrderId,
-            reason: "insufficient wallet balance",
-            errorCode: ExchangeErrorCode.InsufficientBalance,
-            familyId: cmd.familyId,
-            timestamp: Date.now(),
-          });
-          return;
-        }
-      }
+    if (await this.deferSellReplacementIfNeeded(cmd)) {
+      return;
     }
 
+    const reservationRejection = this.getReservationRejection(cmd, notional);
+    if (reservationRejection) {
+      this.recordInternalReservationReject();
+      this.log.debug(reservationRejection.details, reservationRejection.message);
+      await this.rejectOrder(
+        cmd,
+        reservationRejection.reason,
+        ExchangeErrorCode.InsufficientBalance,
+      );
+      return;
+    }
+
+    this.pendingReservations.set(String(cmd.commandId), {
+      tokenId: cmd.tokenId,
+      side: cmd.side,
+      size: cmd.size,
+      price: cmd.price,
+    });
     this.acceptedCommandAt.set(String(cmd.commandId), Date.now());
 
     if (this.queue) {
@@ -344,6 +381,9 @@ export class ExecutionModule implements RuntimeModule {
         await this.executeCancel(cmd);
       }
     } finally {
+      if (cmd.type === "PlaceOrderCommand") {
+        this.pendingReservations.delete(String(cmd.commandId));
+      }
       this.recordExecutionLatency(cmd);
     }
   }
@@ -384,6 +424,8 @@ export class ExecutionModule implements RuntimeModule {
     const now = Date.now();
 
     if (!result.success) {
+      this.recordGatewayReject(result.errorCode ?? ExchangeErrorCode.Unknown);
+      const reason = this.gatewayRejectReason(result.errorCode, result.errorMessage);
       this.log.warn(
         { commandId: cmd.commandId, errorCode: result.errorCode },
         "order rejected by gateway",
@@ -395,7 +437,7 @@ export class ExecutionModule implements RuntimeModule {
       await this.deps.bus.publish("OrderRejected", {
         commandId: cmd.commandId,
         clientOrderId: cmd.clientOrderId,
-        reason: result.errorMessage ?? "unknown",
+        reason,
         errorCode: result.errorCode ?? "UNKNOWN",
         familyId: cmd.familyId,
         timestamp: now,
@@ -482,6 +524,8 @@ export class ExecutionModule implements RuntimeModule {
       familyId: cmd.familyId,
       timestamp: now,
     });
+
+    await this.releasePendingSellReplacement(cmd.orderId);
   }
 
   // ─── Fill detection ───────────────────────────────────────────────────
@@ -501,6 +545,228 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────
+
+  private getReservationSnapshot() {
+    return buildReservationSnapshot(
+      this.deps.orderRepo.findOpen(),
+      this.deps.fillRepo,
+      this.pendingReservations.values(),
+    );
+  }
+
+  private getReservationRejection(
+    cmd: PlaceOrderCommand,
+    notional: number,
+  ): {
+    reason: string;
+    message: string;
+    details: Record<string, unknown>;
+  } | null {
+    const reservations = this.getReservationSnapshot();
+
+    if (cmd.side === "buy") {
+      const walletBalance = this.getWalletBalanceUsdc();
+      if (walletBalance == null) return null;
+
+      const walletBuffer = this.getWalletBufferUsdc(walletBalance);
+      const availableBalance = walletBalance - reservations.reservedBuyUsdc - walletBuffer;
+      if (availableBalance + 1e-9 >= notional) return null;
+
+      return {
+        reason: "reserved-usdc-limit",
+        message: "order skipped — insufficient wallet balance after open-order reservations",
+        details: {
+          wallet: walletBalance,
+          reservedBuy: reservations.reservedBuyUsdc,
+          walletBuffer,
+          available: availableBalance,
+          order: notional,
+        },
+      };
+    }
+
+    if (!this.deps.positionRepo) return null;
+
+    const position = this.deps.positionRepo.findByTokenId(cmd.tokenId);
+    if (!position || position.status !== "open") {
+      return {
+        reason: "reserved-token-limit",
+        message: "sell order skipped — no open position for token",
+        details: { tokenId: cmd.tokenId, orderSize: cmd.size },
+      };
+    }
+
+    const reservedSell = getReservedSellSize(reservations, cmd.tokenId);
+    const availableSize = position.size - reservedSell;
+    if (availableSize + 1e-9 >= cmd.size) return null;
+
+    return {
+      reason: "reserved-token-limit",
+      message: "sell order skipped — token balance already reserved by open sell orders",
+      details: {
+        tokenId: cmd.tokenId,
+        positionSize: position.size,
+        reservedSell,
+        availableSize,
+        orderSize: cmd.size,
+      },
+    };
+  }
+
+  private getWalletBalanceUsdc(): number | null {
+    if (!this.deps.controlDb || !this.deps.activeProfile) return null;
+    const walletRow = this.deps.controlDb
+      .prepare("SELECT wallet_balance_usdc FROM profile_summaries WHERE profile_id = ?")
+      .get(this.deps.activeProfile) as { wallet_balance_usdc: number | null } | undefined;
+    return walletRow?.wallet_balance_usdc ?? null;
+  }
+
+  private getWalletBufferUsdc(walletBalance: number): number {
+    return Math.max(
+      ExecutionModule.MIN_WALLET_BUFFER_USDC,
+      walletBalance * ExecutionModule.WALLET_BUFFER_RATIO,
+    );
+  }
+
+  private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
+    if (cmd.side !== "sell") return false;
+
+    const existingSell = this.findOpenSellOrderForToken(cmd.tokenId);
+    const key = String(cmd.tokenId);
+    if (!existingSell) {
+      this.sellReplaceLocks.delete(key);
+      return false;
+    }
+
+    if (Math.abs(existingSell.price - cmd.price) < cmd.tickSize - 1e-9) {
+      await this.rejectOrder(cmd, "sell-order-already-open", ExchangeErrorCode.LivePolicyBlocked);
+      return true;
+    }
+
+    const now = Date.now();
+    const existingLock = this.sellReplaceLocks.get(key);
+    if (
+      existingLock &&
+      now - existingLock.createdAt < ExecutionModule.SELL_REPLACE_LOCK_TIMEOUT_MS
+    ) {
+      await this.rejectOrder(cmd, "sell-replace-lock-active", ExchangeErrorCode.LivePolicyBlocked);
+      return true;
+    }
+
+    this.sellReplaceLocks.set(key, { orderId: existingSell.orderId, command: cmd, createdAt: now });
+    await this.deps.bus.publish("CancelOrderRequested", {
+      command: {
+        type: "CancelOrderCommand",
+        commandId: createCommandId(`sell-replace-${String(existingSell.orderId)}-${now}`),
+        orderId: existingSell.orderId,
+        reason: existingLock ? "sell_replace_retry" : "sell_replace_reprice",
+        familyId: existingSell.familyId,
+      },
+      timestamp: now,
+    });
+    await this.rejectOrder(
+      cmd,
+      existingLock ? "sell-replace-lock-retry" : "sell-replace-pending",
+      ExchangeErrorCode.LivePolicyBlocked,
+    );
+    return true;
+  }
+
+  private findOpenSellOrderForToken(tokenId: TokenId): Order | null {
+    const openOrders = this.deps.orderRepo
+      .findByTokenId(tokenId)
+      .filter(
+        (order) =>
+          order.side === "sell" &&
+          (order.status === "pending" ||
+            order.status === "open" ||
+            order.status === "partially-filled"),
+      );
+    return openOrders[0] ?? null;
+  }
+
+  private async releasePendingSellReplacement(cancelledOrderId: OrderId): Promise<void> {
+    for (const [tokenKey, lock] of this.sellReplaceLocks) {
+      if (lock.orderId !== cancelledOrderId) continue;
+      this.sellReplaceLocks.delete(tokenKey);
+      const replacement: PlaceOrderCommand = {
+        ...lock.command,
+        commandId: createCommandId(`sell-replace-submit-${String(cancelledOrderId)}-${Date.now()}`),
+      };
+      await this.deps.bus.publish("PlaceOrderRequested", {
+        command: replacement,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+  }
+
+  private async rejectOrder(
+    cmd: PlaceOrderCommand,
+    reason: string,
+    errorCode: ExchangeErrorCode,
+  ): Promise<void> {
+    await this.deps.bus.publish("OrderRejected", {
+      commandId: cmd.commandId,
+      clientOrderId: cmd.clientOrderId,
+      reason,
+      errorCode,
+      familyId: cmd.familyId,
+      timestamp: Date.now(),
+    });
+  }
+
+  private recordGatewayReject(errorCode: string): void {
+    this.gatewayRejects.push({ ts: Date.now(), code: errorCode });
+    this.pruneDiagnosticsWindows();
+  }
+
+  private gatewayRejectReason(
+    errorCode: ExchangeErrorCode | undefined,
+    message: string | undefined,
+  ): string {
+    const lower = (message ?? "").toLowerCase();
+    if (
+      errorCode === ExchangeErrorCode.InsufficientBalance &&
+      lower.includes("balance") &&
+      lower.includes("allowance")
+    ) {
+      return "exchange-insufficient-balance-or-allowance";
+    }
+    return message ?? "unknown";
+  }
+
+  private recordInternalReservationReject(): void {
+    this.internalReservationRejects.push(Date.now());
+    this.pruneDiagnosticsWindows();
+  }
+
+  private getGatewayRejectsLast10mByCode(): Record<string, number> {
+    this.pruneDiagnosticsWindows();
+    const counts: Record<string, number> = {};
+    for (const reject of this.gatewayRejects) {
+      counts[reject.code] = (counts[reject.code] ?? 0) + 1;
+    }
+    return counts;
+  }
+
+  private getInternalReservationRejectsLast10m(): number {
+    this.pruneDiagnosticsWindows();
+    return this.internalReservationRejects.length;
+  }
+
+  private pruneDiagnosticsWindows(): void {
+    const cutoff = Date.now() - 10 * 60 * 1000;
+    while (this.gatewayRejects.length > 0 && this.gatewayRejects[0]!.ts < cutoff) {
+      this.gatewayRejects.shift();
+    }
+    while (
+      this.internalReservationRejects.length > 0 &&
+      this.internalReservationRejects[0]! < cutoff
+    ) {
+      this.internalReservationRejects.shift();
+    }
+  }
 
   private pruneProcessedCommandIds(): void {
     if (this.processedCommandIds.size > 10_000) {

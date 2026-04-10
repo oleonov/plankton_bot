@@ -25,8 +25,17 @@ export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
 export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
 export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
 export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
+export const EXIT_ORDER_TTL_MS = 60_000; // 60s
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff (reduced from 5m)
+
+const EXIT_REASONS = new Set([
+  "repricing-exit",
+  "medium-hold-exit",
+  "tail-prune",
+  "stale-prune",
+  "reduce-only",
+]);
 
 export interface StaleOrderCleanerDeps {
   orderRepo: OrderRepository;
@@ -38,6 +47,7 @@ export interface StaleOrderCleanerDeps {
 export interface StaleCleanResult {
   staleTtlCancelled: number;
   staleEndDateCancelled: number;
+  staleExitTtlCancelled: number;
 }
 
 /**
@@ -60,6 +70,9 @@ export async function cleanStaleEntryOrders(
   const entryBuys = openOrders.filter(
     (o) => o.side === "buy" && o.signalReason != null && ENTRY_REASONS.has(o.signalReason),
   );
+  const exitSells = openOrders.filter(
+    (o) => o.side === "sell" && o.signalReason != null && EXIT_REASONS.has(o.signalReason),
+  );
 
   // Evict backoff entries for orders no longer open
   const openIds = new Set(openOrders.map((o) => String(o.orderId)));
@@ -69,6 +82,7 @@ export async function cleanStaleEntryOrders(
 
   let staleTtlCancelled = 0;
   let staleEndDateCancelled = 0;
+  let staleExitTtlCancelled = 0;
 
   for (const order of entryBuys) {
     const ordKey = String(order.orderId);
@@ -114,7 +128,24 @@ export async function cleanStaleEntryOrders(
     }
   }
 
-  return { staleTtlCancelled, staleEndDateCancelled };
+  for (const order of exitSells) {
+    const ordKey = String(order.orderId);
+    const lastAttempt = backoffMap.get(ordKey);
+    if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
+
+    const ageMs = now - new Date(order.createdAt).getTime();
+    if (ageMs > EXIT_ORDER_TTL_MS) {
+      await publishCancel(bus, order, "stale_exit_ttl");
+      backoffMap.set(ordKey, now);
+      staleExitTtlCancelled++;
+      log.info(
+        { orderId: ordKey, ageMs, ttlMs: EXIT_ORDER_TTL_MS, signalReason: order.signalReason },
+        "stale exit order — TTL exceeded",
+      );
+    }
+  }
+
+  return { staleTtlCancelled, staleEndDateCancelled, staleExitTtlCancelled };
 }
 
 function resolveOrderTtlMs(
@@ -143,7 +174,7 @@ async function publishCancel(
     orderId: import("@plankton/domain").OrderId;
     familyId: import("@plankton/domain").FamilyId;
   },
-  reason: "stale_entry_ttl" | "stale_entry_enddate",
+  reason: "stale_entry_ttl" | "stale_entry_enddate" | "stale_exit_ttl",
 ): Promise<void> {
   await bus.publish("CancelOrderRequested", {
     command: {

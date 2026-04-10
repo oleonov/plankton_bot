@@ -237,6 +237,29 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled).toHaveLength(0);
   });
 
+  it("cancels stale open sell exit orders on the exit TTL", async () => {
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
+    const order = makeOrder({
+      side: "sell",
+      createdAt: twoMinutesAgo,
+      signalReason: "repricing-exit",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleExitTtlCancelled).toBe(1);
+    expect(result.staleTtlCancelled).toBe(0);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
+  });
+
   // ─── Signal reason filtering ───────────────────────────────────────
 
   it("does not cancel buy orders with non-entry signal reason", async () => {

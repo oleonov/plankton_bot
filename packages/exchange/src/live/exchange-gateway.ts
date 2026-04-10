@@ -19,6 +19,7 @@ import type {
 } from "@plankton/domain";
 import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
+import { sanitizeLogArg } from "../redaction.js";
 import {
   mapOpenOrder,
   mapTrade,
@@ -234,7 +235,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         this.reportInfraAlert(e);
         console.error(
           `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
-          e,
+          sanitizeLogArg(e),
         );
         throw e;
       }
@@ -252,7 +253,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       try {
         await redeemBatch(conditionIds);
       } catch (e) {
-        console.error(`Failed to redeem conditions ${conditionIds.join(",")}:`, e);
+        console.error(`Failed to redeem conditions ${conditionIds.join(",")}:`, sanitizeLogArg(e));
         throw e;
       }
       return;
@@ -262,7 +263,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       try {
         await redeemOne!({ conditionId });
       } catch (e) {
-        console.error(`Failed to redeem ${conditionId}:`, e);
+        console.error(`Failed to redeem ${conditionId}:`, sanitizeLogArg(e));
         throw e;
       }
     }
@@ -288,7 +289,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         this.reportInfraAlert(e);
         console.error(
           `Failed to submit relayer merge for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
-          e,
+          sanitizeLogArg(e),
         );
         throw e;
       }
@@ -306,7 +307,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       try {
         await mergeOne({ conditionId: merge.conditionId, amount: merge.amount });
       } catch (e) {
-        console.error(`Failed to merge ${merge.conditionId}:`, e);
+        console.error(`Failed to merge ${merge.conditionId}:`, sanitizeLogArg(e));
         throw e;
       }
     }
@@ -356,7 +357,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
         const request = await this.buildMergeRequest(merge.conditionId, merge.amount);
         if (request) requests.push(request);
       } catch (e) {
-        console.error(`Failed to build merge request for condition ${merge.conditionId}:`, e);
+        console.error(
+          `Failed to build merge request for condition ${merge.conditionId}:`,
+          sanitizeLogArg(e),
+        );
       }
     }
     return requests;
