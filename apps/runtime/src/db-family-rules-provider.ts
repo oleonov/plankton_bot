@@ -17,6 +17,7 @@ import type {
   ScaleInRules,
   ExitRules,
   TwoSidedRules,
+  ThroughputRules,
   TailSuppressionRules,
   SessionRules,
 } from "@plankton/domain";
@@ -83,6 +84,11 @@ interface RawRow {
   allow_two_sided: number;
   two_sided_mode: string;
   min_activity_for_two_sided: number | null;
+
+  // throughput
+  max_concurrent_orders_per_family: number | null;
+  max_probe_in_flight_per_token: number | null;
+  max_entry_signals_per_tick_per_family: number | null;
 
   // tail_suppression
   max_open_value_usdc: number;
@@ -190,6 +196,12 @@ function mapRow(row: RawRow): FamilyRuleBundle {
     minActivityForTwoSided: row.min_activity_for_two_sided,
   };
 
+  const throughput: ThroughputRules = {
+    maxConcurrentOrdersPerFamily: row.max_concurrent_orders_per_family,
+    maxProbeInFlightPerToken: row.max_probe_in_flight_per_token,
+    maxEntrySignalsPerTickPerFamily: row.max_entry_signals_per_tick_per_family,
+  };
+
   const tailSuppression: TailSuppressionRules = {
     maxOpenValueUsdc: row.max_open_value_usdc,
     maxActiveMarkets: row.max_active_markets,
@@ -215,6 +227,7 @@ function mapRow(row: RawRow): FamilyRuleBundle {
     scaleIn,
     exit,
     twoSided,
+    throughput,
     tailSuppression,
     session,
   };

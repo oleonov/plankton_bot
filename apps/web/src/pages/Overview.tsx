@@ -349,6 +349,14 @@ export function Overview() {
                 {status.signalActivity.approvalRate != null && (
                   <> · {status.signalActivity.approvalRate}% approval</>
                 )}
+                {status.executionQueue && (
+                  <>
+                    {" · "}
+                    exec {status.executionQueue.activeCount ?? 0} active /{" "}
+                    {status.executionQueue.queueDepth ?? 0} queued /{" "}
+                    {status.executionQueue.maxConcurrency ?? "∞"} max
+                  </>
+                )}
               </span>
             )}
           </div>
@@ -362,7 +370,7 @@ export function Overview() {
             <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-dim)" }}>
               {status.signalActivity?.candidatesConsideredLast10m != null &&
               status.signalActivity.candidatesConsideredLast10m > 0
-                ? `${status.signalActivity.candidatesConsideredLast10m} candidates considered — ${status.signalActivity.blockedByResolutionBufferLast10m ?? 0} in resolution buffer, ${status.signalActivity.blockedByWeekendLast10m ?? 0} blocked by weekend, ${status.signalActivity.blockedByWindowLast10m ?? 0} outside active window`
+                ? `${status.signalActivity.candidatesConsideredLast10m} candidates considered — ${status.signalActivity.blockedByResolutionBufferLast10m ?? 0} in resolution buffer, ${status.signalActivity.blockedByWeekendLast10m ?? 0} blocked by weekend, ${status.signalActivity.blockedByWindowLast10m ?? 0} outside active window, ${status.signalActivity.blockedByPerFamilyTickLimitLast10m ?? 0} per-family tick limited`
                 : "No signals produced — markets may be outside active window or in resolution buffer"}
             </div>
           )}

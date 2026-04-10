@@ -24,9 +24,9 @@ describe("speedup config vars", () => {
     expect(config.marketDataPollIntervalMs).toBe(5000);
   });
 
-  it("defaults EXECUTION_MAX_CONCURRENCY to 4", () => {
+  it("defaults EXECUTION_MAX_CONCURRENCY to 16", () => {
     const config = loadEnv();
-    expect(config.executionMaxConcurrency).toBe(4);
+    expect(config.executionMaxConcurrency).toBe(16);
   });
 
   it("reads custom STRATEGY_SCAN_INTERVAL_MS from env", () => {

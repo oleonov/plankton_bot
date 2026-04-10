@@ -35,6 +35,14 @@ export class ExecutionQueue {
     return this.queue.length + this.inFlight.size;
   }
 
+  get diagnostics(): { queueDepth: number; activeCount: number; maxConcurrency: number } {
+    return {
+      queueDepth: this.queue.length,
+      activeCount: this.activeCount,
+      maxConcurrency: this.config.maxConcurrency,
+    };
+  }
+
   enqueue(cmd: Command): void {
     if (!this.accepting) {
       this.config.log.warn({ type: cmd.type }, "queue not accepting — command dropped");

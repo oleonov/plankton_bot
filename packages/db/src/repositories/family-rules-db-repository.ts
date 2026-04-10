@@ -86,6 +86,8 @@ export class SqliteFamilyRulesDbRepository {
            target_roi_band_low = ?, target_roi_band_high = ?,
            max_unmoved_hold_hours = ?, max_tail_hold_hours = ?,
            allow_two_sided = ?, two_sided_mode = ?, min_activity_for_two_sided = ?,
+           max_concurrent_orders_per_family = ?, max_probe_in_flight_per_token = ?,
+           max_entry_signals_per_tick_per_family = ?,
            max_open_value_usdc = ?, max_active_markets = ?, max_dust_positions = ?,
            tail_quarantine_threshold_usdc = ?, tail_quarantine_threshold_ratio = ?,
            stale_tail_prune_enabled = ?, threshold_cleanup_required = ?,
@@ -128,6 +130,9 @@ export class SqliteFamilyRulesDbRepository {
         rules.allowTwoSided ? 1 : 0,
         rules.twoSidedMode,
         rules.minActivityForTwoSided ?? null,
+        rules.maxConcurrentOrdersPerFamily ?? null,
+        rules.maxProbeInFlightPerToken ?? null,
+        rules.maxEntrySignalsPerTickPerFamily ?? null,
         rules.maxOpenValueUsdc,
         rules.maxActiveMarkets,
         rules.maxDustPositions,
@@ -237,6 +242,13 @@ export class SqliteFamilyRulesDbRepository {
           twoSidedMode: row.two_sided_mode as string,
           minActivityForTwoSided: (row.min_activity_for_two_sided as number) ?? null,
         },
+        throughput: {
+          maxConcurrentOrdersPerFamily:
+            (row.max_concurrent_orders_per_family as number | null) ?? null,
+          maxProbeInFlightPerToken: (row.max_probe_in_flight_per_token as number | null) ?? null,
+          maxEntrySignalsPerTickPerFamily:
+            (row.max_entry_signals_per_tick_per_family as number | null) ?? null,
+        },
         tailSuppression: {
           maxOpenValueUsdc: row.max_open_value_usdc as number,
           maxActiveMarkets: row.max_active_markets as number,
@@ -248,8 +260,8 @@ export class SqliteFamilyRulesDbRepository {
           autoSettleResolvedMarkets: true,
         },
         session: {
-          activeWindowsUtc: JSON.parse((row.active_windows_utc as string) || "[]"),
-          reducedWindowsUtc: JSON.parse((row.reduced_windows_utc as string) || "[]"),
+          activeWindowsUtc: JSON.parse((row.active_windows_utc as string) || "[]") as string[],
+          reducedWindowsUtc: JSON.parse((row.reduced_windows_utc as string) || "[]") as string[],
           weekdayBias: row.weekday_bias as string,
           weekendMode: row.weekend_mode as string,
         },

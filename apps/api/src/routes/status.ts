@@ -105,6 +105,7 @@ function computeTradingState(
         blockedByResolutionBuffer: number;
         blockedByWeekend: number;
         blockedByWindow: number;
+        blockedByPerFamilyTickLimit?: number;
       })
     : null;
 
@@ -133,6 +134,7 @@ function computeTradingState(
     signalActivity.blockedByResolutionBufferLast10m = scanner.blockedByResolutionBuffer;
     signalActivity.blockedByWeekendLast10m = scanner.blockedByWeekend;
     signalActivity.blockedByWindowLast10m = scanner.blockedByWindow;
+    signalActivity.blockedByPerFamilyTickLimitLast10m = scanner.blockedByPerFamilyTickLimit ?? 0;
   }
 
   const allProbeOnly = db
@@ -172,7 +174,7 @@ function computeTradingState(
 function parseEnvelopeJson(raw: string | null | undefined): Record<string, unknown> {
   if (!raw) return {};
   try {
-    const parsed = JSON.parse(raw);
+    const parsed = JSON.parse(raw) as unknown;
     return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   } catch {
     return {};
@@ -445,6 +447,14 @@ export function buildStatusSnapshot(
       sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
     }),
   };
+  const executionQueueRow = db
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'execution_queue' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { labels: string } | undefined;
+  const executionQueue = executionQueueRow
+    ? (JSON.parse(executionQueueRow.labels) as Record<string, unknown>)
+    : null;
 
   let desiredProfile: string | null = null;
   let currentProfile: string | null = null;
@@ -539,6 +549,7 @@ export function buildStatusSnapshot(
     tradingState,
     signalActivity,
     executionTelemetry24h,
+    executionQueue,
     startupAdoption,
     ...(infraAlerts.length > 0 ? { infraAlerts } : {}),
     ...(familyModeCounts !== undefined ? { familyModeCounts } : {}),

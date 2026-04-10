@@ -869,6 +869,7 @@ async function main(): Promise<void> {
     blockedByResolutionBuffer: 0,
     blockedByWeekend: 0,
     blockedByWindow: 0,
+    blockedByPerFamilyTickLimit: 0,
     lastReset: Date.now(),
   };
 
@@ -877,6 +878,7 @@ async function main(): Promise<void> {
     scannerWindow.blockedByResolutionBuffer += ev.blockedByResolutionBuffer;
     scannerWindow.blockedByWeekend += ev.blockedByWeekend;
     scannerWindow.blockedByWindow += ev.blockedByWindow;
+    scannerWindow.blockedByPerFamilyTickLimit += ev.blockedByPerFamilyTickLimit;
   });
 
   const deleteScanner = ledgerConn.db.prepare(
@@ -884,6 +886,12 @@ async function main(): Promise<void> {
   );
   const insertScanner = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('scanner_activity', 1, ?, ?)",
+  );
+  const deleteExecutionQueue = ledgerConn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'execution_queue'",
+  );
+  const insertExecutionQueue = ledgerConn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('execution_queue', 1, ?, ?)",
   );
   const insertSnapshot = ledgerConn.db.prepare(
     `INSERT INTO trading_state_snapshots (trading_state, signals_produced, signals_approved, signals_rejected, captured_at)
@@ -924,6 +932,7 @@ async function main(): Promise<void> {
       scannerWindow.blockedByResolutionBuffer = 0;
       scannerWindow.blockedByWeekend = 0;
       scannerWindow.blockedByWindow = 0;
+      scannerWindow.blockedByPerFamilyTickLimit = 0;
       scannerWindow.lastReset = now;
     }
     deleteScanner.run();
@@ -933,7 +942,13 @@ async function main(): Promise<void> {
         blockedByResolutionBuffer: scannerWindow.blockedByResolutionBuffer,
         blockedByWeekend: scannerWindow.blockedByWeekend,
         blockedByWindow: scannerWindow.blockedByWindow,
+        blockedByPerFamilyTickLimit: scannerWindow.blockedByPerFamilyTickLimit,
       }),
+      new Date().toISOString(),
+    );
+    deleteExecutionQueue.run();
+    insertExecutionQueue.run(
+      JSON.stringify(executionModule.getDiagnostics()),
       new Date().toISOString(),
     );
 

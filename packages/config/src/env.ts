@@ -18,7 +18,7 @@ const envSchema = z
     STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     INVENTORY_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
-    EXECUTION_MAX_CONCURRENCY: z.coerce.number().int().positive().default(4),
+    EXECUTION_MAX_CONCURRENCY: z.coerce.number().int().positive().default(16),
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
     POLY_PASSPHRASE: z.string().optional(),

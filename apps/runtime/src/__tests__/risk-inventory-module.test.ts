@@ -2242,6 +2242,44 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
+    it("uses configured throughput overrides instead of the family tier fallback", async () => {
+      const bundle = makeRuleBundle({}, { familyKey: "custom-burst-family" });
+      bundle.rules.throughput = {
+        maxConcurrentOrdersPerFamily: 3,
+        maxProbeInFlightPerToken: 3,
+        maxEntrySignalsPerTickPerFamily: null,
+      };
+      rulesProvider = createMockRulesProvider(bundle);
+      mod = createModule();
+      await mod.start();
+
+      const approved: any[] = [];
+      const rejected: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
+      bus.subscribe("SignalRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
+
+      expect(approved).toHaveLength(1);
+      expect(rejected).toHaveLength(0);
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("SignalProduced", {
+        signal: makeSignal({ reason: "probe-entry", signalId: "sig-burst-limit" as any }),
+      });
+
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toContain("family-in-flight-limit");
+
+      await mod.stop();
+    });
+
     it("allows a probe-entry on a different token while another probe is in flight for the family", async () => {
       await mod.start();
 

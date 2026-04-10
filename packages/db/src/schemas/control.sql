@@ -115,6 +115,11 @@ CREATE TABLE IF NOT EXISTS family_rules (
   two_sided_mode                           TEXT NOT NULL DEFAULT 'disabled',
   min_activity_for_two_sided               INTEGER,
 
+  -- throughput
+  max_concurrent_orders_per_family         INTEGER,
+  max_probe_in_flight_per_token            INTEGER,
+  max_entry_signals_per_tick_per_family    INTEGER,
+
   -- tail_suppression
   max_open_value_usdc                      REAL NOT NULL DEFAULT 50,
   max_active_markets                       INTEGER NOT NULL DEFAULT 5,

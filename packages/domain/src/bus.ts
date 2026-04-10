@@ -88,6 +88,7 @@ export interface RuntimeEventMap {
     readonly blockedByResolutionBuffer: number;
     readonly blockedByWeekend: number;
     readonly blockedByWindow: number;
+    readonly blockedByPerFamilyTickLimit: number;
     readonly signalsProduced: number;
     readonly entrySignals: number;
     readonly exitSignals: number;

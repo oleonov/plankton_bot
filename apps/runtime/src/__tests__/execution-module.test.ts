@@ -1217,12 +1217,21 @@ describe("ExecutionModule", () => {
 
     // Gateway call is in-flight but not resolved
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(queuedMod.getDiagnostics()).toMatchObject({
+      pendingCount: 1,
+      activeCount: 1,
+      queueDepth: 0,
+      maxConcurrency: 4,
+      placeCompleted: 0,
+    });
 
     // Resolve the gateway call
     resolvePlace!();
 
     // Drain the queue
     await queuedMod.stop();
+    expect(queuedMod.getDiagnostics().placeCompleted).toBe(1);
+    expect(queuedMod.getDiagnostics().avgPlaceLatencyMs).not.toBeNull();
   });
 
   // ─── Unsubscribe on stop ──────────────────────────────────────────

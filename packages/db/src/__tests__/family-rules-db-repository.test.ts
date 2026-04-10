@@ -78,7 +78,6 @@ describe("SqliteFamilyRulesDbRepository", () => {
     const configs = repo.loadAll();
     expect(configs).toHaveLength(1);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cfg = configs[0]! as any;
     // Identity
     expect(cfg.identity.familyId).toBe("fam-1");
@@ -148,6 +147,9 @@ describe("SqliteFamilyRulesDbRepository", () => {
         resolutionHoldingAllowed: false,
         allowTwoSided: false,
         twoSidedMode: "disabled",
+        maxConcurrentOrdersPerFamily: 20,
+        maxProbeInFlightPerToken: 2,
+        maxEntrySignalsPerTickPerFamily: 10,
         maxOpenValueUsdc: 25,
         maxActiveMarkets: 3,
         maxDustPositions: 2,
@@ -163,11 +165,15 @@ describe("SqliteFamilyRulesDbRepository", () => {
     );
 
     const configs = repo.loadAll();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const cfg = configs[0]! as any;
     expect(cfg.rules.universe.enabled).toBe(false);
     expect(cfg.rules.universe.action).toBe("blocked");
     expect(cfg.rules.entry.entryMode).toBe("disabled");
+    expect(cfg.rules.throughput).toEqual({
+      maxConcurrentOrdersPerFamily: 20,
+      maxProbeInFlightPerToken: 2,
+      maxEntrySignalsPerTickPerFamily: 10,
+    });
     expect(cfg.rules.tailSuppression.maxOpenValueUsdc).toBe(25);
     expect(cfg.rules.session.weekendMode).toBe("disabled");
   });

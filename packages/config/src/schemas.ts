@@ -150,6 +150,18 @@ const twoSidedYamlSchema = z.object({
   min_activity_for_two_sided: z.number().int().nullable().optional().default(null),
 });
 
+const throughputYamlSchema = z.object({
+  max_concurrent_orders_per_family: z.number().int().positive().nullable().optional().default(null),
+  max_probe_in_flight_per_token: z.number().int().positive().nullable().optional().default(null),
+  max_entry_signals_per_tick_per_family: z
+    .number()
+    .int()
+    .positive()
+    .nullable()
+    .optional()
+    .default(null),
+});
+
 const tailSuppressionYamlSchema = z.object({
   max_open_value_usdc: z.number(),
   max_active_markets: z.number().int(),
@@ -174,6 +186,11 @@ export const rulesYamlSchema = z.object({
   scale_in: scaleInYamlSchema,
   exit: exitYamlSchema,
   two_sided: twoSidedYamlSchema,
+  throughput: throughputYamlSchema.optional().default({
+    max_concurrent_orders_per_family: null,
+    max_probe_in_flight_per_token: null,
+    max_entry_signals_per_tick_per_family: null,
+  }),
   tail_suppression: tailSuppressionYamlSchema,
   session: sessionYamlSchema,
 });

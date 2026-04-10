@@ -40,6 +40,8 @@ function seedTestData(db: DbConnection["db"], opts?: { enabled?: number }) {
       resolution_buffer_minutes, target_roi_band_low, target_roi_band_high,
       max_unmoved_hold_hours, max_tail_hold_hours,
       allow_two_sided, two_sided_mode, min_activity_for_two_sided,
+      max_concurrent_orders_per_family, max_probe_in_flight_per_token,
+      max_entry_signals_per_tick_per_family,
       max_open_value_usdc, max_active_markets, max_dust_positions,
       tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio,
       stale_tail_prune_enabled, threshold_cleanup_required,
@@ -60,6 +62,7 @@ function seedTestData(db: DbConnection["db"], opts?: { enabled?: number }) {
       45, 0.15, 0.40,
       72, 168,
       1, 'selective', 5,
+      50, 3, 20,
       100, 10, 5,
       80, 1.5,
       1, 0,
@@ -167,6 +170,11 @@ describe("DbFamilyRulesProvider", () => {
     expect(rules.twoSided.allowTwoSided).toBe(true);
     expect(rules.twoSided.twoSidedMode).toBe("selective");
     expect(rules.twoSided.minActivityForTwoSided).toBe(5);
+    expect(rules.throughput).toEqual({
+      maxConcurrentOrdersPerFamily: 50,
+      maxProbeInFlightPerToken: 3,
+      maxEntrySignalsPerTickPerFamily: 20,
+    });
 
     // tailSuppression
     expect(rules.tailSuppression.maxOpenValueUsdc).toBe(100);

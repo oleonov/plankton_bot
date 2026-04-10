@@ -1098,6 +1098,67 @@ describe("spray cooldown", () => {
   });
 });
 
+// ─── Tests: per-family tick throughput ────────────────────────────────────
+
+describe("per-family tick throughput", () => {
+  it("keeps the legacy one-entry-per-family limit when no throughput override is configured", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 30 } },
+    });
+    const result = scan(
+      [
+        makeNormalizedMarket({ tokenId: TOK_ID, midPrice: 0.035 }),
+        makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.035 }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(bundle),
+        positionRepo: createMockPositionRepo(),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+      },
+      createBuyTracker(),
+      new Date("2026-04-01T12:00:00Z").getTime(),
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.meta.blockedByPerFamilyTickLimit).toBe(1);
+  });
+
+  it("allows configured burst families to emit multiple conviction entries in one tick", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: {
+        entry: { ...makeRules().entry, entryCooldownSeconds: 30 },
+        throughput: {
+          maxConcurrentOrdersPerFamily: null,
+          maxProbeInFlightPerToken: null,
+          maxEntrySignalsPerTickPerFamily: 2,
+        },
+      },
+    });
+    const result = scan(
+      [
+        makeNormalizedMarket({ tokenId: TOK_ID, midPrice: 0.035 }),
+        makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.035 }),
+        makeNormalizedMarket({ tokenId: TOK_ID_3, midPrice: 0.035 }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(bundle),
+        positionRepo: createMockPositionRepo(),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+      },
+      createBuyTracker(),
+      new Date("2026-04-01T12:00:00Z").getTime(),
+    );
+
+    expect(result.signals).toHaveLength(2);
+    expect(result.signals.map((s) => s.sequenceInTick)).toEqual([0, 0]);
+    expect(result.meta.blockedByPerFamilyTickLimit).toBe(1);
+  });
+});
+
 // ─── Tests: attempt-level cooldown tracker ────────────────────────────────
 
 describe("attempt-level cooldown", () => {

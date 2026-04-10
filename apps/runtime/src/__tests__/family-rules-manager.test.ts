@@ -95,6 +95,11 @@ function makeFamilyConfig(
         twoSidedMode: "disabled",
         minActivityForTwoSided: null,
       },
+      throughput: {
+        maxConcurrentOrdersPerFamily: null,
+        maxProbeInFlightPerToken: null,
+        maxEntrySignalsPerTickPerFamily: null,
+      },
       tailSuppression: {
         maxOpenValueUsdc: 50,
         maxActiveMarkets: 5,

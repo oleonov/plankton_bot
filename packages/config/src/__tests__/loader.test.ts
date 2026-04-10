@@ -56,6 +56,11 @@ describe("loadFamilyRulesYaml", () => {
     expect(family.rules.scaleIn.defaultMaxBuysPerLeg).toBe(3);
     expect(family.rules.exit.primaryProfitModel).toBe("sell-into-strength");
     expect(family.rules.twoSided.allowTwoSided).toBe(false);
+    expect(family.rules.throughput).toEqual({
+      maxConcurrentOrdersPerFamily: null,
+      maxProbeInFlightPerToken: null,
+      maxEntrySignalsPerTickPerFamily: null,
+    });
     expect(family.rules.tailSuppression.maxOpenValueUsdc).toBe(75.0);
     expect(family.rules.session.activeWindowsUtc).toEqual([{ start: "14:00", end: "21:00" }]);
   });

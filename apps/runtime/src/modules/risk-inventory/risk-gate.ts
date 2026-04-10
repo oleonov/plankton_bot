@@ -30,43 +30,10 @@ import {
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { resolveFamilyThroughputPolicy } from "../../family-throughput.js";
 
 type DerivedFamilyMode = "active" | "probe-only" | "reduce-only";
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
-
-interface FamilyThroughputLimits {
-  maxConcurrentOrdersPerFamily: number;
-  maxProbeInFlightPerToken: number;
-}
-
-const CORE_FAMILY_KEYS = new Set([
-  "bitcoin-price",
-  "btc-updown-4h",
-  "who-will-be-next-supreme-leader-of-iran",
-  "us-next-strikes-iran-on",
-]);
-
-const REDUCED_FAMILY_KEYS = new Set([
-  "bitcoin-above",
-  "ethereum-price",
-  "will-bitcoin-reach",
-  "will-ethereum-reach",
-]);
-
-const CORE_LIMITS: FamilyThroughputLimits = {
-  maxConcurrentOrdersPerFamily: 10,
-  maxProbeInFlightPerToken: 2,
-};
-
-const REDUCED_LIMITS: FamilyThroughputLimits = {
-  maxConcurrentOrdersPerFamily: 3,
-  maxProbeInFlightPerToken: 1,
-};
-
-const FALLBACK_LIMITS: FamilyThroughputLimits = {
-  maxConcurrentOrdersPerFamily: 2,
-  maxProbeInFlightPerToken: 1,
-};
 
 /**
  * Derive a family's effective trading mode from tail health metrics.
@@ -114,12 +81,6 @@ function hasOpenBuyOrderForToken(orderRepo: OrderRepository, tokenId: TokenId): 
     .some((order) => order.side === "buy" && OPEN_ORDER_STATUSES.has(order.status));
 }
 
-function getFamilyThroughputLimits(familyKey: string): FamilyThroughputLimits {
-  if (CORE_FAMILY_KEYS.has(familyKey)) return CORE_LIMITS;
-  if (REDUCED_FAMILY_KEYS.has(familyKey)) return REDUCED_LIMITS;
-  return FALLBACK_LIMITS;
-}
-
 export class RiskGateImpl implements RiskGate {
   constructor(
     private readonly rulesProvider: FamilyRulesProvider,
@@ -158,7 +119,7 @@ export class RiskGateImpl implements RiskGate {
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("family_exists_and_enabled");
-    const throughputLimits = getFamilyThroughputLimits(bundle.identity.familyKey);
+    const throughputLimits = resolveFamilyThroughputPolicy(bundle);
 
     if (this.liveLiteGuard?.isActive) {
       const policyRejected = this.liveLiteGuard.getFamilyPolicyRejections({
@@ -206,11 +167,22 @@ export class RiskGateImpl implements RiskGate {
     passed.push("runtime_mode_allows");
 
     // In-flight limiter (B2.2) — entry signals only
+    const familyInFlight = this.getInFlightCount?.(signal.familyId) ?? 0;
     if (
       isEntry &&
       this.getInFlightCount &&
-      this.getInFlightCount(signal.familyId) >= throughputLimits.maxConcurrentOrdersPerFamily
+      familyInFlight >= throughputLimits.maxConcurrentOrdersPerFamily
     ) {
+      this.log.debug(
+        {
+          familyId: signal.familyId,
+          familyKey: bundle.identity.familyKey,
+          inFlight: familyInFlight,
+          limit: throughputLimits.maxConcurrentOrdersPerFamily,
+          policySource: throughputLimits.source,
+        },
+        "entry rejected by family throughput policy",
+      );
       rejected.push("family-in-flight-limit");
       return this.decision(signal, false, rejected, passed);
     }
@@ -221,10 +193,21 @@ export class RiskGateImpl implements RiskGate {
         rejected.push("probe token already has open buy order");
         return this.decision(signal, false, rejected, passed);
       }
+      const tokenInFlight = this.getTokenInFlightCount?.(signal.tokenId) ?? 0;
       if (
         this.getTokenInFlightCount &&
-        this.getTokenInFlightCount(signal.tokenId) >= throughputLimits.maxProbeInFlightPerToken
+        tokenInFlight >= throughputLimits.maxProbeInFlightPerToken
       ) {
+        this.log.debug(
+          {
+            tokenId: signal.tokenId,
+            familyId: signal.familyId,
+            inFlight: tokenInFlight,
+            limit: throughputLimits.maxProbeInFlightPerToken,
+            policySource: throughputLimits.source,
+          },
+          "probe rejected by token throughput policy",
+        );
         rejected.push("probe-token-in-flight-limit");
         return this.decision(signal, false, rejected, passed);
       }

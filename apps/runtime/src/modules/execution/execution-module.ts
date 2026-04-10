@@ -26,6 +26,7 @@ import type {
   BotRunId,
   RuntimeControl,
   ProfileId,
+  TokenId,
 } from "@plankton/domain";
 import { createOrderId, ExchangeErrorCode, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
@@ -46,8 +47,9 @@ export interface ExecutionModuleDeps {
   liveLiteGuard?: LiveLiteGuard | undefined;
   runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
   maxConcurrency?: number | undefined;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  controlDb?: any;
+  controlDb?: {
+    prepare(sql: string): { get(...args: unknown[]): unknown };
+  };
   activeProfile?: ProfileId | undefined;
 }
 
@@ -56,6 +58,11 @@ export class ExecutionModule implements RuntimeModule {
   private readonly processedCommandIds = new Set<string>();
   private readonly processedCommandOrder: string[] = [];
   private readonly queue: ExecutionQueue | null;
+  private readonly acceptedCommandAt = new Map<string, number>();
+  private placeCompleted = 0;
+  private cancelCompleted = 0;
+  private placeLatencyTotalMs = 0;
+  private cancelLatencyTotalMs = 0;
   private unsubs: Array<() => void> = [];
   private started = false;
 
@@ -69,7 +76,7 @@ export class ExecutionModule implements RuntimeModule {
           resolveTokenId: (cmd) => {
             if (cmd.type === "PlaceOrderCommand") return cmd.tokenId;
             const order = this.deps.orderRepo.findById(cmd.orderId);
-            return order?.tokenId ?? (cmd.orderId as any);
+            return order?.tokenId ?? (cmd.orderId as unknown as TokenId);
           },
           log: this.log,
         })
@@ -96,6 +103,33 @@ export class ExecutionModule implements RuntimeModule {
   /** Number of queued + in-flight execution tasks. Zero = fully drained. */
   get pendingCount(): number {
     return this.queue?.pendingCount ?? 0;
+  }
+
+  getDiagnostics(): {
+    pendingCount: number;
+    queueDepth: number;
+    activeCount: number;
+    maxConcurrency: number | null;
+    placeCompleted: number;
+    cancelCompleted: number;
+    avgPlaceLatencyMs: number | null;
+    avgCancelLatencyMs: number | null;
+  } {
+    const queue = this.queue?.diagnostics;
+    return {
+      pendingCount: this.pendingCount,
+      queueDepth: queue?.queueDepth ?? 0,
+      activeCount: queue?.activeCount ?? 0,
+      maxConcurrency: queue?.maxConcurrency ?? null,
+      placeCompleted: this.placeCompleted,
+      cancelCompleted: this.cancelCompleted,
+      avgPlaceLatencyMs:
+        this.placeCompleted > 0 ? Math.round(this.placeLatencyTotalMs / this.placeCompleted) : null,
+      avgCancelLatencyMs:
+        this.cancelCompleted > 0
+          ? Math.round(this.cancelLatencyTotalMs / this.cancelCompleted)
+          : null,
+    };
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
@@ -270,12 +304,14 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
+    this.acceptedCommandAt.set(String(cmd.commandId), Date.now());
+
     if (this.queue) {
       this.queue.enqueue(cmd);
       return;
     }
 
-    await this.executePlace(cmd);
+    await this.executeCommand(cmd);
   }
 
   // ─── Cancel order handler ─────────────────────────────────────────────
@@ -288,22 +324,43 @@ export class ExecutionModule implements RuntimeModule {
     this.processedCommandIds.add(cmd.commandId);
     this.processedCommandOrder.push(String(cmd.commandId));
     this.pruneProcessedCommandIds();
+    this.acceptedCommandAt.set(String(cmd.commandId), Date.now());
 
     if (this.queue) {
       this.queue.enqueue(cmd);
       return;
     }
 
-    await this.executeCancel(cmd);
+    await this.executeCommand(cmd);
   }
 
   // ─── Command dispatcher ───────────────────────────────────────────────
 
   private async executeCommand(cmd: PlaceOrderCommand | CancelOrderCommand): Promise<void> {
+    try {
+      if (cmd.type === "PlaceOrderCommand") {
+        await this.executePlace(cmd);
+      } else {
+        await this.executeCancel(cmd);
+      }
+    } finally {
+      this.recordExecutionLatency(cmd);
+    }
+  }
+
+  private recordExecutionLatency(cmd: PlaceOrderCommand | CancelOrderCommand): void {
+    const key = String(cmd.commandId);
+    const startedAt = this.acceptedCommandAt.get(key);
+    if (startedAt == null) return;
+    this.acceptedCommandAt.delete(key);
+
+    const latencyMs = Date.now() - startedAt;
     if (cmd.type === "PlaceOrderCommand") {
-      await this.executePlace(cmd);
+      this.placeCompleted++;
+      this.placeLatencyTotalMs += latencyMs;
     } else {
-      await this.executeCancel(cmd);
+      this.cancelCompleted++;
+      this.cancelLatencyTotalMs += latencyMs;
     }
   }
 

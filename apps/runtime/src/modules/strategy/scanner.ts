@@ -36,6 +36,7 @@ import {
 } from "@plankton/domain";
 import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
+import { resolveFamilyThroughputPolicy } from "../../family-throughput.js";
 
 /** Context needed by the scanner to produce signals. */
 export interface ScannerDeps {
@@ -382,6 +383,7 @@ export interface ScanResult {
     blockedByResolutionBuffer: number;
     blockedByWeekend: number;
     blockedByWindow: number;
+    blockedByPerFamilyTickLimit: number;
     entrySignals: number;
     exitSignals: number;
   };
@@ -412,6 +414,7 @@ export function scan(
   let blockedByResolutionBuffer = 0;
   let blockedByWeekend = 0;
   let blockedByWindow = 0;
+  let blockedByPerFamilyTickLimit = 0;
 
   // Sort markets by composite family score (P1-1: higher-ranked families first)
   const sorted = sortByFamilyPriority(markets, deps.rulesProvider, deps.familyStateRepo);
@@ -429,7 +432,20 @@ export function scan(
   // entry signal per family per scan cycle. Without this, a batch of N
   // markets in the same family would emit N probe-entries before any fill
   // updates lastEntryTs.
-  const familyEntryEmitted = new Set<string>();
+  const familyEntryEmitted = new Map<string, number>();
+  function canEmitNonSprayEntry(bundle: FamilyRuleBundle, familyId: FamilyId): boolean {
+    const policy = resolveFamilyThroughputPolicy(bundle);
+    const key = String(familyId);
+    if ((familyEntryEmitted.get(key) ?? 0) >= policy.maxEntrySignalsPerTickPerFamily) {
+      blockedByPerFamilyTickLimit++;
+      return false;
+    }
+    return true;
+  }
+  function recordNonSprayEntry(familyId: FamilyId): void {
+    const key = String(familyId);
+    familyEntryEmitted.set(key, (familyEntryEmitted.get(key) ?? 0) + 1);
+  }
 
   // Spray-specific tracking (separate from conviction entry dedup)
   let sprayMarketsThisTick = 0;
@@ -537,8 +553,7 @@ export function scan(
       // Intra-tick: only one conviction entry per family per scan cycle.
       // Spray-first families skip this — they carpet-bomb multiple tokens per tick.
       if (entryPolicy !== "spray-first") {
-        const fKey = String(market.familyId);
-        if (familyEntryEmitted.has(fKey)) continue;
+        if (!canEmitNonSprayEntry(bundle, market.familyId)) continue;
       }
     }
 
@@ -563,7 +578,7 @@ export function scan(
           );
           if (scaleSignal) {
             signals.push(scaleSignal);
-            if (effectiveCooldown) familyEntryEmitted.add(String(market.familyId));
+            if (effectiveCooldown) recordNonSprayEntry(market.familyId);
           }
         }
       }
@@ -646,7 +661,7 @@ export function scan(
         );
         if (twoSidedSignal) {
           signals.push(twoSidedSignal);
-          if (effectiveCooldown) familyEntryEmitted.add(String(market.familyId));
+          if (effectiveCooldown) recordNonSprayEntry(market.familyId);
         }
       } else {
         // Probe entry — allowed in reduced mode (probes are low-risk)
@@ -662,7 +677,7 @@ export function scan(
         );
         if (probeSignal) {
           signals.push(probeSignal);
-          if (effectiveCooldown) familyEntryEmitted.add(String(market.familyId));
+          if (effectiveCooldown) recordNonSprayEntry(market.familyId);
         }
       }
     }
@@ -677,6 +692,7 @@ export function scan(
       blockedByResolutionBuffer,
       blockedByWeekend,
       blockedByWindow,
+      blockedByPerFamilyTickLimit,
       entrySignals,
       exitSignals: signals.length - entrySignals,
     },

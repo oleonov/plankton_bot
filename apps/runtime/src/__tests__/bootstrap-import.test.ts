@@ -110,6 +110,11 @@ function makeMockLoaded(): LoadedFamilyRules {
             twoSidedMode: "disabled",
             minActivityForTwoSided: null,
           },
+          throughput: {
+            maxConcurrentOrdersPerFamily: 50,
+            maxProbeInFlightPerToken: 3,
+            maxEntrySignalsPerTickPerFamily: 20,
+          },
           tailSuppression: {
             maxOpenValueUsdc: 45.0,
             maxActiveMarkets: 8,
@@ -231,6 +236,9 @@ describe("bootstrap-import", () => {
     expect(row.scale_mode).toBe("confirm-only");
     expect(row.exit_mode).toBe("repricing-sell");
     expect(row.allow_two_sided).toBe(0);
+    expect(row.max_concurrent_orders_per_family).toBe(50);
+    expect(row.max_probe_in_flight_per_token).toBe(3);
+    expect(row.max_entry_signals_per_tick_per_family).toBe(20);
     expect(row.max_open_value_usdc).toBe(45.0);
     expect(row.stale_tail_prune_enabled).toBe(1);
     expect(JSON.parse(row.active_windows_utc as string)).toEqual([

@@ -1967,6 +1967,56 @@ describe("StrategyModule", () => {
 
       expect(signals).toHaveLength(1);
     });
+
+    it("filters quarantined allowlisted families before scanning in live-lite mode", async () => {
+      const liveLiteGuard = new LiveLiteGuard({
+        familyAllowlist: [String(GOLD_FAM_ID)],
+        maxFamilies: 2,
+        maxOpenValueUsdc: 500,
+        maxOrderUsdc: 50,
+        maxActiveMarkets: 3,
+      });
+      familyStateRepo.save(
+        makeFamilyState({
+          familyId: GOLD_FAM_ID,
+          runtimeMode: "quarantine",
+          quarantineReason: "tail cap breached",
+        }),
+      );
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+        liveLiteGuard,
+      });
+      await mod.start();
+
+      const signals: unknown[] = [];
+      const scanTicks: unknown[] = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+      bus.subscribe("ScanTickCompleted", async (p) => {
+        scanTicks.push(p);
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ familyId: GOLD_FAM_ID, midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+
+      expect(signals).toHaveLength(0);
+      expect(scanTicks).toHaveLength(0);
+      expect(rulesProvider.getRule).not.toHaveBeenCalled();
+    });
   });
 
   // ─── RuntimeControl pause ─────────────────────────────────

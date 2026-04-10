@@ -67,8 +67,19 @@ export interface StatusData {
     blockedByResolutionBufferLast10m?: number;
     blockedByWeekendLast10m?: number;
     blockedByWindowLast10m?: number;
+    blockedByPerFamilyTickLimitLast10m?: number;
     topBlockingLayer?: string | null;
   };
+  executionQueue?: {
+    pendingCount?: number;
+    queueDepth?: number;
+    activeCount?: number;
+    maxConcurrency?: number | null;
+    placeCompleted?: number;
+    cancelCompleted?: number;
+    avgPlaceLatencyMs?: number | null;
+    avgCancelLatencyMs?: number | null;
+  } | null;
   executionTelemetry24h?: ExecutionTelemetryWindow;
   infraAlerts?: Array<{
     code: string;

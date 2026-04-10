@@ -213,6 +213,12 @@ export interface TwoSidedRules {
   minActivityForTwoSided: number | null;
 }
 
+export interface ThroughputRules {
+  maxConcurrentOrdersPerFamily: number | null;
+  maxProbeInFlightPerToken: number | null;
+  maxEntrySignalsPerTickPerFamily: number | null;
+}
+
 export interface TailSuppressionRules {
   maxOpenValueUsdc: number;
   maxActiveMarkets: number;
@@ -238,6 +244,7 @@ export interface FamilyRules {
   scaleIn: ScaleInRules;
   exit: ExitRules;
   twoSided: TwoSidedRules;
+  throughput?: ThroughputRules;
   tailSuppression: TailSuppressionRules;
   session: SessionRules;
 }
