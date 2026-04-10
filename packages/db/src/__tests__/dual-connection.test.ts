@@ -62,6 +62,27 @@ describe("dual-connection infrastructure", () => {
     expect(tables.length).toBeGreaterThan(0);
   });
 
+  it("bootstrapControlDb adds throughput columns to legacy control DBs", () => {
+    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ctrl-throughput-"));
+    const dbPath = path.join(tmpDir, "control.db");
+    const conn1 = bootstrapControlDb(dbPath);
+    conn1.db.prepare("ALTER TABLE family_rules DROP COLUMN max_concurrent_orders_per_family").run();
+    conn1.db.prepare("ALTER TABLE family_rules DROP COLUMN max_probe_in_flight_per_token").run();
+    conn1.db
+      .prepare("ALTER TABLE family_rules DROP COLUMN max_entry_signals_per_tick_per_family")
+      .run();
+    conn1.close();
+
+    const conn2 = bootstrapControlDb(dbPath);
+    conns.push(conn2);
+
+    const columns = conn2.db.prepare("PRAGMA table_info(family_rules)").all() as { name: string }[];
+    const names = columns.map((column) => column.name);
+    expect(names).toContain("max_concurrent_orders_per_family");
+    expect(names).toContain("max_probe_in_flight_per_token");
+    expect(names).toContain("max_entry_signals_per_tick_per_family");
+  });
+
   it("bootstrapLedgerDb is idempotent", () => {
     tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-idem-"));
     const dbPath = path.join(tmpDir, "ledger.db");

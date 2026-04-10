@@ -47,6 +47,9 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "family_catalog", "source_type", "TEXT NOT NULL DEFAULT 'yaml_import'");
   safeAddColumn(conn.db, "family_catalog", "origin_checksum", "TEXT");
   safeAddColumn(conn.db, "family_catalog", "fee_tier", "TEXT NOT NULL DEFAULT 'unknown'");
+  safeAddColumn(conn.db, "family_rules", "max_concurrent_orders_per_family", "INTEGER");
+  safeAddColumn(conn.db, "family_rules", "max_probe_in_flight_per_token", "INTEGER");
+  safeAddColumn(conn.db, "family_rules", "max_entry_signals_per_tick_per_family", "INTEGER");
   safeAddColumn(
     conn.db,
     "family_catalog",
