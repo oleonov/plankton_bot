@@ -144,9 +144,9 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   it("does not cancel fresh open buy entry order within TTL", async () => {
-    const oneHourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
     const order = makeOrder({
-      createdAt: oneHourAgo,
+      createdAt: twoMinutesAgo,
       signalReason: "spray-entry",
     });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
@@ -187,9 +187,9 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   it("does not cancel fresh intraday probe orders before the short TTL", async () => {
-    const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
+    const thirtySecondsAgo = new Date(Date.now() - 30_000).toISOString();
     const order = makeOrder({
-      createdAt: twoMinutesAgo,
+      createdAt: thirtySecondsAgo,
       signalReason: "probe-entry",
     });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);

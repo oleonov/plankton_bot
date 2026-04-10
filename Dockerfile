@@ -107,6 +107,9 @@ COPY --from=builder /app/packages/family-rules/package.json ./packages/family-ru
 # Copy default family rules (operator can override via volume mount)
 COPY --from=builder /app/config ./config
 
+# Copy production DB preparation tooling for controlled ops rollouts.
+COPY --from=builder /app/scripts/prepare-hard-mode-db.ts ./scripts/prepare-hard-mode-db.ts
+
 # Note: DB migrations (.sql files) are already in packages/db/dist/migrations/
 # because the db package build script copies them there (see packages/db/package.json).
 

@@ -1887,7 +1887,7 @@ describe("StrategyModule", () => {
       expect(signals).toHaveLength(0);
     });
 
-    it("skips non-gold families even when they are allowlisted", async () => {
+    it("passes signals for any allowlisted family in live-lite mode", async () => {
       const liveLiteGuard = new LiveLiteGuard({
         familyAllowlist: ["fam-btc"],
         maxFamilies: 2,
@@ -1925,8 +1925,8 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      expect(scanTicks).toHaveLength(0);
-      expect(signals).toHaveLength(0);
+      expect(scanTicks).toHaveLength(1);
+      expect(signals).toHaveLength(1);
     });
 
     it("passes signals for allowlisted gold families in live-lite mode", async () => {

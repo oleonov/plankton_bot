@@ -2211,6 +2211,37 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
+    it("allows up to two same-token probe entries in flight for core families", async () => {
+      rulesProvider = createMockRulesProvider(makeRuleBundle({}, { familyKey: "bitcoin-price" }));
+      mod = createModule();
+      await mod.start();
+
+      const approved: any[] = [];
+      const rejected: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
+      bus.subscribe("SignalRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
+
+      expect(approved).toHaveLength(1);
+      expect(rejected).toHaveLength(0);
+
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("SignalProduced", {
+        signal: makeSignal({ reason: "probe-entry", signalId: "sig-core-token-limit" as any }),
+      });
+
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toContain("probe-token-in-flight-limit");
+
+      await mod.stop();
+    });
+
     it("allows a probe-entry on a different token while another probe is in flight for the family", async () => {
       await mod.start();
 

@@ -22,9 +22,11 @@ export const HORIZON_TTL_MS: Record<string, number> = {
   "ad-hoc": 8 * 60 * 60_000,
 };
 export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
-export const PROBE_LIKE_INTRADAY_TTL_MS = 5 * 60_000;
+export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
+export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
+export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
-export const CANCEL_BACKOFF_MS = 5 * 60_000; // 5 min retry backoff
+export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff (reduced from 5m)
 
 export interface StaleOrderCleanerDeps {
   orderRepo: OrderRepository;
@@ -115,17 +117,21 @@ export async function cleanStaleEntryOrders(
   return { staleTtlCancelled, staleEndDateCancelled };
 }
 
-function resolveOrderTtlMs(order: Pick<Order, "signalReason">, market: Pick<Market, "horizon"> | null) {
+function resolveOrderTtlMs(
+  order: Pick<Order, "signalReason">,
+  market: Pick<Market, "horizon"> | null,
+) {
   const horizon = market?.horizon ?? null;
-  const horizonTtlMs = horizon != null ? (HORIZON_TTL_MS[horizon] ?? DEFAULT_TTL_MS) : DEFAULT_TTL_MS;
+  const horizonTtlMs =
+    horizon != null ? (HORIZON_TTL_MS[horizon] ?? DEFAULT_TTL_MS) : DEFAULT_TTL_MS;
 
-  // Probe/spray orders on fast intraday families need a much shorter leash;
-  // otherwise two resting probes can monopolize the family's in-flight budget.
-  if (
-    horizon === "intraday-4h" &&
-    (order.signalReason === "probe-entry" || order.signalReason === "spray-entry")
-  ) {
-    return Math.min(horizonTtlMs, PROBE_LIKE_INTRADAY_TTL_MS);
+  // Probe/spray orders need a much shorter leash than conviction-style orders.
+  if (order.signalReason === "probe-entry" || order.signalReason === "spray-entry") {
+    if (horizon === "intraday-4h") return Math.min(horizonTtlMs, PROBE_LIKE_INTRADAY_TTL_MS);
+    if (horizon === "daily") return Math.min(horizonTtlMs, PROBE_LIKE_DAILY_TTL_MS);
+    if (horizon === "ad-hoc") return Math.min(horizonTtlMs, PROBE_LIKE_AD_HOC_TTL_MS);
+    // Generic fallback for probe-like: 10m
+    return Math.min(horizonTtlMs, 10 * 60_000);
   }
 
   return horizonTtlMs;

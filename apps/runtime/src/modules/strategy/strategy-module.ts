@@ -54,17 +54,6 @@ export interface StrategyModuleDeps {
   globalConfig?: GlobalConfig | undefined;
 }
 
-function isGoldFamily(familyId: string): boolean {
-  return (
-    familyId.startsWith("bitcoin-above") ||
-    familyId.startsWith("bitcoin-price") ||
-    familyId.startsWith("ethereum-above") ||
-    familyId.startsWith("ethereum-price") ||
-    familyId.startsWith("will-bitcoin-reach") ||
-    familyId.startsWith("will-ethereum-reach")
-  );
-}
-
 export class StrategyModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly buyTracker: BuyTracker;
@@ -171,7 +160,7 @@ export class StrategyModule implements RuntimeModule {
       this.tickCount++;
       const tickTs = Date.now();
 
-      // Keep the live-lite scan loop focused on the explicit gold-family universe.
+      // Keep the live-lite scan loop focused on the explicit operator allowlist.
       const filteredMarkets = this.cachedMarkets.filter((m) => {
         if (!m.familyId) return false;
 
@@ -185,7 +174,7 @@ export class StrategyModule implements RuntimeModule {
           return false;
         }
 
-        return isGoldFamily(fid);
+        return true;
       });
 
       if (filteredMarkets.length === 0) {
