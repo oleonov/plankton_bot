@@ -13,13 +13,17 @@ import { NormalizationModule } from "../modules/normalization/normalization-modu
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
+function nearEndDate(): string {
+  return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+}
+
 function makeIdentity(overrides?: Partial<FamilyIdentity>): FamilyIdentity {
   return {
     familyId: createFamilyId("fam-btc"),
     familyKey: "btc-price",
     primaryCategory: "crypto",
     regime: "threshold" as Regime,
-    horizon: "short",
+    horizon: "daily",
     cadence: "daily",
     strategyProfile: "scalp" as any,
     topicKey: "btc",
@@ -42,7 +46,7 @@ function makeNormalizedMarket(overrides?: Partial<NormalizedMarket>): Normalized
     familyKey: null,
     regime: null,
     horizon: null,
-    endDate: "2026-12-31",
+    endDate: nearEndDate(),
     active: true,
     tickSize: 0.01,
     negRisk: false,
@@ -136,7 +140,7 @@ describe("NormalizationModule", () => {
     expect(received[0]![0]!.familyId).toBe("fam-btc");
     expect(received[0]![0]!.familyKey).toBe("btc-price");
     expect(received[0]![0]!.regime).toBe("threshold");
-    expect(received[0]![0]!.horizon).toBe("short");
+    expect(received[0]![0]!.horizon).toBe("daily");
 
     await mod.stop();
   });
@@ -195,7 +199,7 @@ describe("NormalizationModule", () => {
       familyKey: "eth-price",
       slugPattern: "eth*price",
       regime: "price-range" as Regime,
-      horizon: "medium",
+      horizon: "daily",
     });
 
     rulesProvider = createMockRulesProvider([makeIdentity(), ethFamily]);
@@ -322,6 +326,80 @@ describe("NormalizationModule", () => {
     });
 
     expect(received[0]![0]!.familyId).toBe("fam-btc");
+
+    await mod.stop();
+  });
+
+  it("intraday-4h family rejects long-dated will-bitcoin-reach market", async () => {
+    const intradayFamily = makeIdentity({
+      familyId: createFamilyId("fam-btc-reach"),
+      familyKey: "will-bitcoin-reach",
+      horizon: "intraday-4h",
+      cadence: "intraday-4h",
+      slugPattern: "will-bitcoin-reach-*",
+    });
+    rulesProvider = createMockRulesProvider([intradayFamily]);
+    mod = new NormalizationModule({
+      bus,
+      rulesProvider,
+      marketRepo,
+      log: silentLog,
+    });
+    await mod.start();
+
+    const received: NormalizedMarket[][] = [];
+    bus.subscribe("NormalizedMarketUpdated", async (p) => {
+      received.push([...p.markets]);
+    });
+
+    await bus.publish("MarketSnapshotReceived", {
+      markets: [
+        makeNormalizedMarket({
+          slug: "will-bitcoin-reach-140000-by-december-31-2026-131-829-299",
+          endDate: "2027-01-01T05:00:00Z",
+        }),
+      ],
+      timestamp: Date.parse("2026-04-10T09:38:24.003Z"),
+    });
+
+    expect(received[0]![0]!.familyId).toBeNull();
+
+    await mod.stop();
+  });
+
+  it("intraday-4h family accepts near-term will-bitcoin-reach market", async () => {
+    const intradayFamily = makeIdentity({
+      familyId: createFamilyId("fam-btc-reach"),
+      familyKey: "will-bitcoin-reach",
+      horizon: "intraday-4h",
+      cadence: "intraday-4h",
+      slugPattern: "will-bitcoin-reach-*",
+    });
+    rulesProvider = createMockRulesProvider([intradayFamily]);
+    mod = new NormalizationModule({
+      bus,
+      rulesProvider,
+      marketRepo,
+      log: silentLog,
+    });
+    await mod.start();
+
+    const received: NormalizedMarket[][] = [];
+    bus.subscribe("NormalizedMarketUpdated", async (p) => {
+      received.push([...p.markets]);
+    });
+
+    await bus.publish("MarketSnapshotReceived", {
+      markets: [
+        makeNormalizedMarket({
+          slug: "will-bitcoin-reach-140000",
+          endDate: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(received[0]![0]!.familyId).toBe("fam-btc-reach");
 
     await mod.stop();
   });

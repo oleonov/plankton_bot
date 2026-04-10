@@ -208,6 +208,36 @@ describe("migrateOrphanedPositions", () => {
     expect(positionRepo.save).not.toHaveBeenCalled();
   });
 
+  it("keeps near-expiry positions whose market still matches pattern and max horizon", () => {
+    const nearExpiry = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+    const pos = makePosition({ size: 0 });
+    const market = makeMarket({
+      slug: "bitcoin-above-100k-on-march-16",
+      endDate: nearExpiry,
+    });
+
+    const positionRepo: PositionRepository = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findByFamily: vi.fn().mockReturnValue([pos]),
+      findOpen: vi.fn().mockReturnValue([]),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    };
+
+    const result = migrateOrphanedPositions({
+      positionRepo,
+      marketRepo: makeMarketRepo(market),
+      lotRepo: makeLotRepo(),
+      families: [makeFamily({ horizon: "daily" })],
+      log: silentLog,
+    });
+
+    expect(result.closedCount).toBe(0);
+    expect(positionRepo.save).not.toHaveBeenCalled();
+  });
+
   it("closes positions when market not found in DB", () => {
     const pos = makePosition({ size: 0 });
 

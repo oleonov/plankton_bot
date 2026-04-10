@@ -7,6 +7,10 @@ import type { MarketFixture } from "./types.js";
 
 let marketCounter = 0;
 
+function defaultEndDate(): string {
+  return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+}
+
 /** Create a minimal ClobMarket fixture with YES/NO tokens. */
 export function makeMarket(overrides: {
   slug: string;
@@ -32,7 +36,7 @@ export function makeMarket(overrides: {
     ],
     question: overrides.question ?? `Will ${overrides.slug} happen?`,
     slug: overrides.slug,
-    endDate: overrides.endDate ?? "2026-12-31T00:00:00Z",
+    endDate: overrides.endDate ?? defaultEndDate(),
     active: overrides.active ?? true,
     negRisk: overrides.negRisk ?? false,
     tickSize: overrides.tickSize ?? 0.01,

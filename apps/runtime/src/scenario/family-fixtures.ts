@@ -44,7 +44,7 @@ export function makeFamilyConfig(overrides: {
       familyKey,
       primaryCategory: "test",
       regime,
-      horizon: "short",
+      horizon: "daily",
       cadence: "daily",
       strategyProfile: "scalp",
       feeTier: null,

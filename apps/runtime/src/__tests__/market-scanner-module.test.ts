@@ -15,9 +15,7 @@ import { MarketScannerModule } from "../modules/market-scanner/market-scanner-mo
 
 /** Returns an endDate 1 day from now (within daily horizon filter). */
 function nearEndDate(): string {
-  const d = new Date();
-  d.setDate(d.getDate() + 1);
-  return d.toISOString().split("T")[0]!;
+  return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 }
 
 function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
@@ -345,6 +343,52 @@ describe("MarketScannerModule", () => {
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([nearMarket]);
     (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
       makeFamilyIdentity({ horizon: "daily", slugPattern: "bitcoin-above-*" }),
+    ]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(2); // YES + NO tokens
+  });
+
+  it("intraday-4h family does NOT match long-dated will-bitcoin-reach market", async () => {
+    const longDatedMarket = makeClobMarket({
+      slug: "will-bitcoin-reach-140000-by-december-31-2026-131-829-299",
+      endDate: "2027-01-01T05:00:00Z",
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      longDatedMarket,
+    ]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeFamilyIdentity({
+        familyId: createFamilyId("fam-btc-reach"),
+        familyKey: "will-bitcoin-reach",
+        horizon: "intraday-4h",
+        cadence: "intraday-4h",
+        slugPattern: "will-bitcoin-reach-*",
+      }),
+    ]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).not.toHaveBeenCalled();
+  });
+
+  it("intraday-4h family DOES match near-term will-bitcoin-reach market", async () => {
+    const nearMarket = makeClobMarket({
+      slug: "will-bitcoin-reach-140000",
+      endDate: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([nearMarket]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeFamilyIdentity({
+        familyId: createFamilyId("fam-btc-reach"),
+        familyKey: "will-bitcoin-reach",
+        horizon: "intraday-4h",
+        cadence: "intraday-4h",
+        slugPattern: "will-bitcoin-reach-*",
+      }),
     ]);
 
     await mod.scan();
