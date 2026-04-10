@@ -438,7 +438,7 @@ describe("GET /metrics/portfolio-series", () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('live-lite', 'Live-Lite', datetime('now', '-4 days'))`,
+         VALUES ('live-lite', 'Live-Lite', '2026-04-03T01:29:00.000Z')`,
       )
       .run();
     conn.db
