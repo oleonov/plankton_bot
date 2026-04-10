@@ -1712,6 +1712,8 @@ describe("StrategyModule", () => {
       expect(orderRequests).toHaveLength(1);
       expect(orderRequests[0]!.command.postOnly).toBe(true);
       expect(orderRequests[0]!.command.price).toBe(0.03);
+      expect(orderRequests[0]!.command.size).toBeCloseTo(3.5 / 0.03, 6);
+      expect(orderRequests[0]!.command.price * orderRequests[0]!.command.size).toBeCloseTo(3.5, 6);
     });
 
     it("skips fee-enabled relayer orders when the book cannot support a maker-safe price", async () => {

@@ -106,7 +106,7 @@ export class SignalToOrderBridge {
       source: signal.reason === "operator" ? "operator" : "strategy",
       tokenId: signal.tokenId,
       side: signal.side,
-      size: signal.suggestedSize,
+      size: resolveOrderSize(signal, executionTerms.price),
       price: executionTerms.price,
       ...(executionTerms.postOnly ? { postOnly: true } : {}),
       orderType: "GTC",
@@ -157,6 +157,15 @@ export class SignalToOrderBridge {
 
     return { price: makerOnlyPrice, postOnly: true };
   }
+}
+
+function resolveOrderSize(
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  executionPrice: number,
+): number {
+  if (signal.side !== "buy") return signal.suggestedSize;
+  if (!Number.isFinite(executionPrice) || executionPrice <= 0) return signal.suggestedSize;
+  return signal.suggestedSizeUsdc / executionPrice;
 }
 
 function resolveMakerOnlyPrice(opts: {
