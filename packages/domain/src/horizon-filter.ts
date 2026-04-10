@@ -52,9 +52,7 @@ function isWithinAssignmentWindow(
   if (diffHours === null) return true;
   const window = resolveWindow(horizon, maxDaysOverride);
   // Family assignment should keep near-expiry markets; health checks handle tradability.
-  return (
-    diffHours >= -ASSIGNMENT_PAST_TOLERANCE_HOURS && diffHours <= window.maxDays * 24
-  );
+  return diffHours >= -ASSIGNMENT_PAST_TOLERANCE_HOURS && diffHours <= window.maxDays * 24;
 }
 
 function getDiffHours(endDate: string | null, referenceDate: Date): number | null {
