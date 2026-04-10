@@ -5,6 +5,7 @@ import {
 } from "@plankton/domain";
 
 const CLOB_MARKETABLE_BUY_MIN_USDC = 1;
+const NOTIONAL_EPSILON_USDC = 1e-6;
 
 export interface LiveLiteConfig {
   familyAllowlist: string[];
@@ -82,7 +83,7 @@ export class LiveLiteGuard {
   isOrderAboveMin(notionalUsdc: number): boolean {
     const minOrderUsdc = this.getMinOrderUsdc();
     if (minOrderUsdc == null) return true;
-    return notionalUsdc >= minOrderUsdc;
+    return notionalUsdc + NOTIONAL_EPSILON_USDC >= minOrderUsdc;
   }
 
   /**
@@ -124,7 +125,7 @@ export class LiveLiteGuard {
       );
     }
 
-    if (minOrderUsdc != null && opts.orderNotionalUsdc < minOrderUsdc) {
+    if (minOrderUsdc != null && opts.orderNotionalUsdc + NOTIONAL_EPSILON_USDC < minOrderUsdc) {
       rejected.push("live-min-order-usdc-rejected");
     }
 

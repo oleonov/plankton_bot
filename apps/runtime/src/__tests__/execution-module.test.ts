@@ -1023,6 +1023,47 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
+  it("allows relayer buy entries at the CLOB minimum despite floating-point drift", async () => {
+    const guard = new LiveLiteGuard({
+      familyAllowlist: ["fam-1"],
+      maxFamilies: 10,
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+      walletMode: "relayer",
+      minOrderUsdc: 0.05,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      rulesProvider: createMockRulesProvider({
+        primaryCategory: "geopolitics",
+        feeTier: "fee-free",
+        liveWalletRequirement: "eoa-ok",
+        requiresPostOnlyForLive: false,
+      }),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 0.09, size: 1 / 0.09, signalReason: "spray-entry" }),
+      timestamp: Date.now(),
+    });
+
+    expect(0.09 * (1 / 0.09)).toBeLessThan(1);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await guardedMod.stop();
+  });
+
   // ─── Market inactive guard ──────────────────────────────────────────
 
   it("rejects order when market is inactive (resolved/deactivated)", async () => {

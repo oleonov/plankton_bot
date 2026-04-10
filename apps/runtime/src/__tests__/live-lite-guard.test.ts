@@ -214,6 +214,7 @@ describe("LiveLiteGuard", () => {
       expect(guard.getMinOrderUsdc()).toBe(1);
       expect(guard.getMinEntryNotionalUsdc()).toBe(1);
       expect(guard.isOrderAboveMin(0.99)).toBe(false);
+      expect(guard.isOrderAboveMin(0.9999999999999999)).toBe(true);
       expect(guard.isOrderAboveMin(1)).toBe(true);
     });
 
@@ -243,6 +244,20 @@ describe("LiveLiteGuard", () => {
           signalReason: "spray-entry",
         }),
       ).toEqual(["live-min-order-usdc-rejected"]);
+
+      expect(
+        lowConfiguredGuard.getFamilyPolicyRejections({
+          identity: {
+            primaryCategory: "geopolitics",
+            feeTier: null,
+            liveWalletRequirement: null,
+            requiresPostOnlyForLive: null,
+          },
+          isEntry: true,
+          orderNotionalUsdc: 0.9999999999999999,
+          signalReason: "spray-entry",
+        }),
+      ).toEqual([]);
     });
   });
 
