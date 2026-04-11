@@ -277,6 +277,9 @@ export class SignalToOrderBridge {
     const makerOnlyPrice = resolveMakerOnlyPrice({
       side: signal.side,
       suggestedPrice: signal.suggestedPrice,
+      suggestedSizeUsdc: signal.suggestedSizeUsdc,
+      signalReason: signal.reason,
+      nowMs: Date.now(),
       market,
       policy: marketabilityPolicy,
     });

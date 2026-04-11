@@ -9,6 +9,7 @@
 // dns.setDefaultResultOrder is insufficient because axios reuses connections via its pool.
 // Patching dns.lookup ensures every new socket resolves to IPv4.
 import dns from "node:dns";
+import { readFileSync } from "node:fs";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const _origLookup: any = dns.lookup;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -46,6 +47,8 @@ import {
   SqliteCandidateObservationRepository,
   SqliteFamilyRulesDbRepository,
   SqliteFamilyDeploymentRepository,
+  computeConfigChecksum,
+  getLatestConfigImportMeta,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { FamilyState } from "@plankton/domain";
@@ -78,7 +81,11 @@ import { SqliteMarketResolutionRepository, SqliteMergeLedgerRepository } from "@
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { DbFamilyRulesProvider } from "./db-family-rules-provider.js";
-import { needsBootstrap, bootstrapImport, syncProfileInitialBalances } from "./bootstrap-import.js";
+import {
+  needsBootstrap,
+  bootstrapImport,
+  syncProfileInitialBalances,
+} from "./bootstrap-import.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";
@@ -105,6 +112,8 @@ async function main(): Promise<void> {
   // 2. Bootstrap DBs
   const controlDbPath =
     process.env["CONTROL_DB_PATH"] ?? config.dbPath.replace(/[^/]+\.db$/, "control.db");
+  let familyRulesChecksum = "";
+  let loadedFamilyRules: ReturnType<typeof loadFamilyRulesYaml>;
 
   let controlConn: DbConnection;
   try {
@@ -115,20 +124,50 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  try {
+    const familyRulesRaw = readFileSync(config.familyRulesPath, "utf-8");
+    familyRulesChecksum = computeConfigChecksum(familyRulesRaw);
+    loadedFamilyRules = loadFamilyRulesYaml(config.familyRulesPath);
+  } catch (err) {
+    log.fatal({ err, path: config.familyRulesPath }, "failed to load family rules YAML");
+    controlConn.close();
+    process.exit(1);
+  }
+
   // 2b. Bootstrap import — seed control.db from YAML if empty
   if (needsBootstrap(controlConn.db)) {
-    const loaded = loadFamilyRulesYaml(config.familyRulesPath);
-    bootstrapImport(controlConn.db, loaded);
+    bootstrapImport(controlConn.db, loadedFamilyRules, {
+      sourcePath: config.familyRulesPath,
+      sourceChecksum: familyRulesChecksum,
+      sourceVersion: 1,
+      importedBy: "bootstrap",
+    });
     log.info("control.db bootstrapped from YAML");
+  }
+
+  const latestConfigImport = getLatestConfigImportMeta(controlConn.db);
+  if (!latestConfigImport) {
+    log.warn("control.db has no config import metadata; YAML drift cannot be detected");
+  } else if (latestConfigImport.sourceChecksum !== familyRulesChecksum) {
+    log.warn(
+      {
+        yamlPath: config.familyRulesPath,
+        yamlChecksum: familyRulesChecksum,
+        importedChecksum: latestConfigImport.sourceChecksum,
+        importedAt: latestConfigImport.importedAt,
+        importedBy: latestConfigImport.importedBy,
+        sourcePath: latestConfigImport.sourcePath,
+      },
+      "control.db family rules differ from on-disk YAML; sync and restart are required",
+    );
   }
 
   // 2b-2. Load global config from YAML (spray sizing, budget caps, etc.)
   // Global config lives in YAML only — not persisted to DB.
   let globalConfig: GlobalConfig | undefined;
   try {
-    const yamlGlobal = loadFamilyRulesYaml(config.familyRulesPath);
-    globalConfig = yamlGlobal.global;
-    syncProfileInitialBalances(controlConn.db, yamlGlobal.global.initialBalanceUsdc);
+    globalConfig = loadedFamilyRules.global;
+    syncProfileInitialBalances(controlConn.db, loadedFamilyRules.global.initialBalanceUsdc);
   } catch {
     log.warn("failed to load global config from YAML — spray features disabled");
   }

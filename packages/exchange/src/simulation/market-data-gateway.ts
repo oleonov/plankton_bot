@@ -56,6 +56,7 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
         bestBid: book?.bestBid ?? null,
         bestAsk: book?.bestAsk ?? null,
         lastTradePrice: null,
+        lastTradeAt: null,
         volume24h: null,
         liquidity: null,
         minOrderSize: book?.minOrderSize ?? null,

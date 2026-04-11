@@ -299,4 +299,19 @@ describe("bootstrap-import", () => {
     expect(rows[0]!.evidence_status).toBe("unknown");
     expect(rows[0]!.evidence_score).toBe(0);
   });
+
+  it("records explicit source metadata when bootstrap import is given a checksum", () => {
+    bootstrapImport(db, loaded, {
+      sourcePath: "/tmp/family_rules.yaml",
+      sourceChecksum: "sha256:test",
+      sourceVersion: 1,
+      importedBy: "bootstrap-test",
+    });
+
+    const row = db.prepare("SELECT * FROM config_imports").get() as Record<string, unknown>;
+    expect(row.source_path).toBe("/tmp/family_rules.yaml");
+    expect(row.source_checksum).toBe("sha256:test");
+    expect(row.source_version).toBe(1);
+    expect(row.imported_by).toBe("bootstrap-test");
+  });
 });

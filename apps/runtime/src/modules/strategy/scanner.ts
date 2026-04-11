@@ -42,6 +42,7 @@ import {
   rejectOutcomeCandidate,
   selectFirstEntryOutcomeForCondition,
 } from "./outcome-selection.js";
+import { hasFreshTradeActivity, resolveOneSidedDustBuyPrice } from "./marketability.js";
 
 const DEFAULT_MAX_ADDITIONAL_ENTRY_PRICE = 0.3;
 
@@ -237,6 +238,46 @@ function isWeekend(dayOfWeek: number): boolean {
   return dayOfWeek === 0 || dayOfWeek === 6;
 }
 
+function resolveSprayReferencePrice(
+  market: NormalizedMarket,
+  bundle: FamilyRuleBundle,
+  nowMs: number,
+): number | null {
+  if (market.midPrice != null) return market.midPrice;
+  if (market.bookSource === "gamma-fallback") return null;
+  if (market.bestBid == null || market.bestAsk != null) return null;
+  if (!hasFreshTradeActivity(market.lastTradeAt ?? null, nowMs)) return null;
+
+  const price = resolveOneSidedDustBuyPrice({
+    bestBid: market.bestBid,
+    tickSize: market.tickSize,
+    lastTradePrice: market.lastTradePrice ?? null,
+  });
+  if (price == null) return null;
+
+  const entry = bundle.rules.entry;
+  if (price < entry.minEntryPrice || price > entry.maxEntryPrice) return null;
+  return price;
+}
+
+function selectSprayCandidateTokenForCondition(
+  markets: readonly NormalizedMarket[],
+  bundle: FamilyRuleBundle,
+  nowMs: number,
+): string | null {
+  const selection = selectFirstEntryOutcomeForCondition(markets, bundle);
+  if (selection.tokenId) return selection.tokenId;
+
+  let best: { tokenId: string; price: number } | null = null;
+  for (const market of markets) {
+    const price = resolveSprayReferencePrice(market, bundle, nowMs);
+    if (price == null) continue;
+    const tokenId = String(market.tokenId);
+    if (!best || price < best.price) best = { tokenId, price };
+  }
+  return best?.tokenId ?? null;
+}
+
 /**
  * Evidence-aware size multiplier (P0-3).
  *
@@ -345,7 +386,7 @@ function capEntryNotional(
 export function evaluateSprayEntry(
   market: NormalizedMarket,
   bundle: FamilyRuleBundle,
-  midPrice: number,
+  referencePrice: number,
   tickTs: number,
   nextSeq: (f: FamilyId, t: TokenId, s: string) => number,
   spraySizeUsdc: number,
@@ -354,16 +395,16 @@ export function evaluateSprayEntry(
 ): Signal | null {
   const entry = bundle.rules.entry;
   if (entry.entryMode === "disabled") return null;
-  if (midPrice < entry.minEntryPrice || midPrice > entry.maxEntryPrice) return null;
+  if (referencePrice < entry.minEntryPrice || referencePrice > entry.maxEntryPrice) return null;
 
   const baseSizeUsdc = spraySizeUsdc * sizeMult;
   const suggestedSizeUsdc = scaleSizeByPrice(
     baseSizeUsdc,
-    midPrice,
+    referencePrice,
     market.minOrderSize ?? 5,
     minNotionalUsdc,
   );
-  const suggestedSize = suggestedSizeUsdc / midPrice;
+  const suggestedSize = suggestedSizeUsdc / referencePrice;
   if (suggestedSize < 0.01) return null;
   if (market.minOrderSize != null && suggestedSize < market.minOrderSize) return null;
 
@@ -373,7 +414,7 @@ export function evaluateSprayEntry(
     familyId: market.familyId!,
     tokenId: market.tokenId,
     side: "buy",
-    suggestedPrice: midPrice,
+    suggestedPrice: referencePrice,
     suggestedSize,
     suggestedSizeUsdc,
     reason: "spray-entry" as SignalReason,
@@ -491,15 +532,13 @@ export function scan(
 
     candidatesConsidered++;
 
-    const midPrice = market.midPrice;
-    if (midPrice === null) continue;
-
     const existingPosition = deps.positionRepo.findByTokenId(market.tokenId);
+    const midPrice = market.midPrice;
 
     // ─── Repricing exit ──────────────────────────────────────
     // Exits fire regardless of weekend/window policy — they reduce risk.
     let exitEmitted = false;
-    if (existingPosition && existingPosition.status === "open") {
+    if (existingPosition && existingPosition.status === "open" && midPrice !== null) {
       const exitSignal = evaluateExit(market, bundle, existingPosition, midPrice, tickTs, nextSeq);
       if (exitSignal) {
         signals.push(exitSignal);
@@ -580,7 +619,7 @@ export function scan(
       // exit means "sell everything", a concurrent buy is contradictory
       // and would create opposing orders on the same token.
       if (!exitEmitted) {
-        if (reduced) {
+        if (reduced || midPrice === null) {
           blockedByWindow++;
         } else {
           const scaleSignal = evaluateScaleIn(
@@ -636,6 +675,7 @@ export function scan(
         const maxAdditionalEntryPrice = resolveMaxAdditionalEntryPrice(bundle);
         if (
           reduced ||
+          midPrice === null ||
           rejectOutcomeCandidate(market, bundle, { maxEntryPrice: maxAdditionalEntryPrice })
         ) {
           continue;
@@ -661,7 +701,11 @@ export function scan(
       let selectedToken = selectedFirstEntryTokens.get(conditionKey);
       if (!selectedFirstEntryTokens.has(conditionKey)) {
         const selection = selectFirstEntryOutcomeForCondition(group, bundle);
-        selectedToken = selection.tokenId;
+        selectedToken =
+          selection.tokenId ??
+          (entryPolicy === "spray-first"
+            ? selectSprayCandidateTokenForCondition(group, bundle, tickTs)
+            : null);
         selectedFirstEntryTokens.set(conditionKey, selectedToken ?? null);
         if (group.length > 1) {
           deps.log.debug(
@@ -683,6 +727,7 @@ export function scan(
         // Spray-first families: try spray, or skip entirely. Never fall through to probe.
         const gc = deps.globalConfig;
         const sprayKey = `${market.familyId}|${market.tokenId}`;
+        const sprayReferencePrice = resolveSprayReferencePrice(market, bundle, tickTs);
 
         // Cross-tick dedup: skip tokens that already have spray positions
         if (deps.sprayedTokens?.has(String(market.tokenId))) {
@@ -695,12 +740,13 @@ export function scan(
           sprayMarketsThisTick < (gc.sprayMaxMarketsPerTick ?? 10) &&
           !sprayFamilyEmitted.has(sprayKey) &&
           sprayPositionsRemaining > 0 &&
-          sprayBudgetRemaining > gc.spraySizeUsdc * sizeMult
+          sprayBudgetRemaining > gc.spraySizeUsdc * sizeMult &&
+          sprayReferencePrice != null
         ) {
           const spraySignal = evaluateSprayEntry(
             market,
             bundle,
-            midPrice,
+            sprayReferencePrice,
             tickTs,
             nextSeq,
             gc.spraySizeUsdc,
@@ -720,6 +766,7 @@ export function scan(
       }
 
       // Probe entry — allowed in reduced mode (probes are low-risk)
+      if (midPrice === null) continue;
       const probeSignal = evaluateProbeEntry(
         market,
         bundle,

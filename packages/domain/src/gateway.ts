@@ -117,6 +117,7 @@ export interface MarketPricingSnapshot {
   bestBid: number | null;
   bestAsk: number | null;
   lastTradePrice: number | null;
+  lastTradeAt?: string | null;
   volume24h?: number | null;
   liquidity?: number | null;
   minOrderSize?: number | null;

@@ -446,6 +446,8 @@ export interface NormalizedMarket {
   bestAsk: number | null;
   midPrice: number | null;
   spread: number | null;
+  lastTradePrice?: number | null;
+  lastTradeAt?: string | null;
   volume24h?: number | null;
   liquidity?: number | null;
   minOrderSize?: number | null;

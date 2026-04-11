@@ -159,6 +159,8 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     bestAsk: 0.034,
     midPrice: 0.032,
     spread: 0.004,
+    lastTradePrice: null,
+    lastTradeAt: null,
     volume24h: 100_000,
     liquidity: 10_000,
     snapshotTs: NOW,
@@ -331,6 +333,113 @@ describe("marketability gate", () => {
     expect(decision.approved).toBe(false);
     expect(decision.rejectionReasons).toContain("unfilled-cancel-cooldown");
   });
+
+  it("allows reduced-fast probe entries through the widened spread gate", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal({ suggestedSizeUsdc: 4, reason: "probe-entry" }),
+      market: makeMarket({
+        familyKey: "ethereum-price",
+        bestBid: 0.07,
+        bestAsk: 0.09,
+        midPrice: 0.08,
+        spread: 0.02,
+        volume24h: 50_000,
+      }),
+      bundle: makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "ethereum-price",
+        },
+        rules: {
+          ...makeBundle().rules,
+          throughput: {
+            maxConcurrentOrdersPerFamily: 3,
+            maxProbeInFlightPerToken: 1,
+            maxEntrySignalsPerTickPerFamily: 1,
+            fastLaneEnabled: true,
+          },
+        },
+      }),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("spread-tight");
+  });
+
+  it("keeps stricter follow-up spread caps for reduced-fast scale-ins", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal({ suggestedSizeUsdc: 4, reason: "scale-in" }),
+      market: makeMarket({
+        familyKey: "ethereum-price",
+        bestBid: 0.07,
+        bestAsk: 0.11,
+        midPrice: 0.09,
+        spread: 0.04,
+        volume24h: 50_000,
+      }),
+      bundle: makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "ethereum-price",
+        },
+        rules: {
+          ...makeBundle().rules,
+          throughput: {
+            maxConcurrentOrdersPerFamily: 3,
+            maxProbeInFlightPerToken: 1,
+            maxEntrySignalsPerTickPerFamily: 1,
+            fastLaneEnabled: true,
+          },
+        },
+      }),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("spread-too-wide");
+  });
+
+  it("allows one-sided dust books only for fresh spray entries", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal({ reason: "spray-entry", suggestedSizeUsdc: 0.15 }),
+      market: makeMarket({
+        bestBid: 0.03,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        bookSource: "clob",
+        lastTradePrice: 0.031,
+        lastTradeAt: new Date(NOW - 60_000).toISOString(),
+      }),
+      bundle: makeBundle(),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("book-one-sided-dust-ok");
+    expect(decision.checksPassed).toContain("spread-one-sided-dust-ok");
+  });
+
+  it("rejects one-sided dust books when the trade context is stale", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal({ reason: "spray-entry", suggestedSizeUsdc: 0.15 }),
+      market: makeMarket({
+        bestBid: 0.03,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        bookSource: "clob",
+        lastTradePrice: 0.031,
+        lastTradeAt: new Date(NOW - 10 * 60_000).toISOString(),
+      }),
+      bundle: makeBundle(),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("book-one-sided");
+  });
 });
 
 describe("maker-only price improvement", () => {
@@ -380,6 +489,29 @@ describe("maker-only price improvement", () => {
     });
 
     expect(price).toBeNull();
+  });
+
+  it("anchors one-sided dust BUY pricing to bid + tick and recent trade cap", () => {
+    const policy = resolveMarketabilityPolicy(makeBundle());
+    const price = resolveMakerOnlyPrice({
+      side: "buy",
+      suggestedPrice: 0.031,
+      suggestedSizeUsdc: 0.15,
+      signalReason: "spray-entry",
+      nowMs: NOW,
+      market: makeMarket({
+        bestBid: 0.03,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        tickSize: 0.001,
+        lastTradePrice: 0.031,
+        lastTradeAt: new Date(NOW - 60_000).toISOString(),
+      }),
+      policy,
+    });
+
+    expect(price).toBe(0.031);
   });
 });
 
@@ -432,9 +564,9 @@ describe("marketability policy retuning", () => {
 
     expect(reducedFast.tier).toBe("reduced");
     expect(reducedFast.speedTier).toBe("reduced-fast");
-    expect(reducedFast.maxEntrySpreadCents).toBe(0.015);
+    expect(reducedFast.maxEntrySpreadCents).toBe(0.025);
     expect(reducedFast.makerImprovementTicks).toBe(2);
-    expect(reducedFast.unfilledCancelCooldownMs).toBe(3 * 60_000);
+    expect(reducedFast.unfilledCancelCooldownMs).toBe(60_000);
 
     expect(reducedStandard.tier).toBe("reduced");
     expect(reducedStandard.speedTier).toBe("standard");

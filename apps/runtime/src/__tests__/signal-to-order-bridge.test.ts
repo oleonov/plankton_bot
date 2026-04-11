@@ -206,10 +206,12 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     bestAsk: 0.09,
     midPrice: 0.09,
     spread: 0,
+    lastTradePrice: null,
+    lastTradeAt: null,
     volume24h: 100_000,
     liquidity: 10_000,
     bookSource: "gamma-fallback",
-    snapshotTs: NOW,
+    snapshotTs: Date.now(),
     ...overrides,
   };
 }
@@ -225,7 +227,7 @@ describe("SignalToOrderBridge", () => {
       bestAsk: 0.05,
       midPrice: 0.045,
       spread: 0.01,
-      timestamp: NOW,
+      timestamp: Date.now(),
     };
     const cache = new CandidateBookCache({
       gateway: {
@@ -241,7 +243,16 @@ describe("SignalToOrderBridge", () => {
       bus,
       log: makeLogger(),
       rulesProvider: {
-        getRule: vi.fn(() => makeBundle()),
+        getRule: vi.fn(() =>
+          makeBundle({
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              fastLaneEnabled: true,
+            },
+          }),
+        ),
         isEnabled: vi.fn(() => true),
         getAllFamilies: vi.fn(() => []),
         getRulesForRegime: vi.fn(() => []),
@@ -283,7 +294,16 @@ describe("SignalToOrderBridge", () => {
       bus,
       log: makeLogger(),
       rulesProvider: {
-        getRule: vi.fn(() => makeBundle()),
+        getRule: vi.fn(() =>
+          makeBundle({
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              fastLaneEnabled: true,
+            },
+          }),
+        ),
         isEnabled: vi.fn(() => true),
         getAllFamilies: vi.fn(() => []),
         getRulesForRegime: vi.fn(() => []),
@@ -311,6 +331,68 @@ describe("SignalToOrderBridge", () => {
 
     expect(skipped).toHaveLength(1);
     expect(skipped[0]!.reasons).toContain("gamma-fallback-no-real-book");
+  });
+
+  it("converts one-sided dust spray entries when recent trade context is present", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              fastLaneEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; signalReason?: string | null } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: 0.03,
+          bestAsk: null,
+          midPrice: null,
+          spread: null,
+          tickSize: 0.001,
+          bookSource: "clob",
+          lastTradePrice: 0.031,
+          lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 5,
+        suggestedPrice: 0.031,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.031);
   });
 
   it("keeps token in cooldown when the book did not materially move", async () => {

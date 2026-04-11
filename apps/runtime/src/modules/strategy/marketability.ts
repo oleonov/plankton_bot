@@ -9,6 +9,10 @@ import {
 const EPSILON = 1e-9;
 const DEFAULT_MAX_BOOK_AGE_MS = 15_000;
 const DEFAULT_HARD_MAX_BOOK_AGE_MS = 60_000;
+const ONE_SIDED_DUST_TRADE_FRESHNESS_MS = 5 * 60_000;
+const ONE_SIDED_DUST_MAX_SIZE_USDC = 0.25;
+const REDUCED_FAST_FOLLOW_UP_MAX_ENTRY_SPREAD_CENTS = 0.015;
+const REDUCED_FAST_FOLLOW_UP_MAX_WIDE_ENTRY_SPREAD_CENTS = 0.03;
 
 export interface MarketabilityPolicy {
   readonly tier: "core" | "reduced" | "fallback";
@@ -78,6 +82,7 @@ const CORE_FAST_POLICY: MarketabilityPolicy = {
   maxUnfilledOrdersPerMarket: 10,
   maxUnfilledCancelsBeforeCooldown: 3,
   unfilledCancelCooldownMs: 2 * 60_000,
+  allowOneSidedBooks: true,
 };
 
 const REDUCED_POLICY: MarketabilityPolicy = {
@@ -99,15 +104,16 @@ const REDUCED_POLICY: MarketabilityPolicy = {
 const REDUCED_FAST_POLICY: MarketabilityPolicy = {
   ...REDUCED_POLICY,
   speedTier: "reduced-fast",
-  maxEntrySpreadCents: 0.015,
-  maxWideEntrySpreadCents: 0.03,
+  maxEntrySpreadCents: 0.025,
+  maxWideEntrySpreadCents: 0.045,
   minWideSpreadVolume24h: 15_000,
   maxPriceImprovementCents: 0.015,
   makerImprovementTicks: 2,
   maxUnfilledOrdersPerToken: 2,
   maxUnfilledOrdersPerMarket: 6,
   maxUnfilledCancelsBeforeCooldown: 3,
-  unfilledCancelCooldownMs: 3 * 60_000,
+  unfilledCancelCooldownMs: 60_000,
+  allowOneSidedBooks: true,
 };
 
 const FALLBACK_POLICY: MarketabilityPolicy = {
@@ -173,7 +179,7 @@ export function evaluateMarketability(opts: {
   readonly cooldownUntilMs?: number | null;
 }): MarketabilityDecision {
   const policy = resolveMarketabilityPolicy(opts.bundle);
-  const diagnostics = buildDiagnostics(opts.market, opts.nowMs, policy);
+  const diagnostics = buildDiagnostics(opts.market, opts.signal, opts.nowMs, policy);
   const rejectionReasons: string[] = [];
   const checksPassed: string[] = [];
 
@@ -188,8 +194,8 @@ export function evaluateMarketability(opts: {
   }
 
   applyFamilyActionChecks(opts.bundle, rejectionReasons, checksPassed);
-  applyBookChecks(opts.market, opts.nowMs, policy, rejectionReasons, checksPassed);
-  applySpreadChecks(opts.market, policy, rejectionReasons, checksPassed);
+  applyBookChecks(opts.signal, opts.market, opts.nowMs, policy, rejectionReasons, checksPassed);
+  applySpreadChecks(opts.signal, opts.market, opts.nowMs, policy, rejectionReasons, checksPassed);
   applyRestingOrderChecks(opts, policy, rejectionReasons, checksPassed);
 
   return {
@@ -204,7 +210,13 @@ export function evaluateMarketability(opts: {
 export function resolveMakerOnlyPrice(opts: {
   readonly side: "buy" | "sell";
   readonly suggestedPrice: number;
-  readonly market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "tickSize" | "spread">;
+  readonly suggestedSizeUsdc?: number;
+  readonly signalReason?: string;
+  readonly nowMs?: number;
+  readonly market: Pick<
+    NormalizedMarket,
+    "bestBid" | "bestAsk" | "tickSize" | "spread" | "lastTradePrice" | "lastTradeAt"
+  >;
   readonly policy?: MarketabilityPolicy;
 }): number | null {
   const { side, suggestedPrice, market } = opts;
@@ -213,7 +225,27 @@ export function resolveMakerOnlyPrice(opts: {
   const spread = market.spread ?? (bestBid != null && bestAsk != null ? bestAsk - bestBid : null);
 
   if (side === "buy") {
-    if (bestAsk == null) return null;
+    if (bestAsk == null) {
+      if (
+        !isOneSidedDustPricingEligible(
+          {
+            side,
+            suggestedSizeUsdc: opts.suggestedSizeUsdc ?? null,
+            reason: opts.signalReason ?? null,
+          },
+          market,
+          opts.nowMs ?? Date.now(),
+          policy,
+        )
+      ) {
+        return null;
+      }
+      return resolveOneSidedDustBuyPrice({
+        bestBid,
+        tickSize,
+        lastTradePrice: market.lastTradePrice ?? null,
+      });
+    }
     const target = resolveBuyMakerTarget({ bestBid, bestAsk, tickSize, spread, policy });
     if (target == null) return null;
 
@@ -239,6 +271,34 @@ export function resolveMakerOnlyPrice(opts: {
   return isValidLimitPrice(price, tickSize) ? price : null;
 }
 
+export function hasFreshTradeActivity(
+  lastTradeAt: string | null | undefined,
+  nowMs: number,
+  freshnessMs = ONE_SIDED_DUST_TRADE_FRESHNESS_MS,
+): boolean {
+  if (!lastTradeAt) return false;
+  const tradeMs = Date.parse(lastTradeAt);
+  if (!Number.isFinite(tradeMs)) return false;
+  return Math.max(0, nowMs - tradeMs) <= freshnessMs;
+}
+
+export function resolveOneSidedDustBuyPrice(opts: {
+  readonly bestBid: number | null;
+  readonly tickSize: number;
+  readonly lastTradePrice: number | null;
+}): number | null {
+  const { bestBid, tickSize, lastTradePrice } = opts;
+  if (bestBid == null || lastTradePrice == null) return null;
+
+  const anchoredPrice = roundUpToTick(bestBid + tickSize, tickSize);
+  const recentTradeCap = roundDownToTick(lastTradePrice, tickSize);
+  if (!isValidLimitPrice(anchoredPrice, tickSize) || !isValidLimitPrice(recentTradeCap, tickSize)) {
+    return null;
+  }
+  if (recentTradeCap + EPSILON < anchoredPrice) return null;
+  return anchoredPrice;
+}
+
 function applyFamilyActionChecks(
   bundle: FamilyRuleBundle,
   rejectionReasons: string[],
@@ -260,6 +320,7 @@ function applyFamilyActionChecks(
 }
 
 function applyBookChecks(
+  signal: Signal,
   market: NormalizedMarket,
   nowMs: number,
   policy: MarketabilityPolicy,
@@ -274,9 +335,11 @@ function applyBookChecks(
     checksPassed.push("market-active");
   }
 
-  if (!policy.allowOneSidedBooks && market.bestBid == null && market.bestAsk == null) {
+  if (market.bestBid == null && market.bestAsk == null) {
     rejectionReasons.push("book-missing");
-  } else if (!policy.allowOneSidedBooks && (market.bestBid == null || market.bestAsk == null)) {
+  } else if (isOneSidedDustApprovalEligible(signal, market, nowMs, policy)) {
+    checksPassed.push("book-one-sided-dust-ok");
+  } else if (market.bestBid == null || market.bestAsk == null) {
     rejectionReasons.push("book-one-sided");
   } else {
     checksPassed.push("book-two-sided");
@@ -292,11 +355,19 @@ function applyBookChecks(
 }
 
 function applySpreadChecks(
+  signal: Signal,
   market: NormalizedMarket,
+  nowMs: number,
   policy: MarketabilityPolicy,
   rejectionReasons: string[],
   checksPassed: string[],
 ): void {
+  if (isOneSidedDustApprovalEligible(signal, market, nowMs, policy)) {
+    checksPassed.push("spread-one-sided-dust-ok");
+    return;
+  }
+
+  const spreadCaps = resolveSpreadCaps(policy, signal.reason);
   const spread =
     market.spread ??
     (market.bestBid != null && market.bestAsk != null ? market.bestAsk - market.bestBid : null);
@@ -307,16 +378,13 @@ function applySpreadChecks(
     return;
   }
 
-  if (spread <= policy.maxEntrySpreadCents + EPSILON) {
+  if (spread <= spreadCaps.maxEntrySpreadCents + EPSILON) {
     checksPassed.push("spread-tight");
     return;
   }
 
   const volume24h = market.volume24h ?? 0;
-  if (
-    spread <= policy.maxWideEntrySpreadCents + EPSILON &&
-    volume24h >= policy.minWideSpreadVolume24h
-  ) {
+  if (spread <= spreadCaps.maxWideEntrySpreadCents + EPSILON && volume24h >= policy.minWideSpreadVolume24h) {
     checksPassed.push("spread-wide-volume-qualified");
     return;
   }
@@ -419,9 +487,11 @@ function resolveSellMakerTarget(opts: {
 
 function buildDiagnostics(
   market: NormalizedMarket,
+  signal: Signal,
   nowMs: number,
   policy: MarketabilityPolicy,
 ): Readonly<Record<string, unknown>> {
+  const spreadCaps = resolveSpreadCaps(policy, signal.reason);
   const spread =
     market.spread ??
     (market.bestBid != null && market.bestAsk != null ? market.bestAsk - market.bestBid : null);
@@ -432,10 +502,15 @@ function buildDiagnostics(
     bestBid: market.bestBid,
     bestAsk: market.bestAsk,
     spread,
+    lastTradePrice: market.lastTradePrice ?? null,
+    lastTradeAt: market.lastTradeAt ?? null,
     volume24h: market.volume24h ?? null,
     liquidity: market.liquidity ?? null,
     snapshotTs: market.snapshotTs,
     bookAgeMs: Math.max(0, nowMs - market.snapshotTs),
+    effectiveMaxEntrySpreadCents: spreadCaps.maxEntrySpreadCents,
+    effectiveMaxWideEntrySpreadCents: spreadCaps.maxWideEntrySpreadCents,
+    oneSidedDustEligible: isOneSidedDustApprovalEligible(signal, market, nowMs, policy),
   };
 }
 
@@ -445,6 +520,75 @@ function fallbackPricePolicy(): MarketabilityPolicy {
 
 function isEntrySignal(signal: Pick<Signal, "side" | "reason">): boolean {
   return signal.side === "buy" && ENTRY_REASONS.has(signal.reason);
+}
+
+function resolveSpreadCaps(
+  policy: MarketabilityPolicy,
+  reason: Signal["reason"],
+): {
+  readonly maxEntrySpreadCents: number;
+  readonly maxWideEntrySpreadCents: number;
+} {
+  if (policy.speedTier !== "reduced-fast") {
+    return {
+      maxEntrySpreadCents: policy.maxEntrySpreadCents,
+      maxWideEntrySpreadCents: policy.maxWideEntrySpreadCents,
+    };
+  }
+
+  if (reason === "spray-entry" || reason === "probe-entry") {
+    return {
+      maxEntrySpreadCents: policy.maxEntrySpreadCents,
+      maxWideEntrySpreadCents: policy.maxWideEntrySpreadCents,
+    };
+  }
+
+  return {
+    maxEntrySpreadCents: REDUCED_FAST_FOLLOW_UP_MAX_ENTRY_SPREAD_CENTS,
+    maxWideEntrySpreadCents: REDUCED_FAST_FOLLOW_UP_MAX_WIDE_ENTRY_SPREAD_CENTS,
+  };
+}
+
+function isOneSidedDustApprovalEligible(
+  signal: Pick<Signal, "side" | "reason" | "suggestedSizeUsdc">,
+  market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "bookSource" | "lastTradeAt" | "lastTradePrice">,
+  nowMs: number,
+  policy: MarketabilityPolicy,
+): boolean {
+  return (
+    signal.side === "buy" &&
+    signal.reason === "spray-entry" &&
+    signal.suggestedSizeUsdc <= ONE_SIDED_DUST_MAX_SIZE_USDC + EPSILON &&
+    policy.allowOneSidedBooks &&
+    market.bestBid != null &&
+    market.bestAsk == null &&
+    market.bookSource !== "gamma-fallback" &&
+    market.lastTradePrice != null &&
+    hasFreshTradeActivity(market.lastTradeAt, nowMs)
+  );
+}
+
+function isOneSidedDustPricingEligible(
+  signal: {
+    readonly side: "buy" | "sell";
+    readonly suggestedSizeUsdc: number | null;
+    readonly reason: string | null;
+  },
+  market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice">,
+  nowMs: number,
+  policy: MarketabilityPolicy,
+): boolean {
+  return (
+    signal.side === "buy" &&
+    signal.reason === "spray-entry" &&
+    signal.suggestedSizeUsdc != null &&
+    signal.suggestedSizeUsdc <= ONE_SIDED_DUST_MAX_SIZE_USDC + EPSILON &&
+    policy.allowOneSidedBooks &&
+    market.bestBid != null &&
+    market.bestAsk == null &&
+    market.lastTradePrice != null &&
+    hasFreshTradeActivity(market.lastTradeAt, nowMs)
+  );
 }
 
 function isOpenBuyEntryOrder(order: Order): boolean {

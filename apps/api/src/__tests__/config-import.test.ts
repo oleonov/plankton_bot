@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { bootstrapControlDb, bootstrapLedgerDb } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
@@ -273,6 +274,9 @@ describe("POST /config/import", () => {
       .get() as Record<string, unknown>;
     expect(importRecord).toBeDefined();
     expect(importRecord["families_added"]).toBe(1);
+    expect(importRecord["source_checksum"]).toBe(
+      createHash("sha256").update(FAMILY_YAML).digest("hex"),
+    );
   });
 
   it("classifies identical re-import as unchanged", async () => {

@@ -65,6 +65,8 @@ function makeNormalizedMarket(overrides?: Partial<NormalizedMarket>): Normalized
     bestAsk: 0.04,
     midPrice: 0.035,
     spread: 0.01,
+    lastTradePrice: null,
+    lastTradeAt: null,
     snapshotTs: Date.now(),
     ...overrides,
   };
@@ -454,6 +456,73 @@ describe("evaluateSprayEntry", () => {
 
     expect(signal).not.toBeNull();
     expect(signal!.suggestedSizeUsdc).toBe(1);
+  });
+});
+
+describe("scan one-sided spray support", () => {
+  it("emits spray-entry for spray-first families with a fresh bid-only book", () => {
+    const rulesProvider = {
+      getRule: vi.fn(() =>
+        makeBundle({
+          identity: makeIdentity({ feeTier: null }),
+          evidence: makeEvidence({ promotionState: "probe-only", evidenceScore: 10 }),
+          rules: makeRules({
+            entry: {
+              ...makeRules().entry,
+              minEntryPrice: 0.01,
+              maxEntryPrice: 0.05,
+            },
+          }),
+        }),
+      ),
+      isEnabled: vi.fn(() => true),
+      getAllFamilies: vi.fn(() => []),
+      getRulesForRegime: vi.fn(() => []),
+    } as unknown as FamilyRulesProvider;
+    const positionRepo = {
+      findByTokenId: vi.fn(() => null),
+      findOpen: vi.fn(() => []),
+      findAll: vi.fn(() => []),
+    } as unknown as PositionRepository;
+    const familyStateRepo = {
+      get: vi.fn(() => null),
+    } as unknown as FamilyStateRepository;
+
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          bestBid: 0.03,
+          bestAsk: null,
+          midPrice: null,
+          spread: null,
+          tickSize: 0.001,
+          bookSource: "clob",
+          lastTradePrice: 0.031,
+          lastTradeAt: new Date().toISOString(),
+        }),
+      ],
+      {
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+        globalConfig: {
+          initialBalanceUsdc: 100,
+          spraySizeUsdc: 0.15,
+          sprayMaxMarketsPerTick: 10,
+          sprayCooldownSeconds: 5,
+          sprayBudgetUsdc: 5,
+          sprayMaxTotalPositions: 10,
+        },
+      },
+      createBuyTracker(),
+      Date.now(),
+      createSessionTracker(),
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("spray-entry");
+    expect(result.signals[0]!.suggestedPrice).toBe(0.031);
   });
 });
 

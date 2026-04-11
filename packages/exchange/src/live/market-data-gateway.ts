@@ -97,6 +97,12 @@ function parseOptionalNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseOptionalIsoTimestamp(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
 function extractBookTokenId(raw: Record<string, unknown>): string | null {
   if (typeof raw.asset_id === "string") return raw.asset_id;
   if (typeof raw.token_id === "string") return raw.token_id;
@@ -232,6 +238,11 @@ export class LiveMarketDataGateway implements MarketDataGateway {
       const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
       const outcomePrices = parseStringOrArray(raw.outcomePrices);
       const lastTradePrice = parseOptionalNumber(raw.lastTradePrice);
+      const lastTradeAt =
+        parseOptionalIsoTimestamp(raw.lastTradeAt) ??
+        parseOptionalIsoTimestamp(raw.last_trade_at) ??
+        parseOptionalIsoTimestamp(raw.updatedAt) ??
+        parseOptionalIsoTimestamp(raw.updated_at);
       const volume24h = parseOptionalNumber(raw.volume24hr);
       const liquidity = parseOptionalNumber(raw.liquidity);
 
@@ -263,6 +274,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
           bestBid,
           bestAsk,
           lastTradePrice,
+          lastTradeAt,
           volume24h,
           liquidity,
           minOrderSize: result.get(tokenId)?.minOrderSize ?? null,

@@ -138,6 +138,8 @@ export class MarketDataModule implements RuntimeModule {
           bestAsk,
           midPrice,
           spread,
+          lastTradePrice: pricing?.lastTradePrice ?? null,
+          lastTradeAt: pricing?.lastTradeAt ?? null,
           volume24h: pricing?.volume24h ?? null,
           liquidity: pricing?.liquidity ?? null,
           minOrderSize: pricing?.minOrderSize ?? null,

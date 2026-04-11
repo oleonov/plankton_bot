@@ -19,6 +19,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@plankton/config": "workspace:*",
     "@plankton/domain": "workspace:*",
     "better-sqlite3": "^11.8.0"
   },

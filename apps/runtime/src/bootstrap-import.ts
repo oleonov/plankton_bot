@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import { ensureControlProfiles } from "@plankton/db";
 import type { LoadedFamilyRules } from "@plankton/config";
 import type { FamilyConfig } from "@plankton/config";
 import {
@@ -14,40 +15,24 @@ export function needsBootstrap(db: Database.Database): boolean {
   return row.cnt === 0;
 }
 
-const PROFILES: Array<{
-  profileId: string;
-  displayName: string;
-  description: string;
-}> = [
-  {
-    profileId: ProfileId.Simulation,
-    displayName: "Simulation",
-    description: "In-memory simulated execution",
-  },
-  {
-    profileId: ProfileId.Paper,
-    displayName: "Paper",
-    description: "Live market data, simulated orders",
-  },
-  {
-    profileId: ProfileId.LiveLite,
-    displayName: "Live-Lite",
-    description: "Real orders with envelope caps",
-  },
-];
+export interface BootstrapImportSource {
+  readonly sourcePath?: string | null;
+  readonly sourceChecksum?: string | null;
+  readonly sourceVersion?: number | null;
+  readonly importedBy?: string | null;
+}
 
-export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules): void {
+export function bootstrapImport(
+  db: Database.Database,
+  loaded: LoadedFamilyRules,
+  source?: BootstrapImportSource,
+): void {
   const now = new Date().toISOString();
   const importId = createImportId(randomUUID());
 
   const tx = db.transaction(() => {
     // 1. Profiles
-    const insertProfile = db.prepare(
-      "INSERT INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, ?, ?)",
-    );
-    for (const p of PROFILES) {
-      insertProfile.run(p.profileId, p.displayName, p.description, now);
-    }
+    ensureControlProfiles(db, now);
 
     // 2. Profile settings
     const insertSettings = db.prepare(
@@ -142,11 +127,20 @@ export function bootstrapImport(db: Database.Database, loaded: LoadedFamilyRules
     db.prepare(
       `
       INSERT INTO config_imports (
-        import_id, source_checksum, families_added, families_updated,
-        families_skipped, families_unchanged, imported_at, imported_by
-      ) VALUES (?, 'bootstrap', ?, 0, 0, 0, ?, 'bootstrap')
+        import_id, source_path, source_checksum, source_version,
+        families_added, families_updated, families_skipped, families_unchanged,
+        imported_at, imported_by
+      ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?)
     `,
-    ).run(importId, loaded.families.length, now);
+    ).run(
+      importId,
+      source?.sourcePath ?? null,
+      source?.sourceChecksum ?? "bootstrap",
+      source?.sourceVersion ?? null,
+      loaded.families.length,
+      now,
+      source?.importedBy ?? "bootstrap",
+    );
   });
 
   tx();
