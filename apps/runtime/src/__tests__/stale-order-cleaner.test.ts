@@ -217,7 +217,9 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   it("cancels fast-daily probe orders after the shortened TTL", async () => {
-    const twoMinutesAgo = new Date(Date.now() - PROBE_LIKE_FAST_DAILY_TTL_MS - 30_000).toISOString();
+    const twoMinutesAgo = new Date(
+      Date.now() - PROBE_LIKE_FAST_DAILY_TTL_MS - 30_000,
+    ).toISOString();
     const order = makeOrder({
       createdAt: twoMinutesAgo,
       signalReason: "probe-entry",
@@ -247,7 +249,9 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   it("keeps slow daily probe orders alive past the fast-daily TTL", async () => {
-    const twoMinutesAgo = new Date(Date.now() - PROBE_LIKE_FAST_DAILY_TTL_MS - 30_000).toISOString();
+    const twoMinutesAgo = new Date(
+      Date.now() - PROBE_LIKE_FAST_DAILY_TTL_MS - 30_000,
+    ).toISOString();
     const order = makeOrder({
       createdAt: twoMinutesAgo,
       signalReason: "probe-entry",

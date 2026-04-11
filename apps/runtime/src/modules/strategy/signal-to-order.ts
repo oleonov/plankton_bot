@@ -226,7 +226,10 @@ export class SignalToOrderBridge {
       return { market, cacheStatus: "base-market" };
     }
 
-    const resolution = await this.deps.candidateBookCache.getFreshOrRefresh(String(signal.tokenId), nowMs);
+    const resolution = await this.deps.candidateBookCache.getFreshOrRefresh(
+      String(signal.tokenId),
+      nowMs,
+    );
     if (resolution.entry) {
       return {
         market: applyOrderBookToMarket(market, resolution.entry),
@@ -361,7 +364,10 @@ export class SignalToOrderBridge {
 
     const cooldownUntil = Date.now() + policy.unfilledCancelCooldownMs;
     this.cooldownUntilByToken.set(key, cooldownUntil);
-    this.cooldownBaselineByToken.set(key, buildCooldownBaseline(this.resolveBaselineMarket(order.tokenId)));
+    this.cooldownBaselineByToken.set(
+      key,
+      buildCooldownBaseline(this.resolveBaselineMarket(order.tokenId)),
+    );
     this.log.warn(
       {
         orderId: payload.orderId,
