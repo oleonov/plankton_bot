@@ -173,6 +173,7 @@ describe("SqliteFamilyRulesDbRepository", () => {
       maxConcurrentOrdersPerFamily: 20,
       maxProbeInFlightPerToken: 2,
       maxEntrySignalsPerTickPerFamily: 10,
+      fastLaneEnabled: null,
     });
     expect(cfg.rules.tailSuppression.maxOpenValueUsdc).toBe(25);
     expect(cfg.rules.session.weekendMode).toBe("disabled");
