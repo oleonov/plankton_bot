@@ -274,7 +274,8 @@ export class StrategyModule implements RuntimeModule {
 
     const tokenIds = markets
       .filter(
-        (market) => market.familyId && conditionKeys.has(`${market.familyId}|${market.conditionId}`),
+        (market) =>
+          market.familyId && conditionKeys.has(`${market.familyId}|${market.conditionId}`),
       )
       .map((market) => String(market.tokenId));
     if (tokenIds.length === 0) return markets;

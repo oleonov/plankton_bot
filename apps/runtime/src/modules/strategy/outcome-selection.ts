@@ -69,13 +69,7 @@ export function scoreOutcomeCandidate(market: NormalizedMarket): number {
   const volumeBonus = Math.log10(Math.max(market.volume24h ?? 0, 0) + 1);
   const liquidityBonus = Math.log10(Math.max(market.liquidity ?? 0, 0) + 1) * 0.5;
 
-  return (
-    cheapnessScore +
-    volumeBonus +
-    liquidityBonus -
-    spread * 120 -
-    relativeSpread * 20
-  );
+  return cheapnessScore + volumeBonus + liquidityBonus - spread * 120 - relativeSpread * 20;
 }
 
 export function selectFirstEntryOutcomeForCondition(

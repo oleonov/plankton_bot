@@ -175,10 +175,7 @@ describe("outcome selection", () => {
 
   it("rejects explicit Gamma fallback books for live entry selection", () => {
     const bundle = makeBundle();
-    const rejected = rejectOutcomeCandidate(
-      makeMarket({ bookSource: "gamma-fallback" }),
-      bundle,
-    );
+    const rejected = rejectOutcomeCandidate(makeMarket({ bookSource: "gamma-fallback" }), bundle);
 
     expect(rejected).toBe("gamma-fallback");
   });
@@ -218,7 +215,10 @@ describe("outcome selection", () => {
 
   it("rejects all candidates when every outcome is outside entry quality gates", () => {
     const bundle = makeBundle();
-    const fallback = makeMarket({ tokenId: createTokenId("tok-fallback"), bookSource: "gamma-fallback" });
+    const fallback = makeMarket({
+      tokenId: createTokenId("tok-fallback"),
+      bookSource: "gamma-fallback",
+    });
     const wide = makeMarket({ tokenId: createTokenId("tok-wide"), bestBid: 0.1, bestAsk: 0.2 });
 
     expect(selectFirstEntryTokenForCondition([fallback, wide], bundle)).toBeNull();
