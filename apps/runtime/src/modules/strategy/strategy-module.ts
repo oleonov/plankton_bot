@@ -25,7 +25,6 @@ import type {
   OrderRepository,
   FamilyStateRepository,
   NormalizedMarket,
-  OrderBookSnapshot,
   RuntimeEventMap,
   RuntimeControl,
 } from "@plankton/domain";
