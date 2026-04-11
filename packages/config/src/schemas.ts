@@ -148,6 +148,7 @@ const twoSidedYamlSchema = z.object({
   allow_two_sided: z.boolean(),
   two_sided_mode: twoSidedModeSchema,
   min_activity_for_two_sided: z.number().int().nullable().optional().default(null),
+  max_additional_entry_price: z.number().nullable().optional(),
 });
 
 const throughputYamlSchema = z.object({

@@ -98,6 +98,8 @@ export interface OrderBookSnapshot {
   timestamp: number; // unix ms
 }
 
+export type MarketBookSource = "clob" | "gamma" | "gamma-fallback" | "simulation" | "unknown";
+
 // ─── Market snapshot (persisted periodic summary) ─────────────────────────────
 
 export interface MarketSnapshot {
@@ -211,6 +213,7 @@ export interface TwoSidedRules {
   allowTwoSided: boolean;
   twoSidedMode: TwoSidedMode;
   minActivityForTwoSided: number | null;
+  maxAdditionalEntryPrice?: number | null;
 }
 
 export interface ThroughputRules {
@@ -442,7 +445,10 @@ export interface NormalizedMarket {
   bestAsk: number | null;
   midPrice: number | null;
   spread: number | null;
+  volume24h?: number | null;
+  liquidity?: number | null;
   minOrderSize?: number | null;
+  bookSource?: MarketBookSource | null;
   snapshotTs: number; // unix ms when pricing was captured
 }
 

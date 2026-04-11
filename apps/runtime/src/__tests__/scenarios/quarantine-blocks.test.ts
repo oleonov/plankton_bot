@@ -21,7 +21,7 @@ describe("Scenario: quarantine blocks strategy", () => {
     const fixture = {
       name: "quarantine-blocks",
       description: "Family in quarantine",
-      marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+      marketSnapshots: [makeMarketFixture(market, 0.1, 0.12)],
       familyStateOverrides: [
         {
           familyId: "fam-elections",
@@ -35,7 +35,7 @@ describe("Scenario: quarantine blocks strategy", () => {
     const result = await runScenario(fixture, [familyConfig]);
 
     // Strategy still produces signals, but the risk gate rejects them all
-    // when the family is in quarantine mode
+    // when the family is in quarantine mode.
     expect(result.signalCount).toBeGreaterThan(0);
     expect(result.approvedCount).toBe(0);
     expect(result.rejectedCount).toBe(result.signalCount);

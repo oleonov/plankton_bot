@@ -34,7 +34,7 @@ describe("Scenario: restart/recovery on existing DB", () => {
         {
           name: "restart-run-1",
           description: "First run — creates positions",
-          marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+          marketSnapshots: [makeMarketFixture(market, 0.1, 0.12)],
           ticks: 3,
           dbPath,
         },
@@ -52,7 +52,7 @@ describe("Scenario: restart/recovery on existing DB", () => {
         {
           name: "restart-run-2",
           description: "Second run — verify state preserved",
-          marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+          marketSnapshots: [makeMarketFixture(market, 0.1, 0.12)],
           ticks: 2,
           dbPath,
         },

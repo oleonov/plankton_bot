@@ -1,0 +1,366 @@
+import { describe, expect, it } from "vitest";
+import {
+  createBotRunId,
+  createFamilyId,
+  createOrderId,
+  createTokenId,
+  type ClientOrderId,
+  type FamilyRuleBundle,
+  type NormalizedMarket,
+  type Order,
+  type Signal,
+} from "@plankton/domain";
+import {
+  buildRestingOrderSnapshot,
+  evaluateMarketability,
+  resolveMakerOnlyPrice,
+  resolveMarketabilityPolicy,
+} from "../modules/strategy/marketability.js";
+
+const FAM_ID = createFamilyId("fam-btc");
+const TOKEN_ID = createTokenId("token-yes");
+const NOW = Date.parse("2026-04-10T15:00:00.000Z");
+
+function makeBundle(overrides?: Partial<FamilyRuleBundle>): FamilyRuleBundle {
+  const bundle: FamilyRuleBundle = {
+    identity: {
+      familyId: FAM_ID,
+      familyKey: "bitcoin-price",
+      primaryCategory: "crypto-btc",
+      regime: "price-range",
+      horizon: "daily",
+      cadence: "daily",
+      strategyProfile: "scalp",
+      topicKey: null,
+      slugPattern: null,
+      notes: null,
+      feeTier: "fee-enabled",
+      liveWalletRequirement: "relayer-required",
+      requiresPostOnlyForLive: true,
+    },
+    evidence: {
+      familyId: FAM_ID,
+      evidenceStatus: "confirmed",
+      evidenceScore: 80,
+      promotionState: "scaled",
+      localTradeCount: 20,
+      localMarketCount: 10,
+      localRealizedPnlFifo: 10,
+      openTailCostUsdc: 0,
+      tailAdjustedPnl: 10,
+      remoteClosedRealizedPnl: null,
+      openPositionCount: null,
+      openDustCount: null,
+      bothSidedEligible: true,
+      heavyCampaignEligible: true,
+      activeWindowEdgeScore: null,
+      recurrenceScore: null,
+      recycleScore: null,
+      liveViabilityScore: null,
+      toxicityPenalty: null,
+      lastValidatedAt: null,
+      probeSubstate: null,
+      repricingExitCount: 0,
+    },
+    rules: {
+      familyId: FAM_ID,
+      universe: {
+        enabled: true,
+        action: "trade",
+        priorityRank: 1,
+        allowWeekends: true,
+        sessionMode: "active-window",
+      },
+      entry: {
+        entryMode: "probe-first",
+        minEntryPrice: 0.01,
+        maxEntryPrice: 0.2,
+        maxInitialNotionalUsdc: 5,
+        allowHighPriceOneShot: false,
+        highPriceThreshold: 0.85,
+        requireProvenFamilyAbovePrice: 0.2,
+        preferredEntryBand: null,
+        maxProbeCountPerMarket: null,
+        entryCooldownSeconds: null,
+        maxNewMarketsPerSession: null,
+        probeSizeUsdc: 5,
+        addSizeUsdc: 4,
+      },
+      scaleIn: {
+        scaleMode: "confirm-only",
+        defaultMaxBuysPerLeg: 3,
+        heavyMaxBuysPerLeg: 5,
+        allowHeavyCampaigns: true,
+        requirePositiveRecycleHistoryForScale: true,
+      },
+      exit: {
+        exitMode: "repricing-sell",
+        primaryProfitModel: "sell-into-strength",
+        allowRunnerExtension: false,
+        preferFastRecycle: true,
+        resolutionHoldingAllowed: false,
+        resolutionBufferMinutes: 60,
+        targetRoiBandLow: 20,
+        targetRoiBandHigh: 50,
+        maxUnmovedHoldHours: null,
+        maxTailHoldHours: null,
+      },
+      twoSided: {
+        allowTwoSided: true,
+        twoSidedMode: "active",
+        minActivityForTwoSided: 11,
+      },
+      throughput: {
+        maxConcurrentOrdersPerFamily: 10,
+        maxProbeInFlightPerToken: 2,
+        maxEntrySignalsPerTickPerFamily: 10,
+      },
+      tailSuppression: {
+        maxOpenValueUsdc: 75,
+        maxActiveMarkets: 100,
+        maxDustPositions: 3,
+        tailQuarantineThresholdUsdc: 50,
+        tailQuarantineThresholdRatio: 0.5,
+        staleTailPruneEnabled: true,
+        thresholdCleanupRequired: false,
+        autoSettleResolvedMarkets: true,
+      },
+      session: {
+        activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
+        reducedWindowsUtc: [],
+        weekdayBias: "normal",
+        weekendMode: "normal",
+      },
+    },
+  };
+
+  return { ...bundle, ...overrides };
+}
+
+function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
+  return {
+    tokenId: TOKEN_ID,
+    conditionId: "cond-1",
+    slug: "bitcoin-price-on-april-10",
+    eventSlug: null,
+    question: "Bitcoin price?",
+    outcome: "YES",
+    outcomeIndex: 0,
+    familyId: FAM_ID,
+    familyKey: "bitcoin-price",
+    regime: "price-range",
+    horizon: "daily",
+    endDate: "2026-04-10T23:59:00.000Z",
+    active: true,
+    tickSize: 0.001,
+    negRisk: false,
+    bestBid: 0.03,
+    bestAsk: 0.034,
+    midPrice: 0.032,
+    spread: 0.004,
+    volume24h: 100_000,
+    liquidity: 10_000,
+    snapshotTs: NOW,
+    ...overrides,
+  };
+}
+
+function makeSignal(overrides?: Partial<Signal>): Signal {
+  return {
+    signalId: "sig-1",
+    familyId: FAM_ID,
+    tokenId: TOKEN_ID,
+    side: "buy",
+    suggestedPrice: 0.04,
+    suggestedSize: 100,
+    suggestedSizeUsdc: 4,
+    reason: "probe-entry",
+    strategyTick: NOW,
+    sequenceInTick: 0,
+    generatedAt: new Date(NOW).toISOString(),
+    ...overrides,
+  };
+}
+
+function makeOrder(overrides?: Partial<Order>): Order {
+  return {
+    orderId: createOrderId("order-1"),
+    clientOrderId: "client-1" as ClientOrderId,
+    tokenId: TOKEN_ID,
+    familyId: FAM_ID,
+    side: "buy",
+    orderType: "GTC",
+    postOnly: true,
+    price: 0.03,
+    size: 100,
+    sizeUsdc: 3,
+    status: "open",
+    exchangeOrderId: "order-1",
+    signalId: null,
+    signalReason: "probe-entry",
+    botRunId: createBotRunId("bot-run-1"),
+    createdAt: new Date(NOW).toISOString(),
+    updatedAt: new Date(NOW).toISOString(),
+    ...overrides,
+  };
+}
+
+describe("marketability gate", () => {
+  it("allows tight spread core markets with fresh two-sided books", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal(),
+      market: makeMarket(),
+      bundle: makeBundle(),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("spread-tight");
+  });
+
+  it("rejects stale books before maker improvement or taker mode", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal(),
+      market: makeMarket({ snapshotTs: NOW - 16_000 }),
+      bundle: makeBundle(),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("book-stale");
+  });
+
+  it("rejects high-volume markets when spread is still above the hard tier cap", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.3, bestAsk: 0.36, spread: 0.06, volume24h: 1_000_000 }),
+      bundle: makeBundle(),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("spread-too-wide");
+  });
+
+  it("uses reduce-only family state as a hard no-new-entry override", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal(),
+      market: makeMarket(),
+      bundle: makeBundle({
+        evidence: { ...makeBundle().evidence!, promotionState: "reduce-only" },
+      }),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("family-reduce-only");
+  });
+
+  it("rejects when a family has already saturated resting buy reservation", () => {
+    const market = makeMarket();
+    const snapshot = buildRestingOrderSnapshot(
+      [
+        makeOrder({ orderId: createOrderId("order-1"), sizeUsdc: 13 }),
+        makeOrder({
+          orderId: createOrderId("order-2"),
+          tokenId: createTokenId("token-no"),
+          sizeUsdc: 13,
+        }),
+      ],
+      new Map([[String(TOKEN_ID), market]]),
+    );
+
+    const decision = evaluateMarketability({
+      signal: makeSignal(),
+      market,
+      bundle: makeBundle(),
+      nowMs: NOW,
+      restingSnapshot: snapshot,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("resting-family-reservation-cap");
+  });
+
+  it("rejects when the new entry would exceed family resting buy reservation", () => {
+    const market = makeMarket();
+    const snapshot = buildRestingOrderSnapshot(
+      [makeOrder({ orderId: createOrderId("order-1"), sizeUsdc: 22 })],
+      new Map([[String(TOKEN_ID), market]]),
+    );
+
+    const decision = evaluateMarketability({
+      signal: makeSignal({ suggestedSizeUsdc: 4 }),
+      market,
+      bundle: makeBundle(),
+      nowMs: NOW,
+      restingSnapshot: snapshot,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("resting-family-reservation-cap");
+  });
+
+  it("rejects while token is in cancel-without-fill cooldown", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal(),
+      market: makeMarket(),
+      bundle: makeBundle(),
+      nowMs: NOW,
+      cooldownUntilMs: NOW + 60_000,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("unfilled-cancel-cooldown");
+  });
+});
+
+describe("maker-only price improvement", () => {
+  it("moves BUY orders inside a tight spread without crossing the ask", () => {
+    const policy = resolveMarketabilityPolicy(makeBundle());
+    const price = resolveMakerOnlyPrice({
+      side: "buy",
+      suggestedPrice: 0.04,
+      market: makeMarket(),
+      policy,
+    });
+
+    expect(price).toBe(0.033);
+  });
+
+  it("keeps BUY orders at the strategy price when it is already improved inside the spread", () => {
+    const policy = resolveMarketabilityPolicy(makeBundle());
+    const price = resolveMakerOnlyPrice({
+      side: "buy",
+      suggestedPrice: 0.032,
+      market: makeMarket(),
+      policy,
+    });
+
+    expect(price).toBe(0.032);
+  });
+
+  it("does not place a BUY below best bid when the strategy price is too low", () => {
+    const policy = resolveMarketabilityPolicy(makeBundle());
+    const price = resolveMakerOnlyPrice({
+      side: "buy",
+      suggestedPrice: 0.029,
+      market: makeMarket(),
+      policy,
+    });
+
+    expect(price).toBeNull();
+  });
+
+  it("returns null when there is no legal maker price below the ask", () => {
+    const policy = resolveMarketabilityPolicy(makeBundle());
+    const price = resolveMakerOnlyPrice({
+      side: "buy",
+      suggestedPrice: 0.04,
+      market: makeMarket({ bestBid: 0.04, bestAsk: 0.04, spread: 0 }),
+      policy,
+    });
+
+    expect(price).toBeNull();
+  });
+});

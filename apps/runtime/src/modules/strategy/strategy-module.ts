@@ -22,8 +22,10 @@ import type {
   EventBus,
   FamilyRulesProvider,
   PositionRepository,
+  OrderRepository,
   FamilyStateRepository,
   NormalizedMarket,
+  OrderBookSnapshot,
   RuntimeEventMap,
   RuntimeControl,
 } from "@plankton/domain";
@@ -42,11 +44,17 @@ import {
 } from "./scanner.js";
 import { SignalToOrderBridge } from "./signal-to-order.js";
 
+export interface CandidateBookGateway {
+  getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>>;
+}
+
 export interface StrategyModuleDeps {
   bus: EventBus;
   rulesProvider: FamilyRulesProvider;
   positionRepo: PositionRepository;
+  orderRepo?: OrderRepository | undefined;
   familyStateRepo: FamilyStateRepository;
+  candidateBookGateway?: CandidateBookGateway | undefined;
   log: Logger;
   scanIntervalMs: number;
   runtimeControl?: RuntimeControl | undefined;
@@ -83,6 +91,7 @@ export class StrategyModule implements RuntimeModule {
       bus: deps.bus,
       log: this.log,
       rulesProvider: deps.rulesProvider,
+      orderRepo: deps.orderRepo,
       liveLiteGuard: deps.liveLiteGuard,
     });
   }
@@ -187,11 +196,14 @@ export class StrategyModule implements RuntimeModule {
         return;
       }
 
+      const scanMarkets = await this.prepareMarketsForScan(filteredMarkets);
+
       const { signals, meta: scanMeta } = scan(
-        filteredMarkets,
+        scanMarkets,
         {
           rulesProvider: this.deps.rulesProvider,
           positionRepo: this.deps.positionRepo,
+          orderRepo: this.deps.orderRepo,
           familyStateRepo: this.deps.familyStateRepo,
           log: this.log,
           globalConfig: this.deps.globalConfig,
@@ -242,6 +254,52 @@ export class StrategyModule implements RuntimeModule {
   ): Promise<void> {
     this.cachedMarkets = payload.markets;
     this.log.debug({ count: payload.markets.length }, "market cache updated");
+  }
+
+  private async prepareMarketsForScan(
+    markets: readonly NormalizedMarket[],
+  ): Promise<readonly NormalizedMarket[]> {
+    if (!this.deps.candidateBookGateway) return markets;
+
+    const conditionKeys = new Set<string>();
+    for (const market of markets) {
+      if (!market.familyId || !market.active) continue;
+      const bundle = this.deps.rulesProvider.getRule(market.familyId);
+      if (!bundle || !this.deps.rulesProvider.isEnabled(market.familyId)) continue;
+      if (bundle.rules.universe.action !== "trade") continue;
+      conditionKeys.add(`${market.familyId}|${market.conditionId}`);
+    }
+
+    if (conditionKeys.size === 0) return markets;
+
+    const tokenIds = markets
+      .filter(
+        (market) => market.familyId && conditionKeys.has(`${market.familyId}|${market.conditionId}`),
+      )
+      .map((market) => String(market.tokenId));
+    if (tokenIds.length === 0) return markets;
+
+    try {
+      const books = await this.deps.candidateBookGateway.getOrderBooks([...new Set(tokenIds)]);
+      if (books.size === 0) return markets;
+      return markets.map((market) => {
+        const book = books.get(String(market.tokenId));
+        if (!book || book.bestBid === null || book.bestAsk === null) return market;
+        return {
+          ...market,
+          bestBid: book.bestBid,
+          bestAsk: book.bestAsk,
+          midPrice: book.midPrice,
+          spread: book.spread,
+          minOrderSize: book.minOrderSize ?? market.minOrderSize ?? null,
+          bookSource: "clob",
+          snapshotTs: book.timestamp,
+        };
+      });
+    } catch (err) {
+      this.log.warn({ err, tokenCount: tokenIds.length }, "candidate book enrichment failed");
+      return markets;
+    }
   }
 
   private async handlePositionUpdated(payload: RuntimeEventMap["PositionUpdated"]): Promise<void> {

@@ -13,7 +13,7 @@
 
 import type { TokenId } from "./ids.js";
 import type { OrderSide, OrderType, ExchangeErrorCode, LiquidityRole } from "./enums.js";
-import type { OrderBookSnapshot } from "./types.js";
+import type { MarketBookSource, OrderBookSnapshot } from "./types.js";
 
 // ─── Market catalog types ─────────────────────────────────────────────────
 
@@ -113,6 +113,16 @@ export interface CancelOrderResult {
   readonly errorMessage?: string;
 }
 
+export interface MarketPricingSnapshot {
+  bestBid: number | null;
+  bestAsk: number | null;
+  lastTradePrice: number | null;
+  volume24h?: number | null;
+  liquidity?: number | null;
+  minOrderSize?: number | null;
+  bookSource?: MarketBookSource | null;
+}
+
 // ─── Gateway interfaces ───────────────────────────────────────────────────
 
 /**
@@ -130,6 +140,13 @@ export interface MarketDataGateway {
   /** Fetch the current order book / top-of-book for a token. */
   getOrderBook(tokenId: TokenId): Promise<OrderBookSnapshot>;
 
+  /**
+   * Fetch order books for several tokens in one request when the gateway supports it.
+   * Strategy uses this for outcome-level entry selection; the market-data loop may
+   * also use it to replace Gamma fallback pricing with CLOB top-of-book.
+   */
+  getOrderBooks?(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>>;
+
   /** Fetch the minimum price increment for a token. */
   getTickSize(tokenId: TokenId): Promise<number>;
 
@@ -141,17 +158,7 @@ export interface MarketDataGateway {
    * Returns a map of tokenId → pricing snapshot.
    * Used by the fast pricing loop (Phase 1: Gamma-backed).
    */
-  getMarketPricing(tokenIds: string[]): Promise<
-    Map<
-      string,
-      {
-        bestBid: number | null;
-        bestAsk: number | null;
-        lastTradePrice: number | null;
-        minOrderSize?: number | null;
-      }
-    >
-  >;
+  getMarketPricing(tokenIds: string[]): Promise<Map<string, MarketPricingSnapshot>>;
 }
 
 /**

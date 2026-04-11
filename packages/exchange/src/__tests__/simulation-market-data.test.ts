@@ -80,6 +80,17 @@ describe("SimulationMarketDataGateway", () => {
     expect(book.spread).toBeCloseTo(0.02);
   });
 
+  it("getOrderBooks returns stored books for multiple tokens", async () => {
+    const tokA = createTokenId("tok-a");
+    const tokB = createTokenId("tok-b");
+    gw.setOrderBook(tokA, [{ price: 0.1, size: 10 }], [{ price: 0.11, size: 12 }]);
+    gw.setOrderBook(tokB, [{ price: 0.2, size: 20 }], [{ price: 0.22, size: 22 }]);
+
+    const books = await gw.getOrderBooks(["tok-a", "tok-b"]);
+    expect(books.get("tok-a")!.bestBid).toBe(0.1);
+    expect(books.get("tok-b")!.bestAsk).toBe(0.22);
+  });
+
   it("getTickSize returns market tick size", async () => {
     gw.addMarket(makeMarket({ tickSize: 0.001 }));
     const tick = await gw.getTickSize(createTokenId("tok-yes"));

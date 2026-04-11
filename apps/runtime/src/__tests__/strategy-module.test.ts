@@ -1288,8 +1288,8 @@ describe("StrategyModule", () => {
       // Two different tokens in same family
       await bus.publish("NormalizedMarketUpdated", {
         markets: [
-          makeNormalizedMarket({ tokenId: TOK_ID, midPrice: 0.03 }),
-          makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.03 }),
+          makeNormalizedMarket({ tokenId: TOK_ID, conditionId: "cond-1", midPrice: 0.03 }),
+          makeNormalizedMarket({ tokenId: TOK_ID_2, conditionId: "cond-2", midPrice: 0.03 }),
         ],
         timestamp: Date.now(),
       });
@@ -1679,7 +1679,15 @@ describe("StrategyModule", () => {
 
       await mod.start();
 
-      const market = makeNormalizedMarket({ bestBid: 0.03, bestAsk: 0.04, midPrice: 0.035 });
+      const market = makeNormalizedMarket({
+        familyKey: "bitcoin-price",
+        bestBid: 0.03,
+        bestAsk: 0.034,
+        midPrice: 0.032,
+        spread: 0.004,
+        tickSize: 0.001,
+        volume24h: 100_000,
+      });
       await bus.publish("NormalizedMarketUpdated", {
         markets: [market],
         timestamp: Date.now(),
@@ -1697,9 +1705,9 @@ describe("StrategyModule", () => {
           familyId: FAM_ID,
           tokenId: TOK_ID,
           side: "buy",
-          suggestedPrice: 0.035,
+          suggestedPrice: 0.034,
           suggestedSize: 100,
-          suggestedSizeUsdc: 3.5,
+          suggestedSizeUsdc: 3.4,
           reason: "probe-entry",
           strategyTick: Date.now(),
           sequenceInTick: 0,
@@ -1711,9 +1719,9 @@ describe("StrategyModule", () => {
 
       expect(orderRequests).toHaveLength(1);
       expect(orderRequests[0]!.command.postOnly).toBe(true);
-      expect(orderRequests[0]!.command.price).toBe(0.03);
-      expect(orderRequests[0]!.command.size).toBeCloseTo(3.5 / 0.03, 6);
-      expect(orderRequests[0]!.command.price * orderRequests[0]!.command.size).toBeCloseTo(3.5, 6);
+      expect(orderRequests[0]!.command.price).toBe(0.033);
+      expect(orderRequests[0]!.command.size).toBeCloseTo(3.4 / 0.033, 6);
+      expect(orderRequests[0]!.command.price * orderRequests[0]!.command.size).toBeCloseTo(3.4, 6);
     });
 
     it("skips fee-enabled relayer orders when the book cannot support a maker-safe price", async () => {
@@ -3753,7 +3761,7 @@ describe("StrategyModule", () => {
   // ─── P1-5: selective two-sided overlay ──────────────────────────────
 
   describe("two-sided overlay (P1-5)", () => {
-    it("emits two-sided-entry for NO-outcome market when allowTwoSided is true", async () => {
+    it("emits two-sided-entry for a sibling outcome after the first side is already open", async () => {
       rulesProvider = createMockRulesProvider(
         makeBundle({
           evidence: { bothSidedEligible: true, localTradeCount: 50 },
@@ -3776,6 +3784,10 @@ describe("StrategyModule", () => {
         runtimeControl: { isPaused: () => false },
       });
       await mod.start();
+      positionRepo._setPosition(
+        TOK_ID,
+        makePosition({ tokenId: TOK_ID, avgEntryPrice: 0.03, currentValueUsdc: 3 }),
+      );
 
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
       bus.subscribe("SignalProduced", async (p) => {
@@ -3783,17 +3795,36 @@ describe("StrategyModule", () => {
       });
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ outcome: "NO", midPrice: 0.03 })],
+        markets: [
+          makeNormalizedMarket({
+            tokenId: TOK_ID,
+            outcome: "YES",
+            bestBid: 0.03,
+            bestAsk: 0.03,
+            midPrice: 0.03,
+            spread: 0,
+          }),
+          makeNormalizedMarket({
+            tokenId: createTokenId("tok-no"),
+            outcome: "NO",
+            outcomeIndex: 1,
+            bestBid: 0.03,
+            bestAsk: 0.04,
+            midPrice: 0.035,
+            spread: 0.01,
+          }),
+        ],
         timestamp: Date.now(),
       });
       await bus.drain();
       await mod.tick();
       await bus.drain();
 
-      // NO-outcome with two-sided enabled: should get two-sided-entry (not probe-entry)
+      // Sibling outcome with two-sided enabled: should get two-sided-entry (not first probe).
       const twoSided = signals.filter((s) => s.signal.reason === "two-sided-entry");
       expect(twoSided).toHaveLength(1);
       expect(twoSided[0]!.signal.side).toBe("buy");
+      expect(String(twoSided[0]!.signal.tokenId)).toBe("tok-no");
     });
 
     it("blocks two-sided entry when twoSidedMode is disabled", async () => {

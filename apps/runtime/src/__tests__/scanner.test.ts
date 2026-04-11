@@ -1,6 +1,13 @@
 import { describe, it, expect, vi } from "vitest";
-import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
+import {
+  createBotRunId,
+  createFamilyId,
+  createOrderId,
+  createPositionId,
+  createTokenId,
+} from "@plankton/domain";
 import type {
+  ClientOrderId,
   FamilyRulesProvider,
   FamilyRuleBundle,
   FamilyIdentity,
@@ -8,6 +15,9 @@ import type {
   FamilyRules,
   FamilyState,
   FamilyStateRepository,
+  Order,
+  OrderRepository,
+  Position,
   PositionRepository,
   NormalizedMarket,
   TokenId,
@@ -56,6 +66,49 @@ function makeNormalizedMarket(overrides?: Partial<NormalizedMarket>): Normalized
     midPrice: 0.035,
     spread: 0.01,
     snapshotTs: Date.now(),
+    ...overrides,
+  };
+}
+
+function makePosition(overrides?: Partial<Position>): Position {
+  return {
+    positionId: createPositionId("pos-1"),
+    tokenId: TOK_ID,
+    familyId: FAM_ID,
+    side: "buy",
+    size: 100,
+    avgEntryPrice: 0.03,
+    costBasisUsdc: 3,
+    currentValueUsdc: 3.5,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: null,
+    openedAt: new Date().toISOString(),
+    closedAt: null,
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function makeOrder(overrides?: Partial<Order>): Order {
+  return {
+    orderId: createOrderId("ord-1"),
+    clientOrderId: "plk_ord_1" as ClientOrderId,
+    tokenId: TOK_ID,
+    familyId: FAM_ID,
+    side: "buy",
+    orderType: "GTC",
+    postOnly: true,
+    price: 0.03,
+    size: 100,
+    sizeUsdc: 3,
+    status: "open",
+    exchangeOrderId: "ord-1",
+    signalId: "sig-1",
+    signalReason: "probe-entry",
+    botRunId: createBotRunId("run-1"),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     ...overrides,
   };
 }
@@ -206,8 +259,11 @@ function createMockRulesProvider(bundle: FamilyRuleBundle | null = makeBundle())
   } satisfies FamilyRulesProvider;
 }
 
-function createMockPositionRepo() {
-  const positions = new Map<string, import("@plankton/domain").Position>();
+function createMockPositionRepo(initialPositions: Position[] = []) {
+  const positions = new Map<string, Position>();
+  for (const position of initialPositions) {
+    positions.set(String(position.tokenId), position);
+  }
   return {
     save: vi.fn(),
     findByTokenId: vi.fn((tokenId: TokenId) => positions.get(String(tokenId)) ?? null),
@@ -217,6 +273,25 @@ function createMockPositionRepo() {
     findAll: vi.fn(() => [...positions.values()]),
     findOpenByEntryStyle: vi.fn(() => []),
   } satisfies PositionRepository;
+}
+
+function createMockOrderRepo(initialOrders: Order[] = []) {
+  return {
+    save: vi.fn(),
+    findById: vi.fn(() => null),
+    findByClientOrderId: vi.fn(() => null),
+    findByExchangeOrderId: vi.fn(() => null),
+    findOpen: vi.fn(() => initialOrders.filter((order) => order.status === "open")),
+    findByTokenId: vi.fn((tokenId) =>
+      initialOrders.filter((order) => String(order.tokenId) === String(tokenId)),
+    ),
+    updateStatus: vi.fn(),
+    sumOpenBuyNotional: vi.fn(() =>
+      initialOrders
+        .filter((order) => order.status === "open" && order.side === "buy")
+        .reduce((sum, order) => sum + order.sizeUsdc, 0),
+    ),
+  } satisfies OrderRepository;
 }
 
 function createMockFamilyStateRepo() {
@@ -382,6 +457,214 @@ describe("evaluateSprayEntry", () => {
   });
 });
 
+describe("scan() outcome selection", () => {
+  it("emits first-entry only for the best cheap outcome in a condition", () => {
+    const bundle = makeBundle();
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-yes"),
+          outcome: "YES",
+          bestBid: 0.49,
+          bestAsk: 0.5,
+          midPrice: 0.495,
+          spread: 0.01,
+          bookSource: "clob",
+        }),
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-no"),
+          outcome: "NO",
+          outcomeIndex: 1,
+          bestBid: 0.04,
+          bestAsk: 0.05,
+          midPrice: 0.045,
+          spread: 0.01,
+          bookSource: "clob",
+        }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(bundle),
+        positionRepo: createMockPositionRepo(),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("probe-entry");
+    expect(String(result.signals[0]!.tokenId)).toBe("tok-no");
+  });
+
+  it("does not emit a sibling first-entry while another outcome has an open entry order", () => {
+    const result = scan(
+      [
+        makeNormalizedMarket({ tokenId: createTokenId("tok-yes"), outcome: "YES" }),
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-no"),
+          outcome: "NO",
+          outcomeIndex: 1,
+        }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(makeBundle()),
+        positionRepo: createMockPositionRepo(),
+        orderRepo: createMockOrderRepo([makeOrder({ tokenId: createTokenId("tok-yes") })]),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("emits a two-sided-entry only after a sibling position exists", () => {
+    const bundle = makeBundle({
+      evidence: { bothSidedEligible: true, localTradeCount: 50 },
+      rules: {
+        scaleIn: { ...makeRules().scaleIn, scaleMode: "disabled" },
+        twoSided: {
+          allowTwoSided: true,
+          twoSidedMode: "selective",
+          minActivityForTwoSided: 10,
+        },
+      },
+    });
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-yes"),
+          outcome: "YES",
+          bestBid: 0.03,
+          bestAsk: 0.03,
+          midPrice: 0.03,
+          spread: 0,
+        }),
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-no"),
+          outcome: "NO",
+          outcomeIndex: 1,
+          bestBid: 0.04,
+          bestAsk: 0.05,
+          midPrice: 0.045,
+          spread: 0.01,
+        }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(bundle),
+        positionRepo: createMockPositionRepo([makePosition({ tokenId: createTokenId("tok-yes") })]),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+
+    const entrySignals = result.signals.filter((signal) => signal.reason !== "repricing-exit");
+    expect(entrySignals).toHaveLength(1);
+    expect(entrySignals[0]!.reason).toBe("two-sided-entry");
+    expect(String(entrySignals[0]!.tokenId)).toBe("tok-no");
+  });
+
+  it("allows additional side above the first-entry cap when maxAdditionalEntryPrice permits it", () => {
+    const bundle = makeBundle({
+      evidence: { bothSidedEligible: true, localTradeCount: 50 },
+      rules: {
+        twoSided: {
+          allowTwoSided: true,
+          twoSidedMode: "active",
+          minActivityForTwoSided: null,
+          maxAdditionalEntryPrice: 0.2,
+        },
+      },
+    });
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-yes"),
+          outcome: "YES",
+          bestBid: 0.04,
+          bestAsk: 0.05,
+          midPrice: 0.045,
+          spread: 0.01,
+        }),
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-no"),
+          outcome: "NO",
+          outcomeIndex: 1,
+          bestBid: 0.14,
+          bestAsk: 0.16,
+          midPrice: 0.15,
+          spread: 0.02,
+        }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(bundle),
+        positionRepo: createMockPositionRepo([makePosition({ tokenId: createTokenId("tok-yes") })]),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+
+    expect(result.signals.filter((signal) => signal.reason === "two-sided-entry")).toHaveLength(1);
+  });
+
+  it("blocks expensive sibling outcomes instead of buying 95c as two-sided hedge", () => {
+    const bundle = makeBundle({
+      evidence: { bothSidedEligible: true, localTradeCount: 50 },
+      rules: {
+        twoSided: {
+          allowTwoSided: true,
+          twoSidedMode: "active",
+          minActivityForTwoSided: null,
+          maxAdditionalEntryPrice: 0.2,
+        },
+      },
+    });
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-yes"),
+          outcome: "YES",
+          bestBid: 0.03,
+          bestAsk: 0.03,
+          midPrice: 0.03,
+          spread: 0,
+        }),
+        makeNormalizedMarket({
+          tokenId: createTokenId("tok-no"),
+          outcome: "NO",
+          outcomeIndex: 1,
+          bestBid: 0.94,
+          bestAsk: 0.96,
+          midPrice: 0.95,
+          spread: 0.02,
+        }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(bundle),
+        positionRepo: createMockPositionRepo([makePosition({ tokenId: createTokenId("tok-yes") })]),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+
+    expect(result.signals.filter((signal) => signal.reason === "two-sided-entry")).toHaveLength(0);
+  });
+});
+
 // ─── Tests: scan() with spray integration ───────────��───────────────────
 
 describe("scan() spray integration", () => {
@@ -483,8 +766,13 @@ describe("scan() spray integration", () => {
 
     // Create 5 markets in the same family, each with a different token
     const tokens = [TOK_ID, TOK_ID_2, TOK_ID_3, createTokenId("tok-4"), createTokenId("tok-5")];
-    const markets = tokens.map((tokenId) =>
-      makeNormalizedMarket({ tokenId, familyId: FAM_A, midPrice: 0.035 }),
+    const markets = tokens.map((tokenId, index) =>
+      makeNormalizedMarket({
+        tokenId,
+        conditionId: `cond-${index}`,
+        familyId: FAM_A,
+        midPrice: 0.035,
+      }),
     );
 
     const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
@@ -1139,9 +1427,9 @@ describe("per-family tick throughput", () => {
     });
     const result = scan(
       [
-        makeNormalizedMarket({ tokenId: TOK_ID, midPrice: 0.035 }),
-        makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.035 }),
-        makeNormalizedMarket({ tokenId: TOK_ID_3, midPrice: 0.035 }),
+        makeNormalizedMarket({ tokenId: TOK_ID, conditionId: "cond-1", midPrice: 0.035 }),
+        makeNormalizedMarket({ tokenId: TOK_ID_2, conditionId: "cond-2", midPrice: 0.035 }),
+        makeNormalizedMarket({ tokenId: TOK_ID_3, conditionId: "cond-3", midPrice: 0.035 }),
       ],
       {
         rulesProvider: createMockRulesProvider(bundle),

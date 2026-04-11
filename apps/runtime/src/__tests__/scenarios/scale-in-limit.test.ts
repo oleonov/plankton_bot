@@ -22,7 +22,7 @@ describe("Scenario: scale-in limit respected", () => {
     const fixture = {
       name: "scale-in-limit",
       description: "Family with defaultMaxBuysPerLeg=1",
-      marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+      marketSnapshots: [makeMarketFixture(market, 0.1, 0.12)],
       ticks: 5,
     };
 

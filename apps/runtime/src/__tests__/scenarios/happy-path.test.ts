@@ -24,7 +24,7 @@ describe("Scenario: probe entry happy path", () => {
     const fixture = {
       name: "probe-entry-happy-path",
       description: "Single family, single market, probe entry fires and fills",
-      marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+      marketSnapshots: [makeMarketFixture(market, 0.1, 0.12)],
       ticks: 3,
     };
 

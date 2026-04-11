@@ -23,6 +23,7 @@ import {
   type FamilyRulesProvider,
   type FamilyRuleBundle,
   type PositionRepository,
+  type OrderRepository,
   type FamilyStateRepository,
   type FamilyState,
   type Signal,
@@ -37,11 +38,18 @@ import {
 import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
 import { resolveFamilyThroughputPolicy } from "../../family-throughput.js";
+import {
+  rejectOutcomeCandidate,
+  selectFirstEntryOutcomeForCondition,
+} from "./outcome-selection.js";
+
+const DEFAULT_MAX_ADDITIONAL_ENTRY_PRICE = 0.3;
 
 /** Context needed by the scanner to produce signals. */
 export interface ScannerDeps {
   rulesProvider: FamilyRulesProvider;
   positionRepo: PositionRepository;
+  orderRepo?: OrderRepository | undefined;
   familyStateRepo: FamilyStateRepository;
   log: Logger;
   globalConfig?: GlobalConfig | undefined;
@@ -418,6 +426,16 @@ export function scan(
 
   // Sort markets by composite family score (P1-1: higher-ranked families first)
   const sorted = sortByFamilyPriority(markets, deps.rulesProvider, deps.familyStateRepo);
+  const conditionMarkets = groupMarketsByCondition(sorted);
+  const openPositionTokens = new Set(
+    deps.positionRepo.findOpen().map((position) => String(position.tokenId)),
+  );
+  const openEntryOrderTokens = new Set(
+    (deps.orderRepo?.findOpen() ?? [])
+      .filter((order) => order.side === "buy" && ENTRY_REASONS.has(order.signalReason ?? ""))
+      .map((order) => String(order.tokenId)),
+  );
+  const selectedFirstEntryTokens = new Map<string, string | null>();
 
   // Track sequence per family+token+side within this tick
   const seqMap = new Map<string, number>();
@@ -583,6 +601,21 @@ export function scan(
         }
       }
     } else if (!existingPosition) {
+      if (openEntryOrderTokens.has(String(market.tokenId))) continue;
+
+      const conditionKey = getConditionKey(market);
+      const group = conditionMarkets.get(conditionKey) ?? [market];
+      const hasSiblingPosition = group.some(
+        (candidate) =>
+          String(candidate.tokenId) !== String(market.tokenId) &&
+          openPositionTokens.has(String(candidate.tokenId)),
+      );
+      const hasAnyConditionInventory = group.some(
+        (candidate) =>
+          openPositionTokens.has(String(candidate.tokenId)) ||
+          openEntryOrderTokens.has(String(candidate.tokenId)),
+      );
+
       // P1-6: max probe count per market — skip if already probed this token enough times
       const maxProbes = bundle.rules.entry.maxProbeCountPerMarket;
       if (sessionTracker && maxProbes !== null) {
@@ -598,6 +631,51 @@ export function scan(
         );
         if (isNew && sessionTracker.getNewMarketCount(String(market.familyId)) >= maxNew) continue;
       }
+
+      if (hasSiblingPosition) {
+        const maxAdditionalEntryPrice = resolveMaxAdditionalEntryPrice(bundle);
+        if (
+          reduced ||
+          rejectOutcomeCandidate(market, bundle, { maxEntryPrice: maxAdditionalEntryPrice })
+        ) {
+          continue;
+        }
+        const twoSidedSignal = evaluateTwoSidedEntry(
+          market,
+          bundle,
+          midPrice,
+          tickTs,
+          nextSeq,
+          sizeMult,
+          minEntryNotionalUsdc,
+        );
+        if (twoSidedSignal) {
+          signals.push(twoSidedSignal);
+          if (effectiveCooldown) recordNonSprayEntry(market.familyId);
+        }
+        continue;
+      }
+
+      if (hasAnyConditionInventory) continue;
+
+      let selectedToken = selectedFirstEntryTokens.get(conditionKey);
+      if (!selectedFirstEntryTokens.has(conditionKey)) {
+        const selection = selectFirstEntryOutcomeForCondition(group, bundle);
+        selectedToken = selection.tokenId;
+        selectedFirstEntryTokens.set(conditionKey, selectedToken ?? null);
+        if (group.length > 1) {
+          deps.log.debug(
+            {
+              conditionId: market.conditionId,
+              familyId: String(market.familyId),
+              selectedTokenId: selectedToken ?? null,
+              candidates: selection.candidates,
+            },
+            "outcome selection",
+          );
+        }
+      }
+      if (selectedToken !== String(market.tokenId)) continue;
 
       // ─── Spray entry (runs before probe, uses separate cooldown) ──
 
@@ -641,44 +719,20 @@ export function scan(
         continue;
       }
 
-      // ─── Two-sided overlay (P1-5) ────────────────────────────
-      // NO-outcome markets with two-sided enabled go through the two-sided
-      // entry path instead of the standard probe path.
-      const isTwoSidedCandidate =
-        market.outcome.toUpperCase() === "NO" &&
-        bundle.rules.twoSided.allowTwoSided &&
-        bundle.rules.twoSided.twoSidedMode !== "disabled";
-
-      if (isTwoSidedCandidate && !reduced) {
-        const twoSidedSignal = evaluateTwoSidedEntry(
-          market,
-          bundle,
-          midPrice,
-          tickTs,
-          nextSeq,
-          sizeMult,
-          minEntryNotionalUsdc,
-        );
-        if (twoSidedSignal) {
-          signals.push(twoSidedSignal);
-          if (effectiveCooldown) recordNonSprayEntry(market.familyId);
-        }
-      } else {
-        // Probe entry — allowed in reduced mode (probes are low-risk)
-        const probeSignal = evaluateProbeEntry(
-          market,
-          bundle,
-          midPrice,
-          tickTs,
-          nextSeq,
-          sizeMult,
-          !!(familyState && familyState.tailAdjustedPnlLive < 0),
-          minEntryNotionalUsdc,
-        );
-        if (probeSignal) {
-          signals.push(probeSignal);
-          if (effectiveCooldown) recordNonSprayEntry(market.familyId);
-        }
+      // Probe entry — allowed in reduced mode (probes are low-risk)
+      const probeSignal = evaluateProbeEntry(
+        market,
+        bundle,
+        midPrice,
+        tickTs,
+        nextSeq,
+        sizeMult,
+        !!(familyState && familyState.tailAdjustedPnlLive < 0),
+        minEntryNotionalUsdc,
+      );
+      if (probeSignal) {
+        signals.push(probeSignal);
+        if (effectiveCooldown) recordNonSprayEntry(market.familyId);
       }
     }
   }
@@ -697,6 +751,10 @@ export function scan(
       exitSignals: signals.length - entrySignals,
     },
   };
+}
+
+function resolveMaxAdditionalEntryPrice(bundle: FamilyRuleBundle): number {
+  return bundle.rules.twoSided.maxAdditionalEntryPrice ?? DEFAULT_MAX_ADDITIONAL_ENTRY_PRICE;
 }
 
 /**
@@ -758,6 +816,26 @@ function sortByFamilyPriority(
     const rb = b.familyId ? getScore(b.familyId) : 999;
     return ra - rb;
   });
+}
+
+function getConditionKey(market: NormalizedMarket): string {
+  return `${market.familyId ? String(market.familyId) : "unassigned"}|${market.conditionId}`;
+}
+
+function groupMarketsByCondition(
+  markets: readonly NormalizedMarket[],
+): Map<string, NormalizedMarket[]> {
+  const groups = new Map<string, NormalizedMarket[]>();
+  for (const market of markets) {
+    const key = getConditionKey(market);
+    const group = groups.get(key);
+    if (group) {
+      group.push(market);
+    } else {
+      groups.set(key, [market]);
+    }
+  }
+  return groups;
 }
 
 function evaluateProbeEntry(
@@ -952,11 +1030,11 @@ function evaluateExit(
 /**
  * Two-sided entry evaluation (P1-5).
  *
- * Only fires for NO-outcome markets in families where:
+ * Only fires for sibling outcome markets in families where:
  *  - allowTwoSided is true
  *  - twoSidedMode is "selective" or "active"
  *  - evidence meets minActivityForTwoSided threshold
- *  - NO-side price is in entry band (buying NO tokens as a hedge/complement)
+ *  - sibling price is in entry band (buying an additional cheap side)
  *
  * In "selective" mode, only bothSidedEligible families are allowed.
  * In "active" mode, any family with allowTwoSided can trade both sides.
@@ -974,9 +1052,6 @@ function evaluateTwoSidedEntry(
   if (!ts.allowTwoSided) return null;
   if (ts.twoSidedMode === "disabled") return null;
 
-  // Only for NO-outcome markets
-  if (market.outcome.toUpperCase() !== "NO") return null;
-
   // Selective mode requires evidence of both-sided eligibility
   if (ts.twoSidedMode === "selective" && !bundle.evidence?.bothSidedEligible) return null;
 
@@ -989,8 +1064,10 @@ function evaluateTwoSidedEntry(
   }
 
   const entry = bundle.rules.entry;
-  // NO-side price band check — same entry band as YES side
-  if (midPrice < entry.minEntryPrice || midPrice > entry.maxEntryPrice) return null;
+  // Sibling-side price band check — same entry band as first side.
+  if (midPrice < entry.minEntryPrice || midPrice > resolveMaxAdditionalEntryPrice(bundle)) {
+    return null;
+  }
 
   // Size: use probe size with price-scaling and evidence multiplier
   const baseSizeUsdc = entry.probeSizeUsdc * sizeMult;

@@ -21,7 +21,7 @@ describe("Scenario: reduce-only blocks new entry", () => {
     const fixture = {
       name: "reduce-only-blocks",
       description: "Family in reduce-only mode",
-      marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+      marketSnapshots: [makeMarketFixture(market, 0.1, 0.12)],
       familyStateOverrides: [{ familyId: "fam-elections", runtimeMode: "reduce-only" }],
       ticks: 3,
     };

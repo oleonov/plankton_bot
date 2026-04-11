@@ -6,7 +6,14 @@
  * to prevent SDK types from leaking into @plankton/domain consumers.
  */
 
-import type { MarketDataGateway, ClobMarket, OrderBookSnapshot, TokenId } from "@plankton/domain";
+import {
+  createTokenId,
+  type MarketDataGateway,
+  type MarketPricingSnapshot,
+  type ClobMarket,
+  type OrderBookSnapshot,
+  type TokenId,
+} from "@plankton/domain";
 import { mapMarket, mapOrderBook, parseStringOrArray } from "../mappers.js";
 
 const GAMMA_PRICING_BASE_URL = "https://gamma-api.polymarket.com/markets";
@@ -84,6 +91,18 @@ function chunkItems<T>(items: readonly T[], chunkSize: number): T[][] {
   return chunks;
 }
 
+function parseOptionalNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function extractBookTokenId(raw: Record<string, unknown>): string | null {
+  if (typeof raw.asset_id === "string") return raw.asset_id;
+  if (typeof raw.token_id === "string") return raw.token_id;
+  return null;
+}
+
 /** Sentinel cursor returned by the Polymarket CLOB when no more pages exist. */
 const END_CURSOR = "LTE=";
 
@@ -149,118 +168,8 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     }
   }
 
-  async getTickSize(tokenId: TokenId): Promise<number> {
-    try {
-      const raw = await this.withTimeout(this.client.getTickSize(String(tokenId)), 10_000);
-      return Number(raw);
-    } catch {
-      return 0.01;
-    }
-  }
-
-  async getMarketPricing(tokenIds: string[]): Promise<
-    Map<
-      string,
-      {
-        bestBid: number | null;
-        bestAsk: number | null;
-        lastTradePrice: number | null;
-        minOrderSize?: number | null;
-      }
-    >
-  > {
-    if (tokenIds.length === 0) return new Map();
-
-    const result = new Map<
-      string,
-      {
-        bestBid: number | null;
-        bestAsk: number | null;
-        lastTradePrice: number | null;
-        minOrderSize?: number | null;
-      }
-    >();
-
-    const batches = buildTokenIdBatches(GAMMA_PRICING_BASE_URL, tokenIds, MAX_URL_LENGTH);
-    for (const batch of batches) {
-      const params = batch.map((id) => `clob_token_ids=${id}`).join("&");
-      const url = `${GAMMA_PRICING_BASE_URL}?${params}`;
-      const response = await this.withTimeout(fetch(url), 15_000);
-      if (!response.ok) {
-        throw new Error(`Gamma pricing request failed: ${response.status} ${response.statusText}`);
-      }
-
-      const data = (await response.json()) as Array<Record<string, unknown>>;
-      this.extractPricing(data, result);
-    }
-
-    await this.enrichMinOrderSizes(tokenIds, result);
-
-    return result;
-  }
-
-  private extractPricing(
-    data: Array<Record<string, unknown>>,
-    result: Map<
-      string,
-      {
-        bestBid: number | null;
-        bestAsk: number | null;
-        lastTradePrice: number | null;
-        minOrderSize?: number | null;
-      }
-    >,
-  ): void {
-    for (const raw of data) {
-      const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
-      const outcomePrices = parseStringOrArray(raw.outcomePrices);
-      const lastTradePrice = raw.lastTradePrice != null ? Number(raw.lastTradePrice) : null;
-
-      // Gamma provides market-level bestBid/bestAsk (for the first outcome token).
-      const marketBestBid = raw.bestBid != null ? Number(raw.bestBid) : null;
-      const marketBestAsk = raw.bestAsk != null ? Number(raw.bestAsk) : null;
-
-      for (let i = 0; i < clobTokenIds.length; i++) {
-        const tokenId = clobTokenIds[i]!;
-        const outcomePrice = i < outcomePrices.length ? Number(outcomePrices[i]) : null;
-
-        // First token gets Gamma's real bestBid/bestAsk. Subsequent tokens
-        // fall back to outcomePrices (Gamma only exposes top-of-book for the primary outcome).
-        const bestBid =
-          i === 0 && marketBestBid !== null
-            ? marketBestBid
-            : outcomePrice !== null && !isNaN(outcomePrice)
-              ? outcomePrice
-              : null;
-        const bestAsk =
-          i === 0 && marketBestAsk !== null
-            ? marketBestAsk
-            : outcomePrice !== null && !isNaN(outcomePrice)
-              ? outcomePrice
-              : null;
-
-        result.set(tokenId, {
-          bestBid,
-          bestAsk,
-          lastTradePrice,
-          minOrderSize: result.get(tokenId)?.minOrderSize ?? null,
-        });
-      }
-    }
-  }
-
-  private async enrichMinOrderSizes(
-    tokenIds: readonly string[],
-    result: Map<
-      string,
-      {
-        bestBid: number | null;
-        bestAsk: number | null;
-        lastTradePrice: number | null;
-        minOrderSize?: number | null;
-      }
-    >,
-  ): Promise<void> {
+  async getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>> {
+    const result = new Map<string, OrderBookSnapshot>();
     const batches = chunkItems(tokenIds, BOOKS_BATCH_SIZE);
     for (const batch of batches) {
       const response = await this.withTimeout(
@@ -277,31 +186,91 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
       const books = (await response.json()) as Array<Record<string, unknown>>;
       for (const raw of books) {
-        const tokenId =
-          typeof raw.asset_id === "string"
-            ? raw.asset_id
-            : typeof raw.token_id === "string"
-              ? raw.token_id
-              : null;
+        const tokenId = extractBookTokenId(raw);
         if (!tokenId) continue;
+        result.set(tokenId, mapOrderBook(createTokenId(tokenId), raw));
+      }
+    }
+    return result;
+  }
 
-        const parsedMinOrderSize =
-          raw.min_order_size != null
-            ? Number(raw.min_order_size)
-            : raw.minOrderSize != null
-              ? Number(raw.minOrderSize)
+  async getTickSize(tokenId: TokenId): Promise<number> {
+    try {
+      const raw = await this.withTimeout(this.client.getTickSize(String(tokenId)), 10_000);
+      return Number(raw);
+    } catch {
+      return 0.01;
+    }
+  }
+
+  async getMarketPricing(tokenIds: string[]): Promise<Map<string, MarketPricingSnapshot>> {
+    if (tokenIds.length === 0) return new Map();
+
+    const result = new Map<string, MarketPricingSnapshot>();
+
+    const batches = buildTokenIdBatches(GAMMA_PRICING_BASE_URL, tokenIds, MAX_URL_LENGTH);
+    for (const batch of batches) {
+      const params = batch.map((id) => `clob_token_ids=${id}`).join("&");
+      const url = `${GAMMA_PRICING_BASE_URL}?${params}`;
+      const response = await this.withTimeout(fetch(url), 15_000);
+      if (!response.ok) {
+        throw new Error(`Gamma pricing request failed: ${response.status} ${response.statusText}`);
+      }
+
+      const data = (await response.json()) as Array<Record<string, unknown>>;
+      this.extractPricing(data, result);
+    }
+
+    return result;
+  }
+
+  private extractPricing(
+    data: Array<Record<string, unknown>>,
+    result: Map<string, MarketPricingSnapshot>,
+  ): void {
+    for (const raw of data) {
+      const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
+      const outcomePrices = parseStringOrArray(raw.outcomePrices);
+      const lastTradePrice = parseOptionalNumber(raw.lastTradePrice);
+      const volume24h = parseOptionalNumber(raw.volume24hr);
+      const liquidity = parseOptionalNumber(raw.liquidity);
+
+      // Gamma provides market-level bestBid/bestAsk (for the first outcome token).
+      const marketBestBid = parseOptionalNumber(raw.bestBid);
+      const marketBestAsk = parseOptionalNumber(raw.bestAsk);
+
+      for (let i = 0; i < clobTokenIds.length; i++) {
+        const tokenId = clobTokenIds[i]!;
+        const outcomePrice =
+          i < outcomePrices.length ? parseOptionalNumber(outcomePrices[i]) : null;
+
+        // First token gets Gamma's real bestBid/bestAsk. Subsequent tokens
+        // fall back to outcomePrices (Gamma only exposes top-of-book for the primary outcome).
+        const bestBid =
+          i === 0 && marketBestBid !== null
+            ? marketBestBid
+            : outcomePrice !== null
+              ? outcomePrice
               : null;
-        const minOrderSize =
-          parsedMinOrderSize !== null && Number.isFinite(parsedMinOrderSize)
-            ? parsedMinOrderSize
-            : null;
-        const current = result.get(tokenId) ?? {
-          bestBid: null,
-          bestAsk: null,
-          lastTradePrice: null,
-          minOrderSize: null,
-        };
-        result.set(tokenId, { ...current, minOrderSize });
+        const bestAsk =
+          i === 0 && marketBestAsk !== null
+            ? marketBestAsk
+            : outcomePrice !== null
+              ? outcomePrice
+              : null;
+
+        result.set(tokenId, {
+          bestBid,
+          bestAsk,
+          lastTradePrice,
+          volume24h,
+          liquidity,
+          minOrderSize: result.get(tokenId)?.minOrderSize ?? null,
+          bookSource:
+            i === 0 && marketBestBid !== null && marketBestAsk !== null
+              ? "gamma"
+              : "gamma-fallback",
+        });
       }
     }
   }

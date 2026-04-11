@@ -29,7 +29,7 @@ describe("Scenario: operator pause/resume flow", () => {
     const baselineFixture = {
       name: "pause-baseline",
       description: "6 ticks, no pause — establish signal count baseline",
-      marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+      marketSnapshots: [makeMarketFixture(market, 0.1, 0.12)],
       ticks: 6,
     };
 
@@ -43,7 +43,7 @@ describe("Scenario: operator pause/resume flow", () => {
     const pausedFixture = {
       name: "operator-pause-resume",
       description: "Pause at tick 1, resume at tick 4",
-      marketSnapshots: [makeMarketFixture(market, 0.45, 0.55)],
+      marketSnapshots: [makeMarketFixture(market, 0.1, 0.12)],
       scheduledCommands: [
         { atTick: 1, action: "pause" as const, reason: "test pause" },
         { atTick: 4, action: "resume" as const, reason: "test resume" },

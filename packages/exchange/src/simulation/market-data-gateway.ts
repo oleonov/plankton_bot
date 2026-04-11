@@ -4,6 +4,7 @@ import type {
   OrderBookSnapshot,
   TokenId,
   PriceLevel,
+  MarketPricingSnapshot,
 } from "@plankton/domain";
 
 export class SimulationMarketDataGateway implements MarketDataGateway {
@@ -35,37 +36,30 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
     );
   }
 
+  async getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>> {
+    const result = new Map<string, OrderBookSnapshot>();
+    for (const tokenId of tokenIds) {
+      result.set(tokenId, await this.getOrderBook(tokenId as TokenId));
+    }
+    return result;
+  }
+
   async getTickSize(tokenId: TokenId): Promise<number> {
     return this.tickSizes.get(tokenId) ?? 0.01;
   }
 
-  async getMarketPricing(tokenIds: string[]): Promise<
-    Map<
-      string,
-      {
-        bestBid: number | null;
-        bestAsk: number | null;
-        lastTradePrice: number | null;
-        minOrderSize?: number | null;
-      }
-    >
-  > {
-    const result = new Map<
-      string,
-      {
-        bestBid: number | null;
-        bestAsk: number | null;
-        lastTradePrice: number | null;
-        minOrderSize?: number | null;
-      }
-    >();
+  async getMarketPricing(tokenIds: string[]): Promise<Map<string, MarketPricingSnapshot>> {
+    const result = new Map<string, MarketPricingSnapshot>();
     for (const tokenId of tokenIds) {
       const book = this.orderBooks.get(tokenId);
       result.set(tokenId, {
         bestBid: book?.bestBid ?? null,
         bestAsk: book?.bestAsk ?? null,
         lastTradePrice: null,
+        volume24h: null,
+        liquidity: null,
         minOrderSize: book?.minOrderSize ?? null,
+        bookSource: "simulation",
       });
     }
     return result;

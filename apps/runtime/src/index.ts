@@ -548,7 +548,11 @@ async function main(): Promise<void> {
     bus,
     rulesProvider,
     positionRepo: repos.position,
+    orderRepo: repos.order,
     familyStateRepo: repos.familyState,
+    candidateBookGateway: marketDataGateway.getOrderBooks
+      ? { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) }
+      : undefined,
     log,
     scanIntervalMs: config.strategyScanIntervalMs,
     runtimeControl,
