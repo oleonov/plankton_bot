@@ -81,11 +81,7 @@ import { SqliteMarketResolutionRepository, SqliteMergeLedgerRepository } from "@
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { DbFamilyRulesProvider } from "./db-family-rules-provider.js";
-import {
-  needsBootstrap,
-  bootstrapImport,
-  syncProfileInitialBalances,
-} from "./bootstrap-import.js";
+import { needsBootstrap, bootstrapImport, syncProfileInitialBalances } from "./bootstrap-import.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";

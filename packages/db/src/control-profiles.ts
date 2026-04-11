@@ -25,10 +25,7 @@ export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
   },
 ];
 
-export function ensureControlProfiles(
-  db: Database.Database,
-  now = new Date().toISOString(),
-): void {
+export function ensureControlProfiles(db: Database.Database, now = new Date().toISOString()): void {
   const insertProfile = db.prepare(
     "INSERT OR IGNORE INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, ?, ?)",
   );

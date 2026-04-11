@@ -384,7 +384,10 @@ function applySpreadChecks(
   }
 
   const volume24h = market.volume24h ?? 0;
-  if (spread <= spreadCaps.maxWideEntrySpreadCents + EPSILON && volume24h >= policy.minWideSpreadVolume24h) {
+  if (
+    spread <= spreadCaps.maxWideEntrySpreadCents + EPSILON &&
+    volume24h >= policy.minWideSpreadVolume24h
+  ) {
     checksPassed.push("spread-wide-volume-qualified");
     return;
   }
@@ -551,7 +554,10 @@ function resolveSpreadCaps(
 
 function isOneSidedDustApprovalEligible(
   signal: Pick<Signal, "side" | "reason" | "suggestedSizeUsdc">,
-  market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "bookSource" | "lastTradeAt" | "lastTradePrice">,
+  market: Pick<
+    NormalizedMarket,
+    "bestBid" | "bestAsk" | "bookSource" | "lastTradeAt" | "lastTradePrice"
+  >,
   nowMs: number,
   policy: MarketabilityPolicy,
 ): boolean {
