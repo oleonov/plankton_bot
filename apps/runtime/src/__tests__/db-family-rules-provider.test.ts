@@ -174,6 +174,7 @@ describe("DbFamilyRulesProvider", () => {
       maxConcurrentOrdersPerFamily: 50,
       maxProbeInFlightPerToken: 3,
       maxEntrySignalsPerTickPerFamily: 20,
+      fastLaneEnabled: null,
     });
 
     // tailSuppression
