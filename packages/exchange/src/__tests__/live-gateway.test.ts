@@ -783,14 +783,26 @@ describe("LiveMarketDataGateway", () => {
         Promise.resolve([
           {
             asset_id: "tok-a",
-            bids: [{ price: "0.11", size: "25" }],
-            asks: [{ price: "0.12", size: "30" }],
+            bids: [
+              { price: "0.09", size: "40" },
+              { price: "0.11", size: "25" },
+            ],
+            asks: [
+              { price: "0.15", size: "30" },
+              { price: "0.12", size: "10" },
+            ],
             min_order_size: "5",
           },
           {
             token_id: "tok-b",
-            bids: [{ price: "0.21", size: "15" }],
-            asks: [{ price: "0.23", size: "18" }],
+            bids: [
+              { price: "0.19", size: "9" },
+              { price: "0.21", size: "15" },
+            ],
+            asks: [
+              { price: "0.25", size: "18" },
+              { price: "0.23", size: "7" },
+            ],
           },
         ]),
     });

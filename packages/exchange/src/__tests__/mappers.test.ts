@@ -288,6 +288,29 @@ describe("mapOrderBook", () => {
     expect(book.minOrderSize).toBe(5);
   });
 
+  it("sorts unsorted bid and ask levels before deriving best prices", () => {
+    const tokenId = createTokenId("tok-1");
+    const book = mapOrderBook(tokenId, {
+      bids: [
+        { price: "0.001", size: "9700" },
+        { price: "0.004", size: "693.83" },
+        { price: "0.002", size: "2213.62" },
+      ],
+      asks: [
+        { price: "0.999", size: "9007.1" },
+        { price: "0.054", size: "80" },
+        { price: "0.01", size: "255" },
+      ],
+    });
+
+    expect(book.bids.map((level) => level.price)).toEqual([0.004, 0.002, 0.001]);
+    expect(book.asks.map((level) => level.price)).toEqual([0.01, 0.054, 0.999]);
+    expect(book.bestBid).toBe(0.004);
+    expect(book.bestAsk).toBe(0.01);
+    expect(book.midPrice).toBe(0.007);
+    expect(book.spread).toBeCloseTo(0.006);
+  });
+
   it("handles empty order book", () => {
     const book = mapOrderBook(createTokenId("tok-1"), {});
     expect(book.bids).toEqual([]);

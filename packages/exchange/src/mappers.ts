@@ -229,15 +229,25 @@ export function mapMarket(raw: Record<string, unknown>): ClobMarket {
 
 function mapLevels(levels: unknown): PriceLevel[] {
   if (!Array.isArray(levels)) return [];
-  return levels.map((l: Record<string, unknown>) => ({
-    price: Number(l.price ?? 0),
-    size: Number(l.size ?? 0),
-  }));
+  return levels
+    .map((l: Record<string, unknown>) => ({
+      price: Number(l.price ?? 0),
+      size: Number(l.size ?? 0),
+    }))
+    .filter((level) => Number.isFinite(level.price) && Number.isFinite(level.size));
+}
+
+function sortBidLevels(levels: readonly PriceLevel[]): PriceLevel[] {
+  return [...levels].sort((a, b) => b.price - a.price || b.size - a.size);
+}
+
+function sortAskLevels(levels: readonly PriceLevel[]): PriceLevel[] {
+  return [...levels].sort((a, b) => a.price - b.price || b.size - a.size);
 }
 
 export function mapOrderBook(tokenId: TokenId, raw: Record<string, unknown>): OrderBookSnapshot {
-  const bids = mapLevels(raw.bids);
-  const asks = mapLevels(raw.asks);
+  const bids = sortBidLevels(mapLevels(raw.bids));
+  const asks = sortAskLevels(mapLevels(raw.asks));
   const parsedMinOrderSize =
     raw.min_order_size != null
       ? Number(raw.min_order_size)
