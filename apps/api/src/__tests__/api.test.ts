@@ -483,6 +483,35 @@ describe("GET /status", () => {
     // Clean up
     conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'signal_activity'`);
   });
+
+  it("status includes signal conversion telemetry when available", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES
+        ('signal_activity', 1, '{"produced":10,"approved":3,"rejected":7,"entryApproved":2,"exitApproved":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
+        ('signal_conversion_activity', 1, '{"converted":2,"marketabilityRejectedByReason":{"gamma-fallback-no-real-book":5},"cacheStatusByStatus":{"refresh-budget-exhausted":4,"fresh-cache":2},"exchangeAccepted":1,"exchangeRejectedByCode":{"UNKNOWN":2},"fills":1,"cooldownBypassByReason":{"price-moved":3},"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
+    `);
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
+    const signalActivity = json(res).data.signalActivity;
+
+    expect(signalActivity.signalsConvertedLast10m).toBe(2);
+    expect(signalActivity.marketabilityRejectedLast10mByReason).toEqual({
+      "gamma-fallback-no-real-book": 5,
+    });
+    expect(signalActivity.cacheStatusLast10mByStatus).toEqual({
+      "refresh-budget-exhausted": 4,
+      "fresh-cache": 2,
+    });
+    expect(signalActivity.exchangeAcceptedLast10m).toBe(1);
+    expect(signalActivity.exchangeRejectedLast10mByCode).toEqual({ UNKNOWN: 2 });
+    expect(signalActivity.fillsLast10m).toBe(1);
+    expect(signalActivity.cooldownBypassLast10mByReason).toEqual({ "price-moved": 3 });
+
+    conn.db.exec(
+      `DELETE FROM runtime_metrics WHERE metric_name IN ('signal_activity', 'signal_conversion_activity')`,
+    );
+  });
 });
 
 // ─── Families ───────────────────────────────────────────────────────

@@ -141,6 +141,7 @@ export class ReconciliationModule implements RuntimeModule {
         {
           orderRepo: this.deps.orderRepo,
           marketRepo: this.deps.marketRepo,
+          rulesProvider: this.deps.rulesProvider,
           bus: this.deps.bus,
           log: this.log,
         },

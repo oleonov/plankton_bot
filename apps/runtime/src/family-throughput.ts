@@ -7,6 +7,8 @@ export interface FamilyThroughputPolicy {
   source: "configured" | "core" | "reduced" | "fallback";
 }
 
+export type FamilyThroughputTier = "core" | "reduced" | "fallback";
+
 const CORE_FAMILY_KEYS = new Set([
   "bitcoin-price",
   "btc-updown-4h",
@@ -20,6 +22,8 @@ const REDUCED_FAMILY_KEYS = new Set([
   "will-bitcoin-reach",
   "will-ethereum-reach",
 ]);
+
+export type FamilySpeedTier = "core-fast" | "reduced-fast" | "standard";
 
 const CORE_LIMITS: FamilyThroughputPolicy = {
   maxConcurrentOrdersPerFamily: 10,
@@ -46,6 +50,37 @@ function defaultPolicyForFamilyKey(familyKey: string): FamilyThroughputPolicy {
   if (CORE_FAMILY_KEYS.has(familyKey)) return CORE_LIMITS;
   if (REDUCED_FAMILY_KEYS.has(familyKey)) return REDUCED_LIMITS;
   return FALLBACK_LIMITS;
+}
+
+export function resolveFamilyThroughputTierByFamilyKey(
+  familyKey: string | null | undefined,
+): FamilyThroughputTier {
+  if (!familyKey) return "fallback";
+  if (CORE_FAMILY_KEYS.has(familyKey)) return "core";
+  if (REDUCED_FAMILY_KEYS.has(familyKey)) return "reduced";
+  return "fallback";
+}
+
+export function resolveFamilySpeedTierByFamilyKey(
+  familyKey: string | null | undefined,
+  fastLaneEnabled: boolean | null | undefined = null,
+): FamilySpeedTier {
+  if (!fastLaneEnabled) return "standard";
+  const tier = resolveFamilyThroughputTierByFamilyKey(familyKey);
+  if (tier === "core") return "core-fast";
+  if (tier === "reduced") return "reduced-fast";
+  return "standard";
+}
+
+export function resolveFamilySpeedTier(bundle: FamilyRuleBundle): FamilySpeedTier {
+  return resolveFamilySpeedTierByFamilyKey(
+    bundle.identity.familyKey,
+    bundle.rules.throughput?.fastLaneEnabled ?? null,
+  );
+}
+
+export function isFastLaneEnabled(bundle: FamilyRuleBundle | null | undefined): boolean {
+  return bundle?.rules.throughput?.fastLaneEnabled === true;
 }
 
 export function resolveFamilyThroughputPolicy(bundle: FamilyRuleBundle): FamilyThroughputPolicy {

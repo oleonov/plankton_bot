@@ -833,10 +833,22 @@ async function main(): Promise<void> {
   const insertLastSignalRejected = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('last_signal_rejected', 1, ?)",
   );
+  const deleteSignalConversionActivity = ledgerConn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'signal_conversion_activity'",
+  );
+  const insertSignalConversionActivity = ledgerConn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('signal_conversion_activity', 1, ?, ?)",
+  );
   const upsertSignalActivity = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
     deleteSignalActivity.run();
     insertSignalActivity.run(labels, capturedAt);
   });
+  const upsertSignalConversionActivity = ledgerConn.db.transaction(
+    (labels: string, capturedAt: string) => {
+      deleteSignalConversionActivity.run();
+      insertSignalConversionActivity.run(labels, capturedAt);
+    },
+  );
 
   // Track signal counts in a sliding window (resets every 10 minutes — approximate, not rolling)
   const signalWindow = {
@@ -848,6 +860,16 @@ async function main(): Promise<void> {
     lastReset: Date.now(),
   };
   const SIGNAL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+  const conversionWindow = {
+    converted: 0,
+    marketabilityRejectedByReason: new Map<string, number>(),
+    cacheStatusByStatus: new Map<string, number>(),
+    exchangeAccepted: 0,
+    exchangeRejectedByCode: new Map<string, number>(),
+    fills: 0,
+    cooldownBypassByReason: new Map<string, number>(),
+    lastReset: Date.now(),
+  };
 
   bus.subscribe("SignalProduced", async () => {
     signalWindow.produced++;
@@ -869,6 +891,56 @@ async function main(): Promise<void> {
     signalWindow.rejected++;
     deleteLastSignalRejected.run();
     insertLastSignalRejected.run(new Date().toISOString());
+  });
+
+  bus.subscribe("SignalConversionSkipped", async ({ reasons, diagnostics }) => {
+    for (const reason of reasons.length > 0 ? reasons : ["conversion-skipped"]) {
+      conversionWindow.marketabilityRejectedByReason.set(
+        reason,
+        (conversionWindow.marketabilityRejectedByReason.get(reason) ?? 0) + 1,
+      );
+    }
+    const cacheStatus = diagnostics["cacheStatus"];
+    if (typeof cacheStatus === "string" && cacheStatus.length > 0) {
+      conversionWindow.cacheStatusByStatus.set(
+        cacheStatus,
+        (conversionWindow.cacheStatusByStatus.get(cacheStatus) ?? 0) + 1,
+      );
+    }
+  });
+
+  bus.subscribe("PlaceOrderRequested", async ({ command }) => {
+    if (ENTRY_REASONS.has(command.signalReason ?? "")) {
+      conversionWindow.converted++;
+    }
+  });
+
+  bus.subscribe("OrderPlaced", async ({ signalReason }) => {
+    if (ENTRY_REASONS.has(signalReason ?? "")) {
+      conversionWindow.exchangeAccepted++;
+    }
+  });
+
+  bus.subscribe("OrderRejected", async ({ errorCode, signalReason }) => {
+    if (!ENTRY_REASONS.has(signalReason ?? "")) return;
+    const code = String(errorCode ?? "UNKNOWN");
+    conversionWindow.exchangeRejectedByCode.set(
+      code,
+      (conversionWindow.exchangeRejectedByCode.get(code) ?? 0) + 1,
+    );
+  });
+
+  bus.subscribe("FillReceived", async ({ signalReason }) => {
+    if (ENTRY_REASONS.has(signalReason ?? "")) {
+      conversionWindow.fills++;
+    }
+  });
+
+  bus.subscribe("CooldownBypassApplied", async ({ reason }) => {
+    conversionWindow.cooldownBypassByReason.set(
+      reason,
+      (conversionWindow.cooldownBypassByReason.get(reason) ?? 0) + 1,
+    );
   });
 
   // Scanner-layer metrics
@@ -922,6 +994,16 @@ async function main(): Promise<void> {
       signalWindow.exitApproved = 0;
       signalWindow.lastReset = now;
     }
+    if (now - conversionWindow.lastReset > SIGNAL_WINDOW_MS) {
+      conversionWindow.converted = 0;
+      conversionWindow.marketabilityRejectedByReason.clear();
+      conversionWindow.cacheStatusByStatus.clear();
+      conversionWindow.exchangeAccepted = 0;
+      conversionWindow.exchangeRejectedByCode.clear();
+      conversionWindow.fills = 0;
+      conversionWindow.cooldownBypassByReason.clear();
+      conversionWindow.lastReset = now;
+    }
     upsertSignalActivity(
       JSON.stringify({
         produced: signalWindow.produced,
@@ -930,6 +1012,21 @@ async function main(): Promise<void> {
         entryApproved: signalWindow.entryApproved,
         exitApproved: signalWindow.exitApproved,
         windowStartMs: signalWindow.lastReset,
+      }),
+      new Date().toISOString(),
+    );
+    upsertSignalConversionActivity(
+      JSON.stringify({
+        converted: conversionWindow.converted,
+        marketabilityRejectedByReason: Object.fromEntries(
+          conversionWindow.marketabilityRejectedByReason,
+        ),
+        cacheStatusByStatus: Object.fromEntries(conversionWindow.cacheStatusByStatus),
+        exchangeAccepted: conversionWindow.exchangeAccepted,
+        exchangeRejectedByCode: Object.fromEntries(conversionWindow.exchangeRejectedByCode),
+        fills: conversionWindow.fills,
+        cooldownBypassByReason: Object.fromEntries(conversionWindow.cooldownBypassByReason),
+        windowStartMs: conversionWindow.lastReset,
       }),
       new Date().toISOString(),
     );

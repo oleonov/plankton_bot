@@ -83,6 +83,26 @@ export interface RuntimeEventMap {
     readonly rejectedAt: number;
   };
 
+  SignalConversionSkipped: {
+    readonly signal: Signal;
+    readonly stage: "market-cache-miss" | "marketability" | "execution-terms";
+    readonly reasons: readonly string[];
+    readonly diagnostics: Readonly<Record<string, unknown>>;
+    readonly skippedAt: number;
+  };
+
+  CooldownBypassApplied: {
+    readonly familyId: FamilyId;
+    readonly tokenId: TokenId;
+    readonly reason:
+      | "price-moved"
+      | "spread-narrowed"
+      | "trade-recency-improved"
+      | "manual-family-fast-lane";
+    readonly previousCooldownUntil: number;
+    readonly appliedAt: number;
+  };
+
   ScanTickCompleted: {
     readonly candidatesConsidered: number;
     readonly blockedByResolutionBuffer: number;
@@ -105,6 +125,7 @@ export interface RuntimeEventMap {
     readonly size: number;
     readonly orderType: OrderType;
     readonly familyId: FamilyId;
+    readonly signalReason: string | null;
     readonly timestamp: number;
   };
 
@@ -125,6 +146,7 @@ export interface RuntimeEventMap {
     readonly orderId: OrderId;
     readonly reason: string;
     readonly familyId: FamilyId;
+    readonly signalReason: string | null;
     readonly timestamp: number;
   };
 
@@ -134,6 +156,7 @@ export interface RuntimeEventMap {
     readonly reason: string;
     readonly errorCode: ExchangeErrorCode;
     readonly familyId: FamilyId;
+    readonly signalReason: string | null;
     readonly timestamp: number;
   };
 

@@ -161,6 +161,7 @@ const throughputYamlSchema = z.object({
     .nullable()
     .optional()
     .default(null),
+  fast_lane_enabled: z.boolean().nullable().optional().default(null),
 });
 
 const tailSuppressionYamlSchema = z.object({
@@ -191,6 +192,7 @@ export const rulesYamlSchema = z.object({
     max_concurrent_orders_per_family: null,
     max_probe_in_flight_per_token: null,
     max_entry_signals_per_tick_per_family: null,
+    fast_lane_enabled: null,
   }),
   tail_suppression: tailSuppressionYamlSchema,
   session: sessionYamlSchema,

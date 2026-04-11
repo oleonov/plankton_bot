@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { createFamilyId, type FamilyRuleBundle } from "@plankton/domain";
-import { resolveFamilyThroughputPolicy } from "../family-throughput.js";
+import {
+  isFastLaneEnabled,
+  resolveFamilySpeedTier,
+  resolveFamilySpeedTierByFamilyKey,
+  resolveFamilyThroughputTierByFamilyKey,
+  resolveFamilyThroughputPolicy,
+} from "../family-throughput.js";
 
 function makeBundle(
   familyKey: string,
@@ -46,5 +52,37 @@ describe("resolveFamilyThroughputPolicy", () => {
       maxEntrySignalsPerTickPerFamily: 20,
       source: "configured",
     });
+  });
+});
+
+describe("family speed helpers", () => {
+  it("classifies proven fast families separately from generic tiers", () => {
+    expect(resolveFamilyThroughputTierByFamilyKey("bitcoin-price")).toBe("core");
+    expect(resolveFamilyThroughputTierByFamilyKey("ethereum-price")).toBe("reduced");
+    expect(resolveFamilyThroughputTierByFamilyKey("unknown-family")).toBe("fallback");
+
+    expect(resolveFamilySpeedTierByFamilyKey("bitcoin-price", true)).toBe("core-fast");
+    expect(resolveFamilySpeedTierByFamilyKey("will-bitcoin-reach", true)).toBe("reduced-fast");
+    expect(resolveFamilySpeedTierByFamilyKey("bitcoin-above", true)).toBe("reduced-fast");
+  });
+
+  it("derives fast-lane status from throughput config instead of hardcoded family lists", () => {
+    const fastBundle = makeBundle("bitcoin-price", {
+      maxConcurrentOrdersPerFamily: 50,
+      maxProbeInFlightPerToken: 2,
+      maxEntrySignalsPerTickPerFamily: 20,
+      fastLaneEnabled: true,
+    });
+    const standardBundle = makeBundle("bitcoin-price", {
+      maxConcurrentOrdersPerFamily: 50,
+      maxProbeInFlightPerToken: 2,
+      maxEntrySignalsPerTickPerFamily: 20,
+      fastLaneEnabled: false,
+    });
+
+    expect(isFastLaneEnabled(fastBundle)).toBe(true);
+    expect(resolveFamilySpeedTier(fastBundle)).toBe("core-fast");
+    expect(isFastLaneEnabled(standardBundle)).toBe(false);
+    expect(resolveFamilySpeedTier(standardBundle)).toBe("standard");
   });
 });

@@ -2096,6 +2096,7 @@ describe("RiskInventoryModule", () => {
         reason: "insufficient balance",
         errorCode: "INSUFFICIENT_BALANCE",
         familyId: FAM_ID,
+        signalReason: null,
         timestamp: Date.now(),
       });
       await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });

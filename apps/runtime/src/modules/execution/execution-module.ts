@@ -201,6 +201,7 @@ export class ExecutionModule implements RuntimeModule {
         reason: "runtime-paused",
         errorCode: "RUNTIME_PAUSED",
         familyId: cmd.familyId,
+        signalReason: cmd.signalReason ?? null,
         timestamp: Date.now(),
       });
       return;
@@ -221,6 +222,7 @@ export class ExecutionModule implements RuntimeModule {
         reason: "live-lite-allowlist-rejected",
         errorCode: "LIVE_LITE_ALLOWLIST",
         familyId: cmd.familyId,
+        signalReason: cmd.signalReason ?? null,
         timestamp: Date.now(),
       });
       return;
@@ -254,6 +256,7 @@ export class ExecutionModule implements RuntimeModule {
             reason,
             errorCode: ExchangeErrorCode.LivePolicyBlocked,
             familyId: cmd.familyId,
+            signalReason: cmd.signalReason ?? null,
             timestamp: Date.now(),
           });
           return;
@@ -274,6 +277,7 @@ export class ExecutionModule implements RuntimeModule {
           reason: "live-lite-order-cap-exceeded",
           errorCode: "LIVE_LITE_ORDER_CAP",
           familyId: cmd.familyId,
+          signalReason: cmd.signalReason ?? null,
           timestamp: Date.now(),
         });
         return;
@@ -293,6 +297,7 @@ export class ExecutionModule implements RuntimeModule {
         reason: "market-inactive",
         errorCode: "MARKET_INACTIVE",
         familyId: cmd.familyId,
+        signalReason: cmd.signalReason ?? null,
         timestamp: Date.now(),
       });
       return;
@@ -440,6 +445,7 @@ export class ExecutionModule implements RuntimeModule {
         reason,
         errorCode: result.errorCode ?? "UNKNOWN",
         familyId: cmd.familyId,
+        signalReason: cmd.signalReason ?? null,
         timestamp: now,
       });
       return;
@@ -460,6 +466,7 @@ export class ExecutionModule implements RuntimeModule {
         reason: "gateway returned success without order id",
         errorCode: ExchangeErrorCode.Unknown,
         familyId: cmd.familyId,
+        signalReason: cmd.signalReason ?? null,
         timestamp: now,
       });
       return;
@@ -482,6 +489,7 @@ export class ExecutionModule implements RuntimeModule {
       size: cmd.size,
       orderType: cmd.orderType,
       familyId: cmd.familyId,
+      signalReason: cmd.signalReason ?? null,
       timestamp: now,
     });
 
@@ -522,6 +530,7 @@ export class ExecutionModule implements RuntimeModule {
       orderId: cmd.orderId,
       reason: cmd.reason,
       familyId: cmd.familyId,
+      signalReason: null,
       timestamp: now,
     });
 
@@ -712,6 +721,7 @@ export class ExecutionModule implements RuntimeModule {
       reason,
       errorCode,
       familyId: cmd.familyId,
+      signalReason: cmd.signalReason ?? null,
       timestamp: Date.now(),
     });
   }

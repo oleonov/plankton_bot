@@ -27,6 +27,11 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import {
+  applyOrderBookToMarket,
+  type CandidateBookCache,
+  type CandidateBookResolution,
+} from "./candidate-book-cache.js";
+import {
   buildRestingOrderSnapshot,
   evaluateMarketability,
   resolveMakerOnlyPrice,
@@ -41,6 +46,7 @@ export interface SignalToOrderBridgeDeps {
   rulesProvider: FamilyRulesProvider;
   orderRepo?: OrderRepository | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
+  candidateBookCache?: CandidateBookCache | undefined;
 }
 
 export class SignalToOrderBridge {
@@ -48,6 +54,7 @@ export class SignalToOrderBridge {
   private marketCache = new Map<string, NormalizedMarket>();
   private unfilledCancelCountByToken = new Map<string, number>();
   private cooldownUntilByToken = new Map<string, number>();
+  private cooldownBaselineByToken = new Map<string, CooldownBaseline>();
   private filledOrderIds = new Set<string>();
   private unsubs: Array<() => void> = [];
 
@@ -79,13 +86,17 @@ export class SignalToOrderBridge {
 
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
     const { signal } = payload;
-    const market = this.marketCache.get(String(signal.tokenId));
+    const resolvedMarket = await this.resolveMarket(signal);
+    const market = resolvedMarket.market;
 
     if (!market) {
       this.log.warn(
         { signalId: signal.signalId, tokenId: signal.tokenId },
         "approved signal has no cached market — cannot build order command",
       );
+      await this.publishConversionSkipped(signal, "market-cache-miss", ["market-cache-miss"], {
+        cacheStatus: resolvedMarket.cacheStatus,
+      });
       return;
     }
 
@@ -98,10 +109,15 @@ export class SignalToOrderBridge {
           familyId: signal.familyId,
           tokenId: signal.tokenId,
           reasons: marketability.rejectionReasons,
+          cacheStatus: resolvedMarket.cacheStatus,
           ...marketability.diagnostics,
         },
         "approved signal skipped — marketability gate rejected order",
       );
+      await this.publishConversionSkipped(signal, "marketability", marketability.rejectionReasons, {
+        cacheStatus: resolvedMarket.cacheStatus,
+        ...marketability.diagnostics,
+      });
       return;
     }
 
@@ -125,9 +141,19 @@ export class SignalToOrderBridge {
           bestBid: market.bestBid,
           bestAsk: market.bestAsk,
           spread: market.spread,
+          cacheStatus: resolvedMarket.cacheStatus,
           ...marketability.diagnostics,
         },
         "approved signal skipped — unable to derive maker-safe post-only price",
+      );
+      await this.publishConversionSkipped(
+        signal,
+        "execution-terms",
+        ["maker-safe-post-only-price-unavailable"],
+        {
+          cacheStatus: resolvedMarket.cacheStatus,
+          ...marketability.diagnostics,
+        },
       );
       return;
     }
@@ -171,6 +197,58 @@ export class SignalToOrderBridge {
     await this.deps.bus.publish("PlaceOrderRequested", {
       command: cmd,
       timestamp: Date.now(),
+    });
+  }
+
+  private async resolveMarket(signal: RuntimeEventMap["SignalApproved"]["signal"]): Promise<{
+    market: NormalizedMarket | null;
+    cacheStatus: CandidateBookResolution["status"] | "disabled" | "base-market";
+  }> {
+    const market = this.marketCache.get(String(signal.tokenId));
+    if (!market) {
+      return { market: null, cacheStatus: "disabled" };
+    }
+
+    if (!this.deps.candidateBookCache) {
+      return { market, cacheStatus: "disabled" };
+    }
+
+    const nowMs = Date.now();
+    const freshEntry = this.deps.candidateBookCache.getFreshEntry(String(signal.tokenId), nowMs);
+    if (freshEntry) {
+      return {
+        market: applyOrderBookToMarket(market, freshEntry),
+        cacheStatus: "fresh-cache",
+      };
+    }
+
+    if (market.bookSource === "clob") {
+      return { market, cacheStatus: "base-market" };
+    }
+
+    const resolution = await this.deps.candidateBookCache.getFreshOrRefresh(String(signal.tokenId), nowMs);
+    if (resolution.entry) {
+      return {
+        market: applyOrderBookToMarket(market, resolution.entry),
+        cacheStatus: resolution.status,
+      };
+    }
+
+    return { market, cacheStatus: resolution.status };
+  }
+
+  private async publishConversionSkipped(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    stage: RuntimeEventMap["SignalConversionSkipped"]["stage"],
+    reasons: readonly string[],
+    diagnostics: Readonly<Record<string, unknown>>,
+  ): Promise<void> {
+    await this.deps.bus.publish("SignalConversionSkipped", {
+      signal,
+      stage,
+      reasons,
+      diagnostics,
+      skippedAt: Date.now(),
     });
   }
 
@@ -224,14 +302,28 @@ export class SignalToOrderBridge {
     const restingSnapshot = this.deps.orderRepo
       ? buildRestingOrderSnapshot(this.deps.orderRepo.findOpen(), this.marketCache)
       : null;
+    const { cooldownUntilMs, bypassReason, previousCooldownUntil } = this.resolveCooldownState(
+      signal,
+      market,
+    );
+    if (bypassReason && previousCooldownUntil != null) {
+      this.cooldownUntilByToken.delete(this.cooldownKey(signal.familyId, signal.tokenId));
+      this.cooldownBaselineByToken.delete(this.cooldownKey(signal.familyId, signal.tokenId));
+      void this.deps.bus.publish("CooldownBypassApplied", {
+        familyId: signal.familyId,
+        tokenId: signal.tokenId,
+        reason: bypassReason,
+        previousCooldownUntil,
+        appliedAt: Date.now(),
+      });
+    }
     return evaluateMarketability({
       signal,
       market,
       bundle,
       nowMs: Date.now(),
       restingSnapshot,
-      cooldownUntilMs:
-        this.cooldownUntilByToken.get(this.cooldownKey(signal.familyId, signal.tokenId)) ?? null,
+      cooldownUntilMs,
     });
   }
 
@@ -240,6 +332,7 @@ export class SignalToOrderBridge {
     const key = this.cooldownKey(payload.familyId, payload.tokenId);
     this.unfilledCancelCountByToken.delete(key);
     this.cooldownUntilByToken.delete(key);
+    this.cooldownBaselineByToken.delete(key);
     this.pruneFilledOrderIds();
   }
 
@@ -268,6 +361,7 @@ export class SignalToOrderBridge {
 
     const cooldownUntil = Date.now() + policy.unfilledCancelCooldownMs;
     this.cooldownUntilByToken.set(key, cooldownUntil);
+    this.cooldownBaselineByToken.set(key, buildCooldownBaseline(this.resolveBaselineMarket(order.tokenId)));
     this.log.warn(
       {
         orderId: payload.orderId,
@@ -284,6 +378,43 @@ export class SignalToOrderBridge {
     return `${String(familyId)}|${String(tokenId)}`;
   }
 
+  private resolveBaselineMarket(tokenId: unknown): NormalizedMarket | null {
+    const tokenKey = String(tokenId);
+    const market = this.marketCache.get(tokenKey);
+    if (!market) return null;
+
+    const freshEntry = this.deps.candidateBookCache?.getFreshEntry(tokenKey);
+    if (!freshEntry) return market;
+    return applyOrderBookToMarket(market, freshEntry);
+  }
+
+  private resolveCooldownState(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+  ): {
+    cooldownUntilMs: number | null;
+    bypassReason: CooldownBypassReason | null;
+    previousCooldownUntil: number | null;
+  } {
+    const key = this.cooldownKey(signal.familyId, signal.tokenId);
+    const cooldownUntilMs = this.cooldownUntilByToken.get(key) ?? null;
+    if (cooldownUntilMs == null || cooldownUntilMs <= Date.now()) {
+      return { cooldownUntilMs: null, bypassReason: null, previousCooldownUntil: null };
+    }
+
+    const baseline = this.cooldownBaselineByToken.get(key);
+    const bypassReason = baseline ? resolveCooldownBypassReason(baseline, market) : null;
+    if (!bypassReason) {
+      return { cooldownUntilMs, bypassReason: null, previousCooldownUntil: null };
+    }
+
+    return {
+      cooldownUntilMs: null,
+      bypassReason,
+      previousCooldownUntil: cooldownUntilMs,
+    };
+  }
+
   private pruneFilledOrderIds(): void {
     if (this.filledOrderIds.size <= 10_000) return;
     const targetSize = 5_000;
@@ -294,6 +425,64 @@ export class SignalToOrderBridge {
       this.filledOrderIds.delete(next.value);
     }
   }
+}
+
+type CooldownBypassReason =
+  | "price-moved"
+  | "spread-narrowed"
+  | "trade-recency-improved"
+  | "manual-family-fast-lane";
+
+interface CooldownBaseline {
+  readonly bestBid: number | null;
+  readonly bestAsk: number | null;
+  readonly spread: number | null;
+  readonly tickSize: number;
+  readonly snapshotTs: number;
+}
+
+function buildCooldownBaseline(market: NormalizedMarket | null): CooldownBaseline {
+  return {
+    bestBid: market?.bestBid ?? null,
+    bestAsk: market?.bestAsk ?? null,
+    spread: market?.spread ?? null,
+    tickSize: market?.tickSize ?? 0.01,
+    snapshotTs: market?.snapshotTs ?? Date.now(),
+  };
+}
+
+function resolveCooldownBypassReason(
+  baseline: CooldownBaseline,
+  market: NormalizedMarket,
+): CooldownBypassReason | null {
+  const tickSize = Math.max(baseline.tickSize, market.tickSize, 0.001);
+  if (
+    hasMovedByTick(baseline.bestBid, market.bestBid, tickSize) ||
+    hasMovedByTick(baseline.bestAsk, market.bestAsk, tickSize)
+  ) {
+    return "price-moved";
+  }
+
+  if (
+    baseline.spread != null &&
+    market.spread != null &&
+    Number.isFinite(baseline.spread) &&
+    Number.isFinite(market.spread) &&
+    baseline.spread - market.spread >= tickSize / 2
+  ) {
+    return "spread-narrowed";
+  }
+
+  return null;
+}
+
+function hasMovedByTick(
+  baselinePrice: number | null,
+  currentPrice: number | null,
+  tickSize: number,
+): boolean {
+  if (baselinePrice == null || currentPrice == null) return false;
+  return Math.abs(currentPrice - baselinePrice) >= tickSize - 1e-9;
 }
 
 function resolveOrderSize(
@@ -312,6 +501,7 @@ function isEntryReason(reason: string): boolean {
 function resolveMarketabilityPolicyFallback(): MarketabilityPolicy {
   return {
     tier: "fallback",
+    speedTier: "standard",
     maxBookAgeMs: 15_000,
     hardMaxBookAgeMs: 60_000,
     maxEntrySpreadCents: 0.005,

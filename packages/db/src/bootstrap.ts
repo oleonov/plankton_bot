@@ -50,6 +50,7 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "family_rules", "max_concurrent_orders_per_family", "INTEGER");
   safeAddColumn(conn.db, "family_rules", "max_probe_in_flight_per_token", "INTEGER");
   safeAddColumn(conn.db, "family_rules", "max_entry_signals_per_tick_per_family", "INTEGER");
+  safeAddColumn(conn.db, "family_rules", "fast_lane_enabled", "INTEGER");
   safeAddColumn(
     conn.db,
     "family_catalog",

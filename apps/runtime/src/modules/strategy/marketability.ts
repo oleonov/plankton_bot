@@ -1,6 +1,10 @@
 import type { FamilyRuleBundle, NormalizedMarket, Order, Signal } from "@plankton/domain";
 import { Action, ENTRY_REASONS, PromotionState } from "@plankton/domain";
-import { resolveFamilyThroughputPolicy } from "../../family-throughput.js";
+import {
+  resolveFamilySpeedTier,
+  resolveFamilyThroughputTierByFamilyKey,
+  type FamilySpeedTier,
+} from "../../family-throughput.js";
 
 const EPSILON = 1e-9;
 const DEFAULT_MAX_BOOK_AGE_MS = 15_000;
@@ -8,6 +12,7 @@ const DEFAULT_HARD_MAX_BOOK_AGE_MS = 60_000;
 
 export interface MarketabilityPolicy {
   readonly tier: "core" | "reduced" | "fallback";
+  readonly speedTier: FamilySpeedTier;
   readonly maxBookAgeMs: number;
   readonly hardMaxBookAgeMs: number;
   readonly maxEntrySpreadCents: number;
@@ -38,72 +43,98 @@ export interface MarketabilityDecision {
   readonly diagnostics: Readonly<Record<string, unknown>>;
 }
 
+const BASE_POLICY = {
+  maxBookAgeMs: DEFAULT_MAX_BOOK_AGE_MS,
+  hardMaxBookAgeMs: DEFAULT_HARD_MAX_BOOK_AGE_MS,
+  minEntryVolume24h: 5_000,
+  allowOneSidedBooks: false,
+} as const;
+
+const CORE_POLICY: MarketabilityPolicy = {
+  tier: "core",
+  speedTier: "standard",
+  ...BASE_POLICY,
+  maxEntrySpreadCents: 0.02,
+  maxWideEntrySpreadCents: 0.05,
+  minWideSpreadVolume24h: 50_000,
+  maxPriceImprovementCents: 0.02,
+  makerImprovementTicks: 2,
+  maxRestingBuyReservationUsdc: 25,
+  maxUnfilledOrdersPerToken: 2,
+  maxUnfilledOrdersPerMarket: 8,
+  maxUnfilledCancelsBeforeCooldown: 2,
+  unfilledCancelCooldownMs: 5 * 60_000,
+};
+
+const CORE_FAST_POLICY: MarketabilityPolicy = {
+  ...CORE_POLICY,
+  speedTier: "core-fast",
+  maxEntrySpreadCents: 0.03,
+  maxWideEntrySpreadCents: 0.08,
+  minWideSpreadVolume24h: 25_000,
+  maxPriceImprovementCents: 0.03,
+  makerImprovementTicks: 3,
+  maxUnfilledOrdersPerToken: 3,
+  maxUnfilledOrdersPerMarket: 10,
+  maxUnfilledCancelsBeforeCooldown: 3,
+  unfilledCancelCooldownMs: 2 * 60_000,
+};
+
+const REDUCED_POLICY: MarketabilityPolicy = {
+  tier: "reduced",
+  speedTier: "standard",
+  ...BASE_POLICY,
+  maxEntrySpreadCents: 0.01,
+  maxWideEntrySpreadCents: 0.02,
+  minWideSpreadVolume24h: 25_000,
+  maxPriceImprovementCents: 0.01,
+  makerImprovementTicks: 1,
+  maxRestingBuyReservationUsdc: 10,
+  maxUnfilledOrdersPerToken: 1,
+  maxUnfilledOrdersPerMarket: 4,
+  maxUnfilledCancelsBeforeCooldown: 2,
+  unfilledCancelCooldownMs: 5 * 60_000,
+};
+
+const REDUCED_FAST_POLICY: MarketabilityPolicy = {
+  ...REDUCED_POLICY,
+  speedTier: "reduced-fast",
+  maxEntrySpreadCents: 0.015,
+  maxWideEntrySpreadCents: 0.03,
+  minWideSpreadVolume24h: 15_000,
+  maxPriceImprovementCents: 0.015,
+  makerImprovementTicks: 2,
+  maxUnfilledOrdersPerToken: 2,
+  maxUnfilledOrdersPerMarket: 6,
+  maxUnfilledCancelsBeforeCooldown: 3,
+  unfilledCancelCooldownMs: 3 * 60_000,
+};
+
+const FALLBACK_POLICY: MarketabilityPolicy = {
+  tier: "fallback",
+  speedTier: "standard",
+  ...BASE_POLICY,
+  maxEntrySpreadCents: 0.005,
+  maxWideEntrySpreadCents: 0.01,
+  minWideSpreadVolume24h: 25_000,
+  maxPriceImprovementCents: 0.005,
+  makerImprovementTicks: 1,
+  maxRestingBuyReservationUsdc: 5,
+  maxUnfilledOrdersPerToken: 1,
+  maxUnfilledOrdersPerMarket: 2,
+  maxUnfilledCancelsBeforeCooldown: 1,
+  unfilledCancelCooldownMs: 10 * 60_000,
+};
+
 export function resolveMarketabilityPolicy(bundle: FamilyRuleBundle): MarketabilityPolicy {
-  const throughput = resolveFamilyThroughputPolicy(bundle);
-  const tier =
-    throughput.source === "core" || throughput.maxConcurrentOrdersPerFamily >= 10
-      ? "core"
-      : throughput.source === "reduced" || throughput.maxConcurrentOrdersPerFamily >= 3
-        ? "reduced"
-        : "fallback";
+  const speedTier = resolveFamilySpeedTier(bundle);
+  const tier = resolveFamilyThroughputTierByFamilyKey(bundle.identity.familyKey);
 
-  if (tier === "core") {
-    return {
-      tier,
-      maxBookAgeMs: DEFAULT_MAX_BOOK_AGE_MS,
-      hardMaxBookAgeMs: DEFAULT_HARD_MAX_BOOK_AGE_MS,
-      maxEntrySpreadCents: 0.02,
-      maxWideEntrySpreadCents: 0.05,
-      minWideSpreadVolume24h: 50_000,
-      minEntryVolume24h: 5_000,
-      maxPriceImprovementCents: 0.02,
-      makerImprovementTicks: 2,
-      maxRestingBuyReservationUsdc: 25,
-      maxUnfilledOrdersPerToken: 2,
-      maxUnfilledOrdersPerMarket: 8,
-      maxUnfilledCancelsBeforeCooldown: 2,
-      unfilledCancelCooldownMs: 5 * 60_000,
-      allowOneSidedBooks: false,
-    };
-  }
-
+  if (tier === "core") return speedTier === "core-fast" ? CORE_FAST_POLICY : CORE_POLICY;
   if (tier === "reduced") {
-    return {
-      tier,
-      maxBookAgeMs: DEFAULT_MAX_BOOK_AGE_MS,
-      hardMaxBookAgeMs: DEFAULT_HARD_MAX_BOOK_AGE_MS,
-      maxEntrySpreadCents: 0.01,
-      maxWideEntrySpreadCents: 0.02,
-      minWideSpreadVolume24h: 25_000,
-      minEntryVolume24h: 5_000,
-      maxPriceImprovementCents: 0.01,
-      makerImprovementTicks: 1,
-      maxRestingBuyReservationUsdc: 10,
-      maxUnfilledOrdersPerToken: 1,
-      maxUnfilledOrdersPerMarket: 4,
-      maxUnfilledCancelsBeforeCooldown: 2,
-      unfilledCancelCooldownMs: 5 * 60_000,
-      allowOneSidedBooks: false,
-    };
+    return speedTier === "reduced-fast" ? REDUCED_FAST_POLICY : REDUCED_POLICY;
   }
-
-  return {
-    tier,
-    maxBookAgeMs: DEFAULT_MAX_BOOK_AGE_MS,
-    hardMaxBookAgeMs: DEFAULT_HARD_MAX_BOOK_AGE_MS,
-    maxEntrySpreadCents: 0.005,
-    maxWideEntrySpreadCents: 0.01,
-    minWideSpreadVolume24h: 25_000,
-    minEntryVolume24h: 5_000,
-    maxPriceImprovementCents: 0.005,
-    makerImprovementTicks: 1,
-    maxRestingBuyReservationUsdc: 5,
-    maxUnfilledOrdersPerToken: 1,
-    maxUnfilledOrdersPerMarket: 2,
-    maxUnfilledCancelsBeforeCooldown: 1,
-    unfilledCancelCooldownMs: 10 * 60_000,
-    allowOneSidedBooks: false,
-  };
+  return FALLBACK_POLICY;
 }
 
 export function buildRestingOrderSnapshot(
@@ -243,7 +274,9 @@ function applyBookChecks(
     checksPassed.push("market-active");
   }
 
-  if (!policy.allowOneSidedBooks && (market.bestBid == null || market.bestAsk == null)) {
+  if (!policy.allowOneSidedBooks && market.bestBid == null && market.bestAsk == null) {
+    rejectionReasons.push("book-missing");
+  } else if (!policy.allowOneSidedBooks && (market.bestBid == null || market.bestAsk == null)) {
     rejectionReasons.push("book-one-sided");
   } else {
     checksPassed.push("book-two-sided");
@@ -268,7 +301,9 @@ function applySpreadChecks(
     market.spread ??
     (market.bestBid != null && market.bestAsk != null ? market.bestAsk - market.bestBid : null);
   if (spread == null || !Number.isFinite(spread) || spread <= 0) {
-    rejectionReasons.push("spread-unavailable");
+    rejectionReasons.push(
+      market.bookSource === "gamma-fallback" ? "gamma-fallback-no-real-book" : "spread-unavailable",
+    );
     return;
   }
 
@@ -392,6 +427,8 @@ function buildDiagnostics(
     (market.bestBid != null && market.bestAsk != null ? market.bestAsk - market.bestBid : null);
   return {
     tier: policy.tier,
+    speedTier: policy.speedTier,
+    bookSource: market.bookSource ?? "unknown",
     bestBid: market.bestBid,
     bestAsk: market.bestAsk,
     spread,
@@ -403,23 +440,7 @@ function buildDiagnostics(
 }
 
 function fallbackPricePolicy(): MarketabilityPolicy {
-  return {
-    tier: "fallback",
-    maxBookAgeMs: DEFAULT_MAX_BOOK_AGE_MS,
-    hardMaxBookAgeMs: DEFAULT_HARD_MAX_BOOK_AGE_MS,
-    maxEntrySpreadCents: 0.02,
-    maxWideEntrySpreadCents: 0.05,
-    minWideSpreadVolume24h: 50_000,
-    minEntryVolume24h: 5_000,
-    maxPriceImprovementCents: 0.02,
-    makerImprovementTicks: 1,
-    maxRestingBuyReservationUsdc: 5,
-    maxUnfilledOrdersPerToken: 1,
-    maxUnfilledOrdersPerMarket: 2,
-    maxUnfilledCancelsBeforeCooldown: 1,
-    unfilledCancelCooldownMs: 10 * 60_000,
-    allowOneSidedBooks: false,
-  };
+  return FALLBACK_POLICY;
 }
 
 function isEntrySignal(signal: Pick<Signal, "side" | "reason">): boolean {

@@ -105,6 +105,7 @@ function bindRulesParams(family: FamilyConfig, now: string): unknown[] {
     th?.maxConcurrentOrdersPerFamily ?? null,
     th?.maxProbeInFlightPerToken ?? null,
     th?.maxEntrySignalsPerTickPerFamily ?? null,
+    th?.fastLaneEnabled == null ? null : th.fastLaneEnabled ? 1 : 0,
     ts.maxOpenValueUsdc,
     ts.maxActiveMarkets,
     ts.maxDustPositions,
@@ -121,70 +122,76 @@ function bindRulesParams(family: FamilyConfig, now: string): unknown[] {
   ];
 }
 
+const RULES_COLUMNS = [
+  "family_id",
+  "enabled",
+  "action",
+  "priority_rank",
+  "allow_weekends",
+  "session_mode",
+  "entry_mode",
+  "min_entry_price",
+  "max_entry_price",
+  "max_initial_notional_usdc",
+  "allow_high_price_one_shot",
+  "high_price_threshold",
+  "require_proven_family_above_price",
+  "preferred_entry_band",
+  "max_probe_count_per_market",
+  "entry_cooldown_seconds",
+  "max_new_markets_per_session",
+  "probe_size_usdc",
+  "add_size_usdc",
+  "scale_mode",
+  "default_max_buys_per_leg",
+  "heavy_max_buys_per_leg",
+  "allow_heavy_campaigns",
+  "require_positive_recycle_history_for_scale",
+  "exit_mode",
+  "primary_profit_model",
+  "allow_runner_extension",
+  "prefer_fast_recycle",
+  "resolution_holding_allowed",
+  "resolution_buffer_minutes",
+  "target_roi_band_low",
+  "target_roi_band_high",
+  "max_unmoved_hold_hours",
+  "max_tail_hold_hours",
+  "allow_two_sided",
+  "two_sided_mode",
+  "min_activity_for_two_sided",
+  "max_concurrent_orders_per_family",
+  "max_probe_in_flight_per_token",
+  "max_entry_signals_per_tick_per_family",
+  "fast_lane_enabled",
+  "max_open_value_usdc",
+  "max_active_markets",
+  "max_dust_positions",
+  "tail_quarantine_threshold_usdc",
+  "tail_quarantine_threshold_ratio",
+  "stale_tail_prune_enabled",
+  "threshold_cleanup_required",
+  "auto_settle_resolved_markets",
+  "active_windows_utc",
+  "reduced_windows_utc",
+  "weekday_bias",
+  "weekend_mode",
+  "updated_at",
+] as const;
+
+const RULES_MUTABLE_COLUMNS = RULES_COLUMNS.slice(1);
+
 const RULES_INSERT_SQL = `
   INSERT INTO family_rules (
-    family_id,
-    enabled, action, priority_rank, allow_weekends, session_mode,
-    entry_mode, min_entry_price, max_entry_price, max_initial_notional_usdc,
-    allow_high_price_one_shot, high_price_threshold, require_proven_family_above_price,
-    preferred_entry_band, max_probe_count_per_market, entry_cooldown_seconds,
-    max_new_markets_per_session, probe_size_usdc, add_size_usdc,
-    scale_mode, default_max_buys_per_leg, heavy_max_buys_per_leg,
-    allow_heavy_campaigns, require_positive_recycle_history_for_scale,
-    exit_mode, primary_profit_model, allow_runner_extension, prefer_fast_recycle,
-    resolution_holding_allowed, resolution_buffer_minutes,
-    target_roi_band_low, target_roi_band_high, max_unmoved_hold_hours, max_tail_hold_hours,
-    allow_two_sided, two_sided_mode, min_activity_for_two_sided,
-    max_concurrent_orders_per_family, max_probe_in_flight_per_token,
-    max_entry_signals_per_tick_per_family,
-    max_open_value_usdc, max_active_markets, max_dust_positions,
-    tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio,
-    stale_tail_prune_enabled, threshold_cleanup_required, auto_settle_resolved_markets,
-    active_windows_utc, reduced_windows_utc, weekday_bias, weekend_mode,
-    updated_at
+    ${RULES_COLUMNS.join(",\n    ")}
   ) VALUES (
-    ?,
-    ?, ?, ?, ?, ?,
-    ?, ?, ?, ?,
-    ?, ?, ?,
-    ?, ?, ?,
-    ?, ?, ?,
-    ?, ?, ?,
-    ?, ?, ?,
-    ?, ?,
-    ?, ?, ?, ?,
-    ?, ?,
-    ?, ?, ?, ?,
-    ?, ?, ?,
-    ?, ?, ?,
-    ?, ?,
-    ?, ?, ?,
-    ?, ?, ?, ?,
-    ?
+    ${RULES_COLUMNS.map(() => "?").join(", ")}
   )
 `;
 
-// Same column list but UPDATE instead of INSERT
 const RULES_UPDATE_SQL = `
   UPDATE family_rules SET
-    enabled = ?, action = ?, priority_rank = ?, allow_weekends = ?, session_mode = ?,
-    entry_mode = ?, min_entry_price = ?, max_entry_price = ?, max_initial_notional_usdc = ?,
-    allow_high_price_one_shot = ?, high_price_threshold = ?, require_proven_family_above_price = ?,
-    preferred_entry_band = ?, max_probe_count_per_market = ?, entry_cooldown_seconds = ?,
-    max_new_markets_per_session = ?, probe_size_usdc = ?, add_size_usdc = ?,
-    scale_mode = ?, default_max_buys_per_leg = ?, heavy_max_buys_per_leg = ?,
-    allow_heavy_campaigns = ?, require_positive_recycle_history_for_scale = ?,
-    exit_mode = ?, primary_profit_model = ?, allow_runner_extension = ?, prefer_fast_recycle = ?,
-    resolution_holding_allowed = ?, resolution_buffer_minutes = ?,
-    target_roi_band_low = ?, target_roi_band_high = ?, max_unmoved_hold_hours = ?, max_tail_hold_hours = ?,
-    allow_two_sided = ?, two_sided_mode = ?, min_activity_for_two_sided = ?,
-    max_concurrent_orders_per_family = ?, max_probe_in_flight_per_token = ?,
-    max_entry_signals_per_tick_per_family = ?,
-    max_open_value_usdc = ?, max_active_markets = ?, max_dust_positions = ?,
-    tail_quarantine_threshold_usdc = ?, tail_quarantine_threshold_ratio = ?,
-    stale_tail_prune_enabled = ?, threshold_cleanup_required = ?, auto_settle_resolved_markets = ?,
-    active_windows_utc = ?, reduced_windows_utc = ?, weekday_bias = ?, weekend_mode = ?,
-    updated_at = ?
+    ${RULES_MUTABLE_COLUMNS.map((column) => `${column} = ?`).join(",\n    ")}
   WHERE family_id = ?
 `;
 
@@ -282,6 +289,7 @@ function dbFamilyFingerprint(
     r["max_concurrent_orders_per_family"] ?? null,
     r["max_probe_in_flight_per_token"] ?? null,
     r["max_entry_signals_per_tick_per_family"] ?? null,
+    r["fast_lane_enabled"] == null ? null : r["fast_lane_enabled"] ? 1 : 0,
     r["max_open_value_usdc"],
     r["max_active_markets"],
     r["max_dust_positions"],
@@ -616,6 +624,8 @@ function buildRulesExport(r: Record<string, unknown> | undefined): Record<string
       max_concurrent_orders_per_family: r["max_concurrent_orders_per_family"],
       max_probe_in_flight_per_token: r["max_probe_in_flight_per_token"],
       max_entry_signals_per_tick_per_family: r["max_entry_signals_per_tick_per_family"],
+      fast_lane_enabled:
+        r["fast_lane_enabled"] == null ? null : !!r["fast_lane_enabled"],
     },
     tail_suppression: {
       max_open_value_usdc: r["max_open_value_usdc"],

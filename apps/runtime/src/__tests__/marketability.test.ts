@@ -114,6 +114,7 @@ function makeBundle(overrides?: Partial<FamilyRuleBundle>): FamilyRuleBundle {
         maxConcurrentOrdersPerFamily: 10,
         maxProbeInFlightPerToken: 2,
         maxEntrySignalsPerTickPerFamily: 10,
+        fastLaneEnabled: true,
       },
       tailSuppression: {
         maxOpenValueUsdc: 75,
@@ -230,10 +231,27 @@ describe("marketability gate", () => {
     expect(decision.rejectionReasons).toContain("book-stale");
   });
 
+  it("classifies synthetic gamma fallback zero-spread books separately", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal(),
+      market: makeMarket({
+        bestBid: 0.09,
+        bestAsk: 0.09,
+        spread: 0,
+        bookSource: "gamma-fallback",
+      }),
+      bundle: makeBundle(),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("gamma-fallback-no-real-book");
+  });
+
   it("rejects high-volume markets when spread is still above the hard tier cap", () => {
     const decision = evaluateMarketability({
       signal: makeSignal(),
-      market: makeMarket({ bestBid: 0.3, bestAsk: 0.36, spread: 0.06, volume24h: 1_000_000 }),
+      market: makeMarket({ bestBid: 0.3, bestAsk: 0.39, spread: 0.09, volume24h: 1_000_000 }),
       bundle: makeBundle(),
       nowMs: NOW,
     });
@@ -362,5 +380,89 @@ describe("maker-only price improvement", () => {
     });
 
     expect(price).toBeNull();
+  });
+});
+
+describe("marketability policy retuning", () => {
+  it("uses relaxed core-fast policy for proven high-recycle families", () => {
+    const policy = resolveMarketabilityPolicy(makeBundle());
+
+    expect(policy.tier).toBe("core");
+    expect(policy.speedTier).toBe("core-fast");
+    expect(policy.maxEntrySpreadCents).toBe(0.03);
+    expect(policy.maxWideEntrySpreadCents).toBe(0.08);
+    expect(policy.makerImprovementTicks).toBe(3);
+    expect(policy.unfilledCancelCooldownMs).toBe(2 * 60_000);
+  });
+
+  it("uses reduced-fast policy only for selected reduced families", () => {
+    const reducedFast = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "will-bitcoin-reach",
+        },
+        rules: {
+          ...makeBundle().rules,
+          throughput: {
+            maxConcurrentOrdersPerFamily: 3,
+            maxProbeInFlightPerToken: 1,
+            maxEntrySignalsPerTickPerFamily: 1,
+            fastLaneEnabled: true,
+          },
+        },
+      }),
+    );
+    const reducedStandard = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "bitcoin-above",
+        },
+        rules: {
+          ...makeBundle().rules,
+          throughput: {
+            maxConcurrentOrdersPerFamily: 3,
+            maxProbeInFlightPerToken: 1,
+            maxEntrySignalsPerTickPerFamily: 1,
+          },
+        },
+      }),
+    );
+
+    expect(reducedFast.tier).toBe("reduced");
+    expect(reducedFast.speedTier).toBe("reduced-fast");
+    expect(reducedFast.maxEntrySpreadCents).toBe(0.015);
+    expect(reducedFast.makerImprovementTicks).toBe(2);
+    expect(reducedFast.unfilledCancelCooldownMs).toBe(3 * 60_000);
+
+    expect(reducedStandard.tier).toBe("reduced");
+    expect(reducedStandard.speedTier).toBe("standard");
+    expect(reducedStandard.maxEntrySpreadCents).toBe(0.01);
+    expect(reducedStandard.makerImprovementTicks).toBe(1);
+    expect(reducedStandard.unfilledCancelCooldownMs).toBe(5 * 60_000);
+  });
+
+  it("does not promote reduced families to core just because throughput overrides are high", () => {
+    const policy = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "ethereum-price",
+        },
+        rules: {
+          ...makeBundle().rules,
+          throughput: {
+            maxConcurrentOrdersPerFamily: 20,
+            maxProbeInFlightPerToken: 2,
+            maxEntrySignalsPerTickPerFamily: 20,
+            fastLaneEnabled: true,
+          },
+        },
+      }),
+    );
+
+    expect(policy.tier).toBe("reduced");
+    expect(policy.speedTier).toBe("reduced-fast");
   });
 });

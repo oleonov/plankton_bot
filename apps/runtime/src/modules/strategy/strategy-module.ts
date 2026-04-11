@@ -43,10 +43,11 @@ import {
   type SprayTracker,
 } from "./scanner.js";
 import { SignalToOrderBridge } from "./signal-to-order.js";
-
-export interface CandidateBookGateway {
-  getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>>;
-}
+import {
+  CandidateBookCache,
+  applyOrderBookToMarket,
+  type CandidateBookGateway,
+} from "./candidate-book-cache.js";
 
 export interface StrategyModuleDeps {
   bus: EventBus;
@@ -68,6 +69,7 @@ export class StrategyModule implements RuntimeModule {
   private readonly sessionTracker: SessionTracker;
   private readonly sprayTracker: SprayTracker;
   private readonly bridge: SignalToOrderBridge;
+  private readonly candidateBookCache: CandidateBookCache | undefined;
   /** Last-known size per position — used to distinguish buy-fill updates from sell-fill updates. */
   private readonly lastKnownSize = new Map<string, number>();
   /** Tokens with open spray positions — cross-tick dedup to prevent re-spraying. */
@@ -87,12 +89,19 @@ export class StrategyModule implements RuntimeModule {
     this.buyTracker = createBuyTracker();
     this.sessionTracker = createSessionTracker();
     this.sprayTracker = createSprayTracker();
+    this.candidateBookCache = deps.candidateBookGateway
+      ? new CandidateBookCache({
+          gateway: deps.candidateBookGateway,
+          log: this.log.child({ component: "candidate-book-cache" }),
+        })
+      : undefined;
     this.bridge = new SignalToOrderBridge({
       bus: deps.bus,
       log: this.log,
       rulesProvider: deps.rulesProvider,
       orderRepo: deps.orderRepo,
       liveLiteGuard: deps.liveLiteGuard,
+      candidateBookCache: this.candidateBookCache,
     });
   }
 
@@ -141,6 +150,7 @@ export class StrategyModule implements RuntimeModule {
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.bridge.unsubscribe();
+    this.candidateBookCache?.dispose();
     this.started = false;
     this.log.info("strategy module stopped");
   }
@@ -259,7 +269,7 @@ export class StrategyModule implements RuntimeModule {
   private async prepareMarketsForScan(
     markets: readonly NormalizedMarket[],
   ): Promise<readonly NormalizedMarket[]> {
-    if (!this.deps.candidateBookGateway) return markets;
+    if (!this.candidateBookCache) return markets;
 
     const conditionKeys = new Set<string>();
     for (const market of markets) {
@@ -281,21 +291,12 @@ export class StrategyModule implements RuntimeModule {
     if (tokenIds.length === 0) return markets;
 
     try {
-      const books = await this.deps.candidateBookGateway.getOrderBooks([...new Set(tokenIds)]);
-      if (books.size === 0) return markets;
+      const entries = await this.candidateBookCache.prime([...new Set(tokenIds)]);
+      if (entries.size === 0) return markets;
       return markets.map((market) => {
-        const book = books.get(String(market.tokenId));
-        if (!book || book.bestBid === null || book.bestAsk === null) return market;
-        return {
-          ...market,
-          bestBid: book.bestBid,
-          bestAsk: book.bestAsk,
-          midPrice: book.midPrice,
-          spread: book.spread,
-          minOrderSize: book.minOrderSize ?? market.minOrderSize ?? null,
-          bookSource: "clob",
-          snapshotTs: book.timestamp,
-        };
+        const entry = entries.get(String(market.tokenId));
+        if (!entry) return market;
+        return applyOrderBookToMarket(market, entry);
       });
     } catch (err) {
       this.log.warn({ err, tokenCount: tokenIds.length }, "candidate book enrichment failed");

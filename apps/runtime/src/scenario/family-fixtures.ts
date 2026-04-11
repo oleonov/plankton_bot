@@ -128,6 +128,7 @@ export function makeFamilyConfig(overrides: {
         maxConcurrentOrdersPerFamily: null,
         maxProbeInFlightPerToken: null,
         maxEntrySignalsPerTickPerFamily: null,
+        fastLaneEnabled: null,
       },
       tailSuppression: {
         maxOpenValueUsdc,

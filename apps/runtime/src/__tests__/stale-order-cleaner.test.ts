@@ -3,6 +3,7 @@ import { createTokenId, createFamilyId, createOrderId } from "@plankton/domain";
 import type {
   OrderRepository,
   MarketRepository,
+  FamilyRulesProvider,
   Market,
   Order,
   ClientOrderId,
@@ -11,6 +12,7 @@ import { InProcessEventBus } from "@plankton/event-bus";
 import {
   cleanStaleEntryOrders,
   CANCEL_BACKOFF_MS,
+  PROBE_LIKE_FAST_DAILY_TTL_MS,
   PROBE_LIKE_INTRADAY_TTL_MS,
 } from "../modules/reconciliation/stale-order-cleaner.js";
 
@@ -42,6 +44,15 @@ function createMockMarketRepo(): MarketRepository {
     findByFamily: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
+  };
+}
+
+function createMockRulesProvider(): FamilyRulesProvider {
+  return {
+    getRule: vi.fn().mockReturnValue(null),
+    isEnabled: vi.fn().mockReturnValue(true),
+    getAllFamilies: vi.fn().mockReturnValue([]),
+    getRulesForRegime: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -103,18 +114,23 @@ function makeMarket(overrides?: Partial<Market>): Market {
 describe("cleanStaleEntryOrders", () => {
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
+  let rulesProvider: ReturnType<typeof createMockRulesProvider>;
   let bus: InProcessEventBus;
   let backoffMap: Map<string, number>;
 
   beforeEach(() => {
     orderRepo = createMockOrderRepo();
     marketRepo = createMockMarketRepo();
+    rulesProvider = createMockRulesProvider();
     bus = new InProcessEventBus();
     backoffMap = new Map();
   });
 
   function run() {
-    return cleanStaleEntryOrders({ orderRepo, marketRepo, bus, log: silentLog }, backoffMap);
+    return cleanStaleEntryOrders(
+      { orderRepo, marketRepo, rulesProvider, bus, log: silentLog },
+      backoffMap,
+    );
   }
 
   // ─── TTL cancellation ──────────────────────────────────────────────
@@ -194,6 +210,58 @@ describe("cleanStaleEntryOrders", () => {
     });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
     marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket({ horizon: "intraday-4h" }));
+
+    const result = await run();
+
+    expect(result.staleTtlCancelled).toBe(0);
+  });
+
+  it("cancels fast-daily probe orders after the shortened TTL", async () => {
+    const twoMinutesAgo = new Date(Date.now() - PROBE_LIKE_FAST_DAILY_TTL_MS - 30_000).toISOString();
+    const order = makeOrder({
+      createdAt: twoMinutesAgo,
+      signalReason: "probe-entry",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(
+      makeMarket({
+        horizon: "daily",
+        familyKey: "bitcoin-price",
+      }),
+    );
+    rulesProvider.getRule = vi.fn().mockReturnValue({
+      rules: { throughput: { fastLaneEnabled: true } },
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
+  });
+
+  it("keeps slow daily probe orders alive past the fast-daily TTL", async () => {
+    const twoMinutesAgo = new Date(Date.now() - PROBE_LIKE_FAST_DAILY_TTL_MS - 30_000).toISOString();
+    const order = makeOrder({
+      createdAt: twoMinutesAgo,
+      signalReason: "probe-entry",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(
+      makeMarket({
+        horizon: "daily",
+        familyKey: "bitcoin-above",
+      }),
+    );
+    rulesProvider.getRule = vi.fn().mockReturnValue({
+      rules: { throughput: { fastLaneEnabled: false } },
+    });
 
     const result = await run();
 

@@ -98,6 +98,11 @@ function computeTradingState(
       "SELECT labels FROM runtime_metrics WHERE metric_name = 'scanner_activity' ORDER BY captured_at DESC LIMIT 1",
     )
     .get() as { labels: string } | undefined;
+  const signalConversionRow = db
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'signal_conversion_activity' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { labels: string } | undefined;
 
   const scanner = scannerActivityRow
     ? (JSON.parse(scannerActivityRow.labels) as {
@@ -135,6 +140,26 @@ function computeTradingState(
     signalActivity.blockedByWeekendLast10m = scanner.blockedByWeekend;
     signalActivity.blockedByWindowLast10m = scanner.blockedByWindow;
     signalActivity.blockedByPerFamilyTickLimitLast10m = scanner.blockedByPerFamilyTickLimit ?? 0;
+  }
+
+  if (signalConversionRow?.labels) {
+    const conversion = JSON.parse(signalConversionRow.labels) as {
+      converted?: number;
+      marketabilityRejectedByReason?: Record<string, number>;
+      cacheStatusByStatus?: Record<string, number>;
+      exchangeAccepted?: number;
+      exchangeRejectedByCode?: Record<string, number>;
+      fills?: number;
+      cooldownBypassByReason?: Record<string, number>;
+    };
+    signalActivity.signalsConvertedLast10m = conversion.converted ?? 0;
+    signalActivity.marketabilityRejectedLast10mByReason =
+      conversion.marketabilityRejectedByReason ?? {};
+    signalActivity.cacheStatusLast10mByStatus = conversion.cacheStatusByStatus ?? {};
+    signalActivity.exchangeAcceptedLast10m = conversion.exchangeAccepted ?? 0;
+    signalActivity.exchangeRejectedLast10mByCode = conversion.exchangeRejectedByCode ?? {};
+    signalActivity.fillsLast10m = conversion.fills ?? 0;
+    signalActivity.cooldownBypassLast10mByReason = conversion.cooldownBypassByReason ?? {};
   }
 
   const allProbeOnly = db

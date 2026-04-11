@@ -10,9 +10,18 @@
  * leaves the open set.
  */
 
-import type { OrderRepository, MarketRepository, EventBus, Market, Order } from "@plankton/domain";
+import type {
+  OrderRepository,
+  MarketRepository,
+  EventBus,
+  Market,
+  Order,
+  FamilyRulesProvider,
+  FamilyRuleBundle,
+} from "@plankton/domain";
 import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { isFastLaneEnabled } from "../../family-throughput.js";
 
 // Horizon-aware TTLs for conviction-style entry orders.
 export const HORIZON_TTL_MS: Record<string, number> = {
@@ -23,6 +32,7 @@ export const HORIZON_TTL_MS: Record<string, number> = {
 };
 export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
 export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
+export const PROBE_LIKE_FAST_DAILY_TTL_MS = 90_000; // 90s for proven fast daily families
 export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
 export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
 export const EXIT_ORDER_TTL_MS = 60_000; // 60s
@@ -40,6 +50,7 @@ const EXIT_REASONS = new Set([
 export interface StaleOrderCleanerDeps {
   orderRepo: OrderRepository;
   marketRepo: MarketRepository;
+  rulesProvider: FamilyRulesProvider;
   bus: EventBus;
   log: Logger;
 }
@@ -93,7 +104,8 @@ export async function cleanStaleEntryOrders(
 
     const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();
-    const ttlMs = resolveOrderTtlMs(order, market);
+    const bundle = deps.rulesProvider.getRule(order.familyId);
+    const ttlMs = resolveOrderTtlMs(order, market, bundle);
 
     // Check TTL
     if (ageMs > ttlMs) {
@@ -150,7 +162,8 @@ export async function cleanStaleEntryOrders(
 
 function resolveOrderTtlMs(
   order: Pick<Order, "signalReason">,
-  market: Pick<Market, "horizon"> | null,
+  market: Pick<Market, "horizon" | "familyKey"> | null,
+  bundle: FamilyRuleBundle | null,
 ) {
   const horizon = market?.horizon ?? null;
   const horizonTtlMs =
@@ -159,7 +172,12 @@ function resolveOrderTtlMs(
   // Probe/spray orders need a much shorter leash than conviction-style orders.
   if (order.signalReason === "probe-entry" || order.signalReason === "spray-entry") {
     if (horizon === "intraday-4h") return Math.min(horizonTtlMs, PROBE_LIKE_INTRADAY_TTL_MS);
-    if (horizon === "daily") return Math.min(horizonTtlMs, PROBE_LIKE_DAILY_TTL_MS);
+    if (horizon === "daily") {
+      const dailyTtlMs = isFastLaneEnabled(bundle)
+        ? PROBE_LIKE_FAST_DAILY_TTL_MS
+        : PROBE_LIKE_DAILY_TTL_MS;
+      return Math.min(horizonTtlMs, dailyTtlMs);
+    }
     if (horizon === "ad-hoc") return Math.min(horizonTtlMs, PROBE_LIKE_AD_HOC_TTL_MS);
     // Generic fallback for probe-like: 10m
     return Math.min(horizonTtlMs, 10 * 60_000);
