@@ -230,7 +230,7 @@ describe("Overview Balance Card", () => {
     expect(within(row!).queryByText("1m ago")).not.toBeInTheDocument();
   });
 
-  it("shows order and position throughput in Last Events", async () => {
+  it("shows order and position throughput in position and order cards", async () => {
     server.use(
       http.get("/api/v1/status", () =>
         ok({
@@ -243,12 +243,50 @@ describe("Overview Balance Card", () => {
 
     renderWithProviders(<Overview />);
 
-    const ordersRow = (await screen.findByText("Orders in last min")).closest("tr");
-    const positionsRow = screen.getByText("Positions in last min").closest("tr");
+    const positionsCard = (await screen.findByText("Open Positions")).closest(".card");
+    const ordersCard = screen.getByText("Open Orders").closest(".card");
 
-    expect(ordersRow).not.toBeNull();
-    expect(positionsRow).not.toBeNull();
-    expect(within(ordersRow!).getByText("7")).toBeInTheDocument();
-    expect(within(positionsRow!).getByText("3")).toBeInTheDocument();
+    if (!(positionsCard instanceof HTMLElement)) {
+      throw new Error("expected Open Positions card");
+    }
+    if (!(ordersCard instanceof HTMLElement)) {
+      throw new Error("expected Open Orders card");
+    }
+
+    expect(within(positionsCard).getByText("3 in last min")).toBeInTheDocument();
+    expect(within(ordersCard).getByText("7 in last min")).toBeInTheDocument();
+  });
+
+  it("keeps Last Events focused on timestamped events only", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          ordersPlacedLastMin: 7,
+          positionsOpenedLastMin: 3,
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const lastEventsLabel = await screen.findByText("Last Events");
+    const lastEventsCard = lastEventsLabel.closest(".card");
+    if (!(lastEventsCard instanceof HTMLElement)) {
+      throw new Error("expected Last Events card");
+    }
+
+    const rowLabels = within(lastEventsCard)
+      .getAllByRole("row")
+      .map((row) => row.querySelector("td")?.textContent?.trim());
+
+    expect(rowLabels).toEqual([
+      "Last fill",
+      "Last order placed",
+      "Last reconciliation",
+      "Last market data",
+    ]);
+    expect(within(lastEventsCard).queryByText("Orders in last min")).not.toBeInTheDocument();
+    expect(within(lastEventsCard).queryByText("Positions in last min")).not.toBeInTheDocument();
   });
 });

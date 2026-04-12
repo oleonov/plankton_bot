@@ -176,17 +176,28 @@ export function Overview() {
         </div>
         <BalanceCard status={status} />
         <Link to="/positions" style={{ textDecoration: "none" }}>
-          <div className="card card-accent-blue" style={{ cursor: "pointer" }}>
+          <div
+            className="card card-accent-blue"
+            style={{ cursor: "pointer", display: "flex", flexDirection: "column" }}
+          >
             <div className="label">Open Positions</div>
             <div className="value-lg text-blue">{status.openPositionCount}</div>
-            <div className="value-sm">{dustCount} dust</div>
+            <div style={{ marginTop: "auto" }}>
+              <div className="value-sm">{dustCount} dust</div>
+              <div className="value-sm">{status.positionsOpenedLastMin} in last min</div>
+            </div>
           </div>
         </Link>
         <Link to="/orders" style={{ textDecoration: "none" }}>
-          <div className="card card-accent-blue" style={{ cursor: "pointer" }}>
+          <div
+            className="card card-accent-blue"
+            style={{ cursor: "pointer", display: "flex", flexDirection: "column" }}
+          >
             <div className="label">Open Orders</div>
             <div className="value-lg text-blue">{status.openOrderCount}</div>
-            <div className="value-sm">&nbsp;</div>
+            <div style={{ marginTop: "auto" }}>
+              <div className="value-sm">{status.ordersPlacedLastMin} in last min</div>
+            </div>
           </div>
         </Link>
         <Link to="/families" style={{ textDecoration: "none" }}>
@@ -445,14 +456,6 @@ export function Overview() {
                 <td style={{ textAlign: "right" }}>
                   {formatAgo(recentOrders?.items[0]?.createdAt ?? null)}
                 </td>
-              </tr>
-              <tr>
-                <td style={{ color: "var(--text-muted)" }}>Orders in last min</td>
-                <td style={{ textAlign: "right" }}>{status.ordersPlacedLastMin}</td>
-              </tr>
-              <tr>
-                <td style={{ color: "var(--text-muted)" }}>Positions in last min</td>
-                <td style={{ textAlign: "right" }}>{status.positionsOpenedLastMin}</td>
               </tr>
               <tr>
                 <td style={{ color: "var(--text-muted)" }}>Last reconciliation</td>
