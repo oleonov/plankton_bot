@@ -958,7 +958,7 @@ describe("LiveMarketDataGateway", () => {
       lastTradePrice: number | null;
       hasBook: boolean;
     }> = [];
-    const stream = gw.createMarketPricingStream!({
+    const stream = gw.createMarketPricingStream({
       onUpdates: async (next) => {
         updates.push(
           ...next.map((update) => ({
