@@ -53,7 +53,6 @@ function makeFamilyConfig(
         enabled: true,
         action: "trade",
         priorityRank: 1,
-        allowWeekends: false,
         sessionMode: "active-window",
       },
       entry: {
@@ -101,6 +100,7 @@ function makeFamilyConfig(
         maxEntrySignalsPerTickPerFamily: null,
         fastLaneEnabled: null,
         dustLaneEnabled: null,
+        queueJumpCanaryEnabled: null,
       },
       tailSuppression: {
         maxOpenValueUsdc: 50,
@@ -116,7 +116,6 @@ function makeFamilyConfig(
         activeWindowsUtc: [],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "normal",
       },
     },
   } as FamilyConfig;

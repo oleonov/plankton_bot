@@ -19,6 +19,7 @@
 
 import {
   ENTRY_REASONS,
+  resolveFamilyLiveTradingPolicy,
   type NormalizedMarket,
   type FamilyRulesProvider,
   type FamilyRuleBundle,
@@ -39,11 +40,21 @@ import {
 import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
 import { resolveFamilySpeedTier, resolveFamilyThroughputPolicy } from "../../family-throughput.js";
+import { resolveQueueJumpExecutionTerms } from "../hot-lane/hot-lane-policy.js";
 import {
   rejectOutcomeCandidate,
   selectFirstEntryOutcomeForCondition,
 } from "./outcome-selection.js";
-import { hasFreshTradeActivity, resolveOneSidedDustBuyPrice } from "./marketability.js";
+import {
+  resolveMakerOnlyPrice,
+  resolveMarketabilityPolicy,
+  resolveOneSidedDustBuyPrice,
+} from "./marketability.js";
+import {
+  hasFreshTradeActivity,
+  isGammaFallbackDustEligible,
+  resolveGammaFallbackDustReferencePrice,
+} from "./book-quality-policy.js";
 
 const DEFAULT_MAX_ADDITIONAL_ENTRY_PRICE = 0.3;
 
@@ -190,23 +201,19 @@ function isInTimeWindow(
  * reducedWindowsUtc: explicit reduced windows — if current time is inside one,
  * reduced mode applies even if inside the active window.
  *
- * Weekend + weekendMode="reduced" also forces reduced mode.
+ * Weekend flags have been removed from the runtime model. Scanner behavior is
+ * fully weekend-neutral.
  */
 function isReducedMode(
   session: {
     activeWindowsUtc: Array<{ start: string; end: string }>;
     reducedWindowsUtc: Array<{ start: string; end: string }>;
-    weekendMode: string;
   },
   sessionMode: string,
   nowMinutes: number,
-  weekend: boolean,
 ): boolean {
   // Always-reduced session modes
   if (sessionMode === "reduced" || sessionMode === "always-reduced") return true;
-
-  // Weekend reduced
-  if (weekend && session.weekendMode === "reduced") return true;
 
   // Outside active window
   const inActive = isInTimeWindow(session.activeWindowsUtc, nowMinutes);
@@ -234,18 +241,27 @@ function nextSignalId(): string {
   return `sig-${Date.now()}-${++signalCounter}`;
 }
 
-/** Check if a UTC day-of-week (0=Sun, 6=Sat) is a weekend day. */
-function isWeekend(dayOfWeek: number): boolean {
-  return dayOfWeek === 0 || dayOfWeek === 6;
-}
-
 function resolveSprayReferencePrice(
   market: NormalizedMarket,
   bundle: FamilyRuleBundle,
   nowMs: number,
+  spraySizeUsdc: number | null,
+  executionMinNotionalUsdc: number | null = null,
 ): number | null {
-  if (market.midPrice != null) return market.midPrice;
+  if (
+    isGammaFallbackDustEligible({
+      bundle,
+      market,
+      nowMs,
+      suggestedSizeUsdc: spraySizeUsdc,
+      entryMode: bundle.rules.entry.entryMode,
+      executionMinNotionalUsdc,
+    })
+  ) {
+    return resolveGammaFallbackDustReferencePrice(market);
+  }
   if (market.bookSource === "gamma-fallback") return null;
+  if (market.midPrice != null) return market.midPrice;
   if (market.bestBid == null || market.bestAsk != null) return null;
   if (!hasFreshTradeActivity(market.lastTradeAt ?? null, nowMs)) return null;
 
@@ -265,13 +281,26 @@ function selectSprayCandidateTokenForCondition(
   markets: readonly NormalizedMarket[],
   bundle: FamilyRuleBundle,
   nowMs: number,
+  spraySizeUsdc: number | null,
+  executionMinNotionalUsdc: number | null = null,
 ): string | null {
-  const selection = selectFirstEntryOutcomeForCondition(markets, bundle);
+  const selection = selectFirstEntryOutcomeForCondition(markets, bundle, {
+    allowGammaFallbackDust: spraySizeUsdc != null,
+    dustSuggestedSizeUsdc: spraySizeUsdc,
+    nowMs,
+    executionMinNotionalUsdc,
+  });
   if (selection.tokenId) return selection.tokenId;
 
   let best: { tokenId: string; price: number } | null = null;
   for (const market of markets) {
-    const price = resolveSprayReferencePrice(market, bundle, nowMs);
+    const price = resolveSprayReferencePrice(
+      market,
+      bundle,
+      nowMs,
+      spraySizeUsdc,
+      executionMinNotionalUsdc,
+    );
     if (price == null) continue;
     const tokenId = String(market.tokenId);
     if (!best || price < best.price) best = { tokenId, price };
@@ -469,15 +498,57 @@ function resolveDustMeshCap(bundle: FamilyRuleBundle): number {
   );
 }
 
+function resolveSprayMarketsPerTickCap(
+  globalConfig: GlobalConfig | undefined,
+  isDustLaneEligible: boolean,
+): number {
+  const defaultSprayCap = globalConfig?.sprayMaxMarketsPerTick ?? 10;
+  if (!isDustLaneEligible) return defaultSprayCap;
+  return globalConfig?.dustLaneMaxMarketsPerTick ?? Math.max(defaultSprayCap, 100);
+}
+
+function resolveProjectedSprayExecutionPrice(
+  market: NormalizedMarket,
+  bundle: FamilyRuleBundle,
+  signal: Pick<Signal, "side" | "suggestedPrice" | "suggestedSizeUsdc" | "reason">,
+  executionMinNotionalUsdc: number,
+): number | null {
+  const queueJumpTerms = resolveQueueJumpExecutionTerms({
+    signal,
+    market,
+    bundle,
+    nowMs: market.snapshotTs,
+    executionMinNotionalUsdc,
+  });
+  if (queueJumpTerms) {
+    return queueJumpTerms.price;
+  }
+
+  const liveTradingPolicy = resolveFamilyLiveTradingPolicy(bundle.identity);
+  if (!liveTradingPolicy.requiresPostOnlyForLive) {
+    return signal.suggestedPrice;
+  }
+  return resolveMakerOnlyPrice({
+    side: signal.side,
+    suggestedPrice: signal.suggestedPrice,
+    suggestedSizeUsdc: signal.suggestedSizeUsdc,
+    signalReason: signal.reason,
+    nowMs: market.snapshotTs,
+    executionMinNotionalUsdc,
+    market,
+    policy: resolveMarketabilityPolicy(bundle),
+  });
+}
+
 /** Metadata about what the scanner blocked/produced in a single scan cycle. */
 export interface ScanResult {
   signals: Signal[];
   meta: {
     candidatesConsidered: number;
     blockedByResolutionBuffer: number;
-    blockedByWeekend: number;
     blockedByWindow: number;
     blockedByPerFamilyTickLimit: number;
+    gammaFallbackDustSignalsProduced: number;
     entrySignals: number;
     exitSignals: number;
   };
@@ -501,14 +572,12 @@ export function scan(
   const signals: Signal[] = [];
   const d = new Date(tickTs);
   const nowMinutes = d.getUTCHours() * 60 + d.getUTCMinutes();
-  const dayOfWeek = d.getUTCDay();
-  const weekend = isWeekend(dayOfWeek);
 
   let candidatesConsidered = 0;
   let blockedByResolutionBuffer = 0;
-  let blockedByWeekend = 0;
   let blockedByWindow = 0;
   let blockedByPerFamilyTickLimit = 0;
+  let gammaFallbackDustSignalsProduced = 0;
 
   // Sort markets by composite family score (P1-1: higher-ranked families first)
   const sorted = sortByFamilyPriority(markets, deps.rulesProvider, deps.familyStateRepo);
@@ -590,7 +659,7 @@ export function scan(
     const midPrice = market.midPrice;
 
     // ─── Repricing exit ──────────────────────────────────────
-    // Exits fire regardless of weekend/window policy — they reduce risk.
+    // Exits fire regardless of session throttles — they reduce risk.
     let exitEmitted = false;
     if (existingPosition && existingPosition.status === "open" && midPrice !== null) {
       const exitSignal = evaluateExit(market, bundle, existingPosition, midPrice, tickTs, nextSeq);
@@ -612,24 +681,11 @@ export function scan(
       }
     }
 
-    // ─── Weekend policy (P1-3) ────────────────────────────────
-    // Applies to entry/scale-in signals only. Exits always pass through.
-    if (weekend) {
-      const weekendMode = bundle.rules.session.weekendMode;
-      if (!bundle.rules.universe.allowWeekends || weekendMode === "disabled") {
-        blockedByWeekend++;
-        // Weekend entries fully blocked
-        continue;
-      }
-      // weekendMode === "reduced" handled below alongside active window
-    }
-
     // ─── Entry / Scale-in (session window gated) ─────────────
     const reduced = isReducedMode(
       bundle.rules.session,
       bundle.rules.universe.sessionMode,
       nowMinutes,
-      weekend,
     );
 
     // Fetch family state once (used for cooldown + evidence sizing)
@@ -767,11 +823,26 @@ export function scan(
       if (isDustMeshEligible) {
         selectedToken = String(market.tokenId);
       } else if (!selectedFirstEntryTokens.has(conditionKey)) {
-        const selection = selectFirstEntryOutcomeForCondition(group, bundle);
+        const estimatedDustSizeUsdc =
+          entryPolicy === "spray-first" && deps.globalConfig?.spraySizeUsdc
+            ? Math.max(deps.globalConfig.spraySizeUsdc * sizeMult, minEntryNotionalUsdc)
+            : null;
+        const selection = selectFirstEntryOutcomeForCondition(group, bundle, {
+          allowGammaFallbackDust: entryPolicy === "spray-first" && estimatedDustSizeUsdc != null,
+          dustSuggestedSizeUsdc: estimatedDustSizeUsdc,
+          nowMs: tickTs,
+          executionMinNotionalUsdc: minEntryNotionalUsdc,
+        });
         selectedToken =
           selection.tokenId ??
           (entryPolicy === "spray-first"
-            ? selectSprayCandidateTokenForCondition(group, bundle, tickTs)
+            ? selectSprayCandidateTokenForCondition(
+                group,
+                bundle,
+                tickTs,
+                estimatedDustSizeUsdc,
+                minEntryNotionalUsdc,
+              )
             : null);
         selectedFirstEntryTokens.set(conditionKey, selectedToken ?? null);
         if (group.length > 1) {
@@ -794,7 +865,18 @@ export function scan(
         // Spray-first families: try spray, or skip entirely. Never fall through to probe.
         const gc = deps.globalConfig;
         const sprayKey = `${market.familyId}|${market.tokenId}`;
-        const sprayReferencePrice = resolveSprayReferencePrice(market, bundle, tickTs);
+        const sprayReferencePrice = resolveSprayReferencePrice(
+          market,
+          bundle,
+          tickTs,
+          gc?.spraySizeUsdc != null
+            ? Math.max(gc.spraySizeUsdc * sizeMult, minEntryNotionalUsdc)
+            : null,
+          minEntryNotionalUsdc,
+        );
+        const dustMeshCap = isDustMeshEligible ? resolveDustMeshCap(bundle) : 1;
+        const remainingMeshSlots = Math.max(0, dustMeshCap - existingConditionEntryOrders);
+        const sprayMarketsPerTickCap = resolveSprayMarketsPerTickCap(gc, isDustMeshEligible);
 
         // Cross-tick dedup: skip tokens that already have spray positions
         if (deps.sprayedTokens?.has(String(market.tokenId))) {
@@ -804,33 +886,57 @@ export function scan(
         if (
           gc?.spraySizeUsdc &&
           gc.spraySizeUsdc > 0 &&
-          sprayMarketsThisTick < (gc.sprayMaxMarketsPerTick ?? 10) &&
+          sprayMarketsThisTick < sprayMarketsPerTickCap &&
           !sprayFamilyEmitted.has(sprayKey) &&
           sprayPositionsRemaining > 0 &&
           sprayBudgetRemaining > gc.spraySizeUsdc * sizeMult &&
-          sprayReferencePrice != null
+          sprayReferencePrice != null &&
+          remainingMeshSlots > 0
         ) {
-          const spraySignal = evaluateSprayEntry(
-            market,
-            bundle,
-            sprayReferencePrice,
-            tickTs,
-            nextSeq,
-            gc.spraySizeUsdc,
-            sizeMult,
-            minEntryNotionalUsdc,
-            existingConditionEntryOrders,
-          );
-          if (spraySignal && spraySignal.suggestedSizeUsdc <= sprayBudgetRemaining) {
+          const emittedMeshPrices = new Set<number>();
+          const emittedProjectedExecutionPrices = new Set<number>();
+          let emittedForMarket = 0;
+          for (let meshLevel = 0; meshLevel < remainingMeshSlots; meshLevel++) {
+            const spraySignal = evaluateSprayEntry(
+              market,
+              bundle,
+              sprayReferencePrice,
+              tickTs,
+              nextSeq,
+              gc.spraySizeUsdc,
+              sizeMult,
+              minEntryNotionalUsdc,
+              meshLevel,
+            );
+            if (!spraySignal) continue;
+            if (emittedMeshPrices.has(spraySignal.suggestedPrice)) continue;
+            const projectedExecutionPrice = resolveProjectedSprayExecutionPrice(
+              market,
+              bundle,
+              spraySignal,
+              minEntryNotionalUsdc,
+            );
+            const dedupeExecutionPrice = projectedExecutionPrice ?? spraySignal.suggestedPrice;
+            if (emittedProjectedExecutionPrices.has(dedupeExecutionPrice)) continue;
+            if (spraySignal.suggestedSizeUsdc > sprayBudgetRemaining) break;
+
             signals.push(spraySignal);
-            sprayMarketsThisTick++;
-            sprayFamilyEmitted.add(sprayKey);
-            sprayPositionsRemaining--;
+            emittedMeshPrices.add(spraySignal.suggestedPrice);
+            emittedProjectedExecutionPrices.add(dedupeExecutionPrice);
+            emittedForMarket++;
+            if (market.bookSource === "gamma-fallback") {
+              gammaFallbackDustSignalsProduced++;
+            }
             sprayBudgetRemaining -= spraySignal.suggestedSizeUsdc;
             openEntryOrderCountByCondition.set(
               conditionKey,
               (openEntryOrderCountByCondition.get(conditionKey) ?? 0) + 1,
             );
+          }
+          if (emittedForMarket > 0) {
+            sprayMarketsThisTick++;
+            sprayFamilyEmitted.add(sprayKey);
+            sprayPositionsRemaining--;
           }
         }
         // spray-first families never fall through to probe
@@ -863,9 +969,9 @@ export function scan(
     meta: {
       candidatesConsidered,
       blockedByResolutionBuffer,
-      blockedByWeekend,
       blockedByWindow,
       blockedByPerFamilyTickLimit,
+      gammaFallbackDustSignalsProduced,
       entrySignals,
       exitSignals: signals.length - entrySignals,
     },

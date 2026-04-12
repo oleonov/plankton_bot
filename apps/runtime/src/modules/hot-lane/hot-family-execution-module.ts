@@ -6,7 +6,7 @@ import type {
   RuntimeEventMap,
   RuntimeModule,
 } from "@plankton/domain";
-import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
+import { createCommandId, createTokenId, ENTRY_REASONS } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { applyOrderBookToMarket, CandidateBookCache } from "../strategy/candidate-book-cache.js";
 import {
@@ -15,6 +15,7 @@ import {
   planHotLaneOrderAction,
   shouldUseDustLane,
   shouldUseHotQuoteLane,
+  type HotLaneOrderState,
   type HotLanePolicy,
 } from "./hot-lane-policy.js";
 import { selectHotMarkets } from "./hot-market-selection.js";
@@ -36,6 +37,13 @@ export class HotFamilyExecutionModule implements RuntimeModule {
   private readonly pendingCancelOrderIds = new Set<string>();
   private readonly quickCancelCountByToken = new Map<string, number>();
   private readonly suppressedUntilByToken = new Map<string, number>();
+  private readonly stateByToken = new Map<string, HotLaneOrderState>();
+  private readonly pendingStateAfterCancelByToken = new Map<string, HotLaneOrderState>();
+  private readonly tokenKeyByOrderId = new Map<string, string>();
+  private readonly suppressionStateByToken = new Map<
+    string,
+    { referencePrice: number | null; backoffMs: number }
+  >();
   private readonly lastRepriceCancelAtByToken = new Map<string, number>();
   private readonly lastMaintenanceAtByOrderId = new Map<string, number>();
   private readonly queueBaselineByOrderId = new Map<
@@ -82,6 +90,9 @@ export class HotFamilyExecutionModule implements RuntimeModule {
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.pendingCancelOrderIds.clear();
+    this.pendingStateAfterCancelByToken.clear();
+    this.stateByToken.clear();
+    this.tokenKeyByOrderId.clear();
     this.queueBaselineByOrderId.clear();
     this.lastRepriceCancelAtByToken.clear();
     this.started = false;
@@ -109,16 +120,40 @@ export class HotFamilyExecutionModule implements RuntimeModule {
     const tokenKey = String(payload.tokenId);
     this.quickCancelCountByToken.delete(tokenKey);
     this.suppressedUntilByToken.delete(tokenKey);
+    this.suppressionStateByToken.delete(tokenKey);
     this.lastRepriceCancelAtByToken.delete(tokenKey);
     this.pendingCancelOrderIds.delete(String(payload.orderId));
+    this.pendingStateAfterCancelByToken.delete(tokenKey);
+    this.tokenKeyByOrderId.delete(String(payload.orderId));
     this.lastMaintenanceAtByOrderId.delete(String(payload.orderId));
     this.queueBaselineByOrderId.delete(String(payload.orderId));
   }
 
   private async handleCancel(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
-    this.pendingCancelOrderIds.delete(String(payload.orderId));
-    this.lastMaintenanceAtByOrderId.delete(String(payload.orderId));
-    this.queueBaselineByOrderId.delete(String(payload.orderId));
+    const orderIdKey = String(payload.orderId);
+    this.pendingCancelOrderIds.delete(orderIdKey);
+    const tokenKey = this.tokenKeyByOrderId.get(orderIdKey) ?? null;
+    this.tokenKeyByOrderId.delete(orderIdKey);
+    if (tokenKey == null) {
+      this.lastMaintenanceAtByOrderId.delete(orderIdKey);
+      this.queueBaselineByOrderId.delete(orderIdKey);
+      return;
+    }
+        const pendingState = this.pendingStateAfterCancelByToken.get(tokenKey) ?? null;
+        this.pendingStateAfterCancelByToken.delete(tokenKey);
+        if (pendingState != null) {
+          const market = this.marketCache.get(tokenKey) ?? null;
+          const tokenId = market?.tokenId ?? createTokenId(tokenKey);
+          await this.transitionState(
+            payload.familyId,
+            tokenId,
+            pendingState,
+            toHotLaneStateReason(payload.reason),
+            payload.timestamp,
+          );
+        }
+    this.lastMaintenanceAtByOrderId.delete(orderIdKey);
+    this.queueBaselineByOrderId.delete(orderIdKey);
   }
 
   private async handlePlaced(payload: RuntimeEventMap["OrderPlaced"]): Promise<void> {
@@ -129,6 +164,7 @@ export class HotFamilyExecutionModule implements RuntimeModule {
       return;
     }
     const orderIdKey = String(payload.orderId);
+    this.tokenKeyByOrderId.set(orderIdKey, String(payload.tokenId));
     this.lastMaintenanceAtByOrderId.set(orderIdKey, payload.timestamp);
     const cachedBook = this.deps.candidateBookCache.getFreshEntry(
       String(payload.tokenId),
@@ -140,6 +176,24 @@ export class HotFamilyExecutionModule implements RuntimeModule {
         captureQueueDepthBaseline(payload.side, cachedBook.book, payload.price),
       );
     }
+    const previousState = this.stateByToken.get(String(payload.tokenId)) ?? null;
+    if (previousState === "cooling" || previousState === "suppressed") {
+      await this.transitionState(
+        payload.familyId,
+        payload.tokenId,
+        "reactivated",
+        "order-placed",
+        payload.timestamp,
+        false,
+      );
+    }
+    await this.transitionState(
+      payload.familyId,
+      payload.tokenId,
+      "quote-active",
+      "order-placed",
+      payload.timestamp,
+    );
   }
 
   private async tick(): Promise<void> {
@@ -147,8 +201,10 @@ export class HotFamilyExecutionModule implements RuntimeModule {
     this.running = true;
     try {
       const nowMs = Date.now();
+      await this.reactivateExpiredSuppressions(nowMs);
       const hotMarkets = this.collectHotMarkets(nowMs);
       if (hotMarkets.length === 0) return;
+      const hotTokenKeys = new Set(hotMarkets.map((market) => String(market.tokenId)));
 
       const openOrders = this.deps.orderRepo.findOpen();
       const openOrderIds = new Set(openOrders.map((order) => String(order.orderId)));
@@ -176,6 +232,7 @@ export class HotFamilyExecutionModule implements RuntimeModule {
         }
 
         const tokenKey = String(order.tokenId);
+        if (!hotTokenKeys.has(tokenKey)) continue;
         const suppressedUntil = this.suppressedUntilByToken.get(tokenKey) ?? 0;
         if (suppressedUntil > nowMs) continue;
 
@@ -208,6 +265,12 @@ export class HotFamilyExecutionModule implements RuntimeModule {
         if (isRepriceCancelReason(action.reason)) {
           this.lastRepriceCancelAtByToken.set(tokenKey, nowMs);
         }
+        if (action.reason === "entry-reprice-cancel" || action.reason === "exit-reprice-cancel") {
+          await this.transitionState(order.familyId, order.tokenId, "needs-reprice", action.reason, nowMs);
+          this.pendingStateAfterCancelByToken.set(tokenKey, "cooling");
+        } else if (action.reason === "entry-ttl-cancel" || action.reason === "exit-ttl-cancel") {
+          this.pendingStateAfterCancelByToken.set(tokenKey, "cooling");
+        }
         if (action.reason === "entry-reprice-cancel" || action.reason === "entry-ttl-cancel") {
           this.quickCancelCountByToken.set(
             tokenKey,
@@ -215,7 +278,18 @@ export class HotFamilyExecutionModule implements RuntimeModule {
           );
         } else if (action.reason === "entry-suppress-cancel") {
           this.quickCancelCountByToken.set(tokenKey, 0);
-          this.suppressedUntilByToken.set(tokenKey, nowMs + 60_000);
+          const referencePrice = action.desiredPrice ?? market?.lastTradePrice ?? market?.midPrice ?? null;
+          const nextBackoffMs = resolveNextDustSuppressBackoffMs(
+            this.suppressionStateByToken.get(tokenKey) ?? null,
+            referencePrice,
+            market?.tickSize ?? null,
+          );
+          this.suppressionStateByToken.set(tokenKey, {
+            referencePrice,
+            backoffMs: nextBackoffMs,
+          });
+          this.suppressedUntilByToken.set(tokenKey, nowMs + nextBackoffMs);
+          await this.transitionState(order.familyId, order.tokenId, "suppressed", action.reason, nowMs);
         }
 
         await this.deps.bus.publish("HotLaneActionApplied", {
@@ -252,8 +326,94 @@ export class HotFamilyExecutionModule implements RuntimeModule {
       maxTokens: this.policy.maxTokensPerCycle,
     });
   }
+
+  private async reactivateExpiredSuppressions(nowMs: number): Promise<void> {
+    for (const [tokenKey, suppressedUntil] of [...this.suppressedUntilByToken.entries()]) {
+      if (suppressedUntil > nowMs) continue;
+      if (this.stateByToken.get(tokenKey) !== "suppressed") continue;
+      const market = this.marketCache.get(tokenKey);
+      if (!market?.familyId) continue;
+      await this.transitionState(
+        market.familyId,
+        market.tokenId,
+        "reactivated",
+        "suppression-expired",
+        nowMs,
+      );
+    }
+  }
+
+  private async transitionState(
+    familyId: import("@plankton/domain").FamilyId,
+    tokenId: import("@plankton/domain").TokenId,
+    nextState: HotLaneOrderState,
+    reason:
+      | "order-placed"
+      | "entry-reprice-cancel"
+      | "entry-ttl-cancel"
+      | "entry-suppress-cancel"
+      | "exit-reprice-cancel"
+      | "exit-ttl-cancel"
+      | "suppression-expired",
+    timestamp: number,
+    persistState = true,
+  ): Promise<void> {
+    const tokenKey = String(tokenId);
+    const previousState = this.stateByToken.get(tokenKey) ?? null;
+    if (previousState === nextState) return;
+    if (persistState) {
+      this.stateByToken.set(tokenKey, nextState);
+    }
+    await this.deps.bus.publish("HotLaneStateChanged", {
+      familyId,
+      tokenId,
+      previousState,
+      nextState,
+      reason,
+      timestamp,
+    });
+  }
+}
+
+export function resolveNextDustSuppressBackoffMs(
+  previous: { referencePrice: number | null; backoffMs: number } | null,
+  nextReferencePrice: number | null,
+  tickSize: number | null,
+): number {
+  if (!previous) return 3_000;
+  if (
+    previous.referencePrice == null ||
+    nextReferencePrice == null ||
+    tickSize == null ||
+    Math.abs(previous.referencePrice - nextReferencePrice) >= tickSize - 1e-9
+  ) {
+    return 1_000;
+  }
+  return Math.min(Math.max(3_000, previous.backoffMs * 2), 12_000);
 }
 
 function isRepriceCancelReason(reason: string): boolean {
   return reason === "entry-reprice-cancel" || reason === "exit-reprice-cancel";
+}
+
+function toHotLaneStateReason(
+  reason: string,
+):
+  | "entry-reprice-cancel"
+  | "entry-ttl-cancel"
+  | "entry-suppress-cancel"
+  | "exit-reprice-cancel"
+  | "exit-ttl-cancel"
+  | "order-placed"
+  | "suppression-expired" {
+  switch (reason) {
+    case "entry-reprice-cancel":
+    case "entry-ttl-cancel":
+    case "entry-suppress-cancel":
+    case "exit-reprice-cancel":
+    case "exit-ttl-cancel":
+      return reason;
+    default:
+      return "entry-ttl-cancel";
+  }
 }

@@ -39,7 +39,6 @@ families:
         enabled: true
         action: "trade"
         priority_rank: 10
-        allow_weekends: false
         session_mode: "active-window"
       entry:
         entry_mode: "probe-first"
@@ -82,7 +81,6 @@ families:
             end: "21:00"
         reduced_windows_utc: []
         weekday_bias: "normal"
-        weekend_mode: "reduced"
 `;
 
 function makeTwoFamilyYaml(secondId: string, secondKey: string): string {
@@ -113,7 +111,6 @@ function makeTwoFamilyYaml(secondId: string, secondKey: string): string {
         enabled: true
         action: "monitor"
         priority_rank: 20
-        allow_weekends: false
         session_mode: "active-window"
       entry:
         entry_mode: "probe-first"
@@ -154,7 +151,6 @@ function makeTwoFamilyYaml(secondId: string, secondKey: string): string {
         active_windows_utc: []
         reduced_windows_utc: []
         weekday_bias: "normal"
-        weekend_mode: "reduced"
 `
   );
 }

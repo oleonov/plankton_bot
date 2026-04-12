@@ -62,6 +62,7 @@ describe("loadFamilyRulesYaml", () => {
       maxEntrySignalsPerTickPerFamily: null,
       fastLaneEnabled: null,
       dustLaneEnabled: null,
+      queueJumpCanaryEnabled: null,
     });
     expect(family.rules.tailSuppression.maxOpenValueUsdc).toBe(75.0);
     expect(family.rules.session.activeWindowsUtc).toEqual([{ start: "14:00", end: "21:00" }]);
@@ -112,7 +113,6 @@ families:
         enabled: true
         action: "trade"
         priority_rank: 1
-        allow_weekends: false
         session_mode: "active-window"
       entry:
         entry_mode: "probe-first"
@@ -153,7 +153,6 @@ families:
           - start: "12:00"
             end: "14:00"
         weekday_bias: "normal"
-        weekend_mode: "reduced"
   - family_id: "test-b:generic:weekly"
     identity:
       family_key: "test-b"
@@ -178,7 +177,6 @@ families:
         enabled: true
         action: "monitor"
         priority_rank: 2
-        allow_weekends: true
         session_mode: "reduced"
       entry:
         entry_mode: "conviction-only"
@@ -217,7 +215,6 @@ families:
             end: "17:00"
         reduced_windows_utc: []
         weekday_bias: "required"
-        weekend_mode: "disabled"
 `;
     const filePath = writeTmpYaml("multi.yaml", content);
     try {
@@ -258,7 +255,6 @@ families:
         enabled: true
         action: "trade"
         priority_rank: 1
-        allow_weekends: false
         session_mode: "active-window"
       entry:
         entry_mode: "probe-first"
@@ -297,7 +293,6 @@ families:
             end: "21:00"
         reduced_windows_utc: []
         weekday_bias: "normal"
-        weekend_mode: "reduced"
 `;
     const filePath = writeTmpYaml("no-version.yaml", content);
     try {
@@ -348,7 +343,6 @@ rules:
     enabled: true
     action: "trade"
     priority_rank: 1
-    allow_weekends: false
     session_mode: "active-window"
   entry:
     entry_mode: "probe-first"
@@ -387,7 +381,6 @@ rules:
         end: "21:00"
     reduced_windows_utc: []
     weekday_bias: "normal"
-    weekend_mode: "reduced"
 `;
     const filePath = writeTmpYaml("invalid-schema.yaml", content);
     try {
@@ -432,7 +425,6 @@ rules:
           enabled: true
           action: "trade"
           priority_rank: 1
-          allow_weekends: false
           session_mode: "active-window"
         entry:
           entry_mode: "probe-first"
@@ -470,8 +462,7 @@ rules:
             - start: "14:00"
               end: "21:00"
           reduced_windows_utc: []
-          weekday_bias: "normal"
-          weekend_mode: "reduced"`;
+          weekday_bias: "normal"`;
 
   it("defaults global.initialBalanceUsdc to 10000 when global section is omitted", () => {
     const content = `version: 1\nfamilies:\n${MINIMAL_FAMILY_YAML}\n`;
@@ -479,6 +470,7 @@ rules:
     try {
       const result = loadFamilyRulesYaml(filePath);
       expect(result.global.initialBalanceUsdc).toBe(10_000);
+      expect(result.global.dustLaneMaxMarketsPerTick).toBe(100);
       expect(result.families).toHaveLength(1);
     } finally {
       cleanup();
@@ -491,6 +483,7 @@ rules:
     try {
       const result = loadFamilyRulesYaml(filePath);
       expect(result.global.initialBalanceUsdc).toBe(250);
+      expect(result.global.dustLaneMaxMarketsPerTick).toBe(100);
       expect(result.families).toHaveLength(1);
     } finally {
       cleanup();
@@ -525,7 +518,6 @@ rules:
     enabled: true
     action: "trade"
     priority_rank: 1
-    allow_weekends: false
     session_mode: "active-window"
   entry:
     entry_mode: "probe-first"
@@ -564,7 +556,6 @@ rules:
         end: "21:00"
     reduced_windows_utc: []
     weekday_bias: "normal"
-    weekend_mode: "reduced"
 `;
     const filePath = writeTmpYaml("single-with-global.yaml", content);
     try {

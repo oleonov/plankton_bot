@@ -81,7 +81,6 @@ function makeBundle(overrides?: {
         enabled: true,
         action: "trade",
         priorityRank: 1,
-        allowWeekends: true,
         sessionMode: "active-window",
       },
       entry: {
@@ -143,7 +142,6 @@ function makeBundle(overrides?: {
         activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "normal",
       },
     },
   };
@@ -398,6 +396,150 @@ describe("SignalToOrderBridge", () => {
     expect(placed[0]!.command.price).toBe(0.031);
   });
 
+  it("converts gamma-fallback dust spray entries without requiring a real CLOB book", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+              queueJumpCanaryEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+        getMinEntryNotionalUsdc: () => 1,
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; metadata?: Record<string, unknown> } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: null,
+          bestAsk: null,
+          midPrice: 0.021,
+          spread: null,
+          bookSource: "gamma-fallback",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedPrice: 0.021,
+        suggestedSizeUsdc: 1,
+        suggestedSize: 50,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.02);
+    expect((placed[0]!.command.metadata?.marketData as Record<string, unknown>)?.gammaFallbackDust).toBe(
+      true,
+    );
+  });
+
+  it("falls back to gamma-fallback dust when targeted book refresh fails", async () => {
+    const bus = new InProcessEventBus();
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => null),
+      getFreshOrRefresh: vi.fn(async () => ({ status: "refresh-failed", entry: null })),
+    } as unknown as CandidateBookCache;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      candidateBookCache,
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+            },
+            identity: {
+              familyKey: "ethereum-price",
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+        getMinEntryNotionalUsdc: () => 1,
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { metadata?: Record<string, unknown> } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          familyKey: "ethereum-price",
+          bestBid: null,
+          bestAsk: null,
+          midPrice: 0.021,
+          spread: null,
+          bookSource: "gamma-fallback",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        familyId: createFamilyId("ethereum-price:generic:daily"),
+        reason: "spray-entry",
+        suggestedPrice: 0.021,
+        suggestedSizeUsdc: 1,
+        suggestedSize: 50,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(candidateBookCache.getFreshOrRefresh).toHaveBeenCalledWith(String(TOKEN_ID), expect.any(Number));
+    expect(placed).toHaveLength(1);
+    expect((placed[0]!.command.metadata as Record<string, unknown>)?.cacheStatus).toBe(
+      "refresh-failed",
+    );
+    expect((placed[0]!.command.metadata?.marketData as Record<string, unknown>)?.gammaFallbackDust).toBe(
+      true,
+    );
+  });
+
   it("uses queue-jump execution terms for event-driven geopolitics dust canary", async () => {
     const bus = new InProcessEventBus();
     const bridge = new SignalToOrderBridge({
@@ -419,6 +561,7 @@ describe("SignalToOrderBridge", () => {
               maxProbeInFlightPerToken: 2,
               maxEntrySignalsPerTickPerFamily: 10,
               dustLaneEnabled: true,
+              queueJumpCanaryEnabled: true,
             },
           }),
         ),
@@ -467,6 +610,428 @@ describe("SignalToOrderBridge", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.04);
     expect(placed[0]!.command.postOnly).toBeUndefined();
+  });
+
+  it("uses queue-jump execution terms for recurring crypto dust canary", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              primaryCategory: "crypto-btc",
+              cadence: "daily-dated",
+              strategyProfile: "scalp",
+              requiresPostOnlyForLive: true,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+              queueJumpCanaryEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: 0.02,
+          bestAsk: 0.021,
+          midPrice: 0.0205,
+          spread: 0.001,
+          tickSize: 0.001,
+          bookSource: "clob",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(Date.now() - 30_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 7.5,
+        suggestedPrice: 0.02,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.021);
+    expect(placed[0]!.command.postOnly).toBeUndefined();
+  });
+
+  it("keeps non-canary dust families maker-only even when dust lane is enabled", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              primaryCategory: "crypto-btc",
+              cadence: "daily-dated",
+              strategyProfile: "scalp",
+              requiresPostOnlyForLive: true,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+              queueJumpCanaryEnabled: false,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: 0.02,
+          bestAsk: 0.021,
+          midPrice: 0.0205,
+          spread: 0.001,
+          tickSize: 0.001,
+          bookSource: "clob",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(Date.now() - 30_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 7.5,
+        suggestedPrice: 0.02,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.02);
+    expect(placed[0]!.command.postOnly).toBe(true);
+  });
+
+  it("allows queue-jump on ask-only books for explicit canary families", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              familyKey: "who-will-be-next-supreme-leader-of-iran",
+              primaryCategory: "geopolitics",
+              strategyProfile: "event-driven",
+              feeTier: "fee-free",
+              liveWalletRequirement: "eoa-ok",
+              requiresPostOnlyForLive: false,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+              queueJumpCanaryEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: null,
+          bestAsk: 0.04,
+          midPrice: 0.04,
+          spread: null,
+          tickSize: 0.01,
+          bookSource: "clob",
+          lastTradePrice: 0.04,
+          lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 3.75,
+        suggestedPrice: 0.04,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.postOnly).toBeUndefined();
+  });
+
+  it("keeps stale-trade canaries maker-only instead of queue-jumping", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              primaryCategory: "crypto-btc",
+              cadence: "daily-dated",
+              strategyProfile: "scalp",
+              requiresPostOnlyForLive: true,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+              queueJumpCanaryEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: 0.02,
+          bestAsk: 0.021,
+          midPrice: 0.0205,
+          spread: 0.001,
+          tickSize: 0.001,
+          bookSource: "clob",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(Date.now() - 10 * 60_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 7.5,
+        suggestedPrice: 0.02,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.02);
+    expect(placed[0]!.command.postOnly).toBe(true);
+  });
+
+  it("keeps gamma-fallback dust canaries maker-only instead of queue-jumping", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              primaryCategory: "crypto-btc",
+              cadence: "daily-dated",
+              strategyProfile: "scalp",
+              requiresPostOnlyForLive: true,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+              queueJumpCanaryEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: 0.02,
+          bestAsk: 0.021,
+          midPrice: 0.0205,
+          spread: 0.001,
+          tickSize: 0.001,
+          bookSource: "gamma-fallback",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(Date.now() - 30_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 7.5,
+        suggestedPrice: 0.02,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.02);
+    expect(placed[0]!.command.postOnly).toBe(true);
+  });
+
+  it("keeps slippage-breached canaries maker-only instead of queue-jumping", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              primaryCategory: "crypto-btc",
+              cadence: "daily-dated",
+              strategyProfile: "scalp",
+              requiresPostOnlyForLive: true,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+              queueJumpCanaryEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: 0.019,
+          bestAsk: 0.05,
+          midPrice: 0.0345,
+          spread: 0.031,
+          tickSize: 0.001,
+          bookSource: "clob",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(Date.now() - 30_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 7.5,
+        suggestedPrice: 0.02,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.02);
+    expect(placed[0]!.command.postOnly).toBe(true);
   });
 
   it("keeps token in cooldown when the book did not materially move", async () => {

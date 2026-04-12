@@ -27,7 +27,7 @@ function seedTestData(db: DbConnection["db"], opts?: { enabled?: number }) {
 
     INSERT INTO family_rules (
       family_id,
-      enabled, action, priority_rank, allow_weekends, session_mode,
+      enabled, action, priority_rank, session_mode,
       entry_mode, min_entry_price, max_entry_price, max_initial_notional_usdc,
       allow_high_price_one_shot, high_price_threshold,
       require_proven_family_above_price, preferred_entry_band,
@@ -46,10 +46,10 @@ function seedTestData(db: DbConnection["db"], opts?: { enabled?: number }) {
       tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio,
       stale_tail_prune_enabled, threshold_cleanup_required,
       auto_settle_resolved_markets,
-      active_windows_utc, reduced_windows_utc, weekday_bias, weekend_mode
+      active_windows_utc, reduced_windows_utc, weekday_bias
     ) VALUES (
       'fam-001',
-      1, 'trade', 10, 1, 'active-window',
+      1, 'trade', 10, 'active-window',
       'probe-first', 0.05, 0.85, 25,
       1, 0.20,
       0.15, 'low',
@@ -69,7 +69,7 @@ function seedTestData(db: DbConnection["db"], opts?: { enabled?: number }) {
       1,
       '[{"start":"08:00","end":"20:00"}]',
       '[{"start":"20:00","end":"23:00"}]',
-      'preferred', 'reduced'
+      'preferred'
     );
 
     INSERT INTO family_deployments (family_id, profile, enabled)
@@ -129,7 +129,6 @@ describe("DbFamilyRulesProvider", () => {
     expect(rules.universe.enabled).toBe(true);
     expect(rules.universe.action).toBe("trade");
     expect(rules.universe.priorityRank).toBe(10);
-    expect(rules.universe.allowWeekends).toBe(true);
     expect(rules.universe.sessionMode).toBe("active-window");
 
     // entry
@@ -176,6 +175,7 @@ describe("DbFamilyRulesProvider", () => {
       maxEntrySignalsPerTickPerFamily: 20,
       fastLaneEnabled: null,
       dustLaneEnabled: null,
+      queueJumpCanaryEnabled: null,
     });
 
     // tailSuppression
@@ -192,7 +192,6 @@ describe("DbFamilyRulesProvider", () => {
     expect(rules.session.activeWindowsUtc).toEqual([{ start: "08:00", end: "20:00" }]);
     expect(rules.session.reducedWindowsUtc).toEqual([{ start: "20:00", end: "23:00" }]);
     expect(rules.session.weekdayBias).toBe("preferred");
-    expect(rules.session.weekendMode).toBe("reduced");
 
     // evidence is omitted
     expect(bundle!.evidence).toBeUndefined();

@@ -82,4 +82,26 @@ describe("CandidateBookCache", () => {
     expect(cache.getFreshEntry("tok-a")).not.toBeNull();
     expect(cache.getFreshEntry("tok-b")).not.toBeNull();
   });
+
+  it("reports refresh attempts and failures through the observer hook", async () => {
+    const observed: string[] = [];
+    const cache = new CandidateBookCache({
+      gateway: {
+        getOrderBooks: vi.fn(async () => {
+          throw new Error("timeout");
+        }),
+      },
+      log: makeLogger(),
+      refreshBatchWindowMs: 1,
+      onRefreshObserved: (event) => {
+        observed.push(`${event.source}:${event.outcome}:${event.tokenCount}`);
+      },
+    });
+
+    const resolution = await cache.getFreshOrRefresh("tok-a");
+
+    expect(resolution.status).toBe("refresh-failed");
+    expect(observed).toContain("bridge-refresh:attempted:1");
+    expect(observed).toContain("bridge-refresh:refresh-failed:1");
+  });
 });

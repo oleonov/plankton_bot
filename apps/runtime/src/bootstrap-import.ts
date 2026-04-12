@@ -10,6 +10,63 @@ import {
 } from "@plankton/domain";
 import { ProfileId } from "@plankton/domain";
 
+const RULES_INSERT_COLUMNS = [
+  "family_id",
+  "enabled",
+  "action",
+  "priority_rank",
+  "session_mode",
+  "entry_mode",
+  "min_entry_price",
+  "max_entry_price",
+  "max_initial_notional_usdc",
+  "allow_high_price_one_shot",
+  "high_price_threshold",
+  "require_proven_family_above_price",
+  "preferred_entry_band",
+  "max_probe_count_per_market",
+  "entry_cooldown_seconds",
+  "max_new_markets_per_session",
+  "probe_size_usdc",
+  "add_size_usdc",
+  "scale_mode",
+  "default_max_buys_per_leg",
+  "heavy_max_buys_per_leg",
+  "allow_heavy_campaigns",
+  "require_positive_recycle_history_for_scale",
+  "exit_mode",
+  "primary_profit_model",
+  "allow_runner_extension",
+  "prefer_fast_recycle",
+  "resolution_holding_allowed",
+  "resolution_buffer_minutes",
+  "target_roi_band_low",
+  "target_roi_band_high",
+  "max_unmoved_hold_hours",
+  "max_tail_hold_hours",
+  "allow_two_sided",
+  "two_sided_mode",
+  "min_activity_for_two_sided",
+  "max_concurrent_orders_per_family",
+  "max_probe_in_flight_per_token",
+  "max_entry_signals_per_tick_per_family",
+  "fast_lane_enabled",
+  "dust_lane_enabled",
+  "queue_jump_canary_enabled",
+  "max_open_value_usdc",
+  "max_active_markets",
+  "max_dust_positions",
+  "tail_quarantine_threshold_usdc",
+  "tail_quarantine_threshold_ratio",
+  "stale_tail_prune_enabled",
+  "threshold_cleanup_required",
+  "auto_settle_resolved_markets",
+  "active_windows_utc",
+  "reduced_windows_utc",
+  "weekday_bias",
+  "updated_at",
+] as const;
+
 export function needsBootstrap(db: Database.Database): boolean {
   const row = db.prepare("SELECT COUNT(*) as cnt FROM family_catalog").get() as { cnt: number };
   return row.cnt === 0;
@@ -56,44 +113,9 @@ export function bootstrapImport(
 
     const insertRules = db.prepare(`
       INSERT INTO family_rules (
-        family_id,
-        enabled, action, priority_rank, allow_weekends, session_mode,
-        entry_mode, min_entry_price, max_entry_price, max_initial_notional_usdc,
-        allow_high_price_one_shot, high_price_threshold, require_proven_family_above_price,
-        preferred_entry_band, max_probe_count_per_market, entry_cooldown_seconds,
-        max_new_markets_per_session, probe_size_usdc, add_size_usdc,
-        scale_mode, default_max_buys_per_leg, heavy_max_buys_per_leg,
-        allow_heavy_campaigns, require_positive_recycle_history_for_scale,
-        exit_mode, primary_profit_model, allow_runner_extension, prefer_fast_recycle,
-        resolution_holding_allowed, resolution_buffer_minutes,
-        target_roi_band_low, target_roi_band_high, max_unmoved_hold_hours, max_tail_hold_hours,
-        allow_two_sided, two_sided_mode, min_activity_for_two_sided,
-        max_concurrent_orders_per_family, max_probe_in_flight_per_token,
-        max_entry_signals_per_tick_per_family, fast_lane_enabled, dust_lane_enabled,
-        max_open_value_usdc, max_active_markets, max_dust_positions,
-        tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio,
-        stale_tail_prune_enabled, threshold_cleanup_required, auto_settle_resolved_markets,
-        active_windows_utc, reduced_windows_utc, weekday_bias, weekend_mode,
-        updated_at
+        ${RULES_INSERT_COLUMNS.join(",\n        ")}
       ) VALUES (
-        ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?,
-        ?, ?, ?, ?,
-        ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?, ?,
-        ?, ?, ?,
-        ?, ?,
-        ?, ?, ?,
-        ?, ?, ?, ?,
-        ?
+        ${RULES_INSERT_COLUMNS.map(() => "?").join(", ")}
       )
     `);
 
@@ -214,12 +236,45 @@ function insertFamily(
     now,
   );
 
-  insertRules.run(
-    id.familyId,
+  insertRules.run(...bindRulesInsertParams(id.familyId, rules, now));
+
+  for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
+    const seed = resolveFamilyDeploymentSeed({
+      profile,
+      sourceType: "yaml_import",
+    });
+    insertDeployment.run(
+      id.familyId,
+      profile,
+      seed.enabled ? 1 : 0,
+      seed.deploymentStage,
+      now,
+      now,
+    );
+  }
+}
+
+function bindRulesInsertParams(
+  familyId: string,
+  rules: FamilyConfig["rules"],
+  now: string,
+): Array<string | number | null> {
+  const {
+    universe: u,
+    entry: e,
+    scaleIn: s,
+    exit: x,
+    twoSided: t,
+    throughput: th,
+    tailSuppression: ts,
+    session: ss,
+  } = rules;
+
+  return [
+    familyId,
     u.enabled ? 1 : 0,
     u.action,
     u.priorityRank,
-    u.allowWeekends ? 1 : 0,
     u.sessionMode,
     e.entryMode,
     e.minEntryPrice,
@@ -257,6 +312,7 @@ function insertFamily(
     th?.maxEntrySignalsPerTickPerFamily ?? null,
     th?.fastLaneEnabled == null ? null : th.fastLaneEnabled ? 1 : 0,
     th?.dustLaneEnabled == null ? null : th.dustLaneEnabled ? 1 : 0,
+    th?.queueJumpCanaryEnabled == null ? null : th.queueJumpCanaryEnabled ? 1 : 0,
     ts.maxOpenValueUsdc,
     ts.maxActiveMarkets,
     ts.maxDustPositions,
@@ -268,22 +324,6 @@ function insertFamily(
     JSON.stringify(ss.activeWindowsUtc),
     JSON.stringify(ss.reducedWindowsUtc),
     ss.weekdayBias,
-    ss.weekendMode,
     now,
-  );
-
-  for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
-    const seed = resolveFamilyDeploymentSeed({
-      profile,
-      sourceType: "yaml_import",
-    });
-    insertDeployment.run(
-      id.familyId,
-      profile,
-      seed.enabled ? 1 : 0,
-      seed.deploymentStage,
-      now,
-      now,
-    );
-  }
+  ];
 }

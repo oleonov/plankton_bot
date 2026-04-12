@@ -68,7 +68,6 @@ function makeBundle(overrides?: Partial<FamilyRuleBundle>): FamilyRuleBundle {
         enabled: true,
         action: "trade",
         priorityRank: 1,
-        allowWeekends: true,
         sessionMode: "active-window",
       },
       entry: {
@@ -130,7 +129,6 @@ function makeBundle(overrides?: Partial<FamilyRuleBundle>): FamilyRuleBundle {
         activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "normal",
       },
     },
   };
@@ -248,6 +246,41 @@ describe("marketability gate", () => {
 
     expect(decision.approved).toBe(false);
     expect(decision.rejectionReasons).toContain("gamma-fallback-no-real-book");
+  });
+
+  it("approves gamma fallback dust entries with fresh trade context", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal({
+        reason: "spray-entry",
+        suggestedPrice: 0.021,
+        suggestedSize: 7.5,
+        suggestedSizeUsdc: 0.15,
+      }),
+      market: makeMarket({
+        bestBid: null,
+        bestAsk: null,
+        midPrice: 0.021,
+        spread: null,
+        bookSource: "gamma-fallback",
+        lastTradePrice: 0.02,
+        lastTradeAt: new Date(NOW - 60_000).toISOString(),
+      }),
+      bundle: {
+        ...makeBundle(),
+        rules: {
+          ...makeBundle().rules,
+          entry: { ...makeBundle().rules.entry, entryMode: "spray-first" },
+          throughput: {
+            ...makeBundle().rules.throughput!,
+            dustLaneEnabled: true,
+          },
+        },
+      },
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("gamma-fallback-dust-ok");
   });
 
   it("rejects high-volume markets when spread is still above the hard tier cap", () => {
@@ -611,6 +644,49 @@ describe("marketability policy retuning", () => {
 
     expect(decision.approved).toBe(true);
     expect(decision.checksPassed).toContain("spread-wide-volume-qualified");
+  });
+
+  it("approves gamma-fallback dust entries when live-lite min entry notional raises dust size to $1", () => {
+    const bundle = makeBundle({
+      identity: {
+        ...makeBundle().identity,
+        familyKey: "ethereum-price",
+      },
+      rules: {
+        ...makeBundle().rules,
+        entry: { ...makeBundle().rules.entry, entryMode: "spray-first" },
+        throughput: {
+          maxConcurrentOrdersPerFamily: 10,
+          maxProbeInFlightPerToken: 2,
+          maxEntrySignalsPerTickPerFamily: 10,
+          fastLaneEnabled: true,
+          dustLaneEnabled: true,
+        },
+      },
+    });
+    const decision = evaluateMarketability({
+      signal: makeSignal({
+        reason: "spray-entry",
+        suggestedPrice: 0.02,
+        suggestedSizeUsdc: 1,
+      }),
+      market: makeMarket({
+        familyKey: "ethereum-price",
+        bestBid: null,
+        bestAsk: null,
+        midPrice: 0.021,
+        spread: null,
+        bookSource: "gamma-fallback",
+        lastTradePrice: 0.02,
+        lastTradeAt: new Date(NOW - 60_000).toISOString(),
+      }),
+      bundle,
+      nowMs: NOW,
+      executionMinNotionalUsdc: 1,
+    });
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("gamma-fallback-dust-ok");
   });
 
   it("does not promote reduced families to core just because throughput overrides are high", () => {

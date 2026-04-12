@@ -73,7 +73,7 @@ export class SqliteFamilyRulesDbRepository {
     this.db
       .prepare(
         `UPDATE family_rules SET
-           enabled = ?, action = ?, priority_rank = ?, allow_weekends = ?, session_mode = ?,
+           enabled = ?, action = ?, priority_rank = ?, session_mode = ?,
            entry_mode = ?, min_entry_price = ?, max_entry_price = ?,
            max_initial_notional_usdc = ?, allow_high_price_one_shot = ?,
            high_price_threshold = ?, require_proven_family_above_price = ?,
@@ -88,11 +88,12 @@ export class SqliteFamilyRulesDbRepository {
            allow_two_sided = ?, two_sided_mode = ?, min_activity_for_two_sided = ?,
            max_concurrent_orders_per_family = ?, max_probe_in_flight_per_token = ?,
            max_entry_signals_per_tick_per_family = ?, fast_lane_enabled = ?, dust_lane_enabled = ?,
+           queue_jump_canary_enabled = ?,
            max_open_value_usdc = ?, max_active_markets = ?, max_dust_positions = ?,
            tail_quarantine_threshold_usdc = ?, tail_quarantine_threshold_ratio = ?,
            stale_tail_prune_enabled = ?, threshold_cleanup_required = ?,
            active_windows_utc = ?, reduced_windows_utc = ?,
-           weekday_bias = ?, weekend_mode = ?,
+           weekday_bias = ?,
            updated_at = datetime('now')
          WHERE family_id = ?`,
       )
@@ -100,7 +101,6 @@ export class SqliteFamilyRulesDbRepository {
         rules.enabled ? 1 : 0,
         rules.action,
         rules.priorityRank,
-        rules.allowWeekends ? 1 : 0,
         rules.sessionMode,
         rules.entryMode,
         rules.minEntryPrice,
@@ -135,6 +135,7 @@ export class SqliteFamilyRulesDbRepository {
         rules.maxEntrySignalsPerTickPerFamily ?? null,
         rules.fastLaneEnabled == null ? null : rules.fastLaneEnabled ? 1 : 0,
         rules.dustLaneEnabled == null ? null : rules.dustLaneEnabled ? 1 : 0,
+        rules.queueJumpCanaryEnabled == null ? null : rules.queueJumpCanaryEnabled ? 1 : 0,
         rules.maxOpenValueUsdc,
         rules.maxActiveMarkets,
         rules.maxDustPositions,
@@ -145,7 +146,6 @@ export class SqliteFamilyRulesDbRepository {
         JSON.stringify(rules.activeWindowsUtc ?? []),
         JSON.stringify(rules.reducedWindowsUtc ?? []),
         rules.weekdayBias,
-        rules.weekendMode,
         familyId,
       );
   }
@@ -200,7 +200,6 @@ export class SqliteFamilyRulesDbRepository {
           enabled: Boolean(row.enabled),
           action: row.action as string,
           priorityRank: row.priority_rank as number,
-          allowWeekends: Boolean(row.allow_weekends),
           sessionMode: row.session_mode as string,
         },
         entry: {
@@ -254,6 +253,10 @@ export class SqliteFamilyRulesDbRepository {
             row["fast_lane_enabled"] == null ? null : Boolean(row["fast_lane_enabled"]),
           dustLaneEnabled:
             row["dust_lane_enabled"] == null ? null : Boolean(row["dust_lane_enabled"]),
+          queueJumpCanaryEnabled:
+            row["queue_jump_canary_enabled"] == null
+              ? null
+              : Boolean(row["queue_jump_canary_enabled"]),
         },
         tailSuppression: {
           maxOpenValueUsdc: row.max_open_value_usdc as number,
@@ -269,7 +272,6 @@ export class SqliteFamilyRulesDbRepository {
           activeWindowsUtc: JSON.parse((row.active_windows_utc as string) || "[]") as string[],
           reducedWindowsUtc: JSON.parse((row.reduced_windows_utc as string) || "[]") as string[],
           weekdayBias: row.weekday_bias as string,
-          weekendMode: row.weekend_mode as string,
         },
       },
     };

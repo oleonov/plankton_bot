@@ -123,7 +123,6 @@ function buildRulesExport(r: Record<string, unknown> | undefined): Record<string
       enabled: !!r["enabled"],
       action: r["action"],
       priority_rank: r["priority_rank"],
-      allow_weekends: !!r["allow_weekends"],
       session_mode: r["session_mode"],
     },
     entry: {
@@ -186,7 +185,6 @@ function buildRulesExport(r: Record<string, unknown> | undefined): Record<string
       active_windows_utc: safeJsonParse(r["active_windows_utc"]),
       reduced_windows_utc: safeJsonParse(r["reduced_windows_utc"]),
       weekday_bias: r["weekday_bias"],
-      weekend_mode: r["weekend_mode"],
     },
   };
 }

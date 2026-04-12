@@ -100,6 +100,7 @@ import { HotQuoteBusModule } from "./modules/hot-lane/hot-quote-bus-module.js";
 import { FastExitCleanupModule } from "./modules/hot-lane/fast-exit-cleanup-module.js";
 import { HotMarketDataModule } from "./modules/hot-lane/hot-market-data-module.js";
 import { evaluateConfigDrift } from "./config-drift-monitor.js";
+import type { CandidateBookRefreshObserved } from "./modules/strategy/candidate-book-cache.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -642,10 +643,27 @@ async function main(): Promise<void> {
   });
 
   // 7h. Strategy module
+  const candidateBookRefreshWindow = {
+    attempts: 0,
+    timeouts: 0,
+    lastReset: Date.now(),
+  };
+  const handleCandidateBookRefreshObserved = (event: CandidateBookRefreshObserved): void => {
+    if (event.outcome === "attempted") {
+      candidateBookRefreshWindow.attempts += event.tokenCount;
+    }
+    if (
+      event.outcome === "refresh-budget-exhausted" ||
+      event.outcome === "refresh-failed"
+    ) {
+      candidateBookRefreshWindow.timeouts += event.tokenCount;
+    }
+  };
   const candidateBookCache = marketDataGateway.getOrderBooks
     ? new CandidateBookCache({
         gateway: { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) },
         log: log.child({ module: "candidate-book-cache" }),
+        onRefreshObserved: handleCandidateBookRefreshObserved,
       })
     : undefined;
   const strategyModule = new StrategyModule({
@@ -1051,11 +1069,15 @@ async function main(): Promise<void> {
     cooldownBypassByReason: new Map<string, number>(),
     hotQuoteRefreshes: 0,
     hotLaneActionsByType: new Map<string, number>(),
+    hotLaneStatesByState: new Map<string, number>(),
     queueJumpAccepted: 0,
     queueJumpFills: 0,
+    gammaFallbackDustOrders: 0,
+    gammaFallbackDustFills: 0,
     lastReset: Date.now(),
   };
   const entryOrderPlacedAtMsByOrderId = new Map<string, number>();
+  const gammaFallbackDustClientOrderIds = new Set<string>();
 
   bus.subscribe("SignalProduced", async () => {
     signalWindow.produced++;
@@ -1099,6 +1121,23 @@ async function main(): Promise<void> {
     if (ENTRY_REASONS.has(command.signalReason ?? "")) {
       conversionWindow.converted++;
     }
+    const cacheStatus = command.metadata?.["cacheStatus"];
+    if (typeof cacheStatus === "string" && cacheStatus.length > 0) {
+      conversionWindow.cacheStatusByStatus.set(
+        cacheStatus,
+        (conversionWindow.cacheStatusByStatus.get(cacheStatus) ?? 0) + 1,
+      );
+    }
+    const marketData =
+      command.metadata?.["marketData"] &&
+      typeof command.metadata["marketData"] === "object" &&
+      command.metadata["marketData"] != null
+        ? (command.metadata["marketData"] as Record<string, unknown>)
+        : null;
+    if (marketData?.["gammaFallbackDust"] === true) {
+      conversionWindow.gammaFallbackDustOrders++;
+      gammaFallbackDustClientOrderIds.add(String(command.clientOrderId));
+    }
   });
 
   bus.subscribe("OrderPlaced", async ({ signalReason }) => {
@@ -1133,6 +1172,11 @@ async function main(): Promise<void> {
     if (ENTRY_REASONS.has(signalReason ?? "")) {
       conversionWindow.fills++;
     }
+  });
+
+  bus.subscribe("FillReceived", async ({ clientOrderId }) => {
+    if (!gammaFallbackDustClientOrderIds.has(String(clientOrderId))) return;
+    conversionWindow.gammaFallbackDustFills++;
   });
 
   bus.subscribe("FillReceived", async ({ orderId, signalReason }) => {
@@ -1175,22 +1219,31 @@ async function main(): Promise<void> {
     );
   });
 
+  bus.subscribe("HotLaneStateChanged", async ({ nextState }) => {
+    conversionWindow.hotLaneStatesByState.set(
+      nextState,
+      (conversionWindow.hotLaneStatesByState.get(nextState) ?? 0) + 1,
+    );
+  });
+
   // Scanner-layer metrics
   const scannerWindow = {
     candidatesConsidered: 0,
     blockedByResolutionBuffer: 0,
-    blockedByWeekend: 0,
     blockedByWindow: 0,
     blockedByPerFamilyTickLimit: 0,
+    gammaFallbackDustSignalsProduced: 0,
+    scanPrimeSkippedByPolicy: 0,
     lastReset: Date.now(),
   };
 
   bus.subscribe("ScanTickCompleted", async (ev) => {
     scannerWindow.candidatesConsidered += ev.candidatesConsidered;
     scannerWindow.blockedByResolutionBuffer += ev.blockedByResolutionBuffer;
-    scannerWindow.blockedByWeekend += ev.blockedByWeekend;
     scannerWindow.blockedByWindow += ev.blockedByWindow;
     scannerWindow.blockedByPerFamilyTickLimit += ev.blockedByPerFamilyTickLimit;
+    scannerWindow.gammaFallbackDustSignalsProduced += ev.gammaFallbackDustSignalsProduced;
+    scannerWindow.scanPrimeSkippedByPolicy += ev.scanPrimeSkippedByPolicy;
   });
 
   const deleteScanner = ledgerConn.db.prepare(
@@ -1239,8 +1292,15 @@ async function main(): Promise<void> {
       conversionWindow.cooldownBypassByReason.clear();
       conversionWindow.hotQuoteRefreshes = 0;
       conversionWindow.hotLaneActionsByType.clear();
+      conversionWindow.hotLaneStatesByState.clear();
       conversionWindow.queueJumpAccepted = 0;
       conversionWindow.queueJumpFills = 0;
+      conversionWindow.gammaFallbackDustOrders = 0;
+      conversionWindow.gammaFallbackDustFills = 0;
+      gammaFallbackDustClientOrderIds.clear();
+      candidateBookRefreshWindow.attempts = 0;
+      candidateBookRefreshWindow.timeouts = 0;
+      candidateBookRefreshWindow.lastReset = now;
       conversionWindow.lastReset = now;
     }
     pruneEntryFillLatencyTracker(entryOrderPlacedAtMsByOrderId, now);
@@ -1269,8 +1329,13 @@ async function main(): Promise<void> {
         cooldownBypassByReason: Object.fromEntries(conversionWindow.cooldownBypassByReason),
         hotQuoteRefreshes: conversionWindow.hotQuoteRefreshes,
         hotLaneActionsByType: Object.fromEntries(conversionWindow.hotLaneActionsByType),
+        hotLaneStatesByState: Object.fromEntries(conversionWindow.hotLaneStatesByState),
         queueJumpAccepted: conversionWindow.queueJumpAccepted,
         queueJumpFills: conversionWindow.queueJumpFills,
+        gammaFallbackDustOrders: conversionWindow.gammaFallbackDustOrders,
+        gammaFallbackDustFills: conversionWindow.gammaFallbackDustFills,
+        candidateBookRefreshAttempts: candidateBookRefreshWindow.attempts,
+        candidateBookRefreshTimeouts: candidateBookRefreshWindow.timeouts,
         windowStartMs: conversionWindow.lastReset,
       }),
       new Date().toISOString(),
@@ -1319,9 +1384,10 @@ async function main(): Promise<void> {
     if (now - scannerWindow.lastReset > SIGNAL_WINDOW_MS) {
       scannerWindow.candidatesConsidered = 0;
       scannerWindow.blockedByResolutionBuffer = 0;
-      scannerWindow.blockedByWeekend = 0;
       scannerWindow.blockedByWindow = 0;
       scannerWindow.blockedByPerFamilyTickLimit = 0;
+      scannerWindow.gammaFallbackDustSignalsProduced = 0;
+      scannerWindow.scanPrimeSkippedByPolicy = 0;
       scannerWindow.lastReset = now;
     }
     deleteScanner.run();
@@ -1329,9 +1395,10 @@ async function main(): Promise<void> {
       JSON.stringify({
         candidatesConsidered: scannerWindow.candidatesConsidered,
         blockedByResolutionBuffer: scannerWindow.blockedByResolutionBuffer,
-        blockedByWeekend: scannerWindow.blockedByWeekend,
         blockedByWindow: scannerWindow.blockedByWindow,
         blockedByPerFamilyTickLimit: scannerWindow.blockedByPerFamilyTickLimit,
+        gammaFallbackDustSignalsProduced: scannerWindow.gammaFallbackDustSignalsProduced,
+        scanPrimeSkippedByPolicy: scannerWindow.scanPrimeSkippedByPolicy,
       }),
       new Date().toISOString(),
     );

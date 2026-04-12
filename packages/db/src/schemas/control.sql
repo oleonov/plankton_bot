@@ -73,7 +73,6 @@ CREATE TABLE IF NOT EXISTS family_rules (
   enabled                                  INTEGER NOT NULL DEFAULT 0,
   action                                   TEXT NOT NULL DEFAULT 'blocked',
   priority_rank                            INTEGER NOT NULL DEFAULT 999,
-  allow_weekends                           INTEGER NOT NULL DEFAULT 0,
   session_mode                             TEXT NOT NULL DEFAULT 'active-window',
 
   -- entry
@@ -121,6 +120,7 @@ CREATE TABLE IF NOT EXISTS family_rules (
   max_entry_signals_per_tick_per_family    INTEGER,
   fast_lane_enabled                        INTEGER,
   dust_lane_enabled                        INTEGER,
+  queue_jump_canary_enabled                INTEGER,
 
   -- tail_suppression
   max_open_value_usdc                      REAL NOT NULL DEFAULT 50,
@@ -136,7 +136,6 @@ CREATE TABLE IF NOT EXISTS family_rules (
   active_windows_utc                       TEXT NOT NULL DEFAULT '[]',
   reduced_windows_utc                      TEXT NOT NULL DEFAULT '[]',
   weekday_bias                             TEXT NOT NULL DEFAULT 'normal',
-  weekend_mode                             TEXT NOT NULL DEFAULT 'reduced',
 
   updated_at                               TEXT NOT NULL DEFAULT (datetime('now'))
 );

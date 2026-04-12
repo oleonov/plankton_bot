@@ -29,7 +29,7 @@ function seedFamily(db: Database.Database, familyId: string): void {
 
   db.prepare(
     `INSERT INTO family_rules
-       (family_id, enabled, action, priority_rank, allow_weekends, session_mode,
+       (family_id, enabled, action, priority_rank, session_mode,
         entry_mode, min_entry_price, max_entry_price, max_initial_notional_usdc,
         allow_high_price_one_shot, high_price_threshold, require_proven_family_above_price,
         scale_mode, default_max_buys_per_leg, heavy_max_buys_per_leg,
@@ -40,8 +40,8 @@ function seedFamily(db: Database.Database, familyId: string): void {
         max_open_value_usdc, max_active_markets, max_dust_positions,
         tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio,
         stale_tail_prune_enabled, threshold_cleanup_required,
-        active_windows_utc, reduced_windows_utc, weekday_bias, weekend_mode)
-     VALUES (?, 1, 'trade', 1, 0, 'active-window',
+        active_windows_utc, reduced_windows_utc, weekday_bias)
+     VALUES (?, 1, 'trade', 1, 'active-window',
              'probe-first', 0.05, 0.50, 10,
              0, 0.20, 0.20,
              'confirm-only', 3, 6,
@@ -52,7 +52,7 @@ function seedFamily(db: Database.Database, familyId: string): void {
              50, 5, 3,
              50, 1.0,
              0, 0,
-             '[{"start":"14:00","end":"22:00"}]', '[]', 'normal', 'reduced')`,
+             '[{"start":"14:00","end":"22:00"}]', '[]', 'normal')`,
   ).run(familyId);
 }
 
@@ -106,7 +106,6 @@ describe("SqliteFamilyRulesDbRepository", () => {
     // Rules - session (JSON parsed)
     expect(cfg.rules.session.activeWindowsUtc).toHaveLength(1);
     expect(cfg.rules.session.activeWindowsUtc[0]).toEqual({ start: "14:00", end: "22:00" });
-    expect(cfg.rules.session.weekendMode).toBe("reduced");
   });
 
   it("loadAll returns multiple families", () => {
@@ -126,7 +125,6 @@ describe("SqliteFamilyRulesDbRepository", () => {
         enabled: false,
         action: "blocked",
         priorityRank: 999,
-        allowWeekends: false,
         sessionMode: "active-window",
         entryMode: "disabled",
         minEntryPrice: 0,
@@ -160,7 +158,6 @@ describe("SqliteFamilyRulesDbRepository", () => {
         activeWindowsUtc: [],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "disabled",
       }),
     );
 
@@ -175,9 +172,9 @@ describe("SqliteFamilyRulesDbRepository", () => {
       maxEntrySignalsPerTickPerFamily: 10,
       fastLaneEnabled: null,
       dustLaneEnabled: null,
+      queueJumpCanaryEnabled: null,
     });
     expect(cfg.rules.tailSuppression.maxOpenValueUsdc).toBe(25);
-    expect(cfg.rules.session.weekendMode).toBe("disabled");
   });
 });
 

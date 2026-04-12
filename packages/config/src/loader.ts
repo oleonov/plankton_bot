@@ -123,6 +123,7 @@ export function parseFamilyRulesYaml(content: string, source = "input"): LoadedF
         initialBalanceUsdc: 10_000,
         spraySizeUsdc: 0.15,
         sprayMaxMarketsPerTick: 10,
+        dustLaneMaxMarketsPerTick: 100,
         sprayCooldownSeconds: 5,
         sprayBudgetUsdc: 50,
         sprayMaxTotalPositions: 30,

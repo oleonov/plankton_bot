@@ -213,7 +213,8 @@ export class StrategyModule implements RuntimeModule {
         return;
       }
 
-      const scanMarkets = await this.prepareMarketsForScan(filteredMarkets);
+      const { markets: scanMarkets, scanPrimeSkippedByPolicy } =
+        await this.prepareMarketsForScan(filteredMarkets);
 
       const { signals, meta: scanMeta } = scan(
         scanMarkets,
@@ -249,6 +250,7 @@ export class StrategyModule implements RuntimeModule {
       // Publish scanner metadata every tick (even when no signals) for trading state computation
       await this.deps.bus.publish("ScanTickCompleted", {
         ...scanMeta,
+        scanPrimeSkippedByPolicy,
         signalsProduced: filteredSignals.length,
         timestamp: tickTs,
       });
@@ -275,8 +277,10 @@ export class StrategyModule implements RuntimeModule {
 
   private async prepareMarketsForScan(
     markets: readonly NormalizedMarket[],
-  ): Promise<readonly NormalizedMarket[]> {
-    if (!this.candidateBookCache) return markets;
+  ): Promise<{ readonly markets: readonly NormalizedMarket[]; readonly scanPrimeSkippedByPolicy: number }> {
+    if (!this.candidateBookCache) {
+      return { markets, scanPrimeSkippedByPolicy: 0 };
+    }
 
     const conditionKeys = new Set<string>();
     for (const market of markets) {
@@ -287,7 +291,7 @@ export class StrategyModule implements RuntimeModule {
       conditionKeys.add(`${market.familyId}|${market.conditionId}`);
     }
 
-    if (conditionKeys.size === 0) return markets;
+    if (conditionKeys.size === 0) return { markets, scanPrimeSkippedByPolicy: 0 };
 
     const tokenIds = markets
       .filter(
@@ -295,36 +299,37 @@ export class StrategyModule implements RuntimeModule {
           market.familyId && conditionKeys.has(`${market.familyId}|${market.conditionId}`),
       )
       .map((market) => String(market.tokenId));
-    if (tokenIds.length === 0) return markets;
+    if (tokenIds.length === 0) return { markets, scanPrimeSkippedByPolicy: 0 };
 
     try {
       const uniqueTokenIds = [...new Set(tokenIds)];
       const nowMs = Date.now();
       const cachedEntries = new Map<string, ReturnType<CandidateBookCache["getFreshEntry"]>>();
-      const staleTokenIds: string[] = [];
+      let scanPrimeSkippedByPolicy = 0;
       for (const tokenId of uniqueTokenIds) {
         const entry = this.candidateBookCache.getFreshEntry(tokenId, nowMs);
         if (entry) {
           cachedEntries.set(tokenId, entry);
         } else {
-          staleTokenIds.push(tokenId);
+          scanPrimeSkippedByPolicy++;
         }
       }
 
-      const refreshedEntries =
-        staleTokenIds.length > 0 ? await this.candidateBookCache.prime(staleTokenIds) : new Map();
-      if (cachedEntries.size === 0 && refreshedEntries.size === 0) return markets;
-      return markets.map((market) => {
-        const entry =
-          cachedEntries.get(String(market.tokenId)) ??
-          refreshedEntries.get(String(market.tokenId)) ??
-          null;
-        if (!entry) return market;
-        return applyOrderBookToMarket(market, entry);
-      });
+      if (cachedEntries.size === 0) {
+        return { markets, scanPrimeSkippedByPolicy };
+      }
+      return {
+        scanPrimeSkippedByPolicy,
+        markets: markets.map((market) => {
+          const entry =
+            cachedEntries.get(String(market.tokenId)) ?? null;
+          if (!entry) return market;
+          return applyOrderBookToMarket(market, entry);
+        }),
+      };
     } catch (err) {
       this.log.warn({ err, tokenCount: tokenIds.length }, "candidate book enrichment failed");
-      return markets;
+      return { markets, scanPrimeSkippedByPolicy: 0 };
     }
   }
 

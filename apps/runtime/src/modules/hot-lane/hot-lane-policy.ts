@@ -6,14 +6,20 @@ import type {
   Signal,
 } from "@plankton/domain";
 import {
-  hasFreshTradeActivity,
   resolveMakerOnlyPrice,
   resolveMarketabilityPolicy,
 } from "../strategy/marketability.js";
-import { isDustLaneEnabled, isHotQuoteFamily } from "../../family-throughput.js";
+import {
+  isDustLaneEnabled,
+  isHotQuoteFamily,
+  isQueueJumpCanaryEnabled,
+} from "../../family-throughput.js";
+import {
+  hasFreshTradeActivity,
+  resolveDustSizeCapUsdc,
+} from "../strategy/book-quality-policy.js";
 
 const EPSILON = 1e-9;
-const DUST_MAX_SIZE_USDC = 0.25;
 const DEFAULT_DUST_ENTRY_TTL_MS = 15_000;
 const DEFAULT_DUST_EXIT_TTL_MS = 20_000;
 const DEFAULT_DUST_ENTRY_REPRICE_INTERVAL_MS = 5_000;
@@ -60,6 +66,13 @@ export interface QueueDepthBaseline {
   readonly visibleAheadSize: number | null;
 }
 
+export type HotLaneOrderState =
+  | "quote-active"
+  | "needs-reprice"
+  | "cooling"
+  | "suppressed"
+  | "reactivated";
+
 export const DEFAULT_HOT_LANE_POLICY: HotLanePolicy = {
   hotQuoteRefreshIntervalMs: 1_000,
   maxTokensPerCycle: 80,
@@ -82,6 +95,23 @@ export function shouldUseHotQuoteLane(bundle: FamilyRuleBundle | null | undefine
   return isHotQuoteFamily(bundle);
 }
 
+export function resolveDustExitSignalIntervalMs(
+  bundle: FamilyRuleBundle,
+  policy: Pick<HotLanePolicy, "hotQuoteRefreshIntervalMs"> = DEFAULT_HOT_LANE_POLICY,
+): number {
+  if (bundle.identity.strategyProfile === "event-driven") {
+    return Math.max(1_000, policy.hotQuoteRefreshIntervalMs);
+  }
+  if (
+    bundle.identity.cadence === "daily-dated" ||
+    bundle.identity.cadence === "intraday-4h" ||
+    bundle.rules.tailSuppression.thresholdCleanupRequired
+  ) {
+    return Math.max(1_500, policy.hotQuoteRefreshIntervalMs);
+  }
+  return Math.max(2_000, policy.hotQuoteRefreshIntervalMs);
+}
+
 export function isDustSignalReason(signalReason: string | null | undefined): boolean {
   return signalReason === "spray-entry";
 }
@@ -94,20 +124,20 @@ export function isQueueJumpEligible(opts: {
   readonly signal: Pick<Signal, "side" | "reason" | "suggestedSizeUsdc">;
   readonly market: Pick<
     NormalizedMarket,
-    "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice" | "tickSize"
+    "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice" | "tickSize" | "bookSource"
   >;
   readonly bundle: FamilyRuleBundle;
   readonly nowMs: number;
   readonly maxSlippageCents?: number;
+  readonly executionMinNotionalUsdc?: number | null;
 }): boolean {
   const { signal, market, bundle, nowMs } = opts;
   if (signal.side !== "buy" || signal.reason !== "spray-entry") return false;
-  if (signal.suggestedSizeUsdc > DUST_MAX_SIZE_USDC + EPSILON) return false;
-  if (!shouldUseDustLane(bundle)) return false;
-  if (bundle.identity.strategyProfile !== "event-driven") return false;
-  if (bundle.identity.primaryCategory !== "geopolitics") return false;
-  if (market.bestAsk == null || market.bestBid == null || market.lastTradePrice == null)
-    return false;
+  const dustSizeCapUsdc = resolveDustSizeCapUsdc(opts.executionMinNotionalUsdc ?? null);
+  if (signal.suggestedSizeUsdc > dustSizeCapUsdc + EPSILON) return false;
+  if (!isQueueJumpFamilyEligible(bundle)) return false;
+  if (market.bestAsk == null || market.lastTradePrice == null) return false;
+  if (market.bookSource === "gamma-fallback") return false;
   if (!hasFreshTradeActivity(market.lastTradeAt, nowMs)) return false;
 
   const maxSlippageCents = opts.maxSlippageCents ?? DEFAULT_QUEUE_JUMP_SLIPPAGE_CAP;
@@ -118,17 +148,37 @@ export function resolveQueueJumpExecutionTerms(opts: {
   readonly signal: Pick<Signal, "side" | "reason" | "suggestedSizeUsdc">;
   readonly market: Pick<
     NormalizedMarket,
-    "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice" | "tickSize"
+    "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice" | "tickSize" | "bookSource"
   >;
   readonly bundle: FamilyRuleBundle;
   readonly nowMs: number;
   readonly maxSlippageCents?: number;
+  readonly executionMinNotionalUsdc?: number | null;
 }): QueueJumpExecutionTerms | null {
   if (!isQueueJumpEligible(opts)) return null;
   return {
     price: opts.market.bestAsk!,
     postOnly: false,
   };
+}
+
+function isQueueJumpFamilyEligible(bundle: FamilyRuleBundle): boolean {
+  if (!shouldUseDustLane(bundle)) return false;
+  if (!isQueueJumpCanaryEnabled(bundle)) return false;
+  if (
+    bundle.identity.strategyProfile === "event-driven" &&
+    bundle.identity.primaryCategory === "geopolitics"
+  ) {
+    return true;
+  }
+
+  const cadence = bundle.identity.cadence;
+  const recurringCadence = cadence === "daily-dated" || cadence === "intraday-4h";
+  if (!recurringCadence) return false;
+
+  const evidenceScore = bundle.evidence?.evidenceScore ?? 0;
+  const localTradeCount = bundle.evidence?.localTradeCount ?? 0;
+  return evidenceScore >= 80 && localTradeCount >= 10;
 }
 
 export function planHotLaneOrderAction(opts: {

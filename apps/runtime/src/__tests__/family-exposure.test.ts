@@ -81,7 +81,6 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
         enabled: true,
         action: "trade",
         priorityRank: 1,
-        allowWeekends: false,
         sessionMode: "active-window",
       },
       entry: {
@@ -128,7 +127,6 @@ function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBund
         activeWindowsUtc: [],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "normal",
       },
     } as FamilyRules,
   };

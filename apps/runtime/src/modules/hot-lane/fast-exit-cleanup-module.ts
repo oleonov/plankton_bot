@@ -12,6 +12,7 @@ import { createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { applyOrderBookToMarket, CandidateBookCache } from "../strategy/candidate-book-cache.js";
 import {
+  resolveDustExitSignalIntervalMs,
   shouldUseDustLane,
   shouldUseHotQuoteLane,
   type HotLanePolicy,
@@ -28,7 +29,7 @@ export interface FastExitCleanupModuleDeps {
   readonly policy?: Partial<HotLanePolicy>;
 }
 
-const DEFAULT_EXIT_SIGNAL_INTERVAL_MS = 2_000;
+const DEFAULT_EXIT_TICK_FLOOR_MS = 2_000;
 
 export class FastExitCleanupModule implements RuntimeModule {
   private readonly log: Logger;
@@ -60,7 +61,7 @@ export class FastExitCleanupModule implements RuntimeModule {
       },
       Math.max(
         500,
-        Math.min(this.policy.hotQuoteRefreshIntervalMs, DEFAULT_EXIT_SIGNAL_INTERVAL_MS),
+        Math.min(this.policy.hotQuoteRefreshIntervalMs, DEFAULT_EXIT_TICK_FLOOR_MS),
       ),
     );
     this.started = true;
@@ -114,18 +115,15 @@ export class FastExitCleanupModule implements RuntimeModule {
         if (position.entryStyle !== "spray") continue;
         const tokenKey = String(position.tokenId);
         if (openSellTokens.has(tokenKey)) continue;
-        if (
-          (this.lastExitSignalAtByToken.get(tokenKey) ?? 0) + DEFAULT_EXIT_SIGNAL_INTERVAL_MS >
-          nowMs
-        ) {
-          continue;
-        }
-
         const market = this.resolveMarket(tokenKey, nowMs);
         if (!market || !market.familyId) continue;
         const bundle = this.deps.rulesProvider.getRule(market.familyId);
         if (!bundle || !shouldUseHotQuoteLane(bundle) || !shouldUseDustLane(bundle)) continue;
         if (bundle.rules.universe.action !== "trade") continue;
+        const exitSignalIntervalMs = resolveDustExitSignalIntervalMs(bundle, this.policy);
+        if ((this.lastExitSignalAtByToken.get(tokenKey) ?? 0) + exitSignalIntervalMs > nowMs) {
+          continue;
+        }
 
         const suggestedPrice = market.lastTradePrice ?? market.midPrice ?? market.bestBid ?? null;
         if (suggestedPrice == null || suggestedPrice <= 0) continue;

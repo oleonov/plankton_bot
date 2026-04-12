@@ -51,8 +51,6 @@ const twoSidedModeSchema = z.enum(["disabled", "selective", "active"]);
 
 const weekdayBiasSchema = z.enum(["normal", "preferred", "required"]);
 
-const weekendModeSchema = z.enum(["normal", "reduced", "disabled"]);
-
 const runtimeModeSchema = z.enum(["active", "probe-only", "reduce-only", "quarantine"]);
 
 // ─── Sub-schemas (snake_case YAML input) ────────────────────────────────────
@@ -103,7 +101,6 @@ const universeYamlSchema = z.object({
   enabled: z.boolean(),
   action: actionSchema,
   priority_rank: z.number().int(),
-  allow_weekends: z.boolean(),
   session_mode: sessionModeSchema,
 });
 
@@ -163,6 +160,7 @@ const throughputYamlSchema = z.object({
     .default(null),
   fast_lane_enabled: z.boolean().nullable().optional().default(null),
   dust_lane_enabled: z.boolean().nullable().optional().default(null),
+  queue_jump_canary_enabled: z.boolean().nullable().optional().default(null),
 });
 
 const tailSuppressionYamlSchema = z.object({
@@ -180,7 +178,6 @@ const sessionYamlSchema = z.object({
   active_windows_utc: z.array(timeWindowSchema),
   reduced_windows_utc: z.array(timeWindowSchema),
   weekday_bias: weekdayBiasSchema,
-  weekend_mode: weekendModeSchema,
 });
 
 export const rulesYamlSchema = z.object({
@@ -195,6 +192,7 @@ export const rulesYamlSchema = z.object({
     max_entry_signals_per_tick_per_family: null,
     fast_lane_enabled: null,
     dust_lane_enabled: null,
+    queue_jump_canary_enabled: null,
   }),
   tail_suppression: tailSuppressionYamlSchema,
   session: sessionYamlSchema,
@@ -249,6 +247,7 @@ const globalYamlSchema = z.object({
   initial_balance_usdc: z.number().positive().max(1_000_000).default(10_000),
   spray_size_usdc: z.number().nonnegative().max(100).default(0.15),
   spray_max_markets_per_tick: z.number().int().nonnegative().max(100).default(10),
+  dust_lane_max_markets_per_tick: z.number().int().nonnegative().max(250).default(100),
   spray_cooldown_seconds: z.number().nonnegative().max(3600).default(5),
   spray_budget_usdc: z.number().nonnegative().max(100_000).default(50),
   spray_max_total_positions: z.number().int().nonnegative().max(1000).default(30),
@@ -303,6 +302,7 @@ export interface GlobalConfig {
   initialBalanceUsdc: number;
   spraySizeUsdc: number;
   sprayMaxMarketsPerTick: number;
+  dustLaneMaxMarketsPerTick?: number;
   sprayCooldownSeconds: number;
   sprayBudgetUsdc: number;
   sprayMaxTotalPositions: number;

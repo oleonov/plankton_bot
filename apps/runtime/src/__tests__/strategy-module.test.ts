@@ -101,7 +101,6 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       enabled: true,
       action: "trade",
       priorityRank: 1,
-      allowWeekends: true,
       sessionMode: "active-window",
     },
     entry: {
@@ -157,7 +156,6 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
       reducedWindowsUtc: [],
       weekdayBias: "normal",
-      weekendMode: "normal",
     },
     ...overrides,
   };
@@ -354,6 +352,30 @@ describe("StrategyModule", () => {
       await bus.drain();
       expect(signals).toHaveLength(0);
     });
+  });
+
+  it("does not broad-prime candidate books during scan ticks", async () => {
+    const getOrderBooks = vi.fn(async () => new Map());
+    mod = new StrategyModule({
+      bus,
+      rulesProvider,
+      positionRepo,
+      familyStateRepo,
+      candidateBookGateway: { getOrderBooks },
+      log,
+      scanIntervalMs: 60_000,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket()],
+      timestamp: Date.now(),
+    });
+
+    await mod.tick();
+
+    expect(getOrderBooks).not.toHaveBeenCalled();
   });
 
   // ─── Market cache ─────────────────────────────────────────
@@ -1113,7 +1135,6 @@ describe("StrategyModule", () => {
             activeWindowsUtc: [{ start: "03:00", end: "04:00" }], // very narrow
             reducedWindowsUtc: [],
             weekdayBias: "normal",
-            weekendMode: "normal",
           },
         },
       });
@@ -1165,7 +1186,6 @@ describe("StrategyModule", () => {
             activeWindowsUtc: [{ start: "03:00", end: "04:00" }],
             reducedWindowsUtc: [],
             weekdayBias: "normal",
-            weekendMode: "normal",
           },
         },
       });
@@ -2938,26 +2958,18 @@ describe("StrategyModule", () => {
     });
   });
 
-  // ─── Wave 4: weekend policy (P1-3) ─────────────────────────────────────
+  // ─── Weekend neutrality ────────────────────────────────────────────────
 
-  describe("weekend policy (P1-3)", () => {
+  describe("weekend neutrality", () => {
     afterEach(() => {
       vi.useRealTimers();
     });
 
-    it("blocks all entries on weekend when allowWeekends is false", async () => {
-      // Saturday 2026-03-21 at 16:00 UTC (inside active window)
+    it("allows probe entries on weekend inside the active window", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
 
-      rulesProvider = createMockRulesProvider(
-        makeBundle({
-          rules: {
-            universe: { ...makeRules().universe, allowWeekends: false },
-            session: { ...makeRules().session, weekendMode: "normal" },
-          },
-        }),
-      );
+      rulesProvider = createMockRulesProvider(makeBundle());
       mod = new StrategyModule({
         bus,
         rulesProvider,
@@ -2982,12 +2994,11 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      const entries = signals.filter((s) => s.signal.side === "buy");
-      expect(entries).toHaveLength(0);
+      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
+      expect(probes).toHaveLength(1);
     });
 
-    it("blocks scale-in on weekend when weekendMode is reduced", async () => {
-      // Saturday at 16:00 UTC, weekendMode=reduced → probes allowed, scale-in blocked.
+    it("allows scale-in on weekend when active-window rules are otherwise satisfied", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
 
@@ -2995,8 +3006,7 @@ describe("StrategyModule", () => {
       rulesProvider = createMockRulesProvider(
         makeBundle({
           rules: {
-            universe: { ...makeRules().universe, allowWeekends: true },
-            session: { ...makeRules().session, weekendMode: "reduced" },
+            exit: { ...makeRules().exit, preferFastRecycle: false },
           },
         }),
       );
@@ -3027,61 +3037,15 @@ describe("StrategyModule", () => {
       const scaleIns = signals.filter(
         (s) => s.signal.side === "buy" && s.signal.reason !== "probe-entry",
       );
-      expect(scaleIns).toHaveLength(0);
+      expect(scaleIns).toHaveLength(1);
     });
 
-    it("allows probes on weekend when weekendMode is reduced", async () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
-
-      rulesProvider = createMockRulesProvider(
-        makeBundle({
-          rules: {
-            universe: { ...makeRules().universe, allowWeekends: true },
-            session: { ...makeRules().session, weekendMode: "reduced" },
-          },
-        }),
-      );
-      mod = new StrategyModule({
-        bus,
-        rulesProvider,
-        positionRepo,
-        familyStateRepo,
-        log,
-        scanIntervalMs: 60_000,
-        runtimeControl: { isPaused: () => false },
-      });
-      await mod.start();
-
-      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
-      bus.subscribe("SignalProduced", async (p) => {
-        signals.push(p);
-      });
-
-      await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
-        timestamp: Date.now(),
-      });
-      await bus.drain();
-      await mod.tick();
-      await bus.drain();
-
-      const probes = signals.filter((s) => s.signal.reason === "probe-entry");
-      expect(probes).toHaveLength(1);
-    });
-
-    it("allows exits on weekend regardless of policy", async () => {
+    it("allows exits on weekend", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-03-21T16:00:00Z"));
 
       positionRepo._setPosition(TOK_ID, makePosition({ avgEntryPrice: 0.03 }));
-      rulesProvider = createMockRulesProvider(
-        makeBundle({
-          rules: {
-            universe: { ...makeRules().universe, allowWeekends: false },
-          },
-        }),
-      );
+      rulesProvider = createMockRulesProvider(makeBundle());
       mod = new StrategyModule({
         bus,
         rulesProvider,
@@ -3413,7 +3377,6 @@ describe("StrategyModule", () => {
               activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
               reducedWindowsUtc: [],
               weekdayBias: "normal",
-              weekendMode: "normal",
             },
           },
         }),
@@ -3460,7 +3423,6 @@ describe("StrategyModule", () => {
               activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
               reducedWindowsUtc: [{ start: "16:00", end: "18:00" }], // 17:00 is inside
               weekdayBias: "normal",
-              weekendMode: "normal",
             },
           },
         }),
@@ -3508,7 +3470,6 @@ describe("StrategyModule", () => {
               activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
               reducedWindowsUtc: [{ start: "16:00", end: "18:00" }], // 19:00 is outside
               weekdayBias: "normal",
-              weekendMode: "normal",
             },
           },
         }),
@@ -3925,7 +3886,6 @@ describe("StrategyModule", () => {
               activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
               reducedWindowsUtc: [],
               weekdayBias: "normal",
-              weekendMode: "normal",
             },
           },
         }),
@@ -4177,6 +4137,7 @@ describe("StrategyModule", () => {
         initialBalanceUsdc: 10_000,
         spraySizeUsdc: 0.15,
         sprayMaxMarketsPerTick: 10,
+        dustLaneMaxMarketsPerTick: 100,
         sprayCooldownSeconds: 5,
         sprayBudgetUsdc: 0.2,
         sprayMaxTotalPositions: 30,
@@ -4223,6 +4184,7 @@ describe("StrategyModule", () => {
         initialBalanceUsdc: 10_000,
         spraySizeUsdc: 0.15,
         sprayMaxMarketsPerTick: 10,
+        dustLaneMaxMarketsPerTick: 100,
         sprayCooldownSeconds: 5,
         sprayBudgetUsdc: 0.3,
         sprayMaxTotalPositions: 1,
@@ -4307,6 +4269,7 @@ describe("StrategyModule", () => {
         initialBalanceUsdc: 10_000,
         spraySizeUsdc: 0.15,
         sprayMaxMarketsPerTick: 10,
+        dustLaneMaxMarketsPerTick: 100,
         sprayCooldownSeconds: 5,
         sprayBudgetUsdc: 0.3,
         sprayMaxTotalPositions: 1,

@@ -117,13 +117,6 @@ export const TwoSidedMode = {
 } as const;
 export type TwoSidedMode = (typeof TwoSidedMode)[keyof typeof TwoSidedMode];
 
-export const WeekendMode = {
-  Normal: "normal",
-  Reduced: "reduced",
-  Disabled: "disabled",
-} as const;
-export type WeekendMode = (typeof WeekendMode)[keyof typeof WeekendMode];
-
 export const WeekdayBias = {
   Normal: "normal",
   Preferred: "preferred",

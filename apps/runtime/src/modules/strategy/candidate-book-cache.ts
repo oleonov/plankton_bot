@@ -5,6 +5,13 @@ export interface CandidateBookGateway {
   getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>>;
 }
 
+export interface CandidateBookRefreshObserved {
+  readonly source: "prime" | "bridge-refresh";
+  readonly tokenCount: number;
+  readonly outcome: "attempted" | "refreshed" | "refresh-budget-exhausted" | "refresh-failed";
+  readonly refreshedCount?: number;
+}
+
 export interface CandidateBookCacheEntry {
   readonly tokenId: string;
   readonly snapshotTs: number;
@@ -32,6 +39,7 @@ interface CandidateBookCacheDeps {
   readonly refreshBatchWindowMs?: number;
   readonly refreshBudgetPerWindow?: number;
   readonly refreshBudgetWindowMs?: number;
+  readonly onRefreshObserved?: ((event: CandidateBookRefreshObserved) => void) | undefined;
 }
 
 const DEFAULT_MAX_AGE_MS = 3_000;
@@ -77,7 +85,7 @@ export class CandidateBookCache {
   }
 
   prime(tokenIds: readonly string[]): Promise<Map<string, CandidateBookCacheEntry>> {
-    return this.fetchAndStore(tokenIds, "scan-prime");
+    return this.fetchAndStore(tokenIds, "prime");
   }
 
   getEntry(tokenId: string): CandidateBookCacheEntry | null {
@@ -135,11 +143,16 @@ export class CandidateBookCache {
 
   private async fetchAndStore(
     tokenIds: readonly string[],
-    source: "scan-prime" | "bridge-refresh",
+    source: "prime" | "bridge-refresh",
   ): Promise<Map<string, CandidateBookCacheEntry>> {
     const uniqueTokenIds = [...new Set(tokenIds)].filter((tokenId) => tokenId.length > 0);
     if (uniqueTokenIds.length === 0) return new Map();
 
+    this.deps.onRefreshObserved?.({
+      source,
+      tokenCount: uniqueTokenIds.length,
+      outcome: "attempted",
+    });
     const sourcePolledAtMs = Date.now();
     const books = await this.deps.gateway.getOrderBooks(uniqueTokenIds);
     const nextEntries = new Map<string, CandidateBookCacheEntry>();
@@ -169,6 +182,12 @@ export class CandidateBookCache {
       },
       "candidate book cache updated",
     );
+    this.deps.onRefreshObserved?.({
+      source,
+      tokenCount: uniqueTokenIds.length,
+      outcome: "refreshed",
+      refreshedCount: nextEntries.size,
+    });
     return nextEntries;
   }
 
@@ -205,6 +224,11 @@ export class CandidateBookCache {
 
     if (tokenIds.length === 0) return;
     if (!this.canSpendRefreshBudget(Date.now())) {
+      this.deps.onRefreshObserved?.({
+        source: "bridge-refresh",
+        tokenCount: tokenIds.length,
+        outcome: "refresh-budget-exhausted",
+      });
       for (const tokenId of tokenIds) {
         for (const resolve of pending.get(tokenId)?.resolvers ?? []) {
           resolve({ entry: null, status: "refresh-budget-exhausted" });
@@ -226,6 +250,11 @@ export class CandidateBookCache {
       }
     } catch (err) {
       this.deps.log.warn({ err, tokenCount: tokenIds.length }, "candidate book refresh failed");
+      this.deps.onRefreshObserved?.({
+        source: "bridge-refresh",
+        tokenCount: tokenIds.length,
+        outcome: "refresh-failed",
+      });
       for (const tokenId of tokenIds) {
         for (const resolve of pending.get(tokenId)?.resolvers ?? []) {
           resolve({ entry: null, status: "refresh-failed" });

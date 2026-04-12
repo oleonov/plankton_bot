@@ -43,7 +43,6 @@ interface RawRow {
   enabled: number;
   action: string;
   priority_rank: number;
-  allow_weekends: number;
   session_mode: string;
 
   // entry
@@ -91,6 +90,7 @@ interface RawRow {
   max_entry_signals_per_tick_per_family: number | null;
   fast_lane_enabled: number | null;
   dust_lane_enabled: number | null;
+  queue_jump_canary_enabled: number | null;
 
   // tail_suppression
   max_open_value_usdc: number;
@@ -106,7 +106,6 @@ interface RawRow {
   active_windows_utc: string;
   reduced_windows_utc: string;
   weekday_bias: string;
-  weekend_mode: string;
 }
 
 const LOAD_SQL = `
@@ -151,7 +150,6 @@ function mapRow(row: RawRow): FamilyRuleBundle {
     enabled: bool(row.enabled),
     action: row.action as UniverseRules["action"],
     priorityRank: row.priority_rank,
-    allowWeekends: bool(row.allow_weekends),
     sessionMode: row.session_mode as UniverseRules["sessionMode"],
   };
 
@@ -204,6 +202,8 @@ function mapRow(row: RawRow): FamilyRuleBundle {
     maxEntrySignalsPerTickPerFamily: row.max_entry_signals_per_tick_per_family,
     fastLaneEnabled: row.fast_lane_enabled == null ? null : bool(row.fast_lane_enabled),
     dustLaneEnabled: row.dust_lane_enabled == null ? null : bool(row.dust_lane_enabled),
+    queueJumpCanaryEnabled:
+      row.queue_jump_canary_enabled == null ? null : bool(row.queue_jump_canary_enabled),
   };
 
   const tailSuppression: TailSuppressionRules = {
@@ -221,7 +221,6 @@ function mapRow(row: RawRow): FamilyRuleBundle {
     activeWindowsUtc: JSON.parse(row.active_windows_utc) as TimeWindow[],
     reducedWindowsUtc: JSON.parse(row.reduced_windows_utc) as TimeWindow[],
     weekdayBias: row.weekday_bias as SessionRules["weekdayBias"],
-    weekendMode: row.weekend_mode as SessionRules["weekendMode"],
   };
 
   const rules: FamilyRules = {

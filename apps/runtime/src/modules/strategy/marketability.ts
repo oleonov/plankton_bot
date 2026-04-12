@@ -5,12 +5,16 @@ import {
   resolveFamilyThroughputTierByFamilyKey,
   type FamilySpeedTier,
 } from "../../family-throughput.js";
+import {
+  hasFreshTradeActivity,
+  isGammaFallbackDustEligible,
+  resolveDustSizeCapUsdc,
+  resolveGammaFallbackDustReferencePrice,
+} from "./book-quality-policy.js";
 
 const EPSILON = 1e-9;
 const DEFAULT_MAX_BOOK_AGE_MS = 15_000;
 const DEFAULT_HARD_MAX_BOOK_AGE_MS = 60_000;
-const ONE_SIDED_DUST_TRADE_FRESHNESS_MS = 5 * 60_000;
-const ONE_SIDED_DUST_MAX_SIZE_USDC = 0.25;
 const REDUCED_FAST_FOLLOW_UP_MAX_ENTRY_SPREAD_CENTS = 0.015;
 const REDUCED_FAST_FOLLOW_UP_MAX_WIDE_ENTRY_SPREAD_CENTS = 0.03;
 
@@ -177,9 +181,17 @@ export function evaluateMarketability(opts: {
   readonly nowMs: number;
   readonly restingSnapshot?: RestingOrderSnapshot | null;
   readonly cooldownUntilMs?: number | null;
+  readonly executionMinNotionalUsdc?: number | null;
 }): MarketabilityDecision {
   const policy = resolveMarketabilityPolicy(opts.bundle);
-  const diagnostics = buildDiagnostics(opts.market, opts.signal, opts.nowMs, policy);
+  const diagnostics = buildDiagnostics(
+    opts.market,
+    opts.signal,
+    opts.bundle,
+    opts.nowMs,
+    policy,
+    opts.executionMinNotionalUsdc ?? null,
+  );
   const rejectionReasons: string[] = [];
   const checksPassed: string[] = [];
 
@@ -194,8 +206,26 @@ export function evaluateMarketability(opts: {
   }
 
   applyFamilyActionChecks(opts.bundle, rejectionReasons, checksPassed);
-  applyBookChecks(opts.signal, opts.market, opts.nowMs, policy, rejectionReasons, checksPassed);
-  applySpreadChecks(opts.signal, opts.market, opts.nowMs, policy, rejectionReasons, checksPassed);
+  applyBookChecks(
+    opts.signal,
+    opts.market,
+    opts.bundle,
+    opts.nowMs,
+    policy,
+    rejectionReasons,
+    checksPassed,
+    opts.executionMinNotionalUsdc ?? null,
+  );
+  applySpreadChecks(
+    opts.signal,
+    opts.market,
+    opts.bundle,
+    opts.nowMs,
+    policy,
+    rejectionReasons,
+    checksPassed,
+    opts.executionMinNotionalUsdc ?? null,
+  );
   applyRestingOrderChecks(opts, policy, rejectionReasons, checksPassed);
 
   return {
@@ -213,9 +243,10 @@ export function resolveMakerOnlyPrice(opts: {
   readonly suggestedSizeUsdc?: number;
   readonly signalReason?: string;
   readonly nowMs?: number;
+  readonly executionMinNotionalUsdc?: number | null;
   readonly market: Pick<
     NormalizedMarket,
-    "bestBid" | "bestAsk" | "tickSize" | "spread" | "lastTradePrice" | "lastTradeAt"
+    "bestBid" | "bestAsk" | "tickSize" | "spread" | "lastTradePrice" | "lastTradeAt" | "snapshotTs"
   >;
   readonly policy?: MarketabilityPolicy;
 }): number | null {
@@ -226,6 +257,25 @@ export function resolveMakerOnlyPrice(opts: {
 
   if (side === "buy") {
     if (bestAsk == null) {
+      const gammaFallbackDustPrice = isGammaFallbackDustEligible({
+        market,
+        nowMs: opts.nowMs ?? Date.now(),
+        signal: {
+          side,
+          reason: opts.signalReason ?? null,
+          suggestedSizeUsdc: opts.suggestedSizeUsdc ?? 0,
+        },
+        executionMinNotionalUsdc: opts.executionMinNotionalUsdc ?? null,
+      })
+        ? resolveGammaFallbackDustReferencePrice({
+            midPrice: suggestedPrice,
+            lastTradePrice: market.lastTradePrice ?? null,
+            tickSize,
+          })
+        : null;
+      if (gammaFallbackDustPrice != null) {
+        return gammaFallbackDustPrice;
+      }
       if (
         !isOneSidedDustPricingEligible(
           {
@@ -236,6 +286,7 @@ export function resolveMakerOnlyPrice(opts: {
           market,
           opts.nowMs ?? Date.now(),
           policy,
+          opts.executionMinNotionalUsdc ?? null,
         )
       ) {
         return null;
@@ -269,17 +320,6 @@ export function resolveMakerOnlyPrice(opts: {
   const price = roundUpToTick(Math.max(suggestedPrice, target), tickSize);
   if ((bestAsk != null && price - EPSILON > bestAsk) || price <= bestBid + EPSILON) return null;
   return isValidLimitPrice(price, tickSize) ? price : null;
-}
-
-export function hasFreshTradeActivity(
-  lastTradeAt: string | null | undefined,
-  nowMs: number,
-  freshnessMs = ONE_SIDED_DUST_TRADE_FRESHNESS_MS,
-): boolean {
-  if (!lastTradeAt) return false;
-  const tradeMs = Date.parse(lastTradeAt);
-  if (!Number.isFinite(tradeMs)) return false;
-  return Math.max(0, nowMs - tradeMs) <= freshnessMs;
 }
 
 export function resolveOneSidedDustBuyPrice(opts: {
@@ -322,10 +362,12 @@ function applyFamilyActionChecks(
 function applyBookChecks(
   signal: Signal,
   market: NormalizedMarket,
+  bundle: FamilyRuleBundle,
   nowMs: number,
   policy: MarketabilityPolicy,
   rejectionReasons: string[],
   checksPassed: string[],
+  executionMinNotionalUsdc: number | null,
 ): void {
   const bookAgeMs = Math.max(0, nowMs - market.snapshotTs);
 
@@ -335,9 +377,21 @@ function applyBookChecks(
     checksPassed.push("market-active");
   }
 
-  if (market.bestBid == null && market.bestAsk == null) {
+  if (
+    isGammaFallbackDustApprovalEligible(
+      signal,
+      bundle,
+      market,
+      nowMs,
+      executionMinNotionalUsdc,
+    )
+  ) {
+    checksPassed.push("book-gamma-fallback-dust-ok");
+  } else if (market.bestBid == null && market.bestAsk == null) {
     rejectionReasons.push("book-missing");
-  } else if (isOneSidedDustApprovalEligible(signal, market, nowMs, policy)) {
+  } else if (
+    isOneSidedDustApprovalEligible(signal, market, nowMs, policy, executionMinNotionalUsdc)
+  ) {
     checksPassed.push("book-one-sided-dust-ok");
   } else if (market.bestBid == null || market.bestAsk == null) {
     rejectionReasons.push("book-one-sided");
@@ -357,12 +411,27 @@ function applyBookChecks(
 function applySpreadChecks(
   signal: Signal,
   market: NormalizedMarket,
+  bundle: FamilyRuleBundle,
   nowMs: number,
   policy: MarketabilityPolicy,
   rejectionReasons: string[],
   checksPassed: string[],
+  executionMinNotionalUsdc: number | null,
 ): void {
-  if (isOneSidedDustApprovalEligible(signal, market, nowMs, policy)) {
+  if (
+    isGammaFallbackDustApprovalEligible(
+      signal,
+      bundle,
+      market,
+      nowMs,
+      executionMinNotionalUsdc,
+    )
+  ) {
+    checksPassed.push("gamma-fallback-dust-ok");
+    return;
+  }
+
+  if (isOneSidedDustApprovalEligible(signal, market, nowMs, policy, executionMinNotionalUsdc)) {
     checksPassed.push("spread-one-sided-dust-ok");
     return;
   }
@@ -491,8 +560,10 @@ function resolveSellMakerTarget(opts: {
 function buildDiagnostics(
   market: NormalizedMarket,
   signal: Signal,
+  bundle: FamilyRuleBundle,
   nowMs: number,
   policy: MarketabilityPolicy,
+  executionMinNotionalUsdc: number | null,
 ): Readonly<Record<string, unknown>> {
   const spreadCaps = resolveSpreadCaps(policy, signal.reason);
   const spread =
@@ -513,7 +584,20 @@ function buildDiagnostics(
     bookAgeMs: Math.max(0, nowMs - market.snapshotTs),
     effectiveMaxEntrySpreadCents: spreadCaps.maxEntrySpreadCents,
     effectiveMaxWideEntrySpreadCents: spreadCaps.maxWideEntrySpreadCents,
-    oneSidedDustEligible: isOneSidedDustApprovalEligible(signal, market, nowMs, policy),
+    gammaFallbackDustEligible: isGammaFallbackDustApprovalEligible(
+      signal,
+      bundle,
+      market,
+      nowMs,
+      executionMinNotionalUsdc,
+    ),
+    oneSidedDustEligible: isOneSidedDustApprovalEligible(
+      signal,
+      market,
+      nowMs,
+      policy,
+      executionMinNotionalUsdc,
+    ),
   };
 }
 
@@ -560,11 +644,13 @@ function isOneSidedDustApprovalEligible(
   >,
   nowMs: number,
   policy: MarketabilityPolicy,
+  executionMinNotionalUsdc: number | null,
 ): boolean {
+  const dustSizeCapUsdc = resolveDustSizeCapUsdc(executionMinNotionalUsdc);
   return (
     signal.side === "buy" &&
     signal.reason === "spray-entry" &&
-    signal.suggestedSizeUsdc <= ONE_SIDED_DUST_MAX_SIZE_USDC + EPSILON &&
+    signal.suggestedSizeUsdc <= dustSizeCapUsdc + EPSILON &&
     policy.allowOneSidedBooks &&
     market.bestBid != null &&
     market.bestAsk == null &&
@@ -583,17 +669,40 @@ function isOneSidedDustPricingEligible(
   market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice">,
   nowMs: number,
   policy: MarketabilityPolicy,
+  executionMinNotionalUsdc: number | null,
 ): boolean {
+  const dustSizeCapUsdc = resolveDustSizeCapUsdc(executionMinNotionalUsdc);
   return (
     signal.side === "buy" &&
     signal.reason === "spray-entry" &&
     signal.suggestedSizeUsdc != null &&
-    signal.suggestedSizeUsdc <= ONE_SIDED_DUST_MAX_SIZE_USDC + EPSILON &&
+    signal.suggestedSizeUsdc <= dustSizeCapUsdc + EPSILON &&
     policy.allowOneSidedBooks &&
     market.bestBid != null &&
     market.bestAsk == null &&
     market.lastTradePrice != null &&
     hasFreshTradeActivity(market.lastTradeAt, nowMs)
+  );
+}
+
+function isGammaFallbackDustApprovalEligible(
+  signal: Pick<Signal, "side" | "reason" | "suggestedSizeUsdc">,
+  bundle: FamilyRuleBundle,
+  market: Pick<
+    NormalizedMarket,
+    "bookSource" | "lastTradeAt" | "lastTradePrice" | "midPrice" | "tickSize" | "snapshotTs"
+  >,
+  nowMs: number,
+  executionMinNotionalUsdc: number | null,
+): boolean {
+  return (
+    isGammaFallbackDustEligible({
+      bundle,
+      market,
+      nowMs,
+      signal,
+      executionMinNotionalUsdc,
+    }) && resolveGammaFallbackDustReferencePrice(market) != null
   );
 }
 

@@ -622,7 +622,6 @@ describe("CommandPoller", () => {
         enabled: true,
         action: "trade",
         priorityRank: 1,
-        allowWeekends: false,
         sessionMode: "active-window",
         entryMode: "probe-first",
         minEntryPrice: 0,
@@ -662,7 +661,6 @@ describe("CommandPoller", () => {
         activeWindowsUtc: [],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "reduced",
       });
       snapshotRepo.save({
         familyId: createFamilyId("fam-1"),

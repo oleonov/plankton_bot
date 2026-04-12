@@ -65,9 +65,27 @@ export interface StatusData {
     approvalRate: number | null;
     candidatesConsideredLast10m?: number;
     blockedByResolutionBufferLast10m?: number;
-    blockedByWeekendLast10m?: number;
     blockedByWindowLast10m?: number;
     blockedByPerFamilyTickLimitLast10m?: number;
+    gammaFallbackDustSignalsLast10m?: number;
+    gammaFallbackDustOrdersLast10m?: number;
+    gammaFallbackDustFillsLast10m?: number;
+    scanPrimeSkippedByPolicyLast10m?: number;
+    candidateBookRefreshAttemptsLast10m?: number;
+    candidateBookRefreshTimeoutsLast10m?: number;
+    signalsConvertedLast10m?: number;
+    marketabilityRejectedLast10mByReason?: Record<string, number>;
+    cacheStatusLast10mByStatus?: Record<string, number>;
+    exchangeAcceptedLast10m?: number;
+    exchangeRejectedLast10mByCode?: Record<string, number>;
+    fillsLast10m?: number;
+    fillLatencyMsLast10m?: Record<string, number> | null;
+    cooldownBypassLast10mByReason?: Record<string, number>;
+    hotQuoteRefreshesLast10m?: number;
+    hotLaneActionsLast10mByType?: Record<string, number>;
+    hotLaneStatesLast10mByState?: Record<string, number>;
+    queueJumpAcceptedLast10m?: number;
+    queueJumpFillsLast10m?: number;
     topBlockingLayer?: string | null;
   };
   executionQueue?: {

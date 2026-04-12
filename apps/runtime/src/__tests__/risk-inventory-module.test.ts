@@ -134,7 +134,6 @@ function makeRuleBundle(
         enabled: true,
         action: "trade",
         priorityRank: 1,
-        allowWeekends: false,
         sessionMode: "active-window",
       },
       entry: {
@@ -181,7 +180,6 @@ function makeRuleBundle(
         activeWindowsUtc: [],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "normal",
       },
     } as FamilyRules,
   };

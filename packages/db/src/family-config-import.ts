@@ -39,7 +39,6 @@ const RULES_COLUMNS = [
   "enabled",
   "action",
   "priority_rank",
-  "allow_weekends",
   "session_mode",
   "entry_mode",
   "min_entry_price",
@@ -77,6 +76,7 @@ const RULES_COLUMNS = [
   "max_entry_signals_per_tick_per_family",
   "fast_lane_enabled",
   "dust_lane_enabled",
+  "queue_jump_canary_enabled",
   "max_open_value_usdc",
   "max_active_markets",
   "max_dust_positions",
@@ -88,7 +88,6 @@ const RULES_COLUMNS = [
   "active_windows_utc",
   "reduced_windows_utc",
   "weekday_bias",
-  "weekend_mode",
   "updated_at",
 ] as const;
 
@@ -215,6 +214,17 @@ export function applyFamilyConfigImport(
       deployment_stage, priority, created_at, updated_at
     ) VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, ?, ?)
   `);
+  const upsertDeployment = db.prepare(`
+    INSERT INTO family_deployments (
+      family_id, profile, enabled, operator_mode, strategy_stage,
+      deployment_stage, priority, created_at, updated_at
+    ) VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, ?, ?)
+    ON CONFLICT(family_id, profile) DO UPDATE SET
+      enabled = excluded.enabled,
+      deployment_stage = excluded.deployment_stage,
+      priority = excluded.priority,
+      updated_at = excluded.updated_at
+  `);
   const insertEvidence = db.prepare(
     "INSERT INTO family_evidence (family_id, updated_at) VALUES (?, ?)",
   );
@@ -275,6 +285,20 @@ export function applyFamilyConfigImport(
     );
     const rulesParams = bindRulesParams(family, now);
     updateRules.run(...rulesParams.slice(1), familyId);
+    for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
+      const seed = resolveFamilyDeploymentSeed({
+        profile,
+        sourceType: "yaml_import",
+      });
+      upsertDeployment.run(
+        familyId,
+        profile,
+        seed.enabled ? 1 : 0,
+        seed.deploymentStage,
+        now,
+        now,
+      );
+    }
     upsertMeta.run(familyId, now);
   }
 
@@ -338,7 +362,6 @@ function bindRulesParams(family: FamilyConfig, now: string): unknown[] {
     universe.enabled ? 1 : 0,
     universe.action,
     universe.priorityRank,
-    universe.allowWeekends ? 1 : 0,
     universe.sessionMode,
     entry.entryMode,
     entry.minEntryPrice,
@@ -376,6 +399,7 @@ function bindRulesParams(family: FamilyConfig, now: string): unknown[] {
     throughput?.maxEntrySignalsPerTickPerFamily ?? null,
     throughput?.fastLaneEnabled == null ? null : throughput.fastLaneEnabled ? 1 : 0,
     throughput?.dustLaneEnabled == null ? null : throughput.dustLaneEnabled ? 1 : 0,
+    throughput?.queueJumpCanaryEnabled == null ? null : throughput.queueJumpCanaryEnabled ? 1 : 0,
     tailSuppression.maxOpenValueUsdc,
     tailSuppression.maxActiveMarkets,
     tailSuppression.maxDustPositions,
@@ -387,7 +411,6 @@ function bindRulesParams(family: FamilyConfig, now: string): unknown[] {
     JSON.stringify(session.activeWindowsUtc),
     JSON.stringify(session.reducedWindowsUtc),
     session.weekdayBias,
-    session.weekendMode,
     now,
   ];
 }
@@ -443,7 +466,6 @@ function dbFamilyFingerprint(
     rules["enabled"] ? 1 : 0,
     rules["action"],
     rules["priority_rank"],
-    rules["allow_weekends"] ? 1 : 0,
     rules["session_mode"],
     rules["entry_mode"],
     rules["min_entry_price"],
@@ -481,6 +503,11 @@ function dbFamilyFingerprint(
     rules["max_entry_signals_per_tick_per_family"] ?? null,
     rules["fast_lane_enabled"] == null ? null : rules["fast_lane_enabled"] ? 1 : 0,
     rules["dust_lane_enabled"] == null ? null : rules["dust_lane_enabled"] ? 1 : 0,
+    rules["queue_jump_canary_enabled"] == null
+      ? null
+      : rules["queue_jump_canary_enabled"]
+        ? 1
+        : 0,
     rules["max_open_value_usdc"],
     rules["max_active_markets"],
     rules["max_dust_positions"],
@@ -492,7 +519,6 @@ function dbFamilyFingerprint(
     rules["active_windows_utc"],
     rules["reduced_windows_utc"],
     rules["weekday_bias"],
-    rules["weekend_mode"],
   ];
   return JSON.stringify([...catalogFields, ...rulesCore]);
 }

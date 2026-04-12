@@ -27,7 +27,6 @@ import type {
   ScaleMode,
   SessionMode,
   TwoSidedMode,
-  WeekendMode,
   WeekdayBias,
   ProfitModel,
   OrderSide,
@@ -168,7 +167,6 @@ export interface UniverseRules {
   enabled: boolean;
   action: Action;
   priorityRank: number;
-  allowWeekends: boolean;
   sessionMode: SessionMode;
 }
 
@@ -222,6 +220,7 @@ export interface ThroughputRules {
   maxEntrySignalsPerTickPerFamily: number | null;
   fastLaneEnabled?: boolean | null;
   dustLaneEnabled?: boolean | null;
+  queueJumpCanaryEnabled?: boolean | null;
 }
 
 export interface TailSuppressionRules {
@@ -239,7 +238,6 @@ export interface SessionRules {
   activeWindowsUtc: TimeWindow[];
   reducedWindowsUtc: TimeWindow[];
   weekdayBias: WeekdayBias;
-  weekendMode: WeekendMode;
 }
 
 export interface FamilyRules {

@@ -39,10 +39,12 @@ import {
   type MarketabilityDecision,
   type MarketabilityPolicy,
 } from "./marketability.js";
+import { isGammaFallbackDustEligible } from "./book-quality-policy.js";
 import {
   isDustSignalReason,
   resolveQueueJumpExecutionTerms,
   shouldUseDustLane,
+  type QueueJumpExecutionTerms,
 } from "../hot-lane/hot-lane-policy.js";
 
 export interface SignalToOrderBridgeDeps {
@@ -93,6 +95,7 @@ export class SignalToOrderBridge {
     const { signal } = payload;
     const resolvedMarket = await this.resolveMarket(signal);
     const market = resolvedMarket.market;
+    const executionMinNotionalUsdc = this.resolveExecutionMinNotionalUsdc();
 
     if (!market) {
       this.log.warn(
@@ -106,7 +109,28 @@ export class SignalToOrderBridge {
     }
 
     const bundle = this.deps.rulesProvider.getRule(signal.familyId);
-    const marketability = this.evaluateMarketability(signal, market, bundle);
+    const queueJumpTerms = bundle
+      ? resolveQueueJumpExecutionTerms({
+          signal,
+          market,
+          bundle,
+          nowMs: Date.now(),
+          executionMinNotionalUsdc,
+        })
+      : null;
+    const marketability = this.relaxQueueJumpMarketability(
+      this.evaluateMarketability(signal, market, bundle),
+      queueJumpTerms,
+    );
+    const gammaFallbackDust =
+      bundle != null &&
+      isGammaFallbackDustEligible({
+        bundle,
+        market,
+        nowMs: Date.now(),
+        signal,
+        executionMinNotionalUsdc,
+      });
     if (!marketability.approved) {
       this.log.warn(
         {
@@ -134,7 +158,14 @@ export class SignalToOrderBridge {
       sequenceInTick: signal.sequenceInTick,
     });
 
-    const executionTerms = this.resolveExecutionTerms(signal, market, bundle, marketability.policy);
+    const executionTerms = this.resolveExecutionTerms(
+      signal,
+      market,
+      bundle,
+      marketability.policy,
+      executionMinNotionalUsdc,
+      queueJumpTerms,
+    );
     if (!executionTerms) {
       this.log.warn(
         {
@@ -182,6 +213,11 @@ export class SignalToOrderBridge {
       metadata: {
         marketability: marketability.diagnostics,
         postOnlyPolicy: executionTerms.postOnly === true ? "maker-only" : "limit",
+        cacheStatus: resolvedMarket.cacheStatus,
+        marketData: {
+          bookSource: market.bookSource ?? "unknown",
+          gammaFallbackDust,
+        },
       },
     };
 
@@ -265,6 +301,8 @@ export class SignalToOrderBridge {
     market: NormalizedMarket,
     bundle: ReturnType<FamilyRulesProvider["getRule"]>,
     marketabilityPolicy: MarketabilityPolicy,
+    executionMinNotionalUsdc: number | null,
+    queueJumpTerms: QueueJumpExecutionTerms | null,
   ): { price: number; postOnly?: boolean } | null {
     if (this.deps.liveLiteGuard?.getWalletMode() !== "relayer") {
       return { price: signal.suggestedPrice };
@@ -275,13 +313,7 @@ export class SignalToOrderBridge {
     }
 
     const policy = resolveFamilyLiveTradingPolicy(bundle.identity);
-    const queueJumpTerms = resolveQueueJumpExecutionTerms({
-      signal,
-      market,
-      bundle,
-      nowMs: Date.now(),
-    });
-    if (!policy.requiresPostOnlyForLive && queueJumpTerms) {
+    if (queueJumpTerms) {
       return queueJumpTerms;
     }
     if (!policy.requiresPostOnlyForLive) {
@@ -294,6 +326,7 @@ export class SignalToOrderBridge {
       suggestedSizeUsdc: signal.suggestedSizeUsdc,
       signalReason: signal.reason,
       nowMs: Date.now(),
+      executionMinNotionalUsdc,
       market,
       policy: marketabilityPolicy,
     });
@@ -302,6 +335,37 @@ export class SignalToOrderBridge {
     }
 
     return { price: makerOnlyPrice, postOnly: true };
+  }
+
+  private relaxQueueJumpMarketability(
+    decision: MarketabilityDecision,
+    queueJumpTerms: QueueJumpExecutionTerms | null,
+  ): MarketabilityDecision {
+    if (!queueJumpTerms || decision.approved) return decision;
+    const queueJumpOverrideReasons = new Set([
+      "book-one-sided",
+      "spread-unavailable",
+      "spread-too-wide",
+    ]);
+    const remainingReasons = decision.rejectionReasons.filter(
+      (reason) => !queueJumpOverrideReasons.has(reason),
+    );
+    if (remainingReasons.length === decision.rejectionReasons.length) {
+      return decision;
+    }
+    if (remainingReasons.length > 0) {
+      return {
+        ...decision,
+        rejectionReasons: remainingReasons,
+        approved: false,
+      };
+    }
+    return {
+      ...decision,
+      approved: true,
+      rejectionReasons: [],
+      checksPassed: [...decision.checksPassed, "queue-jump-marketability-override"],
+    };
   }
 
   private evaluateMarketability(
@@ -344,7 +408,19 @@ export class SignalToOrderBridge {
       nowMs: Date.now(),
       restingSnapshot,
       cooldownUntilMs,
+      executionMinNotionalUsdc: this.resolveExecutionMinNotionalUsdc(),
     });
+  }
+
+  private resolveExecutionMinNotionalUsdc(): number | null {
+    const guard = this.deps.liveLiteGuard as
+      | (typeof this.deps.liveLiteGuard & {
+          getMinEntryNotionalUsdc?: () => number | null;
+        })
+      | undefined;
+    return typeof guard?.getMinEntryNotionalUsdc === "function"
+      ? (guard.getMinEntryNotionalUsdc() ?? null)
+      : null;
   }
 
   private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {

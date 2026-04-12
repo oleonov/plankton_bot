@@ -36,7 +36,6 @@ families:
         enabled: true
         action: "trade"
         priority_rank: 1
-        allow_weekends: true
         session_mode: "active-window"
       entry:
         entry_mode: "probe-first"
@@ -85,7 +84,6 @@ families:
             end: "23:59"
         reduced_windows_utc: []
         weekday_bias: "normal"
-        weekend_mode: "normal"
 `;
 
 describe("family-config-import", () => {
@@ -121,6 +119,55 @@ describe("family-config-import", () => {
       };
       expect(row.fast_lane_enabled).toBe(1);
       expect(row.dust_lane_enabled).toBe(1);
+    } finally {
+      conn.close();
+    }
+  });
+
+  it("re-syncs family deployments for updated families", () => {
+    const conn = bootstrapControlDb(":memory:");
+    try {
+      const loaded = parseFamilyRulesYaml(YAML, "test");
+      const checksum = computeConfigChecksum(YAML);
+      conn.db.transaction(() =>
+        applyFamilyConfigImport(conn.db, loaded.families, {
+          dryRun: false,
+          sourcePath: "/tmp/family_rules.yaml",
+          sourceChecksum: checksum,
+          sourceVersion: 1,
+          importedBy: "test",
+        }),
+      )();
+
+      conn.db
+        .prepare(
+          "UPDATE family_deployments SET enabled = 0, deployment_stage = 'disabled' WHERE family_id = ? AND profile = 'live-lite'",
+        )
+        .run("test-fast:generic:daily");
+
+      const updatedYaml = YAML.replace('priority_rank: 1', 'priority_rank: 2');
+      const updated = parseFamilyRulesYaml(updatedYaml, "test");
+      conn.db.transaction(() =>
+        applyFamilyConfigImport(conn.db, updated.families, {
+          dryRun: false,
+          sourcePath: "/tmp/family_rules.yaml",
+          sourceChecksum: computeConfigChecksum(updatedYaml),
+          sourceVersion: 2,
+          importedBy: "test",
+        }),
+      )();
+
+      const deployment = conn.db
+        .prepare(
+          "SELECT enabled, deployment_stage FROM family_deployments WHERE family_id = ? AND profile = 'live-lite'",
+        )
+        .get("test-fast:generic:daily") as {
+        enabled: number;
+        deployment_stage: string;
+      };
+
+      expect(deployment.enabled).toBe(1);
+      expect(deployment.deployment_stage).toBe("live-probe");
     } finally {
       conn.close();
     }

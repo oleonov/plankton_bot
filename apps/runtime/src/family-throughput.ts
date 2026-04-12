@@ -87,6 +87,10 @@ export function isDustLaneEnabled(bundle: FamilyRuleBundle | null | undefined): 
   return bundle?.rules.throughput?.dustLaneEnabled === true;
 }
 
+export function isQueueJumpCanaryEnabled(bundle: FamilyRuleBundle | null | undefined): boolean {
+  return bundle?.rules.throughput?.queueJumpCanaryEnabled === true;
+}
+
 export function isHotQuoteFamily(bundle: FamilyRuleBundle | null | undefined): boolean {
   if (!bundle) return false;
   return (

@@ -122,7 +122,6 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       enabled: true,
       action: "trade",
       priorityRank: 1,
-      allowWeekends: true,
       sessionMode: "active-window",
     },
     entry: {
@@ -178,7 +177,6 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
       reducedWindowsUtc: [],
       weekdayBias: "normal",
-      weekendMode: "normal",
     },
     ...overrides,
   };
@@ -245,6 +243,7 @@ function makeGlobalConfig(overrides?: Partial<GlobalConfig>): GlobalConfig {
     initialBalanceUsdc: 10_000,
     spraySizeUsdc: 0.15,
     sprayMaxMarketsPerTick: 10,
+    dustLaneMaxMarketsPerTick: 100,
     sprayCooldownSeconds: 5,
     sprayBudgetUsdc: 50,
     sprayMaxTotalPositions: 30,
@@ -889,6 +888,54 @@ describe("scan() spray integration", () => {
     expect(result.signals[0]!.reason).toBe("spray-entry");
   });
 
+  it("emits spray-entry for gamma-fallback dust families under a $1 live min notional", () => {
+    const bundle = makeBundle({
+      identity: { familyKey: "ethereum-price" },
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: {
+        entry: { ...makeRules().entry, entryMode: "spray-first" },
+        throughput: {
+          maxConcurrentOrdersPerFamily: 20,
+          maxProbeInFlightPerToken: 2,
+          maxEntrySignalsPerTickPerFamily: 20,
+          fastLaneEnabled: true,
+          dustLaneEnabled: true,
+        },
+      },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [
+      makeNormalizedMarket({
+        familyKey: "ethereum-price",
+        bestBid: null,
+        bestAsk: null,
+        midPrice: 0.04,
+        spread: null,
+        lastTradePrice: 0.03,
+        lastTradeAt: "2026-04-01T11:58:30Z",
+        bookSource: "gamma-fallback",
+      }),
+    ];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig, minEntryNotionalUsdc: 1 },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("spray-entry");
+    expect(result.signals[0]!.suggestedSizeUsdc).toBe(1);
+    expect(result.signals[0]!.suggestedPrice).toBe(0.03);
+  });
+
   it("allows a third dust mesh quote for reduced-fast families when condition cap is 3", () => {
     const bundle = makeBundle({
       identity: { familyKey: "ethereum-price" },
@@ -946,6 +993,164 @@ describe("scan() spray integration", () => {
     expect(result.signals[0]!.tokenId).toBe(TOK_ID_3);
   });
 
+  it("emits multiple dust mesh price levels for the same token when condition capacity remains", () => {
+    const bundle = makeBundle({
+      identity: {
+        familyKey: "who-will-be-next-supreme-leader-of-iran",
+        primaryCategory: "geopolitics",
+      },
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: {
+        entry: { ...makeRules().entry, entryMode: "spray-first", maxEntryPrice: 0.08 },
+        throughput: {
+          maxConcurrentOrdersPerFamily: 20,
+          maxProbeInFlightPerToken: 2,
+          maxEntrySignalsPerTickPerFamily: 20,
+          fastLaneEnabled: true,
+          dustLaneEnabled: true,
+        },
+      },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [
+      makeNormalizedMarket({
+        tokenId: TOK_ID,
+        conditionId: "cond-mesh",
+        familyId: FAM_ID,
+        familyKey: "who-will-be-next-supreme-leader-of-iran",
+        bestBid: 0.02,
+        bestAsk: 0.06,
+        spread: 0.04,
+        midPrice: 0.04,
+        tickSize: 0.01,
+      }),
+    ];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    const spraySignals = result.signals.filter((signal) => signal.reason === "spray-entry");
+    expect(spraySignals.length).toBeGreaterThan(1);
+    expect(new Set(spraySignals.map((signal) => signal.suggestedPrice)).size).toBe(
+      spraySignals.length,
+    );
+  });
+
+  it("dedupes dust mesh levels that collapse to the same maker execution price", () => {
+    const bundle = makeBundle({
+      identity: { familyKey: "ethereum-price" },
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: {
+        entry: { ...makeRules().entry, entryMode: "spray-first", maxEntryPrice: 0.06 },
+        throughput: {
+          maxConcurrentOrdersPerFamily: 20,
+          maxProbeInFlightPerToken: 2,
+          maxEntrySignalsPerTickPerFamily: 20,
+          fastLaneEnabled: true,
+          dustLaneEnabled: true,
+          queueJumpCanaryEnabled: null,
+        },
+      },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [
+      makeNormalizedMarket({
+        tokenId: TOK_ID,
+        conditionId: "cond-mesh-collapse",
+        familyId: FAM_ID,
+        familyKey: "ethereum-price",
+        bestBid: 0.03,
+        bestAsk: 0.06,
+        spread: 0.03,
+        midPrice: 0.045,
+        tickSize: 0.01,
+      }),
+    ];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    const spraySignals = result.signals.filter((signal) => signal.reason === "spray-entry");
+    expect(spraySignals).toHaveLength(1);
+    expect(spraySignals[0]!.suggestedPrice).toBe(0.045);
+  });
+
+  it("dedupes dust mesh levels that collapse to the same queue-jump execution price", () => {
+    const bundle = makeBundle({
+      identity: {
+        familyKey: "who-will-be-next-supreme-leader-of-iran",
+        primaryCategory: "geopolitics",
+        strategyProfile: "event-driven",
+      },
+      evidence: { promotionState: "scaled", evidenceScore: 90, localTradeCount: 50 },
+      rules: {
+        entry: { ...makeRules().entry, entryMode: "spray-first", maxEntryPrice: 0.06 },
+        throughput: {
+          maxConcurrentOrdersPerFamily: 20,
+          maxProbeInFlightPerToken: 2,
+          maxEntrySignalsPerTickPerFamily: 20,
+          fastLaneEnabled: true,
+          dustLaneEnabled: true,
+          queueJumpCanaryEnabled: true,
+        },
+      },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [
+      makeNormalizedMarket({
+        tokenId: TOK_ID,
+        conditionId: "cond-mesh-queue-jump",
+        familyId: FAM_ID,
+        familyKey: "who-will-be-next-supreme-leader-of-iran",
+        bestBid: 0.03,
+        bestAsk: 0.05,
+        spread: 0.02,
+        midPrice: 0.04,
+        tickSize: 0.01,
+        bookSource: "clob",
+        lastTradePrice: 0.05,
+        lastTradeAt: new Date("2026-04-01T11:59:55Z").toISOString(),
+      }),
+    ];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    const spraySignals = result.signals.filter((signal) => signal.reason === "spray-entry");
+    expect(spraySignals).toHaveLength(1);
+    expect(spraySignals[0]!.suggestedPrice).toBe(0.04);
+  });
+
   it("respects sprayMaxMarketsPerTick cap", () => {
     const FAM_A = createFamilyId("fam-a");
     const bundle = makeBundle({
@@ -991,6 +1196,118 @@ describe("scan() spray integration", () => {
 
     // Remaining spray-first markets are skipped entirely (no fallthrough to probe)
     expect(result.signals).toHaveLength(2);
+  });
+
+  it("allows dust-lane families to exceed the legacy spray cap", () => {
+    const FAM_A = createFamilyId("fam-dust");
+    const bundle = makeBundle({
+      identity: { familyId: FAM_A },
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      rules: {
+        familyId: FAM_A,
+        entry: { ...makeRules().entry, entryMode: "spray-first" },
+        throughput: {
+          maxConcurrentOrdersPerFamily: 20,
+          maxProbeInFlightPerToken: 4,
+          maxEntrySignalsPerTickPerFamily: 20,
+          fastLaneEnabled: true,
+          dustLaneEnabled: true,
+          queueJumpCanaryEnabled: null,
+        },
+      },
+    });
+
+    const rulesProvider = {
+      getRule: vi.fn((_id: FamilyId) => bundle),
+      isEnabled: vi.fn((_id: FamilyId) => true),
+      getAllFamilies: vi.fn(() => [bundle.identity]),
+      getRulesForRegime: vi.fn(() => [bundle]),
+    } satisfies FamilyRulesProvider;
+
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig({
+      sprayMaxMarketsPerTick: 2,
+      dustLaneMaxMarketsPerTick: 5,
+    });
+
+    const tokens = [TOK_ID, TOK_ID_2, TOK_ID_3, createTokenId("tok-4"), createTokenId("tok-5")];
+    const markets = tokens.map((tokenId, index) =>
+      makeNormalizedMarket({
+        tokenId,
+        conditionId: `cond-dust-${index}`,
+        familyId: FAM_A,
+        midPrice: 0.035,
+      }),
+    );
+
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
+    expect(spraySignals).toHaveLength(5);
+  });
+
+  it("respects explicit dust-lane cap even when it is lower than the legacy spray cap", () => {
+    const FAM_A = createFamilyId("fam-dust-capped");
+    const bundle = makeBundle({
+      identity: { familyId: FAM_A },
+      evidence: { promotionState: "probe-only", evidenceScore: 10 },
+      rules: {
+        familyId: FAM_A,
+        entry: { ...makeRules().entry, entryMode: "spray-first" },
+        throughput: {
+          maxConcurrentOrdersPerFamily: 20,
+          maxProbeInFlightPerToken: 4,
+          maxEntrySignalsPerTickPerFamily: 20,
+          fastLaneEnabled: true,
+          dustLaneEnabled: true,
+          queueJumpCanaryEnabled: null,
+        },
+      },
+    });
+
+    const rulesProvider = {
+      getRule: vi.fn((_id: FamilyId) => bundle),
+      isEnabled: vi.fn((_id: FamilyId) => true),
+      getAllFamilies: vi.fn(() => [bundle.identity]),
+      getRulesForRegime: vi.fn(() => [bundle]),
+    } satisfies FamilyRulesProvider;
+
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig({
+      sprayMaxMarketsPerTick: 20,
+      dustLaneMaxMarketsPerTick: 3,
+    });
+
+    const tokens = [TOK_ID, TOK_ID_2, TOK_ID_3, createTokenId("tok-4"), createTokenId("tok-5")];
+    const markets = tokens.map((tokenId, index) =>
+      makeNormalizedMarket({
+        tokenId,
+        conditionId: `cond-dust-cap-${index}`,
+        familyId: FAM_A,
+        midPrice: 0.035,
+      }),
+    );
+
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    const spraySignals = result.signals.filter((s) => s.reason === "spray-entry");
+    expect(spraySignals).toHaveLength(3);
   });
 
   it("does NOT generate spray when globalConfig is absent", () => {

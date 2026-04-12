@@ -93,7 +93,6 @@ function makeBundle(overrides?: {
         enabled: true,
         action: "trade",
         priorityRank: 1,
-        allowWeekends: false,
         sessionMode: "active-window",
       },
       entry: {
@@ -145,7 +144,6 @@ function makeBundle(overrides?: {
         activeWindowsUtc: [],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "normal",
       },
     } as FamilyRules,
   };

@@ -11,7 +11,10 @@ import {
   type Signal,
 } from "@plankton/domain";
 import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
-import { HotFamilyExecutionModule } from "../modules/hot-lane/hot-family-execution-module.js";
+import {
+  HotFamilyExecutionModule,
+  resolveNextDustSuppressBackoffMs,
+} from "../modules/hot-lane/hot-family-execution-module.js";
 import { HotQuoteBusModule } from "../modules/hot-lane/hot-quote-bus-module.js";
 import { FastExitCleanupModule } from "../modules/hot-lane/fast-exit-cleanup-module.js";
 import { HotMarketDataModule } from "../modules/hot-lane/hot-market-data-module.js";
@@ -19,6 +22,7 @@ import { runHotLaneReplay } from "../modules/hot-lane/replay-harness.js";
 
 const FAMILY_ID = createFamilyId("who-will-be-next-supreme-leader-of-iran");
 const TOKEN_ID = createTokenId("tok-hot");
+const TOKEN_ID_2 = createTokenId("tok-hot-2");
 
 function makeLogger() {
   return {
@@ -57,7 +61,6 @@ function makeBundle(): FamilyRuleBundle {
         enabled: true,
         action: "trade",
         priorityRank: 1,
-        allowWeekends: true,
         sessionMode: "active-window",
       },
       entry: {
@@ -120,13 +123,12 @@ function makeBundle(): FamilyRuleBundle {
         activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "normal",
       },
     },
   };
 }
 
-function makeMarket(): NormalizedMarket {
+function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
   return {
     tokenId: TOKEN_ID,
     conditionId: "cond-1",
@@ -154,6 +156,7 @@ function makeMarket(): NormalizedMarket {
     minOrderSize: 5,
     bookSource: "clob",
     snapshotTs: Date.now(),
+    ...overrides,
   };
 }
 
@@ -184,7 +187,131 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("resolveNextDustSuppressBackoffMs", () => {
+  it("backs off progressively when price has not moved and resets when it does", () => {
+    expect(resolveNextDustSuppressBackoffMs(null, 0.02, 0.001)).toBe(3_000);
+    expect(
+      resolveNextDustSuppressBackoffMs(
+        { referencePrice: 0.02, backoffMs: 3_000 },
+        0.02,
+        0.001,
+      ),
+    ).toBe(6_000);
+    expect(
+      resolveNextDustSuppressBackoffMs(
+        { referencePrice: 0.02, backoffMs: 6_000 },
+        0.02,
+        0.001,
+      ),
+    ).toBe(12_000);
+    expect(
+      resolveNextDustSuppressBackoffMs(
+        { referencePrice: 0.02, backoffMs: 12_000 },
+        0.021,
+        0.001,
+      ),
+    ).toBe(1_000);
+  });
+});
+
 describe("HotFamilyExecutionModule", () => {
+  it("publishes hot-lane state transitions across quote, reprice, and cooling states", async () => {
+    vi.useFakeTimers();
+    const bus = new InProcessEventBus();
+    const openOrder = makeOpenOrder({
+      orderId: createOrderId("ord-stateful"),
+      price: 0.05,
+      createdAt: new Date(Date.now() - 2_000).toISOString(),
+    });
+    let headSize = 20;
+    const orderRepo = {
+      findOpen: vi.fn(() => [openOrder]),
+    } as never;
+    const gateway = {
+      getOrderBooks: vi.fn(async () => {
+        const book: OrderBookSnapshot = {
+          tokenId: TOKEN_ID,
+          bids: [{ price: 0.05, size: headSize }],
+          asks: [{ price: 0.08, size: 100 }],
+          bestBid: 0.05,
+          bestAsk: 0.08,
+          midPrice: 0.065,
+          spread: 0.03,
+          minOrderSize: 5,
+          timestamp: Date.now(),
+        };
+        return new Map([[String(TOKEN_ID), book]]);
+      }),
+    };
+    const cache = new CandidateBookCache({ gateway, log: makeLogger() });
+    const rulesProvider = {
+      getRule: vi.fn(() => makeBundle()),
+      isEnabled: vi.fn(() => true),
+      getAllFamilies: vi.fn(() => []),
+      getRulesForRegime: vi.fn(() => []),
+    };
+    const mod = new HotFamilyExecutionModule({
+      bus,
+      rulesProvider: rulesProvider as never,
+      orderRepo,
+      candidateBookCache: cache,
+      log: makeLogger(),
+      policy: { hotQuoteRefreshIntervalMs: 500, dustEntryRepriceIntervalMs: 0 },
+    });
+
+    const states: string[] = [];
+    bus.subscribe("HotLaneStateChanged", async (payload) => {
+      states.push(payload.nextState);
+    });
+
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        {
+          ...makeMarket(),
+          bestBid: 0.05,
+          bestAsk: 0.08,
+          midPrice: 0.065,
+          spread: 0.03,
+          lastTradePrice: 0.05,
+        },
+      ],
+      timestamp: Date.now(),
+    });
+    await cache.prime([String(TOKEN_ID)]);
+    await bus.publish("OrderPlaced", {
+      commandId: "cmd-state-1" as never,
+      clientOrderId: "client-state-1" as never,
+      orderId: openOrder.orderId,
+      tokenId: TOKEN_ID,
+      side: "buy",
+      price: openOrder.price,
+      size: openOrder.size,
+      orderType: "GTC",
+      familyId: FAMILY_ID,
+      signalReason: "spray-entry",
+      timestamp: Date.now(),
+    });
+
+    headSize = 120;
+    await cache.prime([String(TOKEN_ID)]);
+    await vi.advanceTimersByTimeAsync(600);
+    await bus.publish("OrderCancelled", {
+      commandId: "cmd-state-cancel" as never,
+      orderId: openOrder.orderId,
+      reason: "entry-reprice-cancel",
+      familyId: FAMILY_ID,
+      signalReason: "spray-entry",
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+    await mod.stop();
+
+    expect(states).toContain("quote-active");
+    expect(states).toContain("needs-reprice");
+    expect(states).toContain("cooling");
+  });
+
   it("cancels dust orders that lost queue position", async () => {
     vi.useFakeTimers();
     const bus = new InProcessEventBus();
@@ -326,6 +453,97 @@ describe("HotFamilyExecutionModule", () => {
     await mod.stop();
 
     expect(cancels).toHaveLength(1);
+    expect(cancels[0]!.command.reason).toBe("entry-reprice-cancel");
+  });
+
+  it("limits maintenance to the bounded hot-token set", async () => {
+    vi.useFakeTimers();
+    const bus = new InProcessEventBus();
+    const firstOrder = makeOpenOrder({
+      orderId: createOrderId("ord-hot-1"),
+      tokenId: TOKEN_ID,
+      price: 0.03,
+      createdAt: new Date(Date.now() - 2_000).toISOString(),
+    });
+    const secondOrder = makeOpenOrder({
+      orderId: createOrderId("ord-hot-2"),
+      tokenId: TOKEN_ID_2,
+      price: 0.03,
+      createdAt: new Date(Date.now() - 2_000).toISOString(),
+    });
+    const orderRepo = {
+      findOpen: vi.fn(() => [firstOrder, secondOrder]),
+    } as never;
+    const gateway = {
+      getOrderBooks: vi.fn(async () => {
+        const books = new Map<string, OrderBookSnapshot>();
+        books.set(String(TOKEN_ID), {
+          tokenId: TOKEN_ID,
+          bids: [{ price: 0.05, size: 100 }],
+          asks: [{ price: 0.06, size: 100 }],
+          bestBid: 0.05,
+          bestAsk: 0.06,
+          midPrice: 0.055,
+          spread: 0.01,
+          minOrderSize: 5,
+          timestamp: Date.now(),
+        });
+        books.set(String(TOKEN_ID_2), {
+          tokenId: TOKEN_ID_2,
+          bids: [{ price: 0.09, size: 100 }],
+          asks: [{ price: 0.1, size: 100 }],
+          bestBid: 0.09,
+          bestAsk: 0.1,
+          midPrice: 0.095,
+          spread: 0.01,
+          minOrderSize: 5,
+          timestamp: Date.now(),
+        });
+        return books;
+      }),
+    };
+    const cache = new CandidateBookCache({ gateway, log: makeLogger() });
+    const rulesProvider = {
+      getRule: vi.fn(() => makeBundle()),
+      isEnabled: vi.fn(() => true),
+      getAllFamilies: vi.fn(() => []),
+      getRulesForRegime: vi.fn(() => []),
+    };
+    const mod = new HotFamilyExecutionModule({
+      bus,
+      rulesProvider: rulesProvider as never,
+      orderRepo,
+      candidateBookCache: cache,
+      log: makeLogger(),
+      policy: { hotQuoteRefreshIntervalMs: 1_000, dustEntryRepriceIntervalMs: 0, maxTokensPerCycle: 1 },
+    });
+
+    const cancels: Array<{ command: { orderId: string; reason: string } }> = [];
+    bus.subscribe("CancelOrderRequested", async (payload) => {
+      cancels.push(payload as never);
+    });
+
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({ tokenId: TOKEN_ID, bestBid: 0.05, bestAsk: 0.06, midPrice: 0.055 }),
+        makeMarket({
+          tokenId: TOKEN_ID_2,
+          conditionId: "cond-2",
+          bestBid: 0.09,
+          bestAsk: 0.1,
+          midPrice: 0.095,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await cache.prime([String(TOKEN_ID), String(TOKEN_ID_2)]);
+    await vi.advanceTimersByTimeAsync(1_100);
+    await bus.drain();
+    await mod.stop();
+
+    expect(cancels).toHaveLength(1);
+    expect(cancels[0]!.command.orderId).toBe(String(firstOrder.orderId));
     expect(cancels[0]!.command.reason).toBe("entry-reprice-cancel");
   });
 
@@ -588,6 +806,71 @@ describe("FastExitCleanupModule", () => {
     expect(signals[0]!.reason).toBe("repricing-exit");
     expect(signals[0]!.side).toBe("sell");
   });
+
+  it("uses family-specific fast-exit intervals instead of a single global timer", async () => {
+    vi.useFakeTimers();
+    const bus = new InProcessEventBus();
+    const cache = new CandidateBookCache({
+      gateway: { getOrderBooks: vi.fn(async () => new Map()) },
+      log: makeLogger(),
+    });
+    const positionRepo = {
+      findOpen: vi.fn(() => [
+        {
+          positionId: "pos-1" as never,
+          tokenId: TOKEN_ID,
+          familyId: FAMILY_ID,
+          side: "buy",
+          size: 5,
+          avgEntryPrice: 0.04,
+          costBasisUsdc: 0.2,
+          currentValueUsdc: null,
+          realizedPnl: 0,
+          status: "open",
+          entryStyle: "spray",
+          openedAt: new Date(Date.now() - 30_000).toISOString(),
+          closedAt: null,
+          updatedAt: new Date().toISOString(),
+        },
+      ]),
+    } as never;
+    const orderRepo = { findOpen: vi.fn(() => []) } as never;
+    const rulesProvider = {
+      getRule: vi.fn(() => makeBundle()),
+      isEnabled: vi.fn(() => true),
+      getAllFamilies: vi.fn(() => []),
+      getRulesForRegime: vi.fn(() => []),
+    };
+    const mod = new FastExitCleanupModule({
+      bus,
+      rulesProvider: rulesProvider as never,
+      positionRepo,
+      orderRepo,
+      candidateBookCache: cache,
+      log: makeLogger(),
+      policy: { hotQuoteRefreshIntervalMs: 500 },
+    });
+
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async ({ signal }) => {
+      signals.push(signal);
+    });
+
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket()],
+      timestamp: Date.now(),
+    });
+    await vi.advanceTimersByTimeAsync(600);
+    await bus.drain();
+    await vi.advanceTimersByTimeAsync(600);
+    await bus.drain();
+    await vi.advanceTimersByTimeAsync(500);
+    await bus.drain();
+    await mod.stop();
+
+    expect(signals).toHaveLength(2);
+  });
 });
 
 describe("runHotLaneReplay", () => {
@@ -672,6 +955,25 @@ describe("runHotLaneReplay", () => {
     expect(result.reprices).toBe(1);
     expect(result.actions[1]?.reason).toBe("exit-reprice-cancel");
     expect(result.actions[1]?.desiredPrice).toBe(0.04);
+  });
+
+  it("reports fill-rate and recycle latency metrics", () => {
+    const startMs = Date.now();
+    const result = runHotLaneReplay({
+      order: makeOpenOrder({ createdAt: new Date(startMs - 5_000).toISOString() }),
+      bundle: makeBundle(),
+      frames: [
+        { nowMs: startMs, market: makeMarket() },
+        { nowMs: startMs + 2_000, market: makeMarket(), fillOccurred: true },
+      ],
+    });
+
+    expect(result.orderCount).toBe(1);
+    expect(result.fills).toBe(1);
+    expect(result.fillRate).toBe(1);
+    expect(result.avgFillLatencyMs).toBe(7_000);
+    expect(result.avgRecycleLatencyMs).toBe(7_000);
+    expect(result.tailOpenOrdersAtEnd).toBe(0);
   });
 });
 

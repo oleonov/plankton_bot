@@ -26,6 +26,7 @@ function makeMockLoaded(): LoadedFamilyRules {
       initialBalanceUsdc: 100,
       spraySizeUsdc: 0.15,
       sprayMaxMarketsPerTick: 10,
+      dustLaneMaxMarketsPerTick: 100,
       sprayCooldownSeconds: 5,
       sprayBudgetUsdc: 50,
       sprayMaxTotalPositions: 30,
@@ -68,7 +69,6 @@ function makeMockLoaded(): LoadedFamilyRules {
             enabled: true,
             action: "trade",
             priorityRank: 1,
-            allowWeekends: true,
             sessionMode: "active-window",
           },
           entry: {
@@ -129,7 +129,6 @@ function makeMockLoaded(): LoadedFamilyRules {
             activeWindowsUtc: [{ start: "14:00", end: "21:00" }],
             reducedWindowsUtc: [],
             weekdayBias: "preferred",
-            weekendMode: "normal",
           },
         },
       } as unknown as LoadedFamilyRules["families"][number],
@@ -246,7 +245,6 @@ describe("bootstrap-import", () => {
     ]);
     expect(JSON.parse(row.reduced_windows_utc as string)).toEqual([]);
     expect(row.weekday_bias).toBe("preferred");
-    expect(row.weekend_mode).toBe("normal");
   });
 
   it("creates family_deployments (sim/paper enabled, live-lite probe-enabled)", () => {

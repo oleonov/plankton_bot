@@ -123,12 +123,35 @@ export interface RuntimeEventMap {
     readonly timestamp: number;
   };
 
+  HotLaneStateChanged: {
+    readonly familyId: FamilyId;
+    readonly tokenId: TokenId;
+    readonly previousState:
+      | "quote-active"
+      | "needs-reprice"
+      | "cooling"
+      | "suppressed"
+      | "reactivated"
+      | null;
+    readonly nextState: "quote-active" | "needs-reprice" | "cooling" | "suppressed" | "reactivated";
+    readonly reason:
+      | "order-placed"
+      | "entry-reprice-cancel"
+      | "entry-ttl-cancel"
+      | "entry-suppress-cancel"
+      | "exit-reprice-cancel"
+      | "exit-ttl-cancel"
+      | "suppression-expired";
+    readonly timestamp: number;
+  };
+
   ScanTickCompleted: {
     readonly candidatesConsidered: number;
     readonly blockedByResolutionBuffer: number;
-    readonly blockedByWeekend: number;
     readonly blockedByWindow: number;
     readonly blockedByPerFamilyTickLimit: number;
+    readonly gammaFallbackDustSignalsProduced: number;
+    readonly scanPrimeSkippedByPolicy: number;
     readonly signalsProduced: number;
     readonly entrySignals: number;
     readonly exitSignals: number;

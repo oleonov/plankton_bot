@@ -11,6 +11,7 @@ import type {
 import {
   rejectOutcomeCandidate,
   scoreOutcomeCandidate,
+  selectFirstEntryOutcomeForCondition,
   selectFirstEntryTokenForCondition,
 } from "../modules/strategy/outcome-selection.js";
 
@@ -55,7 +56,6 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       enabled: true,
       action: "trade",
       priorityRank: 1,
-      allowWeekends: true,
       sessionMode: "active-window",
     },
     entry: {
@@ -112,7 +112,6 @@ function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
       activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
       reducedWindowsUtc: [],
       weekdayBias: "normal",
-      weekendMode: "normal",
     },
     ...overrides,
   };
@@ -178,6 +177,75 @@ describe("outcome selection", () => {
     const rejected = rejectOutcomeCandidate(makeMarket({ bookSource: "gamma-fallback" }), bundle);
 
     expect(rejected).toBe("gamma-fallback");
+  });
+
+  it("allows Gamma fallback books for dust-first micro entries with fresh trade context", () => {
+    const bundle = makeBundle({
+      entry: { ...makeRules().entry, entryMode: "spray-first" },
+      throughput: {
+        maxConcurrentOrdersPerFamily: 10,
+        maxProbeInFlightPerToken: 2,
+        maxEntrySignalsPerTickPerFamily: 10,
+        dustLaneEnabled: true,
+      },
+    });
+    const selection = selectFirstEntryOutcomeForCondition(
+      [
+        makeMarket({
+          tokenId: createTokenId("tok-fallback"),
+          bookSource: "gamma-fallback",
+          bestBid: null,
+          bestAsk: null,
+          midPrice: 0.021,
+          spread: null,
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date().toISOString(),
+        }),
+      ],
+      bundle,
+      {
+        allowGammaFallbackDust: true,
+        dustSuggestedSizeUsdc: 0.15,
+        nowMs: Date.now(),
+      },
+    );
+
+    expect(selection.tokenId).toBe("tok-fallback");
+  });
+
+  it("allows Gamma fallback books for dust-first entries when live-lite raises the minimum to $1", () => {
+    const bundle = makeBundle({
+      entry: { ...makeRules().entry, entryMode: "spray-first" },
+      throughput: {
+        maxConcurrentOrdersPerFamily: 10,
+        maxProbeInFlightPerToken: 2,
+        maxEntrySignalsPerTickPerFamily: 10,
+        dustLaneEnabled: true,
+      },
+    });
+    const selection = selectFirstEntryOutcomeForCondition(
+      [
+        makeMarket({
+          tokenId: createTokenId("tok-fallback-live-floor"),
+          bookSource: "gamma-fallback",
+          bestBid: null,
+          bestAsk: null,
+          midPrice: 0.021,
+          spread: null,
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date().toISOString(),
+        }),
+      ],
+      bundle,
+      {
+        allowGammaFallbackDust: true,
+        dustSuggestedSizeUsdc: 1,
+        executionMinNotionalUsdc: 1,
+        nowMs: Date.now(),
+      },
+    );
+
+    expect(selection.tokenId).toBe("tok-fallback-live-floor");
   });
 
   it("does not let ultra-cheap tokens win when relative spread is broken", () => {

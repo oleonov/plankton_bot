@@ -64,7 +64,6 @@ function makeFamilyConfig(overrides: {
         enabled,
         action,
         priorityRank: 1,
-        allowWeekends: false,
         sessionMode: "active-window",
       },
       entry: {
@@ -112,6 +111,7 @@ function makeFamilyConfig(overrides: {
         maxEntrySignalsPerTickPerFamily: null,
         fastLaneEnabled: null,
         dustLaneEnabled: null,
+        queueJumpCanaryEnabled: null,
       },
       tailSuppression: {
         maxOpenValueUsdc: 500,
@@ -127,7 +127,6 @@ function makeFamilyConfig(overrides: {
         activeWindowsUtc: [{ start: "09:00", end: "17:00" }],
         reducedWindowsUtc: [],
         weekdayBias: "normal",
-        weekendMode: "reduced",
       },
     },
   };

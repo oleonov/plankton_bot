@@ -108,9 +108,10 @@ function computeTradingState(
     ? (JSON.parse(scannerActivityRow.labels) as {
         candidatesConsidered: number;
         blockedByResolutionBuffer: number;
-        blockedByWeekend: number;
         blockedByWindow: number;
         blockedByPerFamilyTickLimit?: number;
+        gammaFallbackDustSignalsProduced?: number;
+        scanPrimeSkippedByPolicy?: number;
       })
     : null;
 
@@ -137,9 +138,11 @@ function computeTradingState(
   if (scanner) {
     signalActivity.candidatesConsideredLast10m = scanner.candidatesConsidered;
     signalActivity.blockedByResolutionBufferLast10m = scanner.blockedByResolutionBuffer;
-    signalActivity.blockedByWeekendLast10m = scanner.blockedByWeekend;
     signalActivity.blockedByWindowLast10m = scanner.blockedByWindow;
     signalActivity.blockedByPerFamilyTickLimitLast10m = scanner.blockedByPerFamilyTickLimit ?? 0;
+    signalActivity.gammaFallbackDustSignalsLast10m =
+      scanner.gammaFallbackDustSignalsProduced ?? 0;
+    signalActivity.scanPrimeSkippedByPolicyLast10m = scanner.scanPrimeSkippedByPolicy ?? 0;
   }
 
   if (signalConversionRow?.labels) {
@@ -154,8 +157,13 @@ function computeTradingState(
       cooldownBypassByReason?: Record<string, number>;
       hotQuoteRefreshes?: number;
       hotLaneActionsByType?: Record<string, number>;
+      hotLaneStatesByState?: Record<string, number>;
       queueJumpAccepted?: number;
       queueJumpFills?: number;
+      gammaFallbackDustOrders?: number;
+      gammaFallbackDustFills?: number;
+      candidateBookRefreshAttempts?: number;
+      candidateBookRefreshTimeouts?: number;
     };
     signalActivity.signalsConvertedLast10m = conversion.converted ?? 0;
     signalActivity.marketabilityRejectedLast10mByReason =
@@ -168,8 +176,15 @@ function computeTradingState(
     signalActivity.cooldownBypassLast10mByReason = conversion.cooldownBypassByReason ?? {};
     signalActivity.hotQuoteRefreshesLast10m = conversion.hotQuoteRefreshes ?? 0;
     signalActivity.hotLaneActionsLast10mByType = conversion.hotLaneActionsByType ?? {};
+    signalActivity.hotLaneStatesLast10mByState = conversion.hotLaneStatesByState ?? {};
     signalActivity.queueJumpAcceptedLast10m = conversion.queueJumpAccepted ?? 0;
     signalActivity.queueJumpFillsLast10m = conversion.queueJumpFills ?? 0;
+    signalActivity.gammaFallbackDustOrdersLast10m = conversion.gammaFallbackDustOrders ?? 0;
+    signalActivity.gammaFallbackDustFillsLast10m = conversion.gammaFallbackDustFills ?? 0;
+    signalActivity.candidateBookRefreshAttemptsLast10m =
+      conversion.candidateBookRefreshAttempts ?? 0;
+    signalActivity.candidateBookRefreshTimeoutsLast10m =
+      conversion.candidateBookRefreshTimeouts ?? 0;
   }
 
   const allProbeOnly = db
