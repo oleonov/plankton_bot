@@ -7,6 +7,7 @@ import { loadFamilyRulesYaml } from "../loader.js";
 const PKG_ROOT = path.resolve(import.meta.dirname, "../..");
 const MONOREPO_ROOT = path.resolve(PKG_ROOT, "../..");
 const TEMPLATE_PATH = path.join(MONOREPO_ROOT, "docs/family_rules_template_v1.yaml");
+const REAL_RULES_PATH = path.join(MONOREPO_ROOT, "config/family_rules.yaml");
 const TMP_DIR = path.join(PKG_ROOT, ".test-tmp");
 
 function writeTmpYaml(name: string, content: string): string {
@@ -35,6 +36,47 @@ describe("loadFamilyRulesYaml", () => {
     expect(family.identity.primaryCategory).toBe("crypto-btc");
     expect(family.identity.regime).toBe("threshold");
     expect(family.identity.strategyProfile).toBe("scalp");
+  });
+
+  it("keeps narrow canary tail caps aligned with production rules", () => {
+    const result = loadFamilyRulesYaml(REAL_RULES_PATH);
+    const byId = new Map(result.families.map((family) => [family.identity.familyId, family]));
+
+    expect(
+      byId.get("donald-trump-of-truth-social-posts:social-activity:ad-hoc")?.rules
+        .tailSuppression,
+    ).toMatchObject({
+      maxActiveMarkets: 3,
+      maxDustPositions: 2,
+    });
+
+    expect(
+      byId.get("highest-temperature-in-london:price-range:daily")?.rules.tailSuppression,
+    ).toMatchObject({
+      maxActiveMarkets: 3,
+      maxDustPositions: 2,
+    });
+
+    expect(
+      byId.get("highest-temperature-in-nyc:price-range:daily")?.rules.tailSuppression,
+    ).toMatchObject({
+      maxActiveMarkets: 2,
+      maxDustPositions: 1,
+    });
+
+    expect(
+      byId.get("highest-temperature-in-seoul:price-range:daily")?.rules.tailSuppression,
+    ).toMatchObject({
+      maxActiveMarkets: 1,
+      maxDustPositions: 1,
+    });
+
+    expect(
+      byId.get("elon-musk-of-tweets:social-activity:weekly-window")?.rules.tailSuppression,
+    ).toMatchObject({
+      maxActiveMarkets: 2,
+      maxDustPositions: 1,
+    });
   });
 
   it("transforms snake_case to camelCase", () => {
