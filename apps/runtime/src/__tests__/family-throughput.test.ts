@@ -59,11 +59,24 @@ describe("family speed helpers", () => {
   it("classifies proven fast families separately from generic tiers", () => {
     expect(resolveFamilyThroughputTierByFamilyKey("bitcoin-price")).toBe("core");
     expect(resolveFamilyThroughputTierByFamilyKey("ethereum-price")).toBe("reduced");
+    expect(resolveFamilyThroughputTierByFamilyKey("donald-trump-of-truth-social-posts")).toBe(
+      "reduced",
+    );
+    expect(resolveFamilyThroughputTierByFamilyKey("highest-temperature-in-nyc")).toBe("reduced");
     expect(resolveFamilyThroughputTierByFamilyKey("unknown-family")).toBe("fallback");
 
     expect(resolveFamilySpeedTierByFamilyKey("bitcoin-price", true)).toBe("core-fast");
     expect(resolveFamilySpeedTierByFamilyKey("will-bitcoin-reach", true)).toBe("reduced-fast");
     expect(resolveFamilySpeedTierByFamilyKey("bitcoin-above", true)).toBe("reduced-fast");
+    expect(resolveFamilySpeedTierByFamilyKey("donald-trump-of-truth-social-posts", true)).toBe(
+      "reduced-fast",
+    );
+    expect(resolveFamilySpeedTierByFamilyKey("highest-temperature-in-london", true)).toBe(
+      "reduced-fast",
+    );
+    expect(resolveFamilySpeedTierByFamilyKey("highest-temperature-in-seoul", true)).toBe(
+      "reduced-fast",
+    );
   });
 
   it("derives fast-lane status from throughput config instead of hardcoded family lists", () => {

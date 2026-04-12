@@ -18,7 +18,11 @@ const CORE_FAMILY_KEYS = new Set([
 
 const REDUCED_FAMILY_KEYS = new Set([
   "bitcoin-above",
+  "donald-trump-of-truth-social-posts",
   "ethereum-price",
+  "highest-temperature-in-london",
+  "highest-temperature-in-nyc",
+  "highest-temperature-in-seoul",
   "will-bitcoin-reach",
   "will-ethereum-reach",
 ]);
