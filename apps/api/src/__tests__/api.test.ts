@@ -489,7 +489,7 @@ describe("GET /status", () => {
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES
         ('signal_activity', 1, '{"produced":10,"approved":3,"rejected":7,"entryApproved":2,"exitApproved":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
-        ('signal_conversion_activity', 1, '{"converted":2,"marketabilityRejectedByReason":{"gamma-fallback-no-real-book":5},"cacheStatusByStatus":{"refresh-budget-exhausted":4,"fresh-cache":2},"exchangeAccepted":1,"exchangeRejectedByCode":{"UNKNOWN":2},"fills":1,"cooldownBypassByReason":{"price-moved":3},"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
+        ('signal_conversion_activity', 1, '{"converted":2,"marketabilityRejectedByReason":{"gamma-fallback-no-real-book":5},"cacheStatusByStatus":{"refresh-budget-exhausted":4,"fresh-cache":2},"exchangeAccepted":1,"exchangeRejectedByCode":{"UNKNOWN":2},"fills":1,"fillLatencyMs":{"count":1,"avgMs":1200,"minMs":1200,"p50Ms":1200,"p95Ms":1200,"maxMs":1200},"cooldownBypassByReason":{"price-moved":3},"hotQuoteRefreshes":7,"hotLaneActionsByType":{"entry-reprice-cancel":2},"queueJumpAccepted":1,"queueJumpFills":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
     `);
 
     const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
@@ -506,11 +506,41 @@ describe("GET /status", () => {
     expect(signalActivity.exchangeAcceptedLast10m).toBe(1);
     expect(signalActivity.exchangeRejectedLast10mByCode).toEqual({ UNKNOWN: 2 });
     expect(signalActivity.fillsLast10m).toBe(1);
+    expect(signalActivity.fillLatencyMsLast10m).toEqual({
+      count: 1,
+      avgMs: 1200,
+      minMs: 1200,
+      p50Ms: 1200,
+      p95Ms: 1200,
+      maxMs: 1200,
+    });
     expect(signalActivity.cooldownBypassLast10mByReason).toEqual({ "price-moved": 3 });
+    expect(signalActivity.hotQuoteRefreshesLast10m).toBe(7);
+    expect(signalActivity.hotLaneActionsLast10mByType).toEqual({ "entry-reprice-cancel": 2 });
+    expect(signalActivity.queueJumpAcceptedLast10m).toBe(1);
+    expect(signalActivity.queueJumpFillsLast10m).toBe(1);
 
     conn.db.exec(
       `DELETE FROM runtime_metrics WHERE metric_name IN ('signal_activity', 'signal_conversion_activity')`,
     );
+  });
+
+  it("status includes risk event volume telemetry when available", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('risk_event_volume', 1, '{"last1h":1200,"last24h":5400,"warning":true,"thresholdPerHour":1000}', '${new Date().toISOString()}')
+    `);
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
+
+    expect(json(res).data.riskEventVolume).toEqual({
+      last1h: 1200,
+      last24h: 5400,
+      warning: true,
+      thresholdPerHour: 1000,
+    });
+
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'risk_event_volume'`);
   });
 });
 

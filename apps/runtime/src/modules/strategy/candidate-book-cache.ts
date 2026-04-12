@@ -91,6 +91,32 @@ export class CandidateBookCache {
     return entry;
   }
 
+  upsertBooks(
+    books: ReadonlyMap<string, OrderBookSnapshot> | ReadonlyArray<readonly [string, OrderBookSnapshot]>,
+    sourcePolledAtMs: number = Date.now(),
+  ): Map<string, CandidateBookCacheEntry> {
+    const nowMs = Date.now();
+    const iterable = books instanceof Map ? books.entries() : books;
+    const nextEntries = new Map<string, CandidateBookCacheEntry>();
+    const nextMap = new Map(this.entries);
+
+    for (const [tokenId, book] of iterable) {
+      const entry: CandidateBookCacheEntry = {
+        tokenId,
+        snapshotTs: book.timestamp,
+        cachedAtMs: nowMs,
+        sourcePolledAtMs,
+        bookSource: "clob",
+        book,
+      };
+      nextEntries.set(tokenId, entry);
+      nextMap.set(tokenId, entry);
+    }
+
+    this.entries = nextMap;
+    return nextEntries;
+  }
+
   async getFreshOrRefresh(
     tokenId: string,
     nowMs: number = Date.now(),

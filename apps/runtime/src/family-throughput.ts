@@ -83,6 +83,19 @@ export function isFastLaneEnabled(bundle: FamilyRuleBundle | null | undefined): 
   return bundle?.rules.throughput?.fastLaneEnabled === true;
 }
 
+export function isDustLaneEnabled(bundle: FamilyRuleBundle | null | undefined): boolean {
+  return bundle?.rules.throughput?.dustLaneEnabled === true;
+}
+
+export function isHotQuoteFamily(bundle: FamilyRuleBundle | null | undefined): boolean {
+  if (!bundle) return false;
+  return (
+    isFastLaneEnabled(bundle) ||
+    isDustLaneEnabled(bundle) ||
+    bundle.identity.strategyProfile === "event-driven"
+  );
+}
+
 export function resolveFamilyThroughputPolicy(bundle: FamilyRuleBundle): FamilyThroughputPolicy {
   const base = defaultPolicyForFamilyKey(bundle.identity.familyKey);
   const configured = bundle.rules.throughput;

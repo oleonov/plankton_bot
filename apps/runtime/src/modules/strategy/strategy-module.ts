@@ -55,6 +55,7 @@ export interface StrategyModuleDeps {
   orderRepo?: OrderRepository | undefined;
   familyStateRepo: FamilyStateRepository;
   candidateBookGateway?: CandidateBookGateway | undefined;
+  candidateBookCache?: CandidateBookCache | undefined;
   log: Logger;
   scanIntervalMs: number;
   runtimeControl?: RuntimeControl | undefined;
@@ -69,6 +70,7 @@ export class StrategyModule implements RuntimeModule {
   private readonly sprayTracker: SprayTracker;
   private readonly bridge: SignalToOrderBridge;
   private readonly candidateBookCache: CandidateBookCache | undefined;
+  private readonly ownsCandidateBookCache: boolean;
   /** Last-known size per position — used to distinguish buy-fill updates from sell-fill updates. */
   private readonly lastKnownSize = new Map<string, number>();
   /** Tokens with open spray positions — cross-tick dedup to prevent re-spraying. */
@@ -88,12 +90,16 @@ export class StrategyModule implements RuntimeModule {
     this.buyTracker = createBuyTracker();
     this.sessionTracker = createSessionTracker();
     this.sprayTracker = createSprayTracker();
-    this.candidateBookCache = deps.candidateBookGateway
-      ? new CandidateBookCache({
-          gateway: deps.candidateBookGateway,
-          log: this.log.child({ component: "candidate-book-cache" }),
-        })
-      : undefined;
+    this.candidateBookCache =
+      deps.candidateBookCache ??
+      (deps.candidateBookGateway
+        ? new CandidateBookCache({
+            gateway: deps.candidateBookGateway,
+            log: this.log.child({ component: "candidate-book-cache" }),
+          })
+        : undefined);
+    this.ownsCandidateBookCache =
+      deps.candidateBookCache == null && this.candidateBookCache != null;
     this.bridge = new SignalToOrderBridge({
       bus: deps.bus,
       log: this.log,
@@ -149,7 +155,9 @@ export class StrategyModule implements RuntimeModule {
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.bridge.unsubscribe();
-    this.candidateBookCache?.dispose();
+    if (this.ownsCandidateBookCache) {
+      this.candidateBookCache?.dispose();
+    }
     this.started = false;
     this.log.info("strategy module stopped");
   }
@@ -290,10 +298,27 @@ export class StrategyModule implements RuntimeModule {
     if (tokenIds.length === 0) return markets;
 
     try {
-      const entries = await this.candidateBookCache.prime([...new Set(tokenIds)]);
-      if (entries.size === 0) return markets;
+      const uniqueTokenIds = [...new Set(tokenIds)];
+      const nowMs = Date.now();
+      const cachedEntries = new Map<string, ReturnType<CandidateBookCache["getFreshEntry"]>>();
+      const staleTokenIds: string[] = [];
+      for (const tokenId of uniqueTokenIds) {
+        const entry = this.candidateBookCache.getFreshEntry(tokenId, nowMs);
+        if (entry) {
+          cachedEntries.set(tokenId, entry);
+        } else {
+          staleTokenIds.push(tokenId);
+        }
+      }
+
+      const refreshedEntries =
+        staleTokenIds.length > 0 ? await this.candidateBookCache.prime(staleTokenIds) : new Map();
+      if (cachedEntries.size === 0 && refreshedEntries.size === 0) return markets;
       return markets.map((market) => {
-        const entry = entries.get(String(market.tokenId));
+        const entry =
+          cachedEntries.get(String(market.tokenId)) ??
+          refreshedEntries.get(String(market.tokenId)) ??
+          null;
         if (!entry) return market;
         return applyOrderBookToMarket(market, entry);
       });

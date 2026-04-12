@@ -90,6 +90,7 @@ interface RawRow {
   max_probe_in_flight_per_token: number | null;
   max_entry_signals_per_tick_per_family: number | null;
   fast_lane_enabled: number | null;
+  dust_lane_enabled: number | null;
 
   // tail_suppression
   max_open_value_usdc: number;
@@ -202,6 +203,7 @@ function mapRow(row: RawRow): FamilyRuleBundle {
     maxProbeInFlightPerToken: row.max_probe_in_flight_per_token,
     maxEntrySignalsPerTickPerFamily: row.max_entry_signals_per_tick_per_family,
     fastLaneEnabled: row.fast_lane_enabled == null ? null : bool(row.fast_lane_enabled),
+    dustLaneEnabled: row.dust_lane_enabled == null ? null : bool(row.dust_lane_enabled),
   };
 
   const tailSuppression: TailSuppressionRules = {

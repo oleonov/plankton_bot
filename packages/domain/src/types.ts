@@ -221,6 +221,7 @@ export interface ThroughputRules {
   maxProbeInFlightPerToken: number | null;
   maxEntrySignalsPerTickPerFamily: number | null;
   fastLaneEnabled?: boolean | null;
+  dustLaneEnabled?: boolean | null;
 }
 
 export interface TailSuppressionRules {

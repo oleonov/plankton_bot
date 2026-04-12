@@ -65,4 +65,27 @@ describe("SqliteRiskEventRepository", () => {
     const count = conn.db.prepare("SELECT COUNT(*) as c FROM risk_events").get() as { c: number };
     expect(count.c).toBe(2);
   });
+
+  it("countSince returns recent event volume", () => {
+    repo.insert({
+      eventType: "older",
+      familyId: createFamilyId("fam-old"),
+      payload: { reason: "old" },
+    });
+    repo.insert({
+      eventType: "recent",
+      familyId: createFamilyId("fam-new"),
+      payload: { reason: "new" },
+    });
+
+    conn.db
+      .prepare("UPDATE risk_events SET created_at = ? WHERE event_type = 'older'")
+      .run("2026-04-10T00:00:00.000Z");
+    conn.db
+      .prepare("UPDATE risk_events SET created_at = ? WHERE event_type = 'recent'")
+      .run("2026-04-12T00:00:00.000Z");
+
+    expect(repo.countSince("2026-04-11T00:00:00.000Z")).toBe(1);
+    expect(repo.countSince("2026-04-09T00:00:00.000Z")).toBe(2);
+  });
 });

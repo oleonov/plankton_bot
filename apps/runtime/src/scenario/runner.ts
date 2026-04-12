@@ -41,7 +41,12 @@ import { NormalizationModule } from "../modules/normalization/normalization-modu
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
 import { StrategyModule } from "../modules/strategy/strategy-module.js";
+import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
+import { HotFamilyExecutionModule } from "../modules/hot-lane/hot-family-execution-module.js";
+import { HotQuoteBusModule } from "../modules/hot-lane/hot-quote-bus-module.js";
+import { FastExitCleanupModule } from "../modules/hot-lane/fast-exit-cleanup-module.js";
+import { HotMarketDataModule } from "../modules/hot-lane/hot-market-data-module.js";
 import { Supervisor } from "../supervisor/supervisor.js";
 import { CommandPoller } from "../supervisor/command-poller.js";
 
@@ -243,19 +248,65 @@ async function executeScenario(
     db: conn.db,
   });
 
+  const candidateBookCache = marketDataGateway.getOrderBooks
+    ? new CandidateBookCache({
+        gateway: { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) },
+        log: log.child({ module: "candidate-book-cache" }),
+      })
+    : undefined;
+
   const strategyModule = new StrategyModule({
     bus,
     rulesProvider,
     positionRepo: repos.position,
     orderRepo: repos.order,
     familyStateRepo: repos.familyState,
-    candidateBookGateway: marketDataGateway.getOrderBooks
-      ? { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) }
-      : undefined,
+    candidateBookCache,
     log,
     scanIntervalMs: 60_000,
     runtimeControl,
   });
+
+  const hotFamilyExecutionModule = candidateBookCache
+    ? new HotFamilyExecutionModule({
+        bus,
+        rulesProvider,
+        orderRepo: repos.order,
+        candidateBookCache,
+        log,
+        policy: { hotQuoteRefreshIntervalMs: 500 },
+      })
+    : null;
+  const hotMarketDataModule = new HotMarketDataModule({
+    bus,
+    gateway: marketDataGateway,
+    rulesProvider,
+    orderRepo: repos.order,
+    ...(candidateBookCache ? { candidateBookCache } : {}),
+    log,
+    policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
+  });
+  const hotQuoteBusModule = candidateBookCache
+    ? new HotQuoteBusModule({
+        bus,
+        rulesProvider,
+        orderRepo: repos.order,
+        candidateBookCache,
+        log,
+        policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
+      })
+    : null;
+  const fastExitCleanupModule = candidateBookCache
+    ? new FastExitCleanupModule({
+        bus,
+        rulesProvider,
+        positionRepo: repos.position,
+        orderRepo: repos.order,
+        candidateBookCache,
+        log,
+        policy: { hotQuoteRefreshIntervalMs: 500 },
+      })
+    : null;
 
   const reconciliationModule = new ReconciliationModule({
     gateway: exchangeGateway,
@@ -276,6 +327,28 @@ async function executeScenario(
       ["normalization", normalizationModule],
       ["reconciliation", reconciliationModule],
       ["strategy", strategyModule],
+      ...(hotMarketDataModule
+        ? [["hot-market-data", hotMarketDataModule] as [string, import("@plankton/domain").RuntimeModule]]
+        : []),
+      ...(hotQuoteBusModule
+        ? [["hot-quote-bus", hotQuoteBusModule] as [string, import("@plankton/domain").RuntimeModule]]
+        : []),
+      ...(hotFamilyExecutionModule
+        ? [
+            [
+              "hot-family-execution",
+              hotFamilyExecutionModule,
+            ] as [string, import("@plankton/domain").RuntimeModule],
+          ]
+        : []),
+      ...(fastExitCleanupModule
+        ? [
+            [
+              "fast-exit-cleanup",
+              fastExitCleanupModule,
+            ] as [string, import("@plankton/domain").RuntimeModule],
+          ]
+        : []),
       ["risk-inventory", riskInventoryModule],
       ["execution", executionModule],
     ],

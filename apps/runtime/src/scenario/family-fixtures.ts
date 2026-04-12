@@ -20,7 +20,7 @@ export function makeFamilyConfig(overrides: {
     | "weather-range";
   enabled?: boolean;
   action?: "trade" | "monitor" | "reduce-only" | "blocked";
-  entryMode?: "probe-first" | "conviction-only" | "disabled";
+  entryMode?: "spray-first" | "probe-first" | "conviction-only" | "disabled";
   maxInitialNotionalUsdc?: number;
   defaultMaxBuysPerLeg?: number;
   maxOpenValueUsdc?: number;
@@ -129,6 +129,7 @@ export function makeFamilyConfig(overrides: {
         maxProbeInFlightPerToken: null,
         maxEntrySignalsPerTickPerFamily: null,
         fastLaneEnabled: null,
+        dustLaneEnabled: null,
       },
       tailSuppression: {
         maxOpenValueUsdc,

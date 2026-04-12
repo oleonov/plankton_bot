@@ -38,6 +38,13 @@ export interface NormalizedMarketUpdated {
   readonly timestamp: number;
 }
 
+export interface HotQuoteUpdated {
+  readonly type: "HotQuoteUpdated";
+  readonly tokenIds: readonly TokenId[];
+  readonly familyIds: readonly FamilyId[];
+  readonly refreshedAt: number;
+}
+
 // ─── Strategy / Signal ────────────────────────────────────────────────────
 
 export interface SignalProduced {
@@ -78,6 +85,21 @@ export interface CooldownBypassApplied {
     | "manual-family-fast-lane";
   readonly previousCooldownUntil: number;
   readonly appliedAt: number;
+}
+
+export interface HotLaneActionApplied {
+  readonly type: "HotLaneActionApplied";
+  readonly familyId: FamilyId;
+  readonly tokenId: TokenId;
+  readonly orderId: OrderId;
+  readonly signalReason: string | null;
+  readonly action:
+    | "entry-reprice-cancel"
+    | "entry-ttl-cancel"
+    | "entry-suppress-cancel"
+    | "exit-reprice-cancel"
+    | "exit-ttl-cancel";
+  readonly timestamp: number;
 }
 
 export interface ScanTickCompleted {
@@ -250,11 +272,13 @@ export interface FamilyDemotionApplied {
 export type DomainEvent =
   | MarketSnapshotReceived
   | NormalizedMarketUpdated
+  | HotQuoteUpdated
   | SignalProduced
   | SignalApproved
   | SignalRejected
   | SignalConversionSkipped
   | CooldownBypassApplied
+  | HotLaneActionApplied
   | ScanTickCompleted
   | OrderPlaced
   | OrderFilled

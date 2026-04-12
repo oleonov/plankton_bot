@@ -39,7 +39,7 @@ const actionSchema = z.enum(["trade", "monitor", "reduce-only", "blocked"]);
 
 const sessionModeSchema = z.enum(["active-window", "reduced", "always-reduced"]);
 
-const entryModeSchema = z.enum(["probe-first", "conviction-only", "disabled"]);
+const entryModeSchema = z.enum(["spray-first", "probe-first", "conviction-only", "disabled"]);
 
 const scaleModeSchema = z.enum(["confirm-only", "disabled", "aggressive-confirm"]);
 
@@ -162,6 +162,7 @@ const throughputYamlSchema = z.object({
     .optional()
     .default(null),
   fast_lane_enabled: z.boolean().nullable().optional().default(null),
+  dust_lane_enabled: z.boolean().nullable().optional().default(null),
 });
 
 const tailSuppressionYamlSchema = z.object({
@@ -193,6 +194,7 @@ export const rulesYamlSchema = z.object({
     max_probe_in_flight_per_token: null,
     max_entry_signals_per_tick_per_family: null,
     fast_lane_enabled: null,
+    dust_lane_enabled: null,
   }),
   tail_suppression: tailSuppressionYamlSchema,
   session: sessionYamlSchema,

@@ -82,6 +82,7 @@ export type RuntimeMode = (typeof RuntimeMode)[keyof typeof RuntimeMode];
 // ─── Entry / exit / scale / session policy enums ─────────────────────────────
 
 export const EntryMode = {
+  SprayFirst: "spray-first",
   ProbeFirst: "probe-first",
   ConvictionOnly: "conviction-only",
   Disabled: "disabled",

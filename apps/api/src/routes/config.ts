@@ -170,6 +170,7 @@ function buildRulesExport(r: Record<string, unknown> | undefined): Record<string
       max_probe_in_flight_per_token: r["max_probe_in_flight_per_token"],
       max_entry_signals_per_tick_per_family: r["max_entry_signals_per_tick_per_family"],
       fast_lane_enabled: r["fast_lane_enabled"] == null ? null : !!r["fast_lane_enabled"],
+      dust_lane_enabled: r["dust_lane_enabled"] == null ? null : !!r["dust_lane_enabled"],
     },
     tail_suppression: {
       max_open_value_usdc: r["max_open_value_usdc"],

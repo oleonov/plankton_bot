@@ -68,6 +68,7 @@ import { NormalizationModule } from "./modules/normalization/normalization-modul
 import { ExecutionModule } from "./modules/execution/execution-module.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
 import { StrategyModule } from "./modules/strategy/strategy-module.js";
+import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
 import { InventoryManagerModule } from "./modules/inventory-auto-merge/inventory-manager-module.js";
@@ -94,8 +95,52 @@ import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { resolveLiveLiteMaxFamilies } from "./live-lite-envelope.js";
 import { installConsoleRedaction } from "./console-redaction.js";
+import { HotFamilyExecutionModule } from "./modules/hot-lane/hot-family-execution-module.js";
+import { HotQuoteBusModule } from "./modules/hot-lane/hot-quote-bus-module.js";
+import { FastExitCleanupModule } from "./modules/hot-lane/fast-exit-cleanup-module.js";
+import { HotMarketDataModule } from "./modules/hot-lane/hot-market-data-module.js";
+import { evaluateConfigDrift } from "./config-drift-monitor.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
+
+const ENTRY_FILL_LATENCY_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const RISK_EVENT_WARNING_THRESHOLD_PER_HOUR = 1_000;
+const RISK_EVENT_WARNING_COOLDOWN_MS = 10 * 60 * 1000;
+
+function summarizeFillLatency(samplesMs: readonly number[]): Record<string, number> | null {
+  if (samplesMs.length === 0) return null;
+  const sorted = [...samplesMs].sort((a, b) => a - b);
+  const sum = sorted.reduce((acc, value) => acc + value, 0);
+  return {
+    count: sorted.length,
+    avgMs: Math.round(sum / sorted.length),
+    minMs: sorted[0]!,
+    p50Ms: percentile(sorted, 0.5),
+    p95Ms: percentile(sorted, 0.95),
+    maxMs: sorted[sorted.length - 1]!,
+  };
+}
+
+function percentile(sortedSamplesMs: readonly number[], q: number): number {
+  if (sortedSamplesMs.length === 0) return 0;
+  const index = Math.min(
+    sortedSamplesMs.length - 1,
+    Math.max(0, Math.ceil(sortedSamplesMs.length * q) - 1),
+  );
+  return sortedSamplesMs[index]!;
+}
+
+function pruneEntryFillLatencyTracker(
+  placedAtByOrderId: Map<string, number>,
+  nowMs: number,
+  maxAgeMs = ENTRY_FILL_LATENCY_TRACK_MAX_AGE_MS,
+): void {
+  for (const [orderId, placedAtMs] of placedAtByOrderId.entries()) {
+    if (nowMs - placedAtMs > maxAgeMs) {
+      placedAtByOrderId.delete(orderId);
+    }
+  }
+}
 
 async function main(): Promise<void> {
   installConsoleRedaction();
@@ -108,6 +153,7 @@ async function main(): Promise<void> {
   // 2. Bootstrap DBs
   const controlDbPath =
     process.env["CONTROL_DB_PATH"] ?? config.dbPath.replace(/[^/]+\.db$/, "control.db");
+  let familyRulesRaw = "";
   let familyRulesChecksum = "";
   let loadedFamilyRules: ReturnType<typeof loadFamilyRulesYaml>;
 
@@ -121,7 +167,7 @@ async function main(): Promise<void> {
   }
 
   try {
-    const familyRulesRaw = readFileSync(config.familyRulesPath, "utf-8");
+    familyRulesRaw = readFileSync(config.familyRulesPath, "utf-8");
     familyRulesChecksum = computeConfigChecksum(familyRulesRaw);
     loadedFamilyRules = loadFamilyRulesYaml(config.familyRulesPath);
   } catch (err) {
@@ -142,21 +188,38 @@ async function main(): Promise<void> {
   }
 
   const latestConfigImport = getLatestConfigImportMeta(controlConn.db);
-  if (!latestConfigImport) {
-    log.warn("control.db has no config import metadata; YAML drift cannot be detected");
-  } else if (latestConfigImport.sourceChecksum !== familyRulesChecksum) {
+  const loadedControlChecksum = latestConfigImport?.sourceChecksum ?? null;
+  let lastConfigDriftWarningKey: string | null = null;
+  const logConfigDriftWarning = (
+    yamlRaw: string,
+    latestImportMeta = getLatestConfigImportMeta(controlConn.db),
+  ): void => {
+    const drift = evaluateConfigDrift({
+      yamlRaw,
+      latestConfigImport: latestImportMeta,
+      loadedControlChecksum,
+    });
+    if (!drift.warningKey) {
+      lastConfigDriftWarningKey = null;
+      return;
+    }
+    if (drift.warningKey === lastConfigDriftWarningKey) return;
+    lastConfigDriftWarningKey = drift.warningKey;
     log.warn(
       {
         yamlPath: config.familyRulesPath,
-        yamlChecksum: familyRulesChecksum,
-        importedChecksum: latestConfigImport.sourceChecksum,
-        importedAt: latestConfigImport.importedAt,
-        importedBy: latestConfigImport.importedBy,
-        sourcePath: latestConfigImport.sourcePath,
+        yamlChecksum: drift.yamlChecksum,
+        importedChecksum: drift.importedChecksum,
+        loadedControlChecksum,
+        importedAt: latestImportMeta?.importedAt ?? null,
+        importedBy: latestImportMeta?.importedBy ?? null,
+        sourcePath: latestImportMeta?.sourcePath ?? null,
+        warnings: drift.warnings,
       },
-      "control.db family rules differ from on-disk YAML; sync and restart are required",
+      "family rules drift detected; sync and/or restart are required",
     );
-  }
+  };
+  logConfigDriftWarning(familyRulesRaw, latestConfigImport);
 
   // 2b-2. Load global config from YAML (spray sizing, budget caps, etc.)
   // Global config lives in YAML only — not persisted to DB.
@@ -579,21 +642,66 @@ async function main(): Promise<void> {
   });
 
   // 7h. Strategy module
+  const candidateBookCache = marketDataGateway.getOrderBooks
+    ? new CandidateBookCache({
+        gateway: { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) },
+        log: log.child({ module: "candidate-book-cache" }),
+      })
+    : undefined;
   const strategyModule = new StrategyModule({
     bus,
     rulesProvider,
     positionRepo: repos.position,
     orderRepo: repos.order,
     familyStateRepo: repos.familyState,
-    candidateBookGateway: marketDataGateway.getOrderBooks
-      ? { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) }
-      : undefined,
+    candidateBookCache,
     log,
     scanIntervalMs: config.strategyScanIntervalMs,
     runtimeControl,
     liveLiteGuard,
     globalConfig,
   });
+
+  const hotFamilyExecutionModule = candidateBookCache
+    ? new HotFamilyExecutionModule({
+        bus,
+        rulesProvider,
+        orderRepo: repos.order,
+        candidateBookCache,
+        log,
+        policy: { hotQuoteRefreshIntervalMs: 500 },
+      })
+    : null;
+  const hotMarketDataModule = new HotMarketDataModule({
+    bus,
+    gateway: marketDataGateway,
+    rulesProvider,
+    orderRepo: repos.order,
+    ...(candidateBookCache ? { candidateBookCache } : {}),
+    log,
+    policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
+  });
+  const hotQuoteBusModule = candidateBookCache
+    ? new HotQuoteBusModule({
+        bus,
+        rulesProvider,
+        orderRepo: repos.order,
+        candidateBookCache,
+        log,
+        policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
+      })
+    : null;
+  const fastExitCleanupModule = candidateBookCache
+    ? new FastExitCleanupModule({
+        bus,
+        rulesProvider,
+        positionRepo: repos.position,
+        orderRepo: repos.order,
+        candidateBookCache,
+        log,
+        policy: { hotQuoteRefreshIntervalMs: 500 },
+      })
+    : null;
 
   // 7i. Reconciliation module
   const reconciliationModule = new ReconciliationModule({
@@ -757,7 +865,29 @@ async function main(): Promise<void> {
     ["safety-evaluator", safetyEvaluator],
     ["profile-publisher", profilePublisher],
     ["reconciliation", reconciliationModule],
-    ["strategy", strategyModule],
+      ["strategy", strategyModule],
+      ...(hotMarketDataModule
+        ? [["hot-market-data", hotMarketDataModule] as [string, import("@plankton/domain").RuntimeModule]]
+        : []),
+      ...(hotQuoteBusModule
+        ? [["hot-quote-bus", hotQuoteBusModule] as [string, import("@plankton/domain").RuntimeModule]]
+        : []),
+    ...(hotFamilyExecutionModule
+      ? [
+          [
+            "hot-family-execution",
+            hotFamilyExecutionModule,
+          ] as [string, import("@plankton/domain").RuntimeModule],
+        ]
+      : []),
+    ...(fastExitCleanupModule
+      ? [
+          [
+            "fast-exit-cleanup",
+            fastExitCleanupModule,
+          ] as [string, import("@plankton/domain").RuntimeModule],
+        ]
+      : []),
     ["resolution", resolutionModule],
     ["stale-pruning", stalePruningModule],
     ["inventory-manager", inventoryManagerModule],
@@ -874,6 +1004,12 @@ async function main(): Promise<void> {
   const insertSignalConversionActivity = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('signal_conversion_activity', 1, ?, ?)",
   );
+  const deleteRiskEventVolume = ledgerConn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'risk_event_volume'",
+  );
+  const insertRiskEventVolume = ledgerConn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('risk_event_volume', 1, ?, ?)",
+  );
   const upsertSignalActivity = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
     deleteSignalActivity.run();
     insertSignalActivity.run(labels, capturedAt);
@@ -884,6 +1020,10 @@ async function main(): Promise<void> {
       insertSignalConversionActivity.run(labels, capturedAt);
     },
   );
+  const upsertRiskEventVolume = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
+    deleteRiskEventVolume.run();
+    insertRiskEventVolume.run(labels, capturedAt);
+  });
 
   // Track signal counts in a sliding window (resets every 10 minutes — approximate, not rolling)
   const signalWindow = {
@@ -902,9 +1042,15 @@ async function main(): Promise<void> {
     exchangeAccepted: 0,
     exchangeRejectedByCode: new Map<string, number>(),
     fills: 0,
+    fillLatencySamplesMs: [] as number[],
     cooldownBypassByReason: new Map<string, number>(),
+    hotQuoteRefreshes: 0,
+    hotLaneActionsByType: new Map<string, number>(),
+    queueJumpAccepted: 0,
+    queueJumpFills: 0,
     lastReset: Date.now(),
   };
+  const entryOrderPlacedAtMsByOrderId = new Map<string, number>();
 
   bus.subscribe("SignalProduced", async () => {
     signalWindow.produced++;
@@ -956,6 +1102,19 @@ async function main(): Promise<void> {
     }
   });
 
+  bus.subscribe("OrderPlaced", async ({ orderId, signalReason }) => {
+    if (!ENTRY_REASONS.has(signalReason ?? "")) return;
+    const order = repos.order.findById(orderId);
+    if (order?.postOnly === false) {
+      conversionWindow.queueJumpAccepted++;
+    }
+  });
+
+  bus.subscribe("OrderPlaced", async ({ orderId, signalReason, timestamp }) => {
+    if (!ENTRY_REASONS.has(signalReason ?? "")) return;
+    entryOrderPlacedAtMsByOrderId.set(String(orderId), timestamp);
+  });
+
   bus.subscribe("OrderRejected", async ({ errorCode, signalReason }) => {
     if (!ENTRY_REASONS.has(signalReason ?? "")) return;
     const code = String(errorCode ?? "UNKNOWN");
@@ -971,10 +1130,43 @@ async function main(): Promise<void> {
     }
   });
 
+  bus.subscribe("FillReceived", async ({ orderId, signalReason }) => {
+    if (!ENTRY_REASONS.has(signalReason ?? "")) return;
+    const order = repos.order.findById(orderId);
+    if (order?.postOnly === false) {
+      conversionWindow.queueJumpFills++;
+    }
+  });
+
+  bus.subscribe("FillReceived", async ({ orderId, signalReason, timestamp }) => {
+    if (!ENTRY_REASONS.has(signalReason ?? "")) return;
+    const orderKey = String(orderId);
+    const placedAtMs = entryOrderPlacedAtMsByOrderId.get(orderKey);
+    if (placedAtMs == null) return;
+    entryOrderPlacedAtMsByOrderId.delete(orderKey);
+    conversionWindow.fillLatencySamplesMs.push(Math.max(0, timestamp - placedAtMs));
+  });
+
+  bus.subscribe("OrderCancelled", async ({ orderId, signalReason }) => {
+    if (!ENTRY_REASONS.has(signalReason ?? "")) return;
+    entryOrderPlacedAtMsByOrderId.delete(String(orderId));
+  });
+
   bus.subscribe("CooldownBypassApplied", async ({ reason }) => {
     conversionWindow.cooldownBypassByReason.set(
       reason,
       (conversionWindow.cooldownBypassByReason.get(reason) ?? 0) + 1,
+    );
+  });
+
+  bus.subscribe("HotQuoteUpdated", async ({ tokenIds }) => {
+    conversionWindow.hotQuoteRefreshes += tokenIds.length;
+  });
+
+  bus.subscribe("HotLaneActionApplied", async ({ action }) => {
+    conversionWindow.hotLaneActionsByType.set(
+      action,
+      (conversionWindow.hotLaneActionsByType.get(action) ?? 0) + 1,
     );
   });
 
@@ -1017,6 +1209,8 @@ async function main(): Promise<void> {
   );
 
   let lastSnapshotMs = 0;
+  let lastRiskEventVolumeWarningAtMs = 0;
+  let lastConfigDriftCheckAtMs = 0;
 
   // Flush signal + scanner activity to DB every 30 seconds, reset windows every 10 minutes
   setInterval(() => {
@@ -1036,9 +1230,15 @@ async function main(): Promise<void> {
       conversionWindow.exchangeAccepted = 0;
       conversionWindow.exchangeRejectedByCode.clear();
       conversionWindow.fills = 0;
+      conversionWindow.fillLatencySamplesMs = [];
       conversionWindow.cooldownBypassByReason.clear();
+      conversionWindow.hotQuoteRefreshes = 0;
+      conversionWindow.hotLaneActionsByType.clear();
+      conversionWindow.queueJumpAccepted = 0;
+      conversionWindow.queueJumpFills = 0;
       conversionWindow.lastReset = now;
     }
+    pruneEntryFillLatencyTracker(entryOrderPlacedAtMsByOrderId, now);
     upsertSignalActivity(
       JSON.stringify({
         produced: signalWindow.produced,
@@ -1060,11 +1260,55 @@ async function main(): Promise<void> {
         exchangeAccepted: conversionWindow.exchangeAccepted,
         exchangeRejectedByCode: Object.fromEntries(conversionWindow.exchangeRejectedByCode),
         fills: conversionWindow.fills,
+        fillLatencyMs: summarizeFillLatency(conversionWindow.fillLatencySamplesMs),
         cooldownBypassByReason: Object.fromEntries(conversionWindow.cooldownBypassByReason),
+        hotQuoteRefreshes: conversionWindow.hotQuoteRefreshes,
+        hotLaneActionsByType: Object.fromEntries(conversionWindow.hotLaneActionsByType),
+        queueJumpAccepted: conversionWindow.queueJumpAccepted,
+        queueJumpFills: conversionWindow.queueJumpFills,
         windowStartMs: conversionWindow.lastReset,
       }),
       new Date().toISOString(),
     );
+    const riskEventsLast1h = repos.riskEvent.countSince(
+      new Date(now - 60 * 60 * 1000).toISOString(),
+    );
+    const riskEventsLast24h = repos.riskEvent.countSince(
+      new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+    );
+    const riskEventWarning = riskEventsLast1h >= RISK_EVENT_WARNING_THRESHOLD_PER_HOUR;
+    upsertRiskEventVolume(
+      JSON.stringify({
+        last1h: riskEventsLast1h,
+        last24h: riskEventsLast24h,
+        warning: riskEventWarning,
+        thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
+        windowStartMs: now - 24 * 60 * 60 * 1000,
+      }),
+      new Date().toISOString(),
+    );
+    if (
+      riskEventWarning &&
+      now - lastRiskEventVolumeWarningAtMs >= RISK_EVENT_WARNING_COOLDOWN_MS
+    ) {
+      lastRiskEventVolumeWarningAtMs = now;
+      log.warn(
+        {
+          riskEventsLast1h,
+          riskEventsLast24h,
+          thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
+        },
+        "risk_events growth threshold exceeded",
+      );
+    }
+    if (now - lastConfigDriftCheckAtMs >= 60_000) {
+      lastConfigDriftCheckAtMs = now;
+      try {
+        logConfigDriftWarning(readFileSync(config.familyRulesPath, "utf-8"));
+      } catch (err) {
+        log.warn({ err, path: config.familyRulesPath }, "failed to re-read family rules YAML");
+      }
+    }
 
     // Reset scanner window on same schedule as signal window
     if (now - scannerWindow.lastReset > SIGNAL_WINDOW_MS) {

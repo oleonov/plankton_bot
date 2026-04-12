@@ -12,6 +12,8 @@ import { InProcessEventBus } from "@plankton/event-bus";
 import {
   cleanStaleEntryOrders,
   CANCEL_BACKOFF_MS,
+  DUST_LANE_ENTRY_TTL_MS,
+  DUST_LANE_EXIT_TTL_MS,
   PROBE_LIKE_FAST_DAILY_TTL_MS,
   PROBE_LIKE_INTRADAY_TTL_MS,
 } from "../modules/reconciliation/stale-order-cleaner.js";
@@ -272,6 +274,36 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(0);
   });
 
+  it("cancels dust-lane spray entries on the dust TTL", async () => {
+    const staleAt = new Date(Date.now() - DUST_LANE_ENTRY_TTL_MS - 5_000).toISOString();
+    const order = makeOrder({
+      createdAt: staleAt,
+      signalReason: "spray-entry",
+      sizeUsdc: 0.15,
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(
+      makeMarket({
+        horizon: "daily",
+        familyKey: "who-will-be-next-supreme-leader-of-iran",
+      }),
+    );
+    rulesProvider.getRule = vi.fn().mockReturnValue({
+      rules: { throughput: { dustLaneEnabled: true } },
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+  });
+
   it("uses horizon TTL for conviction entries on intraday markets", async () => {
     const tenMinutesAgo = new Date(Date.now() - 10 * 60_000).toISOString();
     const order = makeOrder({
@@ -330,6 +362,30 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(0);
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
+  });
+
+  it("uses the shorter exit TTL for dust-lane families", async () => {
+    const staleAt = new Date(Date.now() - DUST_LANE_EXIT_TTL_MS - 5_000).toISOString();
+    const order = makeOrder({
+      side: "sell",
+      createdAt: staleAt,
+      signalReason: "repricing-exit",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    rulesProvider.getRule = vi.fn().mockReturnValue({
+      rules: { throughput: { dustLaneEnabled: true } },
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleExitTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
   });
 
   // ─── Signal reason filtering ───────────────────────────────────────

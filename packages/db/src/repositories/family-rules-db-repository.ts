@@ -87,7 +87,7 @@ export class SqliteFamilyRulesDbRepository {
            max_unmoved_hold_hours = ?, max_tail_hold_hours = ?,
            allow_two_sided = ?, two_sided_mode = ?, min_activity_for_two_sided = ?,
            max_concurrent_orders_per_family = ?, max_probe_in_flight_per_token = ?,
-           max_entry_signals_per_tick_per_family = ?, fast_lane_enabled = ?,
+           max_entry_signals_per_tick_per_family = ?, fast_lane_enabled = ?, dust_lane_enabled = ?,
            max_open_value_usdc = ?, max_active_markets = ?, max_dust_positions = ?,
            tail_quarantine_threshold_usdc = ?, tail_quarantine_threshold_ratio = ?,
            stale_tail_prune_enabled = ?, threshold_cleanup_required = ?,
@@ -134,6 +134,7 @@ export class SqliteFamilyRulesDbRepository {
         rules.maxProbeInFlightPerToken ?? null,
         rules.maxEntrySignalsPerTickPerFamily ?? null,
         rules.fastLaneEnabled == null ? null : rules.fastLaneEnabled ? 1 : 0,
+        rules.dustLaneEnabled == null ? null : rules.dustLaneEnabled ? 1 : 0,
         rules.maxOpenValueUsdc,
         rules.maxActiveMarkets,
         rules.maxDustPositions,
@@ -251,6 +252,8 @@ export class SqliteFamilyRulesDbRepository {
             (row.max_entry_signals_per_tick_per_family as number | null) ?? null,
           fastLaneEnabled:
             row["fast_lane_enabled"] == null ? null : Boolean(row["fast_lane_enabled"]),
+          dustLaneEnabled:
+            row["dust_lane_enabled"] == null ? null : Boolean(row["dust_lane_enabled"]),
         },
         tailSuppression: {
           maxOpenValueUsdc: row.max_open_value_usdc as number,

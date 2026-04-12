@@ -100,6 +100,7 @@ function makeFamilyConfig(
         maxProbeInFlightPerToken: null,
         maxEntrySignalsPerTickPerFamily: null,
         fastLaneEnabled: null,
+        dustLaneEnabled: null,
       },
       tailSuppression: {
         maxOpenValueUsdc: 50,

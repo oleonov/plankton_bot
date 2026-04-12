@@ -334,7 +334,9 @@ describe("resolveFamilyEntryPolicy", () => {
       promotionState: "probe-only",
       evidenceScore: 10,
     });
-    expect(resolveFamilyEntryPolicy(identity, evidence)).toBe("spray-first" as EntryPolicy);
+    expect(resolveFamilyEntryPolicy(identity, evidence, undefined, undefined)).toBe(
+      "spray-first" as EntryPolicy,
+    );
   });
 
   it("returns probe-first for fee-enabled families", () => {
@@ -343,13 +345,17 @@ describe("resolveFamilyEntryPolicy", () => {
       promotionState: "probe-only",
       evidenceScore: 10,
     });
-    expect(resolveFamilyEntryPolicy(identity, evidence)).toBe("probe-first" as EntryPolicy);
+    expect(resolveFamilyEntryPolicy(identity, evidence, undefined, undefined)).toBe(
+      "probe-first" as EntryPolicy,
+    );
   });
 
   it("returns probe-first for scaled families", () => {
     const identity = makeIdentity();
     const evidence = makeEvidence({ promotionState: "scaled" });
-    expect(resolveFamilyEntryPolicy(identity, evidence)).toBe("probe-first" as EntryPolicy);
+    expect(resolveFamilyEntryPolicy(identity, evidence, undefined, undefined)).toBe(
+      "probe-first" as EntryPolicy,
+    );
   });
 
   it("returns probe-first when evidenceScore > 50", () => {
@@ -358,17 +364,57 @@ describe("resolveFamilyEntryPolicy", () => {
       promotionState: "probe-only",
       evidenceScore: 51,
     });
-    expect(resolveFamilyEntryPolicy(identity, evidence)).toBe("probe-first" as EntryPolicy);
+    expect(resolveFamilyEntryPolicy(identity, evidence, undefined, undefined)).toBe(
+      "probe-first" as EntryPolicy,
+    );
+  });
+
+  it("returns spray-first for dust-lane families even when evidence is proven", () => {
+    const identity = makeIdentity();
+    const evidence = makeEvidence({ promotionState: "scaled", evidenceScore: 80 });
+    expect(resolveFamilyEntryPolicy(identity, evidence, { dustLaneEnabled: true }, undefined)).toBe(
+      "spray-first" as EntryPolicy,
+    );
+  });
+
+  it("keeps fee-enabled families on probe-first even when dust lane is enabled", () => {
+    const identity = makeIdentity({ feeTier: "fee-enabled" });
+    const evidence = makeEvidence({ promotionState: "probe-only", evidenceScore: 10 });
+    expect(resolveFamilyEntryPolicy(identity, evidence, { dustLaneEnabled: true }, undefined)).toBe(
+      "probe-first" as EntryPolicy,
+    );
   });
 
   it("returns disabled for restricted families", () => {
     const identity = makeIdentity({ strategyProfile: "restricted" });
-    expect(resolveFamilyEntryPolicy(identity, undefined)).toBe("disabled" as EntryPolicy);
+    expect(resolveFamilyEntryPolicy(identity, undefined, undefined, undefined)).toBe(
+      "disabled" as EntryPolicy,
+    );
   });
 
   it("returns spray-first when no evidence provided", () => {
     const identity = makeIdentity({ strategyProfile: "scalp" });
-    expect(resolveFamilyEntryPolicy(identity, undefined)).toBe("spray-first" as EntryPolicy);
+    expect(resolveFamilyEntryPolicy(identity, undefined, undefined, undefined)).toBe(
+      "spray-first" as EntryPolicy,
+    );
+  });
+
+  it("honors explicit spray-first entry mode for proven families", () => {
+    const identity = makeIdentity();
+    const evidence = makeEvidence({ promotionState: "scaled", evidenceScore: 120 });
+    expect(resolveFamilyEntryPolicy(identity, evidence, undefined, "spray-first")).toBe(
+      "spray-first" as EntryPolicy,
+    );
+  });
+
+  it("honors explicit conviction-only entry mode even when dust lane is enabled", () => {
+    const identity = makeIdentity();
+    const evidence = makeEvidence({ promotionState: "probe-only", evidenceScore: 10 });
+    expect(
+      resolveFamilyEntryPolicy(identity, evidence, { dustLaneEnabled: true }, "conviction-only"),
+    ).toBe(
+      "probe-first" as EntryPolicy,
+    );
   });
 });
 
@@ -811,6 +857,95 @@ describe("scan() spray integration", () => {
     // Should emit probe-entry, NOT spray-entry
     expect(result.signals).toHaveLength(1);
     expect(result.signals[0]!.reason).toBe("probe-entry");
+  });
+
+  it("routes proven families with dust lane into spray-entry", () => {
+    const bundle = makeBundle({
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: {
+        throughput: {
+          maxConcurrentOrdersPerFamily: 20,
+          maxProbeInFlightPerToken: 2,
+          maxEntrySignalsPerTickPerFamily: 20,
+          dustLaneEnabled: true,
+        },
+      },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const markets = [makeNormalizedMarket({ midPrice: 0.035 })];
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("spray-entry");
+  });
+
+  it("allows a third dust mesh quote for reduced-fast families when condition cap is 3", () => {
+    const bundle = makeBundle({
+      identity: { familyKey: "ethereum-price" },
+      evidence: { promotionState: "scaled", evidenceScore: 80 },
+      rules: {
+        entry: { ...makeRules().entry, entryMode: "spray-first" },
+        throughput: {
+          maxConcurrentOrdersPerFamily: 20,
+          maxProbeInFlightPerToken: 2,
+          maxEntrySignalsPerTickPerFamily: 20,
+          fastLaneEnabled: true,
+          dustLaneEnabled: true,
+        },
+      },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const globalConfig = makeGlobalConfig();
+
+    const orderRepo = createMockOrderRepo([
+      makeOrder({ tokenId: TOK_ID, signalReason: "spray-entry" }),
+      makeOrder({
+        orderId: createOrderId("ord-2"),
+        clientOrderId: "plk_ord_2" as ClientOrderId,
+        tokenId: TOK_ID_2,
+        signalReason: "spray-entry",
+      }),
+    ]);
+
+    const markets = [TOK_ID, TOK_ID_2, TOK_ID_3].map((tokenId) =>
+      makeNormalizedMarket({
+        tokenId,
+        conditionId: "cond-shared",
+        familyId: FAM_ID,
+        familyKey: "ethereum-price",
+        bestBid: 0.03,
+        bestAsk: 0.07,
+        spread: 0.04,
+        midPrice: 0.05,
+      }),
+    );
+    const tickTs = new Date("2026-04-01T12:00:00Z").getTime();
+
+    const result = scan(
+      markets,
+      { rulesProvider, positionRepo, orderRepo, familyStateRepo, log, globalConfig },
+      createBuyTracker(),
+      tickTs,
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]!.reason).toBe("spray-entry");
+    expect(result.signals[0]!.tokenId).toBe(TOK_ID_3);
   });
 
   it("respects sprayMaxMarketsPerTick cap", () => {

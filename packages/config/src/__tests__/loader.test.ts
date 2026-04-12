@@ -61,6 +61,7 @@ describe("loadFamilyRulesYaml", () => {
       maxProbeInFlightPerToken: null,
       maxEntrySignalsPerTickPerFamily: null,
       fastLaneEnabled: null,
+      dustLaneEnabled: null,
     });
     expect(family.rules.tailSuppression.maxOpenValueUsdc).toBe(75.0);
     expect(family.rules.session.activeWindowsUtc).toEqual([{ start: "14:00", end: "21:00" }]);

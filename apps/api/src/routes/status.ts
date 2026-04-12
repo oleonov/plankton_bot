@@ -150,7 +150,12 @@ function computeTradingState(
       exchangeAccepted?: number;
       exchangeRejectedByCode?: Record<string, number>;
       fills?: number;
+      fillLatencyMs?: Record<string, number> | null;
       cooldownBypassByReason?: Record<string, number>;
+      hotQuoteRefreshes?: number;
+      hotLaneActionsByType?: Record<string, number>;
+      queueJumpAccepted?: number;
+      queueJumpFills?: number;
     };
     signalActivity.signalsConvertedLast10m = conversion.converted ?? 0;
     signalActivity.marketabilityRejectedLast10mByReason =
@@ -159,7 +164,12 @@ function computeTradingState(
     signalActivity.exchangeAcceptedLast10m = conversion.exchangeAccepted ?? 0;
     signalActivity.exchangeRejectedLast10mByCode = conversion.exchangeRejectedByCode ?? {};
     signalActivity.fillsLast10m = conversion.fills ?? 0;
+    signalActivity.fillLatencyMsLast10m = conversion.fillLatencyMs ?? null;
     signalActivity.cooldownBypassLast10mByReason = conversion.cooldownBypassByReason ?? {};
+    signalActivity.hotQuoteRefreshesLast10m = conversion.hotQuoteRefreshes ?? 0;
+    signalActivity.hotLaneActionsLast10mByType = conversion.hotLaneActionsByType ?? {};
+    signalActivity.queueJumpAcceptedLast10m = conversion.queueJumpAccepted ?? 0;
+    signalActivity.queueJumpFillsLast10m = conversion.queueJumpFills ?? 0;
   }
 
   const allProbeOnly = db
@@ -480,6 +490,14 @@ export function buildStatusSnapshot(
   const executionQueue = executionQueueRow
     ? (JSON.parse(executionQueueRow.labels) as Record<string, unknown>)
     : null;
+  const riskEventVolumeRow = db
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'risk_event_volume' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { labels: string } | undefined;
+  const riskEventVolume = riskEventVolumeRow
+    ? (JSON.parse(riskEventVolumeRow.labels) as Record<string, unknown>)
+    : null;
 
   let desiredProfile: string | null = null;
   let currentProfile: string | null = null;
@@ -573,6 +591,7 @@ export function buildStatusSnapshot(
     reconciliationDriftDetected,
     tradingState,
     signalActivity,
+    riskEventVolume,
     executionTelemetry24h,
     executionQueue,
     startupAdoption,

@@ -31,13 +31,14 @@ import {
   type FamilyId,
   type FamilyIdentity,
   type FamilyEvidence,
+  type EntryMode,
   type TokenId,
   type SignalReason,
   type ScaleInRules,
 } from "@plankton/domain";
 import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
-import { resolveFamilyThroughputPolicy } from "../../family-throughput.js";
+import { resolveFamilySpeedTier, resolveFamilyThroughputPolicy } from "../../family-throughput.js";
 import {
   rejectOutcomeCandidate,
   selectFirstEntryOutcomeForCondition,
@@ -334,14 +335,23 @@ export type EntryPolicy = "spray-first" | "probe-first" | "disabled";
  * Spray-first: unproven families that haven't been validated yet get micro-probes
  * to discover tradeable markets before committing conviction-sized entries.
  * Fee-enabled families skip spray (fees would eat the tiny position).
- * Proven/scaled families go straight to probe-first.
+ * Proven/scaled families go straight to probe-first unless a family explicitly
+ * opts into the dust lane.
  */
 export function resolveFamilyEntryPolicy(
   identity: FamilyIdentity,
   evidence: FamilyEvidence | undefined,
+  throughput: { dustLaneEnabled?: boolean | null } | undefined,
+  configuredEntryMode: EntryMode | null | undefined,
 ): EntryPolicy {
+  if (configuredEntryMode === "disabled") return "disabled";
   if (identity.strategyProfile === "restricted") return "disabled";
   if (identity.feeTier === "fee-enabled") return "probe-first";
+  if (configuredEntryMode === "spray-first") return "spray-first";
+  if (configuredEntryMode === "conviction-only") {
+    return "probe-first";
+  }
+  if (throughput?.dustLaneEnabled === true) return "spray-first";
   if (evidence?.promotionState === "scaled") return "probe-first";
   if (evidence?.evidenceScore != null && evidence.evidenceScore > 50) return "probe-first";
   return "spray-first";
@@ -392,19 +402,23 @@ export function evaluateSprayEntry(
   spraySizeUsdc: number,
   sizeMult: number,
   minNotionalUsdc = 0.05,
+  meshLevel = 0,
 ): Signal | null {
   const entry = bundle.rules.entry;
   if (entry.entryMode === "disabled") return null;
   if (referencePrice < entry.minEntryPrice || referencePrice > entry.maxEntryPrice) return null;
 
+  const suggestedPrice = resolveDustMeshSuggestedPrice(market, referencePrice, meshLevel);
+  if (suggestedPrice == null) return null;
+
   const baseSizeUsdc = spraySizeUsdc * sizeMult;
   const suggestedSizeUsdc = scaleSizeByPrice(
     baseSizeUsdc,
-    referencePrice,
+    suggestedPrice,
     market.minOrderSize ?? 5,
     minNotionalUsdc,
   );
-  const suggestedSize = suggestedSizeUsdc / referencePrice;
+  const suggestedSize = suggestedSizeUsdc / suggestedPrice;
   if (suggestedSize < 0.01) return null;
   if (market.minOrderSize != null && suggestedSize < market.minOrderSize) return null;
 
@@ -414,7 +428,7 @@ export function evaluateSprayEntry(
     familyId: market.familyId!,
     tokenId: market.tokenId,
     side: "buy",
-    suggestedPrice: referencePrice,
+    suggestedPrice,
     suggestedSize,
     suggestedSizeUsdc,
     reason: "spray-entry" as SignalReason,
@@ -422,6 +436,37 @@ export function evaluateSprayEntry(
     sequenceInTick: seq,
     generatedAt: new Date(tickTs).toISOString(),
   };
+}
+
+function resolveDustMeshSuggestedPrice(
+  market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "tickSize">,
+  referencePrice: number,
+  meshLevel: number,
+): number | null {
+  if (meshLevel <= 0) return referencePrice;
+  if (market.bestBid == null || market.bestAsk == null) return referencePrice;
+
+  const offsetTicks = meshLevel + 1;
+  const ladderPrice = market.bestBid + offsetTicks * market.tickSize;
+  const ceiling = market.bestAsk - market.tickSize;
+  const meshPrice = Math.min(ladderPrice, ceiling);
+  if (meshPrice <= market.bestBid + 1e-9) return null;
+  if (meshPrice >= market.bestAsk - 1e-9) return null;
+  return meshPrice;
+}
+
+function resolveDustMeshCap(bundle: FamilyRuleBundle): number {
+  const throughput = resolveFamilyThroughputPolicy(bundle);
+  const speedTier = resolveFamilySpeedTier(bundle);
+  const tierCap = speedTier === "core-fast" ? 4 : speedTier === "reduced-fast" ? 3 : 2;
+  return Math.max(
+    1,
+    Math.min(
+      tierCap,
+      throughput.maxConcurrentOrdersPerFamily,
+      Math.max(throughput.maxProbeInFlightPerToken, 1) + 1,
+    ),
+  );
 }
 
 /** Metadata about what the scanner blocked/produced in a single scan cycle. */
@@ -476,6 +521,15 @@ export function scan(
       .filter((order) => order.side === "buy" && ENTRY_REASONS.has(order.signalReason ?? ""))
       .map((order) => String(order.tokenId)),
   );
+  const openEntryOrderCountByCondition = new Map<string, number>();
+  for (const market of sorted) {
+    if (!openEntryOrderTokens.has(String(market.tokenId))) continue;
+    const conditionKey = getConditionKey(market);
+    openEntryOrderCountByCondition.set(
+      conditionKey,
+      (openEntryOrderCountByCondition.get(conditionKey) ?? 0) + 1,
+    );
+  }
   const selectedFirstEntryTokens = new Map<string, string | null>();
 
   // Track sequence per family+token+side within this tick
@@ -585,7 +639,12 @@ export function scan(
     // Compute entry policy once per market (used for cooldown + spray decisions)
     const entryPolicy = existingPosition
       ? null
-      : resolveFamilyEntryPolicy(bundle.identity, bundle.evidence);
+      : resolveFamilyEntryPolicy(
+          bundle.identity,
+          bundle.evidence,
+          bundle.rules.throughput,
+          bundle.rules.entry.entryMode,
+        );
 
     // Entry cooldown — spray-first uses sprayCooldownSeconds, others use family cooldown
     const cooldownSec = bundle.rules.entry.entryCooldownSeconds;
@@ -654,6 +713,9 @@ export function scan(
           openPositionTokens.has(String(candidate.tokenId)) ||
           openEntryOrderTokens.has(String(candidate.tokenId)),
       );
+      const isDustMeshEligible =
+        entryPolicy === "spray-first" && bundle.rules.throughput?.dustLaneEnabled === true;
+      const existingConditionEntryOrders = openEntryOrderCountByCondition.get(conditionKey) ?? 0;
 
       // P1-6: max probe count per market — skip if already probed this token enough times
       const maxProbes = bundle.rules.entry.maxProbeCountPerMarket;
@@ -696,10 +758,18 @@ export function scan(
         continue;
       }
 
-      if (hasAnyConditionInventory) continue;
+      if (hasAnyConditionInventory && !isDustMeshEligible) continue;
+      if (
+        isDustMeshEligible &&
+        existingConditionEntryOrders >= resolveDustMeshCap(bundle)
+      ) {
+        continue;
+      }
 
       let selectedToken = selectedFirstEntryTokens.get(conditionKey);
-      if (!selectedFirstEntryTokens.has(conditionKey)) {
+      if (isDustMeshEligible) {
+        selectedToken = String(market.tokenId);
+      } else if (!selectedFirstEntryTokens.has(conditionKey)) {
         const selection = selectFirstEntryOutcomeForCondition(group, bundle);
         selectedToken =
           selection.tokenId ??
@@ -752,6 +822,7 @@ export function scan(
             gc.spraySizeUsdc,
             sizeMult,
             minEntryNotionalUsdc,
+            existingConditionEntryOrders,
           );
           if (spraySignal && spraySignal.suggestedSizeUsdc <= sprayBudgetRemaining) {
             signals.push(spraySignal);
@@ -759,6 +830,10 @@ export function scan(
             sprayFamilyEmitted.add(sprayKey);
             sprayPositionsRemaining--;
             sprayBudgetRemaining -= spraySignal.suggestedSizeUsdc;
+            openEntryOrderCountByCondition.set(
+              conditionKey,
+              (openEntryOrderCountByCondition.get(conditionKey) ?? 0) + 1,
+            );
           }
         }
         // spray-first families never fall through to probe

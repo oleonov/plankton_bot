@@ -13,4 +13,11 @@ export class SqliteRiskEventRepository implements RiskEventRepository {
       .prepare("INSERT INTO risk_events (event_type, family_id, payload) VALUES (?, ?, ?)")
       .run(event.eventType, event.familyId, JSON.stringify(event.payload));
   }
+
+  countSince(createdAtIso: string): number {
+    const row = this.db
+      .prepare("SELECT COUNT(*) as c FROM risk_events WHERE created_at >= ?")
+      .get(createdAtIso) as { c: number };
+    return row.c;
+  }
 }

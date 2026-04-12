@@ -68,6 +68,12 @@ export interface RuntimeEventMap {
     readonly timestamp: number;
   };
 
+  HotQuoteUpdated: {
+    readonly tokenIds: readonly TokenId[];
+    readonly familyIds: readonly FamilyId[];
+    readonly refreshedAt: number;
+  };
+
   SignalProduced: {
     readonly signal: Signal;
   };
@@ -101,6 +107,20 @@ export interface RuntimeEventMap {
       | "manual-family-fast-lane";
     readonly previousCooldownUntil: number;
     readonly appliedAt: number;
+  };
+
+  HotLaneActionApplied: {
+    readonly familyId: FamilyId;
+    readonly tokenId: TokenId;
+    readonly orderId: OrderId;
+    readonly signalReason: string | null;
+    readonly action:
+      | "entry-reprice-cancel"
+      | "entry-ttl-cancel"
+      | "entry-suppress-cancel"
+      | "exit-reprice-cancel"
+      | "exit-ttl-cancel";
+    readonly timestamp: number;
   };
 
   ScanTickCompleted: {

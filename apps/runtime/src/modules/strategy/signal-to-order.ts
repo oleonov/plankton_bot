@@ -39,6 +39,11 @@ import {
   type MarketabilityDecision,
   type MarketabilityPolicy,
 } from "./marketability.js";
+import {
+  isDustSignalReason,
+  resolveQueueJumpExecutionTerms,
+  shouldUseDustLane,
+} from "../hot-lane/hot-lane-policy.js";
 
 export interface SignalToOrderBridgeDeps {
   bus: EventBus;
@@ -270,6 +275,15 @@ export class SignalToOrderBridge {
     }
 
     const policy = resolveFamilyLiveTradingPolicy(bundle.identity);
+    const queueJumpTerms = resolveQueueJumpExecutionTerms({
+      signal,
+      market,
+      bundle,
+      nowMs: Date.now(),
+    });
+    if (!policy.requiresPostOnlyForLive && queueJumpTerms) {
+      return queueJumpTerms;
+    }
     if (!policy.requiresPostOnlyForLive) {
       return { price: signal.suggestedPrice };
     }
@@ -359,6 +373,13 @@ export class SignalToOrderBridge {
     if (!bundle) return;
 
     const policy = resolveMarketabilityPolicy(bundle);
+    if (
+      shouldUseDustLane(bundle) &&
+      isDustSignalReason(order.signalReason) &&
+      (payload.reason === "entry-reprice-cancel" || payload.reason === "entry-ttl-cancel")
+    ) {
+      return;
+    }
     const key = this.cooldownKey(order.familyId, order.tokenId);
     const nextCount = (this.unfilledCancelCountByToken.get(key) ?? 0) + 1;
     this.unfilledCancelCountByToken.set(key, nextCount);

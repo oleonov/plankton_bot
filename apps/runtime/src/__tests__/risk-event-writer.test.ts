@@ -3,11 +3,11 @@ import { createFamilyId, createTokenId } from "@plankton/domain";
 import { RiskEventWriter } from "../risk-event-writer.js";
 
 describe("RiskEventWriter", () => {
-  let repo: { insert: ReturnType<typeof vi.fn> };
+  let repo: { insert: ReturnType<typeof vi.fn>; countSince: ReturnType<typeof vi.fn> };
   let writer: RiskEventWriter;
 
   beforeEach(() => {
-    repo = { insert: vi.fn() };
+    repo = { insert: vi.fn(), countSince: vi.fn(() => 0) };
     writer = new RiskEventWriter(repo, { rejectCooldownMs: 15 * 60 * 1000 });
   });
 

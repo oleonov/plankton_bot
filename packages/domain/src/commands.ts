@@ -69,7 +69,12 @@ export interface CancelOrderCommand {
     | "stale_entry_enddate"
     | "stale_exit_ttl"
     | "sell_replace_reprice"
-    | "sell_replace_retry";
+    | "sell_replace_retry"
+    | "entry-reprice-cancel"
+    | "entry-ttl-cancel"
+    | "entry-suppress-cancel"
+    | "exit-reprice-cancel"
+    | "exit-ttl-cancel";
   readonly familyId: FamilyId;
 }
 

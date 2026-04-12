@@ -21,7 +21,7 @@ import type {
 } from "@plankton/domain";
 import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import { isFastLaneEnabled } from "../../family-throughput.js";
+import { isDustLaneEnabled, isFastLaneEnabled } from "../../family-throughput.js";
 
 // Horizon-aware TTLs for conviction-style entry orders.
 export const HORIZON_TTL_MS: Record<string, number> = {
@@ -35,9 +35,12 @@ export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
 export const PROBE_LIKE_FAST_DAILY_TTL_MS = 90_000; // 90s for proven fast daily families
 export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
 export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
+export const DUST_LANE_ENTRY_TTL_MS = 15_000; // 15s for dust-lane spray orders
+export const DUST_LANE_EXIT_TTL_MS = 20_000; // 20s for fast dust exits
 export const EXIT_ORDER_TTL_MS = 60_000; // 60s
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff (reduced from 5m)
+export const DUST_CANCEL_BACKOFF_MS = 5_000; // 5s for dust-lane repricing loops
 
 const EXIT_REASONS = new Set([
   "repricing-exit",
@@ -99,12 +102,12 @@ export async function cleanStaleEntryOrders(
     const ordKey = String(order.orderId);
 
     // Anti-churn: skip if cancel was recently attempted
-    const lastAttempt = backoffMap.get(ordKey);
-    if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
-
     const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();
     const bundle = deps.rulesProvider.getRule(order.familyId);
+    const backoffMs = resolveCancelBackoffMs(order, bundle);
+    const lastAttempt = backoffMap.get(ordKey);
+    if (lastAttempt != null && now - lastAttempt < backoffMs) continue;
     const ttlMs = resolveOrderTtlMs(order, market, bundle);
 
     // Check TTL
@@ -142,16 +145,19 @@ export async function cleanStaleEntryOrders(
 
   for (const order of exitSells) {
     const ordKey = String(order.orderId);
+    const bundle = deps.rulesProvider.getRule(order.familyId);
+    const backoffMs = resolveCancelBackoffMs(order, bundle);
     const lastAttempt = backoffMap.get(ordKey);
-    if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
+    if (lastAttempt != null && now - lastAttempt < backoffMs) continue;
 
     const ageMs = now - new Date(order.createdAt).getTime();
-    if (ageMs > EXIT_ORDER_TTL_MS) {
+    const ttlMs = resolveExitOrderTtlMs(bundle);
+    if (ageMs > ttlMs) {
       await publishCancel(bus, order, "stale_exit_ttl");
       backoffMap.set(ordKey, now);
       staleExitTtlCancelled++;
       log.info(
-        { orderId: ordKey, ageMs, ttlMs: EXIT_ORDER_TTL_MS, signalReason: order.signalReason },
+        { orderId: ordKey, ageMs, ttlMs, signalReason: order.signalReason },
         "stale exit order — TTL exceeded",
       );
     }
@@ -171,6 +177,9 @@ function resolveOrderTtlMs(
 
   // Probe/spray orders need a much shorter leash than conviction-style orders.
   if (order.signalReason === "probe-entry" || order.signalReason === "spray-entry") {
+    if (order.signalReason === "spray-entry" && isDustLaneEnabled(bundle)) {
+      return Math.min(horizonTtlMs, DUST_LANE_ENTRY_TTL_MS);
+    }
     if (horizon === "intraday-4h") return Math.min(horizonTtlMs, PROBE_LIKE_INTRADAY_TTL_MS);
     if (horizon === "daily") {
       const dailyTtlMs = isFastLaneEnabled(bundle)
@@ -184,6 +193,23 @@ function resolveOrderTtlMs(
   }
 
   return horizonTtlMs;
+}
+
+function resolveExitOrderTtlMs(bundle: FamilyRuleBundle | null): number {
+  return isDustLaneEnabled(bundle) ? DUST_LANE_EXIT_TTL_MS : EXIT_ORDER_TTL_MS;
+}
+
+function resolveCancelBackoffMs(
+  order: Pick<Order, "signalReason">,
+  bundle: FamilyRuleBundle | null,
+): number {
+  if (order.signalReason === "spray-entry" && isDustLaneEnabled(bundle)) {
+    return DUST_CANCEL_BACKOFF_MS;
+  }
+  if (order.signalReason === "repricing-exit" && isDustLaneEnabled(bundle)) {
+    return DUST_CANCEL_BACKOFF_MS;
+  }
+  return CANCEL_BACKOFF_MS;
 }
 
 async function publishCancel(

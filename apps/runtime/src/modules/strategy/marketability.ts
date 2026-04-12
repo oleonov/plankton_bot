@@ -106,7 +106,7 @@ const REDUCED_FAST_POLICY: MarketabilityPolicy = {
   speedTier: "reduced-fast",
   maxEntrySpreadCents: 0.025,
   maxWideEntrySpreadCents: 0.045,
-  minWideSpreadVolume24h: 15_000,
+  minWideSpreadVolume24h: 7_500,
   maxPriceImprovementCents: 0.015,
   makerImprovementTicks: 2,
   maxUnfilledOrdersPerToken: 2,

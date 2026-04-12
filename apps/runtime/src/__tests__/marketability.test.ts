@@ -565,6 +565,8 @@ describe("marketability policy retuning", () => {
     expect(reducedFast.tier).toBe("reduced");
     expect(reducedFast.speedTier).toBe("reduced-fast");
     expect(reducedFast.maxEntrySpreadCents).toBe(0.025);
+    expect(reducedFast.maxWideEntrySpreadCents).toBe(0.045);
+    expect(reducedFast.minWideSpreadVolume24h).toBe(7_500);
     expect(reducedFast.makerImprovementTicks).toBe(2);
     expect(reducedFast.unfilledCancelCooldownMs).toBe(60_000);
 
@@ -573,6 +575,42 @@ describe("marketability policy retuning", () => {
     expect(reducedStandard.maxEntrySpreadCents).toBe(0.01);
     expect(reducedStandard.makerImprovementTicks).toBe(1);
     expect(reducedStandard.unfilledCancelCooldownMs).toBe(5 * 60_000);
+  });
+
+  it("allows reduced-fast first entries through the widened spread gate at 7.5k volume", () => {
+    const decision = evaluateMarketability({
+      signal: makeSignal({
+        reason: "probe-entry",
+        suggestedPrice: 0.05,
+        suggestedSizeUsdc: 4,
+      }),
+      market: makeMarket({
+        familyKey: "ethereum-price",
+        bestBid: 0.04,
+        bestAsk: 0.08,
+        spread: 0.04,
+        volume24h: 8_000,
+      }),
+      bundle: makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "ethereum-price",
+        },
+        rules: {
+          ...makeBundle().rules,
+          throughput: {
+            maxConcurrentOrdersPerFamily: 10,
+            maxProbeInFlightPerToken: 2,
+            maxEntrySignalsPerTickPerFamily: 10,
+            fastLaneEnabled: true,
+          },
+        },
+      }),
+      nowMs: NOW,
+    });
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("spread-wide-volume-qualified");
   });
 
   it("does not promote reduced families to core just because throughput overrides are high", () => {

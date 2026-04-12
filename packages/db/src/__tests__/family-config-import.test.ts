@@ -69,6 +69,7 @@ families:
         max_probe_in_flight_per_token: 1
         max_entry_signals_per_tick_per_family: 1
         fast_lane_enabled: true
+        dust_lane_enabled: true
       tail_suppression:
         max_open_value_usdc: 50
         max_active_markets: 5
@@ -110,6 +111,14 @@ describe("family-config-import", () => {
       expect(latest?.sourceChecksum).toBe(checksum);
       expect(latest?.sourcePath).toBe("/tmp/family_rules.yaml");
       expect(latest?.importedBy).toBe("test");
+      const row = conn.db
+        .prepare("SELECT fast_lane_enabled, dust_lane_enabled FROM family_rules WHERE family_id = ?")
+        .get("test-fast:generic:daily") as {
+        fast_lane_enabled: number | null;
+        dust_lane_enabled: number | null;
+      };
+      expect(row.fast_lane_enabled).toBe(1);
+      expect(row.dust_lane_enabled).toBe(1);
     } finally {
       conn.close();
     }

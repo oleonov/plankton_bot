@@ -124,6 +124,19 @@ export interface MarketPricingSnapshot {
   bookSource?: MarketBookSource | null;
 }
 
+export interface MarketPricingStreamUpdate {
+  readonly tokenId: string;
+  readonly pricing: MarketPricingSnapshot;
+  readonly book?: OrderBookSnapshot | null;
+}
+
+export interface MarketPricingStream {
+  /** Replace the active subscription set. Empty means "unsubscribe from all". */
+  setTokenIds(tokenIds: readonly string[]): void;
+  /** Close the stream and release all resources. Idempotent. */
+  close(): void;
+}
+
 // ─── Gateway interfaces ───────────────────────────────────────────────────
 
 /**
@@ -160,6 +173,17 @@ export interface MarketDataGateway {
    * Used by the fast pricing loop (Phase 1: Gamma-backed).
    */
   getMarketPricing(tokenIds: string[]): Promise<Map<string, MarketPricingSnapshot>>;
+
+  /**
+   * Optional live pricing stream for gateways that support push-based updates.
+   * Hot-family execution uses this to reduce dependence on the slow global poll.
+   */
+  createMarketPricingStream?(
+    handlers: Readonly<{
+      onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
+      onError?: (error: unknown) => Promise<void> | void;
+    }>,
+  ): MarketPricingStream;
 }
 
 /**

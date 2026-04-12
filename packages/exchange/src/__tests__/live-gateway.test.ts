@@ -30,6 +30,30 @@ function createMockSettlementClient() {
   };
 }
 
+class FakeMarketSocket {
+  sent: string[] = [];
+  onopen: ((event: unknown) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  onclose: ((event: { code?: number; reason?: string }) => void) | null = null;
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close(): void {
+    this.onclose?.({});
+  }
+
+  emitOpen(): void {
+    this.onopen?.({});
+  }
+
+  emitJson(payload: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(payload) });
+  }
+}
+
 describe("LiveExchangeGateway", () => {
   let client: ReturnType<typeof createMockClient>;
   let gw: LiveExchangeGateway;
@@ -918,6 +942,92 @@ describe("LiveMarketDataGateway", () => {
     client.getOk.mockResolvedValue("OK");
     const health = await gw.healthCheck();
     expect(health.ok).toBe(true);
+  });
+
+  it("createMarketPricingStream subscribes to Polymarket market WS and merges pricing updates", async () => {
+    const socket = new FakeMarketSocket();
+    gw = new LiveMarketDataGateway({
+      client,
+      createWebSocket: () => socket,
+    });
+
+    const updates: Array<{ tokenId: string; bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null; hasBook: boolean }> = [];
+    const stream = gw.createMarketPricingStream!({
+      onUpdates: async (next) => {
+        updates.push(
+          ...next.map((update) => ({
+            tokenId: update.tokenId,
+            bestBid: update.pricing.bestBid,
+            bestAsk: update.pricing.bestAsk,
+            lastTradePrice: update.pricing.lastTradePrice,
+            hasBook: update.book != null,
+          })),
+        );
+      },
+    });
+
+    stream.setTokenIds(["tok-stream"]);
+    socket.emitOpen();
+
+    expect(JSON.parse(socket.sent[0]!)).toEqual({
+      type: "market",
+      assets_ids: ["tok-stream"],
+      custom_feature_enabled: true,
+    });
+
+    socket.emitJson({
+      event_type: "best_bid_ask",
+      asset_id: "tok-stream",
+      best_bid: "0.07",
+      best_ask: "0.09",
+      timestamp: "1766789469958",
+    });
+    socket.emitJson({
+      event_type: "last_trade_price",
+      asset_id: "tok-stream",
+      price: "0.08",
+      timestamp: "1766789469958",
+    });
+    socket.emitJson({
+      event_type: "book",
+      asset_id: "tok-stream",
+      bids: [
+        { price: "0.06", size: "10" },
+        { price: "0.07", size: "20" },
+      ],
+      asks: [
+        { price: "0.10", size: "30" },
+        { price: "0.09", size: "5" },
+      ],
+      min_order_size: "5",
+      timestamp: "1766789469958",
+    });
+
+    expect(updates).toEqual([
+      {
+        tokenId: "tok-stream",
+        bestBid: 0.07,
+        bestAsk: 0.09,
+        lastTradePrice: null,
+        hasBook: false,
+      },
+      {
+        tokenId: "tok-stream",
+        bestBid: 0.07,
+        bestAsk: 0.09,
+        lastTradePrice: 0.08,
+        hasBook: false,
+      },
+      {
+        tokenId: "tok-stream",
+        bestBid: 0.07,
+        bestAsk: 0.09,
+        lastTradePrice: 0.08,
+        hasBook: true,
+      },
+    ]);
+
+    stream.close();
   });
 });
 

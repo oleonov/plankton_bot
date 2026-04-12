@@ -304,6 +304,9 @@ export interface RiskEventRepository {
     familyId: FamilyId | null;
     payload: Record<string, unknown>;
   }): void;
+
+  /** Count risk events since the given ISO timestamp. */
+  countSince(createdAtIso: string): number;
 }
 
 // ─── FamilyCandidate ────────────────────────────────────────────────────

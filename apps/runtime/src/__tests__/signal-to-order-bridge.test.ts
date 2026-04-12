@@ -32,6 +32,7 @@ function makeLogger() {
 
 function makeBundle(overrides?: {
   throughput?: FamilyRuleBundle["rules"]["throughput"];
+  identity?: Partial<FamilyRuleBundle["identity"]>;
 }): FamilyRuleBundle {
   return {
     identity: {
@@ -48,6 +49,7 @@ function makeBundle(overrides?: {
       feeTier: "fee-enabled",
       liveWalletRequirement: "relayer-required",
       requiresPostOnlyForLive: true,
+      ...overrides?.identity,
     },
     evidence: {
       familyId: FAMILY_ID,
@@ -346,6 +348,7 @@ describe("SignalToOrderBridge", () => {
               maxProbeInFlightPerToken: 2,
               maxEntrySignalsPerTickPerFamily: 10,
               fastLaneEnabled: true,
+              dustLaneEnabled: true,
             },
           }),
         ),
@@ -393,6 +396,77 @@ describe("SignalToOrderBridge", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.031);
+  });
+
+  it("uses queue-jump execution terms for event-driven geopolitics dust canary", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              familyKey: "who-will-be-next-supreme-leader-of-iran",
+              primaryCategory: "geopolitics",
+              strategyProfile: "event-driven",
+              feeTier: "fee-free",
+              liveWalletRequirement: "eoa-ok",
+              requiresPostOnlyForLive: false,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: 0.03,
+          bestAsk: 0.04,
+          midPrice: 0.035,
+          spread: 0.01,
+          tickSize: 0.01,
+          bookSource: "clob",
+          lastTradePrice: 0.04,
+          lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 3.75,
+        suggestedPrice: 0.035,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.postOnly).toBeUndefined();
   });
 
   it("keeps token in cooldown when the book did not materially move", async () => {
@@ -572,6 +646,115 @@ describe("SignalToOrderBridge", () => {
 
     expect(bypasses).toHaveLength(1);
     expect(bypasses[0]!.reason).toBe("price-moved");
+    expect(placed).toHaveLength(1);
+  });
+
+  it("does not apply unfilled-cancel cooldown to dust reprice cancels", async () => {
+    const bus = new InProcessEventBus();
+    const order = {
+      ...makeEntryOrder(),
+      signalReason: "spray-entry",
+      price: 0.03,
+      sizeUsdc: 0.15,
+    };
+    const orderRepo = {
+      findOpen: vi.fn(() => []),
+      findById: vi.fn(() => order),
+    } as never;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              familyKey: "who-will-be-next-supreme-leader-of-iran",
+              primaryCategory: "geopolitics",
+              strategyProfile: "event-driven",
+              feeTier: "fee-free",
+              liveWalletRequirement: "eoa-ok",
+              requiresPostOnlyForLive: false,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+      orderRepo,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number } }> = [];
+    const skipped: Array<{ reasons: readonly string[] }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          bestBid: 0.03,
+          bestAsk: 0.04,
+          midPrice: 0.035,
+          spread: 0.01,
+          tickSize: 0.01,
+          bookSource: "clob",
+          lastTradePrice: 0.04,
+          lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("OrderCancelled", {
+      commandId: "cmd-1" as never,
+      orderId: order.orderId,
+      reason: "entry-reprice-cancel",
+      familyId: FAMILY_ID,
+      signalReason: "spray-entry",
+      timestamp: Date.now(),
+    });
+    await bus.publish("OrderCancelled", {
+      commandId: "cmd-2" as never,
+      orderId: order.orderId,
+      reason: "entry-reprice-cancel",
+      familyId: FAMILY_ID,
+      signalReason: "spray-entry",
+      timestamp: Date.now(),
+    });
+    await bus.publish("OrderCancelled", {
+      commandId: "cmd-3" as never,
+      orderId: order.orderId,
+      reason: "entry-reprice-cancel",
+      familyId: FAMILY_ID,
+      signalReason: "spray-entry",
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        reason: "spray-entry",
+        suggestedSizeUsdc: 0.15,
+        suggestedSize: 3.75,
+        suggestedPrice: 0.035,
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
     expect(placed).toHaveLength(1);
   });
 });
