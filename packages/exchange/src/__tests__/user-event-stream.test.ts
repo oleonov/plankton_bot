@@ -140,9 +140,7 @@ describe("LiveUserEventStream", () => {
     expect(sockets[0]!.sent.at(-1)).toBe("{}");
 
     await vi.advanceTimersByTimeAsync(15_001);
-    expect(onGapDetected).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: "pong-timeout" }),
-    );
+    expect(onGapDetected).toHaveBeenCalledWith(expect.objectContaining({ reason: "pong-timeout" }));
 
     await vi.advanceTimersByTimeAsync(2_000);
     expect(sockets.length).toBeGreaterThanOrEqual(2);

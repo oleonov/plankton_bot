@@ -26,7 +26,8 @@ export interface UserEventWebSocketLike {
 }
 
 function defaultWebSocketFactory(url: string): UserEventWebSocketLike {
-  const ctor = (globalThis as { WebSocket?: new (url: string) => UserEventWebSocketLike }).WebSocket;
+  const ctor = (globalThis as { WebSocket?: new (url: string) => UserEventWebSocketLike })
+    .WebSocket;
   if (!ctor) {
     throw new Error("WebSocket is not available in the current runtime");
   }
@@ -58,12 +59,8 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
       traderAddress: string | null;
       createWebSocket?: ((url: string) => UserEventWebSocketLike) | undefined;
       handlers: Readonly<{
-        onTradeEvents: (
-          events: readonly ExchangeUserTradeEvent[],
-        ) => Promise<void> | void;
-        onOrderEvents: (
-          events: readonly ExchangeUserOrderEvent[],
-        ) => Promise<void> | void;
+        onTradeEvents: (events: readonly ExchangeUserTradeEvent[]) => Promise<void> | void;
+        onOrderEvents: (events: readonly ExchangeUserOrderEvent[]) => Promise<void> | void;
         onGapDetected?: (
           info: Readonly<{ reason: string; timestamp: number }>,
         ) => Promise<void> | void;

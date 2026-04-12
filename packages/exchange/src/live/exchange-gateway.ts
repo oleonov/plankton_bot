@@ -89,9 +89,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private readonly settlementClient: any;
   private readonly traderAddress: string | null;
   private readonly userWsAuth: UserEventStreamAuth | null;
-  private readonly createWebSocket:
-    | ((url: string) => UserEventWebSocketLike)
-    | undefined;
+  private readonly createWebSocket: ((url: string) => UserEventWebSocketLike) | undefined;
   private readonly onInfraAlert:
     | ((alert: {
         code: string;
@@ -214,12 +212,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
   createUserEventStream(
     handlers: Readonly<{
-      onTradeEvents: (
-        events: readonly ExchangeUserTradeEvent[],
-      ) => Promise<void> | void;
-      onOrderEvents: (
-        events: readonly ExchangeUserOrderEvent[],
-      ) => Promise<void> | void;
+      onTradeEvents: (events: readonly ExchangeUserTradeEvent[]) => Promise<void> | void;
+      onOrderEvents: (events: readonly ExchangeUserOrderEvent[]) => Promise<void> | void;
       onGapDetected?: (
         info: Readonly<{ reason: string; timestamp: number }>,
       ) => Promise<void> | void;

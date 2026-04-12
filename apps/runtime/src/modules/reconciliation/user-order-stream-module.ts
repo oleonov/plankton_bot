@@ -12,7 +12,11 @@ import type {
 } from "@plankton/domain";
 import { createCommandId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import { findLocalOrderForExchangeFill, importExchangeFills, reconcileFills } from "./fill-reconciler.js";
+import {
+  findLocalOrderForExchangeFill,
+  importExchangeFills,
+  reconcileFills,
+} from "./fill-reconciler.js";
 import { reconcileOrders } from "./order-reconciler.js";
 
 const METRICS_WINDOW_MS = 10 * 60 * 1000;
@@ -251,7 +255,11 @@ export class UserOrderStreamModule implements RuntimeModule {
       nextStatus === "cancelled" && currentStatus !== "cancelled" && currentStatus !== "filled";
 
     if (nextStatus != null || localOrder.exchangeOrderId !== event.orderId) {
-      this.deps.orderRepo.updateStatus(localOrder.orderId, nextStatus ?? currentStatus, event.orderId);
+      this.deps.orderRepo.updateStatus(
+        localOrder.orderId,
+        nextStatus ?? currentStatus,
+        event.orderId,
+      );
     }
 
     if (shouldPublishCancel) {
@@ -272,7 +280,10 @@ export class UserOrderStreamModule implements RuntimeModule {
     for (const [key, buffered] of [...this.orphanBuffer.entries()]) {
       if (nowMs - buffered.firstSeenAt > this.orphanTtlMs) {
         this.orphanBuffer.delete(key);
-        this.log.warn({ tradeId: buffered.event.tradeId }, "dropping expired orphan websocket trade");
+        this.log.warn(
+          { tradeId: buffered.event.tradeId },
+          "dropping expired orphan websocket trade",
+        );
         continue;
       }
       if (!this.hasLocalOrderForTrade(buffered.event)) continue;
@@ -313,8 +324,8 @@ export class UserOrderStreamModule implements RuntimeModule {
   }
 
   private hasLocalOrderForTrade(event: ExchangeUserTradeEvent): boolean {
-    return event.fills.some((fill) =>
-      findLocalOrderForExchangeFill(this.deps.orderRepo, fill, this.log) != null,
+    return event.fills.some(
+      (fill) => findLocalOrderForExchangeFill(this.deps.orderRepo, fill, this.log) != null,
     );
   }
 

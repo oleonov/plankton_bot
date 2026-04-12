@@ -263,12 +263,8 @@ export interface ExchangeGateway {
    */
   createUserEventStream?(
     handlers: Readonly<{
-      onTradeEvents: (
-        events: readonly ExchangeUserTradeEvent[],
-      ) => Promise<void> | void;
-      onOrderEvents: (
-        events: readonly ExchangeUserOrderEvent[],
-      ) => Promise<void> | void;
+      onTradeEvents: (events: readonly ExchangeUserTradeEvent[]) => Promise<void> | void;
+      onOrderEvents: (events: readonly ExchangeUserOrderEvent[]) => Promise<void> | void;
       onGapDetected?: (
         info: Readonly<{ reason: string; timestamp: number }>,
       ) => Promise<void> | void;

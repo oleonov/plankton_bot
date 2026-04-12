@@ -24,7 +24,9 @@ class FakeUserEventStream implements ExchangeUserEventStream {
   handlers: {
     onTradeEvents: (events: readonly ExchangeUserTradeEvent[]) => Promise<void> | void;
     onOrderEvents: (events: readonly ExchangeUserOrderEvent[]) => Promise<void> | void;
-    onGapDetected?: ((info: Readonly<{ reason: string; timestamp: number }>) => Promise<void> | void) | undefined;
+    onGapDetected?:
+      | ((info: Readonly<{ reason: string; timestamp: number }>) => Promise<void> | void)
+      | undefined;
   } | null = null;
   closed = false;
 
@@ -56,7 +58,9 @@ function createMockGateway(stream: FakeUserEventStream): ExchangeGateway {
     }),
     cancelAllOrders: vi.fn().mockResolvedValue({ success: true }),
     getOpenOrders: vi.fn<() => Promise<ExchangeOrder[]>>().mockResolvedValue([]),
-    getOpenOrdersForToken: vi.fn<(tokenId: TokenId) => Promise<ExchangeOrder[]>>().mockResolvedValue([]),
+    getOpenOrdersForToken: vi
+      .fn<(tokenId: TokenId) => Promise<ExchangeOrder[]>>()
+      .mockResolvedValue([]),
     getFills: vi.fn<(sinceMs: number) => Promise<ExchangeFill[]>>().mockResolvedValue([]),
     getBalances: vi.fn<() => Promise<ExchangeBalance[]>>().mockResolvedValue([]),
     getPositionBalance: vi.fn<(tokenId: TokenId) => Promise<number>>().mockResolvedValue(0),
@@ -337,7 +341,11 @@ describe("UserOrderStreamModule", () => {
       timestamp: 1_699_999_999_500,
     });
 
-    expect(orderRepo.updateStatus).not.toHaveBeenCalledWith(order.orderId, "cancelled", "ord-exch-1");
+    expect(orderRepo.updateStatus).not.toHaveBeenCalledWith(
+      order.orderId,
+      "cancelled",
+      "ord-exch-1",
+    );
   });
 
   it("runs catch-up sync on websocket gap and tracks reconnect metrics", async () => {

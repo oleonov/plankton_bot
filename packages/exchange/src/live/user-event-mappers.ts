@@ -71,7 +71,8 @@ export function mapUserOrderEvent(raw: Record<string, unknown>): ExchangeUserOrd
   const sizeFilled = toOptionalNumber(raw.size_matched);
   const sizeRemaining =
     sizeTotal != null && sizeFilled != null ? Math.max(0, sizeTotal - sizeFilled) : null;
-  const tokenIdRaw = typeof raw.asset_id === "string" && raw.asset_id.length > 0 ? raw.asset_id : null;
+  const tokenIdRaw =
+    typeof raw.asset_id === "string" && raw.asset_id.length > 0 ? raw.asset_id : null;
 
   return {
     type: "order",

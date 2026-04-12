@@ -10,10 +10,7 @@ import type { Logger } from "../../logger.js";
 import { CandidateBookCache } from "../strategy/candidate-book-cache.js";
 import { DEFAULT_HOT_LANE_POLICY, type HotLanePolicy } from "./hot-lane-policy.js";
 import { shouldUseHotQuoteLane } from "./hot-lane-policy.js";
-import {
-  dedupeHotFamilyIds,
-  StableHotMarketSelector,
-} from "./hot-market-selection.js";
+import { dedupeHotFamilyIds, StableHotMarketSelector } from "./hot-market-selection.js";
 
 const DEFAULT_EVENT_DRIVEN_FLUSH_MS = 50;
 
