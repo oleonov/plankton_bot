@@ -7,7 +7,6 @@ import type {
   FillRepository,
   Order,
   OrderRepository,
-  RuntimeEventMap,
   RuntimeModule,
 } from "@plankton/domain";
 import { createCommandId } from "@plankton/domain";

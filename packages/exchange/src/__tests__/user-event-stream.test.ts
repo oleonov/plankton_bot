@@ -110,7 +110,7 @@ describe("LiveUserEventStream", () => {
       timestamp: "1672290687",
     });
 
-    await vi.runAllTicks();
+    vi.runAllTicks();
 
     expect(onTradeEvents).toHaveBeenCalledTimes(1);
     expect(onOrderEvents).toHaveBeenCalledTimes(1);
@@ -170,7 +170,7 @@ describe("LiveUserEventStream", () => {
 
     sockets[0]!.emitOpen();
     sockets[0]!.emitRaw("{not-json");
-    await vi.runAllTicks();
+    vi.runAllTicks();
 
     expect(onGapDetected).toHaveBeenCalledWith(
       expect.objectContaining({ reason: "invalid-payload" }),
@@ -192,7 +192,7 @@ describe("LiveUserEventStream", () => {
       maker_address: "0xours",
       trader_side: "TAKER",
     });
-    await vi.runAllTicks();
+    vi.runAllTicks();
 
     expect(onTradeEvents).toHaveBeenCalledTimes(1);
   });

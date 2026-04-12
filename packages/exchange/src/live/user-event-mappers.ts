@@ -34,9 +34,9 @@ function toOptionalNumber(value: unknown): number | null {
 
 function normalizeOrderEventType(value: unknown): ExchangeUserOrderEvent["event"] | null {
   const upper = typeof value === "string" ? value.trim().toUpperCase() : "";
-  if (upper === "PLACEMENT" || upper === "UPDATE" || upper === "CANCELLATION") {
-    return upper as ExchangeUserOrderEvent["event"];
-  }
+  if (upper === "PLACEMENT") return "PLACEMENT";
+  if (upper === "UPDATE") return "UPDATE";
+  if (upper === "CANCELLATION") return "CANCELLATION";
   return null;
 }
 
