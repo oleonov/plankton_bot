@@ -149,4 +149,44 @@ describe("backfillDeployments", () => {
     expect(deps.find((d) => d.profile === "simulation")?.enabled).toBe(1); // backfilled
     expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(1); // backfilled
   });
+
+  it("keeps discovery exact-score intraday families disabled in live-lite during backfill", () => {
+    const dbPath = path.join(tmpDir, "control.db");
+    conn = bootstrapControlDb(dbPath);
+    seedProfiles(conn);
+
+    conn.db
+      .prepare(
+        `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type, created_at, updated_at)
+       VALUES ('exact-score-fam', 'bun-mai-fre-2026-04-12-exact-score-0', 'sports', 'generic', 'intraday-4h', 'ad-hoc', 'scalp', 'discovery', datetime('now'), datetime('now'))`,
+      )
+      .run();
+
+    conn.close();
+    conn = bootstrapControlDb(dbPath);
+
+    const deps = conn.db
+      .prepare(
+        `SELECT profile, enabled, deployment_stage
+         FROM family_deployments
+         WHERE family_id = 'exact-score-fam'
+         ORDER BY profile`,
+      )
+      .all() as { profile: string; enabled: number; deployment_stage: string }[];
+
+    expect(deps).toHaveLength(3);
+    expect(deps.find((d) => d.profile === "simulation")).toMatchObject({
+      enabled: 1,
+      deployment_stage: "disabled",
+    });
+    expect(deps.find((d) => d.profile === "paper")).toMatchObject({
+      enabled: 1,
+      deployment_stage: "disabled",
+    });
+    expect(deps.find((d) => d.profile === "live-lite")).toMatchObject({
+      enabled: 0,
+      deployment_stage: "disabled",
+    });
+  });
 });

@@ -5,12 +5,13 @@ import type {
   ExchangeBalance,
   ExchangeFill,
   ExchangeGateway,
-  ExchangeOrder,
   ExchangeUserEventStream,
+  ExchangeOrder,
   ExchangeUserOrderEvent,
   ExchangeUserTradeEvent,
   FamilyRulesProvider,
   FillRepository,
+  MarketRepository,
   OrderRepository,
   PlaceOrderParams,
   PlaceOrderResult,
@@ -29,6 +30,11 @@ class FakeUserEventStream implements ExchangeUserEventStream {
       | undefined;
   } | null = null;
   closed = false;
+  conditionIds: string[] = [];
+
+  setConditionIds(conditionIds: readonly string[]): void {
+    this.conditionIds = [...conditionIds];
+  }
 
   close(): void {
     this.closed = true;
@@ -131,6 +137,41 @@ function createMockRulesProvider(): FamilyRulesProvider {
   };
 }
 
+function createMockMarketRepo(orderTokenId: TokenId): MarketRepository {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockImplementation((tokenId: TokenId) =>
+      String(tokenId) === String(orderTokenId)
+        ? {
+            tokenId: orderTokenId,
+            conditionId: "cond-1",
+            slug: "slug-1",
+            eventSlug: null,
+            question: "question",
+            outcome: "YES",
+            outcomeIndex: 0,
+            familyId: createFamilyId("fam-1"),
+            familyKey: "fam-key",
+            regime: "generic",
+            horizon: "daily",
+            endDate: null,
+            active: true,
+            tickSize: 0.01,
+            negRisk: false,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          }
+        : null,
+    ),
+    findByTokenIds: vi.fn().mockReturnValue([]),
+    findByConditionId: vi.fn().mockReturnValue([]),
+    findActive: vi.fn().mockReturnValue([]),
+    findByFamily: vi.fn().mockReturnValue([]),
+    findAll: vi.fn().mockReturnValue([]),
+    deactivate: vi.fn(),
+  };
+}
+
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -147,6 +188,7 @@ describe("UserOrderStreamModule", () => {
   let orderRepo: OrderRepository;
   let order: ReturnType<typeof createMockOrderRepo>["order"];
   let rulesProvider: FamilyRulesProvider;
+  let marketRepo: MarketRepository;
   let bus: InProcessEventBus;
   let mod: UserOrderStreamModule;
 
@@ -156,10 +198,12 @@ describe("UserOrderStreamModule", () => {
     fillRepo = createMockFillRepo();
     ({ repo: orderRepo, order } = createMockOrderRepo());
     rulesProvider = createMockRulesProvider();
+    marketRepo = createMockMarketRepo(order.tokenId);
     bus = new InProcessEventBus();
     mod = new UserOrderStreamModule({
       gateway,
       fillRepo,
+      marketRepo,
       orderRepo,
       rulesProvider,
       bus,
@@ -350,6 +394,7 @@ describe("UserOrderStreamModule", () => {
 
   it("runs catch-up sync on websocket gap and tracks reconnect metrics", async () => {
     await mod.start();
+    expect(stream.conditionIds).toEqual(["cond-1"]);
     expect(gateway.getFills).toHaveBeenCalledTimes(1);
     expect(gateway.getOpenOrders).toHaveBeenCalledTimes(1);
 
@@ -359,5 +404,22 @@ describe("UserOrderStreamModule", () => {
     expect(gateway.getOpenOrders).toHaveBeenCalledTimes(2);
     expect(mod.getMetricsSnapshot().wsEventGapDetected).toBe(1);
     expect(mod.getMetricsSnapshot().reconnectCount).toBe(1);
+  });
+
+  it("updates subscribed conditions after order lifecycle changes", async () => {
+    await mod.start();
+    expect(stream.conditionIds).toEqual(["cond-1"]);
+
+    (orderRepo.findOpen as any).mockReturnValue([]);
+    await bus.publish("OrderCancelled", {
+      commandId: "cmd-2" as any,
+      orderId: order.orderId,
+      reason: "cancelled",
+      familyId: order.familyId,
+      signalReason: order.signalReason,
+      timestamp: Date.now(),
+    });
+
+    expect(stream.conditionIds).toEqual([]);
   });
 });

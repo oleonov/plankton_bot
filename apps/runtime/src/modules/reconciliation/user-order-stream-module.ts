@@ -5,6 +5,7 @@ import type {
   ExchangeUserTradeEvent,
   FamilyRulesProvider,
   FillRepository,
+  MarketRepository,
   Order,
   OrderRepository,
   RuntimeModule,
@@ -54,6 +55,7 @@ export interface UserOrderStreamMetricsSnapshot {
 export interface UserOrderStreamModuleDeps {
   gateway: ExchangeGateway;
   bus: EventBus;
+  marketRepo: MarketRepository;
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
   rulesProvider: FamilyRulesProvider;
@@ -74,6 +76,11 @@ interface UserOrderStreamWindow {
   wsEventGapDetected: number;
 }
 
+interface ManagedUserEventStream {
+  close(): void;
+  setConditionIds(conditionIds: readonly string[]): void;
+}
+
 export class UserOrderStreamModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly fillCatchupOverlapMs: number;
@@ -83,7 +90,7 @@ export class UserOrderStreamModule implements RuntimeModule {
   private readonly orphanBuffer = new Map<string, BufferedTradeEvent>();
   private readonly window: UserOrderStreamWindow;
   private unsubs: Array<() => void> = [];
-  private stream: { close(): void } | null = null;
+  private stream: ManagedUserEventStream | null = null;
   private started = false;
   private catchupInFlight = false;
 
@@ -99,7 +106,18 @@ export class UserOrderStreamModule implements RuntimeModule {
     this.started = true;
     this.unsubs.push(
       this.deps.bus.subscribe("OrderPlaced", async () => {
+        this.refreshSubscribedConditions();
         await this.flushOrphanBuffer();
+      }),
+    );
+    this.unsubs.push(
+      this.deps.bus.subscribe("OrderCancelled", async () => {
+        this.refreshSubscribedConditions();
+      }),
+    );
+    this.unsubs.push(
+      this.deps.bus.subscribe("FillReceived", async () => {
+        this.refreshSubscribedConditions();
       }),
     );
 
@@ -121,12 +139,14 @@ export class UserOrderStreamModule implements RuntimeModule {
         this.window.reconnectCount++;
         this.log.warn({ reason }, "user websocket gap detected — running catch-up sync");
         await this.runCatchupSync("gap");
+        this.refreshSubscribedConditions();
       },
       onError: async (error) => {
         this.log.warn({ err: error }, "user websocket stream error");
       },
-    });
+    }) as ManagedUserEventStream;
 
+    this.refreshSubscribedConditions();
     await this.runCatchupSync("startup");
     await this.flushOrphanBuffer();
     this.log.info("user websocket stream module started");
@@ -313,6 +333,7 @@ export class UserOrderStreamModule implements RuntimeModule {
         log: this.log,
         phantomGraceMs: PHANTOM_GRACE_MS,
       });
+      this.refreshSubscribedConditions();
       await this.flushOrphanBuffer();
       this.log.info({ reason }, "user websocket catch-up sync complete");
     } catch (err) {
@@ -390,6 +411,17 @@ export class UserOrderStreamModule implements RuntimeModule {
       reconnectCount: 0,
       wsEventGapDetected: 0,
     };
+  }
+
+  private refreshSubscribedConditions(): void {
+    if (!this.stream) return;
+    const conditionIds = new Set<string>();
+    for (const order of this.deps.orderRepo.findOpen()) {
+      const market = this.deps.marketRepo.findByTokenId(order.tokenId);
+      if (!market) continue;
+      conditionIds.add(market.conditionId);
+    }
+    this.stream.setConditionIds([...conditionIds]);
   }
 }
 

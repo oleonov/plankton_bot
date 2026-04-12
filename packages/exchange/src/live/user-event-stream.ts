@@ -9,6 +9,8 @@ const USER_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
 const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 15_000;
 const RECONNECT_DELAY_MS = 2_000;
+const HEARTBEAT_PING = "PING";
+const HEARTBEAT_PONG = "PONG";
 
 export interface UserEventStreamAuth {
   readonly apiKey: string;
@@ -45,6 +47,29 @@ function normalizeWebSocketPayload(data: unknown): string | null {
   return null;
 }
 
+function normalizeConditionIds(conditionIds: readonly string[]): string[] {
+  return [...new Set(conditionIds.map((value) => value.trim()).filter((value) => value.length > 0))].sort();
+}
+
+function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
+}
+
+function buildUserSubscriptionPayload(input: {
+  auth: UserEventStreamAuth;
+  conditionIds: readonly string[];
+  operation: "subscribe" | "unsubscribe";
+  initialDump?: boolean;
+}): string {
+  return JSON.stringify({
+    auth: input.auth,
+    type: "user",
+    operation: input.operation,
+    markets: input.conditionIds,
+    ...(input.initialDump === undefined ? {} : { initial_dump: input.initialDump }),
+  });
+}
+
 export class LiveUserEventStream implements ExchangeUserEventStream {
   private readonly intentionallyClosedSockets = new WeakSet<UserEventWebSocketLike>();
   private socket: UserEventWebSocketLike | null = null;
@@ -52,6 +77,9 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private pongTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
+  private socketOpen = false;
+  private desiredConditionIds: string[] = [];
+  private subscribedConditionIds: string[] = [];
 
   constructor(
     private readonly deps: Readonly<{
@@ -67,8 +95,29 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
         onError?: (error: unknown) => Promise<void> | void;
       }>;
     }>,
-  ) {
-    this.connect();
+  ) {}
+
+  setConditionIds(conditionIds: readonly string[]): void {
+    const next = normalizeConditionIds(conditionIds);
+    if (arraysEqual(this.desiredConditionIds, next)) return;
+    this.desiredConditionIds = next;
+
+    if (this.closed) return;
+    if (this.desiredConditionIds.length === 0) {
+      this.subscribedConditionIds = [];
+      this.clearTimers();
+      this.closeSocket({ intentional: true });
+      return;
+    }
+
+    if (!this.socket) {
+      this.connect();
+      return;
+    }
+
+    if (this.socketOpen) {
+      this.syncSubscription(this.socket);
+    }
   }
 
   close(): void {
@@ -79,6 +128,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
 
   private connect(): void {
     if (this.closed) return;
+    if (this.desiredConditionIds.length === 0) return;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -87,14 +137,21 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
     try {
       const socket = (this.deps.createWebSocket ?? defaultWebSocketFactory)(USER_WS_URL);
       this.socket = socket;
+      this.socketOpen = false;
+      this.subscribedConditionIds = [];
 
       socket.onopen = () => {
+        if (this.socket !== socket || this.closed) return;
+        this.socketOpen = true;
         socket.send(
-          JSON.stringify({
+          buildUserSubscriptionPayload({
             auth: this.deps.auth,
-            type: "user",
+            conditionIds: this.desiredConditionIds,
+            operation: "subscribe",
+            initialDump: true,
           }),
         );
+        this.subscribedConditionIds = [...this.desiredConditionIds];
         this.startHeartbeat(socket);
       };
 
@@ -111,9 +168,11 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
         const ignoreEvent = this.shouldIgnoreSocketClose(socket);
         if (this.socket === socket) {
           this.socket = null;
+          this.socketOpen = false;
         }
         if (ignoreEvent || this.closed) return;
         this.clearHeartbeat(socket);
+        this.subscribedConditionIds = [];
         void this.deps.handlers.onGapDetected?.({
           reason: "socket-close",
           timestamp: Date.now(),
@@ -131,7 +190,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
     this.pingTimer = setInterval(() => {
       if (this.closed || this.socket !== socket) return;
       if (this.pongTimer) return;
-      socket.send(JSON.stringify({}));
+      socket.send(HEARTBEAT_PING);
       this.pongTimer = setTimeout(() => {
         if (this.closed || this.socket !== socket) return;
         void this.deps.handlers.onGapDetected?.({
@@ -162,6 +221,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
   private reconnect(): void {
     if (this.closed) return;
     this.clearTimers();
+    this.subscribedConditionIds = [];
     this.closeSocket({ intentional: true });
     this.scheduleReconnect();
   }
@@ -190,10 +250,41 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
   private closeSocket(opts?: { intentional?: boolean }): void {
     const socket = this.socket;
     this.socket = null;
+    this.socketOpen = false;
     if (socket && opts?.intentional) {
       this.intentionallyClosedSockets.add(socket);
     }
     socket?.close();
+  }
+
+  private syncSubscription(socket: UserEventWebSocketLike): void {
+    if (this.socket !== socket || !this.socketOpen || this.closed) return;
+    const next = this.desiredConditionIds;
+    const prev = this.subscribedConditionIds;
+
+    const toUnsubscribe = prev.filter((conditionId) => !next.includes(conditionId));
+    if (toUnsubscribe.length > 0) {
+      socket.send(
+        buildUserSubscriptionPayload({
+          auth: this.deps.auth,
+          conditionIds: toUnsubscribe,
+          operation: "unsubscribe",
+        }),
+      );
+    }
+
+    const toSubscribe = next.filter((conditionId) => !prev.includes(conditionId));
+    if (toSubscribe.length > 0) {
+      socket.send(
+        buildUserSubscriptionPayload({
+          auth: this.deps.auth,
+          conditionIds: toSubscribe,
+          operation: "subscribe",
+        }),
+      );
+    }
+
+    this.subscribedConditionIds = [...next];
   }
 
   private async handleMessage(socket: UserEventWebSocketLike, data: unknown): Promise<void> {
@@ -201,15 +292,28 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
       if (this.socket !== socket) return;
       const text = normalizeWebSocketPayload(data);
       if (!text) return;
+      const trimmed = text.trim();
+      if (this.isPongPayload(trimmed)) {
+        if (this.pongTimer) {
+          clearTimeout(this.pongTimer);
+          this.pongTimer = null;
+        }
+        return;
+      }
+
       let parsed: unknown;
       try {
-        parsed = JSON.parse(text) as unknown;
+        parsed = JSON.parse(trimmed) as unknown;
       } catch (error) {
         await this.deps.handlers.onGapDetected?.({
-          reason: "invalid-payload",
+          reason: "protocol-error",
           timestamp: Date.now(),
         });
-        await this.deps.handlers.onError?.(error);
+        await this.deps.handlers.onError?.(
+          new Error(`unexpected user websocket payload: ${trimmed}`, {
+            cause: error,
+          }),
+        );
         return;
       }
 
@@ -252,6 +356,9 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
   }
 
   private isPongPayload(payload: unknown): boolean {
+    if (typeof payload === "string") {
+      return payload.trim().toUpperCase() === HEARTBEAT_PONG;
+    }
     return (
       payload != null &&
       typeof payload === "object" &&

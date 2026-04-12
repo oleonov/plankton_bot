@@ -453,6 +453,45 @@ describe("POST /discovery/candidates/:id/accept", () => {
 
     expect(res.statusCode).toBe(409);
   });
+
+  it("keeps exact-score intraday discovery candidates disabled in live-lite", async () => {
+    const db = conn.db;
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO family_candidates
+         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+          primary_category, strategy_profile, slug_pattern, active_market_count,
+          cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at,
+          reviewed_at)
+       VALUES ('cand-exact-score-1', 'bun-mai-fre-2026-04-12-exact-score-0', 'generic',
+               'intraday-4h', 'intraday-4h', 'medium', 'sports', 'scalp',
+               'bun-mai-fre-*-exact-score-*', 4, 2500, 'promote', 'reviewed', ?, ?, ?)`,
+    ).run(now, now, now);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/discovery/candidates/cand-exact-score-1/accept",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+    const deps = db
+      .prepare(
+        "SELECT profile, enabled, deployment_stage FROM family_deployments WHERE family_id = 'cand-exact-score-1' ORDER BY profile",
+      )
+      .all() as { profile: string; enabled: number; deployment_stage: string }[];
+
+    expect(deps).toHaveLength(3);
+    expect(deps.find((d) => d.profile === "simulation")?.enabled).toBe(1);
+    expect(deps.find((d) => d.profile === "paper")?.enabled).toBe(1);
+    expect(deps.find((d) => d.profile === "live-lite")).toEqual({
+      profile: "live-lite",
+      enabled: 0,
+      deployment_stage: "disabled",
+    });
+  });
 });
 
 // ─── Evidence endpoint ──────────────────────────────────────────────────

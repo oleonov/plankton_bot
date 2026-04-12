@@ -30,6 +30,18 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
   return conn;
 }
 
+function shouldDisableLiveLiteDiscoverySeed(input: {
+  familyKey: string | null;
+  regime: string | null;
+  horizon: string | null;
+}): boolean {
+  return (
+    (input.familyKey ?? "").toLowerCase().includes("exact-score") &&
+    (input.regime ?? "").toLowerCase() === "generic" &&
+    (input.horizon ?? "").toLowerCase() === "intraday-4h"
+  );
+}
+
 function readSchema(filename: string): string {
   return readFileSync(join(import.meta.dirname, "schemas", filename), "utf-8");
 }
@@ -81,9 +93,14 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
  * Idempotent — INSERT OR IGNORE skips existing rows. Wrapped in transaction for atomicity.
  */
 function backfillDeployments(db: import("better-sqlite3").Database): void {
-  const families = db.prepare("SELECT family_id, source_type FROM family_catalog").all() as {
+  const families = db
+    .prepare("SELECT family_id, source_type, family_key, regime, horizon FROM family_catalog")
+    .all() as {
     family_id: string;
     source_type: string | null;
+    family_key: string | null;
+    regime: string | null;
+    horizon: string | null;
   }[];
 
   if (families.length === 0) return;
@@ -96,13 +113,26 @@ function backfillDeployments(db: import("better-sqlite3").Database): void {
   );
 
   db.transaction(() => {
-    for (const { family_id, source_type } of families) {
+    for (const { family_id, source_type, family_key, regime, horizon } of families) {
       for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
         const seed = resolveFamilyDeploymentSeed({
           profile,
           sourceType: source_type,
         });
-        insert.run(family_id, profile, seed.enabled ? 1 : 0, seed.deploymentStage);
+        const liveLiteExactScoreBlocked =
+          profile === ProfileId.LiveLite &&
+          source_type !== "yaml_import" &&
+          shouldDisableLiveLiteDiscoverySeed({
+            familyKey: family_key,
+            regime,
+            horizon,
+          });
+        insert.run(
+          family_id,
+          profile,
+          liveLiteExactScoreBlocked ? 0 : seed.enabled ? 1 : 0,
+          liveLiteExactScoreBlocked ? "disabled" : seed.deploymentStage,
+        );
       }
     }
   })();

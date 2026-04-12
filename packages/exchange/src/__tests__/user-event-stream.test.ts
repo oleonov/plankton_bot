@@ -45,7 +45,7 @@ describe("LiveUserEventStream", () => {
 
   it("sends auth payload on open", () => {
     const sockets: FakeUserSocket[] = [];
-    new LiveUserEventStream({
+    const stream = new LiveUserEventStream({
       auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
       traderAddress: "0xours",
       createWebSocket: () => {
@@ -58,14 +58,19 @@ describe("LiveUserEventStream", () => {
         onOrderEvents: vi.fn(),
       },
     });
+    stream.setConditionIds(["cond-1"]);
 
     expect(sockets).toHaveLength(1);
     sockets[0]!.emitOpen();
 
     expect(JSON.parse(sockets[0]!.sent[0]!)).toEqual({
       auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      initial_dump: true,
+      markets: ["cond-1"],
+      operation: "subscribe",
       type: "user",
     });
+    expect(sockets[0]!.sent).toHaveLength(1);
   });
 
   it("routes trade and order events to handlers", async () => {
@@ -73,7 +78,7 @@ describe("LiveUserEventStream", () => {
     const onTradeEvents = vi.fn();
     const onOrderEvents = vi.fn();
 
-    new LiveUserEventStream({
+    const stream = new LiveUserEventStream({
       auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
       traderAddress: "0xours",
       createWebSocket: () => {
@@ -86,6 +91,7 @@ describe("LiveUserEventStream", () => {
         onOrderEvents,
       },
     });
+    stream.setConditionIds(["cond-1"]);
 
     sockets[0]!.emitOpen();
     sockets[0]!.emitJson({
@@ -125,7 +131,7 @@ describe("LiveUserEventStream", () => {
     const sockets: FakeUserSocket[] = [];
     const onGapDetected = vi.fn();
 
-    new LiveUserEventStream({
+    const stream = new LiveUserEventStream({
       auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
       traderAddress: "0xours",
       createWebSocket: () => {
@@ -139,10 +145,11 @@ describe("LiveUserEventStream", () => {
         onGapDetected,
       },
     });
+    stream.setConditionIds(["cond-1"]);
 
     sockets[0]!.emitOpen();
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(sockets[0]!.sent.at(-1)).toBe("{}");
+    expect(sockets[0]!.sent.at(-1)).toBe("PING");
 
     await vi.advanceTimersByTimeAsync(15_001);
     expect(onGapDetected).toHaveBeenCalledWith(expect.objectContaining({ reason: "pong-timeout" }));
@@ -157,7 +164,7 @@ describe("LiveUserEventStream", () => {
     const onError = vi.fn();
     const onTradeEvents = vi.fn();
 
-    new LiveUserEventStream({
+    const stream = new LiveUserEventStream({
       auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
       traderAddress: "0xours",
       createWebSocket: () => {
@@ -172,13 +179,14 @@ describe("LiveUserEventStream", () => {
         onError,
       },
     });
+    stream.setConditionIds(["cond-1"]);
 
     sockets[0]!.emitOpen();
     sockets[0]!.emitRaw("{not-json");
     await flushAsyncHandlers();
 
     expect(onGapDetected).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: "invalid-payload" }),
+      expect.objectContaining({ reason: "protocol-error" }),
     );
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onTradeEvents).not.toHaveBeenCalled();
@@ -200,5 +208,48 @@ describe("LiveUserEventStream", () => {
     await flushAsyncHandlers();
 
     expect(onTradeEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("updates subscribed markets without reconnecting", () => {
+    const sockets: FakeUserSocket[] = [];
+    const stream = new LiveUserEventStream({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      traderAddress: "0xours",
+      createWebSocket: () => {
+        const socket = new FakeUserSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      handlers: {
+        onTradeEvents: vi.fn(),
+        onOrderEvents: vi.fn(),
+      },
+    });
+
+    stream.setConditionIds(["cond-1", "cond-2"]);
+    sockets[0]!.emitOpen();
+    expect(sockets).toHaveLength(1);
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toEqual({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      initial_dump: true,
+      markets: ["cond-1", "cond-2"],
+      operation: "subscribe",
+      type: "user",
+    });
+
+    stream.setConditionIds(["cond-2", "cond-3"]);
+    expect(sockets).toHaveLength(1);
+    expect(JSON.parse(sockets[0]!.sent[1]!)).toEqual({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      type: "user",
+      operation: "unsubscribe",
+      markets: ["cond-1"],
+    });
+    expect(JSON.parse(sockets[0]!.sent[2]!)).toEqual({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      type: "user",
+      operation: "subscribe",
+      markets: ["cond-3"],
+    });
   });
 });

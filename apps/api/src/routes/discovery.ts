@@ -109,6 +109,14 @@ function getCurrentOrDesiredProfile(
   }
 }
 
+function shouldDisableLiveLiteDiscoverySeed(row: Pick<CandidateRow, "family_key" | "regime" | "horizon">): boolean {
+  return (
+    row.family_key.toLowerCase().includes("exact-score") &&
+    row.regime.toLowerCase() === "generic" &&
+    row.horizon.toLowerCase() === "intraday-4h"
+  );
+}
+
 function formatRun(run: DiscoveryRun | null) {
   if (!run) return null;
   return {
@@ -590,7 +598,16 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           profile,
           currentProfile,
         });
-        insertDep.run(familyId, profile, seed.enabled ? 1 : 0, seed.deploymentStage, now, now);
+        const liveLiteExactScoreBlocked =
+          profile === ProfileId.LiveLite && shouldDisableLiveLiteDiscoverySeed(row);
+        insertDep.run(
+          familyId,
+          profile,
+          liveLiteExactScoreBlocked ? 0 : seed.enabled ? 1 : 0,
+          liveLiteExactScoreBlocked ? "disabled" : seed.deploymentStage,
+          now,
+          now,
+        );
       }
 
       // 4. INSERT family_evidence with zeros + probe warming-up substate

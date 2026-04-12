@@ -745,6 +745,7 @@ async function main(): Promise<void> {
       ? new UserOrderStreamModule({
           gateway: exchangeGateway,
           bus,
+          marketRepo: repos.market,
           orderRepo: repos.order,
           fillRepo: repos.fill,
           rulesProvider,

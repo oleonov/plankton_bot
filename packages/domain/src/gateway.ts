@@ -162,6 +162,8 @@ export interface ExchangeUserOrderEvent {
 }
 
 export interface ExchangeUserEventStream {
+  /** Replace the active market subscription set (condition IDs). */
+  setConditionIds(conditionIds: readonly string[]): void;
   /** Close the stream and release all resources. Idempotent. */
   close(): void;
 }
