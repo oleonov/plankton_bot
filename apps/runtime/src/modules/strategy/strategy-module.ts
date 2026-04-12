@@ -275,9 +275,7 @@ export class StrategyModule implements RuntimeModule {
     this.log.debug({ count: payload.markets.length }, "market cache updated");
   }
 
-  private async prepareMarketsForScan(
-    markets: readonly NormalizedMarket[],
-  ): Promise<{
+  private async prepareMarketsForScan(markets: readonly NormalizedMarket[]): Promise<{
     readonly markets: readonly NormalizedMarket[];
     readonly scanPrimeSkippedByPolicy: number;
   }> {
