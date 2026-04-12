@@ -895,6 +895,78 @@ describe("ExecutionModule", () => {
     await replaceMod.stop();
   });
 
+  it("rejects a sub-min SELL replacement before canceling the existing order", async () => {
+    const existingSell: Order = {
+      orderId: createOrderId("existing-sell"),
+      clientOrderId: "plk_existing_sell" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      familyId: createFamilyId("fam-1"),
+      side: "sell",
+      orderType: "GTC",
+      price: 0.55,
+      size: 6,
+      sizeUsdc: 3.3,
+      status: "open",
+      exchangeOrderId: "existing-sell",
+      signalId: null,
+      signalReason: "repricing-exit",
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 6 })),
+      rulesProvider,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    await replaceMod.start();
+
+    const rejected: any[] = [];
+    const cancelRequested: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelRequested.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-replace-sub-min"),
+        clientOrderId: "plk_sell_replace_sub_min" as ClientOrderId,
+        side: "sell",
+        price: 0.5,
+        size: 3.1,
+        metadata: {
+          marketData: {
+            minOrderSize: 5,
+          },
+        },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(cancelRequested).toHaveLength(0);
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("exchange-min-order-size-rejected");
+    expect(rejected[0].errorCode).toBe("INVALID_SIZE");
+    expect(replaceMod.getDiagnostics().cancelReplacePendingCount).toBe(0);
+
+    await replaceMod.stop();
+  });
+
   // ─── Live-lite allowlist ──────────────────────────────────────────
 
   it("rejects order for non-allowlisted family (live-lite allowlist)", async () => {

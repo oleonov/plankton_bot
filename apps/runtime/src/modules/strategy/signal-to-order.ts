@@ -228,6 +228,7 @@ export class SignalToOrderBridge {
         marketData: {
           bookSource: market.bookSource ?? "unknown",
           gammaFallbackDust,
+          minOrderSize: market.minOrderSize ?? null,
         },
       },
     };

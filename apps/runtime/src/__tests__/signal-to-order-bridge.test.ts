@@ -268,7 +268,7 @@ describe("SignalToOrderBridge", () => {
     });
     bridge.subscribe();
 
-    const placed: Array<{ command: { price: number } }> = [];
+    const placed: Array<{ command: { price: number; metadata?: Record<string, unknown> } }> = [];
     const skipped: unknown[] = [];
     bus.subscribe("PlaceOrderRequested", async (payload) => {
       placed.push(payload);
@@ -278,7 +278,7 @@ describe("SignalToOrderBridge", () => {
     });
 
     await bus.publish("NormalizedMarketUpdated", {
-      markets: [makeMarket()],
+      markets: [makeMarket({ minOrderSize: 5 })],
       timestamp: Date.now(),
     });
     await bus.publish("SignalApproved", {
@@ -290,6 +290,11 @@ describe("SignalToOrderBridge", () => {
     expect(skipped).toHaveLength(0);
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.metadata).toMatchObject({
+      marketData: {
+        minOrderSize: 5,
+      },
+    });
   });
 
   it("publishes a precise conversion skip reason for gamma-fallback zero-spread books", async () => {

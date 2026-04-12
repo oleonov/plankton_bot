@@ -69,6 +69,7 @@ export class ExecutionModule implements RuntimeModule {
   private static readonly WALLET_BUFFER_RATIO = 0.03;
   private static readonly MIN_WALLET_BUFFER_USDC = 0.25;
   private static readonly SELL_REPLACE_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
+  private static readonly SIZE_EPSILON_SHARES = 1e-9;
 
   private readonly log: Logger;
   private readonly processedCommandIds = new Set<string>();
@@ -296,6 +297,29 @@ export class ExecutionModule implements RuntimeModule {
         clientOrderId: cmd.clientOrderId,
         reason: "market-inactive",
         errorCode: "MARKET_INACTIVE",
+        familyId: cmd.familyId,
+        signalReason: cmd.signalReason ?? null,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    const minOrderSizeRejection = this.getMinOrderSizeRejection(cmd);
+    if (minOrderSizeRejection) {
+      this.log.warn(
+        {
+          commandId: cmd.commandId,
+          tokenId: cmd.tokenId,
+          size: cmd.size,
+          minOrderSize: minOrderSizeRejection.minOrderSize,
+        },
+        "order rejected — below exchange minimum size",
+      );
+      await this.deps.bus.publish("OrderRejected", {
+        commandId: cmd.commandId,
+        clientOrderId: cmd.clientOrderId,
+        reason: "exchange-min-order-size-rejected",
+        errorCode: ExchangeErrorCode.InvalidSize,
         familyId: cmd.familyId,
         signalReason: cmd.signalReason ?? null,
         timestamp: Date.now(),
@@ -635,6 +659,32 @@ export class ExecutionModule implements RuntimeModule {
       ExecutionModule.MIN_WALLET_BUFFER_USDC,
       walletBalance * ExecutionModule.WALLET_BUFFER_RATIO,
     );
+  }
+
+  private getMinOrderSizeRejection(
+    cmd: PlaceOrderCommand,
+  ): { minOrderSize: number } | null {
+    const minOrderSize = this.resolveCommandMinOrderSize(cmd);
+    if (
+      minOrderSize == null ||
+      !Number.isFinite(minOrderSize) ||
+      minOrderSize <= 0 ||
+      cmd.size + ExecutionModule.SIZE_EPSILON_SHARES >= minOrderSize
+    ) {
+      return null;
+    }
+    return { minOrderSize };
+  }
+
+  private resolveCommandMinOrderSize(cmd: PlaceOrderCommand): number | null {
+    const metadata = cmd.metadata;
+    if (!metadata || typeof metadata !== "object") return null;
+    const marketData = (metadata as Record<string, unknown>).marketData;
+    if (!marketData || typeof marketData !== "object") return null;
+    const rawMinOrderSize = (marketData as Record<string, unknown>).minOrderSize;
+    return typeof rawMinOrderSize === "number" && Number.isFinite(rawMinOrderSize)
+      ? rawMinOrderSize
+      : null;
   }
 
   private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
