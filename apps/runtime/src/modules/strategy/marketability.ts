@@ -378,13 +378,7 @@ function applyBookChecks(
   }
 
   if (
-    isGammaFallbackDustApprovalEligible(
-      signal,
-      bundle,
-      market,
-      nowMs,
-      executionMinNotionalUsdc,
-    )
+    isGammaFallbackDustApprovalEligible(signal, bundle, market, nowMs, executionMinNotionalUsdc)
   ) {
     checksPassed.push("book-gamma-fallback-dust-ok");
   } else if (market.bestBid == null && market.bestAsk == null) {
@@ -419,13 +413,7 @@ function applySpreadChecks(
   executionMinNotionalUsdc: number | null,
 ): void {
   if (
-    isGammaFallbackDustApprovalEligible(
-      signal,
-      bundle,
-      market,
-      nowMs,
-      executionMinNotionalUsdc,
-    )
+    isGammaFallbackDustApprovalEligible(signal, bundle, market, nowMs, executionMinNotionalUsdc)
   ) {
     checksPassed.push("gamma-fallback-dust-ok");
     return;

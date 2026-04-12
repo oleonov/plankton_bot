@@ -191,25 +191,13 @@ describe("resolveNextDustSuppressBackoffMs", () => {
   it("backs off progressively when price has not moved and resets when it does", () => {
     expect(resolveNextDustSuppressBackoffMs(null, 0.02, 0.001)).toBe(3_000);
     expect(
-      resolveNextDustSuppressBackoffMs(
-        { referencePrice: 0.02, backoffMs: 3_000 },
-        0.02,
-        0.001,
-      ),
+      resolveNextDustSuppressBackoffMs({ referencePrice: 0.02, backoffMs: 3_000 }, 0.02, 0.001),
     ).toBe(6_000);
     expect(
-      resolveNextDustSuppressBackoffMs(
-        { referencePrice: 0.02, backoffMs: 6_000 },
-        0.02,
-        0.001,
-      ),
+      resolveNextDustSuppressBackoffMs({ referencePrice: 0.02, backoffMs: 6_000 }, 0.02, 0.001),
     ).toBe(12_000);
     expect(
-      resolveNextDustSuppressBackoffMs(
-        { referencePrice: 0.02, backoffMs: 12_000 },
-        0.021,
-        0.001,
-      ),
+      resolveNextDustSuppressBackoffMs({ referencePrice: 0.02, backoffMs: 12_000 }, 0.021, 0.001),
     ).toBe(1_000);
   });
 });
@@ -515,7 +503,11 @@ describe("HotFamilyExecutionModule", () => {
       orderRepo,
       candidateBookCache: cache,
       log: makeLogger(),
-      policy: { hotQuoteRefreshIntervalMs: 1_000, dustEntryRepriceIntervalMs: 0, maxTokensPerCycle: 1 },
+      policy: {
+        hotQuoteRefreshIntervalMs: 1_000,
+        dustEntryRepriceIntervalMs: 0,
+        maxTokensPerCycle: 1,
+      },
     });
 
     const cancels: Array<{ command: { orderId: string; reason: string } }> = [];

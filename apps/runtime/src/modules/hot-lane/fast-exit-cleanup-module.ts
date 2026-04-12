@@ -59,10 +59,7 @@ export class FastExitCleanupModule implements RuntimeModule {
       () => {
         void this.tick().catch((err) => this.log.error({ err }, "fast exit cleanup tick error"));
       },
-      Math.max(
-        500,
-        Math.min(this.policy.hotQuoteRefreshIntervalMs, DEFAULT_EXIT_TICK_FLOOR_MS),
-      ),
+      Math.max(500, Math.min(this.policy.hotQuoteRefreshIntervalMs, DEFAULT_EXIT_TICK_FLOOR_MS)),
     );
     this.started = true;
     this.log.info("fast exit cleanup module started");

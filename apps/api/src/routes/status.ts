@@ -140,8 +140,7 @@ function computeTradingState(
     signalActivity.blockedByResolutionBufferLast10m = scanner.blockedByResolutionBuffer;
     signalActivity.blockedByWindowLast10m = scanner.blockedByWindow;
     signalActivity.blockedByPerFamilyTickLimitLast10m = scanner.blockedByPerFamilyTickLimit ?? 0;
-    signalActivity.gammaFallbackDustSignalsLast10m =
-      scanner.gammaFallbackDustSignalsProduced ?? 0;
+    signalActivity.gammaFallbackDustSignalsLast10m = scanner.gammaFallbackDustSignalsProduced ?? 0;
     signalActivity.scanPrimeSkippedByPolicyLast10m = scanner.scanPrimeSkippedByPolicy ?? 0;
   }
 

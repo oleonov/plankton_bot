@@ -652,10 +652,7 @@ async function main(): Promise<void> {
     if (event.outcome === "attempted") {
       candidateBookRefreshWindow.attempts += event.tokenCount;
     }
-    if (
-      event.outcome === "refresh-budget-exhausted" ||
-      event.outcome === "refresh-failed"
-    ) {
+    if (event.outcome === "refresh-budget-exhausted" || event.outcome === "refresh-failed") {
       candidateBookRefreshWindow.timeouts += event.tokenCount;
     }
   };

@@ -5,19 +5,13 @@ import type {
   OrderBookSnapshot,
   Signal,
 } from "@plankton/domain";
-import {
-  resolveMakerOnlyPrice,
-  resolveMarketabilityPolicy,
-} from "../strategy/marketability.js";
+import { resolveMakerOnlyPrice, resolveMarketabilityPolicy } from "../strategy/marketability.js";
 import {
   isDustLaneEnabled,
   isHotQuoteFamily,
   isQueueJumpCanaryEnabled,
 } from "../../family-throughput.js";
-import {
-  hasFreshTradeActivity,
-  resolveDustSizeCapUsdc,
-} from "../strategy/book-quality-policy.js";
+import { hasFreshTradeActivity, resolveDustSizeCapUsdc } from "../strategy/book-quality-policy.js";
 
 const EPSILON = 1e-9;
 const DEFAULT_DUST_ENTRY_TTL_MS = 15_000;

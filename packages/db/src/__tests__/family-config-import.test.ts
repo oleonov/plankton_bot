@@ -145,7 +145,7 @@ describe("family-config-import", () => {
         )
         .run("test-fast:generic:daily");
 
-      const updatedYaml = YAML.replace('priority_rank: 1', 'priority_rank: 2');
+      const updatedYaml = YAML.replace("priority_rank: 1", "priority_rank: 2");
       const updated = parseFamilyRulesYaml(updatedYaml, "test");
       conn.db.transaction(() =>
         applyFamilyConfigImport(conn.db, updated.families, {

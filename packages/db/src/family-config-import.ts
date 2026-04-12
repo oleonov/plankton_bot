@@ -290,14 +290,7 @@ export function applyFamilyConfigImport(
         profile,
         sourceType: "yaml_import",
       });
-      upsertDeployment.run(
-        familyId,
-        profile,
-        seed.enabled ? 1 : 0,
-        seed.deploymentStage,
-        now,
-        now,
-      );
+      upsertDeployment.run(familyId, profile, seed.enabled ? 1 : 0, seed.deploymentStage, now, now);
     }
     upsertMeta.run(familyId, now);
   }
@@ -503,11 +496,7 @@ function dbFamilyFingerprint(
     rules["max_entry_signals_per_tick_per_family"] ?? null,
     rules["fast_lane_enabled"] == null ? null : rules["fast_lane_enabled"] ? 1 : 0,
     rules["dust_lane_enabled"] == null ? null : rules["dust_lane_enabled"] ? 1 : 0,
-    rules["queue_jump_canary_enabled"] == null
-      ? null
-      : rules["queue_jump_canary_enabled"]
-        ? 1
-        : 0,
+    rules["queue_jump_canary_enabled"] == null ? null : rules["queue_jump_canary_enabled"] ? 1 : 0,
     rules["max_open_value_usdc"],
     rules["max_active_markets"],
     rules["max_dust_positions"],

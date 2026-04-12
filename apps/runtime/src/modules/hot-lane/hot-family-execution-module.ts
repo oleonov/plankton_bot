@@ -139,19 +139,19 @@ export class HotFamilyExecutionModule implements RuntimeModule {
       this.queueBaselineByOrderId.delete(orderIdKey);
       return;
     }
-        const pendingState = this.pendingStateAfterCancelByToken.get(tokenKey) ?? null;
-        this.pendingStateAfterCancelByToken.delete(tokenKey);
-        if (pendingState != null) {
-          const market = this.marketCache.get(tokenKey) ?? null;
-          const tokenId = market?.tokenId ?? createTokenId(tokenKey);
-          await this.transitionState(
-            payload.familyId,
-            tokenId,
-            pendingState,
-            toHotLaneStateReason(payload.reason),
-            payload.timestamp,
-          );
-        }
+    const pendingState = this.pendingStateAfterCancelByToken.get(tokenKey) ?? null;
+    this.pendingStateAfterCancelByToken.delete(tokenKey);
+    if (pendingState != null) {
+      const market = this.marketCache.get(tokenKey) ?? null;
+      const tokenId = market?.tokenId ?? createTokenId(tokenKey);
+      await this.transitionState(
+        payload.familyId,
+        tokenId,
+        pendingState,
+        toHotLaneStateReason(payload.reason),
+        payload.timestamp,
+      );
+    }
     this.lastMaintenanceAtByOrderId.delete(orderIdKey);
     this.queueBaselineByOrderId.delete(orderIdKey);
   }
@@ -266,7 +266,13 @@ export class HotFamilyExecutionModule implements RuntimeModule {
           this.lastRepriceCancelAtByToken.set(tokenKey, nowMs);
         }
         if (action.reason === "entry-reprice-cancel" || action.reason === "exit-reprice-cancel") {
-          await this.transitionState(order.familyId, order.tokenId, "needs-reprice", action.reason, nowMs);
+          await this.transitionState(
+            order.familyId,
+            order.tokenId,
+            "needs-reprice",
+            action.reason,
+            nowMs,
+          );
           this.pendingStateAfterCancelByToken.set(tokenKey, "cooling");
         } else if (action.reason === "entry-ttl-cancel" || action.reason === "exit-ttl-cancel") {
           this.pendingStateAfterCancelByToken.set(tokenKey, "cooling");
@@ -278,7 +284,8 @@ export class HotFamilyExecutionModule implements RuntimeModule {
           );
         } else if (action.reason === "entry-suppress-cancel") {
           this.quickCancelCountByToken.set(tokenKey, 0);
-          const referencePrice = action.desiredPrice ?? market?.lastTradePrice ?? market?.midPrice ?? null;
+          const referencePrice =
+            action.desiredPrice ?? market?.lastTradePrice ?? market?.midPrice ?? null;
           const nextBackoffMs = resolveNextDustSuppressBackoffMs(
             this.suppressionStateByToken.get(tokenKey) ?? null,
             referencePrice,
@@ -289,7 +296,13 @@ export class HotFamilyExecutionModule implements RuntimeModule {
             backoffMs: nextBackoffMs,
           });
           this.suppressedUntilByToken.set(tokenKey, nowMs + nextBackoffMs);
-          await this.transitionState(order.familyId, order.tokenId, "suppressed", action.reason, nowMs);
+          await this.transitionState(
+            order.familyId,
+            order.tokenId,
+            "suppressed",
+            action.reason,
+            nowMs,
+          );
         }
 
         await this.deps.bus.publish("HotLaneActionApplied", {

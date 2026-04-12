@@ -277,7 +277,10 @@ export class StrategyModule implements RuntimeModule {
 
   private async prepareMarketsForScan(
     markets: readonly NormalizedMarket[],
-  ): Promise<{ readonly markets: readonly NormalizedMarket[]; readonly scanPrimeSkippedByPolicy: number }> {
+  ): Promise<{
+    readonly markets: readonly NormalizedMarket[];
+    readonly scanPrimeSkippedByPolicy: number;
+  }> {
     if (!this.candidateBookCache) {
       return { markets, scanPrimeSkippedByPolicy: 0 };
     }
@@ -321,8 +324,7 @@ export class StrategyModule implements RuntimeModule {
       return {
         scanPrimeSkippedByPolicy,
         markets: markets.map((market) => {
-          const entry =
-            cachedEntries.get(String(market.tokenId)) ?? null;
+          const entry = cachedEntries.get(String(market.tokenId)) ?? null;
           if (!entry) return market;
           return applyOrderBookToMarket(market, entry);
         }),

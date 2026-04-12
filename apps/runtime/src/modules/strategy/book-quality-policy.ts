@@ -76,7 +76,9 @@ export function resolveGammaFallbackDustReferencePrice(
     (value): value is number => value != null && Number.isFinite(value),
   );
   const fallbackPrice =
-    priceCandidates.length > 0 ? Math.min(...priceCandidates) : market.midPrice ?? market.lastTradePrice ?? null;
+    priceCandidates.length > 0
+      ? Math.min(...priceCandidates)
+      : (market.midPrice ?? market.lastTradePrice ?? null);
   if (fallbackPrice == null || fallbackPrice <= 0) return null;
   return roundDownToTick(fallbackPrice, market.tickSize);
 }

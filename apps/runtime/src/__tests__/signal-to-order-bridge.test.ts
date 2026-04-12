@@ -457,9 +457,9 @@ describe("SignalToOrderBridge", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.02);
-    expect((placed[0]!.command.metadata?.marketData as Record<string, unknown>)?.gammaFallbackDust).toBe(
-      true,
-    );
+    expect(
+      (placed[0]!.command.metadata?.marketData as Record<string, unknown>)?.gammaFallbackDust,
+    ).toBe(true);
   });
 
   it("falls back to gamma-fallback dust when targeted book refresh fails", async () => {
@@ -530,14 +530,17 @@ describe("SignalToOrderBridge", () => {
     });
     await bus.drain();
 
-    expect(candidateBookCache.getFreshOrRefresh).toHaveBeenCalledWith(String(TOKEN_ID), expect.any(Number));
+    expect(candidateBookCache.getFreshOrRefresh).toHaveBeenCalledWith(
+      String(TOKEN_ID),
+      expect.any(Number),
+    );
     expect(placed).toHaveLength(1);
     expect((placed[0]!.command.metadata as Record<string, unknown>)?.cacheStatus).toBe(
       "refresh-failed",
     );
-    expect((placed[0]!.command.metadata?.marketData as Record<string, unknown>)?.gammaFallbackDust).toBe(
-      true,
-    );
+    expect(
+      (placed[0]!.command.metadata?.marketData as Record<string, unknown>)?.gammaFallbackDust,
+    ).toBe(true);
   });
 
   it("uses queue-jump execution terms for event-driven geopolitics dust canary", async () => {
