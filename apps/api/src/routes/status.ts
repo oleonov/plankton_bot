@@ -522,6 +522,14 @@ export function buildStatusSnapshot(
   const riskEventVolume = riskEventVolumeRow
     ? (JSON.parse(riskEventVolumeRow.labels) as Record<string, unknown>)
     : null;
+  const userOrderStreamActivityRow = db
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'user_order_stream_activity' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { labels: string } | undefined;
+  const userOrderStreamActivity = userOrderStreamActivityRow
+    ? (JSON.parse(userOrderStreamActivityRow.labels) as Record<string, unknown>)
+    : null;
 
   let desiredProfile: string | null = null;
   let currentProfile: string | null = null;
@@ -618,6 +626,7 @@ export function buildStatusSnapshot(
     tradingState,
     signalActivity,
     riskEventVolume,
+    userOrderStreamActivity,
     executionTelemetry24h,
     executionQueue,
     startupAdoption,

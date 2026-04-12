@@ -31,6 +31,7 @@ describe("createPolymarketClient", () => {
     expect(result.client).toEqual({ mode: "paper-client" });
     expect(result.settlementClient).toBeNull();
     expect(result.relayerConfig).toBeNull();
+    expect(result.userWsAuth).toBeNull();
     expect(createClobClient).toHaveBeenCalledWith("https://clob.polymarket.com", 137);
   });
 
@@ -55,6 +56,11 @@ describe("createPolymarketClient", () => {
     expect(result.settlementClient).toBeNull();
     expect(result.relayerConfig).toBeNull();
     expect(result.traderAddress).toBe("0x2222222222222222222222222222222222222222");
+    expect(result.userWsAuth).toEqual({
+      apiKey: "poly-key",
+      secret: "poly-secret",
+      passphrase: "poly-passphrase",
+    });
     expect(createWallet).toHaveBeenCalledWith(baseConfig.polyPrivateKey);
     expect(createClobClient).toHaveBeenCalledWith("https://clob.polymarket.com", 137, signer, {
       key: "poly-key",
@@ -108,6 +114,11 @@ describe("createPolymarketClient", () => {
       },
     });
     expect(result.traderAddress).toBe("0x1111111111111111111111111111111111111111");
+    expect(result.userWsAuth).toEqual({
+      apiKey: "poly-key",
+      secret: "poly-secret",
+      passphrase: "poly-passphrase",
+    });
     expect(createBuilderConfig).toHaveBeenCalledWith({
       localBuilderCreds: {
         key: "builder-key",

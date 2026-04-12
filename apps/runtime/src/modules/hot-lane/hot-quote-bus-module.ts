@@ -10,7 +10,10 @@ import type { Logger } from "../../logger.js";
 import { CandidateBookCache } from "../strategy/candidate-book-cache.js";
 import { DEFAULT_HOT_LANE_POLICY, type HotLanePolicy } from "./hot-lane-policy.js";
 import { shouldUseHotQuoteLane } from "./hot-lane-policy.js";
-import { dedupeHotFamilyIds, selectHotMarkets } from "./hot-market-selection.js";
+import {
+  dedupeHotFamilyIds,
+  StableHotMarketSelector,
+} from "./hot-market-selection.js";
 
 const DEFAULT_EVENT_DRIVEN_FLUSH_MS = 50;
 
@@ -26,7 +29,9 @@ export interface HotQuoteBusModuleDeps {
 export class HotQuoteBusModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly policy: HotLanePolicy;
+  private readonly hotSelector = new StableHotMarketSelector();
   private readonly marketCache = new Map<string, NormalizedMarket>();
+  private currentHotTokenKeys = new Set<string>();
   private readonly pendingTokenIds = new Set<string>();
   private unsubs: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -78,6 +83,8 @@ export class HotQuoteBusModule implements RuntimeModule {
     }
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
+    this.hotSelector.reset();
+    this.currentHotTokenKeys.clear();
     this.pendingTokenIds.clear();
     this.started = false;
     this.log.info("hot quote bus module stopped");
@@ -125,14 +132,16 @@ export class HotQuoteBusModule implements RuntimeModule {
     this.running = true;
     try {
       const nowMs = Date.now();
-      const hotMarkets = selectHotMarkets({
+      const hotMarkets = this.hotSelector.select({
         nowMs,
         rulesProvider: this.deps.rulesProvider,
         markets: [...this.marketCache.values()],
         openOrders: this.deps.orderRepo.findOpen(),
         maxTokens: this.policy.maxTokensPerCycle,
+        holdWindowMs: this.policy.hotSetHoldWindowMs,
       });
       if (hotMarkets.length === 0) return;
+      this.currentHotTokenKeys = new Set(hotMarkets.map((market) => String(market.tokenId)));
       for (const market of hotMarkets) {
         this.pendingTokenIds.add(String(market.tokenId));
       }
@@ -165,13 +174,21 @@ export class HotQuoteBusModule implements RuntimeModule {
       .filter((market): market is NormalizedMarket => market != null);
     if (candidateMarkets.length === 0) return;
 
-    const hotMarkets = selectHotMarkets({
-      nowMs,
-      rulesProvider: this.deps.rulesProvider,
-      markets: candidateMarkets,
-      openOrders: this.deps.orderRepo.findOpen(),
-      maxTokens: this.policy.maxTokensPerCycle,
-    });
+    if (this.currentHotTokenKeys.size === 0) {
+      const seededHotMarkets = this.hotSelector.select({
+        nowMs,
+        rulesProvider: this.deps.rulesProvider,
+        markets: [...this.marketCache.values()],
+        openOrders: this.deps.orderRepo.findOpen(),
+        maxTokens: this.policy.maxTokensPerCycle,
+        holdWindowMs: this.policy.hotSetHoldWindowMs,
+      });
+      this.currentHotTokenKeys = new Set(seededHotMarkets.map((market) => String(market.tokenId)));
+    }
+
+    const hotMarkets = candidateMarkets.filter((market) =>
+      this.currentHotTokenKeys.has(String(market.tokenId)),
+    );
     if (hotMarkets.length === 0) return;
 
     const tokenIdsNeedingRefresh = hotMarkets

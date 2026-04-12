@@ -12,7 +12,7 @@ import type {
 import type { Logger } from "../../logger.js";
 import { CandidateBookCache } from "../strategy/candidate-book-cache.js";
 import { DEFAULT_HOT_LANE_POLICY, type HotLanePolicy } from "./hot-lane-policy.js";
-import { selectHotMarkets } from "./hot-market-selection.js";
+import { StableHotMarketSelector } from "./hot-market-selection.js";
 
 export interface HotMarketDataModuleDeps {
   readonly bus: EventBus;
@@ -49,6 +49,7 @@ const HOT_MARKET_DATA_MIN_INTERVAL_MS = 500;
 export class HotMarketDataModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly policy: HotLanePolicy;
+  private readonly hotSelector = new StableHotMarketSelector();
   private readonly marketCache = new Map<string, NormalizedMarket>();
   private readonly lastFastUpdateAtByToken = new Map<string, number>();
   private unsubs: Array<() => void> = [];
@@ -101,6 +102,7 @@ export class HotMarketDataModule implements RuntimeModule {
     }
     this.stream?.close();
     this.stream = null;
+    this.hotSelector.reset();
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.started = false;
@@ -129,12 +131,13 @@ export class HotMarketDataModule implements RuntimeModule {
     this.running = true;
     try {
       const nowMs = Date.now();
-      const hotMarkets = selectHotMarkets({
+      const hotMarkets = this.hotSelector.select({
         nowMs,
         rulesProvider: this.deps.rulesProvider,
         markets: [...this.marketCache.values()],
         openOrders: this.deps.orderRepo.findOpen(),
         maxTokens: this.policy.maxTokensPerCycle,
+        holdWindowMs: this.policy.hotSetHoldWindowMs,
       });
       if (hotMarkets.length === 0) {
         this.stream?.setTokenIds([]);

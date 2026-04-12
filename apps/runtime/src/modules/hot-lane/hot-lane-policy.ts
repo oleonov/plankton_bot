@@ -27,6 +27,7 @@ const DEFAULT_QUEUE_PRESSURE_ABSOLUTE_SIZE = 25;
 export interface HotLanePolicy {
   readonly hotQuoteRefreshIntervalMs: number;
   readonly maxTokensPerCycle: number;
+  readonly hotSetHoldWindowMs: number;
   readonly dustEntryTtlMs: number;
   readonly dustExitTtlMs: number;
   readonly dustEntryRepriceIntervalMs: number;
@@ -34,6 +35,7 @@ export interface HotLanePolicy {
   readonly dustRepriceSuppressAfter: number;
   readonly minRepriceCancelIntervalMs: number;
   readonly queueJumpMaxSlippageCents: number;
+  readonly queueJumpMaxEntryShare: number;
   readonly queuePressureSizeMultiple: number;
   readonly queuePressureAbsoluteShares: number;
 }
@@ -70,6 +72,7 @@ export type HotLaneOrderState =
 export const DEFAULT_HOT_LANE_POLICY: HotLanePolicy = {
   hotQuoteRefreshIntervalMs: 1_000,
   maxTokensPerCycle: 80,
+  hotSetHoldWindowMs: 5_000,
   dustEntryTtlMs: DEFAULT_DUST_ENTRY_TTL_MS,
   dustExitTtlMs: DEFAULT_DUST_EXIT_TTL_MS,
   dustEntryRepriceIntervalMs: DEFAULT_DUST_ENTRY_REPRICE_INTERVAL_MS,
@@ -77,6 +80,7 @@ export const DEFAULT_HOT_LANE_POLICY: HotLanePolicy = {
   dustRepriceSuppressAfter: DEFAULT_DUST_REPRICE_SUPPRESS_AFTER,
   minRepriceCancelIntervalMs: DEFAULT_MIN_REPRICE_CANCEL_INTERVAL_MS,
   queueJumpMaxSlippageCents: DEFAULT_QUEUE_JUMP_SLIPPAGE_CAP,
+  queueJumpMaxEntryShare: 0.25,
   queuePressureSizeMultiple: DEFAULT_QUEUE_PRESSURE_MULTIPLIER,
   queuePressureAbsoluteShares: DEFAULT_QUEUE_PRESSURE_ABSOLUTE_SIZE,
 };

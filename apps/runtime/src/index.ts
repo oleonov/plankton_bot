@@ -71,6 +71,7 @@ import { StrategyModule } from "./modules/strategy/strategy-module.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
+import { UserOrderStreamModule } from "./modules/reconciliation/user-order-stream-module.js";
 import { InventoryManagerModule } from "./modules/inventory-auto-merge/inventory-manager-module.js";
 import { StalePruningModule } from "./modules/pruning/stale-pruning-module.js";
 import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
@@ -441,6 +442,13 @@ async function main(): Promise<void> {
   let settlementClient: SettlementClientLike | null = null;
   let relayerConfig: { walletType: string; funderAddress: string } | null = null;
   let traderAddress: string | undefined;
+  let userWsAuth:
+    | {
+        apiKey: string;
+        secret: string;
+        passphrase: string;
+      }
+    | undefined;
   if (runtimeMode === "paper" || runtimeMode === "live-lite") {
     try {
       const configWithBuilder = config as typeof config & {
@@ -474,6 +482,7 @@ async function main(): Promise<void> {
       polyClient = builtClient.client;
       settlementClient = builtClient.settlementClient;
       traderAddress = builtClient.traderAddress ?? undefined;
+      userWsAuth = builtClient.userWsAuth ?? undefined;
       relayerConfig = builtClient.relayerConfig
         ? {
             walletType: builtClient.relayerConfig.walletType,
@@ -524,6 +533,7 @@ async function main(): Promise<void> {
       polyClient,
       settlementClient: settlementClient ?? undefined,
       traderAddress,
+      userWsAuth,
       slugFilter,
       initialBalanceUsdc,
       onInfraAlert: runtimeMode === "live-lite" ? recordInfraAlert : undefined,
@@ -730,6 +740,18 @@ async function main(): Promise<void> {
     reconcileIntervalMs: 60_000,
   });
 
+  const userOrderStreamModule =
+    runtimeMode === "live-lite"
+      ? new UserOrderStreamModule({
+          gateway: exchangeGateway,
+          bus,
+          orderRepo: repos.order,
+          fillRepo: repos.fill,
+          rulesProvider,
+          log,
+        })
+      : null;
+
   // 7j. Resolution module — detect resolved markets, settle positions
   const marketResolutionRepo = new SqliteMarketResolutionRepository(ledgerConn.db);
   const gammaResolutionClient = new GammaResolutionClient();
@@ -819,6 +841,9 @@ async function main(): Promise<void> {
           log,
           pollIntervalMs: config.fillPollIntervalMs,
           overlapMs: 5_000,
+          onImportObserved: userOrderStreamModule
+            ? ({ imported }) => userOrderStreamModule.recordPollingFills(imported)
+            : undefined,
         })
       : null;
 
@@ -880,6 +905,14 @@ async function main(): Promise<void> {
     ["safety-evaluator", safetyEvaluator],
     ["profile-publisher", profilePublisher],
     ["reconciliation", reconciliationModule],
+    ...(userOrderStreamModule
+      ? [
+          ["user-order-stream", userOrderStreamModule] as [
+            string,
+            import("@plankton/domain").RuntimeModule,
+          ],
+        ]
+      : []),
     ["strategy", strategyModule],
     ...(hotMarketDataModule
       ? [
@@ -1030,6 +1063,12 @@ async function main(): Promise<void> {
   const insertRiskEventVolume = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('risk_event_volume', 1, ?, ?)",
   );
+  const deleteUserOrderStreamActivity = ledgerConn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'user_order_stream_activity'",
+  );
+  const insertUserOrderStreamActivity = ledgerConn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('user_order_stream_activity', 1, ?, ?)",
+  );
   const upsertSignalActivity = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
     deleteSignalActivity.run();
     insertSignalActivity.run(labels, capturedAt);
@@ -1044,6 +1083,12 @@ async function main(): Promise<void> {
     deleteRiskEventVolume.run();
     insertRiskEventVolume.run(labels, capturedAt);
   });
+  const upsertUserOrderStreamActivity = ledgerConn.db.transaction(
+    (labels: string, capturedAt: string) => {
+      deleteUserOrderStreamActivity.run();
+      insertUserOrderStreamActivity.run(labels, capturedAt);
+    },
+  );
 
   // Track signal counts in a sliding window (resets every 10 minutes — approximate, not rolling)
   const signalWindow = {
@@ -1366,6 +1411,12 @@ async function main(): Promise<void> {
           thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
         },
         "risk_events growth threshold exceeded",
+      );
+    }
+    if (userOrderStreamModule) {
+      upsertUserOrderStreamActivity(
+        JSON.stringify(userOrderStreamModule.getMetricsSnapshot()),
+        new Date().toISOString(),
       );
     }
     if (now - lastConfigDriftCheckAtMs >= 60_000) {

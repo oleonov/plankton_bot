@@ -15,7 +15,7 @@ export interface HotMarketSelectionOptions {
   readonly maxTokens: number;
 }
 
-export function selectHotMarkets(opts: HotMarketSelectionOptions): NormalizedMarket[] {
+function rankHotMarkets(opts: HotMarketSelectionOptions): NormalizedMarket[] {
   const hotOpenTokens = new Set(
     (opts.openOrders ?? [])
       .filter(
@@ -52,8 +52,69 @@ export function selectHotMarkets(opts: HotMarketSelectionOptions): NormalizedMar
       const bPrice = b.market.bestBid ?? b.market.bestAsk ?? b.market.midPrice ?? 1;
       return aPrice - bPrice;
     })
-    .slice(0, opts.maxTokens)
     .map(({ market }) => market);
+}
+
+export function selectHotMarkets(opts: HotMarketSelectionOptions): NormalizedMarket[] {
+  return rankHotMarkets(opts).slice(0, opts.maxTokens);
+}
+
+export class StableHotMarketSelector {
+  private currentTokenOrder: string[] = [];
+  private heldUntilByToken = new Map<string, number>();
+
+  select(
+    opts: HotMarketSelectionOptions & {
+      readonly holdWindowMs: number;
+    },
+  ): NormalizedMarket[] {
+    const ranked = rankHotMarkets(opts);
+    const topRanked = ranked.slice(0, opts.maxTokens);
+    const eligibleByToken = new Map(ranked.map((market) => [String(market.tokenId), market]));
+    const topRankedTokenKeys = new Set(topRanked.map((market) => String(market.tokenId)));
+    const selected: NormalizedMarket[] = [];
+    const selectedTokenKeys = new Set<string>();
+
+    for (const tokenKey of this.currentTokenOrder) {
+      if (selected.length >= opts.maxTokens) break;
+      const market = eligibleByToken.get(tokenKey);
+      if (!market) continue;
+
+      const holdUntil = this.heldUntilByToken.get(tokenKey) ?? 0;
+      const stillTopRanked = topRankedTokenKeys.has(tokenKey);
+      const keepHeldToken = stillTopRanked || holdUntil > opts.nowMs;
+      if (!keepHeldToken) continue;
+
+      selected.push(market);
+      selectedTokenKeys.add(tokenKey);
+      if (stillTopRanked) {
+        this.heldUntilByToken.set(tokenKey, opts.nowMs + opts.holdWindowMs);
+      }
+    }
+
+    for (const market of topRanked) {
+      if (selected.length >= opts.maxTokens) break;
+      const tokenKey = String(market.tokenId);
+      if (selectedTokenKeys.has(tokenKey)) continue;
+      selected.push(market);
+      selectedTokenKeys.add(tokenKey);
+      this.heldUntilByToken.set(tokenKey, opts.nowMs + opts.holdWindowMs);
+    }
+
+    this.currentTokenOrder = selected.map((market) => String(market.tokenId));
+    for (const tokenKey of [...this.heldUntilByToken.keys()]) {
+      if (!selectedTokenKeys.has(tokenKey)) {
+        this.heldUntilByToken.delete(tokenKey);
+      }
+    }
+
+    return selected;
+  }
+
+  reset(): void {
+    this.currentTokenOrder = [];
+    this.heldUntilByToken.clear();
+  }
 }
 
 export function dedupeHotFamilyIds(

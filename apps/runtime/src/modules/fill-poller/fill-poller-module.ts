@@ -29,6 +29,7 @@ export interface FillPollerModuleDeps {
   log: Logger;
   pollIntervalMs: number;
   overlapMs: number;
+  onImportObserved?: ((summary: { imported: number; skipped: number; timestamp: number }) => void) | undefined;
 }
 
 export class FillPollerModule implements RuntimeModule {
@@ -107,6 +108,11 @@ export class FillPollerModule implements RuntimeModule {
             "fill poller imported fills",
           );
         }
+        this.deps.onImportObserved?.({
+          imported: result.imported,
+          skipped: result.skipped,
+          timestamp: Date.now(),
+        });
       }
 
       this.pollCount++;

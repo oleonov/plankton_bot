@@ -587,6 +587,37 @@ describe("GET /status", () => {
 
     conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'risk_event_volume'`);
   });
+
+  it("status includes user websocket activity telemetry when available", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('user_order_stream_activity', 1, '{"wsEventsReceived":18,"wsEventsReceivedPerSec":0.3,"wsFills":5,"pollingFills":1,"wsLatencyMs":{"count":5,"avgMs":230,"minMs":120,"p50Ms":220,"p95Ms":400,"maxMs":420},"orphanBufferSize":2,"dedupeHits":3,"reconnectCount":1,"wsEventGapDetected":1,"windowStartMs":${Date.now() - 60_000}}', '${new Date().toISOString()}')
+    `);
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
+
+    expect(json(res).data.userOrderStreamActivity).toEqual({
+      wsEventsReceived: 18,
+      wsEventsReceivedPerSec: 0.3,
+      wsFills: 5,
+      pollingFills: 1,
+      wsLatencyMs: {
+        count: 5,
+        avgMs: 230,
+        minMs: 120,
+        p50Ms: 220,
+        p95Ms: 400,
+        maxMs: 420,
+      },
+      orphanBufferSize: 2,
+      dedupeHits: 3,
+      reconnectCount: 1,
+      wsEventGapDetected: 1,
+      windowStartMs: expect.any(Number),
+    });
+
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'user_order_stream_activity'`);
+  });
 });
 
 // ─── Families ───────────────────────────────────────────────────────

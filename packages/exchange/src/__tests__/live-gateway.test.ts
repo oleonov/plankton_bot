@@ -337,6 +337,15 @@ describe("LiveExchangeGateway", () => {
     await expect(gw.getPositionBalance(createTokenId("tok-1"))).rejects.toThrow("Network error");
   });
 
+  it("createUserEventStream requires websocket auth", () => {
+    expect(() =>
+      gw.createUserEventStream?.({
+        onTradeEvents: vi.fn(),
+        onOrderEvents: vi.fn(),
+      }),
+    ).toThrow("user websocket auth is not configured");
+  });
+
   it("redeemPositions warns once and no-ops when the SDK has no redeem API", async () => {
     const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
 

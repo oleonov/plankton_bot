@@ -213,7 +213,7 @@ describe("outcome selection", () => {
     expect(selection.tokenId).toBe("tok-fallback");
   });
 
-  it("allows Gamma fallback books for dust-first entries when live-lite raises the minimum to $1", () => {
+  it("does not allow Gamma fallback books above the hard $0.25 dust cap", () => {
     const bundle = makeBundle({
       entry: { ...makeRules().entry, entryMode: "spray-first" },
       throughput: {
@@ -245,7 +245,7 @@ describe("outcome selection", () => {
       },
     );
 
-    expect(selection.tokenId).toBe("tok-fallback-live-floor");
+    expect(selection.tokenId).toBeNull();
   });
 
   it("does not let ultra-cheap tokens win when relative spread is broken", () => {

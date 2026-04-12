@@ -41,11 +41,20 @@ import {
 } from "./marketability.js";
 import { isGammaFallbackDustEligible } from "./book-quality-policy.js";
 import {
+  DEFAULT_HOT_LANE_POLICY,
   isDustSignalReason,
   resolveQueueJumpExecutionTerms,
   shouldUseDustLane,
   type QueueJumpExecutionTerms,
 } from "../hot-lane/hot-lane-policy.js";
+
+const QUEUE_JUMP_SHARE_WINDOW_MS = 60_000;
+const MIN_QUEUE_JUMP_SHARE_SAMPLE_SIZE = 8;
+
+interface EntryExecutionSample {
+  readonly atMs: number;
+  readonly queueJump: boolean;
+}
 
 export interface SignalToOrderBridgeDeps {
   bus: EventBus;
@@ -63,6 +72,7 @@ export class SignalToOrderBridge {
   private cooldownUntilByToken = new Map<string, number>();
   private cooldownBaselineByToken = new Map<string, CooldownBaseline>();
   private filledOrderIds = new Set<string>();
+  private readonly recentEntryExecutionSamples: EntryExecutionSample[] = [];
   private unsubs: Array<() => void> = [];
 
   constructor(private readonly deps: SignalToOrderBridgeDeps) {
@@ -118,9 +128,10 @@ export class SignalToOrderBridge {
           executionMinNotionalUsdc,
         })
       : null;
+    const allowedQueueJumpTerms = this.resolveAllowedQueueJumpTerms(queueJumpTerms, signal);
     const marketability = this.relaxQueueJumpMarketability(
       this.evaluateMarketability(signal, market, bundle),
-      queueJumpTerms,
+      allowedQueueJumpTerms,
     );
     const gammaFallbackDust =
       bundle != null &&
@@ -164,7 +175,7 @@ export class SignalToOrderBridge {
       bundle,
       marketability.policy,
       executionMinNotionalUsdc,
-      queueJumpTerms,
+      allowedQueueJumpTerms,
     );
     if (!executionTerms) {
       this.log.warn(
@@ -235,6 +246,9 @@ export class SignalToOrderBridge {
       "signal converted to order command",
     );
 
+    if (isEntryReason(signal.reason)) {
+      this.recordEntryExecution(executionTerms.postOnly !== true);
+    }
     await this.deps.bus.publish("PlaceOrderRequested", {
       command: cmd,
       timestamp: Date.now(),
@@ -421,6 +435,55 @@ export class SignalToOrderBridge {
     return typeof guard?.getMinEntryNotionalUsdc === "function"
       ? (guard.getMinEntryNotionalUsdc() ?? null)
       : null;
+  }
+
+  private resolveAllowedQueueJumpTerms(
+    queueJumpTerms: QueueJumpExecutionTerms | null,
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+  ): QueueJumpExecutionTerms | null {
+    if (!queueJumpTerms || !isEntryReason(signal.reason)) {
+      return queueJumpTerms;
+    }
+    this.pruneEntryExecutionSamples(Date.now());
+    const totalEntries = this.recentEntryExecutionSamples.length;
+    if (totalEntries < MIN_QUEUE_JUMP_SHARE_SAMPLE_SIZE) {
+      return queueJumpTerms;
+    }
+
+    const queueJumpEntries = this.recentEntryExecutionSamples.filter((sample) => sample.queueJump);
+    const nextShare = (queueJumpEntries.length + 1) / (totalEntries + 1);
+    if (nextShare <= DEFAULT_HOT_LANE_POLICY.queueJumpMaxEntryShare) {
+      return queueJumpTerms;
+    }
+
+    this.log.debug(
+      {
+        signalId: signal.signalId,
+        familyId: signal.familyId,
+        tokenId: signal.tokenId,
+        nextShare,
+        maxShare: DEFAULT_HOT_LANE_POLICY.queueJumpMaxEntryShare,
+        totalEntries,
+        queueJumpEntries: queueJumpEntries.length,
+      },
+      "queue-jump suppressed by entry share cap",
+    );
+    return null;
+  }
+
+  private recordEntryExecution(queueJump: boolean): void {
+    const nowMs = Date.now();
+    this.pruneEntryExecutionSamples(nowMs);
+    this.recentEntryExecutionSamples.push({ atMs: nowMs, queueJump });
+  }
+
+  private pruneEntryExecutionSamples(nowMs: number): void {
+    while (
+      this.recentEntryExecutionSamples.length > 0 &&
+      this.recentEntryExecutionSamples[0]!.atMs <= nowMs - QUEUE_JUMP_SHARE_WINDOW_MS
+    ) {
+      this.recentEntryExecutionSamples.shift();
+    }
   }
 
   private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {

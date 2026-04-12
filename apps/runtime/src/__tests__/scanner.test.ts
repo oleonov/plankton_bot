@@ -888,7 +888,7 @@ describe("scan() spray integration", () => {
     expect(result.signals[0]!.reason).toBe("spray-entry");
   });
 
-  it("emits spray-entry for gamma-fallback dust families under a $1 live min notional", () => {
+  it("does not emit gamma-fallback dust spray entries above the hard $0.25 dust cap", () => {
     const bundle = makeBundle({
       identity: { familyKey: "ethereum-price" },
       evidence: { promotionState: "scaled", evidenceScore: 80 },
@@ -930,10 +930,7 @@ describe("scan() spray integration", () => {
       tickTs,
     );
 
-    expect(result.signals).toHaveLength(1);
-    expect(result.signals[0]!.reason).toBe("spray-entry");
-    expect(result.signals[0]!.suggestedSizeUsdc).toBe(1);
-    expect(result.signals[0]!.suggestedPrice).toBe(0.03);
+    expect(result.signals).toHaveLength(0);
   });
 
   it("allows a third dust mesh quote for reduced-fast families when condition cap is 3", () => {

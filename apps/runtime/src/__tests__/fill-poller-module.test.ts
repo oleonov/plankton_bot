@@ -167,6 +167,47 @@ describe("FillPollerModule", () => {
     expect(fillRepo.save).toHaveBeenCalledTimes(1);
   });
 
+  it("reports imported fill counts to the optional observer", async () => {
+    const onImportObserved = vi.fn();
+    mod = new FillPollerModule({
+      gateway,
+      fillRepo,
+      orderRepo,
+      rulesProvider,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 5000,
+      overlapMs: 5000,
+      onImportObserved,
+    });
+
+    const fill: ExchangeFill = {
+      fillId: "fill-observed",
+      orderId: "ord-1",
+      clientOrderId: "co-1",
+      tokenId: createTokenId("tok-1"),
+      side: "buy",
+      price: 0.5,
+      size: 10,
+      liquidityRole: "unknown",
+      fee: 0,
+      feeRateBps: 0,
+      timestamp: Date.now(),
+    };
+    (gateway.getFills as any).mockResolvedValue([fill]);
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 10 }]);
+
+    await mod.start();
+    await mod.poll();
+
+    expect(onImportObserved).toHaveBeenCalledWith(
+      expect.objectContaining({
+        imported: 1,
+        skipped: 0,
+      }),
+    );
+  });
+
   it("skips poll when already polling (re-entrancy guard)", async () => {
     // Make getFills hang
     let resolveGetFills: () => void;

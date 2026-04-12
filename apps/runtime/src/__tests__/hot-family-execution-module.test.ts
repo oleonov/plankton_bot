@@ -1142,4 +1142,90 @@ describe("HotMarketDataModule", () => {
     expect(updates[0]?.[0]?.bestBid).toBe(0.08);
     expect(cache.getFreshEntry(String(TOKEN_ID), Date.now())?.book.bestAsk).toBe(0.09);
   });
+
+  it("holds the hot stream subscription steady across minor ranking flips until hold window expires", async () => {
+    vi.useFakeTimers();
+    const bus = new InProcessEventBus();
+    const stream = {
+      setTokenIds: vi.fn(),
+      close: vi.fn(),
+    };
+    const gateway = {
+      getMarketPricing: vi.fn(async () => new Map()),
+      createMarketPricingStream: vi.fn(() => stream),
+    };
+    const orderRepo = {
+      findOpen: vi.fn(() => []),
+    } as never;
+    const rulesProvider = {
+      getRule: vi.fn(() => makeBundle()),
+      isEnabled: vi.fn(() => true),
+      getAllFamilies: vi.fn(() => []),
+      getRulesForRegime: vi.fn(() => []),
+    };
+    const mod = new HotMarketDataModule({
+      bus,
+      gateway: gateway as never,
+      rulesProvider: rulesProvider as never,
+      orderRepo,
+      log: makeLogger(),
+      policy: { hotQuoteRefreshIntervalMs: 500, hotSetHoldWindowMs: 5_000, maxTokensPerCycle: 1 },
+    });
+
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOKEN_ID,
+          bestBid: 0.03,
+          bestAsk: 0.04,
+          midPrice: 0.035,
+          snapshotTs: Date.now(),
+        }),
+        makeMarket({
+          tokenId: TOKEN_ID_2,
+          conditionId: "cond-2",
+          bestBid: 0.08,
+          bestAsk: 0.09,
+          midPrice: 0.085,
+          snapshotTs: Date.now(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    await vi.advanceTimersByTimeAsync(600);
+    expect(stream.setTokenIds).toHaveBeenLastCalledWith([String(TOKEN_ID)]);
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOKEN_ID,
+          bestBid: 0.09,
+          bestAsk: 0.1,
+          midPrice: 0.095,
+          snapshotTs: Date.now(),
+        }),
+        makeMarket({
+          tokenId: TOKEN_ID_2,
+          conditionId: "cond-2",
+          bestBid: 0.02,
+          bestAsk: 0.03,
+          midPrice: 0.025,
+          snapshotTs: Date.now(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    await vi.advanceTimersByTimeAsync(600);
+    expect(stream.setTokenIds).toHaveBeenLastCalledWith([String(TOKEN_ID)]);
+
+    await vi.advanceTimersByTimeAsync(5_100);
+    expect(stream.setTokenIds).toHaveBeenLastCalledWith([String(TOKEN_ID_2)]);
+
+    await mod.stop();
+  });
 });

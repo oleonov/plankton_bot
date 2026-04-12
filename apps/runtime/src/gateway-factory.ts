@@ -8,6 +8,7 @@ import {
   SimulationExchangeGateway,
   LiveMarketDataGateway,
   LiveExchangeGateway,
+  type UserEventStreamAuth,
 } from "@plankton/exchange";
 
 export interface CreateGatewaysInput {
@@ -15,6 +16,7 @@ export interface CreateGatewaysInput {
   polyClient?: unknown;
   settlementClient?: unknown;
   traderAddress?: string | undefined;
+  userWsAuth?: UserEventStreamAuth | null | undefined;
   /** Optional slug filter passed to live market data gateway. */
   slugFilter?: ((slug: string) => boolean) | undefined;
   /** Initial USDC balance for simulation/paper exchange gateway. Ignored in live-lite. */
@@ -44,6 +46,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     polyClient,
     settlementClient,
     traderAddress,
+    userWsAuth,
     slugFilter,
     initialBalanceUsdc,
     onInfraAlert,
@@ -81,6 +84,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
   const liveExchangeConfig = {
     client: polyClient,
     settlementClient,
+    ...(userWsAuth ? { userWsAuth } : {}),
     ...(traderAddress ? { traderAddress } : {}),
     ...(onInfraAlert ? { onInfraAlert } : {}),
   };

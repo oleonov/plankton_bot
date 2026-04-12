@@ -137,6 +137,35 @@ export interface MarketPricingStream {
   close(): void;
 }
 
+export interface ExchangeUserTradeEvent {
+  readonly type: "trade";
+  readonly tradeId: string;
+  readonly status: string;
+  readonly fills: readonly ExchangeFill[];
+  /** Unix milliseconds when the exchange emitted the event, when available. */
+  readonly timestamp: number;
+}
+
+export interface ExchangeUserOrderEvent {
+  readonly type: "order";
+  readonly event: "PLACEMENT" | "UPDATE" | "CANCELLATION";
+  readonly orderId: string;
+  readonly clientOrderId: string | null;
+  readonly tokenId: TokenId | null;
+  readonly side: OrderSide | null;
+  readonly sizeTotal: number | null;
+  readonly sizeFilled: number | null;
+  readonly sizeRemaining: number | null;
+  readonly status: ExchangeOrder["status"] | null;
+  /** Unix milliseconds when the exchange emitted the event, when available. */
+  readonly timestamp: number;
+}
+
+export interface ExchangeUserEventStream {
+  /** Close the stream and release all resources. Idempotent. */
+  close(): void;
+}
+
 // ─── Gateway interfaces ───────────────────────────────────────────────────
 
 /**
@@ -227,6 +256,25 @@ export interface ExchangeGateway {
 
   /** Fetch fills since a given Unix millisecond timestamp. */
   getFills(sinceMs: number): Promise<ExchangeFill[]>;
+
+  /**
+   * Optional authenticated user stream for order lifecycle and fills.
+   * Runtime uses this as the realtime path while keeping polling as fallback.
+   */
+  createUserEventStream?(
+    handlers: Readonly<{
+      onTradeEvents: (
+        events: readonly ExchangeUserTradeEvent[],
+      ) => Promise<void> | void;
+      onOrderEvents: (
+        events: readonly ExchangeUserOrderEvent[],
+      ) => Promise<void> | void;
+      onGapDetected?: (
+        info: Readonly<{ reason: string; timestamp: number }>,
+      ) => Promise<void> | void;
+      onError?: (error: unknown) => Promise<void> | void;
+    }>,
+  ): ExchangeUserEventStream;
 
   /** Fetch current balances and collateral. */
   getBalances(): Promise<ExchangeBalance[]>;

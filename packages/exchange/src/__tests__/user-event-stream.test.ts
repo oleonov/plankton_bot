@@ -1,0 +1,201 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { LiveUserEventStream } from "../live/user-event-stream.js";
+
+class FakeUserSocket {
+  sent: string[] = [];
+  onopen: ((event: unknown) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  onclose: ((event: { code?: number; reason?: string }) => void) | null = null;
+
+  send(data: string): void {
+    this.sent.push(data);
+  }
+
+  close(): void {
+    this.onclose?.({});
+  }
+
+  emitOpen(): void {
+    this.onopen?.({});
+  }
+
+  emitJson(payload: unknown): void {
+    this.onmessage?.({ data: JSON.stringify(payload) });
+  }
+
+  emitRaw(data: unknown): void {
+    this.onmessage?.({ data });
+  }
+}
+
+describe("LiveUserEventStream", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("sends auth payload on open", () => {
+    const sockets: FakeUserSocket[] = [];
+    new LiveUserEventStream({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      traderAddress: "0xours",
+      createWebSocket: () => {
+        const socket = new FakeUserSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      handlers: {
+        onTradeEvents: vi.fn(),
+        onOrderEvents: vi.fn(),
+      },
+    });
+
+    expect(sockets).toHaveLength(1);
+    sockets[0]!.emitOpen();
+
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toEqual({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      type: "user",
+    });
+  });
+
+  it("routes trade and order events to handlers", async () => {
+    const sockets: FakeUserSocket[] = [];
+    const onTradeEvents = vi.fn();
+    const onOrderEvents = vi.fn();
+
+    new LiveUserEventStream({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      traderAddress: "0xours",
+      createWebSocket: () => {
+        const socket = new FakeUserSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      handlers: {
+        onTradeEvents,
+        onOrderEvents,
+      },
+    });
+
+    sockets[0]!.emitOpen();
+    sockets[0]!.emitJson({
+      event_type: "trade",
+      id: "trade-1",
+      taker_order_id: "ord-1",
+      asset_id: "tok-1",
+      side: "BUY",
+      size: "10",
+      price: "0.57",
+      fee_rate_bps: "0",
+      status: "MATCHED",
+      timestamp: "1672290701",
+      maker_address: "0xours",
+      trader_side: "TAKER",
+    });
+    sockets[0]!.emitJson({
+      event_type: "order",
+      id: "ord-1",
+      client_order_id: "cloid-1",
+      asset_id: "tok-1",
+      side: "SELL",
+      original_size: "10",
+      size_matched: "4",
+      type: "UPDATE",
+      status: "LIVE",
+      timestamp: "1672290687",
+    });
+
+    await vi.runAllTicks();
+
+    expect(onTradeEvents).toHaveBeenCalledTimes(1);
+    expect(onOrderEvents).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends heartbeat and detects missing pong", async () => {
+    const sockets: FakeUserSocket[] = [];
+    const onGapDetected = vi.fn();
+
+    new LiveUserEventStream({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      traderAddress: "0xours",
+      createWebSocket: () => {
+        const socket = new FakeUserSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      handlers: {
+        onTradeEvents: vi.fn(),
+        onOrderEvents: vi.fn(),
+        onGapDetected,
+      },
+    });
+
+    sockets[0]!.emitOpen();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sockets[0]!.sent.at(-1)).toBe("{}");
+
+    await vi.advanceTimersByTimeAsync(15_001);
+    expect(onGapDetected).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "pong-timeout" }),
+    );
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sockets.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("treats malformed payloads as gaps without crashing the stream", async () => {
+    const sockets: FakeUserSocket[] = [];
+    const onGapDetected = vi.fn();
+    const onError = vi.fn();
+    const onTradeEvents = vi.fn();
+
+    new LiveUserEventStream({
+      auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
+      traderAddress: "0xours",
+      createWebSocket: () => {
+        const socket = new FakeUserSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      handlers: {
+        onTradeEvents,
+        onOrderEvents: vi.fn(),
+        onGapDetected,
+        onError,
+      },
+    });
+
+    sockets[0]!.emitOpen();
+    sockets[0]!.emitRaw("{not-json");
+    await vi.runAllTicks();
+
+    expect(onGapDetected).toHaveBeenCalledWith(
+      expect.objectContaining({ reason: "invalid-payload" }),
+    );
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onTradeEvents).not.toHaveBeenCalled();
+
+    sockets[0]!.emitJson({
+      event_type: "trade",
+      id: "trade-1",
+      taker_order_id: "ord-1",
+      asset_id: "tok-1",
+      side: "BUY",
+      size: "10",
+      price: "0.57",
+      fee_rate_bps: "0",
+      status: "MATCHED",
+      timestamp: "1672290701",
+      maker_address: "0xours",
+      trader_side: "TAKER",
+    });
+    await vi.runAllTicks();
+
+    expect(onTradeEvents).toHaveBeenCalledTimes(1);
+  });
+});

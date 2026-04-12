@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
   createFamilyId,
@@ -216,6 +216,10 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
   };
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("SignalToOrderBridge", () => {
   it("uses the shared candidate-book cache so approved signals convert against the same book as scanner", async () => {
     const bus = new InProcessEventBus();
@@ -396,7 +400,7 @@ describe("SignalToOrderBridge", () => {
     expect(placed[0]!.command.price).toBe(0.031);
   });
 
-  it("converts gamma-fallback dust spray entries without requiring a real CLOB book", async () => {
+  it("does not convert gamma-fallback entries above the hard $0.25 dust cap", async () => {
     const bus = new InProcessEventBus();
     const bridge = new SignalToOrderBridge({
       bus,
@@ -455,14 +459,10 @@ describe("SignalToOrderBridge", () => {
     });
     await bus.drain();
 
-    expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.02);
-    expect(
-      (placed[0]!.command.metadata?.marketData as Record<string, unknown>)?.gammaFallbackDust,
-    ).toBe(true);
+    expect(placed).toHaveLength(0);
   });
 
-  it("falls back to gamma-fallback dust when targeted book refresh fails", async () => {
+  it("does not fall back to gamma-fallback dust above the hard $0.25 dust cap", async () => {
     const bus = new InProcessEventBus();
     const candidateBookCache = {
       getFreshEntry: vi.fn(() => null),
@@ -534,13 +534,7 @@ describe("SignalToOrderBridge", () => {
       String(TOKEN_ID),
       expect.any(Number),
     );
-    expect(placed).toHaveLength(1);
-    expect((placed[0]!.command.metadata as Record<string, unknown>)?.cacheStatus).toBe(
-      "refresh-failed",
-    );
-    expect(
-      (placed[0]!.command.metadata?.marketData as Record<string, unknown>)?.gammaFallbackDust,
-    ).toBe(true);
+    expect(placed).toHaveLength(0);
   });
 
   it("uses queue-jump execution terms for event-driven geopolitics dust canary", async () => {
@@ -1035,6 +1029,126 @@ describe("SignalToOrderBridge", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.02);
     expect(placed[0]!.command.postOnly).toBe(true);
+  });
+
+  it("falls back to maker-only when queue-jump share cap is exhausted", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              primaryCategory: "crypto-btc",
+              cadence: "daily-dated",
+              strategyProfile: "scalp",
+              requiresPostOnlyForLive: true,
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              dustLaneEnabled: true,
+              queueJumpCanaryEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number; postOnly?: boolean } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    const publishApproved = async (
+      idx: number,
+      market: NormalizedMarket,
+      signalOverrides?: Partial<Signal>,
+    ) => {
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [{ ...market, snapshotTs: NOW + idx }],
+        timestamp: NOW + idx,
+      });
+      await bus.publish("SignalApproved", {
+        signal: {
+          ...makeSignal(),
+          signalId: `sig-${idx}`,
+          sequenceInTick: idx,
+          strategyTick: NOW + idx,
+          generatedAt: new Date(NOW + idx).toISOString(),
+          reason: "spray-entry",
+          suggestedSizeUsdc: 0.15,
+          suggestedSize: 7.5,
+          suggestedPrice: 0.02,
+          ...signalOverrides,
+        },
+        approvedAt: NOW + idx,
+      });
+      await bus.drain();
+      await vi.advanceTimersByTimeAsync(1_000);
+    };
+
+    for (let i = 0; i < 2; i++) {
+      await publishApproved(
+        i,
+        makeMarket({
+          bestBid: 0.02,
+          bestAsk: 0.021,
+          midPrice: 0.0205,
+          spread: 0.001,
+          tickSize: 0.001,
+          bookSource: "clob",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(NOW - 30_000).toISOString(),
+        }),
+      );
+    }
+    for (let i = 2; i < 8; i++) {
+      await publishApproved(
+        i,
+        makeMarket({
+          bestBid: 0.02,
+          bestAsk: 0.021,
+          midPrice: 0.0205,
+          spread: 0.001,
+          tickSize: 0.001,
+          bookSource: "clob",
+          lastTradePrice: 0.02,
+          lastTradeAt: new Date(NOW - 10 * 60_000).toISOString(),
+        }),
+      );
+    }
+    await publishApproved(
+      8,
+      makeMarket({
+        bestBid: 0.02,
+        bestAsk: 0.021,
+        midPrice: 0.0205,
+        spread: 0.001,
+        tickSize: 0.001,
+        bookSource: "clob",
+        lastTradePrice: 0.02,
+        lastTradeAt: new Date(NOW - 30_000).toISOString(),
+      }),
+    );
+
+    expect(placed).toHaveLength(9);
+    expect(placed[0]!.command.postOnly).toBeUndefined();
+    expect(placed[1]!.command.postOnly).toBeUndefined();
+    expect(placed[7]!.command.postOnly).toBe(true);
+    expect(placed[8]!.command.postOnly).toBe(true);
+    expect(placed[8]!.command.price).toBe(0.02);
   });
 
   it("keeps token in cooldown when the book did not materially move", async () => {

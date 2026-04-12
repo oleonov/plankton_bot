@@ -109,7 +109,7 @@ export function toSdkTickSize(tickSize: number): string {
 
 // ─── Order mapping ───────────────────────────────────────────────────────
 
-function mapOrderStatus(sdkStatus: string): ExchangeOrder["status"] {
+export function mapExchangeOrderStatus(sdkStatus: string): ExchangeOrder["status"] {
   const upper = sdkStatus.toUpperCase();
   switch (upper) {
     case "LIVE":
@@ -143,7 +143,7 @@ export function mapOpenOrder(raw: Record<string, unknown>): ExchangeOrder {
     sizeTotal: originalSize,
     sizeFilled: sizeMatched,
     sizeRemaining: originalSize - sizeMatched,
-    status: mapOrderStatus(String(raw.status ?? "OPEN")),
+    status: mapExchangeOrderStatus(String(raw.status ?? "OPEN")),
     createdAt: toUnixMs(raw.created_at),
   };
 }

@@ -5,8 +5,8 @@ export const DUST_TRADE_FRESHNESS_MS = 5 * 60_000;
 export const DUST_GAMMA_SNAPSHOT_FRESHNESS_MS = 60_000;
 export const DUST_MAX_SIZE_USDC = 0.25;
 
-export function resolveDustSizeCapUsdc(executionMinNotionalUsdc?: number | null): number {
-  return Math.max(DUST_MAX_SIZE_USDC, executionMinNotionalUsdc ?? 0);
+export function resolveDustSizeCapUsdc(_executionMinNotionalUsdc?: number | null): number {
+  return DUST_MAX_SIZE_USDC;
 }
 
 export function hasFreshTradeActivity(

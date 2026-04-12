@@ -16,6 +16,9 @@ import type {
   ExchangeFill,
   ExchangeBalance,
   TokenId,
+  ExchangeUserEventStream,
+  ExchangeUserOrderEvent,
+  ExchangeUserTradeEvent,
 } from "@plankton/domain";
 import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
@@ -29,6 +32,11 @@ import {
   toSdkTickSize,
   ATOMIC_UNIT_DIVISOR,
 } from "../mappers.js";
+import {
+  LiveUserEventStream,
+  type UserEventStreamAuth,
+  type UserEventWebSocketLike,
+} from "./user-event-stream.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -37,6 +45,8 @@ export interface LiveExchangeConfig {
   settlementClient?: unknown;
   /** Wallet/funder address used to extract personal fills from trade rows. */
   traderAddress?: string | null;
+  userWsAuth?: UserEventStreamAuth | null;
+  createWebSocket?: ((url: string) => UserEventWebSocketLike) | undefined;
   /** Optional callback used to surface infra-level settlement issues to runtime/UI. */
   onInfraAlert?:
     | ((alert: {
@@ -78,6 +88,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly settlementClient: any;
   private readonly traderAddress: string | null;
+  private readonly userWsAuth: UserEventStreamAuth | null;
+  private readonly createWebSocket:
+    | ((url: string) => UserEventWebSocketLike)
+    | undefined;
   private readonly onInfraAlert:
     | ((alert: {
         code: string;
@@ -96,6 +110,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
     this.client = config.client;
     this.settlementClient = config.settlementClient ?? null;
     this.traderAddress = config.traderAddress?.trim().toLowerCase() ?? null;
+    this.userWsAuth = config.userWsAuth ?? null;
+    this.createWebSocket = config.createWebSocket;
     this.onInfraAlert = config.onInfraAlert ?? null;
   }
 
@@ -194,6 +210,31 @@ export class LiveExchangeGateway implements ExchangeGateway {
     } catch {
       return [];
     }
+  }
+
+  createUserEventStream(
+    handlers: Readonly<{
+      onTradeEvents: (
+        events: readonly ExchangeUserTradeEvent[],
+      ) => Promise<void> | void;
+      onOrderEvents: (
+        events: readonly ExchangeUserOrderEvent[],
+      ) => Promise<void> | void;
+      onGapDetected?: (
+        info: Readonly<{ reason: string; timestamp: number }>,
+      ) => Promise<void> | void;
+      onError?: (error: unknown) => Promise<void> | void;
+    }>,
+  ): ExchangeUserEventStream {
+    if (!this.userWsAuth) {
+      throw new Error("user websocket auth is not configured");
+    }
+    return new LiveUserEventStream({
+      auth: this.userWsAuth,
+      traderAddress: this.traderAddress,
+      ...(this.createWebSocket ? { createWebSocket: this.createWebSocket } : {}),
+      handlers,
+    });
   }
 
   async getBalances(): Promise<ExchangeBalance[]> {

@@ -51,6 +51,11 @@ export interface PolymarketClientResult {
   settlementClient: SettlementClientLike | null;
   relayerConfig: PolymarketRelayerConfig | null;
   traderAddress: string | null;
+  userWsAuth: {
+    apiKey: string;
+    secret: string;
+    passphrase: string;
+  } | null;
 }
 
 function requireString(value: string | undefined, field: string): string {
@@ -141,6 +146,7 @@ export async function createPolymarketClient(
       settlementClient: null,
       relayerConfig: null,
       traderAddress: null,
+      userWsAuth: null,
     };
   }
 
@@ -153,6 +159,11 @@ export async function createPolymarketClient(
       settlementClient: null,
       relayerConfig: null,
       traderAddress: resolveWalletAddress(signer),
+      userWsAuth: {
+        apiKey: creds.key,
+        secret: creds.secret,
+        passphrase: creds.passphrase,
+      },
     };
   }
 
@@ -191,6 +202,11 @@ export async function createPolymarketClient(
     settlementClient,
     relayerConfig,
     traderAddress: relayerConfig.funderAddress,
+    userWsAuth: {
+      apiKey: creds.key,
+      secret: creds.secret,
+      passphrase: creds.passphrase,
+    },
   };
 }
 

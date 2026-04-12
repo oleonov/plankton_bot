@@ -44,6 +44,21 @@ describe("createGateways", () => {
     expect(result.executionMode).toBe("live");
   });
 
+  it("live-lite mode passes user websocket auth through to the live exchange gateway", () => {
+    const mockClient = { getOk: async () => "OK" };
+    const result = createGateways({
+      runtimeMode: "live-lite",
+      polyClient: mockClient,
+      userWsAuth: {
+        apiKey: "key",
+        secret: "secret",
+        passphrase: "passphrase",
+      },
+    });
+
+    expect(result.exchangeGateway.createUserEventStream).toBeTypeOf("function");
+  });
+
   it("live-lite mode without polyClient throws", () => {
     expect(() => createGateways({ runtimeMode: "live-lite" })).toThrow(
       "polyClient is required for live-lite mode",

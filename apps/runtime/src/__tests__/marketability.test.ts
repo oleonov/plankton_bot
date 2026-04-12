@@ -646,7 +646,7 @@ describe("marketability policy retuning", () => {
     expect(decision.checksPassed).toContain("spread-wide-volume-qualified");
   });
 
-  it("approves gamma-fallback dust entries when live-lite min entry notional raises dust size to $1", () => {
+  it("rejects gamma-fallback dust entries above the hard $0.25 dust cap", () => {
     const bundle = makeBundle({
       identity: {
         ...makeBundle().identity,
@@ -685,8 +685,9 @@ describe("marketability policy retuning", () => {
       executionMinNotionalUsdc: 1,
     });
 
-    expect(decision.approved).toBe(true);
-    expect(decision.checksPassed).toContain("gamma-fallback-dust-ok");
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("book-missing");
+    expect(decision.rejectionReasons).toContain("gamma-fallback-no-real-book");
   });
 
   it("does not promote reduced families to core just because throughput overrides are high", () => {
