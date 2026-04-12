@@ -20,6 +20,7 @@ import type {
 } from "@plankton/domain";
 import { slugPatternToRegex, matchesHorizon } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { resolveFamilyAssignmentMaxDaysAhead } from "../../family-assignment-window.js";
 
 export interface NormalizationModuleDeps {
   bus: EventBus;
@@ -91,7 +92,15 @@ export class NormalizationModule implements RuntimeModule {
 
   private matchFamily(slug: string, endDate: string | null): FamilyIdentity | null {
     for (const { family, regex } of this.patterns) {
-      if (regex.test(slug) && matchesHorizon(family.horizon, endDate, new Date())) {
+      if (
+        regex.test(slug) &&
+        matchesHorizon(
+          family.horizon,
+          endDate,
+          new Date(),
+          resolveFamilyAssignmentMaxDaysAhead(family),
+        )
+      ) {
         return family;
       }
     }

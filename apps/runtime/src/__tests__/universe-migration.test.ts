@@ -238,6 +238,126 @@ describe("migrateOrphanedPositions", () => {
     expect(positionRepo.save).not.toHaveBeenCalled();
   });
 
+  it("closes positions for long-dated threshold deadline markets", () => {
+    const pos = makePosition({
+      familyId: createFamilyId("fam-tsla"),
+      size: 0,
+    });
+    const market = makeMarket({
+      slug: "will-tsla-reach-555-in-april",
+      endDate: new Date(Date.now() + 18 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    const positionRepo: PositionRepository = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findByFamily: vi.fn().mockReturnValue([pos]),
+      findOpen: vi.fn().mockReturnValue([]),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    };
+
+    const result = migrateOrphanedPositions({
+      positionRepo,
+      marketRepo: makeMarketRepo(market),
+      lotRepo: makeLotRepo(),
+      families: [
+        makeFamily({
+          familyId: createFamilyId("fam-tsla"),
+          familyKey: "will-tsla-reach",
+          horizon: "deadline",
+          cadence: "deadline",
+          slugPattern: "will-tsla-reach-*",
+        }),
+      ],
+      log: silentLog,
+    });
+
+    expect(result.closedCount).toBe(1);
+  });
+
+  it("keeps positions for generic deadline markets inside the default window", () => {
+    const pos = makePosition({
+      familyId: createFamilyId("fam-crude"),
+      size: 0,
+    });
+    const market = makeMarket({
+      slug: "will-crude-oil-cl-hit-by-end-of-march",
+      endDate: new Date(Date.now() + 18 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    const positionRepo: PositionRepository = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findByFamily: vi.fn().mockReturnValue([pos]),
+      findOpen: vi.fn().mockReturnValue([]),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    };
+
+    const result = migrateOrphanedPositions({
+      positionRepo,
+      marketRepo: makeMarketRepo(market),
+      lotRepo: makeLotRepo(),
+      families: [
+        makeFamily({
+          familyId: createFamilyId("fam-crude"),
+          familyKey: "will-crude-oil-cl-hit-by-end-of-march",
+          regime: "generic",
+          horizon: "deadline",
+          cadence: "deadline",
+          slugPattern: "will-crude-oil-cl-hit-*",
+        }),
+      ],
+      log: silentLog,
+    });
+
+    expect(result.closedCount).toBe(0);
+    expect(positionRepo.save).not.toHaveBeenCalled();
+  });
+
+  it("keeps positions for near-term threshold deadline markets", () => {
+    const pos = makePosition({
+      familyId: createFamilyId("fam-tsla"),
+      size: 0,
+    });
+    const market = makeMarket({
+      slug: "will-tsla-reach-555-in-april",
+      endDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    const positionRepo: PositionRepository = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findByFamily: vi.fn().mockReturnValue([pos]),
+      findOpen: vi.fn().mockReturnValue([]),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    };
+
+    const result = migrateOrphanedPositions({
+      positionRepo,
+      marketRepo: makeMarketRepo(market),
+      lotRepo: makeLotRepo(),
+      families: [
+        makeFamily({
+          familyId: createFamilyId("fam-tsla"),
+          familyKey: "will-tsla-reach",
+          horizon: "deadline",
+          cadence: "deadline",
+          slugPattern: "will-tsla-reach-*",
+        }),
+      ],
+      log: silentLog,
+    });
+
+    expect(result.closedCount).toBe(0);
+    expect(positionRepo.save).not.toHaveBeenCalled();
+  });
+
   it("closes positions when market not found in DB", () => {
     const pos = makePosition({ size: 0 });
 

@@ -17,6 +17,14 @@ function nearEndDate(): string {
   return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 }
 
+function farDeadlineEndDate(): string {
+  return new Date(Date.now() + 18 * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function nearDeadlineEndDate(): string {
+  return new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function makeIdentity(overrides?: Partial<FamilyIdentity>): FamilyIdentity {
   return {
     familyId: createFamilyId("fam-btc"),
@@ -162,6 +170,84 @@ describe("NormalizationModule", () => {
     expect(received[0]![0]!.familyId).toBeNull();
     expect(received[0]![0]!.familyKey).toBeNull();
     expect(received[0]![0]!.regime).toBeNull();
+
+    await mod.stop();
+  });
+
+  it("leaves long-dated threshold deadline markets unmatched", async () => {
+    rulesProvider = createMockRulesProvider([
+      makeIdentity({
+        familyId: createFamilyId("fam-tsla"),
+        familyKey: "will-tsla-reach",
+        horizon: "deadline",
+        cadence: "deadline",
+        slugPattern: "will-tsla-reach-*",
+      }),
+    ]);
+    mod = new NormalizationModule({
+      bus,
+      rulesProvider,
+      marketRepo,
+      log: silentLog,
+    });
+    await mod.start();
+
+    const received: NormalizedMarket[][] = [];
+    bus.subscribe("NormalizedMarketUpdated", async (p) => {
+      received.push([...p.markets]);
+    });
+
+    await bus.publish("MarketSnapshotReceived", {
+      markets: [
+        makeNormalizedMarket({
+          slug: "will-tsla-reach-555-in-april",
+          endDate: farDeadlineEndDate(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]![0]!.familyId).toBeNull();
+
+    await mod.stop();
+  });
+
+  it("classifies near-term threshold deadline markets", async () => {
+    rulesProvider = createMockRulesProvider([
+      makeIdentity({
+        familyId: createFamilyId("fam-tsla"),
+        familyKey: "will-tsla-reach",
+        horizon: "deadline",
+        cadence: "deadline",
+        slugPattern: "will-tsla-reach-*",
+      }),
+    ]);
+    mod = new NormalizationModule({
+      bus,
+      rulesProvider,
+      marketRepo,
+      log: silentLog,
+    });
+    await mod.start();
+
+    const received: NormalizedMarket[][] = [];
+    bus.subscribe("NormalizedMarketUpdated", async (p) => {
+      received.push([...p.markets]);
+    });
+
+    await bus.publish("MarketSnapshotReceived", {
+      markets: [
+        makeNormalizedMarket({
+          slug: "will-tsla-reach-555-in-april",
+          endDate: nearDeadlineEndDate(),
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]![0]!.familyId).toBe("fam-tsla");
 
     await mod.stop();
   });

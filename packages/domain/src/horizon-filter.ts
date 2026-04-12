@@ -2,6 +2,7 @@
  * Checks if a market's endDate is consistent with the family's declared horizon.
  * Returns true for missing/invalid endDates because market metadata can be incomplete.
  */
+
 export function matchesHorizon(
   familyHorizon: string,
   endDate: string | null,

@@ -21,6 +21,7 @@ import type {
 } from "@plankton/domain";
 import { slugPatternToRegex, matchesHorizon, createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { resolveFamilyAssignmentMaxDaysAhead } from "../../family-assignment-window.js";
 
 export interface MarketScannerModuleDeps {
   discoveryGateway: MarketDiscoveryGateway;
@@ -210,7 +211,15 @@ export class MarketScannerModule implements RuntimeModule {
     compiled: CompiledFamily[],
   ): FamilyIdentity | null {
     for (const { identity, regex } of compiled) {
-      if (regex.test(slug) && matchesHorizon(identity.horizon, endDate, new Date())) {
+      if (
+        regex.test(slug) &&
+        matchesHorizon(
+          identity.horizon,
+          endDate,
+          new Date(),
+          resolveFamilyAssignmentMaxDaysAhead(identity),
+        )
+      ) {
         return identity;
       }
     }

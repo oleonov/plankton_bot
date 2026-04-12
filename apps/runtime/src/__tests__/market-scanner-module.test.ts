@@ -18,6 +18,14 @@ function nearEndDate(): string {
   return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 }
 
+function farDeadlineEndDate(): string {
+  return new Date(Date.now() + 18 * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function nearDeadlineEndDate(): string {
+  return new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+}
+
 function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
   return {
     conditionId: "cond-1",
@@ -166,6 +174,73 @@ describe("MarketScannerModule", () => {
     await mod.scan();
 
     expect(marketRepo.save).not.toHaveBeenCalled();
+  });
+
+  it("scan() skips long-dated threshold deadline markets", async () => {
+    const market = makeClobMarket({
+      slug: "will-tsla-reach-555-in-april",
+      endDate: farDeadlineEndDate(),
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([market]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeFamilyIdentity({
+        familyId: createFamilyId("fam-tsla"),
+        familyKey: "will-tsla-reach",
+        horizon: "deadline",
+        cadence: "deadline",
+        slugPattern: "will-tsla-reach-*",
+      }),
+    ]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).not.toHaveBeenCalled();
+  });
+
+  it("scan() still accepts long-dated generic deadline markets", async () => {
+    const market = makeClobMarket({
+      slug: "will-crude-oil-cl-hit-by-end-of-march",
+      endDate: farDeadlineEndDate(),
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([market]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeFamilyIdentity({
+        familyId: createFamilyId("fam-crude"),
+        familyKey: "will-crude-oil-cl-hit-by-end-of-march",
+        regime: "generic",
+        horizon: "deadline",
+        cadence: "deadline",
+        slugPattern: "will-crude-oil-cl-hit-*",
+      }),
+    ]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(2);
+  });
+
+  it("scan() still accepts near-term threshold deadline markets", async () => {
+    const market = makeClobMarket({
+      slug: "will-tsla-reach-555-in-april",
+      endDate: nearDeadlineEndDate(),
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([market]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeFamilyIdentity({
+        familyId: createFamilyId("fam-tsla"),
+        familyKey: "will-tsla-reach",
+        horizon: "deadline",
+        cadence: "deadline",
+        slugPattern: "will-tsla-reach-*",
+      }),
+    ]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(2);
   });
 
   it("scan() does not crash on discovery failure", async () => {

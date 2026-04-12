@@ -19,6 +19,7 @@ import type {
 } from "@plankton/domain";
 import { slugPatternToRegex, matchesHorizon } from "@plankton/domain";
 import type { Logger } from "./logger.js";
+import { resolveFamilyAssignmentMaxDaysAhead } from "./family-assignment-window.js";
 
 export interface UniverseMigrationDeps {
   positionRepo: PositionRepository;
@@ -68,7 +69,12 @@ export function migrateOrphanedPositions(deps: UniverseMigrationDeps): Migration
       }
 
       const slugMatches = regex.test(market.slug);
-      const horizonMatches = matchesHorizon(family.horizon, market.endDate, now);
+      const horizonMatches = matchesHorizon(
+        family.horizon,
+        market.endDate,
+        now,
+        resolveFamilyAssignmentMaxDaysAhead(family),
+      );
 
       if (!slugMatches || !horizonMatches) {
         if (needsSettlementBeforeClose(deps.lotRepo, pos)) {
