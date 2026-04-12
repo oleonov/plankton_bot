@@ -38,7 +38,7 @@ export function isGammaFallbackDustEligible(opts: {
   readonly signal?:
     | {
         readonly side: Signal["side"];
-        readonly reason: Signal["reason"] | string | null;
+        readonly reason: Signal["reason"] | null;
         readonly suggestedSizeUsdc: number;
       }
     | null

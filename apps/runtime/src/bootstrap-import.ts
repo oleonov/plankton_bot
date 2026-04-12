@@ -207,16 +207,6 @@ function insertFamily(
     liveWalletRequirement: id.liveWalletRequirement ?? null,
     requiresPostOnlyForLive: id.requiresPostOnlyForLive ?? null,
   });
-  const {
-    universe: u,
-    entry: e,
-    scaleIn: s,
-    exit: x,
-    twoSided: t,
-    throughput: th,
-    tailSuppression: ts,
-    session: ss,
-  } = rules;
 
   insertCatalog.run(
     id.familyId,

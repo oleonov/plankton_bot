@@ -241,7 +241,7 @@ export function resolveMakerOnlyPrice(opts: {
   readonly side: "buy" | "sell";
   readonly suggestedPrice: number;
   readonly suggestedSizeUsdc?: number;
-  readonly signalReason?: string;
+  readonly signalReason?: Signal["reason"] | null;
   readonly nowMs?: number;
   readonly executionMinNotionalUsdc?: number | null;
   readonly market: Pick<
