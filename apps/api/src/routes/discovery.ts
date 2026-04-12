@@ -109,7 +109,9 @@ function getCurrentOrDesiredProfile(
   }
 }
 
-function shouldDisableLiveLiteDiscoverySeed(row: Pick<CandidateRow, "family_key" | "regime" | "horizon">): boolean {
+function shouldDisableLiveLiteDiscoverySeed(
+  row: Pick<CandidateRow, "family_key" | "regime" | "horizon">,
+): boolean {
   return (
     row.family_key.toLowerCase().includes("exact-score") &&
     row.regime.toLowerCase() === "generic" &&

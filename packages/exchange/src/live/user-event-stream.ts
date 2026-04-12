@@ -48,7 +48,9 @@ function normalizeWebSocketPayload(data: unknown): string | null {
 }
 
 function normalizeConditionIds(conditionIds: readonly string[]): string[] {
-  return [...new Set(conditionIds.map((value) => value.trim()).filter((value) => value.length > 0))].sort();
+  return [
+    ...new Set(conditionIds.map((value) => value.trim()).filter((value) => value.length > 0)),
+  ].sort();
 }
 
 function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
