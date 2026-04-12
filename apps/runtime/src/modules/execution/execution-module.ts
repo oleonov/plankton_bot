@@ -661,9 +661,7 @@ export class ExecutionModule implements RuntimeModule {
     );
   }
 
-  private getMinOrderSizeRejection(
-    cmd: PlaceOrderCommand,
-  ): { minOrderSize: number } | null {
+  private getMinOrderSizeRejection(cmd: PlaceOrderCommand): { minOrderSize: number } | null {
     const minOrderSize = this.resolveCommandMinOrderSize(cmd);
     if (
       minOrderSize == null ||
