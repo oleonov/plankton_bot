@@ -54,6 +54,28 @@ class FakeMarketSocket {
   }
 }
 
+class DeferredCloseMarketSocket extends FakeMarketSocket {
+  private readonly emitErrorOnClose: boolean;
+
+  constructor(opts?: { emitErrorOnClose?: boolean }) {
+    super();
+    this.emitErrorOnClose = opts?.emitErrorOnClose ?? false;
+  }
+
+  override close(): void {
+    if (this.emitErrorOnClose) {
+      this.onerror?.({
+        type: "error",
+        error: new TypeError("socket closed"),
+      });
+    }
+  }
+
+  emitClose(): void {
+    this.onclose?.({});
+  }
+}
+
 describe("LiveExchangeGateway", () => {
   let client: ReturnType<typeof createMockClient>;
   let gw: LiveExchangeGateway;
@@ -1034,6 +1056,68 @@ describe("LiveMarketDataGateway", () => {
     ]);
 
     stream.close();
+  });
+
+  it("createMarketPricingStream suppresses intentional close errors during token-set reconnect", () => {
+    const sockets: DeferredCloseMarketSocket[] = [];
+    gw = new LiveMarketDataGateway({
+      client,
+      createWebSocket: () => {
+        const socket = new DeferredCloseMarketSocket({ emitErrorOnClose: true });
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    const onError = vi.fn();
+    const stream = gw.createMarketPricingStream({
+      onUpdates: vi.fn(),
+      onError,
+    });
+
+    stream.setTokenIds(["tok-a"]);
+    sockets[0]!.emitOpen();
+    stream.setTokenIds(["tok-b"]);
+
+    expect(sockets).toHaveLength(2);
+    expect(onError).not.toHaveBeenCalled();
+
+    stream.close();
+  });
+
+  it("createMarketPricingStream ignores stale onclose from intentionally closed sockets", () => {
+    vi.useFakeTimers();
+    try {
+      const sockets: DeferredCloseMarketSocket[] = [];
+      gw = new LiveMarketDataGateway({
+        client,
+        createWebSocket: () => {
+          const socket = new DeferredCloseMarketSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      });
+
+      const stream = gw.createMarketPricingStream({
+        onUpdates: vi.fn(),
+        onError: vi.fn(),
+      });
+
+      stream.setTokenIds(["tok-a"]);
+      sockets[0]!.emitOpen();
+
+      stream.setTokenIds(["tok-b"]);
+      sockets[1]!.emitOpen();
+
+      sockets[0]!.emitClose();
+      vi.advanceTimersByTime(1_100);
+
+      expect(sockets).toHaveLength(2);
+
+      stream.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

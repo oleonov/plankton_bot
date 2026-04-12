@@ -229,4 +229,26 @@ describe("Overview Balance Card", () => {
     expect(within(row!).getByText("1h ago")).toBeInTheDocument();
     expect(within(row!).queryByText("1m ago")).not.toBeInTheDocument();
   });
+
+  it("shows order and position throughput in Last Events", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          ordersPlacedLastMin: 7,
+          positionsOpenedLastMin: 3,
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const ordersRow = (await screen.findByText("Orders in last min")).closest("tr");
+    const positionsRow = screen.getByText("Positions in last min").closest("tr");
+
+    expect(ordersRow).not.toBeNull();
+    expect(positionsRow).not.toBeNull();
+    expect(within(ordersRow!).getByText("7")).toBeInTheDocument();
+    expect(within(positionsRow!).getByText("3")).toBeInTheDocument();
+  });
 });

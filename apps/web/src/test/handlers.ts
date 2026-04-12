@@ -69,6 +69,8 @@ export const mockStatus = {
   activeFamilyCount: 12,
   openOrderCount: 2,
   openPositionCount: 10,
+  ordersPlacedLastMin: 0,
+  positionsOpenedLastMin: 0,
   totalOpenValueUsdc: 32.06,
   totalTailCostUsdc: 32.06,
   initialBalanceUsdc: 100,

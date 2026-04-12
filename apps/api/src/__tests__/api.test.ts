@@ -218,6 +218,8 @@ describe("GET /status", () => {
     expect(body.ok).toBe(true);
     expect(typeof body.data.runtimeMode).toBe("string");
     expect(typeof body.data.uptimeSeconds).toBe("number");
+    expect(typeof body.data.ordersPlacedLastMin).toBe("number");
+    expect(typeof body.data.positionsOpenedLastMin).toBe("number");
     expect(typeof body.data.paused).toBe("boolean");
     expect(typeof body.data.activeFamilyCount).toBe("number");
     expect(typeof body.data.openOrderCount).toBe("number");
@@ -229,6 +231,38 @@ describe("GET /status", () => {
     expect(body.data).toHaveProperty("marketDataLastUpdateAt");
     expect(body.data.marketDataSource).toBe("simulation");
     expect(body.data.executionMode).toBe("simulation");
+  });
+
+  it("status includes order and position throughput for the last minute", async () => {
+    const now = new Date().toISOString();
+    const older = new Date(Date.now() - 120_000).toISOString();
+
+    conn.db.exec(`
+      INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc,
+        status, exchange_order_id, bot_run_id, created_at, updated_at)
+      VALUES
+        ('ord-last-min', 'plk_last_min', 'tok-1', 'fam-1', 'buy', 'GTC', 0.4, 10, 4, 'filled', 'ex-last-min', 'run-1',
+          '${now}', '${now}'),
+        ('ord-old', 'plk_old', 'tok-1', 'fam-1', 'buy', 'GTC', 0.4, 10, 4, 'filled', 'ex-old', 'run-1',
+          '${older}', '${older}');
+
+      INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+        current_value_usdc, realized_pnl, status, opened_at, updated_at)
+      VALUES
+        ('pos-last-min', 'tok-3', 'fam-1', 'buy', 10, 0.4, 4, 4, 0, 'open', '${now}', '${now}'),
+        ('pos-old', 'tok-4', 'fam-1', 'buy', 10, 0.4, 4, 4, 0, 'open', '${older}', '${older}');
+    `);
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
+    const data = json(res).data;
+
+    expect(data.ordersPlacedLastMin).toBe(1);
+    expect(data.positionsOpenedLastMin).toBe(1);
+
+    conn.db.exec(`
+      DELETE FROM orders WHERE order_id IN ('ord-last-min', 'ord-old');
+      DELETE FROM positions WHERE position_id IN ('pos-last-min', 'pos-old');
+    `);
   });
 
   it("runtimeMode comes from bot_runs, not family_runtime_state", async () => {

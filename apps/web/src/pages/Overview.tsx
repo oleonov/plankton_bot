@@ -447,6 +447,14 @@ export function Overview() {
                 </td>
               </tr>
               <tr>
+                <td style={{ color: "var(--text-muted)" }}>Orders in last min</td>
+                <td style={{ textAlign: "right" }}>{status.ordersPlacedLastMin}</td>
+              </tr>
+              <tr>
+                <td style={{ color: "var(--text-muted)" }}>Positions in last min</td>
+                <td style={{ textAlign: "right" }}>{status.positionsOpenedLastMin}</td>
+              </tr>
+              <tr>
                 <td style={{ color: "var(--text-muted)" }}>Last reconciliation</td>
                 <td style={{ textAlign: "right" }}>{formatAgo(status.lastReconciliationAt)}</td>
               </tr>

@@ -33,6 +33,8 @@ export interface StatusData {
   activeFamilyCount: number;
   openOrderCount: number;
   openPositionCount: number;
+  ordersPlacedLastMin: number;
+  positionsOpenedLastMin: number;
   totalOpenValueUsdc: number;
   totalTailCostUsdc: number;
   initialBalanceUsdc: number | null;

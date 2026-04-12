@@ -360,6 +360,7 @@ function defaultWebSocketFactory(url: string): MarketDataWebSocketLike {
 
 class LiveMarketPricingStream implements MarketPricingStream {
   private readonly pricingByToken = new Map<string, MarketPricingSnapshot>();
+  private readonly intentionallyClosedSockets = new WeakSet<MarketDataWebSocketLike>();
   private tokenIds: string[] = [];
   private socket: MarketDataWebSocketLike | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -392,7 +393,7 @@ class LiveMarketPricingStream implements MarketPricingStream {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.closeSocket();
+    this.closeSocket({ intentional: true });
     this.pricingByToken.clear();
   }
 
@@ -402,7 +403,7 @@ class LiveMarketPricingStream implements MarketPricingStream {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.closeSocket();
+    this.closeSocket({ intentional: true });
     try {
       const socket = this.deps.createWebSocket(CLOB_MARKET_WS_URL);
       this.socket = socket;
@@ -419,24 +420,49 @@ class LiveMarketPricingStream implements MarketPricingStream {
         void this.handleMessage(event.data);
       };
       socket.onerror = (event) => {
+        if (this.shouldIgnoreSocketError(socket)) return;
         void this.deps.handlers.onError?.(event);
       };
       socket.onclose = () => {
-        this.socket = null;
-        if (this.closed || this.tokenIds.length === 0) return;
-        this.reconnectTimer = setTimeout(() => {
-          this.reconnectTimer = null;
-          this.reconnect();
-        }, WS_RECONNECT_DELAY_MS);
+        const ignoreEvent = this.shouldIgnoreSocketClose(socket);
+        if (this.socket === socket) {
+          this.socket = null;
+        }
+        if (ignoreEvent || this.closed || this.tokenIds.length === 0) return;
+        this.scheduleReconnect();
       };
     } catch (error) {
       void this.deps.handlers.onError?.(error);
     }
   }
 
-  private closeSocket(): void {
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnect();
+    }, WS_RECONNECT_DELAY_MS);
+  }
+
+  private shouldIgnoreSocketError(socket: MarketDataWebSocketLike): boolean {
+    if (this.intentionallyClosedSockets.has(socket)) return true;
+    return this.socket !== socket && this.socket != null;
+  }
+
+  private shouldIgnoreSocketClose(socket: MarketDataWebSocketLike): boolean {
+    if (this.intentionallyClosedSockets.has(socket)) {
+      this.intentionallyClosedSockets.delete(socket);
+      return true;
+    }
+    return this.socket !== socket && this.socket != null;
+  }
+
+  private closeSocket(opts?: { intentional?: boolean }): void {
     const socket = this.socket;
     this.socket = null;
+    if (socket && opts?.intentional) {
+      this.intentionallyClosedSockets.add(socket);
+    }
     socket?.close();
   }
 

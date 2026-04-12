@@ -338,6 +338,8 @@ export function buildStatusSnapshot(
   envMode?: string,
   defaultInitialBalanceUsdc?: number | null,
 ): Record<string, unknown> {
+  const oneMinuteAgoIso = new Date(Date.now() - 60_000).toISOString();
+
   const openOrders = db
     .prepare(
       "SELECT COUNT(*) as cnt FROM orders WHERE status IN ('pending','open','partially-filled')",
@@ -347,6 +349,14 @@ export function buildStatusSnapshot(
   const openPositions = db
     .prepare("SELECT COUNT(*) as cnt FROM positions WHERE status = 'open'")
     .get() as { cnt: number };
+
+  const recentOrderCount = db
+    .prepare("SELECT COUNT(*) as cnt FROM orders WHERE created_at >= ?")
+    .get(oneMinuteAgoIso) as { cnt: number };
+
+  const recentPositionCount = db
+    .prepare("SELECT COUNT(*) as cnt FROM positions WHERE opened_at >= ?")
+    .get(oneMinuteAgoIso) as { cnt: number };
 
   const activeFamilies = db
     .prepare("SELECT COUNT(*) as cnt FROM family_runtime_state WHERE runtime_mode = 'active'")
@@ -588,6 +598,8 @@ export function buildStatusSnapshot(
     activeFamilyCount: activeFamilies.cnt,
     openOrderCount: openOrders.cnt,
     openPositionCount: openPositions.cnt,
+    ordersPlacedLastMin: recentOrderCount.cnt,
+    positionsOpenedLastMin: recentPositionCount.cnt,
     totalOpenValueUsdc: totalExposure.total,
     totalTailCostUsdc: totalExposure.tail,
     initialBalanceUsdc,
