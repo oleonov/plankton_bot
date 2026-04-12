@@ -230,7 +230,10 @@ describe("HotFamilyExecutionModule", () => {
     });
 
     await mod.start();
-    await bus.publish("NormalizedMarketUpdated", { markets: [makeMarket()], timestamp: Date.now() });
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket()],
+      timestamp: Date.now(),
+    });
     await cache.prime([String(TOKEN_ID)]);
     await vi.advanceTimersByTimeAsync(1_100);
     await bus.drain();
@@ -493,7 +496,10 @@ describe("HotQuoteBusModule", () => {
     });
 
     await mod.start();
-    await bus.publish("NormalizedMarketUpdated", { markets: [makeMarket()], timestamp: Date.now() });
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket()],
+      timestamp: Date.now(),
+    });
     await vi.advanceTimersByTimeAsync(600);
     await bus.drain();
     await mod.stop();
@@ -570,7 +576,10 @@ describe("FastExitCleanupModule", () => {
     });
 
     await mod.start();
-    await bus.publish("NormalizedMarketUpdated", { markets: [makeMarket()], timestamp: Date.now() });
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket()],
+      timestamp: Date.now(),
+    });
     await vi.advanceTimersByTimeAsync(600);
     await bus.drain();
     await mod.stop();
@@ -671,22 +680,23 @@ describe("HotMarketDataModule", () => {
     vi.useFakeTimers();
     const bus = new InProcessEventBus();
     const gateway = {
-      getMarketPricing: vi.fn(async () =>
-        new Map([
-          [
-            String(TOKEN_ID),
-            {
-              bestBid: 0.08,
-              bestAsk: 0.09,
-              lastTradePrice: 0.085,
-              lastTradeAt: new Date(Date.now()).toISOString(),
-              volume24h: 200_000,
-              liquidity: 50_000,
-              minOrderSize: 5,
-              bookSource: "clob",
-            },
-          ],
-        ]),
+      getMarketPricing: vi.fn(
+        async () =>
+          new Map([
+            [
+              String(TOKEN_ID),
+              {
+                bestBid: 0.08,
+                bestAsk: 0.09,
+                lastTradePrice: 0.085,
+                lastTradeAt: new Date(Date.now()).toISOString(),
+                volume24h: 200_000,
+                liquidity: 50_000,
+                minOrderSize: 5,
+                bookSource: "clob",
+              },
+            ],
+          ]),
       ),
     };
     const orderRepo = {

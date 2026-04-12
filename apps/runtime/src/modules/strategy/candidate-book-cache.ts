@@ -92,7 +92,9 @@ export class CandidateBookCache {
   }
 
   upsertBooks(
-    books: ReadonlyMap<string, OrderBookSnapshot> | ReadonlyArray<readonly [string, OrderBookSnapshot]>,
+    books:
+      | ReadonlyMap<string, OrderBookSnapshot>
+      | ReadonlyArray<readonly [string, OrderBookSnapshot]>,
     sourcePolledAtMs: number = Date.now(),
   ): Map<string, CandidateBookCacheEntry> {
     const nowMs = Date.now();

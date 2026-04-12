@@ -112,7 +112,9 @@ describe("family-config-import", () => {
       expect(latest?.sourcePath).toBe("/tmp/family_rules.yaml");
       expect(latest?.importedBy).toBe("test");
       const row = conn.db
-        .prepare("SELECT fast_lane_enabled, dust_lane_enabled FROM family_rules WHERE family_id = ?")
+        .prepare(
+          "SELECT fast_lane_enabled, dust_lane_enabled FROM family_rules WHERE family_id = ?",
+        )
         .get("test-fast:generic:daily") as {
         fast_lane_enabled: number | null;
         dust_lane_enabled: number | null;

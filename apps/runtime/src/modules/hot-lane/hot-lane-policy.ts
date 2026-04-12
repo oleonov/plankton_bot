@@ -1,5 +1,15 @@
-import type { FamilyRuleBundle, NormalizedMarket, Order, OrderBookSnapshot, Signal } from "@plankton/domain";
-import { hasFreshTradeActivity, resolveMakerOnlyPrice, resolveMarketabilityPolicy } from "../strategy/marketability.js";
+import type {
+  FamilyRuleBundle,
+  NormalizedMarket,
+  Order,
+  OrderBookSnapshot,
+  Signal,
+} from "@plankton/domain";
+import {
+  hasFreshTradeActivity,
+  resolveMakerOnlyPrice,
+  resolveMarketabilityPolicy,
+} from "../strategy/marketability.js";
 import { isDustLaneEnabled, isHotQuoteFamily } from "../../family-throughput.js";
 
 const EPSILON = 1e-9;
@@ -82,7 +92,10 @@ export function isDustOrder(order: Pick<Order, "signalReason">): boolean {
 
 export function isQueueJumpEligible(opts: {
   readonly signal: Pick<Signal, "side" | "reason" | "suggestedSizeUsdc">;
-  readonly market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice" | "tickSize">;
+  readonly market: Pick<
+    NormalizedMarket,
+    "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice" | "tickSize"
+  >;
   readonly bundle: FamilyRuleBundle;
   readonly nowMs: number;
   readonly maxSlippageCents?: number;
@@ -93,7 +106,8 @@ export function isQueueJumpEligible(opts: {
   if (!shouldUseDustLane(bundle)) return false;
   if (bundle.identity.strategyProfile !== "event-driven") return false;
   if (bundle.identity.primaryCategory !== "geopolitics") return false;
-  if (market.bestAsk == null || market.bestBid == null || market.lastTradePrice == null) return false;
+  if (market.bestAsk == null || market.bestBid == null || market.lastTradePrice == null)
+    return false;
   if (!hasFreshTradeActivity(market.lastTradeAt, nowMs)) return false;
 
   const maxSlippageCents = opts.maxSlippageCents ?? DEFAULT_QUEUE_JUMP_SLIPPAGE_CAP;
@@ -102,7 +116,10 @@ export function isQueueJumpEligible(opts: {
 
 export function resolveQueueJumpExecutionTerms(opts: {
   readonly signal: Pick<Signal, "side" | "reason" | "suggestedSizeUsdc">;
-  readonly market: Pick<NormalizedMarket, "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice" | "tickSize">;
+  readonly market: Pick<
+    NormalizedMarket,
+    "bestBid" | "bestAsk" | "lastTradeAt" | "lastTradePrice" | "tickSize"
+  >;
   readonly bundle: FamilyRuleBundle;
   readonly nowMs: number;
   readonly maxSlippageCents?: number;
@@ -155,7 +172,10 @@ export function planHotLaneOrderAction(opts: {
       market: opts.market,
       policy: resolveMarketabilityPolicy(opts.bundle),
     });
-    if (desiredPrice != null && Math.abs(desiredPrice - opts.order.price) >= opts.market.tickSize - EPSILON) {
+    if (
+      desiredPrice != null &&
+      Math.abs(desiredPrice - opts.order.price) >= opts.market.tickSize - EPSILON
+    ) {
       return { type: "cancel", reason: "entry-reprice-cancel", desiredPrice };
     }
     const queueAwarePrice = resolveQueueAwareRepricePrice({
@@ -167,7 +187,10 @@ export function planHotLaneOrderAction(opts: {
       baseline: opts.queueBaseline ?? null,
       policy,
     });
-    if (queueAwarePrice != null && Math.abs(queueAwarePrice - opts.order.price) >= opts.market.tickSize - EPSILON) {
+    if (
+      queueAwarePrice != null &&
+      Math.abs(queueAwarePrice - opts.order.price) >= opts.market.tickSize - EPSILON
+    ) {
       return { type: "cancel", reason: "entry-reprice-cancel", desiredPrice: queueAwarePrice };
     }
   }
@@ -191,7 +214,10 @@ export function planHotLaneOrderAction(opts: {
       market: opts.market,
       policy: resolveMarketabilityPolicy(opts.bundle),
     });
-    if (desiredPrice != null && Math.abs(desiredPrice - opts.order.price) >= opts.market.tickSize - EPSILON) {
+    if (
+      desiredPrice != null &&
+      Math.abs(desiredPrice - opts.order.price) >= opts.market.tickSize - EPSILON
+    ) {
       return { type: "cancel", reason: "exit-reprice-cancel", desiredPrice };
     }
     const queueAwarePrice = resolveQueueAwareRepricePrice({
@@ -203,7 +229,10 @@ export function planHotLaneOrderAction(opts: {
       baseline: opts.queueBaseline ?? null,
       policy,
     });
-    if (queueAwarePrice != null && Math.abs(queueAwarePrice - opts.order.price) >= opts.market.tickSize - EPSILON) {
+    if (
+      queueAwarePrice != null &&
+      Math.abs(queueAwarePrice - opts.order.price) >= opts.market.tickSize - EPSILON
+    ) {
       return { type: "cancel", reason: "exit-reprice-cancel", desiredPrice: queueAwarePrice };
     }
   }
@@ -220,8 +249,8 @@ export function captureQueueDepthBaseline(
   const levels = side === "buy" ? book.bids : book.asks;
   const referencePrice =
     orderPrice != null
-      ? levels.find((level) => Math.abs(level.price - orderPrice) < EPSILON)?.price ?? null
-      : levels[0]?.price ?? null;
+      ? (levels.find((level) => Math.abs(level.price - orderPrice) < EPSILON)?.price ?? null)
+      : (levels[0]?.price ?? null);
   if (referencePrice == null) return null;
   const level = levels.find((entry) => Math.abs(entry.price - referencePrice) < EPSILON) ?? null;
   if (!level) return null;
@@ -250,7 +279,8 @@ function resolveQueueAwareRepricePrice(opts: {
   if (currentVisibleAhead == null) return null;
   const queueSizeThreshold = Math.max(
     baselineSize * policy.queuePressureSizeMultiple,
-    baselineSize + Math.max(policy.queuePressureAbsoluteShares, currentSize * policy.queuePressureSizeMultiple),
+    baselineSize +
+      Math.max(policy.queuePressureAbsoluteShares, currentSize * policy.queuePressureSizeMultiple),
   );
   if (currentVisibleAhead + EPSILON < queueSizeThreshold) return null;
 

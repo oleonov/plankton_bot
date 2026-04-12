@@ -11,7 +11,12 @@ import type {
 import { createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { applyOrderBookToMarket, CandidateBookCache } from "../strategy/candidate-book-cache.js";
-import { shouldUseDustLane, shouldUseHotQuoteLane, type HotLanePolicy, DEFAULT_HOT_LANE_POLICY } from "./hot-lane-policy.js";
+import {
+  shouldUseDustLane,
+  shouldUseHotQuoteLane,
+  type HotLanePolicy,
+  DEFAULT_HOT_LANE_POLICY,
+} from "./hot-lane-policy.js";
 
 export interface FastExitCleanupModuleDeps {
   readonly bus: EventBus;
@@ -42,14 +47,22 @@ export class FastExitCleanupModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.unsubs.push(
-      this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) => this.handleMarketUpdate(payload)),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) =>
+        this.handleMarketUpdate(payload),
+      ),
       this.deps.bus.subscribe("HotQuoteUpdated", () => this.tick()),
       this.deps.bus.subscribe("FillReceived", () => this.tick()),
       this.deps.bus.subscribe("OrderPlaced", (payload) => this.handleOrderPlaced(payload)),
     );
-    this.timer = setInterval(() => {
-      void this.tick().catch((err) => this.log.error({ err }, "fast exit cleanup tick error"));
-    }, Math.max(500, Math.min(this.policy.hotQuoteRefreshIntervalMs, DEFAULT_EXIT_SIGNAL_INTERVAL_MS)));
+    this.timer = setInterval(
+      () => {
+        void this.tick().catch((err) => this.log.error({ err }, "fast exit cleanup tick error"));
+      },
+      Math.max(
+        500,
+        Math.min(this.policy.hotQuoteRefreshIntervalMs, DEFAULT_EXIT_SIGNAL_INTERVAL_MS),
+      ),
+    );
     this.started = true;
     this.log.info("fast exit cleanup module started");
   }
@@ -91,8 +104,8 @@ export class FastExitCleanupModule implements RuntimeModule {
     try {
       const nowMs = Date.now();
       const openSellTokens = new Set(
-        this.deps
-          .orderRepo.findOpen()
+        this.deps.orderRepo
+          .findOpen()
           .filter((order) => order.side === "sell")
           .map((order) => String(order.tokenId)),
       );
@@ -101,7 +114,10 @@ export class FastExitCleanupModule implements RuntimeModule {
         if (position.entryStyle !== "spray") continue;
         const tokenKey = String(position.tokenId);
         if (openSellTokens.has(tokenKey)) continue;
-        if ((this.lastExitSignalAtByToken.get(tokenKey) ?? 0) + DEFAULT_EXIT_SIGNAL_INTERVAL_MS > nowMs) {
+        if (
+          (this.lastExitSignalAtByToken.get(tokenKey) ?? 0) + DEFAULT_EXIT_SIGNAL_INTERVAL_MS >
+          nowMs
+        ) {
           continue;
         }
 

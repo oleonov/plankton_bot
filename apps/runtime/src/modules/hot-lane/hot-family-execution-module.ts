@@ -8,10 +8,7 @@ import type {
 } from "@plankton/domain";
 import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import {
-  applyOrderBookToMarket,
-  CandidateBookCache,
-} from "../strategy/candidate-book-cache.js";
+import { applyOrderBookToMarket, CandidateBookCache } from "../strategy/candidate-book-cache.js";
 import {
   captureQueueDepthBaseline,
   DEFAULT_HOT_LANE_POLICY,
@@ -41,7 +38,10 @@ export class HotFamilyExecutionModule implements RuntimeModule {
   private readonly suppressedUntilByToken = new Map<string, number>();
   private readonly lastRepriceCancelAtByToken = new Map<string, number>();
   private readonly lastMaintenanceAtByOrderId = new Map<string, number>();
-  private readonly queueBaselineByOrderId = new Map<string, ReturnType<typeof captureQueueDepthBaseline>>();
+  private readonly queueBaselineByOrderId = new Map<
+    string,
+    ReturnType<typeof captureQueueDepthBaseline>
+  >();
   private unsubs: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private started = false;
@@ -54,7 +54,9 @@ export class HotFamilyExecutionModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.unsubs.push(
-      this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) => this.handleMarketUpdate(payload)),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) =>
+        this.handleMarketUpdate(payload),
+      ),
       this.deps.bus.subscribe("FillReceived", (payload) => this.handleFill(payload)),
       this.deps.bus.subscribe("OrderCancelled", (payload) => this.handleCancel(payload)),
       this.deps.bus.subscribe("OrderPlaced", (payload) => this.handlePlaced(payload)),
@@ -120,12 +122,18 @@ export class HotFamilyExecutionModule implements RuntimeModule {
   }
 
   private async handlePlaced(payload: RuntimeEventMap["OrderPlaced"]): Promise<void> {
-    if (!ENTRY_REASONS.has(payload.signalReason ?? "") && payload.signalReason !== "repricing-exit") {
+    if (
+      !ENTRY_REASONS.has(payload.signalReason ?? "") &&
+      payload.signalReason !== "repricing-exit"
+    ) {
       return;
     }
     const orderIdKey = String(payload.orderId);
     this.lastMaintenanceAtByOrderId.set(orderIdKey, payload.timestamp);
-    const cachedBook = this.deps.candidateBookCache.getFreshEntry(String(payload.tokenId), payload.timestamp);
+    const cachedBook = this.deps.candidateBookCache.getFreshEntry(
+      String(payload.tokenId),
+      payload.timestamp,
+    );
     if (cachedBook) {
       this.queueBaselineByOrderId.set(
         orderIdKey,
@@ -160,16 +168,10 @@ export class HotFamilyExecutionModule implements RuntimeModule {
 
         const bundle = this.deps.rulesProvider.getRule(order.familyId);
         if (!bundle) continue;
-        if (
-          order.signalReason === "spray-entry" &&
-          !shouldUseDustLane(bundle)
-        ) {
+        if (order.signalReason === "spray-entry" && !shouldUseDustLane(bundle)) {
           continue;
         }
-        if (
-          order.signalReason === "repricing-exit" &&
-          !shouldUseHotQuoteLane(bundle)
-        ) {
+        if (order.signalReason === "repricing-exit" && !shouldUseHotQuoteLane(bundle)) {
           continue;
         }
 
@@ -207,7 +209,10 @@ export class HotFamilyExecutionModule implements RuntimeModule {
           this.lastRepriceCancelAtByToken.set(tokenKey, nowMs);
         }
         if (action.reason === "entry-reprice-cancel" || action.reason === "entry-ttl-cancel") {
-          this.quickCancelCountByToken.set(tokenKey, (this.quickCancelCountByToken.get(tokenKey) ?? 0) + 1);
+          this.quickCancelCountByToken.set(
+            tokenKey,
+            (this.quickCancelCountByToken.get(tokenKey) ?? 0) + 1,
+          );
         } else if (action.reason === "entry-suppress-cancel") {
           this.quickCancelCountByToken.set(tokenKey, 0);
           this.suppressedUntilByToken.set(tokenKey, nowMs + 60_000);

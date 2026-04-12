@@ -1,4 +1,9 @@
-import type { FamilyRuleBundle, NormalizedMarket, Order, OrderBookSnapshot } from "@plankton/domain";
+import type {
+  FamilyRuleBundle,
+  NormalizedMarket,
+  Order,
+  OrderBookSnapshot,
+} from "@plankton/domain";
 import {
   captureQueueDepthBaseline,
   DEFAULT_HOT_LANE_POLICY,

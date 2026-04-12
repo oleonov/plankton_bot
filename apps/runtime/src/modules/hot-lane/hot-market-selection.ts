@@ -18,7 +18,9 @@ export interface HotMarketSelectionOptions {
 export function selectHotMarkets(opts: HotMarketSelectionOptions): NormalizedMarket[] {
   const hotOpenTokens = new Set(
     (opts.openOrders ?? [])
-      .filter((order) => order.signalReason === "spray-entry" || order.signalReason === "repricing-exit")
+      .filter(
+        (order) => order.signalReason === "spray-entry" || order.signalReason === "repricing-exit",
+      )
       .map((order) => String(order.tokenId)),
   );
 

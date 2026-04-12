@@ -350,7 +350,8 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 }
 
 function defaultWebSocketFactory(url: string): MarketDataWebSocketLike {
-  const ctor = (globalThis as { WebSocket?: new (url: string) => MarketDataWebSocketLike }).WebSocket;
+  const ctor = (globalThis as { WebSocket?: new (url: string) => MarketDataWebSocketLike })
+    .WebSocket;
   if (!ctor) {
     throw new Error("WebSocket is not available in the current runtime");
   }

@@ -412,9 +412,7 @@ describe("resolveFamilyEntryPolicy", () => {
     const evidence = makeEvidence({ promotionState: "probe-only", evidenceScore: 10 });
     expect(
       resolveFamilyEntryPolicy(identity, evidence, { dustLaneEnabled: true }, "conviction-only"),
-    ).toBe(
-      "probe-first" as EntryPolicy,
-    );
+    ).toBe("probe-first" as EntryPolicy);
   });
 });
 

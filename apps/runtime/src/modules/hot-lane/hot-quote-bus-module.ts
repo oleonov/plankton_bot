@@ -41,12 +41,18 @@ export class HotQuoteBusModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.unsubs.push(
-      this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) => this.handleMarketUpdate(payload)),
-      this.deps.bus.subscribe("OrderPlaced", (payload) => this.handleOrderLifecycle(String(payload.tokenId))),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) =>
+        this.handleMarketUpdate(payload),
+      ),
+      this.deps.bus.subscribe("OrderPlaced", (payload) =>
+        this.handleOrderLifecycle(String(payload.tokenId)),
+      ),
       this.deps.bus.subscribe("OrderCancelled", (payload) =>
         this.handleOrderLifecycleByFamily(String(payload.familyId)),
       ),
-      this.deps.bus.subscribe("FillReceived", (payload) => this.handleOrderLifecycle(String(payload.tokenId))),
+      this.deps.bus.subscribe("FillReceived", (payload) =>
+        this.handleOrderLifecycle(String(payload.tokenId)),
+      ),
     );
     this.timer = setInterval(() => {
       void this.tick().catch((err) => this.log.error({ err }, "hot quote bus tick error"));
@@ -138,12 +144,15 @@ export class HotQuoteBusModule implements RuntimeModule {
 
   private scheduleFlush(): void {
     if (this.flushTimer) return;
-    this.flushTimer = setTimeout(() => {
-      this.flushTimer = null;
-      void this.flushPendingRefreshes().catch((err) =>
-        this.log.error({ err }, "hot quote bus event-driven refresh error"),
-      );
-    }, Math.min(DEFAULT_EVENT_DRIVEN_FLUSH_MS, this.policy.hotQuoteRefreshIntervalMs));
+    this.flushTimer = setTimeout(
+      () => {
+        this.flushTimer = null;
+        void this.flushPendingRefreshes().catch((err) =>
+          this.log.error({ err }, "hot quote bus event-driven refresh error"),
+        );
+      },
+      Math.min(DEFAULT_EVENT_DRIVEN_FLUSH_MS, this.policy.hotQuoteRefreshIntervalMs),
+    );
   }
 
   private async flushPendingRefreshes(nowMs = Date.now()): Promise<void> {

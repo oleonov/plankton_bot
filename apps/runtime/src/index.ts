@@ -865,27 +865,32 @@ async function main(): Promise<void> {
     ["safety-evaluator", safetyEvaluator],
     ["profile-publisher", profilePublisher],
     ["reconciliation", reconciliationModule],
-      ["strategy", strategyModule],
-      ...(hotMarketDataModule
-        ? [["hot-market-data", hotMarketDataModule] as [string, import("@plankton/domain").RuntimeModule]]
-        : []),
-      ...(hotQuoteBusModule
-        ? [["hot-quote-bus", hotQuoteBusModule] as [string, import("@plankton/domain").RuntimeModule]]
-        : []),
+    ["strategy", strategyModule],
+    ...(hotMarketDataModule
+      ? [
+          ["hot-market-data", hotMarketDataModule] as [
+            string,
+            import("@plankton/domain").RuntimeModule,
+          ],
+        ]
+      : []),
+    ...(hotQuoteBusModule
+      ? [["hot-quote-bus", hotQuoteBusModule] as [string, import("@plankton/domain").RuntimeModule]]
+      : []),
     ...(hotFamilyExecutionModule
       ? [
-          [
-            "hot-family-execution",
-            hotFamilyExecutionModule,
-          ] as [string, import("@plankton/domain").RuntimeModule],
+          ["hot-family-execution", hotFamilyExecutionModule] as [
+            string,
+            import("@plankton/domain").RuntimeModule,
+          ],
         ]
       : []),
     ...(fastExitCleanupModule
       ? [
-          [
-            "fast-exit-cleanup",
-            fastExitCleanupModule,
-          ] as [string, import("@plankton/domain").RuntimeModule],
+          ["fast-exit-cleanup", fastExitCleanupModule] as [
+            string,
+            import("@plankton/domain").RuntimeModule,
+          ],
         ]
       : []),
     ["resolution", resolutionModule],

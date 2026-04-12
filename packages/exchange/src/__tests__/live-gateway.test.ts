@@ -951,7 +951,13 @@ describe("LiveMarketDataGateway", () => {
       createWebSocket: () => socket,
     });
 
-    const updates: Array<{ tokenId: string; bestBid: number | null; bestAsk: number | null; lastTradePrice: number | null; hasBook: boolean }> = [];
+    const updates: Array<{
+      tokenId: string;
+      bestBid: number | null;
+      bestAsk: number | null;
+      lastTradePrice: number | null;
+      hasBook: boolean;
+    }> = [];
     const stream = gw.createMarketPricingStream!({
       onUpdates: async (next) => {
         updates.push(

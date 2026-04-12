@@ -36,10 +36,12 @@ interface HotMarketPricingStream {
 }
 
 interface StreamCapableMarketDataGateway extends MarketDataGateway {
-  createMarketPricingStream?: (handlers: Readonly<{
-    onUpdates: (updates: readonly HotMarketPricingStreamUpdate[]) => Promise<void> | void;
-    onError?: (error: unknown) => Promise<void> | void;
-  }>) => HotMarketPricingStream;
+  createMarketPricingStream?: (
+    handlers: Readonly<{
+      onUpdates: (updates: readonly HotMarketPricingStreamUpdate[]) => Promise<void> | void;
+      onError?: (error: unknown) => Promise<void> | void;
+    }>,
+  ) => HotMarketPricingStream;
 }
 
 const HOT_MARKET_DATA_MIN_INTERVAL_MS = 500;
@@ -62,7 +64,9 @@ export class HotMarketDataModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.unsubs.push(
-      this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) => this.handleMarketUpdate(payload)),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) =>
+        this.handleMarketUpdate(payload),
+      ),
     );
     const streamGateway = this.deps.gateway as StreamCapableMarketDataGateway;
     if (streamGateway.createMarketPricingStream) {
@@ -73,7 +77,10 @@ export class HotMarketDataModule implements RuntimeModule {
         },
       });
     }
-    const intervalMs = Math.max(HOT_MARKET_DATA_MIN_INTERVAL_MS, this.policy.hotQuoteRefreshIntervalMs);
+    const intervalMs = Math.max(
+      HOT_MARKET_DATA_MIN_INTERVAL_MS,
+      this.policy.hotQuoteRefreshIntervalMs,
+    );
     this.timer = setInterval(() => {
       void this.tick().catch((err) => this.log.error({ err }, "hot market-data tick error"));
     }, intervalMs);
@@ -136,11 +143,15 @@ export class HotMarketDataModule implements RuntimeModule {
       const hotTokenIds = hotMarkets.map((market) => String(market.tokenId));
       this.stream?.setTokenIds(hotTokenIds);
 
-      const staleCutoffMs = nowMs - Math.max(HOT_MARKET_DATA_MIN_INTERVAL_MS, this.policy.hotQuoteRefreshIntervalMs * 3);
+      const staleCutoffMs =
+        nowMs -
+        Math.max(HOT_MARKET_DATA_MIN_INTERVAL_MS, this.policy.hotQuoteRefreshIntervalMs * 3);
       const tokenIdsToPoll =
         this.stream == null
           ? hotTokenIds
-          : hotTokenIds.filter((tokenId) => (this.lastFastUpdateAtByToken.get(tokenId) ?? 0) < staleCutoffMs);
+          : hotTokenIds.filter(
+              (tokenId) => (this.lastFastUpdateAtByToken.get(tokenId) ?? 0) < staleCutoffMs,
+            );
       if (tokenIdsToPoll.length === 0) return;
 
       const pricingMap = await this.deps.gateway.getMarketPricing(tokenIdsToPoll);
@@ -166,7 +177,9 @@ export class HotMarketDataModule implements RuntimeModule {
     }
   }
 
-  private async handleStreamUpdates(updates: readonly HotMarketPricingStreamUpdate[]): Promise<void> {
+  private async handleStreamUpdates(
+    updates: readonly HotMarketPricingStreamUpdate[],
+  ): Promise<void> {
     if (updates.length === 0) return;
     const nowMs = Date.now();
     const changedMarkets: NormalizedMarket[] = [];

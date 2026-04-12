@@ -759,10 +759,7 @@ export function scan(
       }
 
       if (hasAnyConditionInventory && !isDustMeshEligible) continue;
-      if (
-        isDustMeshEligible &&
-        existingConditionEntryOrders >= resolveDustMeshCap(bundle)
-      ) {
+      if (isDustMeshEligible && existingConditionEntryOrders >= resolveDustMeshCap(bundle)) {
         continue;
       }
 

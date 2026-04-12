@@ -328,25 +328,35 @@ async function executeScenario(
       ["reconciliation", reconciliationModule],
       ["strategy", strategyModule],
       ...(hotMarketDataModule
-        ? [["hot-market-data", hotMarketDataModule] as [string, import("@plankton/domain").RuntimeModule]]
+        ? [
+            ["hot-market-data", hotMarketDataModule] as [
+              string,
+              import("@plankton/domain").RuntimeModule,
+            ],
+          ]
         : []),
       ...(hotQuoteBusModule
-        ? [["hot-quote-bus", hotQuoteBusModule] as [string, import("@plankton/domain").RuntimeModule]]
+        ? [
+            ["hot-quote-bus", hotQuoteBusModule] as [
+              string,
+              import("@plankton/domain").RuntimeModule,
+            ],
+          ]
         : []),
       ...(hotFamilyExecutionModule
         ? [
-            [
-              "hot-family-execution",
-              hotFamilyExecutionModule,
-            ] as [string, import("@plankton/domain").RuntimeModule],
+            ["hot-family-execution", hotFamilyExecutionModule] as [
+              string,
+              import("@plankton/domain").RuntimeModule,
+            ],
           ]
         : []),
       ...(fastExitCleanupModule
         ? [
-            [
-              "fast-exit-cleanup",
-              fastExitCleanupModule,
-            ] as [string, import("@plankton/domain").RuntimeModule],
+            ["fast-exit-cleanup", fastExitCleanupModule] as [
+              string,
+              import("@plankton/domain").RuntimeModule,
+            ],
           ]
         : []),
       ["risk-inventory", riskInventoryModule],
