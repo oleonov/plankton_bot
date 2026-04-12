@@ -305,7 +305,7 @@ describe("GET /metrics/portfolio-series", () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('live-lite', 'Live-Lite', datetime('now', '-7 days'))`,
+         VALUES ('live-lite', 'Live-Lite', '2026-03-30T00:00:00.000Z')`,
       )
       .run();
     conn.db
@@ -366,7 +366,7 @@ describe("GET /metrics/portfolio-series", () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('live-lite', 'Live-Lite', datetime('now', '-7 days'))`,
+         VALUES ('live-lite', 'Live-Lite', '2026-03-30T12:00:00.000Z')`,
       )
       .run();
     conn.db
@@ -508,7 +508,7 @@ describe("GET /metrics/portfolio-series", () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('live-lite', 'Live-Lite', datetime('now', '-3 days'))`,
+         VALUES ('live-lite', 'Live-Lite', '2026-04-04T02:00:00.000Z')`,
       )
       .run();
     conn.db
@@ -584,7 +584,7 @@ describe("GET /metrics/portfolio-series", () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('live-lite', 'Live-Lite', datetime('now', '-60 days'))`,
+         VALUES ('live-lite', 'Live-Lite', '2026-02-06T02:00:00.000Z')`,
       )
       .run();
     conn.db
@@ -656,7 +656,7 @@ describe("GET /metrics/portfolio-series", () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('live-lite', 'Live-Lite', datetime('now', '-3 days'))`,
+         VALUES ('live-lite', 'Live-Lite', '2026-04-03T12:00:00.000Z')`,
       )
       .run();
     conn.db
@@ -723,7 +723,7 @@ describe("GET /metrics/portfolio-series", () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('live-lite', 'Live-Lite', datetime('now', '-7 days'))`,
+         VALUES ('live-lite', 'Live-Lite', '2026-03-30T00:00:00.000Z')`,
       )
       .run();
     conn.db
@@ -818,7 +818,7 @@ describe("GET /metrics/portfolio-series", () => {
     conn.db
       .prepare(
         `INSERT OR REPLACE INTO profiles (profile_id, display_name, created_at)
-         VALUES ('simulation', 'Simulation', datetime('now', '-30 days'))`,
+         VALUES ('simulation', 'Simulation', '2026-03-01T00:00:00.000Z')`,
       )
       .run();
     conn.db
