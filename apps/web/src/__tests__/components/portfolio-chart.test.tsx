@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { screen, fireEvent, waitFor } from "@testing-library/react";
 import { delay, http, HttpResponse } from "msw";
 import { PortfolioChart } from "../../components/PortfolioChart.tsx";
@@ -64,6 +64,10 @@ describe("PortfolioChart", () => {
     storageMock.clear();
     storageMock.getItem.mockClear();
     storageMock.setItem.mockClear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("renders portfolio P/L number from API data", async () => {
@@ -190,6 +194,44 @@ describe("PortfolioChart", () => {
     await waitFor(() => {
       expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
       expect(screen.queryByTestId("hover-label")).not.toBeInTheDocument();
+    });
+  });
+
+  it("formats portfolio hover labels using the browser local time", async () => {
+    vi.spyOn(Date.prototype, "getMonth").mockReturnValue(3);
+    vi.spyOn(Date.prototype, "getDate").mockReturnValue(4);
+    vi.spyOn(Date.prototype, "getHours").mockReturnValue(7);
+    vi.spyOn(Date.prototype, "getMinutes").mockReturnValue(5);
+
+    server.use(
+      http.get("/api/v1/metrics/portfolio-series", () => ok(mockPortfolioSeries)),
+      http.get("/api/v1/metrics/pnl-series", () => ok(mockPnlSeries)),
+    );
+
+    renderWithProviders(<PortfolioChart />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pnl-value")).toHaveTextContent("+$5.42");
+    });
+
+    const svg = document.querySelector("svg")!;
+    svg.getBoundingClientRect = () =>
+      ({
+        left: 0,
+        top: 0,
+        right: 700,
+        bottom: 200,
+        width: 700,
+        height: 200,
+        x: 0,
+        y: 0,
+        toJSON: () => {},
+      }) as DOMRect;
+
+    fireEvent.mouseMove(svg, { clientX: 60, clientY: 50 });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("hover-label")).toHaveTextContent("04-04 07:05");
     });
   });
 

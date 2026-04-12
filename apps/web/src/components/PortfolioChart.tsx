@@ -46,11 +46,24 @@ interface ChartPoint {
   label: string;
 }
 
+function formatLocalDateTimeLabel(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso.slice(5, 16).replace("T", " ");
+  }
+
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}`;
+}
+
 function portfolioToChartPoints(series: PortfolioSeriesResponse | undefined): ChartPoint[] {
   const baseline = series?.baseline ?? 0;
   return (series?.items ?? []).map((d) => ({
     value: d.equityUsdc - baseline,
-    label: d.capturedAt.slice(5, 16).replace("T", " "),
+    label: formatLocalDateTimeLabel(d.capturedAt),
   }));
 }
 
