@@ -29,6 +29,11 @@ class FakeUserSocket {
   }
 }
 
+async function flushAsyncHandlers(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
 describe("LiveUserEventStream", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -110,7 +115,7 @@ describe("LiveUserEventStream", () => {
       timestamp: "1672290687",
     });
 
-    vi.runAllTicks();
+    await flushAsyncHandlers();
 
     expect(onTradeEvents).toHaveBeenCalledTimes(1);
     expect(onOrderEvents).toHaveBeenCalledTimes(1);
@@ -170,7 +175,7 @@ describe("LiveUserEventStream", () => {
 
     sockets[0]!.emitOpen();
     sockets[0]!.emitRaw("{not-json");
-    vi.runAllTicks();
+    await flushAsyncHandlers();
 
     expect(onGapDetected).toHaveBeenCalledWith(
       expect.objectContaining({ reason: "invalid-payload" }),
@@ -192,7 +197,7 @@ describe("LiveUserEventStream", () => {
       maker_address: "0xours",
       trader_side: "TAKER",
     });
-    vi.runAllTicks();
+    await flushAsyncHandlers();
 
     expect(onTradeEvents).toHaveBeenCalledTimes(1);
   });
