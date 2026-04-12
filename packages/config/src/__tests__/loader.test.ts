@@ -43,8 +43,7 @@ describe("loadFamilyRulesYaml", () => {
     const byId = new Map(result.families.map((family) => [family.identity.familyId, family]));
 
     expect(
-      byId.get("donald-trump-of-truth-social-posts:social-activity:ad-hoc")?.rules
-        .tailSuppression,
+      byId.get("donald-trump-of-truth-social-posts:social-activity:ad-hoc")?.rules.tailSuppression,
     ).toMatchObject({
       maxActiveMarkets: 3,
       maxDustPositions: 2,
