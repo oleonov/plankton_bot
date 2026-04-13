@@ -409,6 +409,7 @@ describe("POST /discovery/candidates/:id/accept", () => {
     expect(rules.high_price_threshold).toBe(0.35);
     expect(rules.require_proven_family_above_price).toBe(0.35);
     expect(rules.preferred_entry_band).toBe("0.05-0.35");
+    expect(rules.fast_lane_enabled).toBe(0);
 
     // Verify family_runtime_state row exists
     const state = db
@@ -568,6 +569,48 @@ describe("POST /discovery/candidates/:id/accept", () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it("enables fast lane for standard directional-updown discovery families", async () => {
+    const db = conn.db;
+    const now = new Date().toISOString();
+
+    db.prepare(
+      `INSERT INTO family_candidates
+         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+          primary_category, strategy_profile, slug_pattern, active_market_count,
+          cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at,
+          reviewed_at)
+       VALUES ('cand-updown-1', 'spy-up-or-down', 'directional-updown',
+               'deadline', 'daily', 'high', 'stocks', 'scalp',
+               'spy-up-or-down-*', 4, 11800, 'promote', 'reviewed', ?, ?, ?)`,
+    ).run(now, now, now);
+
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/discovery/candidates/cand-updown-1/accept",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {},
+    });
+
+    expect(res.statusCode).toBe(200);
+
+    const rules = db
+      .prepare(
+        `SELECT max_entry_price, preferred_entry_band, fast_lane_enabled
+         FROM family_rules WHERE family_id = ?`,
+      )
+      .get("cand-updown-1") as {
+      max_entry_price: number;
+      preferred_entry_band: string | null;
+      fast_lane_enabled: number | null;
+    };
+
+    expect(rules).toEqual({
+      max_entry_price: 0.35,
+      preferred_entry_band: "0.05-0.35",
+      fast_lane_enabled: 1,
+    });
   });
 });
 

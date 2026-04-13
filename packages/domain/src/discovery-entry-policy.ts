@@ -147,6 +147,14 @@ export function classifyFamilyEntryTier(
     return withReason("aggressive", "structured", "structured regime match (social-activity)");
   }
 
+  if (regime === "directional-updown") {
+    return withReason(
+      "standard",
+      "structured",
+      "structured regime match (directional-updown)",
+    );
+  }
+
   if (primaryCategory.startsWith("crypto")) {
     return withReason("standard", "structured", `structured category match (${primaryCategory})`);
   }

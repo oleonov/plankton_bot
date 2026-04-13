@@ -560,6 +560,26 @@ describe("marketability policy retuning", () => {
     expect(policy.unfilledCancelCooldownMs).toBe(60_000);
   });
 
+  it("uses reduced-fast policy for directional-updown families when fast lane is enabled", () => {
+    const policy = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "spy-up-or-down",
+          primaryCategory: "stocks",
+          regime: "directional-updown",
+          horizon: "deadline",
+        },
+      }),
+    );
+
+    expect(policy.tier).toBe("reduced");
+    expect(policy.speedTier).toBe("reduced-fast");
+    expect(policy.maxEntrySpreadCents).toBe(0.025);
+    expect(policy.maxWideEntrySpreadCents).toBe(0.045);
+    expect(policy.minWideSpreadVolume24h).toBe(7_500);
+  });
+
   it("uses core-fast policy for aggressive geopolitics families", () => {
     const policy = resolveMarketabilityPolicy(
       makeBundle({

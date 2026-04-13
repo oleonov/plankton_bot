@@ -120,6 +120,13 @@ function shouldDisableLiveLiteDiscoverySeed(
   );
 }
 
+function shouldEnableFastLaneForDiscoveryCandidate(
+  row: Pick<CandidateRow, "regime">,
+  entryPolicy: Pick<ReturnType<typeof resolveDiscoveryEntryPolicy>, "tier">,
+): boolean {
+  return row.regime.toLowerCase() === "directional-updown" && entryPolicy.tier === "standard";
+}
+
 function formatRun(run: DiscoveryRun | null) {
   if (!run) return null;
   return {
@@ -535,6 +542,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       slugPattern: row.slug_pattern,
       defaultEntryPreset,
     });
+    const fastLaneEnabled = shouldEnableFastLaneForDiscoveryCandidate(row, entryPolicy);
     if (entryPolicy.matchedBy === "fallback") {
       app.log.warn(
         {
@@ -616,10 +624,10 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
              (family_id, enabled, action, entry_mode, scale_mode, exit_mode,
               min_entry_price, max_entry_price, high_price_threshold,
               require_proven_family_above_price, preferred_entry_band,
-              allow_heavy_campaigns, max_open_value_usdc, max_active_markets,
+              allow_heavy_campaigns, fast_lane_enabled, max_open_value_usdc, max_active_markets,
               max_dust_positions, updated_at)
            VALUES (?, 1, 'trade', 'probe-first', 'disabled', 'repricing-sell',
-                   ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+                   ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
         )
         .run(
           familyId,
@@ -628,6 +636,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           entryPolicy.preset.highPriceThreshold,
           entryPolicy.preset.requireProvenFamilyAbovePrice,
           entryPolicy.preset.preferredEntryBand,
+          fastLaneEnabled ? 1 : 0,
           caps.maxOpenValue,
           caps.maxMarkets,
           caps.maxDust,

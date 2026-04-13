@@ -57,6 +57,28 @@ describe("resolveDiscoveryEntryPolicy", () => {
     });
   });
 
+  it("classifies directional-updown candidates as standard even outside crypto", () => {
+    expect(
+      resolveDiscoveryEntryPolicy({
+        familyKey: "spy-up-or-down",
+        primaryCategory: "stocks",
+        regime: "directional-updown",
+        horizon: "deadline",
+        strategyProfile: "scalp",
+        slugPattern: "spy-up-or-down-*",
+        defaultEntryPreset: DEFAULT_PRESET,
+      }),
+    ).toMatchObject({
+      tier: "standard",
+      matchedBy: "structured",
+      reason: "structured regime match (directional-updown)",
+      preset: {
+        maxEntryPrice: 0.35,
+        preferredEntryBand: "0.05-0.35",
+      },
+    });
+  });
+
   it("uses london weather override", () => {
     expect(
       resolveDiscoveryEntryPolicy({
@@ -217,5 +239,16 @@ describe("family entry tier classification", () => {
         tickSize: 0.001,
       }),
     ).toBe("fallback");
+
+    expect(
+      resolveFamilyMarketabilityTier({
+        familyKey: "spy-up-or-down",
+        primaryCategory: "stocks",
+        regime: "directional-updown",
+        horizon: "deadline",
+        strategyProfile: "scalp",
+        slugPattern: "spy-up-or-down-*",
+      }),
+    ).toBe("reduced");
   });
 });
