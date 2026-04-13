@@ -148,11 +148,7 @@ export function classifyFamilyEntryTier(
   }
 
   if (regime === "directional-updown") {
-    return withReason(
-      "standard",
-      "structured",
-      "structured regime match (directional-updown)",
-    );
+    return withReason("standard", "structured", "structured regime match (directional-updown)");
   }
 
   if (primaryCategory.startsWith("crypto")) {
