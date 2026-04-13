@@ -16,10 +16,46 @@ import type {
   RuntimeModule,
   EventBus,
   MarketDataGateway,
+  MarketPricingLifecycleEvent,
   MarketRepository,
+  MarketPricingStream,
+  MarketPricingStreamMetricsSnapshot,
+  MarketPricingStreamUpdate,
+  Market,
   NormalizedMarket,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import {
+  applyPricingSnapshot,
+  applyStreamUpdate,
+  didMarketPricingChange,
+} from "./market-pricing-utils.js";
+
+const STREAM_FALLBACK_MIN_STALE_MS = 15_000;
+
+export interface MarketDataStreamActivitySnapshot {
+  readonly wsEnabled: boolean;
+  readonly windowStartMs: number | null;
+  readonly wsEventsReceived: number;
+  readonly wsEventsReceivedPerSec: number;
+  readonly wsUpdatesApplied: number;
+  readonly trackedTokenCount: number;
+  readonly shardCount: number;
+  readonly reconnectCount: number;
+  readonly wsEventGapDetected: number;
+  readonly wsLatencyMs: MarketPricingStreamMetricsSnapshot["wsLatencyMs"];
+  readonly staleTokenCount: number;
+  readonly fallbackPollCount: number;
+  readonly fullBookTokenCount: number;
+  readonly bookEventsReceived: number;
+  readonly narrowSubscribeCount: number;
+  readonly narrowUnsubscribeCount: number;
+  readonly narrowRefCountLeaks: number;
+  readonly marketResolvedEvents: number;
+  readonly newMarketEvents: number;
+  readonly gammaFallbackCount: number;
+  readonly gammaFallbackTrackedTokenCount: number;
+}
 
 export interface MarketDataModuleDeps {
   gateway: MarketDataGateway;
@@ -33,9 +69,18 @@ export interface MarketDataModuleDeps {
 
 export class MarketDataModule implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private stream: MarketPricingStream | null = null;
   private polling = false;
-  private lastSuccessfulPollMs = 0;
+  private lastSuccessfulDataMs = 0;
+  private readonly marketCache = new Map<string, NormalizedMarket>();
+  private readonly trackedMarketsByToken = new Map<string, Market>();
+  private readonly lastPricingUpdateAtByToken = new Map<string, number>();
+  private readonly pendingGapTokenIds = new Set<string>();
   private readonly log: Logger;
+  private forceFullPoll = false;
+  private lastTrackedTokenCount = 0;
+  private lastStaleTokenCount = 0;
+  private lastFallbackPollCount = 0;
 
   constructor(private readonly deps: MarketDataModuleDeps) {
     this.log = deps.log.child({ module: "market-data" });
@@ -46,6 +91,33 @@ export class MarketDataModule implements RuntimeModule {
       { intervalMs: this.deps.pollIntervalMs, staleMs: this.deps.staleThresholdMs },
       "starting market-data module",
     );
+    if (this.deps.gateway.createMarketPricingStream) {
+      this.stream = this.deps.gateway.createMarketPricingStream({
+        onUpdates: (updates) => this.handleStreamUpdates(updates),
+        onLifecycleEvents: (events) => this.handleLifecycleEvents(events),
+        onError: (error) => {
+          this.log.warn({ err: error }, "market-data stream error");
+        },
+        onGapDetected: ({ reason, tokenIds }) => {
+          const normalizedTokenIds = normalizeGapTokenIds(tokenIds);
+          if (normalizedTokenIds.length === 0) {
+            this.forceFullPoll = true;
+          } else {
+            for (const tokenId of normalizedTokenIds) {
+              this.pendingGapTokenIds.add(tokenId);
+            }
+          }
+          this.log.warn(
+            {
+              reason,
+              tokenCount: normalizedTokenIds.length,
+              forceFullPoll: normalizedTokenIds.length === 0,
+            },
+            "market-data stream gap detected",
+          );
+        },
+      });
+    }
     // Fire first poll without blocking startup — interval handles retries
     this.poll().catch((err) => this.log.error({ err }, "initial poll failed"));
     this.timer = setInterval(() => {
@@ -58,20 +130,50 @@ export class MarketDataModule implements RuntimeModule {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.stream?.close();
+    this.stream = null;
     this.log.info("market-data module stopped");
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
-    if (this.lastSuccessfulPollMs === 0) {
-      return { ok: false, detail: "no successful poll yet" };
+    if (this.lastSuccessfulDataMs === 0) {
+      return { ok: false, detail: "no successful market data yet" };
     }
-    const ageMs = Date.now() - this.lastSuccessfulPollMs;
+    const ageMs = Date.now() - this.lastSuccessfulDataMs;
     const stale = ageMs > this.deps.staleThresholdMs;
     return {
       ok: !stale,
       detail: stale
-        ? `stale: last poll ${Math.round(ageMs / 1000)}s ago`
-        : `fresh: last poll ${Math.round(ageMs / 1000)}s ago`,
+        ? `stale: last market data ${Math.round(ageMs / 1000)}s ago`
+        : `fresh: last market data ${Math.round(ageMs / 1000)}s ago`,
+    };
+  }
+
+  getMetricsSnapshot(): MarketDataStreamActivitySnapshot {
+    const streamMetrics = this.stream?.getMetricsSnapshot?.() ?? null;
+    const gammaFallbackCount = this.countTrackedGammaFallbackMarkets();
+    return {
+      wsEnabled: this.stream != null,
+      windowStartMs: streamMetrics?.windowStartMs ?? null,
+      wsEventsReceived: streamMetrics?.wsEventsReceived ?? 0,
+      wsEventsReceivedPerSec: streamMetrics?.wsEventsReceivedPerSec ?? 0,
+      wsUpdatesApplied: streamMetrics?.wsUpdatesApplied ?? 0,
+      trackedTokenCount: streamMetrics?.trackedTokenCount ?? this.lastTrackedTokenCount,
+      shardCount: streamMetrics?.shardCount ?? 0,
+      reconnectCount: streamMetrics?.reconnectCount ?? 0,
+      wsEventGapDetected: streamMetrics?.wsEventGapDetected ?? 0,
+      wsLatencyMs: streamMetrics?.wsLatencyMs ?? null,
+      staleTokenCount: this.lastStaleTokenCount,
+      fallbackPollCount: this.lastFallbackPollCount,
+      fullBookTokenCount: streamMetrics?.fullBookTokenCount ?? 0,
+      bookEventsReceived: streamMetrics?.bookEventsReceived ?? 0,
+      narrowSubscribeCount: streamMetrics?.narrowSubscribeCount ?? 0,
+      narrowUnsubscribeCount: streamMetrics?.narrowUnsubscribeCount ?? 0,
+      narrowRefCountLeaks: streamMetrics?.narrowRefCountLeaks ?? 0,
+      marketResolvedEvents: streamMetrics?.marketResolvedEvents ?? 0,
+      newMarketEvents: streamMetrics?.newMarketEvents ?? 0,
+      gammaFallbackCount,
+      gammaFallbackTrackedTokenCount: gammaFallbackCount,
     };
   }
 
@@ -91,9 +193,14 @@ export class MarketDataModule implements RuntimeModule {
       }
 
       const tracked = this.deps.marketRepo.findActive();
+      this.refreshTrackedMarkets(tracked);
+      this.lastTrackedTokenCount = tracked.length;
       if (tracked.length === 0) {
+        this.lastFallbackPollCount = 0;
+        this.lastStaleTokenCount = 0;
+        this.stream?.setTokenIds([]);
         this.log.debug("no active tracked markets — skipping pricing, waiting for scanner");
-        // Do NOT update lastSuccessfulPollMs — no tracked markets means
+        // Do NOT update lastSuccessfulDataMs — no tracked markets means
         // discovery hasn't run yet or found nothing. Stay STALE.
         await this.deps.bus.publish("MarketSnapshotReceived", {
           markets: [],
@@ -103,57 +210,63 @@ export class MarketDataModule implements RuntimeModule {
       }
 
       const tokenIds = tracked.map((m) => String(m.tokenId));
+      this.stream?.setTokenIds(tokenIds);
+      const now = Date.now();
+      const fallbackStaleMs = Math.max(
+        STREAM_FALLBACK_MIN_STALE_MS,
+        this.deps.pollIntervalMs * 3,
+      );
+      const tokenIdsToPoll =
+        this.stream == null || this.forceFullPoll
+          ? tokenIds
+          : tokenIds.filter((tokenId) => {
+              if (this.pendingGapTokenIds.has(tokenId)) return true;
+              const cached = this.marketCache.get(tokenId);
+              const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
+              return cached == null || now - lastUpdatedAt > fallbackStaleMs;
+            });
+      this.lastStaleTokenCount = tokenIdsToPoll.length;
+      this.lastFallbackPollCount = tokenIdsToPoll.length;
       this.log.debug(
-        { trackedCount: tracked.length, tokenCount: tokenIds.length },
+        {
+          trackedCount: tracked.length,
+          tokenCount: tokenIds.length,
+          fallbackPollCount: tokenIdsToPoll.length,
+          forceFullPoll: this.forceFullPoll,
+        },
         "fetching pricing for tracked markets",
       );
 
-      const pricingMap = await this.deps.gateway.getMarketPricing(tokenIds);
-      const now = Date.now();
+      const pricingMap =
+        tokenIdsToPoll.length > 0
+          ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll)
+          : new Map<string, import("@plankton/domain").MarketPricingSnapshot>();
       const markets: NormalizedMarket[] = [];
 
       for (const market of tracked) {
+        const tokenKey = String(market.tokenId);
+        const current = this.marketCache.get(tokenKey);
+        const baseMarket = syncTrackedMarket(current ?? null, market, now);
         const pricing = pricingMap.get(String(market.tokenId));
-        const bestBid = pricing?.bestBid ?? null;
-        const bestAsk = pricing?.bestAsk ?? null;
-        const midPrice = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : null;
-        const spread = bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null;
-
-        markets.push({
-          tokenId: market.tokenId,
-          conditionId: market.conditionId,
-          slug: market.slug,
-          eventSlug: market.eventSlug,
-          question: market.question,
-          outcome: market.outcome,
-          familyId: market.familyId,
-          familyKey: market.familyKey,
-          regime: market.regime,
-          horizon: market.horizon,
-          endDate: market.endDate,
-          active: market.active,
-          tickSize: market.tickSize,
-          negRisk: market.negRisk,
-          bestBid,
-          bestAsk,
-          midPrice,
-          spread,
-          lastTradePrice: pricing?.lastTradePrice ?? null,
-          lastTradeAt: pricing?.lastTradeAt ?? null,
-          volume24h: pricing?.volume24h ?? null,
-          liquidity: pricing?.liquidity ?? null,
-          minOrderSize: pricing?.minOrderSize ?? null,
-          bookSource: pricing?.bookSource ?? "unknown",
-          snapshotTs: now,
-        });
+        const nextMarket =
+          pricing != null ? applyPricingSnapshot(baseMarket, pricing, now) : baseMarket;
+        if (pricing != null) {
+          this.lastPricingUpdateAtByToken.set(tokenKey, now);
+        }
+        this.marketCache.set(tokenKey, nextMarket);
+        markets.push(nextMarket);
       }
 
-      this.lastSuccessfulPollMs = Date.now();
+      this.lastSuccessfulDataMs = now;
+      this.forceFullPoll = false;
+      for (const tokenId of tokenIdsToPoll) {
+        this.pendingGapTokenIds.delete(tokenId);
+      }
       this.log.info({ tokenCount: markets.length }, "poll cycle complete");
 
       await this.deps.bus.publish("MarketSnapshotReceived", {
         markets,
-        timestamp: Date.now(),
+        timestamp: now,
       });
     } catch (err) {
       this.log.error({ err }, "poll cycle failed");
@@ -168,4 +281,128 @@ export class MarketDataModule implements RuntimeModule {
       this.polling = false;
     }
   }
+
+  private async handleStreamUpdates(
+    updates: readonly MarketPricingStreamUpdate[],
+  ): Promise<void> {
+    if (updates.length === 0) return;
+    const nowMs = Date.now();
+    const changedMarkets: NormalizedMarket[] = [];
+
+    for (const update of updates) {
+      const tracked = this.trackedMarketsByToken.get(String(update.tokenId));
+      if (!tracked) continue;
+      const current = syncTrackedMarket(
+        this.marketCache.get(String(update.tokenId)) ?? null,
+        tracked,
+        nowMs,
+      );
+      const nextMarket = applyStreamUpdate(current, update, nowMs);
+      this.lastPricingUpdateAtByToken.set(String(update.tokenId), nowMs);
+      if (!didMarketPricingChange(current, nextMarket)) continue;
+      this.marketCache.set(String(update.tokenId), nextMarket);
+      changedMarkets.push(nextMarket);
+    }
+
+    if (changedMarkets.length === 0) return;
+    this.lastSuccessfulDataMs = nowMs;
+    await this.deps.bus.publish("MarketSnapshotReceived", {
+      markets: changedMarkets,
+      timestamp: nowMs,
+    });
+  }
+
+  private async handleLifecycleEvents(
+    events: readonly MarketPricingLifecycleEvent[],
+  ): Promise<void> {
+    for (const event of events) {
+      if (event.type === "market_resolved") {
+        await this.deps.bus.publish("MarketResolvedHint", {
+          conditionId: event.conditionId,
+          marketId: event.marketId,
+          slug: event.slug,
+          tokenIds: event.tokenIds,
+          winningTokenId: event.winningTokenId,
+          timestamp: event.timestamp,
+        });
+        continue;
+      }
+      await this.deps.bus.publish("NewMarketDiscoveredHint", {
+        conditionId: event.conditionId,
+        marketId: event.marketId,
+        slug: event.slug,
+        question: event.question,
+        active: event.active,
+        tokenIds: event.tokenIds,
+        timestamp: event.timestamp,
+      });
+    }
+  }
+
+  private refreshTrackedMarkets(tracked: readonly Market[]): void {
+    const nextTokenIds = new Set<string>();
+    for (const market of tracked) {
+      const tokenKey = String(market.tokenId);
+      nextTokenIds.add(tokenKey);
+      this.trackedMarketsByToken.set(tokenKey, market);
+    }
+    for (const tokenId of [...this.trackedMarketsByToken.keys()]) {
+      if (nextTokenIds.has(tokenId)) continue;
+      this.trackedMarketsByToken.delete(tokenId);
+      this.marketCache.delete(tokenId);
+      this.lastPricingUpdateAtByToken.delete(tokenId);
+    }
+  }
+
+  private countTrackedGammaFallbackMarkets(): number {
+    let count = 0;
+    for (const tokenId of this.trackedMarketsByToken.keys()) {
+      if (this.marketCache.get(tokenId)?.bookSource === "gamma-fallback") {
+        count++;
+      }
+    }
+    return count;
+  }
+}
+
+function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[] {
+  if (!tokenIds) return [];
+  return [
+    ...new Set(tokenIds.map((tokenId) => tokenId.trim()).filter((tokenId) => tokenId.length > 0)),
+  ];
+}
+
+function syncTrackedMarket(
+  current: NormalizedMarket | null,
+  tracked: Market,
+  nowMs: number,
+): NormalizedMarket {
+  return {
+    tokenId: tracked.tokenId,
+    conditionId: tracked.conditionId,
+    slug: tracked.slug,
+    eventSlug: tracked.eventSlug,
+    question: tracked.question,
+    outcome: tracked.outcome,
+    outcomeIndex: tracked.outcomeIndex ?? null,
+    familyId: tracked.familyId,
+    familyKey: tracked.familyKey,
+    regime: tracked.regime,
+    horizon: tracked.horizon,
+    endDate: tracked.endDate,
+    active: tracked.active,
+    tickSize: tracked.tickSize,
+    negRisk: tracked.negRisk,
+    bestBid: current?.bestBid ?? null,
+    bestAsk: current?.bestAsk ?? null,
+    midPrice: current?.midPrice ?? null,
+    spread: current?.spread ?? null,
+    lastTradePrice: current?.lastTradePrice ?? null,
+    lastTradeAt: current?.lastTradeAt ?? null,
+    volume24h: current?.volume24h ?? null,
+    liquidity: current?.liquidity ?? null,
+    minOrderSize: current?.minOrderSize ?? null,
+    bookSource: current?.bookSource ?? "unknown",
+    snapshotTs: current?.snapshotTs ?? nowMs,
+  };
 }

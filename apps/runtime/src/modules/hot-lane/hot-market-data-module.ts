@@ -3,14 +3,21 @@ import type {
   FamilyRulesProvider,
   MarketDataGateway,
   MarketPricingSnapshot,
+  MarketPricingFullBookReason,
   NormalizedMarket,
   OrderRepository,
   OrderBookSnapshot,
+  PositionRepository,
   RuntimeEventMap,
   RuntimeModule,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { CandidateBookCache } from "../strategy/candidate-book-cache.js";
+import {
+  applyPricingSnapshot,
+  applyStreamUpdate,
+  didMarketPricingChange,
+} from "../market-data/market-pricing-utils.js";
 import { DEFAULT_HOT_LANE_POLICY, type HotLanePolicy } from "./hot-lane-policy.js";
 import { StableHotMarketSelector } from "./hot-market-selection.js";
 
@@ -19,6 +26,7 @@ export interface HotMarketDataModuleDeps {
   readonly gateway: MarketDataGateway;
   readonly rulesProvider: FamilyRulesProvider;
   readonly orderRepo: OrderRepository;
+  readonly positionRepo: PositionRepository;
   readonly log: Logger;
   readonly candidateBookCache?: CandidateBookCache;
   readonly policy?: Partial<HotLanePolicy>;
@@ -28,10 +36,12 @@ interface HotMarketPricingStreamUpdate {
   readonly tokenId: string;
   readonly pricing: MarketPricingSnapshot;
   readonly book?: OrderBookSnapshot | null;
+  readonly tickSize?: number | null;
 }
 
 interface HotMarketPricingStream {
   setTokenIds(tokenIds: readonly string[]): void;
+  setFullBookTokenIds?(reason: MarketPricingFullBookReason, tokenIds: readonly string[]): void;
   close(): void;
 }
 
@@ -45,6 +55,7 @@ interface StreamCapableMarketDataGateway extends MarketDataGateway {
 }
 
 const HOT_MARKET_DATA_MIN_INTERVAL_MS = 500;
+const BRIDGE_CANDIDATE_HOLD_MS = 3_000;
 
 export class HotMarketDataModule implements RuntimeModule {
   private readonly log: Logger;
@@ -52,6 +63,7 @@ export class HotMarketDataModule implements RuntimeModule {
   private readonly hotSelector = new StableHotMarketSelector();
   private readonly marketCache = new Map<string, NormalizedMarket>();
   private readonly lastFastUpdateAtByToken = new Map<string, number>();
+  private readonly bridgeCandidateExpiryByToken = new Map<string, number>();
   private unsubs: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private stream: HotMarketPricingStream | null = null;
@@ -68,6 +80,7 @@ export class HotMarketDataModule implements RuntimeModule {
       this.deps.bus.subscribe("NormalizedMarketUpdated", (payload) =>
         this.handleMarketUpdate(payload),
       ),
+      this.deps.bus.subscribe("SignalApproved", (payload) => this.handleSignalApproved(payload)),
     );
     const streamGateway = this.deps.gateway as StreamCapableMarketDataGateway;
     if (streamGateway.createMarketPricingStream) {
@@ -126,33 +139,31 @@ export class HotMarketDataModule implements RuntimeModule {
     }
   }
 
+  private async handleSignalApproved(
+    payload: RuntimeEventMap["SignalApproved"],
+  ): Promise<void> {
+    this.bridgeCandidateExpiryByToken.set(
+      String(payload.signal.tokenId),
+      Date.now() + BRIDGE_CANDIDATE_HOLD_MS,
+    );
+    this.syncInterestSet(Date.now());
+  }
+
   private async tick(): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
       const nowMs = Date.now();
-      const hotMarkets = this.hotSelector.select({
-        nowMs,
-        rulesProvider: this.deps.rulesProvider,
-        markets: [...this.marketCache.values()],
-        openOrders: this.deps.orderRepo.findOpen(),
-        maxTokens: this.policy.maxTokensPerCycle,
-        holdWindowMs: this.policy.hotSetHoldWindowMs,
-      });
-      if (hotMarkets.length === 0) {
-        this.stream?.setTokenIds([]);
-        return;
-      }
-      const hotTokenIds = hotMarkets.map((market) => String(market.tokenId));
-      this.stream?.setTokenIds(hotTokenIds);
+      const { hotMarkets, subscribedTokenIds } = this.syncInterestSet(nowMs);
+      if (subscribedTokenIds.length === 0) return;
 
       const staleCutoffMs =
         nowMs -
         Math.max(HOT_MARKET_DATA_MIN_INTERVAL_MS, this.policy.hotQuoteRefreshIntervalMs * 3);
       const tokenIdsToPoll =
         this.stream == null
-          ? hotTokenIds
-          : hotTokenIds.filter(
+          ? subscribedTokenIds
+          : subscribedTokenIds.filter(
               (tokenId) => (this.lastFastUpdateAtByToken.get(tokenId) ?? 0) < staleCutoffMs,
             );
       if (tokenIdsToPoll.length === 0) return;
@@ -164,7 +175,7 @@ export class HotMarketDataModule implements RuntimeModule {
         const pricing = pricingMap.get(String(market.tokenId));
         if (!pricing) continue;
         const nextMarket = applyPricingSnapshot(market, pricing, nowMs);
-        if (!didHotMarketPricingChange(market, nextMarket)) continue;
+        if (!didMarketPricingChange(market, nextMarket)) continue;
         this.marketCache.set(String(nextMarket.tokenId), nextMarket);
         this.lastFastUpdateAtByToken.set(String(nextMarket.tokenId), nowMs);
         changedMarkets.push(nextMarket);
@@ -195,7 +206,7 @@ export class HotMarketDataModule implements RuntimeModule {
       const nextMarket = applyStreamUpdate(current, update, nowMs);
       this.lastFastUpdateAtByToken.set(tokenKey, nowMs);
       if (update.book) books.set(tokenKey, update.book);
-      if (!didHotMarketPricingChange(current, nextMarket)) continue;
+      if (!didMarketPricingChange(current, nextMarket)) continue;
       this.marketCache.set(tokenKey, nextMarket);
       changedMarkets.push(nextMarket);
     }
@@ -209,63 +220,47 @@ export class HotMarketDataModule implements RuntimeModule {
       timestamp: nowMs,
     });
   }
-}
 
-function applyPricingSnapshot(
-  market: NormalizedMarket,
-  pricing: MarketPricingSnapshot,
-  nowMs: number,
-): NormalizedMarket {
-  const bestBid = pricing.bestBid ?? null;
-  const bestAsk = pricing.bestAsk ?? null;
-  const midPrice = bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
-  const spread = bestBid != null && bestAsk != null ? bestAsk - bestBid : null;
-  return {
-    ...market,
-    bestBid,
-    bestAsk,
-    midPrice,
-    spread,
-    lastTradePrice: pricing.lastTradePrice ?? null,
-    lastTradeAt: pricing.lastTradeAt ?? null,
-    volume24h: pricing.volume24h ?? market.volume24h ?? null,
-    liquidity: pricing.liquidity ?? market.liquidity ?? null,
-    minOrderSize: pricing.minOrderSize ?? market.minOrderSize ?? null,
-    bookSource: pricing.bookSource ?? market.bookSource ?? "unknown",
-    snapshotTs: nowMs,
-  };
-}
+  private syncInterestSet(nowMs: number): {
+    hotMarkets: NormalizedMarket[];
+    subscribedTokenIds: string[];
+  } {
+    this.pruneBridgeCandidates(nowMs);
+    const openOrders = this.deps.orderRepo.findOpen();
+    const hotMarkets = this.hotSelector.select({
+      nowMs,
+      rulesProvider: this.deps.rulesProvider,
+      markets: [...this.marketCache.values()],
+      openOrders,
+      maxTokens: this.policy.maxTokensPerCycle,
+      holdWindowMs: this.policy.hotSetHoldWindowMs,
+    });
+    const hotTokenIds = hotMarkets.map((market) => String(market.tokenId));
+    const openOrderTokenIds = [...new Set(openOrders.map((order) => String(order.tokenId)))];
+    const openPositionTokenIds = [
+      ...new Set(this.deps.positionRepo.findOpen().map((position) => String(position.tokenId))),
+    ];
+    const bridgeCandidateTokenIds = [...this.bridgeCandidateExpiryByToken.keys()];
+    const subscribedTokenIds = [
+      ...new Set([
+        ...hotTokenIds,
+        ...openOrderTokenIds,
+        ...openPositionTokenIds,
+        ...bridgeCandidateTokenIds,
+      ]),
+    ].sort();
+    this.stream?.setTokenIds(subscribedTokenIds);
+    this.stream?.setFullBookTokenIds?.("hot-set", hotTokenIds);
+    this.stream?.setFullBookTokenIds?.("open-order", openOrderTokenIds);
+    this.stream?.setFullBookTokenIds?.("open-position", openPositionTokenIds);
+    this.stream?.setFullBookTokenIds?.("bridge-candidate", bridgeCandidateTokenIds);
+    return { hotMarkets, subscribedTokenIds };
+  }
 
-function didHotMarketPricingChange(prev: NormalizedMarket, next: NormalizedMarket): boolean {
-  return (
-    prev.bestBid !== next.bestBid ||
-    prev.bestAsk !== next.bestAsk ||
-    prev.midPrice !== next.midPrice ||
-    prev.spread !== next.spread ||
-    prev.lastTradePrice !== next.lastTradePrice ||
-    prev.lastTradeAt !== next.lastTradeAt ||
-    prev.volume24h !== next.volume24h ||
-    prev.liquidity !== next.liquidity ||
-    prev.minOrderSize !== next.minOrderSize ||
-    prev.bookSource !== next.bookSource
-  );
-}
-
-function applyStreamUpdate(
-  market: NormalizedMarket,
-  update: HotMarketPricingStreamUpdate,
-  nowMs: number,
-): NormalizedMarket {
-  const nextMarket = applyPricingSnapshot(market, update.pricing, nowMs);
-  if (!update.book) return nextMarket;
-  return {
-    ...nextMarket,
-    bestBid: update.book.bestBid,
-    bestAsk: update.book.bestAsk,
-    midPrice: update.book.midPrice,
-    spread: update.book.spread,
-    minOrderSize: update.book.minOrderSize ?? nextMarket.minOrderSize ?? null,
-    bookSource: "clob",
-    snapshotTs: update.book.timestamp,
-  };
+  private pruneBridgeCandidates(nowMs: number): void {
+    for (const [tokenId, expiresAtMs] of this.bridgeCandidateExpiryByToken.entries()) {
+      if (expiresAtMs > nowMs) continue;
+      this.bridgeCandidateExpiryByToken.delete(tokenId);
+    }
+  }
 }

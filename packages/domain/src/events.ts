@@ -45,6 +45,27 @@ export interface HotQuoteUpdated {
   readonly refreshedAt: number;
 }
 
+export interface MarketResolvedHint {
+  readonly type: "MarketResolvedHint";
+  readonly conditionId: string;
+  readonly marketId: string | null;
+  readonly slug: string | null;
+  readonly tokenIds: readonly TokenId[];
+  readonly winningTokenId: TokenId | null;
+  readonly timestamp: number;
+}
+
+export interface NewMarketDiscoveredHint {
+  readonly type: "NewMarketDiscoveredHint";
+  readonly conditionId: string;
+  readonly marketId: string | null;
+  readonly slug: string;
+  readonly question: string | null;
+  readonly active: boolean;
+  readonly tokenIds: readonly TokenId[];
+  readonly timestamp: number;
+}
+
 // ─── Strategy / Signal ────────────────────────────────────────────────────
 
 export interface SignalProduced {
@@ -297,6 +318,8 @@ export type DomainEvent =
   | MarketSnapshotReceived
   | NormalizedMarketUpdated
   | HotQuoteUpdated
+  | MarketResolvedHint
+  | NewMarketDiscoveredHint
   | SignalProduced
   | SignalApproved
   | SignalRejected

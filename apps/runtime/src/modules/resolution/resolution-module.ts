@@ -68,11 +68,20 @@ export interface ResolutionModuleDeps {
 
 export class ResolutionModule implements RuntimeModule {
   private intervalHandle: NodeJS.Timeout | null = null;
+  private unsubs: Array<() => void> = [];
+  private readonly pendingHintConditionIds = new Set<string>();
+  private readonly hintedCancelledOrderIds = new Set<string>();
   private running = false;
+  private wsHintConsumed = 0;
 
   constructor(private readonly deps: ResolutionModuleDeps) {}
 
   async start(): Promise<void> {
+    this.unsubs.push(
+      this.deps.bus.subscribe("MarketResolvedHint", async (hint) => {
+        await this.handleMarketResolvedHint(hint);
+      }),
+    );
     // Run once at startup (non-blocking)
     this.runCheck().catch((err) => this.deps.log.error(err, "startup resolution check failed"));
     this.recoverUnresolved().catch((err) => this.deps.log.error(err, "resolution recovery failed"));
@@ -87,6 +96,16 @@ export class ResolutionModule implements RuntimeModule {
       clearInterval(this.intervalHandle);
       this.intervalHandle = null;
     }
+    for (const unsub of this.unsubs) {
+      unsub();
+    }
+    this.unsubs = [];
+  }
+
+  getHintMetricsSnapshot(): { readonly resolutionWsHintsConsumed: number } {
+    return {
+      resolutionWsHintsConsumed: this.wsHintConsumed,
+    };
   }
 
   /** Exposed for testing. */
@@ -96,144 +115,7 @@ export class ResolutionModule implements RuntimeModule {
 
     try {
       const resolutions = await this.deps.detector.detect(this.deps.graceMinutes);
-      let totalSettled = 0;
-
-      for (const resolution of resolutions) {
-        // Check if this is a retry (resolution already exists as "detected")
-        const isRetry = !!this.deps.resolutionRepo.findByConditionId(resolution.conditionId);
-
-        // Persist resolution record (only on first detection; ON CONFLICT DO NOTHING)
-        if (!isRetry) {
-          this.deps.resolutionRepo.save({
-            conditionId: resolution.conditionId,
-            resolution: resolution.resolution,
-            resolvedAt: resolution.resolvedAt,
-            detectedAt: new Date().toISOString(),
-            source: resolution.source,
-            rawResponse: resolution.rawResponse,
-            status: "detected",
-          });
-        }
-
-        // On first pass: deactivate markets and cancel open orders.
-        // On retry: skip — already done on first detection.
-        if (!isRetry) {
-          for (const candidate of resolution.candidates) {
-            this.deps.marketRepo.deactivate(candidate.tokenId);
-            await this.cancelOpenOrders(candidate.tokenId);
-          }
-        }
-
-        // Skip settlement when resolution is unknown.
-        // Detection + deactivation + order cancellation still happen above.
-        // Status stays "detected" — needs manual review.
-        if (resolution.resolution === "unknown") {
-          this.deps.log.warn(
-            { conditionId: resolution.conditionId, source: resolution.source },
-            "resolution unknown — requires manual review",
-          );
-
-          if (!isRetry) {
-            await this.publishMarketResolved(resolution);
-          }
-          continue;
-        }
-
-        // Filter candidates to only families with autoSettleResolvedMarkets enabled
-        let eligibleCandidates = resolution.candidates.filter((c) => {
-          const bundle = this.deps.rulesProvider.getRule(c.familyId);
-          if (!bundle) return true; // unknown family → settle by default
-          return bundle.rules.tailSuppression.autoSettleResolvedMarkets;
-        });
-
-        if (eligibleCandidates.length < resolution.candidates.length) {
-          this.deps.log.info(
-            {
-              conditionId: resolution.conditionId,
-              skipped: resolution.candidates.length - eligibleCandidates.length,
-            },
-            "skipped settlement for families with autoSettleResolvedMarkets=false",
-          );
-        }
-
-        // If no candidates are eligible for settlement, mark as settled
-        // (nothing to retry — autoSettle is disabled for all families).
-        if (eligibleCandidates.length === 0) {
-          this.deps.resolutionRepo.markSettled(resolution.conditionId);
-
-          if (!isRetry) {
-            // Replicate PlanktonXD Auto-Redeem: only if at least one target family has autoSettle enabled.
-            const shouldRedeem = resolution.candidates.some((c) => {
-              const bundle = this.deps.rulesProvider.getRule(c.familyId);
-              return !bundle || bundle.rules.tailSuppression.autoSettleResolvedMarkets;
-            });
-
-            if (this.deps.gateway && shouldRedeem) {
-              await this.deps.gateway.redeemPositions([resolution.conditionId]);
-            }
-
-            await this.publishMarketResolved(resolution);
-          }
-          continue;
-        }
-
-        // Pre-settlement balance verification: when a gateway is provided,
-        // check that each candidate's on-chain token balance is 0 (shares
-        // already redeemed/sold) before allowing ledger settlement.
-        const preFilterCount = eligibleCandidates.length;
-        if (this.deps.gateway && eligibleCandidates.length > 0) {
-          // Replicate PlanktonXD Auto-Redeem: attempt to redeem winning shares
-          // before checking balances.
-          await this.deps.gateway.redeemPositions([resolution.conditionId]);
-
-          if (this.deps.gateway.hasPendingRedeemSubmission?.(resolution.conditionId) ?? false) {
-            this.deps.log.info(
-              { conditionId: resolution.conditionId },
-              "redeem submitted — deferring settlement verification until relayer confirms",
-            );
-            if (!isRetry) {
-              await this.publishMarketResolved(resolution);
-            }
-            continue;
-          }
-
-          eligibleCandidates = await this.filterByZeroBalance(
-            eligibleCandidates,
-            resolution.conditionId,
-          );
-        }
-        const allVerified = !this.deps.gateway || eligibleCandidates.length === preFilterCount;
-
-        const settleable = { ...resolution, candidates: eligibleCandidates };
-
-        // Settle positions
-        const settled =
-          settleable.candidates.length > 0 ? this.deps.settler.settle(settleable) : [];
-        totalSettled += settled.length;
-
-        // Mark settled when all candidates passed balance verification and were settled
-        if (allVerified && settled.length === eligibleCandidates.length) {
-          this.deps.resolutionRepo.markSettled(resolution.conditionId);
-        }
-
-        // Publish events (EventBus.publish is async — must await)
-        if (!isRetry) {
-          await this.publishMarketResolved(resolution);
-        }
-
-        for (const s of settled) {
-          await this.deps.bus.publish("PositionSettled", s);
-        }
-
-        this.deps.log.info(
-          {
-            conditionId: resolution.conditionId,
-            resolution: resolution.resolution,
-            settledCount: settled.length,
-          },
-          `resolved market — settled ${settled.length} positions`,
-        );
-      }
+      const totalSettled = await this.processDetectedResolutions(resolutions);
 
       // Recompute family state for affected families.
       // FamilyExposureChanged is an OUTPUT event — not a trigger.
@@ -255,7 +137,172 @@ export class ResolutionModule implements RuntimeModule {
       return totalSettled;
     } finally {
       this.running = false;
+      void this.flushPendingHintConditions();
     }
+  }
+
+  private async handleMarketResolvedHint(
+    hint: import("@plankton/domain").RuntimeEventMap["MarketResolvedHint"],
+  ): Promise<void> {
+    this.wsHintConsumed++;
+    for (const tokenId of hint.tokenIds) {
+      await this.cancelOpenOrders(tokenId, {
+        rememberCancelledOrderIds: this.hintedCancelledOrderIds,
+      });
+    }
+    this.pendingHintConditionIds.add(hint.conditionId);
+    if (!this.running) {
+      await this.flushPendingHintConditions();
+    }
+  }
+
+  private async flushPendingHintConditions(): Promise<void> {
+    if (this.running || this.pendingHintConditionIds.size === 0) return;
+    this.running = true;
+    try {
+      const conditionIds = [...this.pendingHintConditionIds];
+      this.pendingHintConditionIds.clear();
+      const resolutions: DetectedResolution[] = [];
+      for (const conditionId of conditionIds) {
+        const detected = await this.deps.detector.detectCondition(conditionId);
+        if (detected) {
+          resolutions.push(detected);
+        }
+      }
+      await this.processDetectedResolutions(resolutions);
+    } finally {
+      this.hintedCancelledOrderIds.clear();
+      this.running = false;
+      if (this.pendingHintConditionIds.size > 0) {
+        void this.flushPendingHintConditions();
+      }
+    }
+  }
+
+  private async processDetectedResolutions(
+    resolutions: readonly DetectedResolution[],
+  ): Promise<number> {
+    let totalSettled = 0;
+
+    for (const resolution of resolutions) {
+      const isRetry = !!this.deps.resolutionRepo.findByConditionId(resolution.conditionId);
+
+      if (!isRetry) {
+        this.deps.resolutionRepo.save({
+          conditionId: resolution.conditionId,
+          resolution: resolution.resolution,
+          resolvedAt: resolution.resolvedAt,
+          detectedAt: new Date().toISOString(),
+          source: resolution.source,
+          rawResponse: resolution.rawResponse,
+          status: "detected",
+        });
+      }
+
+      if (!isRetry) {
+        for (const candidate of resolution.candidates) {
+          this.deps.marketRepo.deactivate(candidate.tokenId);
+          await this.cancelOpenOrders(candidate.tokenId, {
+            skipOrderIds: this.hintedCancelledOrderIds,
+          });
+        }
+      }
+
+      if (resolution.resolution === "unknown") {
+        this.deps.log.warn(
+          { conditionId: resolution.conditionId, source: resolution.source },
+          "resolution unknown — requires manual review",
+        );
+
+        if (!isRetry) {
+          await this.publishMarketResolved(resolution);
+        }
+        continue;
+      }
+
+      let eligibleCandidates = resolution.candidates.filter((c) => {
+        const bundle = this.deps.rulesProvider.getRule(c.familyId);
+        if (!bundle) return true;
+        return bundle.rules.tailSuppression.autoSettleResolvedMarkets;
+      });
+
+      if (eligibleCandidates.length < resolution.candidates.length) {
+        this.deps.log.info(
+          {
+            conditionId: resolution.conditionId,
+            skipped: resolution.candidates.length - eligibleCandidates.length,
+          },
+          "skipped settlement for families with autoSettleResolvedMarkets=false",
+        );
+      }
+
+      if (eligibleCandidates.length === 0) {
+        this.deps.resolutionRepo.markSettled(resolution.conditionId);
+
+        if (!isRetry) {
+          const shouldRedeem = resolution.candidates.some((c) => {
+            const bundle = this.deps.rulesProvider.getRule(c.familyId);
+            return !bundle || bundle.rules.tailSuppression.autoSettleResolvedMarkets;
+          });
+
+          if (this.deps.gateway && shouldRedeem) {
+            await this.deps.gateway.redeemPositions([resolution.conditionId]);
+          }
+
+          await this.publishMarketResolved(resolution);
+        }
+        continue;
+      }
+
+      const preFilterCount = eligibleCandidates.length;
+      if (this.deps.gateway && eligibleCandidates.length > 0) {
+        await this.deps.gateway.redeemPositions([resolution.conditionId]);
+
+        if (this.deps.gateway.hasPendingRedeemSubmission?.(resolution.conditionId) ?? false) {
+          this.deps.log.info(
+            { conditionId: resolution.conditionId },
+            "redeem submitted — deferring settlement verification until relayer confirms",
+          );
+          if (!isRetry) {
+            await this.publishMarketResolved(resolution);
+          }
+          continue;
+        }
+
+        eligibleCandidates = await this.filterByZeroBalance(
+          eligibleCandidates,
+          resolution.conditionId,
+        );
+      }
+      const allVerified = !this.deps.gateway || eligibleCandidates.length === preFilterCount;
+
+      const settleable = { ...resolution, candidates: eligibleCandidates };
+      const settled = settleable.candidates.length > 0 ? this.deps.settler.settle(settleable) : [];
+      totalSettled += settled.length;
+
+      if (allVerified && settled.length === eligibleCandidates.length) {
+        this.deps.resolutionRepo.markSettled(resolution.conditionId);
+      }
+
+      if (!isRetry) {
+        await this.publishMarketResolved(resolution);
+      }
+
+      for (const settledPosition of settled) {
+        await this.deps.bus.publish("PositionSettled", settledPosition);
+      }
+
+      this.deps.log.info(
+        {
+          conditionId: resolution.conditionId,
+          resolution: resolution.resolution,
+          settledCount: settled.length,
+        },
+        `resolved market — settled ${settled.length} positions`,
+      );
+    }
+
+    return totalSettled;
   }
 
   /**
@@ -306,22 +353,33 @@ export class ResolutionModule implements RuntimeModule {
   }
 
   /** Publish CancelOrderRequested for open/partially-filled/pending orders on a resolved token. */
-  private async cancelOpenOrders(tokenId: TokenId): Promise<void> {
+  private async cancelOpenOrders(
+    tokenId: TokenId,
+    opts?: Readonly<{
+      skipOrderIds?: ReadonlySet<string>;
+      rememberCancelledOrderIds?: Set<string>;
+    }>,
+  ): Promise<void> {
     const orders = this.deps.orderRepo.findByTokenId(tokenId);
     const active = orders.filter(
       (o) => o.status === "open" || o.status === "partially-filled" || o.status === "pending",
     );
     for (const order of active) {
+      if (opts?.skipOrderIds?.has(String(order.orderId))) {
+        continue;
+      }
       // Pending orders without an exchange-assigned ID cannot be cancelled
       // on the exchange — just deactivate them locally.
       if (order.status === "pending" && !order.exchangeOrderId) {
         this.deps.orderRepo.updateStatus(order.orderId, "cancelled");
+        opts?.rememberCancelledOrderIds?.add(String(order.orderId));
         this.deps.log.info(
           { orderId: String(order.orderId), tokenId: String(tokenId) },
           "locally cancelled pending order without exchange ID on resolved market",
         );
         continue;
       }
+      opts?.rememberCancelledOrderIds?.add(String(order.orderId));
       await this.deps.bus.publish("CancelOrderRequested", {
         command: {
           type: "CancelOrderCommand" as const,

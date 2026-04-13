@@ -618,6 +618,39 @@ describe("GET /status", () => {
 
     conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'user_order_stream_activity'`);
   });
+
+  it("status includes market data stream telemetry when available", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('market_data_stream_activity', 1, '{"wsEnabled":true,"windowStartMs":${Date.now() - 60_000},"wsEventsReceived":120,"wsEventsReceivedPerSec":2,"wsUpdatesApplied":95,"trackedTokenCount":320,"shardCount":1,"reconnectCount":2,"wsEventGapDetected":1,"wsLatencyMs":{"count":8,"avgMs":180,"minMs":75,"p50Ms":160,"p95Ms":290,"maxMs":320},"staleTokenCount":14,"fallbackPollCount":14}', '${new Date().toISOString()}')
+    `);
+
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
+
+    expect(json(res).data.marketDataStreamActivity).toEqual({
+      wsEnabled: true,
+      windowStartMs: expect.any(Number),
+      wsEventsReceived: 120,
+      wsEventsReceivedPerSec: 2,
+      wsUpdatesApplied: 95,
+      trackedTokenCount: 320,
+      shardCount: 1,
+      reconnectCount: 2,
+      wsEventGapDetected: 1,
+      wsLatencyMs: {
+        count: 8,
+        avgMs: 180,
+        minMs: 75,
+        p50Ms: 160,
+        p95Ms: 290,
+        maxMs: 320,
+      },
+      staleTokenCount: 14,
+      fallbackPollCount: 14,
+    });
+
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity'`);
+  });
 });
 
 // ─── Families ───────────────────────────────────────────────────────

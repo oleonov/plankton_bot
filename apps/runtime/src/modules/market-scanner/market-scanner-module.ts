@@ -47,8 +47,11 @@ export interface MarketScanResult {
 
 export class MarketScannerModule implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private hintTimer: ReturnType<typeof setTimeout> | null = null;
+  private unsubs: Array<() => void> = [];
   private scanning = false;
   private lastSuccessfulScanMs = 0;
+  private wsHintConsumed = 0;
   private readonly log: Logger;
 
   constructor(private readonly deps: MarketScannerModuleDeps) {
@@ -57,6 +60,12 @@ export class MarketScannerModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.log.info({ intervalMs: this.deps.scanIntervalMs }, "starting market-scanner module");
+    this.unsubs.push(
+      this.deps.bus.subscribe("NewMarketDiscoveredHint", async () => {
+        this.wsHintConsumed++;
+        this.scheduleHintScan();
+      }),
+    );
     // Fire first scan without blocking startup
     this.scan().catch((err) => this.log.error({ err }, "initial scan failed"));
     this.timer = setInterval(() => {
@@ -69,7 +78,21 @@ export class MarketScannerModule implements RuntimeModule {
       clearInterval(this.timer);
       this.timer = null;
     }
+    if (this.hintTimer) {
+      clearTimeout(this.hintTimer);
+      this.hintTimer = null;
+    }
+    for (const unsub of this.unsubs) {
+      unsub();
+    }
+    this.unsubs = [];
     this.log.info("market-scanner module stopped");
+  }
+
+  getHintMetricsSnapshot(): { readonly discoveryWsHintsConsumed: number } {
+    return {
+      discoveryWsHintsConsumed: this.wsHintConsumed,
+    };
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
@@ -191,6 +214,14 @@ export class MarketScannerModule implements RuntimeModule {
     } finally {
       this.scanning = false;
     }
+  }
+
+  private scheduleHintScan(): void {
+    if (this.hintTimer) return;
+    this.hintTimer = setTimeout(() => {
+      this.hintTimer = null;
+      void this.scan().catch((err) => this.log.error({ err }, "hint-triggered scan failed"));
+    }, 250);
   }
 
   private compileFamilyPatterns(families: FamilyIdentity[]): CompiledFamily[] {

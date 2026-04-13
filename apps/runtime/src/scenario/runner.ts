@@ -282,6 +282,7 @@ async function executeScenario(
     gateway: marketDataGateway,
     rulesProvider,
     orderRepo: repos.order,
+    positionRepo: repos.position,
     ...(candidateBookCache ? { candidateBookCache } : {}),
     log,
     policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },

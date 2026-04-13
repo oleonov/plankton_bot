@@ -237,6 +237,37 @@ export class ResolutionDetector {
     return results;
   }
 
+  async detectCondition(conditionId: string): Promise<DetectedResolution | null> {
+    const markets = this.marketRepo.findByConditionId(conditionId);
+    if (markets.length === 0) return null;
+
+    const tokenIds = new Set(markets.map((market) => String(market.tokenId)));
+    const openPositions = this.positionRepo.findOpen();
+    const dustPositions = this.positionRepo.findDust();
+    const positions = [...openPositions, ...dustPositions].filter((position) =>
+      tokenIds.has(String(position.tokenId)),
+    );
+    if (positions.length === 0) return null;
+
+    const marketByToken = new Map(markets.map((market) => [String(market.tokenId), market]));
+    const candidates: ResolutionCandidate[] = [];
+    for (const position of positions) {
+      const market = marketByToken.get(String(position.tokenId));
+      if (!market) continue;
+      candidates.push({
+        tokenId: position.tokenId,
+        conditionId: market.conditionId,
+        slug: market.slug,
+        outcome: market.outcome,
+        endDate: market.endDate ?? new Date().toISOString(),
+        positionId: position.positionId,
+        familyId: position.familyId,
+      });
+    }
+    if (candidates.length === 0) return null;
+    return this.queryResolution(conditionId, markets[0]!.slug, candidates);
+  }
+
   private async queryResolution(
     conditionId: string,
     slug: string,

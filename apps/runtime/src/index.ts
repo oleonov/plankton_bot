@@ -106,7 +106,10 @@ import { HotQuoteBusModule } from "./modules/hot-lane/hot-quote-bus-module.js";
 import { FastExitCleanupModule } from "./modules/hot-lane/fast-exit-cleanup-module.js";
 import { HotMarketDataModule } from "./modules/hot-lane/hot-market-data-module.js";
 import { evaluateConfigDrift } from "./config-drift-monitor.js";
-import type { CandidateBookRefreshObserved } from "./modules/strategy/candidate-book-cache.js";
+import type {
+  CandidateBookRefreshObserved,
+  CandidateBookUsageObserved,
+} from "./modules/strategy/candidate-book-cache.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -665,19 +668,39 @@ async function main(): Promise<void> {
     timeouts: 0,
     lastReset: Date.now(),
   };
+  const candidateBookUsageWindow = {
+    bridgeRefreshLatenciesMs: [] as number[],
+    bridgeRestBookFetchCount: 0,
+  };
   const handleCandidateBookRefreshObserved = (event: CandidateBookRefreshObserved): void => {
     if (event.outcome === "attempted") {
       candidateBookRefreshWindow.attempts += event.tokenCount;
+      if (event.source === "bridge-refresh") {
+        candidateBookUsageWindow.bridgeRestBookFetchCount += event.tokenCount;
+        conversionWindow.bridgeRestBookFetchCount += event.tokenCount;
+      }
     }
     if (event.outcome === "refresh-budget-exhausted" || event.outcome === "refresh-failed") {
       candidateBookRefreshWindow.timeouts += event.tokenCount;
     }
+    if (event.source === "bridge-refresh" && event.durationMs != null) {
+      candidateBookUsageWindow.bridgeRefreshLatenciesMs.push(event.durationMs);
+      conversionWindow.bridgeBookRefreshLatenciesMs.push(event.durationMs);
+    }
+  };
+  const handleCandidateBookUsageObserved = (event: CandidateBookUsageObserved): void => {
+    if (event.type === "ws-hit") {
+      conversionWindow.candidateBookCacheWsHits++;
+      return;
+    }
+    conversionWindow.candidateBookCacheRestFallbacks++;
   };
   const candidateBookCache = marketDataGateway.getOrderBooks
     ? new CandidateBookCache({
         gateway: { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) },
         log: log.child({ module: "candidate-book-cache" }),
         onRefreshObserved: handleCandidateBookRefreshObserved,
+        onUsageObserved: handleCandidateBookUsageObserved,
       })
     : undefined;
   const strategyModule = new StrategyModule({
@@ -710,6 +733,7 @@ async function main(): Promise<void> {
     gateway: marketDataGateway,
     rulesProvider,
     orderRepo: repos.order,
+    positionRepo: repos.position,
     ...(candidateBookCache ? { candidateBookCache } : {}),
     log,
     policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
@@ -1078,6 +1102,12 @@ async function main(): Promise<void> {
   const insertUserOrderStreamActivity = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('user_order_stream_activity', 1, ?, ?)",
   );
+  const deleteMarketDataStreamActivity = ledgerConn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity'",
+  );
+  const insertMarketDataStreamActivity = ledgerConn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('market_data_stream_activity', 1, ?, ?)",
+  );
   const upsertSignalActivity = ledgerConn.db.transaction((labels: string, capturedAt: string) => {
     deleteSignalActivity.run();
     insertSignalActivity.run(labels, capturedAt);
@@ -1096,6 +1126,12 @@ async function main(): Promise<void> {
     (labels: string, capturedAt: string) => {
       deleteUserOrderStreamActivity.run();
       insertUserOrderStreamActivity.run(labels, capturedAt);
+    },
+  );
+  const upsertMarketDataStreamActivity = ledgerConn.db.transaction(
+    (labels: string, capturedAt: string) => {
+      deleteMarketDataStreamActivity.run();
+      insertMarketDataStreamActivity.run(labels, capturedAt);
     },
   );
 
@@ -1125,6 +1161,10 @@ async function main(): Promise<void> {
     queueJumpFills: 0,
     gammaFallbackDustOrders: 0,
     gammaFallbackDustFills: 0,
+    candidateBookCacheWsHits: 0,
+    candidateBookCacheRestFallbacks: 0,
+    bridgeBookRefreshLatenciesMs: [] as number[],
+    bridgeRestBookFetchCount: 0,
     lastReset: Date.now(),
   };
   const entryOrderPlacedAtMsByOrderId = new Map<string, number>();
@@ -1348,6 +1388,10 @@ async function main(): Promise<void> {
       conversionWindow.queueJumpFills = 0;
       conversionWindow.gammaFallbackDustOrders = 0;
       conversionWindow.gammaFallbackDustFills = 0;
+      conversionWindow.candidateBookCacheWsHits = 0;
+      conversionWindow.candidateBookCacheRestFallbacks = 0;
+      conversionWindow.bridgeBookRefreshLatenciesMs = [];
+      conversionWindow.bridgeRestBookFetchCount = 0;
       gammaFallbackDustClientOrderIds.clear();
       candidateBookRefreshWindow.attempts = 0;
       candidateBookRefreshWindow.timeouts = 0;
@@ -1385,6 +1429,10 @@ async function main(): Promise<void> {
         queueJumpFills: conversionWindow.queueJumpFills,
         gammaFallbackDustOrders: conversionWindow.gammaFallbackDustOrders,
         gammaFallbackDustFills: conversionWindow.gammaFallbackDustFills,
+        candidateBookCacheWsHits: conversionWindow.candidateBookCacheWsHits,
+        candidateBookCacheRestFallbacks: conversionWindow.candidateBookCacheRestFallbacks,
+        bridgeBookRefreshMs: summarizeFillLatency(conversionWindow.bridgeBookRefreshLatenciesMs),
+        bridgeRestBookFetchCount: conversionWindow.bridgeRestBookFetchCount,
         candidateBookRefreshAttempts: candidateBookRefreshWindow.attempts,
         candidateBookRefreshTimeouts: candidateBookRefreshWindow.timeouts,
         windowStartMs: conversionWindow.lastReset,
@@ -1428,6 +1476,14 @@ async function main(): Promise<void> {
         new Date().toISOString(),
       );
     }
+    upsertMarketDataStreamActivity(
+      JSON.stringify({
+        ...marketDataModule.getMetricsSnapshot(),
+        ...marketScannerModule.getHintMetricsSnapshot(),
+        ...resolutionModule.getHintMetricsSnapshot(),
+      }),
+      new Date().toISOString(),
+    );
     if (now - lastConfigDriftCheckAtMs >= 60_000) {
       lastConfigDriftCheckAtMs = now;
       try {

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createFamilyId, createTokenId } from "@plankton/domain";
+import { InProcessEventBus } from "@plankton/event-bus";
 import type {
   MarketDiscoveryGateway,
   ClobMarket,
@@ -515,5 +516,57 @@ describe("MarketScannerModule", () => {
     );
     expect(slugs).toContain("bitcoin-above-100k");
     expect(slugs).toContain("bitcoin-above-110k");
+  });
+
+  it("consumes new-market WS hints with debounce and updates hint metrics", async () => {
+    vi.useFakeTimers();
+    try {
+      const realBus = new InProcessEventBus();
+      mod = new MarketScannerModule({
+        discoveryGateway,
+        familyRules,
+        marketRepo,
+        bus: realBus,
+        log: silentLog,
+        scanIntervalMs: 300_000,
+      });
+      const scanSpy = vi.spyOn(mod, "scan").mockResolvedValue(undefined);
+
+      await mod.start();
+      scanSpy.mockClear();
+
+      await realBus.publish("NewMarketDiscoveredHint", {
+        conditionId: "cond-1",
+        marketId: "market-1",
+        slug: "new-market-1",
+        question: "Will X happen?",
+        active: true,
+        tokenIds: [createTokenId("tok-1")],
+        timestamp: Date.now(),
+      });
+      await realBus.publish("NewMarketDiscoveredHint", {
+        conditionId: "cond-2",
+        marketId: "market-2",
+        slug: "new-market-2",
+        question: "Will Y happen?",
+        active: true,
+        tokenIds: [createTokenId("tok-2")],
+        timestamp: Date.now(),
+      });
+      await realBus.drain();
+
+      await vi.advanceTimersByTimeAsync(249);
+      expect(scanSpy).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(scanSpy).toHaveBeenCalledTimes(1);
+      expect(mod.getHintMetricsSnapshot()).toEqual({
+        discoveryWsHintsConsumed: 2,
+      });
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

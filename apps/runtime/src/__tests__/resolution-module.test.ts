@@ -75,6 +75,9 @@ function makeSettledPosition(overrides?: Partial<SettledPosition>): SettledPosit
 function createMockDetector(): ResolutionDetector {
   return {
     detect: vi.fn<(graceMinutes: number) => Promise<DetectedResolution[]>>().mockResolvedValue([]),
+    detectCondition: vi
+      .fn<(conditionId: string) => Promise<DetectedResolution | null>>()
+      .mockResolvedValue(null),
   } as unknown as ResolutionDetector;
 }
 
@@ -658,6 +661,38 @@ describe("ResolutionModule", () => {
 
     expect(cancelEvents).toHaveLength(1);
     expect(cancelEvents[0].command.orderId).toBe("ord-1");
+  });
+
+  it("consumes market-resolved WS hints, cancels open orders, and verifies via detector", async () => {
+    const resolution = makeDetectedResolution();
+    (detector.detectCondition as any).mockResolvedValue(resolution);
+    (orderRepo.findByTokenId as any).mockReturnValue([
+      { orderId: "ord-1", status: "open", familyId: FAM, exchangeOrderId: "exch-1" },
+    ]);
+
+    const cancelEvents: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (e) => {
+      cancelEvents.push(e);
+    });
+
+    await mod.start();
+    await bus.publish("MarketResolvedHint", {
+      conditionId: CONDITION,
+      marketId: "market-1",
+      slug: "will-x-happen",
+      tokenIds: [TOK_YES],
+      winningTokenId: TOK_YES,
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+    await mod.stop();
+
+    expect(detector.detectCondition as any).toHaveBeenCalledWith(CONDITION);
+    expect(cancelEvents).toHaveLength(1);
+    expect(cancelEvents[0].command.reason).toBe("market_resolved");
+    expect(mod.getHintMetricsSnapshot()).toEqual({
+      resolutionWsHintsConsumed: 1,
+    });
   });
 
   it("full cancel chain: MarketResolved triggers CancelOrderRequested with correct command shape", async () => {

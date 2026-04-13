@@ -530,6 +530,14 @@ export function buildStatusSnapshot(
   const userOrderStreamActivity = userOrderStreamActivityRow
     ? (JSON.parse(userOrderStreamActivityRow.labels) as Record<string, unknown>)
     : null;
+  const marketDataStreamActivityRow = db
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { labels: string } | undefined;
+  const marketDataStreamActivity = marketDataStreamActivityRow
+    ? (JSON.parse(marketDataStreamActivityRow.labels) as Record<string, unknown>)
+    : null;
 
   let desiredProfile: string | null = null;
   let currentProfile: string | null = null;
@@ -627,6 +635,7 @@ export function buildStatusSnapshot(
     signalActivity,
     riskEventVolume,
     userOrderStreamActivity,
+    marketDataStreamActivity,
     executionTelemetry24h,
     executionQueue,
     startupAdoption,

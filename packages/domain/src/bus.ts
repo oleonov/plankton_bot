@@ -74,6 +74,25 @@ export interface RuntimeEventMap {
     readonly refreshedAt: number;
   };
 
+  MarketResolvedHint: {
+    readonly conditionId: string;
+    readonly marketId: string | null;
+    readonly slug: string | null;
+    readonly tokenIds: readonly TokenId[];
+    readonly winningTokenId: TokenId | null;
+    readonly timestamp: number;
+  };
+
+  NewMarketDiscoveredHint: {
+    readonly conditionId: string;
+    readonly marketId: string | null;
+    readonly slug: string;
+    readonly question: string | null;
+    readonly active: boolean;
+    readonly tokenIds: readonly TokenId[];
+    readonly timestamp: number;
+  };
+
   SignalProduced: {
     readonly signal: Signal;
   };

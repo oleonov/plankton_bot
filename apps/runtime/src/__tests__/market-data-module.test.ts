@@ -2,6 +2,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createTokenId, createFamilyId } from "@plankton/domain";
 import type {
   MarketDataGateway,
+  MarketPricingLifecycleEvent,
+  MarketPricingStream,
+  MarketPricingStreamMetricsSnapshot,
+  MarketPricingStreamUpdate,
   NormalizedMarket,
   RuntimeEventMap,
   MarketRepository,
@@ -55,6 +59,107 @@ function createMockGateway(): MarketDataGateway {
   };
 }
 
+class FakePricingStream implements MarketPricingStream {
+  tokenIds: string[] = [];
+  metrics: MarketPricingStreamMetricsSnapshot = {
+    windowStartMs: Date.now(),
+    wsEventsReceived: 0,
+    wsEventsReceivedPerSec: 0,
+    wsUpdatesApplied: 0,
+    trackedTokenCount: 0,
+    shardCount: 1,
+    reconnectCount: 0,
+    wsEventGapDetected: 0,
+    wsLatencyMs: null,
+  };
+
+  constructor(
+    private readonly handlers: Readonly<{
+      onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
+      onLifecycleEvents?: (
+        events: readonly MarketPricingLifecycleEvent[],
+      ) => Promise<void> | void;
+      onError?: (error: unknown) => Promise<void> | void;
+      onGapDetected?: (
+        info: Readonly<{
+          reason: "socket-closed" | "invalid-payload" | "connect-failed";
+          timestamp: number;
+          tokenIds?: readonly string[];
+        }>,
+      ) => Promise<void> | void;
+    }>,
+  ) {}
+
+  setTokenIds(tokenIds: readonly string[]): void {
+    this.tokenIds = [...tokenIds];
+    this.metrics = {
+      ...this.metrics,
+      trackedTokenCount: this.tokenIds.length,
+    };
+  }
+
+  close(): void {
+    this.tokenIds = [];
+    this.metrics = {
+      ...this.metrics,
+      trackedTokenCount: 0,
+    };
+  }
+
+  getMetricsSnapshot(): MarketPricingStreamMetricsSnapshot {
+    return this.metrics;
+  }
+
+  async emitUpdates(updates: readonly MarketPricingStreamUpdate[]): Promise<void> {
+    this.metrics = {
+      ...this.metrics,
+      wsEventsReceived: this.metrics.wsEventsReceived + updates.length,
+      wsUpdatesApplied: this.metrics.wsUpdatesApplied + updates.length,
+      wsEventsReceivedPerSec: updates.length,
+    };
+    await this.handlers.onUpdates(updates);
+  }
+
+  async emitGap(): Promise<void> {
+    this.metrics = {
+      ...this.metrics,
+      reconnectCount: this.metrics.reconnectCount + 1,
+      wsEventGapDetected: this.metrics.wsEventGapDetected + 1,
+    };
+    await this.handlers.onGapDetected?.({
+      reason: "socket-closed",
+      timestamp: Date.now(),
+    });
+  }
+
+  async emitGapForTokenIds(tokenIds: readonly string[]): Promise<void> {
+    this.metrics = {
+      ...this.metrics,
+      reconnectCount: this.metrics.reconnectCount + 1,
+      wsEventGapDetected: this.metrics.wsEventGapDetected + 1,
+    };
+    await this.handlers.onGapDetected?.({
+      reason: "socket-closed",
+      timestamp: Date.now(),
+      tokenIds,
+    });
+  }
+
+  async emitLifecycleEvents(events: readonly MarketPricingLifecycleEvent[]): Promise<void> {
+    this.metrics = {
+      ...this.metrics,
+      wsEventsReceived: this.metrics.wsEventsReceived + events.length,
+      marketResolvedEvents:
+        (this.metrics.marketResolvedEvents ?? 0) +
+        events.filter((event) => event.type === "market_resolved").length,
+      newMarketEvents:
+        (this.metrics.newMarketEvents ?? 0) +
+        events.filter((event) => event.type === "new_market").length,
+    };
+    await this.handlers.onLifecycleEvents?.(events);
+  }
+}
+
 function createMockMarketRepo(): MarketRepository {
   return {
     save: vi.fn(),
@@ -84,11 +189,13 @@ describe("MarketDataModule", () => {
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let bus: InProcessEventBus;
   let mod: MarketDataModule;
+  let stream: FakePricingStream | null;
 
   beforeEach(() => {
     gateway = createMockGateway();
     marketRepo = createMockMarketRepo();
     bus = new InProcessEventBus();
+    stream = null;
     mod = new MarketDataModule({
       gateway,
       marketRepo,
@@ -103,7 +210,7 @@ describe("MarketDataModule", () => {
   it("healthCheck returns not-ok before first poll", async () => {
     const h = await mod.healthCheck();
     expect(h.ok).toBe(false);
-    expect(h.detail).toContain("no successful poll");
+    expect(h.detail).toContain("no successful market data");
   });
 
   it("poll publishes MarketSnapshotReceived with correct data", async () => {
@@ -258,7 +365,7 @@ describe("MarketDataModule", () => {
     expect(h.ok).toBe(false);
   });
 
-  it("lastSuccessfulPollMs is NOT updated when getMarketPricing throws", async () => {
+  it("lastSuccessfulDataMs is NOT updated when getMarketPricing throws", async () => {
     (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("request timed out after 15000ms"),
@@ -268,7 +375,7 @@ describe("MarketDataModule", () => {
 
     const h = await mod.healthCheck();
     expect(h.ok).toBe(false);
-    expect(h.detail).toContain("no successful poll");
+    expect(h.detail).toContain("no successful market data");
   });
 
   it("concurrent polls are guarded by re-entrancy flag", async () => {
@@ -303,7 +410,7 @@ describe("MarketDataModule", () => {
 
     const h = await mod.healthCheck();
     expect(h.ok).toBe(false);
-    expect(h.detail).toContain("no successful poll");
+    expect(h.detail).toContain("no successful market data");
 
     resolvePricing(new Map());
     await new Promise((r) => setTimeout(r, 0));
@@ -320,6 +427,244 @@ describe("MarketDataModule", () => {
     await mod.start();
     await new Promise((r) => setTimeout(r, 0));
     expect(marketRepo.findActive).toHaveBeenCalledTimes(1);
+
+    await mod.stop();
+  });
+
+  it("publishes stream updates between polls when WS stream is available", async () => {
+    const tracked = [
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-a"),
+        conditionId: "cond-a",
+      }),
+    ];
+    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([
+        [
+          "tok-a",
+          {
+            bestBid: 0.4,
+            bestAsk: 0.6,
+            lastTradePrice: 0.5,
+            minOrderSize: 1,
+          },
+        ],
+      ]),
+    );
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    const received: NormalizedMarket[][] = [];
+    bus.subscribe("MarketSnapshotReceived", async (payload) => {
+      received.push([...payload.markets]);
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(received.length).toBeGreaterThan(0);
+    });
+    received.length = 0;
+
+    await stream!.emitUpdates([
+      {
+        tokenId: "tok-a",
+        pricing: {
+          bestBid: 0.45,
+          bestAsk: 0.55,
+          lastTradePrice: 0.5,
+          bookSource: "clob",
+        },
+      },
+    ]);
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toHaveLength(1);
+    expect(received[0]![0]!.bestBid).toBe(0.45);
+    expect(received[0]![0]!.bestAsk).toBe(0.55);
+    expect(mod.getMetricsSnapshot().wsUpdatesApplied).toBe(1);
+
+    await mod.stop();
+  });
+
+  it("poll skips REST pricing fetch when stream data is fresh for all tracked tokens", async () => {
+    vi.useFakeTimers();
+    try {
+      const tracked = [
+        makeTrackedMarket({
+          tokenId: createTokenId("tok-a"),
+          conditionId: "cond-a",
+        }),
+        makeTrackedMarket({
+          tokenId: createTokenId("tok-b"),
+          conditionId: "cond-b",
+        }),
+      ];
+      (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map([
+          ["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }],
+          ["tok-b", { bestBid: 0.41, bestAsk: 0.61, lastTradePrice: 0.51, minOrderSize: 1 }],
+        ]),
+      );
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+      await stream!.emitUpdates([
+        {
+          tokenId: "tok-a",
+          pricing: { bestBid: 0.44, bestAsk: 0.56, lastTradePrice: 0.5, bookSource: "clob" },
+        },
+        {
+          tokenId: "tok-b",
+          pricing: { bestBid: 0.45, bestAsk: 0.57, lastTradePrice: 0.51, bookSource: "clob" },
+        },
+      ]);
+
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).not.toHaveBeenCalled();
+      expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(0);
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("poll forces a full REST refresh after a stream gap", async () => {
+    const tracked = [
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-a"),
+        conditionId: "cond-a",
+      }),
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-b"),
+        conditionId: "cond-b",
+      }),
+    ];
+    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+    });
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+    await stream!.emitGap();
+    await mod.poll();
+
+    expect(gateway.getMarketPricing).toHaveBeenCalledWith(["tok-a", "tok-b"]);
+    expect(mod.getMetricsSnapshot().wsEventGapDetected).toBe(1);
+
+    await mod.stop();
+  });
+
+  it("poll narrows reconnect catch-up to the affected token ids when a shard reports them", async () => {
+    const tracked = [
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-a"),
+        conditionId: "cond-a",
+      }),
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-b"),
+        conditionId: "cond-b",
+      }),
+    ];
+    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([
+        ["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }],
+        ["tok-b", { bestBid: 0.41, bestAsk: 0.61, lastTradePrice: 0.51, minOrderSize: 1 }],
+      ]),
+    );
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+    });
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+    await stream!.emitUpdates([
+      {
+        tokenId: "tok-a",
+        pricing: { bestBid: 0.44, bestAsk: 0.56, lastTradePrice: 0.5, bookSource: "clob" },
+      },
+      {
+        tokenId: "tok-b",
+        pricing: { bestBid: 0.45, bestAsk: 0.57, lastTradePrice: 0.51, bookSource: "clob" },
+      },
+    ]);
+    await stream!.emitGapForTokenIds(["tok-a"]);
+    await mod.poll();
+
+    expect(gateway.getMarketPricing).toHaveBeenCalledWith(["tok-a"]);
+
+    await mod.stop();
+  });
+
+  it("publishes additive lifecycle hints from market WS events and exposes their metrics", async () => {
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    const resolvedHints: RuntimeEventMap["MarketResolvedHint"][] = [];
+    const discoveryHints: RuntimeEventMap["NewMarketDiscoveredHint"][] = [];
+    bus.subscribe("MarketResolvedHint", async (payload) => {
+      resolvedHints.push(payload);
+    });
+    bus.subscribe("NewMarketDiscoveredHint", async (payload) => {
+      discoveryHints.push(payload);
+    });
+
+    await mod.start();
+    await stream!.emitLifecycleEvents([
+      {
+        type: "market_resolved",
+        conditionId: "cond-1",
+        marketId: "market-1",
+        slug: "market-one",
+        tokenIds: [createTokenId("tok-a")],
+        winningTokenId: createTokenId("tok-a"),
+        timestamp: Date.now(),
+      },
+      {
+        type: "new_market",
+        conditionId: "cond-2",
+        marketId: "market-2",
+        slug: "market-two",
+        question: "Will two happen?",
+        active: true,
+        tokenIds: [createTokenId("tok-b")],
+        timestamp: Date.now(),
+      },
+    ]);
+    await bus.drain();
+
+    expect(resolvedHints).toHaveLength(1);
+    expect(discoveryHints).toHaveLength(1);
+    expect(mod.getMetricsSnapshot().marketResolvedEvents).toBe(1);
+    expect(mod.getMetricsSnapshot().newMarketEvents).toBe(1);
 
     await mod.stop();
   });

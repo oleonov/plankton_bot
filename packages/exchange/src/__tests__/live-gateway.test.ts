@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId } from "@plankton/domain";
 import { LiveExchangeGateway } from "../live/exchange-gateway.js";
 import { LiveMarketDataGateway, buildTokenIdBatches } from "../live/market-data-gateway.js";
+import { SharedMarketPricingStreamHub } from "../live/market-pricing-stream-hub.js";
 
 // ─── Mock ClobClient ─────────────────────────────────────────────────────
 
@@ -51,6 +52,10 @@ class FakeMarketSocket {
 
   emitJson(payload: unknown): void {
     this.onmessage?.({ data: JSON.stringify(payload) });
+  }
+
+  emitText(payload: string): void {
+    this.onmessage?.({ data: payload });
   }
 }
 
@@ -988,6 +993,7 @@ describe("LiveMarketDataGateway", () => {
       bestAsk: number | null;
       lastTradePrice: number | null;
       hasBook: boolean;
+      tickSize: number | null;
     }> = [];
     const stream = gw.createMarketPricingStream({
       onUpdates: async (next) => {
@@ -998,12 +1004,14 @@ describe("LiveMarketDataGateway", () => {
             bestAsk: update.pricing.bestAsk,
             lastTradePrice: update.pricing.lastTradePrice,
             hasBook: update.book != null,
+            tickSize: update.tickSize ?? null,
           })),
         );
       },
     });
 
     stream.setTokenIds(["tok-stream"]);
+    stream.setFullBookTokenIds?.("hot-set", ["tok-stream"]);
     socket.emitOpen();
 
     expect(JSON.parse(socket.sent[0]!)).toEqual({
@@ -1039,6 +1047,18 @@ describe("LiveMarketDataGateway", () => {
       min_order_size: "5",
       timestamp: "1766789469958",
     });
+    socket.emitJson({
+      event_type: "price_change",
+      asset_id: "tok-stream",
+      timestamp: "1766789470958",
+      price_changes: [{ price: "0.11", best_bid: "0.10", best_ask: "0.12" }],
+    });
+    socket.emitJson({
+      event_type: "tick_size_change",
+      asset_id: "tok-stream",
+      new_tick_size: "0.05",
+      timestamp: "1766789471958",
+    });
 
     expect(updates).toEqual([
       {
@@ -1047,6 +1067,7 @@ describe("LiveMarketDataGateway", () => {
         bestAsk: 0.09,
         lastTradePrice: null,
         hasBook: false,
+        tickSize: null,
       },
       {
         tokenId: "tok-stream",
@@ -1054,6 +1075,7 @@ describe("LiveMarketDataGateway", () => {
         bestAsk: 0.09,
         lastTradePrice: 0.08,
         hasBook: false,
+        tickSize: null,
       },
       {
         tokenId: "tok-stream",
@@ -1061,40 +1083,107 @@ describe("LiveMarketDataGateway", () => {
         bestAsk: 0.09,
         lastTradePrice: 0.08,
         hasBook: true,
+        tickSize: null,
+      },
+      {
+        tokenId: "tok-stream",
+        bestBid: 0.1,
+        bestAsk: 0.12,
+        lastTradePrice: 0.08,
+        hasBook: false,
+        tickSize: null,
+      },
+      {
+        tokenId: "tok-stream",
+        bestBid: 0.1,
+        bestAsk: 0.12,
+        lastTradePrice: 0.08,
+        hasBook: false,
+        tickSize: 0.05,
       },
     ]);
 
     stream.close();
   });
 
-  it("createMarketPricingStream suppresses intentional close errors during token-set reconnect", () => {
-    const sockets: DeferredCloseMarketSocket[] = [];
+  it("createMarketPricingStream updates subscriptions on the same socket", () => {
+    const sockets: FakeMarketSocket[] = [];
     gw = new LiveMarketDataGateway({
       client,
       createWebSocket: () => {
-        const socket = new DeferredCloseMarketSocket({ emitErrorOnClose: true });
+        const socket = new FakeMarketSocket();
         sockets.push(socket);
         return socket;
       },
     });
 
-    const onError = vi.fn();
     const stream = gw.createMarketPricingStream({
       onUpdates: vi.fn(),
-      onError,
     });
 
-    stream.setTokenIds(["tok-a"]);
+    stream.setTokenIds(["tok-a", "tok-b"]);
     sockets[0]!.emitOpen();
-    stream.setTokenIds(["tok-b"]);
+    stream.setTokenIds(["tok-b", "tok-c"]);
 
-    expect(sockets).toHaveLength(2);
-    expect(onError).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.sent.map((payload) => JSON.parse(payload))).toEqual([
+      {
+        type: "market",
+        assets_ids: ["tok-a", "tok-b"],
+        custom_feature_enabled: true,
+      },
+      {
+        operation: "unsubscribe",
+        assets_ids: ["tok-a"],
+      },
+      {
+        operation: "subscribe",
+        assets_ids: ["tok-c"],
+        custom_feature_enabled: true,
+      },
+    ]);
 
     stream.close();
   });
 
-  it("createMarketPricingStream ignores stale onclose from intentionally closed sockets", () => {
+  it("createMarketPricingStream shards subscriptions when token count exceeds per-socket cap", () => {
+    const sockets: FakeMarketSocket[] = [];
+    gw = new LiveMarketDataGateway({
+      client,
+      createWebSocket: () => {
+        const socket = new FakeMarketSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    const stream = gw.createMarketPricingStream({
+      onUpdates: vi.fn(),
+      onError: vi.fn(),
+    });
+
+    const tokenIds = Array.from({ length: 501 }, (_, index) => `tok-${index}`);
+    const sortedTokenIds = [...tokenIds].sort();
+    stream.setTokenIds(tokenIds);
+    sockets[0]!.emitOpen();
+    sockets[1]!.emitOpen();
+
+    expect(sockets).toHaveLength(2);
+    expect(JSON.parse(sockets[0]!.sent[0]!)).toEqual({
+      type: "market",
+      assets_ids: sortedTokenIds.slice(0, 500),
+      custom_feature_enabled: true,
+    });
+    expect(JSON.parse(sockets[1]!.sent[0]!)).toEqual({
+      type: "market",
+      assets_ids: sortedTokenIds.slice(500),
+      custom_feature_enabled: true,
+    });
+
+    stream.close();
+  });
+
+  it("createMarketPricingStream reconnects after pong timeout", () => {
     vi.useFakeTimers();
     try {
       const sockets: DeferredCloseMarketSocket[] = [];
@@ -1110,15 +1199,14 @@ describe("LiveMarketDataGateway", () => {
       const stream = gw.createMarketPricingStream({
         onUpdates: vi.fn(),
         onError: vi.fn(),
+        onGapDetected: vi.fn(),
       });
 
       stream.setTokenIds(["tok-a"]);
       sockets[0]!.emitOpen();
-
-      stream.setTokenIds(["tok-b"]);
-      sockets[1]!.emitOpen();
-
-      sockets[0]!.emitClose();
+      vi.advanceTimersByTime(10_000);
+      expect(sockets[0]!.sent).toContain("PING");
+      vi.advanceTimersByTime(15_000);
       vi.advanceTimersByTime(1_100);
 
       expect(sockets).toHaveLength(2);
@@ -1127,6 +1215,172 @@ describe("LiveMarketDataGateway", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("createMarketPricingStream treats invalid payload as a gap without crashing", async () => {
+    const socket = new FakeMarketSocket();
+    gw = new LiveMarketDataGateway({
+      client,
+      createWebSocket: () => socket,
+    });
+
+    const onError = vi.fn();
+    const onGapDetected = vi.fn();
+    const stream = gw.createMarketPricingStream({
+      onUpdates: vi.fn(),
+      onError,
+      onGapDetected,
+    });
+
+    stream.setTokenIds(["tok-a"]);
+    socket.emitOpen();
+    socket.emitText("{not-json");
+    await vi.waitFor(() => {
+      expect(onGapDetected).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: "invalid-payload",
+          timestamp: expect.any(Number),
+          tokenIds: ["tok-a"],
+        }),
+      );
+    });
+    expect(onError).toHaveBeenCalled();
+
+    stream.close();
+  });
+
+  it("createMarketPricingStream forwards additive lifecycle events", async () => {
+    const socket = new FakeMarketSocket();
+    gw = new LiveMarketDataGateway({
+      client,
+      createWebSocket: () => socket,
+    });
+
+    const lifecycleEvents: unknown[] = [];
+    const stream = gw.createMarketPricingStream({
+      onUpdates: vi.fn(),
+      onLifecycleEvents: async (events) => {
+        lifecycleEvents.push(...events);
+      },
+    });
+
+    stream.setTokenIds(["tok-stream"]);
+    socket.emitOpen();
+    socket.emitJson({
+      event_type: "market_resolved",
+      condition_id: "cond-1",
+      market: "market-1",
+      slug: "market-one",
+      assets_ids: ["tok-stream"],
+      winning_asset_id: "tok-stream",
+      timestamp: "1766789469958",
+    });
+    socket.emitJson({
+      event_type: "new_market",
+      condition_id: "cond-2",
+      market: "market-2",
+      slug: "market-two",
+      question: "Will two happen?",
+      active: true,
+      assets_ids: ["tok-new"],
+      timestamp: "1766789469958",
+    });
+
+    expect(lifecycleEvents).toEqual([
+      {
+        type: "market_resolved",
+        conditionId: "cond-1",
+        marketId: "market-1",
+        slug: "market-one",
+        tokenIds: [createTokenId("tok-stream")],
+        winningTokenId: createTokenId("tok-stream"),
+        timestamp: 1766789469958,
+      },
+      {
+        type: "new_market",
+        conditionId: "cond-2",
+        marketId: "market-2",
+        slug: "market-two",
+        question: "Will two happen?",
+        active: true,
+        tokenIds: [createTokenId("tok-new")],
+        timestamp: 1766789469958,
+      },
+    ]);
+
+    stream.close();
+  });
+});
+
+describe("SharedMarketPricingStreamHub", () => {
+  it("strips full-book depth for views without narrow full-book interest", async () => {
+    const socket = new FakeMarketSocket();
+    const hub = new SharedMarketPricingStreamHub({
+      createWebSocket: () => socket,
+    });
+    const updatesA: Array<{ hasBook: boolean }> = [];
+    const updatesB: Array<{ hasBook: boolean }> = [];
+    const viewA = hub.createStream({
+      onUpdates: async (updates) => {
+        updatesA.push(...updates.map((update) => ({ hasBook: update.book != null })));
+      },
+    });
+    const viewB = hub.createStream({
+      onUpdates: async (updates) => {
+        updatesB.push(...updates.map((update) => ({ hasBook: update.book != null })));
+      },
+    });
+
+    viewA.setTokenIds(["tok-a"]);
+    viewB.setTokenIds(["tok-a"]);
+    viewA.setFullBookTokenIds?.("hot-set", ["tok-a"]);
+    socket.emitOpen();
+    socket.emitJson({
+      event_type: "book",
+      asset_id: "tok-a",
+      bids: [{ price: "0.04", size: "10" }],
+      asks: [{ price: "0.05", size: "10" }],
+      min_order_size: "5",
+      timestamp: "1766789469958",
+    });
+
+    await vi.waitFor(() => {
+      expect(updatesA).toEqual([{ hasBook: true }]);
+      expect(updatesB).toEqual([{ hasBook: false }]);
+    });
+    expect(viewA.getMetricsSnapshot?.()?.fullBookTokenCount).toBe(1);
+
+    viewA.close();
+    viewB.close();
+  });
+
+  it("reference-counts narrow full-book interest across views and reasons", () => {
+    const socket = new FakeMarketSocket();
+    const hub = new SharedMarketPricingStreamHub({
+      createWebSocket: () => socket,
+    });
+    const viewA = hub.createStream({ onUpdates: vi.fn() });
+    const viewB = hub.createStream({ onUpdates: vi.fn() });
+
+    viewA.setTokenIds(["tok-a"]);
+    viewB.setTokenIds(["tok-a"]);
+    viewA.setFullBookTokenIds?.("hot-set", ["tok-a"]);
+    expect(viewA.getMetricsSnapshot?.()?.narrowSubscribeCount).toBe(1);
+    expect(viewA.getMetricsSnapshot?.()?.narrowUnsubscribeCount).toBe(0);
+
+    viewB.setFullBookTokenIds?.("open-order", ["tok-a"]);
+    expect(viewA.getMetricsSnapshot?.()?.narrowSubscribeCount).toBe(1);
+    expect(viewA.getMetricsSnapshot?.()?.fullBookTokenCount).toBe(1);
+
+    viewA.setFullBookTokenIds?.("hot-set", []);
+    expect(viewA.getMetricsSnapshot?.()?.narrowUnsubscribeCount).toBe(0);
+
+    viewB.setFullBookTokenIds?.("open-order", []);
+    expect(viewA.getMetricsSnapshot?.()?.narrowUnsubscribeCount).toBe(1);
+    expect(viewA.getMetricsSnapshot?.()?.fullBookTokenCount).toBe(0);
+
+    viewA.close();
+    viewB.close();
   });
 });
 

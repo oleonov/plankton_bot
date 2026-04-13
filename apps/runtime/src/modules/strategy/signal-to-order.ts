@@ -50,6 +50,7 @@ import {
 
 const QUEUE_JUMP_SHARE_WINDOW_MS = 60_000;
 const MIN_QUEUE_JUMP_SHARE_SAMPLE_SIZE = 8;
+const BRIDGE_WS_BOOK_WAIT_MS = 100;
 
 interface EntryExecutionSample {
   readonly atMs: number;
@@ -286,6 +287,18 @@ export class SignalToOrderBridge {
 
     if (market.bookSource === "clob") {
       return { market, cacheStatus: "base-market" };
+    }
+
+    const wsEntry = await this.deps.candidateBookCache.waitForFreshEntry(
+      String(signal.tokenId),
+      BRIDGE_WS_BOOK_WAIT_MS,
+      nowMs,
+    );
+    if (wsEntry) {
+      return {
+        market: applyOrderBookToMarket(market, wsEntry),
+        cacheStatus: "fresh-cache",
+      };
     }
 
     const resolution = await this.deps.candidateBookCache.getFreshOrRefresh(

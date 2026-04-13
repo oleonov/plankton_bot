@@ -104,4 +104,45 @@ describe("CandidateBookCache", () => {
     expect(observed).toContain("bridge-refresh:attempted:1");
     expect(observed).toContain("bridge-refresh:refresh-failed:1");
   });
+
+  it("reports ws cache hits when a fresh stream-backed entry is reused", async () => {
+    const observed: string[] = [];
+    const cache = new CandidateBookCache({
+      gateway: {
+        getOrderBooks: vi.fn(async () => new Map()),
+      },
+      log: makeLogger(),
+      onUsageObserved: (event) => {
+        observed.push(`${event.type}:${event.tokenId}`);
+      },
+    });
+
+    cache.upsertBooks(new Map([["tok-a", makeBook("tok-a")]]), Date.now(), "ws");
+    const resolution = await cache.getFreshOrRefresh("tok-a");
+
+    expect(resolution.status).toBe("fresh-cache");
+    expect(observed).toEqual(["ws-hit:tok-a"]);
+  });
+
+  it("waits briefly for a fresh stream-backed book before timing out", async () => {
+    vi.useFakeTimers();
+    try {
+      const cache = new CandidateBookCache({
+        gateway: {
+          getOrderBooks: vi.fn(async () => new Map()),
+        },
+        log: makeLogger(),
+      });
+
+      const waitPromise = cache.waitForFreshEntry("tok-a", 1_000);
+      await vi.advanceTimersByTimeAsync(50);
+      cache.upsertBooks(new Map([["tok-a", makeBook("tok-a")]]), Date.now(), "ws");
+
+      const entry = await waitPromise;
+      expect(entry?.tokenId).toBe("tok-a");
+      expect(entry?.sourceKind).toBe("ws");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

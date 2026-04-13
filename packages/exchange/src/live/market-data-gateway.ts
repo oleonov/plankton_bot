@@ -17,12 +17,18 @@ import {
   type TokenId,
 } from "@plankton/domain";
 import { mapMarket, mapOrderBook, parseStringOrArray } from "../mappers.js";
+import { SharedMarketPricingStreamHub } from "./market-pricing-stream-hub.js";
+import {
+  defaultMarketDataWebSocketFactory,
+  extractBookTokenId,
+  parseOptionalIsoTimestamp,
+  parseOptionalNumber,
+  type MarketDataWebSocketLike,
+} from "./market-data-stream-shared.js";
 
 const GAMMA_PRICING_BASE_URL = "https://gamma-api.polymarket.com/markets";
 const CLOB_ORDER_BOOKS_URL = "https://clob.polymarket.com/books";
-const CLOB_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const BOOKS_BATCH_SIZE = 200;
-const WS_RECONNECT_DELAY_MS = 1_000;
 
 // Transport-safety threshold to avoid 414 URI Too Large.
 // Most HTTP servers/proxies accept up to 8KB; 3500 is conservative.
@@ -87,15 +93,6 @@ export interface LiveMarketDataConfig {
   createWebSocket?: ((url: string) => MarketDataWebSocketLike) | undefined;
 }
 
-interface MarketDataWebSocketLike {
-  send(data: string): void;
-  close(code?: number, reason?: string): void;
-  onopen: ((event: unknown) => void) | null;
-  onmessage: ((event: { data: unknown }) => void) | null;
-  onerror: ((event: unknown) => void) | null;
-  onclose: ((event: { code?: number; reason?: string }) => void) | null;
-}
-
 function chunkItems<T>(items: readonly T[], chunkSize: number): T[][] {
   if (items.length === 0) return [];
   const chunks: T[][] = [];
@@ -103,31 +100,6 @@ function chunkItems<T>(items: readonly T[], chunkSize: number): T[][] {
     chunks.push(items.slice(i, i + chunkSize));
   }
   return chunks;
-}
-
-function parseOptionalNumber(value: unknown): number | null {
-  if (value === null || value === undefined) return null;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function parseOptionalIsoTimestamp(value: unknown): string | null {
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? new Date(value).toISOString() : null;
-  }
-  if (typeof value !== "string" || value.trim().length === 0) return null;
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) {
-    return new Date(numeric).toISOString();
-  }
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
-}
-
-function extractBookTokenId(raw: Record<string, unknown>): string | null {
-  if (typeof raw.asset_id === "string") return raw.asset_id;
-  if (typeof raw.token_id === "string") return raw.token_id;
-  return null;
 }
 
 /** Sentinel cursor returned by the Polymarket CLOB when no more pages exist. */
@@ -138,11 +110,15 @@ export class LiveMarketDataGateway implements MarketDataGateway {
   private readonly client: any;
   private readonly slugFilter: ((slug: string) => boolean) | undefined;
   private readonly createWebSocket: (url: string) => MarketDataWebSocketLike;
+  private readonly sharedMarketStreamHub: SharedMarketPricingStreamHub;
 
   constructor(config: LiveMarketDataConfig) {
     this.client = config.client;
     this.slugFilter = config.slugFilter;
-    this.createWebSocket = config.createWebSocket ?? defaultWebSocketFactory;
+    this.createWebSocket = config.createWebSocket ?? defaultMarketDataWebSocketFactory;
+    this.sharedMarketStreamHub = new SharedMarketPricingStreamHub({
+      createWebSocket: this.createWebSocket,
+    });
   }
 
   /**
@@ -256,13 +232,20 @@ export class LiveMarketDataGateway implements MarketDataGateway {
   createMarketPricingStream(
     handlers: Readonly<{
       onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
+      onLifecycleEvents?: (
+        events: readonly import("@plankton/domain").MarketPricingLifecycleEvent[],
+      ) => Promise<void> | void;
       onError?: (error: unknown) => Promise<void> | void;
+      onGapDetected?: (
+        info: Readonly<{
+          reason: "socket-closed" | "invalid-payload" | "connect-failed";
+          timestamp: number;
+          tokenIds?: readonly string[];
+        }>,
+      ) => Promise<void> | void;
     }>,
   ): MarketPricingStream {
-    return new LiveMarketPricingStream({
-      createWebSocket: this.createWebSocket,
-      handlers,
-    });
+    return this.sharedMarketStreamHub.createStream(handlers);
   }
 
   private extractPricing(
@@ -347,220 +330,4 @@ export class LiveMarketDataGateway implements MarketDataGateway {
       );
     });
   }
-}
-
-function defaultWebSocketFactory(url: string): MarketDataWebSocketLike {
-  const ctor = (globalThis as { WebSocket?: new (url: string) => MarketDataWebSocketLike })
-    .WebSocket;
-  if (!ctor) {
-    throw new Error("WebSocket is not available in the current runtime");
-  }
-  return new ctor(url);
-}
-
-class LiveMarketPricingStream implements MarketPricingStream {
-  private readonly pricingByToken = new Map<string, MarketPricingSnapshot>();
-  private readonly intentionallyClosedSockets = new WeakSet<MarketDataWebSocketLike>();
-  private tokenIds: string[] = [];
-  private socket: MarketDataWebSocketLike | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private closed = false;
-
-  constructor(
-    private readonly deps: Readonly<{
-      createWebSocket: (url: string) => MarketDataWebSocketLike;
-      handlers: Readonly<{
-        onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
-        onError?: (error: unknown) => Promise<void> | void;
-      }>;
-    }>,
-  ) {}
-
-  setTokenIds(tokenIds: readonly string[]): void {
-    const next = [...new Set(tokenIds)].filter((tokenId) => tokenId.length > 0).sort();
-    if (sameTokenList(this.tokenIds, next)) return;
-    this.tokenIds = next;
-    if (this.tokenIds.length === 0) {
-      this.closeSocket();
-      return;
-    }
-    this.reconnect();
-  }
-
-  close(): void {
-    this.closed = true;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    this.closeSocket({ intentional: true });
-    this.pricingByToken.clear();
-  }
-
-  private reconnect(): void {
-    if (this.closed) return;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    this.closeSocket({ intentional: true });
-    try {
-      const socket = this.deps.createWebSocket(CLOB_MARKET_WS_URL);
-      this.socket = socket;
-      socket.onopen = () => {
-        socket.send(
-          JSON.stringify({
-            type: "market",
-            assets_ids: this.tokenIds,
-            custom_feature_enabled: true,
-          }),
-        );
-      };
-      socket.onmessage = (event) => {
-        void this.handleMessage(event.data);
-      };
-      socket.onerror = (event) => {
-        if (this.shouldIgnoreSocketError(socket)) return;
-        void this.deps.handlers.onError?.(event);
-      };
-      socket.onclose = () => {
-        const ignoreEvent = this.shouldIgnoreSocketClose(socket);
-        if (this.socket === socket) {
-          this.socket = null;
-        }
-        if (ignoreEvent || this.closed || this.tokenIds.length === 0) return;
-        this.scheduleReconnect();
-      };
-    } catch (error) {
-      void this.deps.handlers.onError?.(error);
-    }
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      this.reconnect();
-    }, WS_RECONNECT_DELAY_MS);
-  }
-
-  private shouldIgnoreSocketError(socket: MarketDataWebSocketLike): boolean {
-    if (this.intentionallyClosedSockets.has(socket)) return true;
-    return this.socket !== socket && this.socket != null;
-  }
-
-  private shouldIgnoreSocketClose(socket: MarketDataWebSocketLike): boolean {
-    if (this.intentionallyClosedSockets.has(socket)) {
-      this.intentionallyClosedSockets.delete(socket);
-      return true;
-    }
-    return this.socket !== socket && this.socket != null;
-  }
-
-  private closeSocket(opts?: { intentional?: boolean }): void {
-    const socket = this.socket;
-    this.socket = null;
-    if (socket && opts?.intentional) {
-      this.intentionallyClosedSockets.add(socket);
-    }
-    socket?.close();
-  }
-
-  private async handleMessage(data: unknown): Promise<void> {
-    try {
-      const text = normalizeWebSocketPayload(data);
-      if (!text) return;
-      const parsed = JSON.parse(text) as unknown;
-      const updates = collectStreamUpdates(parsed, this.pricingByToken);
-      if (updates.length === 0) return;
-      await this.deps.handlers.onUpdates(updates);
-    } catch (error) {
-      await this.deps.handlers.onError?.(error);
-    }
-  }
-}
-
-function sameTokenList(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  for (let i = 0; i < left.length; i += 1) {
-    if (left[i] !== right[i]) return false;
-  }
-  return true;
-}
-
-function normalizeWebSocketPayload(data: unknown): string | null {
-  if (typeof data === "string") return data;
-  if (data instanceof ArrayBuffer) {
-    return new TextDecoder().decode(new Uint8Array(data));
-  }
-  if (ArrayBuffer.isView(data)) {
-    return new TextDecoder().decode(data);
-  }
-  return null;
-}
-
-function collectStreamUpdates(
-  payload: unknown,
-  pricingByToken: Map<string, MarketPricingSnapshot>,
-): MarketPricingStreamUpdate[] {
-  const records = Array.isArray(payload) ? payload : [payload];
-  const updates: MarketPricingStreamUpdate[] = [];
-
-  for (const entry of records) {
-    if (!entry || typeof entry !== "object") continue;
-    const raw = entry as Record<string, unknown>;
-    const eventType = typeof raw.event_type === "string" ? raw.event_type : "";
-    const tokenId = extractBookTokenId(raw);
-    if (!tokenId) continue;
-
-    const current = pricingByToken.get(tokenId) ?? {
-      bestBid: null,
-      bestAsk: null,
-      lastTradePrice: null,
-      lastTradeAt: null,
-      volume24h: null,
-      liquidity: null,
-      minOrderSize: null,
-      bookSource: "clob" as const,
-    };
-
-    if (eventType === "book") {
-      const book = mapOrderBook(createTokenId(tokenId), raw);
-      const next: MarketPricingSnapshot = {
-        ...current,
-        bestBid: book.bestBid,
-        bestAsk: book.bestAsk,
-        minOrderSize: book.minOrderSize ?? current.minOrderSize ?? null,
-        bookSource: "clob",
-      };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next, book });
-      continue;
-    }
-
-    if (eventType === "best_bid_ask") {
-      const next: MarketPricingSnapshot = {
-        ...current,
-        bestBid: parseOptionalNumber(raw.best_bid),
-        bestAsk: parseOptionalNumber(raw.best_ask),
-        bookSource: "clob",
-      };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next });
-      continue;
-    }
-
-    if (eventType === "last_trade_price" || eventType === "price_change") {
-      const next: MarketPricingSnapshot = {
-        ...current,
-        lastTradePrice: parseOptionalNumber(raw.price),
-        lastTradeAt: parseOptionalIsoTimestamp(raw.timestamp) ?? current.lastTradeAt ?? null,
-        bookSource: "clob",
-      };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next });
-    }
-  }
-
-  return updates;
 }

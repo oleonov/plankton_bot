@@ -10,6 +10,12 @@ export interface CandidateBookRefreshObserved {
   readonly tokenCount: number;
   readonly outcome: "attempted" | "refreshed" | "refresh-budget-exhausted" | "refresh-failed";
   readonly refreshedCount?: number;
+  readonly durationMs?: number;
+}
+
+export interface CandidateBookUsageObserved {
+  readonly type: "ws-hit" | "rest-fallback";
+  readonly tokenId: string;
 }
 
 export interface CandidateBookCacheEntry {
@@ -18,6 +24,7 @@ export interface CandidateBookCacheEntry {
   readonly cachedAtMs: number;
   readonly sourcePolledAtMs: number;
   readonly bookSource: "clob";
+  readonly sourceKind: "ws" | "rest";
   readonly book: OrderBookSnapshot;
 }
 
@@ -40,6 +47,7 @@ interface CandidateBookCacheDeps {
   readonly refreshBudgetPerWindow?: number;
   readonly refreshBudgetWindowMs?: number;
   readonly onRefreshObserved?: ((event: CandidateBookRefreshObserved) => void) | undefined;
+  readonly onUsageObserved?: ((event: CandidateBookUsageObserved) => void) | undefined;
 }
 
 const DEFAULT_MAX_AGE_MS = 3_000;
@@ -49,6 +57,10 @@ const DEFAULT_REFRESH_BUDGET_WINDOW_MS = 1_000;
 
 export class CandidateBookCache {
   private entries = new Map<string, CandidateBookCacheEntry>();
+  private readonly waitersByToken = new Map<
+    string,
+    Array<(entry: CandidateBookCacheEntry | null) => void>
+  >();
   private readonly pendingRefreshes = new Map<
     string,
     {
@@ -82,6 +94,12 @@ export class CandidateBookCache {
       }
     }
     this.pendingRefreshes.clear();
+    for (const waiters of this.waitersByToken.values()) {
+      for (const waiter of waiters) {
+        waiter(null);
+      }
+    }
+    this.waitersByToken.clear();
   }
 
   prime(tokenIds: readonly string[]): Promise<Map<string, CandidateBookCacheEntry>> {
@@ -99,11 +117,46 @@ export class CandidateBookCache {
     return entry;
   }
 
+  async waitForFreshEntry(
+    tokenId: string,
+    timeoutMs: number,
+    nowMs: number = Date.now(),
+  ): Promise<CandidateBookCacheEntry | null> {
+    const fresh = this.getFreshEntry(tokenId, nowMs);
+    if (fresh) return fresh;
+
+    return new Promise((resolve) => {
+      let waiterFn: ((entry: CandidateBookCacheEntry | null) => void) | null = null;
+      const timer = setTimeout(() => {
+        if (!waiterFn) {
+          resolve(null);
+          return;
+        }
+        const waiters = this.waitersByToken.get(tokenId) ?? [];
+        const remaining = waiters.filter((waiter) => waiter !== waiterFn);
+        if (remaining.length === 0) {
+          this.waitersByToken.delete(tokenId);
+        } else {
+          this.waitersByToken.set(tokenId, remaining);
+        }
+        resolve(null);
+      }, timeoutMs);
+      waiterFn = (entry) => {
+        clearTimeout(timer);
+        resolve(entry);
+      };
+      const waiters = this.waitersByToken.get(tokenId) ?? [];
+      waiters.push(waiterFn);
+      this.waitersByToken.set(tokenId, waiters);
+    });
+  }
+
   upsertBooks(
     books:
       | ReadonlyMap<string, OrderBookSnapshot>
       | ReadonlyArray<readonly [string, OrderBookSnapshot]>,
     sourcePolledAtMs: number = Date.now(),
+    sourceKind: "ws" | "rest" = "ws",
   ): Map<string, CandidateBookCacheEntry> {
     const nowMs = Date.now();
     const iterable = books instanceof Map ? books.entries() : books;
@@ -117,10 +170,12 @@ export class CandidateBookCache {
         cachedAtMs: nowMs,
         sourcePolledAtMs,
         bookSource: "clob",
+        sourceKind,
         book,
       };
       nextEntries.set(tokenId, entry);
       nextMap.set(tokenId, entry);
+      this.resolveWaiters(tokenId, entry);
     }
 
     this.entries = nextMap;
@@ -133,11 +188,15 @@ export class CandidateBookCache {
   ): Promise<CandidateBookResolution> {
     const fresh = this.getFreshEntry(tokenId, nowMs);
     if (fresh) {
+      if (fresh.sourceKind === "ws") {
+        this.deps.onUsageObserved?.({ type: "ws-hit", tokenId });
+      }
       return { entry: fresh, status: "fresh-cache" };
     }
 
     const cached = this.getEntry(tokenId);
     const fallbackStatus: CandidateBookResolution["status"] = cached ? "cache-stale" : "cache-miss";
+    this.deps.onUsageObserved?.({ type: "rest-fallback", tokenId });
     return this.enqueueRefresh(tokenId, fallbackStatus);
   }
 
@@ -153,6 +212,7 @@ export class CandidateBookCache {
       tokenCount: uniqueTokenIds.length,
       outcome: "attempted",
     });
+    const startedAtMs = Date.now();
     const sourcePolledAtMs = Date.now();
     const books = await this.deps.gateway.getOrderBooks(uniqueTokenIds);
     const nextEntries = new Map<string, CandidateBookCacheEntry>();
@@ -167,10 +227,12 @@ export class CandidateBookCache {
         cachedAtMs: Date.now(),
         sourcePolledAtMs,
         bookSource: "clob",
+        sourceKind: "rest",
         book,
       };
       nextEntries.set(tokenId, entry);
       nextMap.set(tokenId, entry);
+      this.resolveWaiters(tokenId, entry);
     }
 
     this.entries = nextMap;
@@ -187,6 +249,7 @@ export class CandidateBookCache {
       tokenCount: uniqueTokenIds.length,
       outcome: "refreshed",
       refreshedCount: nextEntries.size,
+      durationMs: Date.now() - startedAtMs,
     });
     return nextEntries;
   }
@@ -233,6 +296,7 @@ export class CandidateBookCache {
         for (const resolve of pending.get(tokenId)?.resolvers ?? []) {
           resolve({ entry: null, status: "refresh-budget-exhausted" });
         }
+        this.resolveWaiters(tokenId, null);
       }
       return;
     }
@@ -259,7 +323,17 @@ export class CandidateBookCache {
         for (const resolve of pending.get(tokenId)?.resolvers ?? []) {
           resolve({ entry: null, status: "refresh-failed" });
         }
+        this.resolveWaiters(tokenId, null);
       }
+    }
+  }
+
+  private resolveWaiters(tokenId: string, entry: CandidateBookCacheEntry | null): void {
+    const waiters = this.waitersByToken.get(tokenId);
+    if (!waiters || waiters.length === 0) return;
+    this.waitersByToken.delete(tokenId);
+    for (const waiter of waiters) {
+      waiter(entry);
     }
   }
 

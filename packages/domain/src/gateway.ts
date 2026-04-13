@@ -128,13 +128,80 @@ export interface MarketPricingStreamUpdate {
   readonly tokenId: string;
   readonly pricing: MarketPricingSnapshot;
   readonly book?: OrderBookSnapshot | null;
+  readonly tickSize?: number | null;
+}
+
+export type MarketPricingFullBookReason =
+  | "hot-set"
+  | "open-order"
+  | "open-position"
+  | "bridge-candidate";
+
+export type MarketPricingLifecycleEvent =
+  | {
+      readonly type: "market_resolved";
+      readonly conditionId: string;
+      readonly marketId: string | null;
+      readonly slug: string | null;
+      readonly tokenIds: readonly TokenId[];
+      readonly winningTokenId: TokenId | null;
+      readonly timestamp: number;
+    }
+  | {
+      readonly type: "new_market";
+      readonly conditionId: string;
+      readonly marketId: string | null;
+      readonly slug: string;
+      readonly question: string | null;
+      readonly active: boolean;
+      readonly tokenIds: readonly TokenId[];
+      readonly timestamp: number;
+    };
+
+export interface MarketPricingStreamLatencySummary {
+  readonly count: number;
+  readonly avgMs: number;
+  readonly minMs: number;
+  readonly p50Ms: number;
+  readonly p95Ms: number;
+  readonly maxMs: number;
+}
+
+export interface MarketPricingStreamMetricsSnapshot {
+  readonly windowStartMs: number;
+  readonly wsEventsReceived: number;
+  readonly wsEventsReceivedPerSec: number;
+  readonly wsUpdatesApplied: number;
+  readonly trackedTokenCount: number;
+  readonly shardCount: number;
+  readonly reconnectCount: number;
+  readonly wsEventGapDetected: number;
+  readonly wsLatencyMs: MarketPricingStreamLatencySummary | null;
+  readonly fullBookTokenCount?: number;
+  readonly bookEventsReceived?: number;
+  readonly narrowSubscribeCount?: number;
+  readonly narrowUnsubscribeCount?: number;
+  readonly narrowRefCountLeaks?: number;
+  readonly marketResolvedEvents?: number;
+  readonly newMarketEvents?: number;
 }
 
 export interface MarketPricingStream {
   /** Replace the active subscription set. Empty means "unsubscribe from all". */
   setTokenIds(tokenIds: readonly string[]): void;
+  /**
+   * Replace the full-book interest set for a single lifecycle reason.
+   * Tokens not covered by any reason still receive top-of-book updates, but their
+   * raw order-book depth should not be retained or exposed to execution caches.
+   */
+  setFullBookTokenIds?(
+    reason: MarketPricingFullBookReason,
+    tokenIds: readonly string[],
+  ): void;
   /** Close the stream and release all resources. Idempotent. */
   close(): void;
+  /** Optional diagnostics for stream-capable gateways. */
+  getMetricsSnapshot?(): MarketPricingStreamMetricsSnapshot;
 }
 
 export interface ExchangeUserTradeEvent {
@@ -212,7 +279,17 @@ export interface MarketDataGateway {
   createMarketPricingStream?(
     handlers: Readonly<{
       onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
+      onLifecycleEvents?: (
+        events: readonly MarketPricingLifecycleEvent[],
+      ) => Promise<void> | void;
       onError?: (error: unknown) => Promise<void> | void;
+      onGapDetected?: (
+        gap: Readonly<{
+          reason: "socket-closed" | "invalid-payload" | "connect-failed";
+          timestamp: number;
+          tokenIds?: readonly string[];
+        }>,
+      ) => Promise<void> | void;
     }>,
   ): MarketPricingStream;
 }

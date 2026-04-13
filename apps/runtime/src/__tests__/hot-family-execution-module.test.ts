@@ -996,6 +996,9 @@ describe("HotMarketDataModule", () => {
     const orderRepo = {
       findOpen: vi.fn(() => []),
     } as never;
+    const positionRepo = {
+      findOpen: vi.fn(() => []),
+    } as never;
     const rulesProvider = {
       getRule: vi.fn(() => makeBundle()),
       isEnabled: vi.fn(() => true),
@@ -1007,6 +1010,7 @@ describe("HotMarketDataModule", () => {
       gateway: gateway as never,
       rulesProvider: rulesProvider as never,
       orderRepo,
+      positionRepo,
       log: makeLogger(),
       policy: { hotQuoteRefreshIntervalMs: 500 },
     });
@@ -1077,6 +1081,9 @@ describe("HotMarketDataModule", () => {
     const orderRepo = {
       findOpen: vi.fn(() => []),
     } as never;
+    const positionRepo = {
+      findOpen: vi.fn(() => []),
+    } as never;
     const rulesProvider = {
       getRule: vi.fn(() => makeBundle()),
       isEnabled: vi.fn(() => true),
@@ -1088,6 +1095,7 @@ describe("HotMarketDataModule", () => {
       gateway: gateway as never,
       rulesProvider: rulesProvider as never,
       orderRepo,
+      positionRepo,
       candidateBookCache: cache,
       log: makeLogger(),
       policy: { hotQuoteRefreshIntervalMs: 500 },
@@ -1143,6 +1151,69 @@ describe("HotMarketDataModule", () => {
     expect(cache.getFreshEntry(String(TOKEN_ID), Date.now())?.book.bestAsk).toBe(0.09);
   });
 
+  it("sets narrow full-book interest for hot, open-order, open-position, and bridge-candidate tokens", async () => {
+    vi.useFakeTimers();
+    const bus = new InProcessEventBus();
+    const positionTokenId = createTokenId("tok-hot-pos");
+    const bridgeTokenId = createTokenId("tok-hot-bridge");
+    const stream = {
+      setTokenIds: vi.fn(),
+      setFullBookTokenIds: vi.fn(),
+      close: vi.fn(),
+    };
+    const gateway = {
+      getMarketPricing: vi.fn(async () => new Map()),
+      createMarketPricingStream: vi.fn(() => stream),
+    };
+    const orderRepo = {
+      findOpen: vi.fn(() => [{ tokenId: TOKEN_ID_2 }]),
+    } as never;
+    const positionRepo = {
+      findOpen: vi.fn(() => [{ tokenId: positionTokenId }]),
+    } as never;
+    const rulesProvider = {
+      getRule: vi.fn(() => makeBundle()),
+      isEnabled: vi.fn(() => true),
+      getAllFamilies: vi.fn(() => []),
+      getRulesForRegime: vi.fn(() => []),
+    };
+    const mod = new HotMarketDataModule({
+      bus,
+      gateway: gateway as never,
+      rulesProvider: rulesProvider as never,
+      orderRepo,
+      positionRepo,
+      log: makeLogger(),
+      policy: { hotQuoteRefreshIntervalMs: 500 },
+    });
+
+    await mod.start();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket()],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        tokenId: bridgeTokenId,
+      } as never,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(stream.setFullBookTokenIds).toHaveBeenCalledWith("hot-set", [String(TOKEN_ID)]);
+    expect(stream.setFullBookTokenIds).toHaveBeenCalledWith("open-order", [String(TOKEN_ID_2)]);
+    expect(stream.setFullBookTokenIds).toHaveBeenCalledWith("open-position", [
+      String(positionTokenId),
+    ]);
+    expect(stream.setFullBookTokenIds).toHaveBeenCalledWith("bridge-candidate", [
+      String(bridgeTokenId),
+    ]);
+
+    await mod.stop();
+  });
+
   it("holds the hot stream subscription steady across minor ranking flips until hold window expires", async () => {
     vi.useFakeTimers();
     const bus = new InProcessEventBus();
@@ -1157,6 +1228,9 @@ describe("HotMarketDataModule", () => {
     const orderRepo = {
       findOpen: vi.fn(() => []),
     } as never;
+    const positionRepo = {
+      findOpen: vi.fn(() => []),
+    } as never;
     const rulesProvider = {
       getRule: vi.fn(() => makeBundle()),
       isEnabled: vi.fn(() => true),
@@ -1168,6 +1242,7 @@ describe("HotMarketDataModule", () => {
       gateway: gateway as never,
       rulesProvider: rulesProvider as never,
       orderRepo,
+      positionRepo,
       log: makeLogger(),
       policy: { hotQuoteRefreshIntervalMs: 500, hotSetHoldWindowMs: 5_000, maxTokensPerCycle: 1 },
     });
