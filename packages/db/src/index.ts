@@ -19,6 +19,7 @@ export { SqlitePromotionProposalRepository } from "./repositories/promotion-prop
 export {
   SqliteFamilyRulesDbRepository,
   type DbFamilyConfig,
+  normalizeFamilyRulesSnapshot,
 } from "./repositories/family-rules-db-repository.js";
 export { SqliteStateTransitionRepository } from "./repositories/state-transition-repository.js";
 export { SqliteFamilyEvidenceRepository } from "./repositories/family-evidence-repository.js";

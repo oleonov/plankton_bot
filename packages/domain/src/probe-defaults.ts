@@ -1,19 +1,33 @@
+export interface FamilyCapsDefaults {
+  readonly maxOpenValueUsdc: number;
+  readonly maxActiveMarkets: number;
+  readonly maxDustPositions: number;
+  readonly tailQuarantineThresholdUsdc: number;
+  readonly tailQuarantineThresholdRatio: number;
+}
+
 /**
  * Default caps for newly materialized probe-only families.
- * Single source of truth — used by API (accept endpoint) and frontend (Accept dialog).
+ * UI editors use the market/dust/open-value fields; server-side flows also
+ * consume the tail ratio so future discovery families materialize with the
+ * same policy instead of falling back to SQL defaults.
  */
-export const PROBE_DEFAULTS = {
+export const PROBE_DEFAULTS: FamilyCapsDefaults = {
   maxOpenValueUsdc: 10,
-  maxActiveMarkets: 3,
-  maxDustPositions: 2,
-} as const;
+  maxActiveMarkets: 100,
+  maxDustPositions: 50,
+  tailQuarantineThresholdUsdc: 1000.0,
+  tailQuarantineThresholdRatio: 1000.0,
+};
 
 /**
  * Default caps for scaled (promoted) families.
- * Single source of truth — used by API (promote endpoint), command-poller, and frontend (Promote dialog).
+ * Used by promote UI, command-poller fallback, and DB writers.
  */
-export const SCALED_DEFAULTS = {
+export const SCALED_DEFAULTS: FamilyCapsDefaults = {
   maxOpenValueUsdc: 50,
-  maxActiveMarkets: 5,
-  maxDustPositions: 3,
-} as const;
+  maxActiveMarkets: 100,
+  maxDustPositions: 50,
+  tailQuarantineThresholdUsdc: 1000.0,
+  tailQuarantineThresholdRatio: 1000.0,
+};

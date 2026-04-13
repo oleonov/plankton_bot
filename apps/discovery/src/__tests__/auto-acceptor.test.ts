@@ -169,6 +169,12 @@ describe("autoAcceptAndPromote", () => {
       expect(result.accepted).toBe(1);
       expect(mockFetch).toHaveBeenCalledOnce();
       expect(mockFetch.mock.calls[0]![0]).toContain("/api/v1/discovery/candidates/cand-1/accept");
+      expect(mockFetch.mock.calls[0]![1]).toEqual(
+        expect.objectContaining({
+          method: "POST",
+          body: undefined,
+        }),
+      );
     });
 
     it("skips candidates with status=materialized", async () => {

@@ -174,6 +174,83 @@ describe("dual-connection infrastructure", () => {
     ]);
   });
 
+  it("bootstrapControlDb applies one-time family limit backfill and refreshes latest snapshots", () => {
+    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ctrl-family-limits-"));
+    const dbPath = path.join(tmpDir, "control.db");
+    const conn1 = bootstrapControlDb(dbPath);
+
+    conn1.db
+      .prepare(
+        `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
+         VALUES ('legacy-fam', 'legacy-fam', 'crypto', 'threshold', 'daily', 'daily', 'scalp', 'yaml_import')`,
+      )
+      .run();
+    conn1.db
+      .prepare(
+        `INSERT INTO family_evidence
+         (family_id, evidence_status, evidence_score, promotion_state,
+          local_trade_count, local_market_count, local_realized_pnl_fifo,
+          open_tail_cost_usdc, tail_adjusted_pnl, both_sided_eligible, heavy_campaign_eligible)
+         VALUES ('legacy-fam', 'confirmed', 1, 'probe-only', 0, 0, 0, 0, 0, 0, 0)`,
+      )
+      .run();
+    conn1.db
+      .prepare(
+        `INSERT INTO family_rules
+         (family_id, max_active_markets, max_dust_positions,
+          tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio)
+         VALUES ('legacy-fam', 2, 1, 25, 5.0)`,
+      )
+      .run();
+    conn1.db
+      .prepare(
+        `INSERT INTO family_rules_snapshot (family_id, snapshot, reason, captured_at)
+         VALUES ('legacy-fam', ?, 'probe-baseline', datetime('now', '-1 minute'))`,
+      )
+      .run(
+        JSON.stringify({
+          maxActiveMarkets: 2,
+          maxDustPositions: 1,
+          tailQuarantineThresholdUsdc: 25,
+          tailQuarantineThresholdRatio: 5.0,
+          scaleMode: "disabled",
+        }),
+      );
+    conn1.close();
+
+    const conn2 = bootstrapControlDb(dbPath);
+    conns.push(conn2);
+
+    const rules = conn2.db
+      .prepare(
+        `SELECT max_active_markets, max_dust_positions,
+                tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio
+           FROM family_rules
+          WHERE family_id = 'legacy-fam'`,
+      )
+      .get() as Record<string, unknown>;
+    expect(rules.max_active_markets).toBe(100);
+    expect(rules.max_dust_positions).toBe(50);
+    expect(rules.tail_quarantine_threshold_usdc).toBe(1000);
+    expect(rules.tail_quarantine_threshold_ratio).toBe(1000);
+
+    const snapshot = conn2.db
+      .prepare(
+        `SELECT snapshot, reason FROM family_rules_snapshot
+          WHERE family_id = 'legacy-fam'
+          ORDER BY captured_at DESC
+          LIMIT 1`,
+      )
+      .get() as { snapshot: string; reason: string };
+    const parsed = JSON.parse(snapshot.snapshot) as Record<string, unknown>;
+    expect(parsed.maxActiveMarkets).toBe(100);
+    expect(parsed.maxDustPositions).toBe(50);
+    expect(parsed.tailQuarantineThresholdUsdc).toBe(1000);
+    expect(parsed.tailQuarantineThresholdRatio).toBe(1000);
+    expect(snapshot.reason).toContain("family-limit-unification-backfill");
+  });
+
   it("bootstrapLedgerDb is idempotent", () => {
     tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-idem-"));
     const dbPath = path.join(tmpDir, "ledger.db");

@@ -410,6 +410,22 @@ describe("POST /discovery/candidates/:id/accept", () => {
     expect(rules.require_proven_family_above_price).toBe(0.35);
     expect(rules.preferred_entry_band).toBe("0.05-0.35");
     expect(rules.fast_lane_enabled).toBe(0);
+    expect(rules.tail_quarantine_threshold_usdc).toBe(1000.0);
+    expect(rules.max_active_markets).toBe(100);
+    expect(rules.max_dust_positions).toBe(50);
+    expect(rules.tail_quarantine_threshold_ratio).toBe(1000.0);
+
+    const snapshot = db
+      .prepare(
+        "SELECT snapshot FROM family_rules_snapshot WHERE family_id = ? ORDER BY captured_at DESC LIMIT 1",
+      )
+      .get("cand-accept-1") as { snapshot: string } | undefined;
+    expect(snapshot).toBeDefined();
+    const parsedSnapshot = JSON.parse(snapshot!.snapshot) as Record<string, unknown>;
+    expect(parsedSnapshot.maxActiveMarkets).toBe(100);
+    expect(parsedSnapshot.maxDustPositions).toBe(50);
+    expect(parsedSnapshot.tailQuarantineThresholdUsdc).toBe(1000);
+    expect(parsedSnapshot.tailQuarantineThresholdRatio).toBe(1000);
 
     // Verify family_runtime_state row exists
     const state = db
@@ -597,19 +613,29 @@ describe("POST /discovery/candidates/:id/accept", () => {
 
     const rules = db
       .prepare(
-        `SELECT max_entry_price, preferred_entry_band, fast_lane_enabled
+        `SELECT max_entry_price, preferred_entry_band, fast_lane_enabled,
+                max_active_markets, max_dust_positions,
+                tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio
          FROM family_rules WHERE family_id = ?`,
       )
       .get("cand-updown-1") as {
       max_entry_price: number;
       preferred_entry_band: string | null;
       fast_lane_enabled: number | null;
+      max_active_markets: number;
+      max_dust_positions: number;
+      tail_quarantine_threshold_usdc: number;
+      tail_quarantine_threshold_ratio: number;
     };
 
     expect(rules).toEqual({
       max_entry_price: 0.35,
       preferred_entry_band: "0.05-0.35",
       fast_lane_enabled: 1,
+      max_active_markets: 100,
+      max_dust_positions: 50,
+      tail_quarantine_threshold_usdc: 1000,
+      tail_quarantine_threshold_ratio: 1000,
     });
   });
 });

@@ -176,6 +176,47 @@ describe("SqliteFamilyRulesDbRepository", () => {
     });
     expect(cfg.rules.tailSuppression.maxOpenValueUsdc).toBe(25);
   });
+
+  it("overwriteRules accepts raw family_rules snapshot rows", () => {
+    seedFamily(conn.db, "fam-1");
+
+    const rawRow = conn.db
+      .prepare("SELECT * FROM family_rules WHERE family_id = ?")
+      .get("fam-1") as Record<string, unknown>;
+
+    repo.overwriteRules("fam-1" as FamilyId, JSON.stringify(rawRow));
+
+    const configs = repo.loadAll();
+    const cfg = configs[0]! as any;
+
+    expect(cfg.rules.entry.entryMode).toBe("probe-first");
+    expect(cfg.rules.entry.maxEntryPrice).toBe(0.5);
+    expect(cfg.rules.tailSuppression.maxActiveMarkets).toBe(5);
+    expect(cfg.rules.tailSuppression.maxDustPositions).toBe(3);
+    expect(cfg.rules.tailSuppression.tailQuarantineThresholdRatio).toBe(1.0);
+  });
+
+  it("updateToScaledDefaults applies canonical scaled caps including tail ratio", () => {
+    seedFamily(conn.db, "fam-1");
+
+    repo.updateToScaledDefaults("fam-1" as FamilyId);
+
+    const row = conn.db
+      .prepare(
+        `SELECT max_open_value_usdc, max_active_markets, max_dust_positions,
+                tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio, scale_mode
+           FROM family_rules
+          WHERE family_id = ?`,
+      )
+      .get("fam-1") as Record<string, unknown>;
+
+    expect(row.max_open_value_usdc).toBe(50);
+    expect(row.max_active_markets).toBe(100);
+    expect(row.max_dust_positions).toBe(50);
+    expect(row.tail_quarantine_threshold_usdc).toBe(1000);
+    expect(row.tail_quarantine_threshold_ratio).toBe(1000);
+    expect(row.scale_mode).toBe("confirm-only");
+  });
 });
 
 // Branded type import for overwriteRules call

@@ -135,10 +135,10 @@ CREATE TABLE IF NOT EXISTS family_rules (
 
   -- tail_suppression
   max_open_value_usdc                      REAL NOT NULL DEFAULT 50,
-  max_active_markets                       INTEGER NOT NULL DEFAULT 5,
-  max_dust_positions                       INTEGER NOT NULL DEFAULT 3,
-  tail_quarantine_threshold_usdc           REAL NOT NULL DEFAULT 50,
-  tail_quarantine_threshold_ratio          REAL NOT NULL DEFAULT 1.0,
+  max_active_markets                       INTEGER NOT NULL DEFAULT 100,
+  max_dust_positions                       INTEGER NOT NULL DEFAULT 50,
+  tail_quarantine_threshold_usdc           REAL NOT NULL DEFAULT 1000.0,
+  tail_quarantine_threshold_ratio          REAL NOT NULL DEFAULT 1000.0,
   stale_tail_prune_enabled                 INTEGER NOT NULL DEFAULT 0,
   threshold_cleanup_required               INTEGER NOT NULL DEFAULT 0,
 

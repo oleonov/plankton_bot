@@ -46,10 +46,10 @@ describe("Discovery Accept dialog with caps", () => {
     expect(screen.getByText("Approve btc-above-50k?")).toBeInTheDocument();
     const inputs = screen.getAllByRole("textbox");
     expect(inputs).toHaveLength(3);
-    // Defaults from PROBE_DEFAULTS: 10, 3, 2
+    // Defaults from PROBE_DEFAULTS: 10, 100, 50
     expect((inputs[0] as HTMLInputElement).value).toBe("10");
-    expect((inputs[1] as HTMLInputElement).value).toBe("3");
-    expect((inputs[2] as HTMLInputElement).value).toBe("2");
+    expect((inputs[1] as HTMLInputElement).value).toBe("100");
+    expect((inputs[2] as HTMLInputElement).value).toBe("50");
   });
 
   it("explains that live-lite approve adds the family to the live profile", async () => {
@@ -178,7 +178,7 @@ describe("Discovery Accept dialog with caps", () => {
     await user.clear(inputs[0]!);
     await user.type(inputs[0]!, "20");
 
-    // Change Max Markets from 3 to 5
+    // Change Max Markets from 100 to 5
     await user.clear(inputs[1]!);
     await user.type(inputs[1]!, "5");
 
@@ -188,7 +188,7 @@ describe("Discovery Accept dialog with caps", () => {
     expect(acceptHandler).toHaveBeenCalledWith({
       maxOpenValueUsdc: 20,
       maxActiveMarkets: 5,
-      maxDustPositions: 2,
+      maxDustPositions: 50,
     });
   });
 

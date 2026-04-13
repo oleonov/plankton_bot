@@ -8,7 +8,11 @@ import {
   resolveFamilyDeploymentSeed,
   resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
-import { SqliteDiscoveryRunRepository, readFamilyRuleDefaults } from "@plankton/db";
+import {
+  SqliteDiscoveryRunRepository,
+  normalizeFamilyRulesSnapshot,
+  readFamilyRuleDefaults,
+} from "@plankton/db";
 import { ok, ApiError } from "../errors.js";
 
 interface DiscoveryOpts {
@@ -524,6 +528,8 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       maxOpenValue: body.maxOpenValueUsdc ?? PROBE_DEFAULTS.maxOpenValueUsdc,
       maxMarkets: body.maxActiveMarkets ?? PROBE_DEFAULTS.maxActiveMarkets,
       maxDust: body.maxDustPositions ?? PROBE_DEFAULTS.maxDustPositions,
+      tailQuarantineThresholdUsdc: PROBE_DEFAULTS.tailQuarantineThresholdUsdc,
+      tailQuarantineThresholdRatio: PROBE_DEFAULTS.tailQuarantineThresholdRatio,
     };
     const defaultEntryPreset = readFamilyRuleDefaults(controlDb).entry;
     if (defaultEntryPreset == null) {
@@ -625,9 +631,10 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
               min_entry_price, max_entry_price, high_price_threshold,
               require_proven_family_above_price, preferred_entry_band,
               allow_heavy_campaigns, fast_lane_enabled, max_open_value_usdc, max_active_markets,
-              max_dust_positions, updated_at)
+              max_dust_positions, tail_quarantine_threshold_usdc,
+              tail_quarantine_threshold_ratio, updated_at)
            VALUES (?, 1, 'trade', 'probe-first', 'disabled', 'repricing-sell',
-                   ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+                   ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           familyId,
@@ -640,6 +647,8 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           caps.maxOpenValue,
           caps.maxMarkets,
           caps.maxDust,
+          caps.tailQuarantineThresholdUsdc,
+          caps.tailQuarantineThresholdRatio,
           now,
         );
 
@@ -685,7 +694,7 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
           `INSERT INTO family_rules_snapshot (family_id, snapshot, reason, captured_at)
            VALUES (?, ?, 'probe-baseline', ?)`,
         )
-        .run(familyId, JSON.stringify(rulesRow), now);
+        .run(familyId, JSON.stringify(normalizeFamilyRulesSnapshot(rulesRow)), now);
 
       // 6. INSERT operator_commands (rules_reload, deduped)
       const pending = controlDb

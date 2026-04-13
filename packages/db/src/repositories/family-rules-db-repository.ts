@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { FamilyId } from "@plankton/domain";
+import { SCALED_DEFAULTS, type FamilyId } from "@plankton/domain";
 
 /**
  * Locally-defined config shape matching @plankton/config FamilyConfig.
@@ -9,6 +9,109 @@ export interface DbFamilyConfig {
   identity: Record<string, unknown>;
   evidence: Record<string, unknown>;
   rules: Record<string, unknown>;
+}
+
+function toSnakeCase(key: string): string {
+  return key.replace(/[A-Z]/g, (char) => `_${char.toLowerCase()}`);
+}
+
+function readRuleField(row: Record<string, unknown>, key: string): unknown {
+  return row[key] ?? row[toSnakeCase(key)];
+}
+
+function readNullableNumber(row: Record<string, unknown>, key: string): number | null {
+  const value = readRuleField(row, key);
+  return value == null ? null : Number(value);
+}
+
+function readNullableString(row: Record<string, unknown>, key: string): string | null {
+  const value = readRuleField(row, key);
+  return value == null ? null : String(value);
+}
+
+function readBoolean(row: Record<string, unknown>, key: string): boolean {
+  return Boolean(readRuleField(row, key));
+}
+
+function readNullableBoolean(row: Record<string, unknown>, key: string): boolean | null {
+  const value = readRuleField(row, key);
+  return value == null ? null : Boolean(value);
+}
+
+function readStringArray(row: Record<string, unknown>, key: string): string[] {
+  const value = readRuleField(row, key);
+  if (Array.isArray(value)) return value.map(String);
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as string[];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+/**
+ * Normalize either a camelCase rule snapshot or a raw family_rules DB row into
+ * the flat camelCase shape expected by overwriteRules/reset-to-probe.
+ */
+export function normalizeFamilyRulesSnapshot(
+  row: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    familyId: readNullableString(row, "familyId"),
+    enabled: readBoolean(row, "enabled"),
+    action: readNullableString(row, "action"),
+    priorityRank: readNullableNumber(row, "priorityRank"),
+    sessionMode: readNullableString(row, "sessionMode"),
+    entryMode: readNullableString(row, "entryMode"),
+    minEntryPrice: readNullableNumber(row, "minEntryPrice"),
+    maxEntryPrice: readNullableNumber(row, "maxEntryPrice"),
+    maxInitialNotionalUsdc: readNullableNumber(row, "maxInitialNotionalUsdc"),
+    allowHighPriceOneShot: readBoolean(row, "allowHighPriceOneShot"),
+    highPriceThreshold: readNullableNumber(row, "highPriceThreshold"),
+    requireProvenFamilyAbovePrice: readNullableNumber(row, "requireProvenFamilyAbovePrice"),
+    preferredEntryBand: readNullableString(row, "preferredEntryBand"),
+    maxProbeCountPerMarket: readNullableNumber(row, "maxProbeCountPerMarket"),
+    entryCooldownSeconds: readNullableNumber(row, "entryCooldownSeconds"),
+    maxNewMarketsPerSession: readNullableNumber(row, "maxNewMarketsPerSession"),
+    scaleMode: readNullableString(row, "scaleMode"),
+    defaultMaxBuysPerLeg: readNullableNumber(row, "defaultMaxBuysPerLeg"),
+    heavyMaxBuysPerLeg: readNullableNumber(row, "heavyMaxBuysPerLeg"),
+    allowHeavyCampaigns: readBoolean(row, "allowHeavyCampaigns"),
+    requirePositiveRecycleHistoryForScale: readBoolean(
+      row,
+      "requirePositiveRecycleHistoryForScale",
+    ),
+    exitMode: readNullableString(row, "exitMode"),
+    primaryProfitModel: readNullableString(row, "primaryProfitModel"),
+    allowRunnerExtension: readBoolean(row, "allowRunnerExtension"),
+    preferFastRecycle: readBoolean(row, "preferFastRecycle"),
+    resolutionHoldingAllowed: readBoolean(row, "resolutionHoldingAllowed"),
+    targetRoiBandLow: readNullableNumber(row, "targetRoiBandLow"),
+    targetRoiBandHigh: readNullableNumber(row, "targetRoiBandHigh"),
+    maxUnmovedHoldHours: readNullableNumber(row, "maxUnmovedHoldHours"),
+    maxTailHoldHours: readNullableNumber(row, "maxTailHoldHours"),
+    allowTwoSided: readBoolean(row, "allowTwoSided"),
+    twoSidedMode: readNullableString(row, "twoSidedMode"),
+    minActivityForTwoSided: readNullableNumber(row, "minActivityForTwoSided"),
+    maxConcurrentOrdersPerFamily: readNullableNumber(row, "maxConcurrentOrdersPerFamily"),
+    maxProbeInFlightPerToken: readNullableNumber(row, "maxProbeInFlightPerToken"),
+    maxEntrySignalsPerTickPerFamily: readNullableNumber(row, "maxEntrySignalsPerTickPerFamily"),
+    fastLaneEnabled: readNullableBoolean(row, "fastLaneEnabled"),
+    dustLaneEnabled: readNullableBoolean(row, "dustLaneEnabled"),
+    queueJumpCanaryEnabled: readNullableBoolean(row, "queueJumpCanaryEnabled"),
+    maxOpenValueUsdc: readNullableNumber(row, "maxOpenValueUsdc"),
+    maxActiveMarkets: readNullableNumber(row, "maxActiveMarkets"),
+    maxDustPositions: readNullableNumber(row, "maxDustPositions"),
+    tailQuarantineThresholdUsdc: readNullableNumber(row, "tailQuarantineThresholdUsdc"),
+    tailQuarantineThresholdRatio: readNullableNumber(row, "tailQuarantineThresholdRatio"),
+    staleTailPruneEnabled: readBoolean(row, "staleTailPruneEnabled"),
+    thresholdCleanupRequired: readBoolean(row, "thresholdCleanupRequired"),
+    activeWindowsUtc: readStringArray(row, "activeWindowsUtc"),
+    reducedWindowsUtc: readStringArray(row, "reducedWindowsUtc"),
+    weekdayBias: readNullableString(row, "weekdayBias"),
+  };
 }
 
 /**
@@ -55,21 +158,25 @@ export class SqliteFamilyRulesDbRepository {
            max_open_value_usdc = ?,
            max_active_markets = ?,
            max_dust_positions = ?,
+           tail_quarantine_threshold_usdc = ?,
+           tail_quarantine_threshold_ratio = ?,
            require_positive_recycle_history_for_scale = 1,
            default_max_buys_per_leg = 3,
            updated_at = datetime('now')
          WHERE family_id = ?`,
       )
       .run(
-        caps?.maxOpenValueUsdc ?? 50.0,
-        caps?.maxActiveMarkets ?? 5,
-        caps?.maxDustPositions ?? 3,
+        caps?.maxOpenValueUsdc ?? SCALED_DEFAULTS.maxOpenValueUsdc,
+        caps?.maxActiveMarkets ?? SCALED_DEFAULTS.maxActiveMarkets,
+        caps?.maxDustPositions ?? SCALED_DEFAULTS.maxDustPositions,
+        SCALED_DEFAULTS.tailQuarantineThresholdUsdc,
+        SCALED_DEFAULTS.tailQuarantineThresholdRatio,
         familyId,
       );
   }
 
   overwriteRules(familyId: FamilyId, rulesJson: string): void {
-    const rules = JSON.parse(rulesJson) as Record<string, unknown>;
+    const rules = normalizeFamilyRulesSnapshot(JSON.parse(rulesJson) as Record<string, unknown>);
     this.db
       .prepare(
         `UPDATE family_rules SET

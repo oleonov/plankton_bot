@@ -482,13 +482,15 @@ describe("CommandPoller", () => {
       // Verify family_rules were updated to scaled defaults
       const rulesRow = conn.db
         .prepare(
-          "SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions, default_max_buys_per_leg FROM family_rules WHERE family_id = ?",
+          "SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions, tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio, default_max_buys_per_leg FROM family_rules WHERE family_id = ?",
         )
         .get("fam-1") as Record<string, unknown>;
       expect(rulesRow.scale_mode).toBe("confirm-only");
       expect(rulesRow.max_open_value_usdc).toBe(50.0);
-      expect(rulesRow.max_active_markets).toBe(5);
-      expect(rulesRow.max_dust_positions).toBe(3);
+      expect(rulesRow.max_active_markets).toBe(100);
+      expect(rulesRow.max_dust_positions).toBe(50);
+      expect(rulesRow.tail_quarantine_threshold_usdc).toBe(1000.0);
+      expect(rulesRow.tail_quarantine_threshold_ratio).toBe(1000.0);
       expect(rulesRow.default_max_buys_per_leg).toBe(3);
 
       const transitions = transitionRepo.findByEntity("family", "fam-1");
@@ -678,6 +680,98 @@ describe("CommandPoller", () => {
       expect(cmdRepo.getPending()).toHaveLength(0);
       expect(dbWriter.overwriteRules).not.toHaveBeenCalled();
     });
+
+    it("restores probe baseline from raw family_rules snapshot rows", async () => {
+      seedFamily("fam-1");
+      seedFamilyEvidence("fam-1");
+
+      conn.db
+        .prepare(
+          `INSERT OR REPLACE INTO family_rules (family_id, enabled, action, priority_rank, session_mode,
+             entry_mode, min_entry_price, max_entry_price, max_initial_notional_usdc,
+             allow_high_price_one_shot, high_price_threshold, require_proven_family_above_price,
+             scale_mode, default_max_buys_per_leg, heavy_max_buys_per_leg,
+             allow_heavy_campaigns, require_positive_recycle_history_for_scale,
+             exit_mode, primary_profit_model, allow_runner_extension, prefer_fast_recycle,
+             resolution_holding_allowed,
+             allow_two_sided, two_sided_mode,
+             max_open_value_usdc, max_active_markets, max_dust_positions,
+             tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio,
+             stale_tail_prune_enabled, threshold_cleanup_required,
+             active_windows_utc, reduced_windows_utc, weekday_bias, updated_at)
+           VALUES ('fam-1', 1, 'trade', 1, 'active-window',
+                   'probe-first', 0.03, 0.35, 10,
+                   0, 0.35, 0.35,
+                   'disabled', 1, 6,
+                   0, 0,
+                   'repricing-sell', 'sell-into-strength', 0, 1,
+                   0,
+                   0, 'disabled',
+                   10, 100, 50,
+                   50, 1000,
+                   0, 0,
+                   '[]', '[]', 'normal', datetime('now'))`,
+        )
+        .run();
+
+      const rawSnapshot = conn.db
+        .prepare("SELECT * FROM family_rules WHERE family_id = ?")
+        .get("fam-1");
+      const snapshotRepo = new SqliteFamilyRulesSnapshotRepository(conn.db);
+      snapshotRepo.save({
+        familyId: createFamilyId("fam-1"),
+        snapshot: JSON.stringify(rawSnapshot),
+        reason: "probe-baseline",
+        capturedAt: new Date().toISOString(),
+      });
+
+      conn.db
+        .prepare(
+          `UPDATE family_rules
+              SET max_open_value_usdc = 50,
+                  max_active_markets = 100,
+                  max_dust_positions = 50,
+                  tail_quarantine_threshold_ratio = 1000,
+                  scale_mode = 'confirm-only'
+            WHERE family_id = 'fam-1'`,
+        )
+        .run();
+
+      const rulesManager: ReloadableRules = { reload: vi.fn() };
+      const normalizationModule: PatternRebuilder = { rebuildPatterns: vi.fn() };
+      const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+      const transitionRepo = new SqliteStateTransitionRepository(conn.db);
+      const { SqliteFamilyRulesDbRepository } = await import("@plankton/db");
+      const dbWriter = new SqliteFamilyRulesDbRepository(conn.db);
+
+      insertCommand("family_reset_to_probe", "fam-1", "resetting");
+      const poller = createPoller({
+        rulesManager,
+        normalizationModule,
+        familyEvidenceRepo: evidenceRepo,
+        stateTransitionRepo: transitionRepo,
+        familyRulesDbWriter: dbWriter,
+        familyRulesSnapshotRepo: snapshotRepo,
+      });
+
+      await poller.poll();
+
+      const row = conn.db
+        .prepare(
+          `SELECT max_open_value_usdc, max_active_markets, max_dust_positions,
+                  tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio, scale_mode
+             FROM family_rules
+            WHERE family_id = ?`,
+        )
+        .get("fam-1") as Record<string, unknown>;
+
+      expect(row.max_open_value_usdc).toBe(10);
+      expect(row.max_active_markets).toBe(100);
+      expect(row.max_dust_positions).toBe(50);
+      expect(row.tail_quarantine_threshold_usdc).toBe(1000);
+      expect(row.tail_quarantine_threshold_ratio).toBe(1000);
+      expect(row.scale_mode).toBe("disabled");
+    });
   });
 
   // ── promote → reset round-trip verifying actual DB rules ──────────────
@@ -775,13 +869,15 @@ describe("CommandPoller", () => {
 
       const afterPromote = conn.db
         .prepare(
-          "SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions FROM family_rules WHERE family_id = ?",
+          "SELECT scale_mode, max_open_value_usdc, max_active_markets, max_dust_positions, tail_quarantine_threshold_usdc, tail_quarantine_threshold_ratio FROM family_rules WHERE family_id = ?",
         )
         .get("fam-1") as Record<string, unknown>;
       expect(afterPromote.scale_mode).toBe("confirm-only");
       expect(afterPromote.max_open_value_usdc).toBe(50.0);
-      expect(afterPromote.max_active_markets).toBe(5);
-      expect(afterPromote.max_dust_positions).toBe(3);
+      expect(afterPromote.max_active_markets).toBe(100);
+      expect(afterPromote.max_dust_positions).toBe(50);
+      expect(afterPromote.tail_quarantine_threshold_usdc).toBe(1000.0);
+      expect(afterPromote.tail_quarantine_threshold_ratio).toBe(1000.0);
 
       const stateAfterPromote = familyStateRepo.get(createFamilyId("fam-1"));
       expect(stateAfterPromote!.runtimeMode).toBe("active");

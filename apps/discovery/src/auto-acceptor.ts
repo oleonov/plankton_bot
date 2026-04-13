@@ -89,11 +89,6 @@ export async function autoAcceptAndPromote(
         {
           method: "POST",
           headers,
-          body: JSON.stringify({
-            maxOpenValueUsdc: 10,
-            maxActiveMarkets: 3,
-            maxDustPositions: 2,
-          }),
         },
       );
       if (res.ok) {

@@ -2,16 +2,19 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   ProfileId,
+  PROBE_DEFAULTS,
   resolveFamilyDeploymentSeed,
   resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
 import { ensureFamilyRuleDefaultsTable } from "./family-rule-defaults.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
 import { runMigrations } from "./migrations/runner.js";
+import { normalizeFamilyRulesSnapshot } from "./repositories/family-rules-db-repository.js";
 
 export function bootstrapDatabase(dbPath: string): DbConnection {
   const conn = openDatabase(dbPath);
   runMigrations(conn.db);
+  ensureBootstrapBackfillsTable(conn.db);
   safeAddColumn(conn.db, "family_catalog", "source_type", "TEXT NOT NULL DEFAULT 'yaml_import'");
   safeAddColumn(conn.db, "family_catalog", "origin_checksum", "TEXT");
   safeAddColumn(conn.db, "family_catalog", "fee_tier", "TEXT NOT NULL DEFAULT 'unknown'");
@@ -29,6 +32,7 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
   );
   backfillFamilyLivePolicy(conn.db);
   backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
+  backfillFamilyLimitUnification(conn.db);
   return conn;
 }
 
@@ -51,6 +55,7 @@ function readSchema(filename: string): string {
 export function bootstrapControlDb(dbPath: string): DbConnection {
   const conn = openDatabaseWithSchema(dbPath, readSchema("control.sql"));
   ensureFamilyRuleDefaultsTable(conn.db);
+  ensureBootstrapBackfillsTable(conn.db);
   // Schema evolution: add columns that may be missing in existing DBs.
   // CREATE TABLE IF NOT EXISTS won't add new columns to existing tables.
   safeAddColumn(conn.db, "profile_summaries", "wallet_balance_usdc", "REAL");
@@ -87,8 +92,140 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   backfillLiveProfileSettings(conn.db);
   backfillFamilyLivePolicy(conn.db);
   backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
+  backfillFamilyLimitUnification(conn.db);
 
   return conn;
+}
+
+const BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION = "2026-04-13-family-limit-unification-v1";
+
+function ensureBootstrapBackfillsTable(db: import("better-sqlite3").Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS bootstrap_backfills (
+    name TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+}
+
+function hasBootstrapBackfill(db: import("better-sqlite3").Database, name: string): boolean {
+  try {
+    const row = db.prepare("SELECT 1 FROM bootstrap_backfills WHERE name = ? LIMIT 1").get(name) as
+      | { 1: number }
+      | undefined;
+    return Boolean(row);
+  } catch {
+    return false;
+  }
+}
+
+function markBootstrapBackfill(db: import("better-sqlite3").Database, name: string): void {
+  db.prepare("INSERT OR IGNORE INTO bootstrap_backfills (name) VALUES (?)").run(name);
+}
+
+function maxNumber(current: unknown, target: number): number {
+  if (typeof current !== "number" || Number.isNaN(current)) return target;
+  return Math.max(current, target);
+}
+
+function backfillFamilyLimitUnification(db: import("better-sqlite3").Database): void {
+  if (hasBootstrapBackfill(db, BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION)) return;
+
+  try {
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE family_rules
+         SET max_active_markets = CASE
+               WHEN max_active_markets < @maxActiveMarkets THEN @maxActiveMarkets
+               ELSE max_active_markets
+             END,
+             max_dust_positions = CASE
+               WHEN max_dust_positions < @maxDustPositions THEN @maxDustPositions
+               ELSE max_dust_positions
+             END,
+             tail_quarantine_threshold_usdc = CASE
+               WHEN tail_quarantine_threshold_usdc < @tailThresholdUsdc THEN @tailThresholdUsdc
+               ELSE tail_quarantine_threshold_usdc
+             END,
+             tail_quarantine_threshold_ratio = CASE
+               WHEN tail_quarantine_threshold_ratio < @tailThresholdRatio THEN @tailThresholdRatio
+               ELSE tail_quarantine_threshold_ratio
+             END,
+             updated_at = datetime('now')
+         WHERE max_active_markets < @maxActiveMarkets
+            OR max_dust_positions < @maxDustPositions
+            OR tail_quarantine_threshold_usdc < @tailThresholdUsdc
+            OR tail_quarantine_threshold_ratio < @tailThresholdRatio`,
+      ).run({
+        maxActiveMarkets: PROBE_DEFAULTS.maxActiveMarkets,
+        maxDustPositions: PROBE_DEFAULTS.maxDustPositions,
+        tailThresholdUsdc: PROBE_DEFAULTS.tailQuarantineThresholdUsdc,
+        tailThresholdRatio: PROBE_DEFAULTS.tailQuarantineThresholdRatio,
+      });
+
+      const latestSnapshots = db
+        .prepare(
+          `SELECT s.id, s.family_id, s.snapshot, s.reason
+             FROM family_rules_snapshot s
+             JOIN (
+               SELECT family_id, MAX(captured_at) AS max_captured_at
+                 FROM family_rules_snapshot
+                GROUP BY family_id
+             ) latest
+               ON latest.family_id = s.family_id
+              AND latest.max_captured_at = s.captured_at`,
+        )
+        .all() as Array<{ id: number; family_id: string; snapshot: string; reason: string }>;
+
+      const insertSnapshot = db.prepare(
+        `INSERT INTO family_rules_snapshot (family_id, snapshot, reason, captured_at)
+         VALUES (?, ?, ?, datetime('now'))`,
+      );
+
+      for (const row of latestSnapshots) {
+        let parsed: Record<string, unknown>;
+        try {
+          parsed = JSON.parse(row.snapshot) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+
+        const normalized = normalizeFamilyRulesSnapshot(parsed);
+        const updated = {
+          ...normalized,
+          maxActiveMarkets: maxNumber(normalized.maxActiveMarkets, PROBE_DEFAULTS.maxActiveMarkets),
+          maxDustPositions: maxNumber(normalized.maxDustPositions, PROBE_DEFAULTS.maxDustPositions),
+          tailQuarantineThresholdUsdc: maxNumber(
+            normalized.tailQuarantineThresholdUsdc,
+            PROBE_DEFAULTS.tailQuarantineThresholdUsdc,
+          ),
+          tailQuarantineThresholdRatio: maxNumber(
+            normalized.tailQuarantineThresholdRatio,
+            PROBE_DEFAULTS.tailQuarantineThresholdRatio,
+          ),
+        };
+
+        if (
+          updated.maxActiveMarkets === normalized.maxActiveMarkets &&
+          updated.maxDustPositions === normalized.maxDustPositions &&
+          updated.tailQuarantineThresholdUsdc === normalized.tailQuarantineThresholdUsdc &&
+          updated.tailQuarantineThresholdRatio === normalized.tailQuarantineThresholdRatio
+        ) {
+          continue;
+        }
+
+        insertSnapshot.run(
+          row.family_id,
+          JSON.stringify(updated),
+          `${row.reason}: family-limit-unification-backfill`,
+        );
+      }
+
+      markBootstrapBackfill(db, BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION);
+    })();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("no such table")) return;
+    throw err;
+  }
 }
 
 /**
