@@ -61,27 +61,33 @@ describe("bootstrapDatabase", () => {
   });
 
   it("backfills legacy discovery directional-updown rows in monolithic DBs", () => {
-    conn.db.prepare(
-      `INSERT INTO family_catalog
+    conn.db
+      .prepare(
+        `INSERT INTO family_catalog
          (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
        VALUES ('legacy-fast:directional-updown:deadline', 'legacy-fast', 'stocks', 'directional-updown', 'deadline', 'daily', 'scalp', 'discovery')`,
-    ).run();
-    conn.db.prepare(
-      `INSERT INTO family_rules
+      )
+      .run();
+    conn.db
+      .prepare(
+        `INSERT INTO family_rules
          (family_id, min_entry_price, max_entry_price, high_price_threshold,
           require_proven_family_above_price, preferred_entry_band, fast_lane_enabled)
        VALUES ('legacy-fast:directional-updown:deadline', 0, 1, 0.2, 0.2, NULL, NULL)`,
-    ).run();
+      )
+      .run();
 
     conn.close();
     conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
 
-    const row = conn.db.prepare(
-      `SELECT min_entry_price, max_entry_price, high_price_threshold,
+    const row = conn.db
+      .prepare(
+        `SELECT min_entry_price, max_entry_price, high_price_threshold,
               require_proven_family_above_price, preferred_entry_band, fast_lane_enabled
          FROM family_rules
         WHERE family_id = 'legacy-fast:directional-updown:deadline'`,
-    ).get() as {
+      )
+      .get() as {
       min_entry_price: number;
       max_entry_price: number;
       high_price_threshold: number;
