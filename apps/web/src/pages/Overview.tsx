@@ -180,17 +180,24 @@ export function Overview() {
             className="card card-accent-blue"
             style={{ cursor: "pointer", display: "flex", flexDirection: "column" }}
           >
-            <div className="label">Positions / Min</div>
-            <div className="value-lg text-blue">{status.positionsOpenedLastMin}</div>
+            <div className="label">Open Positions</div>
+            <div className="value-lg text-blue">{status.openPositionCount}</div>
             <div style={{ marginTop: "auto" }}>
               <div className="value-sm">{dustCount} dust</div>
+              <div className="value-sm">{status.positionsOpenedLastMin} in last min</div>
             </div>
           </div>
         </Link>
         <Link to="/orders" style={{ textDecoration: "none" }}>
-          <div className="card card-accent-blue" style={{ cursor: "pointer" }}>
-            <div className="label">Orders / Min</div>
-            <div className="value-lg text-blue">{status.ordersPlacedLastMin}</div>
+          <div
+            className="card card-accent-blue"
+            style={{ cursor: "pointer", display: "flex", flexDirection: "column" }}
+          >
+            <div className="label">Open Orders</div>
+            <div className="value-lg text-blue">{status.openOrderCount}</div>
+            <div style={{ marginTop: "auto" }}>
+              <div className="value-sm">{status.ordersPlacedLastMin} in last min</div>
+            </div>
           </div>
         </Link>
         <Link to="/families" style={{ textDecoration: "none" }}>

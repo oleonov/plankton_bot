@@ -230,7 +230,7 @@ describe("Overview Balance Card", () => {
     expect(within(row!).queryByText("1m ago")).not.toBeInTheDocument();
   });
 
-  it("uses per-minute throughput as the primary value for position and order cards", async () => {
+  it("shows open counts as the primary value and keeps per-minute throughput in the footer", async () => {
     server.use(
       http.get("/api/v1/status", () =>
         ok({
@@ -245,21 +245,21 @@ describe("Overview Balance Card", () => {
 
     renderWithProviders(<Overview />);
 
-    const positionsCard = (await screen.findByText("Positions / Min")).closest(".card");
-    const ordersCard = screen.getByText("Orders / Min").closest(".card");
+    const positionsCard = (await screen.findByText("Open Positions")).closest(".card");
+    const ordersCard = screen.getByText("Open Orders").closest(".card");
 
     expect(positionsCard).toBeInstanceOf(HTMLElement);
     expect(ordersCard).toBeInstanceOf(HTMLElement);
 
-    expect(positionsCard).toHaveTextContent("3");
-    expect(ordersCard).toHaveTextContent("7");
+    expect(positionsCard).toHaveTextContent("99");
+    expect(ordersCard).toHaveTextContent("88");
     expect(positionsCard).toHaveTextContent(
       /0 dust|1 dust|2 dust|3 dust|4 dust|5 dust|6 dust|7 dust|8 dust|9 dust/,
     );
-    expect(positionsCard).not.toHaveTextContent("99");
-    expect(ordersCard).not.toHaveTextContent("88");
-    expect(screen.queryByText("3 in last min")).not.toBeInTheDocument();
-    expect(screen.queryByText("7 in last min")).not.toBeInTheDocument();
+    expect(positionsCard).toHaveTextContent("3 in last min");
+    expect(ordersCard).toHaveTextContent("7 in last min");
+    expect(screen.queryByText("Positions / Min")).not.toBeInTheDocument();
+    expect(screen.queryByText("Orders / Min")).not.toBeInTheDocument();
   });
 
   it("keeps Last Events focused on timestamped events only", async () => {
