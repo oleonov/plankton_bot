@@ -2679,7 +2679,7 @@ describe("StrategyModule", () => {
   // ─── Attempt-level entry cooldown ───────────────────────────────────────
 
   describe("attempt-level entry cooldown", () => {
-    it("records attempt timestamp on PlaceOrderRequested for entry reasons", async () => {
+    it("records attempt timestamp on OrderPlaced for entry reasons", async () => {
       rulesProvider = createMockRulesProvider(
         makeBundle({
           rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
@@ -2714,24 +2714,18 @@ describe("StrategyModule", () => {
       const firstSignal = signals[0]!.signal;
       expect(firstSignal.reason).toBe("probe-entry");
 
-      // Simulate order being placed (attempt tracker records on PlaceOrderRequested)
-      await bus.publish("PlaceOrderRequested", {
-        command: {
-          type: "PlaceOrderCommand" as const,
-          commandId: "cmd-1" as any,
-          clientOrderId: "plk_test" as any,
-          source: "strategy" as const,
-          tokenId: firstSignal.tokenId,
-          side: firstSignal.side,
-          size: firstSignal.suggestedSize,
-          price: firstSignal.suggestedPrice,
-          orderType: "GTC" as const,
-          tickSize: 0.01,
-          negRisk: false,
-          familyId: firstSignal.familyId,
-          sequenceInTick: 0,
-          signalReason: firstSignal.reason,
-        },
+      // Simulate order being accepted/opened
+      await bus.publish("OrderPlaced", {
+        commandId: "cmd-1" as any,
+        clientOrderId: "plk_test" as any,
+        orderId: "ord-1" as any,
+        tokenId: firstSignal.tokenId,
+        side: firstSignal.side,
+        size: firstSignal.suggestedSize,
+        price: firstSignal.suggestedPrice,
+        orderType: "GTC" as const,
+        familyId: firstSignal.familyId,
+        signalReason: firstSignal.reason,
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -2744,14 +2738,14 @@ describe("StrategyModule", () => {
       expect(signals).toHaveLength(0);
     });
 
-    it("does not set cooldown on SignalApproved alone — only PlaceOrderRequested triggers it", async () => {
+    it("does not set cooldown on SignalApproved alone — only OrderPlaced triggers it", async () => {
       rulesProvider = createMockRulesProvider(
         makeBundle({
           rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
         }),
       );
       // Create module WITHOUT calling bridge.subscribe() — so SignalApproved
-      // won't be converted to PlaceOrderRequested by the bridge
+      // won't be converted downstream and no OrderPlaced will appear
       mod = new StrategyModule({
         bus,
         rulesProvider,
@@ -2769,12 +2763,9 @@ describe("StrategyModule", () => {
         bus.subscribe("PositionUpdated", async (p: any) => {
           (mod as any).handlePositionUpdated(p);
         }),
-        bus.subscribe("PlaceOrderRequested", async (p: any) => {
-          if (ENTRY_REASONS.has(p.command.signalReason ?? "")) {
-            (mod as any).lastAttemptTs.set(
-              `${p.command.familyId}|${p.command.tokenId}`,
-              p.timestamp,
-            );
+        bus.subscribe("OrderPlaced", async (p: any) => {
+          if (ENTRY_REASONS.has(p.signalReason ?? "")) {
+            (mod as any).lastAttemptTs.set(`${p.familyId}|${p.tokenId}`, p.timestamp);
           }
         }),
       );
@@ -2797,18 +2788,79 @@ describe("StrategyModule", () => {
       await bus.drain();
       expect(signals).toHaveLength(1);
 
-      // Simulate: risk gate approves but bridge skips (no PlaceOrderRequested)
+      // Simulate: risk gate approves but bridge skips (no OrderPlaced)
       await bus.publish("SignalApproved", {
         signal: signals[0]!.signal,
         approvedAt: Date.now(),
       });
       await bus.drain();
-      // NOTE: no PlaceOrderRequested published — bridge skipped
+      // NOTE: no OrderPlaced published — bridge skipped
 
       // Second tick: should still emit probe — no cooldown was set
       signals.length = 0;
       await (mod as any).tick();
       await bus.drain();
+      expect(signals).toHaveLength(1);
+      expect(signals[0]!.signal.reason).toBe("probe-entry");
+    });
+
+    it("does not set cooldown on PlaceOrderRequested before exchange acceptance", async () => {
+      rulesProvider = createMockRulesProvider(
+        makeBundle({
+          rules: { entry: { ...makeRules().entry, entryCooldownSeconds: 300 } },
+        }),
+      );
+      mod = new StrategyModule({
+        bus,
+        rulesProvider,
+        positionRepo,
+        familyStateRepo,
+        log,
+        scanIntervalMs: 60_000,
+        runtimeControl: { isPaused: () => false },
+      });
+      await mod.start();
+
+      const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
+      bus.subscribe("SignalProduced", async (p) => {
+        signals.push(p);
+      });
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ midPrice: 0.03 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await mod.tick();
+      await bus.drain();
+      expect(signals).toHaveLength(1);
+
+      await bus.publish("PlaceOrderRequested", {
+        command: {
+          type: "PlaceOrderCommand" as const,
+          commandId: "cmd-pending" as any,
+          clientOrderId: "plk_pending" as any,
+          source: "strategy" as const,
+          tokenId: TOK_ID,
+          side: "buy",
+          size: 100,
+          price: 0.03,
+          orderType: "GTC" as const,
+          tickSize: 0.01,
+          negRisk: false,
+          familyId: FAM_ID,
+          sequenceInTick: 0,
+          signalReason: "probe-entry",
+        },
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      signals.length = 0;
+      await mod.tick();
+      await bus.drain();
+
       expect(signals).toHaveLength(1);
       expect(signals[0]!.signal.reason).toBe("probe-entry");
     });
@@ -2841,23 +2893,17 @@ describe("StrategyModule", () => {
       await bus.drain();
 
       // Simulate exit order being placed — should NOT trigger attempt cooldown
-      await bus.publish("PlaceOrderRequested", {
-        command: {
-          type: "PlaceOrderCommand" as const,
-          commandId: "cmd-exit" as any,
-          clientOrderId: "plk_exit" as any,
-          source: "strategy" as const,
-          tokenId: TOK_ID,
-          side: "sell",
-          size: 100,
-          price: 0.04,
-          orderType: "GTC" as const,
-          tickSize: 0.01,
-          negRisk: false,
-          familyId: FAM_ID,
-          sequenceInTick: 0,
-          signalReason: "repricing-exit",
-        },
+      await bus.publish("OrderPlaced", {
+        commandId: "cmd-exit" as any,
+        clientOrderId: "plk_exit" as any,
+        orderId: "ord-exit" as any,
+        tokenId: TOK_ID,
+        side: "sell",
+        size: 100,
+        price: 0.04,
+        orderType: "GTC" as const,
+        familyId: FAM_ID,
+        signalReason: "repricing-exit",
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -2911,24 +2957,18 @@ describe("StrategyModule", () => {
       await mod.tick();
       await bus.drain();
 
-      // Simulate order placed for TOK_ID
-      await bus.publish("PlaceOrderRequested", {
-        command: {
-          type: "PlaceOrderCommand" as const,
-          commandId: "cmd-probe" as any,
-          clientOrderId: "plk_probe" as any,
-          source: "strategy" as const,
-          tokenId: TOK_ID,
-          side: "buy",
-          size: 166.67,
-          price: 0.03,
-          orderType: "GTC" as const,
-          tickSize: 0.01,
-          negRisk: false,
-          familyId: FAM_ID,
-          sequenceInTick: 0,
-          signalReason: "probe-entry",
-        },
+      // Simulate order accepted for TOK_ID
+      await bus.publish("OrderPlaced", {
+        commandId: "cmd-probe" as any,
+        clientOrderId: "plk_probe" as any,
+        orderId: "ord-probe" as any,
+        tokenId: TOK_ID,
+        side: "buy",
+        size: 166.67,
+        price: 0.03,
+        orderType: "GTC" as const,
+        familyId: FAM_ID,
+        signalReason: "probe-entry",
         timestamp: Date.now(),
       });
       await bus.drain();

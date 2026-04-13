@@ -21,7 +21,11 @@ const FAM_ID = createFamilyId("fam-btc");
 const TOKEN_ID = createTokenId("token-yes");
 const NOW = Date.parse("2026-04-10T15:00:00.000Z");
 
-function makeBundle(overrides?: Partial<FamilyRuleBundle>): FamilyRuleBundle {
+function makeBundle(overrides?: {
+  identity?: Partial<FamilyRuleBundle["identity"]>;
+  evidence?: Partial<FamilyRuleBundle["evidence"]>;
+  rules?: Partial<FamilyRuleBundle["rules"]>;
+}): FamilyRuleBundle {
   const bundle: FamilyRuleBundle = {
     identity: {
       familyId: FAM_ID,
@@ -133,7 +137,15 @@ function makeBundle(overrides?: Partial<FamilyRuleBundle>): FamilyRuleBundle {
     },
   };
 
-  return { ...bundle, ...overrides };
+  return {
+    ...bundle,
+    identity: { ...bundle.identity, ...(overrides?.identity ?? {}) },
+    evidence: {
+      ...(bundle.evidence as NonNullable<FamilyRuleBundle["evidence"]>),
+      ...(overrides?.evidence ?? {}),
+    } as NonNullable<FamilyRuleBundle["evidence"]>,
+    rules: { ...bundle.rules, ...(overrides?.rules ?? {}) },
+  };
 }
 
 function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
@@ -601,7 +613,7 @@ describe("marketability policy retuning", () => {
     expect(policy.unfilledCancelCooldownMs).toBe(2 * 60_000);
   });
 
-  it("keeps weather micro families on fallback spread caps even with fast lane enabled", () => {
+  it("keeps unproven weather micro families on fallback spread caps even with fast lane enabled", () => {
     const policy = resolveMarketabilityPolicy(
       makeBundle({
         identity: {
@@ -617,6 +629,28 @@ describe("marketability policy retuning", () => {
     expect(policy.speedTier).toBe("standard");
     expect(policy.maxEntrySpreadCents).toBe(0.005);
     expect(policy.maxWideEntrySpreadCents).toBe(0.01);
+  });
+
+  it("promotes proven fast-lane weather recyclers from fallback to reduced-fast", () => {
+    const policy = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          familyKey: "highest-temperature-in-seoul",
+          primaryCategory: "weather",
+          regime: "price-range",
+        },
+        evidence: {
+          evidenceStatus: "partial",
+          evidenceScore: 78,
+          localTradeCount: 250,
+        },
+      }),
+    );
+
+    expect(policy.tier).toBe("reduced");
+    expect(policy.speedTier).toBe("reduced-fast");
+    expect(policy.maxEntrySpreadCents).toBe(0.025);
+    expect(policy.maxWideEntrySpreadCents).toBe(0.045);
   });
 
   it("forces fallback spread caps on 0.001 tick markets even for aggressive families", () => {

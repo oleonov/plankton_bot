@@ -845,6 +845,26 @@ describe("positions", () => {
     expect(body.data.items[0].status).toBe("open");
   });
 
+  it("GET /positions default sort stays stable when only updated_at changes", async () => {
+    conn.db.exec(`
+      INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+        current_value_usdc, realized_pnl, status, opened_at, updated_at)
+      VALUES ('pos-stable-order', 'tok-stable', 'fam-1', 'buy', 10, 0.1, 1, 1, 0, 'open',
+        '2026-03-13T00:00:00Z', '2026-03-20T00:00:00Z');
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/positions?status=open",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+
+    expect(body.data.items.map((p: any) => p.positionId)).toEqual(["pos-1", "pos-stable-order"]);
+
+    conn.db.exec(`DELETE FROM positions WHERE position_id = 'pos-stable-order'`);
+  });
+
   it("GET /positions/:id returns single position", async () => {
     const res = await app.inject({
       method: "GET",

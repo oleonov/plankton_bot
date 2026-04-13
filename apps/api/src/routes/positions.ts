@@ -75,10 +75,12 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     // No default filter — return all statuses when not specified
 
     const isTailCostSort = sort === "tail_cost";
-    const sortCol = isTailCostSort ? "cost_basis_usdc" : "updated_at";
+    // Keep the default order stable for human browsing. `updated_at` changes
+    // on mark-to-market refreshes and fills, which makes rows jump under live SSE.
+    const sortCol = isTailCostSort ? "cost_basis_usdc" : "opened_at";
     const orderBy = isTailCostSort
       ? "ORDER BY cost_basis_usdc DESC, position_id DESC"
-      : "ORDER BY updated_at DESC, position_id DESC";
+      : "ORDER BY opened_at DESC, position_id DESC";
 
     // Compound cursor: "sortValue::positionId" — handles ties
     if (!pageRequested && cursor) {

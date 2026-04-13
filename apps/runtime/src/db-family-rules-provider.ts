@@ -5,6 +5,7 @@
 
 import type Database from "better-sqlite3";
 import type {
+  FamilyEvidence,
   FamilyRulesProvider,
   FamilyRuleBundle,
   FamilyIdentity,
@@ -20,6 +21,8 @@ import type {
   ThroughputRules,
   TailSuppressionRules,
   SessionRules,
+  PromotionState,
+  EvidenceStatus,
 } from "@plankton/domain";
 import { createFamilyId } from "@plankton/domain";
 
@@ -118,11 +121,70 @@ const LOAD_SQL = `
   FROM family_deployments d
   JOIN family_catalog c ON c.family_id = d.family_id
   JOIN family_rules r   ON r.family_id = d.family_id
-  WHERE d.profile = ? AND d.enabled = 1
+	  WHERE d.profile = ? AND d.enabled = 1
+	`;
+
+const LOAD_EVIDENCE_SQL = `
+  SELECT *
+  FROM family_evidence
+  WHERE family_id = ?
 `;
 
 function bool(v: number): boolean {
   return v !== 0;
+}
+
+interface RawEvidenceRow {
+  family_id: string;
+  evidence_status: string;
+  evidence_score: number;
+  promotion_state: string;
+  local_trade_count: number;
+  local_market_count: number;
+  local_realized_pnl_fifo: number;
+  open_tail_cost_usdc: number;
+  tail_adjusted_pnl: number;
+  remote_closed_realized_pnl: number | null;
+  open_position_count: number | null;
+  open_dust_count: number | null;
+  both_sided_eligible: number;
+  heavy_campaign_eligible: number;
+  active_window_edge_score: number | null;
+  last_validated_at: string | null;
+  recurrence_score: number | null;
+  recycle_score: number | null;
+  live_viability_score: number | null;
+  toxicity_penalty: number | null;
+  probe_substate: string | null;
+  repricing_exit_count: number;
+}
+
+function mapEvidenceRow(row: RawEvidenceRow | undefined): FamilyEvidence | undefined {
+  if (!row) return undefined;
+  return {
+    familyId: createFamilyId(row.family_id),
+    evidenceStatus: row.evidence_status as EvidenceStatus,
+    evidenceScore: row.evidence_score,
+    promotionState: row.promotion_state as PromotionState,
+    localTradeCount: row.local_trade_count,
+    localMarketCount: row.local_market_count,
+    localRealizedPnlFifo: row.local_realized_pnl_fifo,
+    openTailCostUsdc: row.open_tail_cost_usdc,
+    tailAdjustedPnl: row.tail_adjusted_pnl,
+    remoteClosedRealizedPnl: row.remote_closed_realized_pnl,
+    openPositionCount: row.open_position_count,
+    openDustCount: row.open_dust_count,
+    bothSidedEligible: bool(row.both_sided_eligible),
+    heavyCampaignEligible: bool(row.heavy_campaign_eligible),
+    activeWindowEdgeScore: row.active_window_edge_score,
+    recurrenceScore: row.recurrence_score,
+    recycleScore: row.recycle_score,
+    liveViabilityScore: row.live_viability_score,
+    toxicityPenalty: row.toxicity_penalty,
+    lastValidatedAt: row.last_validated_at,
+    probeSubstate: row.probe_substate,
+    repricingExitCount: row.repricing_exit_count,
+  };
 }
 
 function mapRow(row: RawRow): FamilyRuleBundle {
@@ -240,18 +302,22 @@ function mapRow(row: RawRow): FamilyRuleBundle {
 
 export class DbFamilyRulesProvider implements FamilyRulesProvider {
   private cache: Map<string, FamilyRuleBundle> | null = null;
+  private readonly loadEvidenceStmt;
 
   constructor(
     private readonly db: Database.Database,
     private readonly activeProfile: string,
-  ) {}
+  ) {
+    this.loadEvidenceStmt = this.db.prepare(LOAD_EVIDENCE_SQL);
+  }
 
   reload(): void {
     this.cache = null;
   }
 
   getRule(familyId: FamilyId): FamilyRuleBundle | null {
-    return this.ensureCache().get(familyId) ?? null;
+    const bundle = this.ensureCache().get(familyId) ?? null;
+    return bundle ? this.attachLiveEvidence(bundle) : null;
   }
 
   isEnabled(familyId: FamilyId): boolean {
@@ -263,7 +329,9 @@ export class DbFamilyRulesProvider implements FamilyRulesProvider {
   }
 
   getRulesForRegime(regime: Regime): FamilyRuleBundle[] {
-    return [...this.ensureCache().values()].filter((b) => b.identity.regime === regime);
+    return [...this.ensureCache().values()]
+      .filter((b) => b.identity.regime === regime)
+      .map((b) => this.attachLiveEvidence(b));
   }
 
   private ensureCache(): Map<string, FamilyRuleBundle> {
@@ -281,5 +349,14 @@ export class DbFamilyRulesProvider implements FamilyRulesProvider {
       map.set(row.family_id, bundle);
     }
     return map;
+  }
+
+  private attachLiveEvidence(bundle: FamilyRuleBundle): FamilyRuleBundle {
+    const evidenceRow = this.loadEvidenceStmt.get(String(bundle.identity.familyId)) as
+      | RawEvidenceRow
+      | undefined;
+    const evidence = mapEvidenceRow(evidenceRow);
+    if (evidence == null) return bundle;
+    return { ...bundle, evidence };
   }
 }

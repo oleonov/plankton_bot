@@ -74,6 +74,18 @@ function seedTestData(db: DbConnection["db"], opts?: { enabled?: number }) {
 
     INSERT INTO family_deployments (family_id, profile, enabled)
     VALUES ('fam-001', 'paper', ${enabled});
+
+    INSERT INTO family_evidence (
+      family_id, evidence_status, evidence_score, promotion_state,
+      local_trade_count, local_market_count, local_realized_pnl_fifo,
+      open_tail_cost_usdc, tail_adjusted_pnl, both_sided_eligible,
+      heavy_campaign_eligible, repricing_exit_count
+    ) VALUES (
+      'fam-001', 'partial', 82, 'scaled',
+      240, 18, 12.5,
+      4.5, 8.0, 1,
+      0, 3
+    );
   `);
 }
 
@@ -193,8 +205,31 @@ describe("DbFamilyRulesProvider", () => {
     expect(rules.session.reducedWindowsUtc).toEqual([{ start: "20:00", end: "23:00" }]);
     expect(rules.session.weekdayBias).toBe("preferred");
 
-    // evidence is omitted
-    expect(bundle!.evidence).toBeUndefined();
+    // evidence is hydrated from family_evidence
+    expect(bundle!.evidence).toEqual({
+      familyId: createFamilyId("fam-001"),
+      evidenceStatus: "partial",
+      evidenceScore: 82,
+      promotionState: "scaled",
+      localTradeCount: 240,
+      localMarketCount: 18,
+      localRealizedPnlFifo: 12.5,
+      openTailCostUsdc: 4.5,
+      tailAdjustedPnl: 8,
+      remoteClosedRealizedPnl: null,
+      openPositionCount: null,
+      openDustCount: null,
+      bothSidedEligible: true,
+      heavyCampaignEligible: false,
+      activeWindowEdgeScore: null,
+      recurrenceScore: null,
+      recycleScore: null,
+      liveViabilityScore: null,
+      toxicityPenalty: null,
+      lastValidatedAt: null,
+      probeSubstate: null,
+      repricingExitCount: 3,
+    });
 
     // familyId on rules
     expect(rules.familyId).toBe(createFamilyId("fam-001"));
@@ -227,6 +262,26 @@ describe("DbFamilyRulesProvider", () => {
     // After reload, picks up the change
     provider.reload();
     expect(provider.getAllFamilies()).toHaveLength(0);
+  });
+
+  it("reads updated family_evidence without provider reload", () => {
+    seedTestData(db);
+    const provider = new DbFamilyRulesProvider(db, "paper");
+
+    expect(provider.getRule(createFamilyId("fam-001"))?.evidence?.promotionState).toBe("scaled");
+
+    db.exec(`
+      UPDATE family_evidence
+      SET promotion_state = 'probe-only',
+          evidence_score = 15,
+          local_trade_count = 3
+      WHERE family_id = 'fam-001'
+    `);
+
+    const refreshed = provider.getRule(createFamilyId("fam-001"));
+    expect(refreshed?.evidence?.promotionState).toBe("probe-only");
+    expect(refreshed?.evidence?.evidenceScore).toBe(15);
+    expect(refreshed?.evidence?.localTradeCount).toBe(3);
   });
 
   it("getRulesForRegime filters by regime", () => {

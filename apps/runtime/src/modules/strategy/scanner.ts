@@ -803,7 +803,7 @@ export function scan(
 
     if (effectiveCooldown) {
       // Attempt-level cooldown: blocks re-attempt on same family+token within cooldown.
-      // Fires on SignalApproved so unfilled/rejected orders still trigger cooldown.
+      // Fires when an entry order is accepted/open, not merely requested.
       const attemptKey = `${market.familyId}|${market.tokenId}`;
       const lastAttempt = deps.lastAttemptTs?.get(attemptKey);
       if (lastAttempt) {

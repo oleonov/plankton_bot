@@ -77,7 +77,7 @@ export class StrategyModule implements RuntimeModule {
   private readonly lastKnownSize = new Map<string, number>();
   /** Tokens with open spray positions — cross-tick dedup to prevent re-spraying. */
   private readonly sprayedTokens = new Set<string>();
-  /** Attempt-level entry cooldown: "familyId|tokenId" → epoch ms of last approved entry signal. */
+  /** Attempt-level entry cooldown: "familyId|tokenId" → epoch ms of last accepted entry order. */
   private readonly lastAttemptTs = new Map<string, number>();
   private cachedMarkets: readonly NormalizedMarket[] = [];
   private unsubs: Array<() => void> = [];
@@ -116,9 +116,9 @@ export class StrategyModule implements RuntimeModule {
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
-      this.deps.bus.subscribe("PlaceOrderRequested", async (p) => {
-        if (ENTRY_REASONS.has(p.command.signalReason ?? "")) {
-          const key = `${p.command.familyId}|${p.command.tokenId}`;
+      this.deps.bus.subscribe("OrderPlaced", async (p) => {
+        if (ENTRY_REASONS.has(p.signalReason ?? "")) {
+          const key = `${p.familyId}|${p.tokenId}`;
           this.lastAttemptTs.set(key, p.timestamp);
         }
       }),

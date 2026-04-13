@@ -22,6 +22,7 @@ import type {
   FamilyId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { shouldRelaxNegativeTailProbeOnly } from "../../proven-family-policy.js";
 
 export class FamilyExposureCalculator {
   constructor(
@@ -114,7 +115,7 @@ export class FamilyExposureCalculator {
         ) {
           effectiveMode = "reduce-only";
           derivedModeReason = `tail/pnl ratio ${(currentTailCostUsdc / totalRealizedPnl).toFixed(2)} > ${ts.tailQuarantineThresholdRatio}`;
-        } else if (tailAdjustedPnlLive < 0) {
+        } else if (tailAdjustedPnlLive < 0 && !shouldRelaxNegativeTailProbeOnly(bundle)) {
           effectiveMode = "probe-only";
           derivedModeReason = `tailAdjustedPnl $${tailAdjustedPnlLive.toFixed(2)} < 0`;
         } else {

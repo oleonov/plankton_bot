@@ -124,6 +124,7 @@ function makeTailRules(overrides?: Record<string, unknown>) {
 function makeRuleBundle(
   tailOverrides?: Record<string, unknown>,
   identityOverrides?: Partial<FamilyRuleBundle["identity"]>,
+  evidenceOverrides?: Partial<FamilyRuleBundle["evidence"]>,
 ): FamilyRuleBundle {
   return {
     identity: {
@@ -162,6 +163,7 @@ function makeRuleBundle(
       lastValidatedAt: null,
       probeSubstate: null,
       repricingExitCount: 0,
+      ...evidenceOverrides,
     },
     rules: {
       familyId: FAM_ID,
@@ -1833,6 +1835,43 @@ describe("RiskInventoryModule", () => {
 
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toContain("probe-only");
+
+    await mod.stop();
+  });
+
+  it("allows confirm-scale for proven non-threshold families with negative tail", async () => {
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -5 }));
+    rulesProvider = createMockRulesProvider(
+      makeRuleBundle(
+        undefined,
+        {
+          familyKey: "elon-musk-of-tweets",
+          primaryCategory: "other",
+          regime: "social-activity",
+          strategyProfile: "event-driven" as any,
+        },
+        {
+          evidenceStatus: "partial",
+          evidenceScore: 80,
+          localTradeCount: 250,
+        },
+      ),
+    );
+    const bundle = rulesProvider.getRule(FAM_ID)!;
+    bundle.rules.scaleIn.requirePositiveRecycleHistoryForScale = true;
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ reason: "confirm-scale" }),
+    });
+
+    expect(approved).toHaveLength(1);
 
     await mod.stop();
   });

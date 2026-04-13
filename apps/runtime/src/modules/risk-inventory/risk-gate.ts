@@ -23,6 +23,7 @@ import {
   type FamilyRulesProvider,
   type FamilyStateRepository,
   type FamilyState,
+  type FamilyRuleBundle,
   type PositionRepository,
   type OrderRepository,
   type FamilyId,
@@ -33,6 +34,7 @@ import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import { resolveFamilyThroughputPolicy } from "../../family-throughput.js";
+import { shouldRelaxNegativeTailProbeOnly } from "../../proven-family-policy.js";
 
 type DerivedFamilyMode = "active" | "probe-only" | "reduce-only";
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
@@ -42,10 +44,12 @@ const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
  *
  * - reduce-only: hard tail cap breached → block all entries
  * - probe-only:  tail PnL negative but caps not breached → allow probes only
- * - active:      healthy → everything allowed
+ *                unless the family is a proven non-threshold recycler
+ * - active:      healthy or a proven recycler under temporary tail stress
  */
 function resolveFamilyMode(
   familyState: FamilyState,
+  bundle: FamilyRuleBundle,
   projectedTailCost: number,
   tailThresholdUsdc: number,
   tailThresholdRatio: number,
@@ -64,7 +68,9 @@ function resolveFamilyMode(
     }
   }
 
-  if (familyState.tailAdjustedPnlLive < 0) return "probe-only";
+  if (familyState.tailAdjustedPnlLive < 0 && !shouldRelaxNegativeTailProbeOnly(bundle)) {
+    return "probe-only";
+  }
 
   return "active";
 }
@@ -320,6 +326,7 @@ export class RiskGateImpl implements RiskGate {
     const scaleRules = bundle.rules.scaleIn;
     const derivedMode = resolveFamilyMode(
       familyState,
+      bundle,
       projectedTailCost,
       tail.tailQuarantineThresholdUsdc,
       tail.tailQuarantineThresholdRatio,
@@ -361,7 +368,8 @@ export class RiskGateImpl implements RiskGate {
       derivedMode === "active" &&
       (signal.reason === "scale-in" || signal.reason === "confirm-scale") &&
       scaleRules.requirePositiveRecycleHistoryForScale &&
-      familyState.tailAdjustedPnlLive <= 0
+      familyState.tailAdjustedPnlLive <= 0 &&
+      !shouldRelaxNegativeTailProbeOnly(bundle)
     ) {
       rejected.push(
         `${signal.reason} blocked — requirePositiveRecycleHistoryForScale ` +

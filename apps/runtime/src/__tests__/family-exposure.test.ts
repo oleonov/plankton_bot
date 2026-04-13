@@ -272,6 +272,58 @@ describe("FamilyExposureCalculator effective mode", () => {
     conn.close();
   });
 
+  it("keeps proven non-threshold families active when tailAdjustedPnlLive < 0", () => {
+    const conn = bootstrapDatabase(":memory:");
+    seedFamily(conn.db);
+    conn.db.exec(`
+      UPDATE family_catalog
+      SET regime = 'social-activity'
+      WHERE family_id = '${String(FAM_ID)}'
+    `);
+    // realizedPnl = -5, tailCost = 10 => tailAdjustedPnl = -15
+    seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: -5 });
+    seedLot(conn.db, {
+      lotId: "lot-1",
+      positionId: "pos-1",
+      tokenId: String(TOK_ID),
+      remainingSize: 100,
+      entryPrice: 0.1,
+    });
+
+    const posRepo = new SqlitePositionRepository(conn.db);
+    const lotRepo = new SqliteInventoryLotRepository(conn.db);
+    const stateRepo = new SqliteFamilyStateRepository(conn.db);
+    const baseBundle = makeRuleBundle();
+    const evidence: NonNullable<FamilyRuleBundle["evidence"]> = {
+      ...(baseBundle.evidence as NonNullable<FamilyRuleBundle["evidence"]>),
+      evidenceStatus: "partial",
+      evidenceScore: 80,
+      localTradeCount: 250,
+    };
+    const rulesProvider = createMockRulesProvider({
+      ...baseBundle,
+      identity: {
+        ...baseBundle.identity,
+        regime: "social-activity" as Regime,
+      },
+      evidence,
+    });
+
+    const calc = new FamilyExposureCalculator(
+      stateRepo,
+      posRepo,
+      lotRepo,
+      silentLog,
+      rulesProvider,
+    );
+    const result = calc.recompute(FAM_ID, true);
+
+    expect(result.tailAdjustedPnlLive).toBeLessThan(0);
+    expect(result.effectiveMode).toBe("active");
+    expect(result.derivedModeReason).toBeNull();
+    conn.close();
+  });
+
   it("sets effectiveMode to reduce-only when tail cost exceeds threshold", () => {
     const conn = bootstrapDatabase(":memory:");
     seedFamily(conn.db);
