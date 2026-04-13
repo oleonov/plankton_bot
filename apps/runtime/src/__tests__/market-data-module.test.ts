@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId, createFamilyId } from "@plankton/domain";
 import type {
   MarketDataGateway,
@@ -203,6 +203,10 @@ describe("MarketDataModule", () => {
       staleThresholdMs: 120_000,
       botRunId: "run-test-123",
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("healthCheck returns not-ok before first poll", async () => {
@@ -477,12 +481,76 @@ describe("MarketDataModule", () => {
         },
       },
     ]);
+    await new Promise((resolve) => setTimeout(resolve, 125));
 
     expect(received).toHaveLength(1);
     expect(received[0]).toHaveLength(1);
     expect(received[0]![0]!.bestBid).toBe(0.45);
     expect(received[0]![0]!.bestAsk).toBe(0.55);
     expect(mod.getMetricsSnapshot().wsUpdatesApplied).toBe(1);
+
+    await mod.stop();
+  });
+
+  it("coalesces rapid stream updates into a single published batch with last-write-wins per token", async () => {
+    const tracked = [
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-a"),
+        conditionId: "cond-a",
+      }),
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-b"),
+        conditionId: "cond-b",
+      }),
+    ];
+    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([
+        ["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }],
+        ["tok-b", { bestBid: 0.41, bestAsk: 0.61, lastTradePrice: 0.51, minOrderSize: 1 }],
+      ]),
+    );
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    const received: NormalizedMarket[][] = [];
+    bus.subscribe("MarketSnapshotReceived", async (payload) => {
+      received.push([...payload.markets]);
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(received.length).toBeGreaterThan(0);
+    });
+    received.length = 0;
+
+    await stream!.emitUpdates([
+      {
+        tokenId: "tok-a",
+        pricing: { bestBid: 0.44, bestAsk: 0.56, lastTradePrice: 0.5, bookSource: "clob" },
+      },
+    ]);
+    await stream!.emitUpdates([
+      {
+        tokenId: "tok-a",
+        pricing: { bestBid: 0.45, bestAsk: 0.55, lastTradePrice: 0.5, bookSource: "clob" },
+      },
+      {
+        tokenId: "tok-b",
+        pricing: { bestBid: 0.46, bestAsk: 0.58, lastTradePrice: 0.52, bookSource: "clob" },
+      },
+    ]);
+
+    expect(received).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 125));
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toHaveLength(2);
+    const byToken = new Map(received[0]!.map((market) => [String(market.tokenId), market]));
+    expect(byToken.get("tok-a")!.bestBid).toBe(0.45);
+    expect(byToken.get("tok-b")!.bestBid).toBe(0.46);
 
     await mod.stop();
   });

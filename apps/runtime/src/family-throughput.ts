@@ -72,8 +72,7 @@ export function resolveFamilySpeedTierByFamilyKey(
   if (!fastLaneEnabled) return "standard";
   const tier = resolveFamilyThroughputTierByFamilyKey(familyKey);
   if (tier === "core") return "core-fast";
-  if (tier === "reduced") return "reduced-fast";
-  return "standard";
+  return "reduced-fast";
 }
 
 export function resolveFamilySpeedTier(bundle: FamilyRuleBundle): FamilySpeedTier {

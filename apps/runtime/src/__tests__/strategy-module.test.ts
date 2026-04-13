@@ -394,6 +394,22 @@ describe("StrategyModule", () => {
       expect(h.detail).toContain("markets=1");
     });
 
+    it("merges sequential market update batches instead of overwriting the cache", async () => {
+      await mod.start();
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID, conditionId: "cond-1" })],
+        timestamp: Date.now(),
+      });
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, conditionId: "cond-2" })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const h = await mod.healthCheck();
+      expect(h.detail).toContain("markets=2");
+    });
+
     it("tick with no cached markets produces no signals", async () => {
       await mod.start();
       const signals: unknown[] = [];
@@ -2758,7 +2774,7 @@ describe("StrategyModule", () => {
       // Manually replicate start() without bridge to isolate the attempt tracker
       (mod as any).unsubs.push(
         bus.subscribe("NormalizedMarketUpdated", async (p: any) => {
-          (mod as any).cachedMarkets = p.markets;
+          await (mod as any).handleMarketUpdate(p);
         }),
         bus.subscribe("PositionUpdated", async (p: any) => {
           (mod as any).handlePositionUpdated(p);
@@ -2973,14 +2989,18 @@ describe("StrategyModule", () => {
       });
       await bus.drain();
 
-      // Now tick with TOK_ID_2 (different token, same family)
+      // Now tick with TOK_ID_2 (different token, same family). Mark TOK_ID inactive
+      // so the merged strategy cache does not keep scanning the original token.
       const signals: Array<{ signal: import("@plankton/domain").Signal }> = [];
       bus.subscribe("SignalProduced", async (p) => {
         signals.push(p);
       });
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.03 })],
+        markets: [
+          makeNormalizedMarket({ tokenId: TOK_ID, active: false }),
+          makeNormalizedMarket({ tokenId: TOK_ID_2, conditionId: "cond-2", midPrice: 0.03 }),
+        ],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -3334,10 +3354,14 @@ describe("StrategyModule", () => {
       });
       await bus.drain();
 
-      // Second tick: different market TOK_ID_2 → blocked by session limit
+      // Second tick: different market TOK_ID_2 → blocked by session limit.
+      // Mark TOK_ID inactive so only the new token is considered by the merged cache.
       signals.length = 0;
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeNormalizedMarket({ tokenId: TOK_ID_2, midPrice: 0.03 })],
+        markets: [
+          makeNormalizedMarket({ tokenId: TOK_ID, active: false }),
+          makeNormalizedMarket({ tokenId: TOK_ID_2, conditionId: "cond-2", midPrice: 0.03 }),
+        ],
         timestamp: Date.now(),
       });
       await bus.drain();

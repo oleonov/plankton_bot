@@ -77,10 +77,17 @@ describe("family speed helpers", () => {
     expect(resolveFamilySpeedTierByFamilyKey("highest-temperature-in-seoul", true)).toBe(
       "reduced-fast",
     );
+    expect(resolveFamilySpeedTierByFamilyKey("unknown-family", true)).toBe("reduced-fast");
   });
 
   it("derives fast-lane status from throughput config instead of hardcoded family lists", () => {
     const fastBundle = makeBundle("bitcoin-price", {
+      maxConcurrentOrdersPerFamily: 50,
+      maxProbeInFlightPerToken: 2,
+      maxEntrySignalsPerTickPerFamily: 20,
+      fastLaneEnabled: true,
+    });
+    const unknownFastBundle = makeBundle("unknown-family", {
       maxConcurrentOrdersPerFamily: 50,
       maxProbeInFlightPerToken: 2,
       maxEntrySignalsPerTickPerFamily: 20,
@@ -95,6 +102,7 @@ describe("family speed helpers", () => {
 
     expect(isFastLaneEnabled(fastBundle)).toBe(true);
     expect(resolveFamilySpeedTier(fastBundle)).toBe("core-fast");
+    expect(resolveFamilySpeedTier(unknownFastBundle)).toBe("reduced-fast");
     expect(isFastLaneEnabled(standardBundle)).toBe(false);
     expect(resolveFamilySpeedTier(standardBundle)).toBe("standard");
   });

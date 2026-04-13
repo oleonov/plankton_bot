@@ -66,6 +66,7 @@ export interface StrategyModuleDeps {
 }
 
 export class StrategyModule implements RuntimeModule {
+  private static readonly METRICS_LOG_WINDOW_MS = 30_000;
   private readonly log: Logger;
   private readonly buyTracker: BuyTracker;
   private readonly sessionTracker: SessionTracker;
@@ -79,13 +80,22 @@ export class StrategyModule implements RuntimeModule {
   private readonly sprayedTokens = new Set<string>();
   /** Attempt-level entry cooldown: "familyId|tokenId" → epoch ms of last accepted entry order. */
   private readonly lastAttemptTs = new Map<string, number>();
-  private cachedMarkets: readonly NormalizedMarket[] = [];
+  private readonly cachedMarkets = new Map<string, NormalizedMarket>();
   private unsubs: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
   private scanning = false;
   private started = false;
   private tickCount = 0;
   private signalCount = 0;
+  private lastMetricsLogAtMs = 0;
+  private metricsWindow = {
+    scanTicks: 0,
+    scanUniverseSize: 0,
+    candidatesConsidered: 0,
+    signalsProduced: 0,
+    normalizedBatchCount: 0,
+    normalizedMarketsTotal: 0,
+  };
 
   constructor(private readonly deps: StrategyModuleDeps) {
     this.log = deps.log.child({ module: "strategy" });
@@ -170,7 +180,7 @@ export class StrategyModule implements RuntimeModule {
     }
     return {
       ok: true,
-      detail: `ticks=${this.tickCount} signals=${this.signalCount} markets=${this.cachedMarkets.length}`,
+      detail: `ticks=${this.tickCount} signals=${this.signalCount} markets=${this.cachedMarkets.size}`,
     };
   }
 
@@ -181,7 +191,8 @@ export class StrategyModule implements RuntimeModule {
       this.log.debug("tick skipped — runtime paused");
       return;
     }
-    if (this.cachedMarkets.length === 0) return;
+    const cachedMarkets = this.getCachedMarketsSnapshot();
+    if (cachedMarkets.length === 0) return;
 
     this.scanning = true;
     try {
@@ -189,7 +200,7 @@ export class StrategyModule implements RuntimeModule {
       const tickTs = Date.now();
 
       // Keep the live-lite scan loop focused on the explicit operator allowlist.
-      const filteredMarkets = this.cachedMarkets.filter((m) => {
+      const filteredMarkets = cachedMarkets.filter((m) => {
         if (!m.familyId) return false;
 
         const fid = String(m.familyId);
@@ -245,6 +256,11 @@ export class StrategyModule implements RuntimeModule {
         ? signals.filter((s) => this.deps.liveLiteGuard!.isFamilyAllowed(String(s.familyId)))
         : signals;
 
+      this.metricsWindow.scanTicks++;
+      this.metricsWindow.scanUniverseSize = scanMarkets.length;
+      this.metricsWindow.candidatesConsidered += scanMeta.candidatesConsidered;
+      this.metricsWindow.signalsProduced += filteredSignals.length;
+
       for (const signal of filteredSignals) {
         this.signalCount++;
         await this.deps.bus.publish("SignalProduced", { signal });
@@ -260,12 +276,27 @@ export class StrategyModule implements RuntimeModule {
 
       if (filteredSignals.length > 0) {
         this.log.info(
-          { tick: this.tickCount, signals: filteredSignals.length },
+          {
+            tick: this.tickCount,
+            signals: filteredSignals.length,
+            strategyCachedMarkets: this.cachedMarkets.size,
+            scanUniverseSize: scanMarkets.length,
+            candidatesConsidered: scanMeta.candidatesConsidered,
+          },
           "scan tick produced signals",
         );
       } else {
-        this.log.debug({ tick: this.tickCount }, "scan tick — no signals");
+        this.log.debug(
+          {
+            tick: this.tickCount,
+            strategyCachedMarkets: this.cachedMarkets.size,
+            scanUniverseSize: scanMarkets.length,
+            candidatesConsidered: scanMeta.candidatesConsidered,
+          },
+          "scan tick — no signals",
+        );
       }
+      this.logMetricsWindowIfNeeded(tickTs);
     } finally {
       this.scanning = false;
     }
@@ -274,8 +305,64 @@ export class StrategyModule implements RuntimeModule {
   private async handleMarketUpdate(
     payload: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
-    this.cachedMarkets = payload.markets;
-    this.log.debug({ count: payload.markets.length }, "market cache updated");
+    for (const market of payload.markets) {
+      const tokenKey = String(market.tokenId);
+      if (!market.active) {
+        this.cachedMarkets.delete(tokenKey);
+        continue;
+      }
+      this.cachedMarkets.set(tokenKey, market);
+    }
+    this.metricsWindow.normalizedBatchCount++;
+    this.metricsWindow.normalizedMarketsTotal += payload.markets.length;
+    this.log.debug(
+      {
+        batchSize: payload.markets.length,
+        strategyCachedMarkets: this.cachedMarkets.size,
+      },
+      "market cache merged",
+    );
+  }
+
+  private getCachedMarketsSnapshot(): readonly NormalizedMarket[] {
+    return [...this.cachedMarkets.values()];
+  }
+
+  private logMetricsWindowIfNeeded(nowMs: number): void {
+    if (this.lastMetricsLogAtMs === 0) {
+      this.lastMetricsLogAtMs = nowMs;
+      return;
+    }
+    if (nowMs - this.lastMetricsLogAtMs < StrategyModule.METRICS_LOG_WINDOW_MS) {
+      return;
+    }
+    const avgNormalizedBatchSize =
+      this.metricsWindow.normalizedBatchCount > 0
+        ? this.metricsWindow.normalizedMarketsTotal / this.metricsWindow.normalizedBatchCount
+        : 0;
+    this.log.info(
+      {
+        strategyCachedMarkets: this.cachedMarkets.size,
+        scanTicks: this.metricsWindow.scanTicks,
+        scanUniverseSize: this.metricsWindow.scanUniverseSize,
+        candidatesConsidered: this.metricsWindow.candidatesConsidered,
+        signalsProduced: this.metricsWindow.signalsProduced,
+        normalizedBatchCount: this.metricsWindow.normalizedBatchCount,
+        normalizedMarketsTotal: this.metricsWindow.normalizedMarketsTotal,
+        normalizedAvgBatchSize: Number(avgNormalizedBatchSize.toFixed(2)),
+        windowMs: nowMs - this.lastMetricsLogAtMs,
+      },
+      "strategy throughput snapshot",
+    );
+    this.lastMetricsLogAtMs = nowMs;
+    this.metricsWindow = {
+      scanTicks: 0,
+      scanUniverseSize: 0,
+      candidatesConsidered: 0,
+      signalsProduced: 0,
+      normalizedBatchCount: 0,
+      normalizedMarketsTotal: 0,
+    };
   }
 
   private async prepareMarketsForScan(markets: readonly NormalizedMarket[]): Promise<{

@@ -35,9 +35,16 @@ interface CompiledPattern {
 }
 
 export class NormalizationModule implements RuntimeModule {
+  private static readonly SUMMARY_LOG_WINDOW_MS = 30_000;
   private unsubscribe: (() => void) | null = null;
   private readonly log: Logger;
   private patterns: CompiledPattern[] = [];
+  private lastSummaryLogAtMs = 0;
+  private summaryWindow = {
+    batchCount: 0,
+    normalizedMarkets: 0,
+    matchedMarkets: 0,
+  };
 
   constructor(private readonly deps: NormalizationModuleDeps) {
     this.log = deps.log.child({ module: "normalization" });
@@ -147,14 +154,47 @@ export class NormalizationModule implements RuntimeModule {
       });
     }
 
-    this.log.info(
-      { total: enriched.length, matched: enriched.filter((m) => m.familyId !== null).length },
-      "normalization complete",
-    );
+    const matchedCount = enriched.filter((m) => m.familyId !== null).length;
+    this.summaryWindow.batchCount++;
+    this.summaryWindow.normalizedMarkets += enriched.length;
+    this.summaryWindow.matchedMarkets += matchedCount;
+
+    this.log.debug({ total: enriched.length, matched: matchedCount }, "normalization complete");
+    this.logSummaryIfNeeded(payload.timestamp);
 
     await this.deps.bus.publish("NormalizedMarketUpdated", {
       markets: enriched,
       timestamp: Date.now(),
     });
+  }
+
+  private logSummaryIfNeeded(nowMs: number): void {
+    if (this.lastSummaryLogAtMs === 0) {
+      this.lastSummaryLogAtMs = nowMs;
+      return;
+    }
+    if (nowMs - this.lastSummaryLogAtMs < NormalizationModule.SUMMARY_LOG_WINDOW_MS) {
+      return;
+    }
+    const avgBatchSize =
+      this.summaryWindow.batchCount > 0
+        ? this.summaryWindow.normalizedMarkets / this.summaryWindow.batchCount
+        : 0;
+    this.log.info(
+      {
+        batches: this.summaryWindow.batchCount,
+        normalizedMarkets: this.summaryWindow.normalizedMarkets,
+        matchedMarkets: this.summaryWindow.matchedMarkets,
+        normalizedAvgBatchSize: Number(avgBatchSize.toFixed(2)),
+        windowMs: nowMs - this.lastSummaryLogAtMs,
+      },
+      "normalization summary",
+    );
+    this.lastSummaryLogAtMs = nowMs;
+    this.summaryWindow = {
+      batchCount: 0,
+      normalizedMarkets: 0,
+      matchedMarkets: 0,
+    };
   }
 }

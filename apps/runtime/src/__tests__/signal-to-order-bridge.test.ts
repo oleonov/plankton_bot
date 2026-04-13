@@ -368,6 +368,101 @@ describe("SignalToOrderBridge", () => {
     expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
   });
 
+  it("refreshes stale clob books for hot entry families before marketability rejection", async () => {
+    const bus = new InProcessEventBus();
+    const refreshedEntry = {
+      tokenId: String(TOKEN_ID),
+      snapshotTs: Date.now(),
+      cachedAtMs: Date.now(),
+      sourcePolledAtMs: Date.now(),
+      bookSource: "clob" as const,
+      sourceKind: "rest" as const,
+      book: {
+        tokenId: TOKEN_ID,
+        bids: [{ price: 0.04, size: 10 }],
+        asks: [{ price: 0.05, size: 10 }],
+        bestBid: 0.04,
+        bestAsk: 0.05,
+        midPrice: 0.045,
+        spread: 0.01,
+        timestamp: Date.now(),
+      },
+    };
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => null),
+      waitForFreshEntry: vi.fn(async () => null),
+      getFreshOrRefresh: vi.fn(async () => ({
+        status: "refreshed" as const,
+        entry: refreshedEntry,
+      })),
+    } as unknown as CandidateBookCache;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      rulesProvider: {
+        getRule: vi.fn(() =>
+          makeBundle({
+            identity: {
+              familyKey: "donald-trump-of-truth-social-posts",
+              primaryCategory: "other",
+              regime: "social-activity",
+            },
+            throughput: {
+              maxConcurrentOrdersPerFamily: 10,
+              maxProbeInFlightPerToken: 2,
+              maxEntrySignalsPerTickPerFamily: 10,
+              fastLaneEnabled: true,
+            },
+          }),
+        ),
+        isEnabled: vi.fn(() => true),
+        getAllFamilies: vi.fn(() => []),
+        getRulesForRegime: vi.fn(() => []),
+      },
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+      candidateBookCache,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          familyKey: "donald-trump-of-truth-social-posts",
+          regime: "social-activity",
+          bestBid: 0.04,
+          bestAsk: 0.05,
+          midPrice: 0.045,
+          spread: 0.01,
+          bookSource: "clob",
+          snapshotTs: Date.now() - 30_000,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        familyId: createFamilyId("donald-trump-of-truth-social-posts:social-activity:ad-hoc"),
+      },
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(candidateBookCache.getFreshOrRefresh).toHaveBeenCalledWith(
+      String(TOKEN_ID),
+      expect.any(Number),
+    );
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.04);
+  });
+
   it("publishes a precise conversion skip reason for gamma-fallback zero-spread books", async () => {
     const bus = new InProcessEventBus();
     const bridge = new SignalToOrderBridge({

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId, createFamilyId } from "@plankton/domain";
 import type {
   FamilyRulesProvider,
@@ -110,12 +110,20 @@ describe("NormalizationModule", () => {
     bus = new InProcessEventBus();
     rulesProvider = createMockRulesProvider([makeIdentity()]);
     marketRepo = createMockMarketRepo();
+    silentLog.info.mockClear();
+    silentLog.warn.mockClear();
+    silentLog.error.mockClear();
+    silentLog.debug.mockClear();
     mod = new NormalizationModule({
       bus,
       rulesProvider,
       marketRepo,
       log: silentLog,
     });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("healthCheck returns not-ok before start", async () => {
@@ -149,6 +157,46 @@ describe("NormalizationModule", () => {
     expect(received[0]![0]!.familyKey).toBe("btc-price");
     expect(received[0]![0]!.regime).toBe("threshold");
     expect(received[0]![0]!.horizon).toBe("daily");
+
+    await mod.stop();
+  });
+
+  it("emits per-batch debug logs and periodic summary info logs", async () => {
+    vi.useFakeTimers();
+    await mod.start();
+
+    await bus.publish("MarketSnapshotReceived", {
+      markets: [makeNormalizedMarket({ slug: "btc-one-price" })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("MarketSnapshotReceived", {
+      markets: [makeNormalizedMarket({ tokenId: createTokenId("tok-2"), slug: "btc-two-price" })],
+      timestamp: Date.now(),
+    });
+
+    expect(silentLog.debug).toHaveBeenCalledWith(
+      expect.objectContaining({ total: 1, matched: 1 }),
+      "normalization complete",
+    );
+    expect(silentLog.info).not.toHaveBeenCalledWith(
+      expect.objectContaining({ batches: expect.any(Number) }),
+      "normalization summary",
+    );
+
+    await vi.advanceTimersByTimeAsync(30_001);
+    await bus.publish("MarketSnapshotReceived", {
+      markets: [makeNormalizedMarket({ tokenId: createTokenId("tok-3"), slug: "btc-three-price" })],
+      timestamp: Date.now(),
+    });
+
+    expect(silentLog.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        batches: 3,
+        normalizedMarkets: 3,
+        matchedMarkets: 3,
+      }),
+      "normalization summary",
+    );
 
     await mod.stop();
   });

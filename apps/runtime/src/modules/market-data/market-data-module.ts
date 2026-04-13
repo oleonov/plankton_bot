@@ -33,6 +33,7 @@ import {
 } from "./market-pricing-utils.js";
 
 const STREAM_FALLBACK_MIN_STALE_MS = 15_000;
+const STREAM_UPDATE_COALESCE_MS = 100;
 
 export interface MarketDataStreamActivitySnapshot {
   readonly wsEnabled: boolean;
@@ -82,6 +83,8 @@ export class MarketDataModule implements RuntimeModule {
   private lastTrackedTokenCount = 0;
   private lastStaleTokenCount = 0;
   private lastFallbackPollCount = 0;
+  private readonly pendingStreamUpdatesByToken = new Map<string, MarketPricingStreamUpdate>();
+  private streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private readonly deps: MarketDataModuleDeps) {
     this.log = deps.log.child({ module: "market-data" });
@@ -131,6 +134,11 @@ export class MarketDataModule implements RuntimeModule {
       clearInterval(this.timer);
       this.timer = null;
     }
+    if (this.streamFlushTimer) {
+      clearTimeout(this.streamFlushTimer);
+      this.streamFlushTimer = null;
+    }
+    await this.flushPendingStreamUpdates();
     this.stream?.close();
     this.stream = null;
     this.log.info("market-data module stopped");
@@ -297,7 +305,23 @@ export class MarketDataModule implements RuntimeModule {
 
   private async handleStreamUpdates(updates: readonly MarketPricingStreamUpdate[]): Promise<void> {
     if (updates.length === 0) return;
+    for (const update of updates) {
+      this.pendingStreamUpdatesByToken.set(String(update.tokenId), update);
+    }
+    if (this.streamFlushTimer) return;
+    this.streamFlushTimer = setTimeout(() => {
+      this.streamFlushTimer = null;
+      void this.flushPendingStreamUpdates().catch((err) => {
+        this.log.error({ err }, "stream update flush failed");
+      });
+    }, STREAM_UPDATE_COALESCE_MS);
+  }
+
+  private async flushPendingStreamUpdates(): Promise<void> {
+    if (this.pendingStreamUpdatesByToken.size === 0) return;
     const nowMs = Date.now();
+    const updates = [...this.pendingStreamUpdatesByToken.values()];
+    this.pendingStreamUpdatesByToken.clear();
     const changedMarkets: NormalizedMarket[] = [];
 
     for (const update of updates) {
@@ -317,6 +341,13 @@ export class MarketDataModule implements RuntimeModule {
 
     if (changedMarkets.length === 0) return;
     this.lastSuccessfulDataMs = nowMs;
+    this.log.debug(
+      {
+        coalescedUpdates: updates.length,
+        changedMarkets: changedMarkets.length,
+      },
+      "publishing coalesced stream market snapshot",
+    );
     await this.deps.bus.publish("MarketSnapshotReceived", {
       markets: changedMarkets,
       timestamp: nowMs,

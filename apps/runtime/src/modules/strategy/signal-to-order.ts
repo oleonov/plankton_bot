@@ -15,6 +15,7 @@
 
 import type {
   EventBus,
+  FamilyRuleBundle,
   FamilyRulesProvider,
   NormalizedMarket,
   OrderRepository,
@@ -104,7 +105,8 @@ export class SignalToOrderBridge {
 
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
     const { signal } = payload;
-    const resolvedMarket = await this.resolveMarket(signal);
+    const bundle = this.deps.rulesProvider.getRule(signal.familyId);
+    const resolvedMarket = await this.resolveMarket(signal, bundle);
     const market = resolvedMarket.market;
     const executionMinNotionalUsdc = this.resolveExecutionMinNotionalUsdc();
 
@@ -118,8 +120,6 @@ export class SignalToOrderBridge {
       });
       return;
     }
-
-    const bundle = this.deps.rulesProvider.getRule(signal.familyId);
     const queueJumpTerms = bundle
       ? resolveQueueJumpExecutionTerms({
           signal,
@@ -263,7 +263,10 @@ export class SignalToOrderBridge {
     });
   }
 
-  private async resolveMarket(signal: RuntimeEventMap["SignalApproved"]["signal"]): Promise<{
+  private async resolveMarket(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    bundle: FamilyRuleBundle | null | undefined,
+  ): Promise<{
     market: NormalizedMarket | null;
     cacheStatus: CandidateBookResolution["status"] | "disabled" | "base-market";
   }> {
@@ -285,7 +288,10 @@ export class SignalToOrderBridge {
       };
     }
 
-    if (market.bookSource === "clob") {
+    if (
+      market.bookSource === "clob" &&
+      !shouldRefreshBookBeforeConversion(signal, market, bundle, nowMs)
+    ) {
       return { market, cacheStatus: "base-market" };
     }
 
@@ -676,6 +682,20 @@ export class SignalToOrderBridge {
       this.filledOrderIds.delete(next.value);
     }
   }
+}
+
+function shouldRefreshBookBeforeConversion(
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  market: NormalizedMarket,
+  bundle: FamilyRuleBundle | null | undefined,
+  nowMs: number,
+): boolean {
+  if (!isEntryReason(signal.reason)) return false;
+  if (!bundle) return false;
+  const policy = resolveMarketabilityPolicy(bundle, market.tickSize);
+  const bookAgeMs = Math.max(0, nowMs - market.snapshotTs);
+  if (bookAgeMs > policy.maxBookAgeMs) return true;
+  return bundle.rules.throughput?.fastLaneEnabled === true && bookAgeMs > 5_000;
 }
 
 type CooldownBypassReason =
