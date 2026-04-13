@@ -100,7 +100,10 @@ const YAML_WITH_DEFAULTS = YAML.replace(
     '    preferred_entry_band: "0.01-0.20"',
     "",
   ].join("\n"),
-).replace(/^\s*max_entry_price: 0\.2\n/m, "");
+).replace(
+  '      entry:\n        entry_mode: "probe-first"\n        min_entry_price: 0.01\n        max_entry_price: 0.2\n',
+  '      entry:\n        entry_mode: "probe-first"\n        min_entry_price: 0.01\n',
+);
 
 describe("family-config-import", () => {
   it("applies YAML families and records checksum metadata", () => {

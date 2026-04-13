@@ -41,9 +41,10 @@ $file"
   esac
 done
 
-if [ -z "${files_to_check#"${files_to_check%%[![:space:]]*}"}" ]; then
-  exit 0
+if [ -n "${files_to_check#"${files_to_check%%[![:space:]]*}"}" ]; then
+  echo "pre-push: running prettier --check on changed tracked files"
+  printf '%s\n' "$files_to_check" | sed '/^$/d' | xargs pnpm exec prettier --check --ignore-unknown
 fi
 
-echo "pre-push: running prettier --check on changed tracked files"
-printf '%s\n' "$files_to_check" | sed '/^$/d' | xargs pnpm exec prettier --check --ignore-unknown
+echo "pre-push: running mandatory regression suites"
+pnpm run test:prepush

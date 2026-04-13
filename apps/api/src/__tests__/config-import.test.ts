@@ -103,7 +103,10 @@ const DEFAULTED_FAMILY_YAML = FAMILY_YAML.replace(
       "",
     ].join("\n"),
   )
-  .replace(/^\s*max_entry_price: 0\.30\n/m, "");
+  .replace(
+    '      entry:\n        entry_mode: "probe-first"\n        min_entry_price: 0.02\n        max_entry_price: 0.30\n',
+    '      entry:\n        entry_mode: "probe-first"\n        min_entry_price: 0.02\n',
+  );
 
 function makeTwoFamilyYaml(secondId: string, secondKey: string): string {
   return (
