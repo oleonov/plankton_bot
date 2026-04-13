@@ -573,6 +573,54 @@ describe("MarketDataModule", () => {
     await mod.stop();
   });
 
+  it("poll degrades to cached websocket state on transient fallback fetch failures", async () => {
+    silentLog.warn.mockClear();
+    silentLog.error.mockClear();
+    const tracked = [
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-a"),
+        conditionId: "cond-a",
+      }),
+    ];
+    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce(
+        new Map([
+          ["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }],
+        ]),
+      )
+      .mockRejectedValueOnce(new Error("fetch failed: getaddrinfo ENOTFOUND gamma-api.polymarket.com"));
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+    });
+    await stream!.emitGapForTokenIds(["tok-a"]);
+    await mod.poll();
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        fallbackPollCount: 1,
+        trackedCount: 1,
+      }),
+      "poll cycle degraded — keeping cached websocket state",
+    );
+    expect(silentLog.error).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "poll cycle failed",
+    );
+    await expect(mod.healthCheck()).resolves.toEqual(
+      expect.objectContaining({
+        ok: true,
+      }),
+    );
+
+    await mod.stop();
+  });
+
   it("poll narrows reconnect catch-up to the affected token ids when a shard reports them", async () => {
     const tracked = [
       makeTrackedMarket({

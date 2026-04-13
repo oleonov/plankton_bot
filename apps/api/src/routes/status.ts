@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import { resolveTradingState } from "@plankton/domain";
 import type { LedgerPool } from "../ledger-pool.js";
 import { computeExecutionTelemetry } from "../execution-telemetry.js";
 import { ok } from "../errors.js";
@@ -192,22 +193,16 @@ function computeTradingState(
     )
     .get() as { total: number; probeOnly: number };
 
-  let tradingState: string;
-  if (
-    sa.entryApproved > 0 &&
-    allProbeOnly.total > 0 &&
-    allProbeOnly.probeOnly === allProbeOnly.total
-  ) {
-    tradingState = "PROBING_ONLY";
-  } else if (sa.entryApproved > 0) {
-    tradingState = "ACTIVELY_TRADING";
-  } else if (sa.produced > 0 && sa.rejected > 0 && sa.entryApproved === 0) {
-    tradingState = "ALIVE_BUT_BLOCKED";
-  } else if (sa.produced > 0 && (sa.exitApproved ?? 0) > 0 && sa.entryApproved === 0) {
-    tradingState = "EXITS_ONLY";
-  } else {
-    tradingState = "NO_SIGNALS";
-  }
+  const tradingState = resolveTradingState({
+    signalWindow: {
+      produced: sa.produced,
+      approved: sa.approved,
+      rejected: sa.rejected,
+      entryApproved: sa.entryApproved,
+      exitApproved: sa.exitApproved ?? 0,
+    },
+    activeFamilies: allProbeOnly,
+  });
 
   if (tradingState === "NO_SIGNALS" && scanner && scanner.candidatesConsidered > 0) {
     signalActivity.topBlockingLayer = "scanner";

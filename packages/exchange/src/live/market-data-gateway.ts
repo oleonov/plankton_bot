@@ -17,6 +17,7 @@ import {
   type TokenId,
 } from "@plankton/domain";
 import { mapMarket, mapOrderBook, parseStringOrArray } from "../mappers.js";
+import { isTransientNetworkError, sleep } from "../network-errors.js";
 import { SharedMarketPricingStreamHub } from "./market-pricing-stream-hub.js";
 import {
   defaultMarketDataWebSocketFactory,
@@ -33,6 +34,8 @@ const BOOKS_BATCH_SIZE = 200;
 // Transport-safety threshold to avoid 414 URI Too Large.
 // Most HTTP servers/proxies accept up to 8KB; 3500 is conservative.
 const MAX_URL_LENGTH = 3500;
+const FETCH_MAX_RETRIES = 2;
+const FETCH_RETRY_DELAY_MS = 250;
 
 const PARAM_NAME = "clob_token_ids";
 // "&clob_token_ids=" for subsequent params, "?clob_token_ids=" for the first
@@ -177,12 +180,13 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     const result = new Map<string, OrderBookSnapshot>();
     const batches = chunkItems(tokenIds, BOOKS_BATCH_SIZE);
     for (const batch of batches) {
-      const response = await this.withTimeout(
-        fetch(CLOB_ORDER_BOOKS_URL, {
+      const response = await this.fetchWithRetry(
+        CLOB_ORDER_BOOKS_URL,
+        {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(batch.map((tokenId) => ({ token_id: tokenId }))),
-        }),
+        },
         15_000,
       );
       if (!response.ok) {
@@ -217,7 +221,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     for (const batch of batches) {
       const params = batch.map((id) => `clob_token_ids=${id}`).join("&");
       const url = `${GAMMA_PRICING_BASE_URL}?${params}`;
-      const response = await this.withTimeout(fetch(url), 15_000);
+      const response = await this.fetchWithRetry(url, undefined, 15_000);
       if (!response.ok) {
         throw new Error(`Gamma pricing request failed: ${response.status} ${response.statusText}`);
       }
@@ -329,5 +333,23 @@ export class LiveMarketDataGateway implements MarketDataGateway {
         },
       );
     });
+  }
+
+  private async fetchWithRetry(
+    input: string,
+    init: RequestInit | undefined,
+    timeoutMs: number,
+  ): Promise<Response> {
+    for (let attempt = 1; attempt <= FETCH_MAX_RETRIES; attempt++) {
+      try {
+        return await this.withTimeout(fetch(input, init), timeoutMs);
+      } catch (err) {
+        if (attempt === FETCH_MAX_RETRIES || !isTransientNetworkError(err)) {
+          throw err;
+        }
+        await sleep(FETCH_RETRY_DELAY_MS * attempt);
+      }
+    }
+    throw new Error("unreachable");
   }
 }

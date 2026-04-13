@@ -22,6 +22,7 @@ import type {
 import { slugPatternToRegex, matchesHorizon, createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { resolveFamilyAssignmentMaxDaysAhead } from "../../family-assignment-window.js";
+import { isTransientNetworkError } from "../../network-errors.js";
 
 export interface MarketScannerModuleDeps {
   discoveryGateway: MarketDiscoveryGateway;
@@ -206,6 +207,10 @@ export class MarketScannerModule implements RuntimeModule {
       );
       return result;
     } catch (err) {
+      if (!throwOnError && this.lastSuccessfulScanMs > 0 && isTransientNetworkError(err)) {
+        this.log.warn({ err }, "scan cycle degraded — keeping existing catalog");
+        return null;
+      }
       this.log.error({ err }, "scan cycle failed");
       if (throwOnError) {
         throw err;

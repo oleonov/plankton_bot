@@ -879,6 +879,34 @@ describe("LiveMarketDataGateway", () => {
     }
   });
 
+  it("getOrderBooks retries transient fetch failures before succeeding", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("fetch failed: getaddrinfo ENOTFOUND clob.polymarket.com"))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              asset_id: "tok-a",
+              bids: [{ price: "0.10", size: "10" }],
+              asks: [{ price: "0.12", size: "8" }],
+            },
+          ]),
+      });
+    globalThis.fetch = fetchMock;
+
+    try {
+      const result = await gw.getOrderBooks(["tok-a"]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.get("tok-a")!.bestBid).toBe(0.1);
+      expect(result.get("tok-a")!.bestAsk).toBe(0.12);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("getMarketPricing extracts pricing when Gamma returns stringified clobTokenIds and outcomePrices", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn().mockResolvedValueOnce({
@@ -969,6 +997,35 @@ describe("LiveMarketDataGateway", () => {
       await expect(gw.getMarketPricing(["tok-1"])).resolves.toEqual(new Map());
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(fetchMock.mock.calls[0]![0]).not.toBe("https://clob.polymarket.com/books");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("getMarketPricing retries transient fetch failures before succeeding", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("request timed out after 15000ms"))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              clobTokenIds: ["tok-1"],
+              outcomePrices: "[0.45]",
+              bestBid: 0.44,
+              bestAsk: 0.46,
+            },
+          ]),
+      });
+    globalThis.fetch = fetchMock;
+
+    try {
+      const result = await gw.getMarketPricing(["tok-1"]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(result.get("tok-1")!.bestBid).toBe(0.44);
+      expect(result.get("tok-1")!.bestAsk).toBe(0.46);
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -56,6 +56,7 @@ import {
   createBotRunId,
   slugPatternToRegex,
   ENTRY_REASONS,
+  resolveTradingState,
   type EntryRulePreset,
 } from "@plankton/domain";
 import { migrateOrphanedPositions } from "./universe-migration.js";
@@ -1526,26 +1527,22 @@ async function main(): Promise<void> {
     if (now - lastSnapshotMs >= SNAPSHOT_INTERVAL_MS) {
       lastSnapshotMs = now;
 
-      // Derive trading state from current window — mirrors API computeTradingState logic
       const sa = signalWindow;
-      let tradingState: string;
-      if (sa.entryApproved > 0) {
-        const allProbeOnly = ledgerConn.db
-          .prepare(
-            "SELECT COUNT(*) as total, COUNT(CASE WHEN effective_mode = 'probe-only' THEN 1 END) as probeOnly FROM family_runtime_state WHERE runtime_mode = 'active'",
-          )
-          .get() as { total: number; probeOnly: number };
-        tradingState =
-          allProbeOnly.total > 0 && allProbeOnly.probeOnly === allProbeOnly.total
-            ? "PROBING_ONLY"
-            : "ACTIVELY_TRADING";
-      } else if (sa.produced > 0 && sa.rejected > 0 && sa.entryApproved === 0) {
-        tradingState = "ALIVE_BUT_BLOCKED";
-      } else if (sa.produced > 0 && sa.exitApproved > 0 && sa.entryApproved === 0) {
-        tradingState = "EXITS_ONLY";
-      } else {
-        tradingState = "NO_SIGNALS";
-      }
+      const allProbeOnly = ledgerConn.db
+        .prepare(
+          "SELECT COUNT(*) as total, COUNT(CASE WHEN effective_mode = 'probe-only' THEN 1 END) as probeOnly FROM family_runtime_state WHERE runtime_mode = 'active'",
+        )
+        .get() as { total: number; probeOnly: number };
+      const tradingState = resolveTradingState({
+        signalWindow: {
+          produced: sa.produced,
+          approved: sa.approved,
+          rejected: sa.rejected,
+          entryApproved: sa.entryApproved,
+          exitApproved: sa.exitApproved,
+        },
+        activeFamilies: allProbeOnly,
+      });
 
       insertSnapshot.run(
         tradingState,

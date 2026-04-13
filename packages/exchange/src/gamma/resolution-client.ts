@@ -1,3 +1,5 @@
+import { isTransientNetworkError, sleep } from "../network-errors.js";
+
 /**
  * GammaResolutionClient — queries Gamma API for market resolution status.
  *
@@ -99,14 +101,13 @@ export class GammaResolutionClient {
         if (attempt === this.maxRetries || !this.isTransient(err)) {
           throw err;
         }
-        await new Promise((r) => setTimeout(r, this.retryDelayMs));
+        await sleep(this.retryDelayMs);
       }
     }
     throw new Error("unreachable");
   }
 
   private isTransient(err: unknown): boolean {
-    const msg = err instanceof Error ? err.message : String(err);
-    return /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket hang up|timed out|UND_ERR_SOCKET/.test(msg);
+    return isTransientNetworkError(err);
   }
 }

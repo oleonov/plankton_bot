@@ -25,6 +25,7 @@ import type {
   NormalizedMarket,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { isTransientNetworkError } from "../../network-errors.js";
 import {
   applyPricingSnapshot,
   applyStreamUpdate,
@@ -181,6 +182,8 @@ export class MarketDataModule implements RuntimeModule {
   async poll(): Promise<void> {
     if (this.polling) return;
     this.polling = true;
+    let tracked: readonly Market[] = [];
+    let tokenIdsToPoll: string[] = [];
     try {
       this.log.debug("poll cycle starting");
 
@@ -192,7 +195,7 @@ export class MarketDataModule implements RuntimeModule {
         });
       }
 
-      const tracked = this.deps.marketRepo.findActive();
+      tracked = this.deps.marketRepo.findActive();
       this.refreshTrackedMarkets(tracked);
       this.lastTrackedTokenCount = tracked.length;
       if (tracked.length === 0) {
@@ -213,7 +216,7 @@ export class MarketDataModule implements RuntimeModule {
       this.stream?.setTokenIds(tokenIds);
       const now = Date.now();
       const fallbackStaleMs = Math.max(STREAM_FALLBACK_MIN_STALE_MS, this.deps.pollIntervalMs * 3);
-      const tokenIdsToPoll =
+      tokenIdsToPoll =
         this.stream == null || this.forceFullPoll
           ? tokenIds
           : tokenIds.filter((tokenId) => {
@@ -266,7 +269,20 @@ export class MarketDataModule implements RuntimeModule {
         timestamp: now,
       });
     } catch (err) {
-      this.log.error({ err }, "poll cycle failed");
+      if (this.shouldDegradeToCachedStreamState(err, tracked, tokenIdsToPoll)) {
+        const nowMs = Date.now();
+        await this.publishCachedMarkets(tracked, nowMs);
+        this.log.warn(
+          {
+            err,
+            trackedCount: tracked.length,
+            fallbackPollCount: tokenIdsToPoll.length,
+          },
+          "poll cycle degraded — keeping cached websocket state",
+        );
+      } else {
+        this.log.error({ err }, "poll cycle failed");
+      }
     } finally {
       if (this.deps.botRunId) {
         await this.deps.bus.publish("MarketDataPollProgress", {
@@ -357,6 +373,38 @@ export class MarketDataModule implements RuntimeModule {
       }
     }
     return count;
+  }
+
+  private shouldDegradeToCachedStreamState(
+    err: unknown,
+    tracked: readonly Market[],
+    tokenIdsToPoll: readonly string[],
+  ): boolean {
+    return (
+      this.stream != null &&
+      tracked.length > 0 &&
+      tokenIdsToPoll.length > 0 &&
+      tokenIdsToPoll.every((tokenId) => this.marketCache.has(tokenId)) &&
+      isTransientNetworkError(err)
+    );
+  }
+
+  private async publishCachedMarkets(tracked: readonly Market[], nowMs: number): Promise<void> {
+    const markets: NormalizedMarket[] = [];
+    for (const trackedMarket of tracked) {
+      const tokenKey = String(trackedMarket.tokenId);
+      const nextMarket = syncTrackedMarket(
+        this.marketCache.get(tokenKey) ?? null,
+        trackedMarket,
+        nowMs,
+      );
+      this.marketCache.set(tokenKey, nextMarket);
+      markets.push(nextMarket);
+    }
+    await this.deps.bus.publish("MarketSnapshotReceived", {
+      markets,
+      timestamp: nowMs,
+    });
   }
 }
 

@@ -518,6 +518,17 @@ describe("GET /status", () => {
     conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'signal_activity'`);
   });
 
+  it("returns EXITS_ONLY when only exit approvals exist alongside rejected signals", async () => {
+    conn.db.exec(`
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('signal_activity', 1, '{"produced":12,"approved":1,"rejected":11,"entryApproved":0,"exitApproved":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
+    `);
+    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
+    expect(json(res).data.tradingState).toBe("EXITS_ONLY");
+    expect(json(res).data.signalActivity.topBlockingLayer).toBeNull();
+    conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'signal_activity'`);
+  });
+
   it("status includes signal conversion telemetry when available", async () => {
     conn.db.exec(`
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
