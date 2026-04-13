@@ -4,10 +4,11 @@ import {
   type DiscoveryRun,
   ProfileId,
   PROBE_DEFAULTS,
+  resolveDiscoveryEntryPolicy,
   resolveFamilyDeploymentSeed,
   resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
-import { SqliteDiscoveryRunRepository } from "@plankton/db";
+import { SqliteDiscoveryRunRepository, readFamilyRuleDefaults } from "@plankton/db";
 import { ok, ApiError } from "../errors.js";
 
 interface DiscoveryOpts {
@@ -517,6 +518,40 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
       maxMarkets: body.maxActiveMarkets ?? PROBE_DEFAULTS.maxActiveMarkets,
       maxDust: body.maxDustPositions ?? PROBE_DEFAULTS.maxDustPositions,
     };
+    const defaultEntryPreset = readFamilyRuleDefaults(controlDb).entry;
+    if (defaultEntryPreset == null) {
+      throw new ApiError(
+        500,
+        "family rule defaults are not initialized in control DB",
+        "FAMILY_RULE_DEFAULTS_MISSING",
+      );
+    }
+    const entryPolicy = resolveDiscoveryEntryPolicy({
+      familyKey: row.family_key,
+      primaryCategory: row.primary_category,
+      regime: row.regime,
+      horizon: row.horizon,
+      strategyProfile: row.strategy_profile,
+      slugPattern: row.slug_pattern,
+      defaultEntryPreset,
+    });
+    if (entryPolicy.matchedBy === "fallback") {
+      app.log.warn(
+        {
+          candidateId: row.candidate_id,
+          familyKey: row.family_key,
+          primaryCategory: row.primary_category,
+          regime: row.regime,
+          horizon: row.horizon,
+          strategyProfile: row.strategy_profile,
+          slugPattern: row.slug_pattern,
+          matchedBy: entryPolicy.matchedBy,
+          resolvedTier: entryPolicy.tier,
+          appliedMaxEntryPrice: entryPolicy.preset.maxEntryPrice,
+        },
+        "discovery entry policy fell back to configured defaults",
+      );
+    }
 
     if (!Number.isFinite(caps.maxOpenValue) || caps.maxOpenValue < 1) {
       throw new ApiError(400, "maxOpenValueUsdc must be >= 1", "INVALID_CAPS");
@@ -579,12 +614,25 @@ export const discoveryRoutes: FastifyPluginAsync<DiscoveryOpts> = async (app, op
         .prepare(
           `INSERT INTO family_rules
              (family_id, enabled, action, entry_mode, scale_mode, exit_mode,
+              min_entry_price, max_entry_price, high_price_threshold,
+              require_proven_family_above_price, preferred_entry_band,
               allow_heavy_campaigns, max_open_value_usdc, max_active_markets,
               max_dust_positions, updated_at)
            VALUES (?, 1, 'trade', 'probe-first', 'disabled', 'repricing-sell',
-                   0, ?, ?, ?, ?)`,
+                   ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
         )
-        .run(familyId, caps.maxOpenValue, caps.maxMarkets, caps.maxDust, now);
+        .run(
+          familyId,
+          entryPolicy.preset.minEntryPrice,
+          entryPolicy.preset.maxEntryPrice,
+          entryPolicy.preset.highPriceThreshold,
+          entryPolicy.preset.requireProvenFamilyAbovePrice,
+          entryPolicy.preset.preferredEntryBand,
+          caps.maxOpenValue,
+          caps.maxMarkets,
+          caps.maxDust,
+          now,
+        );
 
       // 3. INSERT family_deployments. In live-lite operation, newly approved
       // families enter the current profile as probe-only; the bot still decides

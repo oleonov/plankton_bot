@@ -1,6 +1,10 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { applyFamilyConfigImport, computeConfigChecksum } from "@plankton/db";
+import {
+  applyFamilyConfigImport,
+  computeConfigChecksum,
+  readFamilyRuleDefaults,
+} from "@plankton/db";
 import { parseFamilyRulesYaml } from "@plankton/config";
 import { stringify as yamlStringify } from "yaml";
 import { ok, ApiError } from "../errors.js";
@@ -33,14 +37,14 @@ export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) =>
     const dryRun = body.dryRun === true;
 
     const result = dryRun
-      ? applyFamilyConfigImport(db, loaded.families, {
+      ? applyFamilyConfigImport(db, loaded, {
           dryRun: true,
           sourcePath: null,
           sourceChecksum: computeConfigChecksum(yaml),
           importedBy: "api",
         })
       : db.transaction(() =>
-          applyFamilyConfigImport(db, loaded.families, {
+          applyFamilyConfigImport(db, loaded, {
             dryRun: false,
             sourcePath: null,
             sourceChecksum: computeConfigChecksum(yaml),
@@ -64,6 +68,7 @@ export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) =>
     const format = (request.query as { format?: string }).format ?? "json";
 
     if (format === "yaml") {
+      const defaults = readFamilyRuleDefaults(db);
       const families = db
         .prepare("SELECT * FROM family_catalog ORDER BY family_id")
         .all() as Record<string, unknown>[];
@@ -97,7 +102,24 @@ export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) =>
         rules: buildRulesExport(rulesMap.get(f["family_id"] as string)),
       }));
 
-      const yamlDoc = { version: 1, families: yamlFamilies };
+      const yamlDoc = {
+        version: 1,
+        ...(defaults.entry == null
+          ? {}
+          : {
+              defaults: {
+                entry: {
+                  min_entry_price: defaults.entry.minEntryPrice,
+                  max_entry_price: defaults.entry.maxEntryPrice,
+                  high_price_threshold: defaults.entry.highPriceThreshold,
+                  require_proven_family_above_price:
+                    defaults.entry.requireProvenFamilyAbovePrice,
+                  preferred_entry_band: defaults.entry.preferredEntryBand,
+                },
+              },
+            }),
+        families: yamlFamilies,
+      };
       const yamlStr = yamlStringify(yamlDoc, { lineWidth: 120 });
 
       return reply.type("text/yaml; charset=utf-8").send(yamlStr);

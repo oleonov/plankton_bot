@@ -151,7 +151,7 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     horizon: "daily",
     endDate: "2026-04-10T23:59:00.000Z",
     active: true,
-    tickSize: 0.001,
+    tickSize: 0.01,
     negRisk: false,
     bestBid: 0.03,
     bestAsk: 0.034,
@@ -400,7 +400,7 @@ describe("marketability gate", () => {
     expect(decision.checksPassed).toContain("spread-tight");
   });
 
-  it("keeps stricter follow-up spread caps for reduced-fast scale-ins", () => {
+  it("does not clamp reduced-fast scale-ins tighter than the first entry", () => {
     const decision = evaluateMarketability({
       signal: makeSignal({ suggestedSizeUsdc: 4, reason: "scale-in" }),
       market: makeMarket({
@@ -429,8 +429,8 @@ describe("marketability gate", () => {
       nowMs: NOW,
     });
 
-    expect(decision.approved).toBe(false);
-    expect(decision.rejectionReasons).toContain("spread-too-wide");
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("spread-wide-volume-qualified");
   });
 
   it("allows one-sided dust books only for fresh spray entries", () => {
@@ -481,7 +481,7 @@ describe("maker-only price improvement", () => {
     const price = resolveMakerOnlyPrice({
       side: "buy",
       suggestedPrice: 0.04,
-      market: makeMarket(),
+      market: makeMarket({ tickSize: 0.001 }),
       policy,
     });
 
@@ -493,7 +493,7 @@ describe("maker-only price improvement", () => {
     const price = resolveMakerOnlyPrice({
       side: "buy",
       suggestedPrice: 0.032,
-      market: makeMarket(),
+      market: makeMarket({ tickSize: 0.001 }),
       policy,
     });
 
@@ -549,8 +549,29 @@ describe("maker-only price improvement", () => {
 });
 
 describe("marketability policy retuning", () => {
-  it("uses relaxed core-fast policy for proven high-recycle families", () => {
+  it("uses reduced-fast policy for standard crypto families", () => {
     const policy = resolveMarketabilityPolicy(makeBundle());
+
+    expect(policy.tier).toBe("reduced");
+    expect(policy.speedTier).toBe("reduced-fast");
+    expect(policy.maxEntrySpreadCents).toBe(0.025);
+    expect(policy.maxWideEntrySpreadCents).toBe(0.045);
+    expect(policy.makerImprovementTicks).toBe(2);
+    expect(policy.unfilledCancelCooldownMs).toBe(60_000);
+  });
+
+  it("uses core-fast policy for aggressive geopolitics families", () => {
+    const policy = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "will-israel-strike-gaza-on",
+          primaryCategory: "geopolitics",
+          regime: "geopolitics",
+          strategyProfile: "event-driven",
+        },
+      }),
+    );
 
     expect(policy.tier).toBe("core");
     expect(policy.speedTier).toBe("core-fast");
@@ -558,6 +579,44 @@ describe("marketability policy retuning", () => {
     expect(policy.maxWideEntrySpreadCents).toBe(0.08);
     expect(policy.makerImprovementTicks).toBe(3);
     expect(policy.unfilledCancelCooldownMs).toBe(2 * 60_000);
+  });
+
+  it("keeps weather micro families on fallback spread caps even with fast lane enabled", () => {
+    const policy = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "highest-temperature-in-nyc",
+          primaryCategory: "weather",
+          regime: "price-range",
+        },
+      }),
+    );
+
+    expect(policy.tier).toBe("fallback");
+    expect(policy.speedTier).toBe("standard");
+    expect(policy.maxEntrySpreadCents).toBe(0.005);
+    expect(policy.maxWideEntrySpreadCents).toBe(0.01);
+  });
+
+  it("forces fallback spread caps on 0.001 tick markets even for aggressive families", () => {
+    const policy = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          ...makeBundle().identity,
+          familyKey: "elon-musk-of-tweets",
+          primaryCategory: "geopolitics",
+          regime: "social-activity",
+          strategyProfile: "event-driven",
+        },
+      }),
+      0.001,
+    );
+
+    expect(policy.tier).toBe("fallback");
+    expect(policy.speedTier).toBe("standard");
+    expect(policy.maxEntrySpreadCents).toBe(0.005);
+    expect(policy.maxWideEntrySpreadCents).toBe(0.01);
   });
 
   it("uses reduced-fast policy only for selected reduced families", () => {

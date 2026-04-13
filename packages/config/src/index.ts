@@ -3,11 +3,13 @@ export { loadFamilyRulesYaml, parseFamilyRulesYaml, type LoadedFamilyRules } fro
 export {
   familyYamlSchema,
   familyRulesFileSchema,
+  familyRuleDefaultsYamlSchema,
   identityYamlSchema,
   evidenceYamlSchema,
   rulesYamlSchema,
   runtimeStateYamlSchema,
   type FamilyConfig,
+  type FamilyRuleDefaultsConfig,
   type GlobalConfig,
   type TimeWindow,
 } from "./schemas.js";

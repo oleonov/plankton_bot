@@ -7,7 +7,7 @@ import {
   bootstrapImport,
   syncProfileInitialBalances,
 } from "../bootstrap-import.js";
-import type { LoadedFamilyRules } from "@plankton/config";
+import { parseFamilyRulesYaml, type LoadedFamilyRules } from "@plankton/config";
 
 const CONTROL_SQL = readFileSync(
   resolve(import.meta.dirname, "../../../../packages/db/src/schemas/control.sql"),
@@ -30,6 +30,15 @@ function makeMockLoaded(): LoadedFamilyRules {
       sprayCooldownSeconds: 5,
       sprayBudgetUsdc: 50,
       sprayMaxTotalPositions: 30,
+    },
+    defaults: {
+      entry: {
+        minEntryPrice: 0.03,
+        maxEntryPrice: 0.2,
+        highPriceThreshold: 0.2,
+        requireProvenFamilyAbovePrice: 0.2,
+        preferredEntryBand: "0.03-0.20",
+      },
     },
     families: [
       {
@@ -245,6 +254,105 @@ describe("bootstrap-import", () => {
     ]);
     expect(JSON.parse(row.reduced_windows_utc as string)).toEqual([]);
     expect(row.weekday_bias).toBe("preferred");
+  });
+
+  it("materializes defaults.entry.max_entry_price before writing family_rules", () => {
+    const yaml = `
+version: 1
+defaults:
+  entry:
+    min_entry_price: 0.03
+    max_entry_price: 0.27
+    high_price_threshold: 0.27
+    require_proven_family_above_price: 0.27
+    preferred_entry_band: "0.03-0.27"
+families:
+  - family_id: "defaulted-family:generic:daily"
+    identity:
+      family_key: "defaulted-family"
+      primary_category: "crypto-btc"
+      regime: "generic"
+      horizon: "daily"
+      cadence: "daily-dated"
+      strategy_profile: "scalp"
+    evidence:
+      evidence_status: "unknown"
+      evidence_score: 0
+      promotion_state: "probe-only"
+      local_trade_count: 0
+      local_market_count: 0
+      local_realized_pnl_fifo: 0
+      open_tail_cost_usdc: 0
+      tail_adjusted_pnl: 0
+      both_sided_eligible: false
+      heavy_campaign_eligible: false
+    rules:
+      universe:
+        enabled: true
+        action: "trade"
+        priority_rank: 1
+        session_mode: "active-window"
+      entry:
+        entry_mode: "probe-first"
+        min_entry_price: 0.03
+        max_initial_notional_usdc: 5
+        allow_high_price_one_shot: false
+        high_price_threshold: 0.27
+        require_proven_family_above_price: 0.27
+      scale_in:
+        scale_mode: "confirm-only"
+        default_max_buys_per_leg: 3
+        heavy_max_buys_per_leg: 4
+        allow_heavy_campaigns: false
+        require_positive_recycle_history_for_scale: true
+      exit:
+        exit_mode: "repricing-sell"
+        primary_profit_model: "sell-into-strength"
+        allow_runner_extension: false
+        prefer_fast_recycle: true
+        resolution_holding_allowed: false
+      two_sided:
+        allow_two_sided: false
+        two_sided_mode: "disabled"
+      tail_suppression:
+        max_open_value_usdc: 45
+        max_active_markets: 8
+        max_dust_positions: 3
+        tail_quarantine_threshold_usdc: 45
+        tail_quarantine_threshold_ratio: 1.0
+        stale_tail_prune_enabled: true
+        threshold_cleanup_required: false
+        auto_settle_resolved_markets: true
+      session:
+        active_windows_utc:
+          - start: "14:00"
+            end: "21:00"
+        reduced_windows_utc: []
+        weekday_bias: "preferred"
+`;
+
+    const loadedWithDefaults = parseFamilyRulesYaml(yaml, "test");
+    bootstrapImport(db, loadedWithDefaults);
+
+    const row = db
+      .prepare("SELECT max_entry_price FROM family_rules WHERE family_id = ?")
+      .get("defaulted-family:generic:daily") as { max_entry_price: number };
+    const defaultsRow = db
+      .prepare(
+        "SELECT min_entry_price, max_entry_price, preferred_entry_band FROM family_rule_defaults WHERE scope = 'global'",
+      )
+      .get() as {
+      min_entry_price: number;
+      max_entry_price: number;
+      preferred_entry_band: string | null;
+    };
+
+    expect(row.max_entry_price).toBe(0.27);
+    expect(defaultsRow).toEqual({
+      min_entry_price: 0.03,
+      max_entry_price: 0.27,
+      preferred_entry_band: "0.03-0.27",
+    });
   });
 
   it("creates family_deployments (sim/paper enabled, live-lite probe-enabled)", () => {

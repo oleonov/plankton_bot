@@ -504,6 +504,10 @@ rules:
               end: "21:00"
           reduced_windows_utc: []
           weekday_bias: "normal"`;
+  const MINIMAL_FAMILY_NO_MAX_ENTRY_PRICE_YAML = MINIMAL_FAMILY_YAML.replace(
+    /^\s*max_entry_price: 0\.50\n/m,
+    "",
+  );
 
   it("defaults global.initialBalanceUsdc to 10000 when global section is omitted", () => {
     const content = `version: 1\nfamilies:\n${MINIMAL_FAMILY_YAML}\n`;
@@ -526,6 +530,84 @@ rules:
       expect(result.global.initialBalanceUsdc).toBe(250);
       expect(result.global.dustLaneMaxMarketsPerTick).toBe(100);
       expect(result.families).toHaveLength(1);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("applies defaults.entry.max_entry_price when family omits it", () => {
+    const content = `version: 1
+defaults:
+  entry:
+    min_entry_price: 0.03
+    max_entry_price: 0.35
+    high_price_threshold: 0.35
+    require_proven_family_above_price: 0.35
+    preferred_entry_band: "0.05-0.35"
+families:
+${MINIMAL_FAMILY_NO_MAX_ENTRY_PRICE_YAML}
+`;
+    const filePath = writeTmpYaml("defaults-max-entry.yaml", content);
+    try {
+      const result = loadFamilyRulesYaml(filePath);
+      expect(result.defaults.entry).toEqual({
+        minEntryPrice: 0.03,
+        maxEntryPrice: 0.35,
+        highPriceThreshold: 0.35,
+        requireProvenFamilyAbovePrice: 0.35,
+        preferredEntryBand: "0.05-0.35",
+      });
+      expect(result.families[0]!.rules.entry.maxEntryPrice).toBe(0.35);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("prefers family max_entry_price over defaults.entry.max_entry_price", () => {
+    const content = `version: 1
+defaults:
+  entry:
+    min_entry_price: 0.03
+    max_entry_price: 0.35
+    high_price_threshold: 0.35
+    require_proven_family_above_price: 0.35
+    preferred_entry_band: "0.05-0.35"
+families:
+${MINIMAL_FAMILY_YAML}
+`;
+    const filePath = writeTmpYaml("defaults-overridden.yaml", content);
+    try {
+      const result = loadFamilyRulesYaml(filePath);
+      expect(result.families[0]!.rules.entry.maxEntryPrice).toBe(0.5);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rejects multi-family YAML when max_entry_price is missing in both family and defaults", () => {
+    const content = `version: 1
+families:
+${MINIMAL_FAMILY_NO_MAX_ENTRY_PRICE_YAML}
+`;
+    const filePath = writeTmpYaml("missing-default-and-family-max.yaml", content);
+    try {
+      expect(() => loadFamilyRulesYaml(filePath)).toThrow("max_entry_price");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rejects partial defaults.entry presets", () => {
+    const content = `version: 1
+defaults:
+  entry:
+    max_entry_price: 0.35
+families:
+${MINIMAL_FAMILY_YAML}
+`;
+    const filePath = writeTmpYaml("partial-default-entry.yaml", content);
+    try {
+      expect(() => loadFamilyRulesYaml(filePath)).toThrow("min_entry_price");
     } finally {
       cleanup();
     }
@@ -602,6 +684,84 @@ rules:
     try {
       expect(() => loadFamilyRulesYaml(filePath)).toThrow(
         '"global" section is not supported in single-family format',
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("rejects single-family file with defaults: key", () => {
+    const content = `
+family_id: "test:threshold:daily"
+defaults:
+  entry:
+    max_entry_price: 0.50
+identity:
+  family_key: "test"
+  primary_category: "test"
+  regime: "threshold"
+  horizon: "daily"
+  cadence: "daily"
+  strategy_profile: "scalp"
+evidence:
+  evidence_status: "unknown"
+  evidence_score: 0
+  promotion_state: "probe-only"
+  local_trade_count: 0
+  local_market_count: 0
+  local_realized_pnl_fifo: 0
+  open_tail_cost_usdc: 0
+  tail_adjusted_pnl: 0
+  both_sided_eligible: false
+  heavy_campaign_eligible: false
+rules:
+  universe:
+    enabled: true
+    action: "trade"
+    priority_rank: 1
+    session_mode: "active-window"
+  entry:
+    entry_mode: "probe-first"
+    min_entry_price: 0.01
+    max_entry_price: 0.50
+    max_initial_notional_usdc: 5
+    allow_high_price_one_shot: false
+    high_price_threshold: 0.50
+    require_proven_family_above_price: 0.50
+  scale_in:
+    scale_mode: "confirm-only"
+    default_max_buys_per_leg: 3
+    heavy_max_buys_per_leg: 6
+    allow_heavy_campaigns: false
+    require_positive_recycle_history_for_scale: true
+  exit:
+    exit_mode: "repricing-sell"
+    primary_profit_model: "sell-into-strength"
+    allow_runner_extension: false
+    prefer_fast_recycle: true
+    resolution_holding_allowed: false
+  two_sided:
+    allow_two_sided: false
+    two_sided_mode: "disabled"
+  tail_suppression:
+    max_open_value_usdc: 50
+    max_active_markets: 5
+    max_dust_positions: 2
+    tail_quarantine_threshold_usdc: 50
+    tail_quarantine_threshold_ratio: 1.0
+    stale_tail_prune_enabled: true
+    threshold_cleanup_required: true
+  session:
+    active_windows_utc:
+      - start: "14:00"
+        end: "21:00"
+    reduced_windows_utc: []
+    weekday_bias: "normal"
+`;
+    const filePath = writeTmpYaml("single-with-defaults.yaml", content);
+    try {
+      expect(() => loadFamilyRulesYaml(filePath)).toThrow(
+        '"defaults" section is not supported in single-family format',
       );
     } finally {
       cleanup();

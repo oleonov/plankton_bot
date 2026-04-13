@@ -85,6 +85,12 @@ beforeAll(async () => {
     )
   `);
   const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO family_rule_defaults
+       (scope, min_entry_price, max_entry_price, high_price_threshold,
+        require_proven_family_above_price, preferred_entry_band, updated_at)
+     VALUES ('global', 0.03, 0.20, 0.20, 0.20, '0.03-0.20', ?)`,
+  ).run(now);
 
   // Seed candidate for accept tests
   db.prepare(

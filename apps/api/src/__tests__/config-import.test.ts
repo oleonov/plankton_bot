@@ -83,6 +83,28 @@ families:
         weekday_bias: "normal"
 `;
 
+const DEFAULTED_FAMILY_YAML = FAMILY_YAML.replace(
+  'family_id: "test-fam:generic:daily"',
+  'family_id: "defaulted-fam:generic:daily"',
+)
+  .replace('family_key: "test-fam"', 'family_key: "defaulted-fam"')
+  .replace(
+    "global:\n  initial_balance_usdc: 100\n",
+    [
+      "global:",
+      "  initial_balance_usdc: 100",
+      "defaults:",
+      "  entry:",
+      "    min_entry_price: 0.02",
+      "    max_entry_price: 0.30",
+      "    high_price_threshold: 0.20",
+      "    require_proven_family_above_price: 0.20",
+      '    preferred_entry_band: "0.02-0.30"',
+      "",
+    ].join("\n"),
+  )
+  .replace(/^\s*max_entry_price: 0\.30\n/m, "");
+
 function makeTwoFamilyYaml(secondId: string, secondKey: string): string {
   return (
     FAMILY_YAML +
@@ -289,6 +311,38 @@ describe("POST /config/import", () => {
     expect(body.data.added).toEqual([]);
     expect(body.data.updated).toEqual([]);
     expect(body.data.unchanged).toEqual(["test-fam:generic:daily"]);
+  });
+
+  it("accepts defaults.entry.max_entry_price and persists the effective family value", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/config/import",
+      headers: authHeaders(),
+      payload: { yaml: DEFAULTED_FAMILY_YAML },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = json(res);
+    expect(body.ok).toBe(true);
+    expect(body.data.added).toEqual(["defaulted-fam:generic:daily"]);
+
+    const rules = conn.db
+      .prepare("SELECT max_entry_price FROM family_rules WHERE family_id = ?")
+      .get("defaulted-fam:generic:daily") as { max_entry_price: number };
+    const defaultsRow = conn.db
+      .prepare(
+        "SELECT min_entry_price, max_entry_price, preferred_entry_band FROM family_rule_defaults WHERE scope = 'global'",
+      )
+      .get() as {
+      min_entry_price: number;
+      max_entry_price: number;
+      preferred_entry_band: string | null;
+    };
+    expect(rules.max_entry_price).toBe(0.3);
+    expect(defaultsRow).toEqual({
+      min_entry_price: 0.02,
+      max_entry_price: 0.3,
+      preferred_entry_band: "0.02-0.30",
+    });
   });
 
   it("skips operator-edited family", async () => {

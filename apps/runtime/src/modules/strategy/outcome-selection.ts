@@ -37,6 +37,7 @@ export interface OutcomeSelection {
 }
 
 export interface OutcomeCandidatePolicy {
+  minEntryPrice?: number | null;
   maxEntryPrice?: number | null;
   allowGammaFallbackDust?: boolean;
   dustSuggestedSizeUsdc?: number | null;
@@ -65,8 +66,9 @@ export function rejectOutcomeCandidate(
   if (allowGammaFallbackDust) {
     if (fallbackPrice == null) return "missing-book";
     const entry = bundle.rules.entry;
+    const minEntryPrice = policy?.minEntryPrice ?? entry.minEntryPrice;
     const maxEntryPrice = policy?.maxEntryPrice ?? entry.maxEntryPrice;
-    if (fallbackPrice < entry.minEntryPrice || fallbackPrice > maxEntryPrice) {
+    if (fallbackPrice < minEntryPrice || fallbackPrice > maxEntryPrice) {
       return "outside-entry-band";
     }
     return null;
@@ -77,8 +79,9 @@ export function rejectOutcomeCandidate(
 
   const price = market.midPrice;
   const entry = bundle.rules.entry;
+  const minEntryPrice = policy?.minEntryPrice ?? entry.minEntryPrice;
   const maxEntryPrice = policy?.maxEntryPrice ?? entry.maxEntryPrice;
-  if (price < entry.minEntryPrice || price > maxEntryPrice) return "outside-entry-band";
+  if (price < minEntryPrice || price > maxEntryPrice) return "outside-entry-band";
 
   const spread = market.spread ?? market.bestAsk - market.bestBid;
   if (!Number.isFinite(spread) || spread < 0) return "missing-book";

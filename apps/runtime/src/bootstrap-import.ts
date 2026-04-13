@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import { ensureControlProfiles } from "@plankton/db";
+import { ensureControlProfiles, upsertFamilyRuleDefaults } from "@plankton/db";
 import type { LoadedFamilyRules } from "@plankton/config";
 import type { FamilyConfig } from "@plankton/config";
 import {
@@ -100,6 +100,9 @@ export function bootstrapImport(
     insertSettings.run(ProfileId.Simulation, loaded.global.initialBalanceUsdc, null, null, now);
     insertSettings.run(ProfileId.Paper, loaded.global.initialBalanceUsdc, null, null, now);
     insertSettings.run(ProfileId.LiveLite, loaded.global.initialBalanceUsdc, "relayer", 1, now);
+
+    // 2.1 Shared family rule defaults for discovery materialization
+    upsertFamilyRuleDefaults(db, loaded.defaults, now);
 
     // 3. Families
     const insertCatalog = db.prepare(`

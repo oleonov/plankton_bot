@@ -47,7 +47,7 @@ async function main(): Promise<void> {
   try {
     const bootstrapMode = needsBootstrap(conn.db);
     const result = options.dryRun
-      ? applyFamilyConfigImport(conn.db, loaded.families, {
+      ? applyFamilyConfigImport(conn.db, loaded, {
           dryRun: true,
           sourcePath: options.familyRulesPath,
           sourceChecksum: checksum,
@@ -70,7 +70,7 @@ async function main(): Promise<void> {
               unchanged: [],
             };
           }
-          return applyFamilyConfigImport(conn.db, loaded.families, {
+          return applyFamilyConfigImport(conn.db, loaded, {
             dryRun: false,
             sourcePath: options.familyRulesPath,
             sourceChecksum: checksum,

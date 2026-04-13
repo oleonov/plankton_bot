@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { bootstrapDatabase } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
@@ -104,6 +104,14 @@ beforeAll(async () => {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     )
   `);
+  conn.db
+    .prepare(
+      `INSERT INTO family_rule_defaults
+         (scope, min_entry_price, max_entry_price, high_price_threshold,
+          require_proven_family_above_price, preferred_entry_band, updated_at)
+       VALUES ('global', 0.03, 0.20, 0.20, 0.20, '0.03-0.20', datetime('now'))`,
+    )
+    .run();
   app = await buildServer({
     config: testConfig(),
     controlDb: conn.db,
@@ -396,6 +404,11 @@ describe("POST /discovery/candidates/:id/accept", () => {
     expect(rules).toBeDefined();
     expect(rules.scale_mode).toBe("disabled");
     expect(rules.entry_mode).toBe("probe-first");
+    expect(rules.min_entry_price).toBe(0.03);
+    expect(rules.max_entry_price).toBe(0.35);
+    expect(rules.high_price_threshold).toBe(0.35);
+    expect(rules.require_proven_family_above_price).toBe(0.35);
+    expect(rules.preferred_entry_band).toBe("0.05-0.35");
 
     // Verify family_runtime_state row exists
     const state = db
@@ -491,6 +504,70 @@ describe("POST /discovery/candidates/:id/accept", () => {
       enabled: 0,
       deployment_stage: "disabled",
     });
+
+    const rules = db
+      .prepare("SELECT max_entry_price, preferred_entry_band FROM family_rules WHERE family_id = ?")
+      .get("cand-exact-score-1") as {
+      max_entry_price: number;
+      preferred_entry_band: string | null;
+    };
+    expect(rules).toEqual({
+      max_entry_price: 0.2,
+      preferred_entry_band: "0.03-0.20",
+    });
+  });
+
+  it("warns and falls back to the configured default preset for unmatched candidates", async () => {
+    const db = conn.db;
+    const now = new Date().toISOString();
+    const warnSpy = vi.spyOn(app.log, "warn");
+
+    db.prepare(
+      `INSERT INTO family_candidates
+         (candidate_id, family_key, regime, horizon, cadence, pattern_confidence,
+          primary_category, strategy_profile, slug_pattern, active_market_count,
+          cluster_volume_24h, gate_recommendation, status, first_seen_at, last_seen_at,
+          reviewed_at)
+       VALUES ('cand-fallback-1', 'unknown-family', 'generic',
+               'daily', 'daily', 'medium', 'other', 'scalp',
+               'unknown-family-*', 2, 700, 'monitor', 'reviewed', ?, ?, ?)`,
+    ).run(now, now, now);
+
+    try {
+      const res = await app.inject({
+        method: "POST",
+        url: "/api/v1/discovery/candidates/cand-fallback-1/accept",
+        headers: { ...authHeaders(), "content-type": "application/json" },
+        payload: {},
+      });
+
+      expect(res.statusCode).toBe(200);
+      const rules = db
+        .prepare(
+          "SELECT min_entry_price, max_entry_price, preferred_entry_band FROM family_rules WHERE family_id = ?",
+        )
+        .get("cand-fallback-1") as {
+        min_entry_price: number;
+        max_entry_price: number;
+        preferred_entry_band: string | null;
+      };
+      expect(rules).toEqual({
+        min_entry_price: 0.03,
+        max_entry_price: 0.2,
+        preferred_entry_band: "0.03-0.20",
+      });
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          candidateId: "cand-fallback-1",
+          matchedBy: "fallback",
+          resolvedTier: "micro-default",
+          appliedMaxEntryPrice: 0.2,
+        }),
+        "discovery entry policy fell back to configured defaults",
+      );
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
 

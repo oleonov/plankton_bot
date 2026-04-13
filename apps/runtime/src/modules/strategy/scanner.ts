@@ -19,6 +19,7 @@
 
 import {
   ENTRY_REASONS,
+  resolveDiscoveryEntryPolicy,
   resolveFamilyLiveTradingPolicy,
   type NormalizedMarket,
   type FamilyRulesProvider,
@@ -36,6 +37,7 @@ import {
   type TokenId,
   type SignalReason,
   type ScaleInRules,
+  type EntryRulePreset,
 } from "@plankton/domain";
 import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
@@ -66,6 +68,7 @@ export interface ScannerDeps {
   familyStateRepo: FamilyStateRepository;
   log: Logger;
   globalConfig?: GlobalConfig | undefined;
+  defaultEntryPreset?: EntryRulePreset | undefined;
   spraySnapshot?: { positionCount: number; exposureUsdc: number } | undefined;
   /** Tokens that already have spray positions — prevents re-spraying across ticks. */
   sprayedTokens?: ReadonlySet<string> | undefined;
@@ -237,8 +240,74 @@ function parseHHMM(hhmm: string): number {
 
 let signalCounter = 0;
 
+const ENTRY_VALUE_EPSILON = 1e-9;
+
 function nextSignalId(): string {
   return `sig-${Date.now()}-${++signalCounter}`;
+}
+
+function matchesEntryPreset(
+  entry: FamilyRuleBundle["rules"]["entry"],
+  preset: EntryRulePreset,
+): boolean {
+  return (
+    Math.abs(entry.minEntryPrice - preset.minEntryPrice) <= ENTRY_VALUE_EPSILON &&
+    Math.abs(entry.maxEntryPrice - preset.maxEntryPrice) <= ENTRY_VALUE_EPSILON &&
+    Math.abs(entry.highPriceThreshold - preset.highPriceThreshold) <= ENTRY_VALUE_EPSILON &&
+    Math.abs(entry.requireProvenFamilyAbovePrice - preset.requireProvenFamilyAbovePrice) <=
+      ENTRY_VALUE_EPSILON &&
+    (entry.preferredEntryBand ?? null) === (preset.preferredEntryBand ?? null)
+  );
+}
+
+function resolveEffectiveEntryRules(
+  bundle: FamilyRuleBundle,
+  defaultEntryPreset: EntryRulePreset | null | undefined,
+  tickSize: number | null | undefined = null,
+): FamilyRuleBundle["rules"]["entry"] {
+  const entry = bundle.rules.entry;
+  if (!defaultEntryPreset) {
+    return entry;
+  }
+
+  const resolved = resolveDiscoveryEntryPolicy({
+    familyKey: bundle.identity.familyKey,
+    primaryCategory: bundle.identity.primaryCategory,
+    regime: bundle.identity.regime,
+    horizon: bundle.identity.horizon,
+    strategyProfile: bundle.identity.strategyProfile,
+    slugPattern: bundle.identity.slugPattern,
+    tickSize,
+    defaultEntryPreset,
+  });
+
+  if (resolved.matchedBy === "safety") {
+    return {
+      ...entry,
+      minEntryPrice: resolved.preset.minEntryPrice,
+      maxEntryPrice: resolved.preset.maxEntryPrice,
+      highPriceThreshold: resolved.preset.highPriceThreshold,
+      requireProvenFamilyAbovePrice: resolved.preset.requireProvenFamilyAbovePrice,
+      preferredEntryBand: resolved.preset.preferredEntryBand,
+    };
+  }
+
+  if (!matchesEntryPreset(entry, defaultEntryPreset)) {
+    return entry;
+  }
+
+  if (resolved.preset.maxEntryPrice <= entry.maxEntryPrice + ENTRY_VALUE_EPSILON) {
+    return entry;
+  }
+
+  return {
+    ...entry,
+    minEntryPrice: resolved.preset.minEntryPrice,
+    maxEntryPrice: resolved.preset.maxEntryPrice,
+    highPriceThreshold: resolved.preset.highPriceThreshold,
+    requireProvenFamilyAbovePrice: resolved.preset.requireProvenFamilyAbovePrice,
+    preferredEntryBand: resolved.preset.preferredEntryBand,
+  };
 }
 
 function resolveSprayReferencePrice(
@@ -246,6 +315,7 @@ function resolveSprayReferencePrice(
   bundle: FamilyRuleBundle,
   nowMs: number,
   spraySizeUsdc: number | null,
+  defaultEntryPreset: EntryRulePreset | null | undefined,
   executionMinNotionalUsdc: number | null = null,
 ): number | null {
   if (
@@ -272,7 +342,7 @@ function resolveSprayReferencePrice(
   });
   if (price == null) return null;
 
-  const entry = bundle.rules.entry;
+  const entry = resolveEffectiveEntryRules(bundle, defaultEntryPreset, market.tickSize);
   if (price < entry.minEntryPrice || price > entry.maxEntryPrice) return null;
   return price;
 }
@@ -282,9 +352,13 @@ function selectSprayCandidateTokenForCondition(
   bundle: FamilyRuleBundle,
   nowMs: number,
   spraySizeUsdc: number | null,
+  defaultEntryPreset: EntryRulePreset | null | undefined,
   executionMinNotionalUsdc: number | null = null,
 ): string | null {
+  const entry = resolveEffectiveEntryRules(bundle, defaultEntryPreset, markets[0]?.tickSize ?? null);
   const selection = selectFirstEntryOutcomeForCondition(markets, bundle, {
+    minEntryPrice: entry.minEntryPrice,
+    maxEntryPrice: entry.maxEntryPrice,
     allowGammaFallbackDust: spraySizeUsdc != null,
     dustSuggestedSizeUsdc: spraySizeUsdc,
     nowMs,
@@ -299,6 +373,7 @@ function selectSprayCandidateTokenForCondition(
       bundle,
       nowMs,
       spraySizeUsdc,
+      defaultEntryPreset,
       executionMinNotionalUsdc,
     );
     if (price == null) continue;
@@ -432,8 +507,9 @@ export function evaluateSprayEntry(
   sizeMult: number,
   minNotionalUsdc = 0.05,
   meshLevel = 0,
+  defaultEntryPreset?: EntryRulePreset,
 ): Signal | null {
-  const entry = bundle.rules.entry;
+  const entry = resolveEffectiveEntryRules(bundle, defaultEntryPreset, market.tickSize);
   if (entry.entryMode === "disabled") return null;
   if (referencePrice < entry.minEntryPrice || referencePrice > entry.maxEntryPrice) return null;
 
@@ -747,6 +823,7 @@ export function scan(
             buyTracker,
             sizeMult,
             minEntryNotionalUsdc,
+            deps.defaultEntryPreset,
           );
           if (scaleSignal) {
             signals.push(scaleSignal);
@@ -827,7 +904,14 @@ export function scan(
           entryPolicy === "spray-first" && deps.globalConfig?.spraySizeUsdc
             ? Math.max(deps.globalConfig.spraySizeUsdc * sizeMult, minEntryNotionalUsdc)
             : null;
+        const effectiveEntry = resolveEffectiveEntryRules(
+          bundle,
+          deps.defaultEntryPreset,
+          market.tickSize,
+        );
         const selection = selectFirstEntryOutcomeForCondition(group, bundle, {
+          minEntryPrice: effectiveEntry.minEntryPrice,
+          maxEntryPrice: effectiveEntry.maxEntryPrice,
           allowGammaFallbackDust: entryPolicy === "spray-first" && estimatedDustSizeUsdc != null,
           dustSuggestedSizeUsdc: estimatedDustSizeUsdc,
           nowMs: tickTs,
@@ -841,6 +925,7 @@ export function scan(
                 bundle,
                 tickTs,
                 estimatedDustSizeUsdc,
+                deps.defaultEntryPreset,
                 minEntryNotionalUsdc,
               )
             : null);
@@ -872,6 +957,7 @@ export function scan(
           gc?.spraySizeUsdc != null
             ? Math.max(gc.spraySizeUsdc * sizeMult, minEntryNotionalUsdc)
             : null,
+          deps.defaultEntryPreset,
           minEntryNotionalUsdc,
         );
         const dustMeshCap = isDustMeshEligible ? resolveDustMeshCap(bundle) : 1;
@@ -907,6 +993,7 @@ export function scan(
               sizeMult,
               minEntryNotionalUsdc,
               meshLevel,
+              deps.defaultEntryPreset,
             );
             if (!spraySignal) continue;
             if (emittedMeshPrices.has(spraySignal.suggestedPrice)) continue;
@@ -954,6 +1041,7 @@ export function scan(
         sizeMult,
         !!(familyState && familyState.tailAdjustedPnlLive < 0),
         minEntryNotionalUsdc,
+        deps.defaultEntryPreset,
       );
       if (probeSignal) {
         signals.push(probeSignal);
@@ -1072,8 +1160,9 @@ function evaluateProbeEntry(
   sizeMult: number = 1.0,
   tailPnlNegative: boolean = false,
   minNotionalUsdc = 0.05,
+  defaultEntryPreset?: EntryRulePreset,
 ): Signal | null {
-  const entry = bundle.rules.entry;
+  const entry = resolveEffectiveEntryRules(bundle, defaultEntryPreset, market.tickSize);
 
   // Entry mode must allow entries
   if (entry.entryMode === "disabled") return null;
@@ -1125,9 +1214,10 @@ function evaluateScaleIn(
   buyTracker: BuyTracker,
   sizeMult: number = 1.0,
   minNotionalUsdc = 0.05,
+  defaultEntryPreset?: EntryRulePreset,
 ): Signal | null {
   const scale = bundle.rules.scaleIn;
-  const entry = bundle.rules.entry;
+  const entry = resolveEffectiveEntryRules(bundle, defaultEntryPreset, market.tickSize);
 
   // Scale mode check
   if (scale.scaleMode === "disabled") return null;

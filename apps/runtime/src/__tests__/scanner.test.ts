@@ -635,6 +635,170 @@ describe("scan() outcome selection", () => {
     expect(result.signals).toHaveLength(0);
   });
 
+  it("uplifts stale default entry presets to the classified standard tier during scanning", () => {
+    const market = makeNormalizedMarket({
+      familyKey: "bitcoin-price",
+      bestBid: 0.29,
+      bestAsk: 0.31,
+      midPrice: 0.3,
+      spread: 0.02,
+    });
+    const bundle = makeBundle({
+      identity: {
+        familyKey: "bitcoin-price",
+        primaryCategory: "crypto-btc",
+        regime: "price-range",
+      },
+      rules: {
+        entry: {
+          ...makeRules().entry,
+          minEntryPrice: 0.03,
+          maxEntryPrice: 0.2,
+          highPriceThreshold: 0.2,
+          requireProvenFamilyAbovePrice: 0.2,
+          preferredEntryBand: "0.03-0.20",
+        },
+      },
+    });
+    const withoutDefaultPreset = scan(
+      [market],
+      {
+        rulesProvider: createMockRulesProvider(bundle),
+        positionRepo: createMockPositionRepo(),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+    const withDefaultPreset = scan(
+      [market],
+      {
+        rulesProvider: createMockRulesProvider(bundle),
+        positionRepo: createMockPositionRepo(),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+        defaultEntryPreset: {
+          minEntryPrice: 0.03,
+          maxEntryPrice: 0.2,
+          highPriceThreshold: 0.2,
+          requireProvenFamilyAbovePrice: 0.2,
+          preferredEntryBand: "0.03-0.20",
+        },
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+
+    expect(withoutDefaultPreset.signals).toHaveLength(0);
+    expect(withDefaultPreset.signals).toHaveLength(1);
+    expect(withDefaultPreset.signals[0]!.reason).toBe("probe-entry");
+  });
+
+  it("keeps explicit stricter entry overrides even when a higher standard tier exists", () => {
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          familyKey: "bitcoin-price",
+          bestBid: 0.29,
+          bestAsk: 0.31,
+          midPrice: 0.3,
+          spread: 0.02,
+        }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(
+          makeBundle({
+            identity: {
+              familyKey: "bitcoin-price",
+              primaryCategory: "crypto-btc",
+              regime: "price-range",
+            },
+            rules: {
+              entry: {
+                ...makeRules().entry,
+                minEntryPrice: 0.03,
+                maxEntryPrice: 0.2,
+                highPriceThreshold: 0.2,
+                requireProvenFamilyAbovePrice: 0.2,
+                preferredEntryBand: "0.05-0.20",
+              },
+            },
+          }),
+        ),
+        positionRepo: createMockPositionRepo(),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+        defaultEntryPreset: {
+          minEntryPrice: 0.03,
+          maxEntryPrice: 0.2,
+          highPriceThreshold: 0.2,
+          requireProvenFamilyAbovePrice: 0.2,
+          preferredEntryBand: "0.03-0.20",
+        },
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("forces micro-default entry cap on 0.001 tick markets even for aggressive families", () => {
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          familyKey: "elon-musk-of-tweets",
+          tickSize: 0.001,
+          bestBid: 0.29,
+          bestAsk: 0.31,
+          midPrice: 0.3,
+          spread: 0.02,
+        }),
+      ],
+      {
+        rulesProvider: createMockRulesProvider(
+          makeBundle({
+            identity: {
+              familyKey: "elon-musk-of-tweets",
+              primaryCategory: "geopolitics",
+              regime: "social-activity",
+              strategyProfile: "event-driven",
+            },
+            rules: {
+              entry: {
+                ...makeRules().entry,
+                minEntryPrice: 0.02,
+                maxEntryPrice: 0.5,
+                highPriceThreshold: 0.5,
+                requireProvenFamilyAbovePrice: 0.5,
+                preferredEntryBand: "0.02-0.50",
+              },
+            },
+          }),
+        ),
+        positionRepo: createMockPositionRepo(),
+        familyStateRepo: createMockFamilyStateRepo(),
+        log: createMockLogger(),
+        defaultEntryPreset: {
+          minEntryPrice: 0.03,
+          maxEntryPrice: 0.2,
+          highPriceThreshold: 0.2,
+          requireProvenFamilyAbovePrice: 0.2,
+          preferredEntryBand: "0.03-0.20",
+        },
+      },
+      createBuyTracker(),
+      Date.parse("2026-04-10T12:00:00Z"),
+      createSessionTracker(),
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
   it("emits a two-sided-entry only after a sibling position exists", () => {
     const bundle = makeBundle({
       evidence: { bothSidedEligible: true, localTradeCount: 50 },

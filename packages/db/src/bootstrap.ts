@@ -5,6 +5,7 @@ import {
   resolveFamilyDeploymentSeed,
   resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
+import { ensureFamilyRuleDefaultsTable } from "./family-rule-defaults.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
 import { runMigrations } from "./migrations/runner.js";
 
@@ -48,6 +49,7 @@ function readSchema(filename: string): string {
 
 export function bootstrapControlDb(dbPath: string): DbConnection {
   const conn = openDatabaseWithSchema(dbPath, readSchema("control.sql"));
+  ensureFamilyRuleDefaultsTable(conn.db);
   // Schema evolution: add columns that may be missing in existing DBs.
   // CREATE TABLE IF NOT EXISTS won't add new columns to existing tables.
   safeAddColumn(conn.db, "profile_summaries", "wallet_balance_usdc", "REAL");

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { FamilyConfig } from "@plankton/config";
+import type { FamilyConfig, LoadedFamilyRules } from "@plankton/config";
 import {
   createImportId,
   ProfileId,
@@ -8,6 +8,7 @@ import {
   resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
 import { ensureControlProfiles } from "./control-profiles.js";
+import { upsertFamilyRuleDefaults } from "./family-rule-defaults.js";
 
 export interface FamilyConfigImportResult {
   added: string[];
@@ -142,9 +143,10 @@ export function getLatestConfigImportMeta(db: Database.Database): LatestConfigIm
 
 export function applyFamilyConfigImport(
   db: Database.Database,
-  families: FamilyConfig[],
+  loaded: Pick<LoadedFamilyRules, "families" | "defaults">,
   opts: ApplyFamilyConfigImportOptions,
 ): FamilyConfigImportResult {
+  const { families, defaults } = loaded;
   const result: FamilyConfigImportResult = {
     added: [],
     updated: [],
@@ -198,6 +200,7 @@ export function applyFamilyConfigImport(
 
   const now = new Date().toISOString();
   ensureControlProfiles(db, now);
+  upsertFamilyRuleDefaults(db, defaults, now);
   const insertCatalog = db.prepare(`
     INSERT INTO family_catalog (
       family_id, family_key, primary_category, regime, horizon, cadence,

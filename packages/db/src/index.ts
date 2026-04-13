@@ -49,3 +49,9 @@ export {
 export { CONTROL_PROFILES, ensureControlProfiles } from "./control-profiles.js";
 export { withImmediate } from "./immediate-transaction.js";
 export { readFamilyLiveness } from "./family-liveness.js";
+export {
+  FAMILY_RULE_DEFAULTS_SCOPE,
+  ensureFamilyRuleDefaultsTable,
+  readFamilyRuleDefaults,
+  upsertFamilyRuleDefaults,
+} from "./family-rule-defaults.js";

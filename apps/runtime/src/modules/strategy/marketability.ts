@@ -1,8 +1,11 @@
 import type { FamilyRuleBundle, NormalizedMarket, Order, Signal } from "@plankton/domain";
-import { Action, ENTRY_REASONS, PromotionState } from "@plankton/domain";
 import {
-  resolveFamilySpeedTier,
-  resolveFamilyThroughputTierByFamilyKey,
+  Action,
+  ENTRY_REASONS,
+  PromotionState,
+  resolveFamilyMarketabilityTier,
+} from "@plankton/domain";
+import {
   type FamilySpeedTier,
 } from "../../family-throughput.js";
 import {
@@ -15,8 +18,6 @@ import {
 const EPSILON = 1e-9;
 const DEFAULT_MAX_BOOK_AGE_MS = 15_000;
 const DEFAULT_HARD_MAX_BOOK_AGE_MS = 60_000;
-const REDUCED_FAST_FOLLOW_UP_MAX_ENTRY_SPREAD_CENTS = 0.015;
-const REDUCED_FAST_FOLLOW_UP_MAX_WIDE_ENTRY_SPREAD_CENTS = 0.03;
 
 export interface MarketabilityPolicy {
   readonly tier: "core" | "reduced" | "fallback";
@@ -136,15 +137,36 @@ const FALLBACK_POLICY: MarketabilityPolicy = {
   unfilledCancelCooldownMs: 10 * 60_000,
 };
 
-export function resolveMarketabilityPolicy(bundle: FamilyRuleBundle): MarketabilityPolicy {
-  const speedTier = resolveFamilySpeedTier(bundle);
-  const tier = resolveFamilyThroughputTierByFamilyKey(bundle.identity.familyKey);
+export function resolveMarketabilityPolicy(
+  bundle: FamilyRuleBundle,
+  tickSize: number | null | undefined = null,
+): MarketabilityPolicy {
+  const tier = resolveFamilyMarketabilityTier({
+    familyKey: bundle.identity.familyKey,
+    primaryCategory: bundle.identity.primaryCategory,
+    regime: bundle.identity.regime,
+    horizon: bundle.identity.horizon,
+    strategyProfile: bundle.identity.strategyProfile,
+    slugPattern: bundle.identity.slugPattern,
+    tickSize,
+  });
+  const speedTier = resolveMarketabilitySpeedTier(bundle, tier);
 
   if (tier === "core") return speedTier === "core-fast" ? CORE_FAST_POLICY : CORE_POLICY;
   if (tier === "reduced") {
     return speedTier === "reduced-fast" ? REDUCED_FAST_POLICY : REDUCED_POLICY;
   }
   return FALLBACK_POLICY;
+}
+
+function resolveMarketabilitySpeedTier(
+  bundle: Pick<FamilyRuleBundle, "rules">,
+  tier: MarketabilityPolicy["tier"],
+): FamilySpeedTier {
+  if (bundle.rules.throughput?.fastLaneEnabled !== true) return "standard";
+  if (tier === "core") return "core-fast";
+  if (tier === "reduced") return "reduced-fast";
+  return "standard";
 }
 
 export function buildRestingOrderSnapshot(
@@ -183,7 +205,7 @@ export function evaluateMarketability(opts: {
   readonly cooldownUntilMs?: number | null;
   readonly executionMinNotionalUsdc?: number | null;
 }): MarketabilityDecision {
-  const policy = resolveMarketabilityPolicy(opts.bundle);
+  const policy = resolveMarketabilityPolicy(opts.bundle, opts.market.tickSize);
   const diagnostics = buildDiagnostics(
     opts.market,
     opts.signal,
@@ -599,28 +621,14 @@ function isEntrySignal(signal: Pick<Signal, "side" | "reason">): boolean {
 
 function resolveSpreadCaps(
   policy: MarketabilityPolicy,
-  reason: Signal["reason"],
+  _reason: Signal["reason"],
 ): {
   readonly maxEntrySpreadCents: number;
   readonly maxWideEntrySpreadCents: number;
 } {
-  if (policy.speedTier !== "reduced-fast") {
-    return {
-      maxEntrySpreadCents: policy.maxEntrySpreadCents,
-      maxWideEntrySpreadCents: policy.maxWideEntrySpreadCents,
-    };
-  }
-
-  if (reason === "spray-entry" || reason === "probe-entry") {
-    return {
-      maxEntrySpreadCents: policy.maxEntrySpreadCents,
-      maxWideEntrySpreadCents: policy.maxWideEntrySpreadCents,
-    };
-  }
-
   return {
-    maxEntrySpreadCents: REDUCED_FAST_FOLLOW_UP_MAX_ENTRY_SPREAD_CENTS,
-    maxWideEntrySpreadCents: REDUCED_FAST_FOLLOW_UP_MAX_WIDE_ENTRY_SPREAD_CENTS,
+    maxEntrySpreadCents: policy.maxEntrySpreadCents,
+    maxWideEntrySpreadCents: policy.maxWideEntrySpreadCents,
   };
 }
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { EntryRulePreset } from "@plankton/domain";
 
 // ─── Enum schemas (independent of @plankton/domain) ─────────────────────────
 
@@ -198,6 +199,14 @@ export const rulesYamlSchema = z.object({
   session: sessionYamlSchema,
 });
 
+const entryYamlInputSchema = entryYamlSchema.extend({
+  max_entry_price: z.number().optional(),
+});
+
+const rulesYamlInputSchema = rulesYamlSchema.extend({
+  entry: entryYamlInputSchema,
+});
+
 export const runtimeStateYamlSchema = z.object({
   runtime_mode: runtimeModeSchema,
   open_value_usdc: z.number(),
@@ -226,20 +235,25 @@ export const evidenceYamlDefaults = {
   heavy_campaign_eligible: false,
 };
 
+function createFamilyYamlSchema<TRules extends z.ZodTypeAny>(rulesSchema: TRules) {
+  return z
+    .object({
+      family_id: z.string(),
+      identity: identityYamlSchema,
+      evidence: evidenceYamlSchema.optional().default(evidenceYamlDefaults),
+      rules: rulesSchema,
+    })
+    .strip();
+}
+
 /**
  * V2 import schema: identity + rules only.
  * Evidence and runtime_state are stripped — they come from DB, not YAML.
  * Evidence defaults are provided for backward compat with v1 YAML files.
  * .strip() silently drops runtime_state and any other unknown keys from v1 files.
  */
-export const familyYamlSchema = z
-  .object({
-    family_id: z.string(),
-    identity: identityYamlSchema,
-    evidence: evidenceYamlSchema.optional().default(evidenceYamlDefaults),
-    rules: rulesYamlSchema,
-  })
-  .strip();
+export const familyYamlSchema = createFamilyYamlSchema(rulesYamlSchema);
+export const familyYamlInputSchema = createFamilyYamlSchema(rulesYamlInputSchema);
 
 // ─── Global config (operator-level runtime settings) ─────────────────────────
 
@@ -255,10 +269,30 @@ const globalYamlSchema = z.object({
 
 export type GlobalYaml = z.infer<typeof globalYamlSchema>;
 
+const entryDefaultsYamlSchema = z.object({
+  min_entry_price: z.number(),
+  max_entry_price: z.number(),
+  high_price_threshold: z.number(),
+  require_proven_family_above_price: z.number(),
+  preferred_entry_band: z.string().nullable().optional().default(null),
+});
+
+export const familyRuleDefaultsYamlSchema = z.object({
+  entry: entryDefaultsYamlSchema.nullable().optional().default(null),
+});
+
 export const familyRulesFileSchema = z.object({
   version: z.number().int(),
   global: globalYamlSchema.default({ initial_balance_usdc: 10_000 }),
+  defaults: familyRuleDefaultsYamlSchema.optional().default({}),
   families: z.array(familyYamlSchema),
+});
+
+export const familyRulesFileInputSchema = z.object({
+  version: z.number().int(),
+  global: globalYamlSchema.default({ initial_balance_usdc: 10_000 }),
+  defaults: familyRuleDefaultsYamlSchema.optional().default({}),
+  families: z.array(familyYamlInputSchema),
 });
 
 export type FamilyYaml = z.infer<typeof familyYamlSchema>;
@@ -306,4 +340,8 @@ export interface GlobalConfig {
   sprayCooldownSeconds: number;
   sprayBudgetUsdc: number;
   sprayMaxTotalPositions: number;
+}
+
+export interface FamilyRuleDefaultsConfig {
+  entry: EntryRulePreset | null;
 }

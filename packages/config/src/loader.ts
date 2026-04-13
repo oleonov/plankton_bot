@@ -4,12 +4,15 @@ import { resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import {
   familyYamlSchema,
   familyRulesFileSchema,
+  familyRulesFileInputSchema,
   type FamilyConfig,
+  type FamilyRuleDefaultsConfig,
   type GlobalConfig,
 } from "./schemas.js";
 
 export interface LoadedFamilyRules {
   global: GlobalConfig;
+  defaults: FamilyRuleDefaultsConfig;
   families: FamilyConfig[];
 }
 
@@ -30,6 +33,33 @@ function transformKeys(obj: unknown): unknown {
     return result;
   }
   return obj;
+}
+
+function formatSchemaIssues(
+  issues: ReadonlyArray<{ path: PropertyKey[]; message: string }>,
+  source: string,
+): Error {
+  const details = issues.map((issue) => `  [${issue.path.join(".")}] ${issue.message}`).join("\n");
+  return new Error(`Schema validation failed for "${source}":\n${details}`);
+}
+
+function materializeMultiFamilyDefaults(
+  doc: ReturnType<typeof familyRulesFileInputSchema.parse>,
+): unknown {
+  const defaultMaxEntryPrice = doc.defaults.entry?.max_entry_price;
+  return {
+    ...doc,
+    families: doc.families.map((family) => ({
+      ...family,
+      rules: {
+        ...family.rules,
+        entry: {
+          ...family.rules.entry,
+          max_entry_price: family.rules.entry.max_entry_price ?? defaultMaxEntryPrice,
+        },
+      },
+    })),
+  };
 }
 
 // ─── Loader ─────────────────────────────────────────────────────────────────
@@ -67,6 +97,17 @@ function transformFamily(validated: { family_id: string; [k: string]: unknown })
   return transformed as unknown as FamilyConfig;
 }
 
+function transformDefaults(validated: {
+  defaults: { entry: Record<string, unknown> | null };
+}): FamilyRuleDefaultsConfig {
+  const transformed = transformKeys(validated.defaults) as {
+    entry: FamilyRuleDefaultsConfig["entry"];
+  };
+  return {
+    entry: transformed.entry ?? null,
+  };
+}
+
 function parseSingleFamily(raw: unknown, index: number): FamilyConfig {
   const parsed = familyYamlSchema.safeParse(raw);
   if (!parsed.success) {
@@ -97,15 +138,20 @@ export function parseFamilyRulesYaml(content: string, source = "input"): LoadedF
 
   // Multi-family format: validate top-level schema (version + families array)
   if (Array.isArray(record["families"])) {
-    const parsed = familyRulesFileSchema.safeParse(doc);
-    if (!parsed.success) {
-      const details = parsed.error.issues
-        .map((i) => `  [${i.path.join(".")}] ${i.message}`)
-        .join("\n");
-      throw new Error(`Schema validation failed for "${source}":\n${details}`);
+    const parsedInput = familyRulesFileInputSchema.safeParse(doc);
+    if (!parsedInput.success) {
+      throw formatSchemaIssues(parsedInput.error.issues, source);
     }
+
+    const materialized = materializeMultiFamilyDefaults(parsedInput.data);
+    const parsed = familyRulesFileSchema.safeParse(materialized);
+    if (!parsed.success) {
+      throw formatSchemaIssues(parsed.error.issues, source);
+    }
+
     return {
       global: transformKeys(parsed.data.global) as GlobalConfig,
+      defaults: transformDefaults(parsed.data),
       families: parsed.data.families.map((f) => transformFamily(f)),
     };
   }
@@ -118,6 +164,12 @@ export function parseFamilyRulesYaml(content: string, source = "input"): LoadedF
           `Use the multi-family format (with "families" array) to set global config.`,
       );
     }
+    if (record["defaults"] !== undefined) {
+      throw new Error(
+        `"defaults" section is not supported in single-family format. ` +
+          `Use the multi-family format (with "families" array) to set shared rule defaults.`,
+      );
+    }
     return {
       global: {
         initialBalanceUsdc: 10_000,
@@ -127,6 +179,9 @@ export function parseFamilyRulesYaml(content: string, source = "input"): LoadedF
         sprayCooldownSeconds: 5,
         sprayBudgetUsdc: 50,
         sprayMaxTotalPositions: 30,
+      },
+      defaults: {
+        entry: null,
       },
       families: [parseSingleFamily(doc, 0)],
     };

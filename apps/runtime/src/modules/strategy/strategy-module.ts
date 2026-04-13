@@ -20,6 +20,7 @@
 import type {
   RuntimeModule,
   EventBus,
+  EntryRulePreset,
   FamilyRulesProvider,
   PositionRepository,
   OrderRepository,
@@ -61,6 +62,7 @@ export interface StrategyModuleDeps {
   runtimeControl?: RuntimeControl | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   globalConfig?: GlobalConfig | undefined;
+  defaultEntryPreset?: EntryRulePreset | undefined;
 }
 
 export class StrategyModule implements RuntimeModule {
@@ -225,6 +227,7 @@ export class StrategyModule implements RuntimeModule {
           familyStateRepo: this.deps.familyStateRepo,
           log: this.log,
           globalConfig: this.deps.globalConfig,
+          defaultEntryPreset: this.deps.defaultEntryPreset,
           minEntryNotionalUsdc: this.deps.liveLiteGuard?.getMinEntryNotionalUsdc() ?? undefined,
           spraySnapshot: {
             positionCount: this.sprayTracker.getPositionCount(),

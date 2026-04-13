@@ -52,7 +52,12 @@ import {
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { FamilyState } from "@plankton/domain";
-import { createBotRunId, slugPatternToRegex, ENTRY_REASONS } from "@plankton/domain";
+import {
+  createBotRunId,
+  slugPatternToRegex,
+  ENTRY_REASONS,
+  type EntryRulePreset,
+} from "@plankton/domain";
 import { migrateOrphanedPositions } from "./universe-migration.js";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
@@ -226,8 +231,10 @@ async function main(): Promise<void> {
   // 2b-2. Load global config from YAML (spray sizing, budget caps, etc.)
   // Global config lives in YAML only — not persisted to DB.
   let globalConfig: GlobalConfig | undefined;
+  let defaultEntryPreset: EntryRulePreset | undefined;
   try {
     globalConfig = loadedFamilyRules.global;
+    defaultEntryPreset = loadedFamilyRules.defaults.entry ?? undefined;
     syncProfileInitialBalances(controlConn.db, loadedFamilyRules.global.initialBalanceUsdc);
   } catch {
     log.warn("failed to load global config from YAML — spray features disabled");
@@ -685,6 +692,7 @@ async function main(): Promise<void> {
     runtimeControl,
     liveLiteGuard,
     globalConfig,
+    defaultEntryPreset,
   });
 
   const hotFamilyExecutionModule = candidateBookCache

@@ -86,6 +86,22 @@ families:
         weekday_bias: "normal"
 `;
 
+const YAML_WITH_DEFAULTS = YAML.replace(
+  "global:\n  initial_balance_usdc: 100\n",
+  [
+    "global:",
+    "  initial_balance_usdc: 100",
+    "defaults:",
+    "  entry:",
+    "    min_entry_price: 0.01",
+    "    max_entry_price: 0.2",
+    "    high_price_threshold: 0.2",
+    "    require_proven_family_above_price: 0.2",
+    '    preferred_entry_band: "0.01-0.20"',
+    "",
+  ].join("\n"),
+).replace(/^\s*max_entry_price: 0\.2\n/m, "");
+
 describe("family-config-import", () => {
   it("applies YAML families and records checksum metadata", () => {
     const conn = bootstrapControlDb(":memory:");
@@ -93,7 +109,7 @@ describe("family-config-import", () => {
       const loaded = parseFamilyRulesYaml(YAML, "test");
       const checksum = computeConfigChecksum(YAML);
       const result = conn.db.transaction(() =>
-        applyFamilyConfigImport(conn.db, loaded.families, {
+        applyFamilyConfigImport(conn.db, loaded, {
           dryRun: false,
           sourcePath: "/tmp/family_rules.yaml",
           sourceChecksum: checksum,
@@ -130,7 +146,7 @@ describe("family-config-import", () => {
       const loaded = parseFamilyRulesYaml(YAML, "test");
       const checksum = computeConfigChecksum(YAML);
       conn.db.transaction(() =>
-        applyFamilyConfigImport(conn.db, loaded.families, {
+        applyFamilyConfigImport(conn.db, loaded, {
           dryRun: false,
           sourcePath: "/tmp/family_rules.yaml",
           sourceChecksum: checksum,
@@ -148,7 +164,7 @@ describe("family-config-import", () => {
       const updatedYaml = YAML.replace("priority_rank: 1", "priority_rank: 2");
       const updated = parseFamilyRulesYaml(updatedYaml, "test");
       conn.db.transaction(() =>
-        applyFamilyConfigImport(conn.db, updated.families, {
+        applyFamilyConfigImport(conn.db, updated, {
           dryRun: false,
           sourcePath: "/tmp/family_rules.yaml",
           sourceChecksum: computeConfigChecksum(updatedYaml),
@@ -168,6 +184,59 @@ describe("family-config-import", () => {
 
       expect(deployment.enabled).toBe(1);
       expect(deployment.deployment_stage).toBe("live-probe");
+    } finally {
+      conn.close();
+    }
+  });
+
+  it("materializes defaults-based max_entry_price and treats equivalent explicit config as unchanged", () => {
+    const conn = bootstrapControlDb(":memory:");
+    try {
+      const loadedWithDefaults = parseFamilyRulesYaml(YAML_WITH_DEFAULTS, "test");
+      conn.db.transaction(() =>
+        applyFamilyConfigImport(conn.db, loadedWithDefaults, {
+          dryRun: false,
+          sourcePath: "/tmp/family_rules.yaml",
+          sourceChecksum: computeConfigChecksum(YAML_WITH_DEFAULTS),
+          sourceVersion: 1,
+          importedBy: "test",
+        }),
+      )();
+
+      const row = conn.db
+        .prepare("SELECT max_entry_price FROM family_rules WHERE family_id = ?")
+        .get("test-fast:generic:daily") as {
+        max_entry_price: number;
+      };
+      expect(row.max_entry_price).toBe(0.2);
+      const defaultsRow = conn.db
+        .prepare(
+          "SELECT min_entry_price, max_entry_price, preferred_entry_band FROM family_rule_defaults WHERE scope = 'global'",
+        )
+        .get() as {
+        min_entry_price: number;
+        max_entry_price: number;
+        preferred_entry_band: string | null;
+      };
+      expect(defaultsRow).toEqual({
+        min_entry_price: 0.01,
+        max_entry_price: 0.2,
+        preferred_entry_band: "0.01-0.20",
+      });
+
+      const loadedExplicit = parseFamilyRulesYaml(YAML, "test");
+      const result = conn.db.transaction(() =>
+        applyFamilyConfigImport(conn.db, loadedExplicit, {
+          dryRun: false,
+          sourcePath: "/tmp/family_rules.yaml",
+          sourceChecksum: computeConfigChecksum(YAML),
+          sourceVersion: 2,
+          importedBy: "test",
+        }),
+      )();
+
+      expect(result.unchanged).toEqual(["test-fast:generic:daily"]);
+      expect(result.updated).toEqual([]);
     } finally {
       conn.close();
     }
