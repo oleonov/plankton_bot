@@ -25,7 +25,7 @@ function seedProfile(
 ): void {
   conn.db
     .prepare(
-      "INSERT INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO profiles (profile_id, display_name, description, created_at) VALUES (?, ?, ?, ?)",
     )
     .run(profileId, displayName, `${displayName} profile`, NOW);
 }

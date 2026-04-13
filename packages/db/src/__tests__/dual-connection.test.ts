@@ -100,7 +100,7 @@ describe("dual-connection infrastructure", () => {
       .run();
     conn1.db
       .prepare(
-        `INSERT INTO profiles (profile_id, display_name)
+        `INSERT OR IGNORE INTO profiles (profile_id, display_name)
        VALUES ('simulation', 'Simulation'), ('paper', 'Paper'), ('live-lite', 'Live Lite')`,
       )
       .run();

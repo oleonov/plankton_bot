@@ -38,7 +38,7 @@ let conn: DbConnection;
 beforeEach(() => {
   conn = bootstrapControlDb(":memory:");
   conn.db
-    .prepare("INSERT INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)")
+    .prepare("INSERT OR IGNORE INTO profiles (profile_id, display_name, created_at) VALUES (?, ?, ?)")
     .run(PROFILE, "Simulation", NOW);
   conn.db
     .prepare(

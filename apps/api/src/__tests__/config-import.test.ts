@@ -227,9 +227,9 @@ beforeAll(async () => {
 
   // Seed profiles (required by foreign keys in family_deployments)
   db.exec(`
-    INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Sim');
-    INSERT INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
-    INSERT INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live');
+    INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('simulation', 'Sim');
+    INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
+    INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live');
     INSERT INTO runtime_control_state (id, desired_profile, paused, runtime_status, schema_version, updated_at)
     VALUES (1, 'simulation', 1, 'stopped', 1, datetime('now'));
   `);

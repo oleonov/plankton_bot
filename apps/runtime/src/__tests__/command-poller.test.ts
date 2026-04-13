@@ -768,7 +768,7 @@ describe("CommandPoller", () => {
       expect(row.max_open_value_usdc).toBe(10);
       expect(row.max_active_markets).toBe(100);
       expect(row.max_dust_positions).toBe(50);
-      expect(row.tail_quarantine_threshold_usdc).toBe(1000);
+      expect(row.tail_quarantine_threshold_usdc).toBe(50);
       expect(row.tail_quarantine_threshold_ratio).toBe(1000);
       expect(row.scale_mode).toBe("disabled");
     });

@@ -63,8 +63,8 @@ beforeAll(async () => {
 
     INSERT INTO family_evidence (family_id) VALUES ('fam-1');
 
-    INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation');
-    INSERT INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
+    INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation');
+    INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
     INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused)
     VALUES (1, 'simulation', 'simulation', 'running', 0);
 

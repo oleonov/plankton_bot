@@ -74,9 +74,9 @@ beforeAll(async () => {
       profile TEXT, run_id TEXT, last_heartbeat_at TEXT NOT NULL, status_json TEXT,
       PRIMARY KEY (service_name, instance_id)
     );
-    INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Sim');
-    INSERT INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
-    INSERT INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live');
+    INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('simulation', 'Sim');
+    INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
+    INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live');
     INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused, schema_version, updated_at)
     VALUES (1, 'simulation', 'simulation', 'running', 0, 1, datetime('now'));
   `);

@@ -172,9 +172,9 @@ describe("autoAcceptAndPromote", () => {
       expect(mockFetch.mock.calls[0]![1]).toEqual(
         expect.objectContaining({
           method: "POST",
-          body: undefined,
         }),
       );
+      expect(mockFetch.mock.calls[0]![1]).not.toHaveProperty("body");
     });
 
     it("skips candidates with status=materialized", async () => {

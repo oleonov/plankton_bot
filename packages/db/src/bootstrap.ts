@@ -6,6 +6,7 @@ import {
   resolveFamilyDeploymentSeed,
   resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
+import { ensureControlProfiles } from "./control-profiles.js";
 import { ensureFamilyRuleDefaultsTable } from "./family-rule-defaults.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
 import { runMigrations } from "./migrations/runner.js";
@@ -54,6 +55,7 @@ function readSchema(filename: string): string {
 
 export function bootstrapControlDb(dbPath: string): DbConnection {
   const conn = openDatabaseWithSchema(dbPath, readSchema("control.sql"));
+  ensureControlProfiles(conn.db);
   ensureFamilyRuleDefaultsTable(conn.db);
   ensureBootstrapBackfillsTable(conn.db);
   // Schema evolution: add columns that may be missing in existing DBs.
@@ -130,6 +132,20 @@ function backfillFamilyLimitUnification(db: import("better-sqlite3").Database): 
   if (hasBootstrapBackfill(db, BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION)) return;
 
   try {
+    const hasFamilyRuleState = Boolean(
+      db
+        .prepare(
+          `SELECT 1
+             FROM family_rules
+            UNION ALL
+           SELECT 1
+             FROM family_rules_snapshot
+            LIMIT 1`,
+        )
+        .get(),
+    );
+    if (!hasFamilyRuleState) return;
+
     db.transaction(() => {
       db.prepare(
         `UPDATE family_rules
