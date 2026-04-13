@@ -210,6 +210,90 @@ describe("CommandPoller", () => {
     expect(state!.quarantineReason).toBeNull();
   });
 
+  it("syncs deployment operator mode on manual family_quarantine", async () => {
+    seedFamily("fam-1");
+
+    const savedDeployments: import("@plankton/domain").FamilyDeployment[] = [];
+    const mockDeploymentUpdater: DeploymentUpdater = {
+      find: vi.fn().mockReturnValue({
+        familyId: createFamilyId("fam-1"),
+        profile: "paper",
+        enabled: true,
+        operatorMode: "active",
+        strategyStage: "probe-only",
+        probeSubstate: null,
+        deploymentStage: "live-probe",
+        approvedSnapshotId: null,
+        approvedScorecardId: null,
+        operatorReason: null,
+        priority: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }),
+      save: vi.fn((d: import("@plankton/domain").FamilyDeployment) => {
+        savedDeployments.push(d);
+      }),
+    };
+
+    insertCommand("family_quarantine", "fam-1", "tail exceeded");
+    const poller = createPoller({
+      deploymentUpdater: mockDeploymentUpdater,
+      activeProfile: "paper",
+    });
+
+    await poller.poll();
+
+    expect(savedDeployments).toHaveLength(1);
+    expect(savedDeployments[0]!.operatorMode).toBe("quarantine");
+    expect(savedDeployments[0]!.operatorReason).toBe("tail exceeded");
+  });
+
+  it("family_activate syncs deployment and restores scaled evidence state", async () => {
+    seedFamily("fam-1");
+    seedFamilyEvidence("fam-1");
+
+    const evidenceRepo = new SqliteFamilyEvidenceRepository(conn.db);
+    const savedDeployments: import("@plankton/domain").FamilyDeployment[] = [];
+    const mockDeploymentUpdater: DeploymentUpdater = {
+      find: vi.fn().mockReturnValue({
+        familyId: createFamilyId("fam-1"),
+        profile: "paper",
+        enabled: true,
+        operatorMode: "quarantine",
+        strategyStage: "scaled",
+        probeSubstate: null,
+        deploymentStage: "live-scaled",
+        approvedSnapshotId: null,
+        approvedScorecardId: null,
+        operatorReason: "old reason",
+        priority: 0,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }),
+      save: vi.fn((d: import("@plankton/domain").FamilyDeployment) => {
+        savedDeployments.push(d);
+      }),
+    };
+
+    insertCommand("family_quarantine", "fam-1", "some reason");
+    const poller = createPoller({
+      familyEvidenceRepo: evidenceRepo,
+      deploymentUpdater: mockDeploymentUpdater,
+      activeProfile: "paper",
+    });
+    await poller.poll();
+
+    insertCommand("family_activate", "fam-1", "operator reactivation");
+    await poller.poll();
+
+    const state = familyStateRepo.get(createFamilyId("fam-1"));
+    const evidence = evidenceRepo.getEvidence(createFamilyId("fam-1"));
+    expect(state!.runtimeMode).toBe("active");
+    expect(evidence!.promotionState).toBe("scaled");
+    expect(savedDeployments.at(-1)?.operatorMode).toBe("active");
+    expect(savedDeployments.at(-1)?.operatorReason).toBe("operator reactivation");
+  });
+
   it("rejects command when family not found", async () => {
     insertCommand("family_quarantine", "nonexistent", "reason");
     const poller = createPoller();

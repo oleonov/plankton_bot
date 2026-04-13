@@ -146,7 +146,7 @@ export class CommandPoller implements RuntimeModule {
           break;
 
         case "family_activate":
-          this.applyFamilyModeChange(cmd, "active", now);
+          this.applyFamilyActivation(cmd, now);
           break;
 
         case "rules_reload":
@@ -246,7 +246,51 @@ export class CommandPoller implements RuntimeModule {
       updatedAt: now,
     });
 
+    this.syncDeploymentOperatorMode(familyId, targetMode, now, cmd.reason ?? null);
+
     this.writeAudit(cmd, "family", cmd.targetId, now);
+  }
+
+  private applyFamilyActivation(cmd: OperatorCommand, now: string): void {
+    this.applyFamilyModeChange(cmd, "active", now);
+
+    if (!cmd.targetId || !this.deps.familyEvidenceRepo) return;
+
+    const familyId = createFamilyId(cmd.targetId);
+    const deployment = this.deps.activeProfile
+      ? this.deps.deploymentUpdater?.find(familyId, this.deps.activeProfile)
+      : null;
+
+    const promotionState =
+      deployment?.strategyStage === "probe-only" ? "probe-only" : ("scaled" as PromotionState);
+    this.deps.familyEvidenceRepo.updatePromotionState(familyId, promotionState);
+    this.deps.familyEvidenceRepo.updateProbeSubstate(familyId, null);
+  }
+
+  private syncDeploymentOperatorMode(
+    familyId: FamilyId,
+    targetMode: RuntimeMode,
+    now: string,
+    reason: string | null,
+  ): void {
+    if (!this.deps.deploymentUpdater || !this.deps.activeProfile) return;
+
+    const deployment = this.deps.deploymentUpdater.find(familyId, this.deps.activeProfile);
+    if (!deployment) return;
+
+    const operatorMode =
+      targetMode === "quarantine"
+        ? "quarantine"
+        : targetMode === "reduce-only"
+          ? "reduce-only"
+          : "active";
+
+    this.deps.deploymentUpdater.save({
+      ...deployment,
+      operatorMode,
+      operatorReason: reason,
+      updatedAt: now,
+    });
   }
 
   /** Sync promotion_state in family_evidence when runtime mode changes. */
