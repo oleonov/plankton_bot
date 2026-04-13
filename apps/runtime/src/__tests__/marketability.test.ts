@@ -614,13 +614,21 @@ describe("marketability policy retuning", () => {
   });
 
   it("keeps unproven weather micro families on fallback spread caps even with fast lane enabled", () => {
+    const base = makeBundle();
     const policy = resolveMarketabilityPolicy(
       makeBundle({
         identity: {
-          ...makeBundle().identity,
+          ...base.identity,
           familyKey: "highest-temperature-in-nyc",
           primaryCategory: "weather",
           regime: "price-range",
+        },
+        rules: {
+          ...base.rules,
+          scaleIn: {
+            ...base.rules.scaleIn,
+            scaleMode: "disabled",
+          },
         },
       }),
     );
@@ -631,7 +639,7 @@ describe("marketability policy retuning", () => {
     expect(policy.maxWideEntrySpreadCents).toBe(0.01);
   });
 
-  it("promotes proven fast-lane weather recyclers from fallback to reduced-fast", () => {
+  it("promotes configured fast-lane weather recyclers from fallback to reduced-fast", () => {
     const policy = resolveMarketabilityPolicy(
       makeBundle({
         identity: {
@@ -640,9 +648,10 @@ describe("marketability policy retuning", () => {
           regime: "price-range",
         },
         evidence: {
-          evidenceStatus: "partial",
-          evidenceScore: 78,
-          localTradeCount: 250,
+          evidenceStatus: "unknown",
+          evidenceScore: 0,
+          promotionState: "probe-only",
+          localTradeCount: 0,
         },
       }),
     );
@@ -651,6 +660,36 @@ describe("marketability policy retuning", () => {
     expect(policy.speedTier).toBe("reduced-fast");
     expect(policy.maxEntrySpreadCents).toBe(0.025);
     expect(policy.maxWideEntrySpreadCents).toBe(0.045);
+  });
+
+  it("keeps disabled weather families on fallback even with fast lane enabled", () => {
+    const base = makeBundle();
+    const policy = resolveMarketabilityPolicy(
+      makeBundle({
+        identity: {
+          ...base.identity,
+          familyKey: "highest-temperature-in-nyc",
+          primaryCategory: "weather",
+          regime: "price-range",
+        },
+        evidence: {
+          evidenceStatus: "unknown",
+          evidenceScore: 0,
+          promotionState: "probe-only",
+          localTradeCount: 0,
+        },
+        rules: {
+          ...base.rules,
+          scaleIn: {
+            ...base.rules.scaleIn,
+            scaleMode: "disabled",
+          },
+        },
+      }),
+    );
+
+    expect(policy.tier).toBe("fallback");
+    expect(policy.speedTier).toBe("standard");
   });
 
   it("forces fallback spread caps on 0.001 tick markets even for aggressive families", () => {

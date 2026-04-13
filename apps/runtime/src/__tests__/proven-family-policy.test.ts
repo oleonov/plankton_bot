@@ -135,4 +135,53 @@ describe("proven-family-policy", () => {
     expect(shouldRelaxNegativeTailProbeOnly(bundle)).toBe(false);
     expect(shouldPromoteFallbackMarketability(bundle, 0.01)).toBe(false);
   });
+
+  it("promotes configured weather recyclers even when legacy evidence is stale", () => {
+    const bundle = {
+      ...makeBundle({
+        evidenceStatus: "unknown",
+        evidenceScore: 0,
+        promotionState: "probe-only",
+        localTradeCount: 0,
+      }),
+      identity: {
+        ...makeBundle().identity,
+        familyKey: "highest-temperature-in-seoul",
+        primaryCategory: "weather",
+        regime: "price-range",
+        strategyProfile: "scalp",
+      },
+    } satisfies FamilyRuleBundle;
+
+    expect(shouldRelaxNegativeTailProbeOnly(bundle)).toBe(false);
+    expect(shouldPromoteFallbackMarketability(bundle, 0.01)).toBe(true);
+  });
+
+  it("does not promote disabled weather families from fallback", () => {
+    const base = makeBundle({
+      evidenceStatus: "unknown",
+      evidenceScore: 0,
+      promotionState: "probe-only",
+      localTradeCount: 0,
+    });
+    const bundle = {
+      ...base,
+      identity: {
+        ...base.identity,
+        familyKey: "highest-temperature-in-nyc",
+        primaryCategory: "weather",
+        regime: "price-range",
+        strategyProfile: "scalp",
+      },
+      rules: {
+        ...base.rules,
+        scaleIn: {
+          ...base.rules.scaleIn,
+          scaleMode: "disabled",
+        },
+      },
+    } satisfies FamilyRuleBundle;
+
+    expect(shouldPromoteFallbackMarketability(bundle, 0.01)).toBe(false);
+  });
 });

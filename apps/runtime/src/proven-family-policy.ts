@@ -26,6 +26,18 @@ function isThresholdRegime(identity: Pick<FamilyIdentity, "regime">): boolean {
   return identity.regime === "threshold";
 }
 
+function isConfiguredWeatherRecycler(
+  bundle: Pick<FamilyRuleBundle, "identity" | "rules">,
+): boolean {
+  if (bundle.identity.primaryCategory !== "weather" || bundle.identity.regime !== "price-range") {
+    return false;
+  }
+  if (bundle.identity.strategyProfile !== "scalp") return false;
+  if (bundle.rules.universe.action !== "trade") return false;
+  if (bundle.rules.throughput?.fastLaneEnabled !== true) return false;
+  return bundle.rules.scaleIn.scaleMode !== "disabled";
+}
+
 export function isProvenNonThresholdFamily(
   bundle:
     | FamilyRuleBundle
@@ -55,5 +67,6 @@ export function shouldPromoteFallbackMarketability(
 ): boolean {
   if (tickSize != null && tickSize <= 0.001) return false;
   if (bundle.rules.throughput?.fastLaneEnabled !== true) return false;
+  if (isConfiguredWeatherRecycler(bundle)) return true;
   return isProvenNonThresholdFamily(bundle);
 }
