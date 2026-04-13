@@ -188,10 +188,7 @@ export function Overview() {
           </div>
         </Link>
         <Link to="/orders" style={{ textDecoration: "none" }}>
-          <div
-            className="card card-accent-blue"
-            style={{ cursor: "pointer" }}
-          >
+          <div className="card card-accent-blue" style={{ cursor: "pointer" }}>
             <div className="label">Orders / Min</div>
             <div className="value-lg text-blue">{status.ordersPlacedLastMin}</div>
           </div>

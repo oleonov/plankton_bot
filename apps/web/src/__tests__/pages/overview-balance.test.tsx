@@ -253,7 +253,9 @@ describe("Overview Balance Card", () => {
 
     expect(positionsCard).toHaveTextContent("3");
     expect(ordersCard).toHaveTextContent("7");
-    expect(positionsCard).toHaveTextContent(/0 dust|1 dust|2 dust|3 dust|4 dust|5 dust|6 dust|7 dust|8 dust|9 dust/);
+    expect(positionsCard).toHaveTextContent(
+      /0 dust|1 dust|2 dust|3 dust|4 dust|5 dust|6 dust|7 dust|8 dust|9 dust/,
+    );
     expect(positionsCard).not.toHaveTextContent("99");
     expect(ordersCard).not.toHaveTextContent("88");
     expect(screen.queryByText("3 in last min")).not.toBeInTheDocument();

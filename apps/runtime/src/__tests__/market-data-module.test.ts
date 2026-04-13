@@ -585,11 +585,11 @@ describe("MarketDataModule", () => {
     (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(
-        new Map([
-          ["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }],
-        ]),
+        new Map([["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }]]),
       )
-      .mockRejectedValueOnce(new Error("fetch failed: getaddrinfo ENOTFOUND gamma-api.polymarket.com"));
+      .mockRejectedValueOnce(
+        new Error("fetch failed: getaddrinfo ENOTFOUND gamma-api.polymarket.com"),
+      );
     gateway.createMarketPricingStream = (handlers) => {
       stream = new FakePricingStream(handlers);
       return stream;
@@ -608,10 +608,7 @@ describe("MarketDataModule", () => {
       }),
       "poll cycle degraded — keeping cached websocket state",
     );
-    expect(silentLog.error).not.toHaveBeenCalledWith(
-      expect.anything(),
-      "poll cycle failed",
-    );
+    expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "poll cycle failed");
     await expect(mod.healthCheck()).resolves.toEqual(
       expect.objectContaining({
         ok: true,

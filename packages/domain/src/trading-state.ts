@@ -43,7 +43,11 @@ export function resolveTradingState(opts: {
     return "ACTIVELY_TRADING";
   }
 
-  if (signalWindow.produced > 0 && signalWindow.exitApproved > 0 && signalWindow.entryApproved === 0) {
+  if (
+    signalWindow.produced > 0 &&
+    signalWindow.exitApproved > 0 &&
+    signalWindow.entryApproved === 0
+  ) {
     return "EXITS_ONLY";
   }
 
