@@ -73,7 +73,8 @@ function diffPreset(current: EntryRulePreset | null, resolved: EntryRulePreset):
   const diffs: string[] = [];
   if (current.minEntryPrice !== resolved.minEntryPrice) diffs.push("min_entry_price");
   if (current.maxEntryPrice !== resolved.maxEntryPrice) diffs.push("max_entry_price");
-  if (current.highPriceThreshold !== resolved.highPriceThreshold) diffs.push("high_price_threshold");
+  if (current.highPriceThreshold !== resolved.highPriceThreshold)
+    diffs.push("high_price_threshold");
   if (current.requireProvenFamilyAbovePrice !== resolved.requireProvenFamilyAbovePrice) {
     diffs.push("require_proven_family_above_price");
   }
@@ -305,7 +306,9 @@ function printSection(title: string, rows: PolicyAuditRow[]): void {
   const mismatches = rows.filter((row) => row.diffs.length > 0);
   const fallbackRows = rows.filter((row) => row.matchedBy === "fallback");
   process.stdout.write(`\n## ${title}\n`);
-  process.stdout.write(`rows=${rows.length} mismatches=${mismatches.length} fallback=${fallbackRows.length}\n`);
+  process.stdout.write(
+    `rows=${rows.length} mismatches=${mismatches.length} fallback=${fallbackRows.length}\n`,
+  );
 
   if (mismatches.length > 0) {
     process.stdout.write("\nMismatches:\n");

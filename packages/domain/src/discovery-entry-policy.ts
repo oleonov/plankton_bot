@@ -22,12 +22,7 @@ export interface DiscoveryEntryPolicyInput extends FamilyEntryClassificationInpu
 
 export type DiscoveryEntryTier = "aggressive" | "standard" | "micro-default";
 
-export type DiscoveryEntryMatchType =
-  | "safety"
-  | "override"
-  | "structured"
-  | "keyword"
-  | "fallback";
+export type DiscoveryEntryMatchType = "safety" | "override" | "structured" | "keyword" | "fallback";
 
 export interface ResolvedDiscoveryEntryPolicy {
   tier: DiscoveryEntryTier;
@@ -129,11 +124,7 @@ export function classifyFamilyEntryTier(
   }
 
   if (familyKey === "highest-temperature-in-london") {
-    return withReason(
-      "micro-default",
-      "override",
-      "family_key=highest-temperature-in-london",
-    );
+    return withReason("micro-default", "override", "family_key=highest-temperature-in-london");
   }
 
   if (includesAny(combined, ["truth-social", "donald-trump", "elon-musk", "tweets"])) {
@@ -168,7 +159,11 @@ export function classifyFamilyEntryTier(
     );
   }
 
-  return withReason("micro-default", "fallback", "no override, structured rule, or keyword rule matched");
+  return withReason(
+    "micro-default",
+    "fallback",
+    "no override, structured rule, or keyword rule matched",
+  );
 }
 
 export function resolveFamilyMarketabilityTier(

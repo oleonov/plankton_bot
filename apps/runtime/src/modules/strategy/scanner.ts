@@ -355,7 +355,11 @@ function selectSprayCandidateTokenForCondition(
   defaultEntryPreset: EntryRulePreset | null | undefined,
   executionMinNotionalUsdc: number | null = null,
 ): string | null {
-  const entry = resolveEffectiveEntryRules(bundle, defaultEntryPreset, markets[0]?.tickSize ?? null);
+  const entry = resolveEffectiveEntryRules(
+    bundle,
+    defaultEntryPreset,
+    markets[0]?.tickSize ?? null,
+  );
   const selection = selectFirstEntryOutcomeForCondition(markets, bundle, {
     minEntryPrice: entry.minEntryPrice,
     maxEntryPrice: entry.maxEntryPrice,

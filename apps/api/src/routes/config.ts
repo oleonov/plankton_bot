@@ -112,8 +112,7 @@ export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) =>
                   min_entry_price: defaults.entry.minEntryPrice,
                   max_entry_price: defaults.entry.maxEntryPrice,
                   high_price_threshold: defaults.entry.highPriceThreshold,
-                  require_proven_family_above_price:
-                    defaults.entry.requireProvenFamilyAbovePrice,
+                  require_proven_family_above_price: defaults.entry.requireProvenFamilyAbovePrice,
                   preferred_entry_band: defaults.entry.preferredEntryBand,
                 },
               },
