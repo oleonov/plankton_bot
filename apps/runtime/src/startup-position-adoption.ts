@@ -16,6 +16,7 @@ import type {
 } from "@plankton/domain";
 import { createFamilyId, createFillId, createOrderId } from "@plankton/domain";
 import type { Logger } from "./logger.js";
+import { resolveOpenPositionStatus } from "./position-status.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
 import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
 import {
@@ -81,7 +82,6 @@ interface StartupAdoptionCleanupResult {
 }
 
 const SYNTHETIC_SIGNAL_REASON = "startup-adoption";
-const DUST_THRESHOLD_USDC = 0.5;
 
 export async function runStartupPositionAdoption(
   deps: StartupPositionAdoptionDeps,
@@ -401,7 +401,7 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string): void {
   const activeRow = openRows.find((row) => row.position_id === activePositionId);
   const entryStyle = activeRow?.entry_style ?? null;
   const openedAt = activeRow?.opened_at ?? remainingLots[0]!.created_at;
-  const status = totalCost < DUST_THRESHOLD_USDC ? "dust" : "open";
+  const status = resolveOpenPositionStatus(totalCost);
   const familyId = remainingLots[0]!.family_id;
   const now = new Date().toISOString();
 

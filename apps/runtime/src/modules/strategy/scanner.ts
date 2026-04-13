@@ -41,6 +41,7 @@ import {
 } from "@plankton/domain";
 import type { GlobalConfig } from "@plankton/config";
 import type { Logger } from "../../logger.js";
+import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 import { resolveFamilySpeedTier, resolveFamilyThroughputPolicy } from "../../family-throughput.js";
 import { resolveQueueJumpExecutionTerms } from "../hot-lane/hot-lane-policy.js";
 import {
@@ -59,6 +60,7 @@ import {
 } from "./book-quality-policy.js";
 
 const DEFAULT_MAX_ADDITIONAL_ENTRY_PRICE = 0.3;
+const MIN_MEANINGFUL_SPLIT_SHARES = 0.001;
 
 /** Context needed by the scanner to produce signals. */
 export interface ScannerDeps {
@@ -484,6 +486,14 @@ function scaleSizeByPrice(
   return Math.max(scaledSizeUsdc, exchangeMinUsdc, minNotionalUsdc);
 }
 
+function resolveMarketMinOrderSize(market: Pick<NormalizedMarket, "minOrderSize">): number {
+  return resolveEffectiveMinOrderSize(market.minOrderSize);
+}
+
+function canExecuteSize(size: number, market: Pick<NormalizedMarket, "minOrderSize">): boolean {
+  return isExecutableOrderSize(size, market.minOrderSize);
+}
+
 function capEntryNotional(
   suggestedSizeUsdc: number,
   maxInitialNotionalUsdc: number,
@@ -522,15 +532,16 @@ export function evaluateSprayEntry(
   if (suggestedPrice == null) return null;
 
   const baseSizeUsdc = spraySizeUsdc * sizeMult;
+  const minOrderSize = resolveMarketMinOrderSize(market);
   const suggestedSizeUsdc = scaleSizeByPrice(
     baseSizeUsdc,
     suggestedPrice,
-    market.minOrderSize ?? 5,
+    minOrderSize,
     minNotionalUsdc,
   );
   const suggestedSize = suggestedSizeUsdc / suggestedPrice;
   if (suggestedSize < 0.01) return null;
-  if (market.minOrderSize != null && suggestedSize < market.minOrderSize) return null;
+  if (!canExecuteSize(suggestedSize, market)) return null;
 
   const seq = nextSeq(market.familyId!, market.tokenId, "buy");
   return {
@@ -1186,11 +1197,12 @@ function evaluateProbeEntry(
   // Size: probeSizeUsdc adjusted by price-scaling, evidence multiplier + probe haircut, capped by max notional
   const probeHaircut = tailPnlNegative ? 0.5 : 1.0;
   const baseSizeUsdc = entry.probeSizeUsdc * sizeMult * probeHaircut;
+  const minOrderSize = resolveMarketMinOrderSize(market);
   const suggestedSizeUsdc = capEntryNotional(
-    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
+    scaleSizeByPrice(baseSizeUsdc, midPrice, minOrderSize, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
     minNotionalUsdc,
-    midPrice * (market.minOrderSize ?? 5),
+    midPrice * minOrderSize,
   );
   if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;
@@ -1241,12 +1253,13 @@ function evaluateScaleIn(
   const baseSizeUsdc = isSprayEscalation
     ? entry.probeSizeUsdc * sizeMult
     : entry.addSizeUsdc * sizeMult;
+  const minOrderSize = resolveMarketMinOrderSize(market);
 
   const suggestedSizeUsdc = capEntryNotional(
-    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
+    scaleSizeByPrice(baseSizeUsdc, midPrice, minOrderSize, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
     minNotionalUsdc,
-    midPrice * (market.minOrderSize ?? 5),
+    midPrice * minOrderSize,
   );
   if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;
@@ -1316,7 +1329,15 @@ function evaluateExit(
   // Sell 50% of position to reduce exposure while holding a runner portion.
   if (roi < effectiveLowBand) {
     const partialSize = position.size * 0.5;
-    if (partialSize < 0.001) return null; // too small to split meaningfully
+    const usePartialExit =
+      partialSize >= MIN_MEANINGFUL_SPLIT_SHARES && canExecuteSize(partialSize, market);
+    const suggestedSize = usePartialExit
+      ? partialSize
+      : canExecuteSize(position.size, market)
+        ? position.size
+        : null;
+    if (suggestedSize == null) return null;
+    const reason = usePartialExit ? "medium-hold-exit" : "repricing-exit";
 
     return {
       signalId: nextSignalId(),
@@ -1324,9 +1345,9 @@ function evaluateExit(
       tokenId: market.tokenId,
       side: "sell",
       suggestedPrice: midPrice,
-      suggestedSize: partialSize,
-      suggestedSizeUsdc: partialSize * midPrice,
-      reason: "medium-hold-exit",
+      suggestedSize,
+      suggestedSizeUsdc: suggestedSize * midPrice,
+      reason,
       strategyTick: tickTs,
       sequenceInTick: nextSeq(market.familyId!, market.tokenId, "sell"),
       generatedAt: new Date(tickTs).toISOString(),
@@ -1334,6 +1355,7 @@ function evaluateExit(
   }
 
   // Full position repricing exit: ROI in [effectiveLowBand, highBand]
+  if (!canExecuteSize(position.size, market)) return null;
   return {
     signalId: nextSignalId(),
     familyId: market.familyId!,
@@ -1393,11 +1415,12 @@ function evaluateTwoSidedEntry(
 
   // Size: use probe size with price-scaling and evidence multiplier
   const baseSizeUsdc = entry.probeSizeUsdc * sizeMult;
+  const minOrderSize = resolveMarketMinOrderSize(market);
   const suggestedSizeUsdc = capEntryNotional(
-    scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
+    scaleSizeByPrice(baseSizeUsdc, midPrice, minOrderSize, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
     minNotionalUsdc,
-    midPrice * (market.minOrderSize ?? 5),
+    midPrice * minOrderSize,
   );
   if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;

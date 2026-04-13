@@ -30,6 +30,7 @@ import type {
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { resolveOpenPositionStatus } from "../../position-status.js";
 import { RiskGateImpl } from "./risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
 import { FamilyExposureCalculator } from "./family-exposure.js";
@@ -88,6 +89,8 @@ export class RiskInventoryModule implements RuntimeModule {
   private readonly tokenProbeInFlight = new Map<string, number>();
   /** Probe-like commands awaiting placement/rejection resolution. */
   private readonly pendingProbeCommands = new Map<string, string>();
+  /** Latest known exchange minimum share size per token from live market updates. */
+  private readonly tokenMinOrderSize = new Map<string, number>();
 
   /** Orders already decremented from in-flight (prevents double-decrement on multi-fill orders). */
   private readonly inFlightDecremented = new Set<string>();
@@ -101,6 +104,7 @@ export class RiskInventoryModule implements RuntimeModule {
       deps.orderRepo,
       this.log,
       deps.liveLiteGuard,
+      (tid) => this.getLatestMinOrderSize(tid),
       (fid) => this.getInFlightCount(fid),
       (tid) => this.getTokenInFlightCount(tid),
     );
@@ -221,6 +225,12 @@ export class RiskInventoryModule implements RuntimeModule {
 
   private getTokenInFlightCount(tokenId: RuntimeEventMap["FillReceived"]["tokenId"]): number {
     return this.tokenProbeInFlight.get(String(tokenId)) ?? 0;
+  }
+
+  private getLatestMinOrderSize(
+    tokenId: RuntimeEventMap["FillReceived"]["tokenId"],
+  ): number | null {
+    return this.tokenMinOrderSize.get(String(tokenId)) ?? null;
   }
 
   private isProbeLikeSignalReason(signalReason: string | null): boolean {
@@ -371,6 +381,13 @@ export class RiskInventoryModule implements RuntimeModule {
     // Build lookup: tokenId → live midPrice
     const priceMap = new Map<string, number>();
     for (const m of payload.markets) {
+      if (
+        typeof m.minOrderSize === "number" &&
+        Number.isFinite(m.minOrderSize) &&
+        m.minOrderSize > 0
+      ) {
+        this.tokenMinOrderSize.set(String(m.tokenId), m.minOrderSize);
+      }
       if (m.midPrice !== null) {
         priceMap.set(String(m.tokenId), m.midPrice);
       }
@@ -385,13 +402,19 @@ export class RiskInventoryModule implements RuntimeModule {
       if (livePrice === undefined) continue;
 
       const newValue = pos.size * livePrice;
-      if (pos.currentValueUsdc !== null && Math.abs(newValue - pos.currentValueUsdc) < 0.001) {
+      const nextStatus = pos.status === "closed" ? "closed" : resolveOpenPositionStatus(newValue);
+      if (
+        pos.currentValueUsdc !== null &&
+        Math.abs(newValue - pos.currentValueUsdc) < 0.001 &&
+        pos.status === nextStatus
+      ) {
         continue; // Skip if value hasn't meaningfully changed
       }
 
       this.deps.positionRepo.save({
         ...pos,
         currentValueUsdc: newValue,
+        status: nextStatus,
         updatedAt: new Date().toISOString(),
       });
       updated++;

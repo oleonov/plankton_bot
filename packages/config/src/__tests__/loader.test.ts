@@ -38,7 +38,7 @@ describe("loadFamilyRulesYaml", () => {
     expect(family.identity.strategyProfile).toBe("scalp");
   });
 
-  it("keeps narrow canary tail caps aligned with production rules", () => {
+  it("keeps production tail caps aligned with live policy", () => {
     const result = loadFamilyRulesYaml(REAL_RULES_PATH);
     const byId = new Map(result.families.map((family) => [family.identity.familyId, family]));
 
@@ -46,35 +46,40 @@ describe("loadFamilyRulesYaml", () => {
       byId.get("donald-trump-of-truth-social-posts:social-activity:ad-hoc")?.rules.tailSuppression,
     ).toMatchObject({
       maxActiveMarkets: 3,
-      maxDustPositions: 2,
+      maxDustPositions: 10,
+      tailQuarantineThresholdRatio: 5,
     });
 
     expect(
       byId.get("highest-temperature-in-london:price-range:daily")?.rules.tailSuppression,
     ).toMatchObject({
       maxActiveMarkets: 3,
-      maxDustPositions: 2,
+      maxDustPositions: 10,
+      tailQuarantineThresholdRatio: 5,
     });
 
     expect(
       byId.get("highest-temperature-in-nyc:price-range:daily")?.rules.tailSuppression,
     ).toMatchObject({
       maxActiveMarkets: 2,
-      maxDustPositions: 1,
+      maxDustPositions: 10,
+      tailQuarantineThresholdRatio: 5,
     });
 
     expect(
       byId.get("highest-temperature-in-seoul:price-range:daily")?.rules.tailSuppression,
     ).toMatchObject({
       maxActiveMarkets: 1,
-      maxDustPositions: 1,
+      maxDustPositions: 10,
+      tailQuarantineThresholdRatio: 5,
     });
 
     expect(
       byId.get("elon-musk-of-tweets:social-activity:weekly-window")?.rules.tailSuppression,
     ).toMatchObject({
       maxActiveMarkets: 2,
-      maxDustPositions: 1,
+      maxDustPositions: 10,
+      tailQuarantineThresholdRatio: 5,
     });
   });
 

@@ -27,9 +27,11 @@ import {
   type OrderRepository,
   type FamilyId,
   type TokenId,
+  type Position,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { isExecutableOrderSize } from "../../min-order-size.js";
 import { resolveFamilyThroughputPolicy } from "../../family-throughput.js";
 
 type DerivedFamilyMode = "active" | "probe-only" | "reduce-only";
@@ -89,9 +91,38 @@ export class RiskGateImpl implements RiskGate {
     private readonly orderRepo: OrderRepository,
     private readonly log: Logger,
     private readonly liveLiteGuard?: LiveLiteGuard,
+    private readonly resolveMinOrderSize?: (tokenId: TokenId) => number | null,
     private readonly getInFlightCount?: (familyId: FamilyId) => number,
     private readonly getTokenInFlightCount?: (tokenId: TokenId) => number,
   ) {}
+
+  private resolveExecutableExposureCounts(familyId: FamilyId): {
+    executableActiveMarketCount: number;
+    executableDustCount: number;
+  } {
+    const positions = this.positionRepo.findByFamily(familyId);
+    const executableTokens = new Set<string>();
+    let executableDustCount = 0;
+
+    for (const position of positions) {
+      if (position.status !== "open" && position.status !== "dust") continue;
+      if (!this.isExecutablePosition(position)) continue;
+
+      executableTokens.add(String(position.tokenId));
+      if (position.status === "dust") {
+        executableDustCount++;
+      }
+    }
+
+    return {
+      executableActiveMarketCount: executableTokens.size,
+      executableDustCount,
+    };
+  }
+
+  private isExecutablePosition(position: Position): boolean {
+    return isExecutableOrderSize(position.size, this.resolveMinOrderSize?.(position.tokenId));
+  }
 
   async evaluate(signal: Signal): Promise<RiskDecision> {
     const passed: string[] = [];
@@ -263,20 +294,23 @@ export class RiskGateImpl implements RiskGate {
     }
     passed.push("max_open_value_ok");
 
+    const { executableActiveMarketCount, executableDustCount } =
+      this.resolveExecutableExposureCounts(signal.familyId);
+
     // 4. Max active markets (skip if signal targets an already-open position)
     const existingPosition = this.positionRepo.findByTokenId(signal.tokenId);
     const isNewMarket = !existingPosition;
-    if (isNewMarket && familyState.activeMarketCount >= tail.maxActiveMarkets) {
+    if (isNewMarket && executableActiveMarketCount >= tail.maxActiveMarkets) {
       rejected.push(
-        `active markets ${familyState.activeMarketCount} >= max ${tail.maxActiveMarkets}`,
+        `active markets ${executableActiveMarketCount} >= max ${tail.maxActiveMarkets}`,
       );
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("max_active_markets_ok");
 
     // 5. Max dust positions
-    if (familyState.openDustCount >= tail.maxDustPositions) {
-      rejected.push(`dust positions ${familyState.openDustCount} >= max ${tail.maxDustPositions}`);
+    if (executableDustCount >= tail.maxDustPositions) {
+      rejected.push(`dust positions ${executableDustCount} >= max ${tail.maxDustPositions}`);
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("max_dust_ok");

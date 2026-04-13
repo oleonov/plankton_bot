@@ -25,6 +25,7 @@ import type {
   FamilyId,
   Regime,
   ClientOrderId,
+  NormalizedMarket,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
@@ -48,6 +49,40 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     sequenceInTick: 0,
     generatedAt: new Date().toISOString(),
     ...overrides,
+  };
+}
+
+function makeNormalizedMarket(
+  tokenId: ReturnType<typeof createTokenId>,
+  minOrderSize: number,
+): NormalizedMarket {
+  return {
+    tokenId,
+    conditionId: `cond-${String(tokenId)}`,
+    slug: `market-${String(tokenId)}`,
+    eventSlug: null,
+    question: "Test market?",
+    outcome: "YES",
+    outcomeIndex: 0,
+    familyId: FAM_ID,
+    familyKey: "btc-price",
+    regime: "threshold" as Regime,
+    horizon: "short",
+    endDate: null,
+    active: true,
+    tickSize: 0.01,
+    negRisk: false,
+    bestBid: 0.19,
+    bestAsk: 0.21,
+    midPrice: 0.2,
+    spread: 0.02,
+    lastTradePrice: null,
+    lastTradeAt: null,
+    volume24h: null,
+    liquidity: null,
+    minOrderSize,
+    bookSource: "clob",
+    snapshotTs: Date.now(),
   };
 }
 
@@ -206,14 +241,20 @@ function createMockFamilyStateRepo(state?: FamilyState): FamilyStateRepository {
   };
 }
 
-function createMockPositionRepo(position?: Position | null): PositionRepository {
+function createMockPositionRepo(position?: Position | Position[] | null): PositionRepository {
+  const positions = Array.isArray(position) ? position : position ? [position] : [];
   return {
     save: vi.fn(),
-    findByTokenId: vi.fn().mockReturnValue(position ?? null),
-    findByFamily: vi.fn().mockReturnValue(position ? [position] : []),
-    findOpen: vi.fn().mockReturnValue(position ? [position] : []),
-    findDust: vi.fn().mockReturnValue([]),
-    findAll: vi.fn().mockReturnValue(position ? [position] : []),
+    findByTokenId: vi
+      .fn()
+      .mockImplementation(
+        (tokenId: ReturnType<typeof createTokenId>) =>
+          positions.find((entry) => String(entry.tokenId) === String(tokenId)) ?? null,
+      ),
+    findByFamily: vi.fn().mockReturnValue(positions),
+    findOpen: vi.fn().mockReturnValue(positions.filter((entry) => entry.status === "open")),
+    findDust: vi.fn().mockReturnValue(positions.filter((entry) => entry.status === "dust")),
+    findAll: vi.fn().mockReturnValue(positions),
     findOpenByEntryStyle: vi.fn().mockReturnValue([]),
   };
 }
@@ -509,9 +550,25 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects entry for new market when max active markets exceeded", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 5 }));
-    // No existing position for this token — it's a new market
-    positionRepo = createMockPositionRepo(null);
+    const blockingToken = createTokenId("tok-blocking-open");
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 1 }));
+    rulesProvider = createMockRulesProvider(makeRuleBundle({ maxActiveMarkets: 1 }));
+    positionRepo = createMockPositionRepo({
+      positionId: createPositionId("pos-blocking-open"),
+      tokenId: blockingToken,
+      familyId: FAM_ID,
+      side: "buy",
+      size: 10,
+      avgEntryPrice: 0.2,
+      costBasisUsdc: 2,
+      currentValueUsdc: 2,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: null,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
     mod = createModule();
     await mod.start();
 
@@ -524,6 +581,89 @@ describe("RiskInventoryModule", () => {
 
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toContain("active markets");
+
+    await mod.stop();
+  });
+
+  it("allows entry when only active family position is below the exchange minimum size", async () => {
+    const legacyToken = createTokenId("tok-legacy-open");
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 1 }));
+    rulesProvider = createMockRulesProvider(makeRuleBundle({ maxActiveMarkets: 1 }));
+    positionRepo = createMockPositionRepo({
+      positionId: createPositionId("pos-legacy-open"),
+      tokenId: legacyToken,
+      familyId: FAM_ID,
+      side: "buy",
+      size: 1,
+      avgEntryPrice: 0.2,
+      costBasisUsdc: 0.2,
+      currentValueUsdc: 0.2,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: null,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket(legacyToken, 5)],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ tokenId: createTokenId("tok-new-open") }),
+    });
+
+    expect(approved).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("uses live minOrderSize when deciding whether an active market is still blocking", async () => {
+    const legacyToken = createTokenId("tok-legacy-executable");
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 1 }));
+    rulesProvider = createMockRulesProvider(makeRuleBundle({ maxActiveMarkets: 1 }));
+    positionRepo = createMockPositionRepo({
+      positionId: createPositionId("pos-legacy-executable"),
+      tokenId: legacyToken,
+      familyId: FAM_ID,
+      side: "buy",
+      size: 3,
+      avgEntryPrice: 0.2,
+      costBasisUsdc: 0.6,
+      currentValueUsdc: 0.6,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: null,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+    mod = createModule();
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket(legacyToken, 2)],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ tokenId: createTokenId("tok-new-blocked") }),
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("active markets 1 >= max 1");
 
     await mod.stop();
   });
@@ -566,7 +706,25 @@ describe("RiskInventoryModule", () => {
   });
 
   it("rejects entry when max dust positions exceeded", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ openDustCount: 3 }));
+    const blockingDustToken = createTokenId("tok-blocking-dust");
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ openDustCount: 1 }));
+    rulesProvider = createMockRulesProvider(makeRuleBundle({ maxDustPositions: 1 }));
+    positionRepo = createMockPositionRepo({
+      positionId: createPositionId("pos-blocking-dust"),
+      tokenId: blockingDustToken,
+      familyId: FAM_ID,
+      side: "buy",
+      size: 10,
+      avgEntryPrice: 0.2,
+      costBasisUsdc: 2,
+      currentValueUsdc: 2,
+      realizedPnl: 0,
+      status: "dust",
+      entryStyle: null,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
     mod = createModule();
     await mod.start();
 
@@ -579,6 +737,47 @@ describe("RiskInventoryModule", () => {
 
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toContain("dust");
+
+    await mod.stop();
+  });
+
+  it("allows entry when only dust family position is below the exchange minimum size", async () => {
+    const dustToken = createTokenId("tok-dust-legacy");
+    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ openDustCount: 1 }));
+    rulesProvider = createMockRulesProvider(makeRuleBundle({ maxDustPositions: 1 }));
+    positionRepo = createMockPositionRepo({
+      positionId: createPositionId("pos-dust-legacy"),
+      tokenId: dustToken,
+      familyId: FAM_ID,
+      side: "buy",
+      size: 1,
+      avgEntryPrice: 0.2,
+      costBasisUsdc: 0.2,
+      currentValueUsdc: 0.2,
+      realizedPnl: 0,
+      status: "dust",
+      entryStyle: null,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+    mod = createModule();
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket(dustToken, 5)],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ tokenId: createTokenId("tok-new-after-dust") }),
+    });
+
+    expect(approved).toHaveLength(1);
 
     await mod.stop();
   });
@@ -1757,6 +1956,65 @@ describe("RiskInventoryModule", () => {
       expect(saveCalls.length).toBeGreaterThanOrEqual(1);
       const savedPos = saveCalls[saveCalls.length - 1][0];
       expect(savedPos.currentValueUsdc).toBeCloseTo(8.0, 2);
+      expect(savedPos.status).toBe("open");
+
+      await mod.stop();
+    });
+
+    it("reclassifies low-value open positions to dust on mark-to-market", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-dustify"),
+        tokenId: TOK_ID,
+        familyId: FAM_ID,
+        side: "buy",
+        size: 1,
+        avgEntryPrice: 0.8,
+        costBasisUsdc: 0.8,
+        currentValueUsdc: 0.8,
+        realizedPnl: 0,
+        status: "open",
+        entryStyle: null,
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule();
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          {
+            tokenId: TOK_ID,
+            conditionId: "c1",
+            slug: "test",
+            eventSlug: null,
+            question: "test?",
+            outcome: "YES" as const,
+            familyId: FAM_ID,
+            familyKey: "btc",
+            regime: "threshold" as Regime,
+            horizon: "daily",
+            endDate: null,
+            active: true,
+            tickSize: 0.01,
+            negRisk: false,
+            bestBid: 0.19,
+            bestAsk: 0.21,
+            midPrice: 0.2,
+            spread: 0.02,
+            snapshotTs: Date.now(),
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls.length).toBeGreaterThanOrEqual(1);
+      const savedPos = saveCalls[saveCalls.length - 1][0];
+      expect(savedPos.currentValueUsdc).toBeCloseTo(0.2, 2);
+      expect(savedPos.status).toBe("dust");
 
       await mod.stop();
     });

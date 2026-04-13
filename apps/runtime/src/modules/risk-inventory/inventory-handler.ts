@@ -23,9 +23,7 @@ import type {
 } from "@plankton/domain";
 import { createPositionId, createLotId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-
-/** Dust threshold in USDC — positions below this are marked "dust". */
-const DUST_THRESHOLD_USDC = 0.5;
+import { resolveOpenPositionStatus } from "../../position-status.js";
 
 export interface FillEvent {
   fillId: FillId;
@@ -204,10 +202,8 @@ export class InventoryHandler {
     let status: "open" | "closed" | "dust";
     if (newSize <= 0) {
       status = "closed";
-    } else if (newSize * fill.price < DUST_THRESHOLD_USDC) {
-      status = "dust";
     } else {
-      status = "open";
+      status = resolveOpenPositionStatus(newSize * fill.price);
     }
 
     // Recompute avg entry price from remaining lots

@@ -1578,6 +1578,107 @@ describe("exchange minimum notional guard", () => {
   });
 });
 
+describe("exit minimum order size guard", () => {
+  it("upgrades medium-hold exit to a full repricing exit when the partial size is below minOrderSize", () => {
+    const rulesProvider = createMockRulesProvider(makeBundle());
+    const positionRepo = createMockPositionRepo([
+      makePosition({
+        size: 8,
+        avgEntryPrice: 0.2,
+        costBasisUsdc: 1.6,
+        currentValueUsdc: 1.84,
+        openedAt: new Date("2026-04-01T09:00:00Z").toISOString(),
+      }),
+    ]);
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          midPrice: 0.23,
+          bestBid: 0.22,
+          bestAsk: 0.24,
+          minOrderSize: 5,
+        }),
+      ],
+      { rulesProvider, positionRepo, familyStateRepo, log },
+      createBuyTracker(),
+      new Date("2026-04-01T12:00:00Z").getTime(),
+    );
+
+    expect(result.signals).toHaveLength(1);
+    expect(result.signals[0]).toMatchObject({
+      reason: "repricing-exit",
+      side: "sell",
+      suggestedSize: 8,
+      suggestedSizeUsdc: 1.84,
+    });
+  });
+
+  it("suppresses repricing exit when the full position is below the explicit exchange minimum size", () => {
+    const rulesProvider = createMockRulesProvider(makeBundle());
+    const positionRepo = createMockPositionRepo([
+      makePosition({
+        size: 4,
+        avgEntryPrice: 0.2,
+        costBasisUsdc: 0.8,
+        currentValueUsdc: 1,
+        openedAt: new Date("2026-04-01T09:00:00Z").toISOString(),
+      }),
+    ]);
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          midPrice: 0.25,
+          bestBid: 0.24,
+          bestAsk: 0.26,
+          minOrderSize: 5,
+        }),
+      ],
+      { rulesProvider, positionRepo, familyStateRepo, log },
+      createBuyTracker(),
+      new Date("2026-04-01T12:00:00Z").getTime(),
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("falls back to minOrderSize=5 when the market book does not provide one", () => {
+    const rulesProvider = createMockRulesProvider(makeBundle());
+    const positionRepo = createMockPositionRepo([
+      makePosition({
+        size: 4,
+        avgEntryPrice: 0.2,
+        costBasisUsdc: 0.8,
+        currentValueUsdc: 1,
+        openedAt: new Date("2026-04-01T09:00:00Z").toISOString(),
+      }),
+    ]);
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          midPrice: 0.25,
+          bestBid: 0.24,
+          bestAsk: 0.26,
+          minOrderSize: null,
+        }),
+      ],
+      { rulesProvider, positionRepo, familyStateRepo, log },
+      createBuyTracker(),
+      new Date("2026-04-01T12:00:00Z").getTime(),
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+});
+
 // ─── Spray → conviction escalation (evaluateScaleIn) ────────────────────
 
 describe("spray → conviction escalation", () => {
