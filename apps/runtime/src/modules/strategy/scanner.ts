@@ -488,9 +488,10 @@ function capEntryNotional(
   suggestedSizeUsdc: number,
   maxInitialNotionalUsdc: number,
   minNotionalUsdc: number,
+  exchangeMinUsdc: number = 0,
 ): number | null {
   const capped = Math.min(suggestedSizeUsdc, maxInitialNotionalUsdc);
-  if (capped + 1e-9 < minNotionalUsdc) return null;
+  if (capped + 1e-9 < Math.max(minNotionalUsdc, exchangeMinUsdc)) return null;
   return capped;
 }
 
@@ -1189,6 +1190,7 @@ function evaluateProbeEntry(
     scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
     minNotionalUsdc,
+    midPrice * (market.minOrderSize ?? 5),
   );
   if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;
@@ -1244,6 +1246,7 @@ function evaluateScaleIn(
     scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
     minNotionalUsdc,
+    midPrice * (market.minOrderSize ?? 5),
   );
   if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;
@@ -1394,6 +1397,7 @@ function evaluateTwoSidedEntry(
     scaleSizeByPrice(baseSizeUsdc, midPrice, market.minOrderSize ?? 5, minNotionalUsdc),
     entry.maxInitialNotionalUsdc,
     minNotionalUsdc,
+    midPrice * (market.minOrderSize ?? 5),
   );
   if (suggestedSizeUsdc == null) return null;
   const suggestedSize = suggestedSizeUsdc / midPrice;

@@ -1495,6 +1495,89 @@ describe("scan() spray integration", () => {
   });
 });
 
+describe("exchange minimum notional guard", () => {
+  it("skips probe-entry when risk cap falls below the exchange minimum notional", () => {
+    const bundle = makeBundle({
+      rules: {
+        entry: {
+          ...makeRules().entry,
+          minEntryPrice: 0.01,
+          maxEntryPrice: 0.35,
+          highPriceThreshold: 0.35,
+          requireProvenFamilyAbovePrice: 0.35,
+          maxInitialNotionalUsdc: 0.5,
+        },
+      },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const positionRepo = createMockPositionRepo();
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          midPrice: 0.17,
+          bestBid: 0.16,
+          bestAsk: 0.18,
+          spread: 0.02,
+          minOrderSize: 5,
+        }),
+      ],
+      { rulesProvider, positionRepo, familyStateRepo, log },
+      createBuyTracker(),
+      new Date("2026-04-01T12:00:00Z").getTime(),
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+
+  it("skips scale-in when risk cap falls below the exchange minimum notional", () => {
+    const bundle = makeBundle({
+      rules: {
+        entry: {
+          ...makeRules().entry,
+          minEntryPrice: 0.01,
+          maxEntryPrice: 0.35,
+          highPriceThreshold: 0.35,
+          requireProvenFamilyAbovePrice: 0.35,
+          maxInitialNotionalUsdc: 0.5,
+        },
+      },
+    });
+    const rulesProvider = createMockRulesProvider(bundle);
+    const existingPosition = makePosition({
+      size: 5,
+      avgEntryPrice: 0.17,
+      costBasisUsdc: 0.85,
+      currentValueUsdc: 0.85,
+      entryStyle: "probe",
+    });
+    const positionRepo = createMockPositionRepo([existingPosition]);
+    const familyStateRepo = createMockFamilyStateRepo();
+    const log = createMockLogger();
+    const buyTracker = createBuyTracker();
+    buyTracker.incrementBuyCount(String(existingPosition.positionId));
+
+    const result = scan(
+      [
+        makeNormalizedMarket({
+          midPrice: 0.17,
+          bestBid: 0.16,
+          bestAsk: 0.18,
+          spread: 0.02,
+          minOrderSize: 5,
+        }),
+      ],
+      { rulesProvider, positionRepo, familyStateRepo, log },
+      buyTracker,
+      new Date("2026-04-01T12:00:00Z").getTime(),
+    );
+
+    expect(result.signals).toHaveLength(0);
+  });
+});
+
 // ─── Spray → conviction escalation (evaluateScaleIn) ────────────────────
 
 describe("spray → conviction escalation", () => {

@@ -28,6 +28,7 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
     "INTEGER NOT NULL DEFAULT 1",
   );
   backfillFamilyLivePolicy(conn.db);
+  backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
   return conn;
 }
 
@@ -85,6 +86,7 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   backfillDeployments(conn.db);
   backfillLiveProfileSettings(conn.db);
   backfillFamilyLivePolicy(conn.db);
+  backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
 
   return conn;
 }
@@ -188,6 +190,73 @@ function backfillFamilyLivePolicy(db: import("better-sqlite3").Database): void {
       );
     }
   })();
+}
+
+const LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS = {
+  minEntryPrice: 0,
+  maxEntryPrice: 1,
+  highPriceThreshold: 0.2,
+  requireProvenFamilyAbovePrice: 0.2,
+};
+
+const DIRECTIONAL_UPDOWN_BACKFILL_PRESET = {
+  minEntryPrice: 0.03,
+  maxEntryPrice: 0.35,
+  highPriceThreshold: 0.35,
+  requireProvenFamilyAbovePrice: 0.35,
+  preferredEntryBand: "0.05-0.35",
+};
+
+/**
+ * Repair discovery directional-updown families materialized before standard-tier
+ * presets and fast-lane routing existed. Only rows that still match the exact
+ * legacy defaults are touched; explicit operator tuning is left intact.
+ */
+function backfillDirectionalUpdownDiscoveryEntryPolicy(
+  db: import("better-sqlite3").Database,
+): void {
+  try {
+    db.prepare(
+      `UPDATE family_rules
+       SET min_entry_price = @minEntryPrice,
+           max_entry_price = @maxEntryPrice,
+           high_price_threshold = @highPriceThreshold,
+           require_proven_family_above_price = @requireProvenFamilyAbovePrice,
+           preferred_entry_band = @preferredEntryBand,
+           fast_lane_enabled = 1,
+           updated_at = datetime('now')
+       WHERE family_id IN (
+         SELECT r.family_id
+         FROM family_rules r
+         JOIN family_catalog c ON c.family_id = r.family_id
+         WHERE c.source_type = 'discovery'
+           AND lower(c.regime) = 'directional-updown'
+           AND r.fast_lane_enabled IS NULL
+           AND abs(r.min_entry_price - @legacyMinEntryPrice) <= 1e-9
+           AND abs(r.max_entry_price - @legacyMaxEntryPrice) <= 1e-9
+           AND abs(r.high_price_threshold - @legacyHighPriceThreshold) <= 1e-9
+           AND abs(r.require_proven_family_above_price - @legacyRequireProvenFamilyAbovePrice)
+                 <= 1e-9
+           AND COALESCE(r.preferred_entry_band, '') = ''
+       )`,
+    ).run({
+      minEntryPrice: DIRECTIONAL_UPDOWN_BACKFILL_PRESET.minEntryPrice,
+      maxEntryPrice: DIRECTIONAL_UPDOWN_BACKFILL_PRESET.maxEntryPrice,
+      highPriceThreshold: DIRECTIONAL_UPDOWN_BACKFILL_PRESET.highPriceThreshold,
+      requireProvenFamilyAbovePrice:
+        DIRECTIONAL_UPDOWN_BACKFILL_PRESET.requireProvenFamilyAbovePrice,
+      preferredEntryBand: DIRECTIONAL_UPDOWN_BACKFILL_PRESET.preferredEntryBand,
+      legacyMinEntryPrice: LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS.minEntryPrice,
+      legacyMaxEntryPrice: LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS.maxEntryPrice,
+      legacyHighPriceThreshold: LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS.highPriceThreshold,
+      legacyRequireProvenFamilyAbovePrice:
+        LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS.requireProvenFamilyAbovePrice,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("no such table")) return;
+    throw err;
+  }
 }
 
 /** ALTER TABLE ADD COLUMN, ignoring "duplicate column" errors. */

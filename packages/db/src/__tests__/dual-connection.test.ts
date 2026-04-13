@@ -83,6 +83,89 @@ describe("dual-connection infrastructure", () => {
     expect(names).toContain("max_entry_signals_per_tick_per_family");
   });
 
+  it("bootstrapControlDb backfills legacy discovery directional-updown families without touching tuned rows", () => {
+    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ctrl-directional-"));
+    const dbPath = path.join(tmpDir, "control.db");
+    const conn1 = bootstrapControlDb(dbPath);
+
+    conn1.db.prepare(
+      `INSERT INTO family_catalog
+         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
+       VALUES
+         ('legacy-fast:directional-updown:deadline', 'legacy-fast', 'stocks', 'directional-updown', 'deadline', 'daily', 'scalp', 'discovery'),
+         ('manual-fast:directional-updown:deadline', 'manual-fast', 'stocks', 'directional-updown', 'deadline', 'daily', 'scalp', 'discovery'),
+         ('yaml-fast:directional-updown:deadline', 'yaml-fast', 'stocks', 'directional-updown', 'deadline', 'daily', 'scalp', 'yaml_import')`,
+    ).run();
+    conn1.db.prepare(
+      `INSERT INTO profiles (profile_id, display_name)
+       VALUES ('simulation', 'Simulation'), ('paper', 'Paper'), ('live-lite', 'Live Lite')`,
+    ).run();
+
+    conn1.db.prepare(
+      `INSERT INTO family_rules
+         (family_id, min_entry_price, max_entry_price, high_price_threshold,
+          require_proven_family_above_price, preferred_entry_band, fast_lane_enabled)
+       VALUES
+         ('legacy-fast:directional-updown:deadline', 0, 1, 0.2, 0.2, NULL, NULL),
+         ('manual-fast:directional-updown:deadline', 0.02, 0.3, 0.3, 0.3, '0.02-0.30', NULL),
+         ('yaml-fast:directional-updown:deadline', 0, 1, 0.2, 0.2, NULL, NULL)`,
+    ).run();
+    conn1.close();
+
+    const conn2 = bootstrapControlDb(dbPath);
+    conns.push(conn2);
+
+    const rows = conn2.db.prepare(
+      `SELECT family_id, min_entry_price, max_entry_price, high_price_threshold,
+              require_proven_family_above_price, preferred_entry_band, fast_lane_enabled
+         FROM family_rules
+        WHERE family_id IN (
+          'legacy-fast:directional-updown:deadline',
+          'manual-fast:directional-updown:deadline',
+          'yaml-fast:directional-updown:deadline'
+        )
+        ORDER BY family_id`,
+    ).all() as Array<{
+      family_id: string;
+      min_entry_price: number;
+      max_entry_price: number;
+      high_price_threshold: number;
+      require_proven_family_above_price: number;
+      preferred_entry_band: string | null;
+      fast_lane_enabled: number | null;
+    }>;
+
+    expect(rows).toEqual([
+      {
+        family_id: "legacy-fast:directional-updown:deadline",
+        min_entry_price: 0.03,
+        max_entry_price: 0.35,
+        high_price_threshold: 0.35,
+        require_proven_family_above_price: 0.35,
+        preferred_entry_band: "0.05-0.35",
+        fast_lane_enabled: 1,
+      },
+      {
+        family_id: "manual-fast:directional-updown:deadline",
+        min_entry_price: 0.02,
+        max_entry_price: 0.3,
+        high_price_threshold: 0.3,
+        require_proven_family_above_price: 0.3,
+        preferred_entry_band: "0.02-0.30",
+        fast_lane_enabled: null,
+      },
+      {
+        family_id: "yaml-fast:directional-updown:deadline",
+        min_entry_price: 0,
+        max_entry_price: 1,
+        high_price_threshold: 0.2,
+        require_proven_family_above_price: 0.2,
+        preferred_entry_band: null,
+        fast_lane_enabled: null,
+      },
+    ]);
+  });
+
   it("bootstrapLedgerDb is idempotent", () => {
     tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-idem-"));
     const dbPath = path.join(tmpDir, "ledger.db");
