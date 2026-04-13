@@ -129,9 +129,15 @@ export class SignalToOrderBridge {
         })
       : null;
     const allowedQueueJumpTerms = this.resolveAllowedQueueJumpTerms(queueJumpTerms, signal);
-    const marketability = this.relaxQueueJumpMarketability(
-      this.evaluateMarketability(signal, market, bundle),
-      allowedQueueJumpTerms,
+    const marketability = this.relaxMakerOnlyDustMarketability(
+      this.relaxQueueJumpMarketability(
+        this.evaluateMarketability(signal, market, bundle),
+        allowedQueueJumpTerms,
+      ),
+      signal,
+      market,
+      bundle,
+      executionMinNotionalUsdc,
     );
     const gammaFallbackDust =
       bundle != null &&
@@ -335,6 +341,13 @@ export class SignalToOrderBridge {
       return { price: signal.suggestedPrice };
     }
 
+    const makerOnlyPolicy =
+      signal.reason === "spray-entry"
+        ? {
+            ...marketabilityPolicy,
+            allowOneSidedBooks: true,
+          }
+        : marketabilityPolicy;
     const makerOnlyPrice = resolveMakerOnlyPrice({
       side: signal.side,
       suggestedPrice: signal.suggestedPrice,
@@ -343,7 +356,7 @@ export class SignalToOrderBridge {
       nowMs: Date.now(),
       executionMinNotionalUsdc,
       market,
-      policy: marketabilityPolicy,
+      policy: makerOnlyPolicy,
     });
     if (makerOnlyPrice == null) {
       return null;
@@ -380,6 +393,61 @@ export class SignalToOrderBridge {
       approved: true,
       rejectionReasons: [],
       checksPassed: [...decision.checksPassed, "queue-jump-marketability-override"],
+    };
+  }
+
+  private relaxMakerOnlyDustMarketability(
+    decision: MarketabilityDecision,
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    bundle: ReturnType<FamilyRulesProvider["getRule"]>,
+    executionMinNotionalUsdc: number | null,
+  ): MarketabilityDecision {
+    if (decision.approved) return decision;
+    if (!bundle) return decision;
+    if (this.deps.liveLiteGuard?.getWalletMode() !== "relayer") return decision;
+
+    const livePolicy = resolveFamilyLiveTradingPolicy(bundle.identity);
+    if (!livePolicy.requiresPostOnlyForLive) return decision;
+
+    const makerOnlyPrice = resolveMakerOnlyPrice({
+      side: signal.side,
+      suggestedPrice: signal.suggestedPrice,
+      suggestedSizeUsdc: signal.suggestedSizeUsdc,
+      signalReason: signal.reason,
+      nowMs: Date.now(),
+      executionMinNotionalUsdc,
+      market,
+      policy: {
+        ...decision.policy,
+        allowOneSidedBooks: true,
+      },
+    });
+    if (makerOnlyPrice == null) return decision;
+
+    const makerOnlyOverrideReasons = new Set([
+      "book-one-sided",
+      "spread-unavailable",
+      "spread-too-wide",
+    ]);
+    const remainingReasons = decision.rejectionReasons.filter(
+      (reason) => !makerOnlyOverrideReasons.has(reason),
+    );
+    if (remainingReasons.length === decision.rejectionReasons.length) {
+      return decision;
+    }
+    if (remainingReasons.length > 0) {
+      return {
+        ...decision,
+        rejectionReasons: remainingReasons,
+        approved: false,
+      };
+    }
+    return {
+      ...decision,
+      approved: true,
+      rejectionReasons: [],
+      checksPassed: [...decision.checksPassed, "maker-only-dust-marketability-override"],
     };
   }
 
