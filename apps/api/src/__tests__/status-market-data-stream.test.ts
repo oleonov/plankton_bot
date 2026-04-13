@@ -11,9 +11,7 @@ function jsonMetric(labels: Record<string, unknown>): { labels: string } {
   return { labels: JSON.stringify(labels) };
 }
 
-function createFakeDb(
-  runtimeMetrics: Record<string, Record<string, unknown>>,
-): Database.Database {
+function createFakeDb(runtimeMetrics: Record<string, Record<string, unknown>>): Database.Database {
   const lastMarketDataIso = new Date().toISOString();
 
   return {
@@ -62,7 +60,9 @@ function createFakeDb(
           if (sql.includes("FROM runtime_metrics") && sql.includes("metric_name = 'infra_alert'")) {
             return [];
           }
-          if (sql.includes("SELECT family_id, runtime_mode, effective_mode FROM family_runtime_state")) {
+          if (
+            sql.includes("SELECT family_id, runtime_mode, effective_mode FROM family_runtime_state")
+          ) {
             return [];
           }
           throw new Error(`Unhandled fake DB all() query: ${sql}`);

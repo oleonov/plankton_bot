@@ -139,9 +139,7 @@ export class HotMarketDataModule implements RuntimeModule {
     }
   }
 
-  private async handleSignalApproved(
-    payload: RuntimeEventMap["SignalApproved"],
-  ): Promise<void> {
+  private async handleSignalApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
     this.bridgeCandidateExpiryByToken.set(
       String(payload.signal.tokenId),
       Date.now() + BRIDGE_CANDIDATE_HOLD_MS,

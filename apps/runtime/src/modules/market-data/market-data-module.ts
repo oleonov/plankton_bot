@@ -212,10 +212,7 @@ export class MarketDataModule implements RuntimeModule {
       const tokenIds = tracked.map((m) => String(m.tokenId));
       this.stream?.setTokenIds(tokenIds);
       const now = Date.now();
-      const fallbackStaleMs = Math.max(
-        STREAM_FALLBACK_MIN_STALE_MS,
-        this.deps.pollIntervalMs * 3,
-      );
+      const fallbackStaleMs = Math.max(STREAM_FALLBACK_MIN_STALE_MS, this.deps.pollIntervalMs * 3);
       const tokenIdsToPoll =
         this.stream == null || this.forceFullPoll
           ? tokenIds
@@ -282,9 +279,7 @@ export class MarketDataModule implements RuntimeModule {
     }
   }
 
-  private async handleStreamUpdates(
-    updates: readonly MarketPricingStreamUpdate[],
-  ): Promise<void> {
+  private async handleStreamUpdates(updates: readonly MarketPricingStreamUpdate[]): Promise<void> {
     if (updates.length === 0) return;
     const nowMs = Date.now();
     const changedMarkets: NormalizedMarket[] = [];

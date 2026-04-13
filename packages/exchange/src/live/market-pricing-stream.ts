@@ -42,9 +42,7 @@ interface LiveMarketPricingStreamDeps {
   createWebSocket: (url: string) => MarketDataWebSocketLike;
   handlers: Readonly<{
     onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
-    onLifecycleEvents?: (
-      events: readonly MarketPricingLifecycleEvent[],
-    ) => Promise<void> | void;
+    onLifecycleEvents?: (events: readonly MarketPricingLifecycleEvent[]) => Promise<void> | void;
     onError?: (error: unknown) => Promise<void> | void;
     onGapDetected?: (
       info: Readonly<{
@@ -193,11 +191,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       marketResolvedEventCount,
       newMarketEventCount,
       latencySamplesMs,
-    } = collectStreamUpdates(
-      records,
-      this.pricingByToken,
-      nowMs,
-    );
+    } = collectStreamUpdates(records, this.pricingByToken, nowMs);
     if (eventCount > 0) {
       this.window.wsEventsReceived += eventCount;
     }

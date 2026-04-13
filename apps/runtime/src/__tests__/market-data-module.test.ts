@@ -76,9 +76,7 @@ class FakePricingStream implements MarketPricingStream {
   constructor(
     private readonly handlers: Readonly<{
       onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
-      onLifecycleEvents?: (
-        events: readonly MarketPricingLifecycleEvent[],
-      ) => Promise<void> | void;
+      onLifecycleEvents?: (events: readonly MarketPricingLifecycleEvent[]) => Promise<void> | void;
       onError?: (error: unknown) => Promise<void> | void;
       onGapDetected?: (
         info: Readonly<{

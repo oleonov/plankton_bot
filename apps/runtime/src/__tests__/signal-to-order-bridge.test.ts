@@ -364,8 +364,8 @@ describe("SignalToOrderBridge", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.04);
-    expect((candidateBookCache.waitForFreshEntry as any)).toHaveBeenCalledTimes(1);
-    expect((candidateBookCache.getFreshOrRefresh as any)).not.toHaveBeenCalled();
+    expect(candidateBookCache.waitForFreshEntry as any).toHaveBeenCalledTimes(1);
+    expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
   });
 
   it("publishes a precise conversion skip reason for gamma-fallback zero-spread books", async () => {

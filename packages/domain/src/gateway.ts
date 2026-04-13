@@ -194,10 +194,7 @@ export interface MarketPricingStream {
    * Tokens not covered by any reason still receive top-of-book updates, but their
    * raw order-book depth should not be retained or exposed to execution caches.
    */
-  setFullBookTokenIds?(
-    reason: MarketPricingFullBookReason,
-    tokenIds: readonly string[],
-  ): void;
+  setFullBookTokenIds?(reason: MarketPricingFullBookReason, tokenIds: readonly string[]): void;
   /** Close the stream and release all resources. Idempotent. */
   close(): void;
   /** Optional diagnostics for stream-capable gateways. */
@@ -279,9 +276,7 @@ export interface MarketDataGateway {
   createMarketPricingStream?(
     handlers: Readonly<{
       onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
-      onLifecycleEvents?: (
-        events: readonly MarketPricingLifecycleEvent[],
-      ) => Promise<void> | void;
+      onLifecycleEvents?: (events: readonly MarketPricingLifecycleEvent[]) => Promise<void> | void;
       onError?: (error: unknown) => Promise<void> | void;
       onGapDetected?: (
         gap: Readonly<{
