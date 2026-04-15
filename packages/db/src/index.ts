@@ -16,19 +16,12 @@ export { SqliteRiskEventRepository } from "./repositories/risk-event-repository.
 export { SqliteFamilyCandidateRepository } from "./repositories/family-candidate-repository.js";
 export { SqliteCandidateObservationRepository } from "./repositories/candidate-observation-repository.js";
 export { SqlitePromotionProposalRepository } from "./repositories/promotion-proposal-repository.js";
-export {
-  SqliteFamilyRulesDbRepository,
-  type DbFamilyConfig,
-  normalizeFamilyRulesSnapshot,
-} from "./repositories/family-rules-db-repository.js";
 export { SqliteStateTransitionRepository } from "./repositories/state-transition-repository.js";
 export { SqliteFamilyEvidenceRepository } from "./repositories/family-evidence-repository.js";
-export { SqliteFamilyRulesSnapshotRepository } from "./repositories/family-rules-snapshot-repository.js";
 export { SqliteDiscoveryRunRepository } from "./repositories/discovery-run-repository.js";
 export { SqliteFamilyProfileRuntimeStateRepository } from "./repositories/family-profile-runtime-state-repository.js";
 export { SqliteProfileRepository } from "./repositories/profile-repository.js";
 export { SqliteProfileSettingsRepository } from "./repositories/profile-settings-repository.js";
-export { SqliteFamilyDeploymentRepository } from "./repositories/family-deployment-repository.js";
 export { SqliteValidationScorecardRepository } from "./repositories/validation-scorecard-repository.js";
 export { SqliteProfileSummaryRepository } from "./repositories/profile-summary-repository.js";
 export { SqliteRuntimeControlStateRepository } from "./repositories/runtime-control-state-repository.js";
@@ -39,6 +32,8 @@ export { SqliteConfigImportRepository } from "./repositories/config-import-repos
 export { SqliteFamilyConfigMetaRepository } from "./repositories/family-config-meta-repository.js";
 export { SqliteMergeLedgerRepository } from "./repositories/merge-ledger-repository.js";
 export { SqliteFamilyProfileRollupRepository } from "./repositories/family-profile-rollup-repository.js";
+export { SqliteAlgoRulesRepository } from "./repositories/algo-rules-repository.js";
+export { SqliteLegStateRepository } from "./repositories/leg-state-repository.js";
 export {
   applyFamilyConfigImport,
   computeConfigChecksum,

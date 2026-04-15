@@ -12,7 +12,6 @@ import {
 import type {
   Profile,
   ProfileSettings,
-  FamilyDeployment,
   ValidationScorecard,
   ProfileSummary,
   RuntimeControlState,
@@ -26,7 +25,6 @@ import type {
 import type { ProfileId } from "@plankton/domain";
 import { SqliteProfileRepository } from "../repositories/profile-repository.js";
 import { SqliteProfileSettingsRepository } from "../repositories/profile-settings-repository.js";
-import { SqliteFamilyDeploymentRepository } from "../repositories/family-deployment-repository.js";
 import { SqliteValidationScorecardRepository } from "../repositories/validation-scorecard-repository.js";
 import { SqliteProfileSummaryRepository } from "../repositories/profile-summary-repository.js";
 import { SqliteRuntimeControlStateRepository } from "../repositories/runtime-control-state-repository.js";
@@ -113,95 +111,6 @@ describe("SqliteProfileSettingsRepository", () => {
     repo.save(settings);
     const found = repo.get(PROFILE_SIM);
     expect(found).toEqual(settings);
-  });
-});
-
-describe("SqliteFamilyDeploymentRepository", () => {
-  it("save + find round-trip", () => {
-    const repo = new SqliteFamilyDeploymentRepository(db);
-    const deployment: FamilyDeployment = {
-      familyId: FAMILY_1,
-      profile: PROFILE_SIM,
-      enabled: true,
-      operatorMode: "active",
-      strategyStage: "probe-only",
-      probeSubstate: null,
-      deploymentStage: "paper-only",
-      approvedSnapshotId: null,
-      approvedScorecardId: null,
-      operatorReason: null,
-      priority: 10,
-      createdAt: NOW,
-      updatedAt: NOW,
-    };
-    repo.save(deployment);
-    const found = repo.find(FAMILY_1, PROFILE_SIM);
-    expect(found).toEqual(deployment);
-  });
-
-  it("findEnabled filters correctly", () => {
-    const repo = new SqliteFamilyDeploymentRepository(db);
-    repo.save({
-      familyId: FAMILY_1,
-      profile: PROFILE_SIM,
-      enabled: false,
-      operatorMode: "active",
-      strategyStage: "probe-only",
-      probeSubstate: null,
-      deploymentStage: "disabled",
-      approvedSnapshotId: null,
-      approvedScorecardId: null,
-      operatorReason: null,
-      priority: 999,
-      createdAt: NOW,
-      updatedAt: NOW,
-    });
-    expect(repo.findEnabled(PROFILE_SIM)).toHaveLength(0);
-  });
-
-  it("updateOperatorMode changes mode and reason", () => {
-    const repo = new SqliteFamilyDeploymentRepository(db);
-    repo.save({
-      familyId: FAMILY_1,
-      profile: PROFILE_SIM,
-      enabled: true,
-      operatorMode: "active",
-      strategyStage: "probe-only",
-      probeSubstate: null,
-      deploymentStage: "paper-only",
-      approvedSnapshotId: null,
-      approvedScorecardId: null,
-      operatorReason: null,
-      priority: 10,
-      createdAt: NOW,
-      updatedAt: NOW,
-    });
-    repo.updateOperatorMode(FAMILY_1, PROFILE_SIM, "reduce-only", "testing");
-    const found = repo.find(FAMILY_1, PROFILE_SIM)!;
-    expect(found.operatorMode).toBe("reduce-only");
-    expect(found.operatorReason).toBe("testing");
-  });
-
-  it("updateDeploymentStage changes stage", () => {
-    const repo = new SqliteFamilyDeploymentRepository(db);
-    repo.save({
-      familyId: FAMILY_1,
-      profile: PROFILE_SIM,
-      enabled: true,
-      operatorMode: "active",
-      strategyStage: "probe-only",
-      probeSubstate: null,
-      deploymentStage: "paper-only",
-      approvedSnapshotId: null,
-      approvedScorecardId: null,
-      operatorReason: null,
-      priority: 10,
-      createdAt: NOW,
-      updatedAt: NOW,
-    });
-    repo.updateDeploymentStage(FAMILY_1, PROFILE_SIM, "live-probe");
-    const found = repo.find(FAMILY_1, PROFILE_SIM)!;
-    expect(found.deploymentStage).toBe("live-probe");
   });
 });
 
