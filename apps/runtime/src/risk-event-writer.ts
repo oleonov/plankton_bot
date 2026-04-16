@@ -30,7 +30,8 @@ export class RiskEventWriter {
     rejectedAt: number,
   ): void {
     const reasonCode = normalizeReasonCode(reason);
-    const key = `${signal.familyId}:${reasonCode}`;
+    const scope = signal.familyId ?? signal.tokenId;
+    const key = `${scope}:${reasonCode}`;
     const lastAt = this.cooldown.get(key);
 
     if (lastAt !== undefined && rejectedAt - lastAt < this.config.rejectCooldownMs) return;

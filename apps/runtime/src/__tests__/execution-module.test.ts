@@ -715,6 +715,27 @@ describe("ExecutionModule", () => {
   // ─── Cancel order ─────────────────────────────────────────────────
 
   it("cancels order via gateway and publishes OrderCancelled", async () => {
+    const savedOrder: Order = {
+      orderId: createOrderId("sim-ord-1"),
+      clientOrderId: "plk_abc123" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
+      familyId: createFamilyId("fam-1"),
+      side: "buy",
+      orderType: "GTC",
+      price: 0.5,
+      size: 10,
+      sizeUsdc: 5,
+      status: "open",
+      exchangeOrderId: "sim-ord-1",
+      signalId: null,
+      signalReason: null,
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue(savedOrder);
+
     await mod.start();
 
     const cancelled: any[] = [];

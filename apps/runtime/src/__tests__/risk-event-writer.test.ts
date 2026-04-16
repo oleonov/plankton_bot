@@ -48,6 +48,17 @@ describe("RiskEventWriter", () => {
       expect(repo.insert).toHaveBeenCalledTimes(2);
     });
 
+    it("deduplicates null-family rejections per-token, not globally", () => {
+      const sigA = { signalId: "sig-a", familyId: null, tokenId: createTokenId("tok-a") };
+      const sigB = { signalId: "sig-b", familyId: null, tokenId: createTokenId("tok-b") };
+
+      writer.onSignalRejected(sigA, "token-in-flight-limit", 1000);
+      writer.onSignalRejected(sigB, "token-in-flight-limit", 1001);
+
+      // Both should write — different tokens despite both having null familyId
+      expect(repo.insert).toHaveBeenCalledTimes(2);
+    });
+
     it("does not update cooldown when insert throws", () => {
       repo.insert.mockImplementationOnce(() => {
         throw new Error("db error");

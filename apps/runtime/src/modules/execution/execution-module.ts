@@ -27,7 +27,6 @@ import type {
   RuntimeControl,
   ProfileId,
   TokenId,
-  ConditionId,
   PositionRepository,
 } from "@plankton/domain";
 import { createCommandId, createOrderId, ExchangeErrorCode } from "@plankton/domain";
@@ -504,16 +503,23 @@ export class ExecutionModule implements RuntimeModule {
     this.log.info({ commandId: cmd.commandId, orderId: cmd.orderId }, "order cancelled");
 
     const cancelledOrder = this.deps.orderRepo.findById(cmd.orderId);
-    await this.deps.bus.publish("OrderCancelled", {
-      commandId: cmd.commandId,
-      orderId: cmd.orderId,
-      tokenId: cancelledOrder?.tokenId ?? (cmd.orderId as unknown as TokenId),
-      conditionId: cancelledOrder?.conditionId ?? ("" as ConditionId),
-      reason: cmd.reason,
-      familyId: cmd.familyId,
-      signalReason: null,
-      timestamp: now,
-    });
+    if (!cancelledOrder) {
+      this.log.warn(
+        { commandId: cmd.commandId, orderId: cmd.orderId },
+        "cancel succeeded but local order not found — skipping OrderCancelled event",
+      );
+    } else {
+      await this.deps.bus.publish("OrderCancelled", {
+        commandId: cmd.commandId,
+        orderId: cmd.orderId,
+        tokenId: cancelledOrder.tokenId,
+        conditionId: cancelledOrder.conditionId,
+        reason: cmd.reason,
+        familyId: cancelledOrder.familyId,
+        signalReason: cancelledOrder.signalReason,
+        timestamp: now,
+      });
+    }
 
     await this.releasePendingSellReplacement(cmd.orderId);
   }
