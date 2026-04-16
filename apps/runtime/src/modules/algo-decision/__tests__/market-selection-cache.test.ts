@@ -137,18 +137,14 @@ describe("MarketSelectionCache", () => {
 
     // TOK_A: outcome "Yes", eligible (distinct=1)
     await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" }),
-      ],
+      markets: [makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" })],
       timestamp: Date.now(),
     });
     expect(cache.isEligible(TOK_A)).toBe(true);
 
     // TOK_B: outcome "No" → distinct=2, both lose eligibility
     await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({ tokenId: TOK_B, conditionId: "cond-1", outcome: "No" }),
-      ],
+      markets: [makeMarket({ tokenId: TOK_B, conditionId: "cond-1", outcome: "No" })],
       timestamp: Date.now(),
     });
     expect(cache.isEligible(TOK_A)).toBe(false);
@@ -175,16 +171,12 @@ describe("MarketSelectionCache", () => {
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" }),
-      ],
+      markets: [makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" })],
       timestamp: Date.now(),
     });
 
     await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({ tokenId: TOK_B, conditionId: "cond-1", outcome: "YES" }),
-      ],
+      markets: [makeMarket({ tokenId: TOK_B, conditionId: "cond-1", outcome: "YES" })],
       timestamp: Date.now(),
     });
 
@@ -203,9 +195,7 @@ describe("MarketSelectionCache", () => {
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" }),
-      ],
+      markets: [makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" })],
       timestamp: Date.now(),
     });
     expect(cache.isEligible(TOK_A)).toBe(true);
@@ -283,9 +273,7 @@ describe("MarketSelectionCache", () => {
 
     // cond-1: single outcome
     await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" }),
-      ],
+      markets: [makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" })],
       timestamp: Date.now(),
     });
 
@@ -316,9 +304,7 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
 
     await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" }),
-      ],
+      markets: [makeMarket({ tokenId: TOK_A, conditionId: "cond-1", outcome: "Yes" })],
       timestamp: Date.now(),
     });
 

@@ -25,11 +25,16 @@ export interface EvalContext {
 
 function compareOp(op: string, actual: number, threshold: number): boolean {
   switch (op) {
-    case "<": return actual < threshold;
-    case "<=": return actual <= threshold;
-    case ">": return actual > threshold;
-    case ">=": return actual >= threshold;
-    default: return false;
+    case "<":
+      return actual < threshold;
+    case "<=":
+      return actual <= threshold;
+    case ">":
+      return actual > threshold;
+    case ">=":
+      return actual >= threshold;
+    default:
+      return false;
   }
 }
 
@@ -46,11 +51,15 @@ export function matchRule(
     }
     if (rule.timeSinceLastOperator != null) {
       if (ctx.timeSinceLastSeconds === null) continue;
-      if (!compareOp(rule.timeSinceLastOperator, ctx.timeSinceLastSeconds, rule.timeSinceLastSeconds!)) continue;
+      if (
+        !compareOp(rule.timeSinceLastOperator, ctx.timeSinceLastSeconds, rule.timeSinceLastSeconds!)
+      )
+        continue;
     }
     if (rule.holdDurationOperator != null) {
       if (ctx.holdDurationSeconds === null) continue;
-      if (!compareOp(rule.holdDurationOperator, ctx.holdDurationSeconds, rule.holdDurationSeconds!)) continue;
+      if (!compareOp(rule.holdDurationOperator, ctx.holdDurationSeconds, rule.holdDurationSeconds!))
+        continue;
     }
     if (rule.buyCountMin != null && ctx.buyCount < rule.buyCountMin) continue;
     if (rule.buyCountMax != null && ctx.buyCount > rule.buyCountMax) continue;

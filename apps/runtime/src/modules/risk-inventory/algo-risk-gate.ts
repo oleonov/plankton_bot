@@ -106,9 +106,7 @@ export class AlgoRiskGateImpl implements RiskGate {
     // 6. Min order size
     const minOrderSize = this.resolveMinOrderSize?.(signal.tokenId) ?? null;
     if (minOrderSize != null && !isExecutableOrderSize(signal.suggestedSize, minOrderSize)) {
-      rejected.push(
-        `order size ${signal.suggestedSize} below min ${minOrderSize}`,
-      );
+      rejected.push(`order size ${signal.suggestedSize} below min ${minOrderSize}`);
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("min_order_size_ok");

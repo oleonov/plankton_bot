@@ -69,7 +69,7 @@ const SEED_DECISION_RULES: AlgoDecisionRule[] = [
     ruleId: "D7-SELL-S1",
     stateCondition: "S1",
     priceOperator: ">=",
-    priceValue: 0.10,
+    priceValue: 0.1,
     timeSinceLastOperator: null,
     timeSinceLastSeconds: null,
     buyCountMin: null,
@@ -128,9 +128,7 @@ const SEED_SIZE_RULES_SELL: AlgoSizeRule[] = [
 
 // ─── Mock helpers ─────────────────────────────────────────────────────────────
 
-type BusHandler<K extends keyof RuntimeEventMap> = (
-  payload: RuntimeEventMap[K],
-) => Promise<void>;
+type BusHandler<K extends keyof RuntimeEventMap> = (payload: RuntimeEventMap[K]) => Promise<void>;
 
 function createMockBus() {
   const handlers = new Map<string, BusHandler<any>[]>();
@@ -150,10 +148,7 @@ function createMockBus() {
     for (const h of list) await h(payload);
   });
 
-  const emit = async <K extends keyof RuntimeEventMap>(
-    event: K,
-    payload: RuntimeEventMap[K],
-  ) => {
+  const emit = async <K extends keyof RuntimeEventMap>(event: K, payload: RuntimeEventMap[K]) => {
     await publish(event, payload);
   };
 
@@ -240,7 +235,9 @@ describe("AlgoDecisionModule", () => {
   let selectedMarketCache: SelectedMarketCache;
   let log: Logger;
 
-  function buildModule(overrides: Partial<import("../algo-decision-module.js").AlgoDecisionModuleDeps> = {}) {
+  function buildModule(
+    overrides: Partial<import("../algo-decision-module.js").AlgoDecisionModuleDeps> = {},
+  ) {
     return new AlgoDecisionModule({
       bus: bus as unknown as EventBus,
       legStateRepo,
@@ -322,7 +319,10 @@ describe("AlgoDecisionModule", () => {
     const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
 
     expect(redeemCalls.length).toBe(1);
-    expect((redeemCalls[0]![1] as import("@plankton/domain").RuntimeEventMap["RedeemRequested"]).conditionIds).toContain(conditionId);
+    expect(
+      (redeemCalls[0]![1] as import("@plankton/domain").RuntimeEventMap["RedeemRequested"])
+        .conditionIds,
+    ).toContain(conditionId);
     expect(signalCalls.length).toBe(0);
 
     await mod.stop();

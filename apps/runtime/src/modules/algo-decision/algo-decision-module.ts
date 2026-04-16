@@ -160,9 +160,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         this.marketCache.set(String(market.tokenId), market);
       }
     }
-    const tokenIds = payload.markets
-      .filter((m) => m.active)
-      .map((m) => m.tokenId);
+    const tokenIds = payload.markets.filter((m) => m.active).map((m) => m.tokenId);
     await this.evaluateTokens(tokenIds);
   }
 

@@ -10,10 +10,7 @@ const TOKEN = createTokenId("tok-test");
 
 function createTestDb(): Database.Database {
   const db = new Database(":memory:");
-  const sql = readFileSync(
-    join(import.meta.dirname, "../migrations/028_algo_engine.sql"),
-    "utf-8",
-  );
+  const sql = readFileSync(join(import.meta.dirname, "../migrations/028_algo_engine.sql"), "utf-8");
   db.exec(sql);
   return db;
 }

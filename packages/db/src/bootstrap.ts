@@ -415,9 +415,8 @@ function backfillDirectionalUpdownDiscoveryEntryPolicy(
 }
 
 export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): void {
-  const count = (
-    db.prepare("SELECT COUNT(*) as c FROM algo_decision_rules").get() as { c: number }
-  ).c;
+  const count = (db.prepare("SELECT COUNT(*) as c FROM algo_decision_rules").get() as { c: number })
+    .c;
   if (count > 0) return; // Already seeded
 
   const insertDecision = db.prepare(
@@ -441,10 +440,23 @@ export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): 
     insertDecision.run(60, "D5", "S1", ">=", 0.2, null, null, null, null, null, null, "SELL");
     insertDecision.run(70, "D6", "S2", null, null, null, null, 4, null, null, null, "BUY");
     insertDecision.run(80, "D7", "S3", null, null, null, null, null, null, null, null, "SELL");
-    insertDecision.run(999, "FALLBACK", "ANY", null, null, null, null, null, null, null, null, "BUY");
+    insertDecision.run(
+      999,
+      "FALLBACK",
+      "ANY",
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      "BUY",
+    );
 
     // Size rules — BUY (nth_buy rules BEFORE state+price rules per BUY Size Precedence Contract)
-    insertSize.run("BUY", 10, "B5", "ANY", null, null, 1, null, null, 2.10);
+    insertSize.run("BUY", 10, "B5", "ANY", null, null, 1, null, null, 2.1);
     insertSize.run("BUY", 20, "B6", "ANY", null, null, 2, null, null, 1.17);
     insertSize.run("BUY", 30, "B7", "ANY", null, null, 3, null, null, 0.92);
     insertSize.run("BUY", 40, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38);
@@ -456,7 +468,7 @@ export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): 
     // Size rules — SELL
     insertSize.run("SELL", 10, "S1", "S2", ">=", 0.2, null, null, null, 6.48);
     insertSize.run("SELL", 20, "S2", "S1", ">=", 0.2, null, null, null, 6.31);
-    insertSize.run("SELL", 30, "S3", "OTHER", ">=", 0.2, null, null, null, 3.40);
+    insertSize.run("SELL", 30, "S3", "OTHER", ">=", 0.2, null, null, null, 3.4);
     insertSize.run("SELL", 40, "S4", "S2", "<", 0.05, null, null, null, 1.01);
     insertSize.run("SELL", 50, "S5", "S3", "<", 0.05, null, null, null, 0.59);
     insertSize.run("SELL", 60, "S6", "ANY", null, null, null, 1, 1, 2.85);

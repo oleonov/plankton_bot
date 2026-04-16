@@ -61,7 +61,7 @@ describe("evaluateContinuation", () => {
   // R2: firstTradePrice >= 0.05 AND tradeCount >= 2 → CONTINUE
   it("continues when firstTradePrice >= 0.05 and tradeCount >= 2", () => {
     expect(evaluateContinuation(2, 0.05)).toBe(true);
-    expect(evaluateContinuation(3, 0.10)).toBe(true);
+    expect(evaluateContinuation(3, 0.1)).toBe(true);
   });
 
   // R3/Fallback: STOP
@@ -72,7 +72,7 @@ describe("evaluateContinuation", () => {
 
   it("stops when firstTradePrice >= 0.05 but tradeCount < 2", () => {
     expect(evaluateContinuation(1, 0.05)).toBe(false);
-    expect(evaluateContinuation(0, 0.10)).toBe(false);
+    expect(evaluateContinuation(0, 0.1)).toBe(false);
   });
 
   it("stops when tradeCount is 0", () => {

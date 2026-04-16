@@ -29,7 +29,6 @@ function makeLogger() {
   } as unknown as import("../logger.js").Logger;
 }
 
-
 function makeEntryOrder(): Order {
   return {
     orderId: createOrderId("ord-1"),

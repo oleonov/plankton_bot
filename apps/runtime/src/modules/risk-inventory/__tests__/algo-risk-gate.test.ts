@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
-import { createFamilyId, createTokenId, type Signal, type Order, type FamilyState } from "@plankton/domain";
+import {
+  createFamilyId,
+  createTokenId,
+  type Signal,
+  type Order,
+  type FamilyState,
+} from "@plankton/domain";
 import type { FamilyStateRepository, OrderRepository } from "@plankton/domain";
 import { AlgoRiskGateImpl } from "../algo-risk-gate.js";
 import { LiveLiteGuard } from "../../../live-lite-guard.js";
