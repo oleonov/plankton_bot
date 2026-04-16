@@ -2,19 +2,19 @@ import { describe, it, expect, vi } from "vitest";
 import {
   createFamilyId,
   createTokenId,
+  createConditionId,
   type Signal,
   type Order,
-  type FamilyState,
 } from "@plankton/domain";
-import type { FamilyStateRepository, OrderRepository } from "@plankton/domain";
+import type { OrderRepository } from "@plankton/domain";
 import { AlgoRiskGateImpl } from "../algo-risk-gate.js";
-import { LiveLiteGuard } from "../../../live-lite-guard.js";
 import type { Logger } from "../../../logger.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
 const FAM_ID = createFamilyId("btc-threshold:scalp:daily");
 const TOK_ID = createTokenId("tok-yes");
+const COND_ID = createConditionId("cond-abc");
 
 function makeLogger(): Logger {
   return {
@@ -35,6 +35,7 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     signalId: "sig-1",
     familyId: FAM_ID,
     tokenId: TOK_ID,
+    conditionId: COND_ID,
     side: "buy",
     suggestedPrice: 0.5,
     suggestedSize: 10,
@@ -45,37 +46,6 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     decisionRuleId: "FALLBACK",
     generatedAt: new Date().toISOString(),
     ...overrides,
-  };
-}
-
-function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
-  return {
-    familyId: FAM_ID,
-    runtimeMode: "active",
-    openValueUsdc: 0,
-    openPositionCount: 0,
-    openDustCount: 0,
-    activeMarketCount: 0,
-    currentTailCostUsdc: 0,
-    tailAdjustedPnlLive: 0,
-    lastEntryTs: null,
-    lastExitTs: null,
-    quarantineReason: null,
-    effectiveMode: null,
-    derivedModeReason: null,
-    firstNegativeTailAt: null,
-    updatedAt: new Date().toISOString(),
-    ...overrides,
-  };
-}
-
-function makeFamilyStateRepo(state?: FamilyState | null): FamilyStateRepository {
-  return {
-    get: vi.fn().mockReturnValue(state ?? null),
-    save: vi.fn(),
-    findAll: vi.fn().mockReturnValue([]),
-    findByMode: vi.fn().mockReturnValue([]),
-    findQuarantined: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -97,6 +67,7 @@ function makeOpenBuyOrder(): Order {
     orderId: "ord-1" as any,
     clientOrderId: "clord-1" as any,
     tokenId: TOK_ID,
+    conditionId: COND_ID,
     familyId: FAM_ID,
     side: "buy",
     orderType: "GTC",
@@ -117,11 +88,7 @@ function makeOpenBuyOrder(): Order {
 
 describe("AlgoRiskGateImpl", () => {
   it("approves a basic buy signal", async () => {
-    const gate = new AlgoRiskGateImpl(
-      makeFamilyStateRepo(makeFamilyState()),
-      makeOrderRepo(),
-      makeLogger(),
-    );
+    const gate = new AlgoRiskGateImpl(makeOrderRepo(), makeLogger());
     const signal = makeSignal();
     const decision = await gate.evaluate(signal);
 
@@ -131,25 +98,8 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.rejectionReasons).toHaveLength(0);
   });
 
-  it("rejects when family is in quarantine mode", async () => {
-    const gate = new AlgoRiskGateImpl(
-      makeFamilyStateRepo(makeFamilyState({ runtimeMode: "quarantine" })),
-      makeOrderRepo(),
-      makeLogger(),
-    );
-    const signal = makeSignal({ reason: "probe-entry" });
-    const decision = await gate.evaluate(signal);
-
-    expect(decision.approved).toBe(false);
-    expect(decision.rejectionReasons).toContain("family in quarantine mode");
-  });
-
   it("rejects buy when token has open buy order", async () => {
-    const gate = new AlgoRiskGateImpl(
-      makeFamilyStateRepo(makeFamilyState()),
-      makeOrderRepo([makeOpenBuyOrder()]),
-      makeLogger(),
-    );
+    const gate = new AlgoRiskGateImpl(makeOrderRepo([makeOpenBuyOrder()]), makeLogger());
     const signal = makeSignal({ side: "buy", reason: "probe-entry" });
     const decision = await gate.evaluate(signal);
 
@@ -158,42 +108,18 @@ describe("AlgoRiskGateImpl", () => {
   });
 
   it("allows sell signals even with open buy order", async () => {
-    const gate = new AlgoRiskGateImpl(
-      makeFamilyStateRepo(makeFamilyState()),
-      makeOrderRepo([makeOpenBuyOrder()]),
-      makeLogger(),
-    );
+    const gate = new AlgoRiskGateImpl(makeOrderRepo([makeOpenBuyOrder()]), makeLogger());
     const signal = makeSignal({ side: "sell", reason: "repricing-exit" });
     const decision = await gate.evaluate(signal);
 
     expect(decision.approved).toBe(true);
   });
 
-  it("rejects buy when family in-flight limit exceeded (>=8)", async () => {
-    const getInFlightCount = vi.fn().mockReturnValue(8);
-    const gate = new AlgoRiskGateImpl(
-      makeFamilyStateRepo(makeFamilyState()),
-      makeOrderRepo(),
-      makeLogger(),
-      undefined,
-      undefined,
-      getInFlightCount,
-    );
-    const signal = makeSignal({ side: "buy", reason: "probe-entry" });
-    const decision = await gate.evaluate(signal);
-
-    expect(decision.approved).toBe(false);
-    expect(decision.rejectionReasons).toContain("family-in-flight-limit");
-  });
-
   it("rejects buy when token in-flight limit exceeded (>=1)", async () => {
     const getTokenInFlightCount = vi.fn().mockReturnValue(1);
     const gate = new AlgoRiskGateImpl(
-      makeFamilyStateRepo(makeFamilyState()),
       makeOrderRepo(),
       makeLogger(),
-      undefined,
-      undefined,
       undefined,
       getTokenInFlightCount,
     );
@@ -204,24 +130,12 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.rejectionReasons).toContain("token-in-flight-limit");
   });
 
-  it("rejects when live-lite guard blocks family", async () => {
-    const guard = new LiveLiteGuard({
-      familyAllowlist: ["other-family"],
-      maxFamilies: 1,
-      maxOpenValueUsdc: 100,
-      maxOrderUsdc: 50,
-      maxActiveMarkets: 5,
-    });
-    const gate = new AlgoRiskGateImpl(
-      makeFamilyStateRepo(makeFamilyState()),
-      makeOrderRepo(),
-      makeLogger(),
-      guard,
-    );
+  it("includes tokenId and conditionId in RiskDecision", async () => {
+    const gate = new AlgoRiskGateImpl(makeOrderRepo(), makeLogger());
     const signal = makeSignal();
     const decision = await gate.evaluate(signal);
 
-    expect(decision.approved).toBe(false);
-    expect(decision.rejectionReasons).toContain("live-lite-allowlist-rejected");
+    expect(decision.tokenId).toBe(TOK_ID);
+    expect(decision.conditionId).toBe(COND_ID);
   });
 });
