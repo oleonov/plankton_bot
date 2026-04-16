@@ -15,6 +15,7 @@
 
 import type {
   TokenId,
+  ConditionId,
   FamilyId,
   OrderId,
   FillId,
@@ -182,11 +183,12 @@ export interface RuntimeEventMap {
     readonly clientOrderId: ClientOrderId;
     readonly orderId: OrderId;
     readonly tokenId: TokenId;
+    readonly conditionId: ConditionId;
     readonly side: OrderSide;
     readonly price: number;
     readonly size: number;
     readonly orderType: OrderType;
-    readonly familyId: FamilyId;
+    readonly familyId: FamilyId | null;
     readonly signalReason: string | null;
     readonly timestamp: number;
   };
@@ -196,18 +198,21 @@ export interface RuntimeEventMap {
     readonly clientOrderId: ClientOrderId;
     readonly orderId: OrderId;
     readonly tokenId: TokenId;
+    readonly conditionId: ConditionId;
     readonly side: OrderSide;
     readonly price: number;
     readonly size: number;
-    readonly familyId: FamilyId;
+    readonly familyId: FamilyId | null;
     readonly timestamp: number;
   };
 
   OrderCancelled: {
     readonly commandId: CommandId;
     readonly orderId: OrderId;
+    readonly tokenId: TokenId;
+    readonly conditionId: ConditionId;
     readonly reason: string;
-    readonly familyId: FamilyId;
+    readonly familyId: FamilyId | null;
     readonly signalReason: string | null;
     readonly timestamp: number;
   };
@@ -215,9 +220,11 @@ export interface RuntimeEventMap {
   OrderRejected: {
     readonly commandId: CommandId;
     readonly clientOrderId: ClientOrderId;
+    readonly tokenId: TokenId;
+    readonly conditionId: ConditionId;
     readonly reason: string;
     readonly errorCode: ExchangeErrorCode;
-    readonly familyId: FamilyId;
+    readonly familyId: FamilyId | null;
     readonly signalReason: string | null;
     readonly timestamp: number;
   };
@@ -227,6 +234,7 @@ export interface RuntimeEventMap {
     readonly orderId: OrderId;
     readonly clientOrderId: ClientOrderId;
     readonly tokenId: TokenId;
+    readonly conditionId: ConditionId;
     readonly side: OrderSide;
     readonly price: number;
     /** Share quantity. */
@@ -236,7 +244,7 @@ export interface RuntimeEventMap {
     readonly liquidityRole: LiquidityRole;
     readonly fee: number;
     readonly feeRateBps: number;
-    readonly familyId: FamilyId;
+    readonly familyId: FamilyId | null;
     readonly signalReason: string | null;
     readonly timestamp: number;
   };

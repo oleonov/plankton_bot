@@ -6,6 +6,7 @@
 // - MarketId is intentionally absent per F1 resolution: use TokenId instead.
 
 export type TokenId = string & { readonly __brand: "TokenId" };
+export type ConditionId = string & { readonly __brand: "ConditionId" };
 export type FamilyId = string & { readonly __brand: "FamilyId" };
 export type OrderId = string & { readonly __brand: "OrderId" };
 export type FillId = string & { readonly __brand: "FillId" };
@@ -23,6 +24,10 @@ export type BotRunId = string & { readonly __brand: "BotRunId" };
 
 export function createTokenId(raw: string): TokenId {
   return raw as TokenId;
+}
+
+export function createConditionId(raw: string): ConditionId {
+  return raw as ConditionId;
 }
 
 export function createFamilyId(raw: string): FamilyId {

@@ -7,7 +7,7 @@
  *  - All timestamps are Unix milliseconds (number) unless labelled as ISO string.
  */
 
-import type { TokenId, FamilyId, OrderId, FillId, ClientOrderId, CommandId } from "./ids.js";
+import type { TokenId, ConditionId, FamilyId, OrderId, FillId, ClientOrderId, CommandId } from "./ids.js";
 import type {
   OrderSide,
   OrderType,
@@ -168,11 +168,12 @@ export interface OrderPlaced {
   readonly clientOrderId: ClientOrderId;
   readonly orderId: OrderId;
   readonly tokenId: TokenId;
+  readonly conditionId: ConditionId;
   readonly side: OrderSide;
   readonly price: number;
   readonly size: number;
   readonly orderType: OrderType;
-  readonly familyId: FamilyId;
+  readonly familyId: FamilyId | null;
   readonly signalReason: string | null;
   readonly timestamp: number;
 }
@@ -183,10 +184,11 @@ export interface OrderFilled {
   readonly clientOrderId: ClientOrderId;
   readonly orderId: OrderId;
   readonly tokenId: TokenId;
+  readonly conditionId: ConditionId;
   readonly side: OrderSide;
   readonly price: number;
   readonly size: number;
-  readonly familyId: FamilyId;
+  readonly familyId: FamilyId | null;
   readonly timestamp: number;
 }
 
@@ -194,8 +196,10 @@ export interface OrderCancelled {
   readonly type: "OrderCancelled";
   readonly commandId: CommandId;
   readonly orderId: OrderId;
+  readonly tokenId: TokenId;
+  readonly conditionId: ConditionId;
   readonly reason: string;
-  readonly familyId: FamilyId;
+  readonly familyId: FamilyId | null;
   readonly signalReason: string | null;
   readonly timestamp: number;
 }
@@ -204,9 +208,11 @@ export interface OrderRejected {
   readonly type: "OrderRejected";
   readonly commandId: CommandId;
   readonly clientOrderId: ClientOrderId;
+  readonly tokenId: TokenId;
+  readonly conditionId: ConditionId;
   readonly reason: string;
   readonly errorCode: ExchangeErrorCode;
-  readonly familyId: FamilyId;
+  readonly familyId: FamilyId | null;
   readonly signalReason: string | null;
   readonly timestamp: number;
 }
@@ -219,6 +225,7 @@ export interface FillReceived {
   readonly orderId: OrderId;
   readonly clientOrderId: ClientOrderId;
   readonly tokenId: TokenId;
+  readonly conditionId: ConditionId;
   readonly side: OrderSide;
   readonly price: number;
   /** Share quantity. */
@@ -228,7 +235,7 @@ export interface FillReceived {
   readonly liquidityRole: LiquidityRole;
   readonly fee: number;
   readonly feeRateBps: number;
-  readonly familyId: FamilyId;
+  readonly familyId: FamilyId | null;
   readonly signalReason: string | null;
   readonly timestamp: number;
 }

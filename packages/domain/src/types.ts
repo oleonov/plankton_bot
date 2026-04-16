@@ -1,5 +1,6 @@
 import type {
   TokenId,
+  ConditionId,
   FamilyId,
   OrderId,
   FillId,
@@ -288,8 +289,9 @@ export interface FamilyState {
 
 export interface Signal {
   signalId: string;
-  familyId: FamilyId;
+  familyId: FamilyId | null;
   tokenId: TokenId;
+  conditionId: ConditionId;
   side: OrderSide;
   suggestedPrice: number;
   suggestedSize: number; // share quantity
@@ -305,7 +307,9 @@ export interface Signal {
 
 export interface RiskDecision {
   signalId: string;
-  familyId: FamilyId;
+  tokenId: TokenId;
+  conditionId: ConditionId;
+  familyId: FamilyId | null;
   approved: boolean;
   rejectionReasons: string[];
   checksPassed: string[];
@@ -322,7 +326,8 @@ export interface Order {
   orderId: OrderId;
   clientOrderId: ClientOrderId;
   tokenId: TokenId;
-  familyId: FamilyId;
+  conditionId: ConditionId;
+  familyId: FamilyId | null;
   side: OrderSide;
   orderType: OrderType;
   postOnly?: boolean;
@@ -346,7 +351,8 @@ export interface Fill {
   fillId: FillId;
   orderId: OrderId;
   tokenId: TokenId;
-  familyId: FamilyId;
+  conditionId: ConditionId;
+  familyId: FamilyId | null;
   side: OrderSide;
   price: number;
   size: number; // shares executed
@@ -362,7 +368,8 @@ export interface Fill {
 export interface Position {
   positionId: PositionId;
   tokenId: TokenId;
-  familyId: FamilyId;
+  conditionId: ConditionId;
+  familyId: FamilyId | null;
   side: OrderSide;
   size: number; // current share quantity
   avgEntryPrice: number;
@@ -382,7 +389,7 @@ export interface InventoryLot {
   lotId: LotId;
   positionId: PositionId;
   tokenId: TokenId;
-  familyId: FamilyId;
+  familyId: FamilyId | null;
   side: OrderSide;
   size: number; // original lot size in shares
   remainingSize: number; // shares not yet matched against a sell

@@ -15,7 +15,7 @@
  *  - sequenceInTick is carried forward from the Signal (F3 decision) for audit trails.
  */
 
-import type { TokenId, FamilyId, OrderId, ClientOrderId, CommandId } from "./ids.js";
+import type { TokenId, ConditionId, FamilyId, OrderId, ClientOrderId, CommandId } from "./ids.js";
 import type { OrderSide, OrderType, OperatorActionType } from "./enums.js";
 
 // ─── Exchange Order Commands ───────────────────────────────────────────────
@@ -28,6 +28,7 @@ export interface PlaceOrderCommand {
   readonly clientOrderId: ClientOrderId;
   readonly source: "strategy" | "operator" | "reconciliation";
   readonly tokenId: TokenId;
+  readonly conditionId: ConditionId;
   readonly side: OrderSide;
   /** Share quantity. */
   readonly size: number;
@@ -40,7 +41,7 @@ export interface PlaceOrderCommand {
   readonly tickSize: number;
   /** Neg-risk flag for this token — required by Polymarket CLOB order signing. */
   readonly negRisk: boolean;
-  readonly familyId: FamilyId;
+  readonly familyId: FamilyId | null;
   /**
    * 0-based index within this strategy tick for the same family+token+side triple.
    * Carried forward from Signal.sequenceInTick (F3 resolution).
@@ -75,7 +76,7 @@ export interface CancelOrderCommand {
     | "entry-suppress-cancel"
     | "exit-reprice-cancel"
     | "exit-ttl-cancel";
-  readonly familyId: FamilyId;
+  readonly familyId: FamilyId | null;
 }
 
 // ─── Global Operator Commands ─────────────────────────────────────────────
