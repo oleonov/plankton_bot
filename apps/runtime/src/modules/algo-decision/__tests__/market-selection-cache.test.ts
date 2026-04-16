@@ -376,6 +376,40 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
+  // ── Historical Universe Filter (intentionally omitted) ─────────────────
+  //
+  // Spec §0 defines a Historical Universe Filter: `trade_count > 0 → INCLUDE;
+  // Fallback → EXCLUDE`. Per design specs 2026-04-14 and 2026-04-16 the runtime
+  // intentionally omits this gate — Gamma does not provide `trade_count` on
+  // ClobMarket, and dropping it was a conscious rollout decision. Zero-trade
+  // tokens must still reach the pre-entry filter.
+
+  it("admits tokens with no trading activity when pre-entry filter passes (historical filter omitted)", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          conditionId: "cond-fresh",
+          eventSlug: "bitcoin-freshly-listed",
+          outcome: "Yes",
+          volume24h: 0,
+          liquidity: 0,
+          lastTradePrice: null,
+          lastTradeAt: null,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(cache.isEligible(TOK_A)).toBe(true);
+
+    cache.dispose();
+  });
+
   // ── Dispose ────────────────────────────────────────────────────────────────────
 
   it("dispose unsubscribes — further events are ignored", async () => {

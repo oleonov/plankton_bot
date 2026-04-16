@@ -1,8 +1,22 @@
 # Strategy Compliance: Rulebook to Runtime Mapping
 
 Generated: 2026-03-13
+Status: **Legacy — superseded for the trading critical path** (see below).
 
 This document verifies that the runtime architecture (arch_tmp.md) correctly serves the validated strategy rulebook (validated_strategy_rulebook.md) and the family rules schema (family_rules_schema_v1.md). It identifies what each runtime module must enforce, where gaps exist, and provides a compliance checklist for implementation.
+
+> **Canonical source-of-truth (current):** `research_plankton/plankton-analysis/06_algorithm_spec.md` for algorithm behavior, and `docs/superpowers/specs/2026-04-16-remove-familyid-critical-path-design.md` for how the runtime wires it.
+>
+> The algo critical path (MarketSelection → state → decision → size → risk gate → execution) operates on `tokenId`/`conditionId`. `familyId` is an **optional annotation** carried through for Discovery and family-exposure monitoring only — it is never a gate.
+>
+> Concretely, this means:
+>
+> - A Signal with `familyId = null` is valid and flows through the risk gate unchanged. AlgoRiskGate checks only token-level constraints (no open buy order for token, token in-flight cap, min order size). It does not call `rulesProvider.getRule(familyId)`, does not consult `familyStateRepo`, and does not enforce family-level caps on the algo path.
+> - Family-scoped rules in `config/family_rules.yaml` (universe/entry/scale_in/exit/session/tail_suppression/two_sided) still load at startup. They remain available to legacy family-scoped features (Discovery, `FamilyExposureCalculator`, stale-pruning polling loop, operator commands) but are **not** applied to algo-path signals regardless of whether `familyId` is present.
+>
+> The HR1-HRn mappings below predate the algo engine and remain relevant only for legacy family-scoped features (Discovery, evidence promotion, family exposure accounting, manual operator actions). Do not read them as requirements for the algo trading path.
+>
+> **Historical Universe Filter (spec §0):** The spec defines `trade_count > 0 → INCLUDE; Fallback → EXCLUDE` as the first selection gate. This is **intentionally omitted** from the live runtime — Gamma does not expose `trade_count` on `ClobMarket`, and dropping the gate was a conscious rollout decision (see `2026-04-14-market-selection-layer-design.md` §2, `2026-04-16-market-selection-layer-design.md` §1.1, and `2026-04-16-ungate-scanner-from-family-design.md` §3.3). The live universe is therefore wider than the spec's historical universe by design. Zero-activity markets (`volume24h = 0`, `lastTradePrice = null`) still reach the pre-entry filter. `MarketSelectionCache` carries a regression test locking in this behavior.
 
 ---
 

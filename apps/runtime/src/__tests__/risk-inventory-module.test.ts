@@ -1089,6 +1089,129 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  // ─── Null-family signals (algo critical path) ─────────────
+  //
+  // Per design spec docs/superpowers/specs/2026-04-16-remove-familyid-critical-path-design.md
+  // the algo trading path treats familyId as an optional annotation. Signals with
+  // familyId = null must flow through the risk gate using only token-level checks
+  // (open-order dedup, token in-flight limit, min order size). Family rules,
+  // FamilyState, and live-lite family allowlist MUST NOT be consulted.
+
+  describe("null-family signals", () => {
+    it("approves a null-family buy signal when token-level checks pass", async () => {
+      mod = createModule();
+      await mod.start();
+
+      const approved: any[] = [];
+      const rejected: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
+      bus.subscribe("SignalRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("SignalProduced", { signal: makeSignal({ familyId: null }) });
+
+      expect(rejected).toHaveLength(0);
+      expect(approved).toHaveLength(1);
+      expect(approved[0].signal.familyId).toBeNull();
+
+      await mod.stop();
+    });
+
+    it("does not consult rulesProvider.getRule for null-family signals", async () => {
+      mod = createModule();
+      await mod.start();
+
+      const getRuleSpy = rulesProvider.getRule as ReturnType<typeof vi.fn>;
+      getRuleSpy.mockClear();
+
+      await bus.publish("SignalProduced", { signal: makeSignal({ familyId: null }) });
+
+      expect(getRuleSpy).not.toHaveBeenCalled();
+
+      await mod.stop();
+    });
+
+    it("still rejects null-family signals that fail token-level checks", async () => {
+      // Simulate an existing open buy order on the same token — AlgoRiskGate
+      // must reject with "token already has open buy order" regardless of family.
+      const existingOrder: Order = {
+        orderId: createOrderId("ord-nullfam-open"),
+        clientOrderId: "plk_nullfam_open" as ClientOrderId,
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        familyId: null,
+        side: "buy",
+        orderType: "GTC",
+        postOnly: true,
+        price: 0.5,
+        size: 10,
+        sizeUsdc: 5,
+        status: "open",
+        exchangeOrderId: "ex-nullfam-open",
+        signalId: null,
+        signalReason: "probe-entry",
+        botRunId: "run-1" as any,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      (orderRepo.findByTokenId as ReturnType<typeof vi.fn>).mockReturnValue([existingOrder]);
+      mod = createModule();
+      await mod.start();
+
+      const approved: any[] = [];
+      const rejected: any[] = [];
+      bus.subscribe("SignalApproved", async (p) => {
+        approved.push(p);
+      });
+      bus.subscribe("SignalRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("SignalProduced", { signal: makeSignal({ familyId: null }) });
+
+      expect(approved).toHaveLength(0);
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toContain("token already has open buy order");
+
+      await mod.stop();
+    });
+
+    it("skips family exposure recompute on fills with null familyId", async () => {
+      mod = createModule();
+      await mod.start();
+
+      const exposureChanges: any[] = [];
+      bus.subscribe("FamilyExposureChanged", async (p) => {
+        exposureChanges.push(p);
+      });
+
+      await bus.publish("FillReceived", {
+        fillId: createFillId("fill-nullfam"),
+        orderId: createOrderId("ord-nullfam"),
+        clientOrderId: "coid-nullfam" as ClientOrderId,
+        familyId: null,
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "buy" as const,
+        price: 0.5,
+        size: 10,
+        sizeUsdc: 5,
+        liquidityRole: "unknown",
+        fee: 0,
+        feeRateBps: 0,
+        signalReason: "probe-entry",
+        timestamp: Date.now(),
+      });
+
+      expect(exposureChanges).toHaveLength(0);
+
+      await mod.stop();
+    });
+  });
+
   // ─── Live-lite allowlist check ────────────────────────────
 
   // NOTE: Live-lite family-level gates (allowlist, fee-tier, wallet mode) were removed
