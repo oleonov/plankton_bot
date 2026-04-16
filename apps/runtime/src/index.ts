@@ -591,6 +591,8 @@ async function main(): Promise<void> {
     bus,
     log,
     scanIntervalMs: 5 * 60 * 1000,
+    positionRepo: repos.position,
+    orderRepo: repos.order,
   });
 
   // 7e. Real modules for market-data and normalization

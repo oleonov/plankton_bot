@@ -13,6 +13,17 @@ export function matchesPreEntryFilter(eventSlug: string | null, distinctOutcomes
 }
 
 /**
+ * Count distinct outcome values in a token set.
+ * Used by the scanner to compute distinct_outcomes per ClobMarket
+ * for the Live Pre-Entry Filter (spec section 0, STEP 2).
+ */
+export function countDistinctOutcomes(tokens: ReadonlyArray<{ readonly outcome: string }>): number {
+  const seen = new Set<string>();
+  for (const t of tokens) seen.add(t.outcome.toLowerCase());
+  return seen.size;
+}
+
+/**
  * Post-Entry Continuation Filter — should the bot keep scaling into this leg?
  * Returns true for CONTINUE, false for STOP.
  */

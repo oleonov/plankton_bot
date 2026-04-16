@@ -18,8 +18,16 @@ import type {
   FamilyRulesProvider,
   FamilyIdentity,
   Market,
+  PositionRepository,
+  OrderRepository,
 } from "@plankton/domain";
-import { slugPatternToRegex, matchesHorizon, createTokenId } from "@plankton/domain";
+import {
+  slugPatternToRegex,
+  matchesHorizon,
+  createTokenId,
+  matchesPreEntryFilter,
+  countDistinctOutcomes,
+} from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { resolveFamilyAssignmentMaxDaysAhead } from "../../family-assignment-window.js";
 import { isTransientNetworkError } from "../../network-errors.js";
@@ -31,6 +39,10 @@ export interface MarketScannerModuleDeps {
   bus: EventBus;
   log: Logger;
   scanIntervalMs: number;
+  /** When provided, tokens with open positions are preserved from deactivation. */
+  positionRepo?: PositionRepository;
+  /** When provided, tokens with open orders are preserved from deactivation. */
+  orderRepo?: OrderRepository;
 }
 
 interface CompiledFamily {
@@ -39,9 +51,18 @@ interface CompiledFamily {
 }
 
 export interface MarketScanResult {
-  discoveredCount: number;
-  matchedCount: number;
-  deactivatedCount: number;
+  /** ClobMarkets seen from Gamma (market-level). */
+  discoveredMarkets: number;
+  /** Markets passing matchesPreEntryFilter (market-level). */
+  algoEligibleMarkets: number;
+  /** Markets matching a family pattern (market-level). */
+  familyMatchedMarkets: number;
+  /** Token rows written to DB (token-level). */
+  savedTokens: number;
+  /** Tokens preserved from deactivation via open positions/orders (token-level). */
+  preservedTokens: number;
+  /** Token rows deactivated (token-level). */
+  deactivatedTokens: number;
   familyCount: number;
   durationMs: number;
 }
@@ -136,16 +157,41 @@ export class MarketScannerModule implements RuntimeModule {
       const families = this.deps.familyRules.getAllFamilies();
       const compiled = this.compileFamilyPatterns(families);
 
-      let matchedCount = 0;
-      let discoveredCount = 0;
+      let discoveredMarkets = 0;
+      let algoEligibleMarkets = 0;
+      let familyMatchedMarkets = 0;
+      let savedTokens = 0;
       const now = new Date().toISOString();
       const discoveredTokenIds = new Set<string>();
 
+      // Build set of tokens with open positions/orders for preservation
+      const activeTokenIds = new Set<string>();
+      if (this.deps.positionRepo) {
+        for (const pos of this.deps.positionRepo.findOpen()) {
+          activeTokenIds.add(String(pos.tokenId));
+        }
+      }
+      if (this.deps.orderRepo) {
+        for (const ord of this.deps.orderRepo.findOpen()) {
+          activeTokenIds.add(String(ord.tokenId));
+        }
+      }
+
       await this.deps.discoveryGateway.forEachMarketPage((pageMarkets) => {
-        discoveredCount += pageMarkets.length;
+        discoveredMarkets += pageMarkets.length;
         for (const clobMarket of pageMarkets) {
+          const distinctOutcomes = countDistinctOutcomes(clobMarket.tokens);
+          const algoEligible = matchesPreEntryFilter(
+            clobMarket.eventSlug ?? null,
+            distinctOutcomes,
+          );
+          const hasActiveLeg = clobMarket.tokens.some((t) => activeTokenIds.has(t.tokenId));
+
+          if (!algoEligible && !hasActiveLeg) continue;
+
           const family = this.matchFamily(clobMarket.slug, clobMarket.endDate, compiled);
-          if (!family) continue;
+          if (algoEligible) algoEligibleMarkets++;
+          if (family) familyMatchedMarkets++;
 
           for (const token of clobMarket.tokens) {
             const tokenId = createTokenId(token.tokenId);
@@ -158,28 +204,31 @@ export class MarketScannerModule implements RuntimeModule {
               question: clobMarket.question,
               outcome: token.outcome,
               outcomeIndex: token.outcomeIndex ?? null,
-              familyId: family.familyId,
-              familyKey: family.familyKey,
-              regime: family.regime,
-              horizon: family.horizon,
+              familyId: family?.familyId ?? null,
+              familyKey: family?.familyKey ?? null,
+              regime: family?.regime ?? null,
+              horizon: family?.horizon ?? null,
               endDate: clobMarket.endDate || null,
-              active: clobMarket.active,
+              active: clobMarket.active || hasActiveLeg,
               tickSize: clobMarket.tickSize,
               negRisk: clobMarket.negRisk,
               createdAt: now,
               updatedAt: now,
             };
             this.deps.marketRepo.save(market);
-            matchedCount++;
+            savedTokens++;
           }
         }
       });
 
-      // Deactivate tracked markets that were not in the latest discovery result
+      // Deactivate tracked markets not in latest scan AND without open positions/orders
       let deactivatedCount = 0;
       const previouslyActive = this.deps.marketRepo.findActive();
       for (const existing of previouslyActive) {
-        if (!discoveredTokenIds.has(String(existing.tokenId))) {
+        if (
+          !discoveredTokenIds.has(String(existing.tokenId)) &&
+          !activeTokenIds.has(String(existing.tokenId))
+        ) {
           this.deps.marketRepo.save({ ...existing, active: false, updatedAt: now });
           deactivatedCount++;
         }
@@ -188,18 +237,24 @@ export class MarketScannerModule implements RuntimeModule {
       this.lastSuccessfulScanMs = Date.now();
       const durationMs = this.lastSuccessfulScanMs - startMs;
       const result: MarketScanResult = {
-        discoveredCount,
-        matchedCount,
-        deactivatedCount,
+        discoveredMarkets,
+        algoEligibleMarkets,
+        familyMatchedMarkets,
+        savedTokens,
+        preservedTokens: activeTokenIds.size,
+        deactivatedTokens: deactivatedCount,
         familyCount: families.length,
         durationMs,
       };
 
       this.log.info(
         {
-          discovered: discoveredCount,
-          matched: matchedCount,
-          deactivated: deactivatedCount,
+          discoveredMarkets,
+          algoEligibleMarkets,
+          familyMatchedMarkets,
+          savedTokens,
+          preservedTokens: activeTokenIds.size,
+          deactivatedTokens: deactivatedCount,
           families: families.length,
           durationMs,
         },

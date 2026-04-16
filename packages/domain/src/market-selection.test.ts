@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { matchesPreEntryFilter, evaluateContinuation } from "./market-selection.js";
+import {
+  matchesPreEntryFilter,
+  evaluateContinuation,
+  countDistinctOutcomes,
+} from "./market-selection.js";
 
 describe("matchesPreEntryFilter", () => {
   // STEP 1: event_slug prefix match
@@ -92,5 +96,29 @@ describe("evaluateContinuation", () => {
   // Boundary: just below R2
   it("stops at firstTradePrice=0.049 and tradeCount=2", () => {
     expect(evaluateContinuation(2, 0.049)).toBe(false);
+  });
+});
+
+describe("countDistinctOutcomes", () => {
+  it("returns 1 for single-outcome condition (negRisk leg)", () => {
+    expect(countDistinctOutcomes([{ outcome: "Yes" }])).toBe(1);
+  });
+
+  it("returns 2 for Yes/No pair", () => {
+    expect(countDistinctOutcomes([{ outcome: "Yes" }, { outcome: "No" }])).toBe(2);
+  });
+
+  it("is case-insensitive", () => {
+    expect(countDistinctOutcomes([{ outcome: "YES" }, { outcome: "yes" }])).toBe(1);
+  });
+
+  it("returns 0 for empty tokens array", () => {
+    expect(countDistinctOutcomes([])).toBe(0);
+  });
+
+  it("counts multiple distinct outcomes in multi-outcome market", () => {
+    expect(
+      countDistinctOutcomes([{ outcome: "Biden" }, { outcome: "Trump" }, { outcome: "Other" }]),
+    ).toBe(3);
   });
 });

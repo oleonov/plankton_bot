@@ -9,6 +9,8 @@ import type {
   MarketRepository,
   Market,
   EventBus,
+  PositionRepository,
+  OrderRepository,
 } from "@plankton/domain";
 import { MarketScannerModule } from "../modules/market-scanner/market-scanner-module.js";
 
@@ -36,6 +38,7 @@ function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
     ],
     question: "Will BTC hit 100k?",
     slug: "bitcoin-above-100k",
+    eventSlug: "bitcoin-above-100k",
     endDate: nearEndDate(),
     active: true,
     negRisk: false,
@@ -113,6 +116,31 @@ function createMockBus(): EventBus {
   };
 }
 
+function createMockPositionRepo(): PositionRepository {
+  return {
+    save: vi.fn(),
+    findByTokenId: vi.fn().mockReturnValue(null),
+    findByFamily: vi.fn().mockReturnValue([]),
+    findOpen: vi.fn().mockReturnValue([]),
+    findDust: vi.fn().mockReturnValue([]),
+    findAll: vi.fn().mockReturnValue([]),
+    findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+  };
+}
+
+function createMockOrderRepo(): OrderRepository {
+  return {
+    save: vi.fn(),
+    findById: vi.fn().mockReturnValue(null),
+    findByClientOrderId: vi.fn().mockReturnValue(null),
+    findByExchangeOrderId: vi.fn().mockReturnValue(null),
+    findOpen: vi.fn().mockReturnValue([]),
+    findByTokenId: vi.fn().mockReturnValue([]),
+    updateStatus: vi.fn(),
+    sumOpenBuyNotional: vi.fn().mockReturnValue(0),
+  };
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe("MarketScannerModule", () => {
@@ -120,6 +148,8 @@ describe("MarketScannerModule", () => {
   let familyRules: ReturnType<typeof createMockFamilyRules>;
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let bus: ReturnType<typeof createMockBus>;
+  let positionRepo: ReturnType<typeof createMockPositionRepo>;
+  let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let mod: MarketScannerModule;
 
   beforeEach(() => {
@@ -127,6 +157,8 @@ describe("MarketScannerModule", () => {
     familyRules = createMockFamilyRules();
     marketRepo = createMockMarketRepo();
     bus = createMockBus();
+    positionRepo = createMockPositionRepo();
+    orderRepo = createMockOrderRepo();
     mod = new MarketScannerModule({
       discoveryGateway,
       familyRules,
@@ -134,12 +166,15 @@ describe("MarketScannerModule", () => {
       bus,
       log: silentLog,
       scanIntervalMs: 300_000,
+      positionRepo,
+      orderRepo,
     });
   });
 
   it("scan() discovers markets and saves matched ones to repo", async () => {
     const btcMarket = makeClobMarket({
       slug: "bitcoin-above-100k",
+      eventSlug: "bitcoin-above-100k",
       tokens: [
         { tokenId: "tok-btc-yes", outcome: "Yes" },
         { tokenId: "tok-btc-no", outcome: "No" },
@@ -163,6 +198,7 @@ describe("MarketScannerModule", () => {
   it("scan() skips markets not matching any family slug pattern", async () => {
     const unrelatedMarket = makeClobMarket({
       slug: "will-it-rain-tomorrow",
+      eventSlug: "will-it-rain-tomorrow",
     });
 
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
@@ -180,6 +216,7 @@ describe("MarketScannerModule", () => {
   it("scan() skips long-dated threshold deadline markets", async () => {
     const market = makeClobMarket({
       slug: "will-tsla-reach-555-in-april",
+      eventSlug: "will-tsla-reach-555-in-april",
       endDate: farDeadlineEndDate(),
     });
 
@@ -202,6 +239,7 @@ describe("MarketScannerModule", () => {
   it("scan() still accepts long-dated generic deadline markets", async () => {
     const market = makeClobMarket({
       slug: "will-crude-oil-cl-hit-by-end-of-march",
+      eventSlug: "bitcoin-crude-oil-proxy",
       endDate: farDeadlineEndDate(),
     });
 
@@ -225,6 +263,7 @@ describe("MarketScannerModule", () => {
   it("scan() still accepts near-term threshold deadline markets", async () => {
     const market = makeClobMarket({
       slug: "will-tsla-reach-555-in-april",
+      eventSlug: "bitcoin-tsla-proxy",
       endDate: nearDeadlineEndDate(),
     });
 
@@ -304,6 +343,7 @@ describe("MarketScannerModule", () => {
   it("scan() saves with correct outcome mapping", async () => {
     const market = makeClobMarket({
       slug: "bitcoin-above-100k",
+      eventSlug: "bitcoin-above-100k",
       tokens: [
         { tokenId: "tok-yes", outcome: "Yes" },
         { tokenId: "tok-no", outcome: "No" },
@@ -323,7 +363,7 @@ describe("MarketScannerModule", () => {
   });
 
   it("scan() skips families without slugPattern", async () => {
-    const market = makeClobMarket({ slug: "some-market" });
+    const market = makeClobMarket({ slug: "some-market", eventSlug: "some-market" });
 
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([market]);
     (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([
@@ -392,9 +432,10 @@ describe("MarketScannerModule", () => {
     expect(deactivated.active).toBe(false);
   });
 
-  it("daily family does NOT match a market with endDate 9 months out", async () => {
+  it("market with matching slug but wrong family horizon gets null familyId", async () => {
     const longDatedMarket = makeClobMarket({
       slug: "bitcoin-above-190k",
+      eventSlug: "bitcoin-above-190k",
       endDate: new Date(Date.now() + 270 * 24 * 60 * 60 * 1000).toISOString(),
     });
 
@@ -407,12 +448,15 @@ describe("MarketScannerModule", () => {
 
     await mod.scan();
 
-    expect(marketRepo.save).not.toHaveBeenCalled();
+    expect(marketRepo.save).toHaveBeenCalledTimes(2);
+    const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
+    expect(saved.familyId).toBeNull();
   });
 
   it("daily family DOES match a market with endDate tomorrow", async () => {
     const nearMarket = makeClobMarket({
       slug: "bitcoin-above-100k",
+      eventSlug: "bitcoin-above-100k",
       endDate: nearEndDate(),
     });
 
@@ -429,6 +473,7 @@ describe("MarketScannerModule", () => {
   it("intraday-4h family does NOT match long-dated will-bitcoin-reach market", async () => {
     const longDatedMarket = makeClobMarket({
       slug: "will-bitcoin-reach-140000-by-december-31-2026-131-829-299",
+      eventSlug: "will-bitcoin-reach-140000-by-december-31-2026-131-829-299",
       endDate: "2027-01-01T05:00:00Z",
     });
 
@@ -453,6 +498,7 @@ describe("MarketScannerModule", () => {
   it("intraday-4h family DOES match near-term will-bitcoin-reach market", async () => {
     const nearMarket = makeClobMarket({
       slug: "will-bitcoin-reach-140000",
+      eventSlug: "bitcoin-price-milestones",
       endDate: new Date(Date.now() + 4 * 60 * 60 * 1000).toISOString(),
     });
 
@@ -516,6 +562,189 @@ describe("MarketScannerModule", () => {
     );
     expect(slugs).toContain("bitcoin-above-100k");
     expect(slugs).toContain("bitcoin-above-110k");
+  });
+
+  it("scan() saves market passing pre-entry filter even without family match", async () => {
+    const btcMarket = makeClobMarket({
+      slug: "bitcoin-above-200k",
+      eventSlug: "bitcoin-above-200k",
+      tokens: [{ tokenId: "tok-200k-yes", outcome: "Yes" }],
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([btcMarket]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(1);
+    const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
+    expect(saved.tokenId).toBe("tok-200k-yes");
+    expect(saved.familyId).toBeNull();
+  });
+
+  it("scan() saves single-outcome market (distinct_outcomes=1) via pre-entry STEP 2", async () => {
+    const negRiskLeg = makeClobMarket({
+      slug: "who-will-win-election-trump",
+      eventSlug: "who-will-win-election",
+      tokens: [{ tokenId: "tok-trump-yes", outcome: "Yes" }],
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([negRiskLeg]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(1);
+    const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
+    expect(saved.familyId).toBeNull();
+  });
+
+  it("scan() skips multi-outcome market without matching slug prefix", async () => {
+    const multiOutcome = makeClobMarket({
+      slug: "who-will-win-nba-finals",
+      eventSlug: "who-will-win-nba-finals",
+      tokens: [
+        { tokenId: "tok-team-a", outcome: "Lakers" },
+        { tokenId: "tok-team-b", outcome: "Celtics" },
+        { tokenId: "tok-team-c", outcome: "Warriors" },
+      ],
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      multiOutcome,
+    ]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).not.toHaveBeenCalled();
+  });
+
+  it("deactivation sweep preserves market with open position", async () => {
+    const staleMarket: Market = {
+      tokenId: createTokenId("tok-old"),
+      conditionId: "cond-old",
+      slug: "some-obscure-market",
+      eventSlug: null,
+      question: "Old market?",
+      outcome: "Yes",
+      outcomeIndex: null,
+      familyId: null,
+      familyKey: null,
+      regime: null,
+      horizon: null,
+      endDate: "2026-01-01",
+      active: true,
+      tickSize: 0.01,
+      negRisk: false,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([staleMarket]);
+    (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+      { tokenId: createTokenId("tok-old"), status: "open" },
+    ]);
+
+    await mod.scan();
+
+    const saveCalls = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls;
+    const deactivations = saveCalls.filter((c: unknown[]) => (c[0] as Market).active === false);
+    expect(deactivations).toHaveLength(0);
+  });
+
+  it("deactivation sweep preserves market with open order", async () => {
+    const staleMarket: Market = {
+      tokenId: createTokenId("tok-pending"),
+      conditionId: "cond-pending",
+      slug: "another-market",
+      eventSlug: null,
+      question: "Pending order market?",
+      outcome: "Yes",
+      outcomeIndex: null,
+      familyId: null,
+      familyKey: null,
+      regime: null,
+      horizon: null,
+      endDate: "2026-06-01",
+      active: true,
+      tickSize: 0.01,
+      negRisk: false,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([staleMarket]);
+    (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+      { tokenId: createTokenId("tok-pending"), status: "open" },
+    ]);
+
+    await mod.scan();
+
+    const saveCalls = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls;
+    const deactivations = saveCalls.filter((c: unknown[]) => (c[0] as Market).active === false);
+    expect(deactivations).toHaveLength(0);
+  });
+
+  it("deactivation sweep deactivates stale market with no open positions or orders", async () => {
+    const staleMarket: Market = {
+      tokenId: createTokenId("tok-stale"),
+      conditionId: "cond-stale",
+      slug: "expired-market",
+      eventSlug: null,
+      question: "Expired?",
+      outcome: "Yes",
+      outcomeIndex: null,
+      familyId: null,
+      familyKey: null,
+      regime: null,
+      horizon: null,
+      endDate: "2025-01-01",
+      active: true,
+      tickSize: 0.01,
+      negRisk: false,
+      createdAt: "2025-01-01T00:00:00Z",
+      updatedAt: "2025-01-01T00:00:00Z",
+    };
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([staleMarket]);
+
+    await mod.scan();
+
+    const saveCalls = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls;
+    expect(saveCalls).toHaveLength(1);
+    expect((saveCalls[0]![0] as Market).tokenId).toBe("tok-stale");
+    expect((saveCalls[0]![0] as Market).active).toBe(false);
+  });
+
+  it("open-leg market returned as inactive by Gamma is saved as active", async () => {
+    const inactiveFromGamma = makeClobMarket({
+      slug: "bitcoin-above-50k",
+      eventSlug: "bitcoin-above-50k",
+      active: false,
+      tokens: [{ tokenId: "tok-leg", outcome: "Yes" }],
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      inactiveFromGamma,
+    ]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+      { tokenId: createTokenId("tok-leg"), status: "open" },
+    ]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(1);
+    const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
+    expect(saved.tokenId).toBe("tok-leg");
+    expect(saved.active).toBe(true);
   });
 
   it("consumes new-market WS hints with debounce and updates hint metrics", async () => {
