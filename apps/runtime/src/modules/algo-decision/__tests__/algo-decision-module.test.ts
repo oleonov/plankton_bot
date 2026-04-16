@@ -11,7 +11,13 @@ import type {
   LegState,
   RuntimeEventMap,
 } from "@plankton/domain";
-import { createTokenId, createFamilyId, createCommandId, createOrderId } from "@plankton/domain";
+import {
+  createTokenId,
+  createFamilyId,
+  createCommandId,
+  createOrderId,
+} from "@plankton/domain";
+import type { ConditionId } from "@plankton/domain";
 import type { Logger } from "../../../logger.js";
 
 // ─── Seed rules ───────────────────────────────────────────────────────────────
@@ -199,18 +205,18 @@ function createMockLogger(): Logger {
 
 function makeMarket(
   tokenId: string,
-  familyId: string,
+  familyId: string | null,
   midPrice: number | null,
-  conditionId = "cond-1",
+  conditionId: string = "cond-1",
 ): NormalizedMarket {
   return {
     tokenId: createTokenId(tokenId),
-    conditionId,
+    conditionId: conditionId as ConditionId,
     slug: "test-market",
     eventSlug: null,
     question: "Test?",
     outcome: "Yes",
-    familyId: createFamilyId(familyId),
+    familyId: familyId !== null ? createFamilyId(familyId) : null,
     familyKey: null,
     regime: null,
     horizon: null,
@@ -281,6 +287,32 @@ describe("AlgoDecisionModule", () => {
     expect(signal.decisionRuleId).toBe("FALLBACK");
     expect(signal.reason).toBe("probe-entry");
     expect(signal.suggestedSizeUsdc).toBeCloseTo(2.1, 5);
+    expect(signal.conditionId).toBe("cond-1");
+
+    await mod.stop();
+  });
+
+  it("emits SignalProduced for eligible token with no familyId", async () => {
+    const tokenId = "token-no-family";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    const market = makeMarket(tokenId, null, 0.45, "cond-1");
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+
+    expect(signalCalls.length).toBe(1);
+    const signal = signalCalls[0]![1].signal as import("@plankton/domain").Signal;
+    expect(signal.familyId).toBeNull();
+    expect(signal.conditionId).toBe("cond-1" as ConditionId);
 
     await mod.stop();
   });

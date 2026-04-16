@@ -335,10 +335,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const side = decision.action === "BUY" ? "buy" : ("sell" as const);
     const reason = resolveSignalReason(side, buyCount);
 
-    const familyId = market.familyId;
-    if (!familyId) return null;
-
-    const seqKey = `${familyId}|${market.tokenId}|${side}`;
+    const seqKey = `${market.tokenId}|${side}`;
     const sequenceInTick = nextSeq(seqKey);
 
     const suggestedSizeUsdc = sizeResult.sizeUsdc;
@@ -346,8 +343,9 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     const signal: import("@plankton/domain").Signal = {
       signalId: randomUUID(),
-      familyId,
+      familyId: market.familyId,
       tokenId: market.tokenId,
+      conditionId: market.conditionId,
       side,
       suggestedPrice: ctx.price,
       suggestedSize,
