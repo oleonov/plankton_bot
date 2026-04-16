@@ -511,9 +511,9 @@ describe("SignalToOrderBridge", () => {
     });
     bridge.subscribe();
 
-    const placed: Array<{ command: Record<string, unknown> }> = [];
+    const placed: Array<{ command: { postOnly?: boolean } & Record<string, unknown> }> = [];
     bus.subscribe("PlaceOrderRequested", async (payload) => {
-      placed.push(payload);
+      placed.push(payload as unknown as (typeof placed)[number]);
     });
 
     await bus.publish("NormalizedMarketUpdated", {

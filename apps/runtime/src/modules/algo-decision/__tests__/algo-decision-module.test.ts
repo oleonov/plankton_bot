@@ -594,6 +594,140 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  describe("timeSinceLast computation", () => {
+    /**
+     * D1-like rule: S2 + timeSinceLast <= 60 → BUY. Drives assertions about
+     * the (now - lastTradeAt) conversion into `timeSinceLastSeconds` inside
+     * `evaluateToken` — without this computation, rules gated on that field
+     * would silently skip.
+     */
+    const D1_LIKE_RULES: AlgoDecisionRule[] = [
+      {
+        id: 20,
+        priority: 20,
+        ruleId: "D1-LIKE",
+        stateCondition: "S2",
+        priceOperator: "<",
+        priceValue: 0.05,
+        timeSinceLastOperator: "<=",
+        timeSinceLastSeconds: 60,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "BUY",
+      },
+      {
+        id: 99,
+        priority: 99,
+        ruleId: "FALLBACK",
+        stateCondition: "ANY",
+        priceOperator: null,
+        priceValue: null,
+        timeSinceLastOperator: null,
+        timeSinceLastSeconds: null,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "BUY",
+      },
+    ];
+
+    function withRules(rules: AlgoDecisionRule[]): AlgoRulesRepository {
+      return {
+        getDecisionRules: vi.fn(() => rules),
+        getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+          actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+        ),
+      };
+    }
+
+    // firstTradePrice=0.10 keeps the continuation gate (R2: price>=0.05 && tradeCount>=2) passing
+    // so timeSinceLast gating is exercised in isolation.
+    function makeTimedLegState(tokenId: string, lastTradeAtMsAgo: number): LegState {
+      const ts = new Date(Date.now() - lastTradeAtMsAgo).toISOString();
+      return {
+        tokenId: createTokenId(tokenId),
+        buyCount: 2,
+        sellCount: 0,
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: ts,
+        lastTradeAt: ts,
+        updatedAt: ts,
+      };
+    }
+
+    it("D1-LIKE fires when lastTradeAt is 30s ago (timeSinceLast ≈ 30 ≤ 60)", async () => {
+      const tokenId = "token-tsl-30";
+      legStateRepo = createMockLegStateRepo([makeTimedLegState(tokenId, 30_000)]);
+      algoRulesRepo = withRules(D1_LIKE_RULES);
+
+      const mod = buildModule();
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, "fam-tsl", 0.03, "cond-tsl-30")],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D1-LIKE");
+
+      await mod.stop();
+    });
+
+    it("D1-LIKE does NOT fire when lastTradeAt is 120s ago (timeSinceLast ≈ 120 > 60) — falls through to FALLBACK", async () => {
+      const tokenId = "token-tsl-120";
+      legStateRepo = createMockLegStateRepo([makeTimedLegState(tokenId, 120_000)]);
+      algoRulesRepo = withRules(D1_LIKE_RULES);
+
+      const mod = buildModule();
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, "fam-tsl", 0.03, "cond-tsl-120")],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("FALLBACK");
+
+      await mod.stop();
+    });
+
+    it("D1-LIKE fires exactly at the 60s boundary (inclusive <=)", async () => {
+      const tokenId = "token-tsl-60";
+      // 59_000ms ago → timeSinceLast = 59s ≤ 60s. Using 60_000 exactly would race against
+      // the (now - lastTradeAt) read inside evaluateToken, which happens a few ms later.
+      legStateRepo = createMockLegStateRepo([makeTimedLegState(tokenId, 59_000)]);
+      algoRulesRepo = withRules(D1_LIKE_RULES);
+
+      const mod = buildModule();
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, "fam-tsl", 0.03, "cond-tsl-60")],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D1-LIKE");
+
+      await mod.stop();
+    });
+  });
+
   it("emits Fallback BUY signal with suggestedSizeUsdc=2.10 for OTHER-state token", async () => {
     const tokenId = "token-other-state";
     const familyId = "fam-other";

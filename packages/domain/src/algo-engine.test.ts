@@ -366,6 +366,36 @@ describe("matchRule", () => {
     };
     expect(matchRule(ctx, DECISION_RULES, REDEEM_ONLY)).toBeNull();
   });
+  it("REDEEM does not match S1 when price >= 0.05 (boundary)", () => {
+    const ctx = {
+      state: "S1" as const,
+      price: 0.05,
+      timeSinceLastSeconds: 100,
+      buyCount: 1,
+      holdDurationSeconds: 1800,
+    };
+    expect(matchRule(ctx, DECISION_RULES, REDEEM_ONLY)).toBeNull();
+  });
+  it("REDEEM does not match S2 when price >= 0.05 (boundary)", () => {
+    const ctx = {
+      state: "S2" as const,
+      price: 0.05,
+      timeSinceLastSeconds: 30,
+      buyCount: 3,
+      holdDurationSeconds: 1800,
+    };
+    expect(matchRule(ctx, DECISION_RULES, REDEEM_ONLY)).toBeNull();
+  });
+  it("REDEEM does not match S1 when price > 0.05", () => {
+    const ctx = {
+      state: "S1" as const,
+      price: 0.15,
+      timeSinceLastSeconds: 100,
+      buyCount: 1,
+      holdDurationSeconds: 1800,
+    };
+    expect(matchRule(ctx, DECISION_RULES, REDEEM_ONLY)).toBeNull();
+  });
   it("buyCountMin/buyCountMax range matching", () => {
     const ctx3 = {
       state: "S2" as const,
@@ -808,6 +838,16 @@ describe("evaluateSize", () => {
         evaluateSize("BUY", { state: "S2", price: 0.03, nthBuy: 4, buyCount: 3 }, BUY_SIZE_RULES),
       ).toEqual({ sizeUsdc: 0.12, ruleId: "B4" });
     });
+    it("4th buy at S3 + low price uses B3 (0.76)", () => {
+      expect(
+        evaluateSize("BUY", { state: "S3", price: 0.03, nthBuy: 4, buyCount: 2 }, BUY_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 0.76, ruleId: "B3" });
+    });
+    it("B3: price=0.05 (boundary) does NOT match; falls to FALLBACK", () => {
+      expect(
+        evaluateSize("BUY", { state: "S3", price: 0.05, nthBuy: 4, buyCount: 2 }, BUY_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 0.44, ruleId: "FALLBACK" });
+    });
     it("5th+ buy with no state+price match uses FALLBACK (0.44)", () => {
       expect(
         evaluateSize("BUY", { state: "S2", price: 0.1, nthBuy: 5, buyCount: 4 }, BUY_SIZE_RULES),
@@ -825,6 +865,30 @@ describe("evaluateSize", () => {
       expect(
         evaluateSize("SELL", { state: "S1", price: 0.3, nthBuy: 0, buyCount: 1 }, SELL_SIZE_RULES),
       ).toEqual({ sizeUsdc: 6.31, ruleId: "S2" });
+    });
+    it("OTHER + price>=0.20 uses S3 rule (3.40)", () => {
+      expect(
+        evaluateSize(
+          "SELL",
+          { state: "OTHER", price: 0.3, nthBuy: 0, buyCount: 0 },
+          SELL_SIZE_RULES,
+        ),
+      ).toEqual({ sizeUsdc: 3.4, ruleId: "S3" });
+    });
+    it("S2 + price<0.05 uses S4 rule (1.01)", () => {
+      expect(
+        evaluateSize("SELL", { state: "S2", price: 0.03, nthBuy: 0, buyCount: 2 }, SELL_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 1.01, ruleId: "S4" });
+    });
+    it("S3 + price<0.05 uses S5 rule (0.59)", () => {
+      expect(
+        evaluateSize("SELL", { state: "S3", price: 0.03, nthBuy: 0, buyCount: 2 }, SELL_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 0.59, ruleId: "S5" });
+    });
+    it("S7 upper boundary: after 3 buys at mid price uses S7 (2.14)", () => {
+      expect(
+        evaluateSize("SELL", { state: "S2", price: 0.1, nthBuy: 0, buyCount: 3 }, SELL_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 2.14, ruleId: "S7" });
     });
     it("after 1 buy at mid price uses S6 (2.85)", () => {
       expect(
