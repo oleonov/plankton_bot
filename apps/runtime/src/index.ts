@@ -73,8 +73,10 @@ import { MarketScannerModule } from "./modules/market-scanner/index.js";
 import { NormalizationModule } from "./modules/normalization/normalization-module.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
-import { StrategyModule } from "./modules/strategy/strategy-module.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
+import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
+import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
+import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
 import { UserOrderStreamModule } from "./modules/reconciliation/user-order-stream-module.js";
@@ -85,7 +87,12 @@ import { ResolutionDetector } from "./modules/resolution/resolution-detector.js"
 import { PositionSettler } from "./modules/resolution/position-settler.js";
 import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
 import { GammaResolutionClient } from "@plankton/exchange";
-import { SqliteMarketResolutionRepository, SqliteMergeLedgerRepository } from "@plankton/db";
+import {
+  SqliteMarketResolutionRepository,
+  SqliteMergeLedgerRepository,
+  SqliteAlgoRulesRepository,
+  SqliteLegStateRepository,
+} from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { DbFamilyRulesProvider } from "./db-family-rules-provider.js";
@@ -304,6 +311,9 @@ async function main(): Promise<void> {
     stateTransition: new SqliteStateTransitionRepository(controlConn.db),
     promotionProposal: new SqlitePromotionProposalRepository(controlConn.db),
     candidateObservation: new SqliteCandidateObservationRepository(controlConn.db),
+    // Algo decision engine — algoRules lives in control.db, legState in ledger.db
+    algoRules: new SqliteAlgoRulesRepository(controlConn.db),
+    legState: new SqliteLegStateRepository(ledgerConn.db),
   };
 
   // 4. Family rules — DB-backed provider
@@ -704,19 +714,27 @@ async function main(): Promise<void> {
         onUsageObserved: handleCandidateBookUsageObserved,
       })
     : undefined;
-  const strategyModule = new StrategyModule({
+  // 7h2. Algo decision module (replaces legacy StrategyModule in the pipeline)
+  const selectedMarketCache = new MarketSelectionCache(bus);
+  selectedMarketCache.subscribe();
+  const algoDecisionModule = new AlgoDecisionModule({
     bus,
-    rulesProvider,
-    positionRepo: repos.position,
-    orderRepo: repos.order,
-    familyStateRepo: repos.familyState,
-    candidateBookCache,
-    log,
-    scanIntervalMs: config.strategyScanIntervalMs,
+    legStateRepo: repos.legState,
+    algoRulesRepo: repos.algoRules,
+    selectedMarketCache,
     runtimeControl,
+    log,
+    sweepIntervalMs: 12_000,
+  });
+
+  // Standalone SignalToOrderBridge — wired here so it is active when AlgoDecisionModule
+  // is used. bridge.subscribe() is called after all modules are wired (below).
+  const signalToOrderBridge = new SignalToOrderBridge({
+    bus,
+    log,
+    orderRepo: repos.order,
     liveLiteGuard,
-    globalConfig,
-    defaultEntryPreset,
+    candidateBookCache,
   });
 
   const hotFamilyExecutionModule = candidateBookCache
@@ -947,7 +965,7 @@ async function main(): Promise<void> {
           ],
         ]
       : []),
-    ["strategy", strategyModule],
+    ["algo-decision", algoDecisionModule],
     ...(hotMarketDataModule
       ? [
           ["hot-market-data", hotMarketDataModule] as [
@@ -1555,6 +1573,9 @@ async function main(): Promise<void> {
     }
   }, 30_000);
 
+  // 7q. Wire SignalToOrderBridge subscriptions (not a RuntimeModule — subscribe directly)
+  signalToOrderBridge.subscribe();
+
   // 8. Create supervisor
   supervisorRef.current = new Supervisor({ modules, bus, log });
   const supervisor = supervisorRef.current;
@@ -1572,6 +1593,9 @@ async function main(): Promise<void> {
     } catch (err) {
       log.error({ err }, "supervisor stop error");
     }
+
+    signalToOrderBridge.unsubscribe();
+    selectedMarketCache.dispose();
 
     if (statePublisherRef.current) {
       statePublisherRef.current.stopHeartbeatLoop();

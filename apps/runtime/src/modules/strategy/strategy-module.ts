@@ -115,7 +115,6 @@ export class StrategyModule implements RuntimeModule {
     this.bridge = new SignalToOrderBridge({
       bus: deps.bus,
       log: this.log,
-      rulesProvider: deps.rulesProvider,
       orderRepo: deps.orderRepo,
       liveLiteGuard: deps.liveLiteGuard,
       candidateBookCache: this.candidateBookCache,

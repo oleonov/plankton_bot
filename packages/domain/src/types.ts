@@ -297,6 +297,7 @@ export interface Signal {
   reason: SignalReason;
   strategyTick: number; // epoch ms of the scanner tick
   sequenceInTick: number; // 0-based within tick for same family+token+side
+  decisionRuleId: string | null;
   generatedAt: string; // ISO timestamp
 }
 
@@ -671,4 +672,47 @@ export interface MergeRecord {
   spreadPnl: number;
   mergedAt: string;
   createdAt?: string;
+}
+
+// ─── Algo Decision Engine Types ─────────────────────────────────────────
+
+export interface AlgoDecisionRule {
+  id: number;
+  priority: number;
+  ruleId: string;
+  stateCondition: string;
+  priceOperator: string | null;
+  priceValue: number | null;
+  timeSinceLastOperator: string | null;
+  timeSinceLastSeconds: number | null;
+  buyCountMin: number | null;
+  buyCountMax: number | null;
+  holdDurationOperator: string | null;
+  holdDurationSeconds: number | null;
+  action: string;
+}
+
+export interface AlgoSizeRule {
+  id: number;
+  actionType: string;
+  priority: number;
+  ruleId: string;
+  stateCondition: string;
+  priceOperator: string | null;
+  priceValue: number | null;
+  nthBuy: number | null;
+  buyCountMin: number | null;
+  buyCountMax: number | null;
+  sizeUsdc: number;
+}
+
+export interface LegState {
+  tokenId: TokenId;
+  buyCount: number;
+  sellCount: number;
+  lastAction: "BUY" | "SELL";
+  firstTradePrice: number;
+  firstTradeAt: string;
+  lastTradeAt: string;
+  updatedAt: string;
 }

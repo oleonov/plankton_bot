@@ -34,6 +34,7 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
   backfillFamilyLivePolicy(conn.db);
   backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
   backfillFamilyLimitUnification(conn.db);
+  ensureAlgoRulesDefaults(conn.db);
   return conn;
 }
 
@@ -95,6 +96,7 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   backfillFamilyLivePolicy(conn.db);
   backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
   backfillFamilyLimitUnification(conn.db);
+  ensureAlgoRulesDefaults(conn.db);
 
   return conn;
 }
@@ -410,6 +412,57 @@ function backfillDirectionalUpdownDiscoveryEntryPolicy(
     if (msg.includes("no such table")) return;
     throw err;
   }
+}
+
+export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): void {
+  const count = (
+    db.prepare("SELECT COUNT(*) as c FROM algo_decision_rules").get() as { c: number }
+  ).c;
+  if (count > 0) return; // Already seeded
+
+  const insertDecision = db.prepare(
+    `INSERT INTO algo_decision_rules (priority, rule_id, state_condition, price_operator, price_value, time_since_last_operator, time_since_last_seconds, buy_count_min, buy_count_max, hold_duration_operator, hold_duration_seconds, action)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  const insertSize = db.prepare(
+    `INSERT INTO algo_size_rules (action_type, priority, rule_id, state_condition, price_operator, price_value, nth_buy, buy_count_min, buy_count_max, size_usdc)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+
+  db.transaction(() => {
+    // Decision rules (priority order)
+    insertDecision.run(10, "REDEEM", "S1", "<", 0.05, null, null, null, null, "<=", 3600, "REDEEM");
+    insertDecision.run(11, "REDEEM", "S2", "<", 0.05, null, null, null, null, "<=", 3600, "REDEEM");
+    insertDecision.run(20, "D1", "S2", "<", 0.05, "<=", 60, null, null, null, null, "BUY");
+    insertDecision.run(30, "D2", "S3", "<", 0.05, "<=", 60, null, null, null, null, "SELL");
+    insertDecision.run(40, "D3", "S1", "<", 0.05, null, null, null, null, null, null, "BUY");
+    insertDecision.run(50, "D4", "S2", ">=", 0.2, ">", 60, null, null, null, null, "SELL");
+    insertDecision.run(60, "D5", "S1", ">=", 0.2, null, null, null, null, null, null, "SELL");
+    insertDecision.run(70, "D6", "S2", null, null, null, null, 4, null, null, null, "BUY");
+    insertDecision.run(80, "D7", "S3", null, null, null, null, null, null, null, null, "SELL");
+    insertDecision.run(999, "FALLBACK", "ANY", null, null, null, null, null, null, null, null, "BUY");
+
+    // Size rules — BUY (nth_buy rules BEFORE state+price rules per BUY Size Precedence Contract)
+    insertSize.run("BUY", 10, "B5", "ANY", null, null, 1, null, null, 2.10);
+    insertSize.run("BUY", 20, "B6", "ANY", null, null, 2, null, null, 1.17);
+    insertSize.run("BUY", 30, "B7", "ANY", null, null, 3, null, null, 0.92);
+    insertSize.run("BUY", 40, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38);
+    insertSize.run("BUY", 50, "B2", "S1", ">=", 0.2, null, null, null, 4.17);
+    insertSize.run("BUY", 60, "B3", "S3", "<", 0.05, null, null, null, 0.76);
+    insertSize.run("BUY", 70, "B4", "S2", "<", 0.05, null, null, null, 0.12);
+    insertSize.run("BUY", 999, "FALLBACK", "ANY", null, null, null, null, null, 0.44);
+
+    // Size rules — SELL
+    insertSize.run("SELL", 10, "S1", "S2", ">=", 0.2, null, null, null, 6.48);
+    insertSize.run("SELL", 20, "S2", "S1", ">=", 0.2, null, null, null, 6.31);
+    insertSize.run("SELL", 30, "S3", "OTHER", ">=", 0.2, null, null, null, 3.40);
+    insertSize.run("SELL", 40, "S4", "S2", "<", 0.05, null, null, null, 1.01);
+    insertSize.run("SELL", 50, "S5", "S3", "<", 0.05, null, null, null, 0.59);
+    insertSize.run("SELL", 60, "S6", "ANY", null, null, null, 1, 1, 2.85);
+    insertSize.run("SELL", 70, "S7", "ANY", null, null, null, 2, 3, 2.14);
+    insertSize.run("SELL", 999, "FALLBACK", "ANY", null, null, null, null, null, 1.62);
+  })();
 }
 
 /** ALTER TABLE ADD COLUMN, ignoring "duplicate column" errors. */

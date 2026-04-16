@@ -96,6 +96,7 @@ export class StalePruningModule implements RuntimeModule {
             reason: "stale-prune",
             strategyTick: Date.now(),
             sequenceInTick: 0,
+            decisionRuleId: null,
             generatedAt: new Date().toISOString(),
           };
 

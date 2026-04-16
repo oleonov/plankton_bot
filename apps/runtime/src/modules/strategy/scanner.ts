@@ -555,6 +555,7 @@ export function evaluateSprayEntry(
     reason: "spray-entry" as SignalReason,
     strategyTick: tickTs,
     sequenceInTick: seq,
+    decisionRuleId: null,
     generatedAt: new Date(tickTs).toISOString(),
   };
 }
@@ -1218,6 +1219,7 @@ function evaluateProbeEntry(
     reason: "probe-entry",
     strategyTick: tickTs,
     sequenceInTick: nextSeq(market.familyId!, market.tokenId, "buy"),
+    decisionRuleId: null,
     generatedAt: new Date(tickTs).toISOString(),
   };
 }
@@ -1275,6 +1277,7 @@ function evaluateScaleIn(
     reason,
     strategyTick: tickTs,
     sequenceInTick: nextSeq(market.familyId!, market.tokenId, "buy"),
+    decisionRuleId: null,
     generatedAt: new Date(tickTs).toISOString(),
   };
 }
@@ -1350,6 +1353,7 @@ function evaluateExit(
       reason,
       strategyTick: tickTs,
       sequenceInTick: nextSeq(market.familyId!, market.tokenId, "sell"),
+      decisionRuleId: null,
       generatedAt: new Date(tickTs).toISOString(),
     };
   }
@@ -1367,6 +1371,7 @@ function evaluateExit(
     reason: "repricing-exit",
     strategyTick: tickTs,
     sequenceInTick: nextSeq(market.familyId!, market.tokenId, "sell"),
+    decisionRuleId: null,
     generatedAt: new Date(tickTs).toISOString(),
   };
 }
@@ -1436,6 +1441,7 @@ function evaluateTwoSidedEntry(
     reason: "two-sided-entry",
     strategyTick: tickTs,
     sequenceInTick: nextSeq(market.familyId!, market.tokenId, "buy"),
+    decisionRuleId: null,
     generatedAt: new Date(tickTs).toISOString(),
   };
 }

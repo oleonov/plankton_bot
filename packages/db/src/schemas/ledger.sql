@@ -327,3 +327,16 @@ CREATE TABLE IF NOT EXISTS merge_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_merge_ledger_family ON merge_ledger(family_id);
 CREATE INDEX IF NOT EXISTS idx_merge_ledger_merged_at ON merge_ledger(merged_at);
+
+-- ═══════════ ALGO DECISION ENGINE ═══════════
+
+CREATE TABLE IF NOT EXISTS leg_states (
+  token_id                TEXT PRIMARY KEY,
+  buy_count               INTEGER NOT NULL DEFAULT 0,
+  sell_count              INTEGER NOT NULL DEFAULT 0,
+  last_action             TEXT NOT NULL,
+  first_trade_price       REAL NOT NULL,
+  first_trade_at          TEXT NOT NULL,
+  last_trade_at           TEXT NOT NULL,
+  updated_at              TEXT NOT NULL
+);

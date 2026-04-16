@@ -16,7 +16,6 @@
 import type {
   EventBus,
   FamilyRuleBundle,
-  FamilyRulesProvider,
   NormalizedMarket,
   OrderRepository,
   RuntimeEventMap,
@@ -39,13 +38,12 @@ import {
   resolveMarketabilityPolicy,
   type MarketabilityDecision,
   type MarketabilityPolicy,
+  type RestingOrderSnapshot,
 } from "./marketability.js";
 import { isGammaFallbackDustEligible } from "./book-quality-policy.js";
 import {
   DEFAULT_HOT_LANE_POLICY,
-  isDustSignalReason,
   resolveQueueJumpExecutionTerms,
-  shouldUseDustLane,
   type QueueJumpExecutionTerms,
 } from "../hot-lane/hot-lane-policy.js";
 
@@ -61,7 +59,6 @@ interface EntryExecutionSample {
 export interface SignalToOrderBridgeDeps {
   bus: EventBus;
   log: Logger;
-  rulesProvider: FamilyRulesProvider;
   orderRepo?: OrderRepository | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   candidateBookCache?: CandidateBookCache | undefined;
@@ -105,7 +102,7 @@ export class SignalToOrderBridge {
 
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
     const { signal } = payload;
-    const bundle = this.deps.rulesProvider.getRule(signal.familyId);
+    const bundle: FamilyRuleBundle | null = null;
     const resolvedMarket = await this.resolveMarket(signal, bundle);
     const market = resolvedMarket.market;
     const executionMinNotionalUsdc = this.resolveExecutionMinNotionalUsdc();
@@ -339,7 +336,7 @@ export class SignalToOrderBridge {
   private resolveExecutionTerms(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
-    bundle: ReturnType<FamilyRulesProvider["getRule"]>,
+    bundle: FamilyRuleBundle | null | undefined,
     marketabilityPolicy: MarketabilityPolicy,
     executionMinNotionalUsdc: number | null,
     queueJumpTerms: QueueJumpExecutionTerms | null,
@@ -349,7 +346,19 @@ export class SignalToOrderBridge {
     }
 
     if (!bundle) {
-      return { price: signal.suggestedPrice };
+      // No bundle in relayer mode — apply maker-safe pricing with fallback policy
+      const makerOnlyPrice = resolveMakerOnlyPrice({
+        side: signal.side,
+        suggestedPrice: signal.suggestedPrice,
+        suggestedSizeUsdc: signal.suggestedSizeUsdc,
+        signalReason: signal.reason,
+        nowMs: Date.now(),
+        executionMinNotionalUsdc,
+        market,
+        policy: marketabilityPolicy,
+      });
+      if (makerOnlyPrice == null) return null;
+      return { price: makerOnlyPrice, postOnly: true };
     }
 
     const policy = resolveFamilyLiveTradingPolicy(bundle.identity);
@@ -419,7 +428,7 @@ export class SignalToOrderBridge {
     decision: MarketabilityDecision,
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
-    bundle: ReturnType<FamilyRulesProvider["getRule"]>,
+    bundle: FamilyRuleBundle | null | undefined,
     executionMinNotionalUsdc: number | null,
   ): MarketabilityDecision {
     if (decision.approved) return decision;
@@ -473,18 +482,24 @@ export class SignalToOrderBridge {
   private evaluateMarketability(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
-    bundle: ReturnType<FamilyRulesProvider["getRule"]>,
+    bundle: FamilyRuleBundle | null | undefined,
   ): MarketabilityDecision {
-    if (!this.deps.liveLiteGuard || !bundle) {
+    // No live-lite guard means sim/paper mode — marketability not enforced
+    if (!this.deps.liveLiteGuard) {
       return {
         approved: true,
         rejectionReasons: [],
         checksPassed: ["marketability-disabled"],
-        policy: bundle ? resolveMarketabilityPolicy(bundle) : resolveMarketabilityPolicyFallback(),
+        policy: resolveMarketabilityPolicyFallback(),
         diagnostics: {},
       };
     }
 
+    // Live-lite with or without bundle — run the gate.
+    // When bundle is null, use fallback policy (global defaults).
+    const policy = bundle
+      ? resolveMarketabilityPolicy(bundle)
+      : resolveMarketabilityPolicyFallback();
     const restingSnapshot = this.deps.orderRepo
       ? buildRestingOrderSnapshot(this.deps.orderRepo.findOpen(), this.marketCache)
       : null;
@@ -503,15 +518,73 @@ export class SignalToOrderBridge {
         appliedAt: Date.now(),
       });
     }
-    return evaluateMarketability({
+
+    if (bundle) {
+      return evaluateMarketability({
+        signal,
+        market,
+        bundle,
+        nowMs: Date.now(),
+        restingSnapshot,
+        cooldownUntilMs,
+        executionMinNotionalUsdc: this.resolveExecutionMinNotionalUsdc(),
+      });
+    }
+
+    // No bundle — inline marketability check using fallback policy
+    return this.evaluateMarketabilityWithFallbackPolicy(
       signal,
       market,
-      bundle,
-      nowMs: Date.now(),
+      policy,
       restingSnapshot,
       cooldownUntilMs,
-      executionMinNotionalUsdc: this.resolveExecutionMinNotionalUsdc(),
-    });
+    );
+  }
+
+  /** Marketability check with fallback policy when no bundle is available. */
+  private evaluateMarketabilityWithFallbackPolicy(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    policy: MarketabilityPolicy,
+    restingSnapshot: RestingOrderSnapshot | null,
+    cooldownUntilMs: number | null,
+  ): MarketabilityDecision {
+    const rejectionReasons: string[] = [];
+    const checksPassed: string[] = [];
+    const nowMs = Date.now();
+
+    // Spread check
+    if (market.spread != null && Number.isFinite(market.spread)) {
+      if (market.spread > policy.maxEntrySpreadCents) {
+        rejectionReasons.push("spread-too-wide");
+      } else {
+        checksPassed.push("spread-ok");
+      }
+    } else if (market.bestBid == null || market.bestAsk == null) {
+      rejectionReasons.push("book-one-sided");
+    } else {
+      rejectionReasons.push("spread-unavailable");
+    }
+
+    // Cooldown check
+    if (cooldownUntilMs != null && cooldownUntilMs > nowMs) {
+      rejectionReasons.push("token-cooling-down");
+    } else {
+      checksPassed.push("cooldown-ok");
+    }
+
+    return {
+      approved: rejectionReasons.length === 0,
+      rejectionReasons,
+      checksPassed,
+      policy,
+      diagnostics: {
+        bestBid: market.bestBid,
+        bestAsk: market.bestAsk,
+        spread: market.spread,
+        fallbackPolicy: true,
+      },
+    };
   }
 
   private resolveExecutionMinNotionalUsdc(): number | null {
@@ -586,6 +659,9 @@ export class SignalToOrderBridge {
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
     if (!this.deps.orderRepo || this.filledOrderIds.has(String(payload.orderId))) return;
 
+    // Reprice cancels are intentional cancel-and-replace — not failed fills
+    if (payload.reason === "entry-reprice-cancel") return;
+
     const order = this.deps.orderRepo.findById(payload.orderId);
     if (
       !order ||
@@ -596,17 +672,7 @@ export class SignalToOrderBridge {
       return;
     }
 
-    const bundle = this.deps.rulesProvider.getRule(order.familyId);
-    if (!bundle) return;
-
-    const policy = resolveMarketabilityPolicy(bundle);
-    if (
-      shouldUseDustLane(bundle) &&
-      isDustSignalReason(order.signalReason) &&
-      (payload.reason === "entry-reprice-cancel" || payload.reason === "entry-ttl-cancel")
-    ) {
-      return;
-    }
+    const policy = resolveMarketabilityPolicyFallback();
     const key = this.cooldownKey(order.familyId, order.tokenId);
     const nextCount = (this.unfilledCancelCountByToken.get(key) ?? 0) + 1;
     this.unfilledCancelCountByToken.set(key, nextCount);
@@ -775,8 +841,8 @@ function resolveMarketabilityPolicyFallback(): MarketabilityPolicy {
     speedTier: "standard",
     maxBookAgeMs: 15_000,
     hardMaxBookAgeMs: 60_000,
-    maxEntrySpreadCents: 0.005,
-    maxWideEntrySpreadCents: 0.01,
+    maxEntrySpreadCents: 0.02,
+    maxWideEntrySpreadCents: 0.05,
     minWideSpreadVolume24h: 25_000,
     minEntryVolume24h: 5_000,
     maxPriceImprovementCents: 0.005,
@@ -784,7 +850,7 @@ function resolveMarketabilityPolicyFallback(): MarketabilityPolicy {
     maxRestingBuyReservationUsdc: 5,
     maxUnfilledOrdersPerToken: 1,
     maxUnfilledOrdersPerMarket: 2,
-    maxUnfilledCancelsBeforeCooldown: 1,
+    maxUnfilledCancelsBeforeCooldown: 3,
     unfilledCancelCooldownMs: 10 * 60_000,
     allowOneSidedBooks: false,
   };
