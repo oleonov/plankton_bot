@@ -599,6 +599,62 @@ describe("MarketScannerModule", () => {
     expect(saved.familyId).toBeNull();
   });
 
+  it("scan() saves market with elon-musk- prefix even without family match", async () => {
+    const elonMarket = makeClobMarket({
+      slug: "elon-musk-foo-2025-yes",
+      eventSlug: "elon-musk-foo-2025",
+      tokens: [{ tokenId: "tok-elon-yes", outcome: "Yes" }],
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([elonMarket]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(1);
+    const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
+    expect(saved.tokenId).toBe("tok-elon-yes");
+    expect(saved.familyId).toBeNull();
+  });
+
+  it("scan() saves market with ethereum- prefix even without family match", async () => {
+    const ethMarket = makeClobMarket({
+      slug: "ethereum-price-2025-yes",
+      eventSlug: "ethereum-price-2025",
+      tokens: [{ tokenId: "tok-eth-yes", outcome: "Yes" }],
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([ethMarket]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).toHaveBeenCalledTimes(1);
+    const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
+    expect(saved.tokenId).toBe("tok-eth-yes");
+    expect(saved.familyId).toBeNull();
+  });
+
+  it("scan() skips multi-outcome market with solana- prefix (not in allowed list)", async () => {
+    const solanaMarket = makeClobMarket({
+      slug: "solana-something",
+      eventSlug: "solana-something",
+      tokens: [
+        { tokenId: "tok-sol-a", outcome: "Above" },
+        { tokenId: "tok-sol-b", outcome: "Below" },
+      ],
+    });
+
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      solanaMarket,
+    ]);
+    (familyRules.getAllFamilies as ReturnType<typeof vi.fn>).mockReturnValue([]);
+
+    await mod.scan();
+
+    expect(marketRepo.save).not.toHaveBeenCalled();
+  });
+
   it("scan() skips multi-outcome market without matching slug prefix", async () => {
     const multiOutcome = makeClobMarket({
       slug: "who-will-win-nba-finals",

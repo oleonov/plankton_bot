@@ -468,6 +468,73 @@ describe("SignalToOrderBridge", () => {
     expect(placed).toHaveLength(1);
   });
 
+  it.each([
+    {
+      walletMode: "relayer" as const,
+      label: "relayer mode → postOnly: true",
+      expectPostOnly: true,
+    },
+    {
+      walletMode: "eoa" as const,
+      label: "non-relayer (eoa) mode → postOnly absent",
+      expectPostOnly: false,
+    },
+  ])("$label", async ({ walletMode, expectPostOnly }) => {
+    const bus = new InProcessEventBus();
+    const clobBook = {
+      tokenId: TOKEN_ID,
+      bids: [{ price: 0.04, size: 10 }],
+      asks: [{ price: 0.05, size: 10 }],
+      bestBid: 0.04,
+      bestAsk: 0.05,
+      midPrice: 0.045,
+      spread: 0.01,
+      timestamp: Date.now(),
+    };
+    const cache = new CandidateBookCache({
+      gateway: {
+        getOrderBooks: vi.fn(async (tokenIds: string[]) => {
+          return new Map(tokenIds.map((tokenId) => [tokenId, clobBook]));
+        }),
+      },
+      log: makeLogger(),
+    });
+    await cache.prime([String(TOKEN_ID)]);
+
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: vi.fn(() => walletMode),
+      } as never,
+      candidateBookCache: cache,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: Record<string, unknown> }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket({ minOrderSize: 5, bookSource: "clob" })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    const cmd = placed[0]!.command;
+    if (expectPostOnly) {
+      expect(cmd.postOnly).toBe(true);
+    } else {
+      expect("postOnly" in cmd).toBe(false);
+    }
+  });
+
   it("does not apply unfilled-cancel cooldown to dust reprice cancels", async () => {
     const bus = new InProcessEventBus();
     const order = {

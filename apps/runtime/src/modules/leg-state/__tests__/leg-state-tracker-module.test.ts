@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { LegStateTrackerModule } from "../leg-state-tracker-module.js";
 import type { LegStateRepository, LegState, RuntimeEventMap } from "@plankton/domain";
-import { createTokenId, createOrderId } from "@plankton/domain";
+import { createTokenId, createOrderId, deriveState } from "@plankton/domain";
 import type { Logger } from "../../../logger.js";
 
 // ─── Mock helpers ─────────────────────────────────────────────────────────────
@@ -237,5 +237,27 @@ describe("LegStateTrackerModule", () => {
   it("healthCheck returns ok", async () => {
     const health = await mod.healthCheck();
     expect(health.ok).toBe(true);
+  });
+
+  // ─── Batch C: Full-cycle state transition (BUY → BUY → SELL → BUY) ──────────
+
+  it("back-transitions through S1→S2→S3→S2 across BUY/SELL/BUY sequence", async () => {
+    await mod.start();
+
+    // 1st BUY: S1
+    await bus.publish("FillReceived", makeFillPayload({ side: "buy", price: 0.03 }));
+    expect(deriveState(repo.get(TOK))).toBe("S1");
+
+    // 2nd BUY: S2
+    await bus.publish("FillReceived", makeFillPayload({ side: "buy", price: 0.04 }));
+    expect(deriveState(repo.get(TOK))).toBe("S2");
+
+    // SELL: S3
+    await bus.publish("FillReceived", makeFillPayload({ side: "sell", price: 0.25 }));
+    expect(deriveState(repo.get(TOK))).toBe("S3");
+
+    // BUY after SELL: back-transitions to S2 (buyCount=3 >= 2, lastAction=BUY)
+    await bus.publish("FillReceived", makeFillPayload({ side: "buy", price: 0.05 }));
+    expect(deriveState(repo.get(TOK))).toBe("S2");
   });
 });

@@ -67,6 +67,87 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
+  it("marks token eligible when eventSlug matches elon-musk- prefix", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          conditionId: "cond-elon",
+          eventSlug: "elon-musk-foo-2025",
+          outcome: "Yes",
+        }),
+        makeMarket({
+          tokenId: TOK_B,
+          conditionId: "cond-elon",
+          eventSlug: "elon-musk-foo-2025",
+          outcome: "No",
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    // distinct_outcomes=2 but slug prefix matches → both eligible
+    expect(cache.isEligible(TOK_A)).toBe(true);
+    expect(cache.isEligible(TOK_B)).toBe(true);
+
+    cache.dispose();
+  });
+
+  it("marks token eligible when eventSlug matches ethereum- prefix", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          conditionId: "cond-eth",
+          eventSlug: "ethereum-price-2025",
+          outcome: "Yes",
+        }),
+        makeMarket({
+          tokenId: TOK_B,
+          conditionId: "cond-eth",
+          eventSlug: "ethereum-price-2025",
+          outcome: "No",
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    // distinct_outcomes=2 but slug prefix matches → both eligible
+    expect(cache.isEligible(TOK_A)).toBe(true);
+    expect(cache.isEligible(TOK_B)).toBe(true);
+
+    cache.dispose();
+  });
+
+  it("counts only active tokens when computing distinct outcomes", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus);
+    cache.subscribe();
+
+    // TOK_A active "Yes", TOK_B inactive "Yes" — same label, only active counted
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({ tokenId: TOK_A, conditionId: "cond-x", outcome: "Yes", active: true }),
+        makeMarket({ tokenId: TOK_B, conditionId: "cond-x", outcome: "Yes", active: false }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    // distinctOutcomes = 1 (only active "Yes") → TOK_A eligible
+    expect(cache.isEligible(TOK_A)).toBe(true);
+    expect(cache.isEligible(TOK_B)).toBe(false); // inactive → never eligible
+
+    cache.dispose();
+  });
+
   // ── Pre-entry: distinct_outcomes = 1 ───────────────────────────────────
 
   it("marks token eligible when it is the only outcome in its condition", async () => {

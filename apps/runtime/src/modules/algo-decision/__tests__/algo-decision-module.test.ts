@@ -24,14 +24,14 @@ const SEED_DECISION_RULES: AlgoDecisionRule[] = [
     priority: 10,
     ruleId: "REDEEM-S1",
     stateCondition: "S1",
-    priceOperator: "<=",
+    priceOperator: "<",
     priceValue: 0.05,
     timeSinceLastOperator: null,
     timeSinceLastSeconds: null,
     buyCountMin: null,
     buyCountMax: null,
-    holdDurationOperator: ">=",
-    holdDurationSeconds: 1500, // 25 min
+    holdDurationOperator: "<=",
+    holdDurationSeconds: 3600, // 1 hour cap
     action: "REDEEM",
   },
   {
@@ -39,14 +39,14 @@ const SEED_DECISION_RULES: AlgoDecisionRule[] = [
     priority: 11,
     ruleId: "REDEEM-S2",
     stateCondition: "S2",
-    priceOperator: "<=",
+    priceOperator: "<",
     priceValue: 0.05,
     timeSinceLastOperator: null,
     timeSinceLastSeconds: null,
     buyCountMin: null,
     buyCountMax: null,
-    holdDurationOperator: ">=",
-    holdDurationSeconds: 1500,
+    holdDurationOperator: "<=",
+    holdDurationSeconds: 3600,
     action: "REDEEM",
   },
   {
@@ -317,24 +317,24 @@ describe("AlgoDecisionModule", () => {
     const familyId = "fam-2";
     const conditionId = "cond-redeem";
 
-    // legState = S1 (buyCount=1, lastAction=BUY), firstTradeAt = 30 min ago
-    const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    // legState = S2 (buyCount=2, lastAction=BUY), firstTradeAt = 25 min ago (~1500s ≤ 3600s)
+    const twentyFiveMinAgo = new Date(Date.now() - 25 * 60 * 1000).toISOString();
     const legState: LegState = {
       tokenId: createTokenId(tokenId),
-      buyCount: 1,
+      buyCount: 2,
       sellCount: 0,
       lastAction: "BUY",
       firstTradePrice: 0.1,
-      firstTradeAt: thirtyMinAgo,
-      lastTradeAt: thirtyMinAgo,
-      updatedAt: thirtyMinAgo,
+      firstTradeAt: twentyFiveMinAgo,
+      lastTradeAt: twentyFiveMinAgo,
+      updatedAt: twentyFiveMinAgo,
     };
     legStateRepo = createMockLegStateRepo([legState]);
 
     const mod = buildModule();
     await mod.start();
 
-    // Price 0.03 ≤ 0.05 + holdDuration ≥ 1800s (30min) > 1500s threshold → REDEEM
+    // Price 0.03 < 0.05 + holdDuration ~1500s ≤ 3600s threshold → REDEEM-S2 fires
     const market = makeMarket(tokenId, familyId, 0.03, conditionId);
     await (bus as any).emit("NormalizedMarketUpdated", {
       markets: [market],
@@ -518,7 +518,7 @@ describe("AlgoDecisionModule", () => {
       const mod = buildModule();
       await mod.start();
 
-      // Price 0.03 ≤ 0.05 + holdDuration ≥ 1800s → REDEEM
+      // Price 0.03 < 0.05 + holdDuration ~1800s ≤ 3600s → REDEEM
       await (bus as any).emit("NormalizedMarketUpdated", {
         markets: [makeMarket(tokenId, familyId, 0.03, conditionId)],
         timestamp: Date.now(),
@@ -556,5 +556,71 @@ describe("AlgoDecisionModule", () => {
 
       await mod.stop();
     });
+  });
+
+  it("REDEEM does not fire when holdDuration exceeds 3600s even if price<0.05 and state is S1/S2", async () => {
+    const tokenId = "token-redeem-expired";
+    const familyId = "fam-redeem-exp";
+    const conditionId = "cond-redeem-exp";
+
+    // legState = S1 (buyCount=1, lastAction=BUY), firstTradeAt = 2 hours ago (7200s > 3600s)
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: twoHoursAgo,
+      lastTradeAt: twoHoursAgo,
+      updatedAt: twoHoursAgo,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    // price 0.03 < 0.05 satisfies price condition, but holdDuration ~7200s > 3600s → REDEEM must NOT fire
+    const market = makeMarket(tokenId, familyId, 0.03, conditionId);
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
+    expect(redeemCalls.length).toBe(0);
+
+    await mod.stop();
+  });
+
+  it("emits Fallback BUY signal with suggestedSizeUsdc=2.10 for OTHER-state token", async () => {
+    const tokenId = "token-other-state";
+    const familyId = "fam-other";
+
+    // No LegState for this token — it is in the initial OTHER state (brand new)
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    // Mid-range price 0.12: does not match any S1/S2/S3 rule, falls through to FALLBACK BUY
+    const market = makeMarket(tokenId, familyId, 0.12);
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+
+    expect(signalCalls.length).toBe(1);
+    const signal = signalCalls[0]![1].signal as import("@plankton/domain").Signal;
+    expect(signal.side).toBe("buy");
+    expect(signal.decisionRuleId).toBe("FALLBACK");
+    // B5 size rule: nth_buy=1 (first purchase) → 2.10 USDC
+    expect(signal.suggestedSizeUsdc).toBeCloseTo(2.1, 5);
+
+    await mod.stop();
   });
 });

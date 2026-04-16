@@ -48,6 +48,17 @@ describe("deriveState", () => {
   it("returns OTHER when buyCount=0 regardless of lastAction", () => {
     expect(deriveState(makeLegState({ buyCount: 0, lastAction: "BUY" }))).toBe("OTHER");
   });
+
+  // ─── Batch B: state re-entry after S3 ──────────────────────────────────────
+  it("returns S2 when sellCount=1, buyCount=3, lastAction=BUY (back-transition from S3)", () => {
+    expect(deriveState(makeLegState({ buyCount: 3, sellCount: 1, lastAction: "BUY" }))).toBe("S2");
+  });
+  it("returns S1 when sellCount=1, buyCount=1, lastAction=BUY (back-transition from S3)", () => {
+    expect(deriveState(makeLegState({ buyCount: 1, sellCount: 1, lastAction: "BUY" }))).toBe("S1");
+  });
+  it("returns S1 when sellCount=2, buyCount=1, lastAction=BUY (back-transition from S3)", () => {
+    expect(deriveState(makeLegState({ buyCount: 1, sellCount: 2, lastAction: "BUY" }))).toBe("S1");
+  });
 });
 
 // ─── Rule fixtures ────────────────────────────────────────────────────────────
@@ -372,6 +383,122 @@ describe("matchRule", () => {
       holdDurationSeconds: 4000,
     };
     expect(matchRule(ctx4, DECISION_RULES, BUY_SELL)).toEqual({ action: "BUY", ruleId: "D6" });
+  });
+});
+
+describe("decision rule boundaries", () => {
+  const BUY_SELL = new Set(["BUY", "SELL"]);
+
+  // D1: S2, price < 0.05, timeSinceLast <= 60 → BUY
+  it("D1: price=0.05 (exactly on boundary) does NOT match D1 (strict <)", () => {
+    const ctx = {
+      state: "S2" as const,
+      price: 0.05,
+      timeSinceLastSeconds: 30,
+      buyCount: 3,
+      holdDurationSeconds: 7200,
+    };
+    // price is not < 0.05; buyCount=3 < 4 so D6 skipped; falls through to FALLBACK
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "BUY", ruleId: "FALLBACK" });
+  });
+  it("D1: price=0.0499 matches D1 (strict <)", () => {
+    const ctx = {
+      state: "S2" as const,
+      price: 0.0499,
+      timeSinceLastSeconds: 30,
+      buyCount: 3,
+      holdDurationSeconds: 7200,
+    };
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "BUY", ruleId: "D1" });
+  });
+  it("D1: timeSinceLast=60 matches D1 (inclusive <=)", () => {
+    const ctx = {
+      state: "S2" as const,
+      price: 0.03,
+      timeSinceLastSeconds: 60,
+      buyCount: 3,
+      holdDurationSeconds: 7200,
+    };
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "BUY", ruleId: "D1" });
+  });
+  it("D1: timeSinceLast=61 does NOT match D1; falls to FALLBACK (buyCount=3)", () => {
+    const ctx = {
+      state: "S2" as const,
+      price: 0.03,
+      timeSinceLastSeconds: 61,
+      buyCount: 3,
+      holdDurationSeconds: 7200,
+    };
+    // D1 requires timeSinceLast <= 60; D4 requires price >= 0.20; D6 requires buyCount >= 4
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "BUY", ruleId: "FALLBACK" });
+  });
+  it("D1: timeSinceLast=61 with buyCount>=4 falls to D6, not D1", () => {
+    const ctx = {
+      state: "S2" as const,
+      price: 0.03,
+      timeSinceLastSeconds: 61,
+      buyCount: 4,
+      holdDurationSeconds: 7200,
+    };
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "BUY", ruleId: "D6" });
+  });
+
+  // D4: S2, price >= 0.20, timeSinceLast > 60 → SELL
+  it("D4: timeSinceLast=60 does NOT match D4 (strict >); falls to FALLBACK (buyCount=3)", () => {
+    const ctx = {
+      state: "S2" as const,
+      price: 0.25,
+      timeSinceLastSeconds: 60,
+      buyCount: 3,
+      holdDurationSeconds: 7200,
+    };
+    // D1 needs price < 0.05; D4 needs timeSinceLast > 60; D6 needs buyCount >= 4
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "BUY", ruleId: "FALLBACK" });
+  });
+  it("D4: timeSinceLast=61 matches D4 (strict >)", () => {
+    const ctx = {
+      state: "S2" as const,
+      price: 0.25,
+      timeSinceLastSeconds: 61,
+      buyCount: 3,
+      holdDurationSeconds: 7200,
+    };
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "SELL", ruleId: "D4" });
+  });
+
+  // D5: S1, price >= 0.20 → SELL
+  it("D5: price=0.20 matches D5 (inclusive >=)", () => {
+    const ctx = {
+      state: "S1" as const,
+      price: 0.2,
+      timeSinceLastSeconds: 30,
+      buyCount: 1,
+      holdDurationSeconds: 1000,
+    };
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "SELL", ruleId: "D5" });
+  });
+  it("D5: price=0.1999 does NOT match D5; falls to FALLBACK (no other S1 rule matches)", () => {
+    const ctx = {
+      state: "S1" as const,
+      price: 0.1999,
+      timeSinceLastSeconds: 30,
+      buyCount: 1,
+      holdDurationSeconds: 1000,
+    };
+    // D3 needs price < 0.05; D5 needs price >= 0.20
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "BUY", ruleId: "FALLBACK" });
+  });
+
+  // D2 mirror: S3, price < 0.05, timeSinceLast <= 60 → SELL
+  it("D2: price=0.05 does NOT match D2 (strict <); falls through to D7 (S3 → SELL)", () => {
+    const ctx = {
+      state: "S3" as const,
+      price: 0.05,
+      timeSinceLastSeconds: 30,
+      buyCount: 2,
+      holdDurationSeconds: 5000,
+    };
+    expect(matchRule(ctx, DECISION_RULES, BUY_SELL)).toEqual({ action: "SELL", ruleId: "D7" });
   });
 });
 
