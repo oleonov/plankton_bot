@@ -19,6 +19,7 @@ import type {
   InventoryLot,
   FillId,
   TokenId,
+  ConditionId,
   FamilyId,
 } from "@plankton/domain";
 import { createPositionId, createLotId } from "@plankton/domain";
@@ -28,7 +29,8 @@ import { resolveOpenPositionStatus } from "../../position-status.js";
 export interface FillEvent {
   fillId: FillId;
   tokenId: TokenId;
-  familyId: FamilyId;
+  conditionId: ConditionId;
+  familyId: FamilyId | null;
   side: "buy" | "sell";
   price: number;
   size: number;
@@ -80,6 +82,7 @@ export class InventoryHandler {
     const position: Position = {
       positionId,
       tokenId: fill.tokenId,
+      conditionId: fill.conditionId,
       familyId: fill.familyId,
       side: "buy",
       size: fill.size,

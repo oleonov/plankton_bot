@@ -7,6 +7,7 @@ import {
   createPositionId,
   createLotId,
   createCommandId,
+  createConditionId,
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -34,12 +35,14 @@ import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-mo
 
 const FAM_ID = createFamilyId("fam-btc");
 const TOK_ID = createTokenId("tok-yes");
+const COND_ID = createConditionId("cond-btc");
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
     signalId: "sig-1",
     familyId: FAM_ID,
     tokenId: TOK_ID,
+    conditionId: COND_ID,
     side: "buy",
     suggestedPrice: 0.5,
     suggestedSize: 10,
@@ -391,21 +394,24 @@ describe("RiskInventoryModule", () => {
   });
 
   // ─── Signal rejection: quarantine ─────────────────────────────────
+  // NOTE: Family-level gates (quarantine, reduce-only, live-lite) were removed from
+  // AlgoRiskGate in the algo-decision-engine refactor. These checks now live upstream
+  // in the strategy scanner. Signals that reach RiskInventoryModule are approved by
+  // token-level checks only.
 
-  it("rejects strategy signal for quarantined family", async () => {
+  it("approves signal even when familyState is quarantine (family gate removed from RiskGate)", async () => {
     familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "quarantine" }));
     mod = createModule();
     await mod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => {
-      rejected.push(p);
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
     });
 
     await bus.publish("SignalProduced", { signal: makeSignal() });
 
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toContain("quarantine");
+    expect(approved).toHaveLength(1);
 
     await mod.stop();
   });
@@ -430,23 +436,23 @@ describe("RiskInventoryModule", () => {
   });
 
   // ─── Signal rejection: reduce-only ────────────────────────────────
+  // NOTE: Family-level reduce-only gate removed from AlgoRiskGate (see quarantine note above).
 
-  it("rejects entry signal for reduce-only family", async () => {
+  it("approves entry signal even when familyState is reduce-only (family gate removed)", async () => {
     familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "reduce-only" }));
     mod = createModule();
     await mod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => {
-      rejected.push(p);
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
     });
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ side: "buy", reason: "probe-entry" }),
     });
 
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toContain("reduce-only");
+    expect(approved).toHaveLength(1);
 
     await mod.stop();
   });
@@ -498,6 +504,7 @@ describe("RiskInventoryModule", () => {
     positionRepo = createMockPositionRepo({
       positionId: createPositionId("pos-legacy-open"),
       tokenId: legacyToken,
+      conditionId: COND_ID,
       familyId: FAM_ID,
       side: "buy",
       size: 1,
@@ -538,6 +545,7 @@ describe("RiskInventoryModule", () => {
     const existingPos: Position = {
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       familyId: FAM_ID,
       side: "buy",
       size: 10,
@@ -576,6 +584,7 @@ describe("RiskInventoryModule", () => {
     positionRepo = createMockPositionRepo({
       positionId: createPositionId("pos-dust-legacy"),
       tokenId: dustToken,
+      conditionId: COND_ID,
       familyId: FAM_ID,
       side: "buy",
       size: 1,
@@ -651,6 +660,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-1"),
       clientOrderId: "plk_abc" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       side: "buy" as const,
       price: 0.5,
       size: 10,
@@ -693,6 +703,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-spray"),
       clientOrderId: "plk_spray" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       side: "buy" as const,
       price: 0.5,
       size: 10,
@@ -724,6 +735,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-probe"),
       clientOrderId: "plk_probe" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       side: "buy" as const,
       price: 0.5,
       size: 10,
@@ -746,6 +758,7 @@ describe("RiskInventoryModule", () => {
     const existingPos: Position = {
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       familyId: FAM_ID,
       side: "buy",
       size: 10,
@@ -768,6 +781,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-2"),
       clientOrderId: "plk_def" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       side: "buy" as const,
       price: 0.6,
       size: 10,
@@ -795,6 +809,7 @@ describe("RiskInventoryModule", () => {
     const existingPos: Position = {
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       familyId: FAM_ID,
       side: "buy",
       size: 10,
@@ -845,6 +860,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-sell"),
       clientOrderId: "plk_sell" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       side: "sell" as const,
       price: 0.6,
       size: 5,
@@ -874,6 +890,7 @@ describe("RiskInventoryModule", () => {
     const existingPos: Position = {
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       familyId: FAM_ID,
       side: "buy",
       size: 10,
@@ -920,6 +937,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-sell-all"),
       clientOrderId: "plk_sellall" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       side: "sell" as const,
       price: 0.6,
       size: 10,
@@ -957,6 +975,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-1"),
       clientOrderId: "plk_abc" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       side: "buy" as const,
       price: 0.5,
       size: 10,
@@ -986,6 +1005,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-1"),
       clientOrderId: "plk_test" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       familyId: FAM_ID,
       side: "buy" as const,
       price: 0.5,
@@ -1012,6 +1032,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-err"),
       clientOrderId: "plk_err" as ClientOrderId,
       tokenId: createTokenId("tok-nonexistent"),
+      conditionId: COND_ID,
       familyId: FAM_ID,
       side: "sell" as const,
       price: 0.5,
@@ -1048,8 +1069,8 @@ describe("RiskInventoryModule", () => {
   // ─── Error resilience ─────────────────────────────────────────────
 
   it("rejects signal on internal error without crashing", async () => {
-    // Make familyStateRepo.get throw to trigger internal error path
-    (familyStateRepo.get as ReturnType<typeof vi.fn>).mockImplementation(() => {
+    // Make orderRepo.findByTokenId throw to trigger internal error path in AlgoRiskGate
+    (orderRepo.findByTokenId as ReturnType<typeof vi.fn>).mockImplementation(() => {
       throw new Error("db explosion");
     });
     mod = createModule();
@@ -1070,7 +1091,11 @@ describe("RiskInventoryModule", () => {
 
   // ─── Live-lite allowlist check ────────────────────────────
 
-  it("rejects signal for non-allowlisted family in live-lite mode", async () => {
+  // NOTE: Live-lite family-level gates (allowlist, fee-tier, wallet mode) were removed
+  // from AlgoRiskGate. These checks now live upstream. RiskInventoryModule accepts the
+  // liveLiteGuard in deps for compatibility but AlgoRiskGate no longer uses it.
+
+  it("approves signal regardless of live-lite allowlist (family gate removed)", async () => {
     const liveLiteGuard = new LiveLiteGuard({
       familyAllowlist: ["fam-other"],
       maxFamilies: 2,
@@ -1081,15 +1106,14 @@ describe("RiskInventoryModule", () => {
     mod = createModule(liveLiteGuard);
     await mod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => {
-      rejected.push(p);
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
     });
 
     await bus.publish("SignalProduced", { signal: makeSignal() }); // familyId = FAM_ID = "fam-btc"
 
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toContain("live-lite-allowlist-rejected");
+    expect(approved).toHaveLength(1);
 
     await mod.stop();
   });
@@ -1163,16 +1187,16 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
-  it("allows exit signal through live-lite caps without rejection", async () => {
+  it("approves exit signal (live-lite caps no longer gate at risk module)", async () => {
     familyStateRepo = createMockFamilyStateRepo(
       makeFamilyState({ openValueUsdc: 999, activeMarketCount: 99 }),
     );
     const liveLiteGuard = new LiveLiteGuard({
       familyAllowlist: ["fam-btc"],
       maxFamilies: 2,
-      maxOpenValueUsdc: 1, // would reject any entry
+      maxOpenValueUsdc: 1,
       maxOrderUsdc: 50,
-      maxActiveMarkets: 1, // would reject new markets
+      maxActiveMarkets: 1,
     });
     mod = createModule(liveLiteGuard);
     await mod.start();
@@ -1182,7 +1206,6 @@ describe("RiskInventoryModule", () => {
       approved.push(p);
     });
 
-    // Exit signal — must never be blocked by live-lite caps
     await bus.publish("SignalProduced", {
       signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
     });
@@ -1210,6 +1233,7 @@ describe("RiskInventoryModule", () => {
       orderId: createOrderId("ord-orphan"),
       clientOrderId: "plk_orphan" as ClientOrderId,
       tokenId: TOK_ID,
+      conditionId: COND_ID,
       side: "sell" as const,
       price: 0.6,
       size: 5,
@@ -1411,6 +1435,7 @@ describe("RiskInventoryModule", () => {
       const pos: Position = {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
+        conditionId: COND_ID,
         familyId: FAM_ID,
         side: "buy",
         size: 100,
@@ -1471,6 +1496,7 @@ describe("RiskInventoryModule", () => {
       const pos: Position = {
         positionId: createPositionId("pos-dustify"),
         tokenId: TOK_ID,
+        conditionId: COND_ID,
         familyId: FAM_ID,
         side: "buy",
         size: 1,
@@ -1529,6 +1555,7 @@ describe("RiskInventoryModule", () => {
       const pos: Position = {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
+        conditionId: COND_ID,
         familyId: FAM_ID,
         side: "buy",
         size: 100,
@@ -1592,8 +1619,10 @@ describe("RiskInventoryModule", () => {
       await bus.publish("SignalProduced", { signal: makeSignal() });
       await bus.drain();
 
-      // Reject by putting family in quarantine mode
-      familyStateRepo.get = vi.fn().mockReturnValue(makeFamilyState({ runtimeMode: "quarantine" }));
+      // Reject by making orderRepo.findByTokenId throw (triggers internal error path)
+      (orderRepo.findByTokenId as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw new Error("db explosion");
+      });
       await bus.publish("SignalProduced", {
         signal: makeSignal({ signalId: "sig-2" }),
       });
@@ -1606,7 +1635,7 @@ describe("RiskInventoryModule", () => {
       expect(diag.families[String(FAM_ID)]).toBeDefined();
       expect(diag.families[String(FAM_ID)]!.signalsApproved).toBe(1);
       expect(diag.families[String(FAM_ID)]!.signalsRejected).toBe(1);
-      expect(diag.families[String(FAM_ID)]!.lastRejectionReason).toContain("quarantine");
+      expect(diag.families[String(FAM_ID)]!.lastRejectionReason).toContain("internal error");
 
       await mod.stop();
     });
@@ -1629,6 +1658,7 @@ describe("RiskInventoryModule", () => {
       const pos: Position = {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
+        conditionId: COND_ID,
         familyId: FAM_ID,
         side: "buy",
         size: 100,
@@ -1701,6 +1731,7 @@ describe("RiskInventoryModule", () => {
     function makePlaceOrderRequested(
       familyId: FamilyId = FAM_ID,
       signalReason: string | null = null,
+      tokenId = TOK_ID,
     ) {
       return {
         command: {
@@ -1708,7 +1739,8 @@ describe("RiskInventoryModule", () => {
           commandId: createCommandId("cmd-1"),
           clientOrderId: "plk_test" as ClientOrderId,
           source: "strategy" as const,
-          tokenId: TOK_ID,
+          tokenId,
+          conditionId: COND_ID,
           side: "buy" as const,
           size: 10,
           price: 0.5,
@@ -1723,7 +1755,7 @@ describe("RiskInventoryModule", () => {
       };
     }
 
-    it("rejects entry signal when family has >= 8 in-flight orders", async () => {
+    it("rejects entry signal when token already has a buy order in flight (token-in-flight-limit)", async () => {
       await mod.start();
 
       const rejected: any[] = [];
@@ -1731,14 +1763,12 @@ describe("RiskInventoryModule", () => {
         rejected.push(p);
       });
 
-      // Fill up to the limit of 8
-      for (let i = 0; i < 8; i++) {
-        await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
-      }
+      // Put 1 buy in flight for TOK_ID (limit is 1 per token)
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
       await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
 
       expect(rejected).toHaveLength(1);
-      expect(rejected[0].reason).toContain("family-in-flight-limit");
+      expect(rejected[0].reason).toContain("token-in-flight-limit");
 
       await mod.stop();
     });
@@ -1751,17 +1781,21 @@ describe("RiskInventoryModule", () => {
         approved.push(p);
       });
 
+      // Put 1 buy in flight for TOK_ID
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
-      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
+      // Reject it — decrements tokenInFlight for TOK_ID
       await bus.publish("OrderRejected", {
         commandId: createCommandId("cmd-1"),
         clientOrderId: "plk_test" as ClientOrderId,
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
         reason: "insufficient balance",
         errorCode: "INSUFFICIENT_BALANCE",
         familyId: FAM_ID,
         signalReason: null,
         timestamp: Date.now(),
       });
+      // Now token counter is 0 — signal should be approved
       await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
 
       expect(approved).toHaveLength(1);
@@ -1772,10 +1806,8 @@ describe("RiskInventoryModule", () => {
     it("decrements in-flight only once when a multi-fill order reaches filled", async () => {
       await mod.start();
 
-      // 8 in-flight orders for the family (fills up the limit)
-      for (let i = 0; i < 8; i++) {
-        await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
-      }
+      // Put 1 buy in flight for TOK_ID (fills the per-token limit of 1)
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
 
       // Mock: order is "filled" (set before FillReceived, as importExchangeFills does)
       (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue({
@@ -1790,6 +1822,7 @@ describe("RiskInventoryModule", () => {
         orderId: createOrderId("ord-1"),
         clientOrderId: "plk_test" as ClientOrderId,
         tokenId: TOK_ID,
+        conditionId: COND_ID,
         side: "buy" as const,
         sizeUsdc: 2.5,
         liquidityRole: "unknown" as const,
@@ -1812,8 +1845,8 @@ describe("RiskInventoryModule", () => {
         size: 5,
       });
 
-      // Counter should have decremented once (8 → 7), not twice (8 → 6).
-      // At 7 in-flight, next entry should be allowed (limit is 8).
+      // Counter should have decremented once (1 → 0), not twice (1 → -1 clamped to 0).
+      // After decrement, token counter = 0, so next entry should be approved.
       const approved: any[] = [];
       bus.subscribe("SignalApproved", async (p) => {
         approved.push(p);
@@ -1822,11 +1855,9 @@ describe("RiskInventoryModule", () => {
       await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
       expect(approved).toHaveLength(1);
 
-      // Add 1 more PlaceOrderRequested to bring counter back to 8 (7 + 1).
-      // If double-decremented (8 → 6), the counter would be at 6+1 = 7, so the next signal
-      // would be approved and not rejected — that would prove a double-decrement bug.
+      // Add 1 more PlaceOrderRequested to bring counter back to 1 (the per-token limit).
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested());
-      // Now at 8 in-flight — next entry should be rejected
+      // Now at 1 in-flight for the token — next entry should be rejected
       const rejected: any[] = [];
       bus.subscribe("SignalRejected", async (p) => {
         rejected.push(p);
@@ -1835,7 +1866,7 @@ describe("RiskInventoryModule", () => {
         signal: makeSignal({ reason: "probe-entry", signalId: "sig-check" as any }),
       });
       expect(rejected).toHaveLength(1);
-      expect(rejected[0].reason).toContain("family-in-flight-limit");
+      expect(rejected[0].reason).toContain("token-in-flight-limit");
 
       await mod.stop();
     });
@@ -1920,6 +1951,7 @@ describe("RiskInventoryModule", () => {
         orderId,
         clientOrderId: "plk_test" as ClientOrderId,
         tokenId: TOK_ID,
+        conditionId: COND_ID,
         side: "buy",
         price: 0.5,
         size: 10,
@@ -1948,6 +1980,7 @@ describe("RiskInventoryModule", () => {
           orderId: createOrderId("ord-open"),
           clientOrderId: "plk_open" as ClientOrderId,
           tokenId: TOK_ID,
+          conditionId: COND_ID,
           familyId: FAM_ID,
           side: "buy",
           orderType: "GTC",

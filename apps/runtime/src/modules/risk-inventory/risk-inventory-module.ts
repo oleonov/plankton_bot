@@ -27,6 +27,7 @@ import type {
   FillRepository,
   RuntimeEventMap,
   FamilyId,
+  TokenId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
@@ -83,12 +84,8 @@ export class RiskInventoryModule implements RuntimeModule {
   /** Per-family diagnostic counters (P2-2). */
   private readonly familyDiag = new Map<string, FamilyDiagnostics>();
 
-  /** Per-family in-flight order counter (B2.2). */
-  private readonly familyInFlight = new Map<string, number>();
-  /** Probe-like entry orders in-flight per token to avoid duplicate probes on one market. */
-  private readonly tokenProbeInFlight = new Map<string, number>();
-  /** Probe-like commands awaiting placement/rejection resolution. */
-  private readonly pendingProbeCommands = new Map<string, string>();
+  /** Per-token in-flight buy order counter (generalized, all buy-side commands). */
+  private readonly tokenInFlight = new Map<string, number>();
   /** Latest known exchange minimum share size per token from live market updates. */
   private readonly tokenMinOrderSize = new Map<string, number>();
 
@@ -98,12 +95,9 @@ export class RiskInventoryModule implements RuntimeModule {
   constructor(private readonly deps: RiskInventoryModuleDeps) {
     this.log = deps.log.child({ module: "risk-inventory" });
     this.riskGate = new AlgoRiskGateImpl(
-      deps.familyStateRepo,
       deps.orderRepo,
       this.log,
-      deps.liveLiteGuard,
       (tid) => this.getLatestMinOrderSize(tid),
-      (fid) => this.getInFlightCount(fid),
       (tid) => this.getTokenInFlightCount(tid),
     );
     this.inventory = new InventoryHandler(
@@ -130,18 +124,12 @@ export class RiskInventoryModule implements RuntimeModule {
         this.incrementInFlight(p.command);
         return Promise.resolve();
       }),
-      this.deps.bus.subscribe("OrderPlaced", (p) => {
-        this.pendingProbeCommands.delete(String(p.commandId));
-        return Promise.resolve();
-      }),
       this.deps.bus.subscribe("OrderRejected", (p) => {
-        this.decrementInFlight(p.familyId);
-        this.decrementProbeInFlightForRejectedCommand(p.commandId, p.clientOrderId);
+        this.decrementTokenInFlight(String(p.tokenId));
         return Promise.resolve();
       }),
       this.deps.bus.subscribe("OrderCancelled", (p) => {
-        this.decrementInFlight(p.familyId);
-        this.decrementProbeInFlightForCancelledOrder(p.orderId);
+        this.decrementTokenInFlight(String(p.tokenId));
         return Promise.resolve();
       }),
     );
@@ -203,26 +191,17 @@ export class RiskInventoryModule implements RuntimeModule {
   // ─── In-flight counter helpers (B2.2) ────────────────────────────
 
   private incrementInFlight(command: RuntimeEventMap["PlaceOrderRequested"]["command"]): void {
-    const fid = String(command.familyId);
-    this.familyInFlight.set(fid, (this.familyInFlight.get(fid) ?? 0) + 1);
-    if (this.isProbeLikeSignalReason(command.signalReason)) {
-      const tokenKey = String(command.tokenId);
-      this.tokenProbeInFlight.set(tokenKey, (this.tokenProbeInFlight.get(tokenKey) ?? 0) + 1);
-      this.pendingProbeCommands.set(String(command.commandId), tokenKey);
-    }
+    if (command.side !== "buy") return;
+    const key = String(command.tokenId);
+    this.tokenInFlight.set(key, (this.tokenInFlight.get(key) ?? 0) + 1);
   }
 
-  private decrementInFlight(familyId: FamilyId): void {
-    const fid = String(familyId);
-    this.familyInFlight.set(fid, Math.max(0, (this.familyInFlight.get(fid) ?? 0) - 1));
+  private decrementTokenInFlight(tokenId: string): void {
+    this.tokenInFlight.set(tokenId, Math.max(0, (this.tokenInFlight.get(tokenId) ?? 0) - 1));
   }
 
-  private getInFlightCount(familyId: FamilyId): number {
-    return this.familyInFlight.get(String(familyId)) ?? 0;
-  }
-
-  private getTokenInFlightCount(tokenId: RuntimeEventMap["FillReceived"]["tokenId"]): number {
-    return this.tokenProbeInFlight.get(String(tokenId)) ?? 0;
+  private getTokenInFlightCount(tokenId: TokenId): number {
+    return this.tokenInFlight.get(String(tokenId)) ?? 0;
   }
 
   private getLatestMinOrderSize(
@@ -231,60 +210,24 @@ export class RiskInventoryModule implements RuntimeModule {
     return this.tokenMinOrderSize.get(String(tokenId)) ?? null;
   }
 
-  private isProbeLikeSignalReason(signalReason: string | null): boolean {
-    return signalReason === "probe-entry" || signalReason === "spray-entry";
-  }
-
-  private decrementTokenProbeInFlight(tokenKey: string | null): void {
-    if (!tokenKey) return;
-    this.tokenProbeInFlight.set(
-      tokenKey,
-      Math.max(0, (this.tokenProbeInFlight.get(tokenKey) ?? 0) - 1),
-    );
-  }
-
-  private decrementProbeInFlightForRejectedCommand(
-    commandId: RuntimeEventMap["OrderRejected"]["commandId"],
-    clientOrderId: RuntimeEventMap["OrderRejected"]["clientOrderId"],
-  ): void {
-    const commandKey = String(commandId);
-    const tokenKey = this.pendingProbeCommands.get(commandKey);
-    if (tokenKey) {
-      this.pendingProbeCommands.delete(commandKey);
-      this.decrementTokenProbeInFlight(tokenKey);
-      return;
-    }
-    const order = this.deps.orderRepo.findByClientOrderId(clientOrderId);
-    if (order && this.isProbeLikeSignalReason(order.signalReason)) {
-      this.decrementTokenProbeInFlight(String(order.tokenId));
-    }
-  }
-
-  private decrementProbeInFlightForCancelledOrder(
-    orderId: RuntimeEventMap["OrderCancelled"]["orderId"],
-  ): void {
-    const order = this.deps.orderRepo.findById(orderId);
-    if (order && this.isProbeLikeSignalReason(order.signalReason)) {
-      this.decrementTokenProbeInFlight(String(order.tokenId));
-    }
-  }
-
   // ─── Signal evaluation ────────────────────────────────────────────
 
   private async handleSignal(payload: RuntimeEventMap["SignalProduced"]): Promise<void> {
     const { signal } = payload;
     this.signalsProcessed++;
 
-    const diag = this.getFamilyDiag(signal.familyId);
-    diag.lastSignalReason = signal.reason;
-    diag.lastSignalAt = signal.generatedAt;
+    const diag = signal.familyId ? this.getFamilyDiag(signal.familyId) : null;
+    if (diag) {
+      diag.lastSignalReason = signal.reason;
+      diag.lastSignalAt = signal.generatedAt;
+    }
 
     try {
       const decision = await this.riskGate.evaluate(signal);
 
       if (decision.approved) {
         this.signalsApprovedCount++;
-        diag.signalsApproved++;
+        if (diag) diag.signalsApproved++;
         this.log.info(
           { signalId: signal.signalId, checks: decision.checksPassed },
           "signal approved",
@@ -295,8 +238,10 @@ export class RiskInventoryModule implements RuntimeModule {
         });
       } else {
         this.signalsRejectedCount++;
-        diag.signalsRejected++;
-        diag.lastRejectionReason = decision.rejectionReasons.join("; ");
+        if (diag) {
+          diag.signalsRejected++;
+          diag.lastRejectionReason = decision.rejectionReasons.join("; ");
+        }
         this.log.info(
           { signalId: signal.signalId, reasons: decision.rejectionReasons },
           "signal rejected",
@@ -309,8 +254,10 @@ export class RiskInventoryModule implements RuntimeModule {
       }
     } catch (err) {
       this.signalsRejectedCount++;
-      diag.signalsRejected++;
-      diag.lastRejectionReason = "internal error during risk evaluation";
+      if (diag) {
+        diag.signalsRejected++;
+        diag.lastRejectionReason = "internal error during risk evaluation";
+      }
       this.log.error({ err, signalId: signal.signalId }, "signal evaluation failed");
       await this.deps.bus.publish("SignalRejected", {
         signal,
@@ -329,6 +276,7 @@ export class RiskInventoryModule implements RuntimeModule {
       const position = this.inventory.applyFill({
         fillId: payload.fillId,
         tokenId: payload.tokenId,
+        conditionId: payload.conditionId,
         familyId: payload.familyId,
         side: payload.side,
         price: payload.price,
@@ -343,25 +291,24 @@ export class RiskInventoryModule implements RuntimeModule {
 
       await this.deps.bus.publish("PositionUpdated", { position });
 
-      // Recompute family exposure
-      const familyState = this.exposure.recompute(payload.familyId, payload.side === "buy");
+      // Recompute family exposure only when familyId is known
+      if (payload.familyId) {
+        const familyState = this.exposure.recompute(payload.familyId, payload.side === "buy");
 
-      await this.deps.bus.publish("FamilyExposureChanged", {
-        familyId: payload.familyId,
-        totalExposureUsdc: familyState.openValueUsdc,
-        openPositionCount: familyState.openPositionCount,
-        familyState,
-        timestamp: Date.now(),
-      });
+        await this.deps.bus.publish("FamilyExposureChanged", {
+          familyId: payload.familyId,
+          totalExposureUsdc: familyState.openValueUsdc,
+          openPositionCount: familyState.openPositionCount,
+          familyState,
+          timestamp: Date.now(),
+        });
+      }
 
       const oid = String(payload.orderId);
       const order = this.deps.orderRepo.findById(payload.orderId);
       if (order && order.status === "filled" && !this.inFlightDecremented.has(oid)) {
         this.inFlightDecremented.add(oid);
-        this.decrementInFlight(payload.familyId);
-        if (this.isProbeLikeSignalReason(order.signalReason)) {
-          this.decrementTokenProbeInFlight(String(payload.tokenId));
-        }
+        this.decrementTokenInFlight(String(payload.tokenId));
       }
     } catch (err) {
       this.log.error(
