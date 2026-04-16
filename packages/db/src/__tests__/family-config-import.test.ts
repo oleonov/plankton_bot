@@ -23,19 +23,27 @@ describe("family-config-import", () => {
     db.close();
   });
 
-  it("applyFamilyConfigImport throws (disabled — dropped tables)", () => {
+  it("applyFamilyConfigImport dry-run returns empty result for empty families list", () => {
     const db = new Database(":memory:");
-    expect(() =>
-      applyFamilyConfigImport(
-        db,
-        {},
-        {
-          dryRun: false,
-          sourceChecksum: "abc",
-          importedBy: "test",
-        },
-      ),
-    ).toThrow("disabled");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS family_catalog (family_id TEXT PRIMARY KEY, family_key TEXT);
+      CREATE TABLE IF NOT EXISTS family_rules (family_id TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS family_config_meta (family_id TEXT PRIMARY KEY, last_operator_edit_at TEXT, last_imported_at TEXT);
+    `);
+    const result = applyFamilyConfigImport(
+      db,
+      { families: [], defaults: { entry: null } },
+      {
+        dryRun: true,
+        sourceChecksum: "abc",
+        importedBy: "test",
+      },
+    );
+    expect(result.added).toEqual([]);
+    expect(result.updated).toEqual([]);
+    expect(result.skipped).toEqual([]);
+    expect(result.conflicts).toEqual([]);
+    expect(result.unchanged).toEqual([]);
     db.close();
   });
 });

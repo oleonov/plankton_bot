@@ -77,6 +77,7 @@ import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
 import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
 import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
+import { LegStateTrackerModule } from "./modules/leg-state/leg-state-tracker-module.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
 import { UserOrderStreamModule } from "./modules/reconciliation/user-order-stream-module.js";
@@ -714,6 +715,14 @@ async function main(): Promise<void> {
         onUsageObserved: handleCandidateBookUsageObserved,
       })
     : undefined;
+  // 7h1. Leg state tracker — maintains leg_states from fills/positions/settlements.
+  // Must start before AlgoDecisionModule so leg states are populated when decisions run.
+  const legStateTrackerModule = new LegStateTrackerModule({
+    bus,
+    legStateRepo: repos.legState,
+    log,
+  });
+
   // 7h2. Algo decision module (replaces legacy StrategyModule in the pipeline)
   const selectedMarketCache = new MarketSelectionCache(bus);
   selectedMarketCache.subscribe();
@@ -965,6 +974,7 @@ async function main(): Promise<void> {
           ],
         ]
       : []),
+    ["leg-state-tracker", legStateTrackerModule],
     ["algo-decision", algoDecisionModule],
     ...(hotMarketDataModule
       ? [
