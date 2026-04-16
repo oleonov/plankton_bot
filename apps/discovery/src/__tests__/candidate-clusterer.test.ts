@@ -83,6 +83,21 @@ describe("inferRegime", () => {
     expect(inferRegime(["us-strike-iran"], ["Will US strike Iran?"])).toBe("geopolitics");
   });
 
+  it("detects social-activity from tweets/posts keywords", () => {
+    expect(
+      inferRegime(["elon-musk-of-tweets"], ["How many tweets will Elon Musk post this week?"]),
+    ).toBe("social-activity");
+    expect(inferRegime(["post-count-weekly"], ["Post count?"])).toBe("social-activity");
+  });
+
+  it("prefers social-activity over threshold when both keywords appear", () => {
+    // "above" (threshold) and "tweets" (social-activity) both match; social
+    // must win because it's listed first for markets like "tweets-above-100".
+    expect(inferRegime(["tweets-above-100"], ["Will tweets be above 100?"])).toBe(
+      "social-activity",
+    );
+  });
+
   it("defaults to generic", () => {
     expect(inferRegime(["random-event"], ["Some random question"])).toBe("generic");
   });
@@ -115,6 +130,18 @@ describe("inferHorizon", () => {
     const dates = ["2026-03-01T00:00:00Z", "2026-04-15T00:00:00Z"];
     expect(inferHorizon(dates)).toBe("ad-hoc");
   });
+
+  it("returns weekly-window when spread is within 8 days", () => {
+    const base = new Date("2026-03-28T12:00:00Z").getTime();
+    const dates = [new Date(base).toISOString(), new Date(base + 7 * 24 * 3600000).toISOString()];
+    expect(inferHorizon(dates)).toBe("weekly-window");
+  });
+
+  it("returns deadline for spread between 8 and 14 days", () => {
+    const base = new Date("2026-03-28T12:00:00Z").getTime();
+    const dates = [new Date(base).toISOString(), new Date(base + 13 * 24 * 3600000).toISOString()];
+    expect(inferHorizon(dates)).toBe("deadline");
+  });
 });
 
 // ─── inferCadence ───────────────────────────────────────────────────────────
@@ -130,6 +157,10 @@ describe("inferCadence", () => {
 
   it("maps deadline horizon to deadline cadence", () => {
     expect(inferCadence([], "deadline")).toBe("deadline");
+  });
+
+  it("maps weekly-window horizon to weekly-window cadence", () => {
+    expect(inferCadence([], "weekly-window")).toBe("weekly-window");
   });
 
   it("defaults to ad-hoc", () => {

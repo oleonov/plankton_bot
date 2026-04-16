@@ -67,12 +67,19 @@ export function normalizeSlug(slug: string): string {
 
 // ─── Regime inference ───────────────────────────────────────────────────────
 
+// Order matters — first match wins. Put more specific patterns before broader
+// ones. Regimes must line up with the taxonomy used in config/family_rules.yaml
+// so candidate families can actually be deployed:
+// directional-updown, threshold, social-activity, succession, geopolitics,
+// price-range, generic. "weather-range" is kept as a forward-looking inference
+// that may be wired into config later.
 const REGIME_RULES: Array<{ keywords: string[]; regime: string }> = [
   { keywords: ["up-or-down", "updown"], regime: "directional-updown" },
-  { keywords: ["above", "below", "hit", "reach"], regime: "threshold" },
-  { keywords: ["temperature", "weather", "rain"], regime: "weather-range" },
+  { keywords: ["tweets", "tweet", "posts", "post-count"], regime: "social-activity" },
   { keywords: ["successor", "supreme-leader", "naming"], regime: "succession" },
   { keywords: ["strike", "attack", "missile"], regime: "geopolitics" },
+  { keywords: ["temperature", "weather", "rain"], regime: "weather-range" },
+  { keywords: ["above", "below", "hit", "reach"], regime: "threshold" },
   { keywords: ["price", "value", "between"], regime: "price-range" },
 ];
 
@@ -104,7 +111,8 @@ export function inferHorizon(endDates: (string | null)[]): string {
   const spreadHours = (max - min) / MS_PER_HOUR;
 
   if (spreadHours <= 8) return "intraday-4h";
-  if (spreadHours <= 72) return "daily";
+  if (spreadHours <= 72) return "daily"; // 3 days
+  if (spreadHours <= 192) return "weekly-window"; // up to 8 days (weekly recurring)
   if (spreadHours <= 336) return "deadline"; // 14 days
   return "ad-hoc";
 }
@@ -114,6 +122,7 @@ export function inferHorizon(endDates: (string | null)[]): string {
 export function inferCadence(endDates: (string | null)[], horizon: string): string {
   if (horizon === "intraday-4h") return "intraday-4h";
   if (horizon === "daily") return "daily-dated";
+  if (horizon === "weekly-window") return "weekly-window";
   if (horizon === "deadline") return "deadline";
   return "ad-hoc";
 }
