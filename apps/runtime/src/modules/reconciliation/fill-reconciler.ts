@@ -16,6 +16,7 @@ import type {
   Fill,
   FillId,
   FamilyId,
+  ConditionId,
   ExchangeFill,
   OrderId,
   ClientOrderId,
@@ -71,12 +72,13 @@ export function findLocalOrderForExchangeFill(
 
 export function buildLocalFillFromExchangeFill(
   fill: ExchangeFill,
-  localOrder: Pick<Order, "orderId" | "familyId" | "signalReason">,
+  localOrder: Pick<Order, "orderId" | "conditionId" | "familyId" | "signalReason">,
   primaryCategory?: string,
 ): {
   fill: Fill;
   fillId: FillId;
   orderId: OrderId;
+  conditionId: ConditionId;
   sizeUsdc: number;
   familyId: FamilyId;
   signalReason: string | null;
@@ -98,6 +100,7 @@ export function buildLocalFillFromExchangeFill(
       fillId,
       orderId: localOrder.orderId,
       tokenId: fill.tokenId,
+      conditionId: localOrder.conditionId,
       familyId: localOrder.familyId,
       side: fill.side,
       price: fill.price,
@@ -110,6 +113,7 @@ export function buildLocalFillFromExchangeFill(
     },
     fillId,
     orderId: localOrder.orderId,
+    conditionId: localOrder.conditionId,
     sizeUsdc,
     familyId: localOrder.familyId,
     signalReason: localOrder.signalReason ?? null,
@@ -157,6 +161,7 @@ export async function importExchangeFills(
     ef: ExchangeFill;
     fillId: FillId;
     orderId: OrderId;
+    conditionId: ConditionId;
     sizeUsdc: number;
     familyId: FamilyId;
     signalReason: string | null;
@@ -195,6 +200,7 @@ export async function importExchangeFills(
       ef,
       fillId: resolved.fillId,
       orderId: resolved.orderId,
+      conditionId: localOrder.conditionId,
       sizeUsdc: resolved.sizeUsdc,
       familyId: resolved.familyId,
       signalReason: resolved.signalReason,
@@ -211,11 +217,11 @@ export async function importExchangeFills(
   }
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
-  for (const { ef, fillId, orderId, sizeUsdc, familyId, signalReason } of savedFills) {
+  for (const { ef, fillId, orderId, conditionId, sizeUsdc, familyId, signalReason } of savedFills) {
     const rule = rulesProvider.getRule(familyId);
     const resolved = buildLocalFillFromExchangeFill(
       ef,
-      { orderId, familyId, signalReason },
+      { orderId, conditionId, familyId, signalReason },
       rule?.identity.primaryCategory,
     );
 
@@ -224,6 +230,7 @@ export async function importExchangeFills(
       orderId,
       clientOrderId: ef.clientOrderId as ClientOrderId,
       tokenId: ef.tokenId,
+      conditionId,
       side: ef.side,
       price: ef.price,
       size: ef.size,

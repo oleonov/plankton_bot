@@ -179,10 +179,10 @@ function createMockPositionRepo(positions: Position[]): PositionRepository {
   };
 }
 
-function createMockMarketRepo(active = true): MarketRepository {
+function createMockMarketRepo(active = true, conditionId = "cond-test"): MarketRepository {
   return {
     save: vi.fn(),
-    findByTokenId: vi.fn().mockReturnValue({ active }),
+    findByTokenId: vi.fn().mockReturnValue({ active, conditionId }),
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),

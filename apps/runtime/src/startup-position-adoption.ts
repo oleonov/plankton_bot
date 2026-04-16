@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import type {
   BotRunId,
+  ConditionId,
   ExchangeFill,
   ExchangeGateway,
   FamilyRulesProvider,
@@ -50,7 +51,6 @@ export interface StartupPositionAdoptionResult {
   cleanedSyntheticTokens: number;
   skippedInvalidTimestamp: number;
   skippedNoMarket: number;
-  skippedNoFamily: number;
   skippedInventoryDrift: number;
   details: string[];
 }
@@ -66,6 +66,7 @@ interface SyntheticOrderSeed {
   exchangeOrderId: string | null;
   clientOrderId: ClientOrderId;
   tokenId: Order["tokenId"];
+  conditionId: ConditionId;
   familyId: Order["familyId"];
   side: Order["side"];
   size: number;
@@ -110,7 +111,6 @@ export async function runStartupPositionAdoption(
     cleanedSyntheticTokens: 0,
     skippedInvalidTimestamp: 0,
     skippedNoMarket: 0,
-    skippedNoFamily: 0,
     skippedInventoryDrift: 0,
     details: [],
   };
@@ -170,16 +170,6 @@ export async function runStartupPositionAdoption(
       continue;
     }
 
-    if (!market.familyId) {
-      result.skippedNoFamily++;
-      result.details.push(`fill ${fill.fillId} skipped — token ${fill.tokenId} has no family`);
-      log.warn(
-        { fillId: fill.fillId, tokenId: fill.tokenId },
-        "startup adoption skipped — market has no family",
-      );
-      continue;
-    }
-
     const orphanGroupKey = buildOrphanGroupKey(fill);
     const existing = syntheticSeeds.get(orphanGroupKey);
     const sizeUsdc = fill.size * fill.price;
@@ -199,6 +189,7 @@ export async function runStartupPositionAdoption(
         exchangeOrderId: resolveSyntheticExchangeOrderId(fill),
         clientOrderId: resolveSyntheticClientOrderId(fill, orphanGroupKey),
         tokenId: fill.tokenId,
+        conditionId: market.conditionId as ConditionId,
         familyId: market.familyId,
         side: fill.side,
         size: fill.size,
@@ -245,6 +236,7 @@ export async function runStartupPositionAdoption(
       inventory.applyFill({
         fillId: savedFill.fillId,
         tokenId: pending.fill.tokenId,
+        conditionId: savedFill.conditionId,
         familyId: localOrder.familyId,
         side: pending.fill.side,
         price: pending.fill.price,
@@ -256,7 +248,9 @@ export async function runStartupPositionAdoption(
       });
       deps.fillRepo.markReconciled([savedFill.fillId]);
 
-      familiesToRecompute.add(String(localOrder.familyId));
+      if (localOrder.familyId) {
+        familiesToRecompute.add(String(localOrder.familyId));
+      }
       result.appliedFills++;
       if (!pending.localOrder) {
         result.adoptedOrphanFills++;
@@ -466,6 +460,7 @@ function resolveSyntheticOrder(
     orderId: createOrderId(seed.orderId),
     clientOrderId: seed.clientOrderId,
     tokenId: seed.tokenId,
+    conditionId: seed.conditionId,
     familyId: seed.familyId,
     side: seed.side,
     orderType: "GTC",

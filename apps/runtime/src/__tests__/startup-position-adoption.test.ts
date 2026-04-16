@@ -10,6 +10,7 @@ import {
 } from "@plankton/db";
 import {
   createBotRunId,
+  createConditionId,
   createFamilyId,
   createFillId,
   createLotId,
@@ -302,6 +303,7 @@ describe("runStartupPositionAdoption", () => {
       orderId: createOrderId("bad-order"),
       clientOrderId: "adopt-bad" as ClientOrderId,
       tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       familyId: FAMILY_ID,
       side: "buy",
       orderType: "GTC",
@@ -321,6 +323,7 @@ describe("runStartupPositionAdoption", () => {
       fillId: createFillId("bad-fill"),
       orderId: createOrderId("bad-order"),
       tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       familyId: FAMILY_ID,
       side: "buy",
       price: 0.9,
@@ -334,6 +337,7 @@ describe("runStartupPositionAdoption", () => {
     positionRepo.save({
       positionId: createPositionId("bad-position"),
       tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       familyId: FAMILY_ID,
       side: "buy",
       size: 334.37188,

@@ -85,10 +85,20 @@ export class StalePruningModule implements RuntimeModule {
         });
 
         for (const pos of stale) {
+          const market = this.deps.marketRepo.findByTokenId(pos.tokenId);
+          if (!market?.conditionId) {
+            this.deps.log.warn(
+              { tokenId: pos.tokenId, positionId: pos.positionId },
+              "stale-prune skipped — no conditionId from market",
+            );
+            continue;
+          }
+
           const signal: Signal = {
             signalId: nextPruneSignalId(),
             familyId: pos.familyId,
             tokenId: pos.tokenId,
+            conditionId: market.conditionId,
             side: "sell",
             suggestedPrice: pos.avgEntryPrice,
             suggestedSize: pos.size,
