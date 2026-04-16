@@ -9,7 +9,12 @@ import type {
   TokenId,
   PositionId,
 } from "@plankton/domain";
-import { createFamilyId, createTokenId, createPositionId } from "@plankton/domain";
+import {
+  createFamilyId,
+  createTokenId,
+  createPositionId,
+  createConditionId,
+} from "@plankton/domain";
 import { migrateOrphanedPositions } from "../universe-migration.js";
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -43,6 +48,7 @@ function makePosition(overrides?: Partial<Position>): Position {
   return {
     positionId: createPositionId("pos-1"),
     tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
     familyId: createFamilyId("fam-btc"),
     side: "buy",
     size: 100,

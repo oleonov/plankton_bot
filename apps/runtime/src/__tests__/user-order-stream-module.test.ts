@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@plankton/event-bus";
-import { createFamilyId, createOrderId, createTokenId } from "@plankton/domain";
+import { createFamilyId, createOrderId, createTokenId, createConditionId } from "@plankton/domain";
 import type {
   ExchangeBalance,
   ExchangeFill,
@@ -102,6 +102,7 @@ function createMockOrderRepo() {
     clientOrderId: "cloid-1" as any,
     familyId: createFamilyId("fam-1"),
     tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
     side: "buy" as const,
     orderType: "GTC" as const,
     price: 0.5,
@@ -290,6 +291,7 @@ describe("UserOrderStreamModule", () => {
       clientOrderId: order.clientOrderId,
       orderId: order.orderId,
       tokenId: order.tokenId,
+      conditionId: order.conditionId,
       side: order.side,
       price: order.price,
       size: order.size,
@@ -414,6 +416,8 @@ describe("UserOrderStreamModule", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-2" as any,
       orderId: order.orderId,
+      tokenId: order.tokenId,
+      conditionId: order.conditionId,
       reason: "cancelled",
       familyId: order.familyId,
       signalReason: order.signalReason,

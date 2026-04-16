@@ -144,7 +144,9 @@ export class ResolutionModule implements RuntimeModule {
       // FamilyExposureChanged is an OUTPUT event — not a trigger.
       // We call the calculator directly.
       const affectedFamilies = new Set<FamilyId>(
-        resolutions.flatMap((r) => r.candidates.map((c) => c.familyId)),
+        resolutions
+          .flatMap((r) => r.candidates.map((c) => c.familyId))
+          .filter((f): f is FamilyId => f != null),
       );
       for (const familyId of affectedFamilies) {
         const updated = this.deps.exposureCalculator.recompute(familyId, false);
@@ -244,6 +246,7 @@ export class ResolutionModule implements RuntimeModule {
       }
 
       let eligibleCandidates = resolution.candidates.filter((c) => {
+        if (!c.familyId) return true;
         const bundle = this.deps.rulesProvider.getRule(c.familyId);
         if (!bundle) return true;
         return bundle.rules.tailSuppression.autoSettleResolvedMarkets;
@@ -264,6 +267,7 @@ export class ResolutionModule implements RuntimeModule {
 
         if (!isRetry) {
           const shouldRedeem = resolution.candidates.some((c) => {
+            if (!c.familyId) return true;
             const bundle = this.deps.rulesProvider.getRule(c.familyId);
             return !bundle || bundle.rules.tailSuppression.autoSettleResolvedMarkets;
           });
@@ -527,7 +531,7 @@ export class ResolutionModule implements RuntimeModule {
               updatedAt: new Date().toISOString(),
             });
 
-            affectedFamilies.add(pos.familyId);
+            if (pos.familyId) affectedFamilies.add(pos.familyId);
 
             this.deps.log.info(
               {

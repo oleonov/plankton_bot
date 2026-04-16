@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createFamilyId, createTokenId, createPositionId } from "@plankton/domain";
+import {
+  createFamilyId,
+  createTokenId,
+  createPositionId,
+  createConditionId,
+} from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import type {
   FamilyRulesProvider,
@@ -23,6 +28,7 @@ function makePosition(overrides?: Partial<Position>): Position {
   return {
     positionId: createPositionId("pos-1"),
     tokenId: TOK_ID,
+    conditionId: createConditionId("cond-1"),
     familyId: FAM_ID,
     side: "buy",
     size: 100,

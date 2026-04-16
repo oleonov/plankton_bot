@@ -25,7 +25,7 @@ export class RiskEventWriter {
   ) {}
 
   onSignalRejected(
-    signal: { signalId: string; familyId: FamilyId; tokenId: string },
+    signal: { signalId: string; familyId: FamilyId | null; tokenId: string },
     reason: string,
     rejectedAt: number,
   ): void {

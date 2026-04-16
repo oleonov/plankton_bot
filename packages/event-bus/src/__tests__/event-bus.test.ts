@@ -1,13 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { InProcessEventBus } from "../event-bus.js";
 import type { Signal, Position, FamilyState } from "@plankton/domain";
-import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
+import {
+  createTokenId,
+  createFamilyId,
+  createPositionId,
+  createConditionId,
+} from "@plankton/domain";
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
     signalId: "sig-1",
     familyId: createFamilyId("fam-1"),
     tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
     side: "buy",
     suggestedPrice: 0.55,
     suggestedSize: 100,
@@ -25,6 +31,7 @@ function makePosition(overrides?: Partial<Position>): Position {
   return {
     positionId: createPositionId("pos-1"),
     tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
     familyId: createFamilyId("fam-1"),
     side: "buy",
     size: 100,

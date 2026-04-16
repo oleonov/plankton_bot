@@ -118,7 +118,7 @@ export interface RuntimeEventMap {
   };
 
   CooldownBypassApplied: {
-    readonly familyId: FamilyId;
+    readonly familyId: FamilyId | null;
     readonly tokenId: TokenId;
     readonly reason:
       | "price-moved"
@@ -326,7 +326,7 @@ export interface RuntimeEventMap {
   PositionSettled: {
     readonly positionId: PositionId;
     readonly tokenId: TokenId;
-    readonly familyId: FamilyId;
+    readonly familyId: FamilyId | null;
     readonly resolution: string;
     readonly settlementPrice: number;
     readonly realizedPnl: number;

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createFamilyId, createOrderId } from "@plankton/domain";
+import { createTokenId, createFamilyId, createOrderId, createConditionId } from "@plankton/domain";
 import type {
   ExchangeGateway,
   ExchangeOrder,
@@ -129,6 +129,7 @@ function makeLocalOrder(overrides?: Partial<Order>): Order {
     orderId: createOrderId("ord-1"),
     clientOrderId: "plk_abc" as ClientOrderId,
     tokenId: TOK,
+    conditionId: createConditionId("cond-1"),
     familyId: FAM,
     side: "buy",
     orderType: "GTC",

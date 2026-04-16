@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   createBotRunId,
+  createConditionId,
   createFamilyId,
   createOrderId,
   createPositionId,
@@ -76,6 +77,7 @@ function makePosition(overrides?: Partial<Position>): Position {
   return {
     positionId: createPositionId("pos-1"),
     tokenId: TOK_ID,
+    conditionId: createConditionId("cond-1"),
     familyId: FAM_ID,
     side: "buy",
     size: 100,
@@ -97,6 +99,7 @@ function makeOrder(overrides?: Partial<Order>): Order {
     orderId: createOrderId("ord-1"),
     clientOrderId: "plk_ord_1" as ClientOrderId,
     tokenId: TOK_ID,
+    conditionId: createConditionId("cond-1"),
     familyId: FAM_ID,
     side: "buy",
     orderType: "GTC",
@@ -1690,6 +1693,7 @@ describe("spray → conviction escalation", () => {
     const sprayPos: import("@plankton/domain").Position = {
       positionId: createPositionId("pos-spray"),
       tokenId: TOK_ID,
+      conditionId: createConditionId("cond-1"),
       familyId: FAM_ID,
       side: "buy",
       size: 5,
@@ -1738,6 +1742,7 @@ describe("spray → conviction escalation", () => {
     const probePos: import("@plankton/domain").Position = {
       positionId: createPositionId("pos-probe"),
       tokenId: TOK_ID,
+      conditionId: createConditionId("cond-1"),
       familyId: FAM_ID,
       side: "buy",
       size: 100,
@@ -1784,6 +1789,7 @@ describe("spray → conviction escalation", () => {
     const sprayPos: import("@plankton/domain").Position = {
       positionId: createPositionId("pos-spray2"),
       tokenId: TOK_ID,
+      conditionId: createConditionId("cond-1"),
       familyId: FAM_ID,
       side: "buy",
       size: 100,

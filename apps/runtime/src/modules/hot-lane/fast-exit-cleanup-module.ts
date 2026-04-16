@@ -7,7 +7,6 @@ import type {
   RuntimeEventMap,
   RuntimeModule,
   Signal,
-  ConditionId,
 } from "@plankton/domain";
 import { createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";

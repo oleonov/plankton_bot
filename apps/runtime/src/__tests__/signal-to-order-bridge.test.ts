@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
+  createConditionId,
   createFamilyId,
   createOrderId,
   createTokenId,
@@ -338,6 +339,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-1" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
       familyId: FAMILY_ID,
       signalReason: "probe-entry",
@@ -346,6 +349,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-2" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
       familyId: FAMILY_ID,
       signalReason: "probe-entry",
@@ -354,6 +359,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-3" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
       familyId: FAMILY_ID,
       signalReason: "probe-entry",
@@ -411,6 +418,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-1" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
       familyId: FAMILY_ID,
       signalReason: "probe-entry",
@@ -419,6 +428,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-2" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
       familyId: FAMILY_ID,
       signalReason: "probe-entry",
@@ -427,6 +438,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-3" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
       familyId: FAMILY_ID,
       signalReason: "probe-entry",
@@ -504,6 +517,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-1" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
       familyId: FAMILY_ID,
       signalReason: "spray-entry",
@@ -512,6 +527,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-2" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
       familyId: FAMILY_ID,
       signalReason: "spray-entry",
@@ -520,6 +537,8 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-3" as never,
       orderId: order.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
       familyId: FAMILY_ID,
       signalReason: "spray-entry",

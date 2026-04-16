@@ -11,12 +11,7 @@ import type {
   LegState,
   RuntimeEventMap,
 } from "@plankton/domain";
-import {
-  createTokenId,
-  createFamilyId,
-  createCommandId,
-  createOrderId,
-} from "@plankton/domain";
+import { createTokenId, createFamilyId, createCommandId, createOrderId } from "@plankton/domain";
 import type { ConditionId } from "@plankton/domain";
 import type { Logger } from "../../../logger.js";
 

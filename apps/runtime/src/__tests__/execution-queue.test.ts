@@ -1,6 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { ExecutionQueue } from "../modules/execution/execution-queue.js";
-import { createTokenId, createCommandId, createFamilyId, createConditionId } from "@plankton/domain";
+import {
+  createTokenId,
+  createCommandId,
+  createFamilyId,
+  createConditionId,
+} from "@plankton/domain";
 import type { PlaceOrderCommand, CancelOrderCommand, ClientOrderId } from "@plankton/domain";
 
 const silentLog = {

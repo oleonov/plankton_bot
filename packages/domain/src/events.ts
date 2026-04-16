@@ -7,7 +7,15 @@
  *  - All timestamps are Unix milliseconds (number) unless labelled as ISO string.
  */
 
-import type { TokenId, ConditionId, FamilyId, OrderId, FillId, ClientOrderId, CommandId } from "./ids.js";
+import type {
+  TokenId,
+  ConditionId,
+  FamilyId,
+  OrderId,
+  FillId,
+  ClientOrderId,
+  CommandId,
+} from "./ids.js";
 import type {
   OrderSide,
   OrderType,

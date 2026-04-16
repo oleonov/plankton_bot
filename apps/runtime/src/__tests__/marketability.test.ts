@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   createBotRunId,
+  createConditionId,
   createFamilyId,
   createOrderId,
   createTokenId,
   type ClientOrderId,
+  type ConditionId,
   type FamilyRuleBundle,
   type NormalizedMarket,
   type Order,
@@ -183,6 +185,7 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     signalId: "sig-1",
     familyId: FAM_ID,
     tokenId: TOKEN_ID,
+    conditionId: "cond-1" as ConditionId,
     side: "buy",
     suggestedPrice: 0.04,
     suggestedSize: 100,
@@ -201,6 +204,7 @@ function makeOrder(overrides?: Partial<Order>): Order {
     orderId: createOrderId("order-1"),
     clientOrderId: "client-1" as ClientOrderId,
     tokenId: TOKEN_ID,
+    conditionId: createConditionId("cond-1"),
     familyId: FAM_ID,
     side: "buy",
     orderType: "GTC",

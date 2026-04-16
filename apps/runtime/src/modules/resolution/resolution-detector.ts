@@ -22,7 +22,7 @@ export interface ResolutionCandidate {
   outcome: string;
   endDate: string;
   positionId: PositionId;
-  familyId: FamilyId;
+  familyId: FamilyId | null;
 }
 
 export interface DetectedResolution {

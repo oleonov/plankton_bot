@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createBotRunId,
+  createConditionId,
   createFamilyId,
   createFillId,
   createOrderId,
@@ -21,6 +22,7 @@ function makeOrder(overrides?: Partial<Order>): Order {
     orderId: createOrderId("ord-1"),
     clientOrderId: "plk_ord_1" as ClientOrderId,
     tokenId: TOKEN_ID,
+    conditionId: createConditionId("cond-1"),
     familyId: FAMILY_ID,
     side: "buy",
     orderType: "GTC",
@@ -43,6 +45,7 @@ function makeFill(orderId: string, size: number): Fill {
     fillId: createFillId(`fill-${orderId}-${size}`),
     orderId: createOrderId(orderId),
     tokenId: TOKEN_ID,
+    conditionId: createConditionId("cond-1"),
     familyId: FAMILY_ID,
     side: "buy",
     price: 0.5,
