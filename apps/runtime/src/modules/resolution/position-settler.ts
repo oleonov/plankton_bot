@@ -8,11 +8,19 @@
  */
 
 import type Database from "better-sqlite3";
-import type { PositionRepository, InventoryLotRepository, Position } from "@plankton/domain";
+import type {
+  PositionRepository,
+  InventoryLotRepository,
+  MarketRepository,
+  Position,
+} from "@plankton/domain";
 import type { RuntimeEventMap } from "@plankton/domain";
 import type { DetectedResolution, ResolutionCandidate } from "./resolution-detector.js";
 
 export type SettledPosition = RuntimeEventMap["PositionSettled"];
+
+const ALGO_REDEEM_RESOLUTION = "algo-redeem";
+const ALGO_REDEEM_SETTLEMENT_PRICE = 0;
 
 function normalizeOutcomeLabel(value: string): string {
   return value.trim().toLowerCase();
@@ -21,11 +29,13 @@ function normalizeOutcomeLabel(value: string): string {
 export class PositionSettler {
   private readonly db: Database.Database;
   private readonly settlementInsert: Database.Statement;
+  private readonly settlementInsertOrIgnore: Database.Statement;
 
   constructor(
     private readonly positionRepo: PositionRepository,
     private readonly lotRepo: InventoryLotRepository,
     db: Database.Database,
+    private readonly marketRepo?: MarketRepository,
   ) {
     this.db = db;
     this.settlementInsert = db.prepare(
@@ -34,6 +44,85 @@ export class PositionSettler {
           resolution, settlement_price, size, delta, settled_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    this.settlementInsertOrIgnore = db.prepare(
+      `INSERT OR IGNORE INTO settlement_ledger
+         (settlement_id, condition_id, position_id, token_id, family_id,
+          resolution, settlement_price, size, delta, settled_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+  }
+
+  /**
+   * Settle positions triggered by the algorithm's REDEEM rule.
+   * Unlike market-resolution settlement, the market may not actually be
+   * resolved on-chain — the algo detected conditions (state=S1|S2 + price<0.05 +
+   * hold_duration<=3600) that observationally correspond to near-certain loss.
+   * Settles at price 0, marks resolution as "algo-redeem".
+   *
+   * Idempotent: already-closed positions are skipped; duplicate settlement_ledger
+   * rows are ignored via INSERT OR IGNORE.
+   */
+  settleAlgoRedeem(conditionIds: readonly string[]): SettledPosition[] {
+    if (!this.marketRepo) {
+      throw new Error("settleAlgoRedeem requires marketRepo in constructor deps");
+    }
+    const marketRepo = this.marketRepo;
+    const results: SettledPosition[] = [];
+    const resolvedAt = new Date().toISOString();
+
+    const runSettlement = this.db.transaction(() => {
+      for (const conditionId of conditionIds) {
+        const markets = marketRepo.findByConditionId(conditionId);
+        for (const market of markets) {
+          const position = this.positionRepo.findByTokenId(market.tokenId);
+          if (!position || position.status === "closed") continue;
+
+          const settlementPnl =
+            (ALGO_REDEEM_SETTLEMENT_PRICE - position.avgEntryPrice) * position.size;
+
+          this.lotRepo.settleAll(position.positionId);
+
+          const settlementId = `algo-redeem-${conditionId}-${String(market.tokenId)}`;
+          this.settlementInsertOrIgnore.run(
+            settlementId,
+            conditionId,
+            String(position.positionId),
+            String(market.tokenId),
+            String(position.familyId),
+            ALGO_REDEEM_RESOLUTION,
+            ALGO_REDEEM_SETTLEMENT_PRICE,
+            position.size,
+            settlementPnl,
+            resolvedAt,
+          );
+
+          this.positionRepo.save({
+            ...position,
+            status: "closed",
+            size: 0,
+            realizedPnl: position.realizedPnl + settlementPnl,
+            currentValueUsdc: 0,
+            closedAt: resolvedAt,
+            updatedAt: resolvedAt,
+          });
+
+          results.push({
+            positionId: position.positionId,
+            tokenId: market.tokenId,
+            familyId: position.familyId,
+            resolution: ALGO_REDEEM_RESOLUTION,
+            settlementPrice: ALGO_REDEEM_SETTLEMENT_PRICE,
+            realizedPnl: settlementPnl,
+            size: position.size,
+            avgEntryPrice: position.avgEntryPrice,
+            timestamp: Date.now(),
+          });
+        }
+      }
+    });
+    runSettlement();
+
+    return results;
   }
 
   settle(resolution: DetectedResolution): SettledPosition[] {

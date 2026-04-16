@@ -84,25 +84,7 @@ export class ResolutionModule implements RuntimeModule {
     );
     this.unsubs.push(
       this.deps.bus.subscribe("RedeemRequested", async (payload) => {
-        if (payload.conditionIds.length === 0) return;
-        this.deps.log.info(
-          { conditionIds: payload.conditionIds },
-          "algo-triggered redeem requested",
-        );
-        try {
-          if (this.deps.gateway) {
-            await this.deps.gateway.redeemPositions([...payload.conditionIds]);
-            this.deps.log.info(
-              { conditionIds: payload.conditionIds },
-              "algo-triggered redeem executed",
-            );
-          }
-        } catch (err) {
-          this.deps.log.error(
-            { err, conditionIds: payload.conditionIds },
-            "algo-triggered redeem failed",
-          );
-        }
+        await this.handleAlgoRedeem(payload.conditionIds);
       }),
     );
     // Run once at startup (non-blocking)
@@ -123,6 +105,56 @@ export class ResolutionModule implements RuntimeModule {
       unsub();
     }
     this.unsubs = [];
+  }
+
+  private async handleAlgoRedeem(conditionIds: readonly string[]): Promise<void> {
+    if (conditionIds.length === 0) return;
+    this.deps.log.info({ conditionIds }, "algo-triggered redeem requested");
+
+    if (this.deps.gateway) {
+      try {
+        await this.deps.gateway.redeemPositions([...conditionIds]);
+        this.deps.log.info({ conditionIds }, "algo-triggered on-chain redeem submitted");
+      } catch (err) {
+        this.deps.log.error({ err, conditionIds }, "algo-triggered on-chain redeem failed");
+      }
+    }
+
+    // Cancel any open orders on tokens we're about to settle so they don't
+    // fill after the leg terminates. Mirrors cancelOpenOrders in the normal
+    // resolution path.
+    for (const conditionId of conditionIds) {
+      const markets = this.deps.marketRepo.findByConditionId(conditionId);
+      for (const market of markets) {
+        await this.cancelOpenOrders(market.tokenId);
+      }
+    }
+
+    const settled = this.deps.settler.settleAlgoRedeem(conditionIds);
+    for (const s of settled) {
+      await this.deps.bus.publish("PositionSettled", s);
+    }
+
+    const affectedFamilies = new Set<FamilyId>(
+      settled.map((s) => s.familyId).filter((f): f is FamilyId => f != null),
+    );
+    for (const familyId of affectedFamilies) {
+      const updated = this.deps.exposureCalculator.recompute(familyId, false);
+      await this.deps.bus.publish("FamilyExposureChanged", {
+        familyId,
+        totalExposureUsdc: updated.openValueUsdc,
+        openPositionCount: updated.openPositionCount,
+        familyState: updated,
+        timestamp: Date.now(),
+      });
+    }
+
+    if (settled.length > 0) {
+      this.deps.log.info(
+        { conditionIds, settledCount: settled.length },
+        "algo-triggered redeem settled local positions",
+      );
+    }
   }
 
   getHintMetricsSnapshot(): { readonly resolutionWsHintsConsumed: number } {

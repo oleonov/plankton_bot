@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
-import type { PositionRepository, InventoryLotRepository, Position } from "@plankton/domain";
+import type {
+  PositionRepository,
+  InventoryLotRepository,
+  MarketRepository,
+  Market,
+  Position,
+  TokenId,
+} from "@plankton/domain";
 import type {
   DetectedResolution,
   ResolutionCandidate,
@@ -224,6 +231,111 @@ describe("PositionSettler", () => {
     expect(results[0]!.settlementPrice).toBe(1.0);
     // PnL: (1.0 - 0.4) * 20 = 12
     expect(results[0]!.realizedPnl).toBeCloseTo(12.0, 5);
+  });
+
+  describe("settleAlgoRedeem", () => {
+    function makeMarket(tokenId: TokenId, conditionId: string): Market {
+      return {
+        tokenId,
+        conditionId,
+        slug: "some-market",
+        familyId: FAM,
+        outcome: "YES",
+        tickSize: 0.01,
+        negRisk: false,
+        endDate: "2026-01-01T00:00:00Z",
+        active: true,
+        updatedAt: "2026-01-01T00:00:00Z",
+      } as unknown as Market;
+    }
+
+    function createMockMarketRepo(marketsByCondition: Map<string, Market[]>): MarketRepository {
+      return {
+        findByConditionId: vi.fn((cid: string) => marketsByCondition.get(cid) ?? []),
+        findByTokenId: vi.fn().mockReturnValue(null),
+        findByTokenIds: vi.fn().mockReturnValue([]),
+        findActive: vi.fn().mockReturnValue([]),
+        findByFamily: vi.fn().mockReturnValue([]),
+        findAll: vi.fn().mockReturnValue([]),
+        deactivate: vi.fn(),
+        save: vi.fn(),
+      } as unknown as MarketRepository;
+    }
+
+    it("throws when constructed without marketRepo", () => {
+      const positionRepo = createMockPositionRepo(new Map());
+      const settler = new PositionSettler(positionRepo, lotRepo, db as any);
+      expect(() => settler.settleAlgoRedeem(["c1"])).toThrow(
+        /settleAlgoRedeem requires marketRepo/,
+      );
+    });
+
+    it("closes open position at price 0 and returns SettledPosition", () => {
+      const pos = makePosition({
+        positionId: POS_UP,
+        tokenId: TOK_UP,
+        avgEntryPrice: 0.12,
+        size: 50,
+        realizedPnl: 1.5,
+      });
+      const positionMap = new Map([["tok-up", pos]]);
+      const positionRepo = createMockPositionRepo(positionMap);
+      const marketRepo = createMockMarketRepo(
+        new Map([[CONDITION, [makeMarket(TOK_UP, CONDITION)]]]),
+      );
+      const settler = new PositionSettler(positionRepo, lotRepo, db as any, marketRepo);
+
+      const results = settler.settleAlgoRedeem([CONDITION]);
+
+      expect(results).toHaveLength(1);
+      const [r] = results;
+      expect(r!.settlementPrice).toBe(0);
+      expect(r!.resolution).toBe("algo-redeem");
+      expect(r!.size).toBe(50);
+      // realized PnL = (0 - 0.12) * 50 = -6
+      expect(r!.realizedPnl).toBeCloseTo(-6, 5);
+      expect(r!.tokenId).toBe(TOK_UP);
+
+      expect((positionRepo.save as any).mock.calls.length).toBe(1);
+      const saved = (positionRepo.save as any).mock.calls[0][0] as Position;
+      expect(saved.status).toBe("closed");
+      expect(saved.size).toBe(0);
+      expect(saved.currentValueUsdc).toBe(0);
+      // realized PnL accumulates prior + settlement delta
+      expect(saved.realizedPnl).toBeCloseTo(1.5 + -6, 5);
+      expect((lotRepo.settleAll as any).mock.calls.length).toBe(1);
+    });
+
+    it("skips closed positions idempotently", () => {
+      const closedPos = makePosition({
+        positionId: POS_UP,
+        tokenId: TOK_UP,
+        status: "closed",
+        size: 0,
+      });
+      const positionMap = new Map([["tok-up", closedPos]]);
+      const positionRepo = createMockPositionRepo(positionMap);
+      const marketRepo = createMockMarketRepo(
+        new Map([[CONDITION, [makeMarket(TOK_UP, CONDITION)]]]),
+      );
+      const settler = new PositionSettler(positionRepo, lotRepo, db as any, marketRepo);
+
+      const results = settler.settleAlgoRedeem([CONDITION]);
+
+      expect(results).toHaveLength(0);
+      expect((positionRepo.save as any).mock.calls.length).toBe(0);
+      expect((lotRepo.settleAll as any).mock.calls.length).toBe(0);
+    });
+
+    it("skips conditions with no markets or no open positions", () => {
+      const positionRepo = createMockPositionRepo(new Map());
+      const marketRepo = createMockMarketRepo(new Map());
+      const settler = new PositionSettler(positionRepo, lotRepo, db as any, marketRepo);
+
+      const results = settler.settleAlgoRedeem(["unknown-condition"]);
+
+      expect(results).toHaveLength(0);
+    });
   });
 
   it("matches outcome labels case-insensitively when winnerTokenId is null", () => {

@@ -843,7 +843,12 @@ async function main(): Promise<void> {
     gammaResolutionClient,
     log,
   );
-  const positionSettler = new PositionSettler(repos.position, repos.inventoryLot, ledgerConn.db);
+  const positionSettler = new PositionSettler(
+    repos.position,
+    repos.inventoryLot,
+    ledgerConn.db,
+    repos.market,
+  );
   const resolutionModule = new ResolutionModule({
     detector: resolutionDetector,
     settler: positionSettler,

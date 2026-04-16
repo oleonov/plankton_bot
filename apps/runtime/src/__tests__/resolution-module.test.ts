@@ -84,6 +84,9 @@ function createMockDetector(): ResolutionDetector {
 function createMockSettler(): PositionSettler {
   return {
     settle: vi.fn<(resolution: DetectedResolution) => SettledPosition[]>().mockReturnValue([]),
+    settleAlgoRedeem: vi
+      .fn<(conditionIds: readonly string[]) => SettledPosition[]>()
+      .mockReturnValue([]),
   } as unknown as PositionSettler;
 }
 
@@ -1463,5 +1466,134 @@ describe("ResolutionModule", () => {
       expect.objectContaining({ conditionId: CONDITION }),
       "recovery Gamma lookup failed — skipping",
     );
+  });
+
+  // ─── RedeemRequested (algo-triggered redeem) ─────────────────────────────
+
+  describe("RedeemRequested (algo-triggered)", () => {
+    it("no-ops when conditionIds is empty", async () => {
+      await mod.start();
+      await bus.publish("RedeemRequested", { conditionIds: [], timestamp: Date.now() });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await mod.stop();
+
+      expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+    });
+
+    it("settles local positions and publishes PositionSettled in all modes", async () => {
+      const settledEvents: SettledPosition[] = [];
+      const unsub = bus.subscribe("PositionSettled", async (p) => {
+        settledEvents.push(p);
+      });
+
+      const settled = [makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 })];
+      (settler.settleAlgoRedeem as any).mockReturnValue(settled);
+
+      await mod.start();
+      await bus.publish("RedeemRequested", {
+        conditionIds: [CONDITION],
+        timestamp: Date.now(),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await mod.stop();
+      unsub();
+
+      expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+      expect(settledEvents).toHaveLength(1);
+      expect(settledEvents[0]!.resolution).toBe("algo-redeem");
+      expect(settledEvents[0]!.settlementPrice).toBe(0);
+    });
+
+    it("submits on-chain redeem and still settles locally when gateway is present", async () => {
+      const gateway = createMockGateway();
+      mod = createModule({ gateway });
+
+      const settled = [makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 })];
+      (settler.settleAlgoRedeem as any).mockReturnValue(settled);
+
+      await mod.start();
+      await bus.publish("RedeemRequested", {
+        conditionIds: [CONDITION],
+        timestamp: Date.now(),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await mod.stop();
+
+      expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION]);
+      expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+    });
+
+    it("still settles locally when on-chain redeem throws", async () => {
+      const gateway = createMockGateway();
+      (gateway.redeemPositions as any).mockRejectedValue(new Error("relayer down"));
+      mod = createModule({ gateway });
+
+      const settled = [makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 })];
+      (settler.settleAlgoRedeem as any).mockReturnValue(settled);
+
+      await mod.start();
+      await bus.publish("RedeemRequested", {
+        conditionIds: [CONDITION],
+        timestamp: Date.now(),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await mod.stop();
+
+      expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+      expect(log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ conditionIds: [CONDITION] }),
+        "algo-triggered on-chain redeem failed",
+      );
+    });
+
+    it("recomputes family exposure after settling", async () => {
+      const settled = [
+        makeSettledPosition({ familyId: FAM, resolution: "algo-redeem", settlementPrice: 0 }),
+        makeSettledPosition({ familyId: FAM2, resolution: "algo-redeem", settlementPrice: 0 }),
+      ];
+      (settler.settleAlgoRedeem as any).mockReturnValue(settled);
+
+      await mod.start();
+      await bus.publish("RedeemRequested", {
+        conditionIds: [CONDITION],
+        timestamp: Date.now(),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await mod.stop();
+
+      expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM, false);
+      expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM2, false);
+    });
+
+    it("cancels open orders for tokens belonging to algo-redeemed conditions", async () => {
+      (marketRepo.findByConditionId as any).mockReturnValue([
+        { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", familyId: FAM, outcome: "YES" },
+      ]);
+      const openOrder = {
+        orderId: "ord-1" as any,
+        exchangeOrderId: "exch-1",
+        tokenId: TOK_YES,
+        familyId: FAM,
+        status: "open",
+        side: "buy",
+      };
+      (orderRepo.findByTokenId as any).mockReturnValue([openOrder]);
+
+      const cancels: Array<Record<string, unknown>> = [];
+      const unsub = bus.subscribe("CancelOrderRequested", async (p) => {
+        cancels.push(p as unknown as Record<string, unknown>);
+      });
+
+      await mod.start();
+      await bus.publish("RedeemRequested", {
+        conditionIds: [CONDITION],
+        timestamp: Date.now(),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await mod.stop();
+      unsub();
+
+      expect(cancels).toHaveLength(1);
+    });
   });
 });
