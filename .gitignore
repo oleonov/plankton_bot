@@ -20,6 +20,7 @@ research/data/*.db
 research/data/*.db-wal
 research/data/*.db-shm
 research/data/docs/
+research_plankton/data/
 
 # WAL artifacts anywhere
 *.db-wal
@@ -46,3 +47,4 @@ config/*.bak
 
 # Git worktrees
 .worktrees/
+/.claude/worktrees/*
