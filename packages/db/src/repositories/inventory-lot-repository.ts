@@ -14,7 +14,7 @@ interface LotRow {
   lot_id: string;
   position_id: string;
   token_id: string;
-  family_id: string;
+  family_id: string | null;
   side: string;
   size: number;
   remaining_size: number;
@@ -29,7 +29,7 @@ function rowToLot(row: LotRow): InventoryLot {
     lotId: createLotId(row.lot_id),
     positionId: createPositionId(row.position_id),
     tokenId: createTokenId(row.token_id),
-    familyId: createFamilyId(row.family_id),
+    familyId: row.family_id ? createFamilyId(row.family_id) : null,
     side: row.side as OrderSide,
     size: row.size,
     remainingSize: row.remaining_size,

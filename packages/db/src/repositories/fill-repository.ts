@@ -1,7 +1,13 @@
 import type Database from "better-sqlite3";
 import type { FillRepository, Fill } from "@plankton/domain";
 import type { OrderId, TokenId, FillId, OrderSide, LiquidityRole } from "@plankton/domain";
-import { createFillId, createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
+import {
+  createFillId,
+  createOrderId,
+  createTokenId,
+  createFamilyId,
+  createConditionId,
+} from "@plankton/domain";
 
 export class SqliteFillRepository implements FillRepository {
   private static readonly FIND_BY_ORDER_IDS_CHUNK_SIZE = 500;
@@ -12,15 +18,16 @@ export class SqliteFillRepository implements FillRepository {
     this.db
       .prepare(
         `INSERT INTO fills
-         (fill_id, order_id, token_id, family_id, side, price, size,
+         (fill_id, order_id, token_id, family_id, condition_id, side, price, size,
           size_usdc, liquidity_role, fee, fee_rate_bps, filled_at, reconciled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       )
       .run(
         fill.fillId,
         fill.orderId,
         fill.tokenId,
         fill.familyId,
+        fill.conditionId,
         fill.side,
         fill.price,
         fill.size,
@@ -113,7 +120,8 @@ export class SqliteFillRepository implements FillRepository {
       fillId: createFillId(row.fill_id as string),
       orderId: createOrderId(row.order_id as string),
       tokenId: createTokenId(row.token_id as string),
-      familyId: createFamilyId(row.family_id as string),
+      conditionId: createConditionId(row.condition_id as string),
+      familyId: row.family_id ? createFamilyId(row.family_id as string) : null,
       side: row.side as OrderSide,
       price: row.price as number,
       size: row.size as number,

@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { PositionRepository, Position } from "@plankton/domain";
 import type { TokenId, FamilyId, OrderSide, PositionStatus } from "@plankton/domain";
-import { createPositionId, createTokenId, createFamilyId } from "@plankton/domain";
+import { createPositionId, createTokenId, createFamilyId, createConditionId } from "@plankton/domain";
 
 export class SqlitePositionRepository implements PositionRepository {
   constructor(private readonly db: Database.Database) {}
@@ -10,10 +10,10 @@ export class SqlitePositionRepository implements PositionRepository {
     this.db
       .prepare(
         `INSERT INTO positions
-         (position_id, token_id, family_id, side, size, avg_entry_price,
+         (position_id, token_id, family_id, condition_id, side, size, avg_entry_price,
           cost_basis_usdc, current_value_usdc, realized_pnl, status,
           entry_style, opened_at, closed_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(position_id) DO UPDATE SET
            size = excluded.size,
            avg_entry_price = excluded.avg_entry_price,
@@ -29,6 +29,7 @@ export class SqlitePositionRepository implements PositionRepository {
         position.positionId,
         position.tokenId,
         position.familyId,
+        position.conditionId,
         position.side,
         position.size,
         position.avgEntryPrice,
@@ -93,7 +94,8 @@ export class SqlitePositionRepository implements PositionRepository {
     return {
       positionId: createPositionId(row.position_id as string),
       tokenId: createTokenId(row.token_id as string),
-      familyId: createFamilyId(row.family_id as string),
+      conditionId: createConditionId(row.condition_id as string),
+      familyId: row.family_id ? createFamilyId(row.family_id as string) : null,
       side: row.side as OrderSide,
       size: row.size as number,
       avgEntryPrice: row.avg_entry_price as number,

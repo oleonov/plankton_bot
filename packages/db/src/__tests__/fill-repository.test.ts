@@ -6,7 +6,13 @@ import type Database from "better-sqlite3";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteFillRepository } from "../repositories/fill-repository.js";
-import { createFillId, createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
+import {
+  createFillId,
+  createOrderId,
+  createTokenId,
+  createFamilyId,
+  createConditionId,
+} from "@plankton/domain";
 import type { Fill } from "@plankton/domain";
 
 let conn: DbConnection;
@@ -40,6 +46,7 @@ function makeFill(overrides?: Partial<Fill>): Fill {
     fillId: createFillId("fill-1"),
     orderId: createOrderId("ord-1"),
     tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
     familyId: createFamilyId("fam-1"),
     side: "buy",
     price: 0.55,

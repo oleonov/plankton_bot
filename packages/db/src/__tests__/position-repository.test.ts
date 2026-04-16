@@ -5,7 +5,7 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqlitePositionRepository } from "../repositories/position-repository.js";
-import { createPositionId, createTokenId, createFamilyId } from "@plankton/domain";
+import { createPositionId, createTokenId, createFamilyId, createConditionId } from "@plankton/domain";
 import type { Position } from "@plankton/domain";
 
 let conn: DbConnection;
@@ -17,6 +17,7 @@ function makePosition(overrides?: Partial<Position>): Position {
   return {
     positionId: createPositionId("pos-1"),
     tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
     familyId: createFamilyId("fam-1"),
     side: "buy",
     size: 100,
