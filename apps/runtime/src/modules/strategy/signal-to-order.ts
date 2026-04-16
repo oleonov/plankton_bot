@@ -20,6 +20,7 @@ import type {
   OrderRepository,
   RuntimeEventMap,
   PlaceOrderCommand,
+  TokenId,
 } from "@plankton/domain";
 import { createCommandId, ENTRY_REASONS, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 import { buildClientOrderId } from "@plankton/domain/node";
@@ -166,11 +167,9 @@ export class SignalToOrderBridge {
     }
 
     const clientOrderId = buildClientOrderId({
-      familyId: signal.familyId,
+      signalId: signal.signalId,
       tokenId: signal.tokenId,
       side: signal.side,
-      intentEpochMs: signal.strategyTick,
-      sequenceInTick: signal.sequenceInTick,
     });
 
     const executionTerms = this.resolveExecutionTerms(
@@ -215,6 +214,7 @@ export class SignalToOrderBridge {
       clientOrderId,
       source: signal.reason === "operator" ? "operator" : "strategy",
       tokenId: signal.tokenId,
+      conditionId: signal.conditionId,
       side: signal.side,
       size: resolveOrderSize(signal, executionTerms.price),
       price: executionTerms.price,
@@ -336,46 +336,17 @@ export class SignalToOrderBridge {
   private resolveExecutionTerms(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
-    bundle: FamilyRuleBundle | null | undefined,
+    _bundle: FamilyRuleBundle | null | undefined,
     marketabilityPolicy: MarketabilityPolicy,
     executionMinNotionalUsdc: number | null,
-    queueJumpTerms: QueueJumpExecutionTerms | null,
+    _queueJumpTerms: QueueJumpExecutionTerms | null,
   ): { price: number; postOnly?: boolean } | null {
     if (this.deps.liveLiteGuard?.getWalletMode() !== "relayer") {
       return { price: signal.suggestedPrice };
     }
 
-    if (!bundle) {
-      // No bundle in relayer mode — apply maker-safe pricing with fallback policy
-      const makerOnlyPrice = resolveMakerOnlyPrice({
-        side: signal.side,
-        suggestedPrice: signal.suggestedPrice,
-        suggestedSizeUsdc: signal.suggestedSizeUsdc,
-        signalReason: signal.reason,
-        nowMs: Date.now(),
-        executionMinNotionalUsdc,
-        market,
-        policy: marketabilityPolicy,
-      });
-      if (makerOnlyPrice == null) return null;
-      return { price: makerOnlyPrice, postOnly: true };
-    }
-
-    const policy = resolveFamilyLiveTradingPolicy(bundle.identity);
-    if (queueJumpTerms) {
-      return queueJumpTerms;
-    }
-    if (!policy.requiresPostOnlyForLive) {
-      return { price: signal.suggestedPrice };
-    }
-
-    const makerOnlyPolicy =
-      signal.reason === "spray-entry"
-        ? {
-            ...marketabilityPolicy,
-            allowOneSidedBooks: true,
-          }
-        : marketabilityPolicy;
+    // Algo-path orders use maker-safe pricing with 1-tick improvement for all signals.
+    // Family rules are not consulted — universal policy applies.
     const makerOnlyPrice = resolveMakerOnlyPrice({
       side: signal.side,
       suggestedPrice: signal.suggestedPrice,
@@ -384,12 +355,9 @@ export class SignalToOrderBridge {
       nowMs: Date.now(),
       executionMinNotionalUsdc,
       market,
-      policy: makerOnlyPolicy,
+      policy: marketabilityPolicy,
     });
-    if (makerOnlyPrice == null) {
-      return null;
-    }
-
+    if (makerOnlyPrice == null) return null;
     return { price: makerOnlyPrice, postOnly: true };
   }
 
@@ -508,8 +476,8 @@ export class SignalToOrderBridge {
       market,
     );
     if (bypassReason && previousCooldownUntil != null) {
-      this.cooldownUntilByToken.delete(this.cooldownKey(signal.familyId, signal.tokenId));
-      this.cooldownBaselineByToken.delete(this.cooldownKey(signal.familyId, signal.tokenId));
+      this.cooldownUntilByToken.delete(this.cooldownKey(signal.tokenId));
+      this.cooldownBaselineByToken.delete(this.cooldownKey(signal.tokenId));
       void this.deps.bus.publish("CooldownBypassApplied", {
         familyId: signal.familyId,
         tokenId: signal.tokenId,
@@ -649,7 +617,7 @@ export class SignalToOrderBridge {
 
   private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {
     this.filledOrderIds.add(String(payload.orderId));
-    const key = this.cooldownKey(payload.familyId, payload.tokenId);
+    const key = this.cooldownKey(payload.tokenId);
     this.unfilledCancelCountByToken.delete(key);
     this.cooldownUntilByToken.delete(key);
     this.cooldownBaselineByToken.delete(key);
@@ -673,7 +641,7 @@ export class SignalToOrderBridge {
     }
 
     const policy = resolveMarketabilityPolicyFallback();
-    const key = this.cooldownKey(order.familyId, order.tokenId);
+    const key = this.cooldownKey(order.tokenId);
     const nextCount = (this.unfilledCancelCountByToken.get(key) ?? 0) + 1;
     this.unfilledCancelCountByToken.set(key, nextCount);
 
@@ -697,8 +665,8 @@ export class SignalToOrderBridge {
     );
   }
 
-  private cooldownKey(familyId: unknown, tokenId: unknown): string {
-    return `${String(familyId)}|${String(tokenId)}`;
+  private cooldownKey(tokenId: TokenId): string {
+    return String(tokenId);
   }
 
   private resolveBaselineMarket(tokenId: unknown): NormalizedMarket | null {
@@ -719,7 +687,7 @@ export class SignalToOrderBridge {
     bypassReason: CooldownBypassReason | null;
     previousCooldownUntil: number | null;
   } {
-    const key = this.cooldownKey(signal.familyId, signal.tokenId);
+    const key = this.cooldownKey(signal.tokenId);
     const cooldownUntilMs = this.cooldownUntilByToken.get(key) ?? null;
     if (cooldownUntilMs == null || cooldownUntilMs <= Date.now()) {
       return { cooldownUntilMs: null, bypassReason: null, previousCooldownUntil: null };
