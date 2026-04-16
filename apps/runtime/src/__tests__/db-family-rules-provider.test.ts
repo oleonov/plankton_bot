@@ -284,6 +284,33 @@ describe("DbFamilyRulesProvider", () => {
     expect(refreshed?.evidence?.localTradeCount).toBe(3);
   });
 
+  it("getAllFamilies returns families sorted by priority_rank DESC then family_id ASC", () => {
+    seedTestData(db); // fam-001 has priority_rank = 10
+
+    // Add higher-priority fam-002 and lower-priority fam-003
+    db.exec(`
+      INSERT INTO family_catalog (
+        family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile
+      ) VALUES
+        ('fam-002', 'eth-daily', 'crypto', 'price-range', 'daily', 'daily', 'scalp'),
+        ('fam-003', 'sports-daily', 'sports', 'price-range', 'daily', 'daily', 'scalp');
+
+      INSERT INTO family_rules (family_id, priority_rank, probe_size_usdc, add_size_usdc)
+      VALUES
+        ('fam-002', 99, 5, 4),
+        ('fam-003', 1, 5, 4);
+
+      INSERT INTO family_deployments (family_id, profile, enabled) VALUES
+        ('fam-002', 'paper', 1),
+        ('fam-003', 'paper', 1);
+    `);
+
+    const provider = new DbFamilyRulesProvider(db, "paper");
+    const families = provider.getAllFamilies();
+
+    expect(families.map((f) => String(f.familyId))).toEqual(["fam-002", "fam-001", "fam-003"]);
+  });
+
   it("getRulesForRegime filters by regime", () => {
     seedTestData(db);
 

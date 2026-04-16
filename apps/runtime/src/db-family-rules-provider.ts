@@ -121,8 +121,9 @@ const LOAD_SQL = `
   FROM family_deployments d
   JOIN family_catalog c ON c.family_id = d.family_id
   JOIN family_rules r   ON r.family_id = d.family_id
-	  WHERE d.profile = ? AND d.enabled = 1
-	`;
+  WHERE d.profile = ? AND d.enabled = 1
+  ORDER BY r.priority_rank DESC, c.family_id ASC
+`;
 
 const LOAD_EVIDENCE_SQL = `
   SELECT *
