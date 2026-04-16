@@ -6,6 +6,7 @@ import {
   createCommandId,
   createBotRunId,
   createPositionId,
+  createConditionId,
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -43,6 +44,7 @@ function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand
     clientOrderId: "plk_abc123" as ClientOrderId,
     source: "strategy",
     tokenId: createTokenId("tok-yes"),
+    conditionId: createConditionId("cond-1"),
     side: "buy",
     size: 10,
     price: 0.5,
@@ -135,6 +137,7 @@ function makePosition(overrides?: Partial<Position>): Position {
   return {
     positionId: createPositionId("pos-1"),
     tokenId: createTokenId("tok-yes"),
+    conditionId: createConditionId("cond-1"),
     familyId: createFamilyId("fam-1"),
     side: "buy",
     size: 10,
@@ -517,6 +520,7 @@ describe("ExecutionModule", () => {
       orderId: createOrderId("sim-ord-1"),
       clientOrderId: "plk_abc123" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
       familyId: createFamilyId("fam-1"),
       side: "buy",
       orderType: "GTC",
@@ -588,6 +592,7 @@ describe("ExecutionModule", () => {
       orderId: createOrderId("sim-ord-1"),
       clientOrderId: "plk_abc123" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
       familyId: createFamilyId("fam-1"),
       side: "buy",
       orderType: "GTC",
@@ -660,6 +665,7 @@ describe("ExecutionModule", () => {
       orderId: createOrderId("sim-ord-1"),
       clientOrderId: "plk_abc123" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
       familyId: createFamilyId("fam-1"),
       side: "buy",
       orderType: "GTC",
@@ -832,6 +838,7 @@ describe("ExecutionModule", () => {
       orderId: createOrderId("existing-sell"),
       clientOrderId: "plk_existing_sell" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
       familyId: createFamilyId("fam-1"),
       side: "sell",
       orderType: "GTC",
@@ -900,6 +907,7 @@ describe("ExecutionModule", () => {
       orderId: createOrderId("existing-sell"),
       clientOrderId: "plk_existing_sell" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
       familyId: createFamilyId("fam-1"),
       side: "sell",
       orderType: "GTC",
@@ -967,9 +975,11 @@ describe("ExecutionModule", () => {
     await replaceMod.stop();
   });
 
-  // ─── Live-lite allowlist ──────────────────────────────────────────
+  // ─── Live-lite allowlist (removed) ──────────────────────────────────────────
+  // The per-family allowlist gate was removed from ExecutionModule.
+  // Orders are no longer rejected based on family allowlist membership.
 
-  it("rejects order for non-allowlisted family (live-lite allowlist)", async () => {
+  it("places order for any family (family allowlist gate removed)", async () => {
     const guard = new LiveLiteGuard({
       familyAllowlist: ["fam-allowed"],
       maxFamilies: 10,
@@ -992,19 +1002,13 @@ describe("ExecutionModule", () => {
 
     await guardedMod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => {
-      rejected.push(p);
-    });
-
     await bus.publish("PlaceOrderRequested", {
-      command: makePlaceCmd({ familyId: createFamilyId("fam-bad") }),
+      command: makePlaceCmd({ familyId: createFamilyId("fam-not-in-allowlist") }),
       timestamp: Date.now(),
     });
 
-    expect(gateway.placeOrder).not.toHaveBeenCalled();
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toBe("live-lite-allowlist-rejected");
+    // Family allowlist gate is removed — order reaches the gateway
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
     await guardedMod.stop();
   });
@@ -1050,7 +1054,7 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
-  it("rejects fee-enabled buy orders in live-lite EOA mode before gateway call", async () => {
+  it("places fee-enabled EOA orders to gateway (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
       familyAllowlist: ["fam-1"],
       maxFamilies: 10,
@@ -1080,21 +1084,13 @@ describe("ExecutionModule", () => {
 
     await guardedMod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => {
-      rejected.push(p);
-    });
-
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(),
       timestamp: Date.now(),
     });
 
-    expect(gateway.placeOrder).not.toHaveBeenCalled();
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
-    expect(rejected[0].reason).toContain("live-post-only-required");
-    expect(rejected[0].reason).toContain("live-eoa-fee-enabled-family-rejected");
+    // Family policy gate is removed — order reaches the gateway
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
     await guardedMod.stop();
   });
@@ -1143,7 +1139,7 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
-  it("rejects relayer fee-enabled orders that are missing post-only execution", async () => {
+  it("places relayer fee-enabled orders to gateway without post-only (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
       familyAllowlist: ["fam-1"],
       maxFamilies: 10,
@@ -1173,25 +1169,18 @@ describe("ExecutionModule", () => {
 
     await guardedMod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => {
-      rejected.push(p);
-    });
-
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd(),
       timestamp: Date.now(),
     });
 
-    expect(gateway.placeOrder).not.toHaveBeenCalled();
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
-    expect(rejected[0].reason).toBe("live-post-only-required");
+    // Family policy gate is removed — order reaches the gateway even without post-only
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
     await guardedMod.stop();
   });
 
-  it("rejects live-lite buy orders below min_order_usdc before gateway call", async () => {
+  it("places buy orders below min_order_usdc to gateway (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
       familyAllowlist: ["fam-1"],
       maxFamilies: 10,
@@ -1221,25 +1210,18 @@ describe("ExecutionModule", () => {
 
     await guardedMod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => {
-      rejected.push(p);
-    });
-
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd({ price: 0.5, size: 5 }),
       timestamp: Date.now(),
     });
 
-    expect(gateway.placeOrder).not.toHaveBeenCalled();
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
-    expect(rejected[0].reason).toContain("live-min-order-usdc-rejected");
+    // Family policy gate is removed — order reaches the gateway regardless of min_order_usdc
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
     await guardedMod.stop();
   });
 
-  it("rejects relayer buy entries below the CLOB marketable minimum before gateway call", async () => {
+  it("places relayer buy entries below CLOB marketable minimum to gateway (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
       familyAllowlist: ["fam-1"],
       maxFamilies: 10,
@@ -1269,20 +1251,13 @@ describe("ExecutionModule", () => {
 
     await guardedMod.start();
 
-    const rejected: any[] = [];
-    bus.subscribe("OrderRejected", async (p) => {
-      rejected.push(p);
-    });
-
     await bus.publish("PlaceOrderRequested", {
       command: makePlaceCmd({ price: 0.12, size: 5, signalReason: "spray-entry" }),
       timestamp: Date.now(),
     });
 
-    expect(gateway.placeOrder).not.toHaveBeenCalled();
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
-    expect(rejected[0].reason).toContain("live-min-order-usdc-rejected");
+    // Family policy gate is removed — order reaches the gateway regardless of CLOB minimum check
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
 
     await guardedMod.stop();
   });

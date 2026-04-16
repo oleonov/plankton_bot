@@ -5,6 +5,7 @@ import {
   createFillId,
   createOrderId,
   createPositionId,
+  createConditionId,
   OrderSide,
 } from "@plankton/domain";
 import type { LegStateRepository, TokenId, ClientOrderId, LegState } from "@plankton/domain";
@@ -56,6 +57,7 @@ function makeFillPayload(
     orderId: ORDER_ID,
     clientOrderId: CLIENT_ORDER_ID,
     tokenId: overrides?.tokenId ?? TOK,
+    conditionId: createConditionId("cond-1"),
     side,
     price: overrides?.price ?? 0.45,
     size: 100,
@@ -88,6 +90,7 @@ function makePositionUpdatedPayload(size: number, overrides?: Partial<{ tokenId:
     position: {
       positionId: POS,
       tokenId: overrides?.tokenId ?? TOK,
+      conditionId: createConditionId("cond-1"),
       familyId: FAM,
       side: "buy" as const,
       size,

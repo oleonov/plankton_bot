@@ -27,13 +27,13 @@ import type {
   RuntimeControl,
   ProfileId,
   TokenId,
+  ConditionId,
   PositionRepository,
 } from "@plankton/domain";
 import {
   createCommandId,
   createOrderId,
   ExchangeErrorCode,
-  resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
@@ -199,6 +199,8 @@ export class ExecutionModule implements RuntimeModule {
       await this.deps.bus.publish("OrderRejected", {
         commandId: cmd.commandId,
         clientOrderId: cmd.clientOrderId,
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
         reason: "runtime-paused",
         errorCode: "RUNTIME_PAUSED",
         familyId: cmd.familyId,
@@ -208,64 +210,9 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
-    // Live-lite allowlist check (Layer 4)
-    if (
-      this.deps.liveLiteGuard?.isActive &&
-      !this.deps.liveLiteGuard.isFamilyAllowed(String(cmd.familyId))
-    ) {
-      this.log.warn(
-        { commandId: cmd.commandId, familyId: cmd.familyId },
-        "order rejected — family not in live-lite allowlist",
-      );
-      await this.deps.bus.publish("OrderRejected", {
-        commandId: cmd.commandId,
-        clientOrderId: cmd.clientOrderId,
-        reason: "live-lite-allowlist-rejected",
-        errorCode: "LIVE_LITE_ALLOWLIST",
-        familyId: cmd.familyId,
-        signalReason: cmd.signalReason ?? null,
-        timestamp: Date.now(),
-      });
-      return;
-    }
-
     const notional = cmd.price * cmd.size;
 
-    if (this.deps.liveLiteGuard?.isActive && this.deps.rulesProvider) {
-      const bundle = this.deps.rulesProvider.getRule(cmd.familyId);
-      if (bundle) {
-        const liveTradingPolicy = resolveFamilyLiveTradingPolicy(bundle.identity);
-        const policyRejected = this.deps.liveLiteGuard.getFamilyPolicyRejections({
-          identity: bundle.identity,
-          isEntry: cmd.side === "buy",
-          orderNotionalUsdc: notional,
-          hasPostOnlySupport: cmd.postOnly === true,
-          signalReason: cmd.signalReason,
-        });
-        if (cmd.side !== "buy" && liveTradingPolicy.requiresPostOnlyForLive && !cmd.postOnly) {
-          policyRejected.unshift("live-post-only-required");
-        }
-        if (policyRejected.length > 0) {
-          const reason = policyRejected.join("; ");
-          this.log.warn(
-            { commandId: cmd.commandId, familyId: cmd.familyId, reason },
-            "order rejected — blocked by live trading policy",
-          );
-          await this.deps.bus.publish("OrderRejected", {
-            commandId: cmd.commandId,
-            clientOrderId: cmd.clientOrderId,
-            reason,
-            errorCode: ExchangeErrorCode.LivePolicyBlocked,
-            familyId: cmd.familyId,
-            signalReason: cmd.signalReason ?? null,
-            timestamp: Date.now(),
-          });
-          return;
-        }
-      }
-    }
-
-    // Live-lite order cap check (Layer 5)
+    // Live-lite order cap check (Layer 4)
     if (this.deps.liveLiteGuard?.isActive) {
       if (!this.deps.liveLiteGuard.isOrderWithinCap(notional)) {
         this.log.warn(
@@ -275,6 +222,8 @@ export class ExecutionModule implements RuntimeModule {
         await this.deps.bus.publish("OrderRejected", {
           commandId: cmd.commandId,
           clientOrderId: cmd.clientOrderId,
+          tokenId: cmd.tokenId,
+          conditionId: cmd.conditionId,
           reason: "live-lite-order-cap-exceeded",
           errorCode: "LIVE_LITE_ORDER_CAP",
           familyId: cmd.familyId,
@@ -295,6 +244,8 @@ export class ExecutionModule implements RuntimeModule {
       await this.deps.bus.publish("OrderRejected", {
         commandId: cmd.commandId,
         clientOrderId: cmd.clientOrderId,
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
         reason: "market-inactive",
         errorCode: "MARKET_INACTIVE",
         familyId: cmd.familyId,
@@ -318,6 +269,8 @@ export class ExecutionModule implements RuntimeModule {
       await this.deps.bus.publish("OrderRejected", {
         commandId: cmd.commandId,
         clientOrderId: cmd.clientOrderId,
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
         reason: "exchange-min-order-size-rejected",
         errorCode: ExchangeErrorCode.InvalidSize,
         familyId: cmd.familyId,
@@ -466,6 +419,8 @@ export class ExecutionModule implements RuntimeModule {
       await this.deps.bus.publish("OrderRejected", {
         commandId: cmd.commandId,
         clientOrderId: cmd.clientOrderId,
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
         reason,
         errorCode: result.errorCode ?? "UNKNOWN",
         familyId: cmd.familyId,
@@ -487,6 +442,8 @@ export class ExecutionModule implements RuntimeModule {
       await this.deps.bus.publish("OrderRejected", {
         commandId: cmd.commandId,
         clientOrderId: cmd.clientOrderId,
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
         reason: "gateway returned success without order id",
         errorCode: ExchangeErrorCode.Unknown,
         familyId: cmd.familyId,
@@ -508,6 +465,7 @@ export class ExecutionModule implements RuntimeModule {
       clientOrderId: cmd.clientOrderId,
       orderId,
       tokenId: cmd.tokenId,
+      conditionId: cmd.conditionId,
       side: cmd.side,
       price: cmd.price,
       size: cmd.size,
@@ -549,9 +507,12 @@ export class ExecutionModule implements RuntimeModule {
 
     this.log.info({ commandId: cmd.commandId, orderId: cmd.orderId }, "order cancelled");
 
+    const cancelledOrder = this.deps.orderRepo.findById(cmd.orderId);
     await this.deps.bus.publish("OrderCancelled", {
       commandId: cmd.commandId,
       orderId: cmd.orderId,
+      tokenId: cancelledOrder?.tokenId ?? (cmd.orderId as unknown as TokenId),
+      conditionId: cancelledOrder?.conditionId ?? ("" as ConditionId),
       reason: cmd.reason,
       familyId: cmd.familyId,
       signalReason: null,
@@ -766,6 +727,8 @@ export class ExecutionModule implements RuntimeModule {
     await this.deps.bus.publish("OrderRejected", {
       commandId: cmd.commandId,
       clientOrderId: cmd.clientOrderId,
+      tokenId: cmd.tokenId,
+      conditionId: cmd.conditionId,
       reason,
       errorCode,
       familyId: cmd.familyId,
@@ -847,6 +810,7 @@ export class ExecutionModule implements RuntimeModule {
         : createOrderId(`rej-${cmd.commandId}`),
       clientOrderId: cmd.clientOrderId,
       tokenId: cmd.tokenId,
+      conditionId: cmd.conditionId,
       familyId: cmd.familyId,
       side: cmd.side,
       orderType: cmd.orderType,

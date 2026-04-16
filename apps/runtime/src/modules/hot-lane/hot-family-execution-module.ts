@@ -221,6 +221,7 @@ export class HotFamilyExecutionModule implements RuntimeModule {
         }
         const orderIdKey = String(order.orderId);
         if (this.pendingCancelOrderIds.has(orderIdKey)) continue;
+        if (!order.familyId) continue;
 
         const bundle = this.deps.rulesProvider.getRule(order.familyId);
         if (!bundle) continue;
@@ -357,7 +358,7 @@ export class HotFamilyExecutionModule implements RuntimeModule {
   }
 
   private async transitionState(
-    familyId: import("@plankton/domain").FamilyId,
+    familyId: import("@plankton/domain").FamilyId | null,
     tokenId: import("@plankton/domain").TokenId,
     nextState: HotLaneOrderState,
     reason:
@@ -377,6 +378,8 @@ export class HotFamilyExecutionModule implements RuntimeModule {
     if (persistState) {
       this.stateByToken.set(tokenKey, nextState);
     }
+    // Skip publishing the state-changed event if familyId is unavailable
+    if (!familyId) return;
     await this.deps.bus.publish("HotLaneStateChanged", {
       familyId,
       tokenId,

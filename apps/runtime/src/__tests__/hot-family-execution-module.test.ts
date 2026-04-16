@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
+  createConditionId,
   createFamilyId,
   createOrderId,
   createTokenId,
@@ -165,6 +166,7 @@ function makeOpenOrder(overrides?: Partial<Order>): Order {
     orderId: createOrderId("ord-hot"),
     clientOrderId: "client-hot" as never,
     tokenId: TOKEN_ID,
+    conditionId: createConditionId("cond-1"),
     familyId: FAMILY_ID,
     side: "buy",
     orderType: "GTC",
@@ -272,6 +274,7 @@ describe("HotFamilyExecutionModule", () => {
       clientOrderId: "client-state-1" as never,
       orderId: openOrder.orderId,
       tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       side: "buy",
       price: openOrder.price,
       size: openOrder.size,
@@ -287,6 +290,8 @@ describe("HotFamilyExecutionModule", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-state-cancel" as never,
       orderId: openOrder.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
       familyId: FAMILY_ID,
       signalReason: "spray-entry",
@@ -426,6 +431,7 @@ describe("HotFamilyExecutionModule", () => {
       clientOrderId: "client-hot" as never,
       orderId: openOrder.orderId,
       tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       side: "buy",
       price: 0.05,
       size: openOrder.size,
@@ -612,6 +618,7 @@ describe("HotFamilyExecutionModule", () => {
       clientOrderId: "client-hot-1" as never,
       orderId: currentOrder.orderId,
       tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       side: "buy",
       price: 0.05,
       size: currentOrder.size,
@@ -631,6 +638,8 @@ describe("HotFamilyExecutionModule", () => {
     await bus.publish("OrderCancelled", {
       commandId: "cmd-cancel-1" as never,
       orderId: currentOrder.orderId,
+      tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
       familyId: FAMILY_ID,
       signalReason: "spray-entry",
@@ -646,6 +655,7 @@ describe("HotFamilyExecutionModule", () => {
       clientOrderId: "client-hot-2" as never,
       orderId: currentOrder.orderId,
       tokenId: TOKEN_ID,
+      conditionId: createConditionId("cond-1"),
       side: "buy",
       price: 0.05,
       size: currentOrder.size,

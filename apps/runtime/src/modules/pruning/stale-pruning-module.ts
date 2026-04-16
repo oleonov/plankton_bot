@@ -15,6 +15,7 @@ import type {
   MarketRepository,
   FamilyRulesProvider,
   Signal,
+  ConditionId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
@@ -98,7 +99,7 @@ export class StalePruningModule implements RuntimeModule {
             signalId: nextPruneSignalId(),
             familyId: pos.familyId,
             tokenId: pos.tokenId,
-            conditionId: market.conditionId,
+            conditionId: market.conditionId as ConditionId,
             side: "sell",
             suggestedPrice: pos.avgEntryPrice,
             suggestedSize: pos.size,

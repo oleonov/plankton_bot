@@ -80,7 +80,7 @@ export function buildLocalFillFromExchangeFill(
   orderId: OrderId;
   conditionId: ConditionId;
   sizeUsdc: number;
-  familyId: FamilyId;
+  familyId: FamilyId | null;
   signalReason: string | null;
 } {
   const fillId = createFillId(fill.fillId);
@@ -163,7 +163,7 @@ export async function importExchangeFills(
     orderId: OrderId;
     conditionId: ConditionId;
     sizeUsdc: number;
-    familyId: FamilyId;
+    familyId: FamilyId | null;
     signalReason: string | null;
   }> = [];
 
@@ -190,7 +190,7 @@ export async function importExchangeFills(
       continue;
     }
 
-    const rule = rulesProvider.getRule(localOrder.familyId);
+    const rule = localOrder.familyId ? rulesProvider.getRule(localOrder.familyId) : null;
     const resolved = buildLocalFillFromExchangeFill(ef, localOrder, rule?.identity.primaryCategory);
 
     fillRepo.save(resolved.fill);
@@ -218,7 +218,7 @@ export async function importExchangeFills(
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
   for (const { ef, fillId, orderId, conditionId, sizeUsdc, familyId, signalReason } of savedFills) {
-    const rule = rulesProvider.getRule(familyId);
+    const rule = familyId ? rulesProvider.getRule(familyId) : null;
     const resolved = buildLocalFillFromExchangeFill(
       ef,
       { orderId, conditionId, familyId, signalReason },

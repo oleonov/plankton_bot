@@ -66,6 +66,7 @@ export class MergeCandidateService {
       });
 
       if (!yesPos || !noPos) continue;
+      if (!yesPos.familyId) continue;
 
       // Calculate locked sizes from open SELL orders
       const yesOrders = this.orderRepo.findByTokenId(yesPos.tokenId);

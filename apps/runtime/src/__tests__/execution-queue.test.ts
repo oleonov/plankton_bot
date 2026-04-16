@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { ExecutionQueue } from "../modules/execution/execution-queue.js";
-import { createTokenId, createCommandId, createFamilyId } from "@plankton/domain";
+import { createTokenId, createCommandId, createFamilyId, createConditionId } from "@plankton/domain";
 import type { PlaceOrderCommand, CancelOrderCommand, ClientOrderId } from "@plankton/domain";
 
 const silentLog = {
@@ -18,6 +18,7 @@ function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand
     clientOrderId: "co-1" as ClientOrderId,
     source: "strategy",
     tokenId: createTokenId("tok-1"),
+    conditionId: createConditionId("cond-1"),
     side: "buy",
     size: 10,
     price: 0.5,

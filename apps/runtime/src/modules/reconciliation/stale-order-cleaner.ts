@@ -104,7 +104,7 @@ export async function cleanStaleEntryOrders(
     // Anti-churn: skip if cancel was recently attempted
     const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();
-    const bundle = deps.rulesProvider.getRule(order.familyId);
+    const bundle = order.familyId ? deps.rulesProvider.getRule(order.familyId) : null;
     const backoffMs = resolveCancelBackoffMs(order, bundle);
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < backoffMs) continue;
@@ -145,7 +145,7 @@ export async function cleanStaleEntryOrders(
 
   for (const order of exitSells) {
     const ordKey = String(order.orderId);
-    const bundle = deps.rulesProvider.getRule(order.familyId);
+    const bundle = order.familyId ? deps.rulesProvider.getRule(order.familyId) : null;
     const backoffMs = resolveCancelBackoffMs(order, bundle);
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < backoffMs) continue;
@@ -216,7 +216,7 @@ async function publishCancel(
   bus: EventBus,
   order: {
     orderId: import("@plankton/domain").OrderId;
-    familyId: import("@plankton/domain").FamilyId;
+    familyId: import("@plankton/domain").FamilyId | null;
   },
   reason: "stale_entry_ttl" | "stale_entry_enddate" | "stale_exit_ttl",
 ): Promise<void> {

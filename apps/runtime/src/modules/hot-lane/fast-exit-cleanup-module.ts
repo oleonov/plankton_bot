@@ -7,6 +7,7 @@ import type {
   RuntimeEventMap,
   RuntimeModule,
   Signal,
+  ConditionId,
 } from "@plankton/domain";
 import { createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -129,6 +130,7 @@ export class FastExitCleanupModule implements RuntimeModule {
           signalId: `fast-exit-${tokenKey}-${nowMs}`,
           familyId: position.familyId,
           tokenId: createTokenId(tokenKey),
+          conditionId: position.conditionId,
           side: "sell",
           suggestedPrice,
           suggestedSize: position.size,

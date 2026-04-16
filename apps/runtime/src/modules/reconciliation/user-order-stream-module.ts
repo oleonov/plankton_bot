@@ -285,6 +285,8 @@ export class UserOrderStreamModule implements RuntimeModule {
       await this.deps.bus.publish("OrderCancelled", {
         commandId: createCommandId(`user-ws-cancel-${event.orderId}-${event.timestamp}`),
         orderId: localOrder.orderId,
+        tokenId: localOrder.tokenId,
+        conditionId: localOrder.conditionId,
         reason: "exchange-user-ws-cancelled",
         familyId: localOrder.familyId,
         signalReason: localOrder.signalReason ?? null,

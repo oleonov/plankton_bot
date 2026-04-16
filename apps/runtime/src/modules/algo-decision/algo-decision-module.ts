@@ -25,6 +25,7 @@ import type {
   AlgoSizeRule,
   RuntimeEventMap,
   TokenId,
+  ConditionId,
 } from "@plankton/domain";
 import {
   deriveState,
@@ -345,7 +346,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       signalId: randomUUID(),
       familyId: market.familyId,
       tokenId: market.tokenId,
-      conditionId: market.conditionId,
+      conditionId: market.conditionId as ConditionId,
       side,
       suggestedPrice: ctx.price,
       suggestedSize,
