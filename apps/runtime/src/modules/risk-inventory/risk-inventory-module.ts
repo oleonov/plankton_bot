@@ -31,7 +31,7 @@ import type {
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
-import { RiskGateImpl } from "./risk-gate.js";
+import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
 import { FamilyExposureCalculator } from "./family-exposure.js";
 
@@ -69,7 +69,7 @@ export interface RiskDiagnostics {
 
 export class RiskInventoryModule implements RuntimeModule {
   private readonly log: Logger;
-  private readonly riskGate: RiskGateImpl;
+  private readonly riskGate: AlgoRiskGateImpl;
   private readonly inventory: InventoryHandler;
   private readonly exposure: FamilyExposureCalculator;
   private unsubs: Array<() => void> = [];
@@ -97,10 +97,8 @@ export class RiskInventoryModule implements RuntimeModule {
 
   constructor(private readonly deps: RiskInventoryModuleDeps) {
     this.log = deps.log.child({ module: "risk-inventory" });
-    this.riskGate = new RiskGateImpl(
-      deps.rulesProvider,
+    this.riskGate = new AlgoRiskGateImpl(
       deps.familyStateRepo,
-      deps.positionRepo,
       deps.orderRepo,
       this.log,
       deps.liveLiteGuard,

@@ -82,6 +82,29 @@ export class ResolutionModule implements RuntimeModule {
         await this.handleMarketResolvedHint(hint);
       }),
     );
+    this.unsubs.push(
+      this.deps.bus.subscribe("RedeemRequested", async (payload) => {
+        if (payload.conditionIds.length === 0) return;
+        this.deps.log.info(
+          { conditionIds: payload.conditionIds },
+          "algo-triggered redeem requested",
+        );
+        try {
+          if (this.deps.gateway) {
+            await this.deps.gateway.redeemPositions([...payload.conditionIds]);
+            this.deps.log.info(
+              { conditionIds: payload.conditionIds },
+              "algo-triggered redeem executed",
+            );
+          }
+        } catch (err) {
+          this.deps.log.error(
+            { err, conditionIds: payload.conditionIds },
+            "algo-triggered redeem failed",
+          );
+        }
+      }),
+    );
     // Run once at startup (non-blocking)
     this.runCheck().catch((err) => this.deps.log.error(err, "startup resolution check failed"));
     this.recoverUnresolved().catch((err) => this.deps.log.error(err, "resolution recovery failed"));

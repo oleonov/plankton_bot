@@ -47,6 +47,9 @@ import type {
   ServiceHeartbeat,
   ConfigImport,
   ValidationScorecard,
+  AlgoDecisionRule,
+  AlgoSizeRule,
+  LegState,
 } from "./types.js";
 
 // ─── MarketRepository ────────────────────────────────────────────────────
@@ -665,4 +668,20 @@ export interface FamilyProfileRuntimeStateRepository {
   get(familyId: FamilyId): FamilyProfileRuntimeState | null;
   save(state: FamilyProfileRuntimeState): void;
   findAll(): FamilyProfileRuntimeState[];
+}
+
+// ─── AlgoRulesRepository ────────────────────────────────────────────────
+
+export interface AlgoRulesRepository {
+  getDecisionRules(): AlgoDecisionRule[];
+  getSizeRules(actionType: "BUY" | "SELL"): AlgoSizeRule[];
+}
+
+// ─── LegStateRepository ────────────────────────────────────────────────
+
+export interface LegStateRepository {
+  get(tokenId: TokenId): LegState | null;
+  upsert(state: LegState): void;
+  delete(tokenId: TokenId): void;
+  getAll(): LegState[];
 }

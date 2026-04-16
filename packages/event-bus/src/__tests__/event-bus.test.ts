@@ -15,6 +15,7 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     reason: "probe-entry",
     strategyTick: Date.now(),
     sequenceInTick: 0,
+    decisionRuleId: null,
     generatedAt: new Date().toISOString(),
     ...overrides,
   };

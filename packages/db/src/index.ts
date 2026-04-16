@@ -32,6 +32,12 @@ export { SqliteConfigImportRepository } from "./repositories/config-import-repos
 export { SqliteFamilyConfigMetaRepository } from "./repositories/family-config-meta-repository.js";
 export { SqliteMergeLedgerRepository } from "./repositories/merge-ledger-repository.js";
 export { SqliteFamilyProfileRollupRepository } from "./repositories/family-profile-rollup-repository.js";
+export { SqliteFamilyRulesSnapshotRepository } from "./repositories/family-rules-snapshot-repository.js";
+export {
+  SqliteFamilyRulesDbRepository,
+  normalizeFamilyRulesSnapshot,
+} from "./repositories/family-rules-db-repository.js";
+export { SqliteFamilyDeploymentRepository } from "./repositories/family-deployment-repository.js";
 export { SqliteAlgoRulesRepository } from "./repositories/algo-rules-repository.js";
 export { SqliteLegStateRepository } from "./repositories/leg-state-repository.js";
 export {

@@ -136,6 +136,7 @@ export class FastExitCleanupModule implements RuntimeModule {
           reason: "repricing-exit",
           strategyTick: nowMs,
           sequenceInTick: 0,
+          decisionRuleId: null,
           generatedAt: new Date(nowMs).toISOString(),
         };
         this.lastExitSignalAtByToken.set(tokenKey, nowMs);

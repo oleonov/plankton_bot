@@ -326,6 +326,11 @@ export interface RuntimeEventMap {
     readonly avgEntryPrice: number;
     readonly timestamp: number;
   };
+
+  RedeemRequested: {
+    readonly conditionIds: readonly string[];
+    readonly timestamp: number;
+  };
 }
 
 // ─── EventBus interface ───────────────────────────────────────────────────
