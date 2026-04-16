@@ -242,11 +242,11 @@ async function main(): Promise<void> {
 
   // 2b-2. Load global config from YAML (spray sizing, budget caps, etc.)
   // Global config lives in YAML only — not persisted to DB.
-  let globalConfig: GlobalConfig | undefined;
-  let defaultEntryPreset: EntryRulePreset | undefined;
+  let _globalConfig: GlobalConfig | undefined;
+  let _defaultEntryPreset: EntryRulePreset | undefined;
   try {
-    globalConfig = loadedFamilyRules.global;
-    defaultEntryPreset = loadedFamilyRules.defaults.entry ?? undefined;
+    _globalConfig = loadedFamilyRules.global;
+    _defaultEntryPreset = loadedFamilyRules.defaults.entry ?? undefined;
     syncProfileInitialBalances(controlConn.db, loadedFamilyRules.global.initialBalanceUsdc);
   } catch {
     log.warn("failed to load global config from YAML — spray features disabled");
