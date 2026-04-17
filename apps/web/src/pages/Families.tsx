@@ -406,10 +406,7 @@ export function Families() {
                     )}
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
-                    <FamilyActions
-                      familyId={f.familyId}
-                      enabled={f.deployment?.enabled ?? true}
-                    />
+                    <FamilyActions familyId={f.familyId} enabled={f.deployment?.enabled ?? true} />
                   </td>
                 </tr>
                 {isExpanded && <FamilyDetail family={f} />}

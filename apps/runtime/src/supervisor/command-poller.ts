@@ -171,11 +171,7 @@ export class CommandPoller implements RuntimeModule {
     const familyId = createFamilyId(cmd.targetId);
 
     if (this.deps.deploymentToggler && this.deps.activeProfile) {
-      this.deps.deploymentToggler.disable(
-        familyId,
-        this.deps.activeProfile,
-        cmd.reason ?? null,
-      );
+      this.deps.deploymentToggler.disable(familyId, this.deps.activeProfile, cmd.reason ?? null);
     }
 
     this.writeAudit(cmd, "family", cmd.targetId, now);

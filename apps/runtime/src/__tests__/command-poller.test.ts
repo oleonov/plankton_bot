@@ -196,11 +196,7 @@ describe("CommandPoller", () => {
 
     await poller.poll();
 
-    expect(toggler.disable).toHaveBeenCalledWith(
-      createFamilyId("fam-1"),
-      "paper",
-      "tail exceeded",
-    );
+    expect(toggler.disable).toHaveBeenCalledWith(createFamilyId("fam-1"), "paper", "tail exceeded");
     expect(toggler.enable).not.toHaveBeenCalled();
 
     const actions = actionRepo.findRecent(10);

@@ -100,11 +100,7 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
  * applied → runner skips them. Upgrade installs satisfy none (or only some,
  * for partial upgrades) → the runner applies the rest in order.
  */
-function hasColumn(
-  db: import("better-sqlite3").Database,
-  table: string,
-  column: string,
-): boolean {
+function hasColumn(db: import("better-sqlite3").Database, table: string, column: string): boolean {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   return columns.some((c) => c.name === column);
 }
@@ -316,9 +312,7 @@ function backfillFamilyLimitUnification(db: import("better-sqlite3").Database): 
  * Idempotent — INSERT OR IGNORE skips existing rows. Wrapped in transaction for atomicity.
  */
 function backfillDeployments(db: import("better-sqlite3").Database): void {
-  const families = db
-    .prepare("SELECT family_id, source_type FROM family_catalog")
-    .all() as {
+  const families = db.prepare("SELECT family_id, source_type FROM family_catalog").all() as {
     family_id: string;
     source_type: string | null;
   }[];

@@ -22,7 +22,6 @@ const silentLog = {
   child: () => silentLog,
 } as any;
 
-
 function seedFamily(db: import("better-sqlite3").Database) {
   db.exec(`
     INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)

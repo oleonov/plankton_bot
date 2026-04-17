@@ -225,7 +225,6 @@ describe("Families table sorting", () => {
     expect(screen.getByText(/fees \$0\.120/)).toBeInTheDocument();
     expect(screen.getByText(/leakage 1\.00%/)).toBeInTheDocument();
   });
-
 });
 
 describe("Families scope toggle", () => {

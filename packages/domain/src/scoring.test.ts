@@ -301,4 +301,3 @@ describe("computeToxicityPenalty", () => {
     expect(approx(score)).toBe(0.21);
   });
 });
-

@@ -1,10 +1,4 @@
-import type {
-  OrderStatus,
-  PromotionState,
-  Regime,
-  ProfileId,
-  SwitchState,
-} from "./enums.js";
+import type { OrderStatus, PromotionState, Regime, ProfileId, SwitchState } from "./enums.js";
 import type {
   FamilyId,
   FillId,

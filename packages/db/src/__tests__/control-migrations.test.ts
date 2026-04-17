@@ -23,9 +23,7 @@ describe("control-db migration infrastructure", () => {
   it("bootstrapControlDb creates schema_migrations table", () => {
     conn = bootstrapControlDb(path.join(tmpDir, "control.db"));
     const row = conn.db
-      .prepare(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`,
-      )
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`)
       .get();
     expect(row).toBeDefined();
   });
@@ -37,9 +35,7 @@ describe("control-db migration infrastructure", () => {
     conn = bootstrapControlDb(dbPath);
 
     const tables = conn.db
-      .prepare(
-        `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
-      )
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
       .all() as { name: string }[];
     expect(tables.length).toBeGreaterThan(0);
   });

@@ -94,4 +94,3 @@ export function computeToxicityPenalty(input: {
     [stalePositionRatio, 0.15],
   ]);
 }
-

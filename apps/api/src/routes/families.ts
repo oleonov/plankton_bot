@@ -562,7 +562,6 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       return ok(rows);
     },
   );
-
 };
 
 function toPositionDto(row: Record<string, unknown>) {

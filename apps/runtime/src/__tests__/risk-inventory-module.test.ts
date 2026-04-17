@@ -2034,4 +2034,3 @@ describe("RiskInventoryModule", () => {
     });
   });
 });
-

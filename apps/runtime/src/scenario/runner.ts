@@ -26,11 +26,7 @@ import {
   SqliteOperatorActionRepository,
 } from "@plankton/db";
 import type { FamilyState } from "@plankton/domain";
-import {
-  createBotRunId,
-  createTokenId,
-  slugPatternToRegex,
-} from "@plankton/domain";
+import { createBotRunId, createTokenId, slugPatternToRegex } from "@plankton/domain";
 import type { Market, ClobMarket } from "@plankton/domain";
 import type { FamilyConfig } from "@plankton/config";
 import { SimulationMarketDataGateway, SimulationExchangeGateway } from "@plankton/exchange";
