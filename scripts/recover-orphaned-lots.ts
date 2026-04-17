@@ -281,8 +281,6 @@ async function main() {
         active_market_count = ?,
         current_tail_cost_usdc = ?,
         tail_adjusted_pnl_live = ?,
-        effective_mode = NULL,
-        derived_mode_reason = NULL,
         updated_at = ?
       WHERE family_id = ?
     `,

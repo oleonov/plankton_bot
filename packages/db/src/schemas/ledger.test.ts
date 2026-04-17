@@ -54,14 +54,27 @@ describe("ledger.db schema", () => {
     expect(names).not.toContain("operator_commands");
   });
 
-  it("family_profile_runtime_state has no runtime_mode column", () => {
+  it("family_profile_runtime_state has no governance columns", () => {
     const cols = db.prepare("PRAGMA table_info(family_profile_runtime_state)").all() as {
       name: string;
     }[];
     const names = cols.map((c) => c.name);
     expect(names).toContain("open_value_usdc");
-    expect(names).toContain("effective_mode");
     expect(names).not.toContain("runtime_mode");
     expect(names).not.toContain("quarantine_reason");
+    expect(names).not.toContain("effective_mode");
+    expect(names).not.toContain("derived_mode_reason");
+  });
+
+  it("family_runtime_state has no governance columns", () => {
+    const cols = db.prepare("PRAGMA table_info(family_runtime_state)").all() as {
+      name: string;
+    }[];
+    const names = cols.map((c) => c.name);
+    expect(names).toContain("open_value_usdc");
+    expect(names).not.toContain("runtime_mode");
+    expect(names).not.toContain("quarantine_reason");
+    expect(names).not.toContain("effective_mode");
+    expect(names).not.toContain("derived_mode_reason");
   });
 });

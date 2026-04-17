@@ -49,7 +49,6 @@ function seedFamilyState(
     active_market_count: 0,
     current_tail_cost_usdc: 0,
     tail_adjusted_pnl_live: 0,
-    effective_mode: null,
     last_entry_ts: null,
     last_exit_ts: null,
     ...overrides,
@@ -59,8 +58,8 @@ function seedFamilyState(
       `INSERT INTO family_runtime_state
         (family_id, open_value_usdc, open_position_count, open_dust_count,
          active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live,
-         effective_mode, last_entry_ts, last_exit_ts)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         last_entry_ts, last_exit_ts)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       familyId,
@@ -70,7 +69,6 @@ function seedFamilyState(
       defaults.active_market_count,
       defaults.current_tail_cost_usdc,
       defaults.tail_adjusted_pnl_live,
-      defaults.effective_mode,
       defaults.last_entry_ts,
       defaults.last_exit_ts,
     );
@@ -135,7 +133,6 @@ describe("ProfileRuntimePublisher", () => {
       active_market_count: 2,
       current_tail_cost_usdc: 4.2,
       tail_adjusted_pnl_live: -1.3,
-      effective_mode: "reduce-only",
       last_entry_ts: "2026-03-01T12:00:00Z",
     });
     seedFamilyState(ledgerConn, FAMILY_B, {
@@ -156,7 +153,6 @@ describe("ProfileRuntimePublisher", () => {
     expect(alpha.active_markets).toBe(2);
     expect(alpha.tail_cost_usdc).toBe(4.2);
     expect(alpha.tail_adjusted_pnl).toBe(-1.3);
-    expect(alpha.effective_mode).toBe("reduce-only");
     expect(alpha.last_trade_at).toBe("2026-03-01T12:00:00Z");
 
     const beta = rollups.find((r) => r.family_id === FAMILY_B)!;
@@ -339,7 +335,6 @@ describe("ProfileRuntimePublisher", () => {
     const alpha = rollups[0]!;
     expect(alpha.open_value_usdc).toBe(0);
     expect(alpha.open_positions).toBe(0);
-    expect(alpha.effective_mode).toBeNull();
     expect(alpha.last_trade_at).toBeNull();
   });
 

@@ -1,20 +1,12 @@
 import { Link } from "react-router-dom";
-import { useFamiliesScoped, useStatus } from "../api/hooks.ts";
+import { useStatus } from "../api/hooks.ts";
 import { useSSEState } from "../api/sse.tsx";
 
 export function AlertStrip() {
-  const { data: familiesResponse } = useFamiliesScoped("profile", 1, 200);
   const { data: status } = useStatus();
   const sseState = useSSEState();
-  const families = familiesResponse?.items ?? [];
 
   const alerts: string[] = [];
-
-  const quarantined = families?.filter((f) => f.state?.runtimeMode === "quarantine") ?? [];
-  if (quarantined.length > 0) {
-    const names = quarantined.map((f) => f.familyKey).join(", ");
-    alerts.push(`${quarantined.length} families quarantined \u2014 ${names}`);
-  }
 
   if (status?.marketDataStale) alerts.push("Market data stale");
   if (sseState === "disconnected") alerts.push("SSE disconnected");

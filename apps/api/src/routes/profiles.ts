@@ -60,8 +60,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
 
     const deployedFamilies = controlDb
       .prepare(
-        `SELECT fd.family_id, fd.enabled, fd.operator_mode, fd.strategy_stage,
-                fd.deployment_stage, fd.priority,
+        `SELECT fd.family_id, fd.enabled, fd.priority,
                 fc.family_key, fc.primary_category, fc.regime,
                 fc.fee_tier, fc.live_wallet_requirement, fc.requires_post_only_for_live
          FROM family_deployments fd
@@ -114,10 +113,6 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .prepare("SELECT * FROM state_transitions ORDER BY created_at DESC LIMIT 10")
       .all();
 
-    const proposalCount = controlDb
-      .prepare("SELECT COUNT(*) as cnt FROM promotion_proposals WHERE status = 'pending'")
-      .get() as { cnt: number };
-
     const heartbeats = controlDb
       .prepare("SELECT * FROM service_heartbeats ORDER BY last_heartbeat_at DESC")
       .all();
@@ -127,7 +122,6 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       runtimeState,
       activeSwitch,
       recentTransitions,
-      pendingProposals: proposalCount.cnt,
       heartbeats,
     });
   });

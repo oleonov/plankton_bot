@@ -93,7 +93,6 @@ function seedMarket(repo: SqliteMarketRepository): void {
 function seedFamilyState(repo: SqliteFamilyStateRepository): void {
   repo.save({
     familyId: FAMILY_ID,
-    runtimeMode: "active",
     openValueUsdc: 0,
     openPositionCount: 0,
     openDustCount: 0,
@@ -102,9 +101,6 @@ function seedFamilyState(repo: SqliteFamilyStateRepository): void {
     tailAdjustedPnlLive: 0,
     lastEntryTs: null,
     lastExitTs: null,
-    quarantineReason: null,
-    effectiveMode: null,
-    derivedModeReason: null,
     firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
   });

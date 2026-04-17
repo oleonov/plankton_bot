@@ -52,8 +52,6 @@ const twoSidedModeSchema = z.enum(["disabled", "selective", "active"]);
 
 const weekdayBiasSchema = z.enum(["normal", "preferred", "required"]);
 
-const runtimeModeSchema = z.enum(["active", "probe-only", "reduce-only", "quarantine"]);
-
 // ─── Sub-schemas (snake_case YAML input) ────────────────────────────────────
 
 const timeWindowSchema = z.object({
@@ -208,7 +206,6 @@ const rulesYamlInputSchema = rulesYamlSchema.extend({
 });
 
 export const runtimeStateYamlSchema = z.object({
-  runtime_mode: runtimeModeSchema,
   open_value_usdc: z.number(),
   open_position_count: z.number().int(),
   open_dust_count: z.number().int(),
@@ -217,7 +214,6 @@ export const runtimeStateYamlSchema = z.object({
   tail_adjusted_pnl_live: z.number(),
   last_entry_ts: z.string().nullable().optional().default(null),
   last_exit_ts: z.string().nullable().optional().default(null),
-  quarantine_reason: z.string().nullable().optional().default(null),
 });
 
 // ─── Top-level family YAML schema ───────────────────────────────────────────

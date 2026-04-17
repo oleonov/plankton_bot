@@ -213,18 +213,15 @@ export function applyFamilyConfigImport(
   const updateRules = db.prepare(RULES_UPDATE_SQL);
   const insertDeployment = db.prepare(`
     INSERT INTO family_deployments (
-      family_id, profile, enabled, operator_mode, strategy_stage,
-      deployment_stage, priority, created_at, updated_at
-    ) VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, ?, ?)
+      family_id, profile, enabled, priority, created_at, updated_at
+    ) VALUES (?, ?, ?, 999, ?, ?)
   `);
   const upsertDeployment = db.prepare(`
     INSERT INTO family_deployments (
-      family_id, profile, enabled, operator_mode, strategy_stage,
-      deployment_stage, priority, created_at, updated_at
-    ) VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, ?, ?)
+      family_id, profile, enabled, priority, created_at, updated_at
+    ) VALUES (?, ?, ?, 999, ?, ?)
     ON CONFLICT(family_id, profile) DO UPDATE SET
       enabled = excluded.enabled,
-      deployment_stage = excluded.deployment_stage,
       priority = excluded.priority,
       updated_at = excluded.updated_at
   `);
@@ -256,7 +253,7 @@ export function applyFamilyConfigImport(
         profile,
         sourceType: "yaml_import",
       });
-      insertDeployment.run(familyId, profile, seed.enabled ? 1 : 0, seed.deploymentStage, now, now);
+      insertDeployment.run(familyId, profile, seed.enabled ? 1 : 0, now, now);
     }
     insertEvidence.run(familyId, now);
     upsertMeta.run(familyId, now);
@@ -293,7 +290,7 @@ export function applyFamilyConfigImport(
         profile,
         sourceType: "yaml_import",
       });
-      upsertDeployment.run(familyId, profile, seed.enabled ? 1 : 0, seed.deploymentStage, now, now);
+      upsertDeployment.run(familyId, profile, seed.enabled ? 1 : 0, now, now);
     }
     upsertMeta.run(familyId, now);
   }

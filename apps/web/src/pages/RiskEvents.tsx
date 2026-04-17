@@ -1,13 +1,11 @@
 import { useState } from "react";
-import { useFamilies, useFamiliesScoped, useRiskEvents } from "../api/hooks.ts";
+import { useFamilies, useRiskEvents } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
-import { FamilyActions } from "../components/FamilyActions.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { formatTimestamp } from "../utils/format.ts";
 
-export function RiskQuarantine() {
+export function RiskEvents() {
   const { data: families } = useFamilies();
-  const { data: familiesResponse } = useFamiliesScoped("profile", 1, 200);
   const [eventFamily, setEventFamily] = useState("");
   const [eventType, setEventType] = useState("");
   const [page, setPage] = useState(1);
@@ -24,54 +22,8 @@ export function RiskQuarantine() {
   const pageInfo = totalCount > 0 ? `${pageStart}\u2013${pageEnd} of ${totalCount}` : undefined;
   const totalPages = riskEvents?.totalPages ?? Math.max(1, Math.ceil(totalCount / 50));
 
-  const attentionFamilies = (familiesResponse?.items ?? []).filter((f) => {
-    const em = f.state?.effectiveMode ?? f.state?.runtimeMode;
-    return em === "quarantine" || em === "reduce-only" || em === "probe-only";
-  });
-
   return (
     <div className="page">
-      {/* Families Requiring Attention */}
-      {attentionFamilies.length > 0 && (
-        <>
-          <div className="page-title">Families Requiring Attention</div>
-          <div className="grid-3" style={{ marginBottom: 24 }}>
-            {attentionFamilies.map((f) => {
-              const mode = f.state?.effectiveMode ?? f.state?.runtimeMode ?? "unknown";
-              return (
-                <div
-                  key={f.familyId}
-                  className={`card ${mode === "quarantine" ? "card-accent-red" : "card-accent-orange"}`}
-                >
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                    }}
-                  >
-                    <span style={{ fontWeight: 700 }}>{f.familyKey}</span>
-                    <Badge value={mode} type="mode" />
-                  </div>
-                  {f.state?.quarantineReason && (
-                    <div className="value-sm" style={{ marginTop: 4 }}>
-                      Reason: {f.state.quarantineReason}
-                    </div>
-                  )}
-                  <div className="value-sm">
-                    ${(f.state?.openValueUsdc ?? 0).toFixed(2)} open &middot;{" "}
-                    {f.state?.openPositionCount ?? 0} positions
-                  </div>
-                  <div style={{ marginTop: 8 }}>
-                    <FamilyActions familyId={f.familyId} mode={mode} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </>
-      )}
-
       {/* Recent Risk Events */}
       <div className="page-title">Recent Risk Events</div>
       <div className="filter-bar">
@@ -97,8 +49,6 @@ export function RiskQuarantine() {
           }}
         >
           <option value="">All types</option>
-          <option value="family_quarantined">Quarantined</option>
-          <option value="family_reduce_only">Reduce-only</option>
           <option value="max_exposure_breach">Exposure Breach</option>
           <option value="stale_signal">Stale Signal</option>
           <option value="reconciliation_drift">Recon Drift</option>

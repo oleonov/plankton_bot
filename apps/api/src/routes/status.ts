@@ -187,12 +187,6 @@ function computeTradingState(
       conversion.candidateBookRefreshTimeouts ?? 0;
   }
 
-  const allProbeOnly = db
-    .prepare(
-      "SELECT COUNT(*) as total, COUNT(CASE WHEN effective_mode = 'probe-only' THEN 1 END) as probeOnly FROM family_runtime_state WHERE runtime_mode = 'active'",
-    )
-    .get() as { total: number; probeOnly: number };
-
   const tradingState = resolveTradingState({
     signalWindow: {
       produced: sa.produced,
@@ -201,7 +195,6 @@ function computeTradingState(
       entryApproved: sa.entryApproved,
       exitApproved: sa.exitApproved ?? 0,
     },
-    activeFamilies: allProbeOnly,
   });
 
   if (tradingState === "NO_SIGNALS" && scanner && scanner.candidatesConsidered > 0) {
@@ -354,7 +347,9 @@ export function buildStatusSnapshot(
     .get(oneMinuteAgoIso) as { cnt: number };
 
   const activeFamilies = db
-    .prepare("SELECT COUNT(*) as cnt FROM family_runtime_state WHERE runtime_mode = 'active'")
+    .prepare(
+      "SELECT COUNT(*) as cnt FROM family_runtime_state WHERE open_position_count > 0 OR open_value_usdc > 0 OR active_market_count > 0",
+    )
     .get() as { cnt: number };
 
   const totalExposure = db
@@ -548,38 +543,6 @@ export function buildStatusSnapshot(
     }
   }
 
-  // Family mode breakdown for current profile
-  let familyModeCounts: Record<string, number> | undefined;
-  if (controlDb) {
-    try {
-      const enabledFamilies = controlDb
-        .prepare("SELECT family_id FROM family_deployments WHERE profile = ? AND enabled = 1")
-        .all(runtimeMode) as Array<{ family_id: string }>;
-
-      const enabledIds = new Set(enabledFamilies.map((f) => f.family_id));
-
-      const allStates = db
-        .prepare("SELECT family_id, runtime_mode, effective_mode FROM family_runtime_state")
-        .all() as Array<{ family_id: string; runtime_mode: string; effective_mode: string | null }>;
-
-      const counts: Record<string, number> = {};
-      for (const s of allStates) {
-        if (!enabledIds.has(s.family_id)) continue;
-        const mode = s.effective_mode ?? s.runtime_mode;
-        counts[mode] = (counts[mode] ?? 0) + 1;
-      }
-      familyModeCounts = counts;
-
-      // Count disabled families for the profile
-      const disabledRow = controlDb
-        .prepare("SELECT COUNT(*) as cnt FROM family_deployments WHERE profile = ? AND enabled = 0")
-        .get(runtimeMode) as { cnt: number };
-      familyModeCounts._disabled = disabledRow.cnt;
-    } catch {
-      // control DB may not have family_deployments in legacy/test setups
-    }
-  }
-
   const startupAdoptionRow = db
     .prepare(
       "SELECT value, labels, captured_at FROM runtime_metrics WHERE metric_name = 'startup_adoption' ORDER BY captured_at DESC LIMIT 1",
@@ -635,7 +598,6 @@ export function buildStatusSnapshot(
     executionQueue,
     startupAdoption,
     ...(infraAlerts.length > 0 ? { infraAlerts } : {}),
-    ...(familyModeCounts !== undefined ? { familyModeCounts } : {}),
     ...(marketDataPoll ? { marketDataPoll } : {}),
   };
 }

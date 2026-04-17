@@ -4,43 +4,25 @@ import type {
   OperatorCommandRepository,
   OperatorActionRepository,
   FamilyStateRepository,
-  FamilyEvidenceRepository,
-  FamilyRulesSnapshotRepository,
-  FamilyCandidateRepository,
   StateTransitionRepository,
   OperatorCommand,
-  RuntimeMode,
-  PromotionState,
   FamilyId,
-  FamilyDeployment,
   ProfileId,
 } from "@plankton/domain";
 import { createFamilyId } from "@plankton/domain";
 import type { Logger } from "../logger.js";
 
-/** Minimal interface for the reloadable rules manager. */
 export interface ReloadableRules {
   reload(): void;
 }
 
-/** Minimal interface for the normalization module's pattern cache. */
 export interface PatternRebuilder {
   rebuildPatterns(): void;
 }
 
-/** Minimal interface for the DB family rules repository (overwrite on reset / promote). */
-export interface FamilyRulesDbWriter {
-  overwriteRules(familyId: FamilyId, rulesJson: string): void;
-  updateToScaledDefaults(
-    familyId: FamilyId,
-    caps?: { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number },
-  ): void;
-}
-
-/** Minimal interface for updating family_deployments strategy_stage. */
-export interface DeploymentUpdater {
-  find(familyId: FamilyId, profile: ProfileId): FamilyDeployment | null;
-  save(deployment: FamilyDeployment): void;
+export interface DeploymentToggler {
+  enable(familyId: FamilyId, profile: ProfileId): void;
+  disable(familyId: FamilyId, profile: ProfileId, reason: string | null): void;
 }
 
 export interface CommandPollerDeps {
@@ -49,21 +31,14 @@ export interface CommandPollerDeps {
   familyStateRepo: FamilyStateRepository;
   bus: EventBus;
   log: Logger;
-  /** Reference to supervisor pause state -- getter/setter pair */
   getPaused: () => boolean;
   setPaused: (paused: boolean) => void;
-  /** Polling interval in ms. Default: 5000 */
   pollIntervalMs?: number;
 
-  // ── Optional deps for discovery commands ─────────────────────────────
   rulesManager?: ReloadableRules;
   normalizationModule?: PatternRebuilder;
-  familyEvidenceRepo?: FamilyEvidenceRepository;
-  familyRulesSnapshotRepo?: FamilyRulesSnapshotRepository;
-  familyCandidateRepo?: FamilyCandidateRepository;
   stateTransitionRepo?: StateTransitionRepository;
-  familyRulesDbWriter?: FamilyRulesDbWriter;
-  deploymentUpdater?: DeploymentUpdater;
+  deploymentToggler?: DeploymentToggler;
   activeProfile?: ProfileId;
 }
 
@@ -118,12 +93,6 @@ export class CommandPoller implements RuntimeModule {
   private async applyCommand(cmd: OperatorCommand): Promise<void> {
     const now = new Date().toISOString();
     try {
-      // Capture previous lifecycle state BEFORE applying changes (needed for transitions)
-      const previousPromotionState = cmd.targetId
-        ? (this.deps.familyEvidenceRepo?.getEvidence(createFamilyId(cmd.targetId))
-            ?.promotionState ?? "unknown")
-        : "unknown";
-
       switch (cmd.action) {
         case "pause":
           this.deps.setPaused(true);
@@ -135,31 +104,17 @@ export class CommandPoller implements RuntimeModule {
           this.writeAudit(cmd, "bot", "runtime", now);
           break;
 
-        case "family_reduce_only":
-          this.applyFamilyModeChange(cmd, "reduce-only", now);
-          this.syncPromotionState(cmd, "reduce-only");
+        case "family_enable":
+          this.applyFamilyEnable(cmd, now);
           break;
 
-        case "family_quarantine":
-          this.applyFamilyModeChange(cmd, "quarantine", now);
-          this.syncPromotionState(cmd, "quarantine");
-          break;
-
-        case "family_activate":
-          this.applyFamilyActivation(cmd, now);
+        case "family_disable":
+          this.applyFamilyDisable(cmd, now);
           break;
 
         case "rules_reload":
           this.applyRulesReload(now);
           this.writeAudit(cmd, "bot", "runtime", now);
-          break;
-
-        case "family_promote_scaled":
-          this.applyPromoteScaled(cmd, now);
-          break;
-
-        case "family_reset_to_probe":
-          this.applyResetToProbe(cmd, now);
           break;
 
         default:
@@ -181,45 +136,18 @@ export class CommandPoller implements RuntimeModule {
         appliedAt: Date.now(),
       });
 
-      // Write state transition for ALL family mode changes (system + operator)
-      if (
-        cmd.targetId &&
-        (cmd.action === "family_reduce_only" ||
-          cmd.action === "family_quarantine" ||
-          cmd.action === "family_activate")
-      ) {
-        const newState =
-          cmd.action === "family_reduce_only"
-            ? "reduce-only"
-            : cmd.action === "family_quarantine"
-              ? "quarantine"
-              : "active";
-
+      if (cmd.targetId && (cmd.action === "family_enable" || cmd.action === "family_disable")) {
         this.deps.stateTransitionRepo?.insert({
           entityType: "family",
           entityId: cmd.targetId,
           profile: this.deps.activeProfile ?? null,
-          fromState: previousPromotionState,
-          toState: newState,
+          fromState: cmd.action === "family_enable" ? "disabled" : "enabled",
+          toState: cmd.action === "family_enable" ? "enabled" : "disabled",
           triggerType: cmd.initiatorType,
           initiator: cmd.initiator ?? null,
           reason: cmd.reason ?? `${cmd.action} applied`,
           scoresSnapshot: null,
         });
-
-        // System-initiated demotions also publish FamilyDemotionApplied event
-        if (
-          cmd.initiatorType === "system" &&
-          (cmd.action === "family_reduce_only" || cmd.action === "family_quarantine")
-        ) {
-          await this.deps.bus.publish("FamilyDemotionApplied", {
-            familyId: createFamilyId(cmd.targetId),
-            previousState: previousPromotionState,
-            newState,
-            reason: cmd.reason ?? "system demotion",
-            timestamp: Date.now(),
-          });
-        }
       }
     } catch (err) {
       this.log.error({ id: cmd.id, action: cmd.action, err }, "command failed -- rejecting");
@@ -227,79 +155,30 @@ export class CommandPoller implements RuntimeModule {
     }
   }
 
-  private applyFamilyModeChange(cmd: OperatorCommand, targetMode: RuntimeMode, now: string): void {
-    if (!cmd.targetId) {
-      throw new Error(`${cmd.action} requires targetId (familyId)`);
-    }
-
+  private applyFamilyEnable(cmd: OperatorCommand, now: string): void {
+    if (!cmd.targetId) throw new Error("family_enable requires targetId (familyId)");
     const familyId = createFamilyId(cmd.targetId);
-    const state = this.deps.familyStateRepo.get(familyId);
 
-    if (!state) {
-      throw new Error(`Family ${cmd.targetId} not found in runtime state`);
+    if (this.deps.deploymentToggler && this.deps.activeProfile) {
+      this.deps.deploymentToggler.enable(familyId, this.deps.activeProfile);
     }
-
-    this.deps.familyStateRepo.save({
-      ...state,
-      runtimeMode: targetMode,
-      quarantineReason: targetMode === "quarantine" ? (cmd.reason ?? "operator command") : null,
-      updatedAt: now,
-    });
-
-    this.syncDeploymentOperatorMode(familyId, targetMode, now, cmd.reason ?? null);
 
     this.writeAudit(cmd, "family", cmd.targetId, now);
   }
 
-  private applyFamilyActivation(cmd: OperatorCommand, now: string): void {
-    this.applyFamilyModeChange(cmd, "active", now);
-
-    if (!cmd.targetId || !this.deps.familyEvidenceRepo) return;
-
+  private applyFamilyDisable(cmd: OperatorCommand, now: string): void {
+    if (!cmd.targetId) throw new Error("family_disable requires targetId (familyId)");
     const familyId = createFamilyId(cmd.targetId);
-    const deployment = this.deps.activeProfile
-      ? this.deps.deploymentUpdater?.find(familyId, this.deps.activeProfile)
-      : null;
 
-    const promotionState =
-      deployment?.strategyStage === "probe-only" ? "probe-only" : ("scaled" as PromotionState);
-    this.deps.familyEvidenceRepo.updatePromotionState(familyId, promotionState);
-    this.deps.familyEvidenceRepo.updateProbeSubstate(familyId, null);
-  }
+    if (this.deps.deploymentToggler && this.deps.activeProfile) {
+      this.deps.deploymentToggler.disable(
+        familyId,
+        this.deps.activeProfile,
+        cmd.reason ?? null,
+      );
+    }
 
-  private syncDeploymentOperatorMode(
-    familyId: FamilyId,
-    targetMode: RuntimeMode,
-    now: string,
-    reason: string | null,
-  ): void {
-    if (!this.deps.deploymentUpdater || !this.deps.activeProfile) return;
-
-    const deployment = this.deps.deploymentUpdater.find(familyId, this.deps.activeProfile);
-    if (!deployment) return;
-
-    const operatorMode =
-      targetMode === "quarantine"
-        ? "quarantine"
-        : targetMode === "reduce-only"
-          ? "reduce-only"
-          : "active";
-
-    this.deps.deploymentUpdater.save({
-      ...deployment,
-      operatorMode,
-      operatorReason: reason,
-      updatedAt: now,
-    });
-  }
-
-  /** Sync promotion_state in family_evidence when runtime mode changes. */
-  private syncPromotionState(cmd: OperatorCommand, promotionState: PromotionState): void {
-    if (!cmd.targetId || !this.deps.familyEvidenceRepo) return;
-    const familyId = createFamilyId(cmd.targetId);
-    this.deps.familyEvidenceRepo.updatePromotionState(familyId, promotionState);
-    // Transitioning out of probe clears substate
-    this.deps.familyEvidenceRepo.updateProbeSubstate(familyId, null);
+    this.writeAudit(cmd, "family", cmd.targetId, now);
   }
 
   private applyRulesReload(_now: string): void {
@@ -308,168 +187,6 @@ export class CommandPoller implements RuntimeModule {
     }
     this.deps.rulesManager.reload();
     this.deps.normalizationModule?.rebuildPatterns();
-
-    // Promote materialized candidates to deployed
-    if (this.deps.familyCandidateRepo) {
-      const materialized = this.deps.familyCandidateRepo.findByStatus("materialized");
-      for (const c of materialized) {
-        this.deps.familyCandidateRepo.updateStatus(c.candidateId, "deployed");
-      }
-      if (materialized.length > 0) {
-        this.log.info(
-          { count: materialized.length },
-          "promoted materialized candidates to deployed",
-        );
-      }
-    }
-  }
-
-  private applyPromoteScaled(cmd: OperatorCommand, now: string): void {
-    if (!cmd.targetId) {
-      throw new Error("family_promote_scaled requires targetId (familyId)");
-    }
-    const familyId = createFamilyId(cmd.targetId);
-
-    const state = this.deps.familyStateRepo.get(familyId);
-    if (!state) {
-      throw new Error(`Family ${cmd.targetId} not found in runtime state`);
-    }
-
-    // Update family_rules to scaled defaults before reloading
-    if (!this.deps.familyRulesDbWriter) {
-      throw new Error("family_promote_scaled requires familyRulesDbWriter dep");
-    }
-
-    // Parse optional caps from reason JSON (set by promote API)
-    let caps:
-      | { maxOpenValueUsdc?: number; maxActiveMarkets?: number; maxDustPositions?: number }
-      | undefined;
-    if (cmd.reason) {
-      try {
-        const parsed = JSON.parse(cmd.reason) as { caps?: typeof caps };
-        caps = parsed.caps;
-      } catch {
-        // reason is plain text, not JSON — use defaults
-      }
-    }
-    this.deps.familyRulesDbWriter.updateToScaledDefaults(familyId, caps);
-
-    // Reload rules to pick up the DB changes
-    this.deps.rulesManager?.reload();
-    this.deps.normalizationModule?.rebuildPatterns();
-
-    // Set runtime_mode to active
-    this.deps.familyStateRepo.save({
-      ...state,
-      runtimeMode: "active",
-      quarantineReason: null,
-      updatedAt: now,
-    });
-
-    // Read previous promotion state before updating
-    const prevPromotionState =
-      this.deps.familyEvidenceRepo?.getEvidence(familyId)?.promotionState ?? "unknown";
-
-    // Set promotion_state to scaled, clear probe substate
-    this.deps.familyEvidenceRepo?.updatePromotionState(familyId, "scaled");
-    this.deps.familyEvidenceRepo?.updateProbeSubstate(familyId, null);
-
-    // Write state transition using lifecycle states
-    this.deps.stateTransitionRepo?.insert({
-      entityType: "family",
-      entityId: cmd.targetId,
-      profile: this.deps.activeProfile ?? null,
-      fromState: prevPromotionState,
-      toState: "scaled",
-      triggerType: cmd.initiatorType,
-      initiator: cmd.initiator ?? null,
-      reason: cmd.reason ?? "promote to scaled",
-      scoresSnapshot: null,
-    });
-
-    // Update deployment stage so ControlEvaluator stops re-proposing
-    if (this.deps.deploymentUpdater && this.deps.activeProfile) {
-      try {
-        const deployment = this.deps.deploymentUpdater.find(familyId, this.deps.activeProfile);
-        if (deployment) {
-          this.deps.deploymentUpdater.save({
-            ...deployment,
-            strategyStage: "scaled",
-            updatedAt: now,
-          });
-        }
-      } catch (err) {
-        this.log.warn(
-          { err, familyId: cmd.targetId },
-          "failed to update deployment strategy_stage",
-        );
-      }
-    }
-
-    this.writeAudit(cmd, "family", cmd.targetId, now);
-  }
-
-  private applyResetToProbe(cmd: OperatorCommand, now: string): void {
-    if (!cmd.targetId) {
-      throw new Error("family_reset_to_probe requires targetId (familyId)");
-    }
-    const familyId = createFamilyId(cmd.targetId);
-
-    const state = this.deps.familyStateRepo.get(familyId);
-    if (!state) {
-      throw new Error(`Family ${cmd.targetId} not found in runtime state`);
-    }
-
-    // Read probe-baseline snapshot
-    if (!this.deps.familyRulesSnapshotRepo) {
-      throw new Error("family_reset_to_probe requires familyRulesSnapshotRepo dep");
-    }
-    const snapshot = this.deps.familyRulesSnapshotRepo.findLatest(familyId);
-    if (!snapshot) {
-      throw new Error(`No probe-baseline snapshot found for family ${cmd.targetId}`);
-    }
-
-    // Overwrite family_rules with snapshot JSON
-    if (!this.deps.familyRulesDbWriter) {
-      throw new Error("family_reset_to_probe requires familyRulesDbWriter dep");
-    }
-    this.deps.familyRulesDbWriter.overwriteRules(familyId, snapshot.snapshot);
-
-    // Reload rules and patterns
-    this.deps.rulesManager?.reload();
-    this.deps.normalizationModule?.rebuildPatterns();
-
-    // Set runtime_mode to active — probe behavior is enforced by entry_mode/scale_mode
-    // in the rules, not by runtime_mode. Setting probe-only would block repricing exits.
-    this.deps.familyStateRepo.save({
-      ...state,
-      runtimeMode: "active",
-      quarantineReason: null,
-      updatedAt: now,
-    });
-
-    // Read previous promotion state before updating
-    const prevPromotionState =
-      this.deps.familyEvidenceRepo?.getEvidence(familyId)?.promotionState ?? "unknown";
-
-    // Set promotion_state to probe-only with reset substate
-    this.deps.familyEvidenceRepo?.updatePromotionState(familyId, "probe-only");
-    this.deps.familyEvidenceRepo?.updateProbeSubstate(familyId, "reset-probe");
-
-    // Write state transition using lifecycle states
-    this.deps.stateTransitionRepo?.insert({
-      entityType: "family",
-      entityId: cmd.targetId,
-      profile: this.deps.activeProfile ?? null,
-      fromState: prevPromotionState,
-      toState: "probe-only",
-      triggerType: cmd.initiatorType,
-      initiator: cmd.initiator ?? null,
-      reason: cmd.reason ?? "reset to probe",
-      scoresSnapshot: snapshot.snapshot,
-    });
-
-    this.writeAudit(cmd, "family", cmd.targetId, now);
   }
 
   private writeAudit(

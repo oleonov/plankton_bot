@@ -10,17 +10,10 @@ export interface MarketFixture {
   orderBooks: Record<string, { bids: PriceLevel[]; asks: PriceLevel[] }>;
 }
 
-/** Pre-seeded family state override (applied before scenario starts). */
-export interface FamilyStateOverride {
-  familyId: string;
-  runtimeMode?: string;
-  quarantineReason?: string | null;
-}
-
 /** An operator command to inject at a specific tick. */
 export interface ScheduledCommand {
   atTick: number;
-  action: "pause" | "resume" | "family_reduce_only" | "family_quarantine" | "family_activate";
+  action: "pause" | "resume" | "family_enable" | "family_disable";
   familyId?: string;
   reason?: string;
 }
@@ -30,7 +23,6 @@ export interface ScenarioFixture {
   name: string;
   description: string;
   marketSnapshots: MarketFixture[];
-  familyStateOverrides?: FamilyStateOverride[];
   scheduledCommands?: ScheduledCommand[];
   ticks: number;
   /** Optional setup callback, called after DB bootstrap + seeding, before modules start. */
@@ -51,7 +43,6 @@ export interface ScenarioResult {
   dustPositionCount: number;
   familyStates: Array<{
     familyId: string;
-    runtimeMode: string;
     openValueUsdc: number;
     openPositionCount: number;
     tailAdjustedPnlLive: number;

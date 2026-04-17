@@ -94,7 +94,6 @@ function makeNormalizedMarket(
 function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
   return {
     familyId: FAM_ID,
-    runtimeMode: "active",
     openValueUsdc: 0,
     openPositionCount: 0,
     openDustCount: 0,
@@ -103,9 +102,6 @@ function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
     tailAdjustedPnlLive: 0,
     lastEntryTs: null,
     lastExitTs: null,
-    quarantineReason: null,
-    effectiveMode: null,
-    derivedModeReason: null,
     firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
     ...overrides,
@@ -243,8 +239,6 @@ function createMockFamilyStateRepo(state?: FamilyState): FamilyStateRepository {
     get: vi.fn().mockReturnValue(state ?? null),
     save: vi.fn(),
     findAll: vi.fn().mockReturnValue(state ? [state] : []),
-    findByMode: vi.fn().mockReturnValue([]),
-    findQuarantined: vi.fn().mockReturnValue([]),
   };
 }
 
@@ -387,108 +381,6 @@ describe("RiskInventoryModule", () => {
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  // ─── Signal rejection: quarantine ─────────────────────────────────
-  // NOTE: Family-level gates (quarantine, reduce-only, live-lite) were removed from
-  // AlgoRiskGate in the algo-decision-engine refactor. These checks now live upstream
-  // in the strategy scanner. Signals that reach RiskInventoryModule are approved by
-  // token-level checks only.
-
-  it("approves signal even when familyState is quarantine (family gate removed from RiskGate)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "quarantine" }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", { signal: makeSignal() });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("allows operator signal for quarantined family", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "quarantine" }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "operator", side: "sell" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  // ─── Signal rejection: reduce-only ────────────────────────────────
-  // NOTE: Family-level reduce-only gate removed from AlgoRiskGate (see quarantine note above).
-
-  it("approves entry signal even when familyState is reduce-only (family gate removed)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "reduce-only" }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ side: "buy", reason: "probe-entry" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("allows exit signal for reduce-only family", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "reduce-only" }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("approves spray-entry signal in probe-only family", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ runtimeMode: "probe-only" }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "spray-entry", suggestedSizeUsdc: 0.15 }),
     });
 
     expect(approved).toHaveLength(1);
@@ -2143,22 +2035,3 @@ describe("RiskInventoryModule", () => {
   });
 });
 
-// ─── Normalization tests ──────────────────────────────────────────────
-
-import { normalizeReasonCode } from "../risk-event-codes.js";
-
-describe("risk event code normalization for new rejection messages", () => {
-  it("normalizes absolute cap rejection to derived_reduce_only", () => {
-    const code = normalizeReasonCode(
-      "entry blocked — family in derived reduce-only (tail cost 55.00 > cap 50)",
-    );
-    expect(code).toBe("derived_reduce_only");
-  });
-
-  it("normalizes ratio rejection to same derived_reduce_only code", () => {
-    const code = normalizeReasonCode(
-      "entry blocked — family in derived reduce-only (tail/pnl ratio 1.30 > 0.5, tail 13.00, realized 10.00)",
-    );
-    expect(code).toBe("derived_reduce_only");
-  });
-});

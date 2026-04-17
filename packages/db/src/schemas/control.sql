@@ -167,17 +167,13 @@ CREATE INDEX IF NOT EXISTS idx_family_rules_snapshot_family
 -- ═══════════ FAMILY DEPLOYMENTS ═══════════
 -- New table: per (family, profile) deployment control
 
+-- Post-Phase 6 shape: single enable/disable lever, no legacy governance columns.
 CREATE TABLE IF NOT EXISTS family_deployments (
   family_id            TEXT NOT NULL REFERENCES family_catalog(family_id),
   profile              TEXT NOT NULL REFERENCES profiles(profile_id),
   enabled              INTEGER NOT NULL DEFAULT 0,
-  operator_mode        TEXT NOT NULL DEFAULT 'active',
-  strategy_stage       TEXT NOT NULL DEFAULT 'probe-only',
-  probe_substate       TEXT,
-  deployment_stage     TEXT NOT NULL DEFAULT 'disabled',
-  approved_snapshot_id INTEGER REFERENCES family_rules_snapshot(id),
-  approved_scorecard_id TEXT REFERENCES family_validation_scorecards(scorecard_id),
-  operator_reason      TEXT,
+  disabled_at          TEXT,
+  disabled_reason      TEXT,
   priority             INTEGER NOT NULL DEFAULT 999,
   created_at           TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
@@ -233,7 +229,6 @@ CREATE TABLE IF NOT EXISTS family_profile_rollups (
   realized_pnl       REAL NOT NULL DEFAULT 0,
   tail_cost_usdc     REAL NOT NULL DEFAULT 0,
   tail_adjusted_pnl  REAL NOT NULL DEFAULT 0,
-  effective_mode     TEXT,
   last_trade_at      TEXT,
   updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (family_id, profile)
@@ -248,119 +243,6 @@ CREATE TABLE IF NOT EXISTS family_config_meta (
   last_operator_edit_at  TEXT,
   import_checksum        TEXT
 );
-
--- ═══════════ FAMILY CANDIDATES ═══════════
--- From 008_discovery_new_tables.sql
-
-CREATE TABLE IF NOT EXISTS family_candidates (
-  candidate_id          TEXT PRIMARY KEY,
-  family_key            TEXT NOT NULL,
-  regime                TEXT NOT NULL,
-  horizon               TEXT NOT NULL,
-  cadence               TEXT NOT NULL DEFAULT 'ad-hoc',
-  pattern_confidence    TEXT NOT NULL DEFAULT 'low',
-  primary_category      TEXT NOT NULL DEFAULT 'other',
-  strategy_profile      TEXT NOT NULL DEFAULT 'scalp',
-  slug_pattern          TEXT,
-  matched_family_id     TEXT,
-  active_market_count   INTEGER NOT NULL DEFAULT 0,
-  nearest_end_date      TEXT,
-  cluster_volume_24h    REAL NOT NULL DEFAULT 0,
-  recurrence_score      REAL,
-  recycle_score         REAL,
-  live_viability_score  REAL,
-  toxicity_penalty      REAL,
-  gate_recommendation   TEXT NOT NULL DEFAULT 'ignore',
-  recommendation_reason TEXT,
-  scores_updated_at     TEXT,
-  status                TEXT NOT NULL DEFAULT 'discovered',
-  first_seen_at         TEXT NOT NULL DEFAULT (datetime('now')),
-  last_seen_at          TEXT NOT NULL DEFAULT (datetime('now')),
-  reviewed_at           TEXT,
-  materialized_at       TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_candidates_status ON family_candidates(status);
-CREATE INDEX IF NOT EXISTS idx_candidates_recommendation ON family_candidates(gate_recommendation);
-
--- ═══════════ CANDIDATE OBSERVATIONS ═══════════
--- From 008_discovery_new_tables.sql
-
-CREATE TABLE IF NOT EXISTS candidate_observations (
-  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-  candidate_id          TEXT NOT NULL REFERENCES family_candidates(candidate_id),
-  active_market_count   INTEGER NOT NULL,
-  cluster_volume_24h    REAL NOT NULL,
-  nearest_end_date      TEXT,
-  observed_at           TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX IF NOT EXISTS idx_candidate_obs_id_ts
-  ON candidate_observations(candidate_id, observed_at DESC);
-
--- ═══════════ CANDIDATE OBSERVATION MARKETS ═══════════
--- From 008_discovery_new_tables.sql
-
-CREATE TABLE IF NOT EXISTS candidate_observation_markets (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  candidate_id    TEXT NOT NULL REFERENCES family_candidates(candidate_id),
-  observed_at     TEXT NOT NULL,
-  condition_id    TEXT NOT NULL,
-  slug            TEXT NOT NULL,
-  end_date        TEXT,
-  volume_24h      REAL,
-  UNIQUE(candidate_id, observed_at, condition_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_com_candidate_ts
-  ON candidate_observation_markets(candidate_id, observed_at);
-CREATE INDEX IF NOT EXISTS idx_com_slug
-  ON candidate_observation_markets(slug);
-
--- ═══════════ DISCOVERY RUNS ═══════════
--- From 010_discovery_runs.sql
-
-CREATE TABLE IF NOT EXISTS discovery_runs (
-  id              INTEGER PRIMARY KEY AUTOINCREMENT,
-  trigger_type    TEXT NOT NULL,
-  status          TEXT NOT NULL DEFAULT 'queued',
-  requested_by    TEXT,
-  requested_at    TEXT NOT NULL DEFAULT (datetime('now')),
-  started_at      TEXT,
-  finished_at     TEXT,
-  heartbeat_at    TEXT,
-  stats_json      TEXT,
-  error           TEXT,
-  worker_id       TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_discovery_runs_status ON discovery_runs(status);
-
--- ═══════════ PROMOTION PROPOSALS ═══════════
--- From 008_discovery_new_tables.sql + extended: profile, source_scorecard_id, applied_command_id
-
-CREATE TABLE IF NOT EXISTS promotion_proposals (
-  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-  family_id           TEXT NOT NULL,
-  profile             TEXT REFERENCES profiles(profile_id),
-  current_state       TEXT NOT NULL,
-  proposed_state      TEXT NOT NULL,
-  reason              TEXT NOT NULL,
-  scores_snapshot     TEXT NOT NULL,
-  source_scorecard_id TEXT REFERENCES family_validation_scorecards(scorecard_id),
-  applied_command_id  INTEGER REFERENCES operator_commands(id),
-  status              TEXT NOT NULL DEFAULT 'pending',
-  created_at          TEXT NOT NULL DEFAULT (datetime('now')),
-  resolved_at         TEXT,
-  resolved_by         TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_proposals_status ON promotion_proposals(status);
-CREATE INDEX IF NOT EXISTS idx_proposals_family ON promotion_proposals(family_id, created_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_one_pending_per_family_profile
-  ON promotion_proposals(family_id, profile) WHERE status = 'pending' AND profile IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_proposals_one_pending_per_family_null_profile
-  ON promotion_proposals(family_id) WHERE status = 'pending' AND profile IS NULL;
 
 -- ═══════════ RUNTIME CONTROL STATE ═══════════
 -- Singleton row for current runtime state
@@ -416,7 +298,6 @@ CREATE INDEX IF NOT EXISTS idx_operator_actions_ts ON operator_actions(performed
 CREATE INDEX IF NOT EXISTS idx_operator_actions_target ON operator_actions(target_id);
 
 -- ═══════════ STATE TRANSITIONS ═══════════
--- From 008_discovery_new_tables.sql + extended: profile, deployment_id
 
 CREATE TABLE IF NOT EXISTS state_transitions (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -484,7 +365,6 @@ CREATE TABLE IF NOT EXISTS profile_switch_requests (
 -- ═══════════ FAMILY EVIDENCE (legacy compat) ═══════════
 -- Kept for backward compatibility with existing repos and raw SQL.
 -- Phase 4 will migrate consumers to family_validation_scorecards.
--- Cumulative schema: 001_initial + 007_discovery_existing_alters + 011_probe_substate
 
 CREATE TABLE IF NOT EXISTS family_evidence (
   family_id                     TEXT PRIMARY KEY REFERENCES family_catalog(family_id),

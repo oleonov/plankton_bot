@@ -118,13 +118,9 @@ describe("Overview Balance Card", () => {
             familyKey: "bitcoin-above",
             feeTier: "fee-enabled",
             requiresPostOnlyForLive: true,
-            runtimeMode: "active",
             openValueUsdc: 12,
             openPositionCount: 2,
             tailAdjustedPnlLive: 1.5,
-            quarantineReason: null,
-            effectiveMode: "active",
-            derivedModeReason: null,
             executionTelemetry24h: {
               windowHours: 24,
               totalFills: 4,
@@ -150,7 +146,7 @@ describe("Overview Balance Card", () => {
     expect(screen.getByText(/2 taker.*\$0\.120 fees/)).toBeInTheDocument();
   });
 
-  it("uses enabled family mode breakdown for live-lite overview summary", async () => {
+  it("uses live-lite allowlist length for enabled family count", async () => {
     server.use(
       http.get("/api/v1/status", () =>
         ok({
@@ -163,12 +159,6 @@ describe("Overview Balance Card", () => {
             maxActiveMarkets: 10,
             maxOrderUsdc: 25,
             familyAllowlist: Array.from({ length: 12 }, (_, index) => `fam-${index}`),
-          },
-          familyModeCounts: {
-            active: 9,
-            "probe-only": 1,
-            "reduce-only": 2,
-            _disabled: 435,
           },
         }),
       ),
@@ -183,7 +173,6 @@ describe("Overview Balance Card", () => {
     }
     const familyCard: HTMLElement = card;
     expect(within(familyCard).getByText("12")).toBeInTheDocument();
-    expect(within(familyCard).getByText(/1 probe-only/)).toBeInTheDocument();
     expect(within(familyCard).queryByText("422")).not.toBeInTheDocument();
   });
 

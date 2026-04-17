@@ -4,47 +4,11 @@ import { ScoreComputer } from "../modules/evidence/score-computer.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-const CANDIDATE_ID = "cand-1";
 const FAMILY_ID = "fam-test";
 
 function freshDb() {
   const conn = bootstrapDatabase(":memory:");
   return conn;
-}
-
-function seedCandidate(db: import("better-sqlite3").Database) {
-  db.exec(`
-    INSERT INTO family_candidates
-      (candidate_id, family_key, regime, horizon, cadence, primary_category, strategy_profile,
-       active_market_count, cluster_volume_24h, status, first_seen_at, last_seen_at)
-    VALUES
-      ('${CANDIDATE_ID}', 'test-key', 'threshold', 'daily', 'daily', 'crypto', 'scalp',
-       4, 30000, 'discovered', '2026-01-01', '2026-03-20');
-  `);
-}
-
-function seedObservations(db: import("better-sqlite3").Database, dates: string[], marketCount = 3) {
-  for (const d of dates) {
-    db.exec(`
-      INSERT INTO candidate_observations (candidate_id, active_market_count, cluster_volume_24h, observed_at)
-      VALUES ('${CANDIDATE_ID}', ${marketCount}, 25000, '${d}');
-    `);
-  }
-}
-
-function seedObservationMarkets(
-  db: import("better-sqlite3").Database,
-  observedAt: string,
-  markets: { conditionId: string; slug: string; endDate: string | null }[],
-) {
-  for (const m of markets) {
-    db.exec(`
-      INSERT INTO candidate_observation_markets
-        (candidate_id, observed_at, condition_id, slug, end_date, volume_24h)
-      VALUES ('${CANDIDATE_ID}', '${observedAt}', '${m.conditionId}', '${m.slug}',
-        ${m.endDate ? `'${m.endDate}'` : "NULL"}, 10000);
-    `);
-  }
 }
 
 function seedFamily(db: import("better-sqlite3").Database) {
@@ -54,9 +18,9 @@ function seedFamily(db: import("better-sqlite3").Database) {
     VALUES ('${FAMILY_ID}', 'test-fam', 'crypto', 'threshold', 'short', 'daily', 'scalp', '2026-01-01T00:00:00Z');
 
     INSERT INTO family_runtime_state
-      (family_id, runtime_mode, open_value_usdc, open_position_count, open_dust_count,
+      (family_id, open_value_usdc, open_position_count, open_dust_count,
        active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-    VALUES ('${FAMILY_ID}', 'active', 10, 2, 1, 3, 5.0, 12.5, '2026-03-20T00:00:00Z');
+    VALUES ('${FAMILY_ID}', 10, 2, 1, 3, 5.0, 12.5, '2026-03-20T00:00:00Z');
   `);
 }
 
@@ -133,93 +97,6 @@ function seedPnlLedger(
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 describe("ScoreComputer", () => {
-  describe("computeRecurrenceMetrics", () => {
-    it("returns zeroes for unknown candidate", () => {
-      const conn = freshDb();
-      const sc = new ScoreComputer(conn.db, conn.db);
-      const m = sc.computeRecurrenceMetrics("nonexistent");
-
-      expect(m.spanDays).toBe(0);
-      expect(m.presenceDays).toBe(0);
-      expect(m.totalDays).toBe(0);
-      expect(m.cadenceMean).toBe(0);
-      expect(m.cadenceStddev).toBe(0);
-      expect(m.distinctConditions).toBe(0);
-      conn.close();
-    });
-
-    it("computes span, presence, and total days from observations", () => {
-      const conn = freshDb();
-      seedCandidate(conn.db);
-      // 5 observations across 3 distinct dates, span = 10 days
-      seedObservations(conn.db, [
-        "2026-03-01T10:00:00Z",
-        "2026-03-01T14:00:00Z",
-        "2026-03-05T10:00:00Z",
-        "2026-03-08T10:00:00Z",
-        "2026-03-11T10:00:00Z",
-      ]);
-
-      const sc = new ScoreComputer(conn.db, conn.db);
-      const m = sc.computeRecurrenceMetrics(CANDIDATE_ID);
-
-      expect(m.spanDays).toBeCloseTo(10, 0);
-      // All have active_market_count=3 >= 2, so presence = total = 4 distinct dates
-      expect(m.presenceDays).toBe(4);
-      expect(m.totalDays).toBe(4);
-      conn.close();
-    });
-
-    it("excludes observations with active_market_count < 2 from presence", () => {
-      const conn = freshDb();
-      seedCandidate(conn.db);
-      seedObservations(conn.db, ["2026-03-01T10:00:00Z"], 3); // qualifies
-      seedObservations(conn.db, ["2026-03-02T10:00:00Z"], 1); // does not qualify
-
-      const sc = new ScoreComputer(conn.db, conn.db);
-      const m = sc.computeRecurrenceMetrics(CANDIDATE_ID);
-
-      expect(m.totalDays).toBe(2);
-      expect(m.presenceDays).toBe(1);
-      conn.close();
-    });
-
-    it("computes cadence stats from inter-day gaps", () => {
-      const conn = freshDb();
-      seedCandidate(conn.db);
-      // Days: Mar 1, Mar 3, Mar 5 → gaps: 2, 2 → mean=2, stddev=0
-      seedObservations(conn.db, [
-        "2026-03-01T10:00:00Z",
-        "2026-03-03T10:00:00Z",
-        "2026-03-05T10:00:00Z",
-      ]);
-
-      const sc = new ScoreComputer(conn.db, conn.db);
-      const m = sc.computeRecurrenceMetrics(CANDIDATE_ID);
-
-      expect(m.cadenceMean).toBeCloseTo(2, 1);
-      expect(m.cadenceStddev).toBeCloseTo(0, 1);
-      conn.close();
-    });
-
-    it("counts distinct conditions from observation markets", () => {
-      const conn = freshDb();
-      seedCandidate(conn.db);
-      seedObservations(conn.db, ["2026-03-01T10:00:00Z"]);
-      seedObservationMarkets(conn.db, "2026-03-01T10:00:00Z", [
-        { conditionId: "c1", slug: "s1", endDate: null },
-        { conditionId: "c2", slug: "s2", endDate: null },
-        { conditionId: "c3", slug: "s3", endDate: null },
-      ]);
-
-      const sc = new ScoreComputer(conn.db, conn.db);
-      const m = sc.computeRecurrenceMetrics(CANDIDATE_ID);
-
-      expect(m.distinctConditions).toBe(3);
-      conn.close();
-    });
-  });
-
   describe("computeRecycleMetrics", () => {
     it("returns zeroes for family with no activity", () => {
       const conn = freshDb();
@@ -293,52 +170,6 @@ describe("ScoreComputer", () => {
       const m = sc.computeRecycleMetrics(FAMILY_ID);
 
       expect(m.totalNonSettlementClosed).toBe(2);
-      conn.close();
-    });
-  });
-
-  describe("computeLiveViabilityMetrics", () => {
-    it("returns zeroes for unknown candidate", () => {
-      const conn = freshDb();
-      const sc = new ScoreComputer(conn.db, conn.db);
-      const m = sc.computeLiveViabilityMetrics("nonexistent", "daily");
-
-      expect(m.activeMarketCount).toBe(0);
-      expect(m.healthyEndDateFraction).toBe(0);
-      expect(m.clusterVolume24h).toBe(0);
-      conn.close();
-    });
-
-    it("reads market count and volume from candidate row", () => {
-      const conn = freshDb();
-      seedCandidate(conn.db);
-      const sc = new ScoreComputer(conn.db, conn.db);
-      const m = sc.computeLiveViabilityMetrics(CANDIDATE_ID, "daily");
-
-      expect(m.activeMarketCount).toBe(4);
-      expect(m.clusterVolume24h).toBe(30000);
-      conn.close();
-    });
-
-    it("computes healthy end date fraction from latest observation markets", () => {
-      const conn = freshDb();
-      seedCandidate(conn.db);
-      const obsDate = "2026-03-20T10:00:00Z";
-      seedObservations(conn.db, [obsDate]);
-
-      // 2 markets with end dates within daily health window, 1 expired
-      const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-      seedObservationMarkets(conn.db, obsDate, [
-        { conditionId: "c1", slug: "s1", endDate: tomorrow },
-        { conditionId: "c2", slug: "s2", endDate: tomorrow },
-        { conditionId: "c3", slug: "s3", endDate: "2025-01-01T00:00:00Z" },
-      ]);
-
-      const sc = new ScoreComputer(conn.db, conn.db);
-      const m = sc.computeLiveViabilityMetrics(CANDIDATE_ID, "daily");
-
-      // 2 of 3 are healthy
-      expect(m.healthyEndDateFraction).toBeCloseTo(2 / 3, 1);
       conn.close();
     });
   });

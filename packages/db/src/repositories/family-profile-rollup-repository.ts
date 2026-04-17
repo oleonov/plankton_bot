@@ -10,9 +10,9 @@ export class SqliteFamilyProfileRollupRepository implements FamilyProfileRollupR
       .prepare(
         `INSERT INTO family_profile_rollups
          (family_id, profile, open_value_usdc, open_positions, active_markets,
-          realized_pnl, tail_cost_usdc, tail_adjusted_pnl, effective_mode,
+          realized_pnl, tail_cost_usdc, tail_adjusted_pnl,
           last_trade_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(family_id, profile) DO UPDATE SET
            open_value_usdc = excluded.open_value_usdc,
            open_positions = excluded.open_positions,
@@ -20,7 +20,6 @@ export class SqliteFamilyProfileRollupRepository implements FamilyProfileRollupR
            realized_pnl = excluded.realized_pnl,
            tail_cost_usdc = excluded.tail_cost_usdc,
            tail_adjusted_pnl = excluded.tail_adjusted_pnl,
-           effective_mode = excluded.effective_mode,
            last_trade_at = excluded.last_trade_at,
            updated_at = excluded.updated_at`,
       )
@@ -33,7 +32,6 @@ export class SqliteFamilyProfileRollupRepository implements FamilyProfileRollupR
         rollup.realizedPnl,
         rollup.tailCostUsdc,
         rollup.tailAdjustedPnl,
-        rollup.effectiveMode,
         rollup.lastTradeAt,
         rollup.updatedAt,
       );
@@ -64,7 +62,6 @@ function rowToRollup(row: Record<string, unknown>): FamilyProfileRollup {
     realizedPnl: row.realized_pnl as number,
     tailCostUsdc: row.tail_cost_usdc as number,
     tailAdjustedPnl: row.tail_adjusted_pnl as number,
-    effectiveMode: (row.effective_mode as string) ?? null,
     lastTradeAt: (row.last_trade_at as string) ?? null,
     updatedAt: row.updated_at as string,
   };

@@ -68,15 +68,15 @@ beforeAll(async () => {
     INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused)
     VALUES (1, 'simulation', 'simulation', 'running', 0);
 
-    INSERT INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
-    VALUES ('fam-1', 'simulation', 1, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+    INSERT INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
+    VALUES ('fam-1', 'simulation', 1, 999, datetime('now'), datetime('now'));
   `);
 
   // Ledger: runtime state, positions, orders, bot_runs, metrics, markets
   ldb.exec(`
-    INSERT INTO family_runtime_state (family_id, runtime_mode, open_value_usdc, open_position_count, open_dust_count,
+    INSERT INTO family_runtime_state (family_id, open_value_usdc, open_position_count, open_dust_count,
       active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-    VALUES ('fam-1', 'active', 50.0, 2, 0, 3, 10.0, 5.0, '2026-03-14T00:00:00Z');
+    VALUES ('fam-1', 50.0, 2, 0, 3, 10.0, 5.0, '2026-03-14T00:00:00Z');
 
     INSERT INTO bot_runs (run_id, mode, started_at)
     VALUES ('run-1', 'simulation', '2026-03-14T00:00:00Z');
@@ -131,29 +131,18 @@ describe("API against real split schemas", () => {
     expect(body.data.executionTelemetry24h).toBeDefined();
   });
 
-  it("GET /status includes familyModeCounts breakdown for enabled families", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: auth() });
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-    // fam-1 is enabled for simulation profile and has runtime_mode='active' with no effective_mode
-    // so it should appear under the 'active' bucket
-    expect(body.data.familyModeCounts).toBeDefined();
-    expect(body.data.familyModeCounts.active).toBe(1);
-    expect(body.data.familyModeCounts._disabled).toBeDefined();
-  });
-
   it("GET /status derives live-lite envelope from current control state, not stale runtime metric", async () => {
     controlConn.db.exec(`
       INSERT OR REPLACE INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live Lite');
       INSERT OR REPLACE INTO profile_settings (profile_id, envelope_json, wallet_mode, min_order_usdc)
       VALUES ('live-lite', '{"maxFamilies":100,"maxOpenValueUsdc":500,"maxOrderUsdc":25,"maxActiveMarkets":10}', 'relayer', 1);
 
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
-      VALUES ('fam-1', 'live-lite', 1, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
+      VALUES ('fam-1', 'live-lite', 1, 999, datetime('now'), datetime('now'));
       INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
       VALUES ('fam-disabled-live', 'disabled-live-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
-      VALUES ('fam-disabled-live', 'live-lite', 0, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
+      VALUES ('fam-disabled-live', 'live-lite', 0, 999, datetime('now'), datetime('now'));
 
       UPDATE runtime_control_state
       SET current_profile = 'live-lite', desired_profile = 'live-lite', updated_at = datetime('now')
@@ -183,7 +172,6 @@ describe("API against real split schemas", () => {
         walletMode: "relayer",
         minOrderUsdc: 1,
       });
-      expect(body.data.familyModeCounts._disabled).toBeGreaterThanOrEqual(1);
     } finally {
       controlConn.db.exec(`
         UPDATE runtime_control_state
@@ -237,8 +225,6 @@ describe("API against real split schemas", () => {
     expect(body.data.items).toHaveLength(body.data.meta.totalCatalogCount);
     expect(body.data.items[0].deployment).toEqual({
       enabled: true,
-      operatorMode: "active",
-      deploymentStage: "disabled",
       priority: 999,
     });
   });
@@ -247,8 +233,8 @@ describe("API against real split schemas", () => {
     controlConn.db.exec(`
       INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
       VALUES ('fam-disabled', 'disabled-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
-      VALUES ('fam-disabled', 'simulation', 0, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
+      VALUES ('fam-disabled', 'simulation', 0, 999, datetime('now'), datetime('now'));
     `);
     try {
       const res = await app.inject({
@@ -268,73 +254,6 @@ describe("API against real split schemas", () => {
     }
   });
 
-  it("POST /actions/rotate-weak-families disables only families without open positions or open orders", async () => {
-    controlConn.db.exec(`
-      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
-      VALUES ('fam-weak', 'weak-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
-      VALUES ('fam-open-order', 'open-order-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
-      VALUES ('fam-weak', 'simulation', 1, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
-      VALUES ('fam-open-order', 'simulation', 1, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
-
-      INSERT OR REPLACE INTO family_profile_rollups (family_id, profile, open_value_usdc, open_positions, tail_adjusted_pnl, updated_at)
-      VALUES ('fam-weak', 'simulation', 0, 0, -10, datetime('now'));
-      INSERT OR REPLACE INTO family_profile_rollups (family_id, profile, open_value_usdc, open_positions, tail_adjusted_pnl, updated_at)
-      VALUES ('fam-open-order', 'simulation', 0, 0, -20, datetime('now'));
-    `);
-    ledgerConn.db.exec(`
-      INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc,
-        status, exchange_order_id, bot_run_id, created_at, updated_at)
-      VALUES ('ord-open-rotate', 'plk_rotate', 'tok-rotate', 'fam-open-order', 'buy', 'GTC', 0.2, 10, 2, 'open', 'ex-rotate', 'run-1',
-        '2026-03-14T02:00:00Z', '2026-03-14T02:00:00Z');
-    `);
-
-    try {
-      const res = await app.inject({
-        method: "POST",
-        url: "/api/v1/actions/rotate-weak-families",
-        headers: { ...auth(), "content-type": "application/json" },
-        payload: { profile: "simulation", slotsNeeded: 2 },
-      });
-      expect(res.statusCode).toBe(200);
-      const body = res.json();
-      expect(body.ok).toBe(true);
-      expect(body.data.rotated).toBe(1);
-      expect(body.data.familyIds).toEqual(["fam-weak"]);
-
-      const famWeak = controlConn.db
-        .prepare(
-          "SELECT enabled FROM family_deployments WHERE family_id = 'fam-weak' AND profile = 'simulation'",
-        )
-        .get() as { enabled: number };
-      const famOpenOrder = controlConn.db
-        .prepare(
-          "SELECT enabled FROM family_deployments WHERE family_id = 'fam-open-order' AND profile = 'simulation'",
-        )
-        .get() as { enabled: number };
-      expect(famWeak.enabled).toBe(0);
-      expect(famOpenOrder.enabled).toBe(1);
-
-      const reload = controlConn.db
-        .prepare(
-          "SELECT COUNT(*) as cnt FROM operator_commands WHERE action = 'rules_reload' AND initiator = 'auto-rotation' AND status = 'pending'",
-        )
-        .get() as { cnt: number };
-      expect(reload.cnt).toBeGreaterThan(0);
-    } finally {
-      ledgerConn.db.exec(`DELETE FROM orders WHERE order_id = 'ord-open-rotate';`);
-      controlConn.db.exec(`
-        DELETE FROM operator_commands WHERE initiator = 'auto-rotation';
-        DELETE FROM family_profile_rollups WHERE family_id IN ('fam-weak', 'fam-open-order');
-        DELETE FROM family_deployments WHERE family_id IN ('fam-weak', 'fam-open-order');
-        DELETE FROM family_catalog WHERE family_id IN ('fam-weak', 'fam-open-order');
-      `);
-    }
-  });
-
   it("GET /families/:id includes deployment metadata for current profile", async () => {
     const res = await app.inject({
       method: "GET",
@@ -345,8 +264,6 @@ describe("API against real split schemas", () => {
     expect(body.ok).toBe(true);
     expect(body.data.deployment).toEqual({
       enabled: true,
-      operatorMode: "active",
-      deploymentStage: "disabled",
       priority: 999,
     });
     expect(body.data.liveness).toBe("active");
@@ -405,15 +322,6 @@ describe("API against real split schemas", () => {
     expect(body.data[0].executionTelemetry24h.windowHours).toBe(24);
   });
 
-  it("GET /discovery/status succeeds (control-only)", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/discovery/status",
-      headers: auth(),
-    });
-    expect(res.statusCode).toBe(200);
-  });
-
   it("POST /actions/pause succeeds (control-only)", async () => {
     const res = await app.inject({
       method: "POST",
@@ -434,9 +342,9 @@ describe("API against real split schemas", () => {
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES ('runtime_paused', 0, NULL, '2026-03-15T00:00:00Z');
 
-      INSERT INTO family_runtime_state (family_id, runtime_mode, open_value_usdc, open_position_count,
+      INSERT INTO family_runtime_state (family_id, open_value_usdc, open_position_count,
         open_dust_count, active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-      VALUES ('fam-1', 'active', 100.0, 5, 1, 4, 20.0, 10.0, '2026-03-15T00:00:00Z');
+      VALUES ('fam-1', 100.0, 5, 1, 4, 20.0, 10.0, '2026-03-15T00:00:00Z');
     `);
 
     // Update control.db to point to paper as current profile
@@ -484,8 +392,8 @@ describe("API against real split schemas", () => {
     controlConn.db.exec(`
       INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
       VALUES ('fam-disabled-all', 'disabled-all-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, operator_mode, strategy_stage, deployment_stage, priority, created_at, updated_at)
-      VALUES ('fam-disabled-all', 'simulation', 0, 'active', 'probe-only', 'disabled', 999, datetime('now'), datetime('now'));
+      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
+      VALUES ('fam-disabled-all', 'simulation', 0, 999, datetime('now'), datetime('now'));
     `);
 
     try {
@@ -499,8 +407,6 @@ describe("API against real split schemas", () => {
       expect(disabled).toBeDefined();
       expect(disabled.deployment).toEqual({
         enabled: false,
-        operatorMode: "active",
-        deploymentStage: "disabled",
         priority: 999,
       });
     } finally {
@@ -516,9 +422,9 @@ describe("API against real split schemas", () => {
     const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));
     paperConn.db.exec(`
       INSERT INTO bot_runs (run_id, mode, started_at) VALUES ('run-paper-sse', 'paper', '2026-03-15T00:00:00Z');
-      INSERT INTO family_runtime_state (family_id, runtime_mode, open_value_usdc, open_position_count,
+      INSERT INTO family_runtime_state (family_id, open_value_usdc, open_position_count,
         open_dust_count, active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-      VALUES ('fam-sse', 'active', 200.0, 3, 0, 2, 5.0, 15.0, '2026-03-15T00:00:00Z');
+      VALUES ('fam-sse', 200.0, 3, 0, 2, 5.0, 15.0, '2026-03-15T00:00:00Z');
       INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
       VALUES ('tok-sse', 'cond-sse', 'test-sse', 'SSE test?', 'Yes', 1, 0.01, 0, '2026-04-01T00:00:00Z', '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z');
       INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,

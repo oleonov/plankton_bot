@@ -305,8 +305,6 @@ function createMockFamilyStateRepo() {
     get: vi.fn((_id: FamilyId) => states.get(String(_id)) ?? null),
     save: vi.fn(),
     findAll: vi.fn(() => [...states.values()]),
-    findByMode: vi.fn(() => []),
-    findQuarantined: vi.fn(() => []),
   } satisfies FamilyStateRepository;
 }
 
@@ -2139,7 +2137,6 @@ describe("spray cooldown", () => {
     const tickTs = new Date("2026-04-01T12:00:10Z").getTime();
     (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
       familyId: FAM_ID,
-      runtimeMode: "active",
       openValueUsdc: 0,
       openPositionCount: 0,
       openDustCount: 0,
@@ -2148,9 +2145,6 @@ describe("spray cooldown", () => {
       tailAdjustedPnlLive: 0,
       lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
       lastExitTs: null,
-      quarantineReason: null,
-      effectiveMode: null,
-      derivedModeReason: null,
       firstNegativeTailAt: null,
       updatedAt: new Date().toISOString(),
     } satisfies FamilyState);
@@ -2184,7 +2178,6 @@ describe("spray cooldown", () => {
     const tickTs = new Date("2026-04-01T12:00:03Z").getTime();
     (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
       familyId: FAM_ID,
-      runtimeMode: "active",
       openValueUsdc: 0,
       openPositionCount: 0,
       openDustCount: 0,
@@ -2193,9 +2186,6 @@ describe("spray cooldown", () => {
       tailAdjustedPnlLive: 0,
       lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
       lastExitTs: null,
-      quarantineReason: null,
-      effectiveMode: null,
-      derivedModeReason: null,
       firstNegativeTailAt: null,
       updatedAt: new Date().toISOString(),
     } satisfies FamilyState);
@@ -2229,7 +2219,6 @@ describe("spray cooldown", () => {
     const tickTs = new Date("2026-04-01T12:00:10Z").getTime();
     (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
       familyId: FAM_ID,
-      runtimeMode: "active",
       openValueUsdc: 0,
       openPositionCount: 0,
       openDustCount: 0,
@@ -2238,9 +2227,6 @@ describe("spray cooldown", () => {
       tailAdjustedPnlLive: 0,
       lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
       lastExitTs: null,
-      quarantineReason: null,
-      effectiveMode: null,
-      derivedModeReason: null,
       firstNegativeTailAt: null,
       updatedAt: new Date().toISOString(),
     } satisfies FamilyState);
@@ -2396,7 +2382,6 @@ describe("attempt-level cooldown", () => {
 
     (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
       familyId: FAM_ID,
-      runtimeMode: "active",
       openValueUsdc: 0,
       openPositionCount: 0,
       openDustCount: 0,
@@ -2405,9 +2390,6 @@ describe("attempt-level cooldown", () => {
       tailAdjustedPnlLive: 0,
       lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
       lastExitTs: null,
-      quarantineReason: null,
-      effectiveMode: null,
-      derivedModeReason: null,
       firstNegativeTailAt: null,
       updatedAt: new Date().toISOString(),
     } satisfies FamilyState);
@@ -2440,7 +2422,6 @@ describe("attempt-level cooldown", () => {
 
     (familyStateRepo.get as ReturnType<typeof vi.fn>).mockReturnValue({
       familyId: FAM_ID,
-      runtimeMode: "active",
       openValueUsdc: 0,
       openPositionCount: 0,
       openDustCount: 0,
@@ -2449,9 +2430,6 @@ describe("attempt-level cooldown", () => {
       tailAdjustedPnlLive: 0,
       lastEntryTs: new Date("2026-04-01T12:00:00Z").toISOString(),
       lastExitTs: null,
-      quarantineReason: null,
-      effectiveMode: null,
-      derivedModeReason: null,
       firstNegativeTailAt: null,
       updatedAt: new Date().toISOString(),
     } satisfies FamilyState);

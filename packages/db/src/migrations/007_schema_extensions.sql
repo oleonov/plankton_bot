@@ -1,5 +1,8 @@
--- 007_discovery_existing_alters.sql
--- Extends existing tables for family discovery system.
+-- 007_schema_extensions.sql
+-- Schema extensions used by runtime repositories: signal reason on orders,
+-- operator command provenance, per-family pnl index, and family evidence score
+-- columns. Originally bundled with discovery work; the discovery pieces were
+-- removed in migration 034, but these additions remain in active use.
 
 -- orders: persist signal reason for repricing exit tracking
 ALTER TABLE orders ADD COLUMN signal_reason TEXT;

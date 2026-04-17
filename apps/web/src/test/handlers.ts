@@ -103,7 +103,6 @@ export const mockControlOverview = {
   ...mockProfiles,
   activeSwitch: null,
   recentTransitions: [],
-  pendingProposals: 0,
   heartbeats: [],
 };
 
@@ -120,9 +119,6 @@ export const mockProfileDetail = {
     {
       family_id: "fam-1",
       enabled: 1,
-      operator_mode: "active",
-      strategy_stage: "probe-only",
-      deployment_stage: "paper-only",
       priority: 1,
       family_key: "bitcoin-above",
       primary_category: "crypto",
@@ -177,8 +173,6 @@ export const handlers = [
       },
     }),
   ),
-  http.get("/api/v1/families/proposals", () => ok([])),
-  http.get("/api/v1/families/recent-demotions", () => ok([])),
   http.get("/api/v1/metrics", () =>
     ok({
       positions: {},
@@ -202,13 +196,6 @@ export const handlers = [
   http.get("/api/v1/metrics/families", () => ok([])),
   http.get("/api/v1/audit", () => ok({ ...mockAudit, totalCount: mockAudit.items.length })),
   http.get("/api/v1/risk-events", () => ok({ items: [], nextCursor: null, totalCount: 0 })),
-  http.get("/api/v1/discovery/status", () =>
-    ok({ lastRun: null, lastSuccessfulRun: null, activeRun: null, workerState: "healthy" }),
-  ),
-  http.get("/api/v1/discovery/candidates", () =>
-    ok({ items: [], nextCursor: null, totalCount: 0 }),
-  ),
-  http.get("/api/v1/discovery/runs", () => ok([])),
   http.get("/api/v1/positions", () => ok({ items: [], nextCursor: null, totalCount: 0 })),
   http.get("/api/v1/orders", () => ok({ items: [], nextCursor: null, totalCount: 0 })),
   http.get("/api/v1/fills", () => ok({ items: [], nextCursor: null, totalCount: 0 })),

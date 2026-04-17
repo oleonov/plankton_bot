@@ -52,7 +52,7 @@ describe("SqliteOperatorCommandRepository", () => {
       createdAt: "2026-01-01T00:00:00Z",
     });
     cmdRepo.insert({
-      action: "family_quarantine",
+      action: "family_disable",
       targetId: "fam-1",
       reason: "reason-2",
       createdAt: "2026-01-01T00:01:00Z",
@@ -63,7 +63,7 @@ describe("SqliteOperatorCommandRepository", () => {
     expect(pending[0]!.action).toBe("pause");
     expect(pending[0]!.status).toBe("pending");
     expect(pending[0]!.appliedAt).toBeNull();
-    expect(pending[1]!.action).toBe("family_quarantine");
+    expect(pending[1]!.action).toBe("family_disable");
     expect(pending[1]!.targetId).toBe("fam-1");
   });
 
@@ -83,7 +83,7 @@ describe("SqliteOperatorCommandRepository", () => {
 
   it("updateStatus marks as rejected", () => {
     const id = cmdRepo.insert({
-      action: "family_activate",
+      action: "family_enable",
       targetId: "fam-1",
       reason: "test",
       createdAt: "2026-01-01T00:00:00Z",
@@ -97,18 +97,18 @@ describe("SqliteOperatorCommandRepository", () => {
 
   it("round-trips initiatorType and initiator", () => {
     cmdRepo.insert({
-      action: "family_activate",
+      action: "family_enable",
       targetId: "fam-1",
       reason: "auto-promote",
       createdAt: "2026-01-01T00:00:00Z",
       initiatorType: "system",
-      initiator: "discovery-engine",
+      initiator: "rules-import",
     });
 
     const pending = cmdRepo.getPending();
     expect(pending).toHaveLength(1);
     expect(pending[0]!.initiatorType).toBe("system");
-    expect(pending[0]!.initiator).toBe("discovery-engine");
+    expect(pending[0]!.initiator).toBe("rules-import");
   });
 
   it("defaults initiatorType to operator when omitted", () => {
@@ -138,7 +138,7 @@ describe("SqliteOperatorCommandRepository", () => {
       createdAt: "2026-01-01T00:01:00Z",
     });
     cmdRepo.insert({
-      action: "family_reduce_only",
+      action: "family_disable",
       targetId: "fam-1",
       reason: null,
       createdAt: "2026-01-01T00:02:00Z",
@@ -149,7 +149,7 @@ describe("SqliteOperatorCommandRepository", () => {
 
     const pending = cmdRepo.getPending();
     expect(pending).toHaveLength(1);
-    expect(pending[0]!.action).toBe("family_reduce_only");
+    expect(pending[0]!.action).toBe("family_disable");
   });
 });
 
@@ -188,7 +188,7 @@ describe("SqliteOperatorActionRepository", () => {
       performedAt: "2026-01-02T00:00:00Z",
     });
     actionRepo.insert({
-      action: "family_quarantine",
+      action: "family_disable",
       targetType: "family",
       targetId: "fam-1",
       reason: "tail exceeded",
@@ -197,27 +197,27 @@ describe("SqliteOperatorActionRepository", () => {
 
     const recent = actionRepo.findRecent(2);
     expect(recent).toHaveLength(2);
-    expect(recent[0]!.action).toBe("family_quarantine");
+    expect(recent[0]!.action).toBe("family_disable");
     expect(recent[1]!.action).toBe("resume");
   });
 
   it("findByFamily returns actions for specific family", () => {
     actionRepo.insert({
-      action: "family_quarantine",
+      action: "family_disable",
       targetType: "family",
       targetId: "fam-1",
       reason: "tail",
       performedAt: "2026-01-01T00:00:00Z",
     });
     actionRepo.insert({
-      action: "family_activate",
+      action: "family_enable",
       targetType: "family",
       targetId: "fam-1",
       reason: null,
       performedAt: "2026-01-02T00:00:00Z",
     });
     actionRepo.insert({
-      action: "family_quarantine",
+      action: "family_disable",
       targetType: "family",
       targetId: "fam-2",
       reason: "other",
@@ -227,8 +227,8 @@ describe("SqliteOperatorActionRepository", () => {
     const fam1Actions = actionRepo.findByFamily(createFamilyId("fam-1"));
     expect(fam1Actions).toHaveLength(2);
     // Newest first
-    expect(fam1Actions[0]!.action).toBe("family_activate");
-    expect(fam1Actions[1]!.action).toBe("family_quarantine");
+    expect(fam1Actions[0]!.action).toBe("family_enable");
+    expect(fam1Actions[1]!.action).toBe("family_disable");
 
     const fam2Actions = actionRepo.findByFamily(createFamilyId("fam-2"));
     expect(fam2Actions).toHaveLength(1);
@@ -245,7 +245,7 @@ describe("SqliteOperatorActionRepository", () => {
     });
     // Insert action with targetType='family' and targetId='fam-1'
     actionRepo.insert({
-      action: "family_quarantine",
+      action: "family_disable",
       targetType: "family",
       targetId: "fam-1",
       reason: "tail",

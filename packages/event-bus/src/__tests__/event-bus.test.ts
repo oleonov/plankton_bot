@@ -51,7 +51,6 @@ function makePosition(overrides?: Partial<Position>): Position {
 function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
   return {
     familyId: createFamilyId("fam-1"),
-    runtimeMode: "active",
     openValueUsdc: 100,
     openPositionCount: 1,
     openDustCount: 0,
@@ -60,9 +59,6 @@ function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
     tailAdjustedPnlLive: 10,
     lastEntryTs: null,
     lastExitTs: null,
-    quarantineReason: null,
-    effectiveMode: null,
-    derivedModeReason: null,
     firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
     ...overrides,

@@ -5,7 +5,6 @@ import type {
   FamilyEvidenceRepository,
   FamilyRulesProvider,
   FamilyIdentity,
-  FamilyEvidence,
   RuntimeEventMap,
 } from "@plankton/domain";
 import type { ScoreComputer, RecycleMetrics } from "../modules/evidence/score-computer.js";
@@ -61,14 +60,6 @@ function createMockScoreComputer(overrides?: {
   toxicity?: Partial<import("../modules/evidence/score-computer.js").ToxicityMetrics>;
 }): ScoreComputer {
   return {
-    computeRecurrenceMetrics: vi.fn().mockReturnValue({
-      spanDays: 20,
-      presenceDays: 15,
-      totalDays: 20,
-      cadenceMean: 1.5,
-      cadenceStddev: 0.3,
-      distinctConditions: 10,
-    }),
     computeRecycleMetrics: vi.fn().mockReturnValue({
       tradeCount: 25,
       distinctMarkets: 6,
@@ -76,11 +67,6 @@ function createMockScoreComputer(overrides?: {
       repricingExits: 4,
       totalNonSettlementClosed: 8,
       ...overrides?.recycleMetrics,
-    }),
-    computeLiveViabilityMetrics: vi.fn().mockReturnValue({
-      activeMarketCount: 4,
-      healthyEndDateFraction: 0.8,
-      clusterVolume24h: 30000,
     }),
     computeToxicityMetrics: vi.fn().mockReturnValue({
       dustCount: 0,
@@ -219,95 +205,6 @@ describe("FamilyEvidenceEngine", () => {
 
     // Verify recompute ran again
     expect(evidenceRepo.updateScores).toHaveBeenCalled();
-
-    await engine.stop();
-  });
-
-  it("warming-up persists while evidence insufficient", async () => {
-    const identity = makeFamilyIdentity();
-    const rulesProvider = {
-      getRule: vi.fn(),
-      isEnabled: vi.fn().mockReturnValue(true),
-      getAllFamilies: vi.fn().mockReturnValue([identity]),
-      getRulesForRegime: vi.fn().mockReturnValue([]),
-    } as any;
-
-    // Low trade count = insufficient evidence
-    const sc = createMockScoreComputer({
-      recycleMetrics: {
-        tradeCount: 5,
-        distinctMarkets: 2,
-        tailAdjustedPnl: 1,
-        repricingExits: 0,
-        totalNonSettlementClosed: 1,
-      },
-    });
-
-    const evidenceRepo = {
-      updateScores: vi.fn(),
-      updatePromotionState: vi.fn(),
-      updateProbeSubstate: vi.fn(),
-      getEvidence: vi.fn().mockReturnValue({
-        promotionState: "probe-only",
-        probeSubstate: "warming-up",
-      } as Partial<FamilyEvidence>),
-    } as any;
-
-    const deps = createMockDeps({ rulesProvider, scoreComputer: sc, evidenceRepo });
-    const engine = new FamilyEvidenceEngine({
-      ...deps,
-      log: silentLog,
-      recomputeIntervalMs: 999_999,
-    });
-
-    await engine.start();
-
-    // tradeCount < 20 -> no substate update to "retained"
-    expect(evidenceRepo.updateProbeSubstate).not.toHaveBeenCalled();
-
-    await engine.stop();
-  });
-
-  it("retained set when trade_count >= 20 but thresholds not met", async () => {
-    const identity = makeFamilyIdentity();
-    const rulesProvider = {
-      getRule: vi.fn(),
-      isEnabled: vi.fn().mockReturnValue(true),
-      getAllFamilies: vi.fn().mockReturnValue([identity]),
-      getRulesForRegime: vi.fn().mockReturnValue([]),
-    } as any;
-
-    // Enough trades but failing other thresholds (only 1 repricing exit, 2 markets)
-    const sc = createMockScoreComputer({
-      recycleMetrics: {
-        tradeCount: 25,
-        distinctMarkets: 2,
-        tailAdjustedPnl: -5,
-        repricingExits: 1,
-        totalNonSettlementClosed: 4,
-      },
-    });
-
-    const evidenceRepo = {
-      updateScores: vi.fn(),
-      updatePromotionState: vi.fn(),
-      updateProbeSubstate: vi.fn(),
-      getEvidence: vi.fn().mockReturnValue({
-        promotionState: "probe-only",
-        probeSubstate: "warming-up",
-      } as Partial<FamilyEvidence>),
-    } as any;
-
-    const deps = createMockDeps({ rulesProvider, scoreComputer: sc, evidenceRepo });
-    const engine = new FamilyEvidenceEngine({
-      ...deps,
-      log: silentLog,
-      recomputeIntervalMs: 999_999,
-    });
-
-    await engine.start();
-
-    expect(evidenceRepo.updateProbeSubstate).toHaveBeenCalledWith(FAM_ID, "retained");
 
     await engine.stop();
   });

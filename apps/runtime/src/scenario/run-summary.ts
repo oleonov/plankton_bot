@@ -31,7 +31,7 @@ export function formatRunSummary(name: string, result: ScenarioResult): string {
 
   for (const f of result.familyStates) {
     lines.push(
-      `  ${f.familyId}: mode=${f.runtimeMode} positions=${f.openPositionCount} value=$${f.openValueUsdc.toFixed(2)} pnl=${f.tailAdjustedPnlLive.toFixed(2)}`,
+      `  ${f.familyId}: positions=${f.openPositionCount} value=$${f.openValueUsdc.toFixed(2)} pnl=${f.tailAdjustedPnlLive.toFixed(2)}`,
     );
   }
 

@@ -287,7 +287,6 @@ describe("POST /config/import", () => {
       deployments.find((d) => d["profile"] === "live-lite") as Record<string, unknown>,
     ).toMatchObject({
       enabled: 1,
-      deployment_stage: "live-probe",
     });
 
     const importRecord = conn.db

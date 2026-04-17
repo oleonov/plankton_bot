@@ -39,30 +39,6 @@ describe("normalizeReasonCode", () => {
     expect(normalizeReasonCode("dust positions 3 >= max 2")).toBe("max_dust_positions");
   });
 
-  it("maps derived reduce-only reason", () => {
-    expect(
-      normalizeReasonCode(
-        "entry blocked — family in derived reduce-only (tail cost 3.75 breaches cap)",
-      ),
-    ).toBe("derived_reduce_only");
-  });
-
-  it("maps derived probe-only reason", () => {
-    expect(
-      normalizeReasonCode(
-        "confirm-scale blocked — family in derived probe-only (tailAdjustedPnlLive -4.00 < 0)",
-      ),
-    ).toBe("derived_probe_only");
-  });
-
-  it("maps requirePositiveRecycleHistoryForScale reason", () => {
-    expect(
-      normalizeReasonCode(
-        "scale-in blocked — requirePositiveRecycleHistoryForScale and tailAdjustedPnlLive -2.50 <= 0",
-      ),
-    ).toBe("require_positive_recycle");
-  });
-
   it("maps family not found", () => {
     expect(normalizeReasonCode("family fam-xyz not found in rules")).toBe("family_not_found");
   });
@@ -71,25 +47,9 @@ describe("normalizeReasonCode", () => {
     expect(normalizeReasonCode("family fam-xyz is disabled")).toBe("family_disabled");
   });
 
-  it("maps operator quarantine mode", () => {
-    expect(normalizeReasonCode("family in quarantine mode")).toBe("operator_quarantine");
-  });
-
-  it("maps operator reduce-only mode", () => {
-    expect(normalizeReasonCode("family in reduce-only mode — entry blocked")).toBe(
-      "operator_reduce_only",
-    );
-  });
-
   it("maps probe token open-order blocker", () => {
     expect(normalizeReasonCode("probe token already has open buy order")).toBe(
       "probe_token_open_buy_order",
-    );
-  });
-
-  it("maps operator probe-only mode", () => {
-    expect(normalizeReasonCode("family in probe-only mode — scale-in blocked")).toBe(
-      "operator_probe_only",
     );
   });
 

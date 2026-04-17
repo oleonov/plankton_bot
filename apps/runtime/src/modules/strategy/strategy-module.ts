@@ -212,11 +212,6 @@ export class StrategyModule implements RuntimeModule {
           return false;
         }
 
-        const familyState = this.deps.familyStateRepo.get(m.familyId);
-        if (familyState?.runtimeMode === "quarantine") {
-          return false;
-        }
-
         return true;
       });
 

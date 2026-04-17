@@ -115,7 +115,6 @@ export interface StatusData {
     details?: Record<string, unknown> | null;
     lastSeenAt: string;
   }>;
-  familyModeCounts?: Record<string, number> | null;
 }
 
 /** GET /metrics */
@@ -174,13 +173,9 @@ export interface FamilyMetric {
   familyKey: string;
   feeTier?: string | null;
   requiresPostOnlyForLive?: boolean | null;
-  runtimeMode: string;
   openValueUsdc: number;
   openPositionCount: number;
   tailAdjustedPnlLive: number;
-  quarantineReason: string | null;
-  effectiveMode: string | null;
-  derivedModeReason: string | null;
   executionTelemetry24h?: ExecutionTelemetryWindow;
   updatedAt: string;
 }
@@ -267,21 +262,15 @@ export interface FamilyDTO {
   feeTier?: string | null;
   liveWalletRequirement?: string | null;
   requiresPostOnlyForLive?: boolean | null;
-  promotionState: string | null;
-  probeSubstate: string | null;
   liveness?: FamilyLiveness;
   executionTelemetry24h?: ExecutionTelemetryWindow;
   state: {
-    runtimeMode: string;
     openValueUsdc: number;
     openPositionCount: number;
     openDustCount: number;
     activeMarketCount: number;
     currentTailCostUsdc: number;
     tailAdjustedPnlLive: number;
-    quarantineReason: string | null;
-    effectiveMode: string | null;
-    derivedModeReason: string | null;
   } | null;
   caps: {
     maxOpenValueUsdc: number;
@@ -290,8 +279,6 @@ export interface FamilyDTO {
   } | null;
   deployment: {
     enabled: boolean;
-    operatorMode: string;
-    deploymentStage: string;
     priority: number;
   } | null;
 }
@@ -338,116 +325,11 @@ export interface Paginated<T> {
   totalPages?: number;
 }
 
-/** GET /discovery/candidates item */
-export interface CandidateDTO {
-  candidateId: string;
-  familyKey: string;
-  regime: string;
-  horizon: string;
-  cadence: string;
-  patternConfidence: string;
-  primaryCategory: string;
-  strategyProfile: string;
-  slugPattern: string | null;
-  matchedFamilyId: string | null;
-  activeMarketCount: number;
-  nearestEndDate: string | null;
-  clusterVolume24h: number;
-  recurrenceScore: number | null;
-  recycleScore: number | null;
-  liveViabilityScore: number | null;
-  toxicityPenalty: number | null;
-  gateRecommendation: string;
-  recommendationReason: string | null;
-  scoresUpdatedAt: string | null;
-  status: string;
-  firstSeenAt: string;
-  lastSeenAt: string;
-  reviewedAt: string | null;
-  materializedAt: string | null;
-}
-
-/** GET /discovery/candidates/:id (detail) */
-export interface CandidateDetailDTO extends CandidateDTO {
-  recentObservations: ObservationDTO[];
-}
-
-/** Candidate observation */
-export interface ObservationDTO {
-  id: number;
-  candidateId: string;
-  activeMarketCount: number;
-  clusterVolume24h: number;
-  nearestEndDate: string | null;
-  observedAt: string;
-}
-
-/** GET /discovery/status */
-export interface DiscoveryScanStatsDTO {
-  marketsFound: number;
-  clustersCreated: number;
-  candidatesUpserted: number;
-  matched: number;
-  pruned: number;
-}
-
-export interface DiscoveryRunDTO {
-  id: number;
-  triggerType: "startup" | "schedule" | "manual";
-  status: "queued" | "running" | "succeeded" | "failed";
-  requestedBy: string | null;
-  requestedAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-  heartbeatAt: string | null;
-  stats: DiscoveryScanStatsDTO | null;
-  error: string | null;
-}
-
-export interface DiscoveryStatusDTO {
-  lastRun: DiscoveryRunDTO | null;
-  lastSuccessfulRun: DiscoveryRunDTO | null;
-  activeRun: DiscoveryRunDTO | null;
-  workerState: "healthy" | "offline";
-}
-
-/** GET /families/proposals item */
-export interface ProposalDTO {
-  id: number;
-  familyId: string;
-  profile: string | null;
-  currentState: string;
-  proposedState: string;
-  reason: string;
-  scoresSnapshot: string | null;
-  status: string;
-  createdAt: string;
-  resolvedAt: string | null;
-  resolvedBy: string | null;
-}
-
-/** Promotion blocker threshold check */
-export interface PromotionBlockerDTO {
-  metric: string;
-  current: number;
-  required: number;
-  passed: boolean;
-}
-
-export interface ExecutionCanaryDTO {
-  windowHours: number;
-  required: boolean;
-  eligible: boolean;
-  minTotalFills: number;
-  blockers: PromotionBlockerDTO[];
-}
-
 /** GET /families/:id/evidence */
 export interface FamilyEvidenceDTO {
   familyId: string;
   evidenceStatus: string | null;
   evidenceScore: number | null;
-  promotionState: string | null;
   localTradeCount: number | null;
   localMarketCount: number | null;
   localRealizedPnlFifo: number | null;
@@ -464,10 +346,7 @@ export interface FamilyEvidenceDTO {
   liveViabilityScore: number | null;
   toxicityPenalty: number | null;
   lastValidatedAt: string | null;
-  probeSubstate: string | null;
   repricingExitCount: number;
-  promotionBlockers?: PromotionBlockerDTO[];
-  executionCanary24h?: ExecutionCanaryDTO;
 }
 
 /** GET /families/:id/transitions item */
@@ -530,9 +409,6 @@ export interface ProfileSettingsDTO {
 export interface DeployedFamilyDTO {
   family_id: string;
   enabled: number;
-  operator_mode: string;
-  strategy_stage: string;
-  deployment_stage: string;
   priority: number;
   family_key: string;
   primary_category: string;
@@ -574,6 +450,5 @@ export interface ControlOverviewDTO {
   } | null;
   activeSwitch: Record<string, unknown> | null;
   recentTransitions: AuditEntryDTO[];
-  pendingProposals: number;
   heartbeats: Record<string, unknown>[];
 }

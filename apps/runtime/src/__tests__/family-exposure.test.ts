@@ -6,7 +6,6 @@ import {
   SqliteFamilyStateRepository,
 } from "@plankton/db";
 import { createFamilyId, createTokenId } from "@plankton/domain";
-import type { FamilyRulesProvider, FamilyRuleBundle, FamilyRules, Regime } from "@plankton/domain";
 import { FamilyExposureCalculator } from "../modules/risk-inventory/family-exposure.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────
@@ -23,134 +22,15 @@ const silentLog = {
   child: () => silentLog,
 } as any;
 
-function makeTailRules(overrides?: Record<string, unknown>) {
-  return {
-    maxOpenValueUsdc: 100,
-    maxActiveMarkets: 5,
-    maxDustPositions: 3,
-    tailQuarantineThresholdUsdc: 50,
-    tailQuarantineThresholdRatio: 0.5,
-    staleTailPruneEnabled: false,
-    thresholdCleanupRequired: false,
-    autoSettleResolvedMarkets: true,
-    ...overrides,
-  };
-}
-
-function makeRuleBundle(tailOverrides?: Record<string, unknown>): FamilyRuleBundle {
-  return {
-    identity: {
-      familyId: FAM_ID,
-      familyKey: "test-fam",
-      primaryCategory: "crypto",
-      regime: "threshold" as Regime,
-      horizon: "short",
-      cadence: "daily",
-      strategyProfile: "scalp" as any,
-      topicKey: "test",
-      slugPattern: "test*",
-      notes: null,
-    },
-    evidence: {
-      familyId: FAM_ID,
-      evidenceStatus: "confirmed",
-      evidenceScore: 80,
-      promotionState: "scaled",
-      localTradeCount: 10,
-      localMarketCount: 3,
-      localRealizedPnlFifo: 5,
-      openTailCostUsdc: 0,
-      tailAdjustedPnl: 5,
-      remoteClosedRealizedPnl: null,
-      openPositionCount: null,
-      openDustCount: null,
-      bothSidedEligible: false,
-      heavyCampaignEligible: false,
-      activeWindowEdgeScore: null,
-      recurrenceScore: null,
-      recycleScore: null,
-      liveViabilityScore: null,
-      toxicityPenalty: null,
-      lastValidatedAt: null,
-      probeSubstate: null,
-      repricingExitCount: 0,
-    },
-    rules: {
-      familyId: FAM_ID,
-      universe: {
-        enabled: true,
-        action: "trade",
-        priorityRank: 1,
-        sessionMode: "active-window",
-      },
-      entry: {
-        entryMode: "probe-first",
-        minEntryPrice: 0.05,
-        maxEntryPrice: 0.95,
-        maxInitialNotionalUsdc: 10,
-        allowHighPriceOneShot: false,
-        highPriceThreshold: 0.85,
-        requireProvenFamilyAbovePrice: 0.7,
-        preferredEntryBand: null,
-        maxProbeCountPerMarket: null,
-        entryCooldownSeconds: null,
-        maxNewMarketsPerSession: null,
-        probeSizeUsdc: 5,
-        addSizeUsdc: 4,
-      },
-      scaleIn: {
-        scaleMode: "confirm-only",
-        defaultMaxBuysPerLeg: 3,
-        heavyMaxBuysPerLeg: 5,
-        allowHeavyCampaigns: false,
-        requirePositiveRecycleHistoryForScale: false,
-      },
-      exit: {
-        exitMode: "repricing-sell",
-        primaryProfitModel: "sell-into-strength",
-        allowRunnerExtension: false,
-        preferFastRecycle: true,
-        resolutionHoldingAllowed: false,
-        resolutionBufferMinutes: 60,
-        targetRoiBandLow: null,
-        targetRoiBandHigh: null,
-        maxUnmovedHoldHours: null,
-        maxTailHoldHours: null,
-      },
-      twoSided: {
-        allowTwoSided: false,
-        twoSidedMode: "disabled",
-        minActivityForTwoSided: null,
-      },
-      tailSuppression: makeTailRules(tailOverrides),
-      session: {
-        activeWindowsUtc: [],
-        reducedWindowsUtc: [],
-        weekdayBias: "normal",
-      },
-    } as FamilyRules,
-  };
-}
-
-function createMockRulesProvider(
-  bundle: FamilyRuleBundle | null = makeRuleBundle(),
-): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue(bundle),
-    isEnabled: vi.fn().mockReturnValue(bundle !== null),
-    getAllFamilies: vi.fn().mockReturnValue(bundle ? [bundle.identity] : []),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  };
-}
 
 function seedFamily(db: import("better-sqlite3").Database) {
   db.exec(`
     INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
     VALUES ('${String(FAM_ID)}', 'test-fam', 'crypto', 'threshold', 'short', 'daily', 'scalp');
 
-    INSERT OR REPLACE INTO family_runtime_state (family_id, runtime_mode, open_value_usdc, open_position_count, open_dust_count,
+    INSERT OR REPLACE INTO family_runtime_state (family_id, open_value_usdc, open_position_count, open_dust_count,
       active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-    VALUES ('${String(FAM_ID)}', 'active', 0, 0, 0, 0, 0, 0, '${new Date().toISOString()}');
+    VALUES ('${String(FAM_ID)}', 0, 0, 0, 0, 0, 0, '${new Date().toISOString()}');
   `);
 }
 
@@ -207,198 +87,22 @@ function seedLot(
 
 // ─── Tests ──────────────────────────────────────────────────────────────
 
-describe("FamilyExposureCalculator effective mode", () => {
-  it("sets effectiveMode to active when tail health is good", () => {
+describe("FamilyExposureCalculator", () => {
+  it("computes openValue, counts, tail cost, and tailAdjustedPnlLive correctly", () => {
     const conn = bootstrapDatabase(":memory:");
     seedFamily(conn.db);
-    seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: 10 });
+    seedPosition(conn.db, {
+      positionId: "pos-1",
+      tokenId: String(TOK_ID),
+      realizedPnl: 10,
+      costBasisUsdc: 8,
+    });
     seedLot(conn.db, {
       lotId: "lot-1",
       positionId: "pos-1",
       tokenId: String(TOK_ID),
       remainingSize: 10,
-      entryPrice: 0.05,
-    });
-
-    const posRepo = new SqlitePositionRepository(conn.db);
-    const lotRepo = new SqliteInventoryLotRepository(conn.db);
-    const stateRepo = new SqliteFamilyStateRepository(conn.db);
-    const rulesProvider = createMockRulesProvider();
-
-    const calc = new FamilyExposureCalculator(
-      stateRepo,
-      posRepo,
-      lotRepo,
-      silentLog,
-      rulesProvider,
-    );
-    const result = calc.recompute(FAM_ID, true);
-
-    expect(result.effectiveMode).toBe("active");
-    expect(result.derivedModeReason).toBeNull();
-    conn.close();
-  });
-
-  it("sets effectiveMode to probe-only when tailAdjustedPnlLive < 0", () => {
-    const conn = bootstrapDatabase(":memory:");
-    seedFamily(conn.db);
-    // realizedPnl = -5, tailCost = 10 => tailAdjustedPnl = -5 - 10 = -15
-    seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: -5 });
-    seedLot(conn.db, {
-      lotId: "lot-1",
-      positionId: "pos-1",
-      tokenId: String(TOK_ID),
-      remainingSize: 100,
-      entryPrice: 0.1,
-    });
-
-    const posRepo = new SqlitePositionRepository(conn.db);
-    const lotRepo = new SqliteInventoryLotRepository(conn.db);
-    const stateRepo = new SqliteFamilyStateRepository(conn.db);
-    const rulesProvider = createMockRulesProvider();
-
-    const calc = new FamilyExposureCalculator(
-      stateRepo,
-      posRepo,
-      lotRepo,
-      silentLog,
-      rulesProvider,
-    );
-    const result = calc.recompute(FAM_ID, true);
-
-    expect(result.tailAdjustedPnlLive).toBeLessThan(0);
-    expect(result.effectiveMode).toBe("probe-only");
-    expect(result.derivedModeReason).toContain("tailAdjustedPnl");
-    conn.close();
-  });
-
-  it("keeps proven non-threshold families active when tailAdjustedPnlLive < 0", () => {
-    const conn = bootstrapDatabase(":memory:");
-    seedFamily(conn.db);
-    conn.db.exec(`
-      UPDATE family_catalog
-      SET regime = 'social-activity'
-      WHERE family_id = '${String(FAM_ID)}'
-    `);
-    // realizedPnl = -5, tailCost = 10 => tailAdjustedPnl = -15
-    seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: -5 });
-    seedLot(conn.db, {
-      lotId: "lot-1",
-      positionId: "pos-1",
-      tokenId: String(TOK_ID),
-      remainingSize: 100,
-      entryPrice: 0.1,
-    });
-
-    const posRepo = new SqlitePositionRepository(conn.db);
-    const lotRepo = new SqliteInventoryLotRepository(conn.db);
-    const stateRepo = new SqliteFamilyStateRepository(conn.db);
-    const baseBundle = makeRuleBundle();
-    const evidence: NonNullable<FamilyRuleBundle["evidence"]> = {
-      ...(baseBundle.evidence as NonNullable<FamilyRuleBundle["evidence"]>),
-      evidenceStatus: "partial",
-      evidenceScore: 80,
-      localTradeCount: 250,
-    };
-    const rulesProvider = createMockRulesProvider({
-      ...baseBundle,
-      identity: {
-        ...baseBundle.identity,
-        regime: "social-activity" as Regime,
-      },
-      evidence,
-    });
-
-    const calc = new FamilyExposureCalculator(
-      stateRepo,
-      posRepo,
-      lotRepo,
-      silentLog,
-      rulesProvider,
-    );
-    const result = calc.recompute(FAM_ID, true);
-
-    expect(result.tailAdjustedPnlLive).toBeLessThan(0);
-    expect(result.effectiveMode).toBe("active");
-    expect(result.derivedModeReason).toBeNull();
-    conn.close();
-  });
-
-  it("sets effectiveMode to reduce-only when tail cost exceeds threshold", () => {
-    const conn = bootstrapDatabase(":memory:");
-    seedFamily(conn.db);
-    seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: 100 });
-    // tailCost = 1000 * 0.1 = 100 > threshold 50
-    seedLot(conn.db, {
-      lotId: "lot-1",
-      positionId: "pos-1",
-      tokenId: String(TOK_ID),
-      remainingSize: 1000,
-      entryPrice: 0.1,
-    });
-
-    const posRepo = new SqlitePositionRepository(conn.db);
-    const lotRepo = new SqliteInventoryLotRepository(conn.db);
-    const stateRepo = new SqliteFamilyStateRepository(conn.db);
-    const rulesProvider = createMockRulesProvider();
-
-    const calc = new FamilyExposureCalculator(
-      stateRepo,
-      posRepo,
-      lotRepo,
-      silentLog,
-      rulesProvider,
-    );
-    const result = calc.recompute(FAM_ID, true);
-
-    expect(result.currentTailCostUsdc).toBeGreaterThan(50);
-    expect(result.effectiveMode).toBe("reduce-only");
-    expect(result.derivedModeReason).toContain("tail cost");
-    conn.close();
-  });
-
-  it("sets effectiveMode to reduce-only when tail/pnl ratio exceeds threshold", () => {
-    const conn = bootstrapDatabase(":memory:");
-    seedFamily(conn.db);
-    // realizedPnl = 10, tailCost = 100 * 0.08 = 8, ratio = 8/10 = 0.8 > 0.5 threshold
-    seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: 10 });
-    seedLot(conn.db, {
-      lotId: "lot-1",
-      positionId: "pos-1",
-      tokenId: String(TOK_ID),
-      remainingSize: 100,
-      entryPrice: 0.08,
-    });
-
-    const posRepo = new SqlitePositionRepository(conn.db);
-    const lotRepo = new SqliteInventoryLotRepository(conn.db);
-    const stateRepo = new SqliteFamilyStateRepository(conn.db);
-    const rulesProvider = createMockRulesProvider();
-
-    const calc = new FamilyExposureCalculator(
-      stateRepo,
-      posRepo,
-      lotRepo,
-      silentLog,
-      rulesProvider,
-    );
-    const result = calc.recompute(FAM_ID, true);
-
-    expect(result.effectiveMode).toBe("reduce-only");
-    expect(result.derivedModeReason).toContain("ratio");
-    conn.close();
-  });
-
-  it("returns null effectiveMode when rulesProvider not available", () => {
-    const conn = bootstrapDatabase(":memory:");
-    seedFamily(conn.db);
-    seedPosition(conn.db, { positionId: "pos-1", tokenId: String(TOK_ID), realizedPnl: 0 });
-    seedLot(conn.db, {
-      lotId: "lot-1",
-      positionId: "pos-1",
-      tokenId: String(TOK_ID),
-      remainingSize: 10,
-      entryPrice: 0.05,
+      entryPrice: 0.3,
     });
 
     const posRepo = new SqlitePositionRepository(conn.db);
@@ -408,8 +112,10 @@ describe("FamilyExposureCalculator effective mode", () => {
     const calc = new FamilyExposureCalculator(stateRepo, posRepo, lotRepo, silentLog);
     const result = calc.recompute(FAM_ID, true);
 
-    // effectiveMode retains whatever was in the existing state (null by default)
-    expect(result.effectiveMode).toBeNull();
+    expect(result.openPositionCount).toBe(1);
+    expect(result.openValueUsdc).toBe(8);
+    expect(result.currentTailCostUsdc).toBeCloseTo(3, 2);
+    expect(result.tailAdjustedPnlLive).toBeCloseTo(7, 2);
     conn.close();
   });
 });

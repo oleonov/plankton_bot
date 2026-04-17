@@ -33,7 +33,6 @@ function makeState(overrides?: Partial<FamilyState>): FamilyState {
   const now = new Date().toISOString();
   return {
     familyId: createFamilyId("fam-1"),
-    runtimeMode: "active",
     openValueUsdc: 100,
     openPositionCount: 3,
     openDustCount: 1,
@@ -42,9 +41,6 @@ function makeState(overrides?: Partial<FamilyState>): FamilyState {
     tailAdjustedPnlLive: 5,
     lastEntryTs: null,
     lastExitTs: null,
-    quarantineReason: null,
-    effectiveMode: null,
-    derivedModeReason: null,
     firstNegativeTailAt: null,
     updatedAt: now,
     ...overrides,
@@ -72,7 +68,6 @@ describe("SqliteFamilyStateRepository", () => {
     const found = repo.get(createFamilyId("fam-1"));
     expect(found).not.toBeNull();
     expect(found!.familyId).toBe("fam-1");
-    expect(found!.runtimeMode).toBe("active");
     expect(found!.openValueUsdc).toBe(100);
     expect(found!.openPositionCount).toBe(3);
     expect(found!.openDustCount).toBe(1);
@@ -80,7 +75,6 @@ describe("SqliteFamilyStateRepository", () => {
     expect(found!.currentTailCostUsdc).toBe(10);
     expect(found!.tailAdjustedPnlLive).toBe(5);
     expect(found!.lastEntryTs).toBeNull();
-    expect(found!.quarantineReason).toBeNull();
   });
 
   it("get returns null for unknown family", () => {
@@ -95,44 +89,6 @@ describe("SqliteFamilyStateRepository", () => {
     repo.save(makeState({ familyId: createFamilyId("fam-2") }));
 
     expect(repo.findAll()).toHaveLength(2);
-  });
-
-  it("findByMode filters correctly", () => {
-    catalogRepo.upsert(makeIdentity("fam-1"));
-    catalogRepo.upsert(makeIdentity("fam-2"));
-    catalogRepo.upsert(makeIdentity("fam-3"));
-
-    repo.save(makeState({ familyId: createFamilyId("fam-1"), runtimeMode: "active" }));
-    repo.save(makeState({ familyId: createFamilyId("fam-2"), runtimeMode: "quarantine" }));
-    repo.save(makeState({ familyId: createFamilyId("fam-3"), runtimeMode: "active" }));
-
-    const active = repo.findByMode("active");
-    expect(active).toHaveLength(2);
-
-    const quarantine = repo.findByMode("quarantine");
-    expect(quarantine).toHaveLength(1);
-    expect(quarantine[0]!.familyId).toBe("fam-2");
-  });
-
-  it("findQuarantined returns only quarantined families", () => {
-    catalogRepo.upsert(makeIdentity("fam-1"));
-    catalogRepo.upsert(makeIdentity("fam-2"));
-    catalogRepo.upsert(makeIdentity("fam-3"));
-
-    repo.save(makeState({ familyId: createFamilyId("fam-1"), runtimeMode: "active" }));
-    repo.save(
-      makeState({
-        familyId: createFamilyId("fam-2"),
-        runtimeMode: "quarantine",
-        quarantineReason: "tail exceeded",
-      }),
-    );
-    repo.save(makeState({ familyId: createFamilyId("fam-3"), runtimeMode: "reduce-only" }));
-
-    const quarantined = repo.findQuarantined();
-    expect(quarantined).toHaveLength(1);
-    expect(quarantined[0]!.familyId).toBe("fam-2");
-    expect(quarantined[0]!.quarantineReason).toBe("tail exceeded");
   });
 
   it("save updates existing state (upsert)", () => {

@@ -29,7 +29,6 @@ import { riskEventsRoutes } from "./routes/risk-events.js";
 import { pnlSeriesRoutes } from "./routes/pnl-series.js";
 import { portfolioSeriesRoutes } from "./routes/portfolio-series.js";
 import { tradingActivityRoutes } from "./routes/trading-activity.js";
-import { discoveryRoutes } from "./routes/discovery.js";
 import { configRoutes } from "./routes/config.js";
 import { profileRoutes } from "./routes/profiles.js";
 import { auditRoutes } from "./routes/audit.js";
@@ -146,11 +145,6 @@ export async function buildServer(deps: ServerDeps) {
 
   // Mixed routes — pass both
   await app.register(familyRoutes, {
-    prefix: "/api/v1",
-    controlDb: deps.controlDb,
-    ledgerDb: deps.ledgerDb,
-  });
-  await app.register(discoveryRoutes, {
     prefix: "/api/v1",
     controlDb: deps.controlDb,
     ledgerDb: deps.ledgerDb,

@@ -20,8 +20,6 @@ function makeState(overrides?: Partial<FamilyProfileRuntimeState>): FamilyProfil
     tailAdjustedPnlLive: 5,
     lastEntryTs: null,
     lastExitTs: null,
-    effectiveMode: null,
-    derivedModeReason: null,
     firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
     ...overrides,
@@ -43,8 +41,6 @@ describe("SqliteFamilyProfileRuntimeStateRepository", () => {
 
   it("save and get round-trip", () => {
     const state = makeState({
-      effectiveMode: "active",
-      derivedModeReason: "healthy",
       lastEntryTs: "2026-03-30T10:00:00.000Z",
     });
     repo.save(state);
@@ -60,8 +56,6 @@ describe("SqliteFamilyProfileRuntimeStateRepository", () => {
     expect(found!.tailAdjustedPnlLive).toBe(5);
     expect(found!.lastEntryTs).toBe("2026-03-30T10:00:00.000Z");
     expect(found!.lastExitTs).toBeNull();
-    expect(found!.effectiveMode).toBe("active");
-    expect(found!.derivedModeReason).toBe("healthy");
     expect(found!.firstNegativeTailAt).toBeNull();
   });
 

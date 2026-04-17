@@ -261,11 +261,10 @@ CREATE INDEX IF NOT EXISTS idx_trading_state_snapshots_ts
 -- ═══════════ FAMILY RUNTIME STATE (legacy compat) ═══════════
 -- Kept for backward compatibility with existing repos and raw SQL.
 -- Phase 4 will migrate consumers to family_profile_runtime_state.
--- Cumulative schema: 001_initial + 006_effective_mode + 009_negative_tail + 011_probe_substate
+-- Cumulative schema: 001_initial + 009_negative_tail + 031_drop_family_mode_columns
 
 CREATE TABLE IF NOT EXISTS family_runtime_state (
   family_id               TEXT PRIMARY KEY,
-  runtime_mode            TEXT NOT NULL DEFAULT 'active',
   open_value_usdc         REAL NOT NULL DEFAULT 0,
   open_position_count     INTEGER NOT NULL DEFAULT 0,
   open_dust_count         INTEGER NOT NULL DEFAULT 0,
@@ -274,16 +273,12 @@ CREATE TABLE IF NOT EXISTS family_runtime_state (
   tail_adjusted_pnl_live  REAL NOT NULL DEFAULT 0,
   last_entry_ts           TEXT,
   last_exit_ts            TEXT,
-  quarantine_reason       TEXT,
-  effective_mode          TEXT,
-  derived_mode_reason     TEXT,
   first_negative_tail_at  TEXT,
   updated_at              TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ═══════════ FAMILY PROFILE RUNTIME STATE ═══════════
--- New table for Phase 2+: drops runtime_mode, quarantine_reason
--- From spec Section 3.3
+-- Flattened to enable/disable-only after 031_drop_family_mode_columns
 
 CREATE TABLE IF NOT EXISTS family_profile_runtime_state (
   family_id                TEXT PRIMARY KEY,
@@ -295,8 +290,6 @@ CREATE TABLE IF NOT EXISTS family_profile_runtime_state (
   tail_adjusted_pnl_live   REAL NOT NULL DEFAULT 0,
   last_entry_ts            TEXT,
   last_exit_ts             TEXT,
-  effective_mode           TEXT,
-  derived_mode_reason      TEXT,
   first_negative_tail_at   TEXT,
   updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );

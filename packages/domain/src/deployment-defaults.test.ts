@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DeploymentStage, ProfileId } from "./enums.js";
+import { ProfileId } from "./enums.js";
 import { resolveFamilyDeploymentSeed } from "./deployment-defaults.js";
 
 describe("resolveFamilyDeploymentSeed", () => {
@@ -9,10 +9,7 @@ describe("resolveFamilyDeploymentSeed", () => {
         profile: ProfileId.LiveLite,
         sourceType: "yaml_import",
       }),
-    ).toEqual({
-      enabled: true,
-      deploymentStage: DeploymentStage.LiveProbe,
-    });
+    ).toEqual({ enabled: true });
   });
 
   it("keeps discovery families live-lite disabled when current profile is not live-lite", () => {
@@ -21,10 +18,7 @@ describe("resolveFamilyDeploymentSeed", () => {
         profile: ProfileId.LiveLite,
         currentProfile: ProfileId.Paper,
       }),
-    ).toEqual({
-      enabled: false,
-      deploymentStage: DeploymentStage.Disabled,
-    });
+    ).toEqual({ enabled: false });
   });
 
   it("enables discovery families in the current live-lite profile", () => {
@@ -33,9 +27,6 @@ describe("resolveFamilyDeploymentSeed", () => {
         profile: ProfileId.LiveLite,
         currentProfile: ProfileId.LiveLite,
       }),
-    ).toEqual({
-      enabled: true,
-      deploymentStage: DeploymentStage.LiveProbe,
-    });
+    ).toEqual({ enabled: true });
   });
 });

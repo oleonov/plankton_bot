@@ -27,7 +27,6 @@ import {
 } from "@plankton/db";
 import type { FamilyState } from "@plankton/domain";
 import {
-  createFamilyId,
   createBotRunId,
   createTokenId,
   slugPatternToRegex,
@@ -104,7 +103,6 @@ async function executeScenario(
     if (!existing) {
       const baseline: FamilyState = {
         familyId: identity.familyId,
-        runtimeMode: "active",
         openValueUsdc: 0,
         openPositionCount: 0,
         openDustCount: 0,
@@ -113,32 +111,10 @@ async function executeScenario(
         tailAdjustedPnlLive: 0,
         lastEntryTs: null,
         lastExitTs: null,
-        quarantineReason: null,
-        effectiveMode: null,
-        derivedModeReason: null,
         firstNegativeTailAt: null,
         updatedAt: new Date().toISOString(),
       };
       repos.familyState.save(baseline);
-    }
-  }
-
-  // 3. Apply family state overrides
-  if (fixture.familyStateOverrides) {
-    for (const override of fixture.familyStateOverrides) {
-      const familyId = createFamilyId(override.familyId);
-      const existing = repos.familyState.get(familyId);
-      if (existing) {
-        repos.familyState.save({
-          ...existing,
-          runtimeMode: (override.runtimeMode as FamilyState["runtimeMode"]) ?? existing.runtimeMode,
-          quarantineReason:
-            override.quarantineReason !== undefined
-              ? override.quarantineReason
-              : existing.quarantineReason,
-          updatedAt: new Date().toISOString(),
-        });
-      }
     }
   }
 
@@ -479,7 +455,6 @@ async function executeScenario(
     dustPositionCount: dustPositions.length,
     familyStates: finalFamilyStates.map((fs) => ({
       familyId: fs.familyId,
-      runtimeMode: fs.runtimeMode,
       openValueUsdc: fs.openValueUsdc,
       openPositionCount: fs.openPositionCount,
       tailAdjustedPnlLive: fs.tailAdjustedPnlLive,

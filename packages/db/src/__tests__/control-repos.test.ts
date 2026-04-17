@@ -518,7 +518,6 @@ describe("SqliteFamilyProfileRollupRepository", () => {
       realizedPnl: 50.5,
       tailCostUsdc: 10,
       tailAdjustedPnl: 40.5,
-      effectiveMode: "active",
       lastTradeAt: NOW,
       updatedAt: NOW,
     };
@@ -538,7 +537,6 @@ describe("SqliteFamilyProfileRollupRepository", () => {
       realizedPnl: 0,
       tailCostUsdc: 0,
       tailAdjustedPnl: 0,
-      effectiveMode: null,
       lastTradeAt: null,
       updatedAt: NOW,
     });

@@ -2,7 +2,7 @@
  * Plankton API — operator-facing REST + SSE server.
  *
  * Reads from two databases:
- *   control.db  — family catalog, rules, candidates, operator commands
+ *   control.db  — family catalog, rules, operator commands
  *   ledger-{profile}.db — positions, orders, fills, metrics, market data
  *
  * Does NOT import runtime modules or exchange SDK.

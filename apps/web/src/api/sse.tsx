@@ -12,14 +12,6 @@ const SSE_INVALIDATION_MAP: Record<string, string[][]> = {
   "fill:new": [["fills"], ["pnl-series"], ["metrics"]],
   "family:state_changed": [["families"], ["metrics-families"], ["status"]],
   "risk:event": [["risk-events"]],
-  candidate_updates: [["discovery", "candidates"]],
-  // discovery_status fires on scan start/finish; worker liveness comes from
-  // runtime_metrics (no SSE), so useDiscoveryStatus polls every 5s when active.
-  discovery_status: [
-    ["discovery", "status"],
-    ["discovery", "runs"],
-  ],
-  proposals: [["families", "proposals"]],
   transitions: [["families", "transitions"]],
 };
 

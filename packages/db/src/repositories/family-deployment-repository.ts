@@ -1,8 +1,6 @@
 import type Database from "better-sqlite3";
 import type { FamilyDeploymentRepository, FamilyDeployment } from "@plankton/domain";
-import type { FamilyId } from "@plankton/domain";
-import { createScorecardId } from "@plankton/domain";
-import type { ProfileId, OperatorMode, DeploymentStage, StrategyStage } from "@plankton/domain";
+import type { FamilyId, ProfileId } from "@plankton/domain";
 
 export class SqliteFamilyDeploymentRepository implements FamilyDeploymentRepository {
   constructor(private readonly db: Database.Database) {}
@@ -32,19 +30,12 @@ export class SqliteFamilyDeploymentRepository implements FamilyDeploymentReposit
     this.db
       .prepare(
         `INSERT INTO family_deployments
-         (family_id, profile, enabled, operator_mode, strategy_stage, probe_substate,
-          deployment_stage, approved_snapshot_id, approved_scorecard_id, operator_reason,
-          priority, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (family_id, profile, enabled, disabled_at, disabled_reason, priority, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(family_id, profile) DO UPDATE SET
            enabled = excluded.enabled,
-           operator_mode = excluded.operator_mode,
-           strategy_stage = excluded.strategy_stage,
-           probe_substate = excluded.probe_substate,
-           deployment_stage = excluded.deployment_stage,
-           approved_snapshot_id = excluded.approved_snapshot_id,
-           approved_scorecard_id = excluded.approved_scorecard_id,
-           operator_reason = excluded.operator_reason,
+           disabled_at = excluded.disabled_at,
+           disabled_reason = excluded.disabled_reason,
            priority = excluded.priority,
            updated_at = excluded.updated_at`,
       )
@@ -52,42 +43,34 @@ export class SqliteFamilyDeploymentRepository implements FamilyDeploymentReposit
         deployment.familyId,
         deployment.profile,
         deployment.enabled ? 1 : 0,
-        deployment.operatorMode,
-        deployment.strategyStage,
-        deployment.probeSubstate,
-        deployment.deploymentStage,
-        deployment.approvedSnapshotId,
-        deployment.approvedScorecardId,
-        deployment.operatorReason,
+        deployment.disabledAt,
+        deployment.disabledReason,
         deployment.priority,
         deployment.createdAt,
         deployment.updatedAt,
       );
   }
 
-  updateOperatorMode(
-    familyId: FamilyId,
-    profile: ProfileId,
-    mode: OperatorMode,
-    reason: string | null,
-  ): void {
+  enable(familyId: FamilyId, profile: ProfileId): void {
     this.db
       .prepare(
         `UPDATE family_deployments
-         SET operator_mode = ?, operator_reason = ?, updated_at = datetime('now')
+         SET enabled = 1, disabled_at = NULL, disabled_reason = NULL,
+             updated_at = datetime('now')
          WHERE family_id = ? AND profile = ?`,
       )
-      .run(mode, reason, familyId, profile);
+      .run(familyId, profile);
   }
 
-  updateDeploymentStage(familyId: FamilyId, profile: ProfileId, stage: DeploymentStage): void {
+  disable(familyId: FamilyId, profile: ProfileId, reason: string | null): void {
     this.db
       .prepare(
         `UPDATE family_deployments
-         SET deployment_stage = ?, updated_at = datetime('now')
+         SET enabled = 0, disabled_at = datetime('now'), disabled_reason = ?,
+             updated_at = datetime('now')
          WHERE family_id = ? AND profile = ?`,
       )
-      .run(stage, familyId, profile);
+      .run(reason, familyId, profile);
   }
 }
 
@@ -96,15 +79,8 @@ function rowToDeployment(row: Record<string, unknown>): FamilyDeployment {
     familyId: row.family_id as FamilyId,
     profile: row.profile as ProfileId,
     enabled: row.enabled === 1,
-    operatorMode: row.operator_mode as OperatorMode,
-    strategyStage: row.strategy_stage as StrategyStage,
-    probeSubstate: (row.probe_substate as string) ?? null,
-    deploymentStage: row.deployment_stage as DeploymentStage,
-    approvedSnapshotId: (row.approved_snapshot_id as number) ?? null,
-    approvedScorecardId: row.approved_scorecard_id
-      ? createScorecardId(row.approved_scorecard_id as string)
-      : null,
-    operatorReason: (row.operator_reason as string) ?? null,
+    disabledAt: (row.disabled_at as string) ?? null,
+    disabledReason: (row.disabled_reason as string) ?? null,
     priority: row.priority as number,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,

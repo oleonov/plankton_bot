@@ -50,25 +50,12 @@ describe("Evidence engine deployed family scoring", () => {
     conn.db.prepare("INSERT INTO family_evidence (family_id) VALUES (?)").run(String(FAM_ID));
 
     const mockSc: ScoreComputer = {
-      computeRecurrenceMetrics: vi.fn().mockReturnValue({
-        spanDays: 10,
-        presenceDays: 8,
-        totalDays: 10,
-        cadenceMean: 1.2,
-        cadenceStddev: 0.2,
-        distinctConditions: 5,
-      }),
       computeRecycleMetrics: vi.fn().mockReturnValue({
         tradeCount: 10,
         distinctMarkets: 3,
         tailAdjustedPnl: 5,
         repricingExits: 1,
         totalNonSettlementClosed: 3,
-      }),
-      computeLiveViabilityMetrics: vi.fn().mockReturnValue({
-        activeMarketCount: 3,
-        healthyEndDateFraction: 0.7,
-        clusterVolume24h: 5000,
       }),
       computeToxicityMetrics: vi.fn().mockReturnValue({
         dustCount: 0,

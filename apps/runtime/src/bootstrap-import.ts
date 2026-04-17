@@ -146,7 +146,7 @@ export function bootstrapImport(
     insertSettings.run(ProfileId.Paper, loaded.global.initialBalanceUsdc, null, null, now);
     insertSettings.run(ProfileId.LiveLite, loaded.global.initialBalanceUsdc, "relayer", 1, now);
 
-    // 2.1 Shared family rule defaults for discovery materialization
+    // 2.1 Shared family rule defaults
     upsertFamilyRuleDefaults(db, loaded.defaults, now);
 
     // 3. Families
@@ -169,9 +169,8 @@ export function bootstrapImport(
 
     const insertDeployment = db.prepare(`
       INSERT INTO family_deployments (
-        family_id, profile, enabled, operator_mode, strategy_stage,
-        deployment_stage, priority, created_at, updated_at
-      ) VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, ?, ?)
+        family_id, profile, enabled, priority, created_at, updated_at
+      ) VALUES (?, ?, ?, 999, ?, ?)
     `);
 
     // Legacy compat: family_evidence baseline (repos and API routes still read this table)
@@ -281,14 +280,7 @@ function insertFamily(
       profile,
       sourceType: "yaml_import",
     });
-    insertDeployment.run(
-      id.familyId,
-      profile,
-      seed.enabled ? 1 : 0,
-      seed.deploymentStage,
-      now,
-      now,
-    );
+    insertDeployment.run(id.familyId, profile, seed.enabled ? 1 : 0, now, now);
   }
 }
 

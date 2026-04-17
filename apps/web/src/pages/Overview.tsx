@@ -87,10 +87,6 @@ function formatExecutionRejects(rejects?: Record<string, number>): string | null
     .join(", ");
 }
 
-function getFamilyMode(metric: FamilyMetric): string {
-  return metric.effectiveMode ?? metric.runtimeMode;
-}
-
 function BalanceCard({ status }: { status: import("../api/types.ts").StatusData }) {
   const isLive = status.runtimeMode === "live-lite";
   const dim = { color: "var(--text-dim)" };
@@ -135,35 +131,15 @@ export function Overview() {
   if (!status || !metrics) return <div className="page">Loading...</div>;
 
   const dustCount = metrics.positions.dust ?? 0;
-  const modeCounts = status.familyModeCounts ?? null;
-  const countFamiliesByMode = (mode: string): number =>
-    familyMetrics?.filter((family) => getFamilyMode(family) === mode).length ?? 0;
-  const activeCount = modeCounts?.active ?? countFamiliesByMode("active");
-  const probeOnlyCount = modeCounts?.["probe-only"] ?? countFamiliesByMode("probe-only");
-  const reduceOnlyCount = modeCounts?.["reduce-only"] ?? countFamiliesByMode("reduce-only");
-  const quarantinedCount = modeCounts?.quarantine ?? countFamiliesByMode("quarantine");
-  const countedEnabledFamilies = modeCounts
-    ? Object.entries(modeCounts)
-        .filter(([mode]) => mode !== "_disabled")
-        .reduce((sum, [, count]) => sum + count, 0)
-    : null;
   const enabledFamilyCount =
-    status.liveLite?.familyAllowlist.length ??
-    countedEnabledFamilies ??
-    familyMetrics?.length ??
-    status.activeFamilyCount;
+    status.liveLite?.familyAllowlist.length ?? familyMetrics?.length ?? status.activeFamilyCount;
+  const activeCount = status.activeFamilyCount;
   const tailAdjPnl = metrics.totalRealizedPnl - status.totalTailCostUsdc;
   const execution = status.executionTelemetry24h;
   const executionWatch = familyMetrics ? getExecutionWatchFamilies(familyMetrics) : [];
   const topExecutionWatch = executionWatch[0];
   const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
   const leakagePct = execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
-  const familyCardSummary = [
-    probeOnlyCount > 0 ? `${probeOnlyCount} probe-only` : null,
-    quarantinedCount > 0 ? `${quarantinedCount} quarantined` : null,
-  ]
-    .filter(Boolean)
-    .join(" · ");
 
   return (
     <div className="page">
@@ -204,7 +180,7 @@ export function Overview() {
           <div className="card card-accent-purple" style={{ cursor: "pointer" }}>
             <div className="label">Enabled Families</div>
             <div className="value-lg text-purple">{enabledFamilyCount}</div>
-            <div className="value-sm">{familyCardSummary || "\u00a0"}</div>
+            <div className="value-sm">{activeCount} active</div>
           </div>
         </Link>
       </div>
@@ -224,29 +200,7 @@ export function Overview() {
             Live-Lite Envelope
           </div>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-            <span>
-              Families: {status.liveLite.familyAllowlist.length}
-              {status.familyModeCounts &&
-                (() => {
-                  const disabled = status.familyModeCounts._disabled ?? 0;
-                  const modes = Object.entries(status.familyModeCounts)
-                    .filter(([k]) => k !== "_disabled")
-                    .sort(([a], [b]) => a.localeCompare(b))
-                    .map(([mode, count]) => `${count} ${mode}`)
-                    .join(", ");
-                  return (
-                    <>
-                      {" "}
-                      ({modes})
-                      {disabled > 0 && (
-                        <span style={{ color: "var(--text-dim)", marginLeft: 8 }}>
-                          + {disabled} disabled
-                        </span>
-                      )}
-                    </>
-                  );
-                })()}
-            </span>
+            <span>Families: {status.liveLite.familyAllowlist.length}</span>
             <span>Wallet: {(status.liveLite.walletMode ?? "eoa").toUpperCase()}</span>
             <span>
               Min order: $
@@ -418,11 +372,6 @@ export function Overview() {
                 : "No signals produced — markets may be outside active window or in resolution buffer"}
             </div>
           )}
-          {status.tradingState === "PROBING_ONLY" && (
-            <div style={{ marginTop: 8, fontSize: 12, color: "var(--blue, #42a5f5)" }}>
-              Only probe entries allowed — all families in derived probe-only mode
-            </div>
-          )}
           {status.tradingState === "EXITS_ONLY" && (
             <div style={{ marginTop: 8, fontSize: 12, color: "var(--orange)" }}>
               Only exit signals active — no new entries being opened
@@ -479,29 +428,11 @@ export function Overview() {
                 title={`${activeCount} active`}
               />
             )}
-            {probeOnlyCount > 0 && (
-              <div
-                style={{ flex: probeOnlyCount, background: "var(--blue, #42a5f5)" }}
-                title={`${probeOnlyCount} probe-only`}
-              />
-            )}
-            {reduceOnlyCount > 0 && (
-              <div
-                style={{ flex: reduceOnlyCount, background: "var(--orange)" }}
-                title={`${reduceOnlyCount} reduce-only`}
-              />
-            )}
-            {quarantinedCount > 0 && (
-              <div
-                style={{ flex: quarantinedCount, background: "var(--red)" }}
-                title={`${quarantinedCount} quarantined`}
-              />
-            )}
           </div>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+              gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
               gap: 8,
               marginTop: 10,
               fontSize: 12,
@@ -514,22 +445,10 @@ export function Overview() {
               <div className="value-sm">active</div>
             </div>
             <div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--blue, #42a5f5)" }}>
-                {probeOnlyCount}
+              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text-dim)" }}>
+                {enabledFamilyCount}
               </div>
-              <div className="value-sm">probe-only</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--orange)" }}>
-                {reduceOnlyCount}
-              </div>
-              <div className="value-sm">reduce-only</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--red)" }}>
-                {quarantinedCount}
-              </div>
-              <div className="value-sm">quarantined</div>
+              <div className="value-sm">enabled</div>
             </div>
           </div>
         </div>

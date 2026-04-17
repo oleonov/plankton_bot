@@ -22,7 +22,9 @@ function createFakeDb(runtimeMetrics: Record<string, Record<string, unknown>>): 
           if (sql.includes("FROM orders WHERE created_at >=")) return { cnt: 0 };
           if (sql.includes("FROM positions WHERE status = 'open'")) return { cnt: 0 };
           if (sql.includes("FROM positions WHERE opened_at >=")) return { cnt: 0 };
-          if (sql.includes("FROM family_runtime_state WHERE runtime_mode = 'active'")) {
+          if (
+            sql.includes("FROM family_runtime_state WHERE open_position_count > 0 OR open_value_usdc > 0 OR active_market_count > 0")
+          ) {
             return { cnt: 0 };
           }
           if (sql.includes("SUM(open_value_usdc)")) return { total: 0, tail: 0 };
@@ -58,11 +60,6 @@ function createFakeDb(runtimeMetrics: Record<string, Record<string, unknown>>): 
         },
         all: () => {
           if (sql.includes("FROM runtime_metrics") && sql.includes("metric_name = 'infra_alert'")) {
-            return [];
-          }
-          if (
-            sql.includes("SELECT family_id, runtime_mode, effective_mode FROM family_runtime_state")
-          ) {
             return [];
           }
           throw new Error(`Unhandled fake DB all() query: ${sql}`);

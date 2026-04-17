@@ -20,8 +20,6 @@ const families: FamilyDTO[] = [
     horizon: "weekly",
     cadence: "daily",
     strategyProfile: "generic",
-    promotionState: "probe-only",
-    probeSubstate: null,
     liveness: "active",
     executionTelemetry24h: {
       windowHours: 24,
@@ -37,16 +35,12 @@ const families: FamilyDTO[] = [
       lastFillAt: "2026-03-31T00:00:00Z",
     },
     state: {
-      runtimeMode: "active",
       openValueUsdc: 50,
       openPositionCount: 3,
       openDustCount: 0,
       activeMarketCount: 5,
       currentTailCostUsdc: 10,
       tailAdjustedPnlLive: -2,
-      quarantineReason: null,
-      effectiveMode: null,
-      derivedModeReason: null,
     },
     caps: { maxOpenValueUsdc: 100, maxActiveMarkets: 10, maxDustPositions: 5 },
     deployment: null,
@@ -59,8 +53,6 @@ const families: FamilyDTO[] = [
     horizon: "weekly",
     cadence: "daily",
     strategyProfile: "generic",
-    promotionState: "scaled",
-    probeSubstate: null,
     liveness: "dormant",
     executionTelemetry24h: {
       windowHours: 24,
@@ -76,16 +68,12 @@ const families: FamilyDTO[] = [
       lastFillAt: null,
     },
     state: {
-      runtimeMode: "active",
       openValueUsdc: 20,
       openPositionCount: 1,
       openDustCount: 0,
       activeMarketCount: 2,
       currentTailCostUsdc: 5,
       tailAdjustedPnlLive: 8,
-      quarantineReason: null,
-      effectiveMode: null,
-      derivedModeReason: null,
     },
     caps: { maxOpenValueUsdc: 100, maxActiveMarkets: 10, maxDustPositions: 5 },
     deployment: null,
@@ -98,8 +86,6 @@ const families: FamilyDTO[] = [
     horizon: "weekly",
     cadence: "daily",
     strategyProfile: "generic",
-    promotionState: "probe-only",
-    probeSubstate: null,
     liveness: "unseen",
     executionTelemetry24h: {
       windowHours: 24,
@@ -115,16 +101,12 @@ const families: FamilyDTO[] = [
       lastFillAt: "2026-03-31T00:00:00Z",
     },
     state: {
-      runtimeMode: "quarantine",
       openValueUsdc: 0,
       openPositionCount: 0,
       openDustCount: 0,
       activeMarketCount: 0,
       currentTailCostUsdc: 0,
       tailAdjustedPnlLive: -5,
-      quarantineReason: "risk breach",
-      effectiveMode: null,
-      derivedModeReason: null,
     },
     caps: { maxOpenValueUsdc: 100, maxActiveMarkets: 10, maxDustPositions: 5 },
     deployment: null,
@@ -244,58 +226,6 @@ describe("Families table sorting", () => {
     expect(screen.getByText(/leakage 1\.00%/)).toBeInTheDocument();
   });
 
-  it("renders execution canary blockers inside evidence detail", async () => {
-    setup({
-      "fam-1": {
-        familyId: "fam-1",
-        evidenceStatus: "confirmed",
-        evidenceScore: 0.8,
-        promotionState: "probe-only",
-        localTradeCount: 25,
-        localMarketCount: 6,
-        localRealizedPnlFifo: 4,
-        openTailCostUsdc: 1,
-        tailAdjustedPnl: 3,
-        remoteClosedRealizedPnl: null,
-        openPositionCount: 1,
-        openDustCount: 0,
-        bothSidedEligible: false,
-        heavyCampaignEligible: false,
-        activeWindowEdgeScore: null,
-        recurrenceScore: 0.6,
-        recycleScore: 0.7,
-        liveViabilityScore: 0.5,
-        toxicityPenalty: 0.1,
-        lastValidatedAt: "2026-03-31T00:00:00Z",
-        probeSubstate: null,
-        repricingExitCount: 3,
-        promotionBlockers: [],
-        executionCanary24h: {
-          windowHours: 24,
-          required: true,
-          eligible: false,
-          minTotalFills: 10,
-          blockers: [
-            { metric: "24h fills", current: 5, required: 10, passed: false },
-            { metric: "Taker fills", current: 1, required: 0, passed: false },
-            { metric: "Explicit fees (USDC)", current: 0.12, required: 0, passed: false },
-          ],
-        },
-      },
-    });
-    const user = userEvent.setup();
-    renderWithProviders(<Families />);
-
-    await screen.findByText(/alpha/);
-    await user.click(screen.getByText(/alpha/));
-    await user.click(screen.getByText(/Evidence/));
-
-    expect(await screen.findByText("Execution Canary (24h)")).toBeInTheDocument();
-    expect(screen.getByText(/Execution Canary:/)).toBeInTheDocument();
-    expect(screen.getByText("blocked")).toBeInTheDocument();
-    expect(screen.getByText(/24h fills/)).toBeInTheDocument();
-    expect(screen.getByText(/Taker fills/)).toBeInTheDocument();
-  });
 });
 
 describe("Families scope toggle", () => {
@@ -362,8 +292,6 @@ describe("Families scope toggle", () => {
         ...families[0]!,
         deployment: {
           enabled: true,
-          operatorMode: "active",
-          deploymentStage: "live",
           priority: 1,
         },
       },
@@ -374,8 +302,6 @@ describe("Families scope toggle", () => {
         ...families[1]!,
         deployment: {
           enabled: false,
-          operatorMode: "active",
-          deploymentStage: "disabled",
           priority: 999,
         },
       },
@@ -451,8 +377,6 @@ describe("Families scope toggle", () => {
           liveness: "active",
           deployment: {
             enabled: true,
-            operatorMode: "active",
-            deploymentStage: "live",
             priority: 1,
           },
         },
@@ -461,8 +385,6 @@ describe("Families scope toggle", () => {
           liveness: "dormant",
           deployment: {
             enabled: true,
-            operatorMode: "active",
-            deploymentStage: "live",
             priority: 2,
           },
         },

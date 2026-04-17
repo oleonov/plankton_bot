@@ -89,8 +89,8 @@ describe("SqliteStateTransitionRepository", () => {
       scoresSnapshot: null,
     });
     repo.insert({
-      entityType: "candidate",
-      entityId: "cand-1",
+      entityType: "deployment",
+      entityId: "dep-1",
       profile: null,
       fromState: "c",
       toState: "d",
@@ -101,8 +101,8 @@ describe("SqliteStateTransitionRepository", () => {
     });
 
     expect(repo.findByEntity("family", "fam-1")).toHaveLength(1);
-    expect(repo.findByEntity("candidate", "cand-1")).toHaveLength(1);
-    expect(repo.findByEntity("family", "cand-1")).toHaveLength(0);
+    expect(repo.findByEntity("deployment", "dep-1")).toHaveLength(1);
+    expect(repo.findByEntity("family", "dep-1")).toHaveLength(0);
   });
 
   it("findRecent returns newest first with limit", () => {

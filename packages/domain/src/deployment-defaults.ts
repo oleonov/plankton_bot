@@ -1,4 +1,4 @@
-import { DeploymentStage, ProfileId } from "./enums.js";
+import { ProfileId } from "./enums.js";
 
 interface ResolveFamilyDeploymentSeedInput {
   profile: import("./enums.js").ProfileId;
@@ -8,7 +8,6 @@ interface ResolveFamilyDeploymentSeedInput {
 
 interface FamilyDeploymentSeed {
   enabled: boolean;
-  deploymentStage: import("./enums.js").DeploymentStage;
 }
 
 export function resolveFamilyDeploymentSeed({
@@ -17,17 +16,14 @@ export function resolveFamilyDeploymentSeed({
   currentProfile,
 }: ResolveFamilyDeploymentSeedInput): FamilyDeploymentSeed {
   if (sourceType === "yaml_import") {
-    return profile === ProfileId.LiveLite
-      ? { enabled: true, deploymentStage: DeploymentStage.LiveProbe }
-      : { enabled: true, deploymentStage: DeploymentStage.Disabled };
+    return { enabled: true };
   }
 
   if (profile === ProfileId.LiveLite && currentProfile === ProfileId.LiveLite) {
-    return { enabled: true, deploymentStage: DeploymentStage.LiveProbe };
+    return { enabled: true };
   }
 
   return {
     enabled: profile === ProfileId.Simulation || profile === ProfileId.Paper,
-    deploymentStage: DeploymentStage.Disabled,
   };
 }

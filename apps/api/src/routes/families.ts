@@ -1,14 +1,11 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { evaluateExecutionCanaryGate, getPromotionBlockers } from "@plankton/domain";
 import { readFamilyLiveness } from "@plankton/db";
 import {
   computeExecutionTelemetryByFamily,
-  computeExecutionTelemetryForFamily,
   emptyExecutionTelemetry,
 } from "../execution-telemetry.js";
 import { ok, ApiError } from "../errors.js";
-import { getActor } from "../auth.js";
 
 interface FamilyOpts {
   controlDb: Database.Database;
@@ -33,7 +30,6 @@ interface FamilyCatalogRow {
 
 interface FamilyStateRow {
   family_id: string;
-  runtime_mode: string;
   open_value_usdc: number;
   open_position_count: number;
   open_dust_count: number;
@@ -42,9 +38,6 @@ interface FamilyStateRow {
   tail_adjusted_pnl_live: number;
   last_entry_ts: string | null;
   last_exit_ts: string | null;
-  quarantine_reason: string | null;
-  effective_mode: string | null;
-  derived_mode_reason: string | null;
   updated_at: string;
 }
 
@@ -57,8 +50,6 @@ interface FamilyCaps {
 interface FamilyDeploymentRow {
   family_id: string;
   enabled: number;
-  operator_mode: string;
-  deployment_stage: string;
   priority: number;
 }
 
@@ -76,8 +67,6 @@ function toFamilyDto(
   catalog: FamilyCatalogRow,
   state: FamilyStateRow | undefined,
   caps: FamilyCaps | null,
-  promotionState?: string | null,
-  probeSubstate?: string | null,
   executionTelemetry24h?: ReturnType<typeof emptyExecutionTelemetry>,
   deployment?: FamilyDeploymentRow | null,
   liveness?: import("@plankton/domain").FamilyLiveness,
@@ -96,8 +85,6 @@ function toFamilyDto(
       catalog.requires_post_only_for_live == null
         ? null
         : catalog.requires_post_only_for_live === 1,
-    promotionState: promotionState ?? null,
-    probeSubstate: probeSubstate ?? null,
     liveness: liveness ?? "unseen",
     executionTelemetry24h: {
       windowHours: 24,
@@ -105,7 +92,6 @@ function toFamilyDto(
     },
     state: state
       ? {
-          runtimeMode: state.runtime_mode,
           openValueUsdc: state.open_value_usdc,
           openPositionCount: state.open_position_count,
           openDustCount: state.open_dust_count,
@@ -114,9 +100,6 @@ function toFamilyDto(
           tailAdjustedPnlLive: state.tail_adjusted_pnl_live,
           lastEntryTs: state.last_entry_ts,
           lastExitTs: state.last_exit_ts,
-          quarantineReason: state.quarantine_reason,
-          effectiveMode: state.effective_mode,
-          derivedModeReason: state.derived_mode_reason,
           updatedAt: state.updated_at,
         }
       : null,
@@ -124,8 +107,6 @@ function toFamilyDto(
     deployment: deployment
       ? {
           enabled: deployment.enabled === 1,
-          operatorMode: deployment.operator_mode,
-          deploymentStage: deployment.deployment_stage,
           priority: deployment.priority,
         }
       : null,
@@ -173,13 +154,13 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
   }
 
   const listDeployments = safePrepare(
-    "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE profile = ?",
+    "SELECT family_id, enabled, priority FROM family_deployments WHERE profile = ?",
   );
   const listEnabledDeployments = safePrepare(
-    "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE profile = ? AND enabled = 1",
+    "SELECT family_id, enabled, priority FROM family_deployments WHERE profile = ? AND enabled = 1",
   );
   const getDeployment = safePrepare(
-    "SELECT family_id, enabled, operator_mode, deployment_stage, priority FROM family_deployments WHERE family_id = ? AND profile = ?",
+    "SELECT family_id, enabled, priority FROM family_deployments WHERE family_id = ? AND profile = ?",
   );
   const getProfile = safePrepare("SELECT current_profile FROM runtime_control_state WHERE id = 1");
 
@@ -371,26 +352,12 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
         pageFamilyIds,
       );
       const capsMap = new Map(capsRows.map((r) => [r.family_id, toCaps(r)]));
-      const evidenceRows = selectRowsByFamilyIds<{
-        family_id: string;
-        promotion_state: string | null;
-        probe_substate: string | null;
-      }>(
-        controlDb,
-        "SELECT family_id, promotion_state, probe_substate FROM family_evidence",
-        pageFamilyIds,
-      );
-      const promoMap = new Map(evidenceRows.map((r) => [r.family_id, r.promotion_state]));
-      const substateMap = new Map(evidenceRows.map((r) => [r.family_id, r.probe_substate]));
-
       return ok({
         items: page.map((c) =>
           toFamilyDto(
             c,
             stateMap.get(c.family_id),
             capsMap.get(c.family_id) ?? null,
-            promoMap.get(c.family_id),
-            substateMap.get(c.family_id),
             executionMap24h.get(c.family_id),
             deploymentMap.get(c.family_id) ?? null,
             livenessMap.get(c.family_id)?.liveness,
@@ -441,8 +408,6 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
         catalog,
         state,
         capsRow ? toCaps(capsRow) : null,
-        undefined,
-        undefined,
         executionMap24h.get(familyId),
         deploymentRow ?? null,
         liveness,
@@ -476,36 +441,10 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       .get(familyId) as Record<string, unknown> | undefined;
     if (!row) return ok(null);
 
-    const repricingExitCount = (row.repricing_exit_count as number) ?? 0;
-    const blockers = getPromotionBlockers({
-      repricingExits: repricingExitCount,
-      distinctMarkets: (row.local_market_count as number) ?? 0,
-      tradeCount: (row.local_trade_count as number) ?? 0,
-      recycleScore: (row.recycle_score as number) ?? 0,
-      toxicity: (row.toxicity_penalty as number) ?? 0,
-      tailAdjustedPnl: (row.tail_adjusted_pnl as number) ?? 0,
-    });
-    const executionTelemetry24h = computeExecutionTelemetryForFamily(ledgerDb, familyId, {
-      sinceIso: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-    });
-    const executionCanary24h = evaluateExecutionCanaryGate({
-      primaryCategory: catalog.primary_category,
-      feeTier: catalog.fee_tier as import("@plankton/domain").FeeTier | null,
-      liveWalletRequirement: catalog.live_wallet_requirement as
-        | import("@plankton/domain").LiveWalletRequirement
-        | null,
-      requiresPostOnlyForLive:
-        catalog.requires_post_only_for_live == null
-          ? null
-          : catalog.requires_post_only_for_live === 1,
-      executionTelemetry: executionTelemetry24h,
-    });
-
     return ok({
       familyId: row.family_id,
       evidenceStatus: row.evidence_status,
       evidenceScore: row.evidence_score,
-      promotionState: row.promotion_state,
       localTradeCount: row.local_trade_count,
       localMarketCount: row.local_market_count,
       localRealizedPnlFifo: row.local_realized_pnl_fifo,
@@ -522,45 +461,8 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
       liveViabilityScore: row.live_viability_score ?? null,
       toxicityPenalty: row.toxicity_penalty ?? null,
       lastValidatedAt: row.last_validated_at ?? null,
-      probeSubstate: (row.probe_substate as string) ?? null,
-      repricingExitCount,
-      promotionBlockers: blockers,
-      executionCanary24h: {
-        windowHours: 24,
-        required: executionCanary24h.required,
-        eligible: executionCanary24h.eligible,
-        minTotalFills: executionCanary24h.minTotalFills,
-        blockers: executionCanary24h.blockers,
-      },
+      repricingExitCount: (row.repricing_exit_count as number) ?? 0,
     });
-  });
-
-  // ── GET /families/recent-demotions ─────────────────────────────────────
-  app.get("/families/recent-demotions", async () => {
-    const rows = controlDb
-      .prepare(
-        `SELECT * FROM state_transitions
-         WHERE entity_type = 'family'
-           AND trigger_type = 'system'
-           AND to_state IN ('reduce-only', 'quarantine')
-           AND created_at > datetime('now', '-1 hour')
-         ORDER BY created_at DESC`,
-      )
-      .all() as Array<Record<string, unknown>>;
-    return ok(
-      rows.map((r) => ({
-        id: r.id,
-        entityType: r.entity_type,
-        entityId: r.entity_id,
-        fromState: r.from_state,
-        toState: r.to_state,
-        triggerType: r.trigger_type,
-        initiator: r.initiator,
-        reason: r.reason,
-        scoresSnapshot: r.scores_snapshot,
-        createdAt: r.created_at,
-      })),
-    );
   });
 
   // ── GET /families/:familyId/transitions ────────────────────────────────
@@ -661,40 +563,6 @@ export const familyRoutes: FastifyPluginAsync<FamilyOpts> = async (app, opts) =>
     },
   );
 
-  // ── GET /families/proposals ────────────────────────────────────────────
-  app.get("/families/proposals", async () => {
-    const rows = controlDb
-      .prepare("SELECT * FROM promotion_proposals WHERE status = 'pending' ORDER BY created_at ASC")
-      .all() as Array<Record<string, unknown>>;
-    return ok(rows.map(toProposalDto));
-  });
-
-  // ── POST /families/proposals/:proposalId/dismiss ───────────────────────
-  app.post<{ Params: { proposalId: string }; Body: { reason?: string } }>(
-    "/families/proposals/:proposalId/dismiss",
-    async (request) => {
-      const id = Number(request.params.proposalId);
-      const row = controlDb.prepare("SELECT * FROM promotion_proposals WHERE id = ?").get(id) as
-        | Record<string, unknown>
-        | undefined;
-      if (!row) throw new ApiError(404, `proposal ${id} not found`, "PROPOSAL_NOT_FOUND");
-      if (row.status !== "pending") {
-        throw new ApiError(
-          409,
-          `proposal status is '${row.status}', expected 'pending'`,
-          "INVALID_STATUS",
-        );
-      }
-      controlDb
-        .prepare(
-          `UPDATE promotion_proposals
-           SET status = 'dismissed', resolved_at = datetime('now'), resolved_by = ?
-           WHERE id = ?`,
-        )
-        .run(getActor(request), id);
-      return ok({ proposalId: id, status: "dismissed" });
-    },
-  );
 };
 
 function toPositionDto(row: Record<string, unknown>) {
@@ -712,22 +580,6 @@ function toPositionDto(row: Record<string, unknown>) {
     openedAt: row.opened_at,
     closedAt: row.closed_at,
     updatedAt: row.updated_at,
-  };
-}
-
-function toProposalDto(row: Record<string, unknown>) {
-  return {
-    id: row.id,
-    familyId: row.family_id,
-    profile: row.profile,
-    currentState: row.current_state,
-    proposedState: row.proposed_state,
-    reason: row.reason,
-    scoresSnapshot: row.scores_snapshot,
-    status: row.status,
-    createdAt: row.created_at,
-    resolvedAt: row.resolved_at,
-    resolvedBy: row.resolved_by,
   };
 }
 

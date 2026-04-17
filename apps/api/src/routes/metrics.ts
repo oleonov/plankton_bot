@@ -60,9 +60,8 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const catalogMap = new Map(catalogRows.map((row) => [row.family_id, row]));
     const rows = ledgerDb
       .prepare(
-        `SELECT fs.family_id, fs.runtime_mode, fs.open_value_usdc,
+        `SELECT fs.family_id, fs.open_value_usdc,
                 fs.open_position_count, fs.tail_adjusted_pnl_live,
-                fs.quarantine_reason, fs.effective_mode, fs.derived_mode_reason,
                 fs.updated_at
          FROM family_runtime_state fs
          ORDER BY fs.open_value_usdc DESC`,
@@ -80,13 +79,9 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
             catalog?.requires_post_only_for_live == null
               ? null
               : catalog.requires_post_only_for_live === 1,
-          runtimeMode: r.runtime_mode,
           openValueUsdc: r.open_value_usdc,
           openPositionCount: r.open_position_count,
           tailAdjustedPnlLive: r.tail_adjusted_pnl_live,
-          quarantineReason: r.quarantine_reason,
-          effectiveMode: (r.effective_mode as string | null) ?? null,
-          derivedModeReason: (r.derived_mode_reason as string | null) ?? null,
           executionTelemetry24h: {
             windowHours: 24,
             ...(executionMap24h.get(String(r.family_id)) ?? emptyExecutionTelemetry()),

@@ -7,8 +7,7 @@ import { Overview } from "./pages/Overview.tsx";
 import { Positions } from "./pages/Positions.tsx";
 import { OrdersFills } from "./pages/OrdersFills.tsx";
 import { Families } from "./pages/Families.tsx";
-import { RiskQuarantine } from "./pages/RiskQuarantine.tsx";
-import { Discovery } from "./pages/Discovery.tsx";
+import { RiskEvents } from "./pages/RiskEvents.tsx";
 import { ControlCenter } from "./pages/ControlCenter.tsx";
 import { Profiles } from "./pages/Profiles.tsx";
 import { ProfileDetail } from "./pages/ProfileDetail.tsx";
@@ -36,8 +35,7 @@ export function App() {
                 <Route path="/positions" element={<Positions />} />
                 <Route path="/orders" element={<OrdersFills />} />
                 <Route path="/families" element={<Families />} />
-                <Route path="/risk" element={<RiskQuarantine />} />
-                <Route path="/discovery" element={<Discovery />} />
+                <Route path="/risk" element={<RiskEvents />} />
                 <Route path="/control" element={<ControlCenter />} />
                 <Route path="/profiles" element={<Profiles />} />
                 <Route path="/profiles/:profileId" element={<ProfileDetail />} />

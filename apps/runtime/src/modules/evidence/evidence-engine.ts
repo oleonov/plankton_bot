@@ -2,18 +2,14 @@
  * FamilyEvidenceEngine — RuntimeModule that periodically recomputes
  * scoring metrics for deployed families and writes to ledger's family_evidence.
  *
- * Candidate scoring and promotion proposals are handled by ControlEvaluator
- * in the discovery service, reading from control.db scorecards.
- * Safety enforcement (demotion/quarantine) is handled by RuntimeSafetyEvaluator.
+ * Candidate scoring is handled by ControlEvaluator in the discovery service,
+ * reading from control.db scorecards. Evidence scores here are read-only
+ * observability surface on the Families page.
  */
 
 import type { EventBus, RuntimeModule } from "@plankton/domain";
 import type { FamilyEvidenceRepository, FamilyRulesProvider } from "@plankton/domain";
-import {
-  computeRecycleScore,
-  computeToxicityPenalty,
-  meetsPromotionThresholds,
-} from "@plankton/domain";
+import { computeRecycleScore, computeToxicityPenalty } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { ScoreComputer } from "./score-computer.js";
 
@@ -119,24 +115,6 @@ export class FamilyEvidenceEngine implements RuntimeModule {
         repricingExitCount: recycleMetrics.repricingExits,
         scoresUpdatedAt: now,
       });
-
-      // If probe-only with sufficient evidence but not meeting promotion thresholds → retained
-      const evidence = this.evidenceRepo.getEvidence(familyId);
-      if (evidence?.promotionState === "probe-only" && recycleMetrics.tradeCount >= 20) {
-        const eligible = meetsPromotionThresholds({
-          repricingExits: recycleMetrics.repricingExits,
-          distinctMarkets: recycleMetrics.distinctMarkets,
-          tradeCount: recycleMetrics.tradeCount,
-          recycleScore: recycle,
-          toxicity,
-          tailAdjustedPnl: recycleMetrics.tailAdjustedPnl,
-        });
-        if (!eligible) {
-          this.evidenceRepo.updateProbeSubstate(familyId, "retained");
-        } else {
-          this.evidenceRepo.updateProbeSubstate(familyId, null);
-        }
-      }
 
       this.log.debug(
         { familyId: familyIdStr, recycle, toxicity },

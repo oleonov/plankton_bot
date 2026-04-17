@@ -22,7 +22,6 @@ import type {
   EvidenceStatus,
   PromotionState,
   Action,
-  RuntimeMode,
   EntryMode,
   ExitMode,
   ScaleMode,
@@ -39,9 +38,6 @@ import type {
   OperatorActionType,
   CommandStatus,
   ProfileId,
-  DeploymentStage,
-  StrategyStage,
-  OperatorMode,
   SwitchState,
   PreflightKind,
   PreflightStatus,
@@ -273,7 +269,6 @@ export interface FamilyConfig {
 
 export interface FamilyState {
   familyId: FamilyId;
-  runtimeMode: RuntimeMode;
   openValueUsdc: number;
   openPositionCount: number;
   openDustCount: number;
@@ -282,9 +277,6 @@ export interface FamilyState {
   tailAdjustedPnlLive: number;
   lastEntryTs: string | null; // ISO timestamp
   lastExitTs: string | null; // ISO timestamp
-  quarantineReason: string | null;
-  effectiveMode: string | null;
-  derivedModeReason: string | null;
   firstNegativeTailAt: string | null;
   updatedAt: string; // ISO timestamp
 }
@@ -523,13 +515,8 @@ export interface FamilyDeployment {
   familyId: FamilyId;
   profile: ProfileId;
   enabled: boolean;
-  operatorMode: OperatorMode;
-  strategyStage: StrategyStage;
-  probeSubstate: string | null;
-  deploymentStage: DeploymentStage;
-  approvedSnapshotId: number | null;
-  approvedScorecardId: ScorecardId | null;
-  operatorReason: string | null;
+  disabledAt: string | null;
+  disabledReason: string | null;
   priority: number;
   createdAt: string;
   updatedAt: string;
@@ -646,7 +633,6 @@ export interface FamilyProfileRollup {
   realizedPnl: number;
   tailCostUsdc: number;
   tailAdjustedPnl: number;
-  effectiveMode: string | null;
   lastTradeAt: string | null;
   updatedAt: string;
 }
@@ -661,8 +647,6 @@ export interface FamilyProfileRuntimeState {
   tailAdjustedPnlLive: number;
   lastEntryTs: string | null;
   lastExitTs: string | null;
-  effectiveMode: string | null;
-  derivedModeReason: string | null;
   firstNegativeTailAt: string | null;
   updatedAt: string;
 }

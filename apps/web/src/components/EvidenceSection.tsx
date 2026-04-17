@@ -1,21 +1,6 @@
 import { useState } from "react";
-import { useResetToProbe } from "../api/hooks.ts";
 import { ScoreBars } from "./ScoreBars.tsx";
-import { ConfirmAction } from "./ConfirmAction.tsx";
-import { Badge } from "./Badge.tsx";
-import { PromotionBlockers } from "./PromotionBlockers.tsx";
 import type { FamilyEvidenceDTO } from "../api/types.ts";
-
-const SUBSTATE_STYLES: Record<string, string> = {
-  "warming-up": "badge-blue",
-  retained: "badge-orange",
-  "reset-probe": "badge-orange",
-};
-
-function ProbeSubstateBadge({ substate }: { substate: string }) {
-  const cls = SUBSTATE_STYLES[substate] ?? "badge-blue";
-  return <span className={`badge ${cls}`}>{substate}</span>;
-}
 
 function EvidenceStat({ label, value }: { label: string; value: string | number | null }) {
   return (
@@ -26,22 +11,10 @@ function EvidenceStat({ label, value }: { label: string; value: string | number 
   );
 }
 
-export function EvidenceSection({
-  evidence,
-  familyId,
-}: {
-  evidence: FamilyEvidenceDTO | null;
-  familyId: string;
-}) {
+export function EvidenceSection({ evidence }: { evidence: FamilyEvidenceDTO | null }) {
   const [expanded, setExpanded] = useState(false);
-  const resetToProbe = useResetToProbe(familyId);
 
   if (!evidence) return null;
-
-  const showReset =
-    evidence.promotionState === "scaled" || evidence.promotionState === "reduce-only";
-  const isProbeOnly = evidence.promotionState === "probe-only";
-  const executionCanary = evidence.executionCanary24h;
 
   return (
     <div style={{ marginBottom: 12 }}>
@@ -50,8 +23,6 @@ export function EvidenceSection({
         onClick={() => setExpanded(!expanded)}
       >
         {expanded ? "\u25BC" : "\u25B6"} Evidence
-        {evidence.promotionState && <Badge value={evidence.promotionState} />}
-        {evidence.probeSubstate && <ProbeSubstateBadge substate={evidence.probeSubstate} />}
       </div>
       {expanded && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 8 }}>
@@ -68,37 +39,6 @@ export function EvidenceSection({
               value={evidence.evidenceScore?.toFixed(2) ?? null}
             />
             <EvidenceStat label="Repricing Exits" value={evidence.repricingExitCount} />
-            {executionCanary?.required && (
-              <>
-                <EvidenceStat
-                  label="Execution Canary"
-                  value={executionCanary.eligible ? "pass" : "blocked"}
-                />
-                <EvidenceStat label="Canary Window" value={`${executionCanary.windowHours}h`} />
-                <EvidenceStat label="Min Fills" value={executionCanary.minTotalFills} />
-              </>
-            )}
-            {showReset && (
-              <div style={{ marginTop: 8 }}>
-                <ConfirmAction
-                  label="Reset to Probe"
-                  confirmText={`Reset ${familyId} to probe?`}
-                  variant="danger"
-                  showReason
-                  onConfirm={(r) => resetToProbe.mutate(r)}
-                  isPending={resetToProbe.isPending}
-                />
-              </div>
-            )}
-            {isProbeOnly && evidence.promotionBlockers && (
-              <PromotionBlockers blockers={evidence.promotionBlockers} />
-            )}
-            {executionCanary?.required && (
-              <PromotionBlockers
-                blockers={executionCanary.blockers}
-                title={`Execution Canary (${executionCanary.windowHours}h)`}
-              />
-            )}
           </div>
           <ScoreBars
             recurrence={evidence.recurrenceScore}

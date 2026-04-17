@@ -13,7 +13,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -b && mkdir -p dist/migrations dist/schemas && cp src/migrations/*.sql dist/migrations/ && cp src/schemas/*.sql dist/schemas/",
+    "build": "tsc -b --force && mkdir -p dist/migrations dist/migrations-control dist/schemas && rm -f dist/migrations/*.sql dist/migrations-control/*.sql dist/schemas/*.sql && cp src/migrations/*.sql dist/migrations/ && (cp src/migrations-control/*.sql dist/migrations-control/ 2>/dev/null || true) && cp src/schemas/*.sql dist/schemas/",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "test": "vitest run"

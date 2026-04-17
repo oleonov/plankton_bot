@@ -84,8 +84,8 @@ function FamilyDetail({ family }: { family: FamilyDTO }) {
 
   return (
     <tr>
-      <td colSpan={10} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
-        {evidence && <EvidenceSection evidence={evidence} familyId={familyId} />}
+      <td colSpan={9} style={{ padding: "8px 16px", background: "var(--bg-elevated)" }}>
+        {evidence && <EvidenceSection evidence={evidence} />}
         <TransitionTimeline familyId={familyId} />
         <div style={{ marginBottom: 12 }}>
           <div
@@ -210,8 +210,6 @@ function utilizationColor(current: number, max: number): string {
 }
 
 const familyAccessors: Record<string, (f: FamilyDTO) => string | number | null> = {
-  mode: (f) => f.state?.runtimeMode ?? "",
-  promotion: (f) => f.promotionState,
   openValue: (f) => f.state?.openValueUsdc ?? 0,
   positions: (f) => f.state?.openPositionCount ?? 0,
   markets: (f) => f.state?.activeMarketCount ?? 0,
@@ -309,8 +307,7 @@ export function Families() {
         <thead>
           <tr>
             <th>Family</th>
-            <SortTh label="Mode" sortKey="mode" sort={sort} onToggle={toggle} />
-            <SortTh label="Promotion" sortKey="promotion" sort={sort} onToggle={toggle} />
+            <th>Status</th>
             <SortTh label="Open Value" sortKey="openValue" sort={sort} onToggle={toggle} />
             <SortTh label="Positions" sortKey="positions" sort={sort} onToggle={toggle} />
             <SortTh label="Markets" sortKey="markets" sort={sort} onToggle={toggle} />
@@ -322,16 +319,12 @@ export function Families() {
         </thead>
         <tbody>
           {sorted.map((f) => {
-            const operatorMode = f.state?.runtimeMode ?? "unknown";
-            const displayMode = f.state?.effectiveMode ?? operatorMode;
             const isExpanded = expanded === f.familyId;
+            const isEnabled = f.deployment?.enabled ?? false;
             return (
               <Fragment key={f.familyId}>
                 <tr
                   style={{
-                    ...(operatorMode === "quarantine"
-                      ? { background: "rgba(239,83,80,0.06)" }
-                      : undefined),
                     ...(effectiveScope === "profile" && !isLiveFamily(f)
                       ? { opacity: 0.6 }
                       : undefined),
@@ -349,35 +342,7 @@ export function Families() {
                     </span>
                   </td>
                   <td>
-                    <Badge value={operatorMode} type="mode" />
-                    {f.deployment && f.deployment.deploymentStage !== "live" && (
-                      <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: 4 }}>
-                        {f.deployment.deploymentStage}
-                      </span>
-                    )}
-                    {f.deployment && !f.deployment.enabled && <Badge value="disabled" />}
-                    {f.state?.effectiveMode && f.state.effectiveMode !== operatorMode && (
-                      <div style={{ fontSize: 10, color: "var(--orange)", marginTop: 2 }}>
-                        eff: {displayMode}
-                        {f.state.derivedModeReason && ` — ${f.state.derivedModeReason}`}
-                      </div>
-                    )}
-                  </td>
-                  <td>
-                    {f.promotionState ? <Badge value={f.promotionState} /> : "\u2014"}
-                    {f.probeSubstate && (
-                      <span
-                        className={`badge ${
-                          f.probeSubstate === "warming-up"
-                            ? "badge-blue"
-                            : f.probeSubstate === "retained"
-                              ? "badge-orange"
-                              : "badge-orange"
-                        }`}
-                      >
-                        {f.probeSubstate}
-                      </span>
-                    )}
+                    <Badge value={isEnabled ? "enabled" : "disabled"} />
                   </td>
                   <td
                     style={{
@@ -441,7 +406,10 @@ export function Families() {
                     )}
                   </td>
                   <td onClick={(e) => e.stopPropagation()}>
-                    <FamilyActions familyId={f.familyId} mode={operatorMode} />
+                    <FamilyActions
+                      familyId={f.familyId}
+                      enabled={f.deployment?.enabled ?? true}
+                    />
                   </td>
                 </tr>
                 {isExpanded && <FamilyDetail family={f} />}

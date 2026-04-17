@@ -91,11 +91,6 @@ describe("fee-backfill script", () => {
         approved_scorecard_id TEXT REFERENCES family_validation_scorecards(scorecard_id),
         PRIMARY KEY (family_id, profile)
       );
-      CREATE TABLE IF NOT EXISTS promotion_proposals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        family_id TEXT,
-        source_scorecard_id TEXT REFERENCES family_validation_scorecards(scorecard_id)
-      );
       PRAGMA foreign_keys = ON;
     `);
 
@@ -303,9 +298,6 @@ describe("fee-backfill script", () => {
         "INSERT INTO family_deployments (family_id, profile, approved_scorecard_id) VALUES (?, ?, ?)",
       )
       .run("fam-1", "live-lite", "sc-1");
-    control
-      .prepare("INSERT INTO promotion_proposals (family_id, source_scorecard_id) VALUES (?, ?)")
-      .run("fam-1", "sc-1");
     control.close();
 
     const ledger = new Database(LEDGER_DB);
@@ -343,10 +335,6 @@ describe("fee-backfill script", () => {
     expect(
       (controlCheck.prepare("SELECT approved_scorecard_id FROM family_deployments").get() as any)
         .approved_scorecard_id,
-    ).toBeNull();
-    expect(
-      (controlCheck.prepare("SELECT source_scorecard_id FROM promotion_proposals").get() as any)
-        .source_scorecard_id,
     ).toBeNull();
     controlCheck.close();
   });

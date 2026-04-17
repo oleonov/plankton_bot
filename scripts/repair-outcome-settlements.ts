@@ -763,7 +763,7 @@ export function resetClosedFamily(
     tailAdjustedPnl,
   } = recomputeFamilyPnl(ledgerDb, familyId);
 
-  // Ledger: full reset — mode back to active, quarantine cleared
+  // Ledger: reset family exposure counters
   ledgerDb
     .prepare(
       `UPDATE family_runtime_state
@@ -773,10 +773,6 @@ export function resetClosedFamily(
            open_position_count = ?,
            open_dust_count = ?,
            active_market_count = ?,
-           runtime_mode = 'active',
-           quarantine_reason = NULL,
-           effective_mode = NULL,
-           derived_mode_reason = NULL,
            updated_at = datetime('now')
        WHERE family_id = ?`,
     )

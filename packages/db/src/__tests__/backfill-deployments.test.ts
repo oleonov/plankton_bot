@@ -82,12 +82,11 @@ describe("backfillDeployments", () => {
 
     const live = conn.db
       .prepare(
-        "SELECT enabled, deployment_stage FROM family_deployments WHERE family_id = 'yaml-fam' AND profile = 'live-lite'",
+        "SELECT enabled FROM family_deployments WHERE family_id = 'yaml-fam' AND profile = 'live-lite'",
       )
-      .get() as { enabled: number; deployment_stage: string };
+      .get() as { enabled: number };
 
     expect(live.enabled).toBe(1);
-    expect(live.deployment_stage).toBe("live-probe");
   });
 
   it("does not duplicate deployments on repeated bootstrap", () => {
@@ -150,7 +149,7 @@ describe("backfillDeployments", () => {
     expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(1); // backfilled
   });
 
-  it("keeps discovery exact-score intraday families disabled in live-lite during backfill", () => {
+  it("keeps legacy non-yaml families disabled in live-lite during backfill (without currentProfile)", () => {
     const dbPath = path.join(tmpDir, "control.db");
     conn = bootstrapControlDb(dbPath);
     seedProfiles(conn);
@@ -159,7 +158,7 @@ describe("backfillDeployments", () => {
       .prepare(
         `INSERT INTO family_catalog
          (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type, created_at, updated_at)
-       VALUES ('exact-score-fam', 'bun-mai-fre-2026-04-12-exact-score-0', 'sports', 'generic', 'intraday-4h', 'ad-hoc', 'scalp', 'discovery', datetime('now'), datetime('now'))`,
+       VALUES ('disc-fam', 'disc-key', 'sports', 'generic', 'intraday-4h', 'ad-hoc', 'scalp', 'discovery', datetime('now'), datetime('now'))`,
       )
       .run();
 
@@ -168,25 +167,16 @@ describe("backfillDeployments", () => {
 
     const deps = conn.db
       .prepare(
-        `SELECT profile, enabled, deployment_stage
+        `SELECT profile, enabled
          FROM family_deployments
-         WHERE family_id = 'exact-score-fam'
+         WHERE family_id = 'disc-fam'
          ORDER BY profile`,
       )
-      .all() as { profile: string; enabled: number; deployment_stage: string }[];
+      .all() as { profile: string; enabled: number }[];
 
     expect(deps).toHaveLength(3);
-    expect(deps.find((d) => d.profile === "simulation")).toMatchObject({
-      enabled: 1,
-      deployment_stage: "disabled",
-    });
-    expect(deps.find((d) => d.profile === "paper")).toMatchObject({
-      enabled: 1,
-      deployment_stage: "disabled",
-    });
-    expect(deps.find((d) => d.profile === "live-lite")).toMatchObject({
-      enabled: 0,
-      deployment_stage: "disabled",
-    });
+    expect(deps.find((d) => d.profile === "simulation")?.enabled).toBe(1);
+    expect(deps.find((d) => d.profile === "paper")?.enabled).toBe(1);
+    expect(deps.find((d) => d.profile === "live-lite")?.enabled).toBe(0);
   });
 });

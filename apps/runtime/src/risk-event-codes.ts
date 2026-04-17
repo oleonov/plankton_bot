@@ -24,20 +24,13 @@ const STATIC_CODES: Record<string, string> = {
   "sell-replace-lock-active": "sell_replace_lock_active",
   "sell-replace-lock-retry": "sell_replace_lock_retry",
   "sell-replace-pending": "sell_replace_pending",
-  "family in quarantine mode": "operator_quarantine",
 };
 
 const PREFIX_CODES: [string, string][] = [
   ["open value would be", "max_open_value"],
   ["active markets", "max_active_markets"],
   ["dust positions", "max_dust_positions"],
-  ["entry blocked — family in derived reduce-only", "derived_reduce_only"],
-  ["family in derived reduce-only", "derived_reduce_only"],
-  ["family in reduce-only mode", "operator_reduce_only"],
-  ["family in probe-only mode", "operator_probe_only"],
   ["probe token already has open buy order", "probe_token_open_buy_order"],
-  ["requirePositiveRecycleHistoryForScale", "require_positive_recycle"],
-  ["family in derived probe-only", "derived_probe_only"],
   ["not found in rules", "family_not_found"],
   ["is disabled", "family_disabled"],
 ];

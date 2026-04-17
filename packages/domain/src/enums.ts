@@ -71,14 +71,6 @@ export const Action = {
 } as const;
 export type Action = (typeof Action)[keyof typeof Action];
 
-export const RuntimeMode = {
-  Active: "active",
-  ProbeOnly: "probe-only",
-  ReduceOnly: "reduce-only",
-  Quarantine: "quarantine",
-} as const;
-export type RuntimeMode = (typeof RuntimeMode)[keyof typeof RuntimeMode];
-
 // ─── Entry / exit / scale / session policy enums ─────────────────────────────
 
 export const EntryMode = {
@@ -211,12 +203,9 @@ export const ENTRY_REASONS: ReadonlySet<string> = new Set([
 export const OperatorActionType = {
   Pause: "pause",
   Resume: "resume",
-  FamilyReduceOnly: "family_reduce_only",
-  FamilyQuarantine: "family_quarantine",
-  FamilyActivate: "family_activate",
+  FamilyEnable: "family_enable",
+  FamilyDisable: "family_disable",
   RulesReload: "rules_reload",
-  FamilyPromoteScaled: "family_promote_scaled",
-  FamilyResetToProbe: "family_reset_to_probe",
 } as const;
 export type OperatorActionType = (typeof OperatorActionType)[keyof typeof OperatorActionType];
 

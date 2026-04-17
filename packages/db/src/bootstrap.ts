@@ -6,10 +6,11 @@ import {
   resolveFamilyDeploymentSeed,
   resolveFamilyLiveTradingPolicy,
 } from "@plankton/domain";
+
 import { ensureControlProfiles } from "./control-profiles.js";
 import { ensureFamilyRuleDefaultsTable } from "./family-rule-defaults.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
-import { runMigrations } from "./migrations/runner.js";
+import { runControlMigrations, runMigrations } from "./migrations/runner.js";
 import { normalizeFamilyRulesSnapshot } from "./repositories/family-rules-db-repository.js";
 
 export function bootstrapDatabase(dbPath: string): DbConnection {
@@ -33,23 +34,10 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
     "INTEGER NOT NULL DEFAULT 1",
   );
   backfillFamilyLivePolicy(conn.db);
-  backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
   backfillFamilyLimitUnification(conn.db);
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
   return conn;
-}
-
-function shouldDisableLiveLiteDiscoverySeed(input: {
-  familyKey: string | null;
-  regime: string | null;
-  horizon: string | null;
-}): boolean {
-  return (
-    (input.familyKey ?? "").toLowerCase().includes("exact-score") &&
-    (input.regime ?? "").toLowerCase() === "generic" &&
-    (input.horizon ?? "").toLowerCase() === "intraday-4h"
-  );
 }
 
 function readSchema(filename: string): string {
@@ -61,11 +49,12 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   ensureControlProfiles(conn.db);
   ensureFamilyRuleDefaultsTable(conn.db);
   ensureBootstrapBackfillsTable(conn.db);
+  seedControlMigrationsBaseline(conn.db);
+  runControlMigrations(conn.db);
   // Schema evolution: add columns that may be missing in existing DBs.
   // CREATE TABLE IF NOT EXISTS won't add new columns to existing tables.
   safeAddColumn(conn.db, "profile_summaries", "wallet_balance_usdc", "REAL");
   safeAddColumn(conn.db, "runtime_control_state", "resume_intent_at", "TEXT");
-  safeAddColumn(conn.db, "promotion_proposals", "applied_command_id", "INTEGER");
   safeAddColumn(conn.db, "profile_settings", "wallet_mode", "TEXT");
   safeAddColumn(conn.db, "profile_settings", "min_order_usdc", "REAL");
   safeAddColumn(conn.db, "profile_settings", "relayer_json", "TEXT");
@@ -96,12 +85,83 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   backfillDeployments(conn.db);
   backfillLiveProfileSettings(conn.db);
   backfillFamilyLivePolicy(conn.db);
-  backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
   backfillFamilyLimitUnification(conn.db);
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
 
   return conn;
+}
+
+/**
+ * Per-migration fresh-install detector for control-db migrations. Each
+ * migration declares a predicate that returns true when the DB already
+ * reflects that migration's target shape. Fresh installs (created from the
+ * latest control.sql) satisfy all predicates → all migrations get seeded as
+ * applied → runner skips them. Upgrade installs satisfy none (or only some,
+ * for partial upgrades) → the runner applies the rest in order.
+ */
+function hasColumn(
+  db: import("better-sqlite3").Database,
+  table: string,
+  column: string,
+): boolean {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return columns.some((c) => c.name === column);
+}
+
+type ControlMigrationBaseline = {
+  name: string;
+  isAlreadyApplied: (db: import("better-sqlite3").Database) => boolean;
+};
+
+function hasTable(db: import("better-sqlite3").Database, table: string): boolean {
+  const row = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table) as { name: string } | undefined;
+  return Boolean(row);
+}
+
+const CONTROL_MIGRATION_BASELINES: ControlMigrationBaseline[] = [
+  {
+    name: "031_flatten_family_deployments.sql",
+    // Post-031 shape: disabled_at column exists. Fresh bootstrap creates it
+    // directly; upgrade installs gain it when migration 031 runs.
+    isAlreadyApplied: (db) => hasColumn(db, "family_deployments", "disabled_at"),
+  },
+  {
+    name: "033_drop_legacy_governance.sql",
+    // Post-033 shape: strategy_stage column is gone. Fresh bootstrap creates
+    // the slim table directly; upgrade installs rebuild via migration 033.
+    isAlreadyApplied: (db) => !hasColumn(db, "family_deployments", "strategy_stage"),
+  },
+  {
+    name: "034_drop_discovery_tables.sql",
+    // Post-034 shape: discovery tables are gone. Fresh bootstrap never creates
+    // them; upgrade installs drop them via migration 034.
+    isAlreadyApplied: (db) => !hasTable(db, "family_candidates"),
+  },
+  {
+    name: "035_drop_family_rollup_effective_mode.sql",
+    // Post-035 shape: effective_mode is gone from family_profile_rollups. Fresh
+    // bootstrap creates the slim table directly; upgrade installs drop the
+    // column via migration 035.
+    isAlreadyApplied: (db) => !hasColumn(db, "family_profile_rollups", "effective_mode"),
+  },
+];
+
+function seedControlMigrationsBaseline(db: import("better-sqlite3").Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
+  const seed = db.prepare("INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)");
+  for (const baseline of CONTROL_MIGRATION_BASELINES) {
+    if (baseline.isAlreadyApplied(db)) {
+      seed.run(baseline.name);
+    }
+  }
 }
 
 const BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION = "2026-04-13-family-limit-unification-v1";
@@ -257,45 +317,28 @@ function backfillFamilyLimitUnification(db: import("better-sqlite3").Database): 
  */
 function backfillDeployments(db: import("better-sqlite3").Database): void {
   const families = db
-    .prepare("SELECT family_id, source_type, family_key, regime, horizon FROM family_catalog")
+    .prepare("SELECT family_id, source_type FROM family_catalog")
     .all() as {
     family_id: string;
     source_type: string | null;
-    family_key: string | null;
-    regime: string | null;
-    horizon: string | null;
   }[];
 
   if (families.length === 0) return;
 
   const insert = db.prepare(
     `INSERT OR IGNORE INTO family_deployments
-       (family_id, profile, enabled, operator_mode, strategy_stage,
-        deployment_stage, priority, created_at, updated_at)
-     VALUES (?, ?, ?, 'active', 'probe-only', ?, 999, datetime('now'), datetime('now'))`,
+       (family_id, profile, enabled, priority, created_at, updated_at)
+     VALUES (?, ?, ?, 999, datetime('now'), datetime('now'))`,
   );
 
   db.transaction(() => {
-    for (const { family_id, source_type, family_key, regime, horizon } of families) {
+    for (const { family_id, source_type } of families) {
       for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
         const seed = resolveFamilyDeploymentSeed({
           profile,
           sourceType: source_type,
         });
-        const liveLiteExactScoreBlocked =
-          profile === ProfileId.LiveLite &&
-          source_type !== "yaml_import" &&
-          shouldDisableLiveLiteDiscoverySeed({
-            familyKey: family_key,
-            regime,
-            horizon,
-          });
-        insert.run(
-          family_id,
-          profile,
-          liveLiteExactScoreBlocked ? 0 : seed.enabled ? 1 : 0,
-          liveLiteExactScoreBlocked ? "disabled" : seed.deploymentStage,
-        );
+        insert.run(family_id, profile, seed.enabled ? 1 : 0);
       }
     }
   })();
@@ -349,73 +392,6 @@ function backfillFamilyLivePolicy(db: import("better-sqlite3").Database): void {
       );
     }
   })();
-}
-
-const LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS = {
-  minEntryPrice: 0,
-  maxEntryPrice: 1,
-  highPriceThreshold: 0.2,
-  requireProvenFamilyAbovePrice: 0.2,
-};
-
-const DIRECTIONAL_UPDOWN_BACKFILL_PRESET = {
-  minEntryPrice: 0.03,
-  maxEntryPrice: 0.35,
-  highPriceThreshold: 0.35,
-  requireProvenFamilyAbovePrice: 0.35,
-  preferredEntryBand: "0.05-0.35",
-};
-
-/**
- * Repair discovery directional-updown families materialized before standard-tier
- * presets and fast-lane routing existed. Only rows that still match the exact
- * legacy defaults are touched; explicit operator tuning is left intact.
- */
-function backfillDirectionalUpdownDiscoveryEntryPolicy(
-  db: import("better-sqlite3").Database,
-): void {
-  try {
-    db.prepare(
-      `UPDATE family_rules
-       SET min_entry_price = @minEntryPrice,
-           max_entry_price = @maxEntryPrice,
-           high_price_threshold = @highPriceThreshold,
-           require_proven_family_above_price = @requireProvenFamilyAbovePrice,
-           preferred_entry_band = @preferredEntryBand,
-           fast_lane_enabled = 1,
-           updated_at = datetime('now')
-       WHERE family_id IN (
-         SELECT r.family_id
-         FROM family_rules r
-         JOIN family_catalog c ON c.family_id = r.family_id
-         WHERE c.source_type = 'discovery'
-           AND lower(c.regime) = 'directional-updown'
-           AND r.fast_lane_enabled IS NULL
-           AND abs(r.min_entry_price - @legacyMinEntryPrice) <= 1e-9
-           AND abs(r.max_entry_price - @legacyMaxEntryPrice) <= 1e-9
-           AND abs(r.high_price_threshold - @legacyHighPriceThreshold) <= 1e-9
-           AND abs(r.require_proven_family_above_price - @legacyRequireProvenFamilyAbovePrice)
-                 <= 1e-9
-           AND COALESCE(r.preferred_entry_band, '') = ''
-       )`,
-    ).run({
-      minEntryPrice: DIRECTIONAL_UPDOWN_BACKFILL_PRESET.minEntryPrice,
-      maxEntryPrice: DIRECTIONAL_UPDOWN_BACKFILL_PRESET.maxEntryPrice,
-      highPriceThreshold: DIRECTIONAL_UPDOWN_BACKFILL_PRESET.highPriceThreshold,
-      requireProvenFamilyAbovePrice:
-        DIRECTIONAL_UPDOWN_BACKFILL_PRESET.requireProvenFamilyAbovePrice,
-      preferredEntryBand: DIRECTIONAL_UPDOWN_BACKFILL_PRESET.preferredEntryBand,
-      legacyMinEntryPrice: LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS.minEntryPrice,
-      legacyMaxEntryPrice: LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS.maxEntryPrice,
-      legacyHighPriceThreshold: LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS.highPriceThreshold,
-      legacyRequireProvenFamilyAbovePrice:
-        LEGACY_DISCOVERY_DIRECTIONAL_UPDOWN_DEFAULTS.requireProvenFamilyAbovePrice,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("no such table")) return;
-    throw err;
-  }
 }
 
 export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): void {

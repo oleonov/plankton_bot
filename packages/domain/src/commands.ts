@@ -95,28 +95,20 @@ export interface ResumeCommand {
 
 // ─── Family-Scoped Operator Commands ─────────────────────────────────────
 
-export interface FamilyReduceOnlyCommand {
-  readonly type: "FamilyReduceOnlyCommand";
+export interface FamilyEnableCommand {
+  readonly type: "FamilyEnableCommand";
   readonly commandId: CommandId;
   readonly familyId: FamilyId;
   readonly reason: string;
-  readonly action: Extract<OperatorActionType, "family_reduce_only">;
+  readonly action: Extract<OperatorActionType, "family_enable">;
 }
 
-export interface FamilyQuarantineCommand {
-  readonly type: "FamilyQuarantineCommand";
+export interface FamilyDisableCommand {
+  readonly type: "FamilyDisableCommand";
   readonly commandId: CommandId;
   readonly familyId: FamilyId;
   readonly reason: string;
-  readonly action: Extract<OperatorActionType, "family_quarantine">;
-}
-
-export interface FamilyActivateCommand {
-  readonly type: "FamilyActivateCommand";
-  readonly commandId: CommandId;
-  readonly familyId: FamilyId;
-  readonly reason: string;
-  readonly action: Extract<OperatorActionType, "family_activate">;
+  readonly action: Extract<OperatorActionType, "family_disable">;
 }
 
 // ─── Discriminated Union ──────────────────────────────────────────────────
@@ -126,6 +118,5 @@ export type DomainCommand =
   | CancelOrderCommand
   | PauseCommand
   | ResumeCommand
-  | FamilyReduceOnlyCommand
-  | FamilyQuarantineCommand
-  | FamilyActivateCommand;
+  | FamilyEnableCommand
+  | FamilyDisableCommand;

@@ -36,11 +36,6 @@ describe("control.db schema", () => {
     expect(names).toContain("family_validation_latest");
     expect(names).toContain("family_profile_rollups");
     expect(names).toContain("family_config_meta");
-    expect(names).toContain("family_candidates");
-    expect(names).toContain("candidate_observations");
-    expect(names).toContain("candidate_observation_markets");
-    expect(names).toContain("discovery_runs");
-    expect(names).toContain("promotion_proposals");
     expect(names).toContain("runtime_control_state");
     expect(names).toContain("operator_commands");
     expect(names).toContain("operator_actions");

@@ -38,13 +38,9 @@ import {
   SqliteOperatorActionRepository,
   SqliteMarketSnapshotRepository,
   SqliteRiskEventRepository,
-  SqliteFamilyCandidateRepository,
   SqliteFamilyEvidenceRepository,
   SqliteFamilyRulesSnapshotRepository,
   SqliteStateTransitionRepository,
-  SqlitePromotionProposalRepository,
-  SqliteCandidateObservationRepository,
-  SqliteFamilyRulesDbRepository,
   SqliteFamilyDeploymentRepository,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
@@ -98,9 +94,7 @@ import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";
 import { ScoreComputer } from "./modules/evidence/score-computer.js";
-import { RuntimeSafetyEvaluator } from "./modules/safety/runtime-safety-evaluator.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
-import { ValidationMetricsReader } from "./modules/publisher/validation-metrics-reader.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
@@ -243,12 +237,9 @@ async function main(): Promise<void> {
     familyCatalog: new SqliteFamilyCatalogRepository(controlConn.db),
     operatorCommand: new SqliteOperatorCommandRepository(controlConn.db),
     operatorAction: new SqliteOperatorActionRepository(controlConn.db),
-    familyCandidate: new SqliteFamilyCandidateRepository(controlConn.db),
     familyEvidence: new SqliteFamilyEvidenceRepository(controlConn.db),
     familyRulesSnapshot: new SqliteFamilyRulesSnapshotRepository(controlConn.db),
     stateTransition: new SqliteStateTransitionRepository(controlConn.db),
-    promotionProposal: new SqlitePromotionProposalRepository(controlConn.db),
-    candidateObservation: new SqliteCandidateObservationRepository(controlConn.db),
     // Algo decision engine — algoRules lives in control.db, legState in ledger.db
     algoRules: new SqliteAlgoRulesRepository(controlConn.db),
     legState: new SqliteLegStateRepository(ledgerConn.db),
@@ -290,7 +281,6 @@ async function main(): Promise<void> {
     if (!existing) {
       const baseline: FamilyState = {
         familyId: identity.familyId,
-        runtimeMode: "active",
         openValueUsdc: 0,
         openPositionCount: 0,
         openDustCount: 0,
@@ -299,9 +289,6 @@ async function main(): Promise<void> {
         tailAdjustedPnlLive: 0,
         lastEntryTs: null,
         lastExitTs: null,
-        quarantineReason: null,
-        effectiveMode: null,
-        derivedModeReason: null,
         firstNegativeTailAt: null,
         updatedAt: new Date().toISOString(),
       };
@@ -562,12 +549,8 @@ async function main(): Promise<void> {
     pollIntervalMs: 5_000,
     rulesManager: rulesProvider,
     normalizationModule,
-    familyEvidenceRepo: repos.familyEvidence,
-    familyRulesSnapshotRepo: repos.familyRulesSnapshot,
-    familyCandidateRepo: repos.familyCandidate,
     stateTransitionRepo: repos.stateTransition,
-    familyRulesDbWriter: new SqliteFamilyRulesDbRepository(controlConn.db),
-    deploymentUpdater: new SqliteFamilyDeploymentRepository(controlConn.db),
+    deploymentToggler: new SqliteFamilyDeploymentRepository(controlConn.db),
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });
 
@@ -858,28 +841,12 @@ async function main(): Promise<void> {
     controlConn.db,
     activeProfile as import("@plankton/domain").ProfileId,
   );
-  const validationMetricsReader = new ValidationMetricsReader(ledgerConn.db);
   const evidenceEngine = new FamilyEvidenceEngine({
     bus,
     log,
     scoreComputer,
     evidenceRepo: repos.familyEvidence,
     rulesProvider,
-  });
-
-  // 7l2b. Safety evaluator — toxicity-based demotion writes to family_deployments
-  const deploymentRepo = new SqliteFamilyDeploymentRepository(controlConn.db);
-  const safetyEvaluator = new RuntimeSafetyEvaluator({
-    bus,
-    log,
-    scoreComputer,
-    executionTelemetryReader: validationMetricsReader,
-    deploymentRepo,
-    stateTransitionRepo: repos.stateTransition,
-    familyStateRepo: repos.familyState,
-    familyEvidenceRepo: repos.familyEvidence,
-    rulesProvider,
-    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });
 
   // 7l3. Profile runtime publisher — periodic rollup of family metrics to control.db
@@ -907,7 +874,6 @@ async function main(): Promise<void> {
     ["normalization", normalizationModule],
     ["risk-inventory", riskInventoryModule],
     ["evidence-engine", evidenceEngine],
-    ["safety-evaluator", safetyEvaluator],
     ["profile-publisher", profilePublisher],
     ["reconciliation", reconciliationModule],
     ...(userOrderStreamModule
@@ -1005,10 +971,6 @@ async function main(): Promise<void> {
       ev.reason,
       ev.initiatorType,
     );
-  });
-
-  bus.subscribe("FamilyDemotionApplied", async (ev) => {
-    riskEventWriter.onFamilyDemotionApplied(ev.familyId, ev.previousState, ev.newState, ev.reason);
   });
 
   bus.subscribe("ReconciliationDriftDetected", async ({ details, severity, timestamp }) => {
@@ -1490,11 +1452,6 @@ async function main(): Promise<void> {
       lastSnapshotMs = now;
 
       const sa = signalWindow;
-      const allProbeOnly = ledgerConn.db
-        .prepare(
-          "SELECT COUNT(*) as total, COUNT(CASE WHEN effective_mode = 'probe-only' THEN 1 END) as probeOnly FROM family_runtime_state WHERE runtime_mode = 'active'",
-        )
-        .get() as { total: number; probeOnly: number };
       const tradingState = resolveTradingState({
         signalWindow: {
           produced: sa.produced,
@@ -1503,7 +1460,6 @@ async function main(): Promise<void> {
           entryApproved: sa.entryApproved,
           exitApproved: sa.exitApproved,
         },
-        activeFamilies: allProbeOnly,
       });
 
       insertSnapshot.run(

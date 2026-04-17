@@ -1,7 +1,6 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useProfileDetail } from "../api/hooks.ts";
-import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
 import type { ProfileDTO, DeployedFamilyDTO } from "../api/types.ts";
 
@@ -53,9 +52,8 @@ function FamiliesTab({ families }: { families: DeployedFamilyDTO[] }) {
           <th>Family</th>
           <th>Category</th>
           <th>Regime</th>
-          <th>Operator Mode</th>
-          <th>Strategy Stage</th>
-          <th>Deployment Stage</th>
+          <th>Enabled</th>
+          <th>Priority</th>
         </tr>
       </thead>
       <tbody>
@@ -64,15 +62,8 @@ function FamiliesTab({ families }: { families: DeployedFamilyDTO[] }) {
             <td style={{ color: "var(--blue)" }}>{f.family_key}</td>
             <td>{f.primary_category}</td>
             <td>{f.regime}</td>
-            <td>
-              <Badge value={f.operator_mode} type="mode" />
-            </td>
-            <td>
-              <Badge value={f.strategy_stage} />
-            </td>
-            <td>
-              <Badge value={f.deployment_stage} />
-            </td>
+            <td>{f.enabled ? "yes" : "no"}</td>
+            <td>{f.priority}</td>
           </tr>
         ))}
       </tbody>

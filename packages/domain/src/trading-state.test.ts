@@ -11,7 +11,7 @@ describe("resolveTradingState", () => {
     ).toBe("PAUSED");
   });
 
-  it("returns PROBING_ONLY when all active families are probe-only and entries are approved", () => {
+  it("returns ACTIVELY_TRADING when entry approvals exist", () => {
     expect(
       resolveTradingState({
         signalWindow: {
@@ -21,12 +21,8 @@ describe("resolveTradingState", () => {
           entryApproved: 2,
           exitApproved: 1,
         },
-        activeFamilies: {
-          total: 2,
-          probeOnly: 2,
-        },
       }),
-    ).toBe("PROBING_ONLY");
+    ).toBe("ACTIVELY_TRADING");
   });
 
   it("returns EXITS_ONLY before ALIVE_BUT_BLOCKED when only exit approvals exist", () => {
@@ -38,10 +34,6 @@ describe("resolveTradingState", () => {
           rejected: 19,
           entryApproved: 0,
           exitApproved: 1,
-        },
-        activeFamilies: {
-          total: 3,
-          probeOnly: 0,
         },
       }),
     ).toBe("EXITS_ONLY");
@@ -56,10 +48,6 @@ describe("resolveTradingState", () => {
           rejected: 20,
           entryApproved: 0,
           exitApproved: 0,
-        },
-        activeFamilies: {
-          total: 3,
-          probeOnly: 0,
         },
       }),
     ).toBe("ALIVE_BUT_BLOCKED");

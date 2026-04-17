@@ -3,19 +3,16 @@
  *
  * Polls SQLite for state changes and streams events to connected clients.
  *
- * Filter: `?types=position,order,fill,family,status,metrics,discovery,discovery_status,proposals,transitions`
+ * Filter: `?types=position,order,fill,family,status,metrics,risk,transitions`
  * These are coarse categories. Each maps to one or more event names:
- *   position         → position:updated
- *   order            → order:created, order:filled, order:cancelled
- *   fill             → fill:new
- *   family           → family:state_changed
- *   status           → status
- *   metrics          → metrics:snapshot
- *   discovery        → candidate_updates
- *   discovery_status → discovery_status
- *   proposals        → proposals
- *   transitions      → transitions
- *
+ *   position    → position:updated
+ *   order       → order:created, order:filled, order:cancelled
+ *   fill        → fill:new
+ *   family      → family:state_changed
+ *   status      → status
+ *   metrics     → metrics:snapshot
+ *   risk        → risk:event
+ *   transitions → transitions
  */
 
 import type { FastifyPluginAsync } from "fastify";
@@ -38,9 +35,6 @@ interface ChangeSnapshot {
   riskEvents: string;
   /** Composite key: changes in operator_commands OR bot_runs OR runtime_metrics trigger status events. */
   statusHash: string;
-  candidates: string;
-  discoveryRuns: string;
-  proposalCount: number;
   transitions: string;
 }
 
@@ -53,9 +47,6 @@ const CATEGORY_TO_EVENTS: Record<string, string[]> = {
   status: ["status"],
   metrics: ["metrics:snapshot"],
   risk: ["risk:event"],
-  discovery: ["candidate_updates"],
-  discovery_status: ["discovery_status"],
-  proposals: ["proposals"],
   transitions: ["transitions"],
 };
 
@@ -89,18 +80,6 @@ function takeSnapshot(controlDb: Database.Database, ledgerDb: Database.Database)
   const opCmd = controlDb
     .prepare("SELECT MAX(applied_at) as ts FROM operator_commands WHERE status = 'applied'")
     .get() as { ts: string | null };
-  const discoveryRunTs = controlDb
-    .prepare("SELECT MAX(COALESCE(finished_at, started_at, requested_at)) FROM discovery_runs")
-    .pluck()
-    .get() as string | null;
-  const candidateMaxTs = controlDb
-    .prepare("SELECT MAX(scores_updated_at) FROM family_candidates")
-    .pluck()
-    .get() as string | null;
-  const proposalCount = controlDb
-    .prepare("SELECT COUNT(*) FROM promotion_proposals WHERE status = 'pending'")
-    .pluck()
-    .get() as number;
   const transitionMaxTs = controlDb
     .prepare("SELECT MAX(created_at) FROM state_transitions")
     .pluck()
@@ -113,9 +92,6 @@ function takeSnapshot(controlDb: Database.Database, ledgerDb: Database.Database)
     families: fam.ts ?? "",
     riskEvents: risk.ts ?? "",
     statusHash: `${opCmd.ts ?? ""}|${botRun.ts ?? ""}|${reconMetric.ts ?? ""}`,
-    candidates: candidateMaxTs ?? "",
-    discoveryRuns: discoveryRunTs ?? "",
-    proposalCount,
     transitions: transitionMaxTs ?? "",
   };
 }
@@ -246,12 +222,8 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
           for (const row of rows) {
             sendEvent("family:state_changed", {
               familyId: row.family_id,
-              runtimeMode: row.runtime_mode,
               openValueUsdc: row.open_value_usdc,
               openPositionCount: row.open_position_count,
-              quarantineReason: row.quarantine_reason,
-              effectiveMode: row.effective_mode ?? null,
-              derivedModeReason: row.derived_mode_reason ?? null,
               updatedAt: row.updated_at,
             });
           }
@@ -279,23 +251,6 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
           for (const row of rows) {
             sendEvent("risk:event", normalizeRiskEvent(row));
           }
-        }
-
-        // Emit discovery_status when scan state changes (queued/running/finished)
-        if (next.discoveryRuns !== snapshot.discoveryRuns) {
-          sendEvent("discovery_status", { updatedAt: next.discoveryRuns });
-          // Completed scan likely produced new/updated candidates
-          sendEvent("candidate_updates", { updatedAt: next.candidates });
-        }
-
-        // Emit candidate_updates when scores change
-        if (next.candidates !== snapshot.candidates) {
-          sendEvent("candidate_updates", { updatedAt: next.candidates });
-        }
-
-        // Emit proposals when pending count changes
-        if (next.proposalCount !== snapshot.proposalCount) {
-          sendEvent("proposals", { pendingCount: next.proposalCount });
         }
 
         // Emit transitions when new state transitions appear

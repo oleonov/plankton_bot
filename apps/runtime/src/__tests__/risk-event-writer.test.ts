@@ -73,11 +73,18 @@ describe("RiskEventWriter", () => {
   });
 
   describe("onOperatorCommand", () => {
-    it("writes family mode transitions", () => {
-      writer.onOperatorCommand("family_quarantine", createFamilyId("fam-1"), 1, "max loss");
+    it("writes family enable transitions", () => {
+      writer.onOperatorCommand("family_enable", createFamilyId("fam-1"), 1, "reactivating");
 
       expect(repo.insert).toHaveBeenCalledTimes(1);
-      expect(repo.insert.mock.calls[0]![0].eventType).toBe("family_quarantined");
+      expect(repo.insert.mock.calls[0]![0].eventType).toBe("family_enabled");
+    });
+
+    it("writes family disable transitions", () => {
+      writer.onOperatorCommand("family_disable", createFamilyId("fam-1"), 1, "manual disable");
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+      expect(repo.insert.mock.calls[0]![0].eventType).toBe("family_disabled");
     });
 
     it("ignores non-family commands", () => {
@@ -92,44 +99,14 @@ describe("RiskEventWriter", () => {
       expect(repo.insert).not.toHaveBeenCalled();
     });
 
-    it("skips system demotion commands to avoid duplicate risk events", () => {
+    it("skips system-initiated disable to avoid duplicate risk events", () => {
       writer.onOperatorCommand(
-        "family_reduce_only",
+        "family_disable",
         createFamilyId("fam-1"),
         1,
-        "auto-demotion",
+        "auto-disable",
         "system",
       );
-
-      expect(repo.insert).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("onFamilyDemotionApplied", () => {
-    it("writes system family demotions as risk events", () => {
-      writer.onFamilyDemotionApplied(
-        createFamilyId("fam-1"),
-        "scaled",
-        "reduce-only",
-        "Auto-demotion: execution canary breach",
-      );
-
-      expect(repo.insert).toHaveBeenCalledTimes(1);
-      expect(repo.insert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventType: "family_reduce_only",
-          familyId: createFamilyId("fam-1"),
-          payload: expect.objectContaining({
-            previousState: "scaled",
-            newState: "reduce-only",
-            source: "system",
-          }),
-        }),
-      );
-    });
-
-    it("ignores non-demotion states", () => {
-      writer.onFamilyDemotionApplied(createFamilyId("fam-1"), "probe-only", "active", "recovered");
 
       expect(repo.insert).not.toHaveBeenCalled();
     });

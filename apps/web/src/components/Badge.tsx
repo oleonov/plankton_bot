@@ -1,11 +1,10 @@
 const MODE_STYLES: Record<string, string> = {
-  active: "badge-green",
-  "reduce-only": "badge-orange",
-  quarantine: "badge-red",
   simulation: "badge-green",
   paper: "badge-orange",
   "paper-trade": "badge-orange",
   "live-lite": "badge-red",
+  PAUSED: "badge-red",
+  RUNNING: "badge-green",
 };
 
 const STATUS_STYLES: Record<string, string> = {
@@ -18,6 +17,8 @@ const STATUS_STYLES: Record<string, string> = {
   dust: "badge-orange",
   resolving: "badge-orange",
   settled: "badge-green",
+  enabled: "badge-green",
+  disabled: "badge-red",
 };
 
 const SEVERITY_STYLES: Record<string, string> = {

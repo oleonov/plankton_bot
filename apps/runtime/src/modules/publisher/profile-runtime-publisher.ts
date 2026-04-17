@@ -85,8 +85,8 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       const upsertRollup = db.prepare(`
         INSERT INTO family_profile_rollups
           (family_id, profile, open_value_usdc, open_positions, active_markets,
-           realized_pnl, tail_cost_usdc, tail_adjusted_pnl, effective_mode, last_trade_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           realized_pnl, tail_cost_usdc, tail_adjusted_pnl, last_trade_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
         ON CONFLICT(family_id, profile) DO UPDATE SET
           open_value_usdc   = excluded.open_value_usdc,
           open_positions    = excluded.open_positions,
@@ -94,7 +94,6 @@ export class ProfileRuntimePublisher implements RuntimeModule {
           realized_pnl      = excluded.realized_pnl,
           tail_cost_usdc    = excluded.tail_cost_usdc,
           tail_adjusted_pnl = excluded.tail_adjusted_pnl,
-          effective_mode    = excluded.effective_mode,
           last_trade_at     = excluded.last_trade_at,
           updated_at        = excluded.updated_at
       `);
@@ -109,7 +108,6 @@ export class ProfileRuntimePublisher implements RuntimeModule {
           fm.realizedPnl,
           fm.tailCostUsdc,
           fm.tailAdjustedPnl,
-          fm.effectiveMode,
           fm.lastTradeAt,
         );
       }

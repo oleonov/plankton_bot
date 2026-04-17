@@ -76,9 +76,9 @@ beforeAll(async () => {
     INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
     VALUES ('fam-1', 'test-family', 'politics', 'standard', 'medium', 'daily', 'v1');
 
-    INSERT INTO family_runtime_state (family_id, runtime_mode, open_value_usdc, open_position_count, open_dust_count,
+    INSERT INTO family_runtime_state (family_id, open_value_usdc, open_position_count, open_dust_count,
       active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-    VALUES ('fam-1', 'active', 50.0, 2, 0, 3, 10.0, 5.0, '2026-03-14T00:00:00Z');
+    VALUES ('fam-1', 50.0, 2, 0, 3, 10.0, 5.0, '2026-03-14T00:00:00Z');
 
     INSERT INTO family_rules (family_id, max_open_value_usdc, max_active_markets, max_dust_positions)
     VALUES ('fam-1', 50, 5, 3);
@@ -272,7 +272,7 @@ describe("GET /status", () => {
       headers: authHeaders(),
     });
     const body = json(res);
-    // bot_runs has mode='simulation', family_runtime_state has runtime_mode='active'
+    // bot_runs has mode='simulation' — runtimeMode is derived from bot_runs.mode
     expect(body.data.runtimeMode).toBe("simulation");
   });
 
@@ -679,7 +679,6 @@ describe("families", () => {
     expect(body.data.items).toHaveLength(1);
     expect(body.data.items[0].familyId).toBe("fam-1");
     expect(body.data.items[0].state).toBeDefined();
-    expect(body.data.items[0].state.runtimeMode).toBe("active");
   });
 
   it("GET /families includes caps from family_rules", async () => {
@@ -1144,20 +1143,20 @@ describe("operator actions", () => {
     expect(json(res).ok).toBe(true);
   });
 
-  it("POST /actions/family/:id/quarantine validates family exists", async () => {
+  it("POST /actions/family/:id/disable validates family exists", async () => {
     const res = await app.inject({
       method: "POST",
-      url: "/api/v1/actions/family/no-such/quarantine",
+      url: "/api/v1/actions/family/no-such/disable",
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {},
     });
     expect(res.statusCode).toBe(404);
   });
 
-  it("POST /actions/family/:id/quarantine inserts command for valid family", async () => {
+  it("POST /actions/family/:id/disable inserts command for valid family", async () => {
     const res = await app.inject({
       method: "POST",
-      url: "/api/v1/actions/family/fam-1/quarantine",
+      url: "/api/v1/actions/family/fam-1/disable",
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: { reason: "risk concern" },
     });
@@ -1167,29 +1166,25 @@ describe("operator actions", () => {
     const row = conn.db
       .prepare("SELECT * FROM operator_commands WHERE id = ?")
       .get(body.data.commandId) as Record<string, unknown>;
-    expect(row.action).toBe("family_quarantine");
+    expect(row.action).toBe("family_disable");
     expect(row.target_id).toBe("fam-1");
     expect(row.initiator).toBe("api_key");
   });
 
-  it("POST /actions/family/:id/reduce-only works", async () => {
+  it("POST /actions/family/:id/enable works", async () => {
     const res = await app.inject({
       method: "POST",
-      url: "/api/v1/actions/family/fam-1/reduce-only",
+      url: "/api/v1/actions/family/fam-1/enable",
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {},
     });
-    expect(json(res).ok).toBe(true);
-  });
+    const body = json(res);
+    expect(body.ok).toBe(true);
 
-  it("POST /actions/family/:id/activate works", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/family/fam-1/activate",
-      headers: { ...authHeaders(), "content-type": "application/json" },
-      payload: {},
-    });
-    expect(json(res).ok).toBe(true);
+    const row = conn.db
+      .prepare("SELECT * FROM operator_commands WHERE id = ?")
+      .get(body.data.commandId) as Record<string, unknown>;
+    expect(row.action).toBe("family_enable");
   });
 });
 
@@ -1472,146 +1467,4 @@ describe("GET /metrics/pnl-series", () => {
   });
 });
 
-// ─── Promote proposal ───────────────────────────────────────────────
-
-describe("POST /actions/family/:familyId/promote", () => {
-  it("approves a pending proposal and enqueues a command", async () => {
-    const now = new Date().toISOString();
-    conn.db.exec(`
-      INSERT INTO family_validation_scorecards
-        (scorecard_id, family_id, profile, evidence_status, evidence_score,
-         recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
-         trade_count, market_count, realized_pnl, tail_adjusted_pnl,
-         both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
-         summary_json, validated_at)
-      VALUES (
-        'sc-promote-ok', 'fam-1', 'simulation', 'confirmed', 0.9,
-        0.7, 0.7, 0.6, 0.1,
-        30, 8, 10, 5,
-        0, 0, NULL,
-        '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":24,"makerFills":12,"takerFills":0,"unknownFills":0,"makerRatio":1,"takerRatio":0,"explicitFeesUsdc":0,"feeLeakageRatio":0,"lastFillAt":"${now}"},"executionCanary24h":{"required":true,"eligible":true,"minTotalFills":10,"blockers":[]}}',
-        '${now}'
-      );
-      INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
-      VALUES ('fam-1', 'simulation', 'sc-promote-ok')
-      ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id;
-    `);
-
-    // Seed a pending proposal for fam-1
-    conn.db.exec(`
-      INSERT OR IGNORE INTO promotion_proposals
-        (family_id, current_state, proposed_state, reason, scores_snapshot, status)
-      VALUES ('fam-1', 'probe-only', 'scaled', 'evidence passed', '{}', 'pending')
-    `);
-
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/family/fam-1/promote",
-      headers: { ...authHeaders(), "content-type": "application/json" },
-      payload: JSON.stringify({ reason: "manual approve" }),
-    });
-
-    const body = json(res);
-    expect(res.statusCode).toBe(200);
-    expect(body.ok).toBe(true);
-    expect(body.data.commandId).toBeDefined();
-    expect(body.data.proposalId).toBeDefined();
-
-    // Verify proposal status changed
-    const proposal = conn.db
-      .prepare(
-        "SELECT status FROM promotion_proposals WHERE family_id = 'fam-1' AND status = 'approved'",
-      )
-      .get() as { status: string } | undefined;
-    expect(proposal?.status).toBe("approved");
-
-    // Verify command was enqueued
-    const cmd = conn.db
-      .prepare("SELECT action, target_id FROM operator_commands WHERE id = ?")
-      .get(body.data.commandId) as { action: string; target_id: string };
-    expect(cmd.action).toBe("family_promote_scaled");
-    expect(cmd.target_id).toBe("fam-1");
-  });
-
-  it("blocks live-lite promote when execution canary fails", async () => {
-    const now = new Date().toISOString();
-    conn.db.exec(`
-      INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
-      VALUES ('fam-canary-block', 'canary-block', 'crypto', 'standard', 'daily', 'daily', 'v1');
-      INSERT INTO family_validation_scorecards
-        (scorecard_id, family_id, profile, evidence_status, evidence_score,
-         recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
-         trade_count, market_count, realized_pnl, tail_adjusted_pnl,
-         both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
-         summary_json, validated_at)
-      VALUES (
-        'sc-promote-block', 'fam-canary-block', 'live-lite', 'confirmed', 0.7,
-        0.6, 0.6, 0.5, 0.1,
-        25, 7, 4, 3,
-        0, 0, NULL,
-        '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":20,"makerFills":10,"takerFills":2,"unknownFills":0,"makerRatio":0.8333,"takerRatio":0.1667,"explicitFeesUsdc":0.12,"feeLeakageRatio":0.006,"lastFillAt":"${now}"},"executionCanary24h":{"required":true,"eligible":false,"minTotalFills":10,"blockers":[{"metric":"Taker fills","current":2,"required":0,"passed":false},{"metric":"Explicit fees (USDC)","current":0.12,"required":0,"passed":false}]}}',
-        '${now}'
-      );
-      INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
-      VALUES ('fam-canary-block', 'live-lite', 'sc-promote-block')
-      ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id;
-      INSERT INTO promotion_proposals
-        (family_id, profile, current_state, proposed_state, reason, scores_snapshot, status)
-      VALUES ('fam-canary-block', 'live-lite', 'probe-only', 'scaled', 'execution pending', '{}', 'pending');
-    `);
-
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/family/fam-canary-block/promote",
-      headers: { ...authHeaders(), "content-type": "application/json" },
-      payload: JSON.stringify({}),
-    });
-
-    expect(res.statusCode).toBe(409);
-    expect(json(res).error.code).toBe("PROMOTION_BLOCKED_BY_EXECUTION_CANARY");
-  });
-
-  it("allows paper promote while execution canary is still warning-only", async () => {
-    const now = new Date().toISOString();
-    conn.db.exec(`
-      INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
-      VALUES ('fam-canary-paper', 'canary-paper', 'crypto', 'standard', 'daily', 'daily', 'v1');
-      INSERT INTO family_validation_scorecards
-        (scorecard_id, family_id, profile, evidence_status, evidence_score,
-         recurrence_score, recycle_score, live_viability_score, toxicity_penalty,
-         trade_count, market_count, realized_pnl, tail_adjusted_pnl,
-         both_sided_eligible, heavy_campaign_eligible, active_window_edge_score,
-         summary_json, validated_at)
-      VALUES (
-        'sc-promote-paper', 'fam-canary-paper', 'paper', 'confirmed', 0.7,
-        0.6, 0.6, 0.5, 0.1,
-        25, 7, 4, 3,
-        0, 0, NULL,
-        '{"executionTelemetry24h":{"totalFills":12,"volumeUsdc":20,"makerFills":0,"takerFills":0,"unknownFills":12,"makerRatio":0,"takerRatio":0,"explicitFeesUsdc":0,"feeLeakageRatio":0,"lastFillAt":"${now}"},"executionCanary24h":{"required":true,"eligible":false,"minTotalFills":10,"blockers":[{"metric":"Maker ratio %","current":0,"required":100,"passed":false},{"metric":"Unknown fills","current":12,"required":0,"passed":false}]}}',
-        '${now}'
-      );
-      INSERT INTO family_validation_latest (family_id, profile, scorecard_id)
-      VALUES ('fam-canary-paper', 'paper', 'sc-promote-paper')
-      ON CONFLICT(family_id, profile) DO UPDATE SET scorecard_id = excluded.scorecard_id;
-      INSERT INTO promotion_proposals
-        (family_id, profile, current_state, proposed_state, reason, scores_snapshot, status)
-      VALUES ('fam-canary-paper', 'paper', 'probe-only', 'scaled', 'execution pending', '{}', 'pending');
-    `);
-
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/family/fam-canary-paper/promote",
-      headers: { ...authHeaders(), "content-type": "application/json" },
-      payload: JSON.stringify({}),
-    });
-
-    expect(res.statusCode).toBe(200);
-    expect(json(res).data.commandId).toBeTypeOf("number");
-    const proposal = conn.db
-      .prepare(
-        "SELECT status FROM promotion_proposals WHERE family_id = 'fam-canary-paper' AND profile = 'paper'",
-      )
-      .get() as { status: string } | undefined;
-    expect(proposal?.status).toBe("approved");
-  });
-});
+// ─── /promote route removed in Phase 3 — collapsed to enable/disable ─────

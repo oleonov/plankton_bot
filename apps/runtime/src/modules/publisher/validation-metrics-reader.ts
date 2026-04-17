@@ -15,7 +15,6 @@ export interface FamilyMetrics {
   realizedPnl: number;
   tailCostUsdc: number;
   tailAdjustedPnl: number;
-  effectiveMode: string | null;
   lastTradeAt: string | null;
 }
 
@@ -66,7 +65,6 @@ const EMPTY_FAMILY: Omit<FamilyMetrics, "familyId"> = {
   realizedPnl: 0,
   tailCostUsdc: 0,
   tailAdjustedPnl: 0,
-  effectiveMode: null,
   lastTradeAt: null,
 };
 
@@ -90,7 +88,6 @@ export class ValidationMetricsReader {
         realizedPnl: 0, // per-position PnL now computed in readTradeMetrics for scorecards
         tailCostUsdc: Number(row.current_tail_cost_usdc ?? 0),
         tailAdjustedPnl: Number(row.tail_adjusted_pnl_live ?? 0),
-        effectiveMode: (row.effective_mode as string) ?? null,
         lastTradeAt: maxTimestamp(
           row.last_entry_ts as string | null,
           row.last_exit_ts as string | null,

@@ -591,10 +591,6 @@ describe("repair-outcome-settlements helpers", () => {
         open_position_count INTEGER NOT NULL DEFAULT 0,
         open_dust_count INTEGER NOT NULL DEFAULT 0,
         active_market_count INTEGER NOT NULL DEFAULT 0,
-        runtime_mode TEXT NOT NULL DEFAULT 'reduce-only',
-        quarantine_reason TEXT,
-        effective_mode TEXT,
-        derived_mode_reason TEXT,
         updated_at TEXT
       );
     `);
@@ -636,10 +632,8 @@ describe("repair-outcome-settlements helpers", () => {
       .prepare(
         `INSERT INTO family_runtime_state
            (family_id, current_tail_cost_usdc, tail_adjusted_pnl_live, open_value_usdc,
-            open_position_count, open_dust_count, active_market_count, runtime_mode,
-            quarantine_reason, effective_mode, derived_mode_reason, updated_at)
-         VALUES ('fam-closed', 99, 99, 99, 9, 9, 9, 'reduce-only',
-                 'bad settlement', 'reduce-only', 'bad pnl', datetime('now'))`,
+            open_position_count, open_dust_count, active_market_count, updated_at)
+         VALUES ('fam-closed', 99, 99, 99, 9, 9, 9, datetime('now'))`,
       )
       .run();
 
@@ -670,8 +664,7 @@ describe("repair-outcome-settlements helpers", () => {
     const familyState = ledgerDb
       .prepare(
         `SELECT current_tail_cost_usdc, tail_adjusted_pnl_live, open_value_usdc,
-                open_position_count, open_dust_count, active_market_count, runtime_mode,
-                quarantine_reason, effective_mode, derived_mode_reason
+                open_position_count, open_dust_count, active_market_count
          FROM family_runtime_state WHERE family_id = 'fam-closed'`,
       )
       .get() as {
@@ -681,10 +674,6 @@ describe("repair-outcome-settlements helpers", () => {
       open_position_count: number;
       open_dust_count: number;
       active_market_count: number;
-      runtime_mode: string;
-      quarantine_reason: string | null;
-      effective_mode: string | null;
-      derived_mode_reason: string | null;
     };
     expect(familyState.current_tail_cost_usdc).toBe(0);
     expect(familyState.tail_adjusted_pnl_live).toBe(-2.5);
@@ -692,10 +681,6 @@ describe("repair-outcome-settlements helpers", () => {
     expect(familyState.open_position_count).toBe(0);
     expect(familyState.open_dust_count).toBe(0);
     expect(familyState.active_market_count).toBe(0);
-    expect(familyState.runtime_mode).toBe("active");
-    expect(familyState.quarantine_reason).toBeNull();
-    expect(familyState.effective_mode).toBeNull();
-    expect(familyState.derived_mode_reason).toBeNull();
 
     const evidence = controlDb
       .prepare(

@@ -22,7 +22,6 @@ import type {
   FamilyId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import { shouldRelaxNegativeTailProbeOnly } from "../../proven-family-policy.js";
 
 export class FamilyExposureCalculator {
   constructor(
@@ -30,7 +29,7 @@ export class FamilyExposureCalculator {
     private readonly positionRepo: PositionRepository,
     private readonly lotRepo: InventoryLotRepository,
     private readonly log: Logger,
-    private readonly rulesProvider?: FamilyRulesProvider,
+    _rulesProvider?: FamilyRulesProvider,
   ) {}
 
   /**
@@ -44,7 +43,6 @@ export class FamilyExposureCalculator {
       // Return baseline state
       return {
         familyId,
-        runtimeMode: "active",
         openValueUsdc: 0,
         openPositionCount: 0,
         openDustCount: 0,
@@ -53,9 +51,6 @@ export class FamilyExposureCalculator {
         tailAdjustedPnlLive: 0,
         lastEntryTs: null,
         lastExitTs: null,
-        quarantineReason: null,
-        effectiveMode: null,
-        derivedModeReason: null,
         firstNegativeTailAt: null,
         updatedAt: new Date().toISOString(),
       };
@@ -97,34 +92,6 @@ export class FamilyExposureCalculator {
 
     const tailAdjustedPnlLive = totalRealizedPnl - currentTailCostUsdc;
 
-    // Compute signal-independent effective mode from current tail health
-    let effectiveMode: string | null = existing.effectiveMode ?? null;
-    let derivedModeReason: string | null = existing.derivedModeReason ?? null;
-
-    if (this.rulesProvider) {
-      const bundle = this.rulesProvider.getRule(familyId);
-      if (bundle) {
-        const ts = bundle.rules.tailSuppression;
-
-        if (currentTailCostUsdc > ts.tailQuarantineThresholdUsdc) {
-          effectiveMode = "reduce-only";
-          derivedModeReason = `tail cost $${currentTailCostUsdc.toFixed(2)} > cap $${ts.tailQuarantineThresholdUsdc}`;
-        } else if (
-          totalRealizedPnl > 0 &&
-          currentTailCostUsdc / totalRealizedPnl > ts.tailQuarantineThresholdRatio
-        ) {
-          effectiveMode = "reduce-only";
-          derivedModeReason = `tail/pnl ratio ${(currentTailCostUsdc / totalRealizedPnl).toFixed(2)} > ${ts.tailQuarantineThresholdRatio}`;
-        } else if (tailAdjustedPnlLive < 0 && !shouldRelaxNegativeTailProbeOnly(bundle)) {
-          effectiveMode = "probe-only";
-          derivedModeReason = `tailAdjustedPnl $${tailAdjustedPnlLive.toFixed(2)} < 0`;
-        } else {
-          effectiveMode = "active";
-          derivedModeReason = null;
-        }
-      }
-    }
-
     const updated: FamilyState = {
       ...existing,
       openValueUsdc,
@@ -133,8 +100,6 @@ export class FamilyExposureCalculator {
       activeMarketCount: activeTokens.size,
       currentTailCostUsdc,
       tailAdjustedPnlLive,
-      effectiveMode,
-      derivedModeReason,
       lastEntryTs: updateActivityTs && isBuy ? now : existing.lastEntryTs,
       lastExitTs: updateActivityTs && !isBuy ? now : existing.lastExitTs,
       updatedAt: now,
