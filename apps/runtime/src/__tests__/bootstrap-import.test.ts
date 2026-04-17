@@ -529,9 +529,9 @@ families:
     expect(result.bootstrapped).toBe(true);
     expect(result.importedFamilies).toBe(1);
     expect(needsBootstrap(db)).toBe(false);
-    const families = db
-      .prepare("SELECT family_id FROM family_catalog")
-      .all() as Array<{ family_id: string }>;
+    const families = db.prepare("SELECT family_id FROM family_catalog").all() as Array<{
+      family_id: string;
+    }>;
     expect(families.map((f) => f.family_id)).toContain("maybe-family:generic:daily");
   });
 

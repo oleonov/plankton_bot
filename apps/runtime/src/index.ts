@@ -181,10 +181,7 @@ async function main(): Promise<void> {
   try {
     const result = maybeBootstrapFromYaml(controlConn.db, config.familyRulesPath);
     if (result.bootstrapped) {
-      log.info(
-        { importedFamilies: result.importedFamilies },
-        "control.db bootstrapped from YAML",
-      );
+      log.info({ importedFamilies: result.importedFamilies }, "control.db bootstrapped from YAML");
     }
   } catch (err) {
     log.fatal({ err, path: config.familyRulesPath }, "bootstrap from YAML failed");

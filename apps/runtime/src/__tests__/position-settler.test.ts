@@ -338,7 +338,7 @@ describe("PositionSettler", () => {
     });
   });
 
-  describe("null-family settlement (regression: no \"null\" string in family_id)", () => {
+  describe('null-family settlement (regression: no "null" string in family_id)', () => {
     function createSpyingDb() {
       const runSpy = vi.fn();
       const stmt = { run: runSpy };
