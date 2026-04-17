@@ -1,11 +1,14 @@
-import { describe, it, expect, beforeEach } from "vitest";
-import { readFileSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
+import os from "node:os";
+import path from "node:path";
 import { openDatabase, type DbConnection } from "@plankton/db";
 import {
   needsBootstrap,
   bootstrapImport,
   syncProfileInitialBalances,
+  maybeBootstrapFromYaml,
 } from "../bootstrap-import.js";
 import { parseFamilyRulesYaml, type LoadedFamilyRules } from "@plankton/config";
 
@@ -419,5 +422,140 @@ families:
     expect(row.source_checksum).toBe("sha256:test");
     expect(row.source_version).toBe(1);
     expect(row.imported_by).toBe("bootstrap-test");
+  });
+});
+
+describe("maybeBootstrapFromYaml", () => {
+  const MINIMAL_YAML = `
+version: 1
+defaults:
+  entry:
+    min_entry_price: 0.03
+    max_entry_price: 0.2
+    high_price_threshold: 0.2
+    require_proven_family_above_price: 0.2
+    preferred_entry_band: "0.03-0.20"
+families:
+  - family_id: "maybe-family:generic:daily"
+    identity:
+      family_key: "maybe-family"
+      primary_category: "crypto-btc"
+      regime: "generic"
+      horizon: "daily"
+      cadence: "daily-dated"
+      strategy_profile: "scalp"
+    evidence:
+      evidence_status: "unknown"
+      evidence_score: 0
+      promotion_state: "probe-only"
+      local_trade_count: 0
+      local_market_count: 0
+      local_realized_pnl_fifo: 0
+      open_tail_cost_usdc: 0
+      tail_adjusted_pnl: 0
+      both_sided_eligible: false
+      heavy_campaign_eligible: false
+    rules:
+      universe:
+        enabled: true
+        action: "trade"
+        priority_rank: 1
+        session_mode: "active-window"
+      entry:
+        entry_mode: "probe-first"
+        min_entry_price: 0.03
+        max_initial_notional_usdc: 5
+        allow_high_price_one_shot: false
+        high_price_threshold: 0.2
+        require_proven_family_above_price: 0.2
+      scale_in:
+        scale_mode: "confirm-only"
+        default_max_buys_per_leg: 3
+        heavy_max_buys_per_leg: 4
+        allow_heavy_campaigns: false
+        require_positive_recycle_history_for_scale: true
+      exit:
+        exit_mode: "repricing-sell"
+        primary_profit_model: "sell-into-strength"
+        allow_runner_extension: false
+        prefer_fast_recycle: true
+        resolution_holding_allowed: false
+      two_sided:
+        allow_two_sided: false
+        two_sided_mode: "disabled"
+      tail_suppression:
+        max_open_value_usdc: 45
+        max_active_markets: 8
+        max_dust_positions: 3
+        tail_quarantine_threshold_usdc: 45
+        tail_quarantine_threshold_ratio: 1.0
+        stale_tail_prune_enabled: true
+        threshold_cleanup_required: false
+        auto_settle_resolved_markets: true
+      session:
+        active_windows_utc:
+          - start: "14:00"
+            end: "21:00"
+        reduced_windows_utc: []
+        weekday_bias: "preferred"
+`;
+
+  let conn: DbConnection;
+  let db: import("better-sqlite3").Database;
+  let tmpDir: string;
+  let yamlPath: string;
+
+  beforeEach(() => {
+    conn = openDatabase(":memory:");
+    const controlSql = readFileSync(
+      resolve(import.meta.dirname, "../../../../packages/db/src/schemas/control.sql"),
+      "utf-8",
+    );
+    conn.db.exec(controlSql);
+    db = conn.db;
+
+    tmpDir = mkdtempSync(path.join(os.tmpdir(), "plankton-bootstrap-"));
+    yamlPath = path.join(tmpDir, "family_rules.yaml");
+    writeFileSync(yamlPath, MINIMAL_YAML, "utf-8");
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("imports from YAML when control.db is empty", () => {
+    const result = maybeBootstrapFromYaml(db, yamlPath);
+
+    expect(result.bootstrapped).toBe(true);
+    expect(result.importedFamilies).toBe(1);
+    expect(needsBootstrap(db)).toBe(false);
+    const families = db
+      .prepare("SELECT family_id FROM family_catalog")
+      .all() as Array<{ family_id: string }>;
+    expect(families.map((f) => f.family_id)).toContain("maybe-family:generic:daily");
+  });
+
+  it("does NOT read YAML when control.db is already bootstrapped", () => {
+    maybeBootstrapFromYaml(db, yamlPath);
+    rmSync(yamlPath);
+
+    const result = maybeBootstrapFromYaml(db, yamlPath);
+
+    expect(result.bootstrapped).toBe(false);
+    expect(result.importedFamilies).toBe(0);
+  });
+
+  it("throws a clear error when DB is empty and YAML file is missing", () => {
+    const missingPath = path.join(tmpDir, "does-not-exist.yaml");
+    expect(() => maybeBootstrapFromYaml(db, missingPath)).toThrow(/family rules/i);
+  });
+
+  it("records source metadata (path + sha256 checksum) for imported config", () => {
+    maybeBootstrapFromYaml(db, yamlPath);
+
+    const row = db.prepare("SELECT * FROM config_imports").get() as Record<string, unknown>;
+    expect(row.source_path).toBe(yamlPath);
+    expect(row.source_checksum).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.imported_by).toBe("bootstrap");
   });
 });

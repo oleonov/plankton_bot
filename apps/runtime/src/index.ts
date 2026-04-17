@@ -9,7 +9,6 @@
 // dns.setDefaultResultOrder is insufficient because axios reuses connections via its pool.
 // Patching dns.lookup ensures every new socket resolves to IPv4.
 import dns from "node:dns";
-import { readFileSync } from "node:fs";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const _origLookup: any = dns.lookup;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -23,7 +22,7 @@ const _origLookup: any = dns.lookup;
 
 import { randomUUID } from "node:crypto";
 import process from "node:process";
-import { loadEnv, loadFamilyRulesYaml, type GlobalConfig } from "@plankton/config";
+import { loadEnv } from "@plankton/config";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
   bootstrapControlDb,
@@ -47,8 +46,6 @@ import {
   SqliteCandidateObservationRepository,
   SqliteFamilyRulesDbRepository,
   SqliteFamilyDeploymentRepository,
-  computeConfigChecksum,
-  getLatestConfigImportMeta,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { FamilyState } from "@plankton/domain";
@@ -57,7 +54,6 @@ import {
   slugPatternToRegex,
   ENTRY_REASONS,
   resolveTradingState,
-  type EntryRulePreset,
 } from "@plankton/domain";
 import { migrateOrphanedPositions } from "./universe-migration.js";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
@@ -97,7 +93,7 @@ import {
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { DbFamilyRulesProvider } from "./db-family-rules-provider.js";
-import { needsBootstrap, bootstrapImport, syncProfileInitialBalances } from "./bootstrap-import.js";
+import { maybeBootstrapFromYaml } from "./bootstrap-import.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";
@@ -114,7 +110,6 @@ import { HotFamilyExecutionModule } from "./modules/hot-lane/hot-family-executio
 import { HotQuoteBusModule } from "./modules/hot-lane/hot-quote-bus-module.js";
 import { FastExitCleanupModule } from "./modules/hot-lane/fast-exit-cleanup-module.js";
 import { HotMarketDataModule } from "./modules/hot-lane/hot-market-data-module.js";
-import { evaluateConfigDrift } from "./config-drift-monitor.js";
 import type {
   CandidateBookRefreshObserved,
   CandidateBookUsageObserved,
@@ -172,9 +167,6 @@ async function main(): Promise<void> {
   // 2. Bootstrap DBs
   const controlDbPath =
     process.env["CONTROL_DB_PATH"] ?? config.dbPath.replace(/[^/]+\.db$/, "control.db");
-  let familyRulesRaw = "";
-  let familyRulesChecksum = "";
-  let loadedFamilyRules: ReturnType<typeof loadFamilyRulesYaml>;
 
   let controlConn: DbConnection;
   try {
@@ -185,71 +177,19 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // 2b. If control.db is empty, seed it from YAML (one-time bootstrap only).
   try {
-    familyRulesRaw = readFileSync(config.familyRulesPath, "utf-8");
-    familyRulesChecksum = computeConfigChecksum(familyRulesRaw);
-    loadedFamilyRules = loadFamilyRulesYaml(config.familyRulesPath);
+    const result = maybeBootstrapFromYaml(controlConn.db, config.familyRulesPath);
+    if (result.bootstrapped) {
+      log.info(
+        { importedFamilies: result.importedFamilies },
+        "control.db bootstrapped from YAML",
+      );
+    }
   } catch (err) {
-    log.fatal({ err, path: config.familyRulesPath }, "failed to load family rules YAML");
+    log.fatal({ err, path: config.familyRulesPath }, "bootstrap from YAML failed");
     controlConn.close();
     process.exit(1);
-  }
-
-  // 2b. Bootstrap import — seed control.db from YAML if empty
-  if (needsBootstrap(controlConn.db)) {
-    bootstrapImport(controlConn.db, loadedFamilyRules, {
-      sourcePath: config.familyRulesPath,
-      sourceChecksum: familyRulesChecksum,
-      sourceVersion: 1,
-      importedBy: "bootstrap",
-    });
-    log.info("control.db bootstrapped from YAML");
-  }
-
-  const latestConfigImport = getLatestConfigImportMeta(controlConn.db);
-  const loadedControlChecksum = latestConfigImport?.sourceChecksum ?? null;
-  let lastConfigDriftWarningKey: string | null = null;
-  const logConfigDriftWarning = (
-    yamlRaw: string,
-    latestImportMeta = getLatestConfigImportMeta(controlConn.db),
-  ): void => {
-    const drift = evaluateConfigDrift({
-      yamlRaw,
-      latestConfigImport: latestImportMeta,
-      loadedControlChecksum,
-    });
-    if (!drift.warningKey) {
-      lastConfigDriftWarningKey = null;
-      return;
-    }
-    if (drift.warningKey === lastConfigDriftWarningKey) return;
-    lastConfigDriftWarningKey = drift.warningKey;
-    log.warn(
-      {
-        yamlPath: config.familyRulesPath,
-        yamlChecksum: drift.yamlChecksum,
-        importedChecksum: drift.importedChecksum,
-        loadedControlChecksum,
-        importedAt: latestImportMeta?.importedAt ?? null,
-        importedBy: latestImportMeta?.importedBy ?? null,
-        sourcePath: latestImportMeta?.sourcePath ?? null,
-        warnings: drift.warnings,
-      },
-      "family rules drift detected; sync and/or restart are required",
-    );
-  };
-  logConfigDriftWarning(familyRulesRaw, latestConfigImport);
-
-  // 2b-2. Load global config from YAML (spray sizing, budget caps, etc.)
-  // Global config lives in YAML only — not persisted to DB.
-  let _globalConfig: GlobalConfig | undefined;
-  let _defaultEntryPreset: EntryRulePreset | undefined;
-  try {
-    _globalConfig = loadedFamilyRules.global;
-    _defaultEntryPreset = loadedFamilyRules.defaults.entry ?? undefined;
-    syncProfileInitialBalances(controlConn.db, loadedFamilyRules.global.initialBalanceUsdc);
-  } catch {
-    log.warn("failed to load global config from YAML — spray features disabled");
   }
 
   // 2c. Resolve active profile from control.db (falls back to RUNTIME_MODE env)
@@ -1395,7 +1335,6 @@ async function main(): Promise<void> {
 
   let lastSnapshotMs = 0;
   let lastRiskEventVolumeWarningAtMs = 0;
-  let lastConfigDriftCheckAtMs = 0;
 
   // Flush signal + scanner activity to DB every 30 seconds, reset windows every 10 minutes
   setInterval(() => {
@@ -1520,15 +1459,6 @@ async function main(): Promise<void> {
       }),
       new Date().toISOString(),
     );
-    if (now - lastConfigDriftCheckAtMs >= 60_000) {
-      lastConfigDriftCheckAtMs = now;
-      try {
-        logConfigDriftWarning(readFileSync(config.familyRulesPath, "utf-8"));
-      } catch (err) {
-        log.warn({ err, path: config.familyRulesPath }, "failed to re-read family rules YAML");
-      }
-    }
-
     // Reset scanner window on same schedule as signal window
     if (now - scannerWindow.lastReset > SIGNAL_WINDOW_MS) {
       scannerWindow.candidatesConsidered = 0;

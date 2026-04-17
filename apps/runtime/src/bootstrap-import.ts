@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type Database from "better-sqlite3";
-import { ensureControlProfiles, upsertFamilyRuleDefaults } from "@plankton/db";
+import {
+  computeConfigChecksum,
+  ensureControlProfiles,
+  upsertFamilyRuleDefaults,
+} from "@plankton/db";
+import { loadFamilyRulesYaml } from "@plankton/config";
 import type { LoadedFamilyRules } from "@plankton/config";
 import type { FamilyConfig } from "@plankton/config";
 import {
@@ -70,6 +76,45 @@ const RULES_INSERT_COLUMNS = [
 export function needsBootstrap(db: Database.Database): boolean {
   const row = db.prepare("SELECT COUNT(*) as cnt FROM family_catalog").get() as { cnt: number };
   return row.cnt === 0;
+}
+
+export interface MaybeBootstrapResult {
+  readonly bootstrapped: boolean;
+  readonly importedFamilies: number;
+}
+
+/**
+ * Bootstrap control.db from a family_rules.yaml file — but only when the DB is empty.
+ *
+ * This is the single entry point that ties YAML to the runtime: once the DB is seeded,
+ * the runtime never reads the YAML again. Steady-state operation uses rules from the DB.
+ */
+export function maybeBootstrapFromYaml(
+  db: Database.Database,
+  yamlPath: string,
+): MaybeBootstrapResult {
+  if (!needsBootstrap(db)) {
+    return { bootstrapped: false, importedFamilies: 0 };
+  }
+
+  let raw: string;
+  try {
+    raw = readFileSync(yamlPath, "utf-8");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `control.db is empty and the family rules YAML cannot be read at "${yamlPath}": ${msg}`,
+    );
+  }
+
+  const loaded = loadFamilyRulesYaml(yamlPath);
+  bootstrapImport(db, loaded, {
+    sourcePath: yamlPath,
+    sourceChecksum: computeConfigChecksum(raw),
+    sourceVersion: 1,
+    importedBy: "bootstrap",
+  });
+  return { bootstrapped: true, importedFamilies: loaded.families.length };
 }
 
 export interface BootstrapImportSource {
