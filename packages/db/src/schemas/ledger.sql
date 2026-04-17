@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS settlement_ledger (
   condition_id     TEXT NOT NULL REFERENCES market_resolutions(condition_id),
   position_id      TEXT NOT NULL REFERENCES positions(position_id),
   token_id         TEXT NOT NULL,
-  family_id        TEXT NOT NULL,
+  family_id        TEXT,
   resolution       TEXT NOT NULL,
   settlement_price REAL NOT NULL,
   size             REAL NOT NULL,

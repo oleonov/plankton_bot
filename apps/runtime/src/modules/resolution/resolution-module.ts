@@ -546,7 +546,7 @@ export class ResolutionModule implements RuntimeModule {
                 mr.conditionId,
                 String(pos.positionId),
                 String(market.tokenId),
-                String(pos.familyId),
+                pos.familyId ?? null,
                 resolution,
                 settlementPrice,
                 remainingSize,
