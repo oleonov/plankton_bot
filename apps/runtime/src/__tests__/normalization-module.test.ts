@@ -368,6 +368,55 @@ describe("NormalizationModule", () => {
     await mod.stop();
   });
 
+  it("higher-priority family wins when two slug patterns overlap", async () => {
+    // DbFamilyRulesProvider.getAllFamilies() returns priority_rank DESC order, so the
+    // first entry is the highest-priority match. NormalizationModule iterates that
+    // list and takes the first hit — so the higher-priority family must win even
+    // when both patterns match the same slug.
+    const highPriority = makeIdentity({
+      familyId: createFamilyId("fam-btc-strict"),
+      familyKey: "btc-above-strict",
+      slugPattern: "btc-above*price",
+      regime: "threshold" as Regime,
+      horizon: "daily",
+    });
+    const lowPriority = makeIdentity({
+      familyId: createFamilyId("fam-btc-loose"),
+      familyKey: "btc-any-price",
+      slugPattern: "btc*price",
+      regime: "price-range" as Regime,
+      horizon: "daily",
+    });
+
+    // Mock provider receives them in priority-DESC order (highest first) — the
+    // exact contract DbFamilyRulesProvider enforces via ORDER BY priority_rank DESC.
+    rulesProvider = createMockRulesProvider([highPriority, lowPriority]);
+    mod = new NormalizationModule({
+      bus,
+      rulesProvider,
+      marketRepo,
+      log: silentLog,
+    });
+    await mod.start();
+
+    const received: NormalizedMarket[][] = [];
+    bus.subscribe("NormalizedMarketUpdated", async (p) => {
+      received.push([...p.markets]);
+    });
+
+    // "btc-above-100k-price" matches BOTH patterns (loose: btc*price, strict: btc-above*price).
+    await bus.publish("MarketSnapshotReceived", {
+      markets: [makeNormalizedMarket({ slug: "btc-above-100k-price" })],
+      timestamp: Date.now(),
+    });
+
+    expect(received[0]![0]!.familyId).toBe("fam-btc-strict");
+    expect(received[0]![0]!.familyKey).toBe("btc-above-strict");
+    expect(received[0]![0]!.regime).toBe("threshold");
+
+    await mod.stop();
+  });
+
   it("does not crash on families without slug pattern", async () => {
     rulesProvider = createMockRulesProvider([makeIdentity({ slugPattern: null })]);
     mod = new NormalizationModule({
