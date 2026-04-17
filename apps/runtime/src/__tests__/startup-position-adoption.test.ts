@@ -4,6 +4,7 @@ import {
   SqliteFamilyStateRepository,
   SqliteFillRepository,
   SqliteInventoryLotRepository,
+  SqliteLegStateRepository,
   SqliteMarketRepository,
   SqliteOrderRepository,
   SqlitePositionRepository,
@@ -124,6 +125,7 @@ describe("runStartupPositionAdoption", () => {
     const fillRepo = new SqliteFillRepository(conn.db);
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
     const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedMarket(marketRepo);
     seedFamilyState(familyStateRepo);
@@ -137,6 +139,7 @@ describe("runStartupPositionAdoption", () => {
       fillRepo,
       positionRepo,
       inventoryLotRepo,
+      legStateRepo,
       familyStateRepo,
       rulesProvider: createRulesProvider(),
       log: silentLog,
@@ -172,6 +175,7 @@ describe("runStartupPositionAdoption", () => {
     const fillRepo = new SqliteFillRepository(conn.db);
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
     const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedMarket(marketRepo);
     seedFamilyState(familyStateRepo);
@@ -187,6 +191,7 @@ describe("runStartupPositionAdoption", () => {
       fillRepo,
       positionRepo,
       inventoryLotRepo,
+      legStateRepo,
       familyStateRepo,
       rulesProvider: createRulesProvider(),
       log: silentLog,
@@ -200,6 +205,7 @@ describe("runStartupPositionAdoption", () => {
       fillRepo,
       positionRepo,
       inventoryLotRepo,
+      legStateRepo,
       familyStateRepo,
       rulesProvider: createRulesProvider(),
       log: silentLog,
@@ -224,6 +230,7 @@ describe("runStartupPositionAdoption", () => {
     const fillRepo = new SqliteFillRepository(conn.db);
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
     const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedFamilyState(familyStateRepo);
 
@@ -236,6 +243,7 @@ describe("runStartupPositionAdoption", () => {
       fillRepo,
       positionRepo,
       inventoryLotRepo,
+      legStateRepo,
       familyStateRepo,
       rulesProvider: createRulesProvider(),
       log: silentLog,
@@ -257,6 +265,7 @@ describe("runStartupPositionAdoption", () => {
     const fillRepo = new SqliteFillRepository(conn.db);
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
     const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedMarket(marketRepo);
     seedFamilyState(familyStateRepo);
@@ -270,6 +279,7 @@ describe("runStartupPositionAdoption", () => {
       fillRepo,
       positionRepo,
       inventoryLotRepo,
+      legStateRepo,
       familyStateRepo,
       rulesProvider: createRulesProvider(),
       log: silentLog,
@@ -292,6 +302,7 @@ describe("runStartupPositionAdoption", () => {
     const fillRepo = new SqliteFillRepository(conn.db);
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+    const legStateRepo = new SqliteLegStateRepository(conn.db);
     const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedMarket(marketRepo);
     seedFamilyState(familyStateRepo);
@@ -379,6 +390,7 @@ describe("runStartupPositionAdoption", () => {
       fillRepo,
       positionRepo,
       inventoryLotRepo,
+      legStateRepo,
       familyStateRepo,
       rulesProvider: createRulesProvider(),
       log: silentLog,
@@ -395,5 +407,281 @@ describe("runStartupPositionAdoption", () => {
     expect(position?.size).toBeCloseTo(43.47, 6);
     expect(position?.avgEntryPrice).toBeCloseTo(0.11, 6);
     expect(position?.costBasisUsdc).toBeCloseTo(4.7817, 6);
+  });
+
+  describe("leg-state rebuild", () => {
+    function seedOrder(orderRepo: SqliteOrderRepository, orderId: string): void {
+      orderRepo.save({
+        orderId: createOrderId(orderId),
+        clientOrderId: `coid-${orderId}` as ClientOrderId,
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        familyId: FAMILY_ID,
+        side: "buy",
+        orderType: "GTC",
+        postOnly: false,
+        price: 0.42,
+        size: 10,
+        sizeUsdc: 4.2,
+        status: "filled",
+        exchangeOrderId: orderId,
+        signalId: null,
+        signalReason: "probe-entry",
+        botRunId: createBotRunId("run-seed"),
+        createdAt: "2026-04-01T00:00:00Z",
+        updatedAt: "2026-04-01T00:00:00Z",
+      });
+    }
+
+    function seedOpenPosition(
+      positionRepo: SqlitePositionRepository,
+      overrides?: Partial<Parameters<SqlitePositionRepository["save"]>[0]>,
+    ): void {
+      positionRepo.save({
+        positionId: createPositionId("pos-1"),
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        familyId: FAMILY_ID,
+        side: "buy",
+        size: 10,
+        avgEntryPrice: 0.42,
+        costBasisUsdc: 4.2,
+        currentValueUsdc: 4.2,
+        realizedPnl: 0,
+        status: "open",
+        entryStyle: "probe",
+        openedAt: "2026-04-01T00:00:00Z",
+        closedAt: null,
+        updatedAt: "2026-04-01T00:00:00Z",
+        ...overrides,
+      });
+    }
+
+    function seedFill(
+      fillRepo: SqliteFillRepository,
+      overrides: Omit<Partial<Parameters<SqliteFillRepository["save"]>[0]>, "fillId"> & {
+        fillId: string;
+      },
+    ): void {
+      const { fillId, ...rest } = overrides;
+      fillRepo.save({
+        fillId: createFillId(fillId),
+        orderId: createOrderId("ord-seed"),
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        familyId: FAMILY_ID,
+        side: "buy",
+        price: 0.42,
+        size: 10,
+        sizeUsdc: 4.2,
+        liquidityRole: "maker",
+        fee: 0,
+        feeRateBps: 0,
+        filledAt: "2026-04-01T00:00:00Z",
+        ...rest,
+      });
+    }
+
+    async function runRebuild(conn: ReturnType<typeof bootstrapLedgerDb>): Promise<{
+      result: Awaited<ReturnType<typeof runStartupPositionAdoption>>;
+      legStateRepo: SqliteLegStateRepository;
+    }> {
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
+      const legStateRepo = new SqliteLegStateRepository(conn.db);
+      const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
+      const result = await runStartupPositionAdoption({
+        gateway: { getFills: vi.fn().mockResolvedValue([]) },
+        marketRepo,
+        orderRepo,
+        fillRepo,
+        positionRepo,
+        inventoryLotRepo,
+        legStateRepo,
+        familyStateRepo,
+        rulesProvider: createRulesProvider(),
+        log: silentLog,
+        db: conn.db,
+        botRunId: createBotRunId("run-1"),
+      });
+      return { result, legStateRepo };
+    }
+
+    function primeLedger(conn: ReturnType<typeof bootstrapLedgerDb>): {
+      marketRepo: SqliteMarketRepository;
+      orderRepo: SqliteOrderRepository;
+      fillRepo: SqliteFillRepository;
+      positionRepo: SqlitePositionRepository;
+    } {
+      const marketRepo = new SqliteMarketRepository(conn.db);
+      const orderRepo = new SqliteOrderRepository(conn.db);
+      const fillRepo = new SqliteFillRepository(conn.db);
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      seedMarket(marketRepo);
+      seedOrder(orderRepo, "ord-seed");
+      return { marketRepo, orderRepo, fillRepo, positionRepo };
+    }
+
+    it("seeds leg_state for open position with matching fills", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+      seedOpenPosition(positionRepo);
+      seedFill(fillRepo, { fillId: "f-1", price: 0.42, filledAt: "2026-04-01T00:00:00Z" });
+
+      const { result, legStateRepo } = await runRebuild(conn);
+
+      expect(result.seededLegStates).toBe(1);
+      expect(result.alreadyPresentLegStates).toBe(0);
+      expect(result.positionsWithoutFills).toEqual([]);
+      const state = legStateRepo.get(TOKEN_ID);
+      expect(state).not.toBeNull();
+      expect(state?.buyCount).toBe(1);
+      expect(state?.sellCount).toBe(0);
+      expect(state?.lastAction).toBe("BUY");
+      expect(state?.firstTradePrice).toBe(0.42);
+      expect(state?.firstTradeAt).toBe("2026-04-01T00:00:00Z");
+    });
+
+    it("is idempotent: second run does not overwrite existing leg_state", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+      seedOpenPosition(positionRepo);
+      seedFill(fillRepo, { fillId: "f-1", price: 0.42, filledAt: "2026-04-01T00:00:00Z" });
+
+      const first = await runRebuild(conn);
+      expect(first.result.seededLegStates).toBe(1);
+      const firstState = first.legStateRepo.get(TOKEN_ID);
+
+      const second = await runRebuild(conn);
+      expect(second.result.seededLegStates).toBe(0);
+      expect(second.result.alreadyPresentLegStates).toBe(1);
+      const secondState = second.legStateRepo.get(TOKEN_ID);
+      expect(secondState).toEqual(firstState);
+    });
+
+    it("counts buy and sell fills across multiple fills of each side", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+      seedOpenPosition(positionRepo);
+      seedFill(fillRepo, { fillId: "f-1", side: "buy", price: 0.42, filledAt: "2026-04-01T00:00:00Z" });
+      seedFill(fillRepo, { fillId: "f-2", side: "buy", price: 0.11, filledAt: "2026-04-02T00:00:00Z" });
+      seedFill(fillRepo, { fillId: "f-3", side: "sell", price: 0.55, filledAt: "2026-04-03T00:00:00Z" });
+
+      const { legStateRepo } = await runRebuild(conn);
+
+      const state = legStateRepo.get(TOKEN_ID);
+      expect(state?.buyCount).toBe(2);
+      expect(state?.sellCount).toBe(1);
+      expect(state?.lastAction).toBe("SELL");
+      expect(state?.lastTradeAt).toBe("2026-04-03T00:00:00Z");
+    });
+
+    it("uses first BUY fill for firstTradePrice (ordered by filled_at ASC, fill_id ASC)", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+      seedOpenPosition(positionRepo);
+      seedFill(fillRepo, { fillId: "f-b", price: 0.99, filledAt: "2026-04-01T00:00:00Z" });
+      seedFill(fillRepo, { fillId: "f-a", price: 0.42, filledAt: "2026-04-01T00:00:00Z" });
+      seedFill(fillRepo, { fillId: "f-c", price: 0.11, filledAt: "2026-04-02T00:00:00Z" });
+
+      const { legStateRepo } = await runRebuild(conn);
+
+      const state = legStateRepo.get(TOKEN_ID);
+      expect(state?.firstTradePrice).toBe(0.42);
+      expect(state?.firstTradeAt).toBe("2026-04-01T00:00:00Z");
+    });
+
+    it("reports positionsWithoutFills for an open position with zero fills", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { positionRepo } = primeLedger(conn);
+      seedOpenPosition(positionRepo);
+
+      const { result, legStateRepo } = await runRebuild(conn);
+
+      expect(result.positionsWithoutFills).toEqual([TOKEN_ID]);
+      expect(result.seededLegStates).toBe(0);
+      expect(legStateRepo.get(TOKEN_ID)).toBeNull();
+    });
+
+    it("falls back to position.avgEntryPrice when the first BUY fill has price=0", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+      seedOpenPosition(positionRepo, { avgEntryPrice: 0.37, costBasisUsdc: 3.7 });
+      seedFill(fillRepo, { fillId: "f-1", price: 0, filledAt: "2026-04-01T00:00:00Z" });
+
+      const { legStateRepo } = await runRebuild(conn);
+
+      const state = legStateRepo.get(TOKEN_ID);
+      expect(state?.firstTradePrice).toBe(0.37);
+    });
+
+    it("seeds leg_state for dust positions (not just open)", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+      seedOpenPosition(positionRepo, { status: "dust" });
+      seedFill(fillRepo, { fillId: "f-1", price: 0.42, filledAt: "2026-04-01T00:00:00Z" });
+
+      const { result, legStateRepo } = await runRebuild(conn);
+
+      expect(result.seededLegStates).toBe(1);
+      expect(legStateRepo.get(TOKEN_ID)?.buyCount).toBe(1);
+    });
+
+    it("skips closed positions", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+      seedOpenPosition(positionRepo, {
+        status: "closed",
+        closedAt: "2026-04-02T00:00:00Z",
+      });
+      seedFill(fillRepo, { fillId: "f-1", price: 0.42, filledAt: "2026-04-01T00:00:00Z" });
+
+      const { result, legStateRepo } = await runRebuild(conn);
+
+      expect(result.seededLegStates).toBe(0);
+      expect(result.positionsWithoutFills).toEqual([]);
+      expect(legStateRepo.get(TOKEN_ID)).toBeNull();
+    });
+
+    it("dedups tokens with coexisting open + dust rows (counts fills once)", async () => {
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+      positionRepo.save({
+        positionId: createPositionId("pos-dust"),
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        familyId: FAMILY_ID,
+        side: "buy",
+        size: 1,
+        avgEntryPrice: 0.3,
+        costBasisUsdc: 0.3,
+        currentValueUsdc: 0.3,
+        realizedPnl: 0,
+        status: "dust",
+        entryStyle: "probe",
+        openedAt: "2026-03-30T00:00:00Z",
+        closedAt: null,
+        updatedAt: "2026-03-30T00:00:00Z",
+      });
+      seedOpenPosition(positionRepo, { positionId: createPositionId("pos-open") });
+      seedFill(fillRepo, { fillId: "f-1", price: 0.42, filledAt: "2026-04-01T00:00:00Z" });
+
+      const { result, legStateRepo } = await runRebuild(conn);
+
+      expect(result.seededLegStates).toBe(1);
+      expect(legStateRepo.get(TOKEN_ID)?.buyCount).toBe(1);
+    });
   });
 });

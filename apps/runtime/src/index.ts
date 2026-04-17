@@ -1522,6 +1522,7 @@ async function main(): Promise<void> {
     fillRepo: repos.fill,
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
+    legStateRepo: repos.legState,
     familyStateRepo: repos.familyState,
     rulesProvider,
     log,
@@ -1536,6 +1537,19 @@ async function main(): Promise<void> {
     .run(
       startupAdoption.positionsCreated,
       JSON.stringify(startupAdoption),
+      new Date().toISOString(),
+    );
+  ledgerConn.db
+    .prepare(
+      "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('startup_leg_state_seed', ?, ?, ?)",
+    )
+    .run(
+      startupAdoption.seededLegStates,
+      JSON.stringify({
+        seeded: startupAdoption.seededLegStates,
+        alreadyPresent: startupAdoption.alreadyPresentLegStates,
+        withoutFills: startupAdoption.positionsWithoutFills.length,
+      }),
       new Date().toISOString(),
     );
 

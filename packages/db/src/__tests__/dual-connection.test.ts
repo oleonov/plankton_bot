@@ -49,6 +49,53 @@ describe("dual-connection infrastructure", () => {
     expect(names).not.toContain("family_catalog");
   });
 
+  it("bootstrapLedgerDb repairs pre-existing duplicate open positions and installs unique index", () => {
+    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-repair-"));
+    const dbPath = path.join(tmpDir, "ledger.db");
+
+    // Simulate an upgrade install: first bootstrap creates the schema, we then
+    // drop the invariant index and inject two open rows for the same token —
+    // exactly the aberrant state that the repair is designed to heal.
+    const conn1 = bootstrapLedgerDb(dbPath);
+    conn1.db.exec("DROP INDEX IF EXISTS idx_positions_unique_open_per_token");
+    conn1.db
+      .prepare(
+        `INSERT INTO positions
+           (position_id, token_id, side, status, opened_at, updated_at)
+         VALUES ('p-old', 'tok-1', 'buy', 'open', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+                ('p-new', 'tok-1', 'buy', 'open', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')`,
+      )
+      .run();
+    conn1.close();
+
+    // Second bootstrap must repair + recreate the invariant without throwing.
+    const conn2 = bootstrapLedgerDb(dbPath);
+    conns.push(conn2);
+
+    const rows = conn2.db
+      .prepare("SELECT position_id, status FROM positions ORDER BY position_id")
+      .all() as Array<{ position_id: string; status: string }>;
+    expect(rows.find((r) => r.position_id === "p-old")!.status).toBe("closed");
+    expect(rows.find((r) => r.position_id === "p-new")!.status).toBe("open");
+
+    const idx = conn2.db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_positions_unique_open_per_token'",
+      )
+      .get();
+    expect(idx).toBeDefined();
+
+    expect(() =>
+      conn2.db
+        .prepare(
+          `INSERT INTO positions
+             (position_id, token_id, side, status, opened_at, updated_at)
+           VALUES ('p-dup', 'tok-1', 'buy', 'open', '2026-01-03T00:00:00Z', '2026-01-03T00:00:00Z')`,
+        )
+        .run(),
+    ).toThrow(/UNIQUE constraint failed/i);
+  });
+
   it("bootstrapControlDb is idempotent", () => {
     tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ctrl-idem-"));
     const dbPath = path.join(tmpDir, "control.db");

@@ -507,5 +507,51 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   // Existing DBs predate tradable. Default to 1 so preserved rows stay eligible
   // until the next scan cycle rewrites them with the authoritative clob flag.
   safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
+  ensureUniqueOpenPositionIndex(conn.db);
   return conn;
+}
+
+/**
+ * Enforce "at most one open row per token" at the DB layer.
+ *
+ * Repairs any pre-existing duplicate-open rows first (idempotent: closes all
+ * but the canonical winner per PositionRepository.findByTokenId ordering —
+ * opened_at DESC, position_id DESC as tie-breaker) and then creates the
+ * partial UNIQUE index. Fresh DBs skip the repair (empty positions).
+ *
+ * Kept in bootstrapLedgerDb rather than ledger.sql because db.exec() cannot
+ * repair before creating the index — the CREATE UNIQUE INDEX would fail on
+ * upgrade DBs with pre-existing duplicates.
+ */
+function ensureUniqueOpenPositionIndex(db: import("better-sqlite3").Database): void {
+  try {
+    db.transaction(() => {
+      db.prepare(
+        `UPDATE positions
+            SET status = 'closed',
+                closed_at = COALESCE(closed_at, datetime('now')),
+                updated_at = datetime('now')
+          WHERE position_id IN (
+            SELECT p1.position_id
+              FROM positions p1
+              JOIN positions p2
+                ON p1.token_id = p2.token_id
+               AND p1.status = 'open'
+               AND p2.status = 'open'
+               AND (
+                     p1.opened_at < p2.opened_at
+                  OR (p1.opened_at = p2.opened_at AND p1.position_id < p2.position_id)
+               )
+          )`,
+      ).run();
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_positions_unique_open_per_token
+           ON positions(token_id) WHERE status = 'open'`,
+      );
+    })();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("no such table")) return;
+    throw err;
+  }
 }

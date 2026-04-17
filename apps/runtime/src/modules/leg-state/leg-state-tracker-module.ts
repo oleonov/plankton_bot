@@ -1,5 +1,6 @@
 import type { EventBus, LegStateRepository, RuntimeModule } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { updateLegStateForFill } from "./update-leg-state-for-fill.js";
 
 export interface LegStateTrackerModuleDeps {
   bus: EventBus;
@@ -37,52 +38,17 @@ export class LegStateTrackerModule implements RuntimeModule {
   private async handleFill(
     p: import("@plankton/domain").RuntimeEventMap["FillReceived"],
   ): Promise<void> {
-    const { tokenId, side, price, filledAt } = {
-      tokenId: p.tokenId,
-      side: p.side,
-      price: p.price,
-      filledAt: new Date(p.timestamp).toISOString(),
-    };
-    const now = new Date().toISOString();
-    const existing = this.deps.legStateRepo.get(tokenId);
-
-    if (side === "buy") {
-      if (!existing) {
-        this.deps.legStateRepo.upsert({
-          tokenId,
-          buyCount: 1,
-          sellCount: 0,
-          lastAction: "BUY",
-          firstTradePrice: price,
-          firstTradeAt: filledAt,
-          lastTradeAt: filledAt,
-          updatedAt: now,
-        });
-      } else {
-        this.deps.legStateRepo.upsert({
-          ...existing,
-          buyCount: existing.buyCount + 1,
-          lastAction: "BUY",
-          lastTradeAt: filledAt,
-          updatedAt: now,
-        });
-      }
-    } else {
-      if (!existing) {
-        this.log.warn(
-          { tokenId: String(tokenId) },
-          "SELL fill received with no open leg state — skipping",
-        );
-        return;
-      }
-      this.deps.legStateRepo.upsert({
-        ...existing,
-        sellCount: existing.sellCount + 1,
-        lastAction: "SELL",
-        lastTradeAt: filledAt,
-        updatedAt: now,
-      });
-    }
+    updateLegStateForFill(
+      this.deps.legStateRepo,
+      {
+        tokenId: p.tokenId,
+        side: p.side,
+        price: p.price,
+        filledAt: new Date(p.timestamp).toISOString(),
+      },
+      this.log,
+      new Date().toISOString(),
+    );
   }
 
   private async handlePositionUpdated(

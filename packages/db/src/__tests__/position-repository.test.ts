@@ -200,7 +200,7 @@ describe("SqlitePositionRepository", () => {
     expect(found).toBeNull();
   });
 
-  it("findByTokenId returns most recent open position", () => {
+  it("findByTokenId returns most recent non-closed position (open + dust coexist)", () => {
     repo.save(
       makePosition({
         positionId: createPositionId("p-old"),
@@ -221,6 +221,49 @@ describe("SqlitePositionRepository", () => {
     const found = repo.findByTokenId(createTokenId("tok-1"));
     expect(found).not.toBeNull();
     expect(found!.positionId).toBe("p-new");
+  });
+
+  it("unique index prevents two open rows for same token", () => {
+    repo.save(
+      makePosition({
+        positionId: createPositionId("p-first"),
+        tokenId: createTokenId("tok-1"),
+        status: "open",
+        openedAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+
+    expect(() =>
+      repo.save(
+        makePosition({
+          positionId: createPositionId("p-second"),
+          tokenId: createTokenId("tok-1"),
+          status: "open",
+          openedAt: "2026-01-02T00:00:00Z",
+        }),
+      ),
+    ).toThrow(/UNIQUE constraint failed/i);
+  });
+
+  it("partial unique index does not constrain dust rows", () => {
+    expect(() => {
+      repo.save(
+        makePosition({
+          positionId: createPositionId("p-dust-a"),
+          tokenId: createTokenId("tok-1"),
+          status: "dust",
+          openedAt: "2026-01-01T00:00:00Z",
+        }),
+      );
+      repo.save(
+        makePosition({
+          positionId: createPositionId("p-dust-b"),
+          tokenId: createTokenId("tok-1"),
+          status: "dust",
+          openedAt: "2026-01-02T00:00:00Z",
+        }),
+      );
+    }).not.toThrow();
   });
 
   it("upsert preserves FK integrity with inventory_lots", () => {

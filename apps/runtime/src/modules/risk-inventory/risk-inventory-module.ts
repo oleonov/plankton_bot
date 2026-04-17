@@ -96,6 +96,7 @@ export class RiskInventoryModule implements RuntimeModule {
     this.log = deps.log.child({ module: "risk-inventory" });
     this.riskGate = new AlgoRiskGateImpl(
       deps.orderRepo,
+      deps.positionRepo,
       this.log,
       (tid) => this.getLatestMinOrderSize(tid),
       (tid) => this.getTokenInFlightCount(tid),

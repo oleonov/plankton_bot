@@ -131,6 +131,10 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
 CREATE INDEX IF NOT EXISTS idx_positions_family ON positions(family_id);
 CREATE INDEX IF NOT EXISTS idx_positions_token ON positions(token_id);
+-- idx_positions_unique_open_per_token (partial UNIQUE on token_id WHERE
+-- status='open') is created in bootstrapLedgerDb after an idempotent repair
+-- step so that upgrade installs with pre-existing duplicate-open rows don't
+-- break on `CREATE UNIQUE INDEX`. See packages/db/src/bootstrap.ts.
 
 -- ═══════════ INVENTORY LOTS (FIFO) ═══════════
 -- From 001_initial.sql

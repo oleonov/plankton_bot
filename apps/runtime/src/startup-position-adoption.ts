@@ -7,6 +7,7 @@ import type {
   FamilyRulesProvider,
   FamilyStateRepository,
   FillRepository,
+  LegStateRepository,
   MarketRepository,
   Order,
   OrderRepository,
@@ -14,8 +15,9 @@ import type {
   InventoryLotRepository,
   ClientOrderId,
   FamilyId,
+  TokenId,
 } from "@plankton/domain";
-import { createFamilyId, createFillId, createOrderId } from "@plankton/domain";
+import { createFamilyId, createFillId, createOrderId, createTokenId } from "@plankton/domain";
 import type { Logger } from "./logger.js";
 import { resolveOpenPositionStatus } from "./position-status.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
@@ -24,6 +26,7 @@ import {
   findLocalOrderForExchangeFill,
   importExchangeFills,
 } from "./modules/reconciliation/fill-reconciler.js";
+import { updateLegStateForFill } from "./modules/leg-state/update-leg-state-for-fill.js";
 
 export interface StartupPositionAdoptionDeps {
   gateway: Pick<ExchangeGateway, "getFills">;
@@ -32,6 +35,7 @@ export interface StartupPositionAdoptionDeps {
   fillRepo: FillRepository;
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
+  legStateRepo: LegStateRepository;
   familyStateRepo: FamilyStateRepository;
   rulesProvider: FamilyRulesProvider;
   log: Logger;
@@ -52,6 +56,9 @@ export interface StartupPositionAdoptionResult {
   skippedInvalidTimestamp: number;
   skippedNoMarket: number;
   skippedInventoryDrift: number;
+  seededLegStates: number;
+  alreadyPresentLegStates: number;
+  positionsWithoutFills: TokenId[];
   details: string[];
 }
 
@@ -112,6 +119,9 @@ export async function runStartupPositionAdoption(
     skippedInvalidTimestamp: 0,
     skippedNoMarket: 0,
     skippedInventoryDrift: 0,
+    seededLegStates: 0,
+    alreadyPresentLegStates: 0,
+    positionsWithoutFills: [],
     details: [],
   };
   const familiesToRecompute = new Set<string>();
@@ -279,7 +289,116 @@ export async function runStartupPositionAdoption(
   }
 
   result.syntheticOrdersCreated = syntheticOrders.size;
+
+  rebuildLegStatesFromLedger(deps, result, log);
+
   return result;
+}
+
+/**
+ * Seed `leg_states` from the ledger for any active token that has no row yet.
+ *
+ * Why this belongs in startup adoption: adoption applies fills through a
+ * no-op bus (the supervisor has not started, `LegStateTrackerModule` is not
+ * subscribed yet), which means restart flow never populates `leg_states` from
+ * the adopted fills. `AlgoDecisionModule.decide` treats a missing leg_state
+ * as "first entry" and can fire a fresh probe-entry against an existing open
+ * position on the next tick.
+ *
+ * Replay fills through `updateLegStateForFill` in deterministic
+ * (filled_at ASC, fill_id ASC) order so that the result is byte-identical to
+ * the live path regardless of tie ordering. Token dedup is performed up-front
+ * — a token with coexisting open + dust rows must not have its fills counted
+ * twice.
+ */
+function rebuildLegStatesFromLedger(
+  deps: StartupPositionAdoptionDeps,
+  result: StartupPositionAdoptionResult,
+  log: Logger,
+): void {
+  const activeTokens = deps.db
+    .prepare(
+      `SELECT DISTINCT token_id FROM positions
+        WHERE status != 'closed'
+          AND NOT EXISTS (
+            SELECT 1 FROM leg_states ls WHERE ls.token_id = positions.token_id
+          )`,
+    )
+    .all() as Array<{ token_id: string }>;
+
+  const existingLegStateCount = deps.db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM leg_states ls
+        WHERE EXISTS (
+          SELECT 1 FROM positions p
+           WHERE p.token_id = ls.token_id AND p.status != 'closed'
+        )`,
+    )
+    .get() as { c: number };
+  result.alreadyPresentLegStates = existingLegStateCount.c;
+
+  if (activeTokens.length === 0) return;
+
+  const selectFills = deps.db.prepare(
+    `SELECT fill_id, token_id, side, price, filled_at FROM fills
+      WHERE token_id = ?
+      ORDER BY filled_at ASC, fill_id ASC`,
+  );
+
+  const now = new Date().toISOString();
+
+  for (const { token_id } of activeTokens) {
+    const tokenId = createTokenId(token_id);
+    const fills = selectFills.all(token_id) as Array<{
+      fill_id: string;
+      token_id: string;
+      side: "buy" | "sell";
+      price: number;
+      filled_at: string;
+    }>;
+
+    if (fills.length === 0) {
+      result.positionsWithoutFills.push(tokenId);
+      log.warn(
+        { tokenId: token_id },
+        "startup leg-state rebuild — active position has no matching fills",
+      );
+      continue;
+    }
+
+    for (const f of fills) {
+      updateLegStateForFill(
+        deps.legStateRepo,
+        {
+          tokenId: createTokenId(f.token_id),
+          side: f.side,
+          price: f.price,
+          filledAt: f.filled_at,
+        },
+        log,
+        now,
+      );
+    }
+
+    // Synthetic orphan-adoption fills can land with price=0 when the
+    // exchange fill lacks a usable price. Fall back to the canonical
+    // position's avg_entry_price so the leg_state reflects economic reality.
+    const seeded = deps.legStateRepo.get(tokenId);
+    if (seeded && seeded.firstTradePrice === 0) {
+      const position = deps.positionRepo.findByTokenId(tokenId);
+      if (position && position.avgEntryPrice > 0) {
+        deps.legStateRepo.upsert({
+          ...seeded,
+          firstTradePrice: position.avgEntryPrice,
+          updatedAt: now,
+        });
+      }
+    }
+
+    if (deps.legStateRepo.get(tokenId)) {
+      result.seededLegStates += 1;
+    }
+  }
 }
 
 function cleanupPriorStartupAdoptionArtifacts(
@@ -321,7 +440,7 @@ function cleanupPriorStartupAdoptionArtifacts(
     deleteWhereIn(deps.db, "orders", "order_id", orderIds);
 
     for (const tokenId of tokenIds) {
-      rebuildTokenPosition(deps.db, tokenId);
+      rebuildTokenPosition(deps.db, tokenId, deps.log);
     }
   })();
 
@@ -348,13 +467,18 @@ function deleteWhereIn(
   db.prepare(`DELETE FROM ${table} WHERE ${column} IN (${placeholders})`).run(...values);
 }
 
-function rebuildTokenPosition(db: Database.Database, tokenId: string): void {
+function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logger): void {
+  // Winner selection matches the DB invariant:
+  //   `idx_positions_unique_open_per_token` + migration 032 repair rule =
+  //   `opened_at DESC, position_id DESC`.
+  // Tie-break on position_id DESC eliminates SQLite's implementation-defined
+  // ordering when two rows share the same opened_at.
   const openRows = db
     .prepare(
       `SELECT position_id, entry_style, opened_at
        FROM positions
        WHERE token_id = ? AND status != 'closed'
-       ORDER BY opened_at DESC`,
+       ORDER BY opened_at DESC, position_id DESC`,
     )
     .all(tokenId) as Array<{
     position_id: string;
@@ -382,7 +506,19 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string): void {
     return;
   }
 
-  const activePositionId = remainingLots[0]!.position_id;
+  if (openRows.length > 1) {
+    log.warn(
+      {
+        tokenId,
+        duplicateCount: openRows.length,
+        canonicalPositionId: openRows[0]!.position_id,
+        closedPositionIds: openRows.slice(1).map((r) => r.position_id),
+      },
+      "startup adoption repair — multiple non-closed positions for same token (invariant bypassed)",
+    );
+  }
+
+  const activePositionId = openRows[0]?.position_id ?? remainingLots[0]!.position_id;
   const totalSize = remainingLots.reduce((sum, lot) => sum + lot.remaining_size, 0);
   const totalCost = remainingLots.reduce(
     (sum, lot) => sum + lot.remaining_size * lot.entry_price,
