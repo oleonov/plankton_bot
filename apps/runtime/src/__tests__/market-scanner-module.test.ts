@@ -400,6 +400,7 @@ describe("MarketScannerModule", () => {
       horizon: "daily",
       endDate: "2026-01-01",
       active: true,
+      tradable: true,
       tickSize: 0.01,
       negRisk: false,
       createdAt: "2026-01-01T00:00:00Z",
@@ -582,7 +583,7 @@ describe("MarketScannerModule", () => {
     expect(saved.familyId).toBeNull();
   });
 
-  it("scan() saves single-outcome market (distinct_outcomes=1) via pre-entry STEP 2", async () => {
+  it("scan() skips single-outcome market when slug prefix does not match (spec v2.2 removed STEP 2)", async () => {
     const negRiskLeg = makeClobMarket({
       slug: "who-will-win-election-trump",
       eventSlug: "who-will-win-election",
@@ -594,9 +595,7 @@ describe("MarketScannerModule", () => {
 
     await mod.scan();
 
-    expect(marketRepo.save).toHaveBeenCalledTimes(1);
-    const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
-    expect(saved.familyId).toBeNull();
+    expect(marketRepo.save).not.toHaveBeenCalled();
   });
 
   it("scan() saves market with elon-musk- prefix even without family match", async () => {
@@ -691,6 +690,7 @@ describe("MarketScannerModule", () => {
       horizon: null,
       endDate: "2026-01-01",
       active: true,
+      tradable: true,
       tickSize: 0.01,
       negRisk: false,
       createdAt: "2026-01-01T00:00:00Z",
@@ -726,6 +726,7 @@ describe("MarketScannerModule", () => {
       horizon: null,
       endDate: "2026-06-01",
       active: true,
+      tradable: true,
       tickSize: 0.01,
       negRisk: false,
       createdAt: "2026-01-01T00:00:00Z",
@@ -761,6 +762,7 @@ describe("MarketScannerModule", () => {
       horizon: null,
       endDate: "2025-01-01",
       active: true,
+      tradable: true,
       tickSize: 0.01,
       negRisk: false,
       createdAt: "2025-01-01T00:00:00Z",

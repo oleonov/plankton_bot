@@ -26,7 +26,6 @@ import {
   matchesHorizon,
   createTokenId,
   matchesPreEntryFilter,
-  countDistinctOutcomes,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { resolveFamilyAssignmentMaxDaysAhead } from "../../family-assignment-window.js";
@@ -180,11 +179,7 @@ export class MarketScannerModule implements RuntimeModule {
       await this.deps.discoveryGateway.forEachMarketPage((pageMarkets) => {
         discoveredMarkets += pageMarkets.length;
         for (const clobMarket of pageMarkets) {
-          const distinctOutcomes = countDistinctOutcomes(clobMarket.tokens);
-          const algoEligible = matchesPreEntryFilter(
-            clobMarket.eventSlug ?? null,
-            distinctOutcomes,
-          );
+          const algoEligible = matchesPreEntryFilter(clobMarket.eventSlug ?? null);
           const hasActiveLeg = clobMarket.tokens.some((t) => activeTokenIds.has(t.tokenId));
 
           if (!algoEligible && !hasActiveLeg) continue;
@@ -210,6 +205,10 @@ export class MarketScannerModule implements RuntimeModule {
               horizon: family?.horizon ?? null,
               endDate: clobMarket.endDate || null,
               active: clobMarket.active || hasActiveLeg,
+              // `tradable` reflects CLOB entry-eligibility only; preserved rows
+              // (active=true via open leg, clobMarket.active=false) become
+              // tradable=false so MarketSelectionCache stops signalling new BUYs.
+              tradable: clobMarket.active,
               tickSize: clobMarket.tickSize,
               negRisk: clobMarket.negRisk,
               createdAt: now,

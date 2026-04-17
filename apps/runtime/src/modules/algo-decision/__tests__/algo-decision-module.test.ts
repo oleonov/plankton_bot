@@ -217,6 +217,7 @@ function makeMarket(
     horizon: null,
     endDate: null,
     active: true,
+    tradable: true,
     tickSize: 0.01,
     negRisk: false,
     bestBid: midPrice !== null ? midPrice - 0.01 : null,
@@ -412,6 +413,8 @@ describe("AlgoDecisionModule", () => {
         updatedAt: new Date().toISOString(),
       };
       legStateRepo = createMockLegStateRepo([legState]);
+      // Tradable market → eligible for scale-in BUYs (not preserved-for-lifecycle)
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
 
       const mod = buildModule();
       await mod.start();
@@ -532,6 +535,48 @@ describe("AlgoDecisionModule", () => {
       // No SignalProduced
       const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
       expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+
+    it("preserved-for-lifecycle market (legState + tradable:false) emits only SELL, never BUY", async () => {
+      const tokenId = "token-preserved";
+      const familyId = "fam-cont";
+      // legState with tradeCount >= 6 would normally allow BUY (CONTINUE path),
+      // but the market is preserved-for-lifecycle (tradable:false), so only
+      // SELL rules may fire per spec v2.2 §0 pre-entry gate.
+      const legState: LegState = {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 5,
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      legStateRepo = createMockLegStateRepo([legState]);
+      // Cache may or may not contain tokenId — preservedOnly keys on
+      // market.tradable directly, not eligibility.
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      const preservedMarket: NormalizedMarket = {
+        ...makeMarket(tokenId, familyId, 0.15),
+        tradable: false,
+      };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [preservedMarket],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      // S1 + price 0.15 triggers D7-SELL-S1, never any BUY rule
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.side).toBe("sell");
 
       await mod.stop();
     });
@@ -663,6 +708,7 @@ describe("AlgoDecisionModule", () => {
       const tokenId = "token-tsl-30";
       legStateRepo = createMockLegStateRepo([makeTimedLegState(tokenId, 30_000)]);
       algoRulesRepo = withRules(D1_LIKE_RULES);
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
 
       const mod = buildModule();
       await mod.start();
@@ -685,6 +731,7 @@ describe("AlgoDecisionModule", () => {
       const tokenId = "token-tsl-120";
       legStateRepo = createMockLegStateRepo([makeTimedLegState(tokenId, 120_000)]);
       algoRulesRepo = withRules(D1_LIKE_RULES);
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
 
       const mod = buildModule();
       await mod.start();
@@ -709,6 +756,7 @@ describe("AlgoDecisionModule", () => {
       // the (now - lastTradeAt) read inside evaluateToken, which happens a few ms later.
       legStateRepo = createMockLegStateRepo([makeTimedLegState(tokenId, 59_000)]);
       algoRulesRepo = withRules(D1_LIKE_RULES);
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
 
       const mod = buildModule();
       await mod.start();

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS markets (
   horizon       TEXT,
   end_date      TEXT,
   active        INTEGER NOT NULL DEFAULT 1,
+  tradable      INTEGER NOT NULL DEFAULT 1,
   tick_size     REAL NOT NULL,
   neg_risk      INTEGER NOT NULL DEFAULT 0,
   event_slug    TEXT,

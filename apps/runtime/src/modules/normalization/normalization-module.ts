@@ -147,6 +147,7 @@ export class NormalizationModule implements RuntimeModule {
         horizon: family?.horizon ?? null,
         endDate: market.endDate,
         active: market.active,
+        tradable: market.tradable,
         tickSize: market.tickSize,
         negRisk: market.negRisk,
         createdAt: now,

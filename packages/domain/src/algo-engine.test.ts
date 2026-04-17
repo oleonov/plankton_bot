@@ -579,50 +579,12 @@ describe("evaluateRedeem", () => {
 
 // ─── Size rule fixtures ───────────────────────────────────────────────────────
 
+// Spec v2.2 §2: state+price rules (B1–B4) override nth_buy rules (B5–B7).
 const BUY_SIZE_RULES: AlgoSizeRule[] = [
   {
     id: 1,
     actionType: "BUY",
     priority: 10,
-    ruleId: "B5",
-    stateCondition: "ANY",
-    priceOperator: null,
-    priceValue: null,
-    nthBuy: 1,
-    buyCountMin: null,
-    buyCountMax: null,
-    sizeUsdc: 2.1,
-  },
-  {
-    id: 2,
-    actionType: "BUY",
-    priority: 20,
-    ruleId: "B6",
-    stateCondition: "ANY",
-    priceOperator: null,
-    priceValue: null,
-    nthBuy: 2,
-    buyCountMin: null,
-    buyCountMax: null,
-    sizeUsdc: 1.17,
-  },
-  {
-    id: 3,
-    actionType: "BUY",
-    priority: 30,
-    ruleId: "B7",
-    stateCondition: "ANY",
-    priceOperator: null,
-    priceValue: null,
-    nthBuy: 3,
-    buyCountMin: null,
-    buyCountMax: null,
-    sizeUsdc: 0.92,
-  },
-  {
-    id: 4,
-    actionType: "BUY",
-    priority: 40,
     ruleId: "B1",
     stateCondition: "OTHER",
     priceOperator: ">=",
@@ -633,9 +595,9 @@ const BUY_SIZE_RULES: AlgoSizeRule[] = [
     sizeUsdc: 8.38,
   },
   {
-    id: 5,
+    id: 2,
     actionType: "BUY",
-    priority: 50,
+    priority: 20,
     ruleId: "B2",
     stateCondition: "S1",
     priceOperator: ">=",
@@ -646,9 +608,9 @@ const BUY_SIZE_RULES: AlgoSizeRule[] = [
     sizeUsdc: 4.17,
   },
   {
-    id: 6,
+    id: 3,
     actionType: "BUY",
-    priority: 60,
+    priority: 30,
     ruleId: "B3",
     stateCondition: "S3",
     priceOperator: "<",
@@ -659,9 +621,9 @@ const BUY_SIZE_RULES: AlgoSizeRule[] = [
     sizeUsdc: 0.76,
   },
   {
-    id: 7,
+    id: 4,
     actionType: "BUY",
-    priority: 70,
+    priority: 40,
     ruleId: "B4",
     stateCondition: "S2",
     priceOperator: "<",
@@ -670,6 +632,45 @@ const BUY_SIZE_RULES: AlgoSizeRule[] = [
     buyCountMin: null,
     buyCountMax: null,
     sizeUsdc: 0.12,
+  },
+  {
+    id: 5,
+    actionType: "BUY",
+    priority: 50,
+    ruleId: "B5",
+    stateCondition: "ANY",
+    priceOperator: null,
+    priceValue: null,
+    nthBuy: 1,
+    buyCountMin: null,
+    buyCountMax: null,
+    sizeUsdc: 2.1,
+  },
+  {
+    id: 6,
+    actionType: "BUY",
+    priority: 60,
+    ruleId: "B6",
+    stateCondition: "ANY",
+    priceOperator: null,
+    priceValue: null,
+    nthBuy: 2,
+    buyCountMin: null,
+    buyCountMax: null,
+    sizeUsdc: 1.17,
+  },
+  {
+    id: 7,
+    actionType: "BUY",
+    priority: 70,
+    ruleId: "B7",
+    stateCondition: "ANY",
+    priceOperator: null,
+    priceValue: null,
+    nthBuy: 3,
+    buyCountMin: null,
+    buyCountMax: null,
+    sizeUsdc: 0.92,
   },
   {
     id: 8,
@@ -794,61 +795,57 @@ const SELL_SIZE_RULES: AlgoSizeRule[] = [
 ];
 
 describe("evaluateSize", () => {
-  describe("BUY sizing — nth_buy precedence contract", () => {
-    it("1st buy always uses B5 (2.10) regardless of state/price", () => {
+  // Spec v2.2 §2 Size Flow — state+price rules (B1–B4) override nth_buy rules (B5–B7).
+  // nth_buy rules apply only when state+price conditions are not matched.
+  describe("BUY sizing — state+price precedence (spec v2.2)", () => {
+    it("B1 wins over B5: nth_buy=1 + state=OTHER + price>=0.20 → 8.38", () => {
       expect(
-        evaluateSize("BUY", { state: "OTHER", price: 0.5, nthBuy: 1, buyCount: 0 }, BUY_SIZE_RULES),
-      ).toEqual({ sizeUsdc: 2.1, ruleId: "B5" });
-    });
-    it("1st buy uses B5 even at low price", () => {
-      expect(
-        evaluateSize(
-          "BUY",
-          { state: "OTHER", price: 0.03, nthBuy: 1, buyCount: 0 },
-          BUY_SIZE_RULES,
-        ),
-      ).toEqual({ sizeUsdc: 2.1, ruleId: "B5" });
-    });
-    it("2nd buy uses B6 (1.17)", () => {
-      expect(
-        evaluateSize("BUY", { state: "S1", price: 0.03, nthBuy: 2, buyCount: 1 }, BUY_SIZE_RULES),
-      ).toEqual({ sizeUsdc: 1.17, ruleId: "B6" });
-    });
-    it("3rd buy uses B7 (0.92)", () => {
-      expect(
-        evaluateSize("BUY", { state: "S2", price: 0.03, nthBuy: 3, buyCount: 2 }, BUY_SIZE_RULES),
-      ).toEqual({ sizeUsdc: 0.92, ruleId: "B7" });
-    });
-    it("4th buy at high price uses B1 (8.38) for OTHER state", () => {
-      expect(
-        evaluateSize(
-          "BUY",
-          { state: "OTHER", price: 0.25, nthBuy: 4, buyCount: 3 },
-          BUY_SIZE_RULES,
-        ),
+        evaluateSize("BUY", { state: "OTHER", price: 0.25, nthBuy: 1, buyCount: 0 }, BUY_SIZE_RULES),
       ).toEqual({ sizeUsdc: 8.38, ruleId: "B1" });
     });
-    it("4th buy at S1 + high price uses B2 (4.17)", () => {
+    it("B2 wins over B5: nth_buy=1 + state=S1 + price>=0.20 → 4.17", () => {
       expect(
-        evaluateSize("BUY", { state: "S1", price: 0.25, nthBuy: 4, buyCount: 3 }, BUY_SIZE_RULES),
+        evaluateSize("BUY", { state: "S1", price: 0.25, nthBuy: 1, buyCount: 1 }, BUY_SIZE_RULES),
       ).toEqual({ sizeUsdc: 4.17, ruleId: "B2" });
     });
-    it("4th buy at S2 + low price uses B4 (0.12)", () => {
+    it("B3 wins over B7: nth_buy=3 + state=S3 + price<0.05 → 0.76", () => {
       expect(
-        evaluateSize("BUY", { state: "S2", price: 0.03, nthBuy: 4, buyCount: 3 }, BUY_SIZE_RULES),
-      ).toEqual({ sizeUsdc: 0.12, ruleId: "B4" });
-    });
-    it("4th buy at S3 + low price uses B3 (0.76)", () => {
-      expect(
-        evaluateSize("BUY", { state: "S3", price: 0.03, nthBuy: 4, buyCount: 2 }, BUY_SIZE_RULES),
+        evaluateSize("BUY", { state: "S3", price: 0.03, nthBuy: 3, buyCount: 2 }, BUY_SIZE_RULES),
       ).toEqual({ sizeUsdc: 0.76, ruleId: "B3" });
     });
-    it("B3: price=0.05 (boundary) does NOT match; falls to FALLBACK", () => {
+    it("B4 wins over B6: nth_buy=2 + state=S2 + price<0.05 → 0.12", () => {
       expect(
-        evaluateSize("BUY", { state: "S3", price: 0.05, nthBuy: 4, buyCount: 2 }, BUY_SIZE_RULES),
-      ).toEqual({ sizeUsdc: 0.44, ruleId: "FALLBACK" });
+        evaluateSize("BUY", { state: "S2", price: 0.03, nthBuy: 2, buyCount: 2 }, BUY_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 0.12, ruleId: "B4" });
     });
-    it("5th+ buy with no state+price match uses FALLBACK (0.44)", () => {
+
+    it("B5 used only when no B1–B4 match: nth_buy=1 + state=OTHER + price=0.10 → 2.10", () => {
+      expect(
+        evaluateSize("BUY", { state: "OTHER", price: 0.1, nthBuy: 1, buyCount: 0 }, BUY_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 2.1, ruleId: "B5" });
+    });
+    it("B5 used for 1st buy at low price in OTHER state → 2.10", () => {
+      expect(
+        evaluateSize("BUY", { state: "OTHER", price: 0.03, nthBuy: 1, buyCount: 0 }, BUY_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 2.1, ruleId: "B5" });
+    });
+    it("B6 used only when no B1–B4 match: nth_buy=2 + state=S1 + price=0.10 → 1.17", () => {
+      expect(
+        evaluateSize("BUY", { state: "S1", price: 0.1, nthBuy: 2, buyCount: 1 }, BUY_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 1.17, ruleId: "B6" });
+    });
+    it("B7 used only when no B1–B4 match: nth_buy=3 + state=S2 + price=0.10 → 0.92", () => {
+      expect(
+        evaluateSize("BUY", { state: "S2", price: 0.1, nthBuy: 3, buyCount: 2 }, BUY_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 0.92, ruleId: "B7" });
+    });
+
+    it("B3 boundary: price=0.05 does NOT match (< strict), falls through to B5 for nth_buy=1", () => {
+      expect(
+        evaluateSize("BUY", { state: "S3", price: 0.05, nthBuy: 1, buyCount: 2 }, BUY_SIZE_RULES),
+      ).toEqual({ sizeUsdc: 2.1, ruleId: "B5" });
+    });
+    it("FALLBACK: nth_buy=5 with no state+price match → 0.44", () => {
       expect(
         evaluateSize("BUY", { state: "S2", price: 0.1, nthBuy: 5, buyCount: 4 }, BUY_SIZE_RULES),
       ).toEqual({ sizeUsdc: 0.44, ruleId: "FALLBACK" });

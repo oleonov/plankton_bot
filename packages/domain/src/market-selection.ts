@@ -1,26 +1,13 @@
 const PRE_ENTRY_SLUG_PREFIXES = ["elon-musk-", "bitcoin-", "ethereum-"] as const;
 
 /**
- * Live Pre-Entry Filter — should this token be in the eligible universe?
- * Evaluates STEP 1 (event_slug prefix) then STEP 2 (distinct_outcomes = 1).
+ * Live Pre-Entry Filter (spec v2.2 §0) — slug-prefix only.
+ * INCLUDE when event_slug starts with one of elon-musk-, bitcoin-, ethereum-.
+ * EXCLUDE otherwise.
  */
-export function matchesPreEntryFilter(eventSlug: string | null, distinctOutcomes: number): boolean {
-  if (eventSlug != null && PRE_ENTRY_SLUG_PREFIXES.some((p) => eventSlug.startsWith(p))) {
-    return true;
-  }
-  if (distinctOutcomes === 1) return true;
-  return false;
-}
-
-/**
- * Count distinct outcome values in a token set.
- * Used by the scanner to compute distinct_outcomes per ClobMarket
- * for the Live Pre-Entry Filter (spec section 0, STEP 2).
- */
-export function countDistinctOutcomes(tokens: ReadonlyArray<{ readonly outcome: string }>): number {
-  const seen = new Set<string>();
-  for (const t of tokens) seen.add(t.outcome.toLowerCase());
-  return seen.size;
+export function matchesPreEntryFilter(eventSlug: string | null): boolean {
+  if (eventSlug == null) return false;
+  return PRE_ENTRY_SLUG_PREFIXES.some((p) => eventSlug.startsWith(p));
 }
 
 /**

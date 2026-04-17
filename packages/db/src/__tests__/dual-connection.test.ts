@@ -251,6 +251,48 @@ describe("dual-connection infrastructure", () => {
     expect(snapshot.reason).toContain("family-limit-unification-backfill");
   });
 
+  it("bootstrapControlDb fixes legacy-inverted BUY size priorities on existing rules (spec v2.2)", () => {
+    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ctrl-buy-prec-"));
+    const dbPath = path.join(tmpDir, "control.db");
+
+    // Simulate a control.db seeded under the pre-v2.2 precedence contract:
+    // nth_buy rules (B5/B6/B7) at priorities 10/20/30, state+price (B1..B4) at 40..70.
+    const conn1 = bootstrapControlDb(dbPath);
+    conn1.db.exec("DELETE FROM algo_size_rules WHERE action_type = 'BUY'");
+    conn1.db.exec("DELETE FROM bootstrap_backfills WHERE name LIKE '%buy-size-precedence%'");
+    const insert = conn1.db.prepare(
+      `INSERT INTO algo_size_rules (action_type, priority, rule_id, state_condition, price_operator, price_value, nth_buy, buy_count_min, buy_count_max, size_usdc)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    insert.run("BUY", 10, "B5", "ANY", null, null, 1, null, null, 2.1);
+    insert.run("BUY", 20, "B6", "ANY", null, null, 2, null, null, 1.17);
+    insert.run("BUY", 30, "B7", "ANY", null, null, 3, null, null, 0.92);
+    insert.run("BUY", 40, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38);
+    insert.run("BUY", 50, "B2", "S1", ">=", 0.2, null, null, null, 4.17);
+    insert.run("BUY", 60, "B3", "S3", "<", 0.05, null, null, null, 0.76);
+    insert.run("BUY", 70, "B4", "S2", "<", 0.05, null, null, null, 0.12);
+    conn1.close();
+
+    // Re-bootstrap should detect the legacy ordering and re-priority in place.
+    const conn2 = bootstrapControlDb(dbPath);
+    conns.push(conn2);
+
+    const rows = conn2.db
+      .prepare(
+        "SELECT rule_id, priority FROM algo_size_rules WHERE action_type = 'BUY' AND rule_id IN ('B1','B2','B3','B4','B5','B6','B7') ORDER BY priority",
+      )
+      .all() as { rule_id: string; priority: number }[];
+
+    expect(rows.map((r) => r.rule_id)).toEqual(["B1", "B2", "B3", "B4", "B5", "B6", "B7"]);
+    expect(rows.map((r) => r.priority)).toEqual([10, 20, 30, 40, 50, 60, 70]);
+
+    // And the backfill marker is recorded, so a third bootstrap is a no-op.
+    const marker = conn2.db
+      .prepare("SELECT name FROM bootstrap_backfills WHERE name LIKE '%buy-size-precedence%'")
+      .get() as { name: string } | undefined;
+    expect(marker).toBeDefined();
+  });
+
   it("bootstrapLedgerDb is idempotent", () => {
     tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-idem-"));
     const dbPath = path.join(tmpDir, "ledger.db");

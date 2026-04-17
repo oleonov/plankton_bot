@@ -56,6 +56,7 @@ function makeNormalizedMarket(overrides?: Partial<NormalizedMarket>): Normalized
     horizon: null,
     endDate: nearEndDate(),
     active: true,
+    tradable: true,
     tickSize: 0.01,
     negRisk: false,
     bestBid: 0.45,

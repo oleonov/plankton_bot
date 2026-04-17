@@ -87,6 +87,7 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     horizon: "daily",
     endDate: "2026-04-11T23:59:00.000Z",
     active: true,
+    tradable: true,
     tickSize: 0.01,
     negRisk: false,
     bestBid: 0.09,

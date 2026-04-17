@@ -301,11 +301,21 @@ export class AlgoDecisionModule implements RuntimeModule {
       return { type: "redeem", conditionId: market.conditionId };
     }
 
-    // Post-entry continuation gate — only applies when we have a leg
+    // Preserved-for-lifecycle gate: market has an open leg but the CLOB no
+    // longer accepts new entries (tradable=false). Per spec v2.2 §0 the
+    // pre-entry filter is a NEW-BUY gate — preserved markets only emit SELL.
+    // Keyed directly on market.tradable, not !isEligible(...), so unrelated
+    // eligibility reasons (slug mismatch, etc.) do not force SELL-only.
+    const preservedOnly = legState !== null && !market.tradable;
+
+    // Post-entry continuation gate — only applies when we have a leg.
+    // Per market-selection-layer-design.md:53, pre-entry filter is separate from
+    // position management: legState tokens are gated by continuation, not eligibility.
     if (legState) {
       const tradeCount = legState.buyCount + legState.sellCount;
-      if (!evaluateContinuation(tradeCount, legState.firstTradePrice)) {
-        // STOP: only SELL rules are evaluated, BUY is never considered
+      const stop = !evaluateContinuation(tradeCount, legState.firstTradePrice);
+      if (stop || preservedOnly) {
+        // STOP or preserved-only: only SELL rules are evaluated, BUY is never considered
         const sellMatch = matchRule(ctx, this.decisionRules, SELL_ONLY);
         if (!sellMatch) return null;
         return this.buildSignal(market, sellMatch, ctx, buyCount, now, nextSeq);

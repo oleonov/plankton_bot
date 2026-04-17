@@ -82,6 +82,7 @@ function seedMarket(repo: SqliteMarketRepository): void {
     horizon: "daily",
     endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     active: true,
+    tradable: true,
     tickSize: 0.01,
     negRisk: false,
     createdAt: new Date().toISOString(),

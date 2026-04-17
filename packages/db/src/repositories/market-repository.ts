@@ -12,8 +12,8 @@ export class SqliteMarketRepository implements MarketRepository {
       .prepare(
         `INSERT INTO markets
          (token_id, condition_id, slug, event_slug, question, outcome, outcome_index, family_id, family_key,
-          regime, horizon, end_date, active, tick_size, neg_risk, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          regime, horizon, end_date, active, tradable, tick_size, neg_risk, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(token_id) DO UPDATE SET
            condition_id = excluded.condition_id,
            slug = excluded.slug,
@@ -27,6 +27,7 @@ export class SqliteMarketRepository implements MarketRepository {
            horizon = excluded.horizon,
            end_date = excluded.end_date,
            active = excluded.active,
+           tradable = excluded.tradable,
            tick_size = excluded.tick_size,
            neg_risk = excluded.neg_risk,
            updated_at = excluded.updated_at`,
@@ -45,6 +46,7 @@ export class SqliteMarketRepository implements MarketRepository {
         market.horizon,
         market.endDate,
         market.active ? 1 : 0,
+        market.tradable ? 1 : 0,
         market.tickSize,
         market.negRisk ? 1 : 0,
         market.createdAt,
@@ -116,6 +118,7 @@ export class SqliteMarketRepository implements MarketRepository {
       horizon: (row.horizon as string) ?? null,
       endDate: (row.end_date as string) ?? null,
       active: row.active === 1,
+      tradable: row.tradable == null ? row.active === 1 : row.tradable === 1,
       tickSize: row.tick_size as number,
       negRisk: row.neg_risk === 1,
       createdAt: row.created_at as string,

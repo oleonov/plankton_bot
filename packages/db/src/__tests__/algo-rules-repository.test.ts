@@ -35,11 +35,11 @@ describe("SqliteAlgoRulesRepository", () => {
     expect(rules[rules.length - 1]!.ruleId).toBe("FALLBACK");
   });
 
-  it("returns BUY size rules with nth_buy before state+price", () => {
+  it("returns BUY size rules with state+price before nth_buy (spec v2.2 §2)", () => {
     const rules = repo.getSizeRules("BUY");
-    expect(rules.length).toBe(8); // B5, B6, B7, B1, B2, B3, B4, FALLBACK
+    expect(rules.length).toBe(8); // B1, B2, B3, B4, B5, B6, B7, FALLBACK
     const ruleIds = rules.map((r) => r.ruleId);
-    expect(ruleIds).toEqual(["B5", "B6", "B7", "B1", "B2", "B3", "B4", "FALLBACK"]);
+    expect(ruleIds).toEqual(["B1", "B2", "B3", "B4", "B5", "B6", "B7", "FALLBACK"]);
   });
 
   it("returns SELL size rules sorted by priority", () => {
@@ -115,13 +115,13 @@ describe("seeded defaults match spec", () => {
   // Fields: priority, ruleId, stateCondition, priceOperator, priceValue,
   //         nthBuy, buyCountMin, buyCountMax, sizeUsdc
   it.each([
-    [10, "B5", "ANY", null, null, 1, null, null, 2.1],
-    [20, "B6", "ANY", null, null, 2, null, null, 1.17],
-    [30, "B7", "ANY", null, null, 3, null, null, 0.92],
-    [40, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38],
-    [50, "B2", "S1", ">=", 0.2, null, null, null, 4.17],
-    [60, "B3", "S3", "<", 0.05, null, null, null, 0.76],
-    [70, "B4", "S2", "<", 0.05, null, null, null, 0.12],
+    [10, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38],
+    [20, "B2", "S1", ">=", 0.2, null, null, null, 4.17],
+    [30, "B3", "S3", "<", 0.05, null, null, null, 0.76],
+    [40, "B4", "S2", "<", 0.05, null, null, null, 0.12],
+    [50, "B5", "ANY", null, null, 1, null, null, 2.1],
+    [60, "B6", "ANY", null, null, 2, null, null, 1.17],
+    [70, "B7", "ANY", null, null, 3, null, null, 0.92],
     [999, "FALLBACK", "ANY", null, null, null, null, null, 0.44],
   ] as const)(
     "BUY size rule priority=%i ruleId=%s",

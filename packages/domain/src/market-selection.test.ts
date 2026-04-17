@@ -1,57 +1,42 @@
 import { describe, it, expect } from "vitest";
-import {
-  matchesPreEntryFilter,
-  evaluateContinuation,
-  countDistinctOutcomes,
-} from "./market-selection.js";
+import { matchesPreEntryFilter, evaluateContinuation } from "./market-selection.js";
 
+// Spec v2.2 §0 — Live Pre-Entry Filter is slug-prefix only.
 describe("matchesPreEntryFilter", () => {
-  // STEP 1: event_slug prefix match
   it("includes when eventSlug starts with elon-musk-", () => {
-    expect(matchesPreEntryFilter("elon-musk-tweet-count", 5)).toBe(true);
+    expect(matchesPreEntryFilter("elon-musk-tweet-count")).toBe(true);
   });
 
   it("includes when eventSlug starts with bitcoin-", () => {
-    expect(matchesPreEntryFilter("bitcoin-price-above-100k", 3)).toBe(true);
+    expect(matchesPreEntryFilter("bitcoin-price-above-100k")).toBe(true);
   });
 
   it("includes when eventSlug starts with ethereum-", () => {
-    expect(matchesPreEntryFilter("ethereum-merge-date", 2)).toBe(true);
+    expect(matchesPreEntryFilter("ethereum-merge-date")).toBe(true);
   });
 
-  it("slug prefix match wins regardless of distinctOutcomes", () => {
-    expect(matchesPreEntryFilter("elon-musk-fires-someone", 10)).toBe(true);
+  it("excludes when eventSlug is null", () => {
+    expect(matchesPreEntryFilter(null)).toBe(false);
   });
 
-  // STEP 2: distinct_outcomes = 1
-  it("includes when distinctOutcomes is 1 and no slug match", () => {
-    expect(matchesPreEntryFilter("random-event", 1)).toBe(true);
+  it("excludes when eventSlug does not match any prefix", () => {
+    expect(matchesPreEntryFilter("us-election-winner")).toBe(false);
   });
 
-  it("includes when eventSlug is null and distinctOutcomes is 1", () => {
-    expect(matchesPreEntryFilter(null, 1)).toBe(true);
-  });
-
-  // FINAL: exclude
-  it("excludes when eventSlug is null and distinctOutcomes > 1", () => {
-    expect(matchesPreEntryFilter(null, 2)).toBe(false);
-  });
-
-  it("excludes when eventSlug does not match prefix and distinctOutcomes > 1", () => {
-    expect(matchesPreEntryFilter("us-election-winner", 3)).toBe(false);
-  });
-
-  it("excludes when distinctOutcomes is 0", () => {
-    expect(matchesPreEntryFilter(null, 0)).toBe(false);
-  });
-
-  // Edge: partial prefix that does NOT match
-  it("excludes partial prefix like 'elon-' (not 'elon-musk-')", () => {
-    expect(matchesPreEntryFilter("elon-fires-someone", 4)).toBe(false);
+  it("excludes partial prefix 'elon-' (not 'elon-musk-')", () => {
+    expect(matchesPreEntryFilter("elon-fires-someone")).toBe(false);
   });
 
   it("excludes 'bitcoins-' (not 'bitcoin-')", () => {
-    expect(matchesPreEntryFilter("bitcoins-price", 2)).toBe(false);
+    expect(matchesPreEntryFilter("bitcoins-price")).toBe(false);
+  });
+
+  it("excludes 'etherium-' (typo, not 'ethereum-')", () => {
+    expect(matchesPreEntryFilter("etherium-price")).toBe(false);
+  });
+
+  it("excludes empty string", () => {
+    expect(matchesPreEntryFilter("")).toBe(false);
   });
 });
 
@@ -83,42 +68,16 @@ describe("evaluateContinuation", () => {
     expect(evaluateContinuation(0, 0.03)).toBe(false);
   });
 
-  // Boundary: exactly at R1 threshold
+  // Boundaries
   it("continues at exactly tradeCount=6 with low price", () => {
     expect(evaluateContinuation(6, 0.01)).toBe(true);
   });
 
-  // Boundary: R2 exact threshold
   it("continues at exactly firstTradePrice=0.05 and tradeCount=2", () => {
     expect(evaluateContinuation(2, 0.05)).toBe(true);
   });
 
-  // Boundary: just below R2
   it("stops at firstTradePrice=0.049 and tradeCount=2", () => {
     expect(evaluateContinuation(2, 0.049)).toBe(false);
-  });
-});
-
-describe("countDistinctOutcomes", () => {
-  it("returns 1 for single-outcome condition (negRisk leg)", () => {
-    expect(countDistinctOutcomes([{ outcome: "Yes" }])).toBe(1);
-  });
-
-  it("returns 2 for Yes/No pair", () => {
-    expect(countDistinctOutcomes([{ outcome: "Yes" }, { outcome: "No" }])).toBe(2);
-  });
-
-  it("is case-insensitive", () => {
-    expect(countDistinctOutcomes([{ outcome: "YES" }, { outcome: "yes" }])).toBe(1);
-  });
-
-  it("returns 0 for empty tokens array", () => {
-    expect(countDistinctOutcomes([])).toBe(0);
-  });
-
-  it("counts multiple distinct outcomes in multi-outcome market", () => {
-    expect(
-      countDistinctOutcomes([{ outcome: "Biden" }, { outcome: "Trump" }, { outcome: "Other" }]),
-    ).toBe(3);
   });
 });

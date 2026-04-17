@@ -31,6 +31,7 @@ function makeTrackedMarket(overrides?: Partial<Market>): Market {
     horizon: "daily",
     endDate: "2026-12-31",
     active: true,
+    tradable: true,
     tickSize: 0.01,
     negRisk: false,
     createdAt: "2026-01-01T00:00:00Z",

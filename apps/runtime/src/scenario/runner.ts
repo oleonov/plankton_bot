@@ -395,6 +395,7 @@ async function executeScenario(
         horizon: matched?.identity.horizon ?? null,
         endDate: clobMarket.endDate,
         active: clobMarket.active,
+        tradable: true,
         tickSize: clobMarket.tickSize,
         negRisk: clobMarket.negRisk,
         createdAt: now,

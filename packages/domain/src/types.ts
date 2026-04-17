@@ -73,6 +73,14 @@ export interface Market {
   horizon: string | null;
   endDate: string | null; // ISO timestamp
   active: boolean;
+  /**
+   * CLOB is actively quoting and accepting orders for new entries.
+   * Distinct from `active`: a market preserved-for-lifecycle (closed on CLOB
+   * but with an open leg) keeps `active: true` so pricing continues flowing
+   * for SELL/REDEEM, while `tradable: false` suppresses new BUY eligibility
+   * in MarketSelectionCache.
+   */
+  tradable: boolean;
   tickSize: number;
   negRisk: boolean;
   createdAt: string; // ISO timestamp
@@ -447,6 +455,8 @@ export interface NormalizedMarket {
   horizon: string | null;
   endDate: string | null;
   active: boolean;
+  /** See `Market.tradable` — mirrors the persisted flag. */
+  tradable: boolean;
   tickSize: number;
   negRisk: boolean;
   bestBid: number | null;

@@ -104,6 +104,7 @@ function makeMarket(overrides?: Partial<Market>): Market {
     horizon: "daily",
     endDate: null,
     active: true,
+    tradable: true,
     tickSize: 0.01,
     negRisk: false,
     createdAt: new Date().toISOString(),

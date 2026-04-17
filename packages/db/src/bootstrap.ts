@@ -16,6 +16,7 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
   const conn = openDatabase(dbPath);
   runMigrations(conn.db);
   ensureBootstrapBackfillsTable(conn.db);
+  safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
   safeAddColumn(conn.db, "family_catalog", "source_type", "TEXT NOT NULL DEFAULT 'yaml_import'");
   safeAddColumn(conn.db, "family_catalog", "origin_checksum", "TEXT");
   safeAddColumn(conn.db, "family_catalog", "fee_tier", "TEXT NOT NULL DEFAULT 'unknown'");
@@ -35,6 +36,7 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
   backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
   backfillFamilyLimitUnification(conn.db);
   ensureAlgoRulesDefaults(conn.db);
+  backfillBuySizePrecedence(conn.db);
   return conn;
 }
 
@@ -97,11 +99,13 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   backfillDirectionalUpdownDiscoveryEntryPolicy(conn.db);
   backfillFamilyLimitUnification(conn.db);
   ensureAlgoRulesDefaults(conn.db);
+  backfillBuySizePrecedence(conn.db);
 
   return conn;
 }
 
 const BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION = "2026-04-13-family-limit-unification-v1";
+const BOOTSTRAP_BACKFILL_BUY_SIZE_PRECEDENCE_V22 = "2026-04-17-buy-size-precedence-v2.2";
 
 function ensureBootstrapBackfillsTable(db: import("better-sqlite3").Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS bootstrap_backfills (
@@ -455,14 +459,14 @@ export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): 
       "BUY",
     );
 
-    // Size rules — BUY (nth_buy rules BEFORE state+price rules per BUY Size Precedence Contract)
-    insertSize.run("BUY", 10, "B5", "ANY", null, null, 1, null, null, 2.1);
-    insertSize.run("BUY", 20, "B6", "ANY", null, null, 2, null, null, 1.17);
-    insertSize.run("BUY", 30, "B7", "ANY", null, null, 3, null, null, 0.92);
-    insertSize.run("BUY", 40, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38);
-    insertSize.run("BUY", 50, "B2", "S1", ">=", 0.2, null, null, null, 4.17);
-    insertSize.run("BUY", 60, "B3", "S3", "<", 0.05, null, null, null, 0.76);
-    insertSize.run("BUY", 70, "B4", "S2", "<", 0.05, null, null, null, 0.12);
+    // Size rules — BUY (spec v2.2 §2: state+price rules B1–B4 override nth_buy rules B5–B7)
+    insertSize.run("BUY", 10, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38);
+    insertSize.run("BUY", 20, "B2", "S1", ">=", 0.2, null, null, null, 4.17);
+    insertSize.run("BUY", 30, "B3", "S3", "<", 0.05, null, null, null, 0.76);
+    insertSize.run("BUY", 40, "B4", "S2", "<", 0.05, null, null, null, 0.12);
+    insertSize.run("BUY", 50, "B5", "ANY", null, null, 1, null, null, 2.1);
+    insertSize.run("BUY", 60, "B6", "ANY", null, null, 2, null, null, 1.17);
+    insertSize.run("BUY", 70, "B7", "ANY", null, null, 3, null, null, 0.92);
     insertSize.run("BUY", 999, "FALLBACK", "ANY", null, null, null, null, null, 0.44);
 
     // Size rules — SELL
@@ -475,6 +479,37 @@ export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): 
     insertSize.run("SELL", 70, "S7", "ANY", null, null, null, 2, 3, 2.14);
     insertSize.run("SELL", 999, "FALLBACK", "ANY", null, null, null, null, null, 1.62);
   })();
+}
+
+/**
+ * Spec v2.2 §2 BUY Size Precedence: state+price rules (B1–B4) override
+ * nth_buy rules (B5–B7). Pre-v2.2 seed used the inverted order; this backfill
+ * re-priorities existing rows in place. Idempotent via bootstrap_backfills.
+ *
+ * Must run against control.db (which holds algo rules in the split layout) —
+ * migrations only run against the legacy merged DB via bootstrapDatabase().
+ */
+function backfillBuySizePrecedence(db: import("better-sqlite3").Database): void {
+  try {
+    if (hasBootstrapBackfill(db, BOOTSTRAP_BACKFILL_BUY_SIZE_PRECEDENCE_V22)) return;
+    db.transaction(() => {
+      const stmt = db.prepare(
+        "UPDATE algo_size_rules SET priority = ? WHERE action_type = 'BUY' AND rule_id = ?",
+      );
+      stmt.run(10, "B1");
+      stmt.run(20, "B2");
+      stmt.run(30, "B3");
+      stmt.run(40, "B4");
+      stmt.run(50, "B5");
+      stmt.run(60, "B6");
+      stmt.run(70, "B7");
+      markBootstrapBackfill(db, BOOTSTRAP_BACKFILL_BUY_SIZE_PRECEDENCE_V22);
+    })();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("no such table")) return;
+    throw err;
+  }
 }
 
 /** ALTER TABLE ADD COLUMN, ignoring "duplicate column" errors. */
@@ -499,5 +534,8 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "fills", "liquidity_role", "TEXT NOT NULL DEFAULT 'unknown'");
   safeAddColumn(conn.db, "fills", "fee_rate_bps", "REAL NOT NULL DEFAULT 0");
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
+  // Existing DBs predate tradable. Default to 1 so preserved rows stay eligible
+  // until the next scan cycle rewrites them with the authoritative clob flag.
+  safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
   return conn;
 }

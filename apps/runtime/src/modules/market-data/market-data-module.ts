@@ -465,6 +465,7 @@ function syncTrackedMarket(
     horizon: tracked.horizon,
     endDate: tracked.endDate,
     active: tracked.active,
+    tradable: tracked.tradable,
     tickSize: tracked.tickSize,
     negRisk: tracked.negRisk,
     bestBid: current?.bestBid ?? null,
