@@ -800,7 +800,11 @@ describe("evaluateSize", () => {
   describe("BUY sizing — state+price precedence (spec v2.2)", () => {
     it("B1 wins over B5: nth_buy=1 + state=OTHER + price>=0.20 → 8.38", () => {
       expect(
-        evaluateSize("BUY", { state: "OTHER", price: 0.25, nthBuy: 1, buyCount: 0 }, BUY_SIZE_RULES),
+        evaluateSize(
+          "BUY",
+          { state: "OTHER", price: 0.25, nthBuy: 1, buyCount: 0 },
+          BUY_SIZE_RULES,
+        ),
       ).toEqual({ sizeUsdc: 8.38, ruleId: "B1" });
     });
     it("B2 wins over B5: nth_buy=1 + state=S1 + price>=0.20 → 4.17", () => {
@@ -826,7 +830,11 @@ describe("evaluateSize", () => {
     });
     it("B5 used for 1st buy at low price in OTHER state → 2.10", () => {
       expect(
-        evaluateSize("BUY", { state: "OTHER", price: 0.03, nthBuy: 1, buyCount: 0 }, BUY_SIZE_RULES),
+        evaluateSize(
+          "BUY",
+          { state: "OTHER", price: 0.03, nthBuy: 1, buyCount: 0 },
+          BUY_SIZE_RULES,
+        ),
       ).toEqual({ sizeUsdc: 2.1, ruleId: "B5" });
     });
     it("B6 used only when no B1–B4 match: nth_buy=2 + state=S1 + price=0.10 → 1.17", () => {
