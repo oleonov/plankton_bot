@@ -1,20 +1,17 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useProfilePositions, useFamilies } from "../api/hooks.ts";
+import { useProfilePositions } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
 import { formatAge, formatTimeLeft } from "../utils/format.ts";
 
 export function ProfilePositions() {
   const { profileId } = useParams<{ profileId: string }>();
-  const [familyId, setFamilyId] = useState("");
   const [status, setStatus] = useState("");
 
   const { data: positions, isLoading } = useProfilePositions(profileId, {
-    familyId: familyId || undefined,
     status: status || undefined,
   });
-  const { data: families } = useFamilies();
 
   return (
     <div className="page">
@@ -27,14 +24,6 @@ export function ProfilePositions() {
 
       <div className="filter-bar">
         <span style={{ color: "var(--text-muted)" }}>({positions?.length ?? 0})</span>
-        <select value={familyId} onChange={(e) => setFamilyId(e.target.value)}>
-          <option value="">All families</option>
-          {families?.map((f) => (
-            <option key={f.familyId} value={f.familyId}>
-              {f.familyKey}
-            </option>
-          ))}
-        </select>
         <select value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="">All statuses</option>
           <option value="open">Open</option>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useOrders, useFills, useFamilies } from "../api/hooks.ts";
+import { useOrders, useFills } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
@@ -33,21 +33,15 @@ const fillAccessors: Record<string, (f: FillDTO) => string | number | null> = {
 
 export function OrdersFills() {
   const [tab, setTab] = useState<"orders" | "fills">("orders");
-  const [familyId, setFamilyId] = useState("");
   const [orderStatus, setOrderStatus] = useState("");
   const [page, setPage] = useState(1);
   const orderSort = useSort();
   const fillSort = useSort();
 
-  const { data: families } = useFamilies();
   const orders = useOrders(
-    tab === "orders"
-      ? { status: orderStatus || undefined, familyId: familyId || undefined, limit: 50, page }
-      : {},
+    tab === "orders" ? { status: orderStatus || undefined, limit: 50, page } : {},
   );
-  const fills = useFills(
-    tab === "fills" ? { familyId: familyId || undefined, limit: 50, page } : {},
-  );
+  const fills = useFills(tab === "fills" ? { limit: 50, page } : {});
   const activeData = tab === "orders" ? orders.data : fills.data;
   const totalCount = activeData?.totalCount ?? 0;
   const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
@@ -79,20 +73,6 @@ export function OrdersFills() {
       </div>
 
       <div className="filter-bar">
-        <select
-          value={familyId}
-          onChange={(e) => {
-            setFamilyId(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">All families</option>
-          {families?.map((f) => (
-            <option key={f.familyId} value={f.familyId}>
-              {f.familyKey}
-            </option>
-          ))}
-        </select>
         {tab === "orders" && (
           <select
             value={orderStatus}

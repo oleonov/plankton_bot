@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { usePositions, useFamilies } from "../api/hooks.ts";
+import { usePositions } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
 import { Pagination } from "../components/Pagination.tsx";
@@ -20,7 +20,6 @@ function getPositionTotalPnl(position: {
 }
 
 export function Positions() {
-  const [familyId, setFamilyId] = useState("");
   const [dustOnly, setDustOnly] = useState(false);
   const [status, setStatus] = useState("");
   const [sort, setSort] = useState("");
@@ -31,7 +30,6 @@ export function Positions() {
   }, []);
 
   const { data, isLoading } = usePositions({
-    familyId: familyId || undefined,
     dust: dustOnly || undefined,
     status: status || undefined,
     sort: sort || undefined,
@@ -41,7 +39,6 @@ export function Positions() {
 
   const positions = data?.items;
   const totalCount = data?.totalCount ?? 0;
-  const { data: families } = useFamilies();
 
   const pageStart = totalCount > 0 ? (page - 1) * PAGE_SIZE + 1 : 0;
   const pageEnd = pageStart + (positions?.length ?? 0) - 1;
@@ -53,20 +50,6 @@ export function Positions() {
       <div className="filter-bar">
         <span style={{ fontWeight: 700 }}>Positions</span>
         <span style={{ color: "var(--text-muted)" }}>({totalCount})</span>
-        <select
-          value={familyId}
-          onChange={(e) => {
-            setFamilyId(e.target.value);
-            resetPagination();
-          }}
-        >
-          <option value="">All families</option>
-          {families?.map((f) => (
-            <option key={f.familyId} value={f.familyId}>
-              {f.familyKey}
-            </option>
-          ))}
-        </select>
         <select
           value={status}
           onChange={(e) => {

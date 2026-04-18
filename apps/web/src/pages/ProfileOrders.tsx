@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useProfileOrders, useFamilies } from "../api/hooks.ts";
+import { useProfileOrders } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
@@ -8,14 +8,11 @@ import { formatTimeLeft, formatTimestamp } from "../utils/format.ts";
 
 export function ProfileOrders() {
   const { profileId } = useParams<{ profileId: string }>();
-  const [familyId, setFamilyId] = useState("");
   const [orderStatus, setOrderStatus] = useState("");
   const [page, setPage] = useState(1);
 
-  const { data: families } = useFamilies();
   const orders = useProfileOrders(profileId, {
     status: orderStatus || undefined,
-    familyId: familyId || undefined,
     limit: 50,
     page,
   });
@@ -35,20 +32,6 @@ export function ProfileOrders() {
       </div>
 
       <div className="filter-bar">
-        <select
-          value={familyId}
-          onChange={(e) => {
-            setFamilyId(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">All families</option>
-          {families?.map((f) => (
-            <option key={f.familyId} value={f.familyId}>
-              {f.familyKey}
-            </option>
-          ))}
-        </select>
         <select
           value={orderStatus}
           onChange={(e) => {

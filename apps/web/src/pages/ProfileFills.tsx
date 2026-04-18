@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { useProfileFills, useFamilies } from "../api/hooks.ts";
+import { useProfileFills } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
@@ -8,11 +8,9 @@ import { formatTimestamp } from "../utils/format.ts";
 
 export function ProfileFills() {
   const { profileId } = useParams<{ profileId: string }>();
-  const [familyId, setFamilyId] = useState("");
   const [page, setPage] = useState(1);
 
-  const { data: families } = useFamilies();
-  const fills = useProfileFills(profileId, { familyId: familyId || undefined, limit: 50, page });
+  const fills = useProfileFills(profileId, { limit: 50, page });
   const totalCount = fills.data?.totalCount ?? 0;
   const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
   const pageEnd = pageStart + ((fills.data?.items.length ?? 0) - 1);
@@ -28,22 +26,7 @@ export function ProfileFills() {
         Fills — Profile {profileId?.slice(0, 12)}
       </div>
 
-      <div className="filter-bar">
-        <select
-          value={familyId}
-          onChange={(e) => {
-            setFamilyId(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">All families</option>
-          {families?.map((f) => (
-            <option key={f.familyId} value={f.familyId}>
-              {f.familyKey}
-            </option>
-          ))}
-        </select>
-      </div>
+      <div className="filter-bar" />
 
       <table>
         <thead>

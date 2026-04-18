@@ -109,71 +109,43 @@ describe("Overview Balance Card", () => {
     expect(screen.getByText(/\$0\.480 fees.*2\.00% leakage/)).toBeInTheDocument();
   });
 
-  it("shows canary watch summary for families with taker leakage", async () => {
-    server.use(
-      http.get("/api/v1/metrics/families", () =>
-        ok([
-          {
-            familyId: "fam-1",
-            familyKey: "bitcoin-above",
-            feeTier: "fee-enabled",
-            requiresPostOnlyForLive: true,
-            openValueUsdc: 12,
-            openPositionCount: 2,
-            tailAdjustedPnlLive: 1.5,
-            executionTelemetry24h: {
-              windowHours: 24,
-              totalFills: 4,
-              volumeUsdc: 18,
-              makerFills: 2,
-              takerFills: 2,
-              unknownFills: 0,
-              makerRatio: 0.5,
-              takerRatio: 0.5,
-              explicitFeesUsdc: 0.12,
-              feeLeakageRatio: 0.0066666667,
-              lastFillAt: new Date().toISOString(),
-            },
-            updatedAt: new Date().toISOString(),
-          },
-        ]),
-      ),
-    );
-
-    renderWithProviders(<Overview />);
-
-    expect(await screen.findByText(/Watch: bitcoin-above/i)).toBeInTheDocument();
-    expect(screen.getByText(/2 taker.*\$0\.120 fees/)).toBeInTheDocument();
-  });
-
-  it("uses live-lite allowlist length for enabled family count", async () => {
+  it("shows execution telemetry note in execution quality card when no fills", async () => {
     server.use(
       http.get("/api/v1/status", () =>
         ok({
           ...mockStatus,
-          runtimeMode: "live-lite",
-          activeFamilyCount: 422,
-          liveLite: {
-            maxOpenValueUsdc: 500,
-            maxFamilies: 100,
-            maxActiveMarkets: 10,
-            maxOrderUsdc: 25,
-            familyAllowlist: Array.from({ length: 12 }, (_, index) => `fam-${index}`),
+          executionTelemetry24h: {
+            ...mockStatus.executionTelemetry24h,
+            totalFills: 0,
           },
         }),
       ),
-      http.get("/api/v1/metrics/families", () => ok([])),
     );
 
     renderWithProviders(<Overview />);
 
-    const card = (await screen.findByText("Enabled Families")).closest(".card");
+    expect(await screen.findByText("Execution Quality")).toBeInTheDocument();
+    expect(screen.getByText("No fills in 24h")).toBeInTheDocument();
+  });
+
+  it("shows active market count in the selection-rules card", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          activeFamilyCount: 42,
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const card = (await screen.findByText("Active Markets")).closest(".card");
     if (!(card instanceof HTMLElement)) {
-      throw new Error("expected Enabled Families card");
+      throw new Error("expected Active Markets card");
     }
-    const familyCard: HTMLElement = card;
-    expect(within(familyCard).getByText("12")).toBeInTheDocument();
-    expect(within(familyCard).queryByText("422")).not.toBeInTheDocument();
+    expect(within(card).getByText("42")).toBeInTheDocument();
+    expect(within(card).getByText("View selection rules")).toBeInTheDocument();
   });
 
   it("shows last order placed by createdAt, not last status update", async () => {

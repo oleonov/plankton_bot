@@ -1,17 +1,14 @@
 import { useState } from "react";
-import { useFamilies, useRiskEvents } from "../api/hooks.ts";
+import { useRiskEvents } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { formatTimestamp } from "../utils/format.ts";
 
 export function RiskEvents() {
-  const { data: families } = useFamilies();
-  const [eventFamily, setEventFamily] = useState("");
   const [eventType, setEventType] = useState("");
   const [page, setPage] = useState(1);
 
   const { data: riskEvents } = useRiskEvents({
-    familyId: eventFamily || undefined,
     eventType: eventType || undefined,
     limit: 50,
     page,
@@ -27,20 +24,6 @@ export function RiskEvents() {
       {/* Recent Risk Events */}
       <div className="page-title">Recent Risk Events</div>
       <div className="filter-bar">
-        <select
-          value={eventFamily}
-          onChange={(e) => {
-            setEventFamily(e.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">All families</option>
-          {families?.map((f) => (
-            <option key={f.familyId} value={f.familyId}>
-              {f.familyKey}
-            </option>
-          ))}
-        </select>
         <select
           value={eventType}
           onChange={(e) => {

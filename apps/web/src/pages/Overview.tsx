@@ -1,6 +1,5 @@
 import { Link } from "react-router-dom";
-import type { FamilyMetric } from "../api/types.ts";
-import { useStatus, useMetrics, useMetricsFamilies, useFills, useOrders } from "../api/hooks.ts";
+import { useStatus, useMetrics, useFills, useOrders } from "../api/hooks.ts";
 import { PortfolioChart } from "../components/PortfolioChart.tsx";
 import { TradingActivityPanel } from "../components/TradingActivityPanel.tsx";
 import { formatAgo, formatUsd } from "../utils/format.ts";
@@ -41,39 +40,6 @@ function tradingStateLabel(state?: string): string {
     default:
       return "UNKNOWN";
   }
-}
-
-function getExecutionWatchFamilies(familyMetrics: FamilyMetric[]): FamilyMetric[] {
-  return familyMetrics
-    .filter((family) => {
-      const execution = family.executionTelemetry24h;
-      if (!execution || execution.totalFills === 0) return false;
-      return (
-        execution.takerFills > 0 ||
-        execution.unknownFills > 0 ||
-        (execution.feeLeakageRatio ?? 0) > 0
-      );
-    })
-    .sort((left, right) => {
-      const leftExecution = left.executionTelemetry24h;
-      const rightExecution = right.executionTelemetry24h;
-      const feeDelta =
-        (rightExecution?.explicitFeesUsdc ?? 0) - (leftExecution?.explicitFeesUsdc ?? 0);
-      if (feeDelta !== 0) return feeDelta;
-      const takerDelta = (rightExecution?.takerFills ?? 0) - (leftExecution?.takerFills ?? 0);
-      if (takerDelta !== 0) return takerDelta;
-      return left.familyKey.localeCompare(right.familyKey);
-    });
-}
-
-function formatExecutionWatch(metric: FamilyMetric): string {
-  const execution = metric.executionTelemetry24h;
-  if (!execution) return metric.familyKey;
-  const parts: string[] = [];
-  if (execution.takerFills > 0) parts.push(`${execution.takerFills} taker`);
-  if (execution.unknownFills > 0) parts.push(`${execution.unknownFills} unknown`);
-  if (execution.explicitFeesUsdc > 0) parts.push(`$${execution.explicitFeesUsdc.toFixed(3)} fees`);
-  return `${metric.familyKey} · ${parts.join(" · ")}`;
 }
 
 function formatExecutionRejects(rejects?: Record<string, number>): string | null {
@@ -124,20 +90,15 @@ function BalanceCard({ status }: { status: import("../api/types.ts").StatusData 
 export function Overview() {
   const { data: status } = useStatus();
   const { data: metrics } = useMetrics();
-  const { data: familyMetrics } = useMetricsFamilies();
   const { data: recentFills } = useFills({ limit: 1 });
   const { data: recentOrders } = useOrders({ limit: 1 });
 
   if (!status || !metrics) return <div className="page">Loading...</div>;
 
   const dustCount = metrics.positions.dust ?? 0;
-  const enabledFamilyCount =
-    status.liveLite?.familyAllowlist.length ?? familyMetrics?.length ?? status.activeFamilyCount;
   const activeCount = status.activeFamilyCount;
   const tailAdjPnl = metrics.totalRealizedPnl - status.totalTailCostUsdc;
   const execution = status.executionTelemetry24h;
-  const executionWatch = familyMetrics ? getExecutionWatchFamilies(familyMetrics) : [];
-  const topExecutionWatch = executionWatch[0];
   const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
   const leakagePct = execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
 
@@ -176,11 +137,13 @@ export function Overview() {
             </div>
           </div>
         </Link>
-        <Link to="/families" style={{ textDecoration: "none" }}>
+        <Link to="/selection-rules" style={{ textDecoration: "none" }}>
           <div className="card card-accent-purple" style={{ cursor: "pointer" }}>
-            <div className="label">Enabled Families</div>
-            <div className="value-lg text-purple">{enabledFamilyCount}</div>
-            <div className="value-sm">{activeCount} active</div>
+            <div className="label">Active Markets</div>
+            <div className="value-lg text-purple">{activeCount}</div>
+            <div className="value-sm">
+              <span style={{ fontSize: 11 }}>View selection rules</span>
+            </div>
           </div>
         </Link>
       </div>
@@ -200,7 +163,7 @@ export function Overview() {
             Live-Lite Envelope
           </div>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-            <span>Families: {status.liveLite.familyAllowlist.length}</span>
+            <span>Rules: {status.liveLite.familyAllowlist.length}</span>
             <span>Wallet: {(status.liveLite.walletMode ?? "eoa").toUpperCase()}</span>
             <span>
               Min order: $
@@ -279,15 +242,9 @@ export function Overview() {
           </div>
           <div
             className="value-sm"
-            style={{
-              color: topExecutionWatch ? "var(--orange)" : "var(--text-dim)",
-            }}
+            style={{ color: "var(--text-dim)" }}
           >
-            {familyMetrics == null
-              ? "Loading family telemetry"
-              : topExecutionWatch
-                ? `Watch: ${formatExecutionWatch(topExecutionWatch)}${executionWatch.length > 1 ? ` · +${executionWatch.length - 1} more` : ""}`
-                : "All families clean in 24h"}
+            {execution && execution.totalFills > 0 ? "Execution telemetry available" : "No recent fills"}
           </div>
         </div>
       </div>
@@ -446,7 +403,7 @@ export function Overview() {
             </div>
             <div>
               <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text-dim)" }}>
-                {enabledFamilyCount}
+                {status.activeFamilyCount}
               </div>
               <div className="value-sm">enabled</div>
             </div>
