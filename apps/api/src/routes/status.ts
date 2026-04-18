@@ -18,7 +18,6 @@ interface StatusOpts {
 const startedAt = Date.now();
 
 interface LiveLiteStatus {
-  familyAllowlist: string[];
   maxFamilies: number;
   maxOpenValueUsdc: number;
   maxOrderUsdc: number;
@@ -282,15 +281,7 @@ function buildLiveLiteStatus(
           }
         | undefined;
       const envelope = parseEnvelopeJson(settingsRow?.envelope_json);
-      const deploymentRows = controlDb
-        .prepare(
-          "SELECT family_id FROM family_deployments WHERE profile = ? AND enabled = 1 ORDER BY family_id ASC",
-        )
-        .all(runtimeMode) as Array<{ family_id: string }>;
-
-      const familyAllowlist = deploymentRows.map((row) => row.family_id);
       const liveLiteStatus: LiveLiteStatus = {
-        familyAllowlist,
         maxFamilies: resolveLiveLiteMaxFamilies(envelope),
         maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
         maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
@@ -346,17 +337,19 @@ export function buildStatusSnapshot(
     .prepare("SELECT COUNT(*) as cnt FROM positions WHERE opened_at >= ?")
     .get(oneMinuteAgoIso) as { cnt: number };
 
+  // Count of unique condition IDs with an open or dust position (replaces family_runtime_state)
   const activeFamilies = db
     .prepare(
-      "SELECT COUNT(*) as cnt FROM family_runtime_state WHERE open_position_count > 0 OR open_value_usdc > 0 OR active_market_count > 0",
+      "SELECT COUNT(DISTINCT condition_id) as cnt FROM positions WHERE status IN ('open','dust')",
     )
     .get() as { cnt: number };
 
+  // Open exposure from positions; tail cost is no longer tracked in a summary table
   const totalExposure = db
     .prepare(
-      "SELECT COALESCE(SUM(open_value_usdc),0) as total, COALESCE(SUM(current_tail_cost_usdc),0) as tail FROM family_runtime_state",
+      "SELECT COALESCE(SUM(current_value_usdc),0) as total FROM positions WHERE status = 'open'",
     )
-    .get() as { total: number; tail: number };
+    .get() as { total: number };
 
   // Runtime mode from the latest bot run
   const botRun = db
@@ -575,7 +568,7 @@ export function buildStatusSnapshot(
     ordersPlacedLastMin: recentOrderCount.cnt,
     positionsOpenedLastMin: recentPositionCount.cnt,
     totalOpenValueUsdc: totalExposure.total,
-    totalTailCostUsdc: totalExposure.tail,
+    totalTailCostUsdc: 0,
     initialBalanceUsdc,
     balanceUsdc,
     walletBalanceUsdc,

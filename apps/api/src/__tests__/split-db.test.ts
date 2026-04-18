@@ -53,31 +53,16 @@ beforeAll(async () => {
   const cdb = controlConn.db;
   const ldb = ledgerConn.db;
 
-  // Control: family catalog + rules + evidence
+  // Control: profiles + runtime state
   cdb.exec(`
-    INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
-    VALUES ('fam-1', 'test-family', 'politics', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-
-    INSERT INTO family_rules (family_id, max_open_value_usdc, max_active_markets, max_dust_positions)
-    VALUES ('fam-1', 50, 5, 3);
-
-    INSERT INTO family_evidence (family_id) VALUES ('fam-1');
-
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation');
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
     INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused)
     VALUES (1, 'simulation', 'simulation', 'running', 0);
-
-    INSERT INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
-    VALUES ('fam-1', 'simulation', 1, 999, datetime('now'), datetime('now'));
   `);
 
   // Ledger: runtime state, positions, orders, bot_runs, metrics, markets
   ldb.exec(`
-    INSERT INTO family_runtime_state (family_id, open_value_usdc, open_position_count, open_dust_count,
-      active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-    VALUES ('fam-1', 50.0, 2, 0, 3, 10.0, 5.0, '2026-03-14T00:00:00Z');
-
     INSERT INTO bot_runs (run_id, mode, started_at)
     VALUES ('run-1', 'simulation', '2026-03-14T00:00:00Z');
 
@@ -122,7 +107,7 @@ function auth() {
 }
 
 describe("API against real split schemas", () => {
-  it("GET /status succeeds (ledger: runtime_metrics, family_runtime_state, bot_runs)", async () => {
+  it("GET /status succeeds (ledger: runtime_metrics, positions, bot_runs)", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: auth() });
     expect(res.statusCode).toBe(200);
     const body = res.json();
@@ -136,13 +121,6 @@ describe("API against real split schemas", () => {
       INSERT OR REPLACE INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live Lite');
       INSERT OR REPLACE INTO profile_settings (profile_id, envelope_json, wallet_mode, min_order_usdc)
       VALUES ('live-lite', '{"maxFamilies":100,"maxOpenValueUsdc":500,"maxOrderUsdc":25,"maxActiveMarkets":10}', 'relayer', 1);
-
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
-      VALUES ('fam-1', 'live-lite', 1, 999, datetime('now'), datetime('now'));
-      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
-      VALUES ('fam-disabled-live', 'disabled-live-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
-      VALUES ('fam-disabled-live', 'live-lite', 0, 999, datetime('now'), datetime('now'));
 
       UPDATE runtime_control_state
       SET current_profile = 'live-lite', desired_profile = 'live-lite', updated_at = datetime('now')
@@ -164,7 +142,6 @@ describe("API against real split schemas", () => {
       expect(body.ok).toBe(true);
       expect(body.data.runtimeMode).toBe("live-lite");
       expect(body.data.liveLite).toEqual({
-        familyAllowlist: ["fam-1"],
         maxFamilies: 100,
         maxOpenValueUsdc: 500,
         maxOrderUsdc: 25,
@@ -177,8 +154,6 @@ describe("API against real split schemas", () => {
         UPDATE runtime_control_state
         SET current_profile = 'simulation', desired_profile = 'simulation', updated_at = datetime('now')
         WHERE id = 1;
-        DELETE FROM family_deployments WHERE profile = 'live-lite';
-        DELETE FROM family_catalog WHERE family_id = 'fam-disabled-live';
         DELETE FROM profile_settings WHERE profile_id = 'live-lite';
         DELETE FROM profiles WHERE profile_id = 'live-lite';
       `);
@@ -235,9 +210,10 @@ describe("API against real split schemas", () => {
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES ('runtime_paused', 0, NULL, '2026-03-15T00:00:00Z');
 
-      INSERT INTO family_runtime_state (family_id, open_value_usdc, open_position_count,
-        open_dust_count, active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-      VALUES ('fam-1', 100.0, 5, 1, 4, 20.0, 10.0, '2026-03-15T00:00:00Z');
+      INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price,
+        cost_basis_usdc, current_value_usdc, realized_pnl, status, opened_at, updated_at)
+      VALUES ('pos-paper-1', 'tok-paper-1', 'cond-paper-1', 'buy', 200, 0.5, 80, 100.0, 0, 'open',
+        '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z');
     `);
 
     // Update control.db to point to paper as current profile
@@ -286,14 +262,11 @@ describe("API against real split schemas", () => {
     const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));
     paperConn.db.exec(`
       INSERT INTO bot_runs (run_id, mode, started_at) VALUES ('run-paper-sse', 'paper', '2026-03-15T00:00:00Z');
-      INSERT INTO family_runtime_state (family_id, open_value_usdc, open_position_count,
-        open_dust_count, active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-      VALUES ('fam-sse', 200.0, 3, 0, 2, 5.0, 15.0, '2026-03-15T00:00:00Z');
       INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
       VALUES ('tok-sse', 'cond-sse', 'test-sse', 'SSE test?', 'Yes', 1, 0.01, 0, '2026-04-01T00:00:00Z', '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z');
-      INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
+      INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc,
         current_value_usdc, realized_pnl, status, opened_at, updated_at)
-      VALUES ('pos-sse', 'tok-sse', 'buy', 50, 0.4, 20, 25, 0, 'open', '2026-03-15T00:00:00Z', '2026-03-15T01:00:00Z');
+      VALUES ('pos-sse', 'tok-sse', 'cond-sse', 'buy', 50, 0.4, 20, 200.0, 0, 'open', '2026-03-15T00:00:00Z', '2026-03-15T01:00:00Z');
     `);
 
     // Switch to paper

@@ -20,16 +20,10 @@ function createFakeDb(runtimeMetrics: Record<string, Record<string, unknown>>): 
         get: () => {
           if (sql.includes("FROM orders WHERE status IN")) return { cnt: 0 };
           if (sql.includes("FROM orders WHERE created_at >=")) return { cnt: 0 };
-          if (sql.includes("FROM positions WHERE status = 'open'")) return { cnt: 0 };
+          if (sql.includes("COUNT(DISTINCT condition_id)")) return { cnt: 0 };
+          if (sql.includes("COUNT(*) as cnt FROM positions WHERE status = 'open'")) return { cnt: 0 };
           if (sql.includes("FROM positions WHERE opened_at >=")) return { cnt: 0 };
-          if (
-            sql.includes(
-              "FROM family_runtime_state WHERE open_position_count > 0 OR open_value_usdc > 0 OR active_market_count > 0",
-            )
-          ) {
-            return { cnt: 0 };
-          }
-          if (sql.includes("SUM(open_value_usdc)")) return { total: 0, tail: 0 };
+          if (sql.includes("SUM(current_value_usdc)")) return { total: 0 };
           if (sql.includes("FROM bot_runs ORDER BY started_at DESC LIMIT 1")) {
             return { run_id: "run-1", mode: "simulation" };
           }
@@ -44,7 +38,6 @@ function createFakeDb(runtimeMetrics: Record<string, Record<string, unknown>>): 
           if (sql.includes("metric_name = 'reconciliation_clean'")) return undefined;
           if (sql.includes("metric_name = 'market_data_poll_progress'")) return undefined;
           if (sql.includes("SUM(realized_pnl)")) return { total: 0 };
-          if (sql.includes("SUM(current_value_usdc)")) return { total: 0 };
           if (sql.includes("metric_name = 'execution_queue'")) return undefined;
           if (sql.includes("metric_name = 'risk_event_volume'")) return undefined;
           if (sql.includes("metric_name = 'user_order_stream_activity'")) return undefined;

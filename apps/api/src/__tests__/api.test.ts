@@ -76,10 +76,6 @@ beforeAll(async () => {
     INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
     VALUES ('fam-1', 'test-family', 'politics', 'standard', 'medium', 'daily', 'v1');
 
-    INSERT INTO family_runtime_state (family_id, open_value_usdc, open_position_count, open_dust_count,
-      active_market_count, current_tail_cost_usdc, tail_adjusted_pnl_live, updated_at)
-    VALUES ('fam-1', 50.0, 2, 0, 3, 10.0, 5.0, '2026-03-14T00:00:00Z');
-
     INSERT INTO family_rules (family_id, max_open_value_usdc, max_active_markets, max_dust_positions)
     VALUES ('fam-1', 50, 5, 3);
 
