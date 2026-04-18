@@ -454,14 +454,13 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
 
   const remainingLots = db
     .prepare(
-      `SELECT position_id, family_id, remaining_size, entry_price, created_at
+      `SELECT position_id, remaining_size, entry_price, created_at
        FROM inventory_lots
        WHERE token_id = ? AND remaining_size > 0
        ORDER BY created_at ASC`,
     )
     .all(tokenId) as Array<{
     position_id: string;
-    family_id: string;
     remaining_size: number;
     entry_price: number;
     created_at: string;
@@ -498,13 +497,11 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
   const entryStyle = activeRow?.entry_style ?? null;
   const openedAt = activeRow?.opened_at ?? remainingLots[0]!.created_at;
   const status = resolveOpenPositionStatus(totalCost);
-  const familyId = remainingLots[0]!.family_id;
   const now = new Date().toISOString();
 
   db.prepare(
     `UPDATE positions
-     SET family_id = ?,
-         side = 'buy',
+     SET side = 'buy',
          size = ?,
          avg_entry_price = ?,
          cost_basis_usdc = ?,
@@ -517,7 +514,6 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
          updated_at = ?
      WHERE position_id = ?`,
   ).run(
-    familyId,
     totalSize,
     avgEntryPrice,
     totalCost,
