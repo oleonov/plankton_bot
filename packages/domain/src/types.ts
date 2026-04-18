@@ -7,7 +7,6 @@ import type {
   ClientOrderId,
   LotId,
   BotRunId,
-  ScorecardId,
   SwitchId,
   ReportId,
   ImportId,
@@ -15,7 +14,6 @@ import type {
 import type {
   Regime,
   WalletMode,
-  EvidenceStatus,
   OrderSide,
   OrderType,
   OrderStatus,
@@ -329,26 +327,6 @@ export interface ProfileSettings {
   minOrderUsdc?: number | null;
   relayerJson?: string | null;
   updatedAt: string;
-}
-
-export interface ValidationScorecard {
-  scorecardId: ScorecardId;
-  profile: ProfileId;
-  evidenceStatus: EvidenceStatus;
-  evidenceScore: number;
-  recurrenceScore: number | null;
-  recycleScore: number | null;
-  liveViabilityScore: number | null;
-  toxicityPenalty: number | null;
-  tradeCount: number;
-  marketCount: number;
-  realizedPnl: number;
-  tailAdjustedPnl: number;
-  bothSidedEligible: boolean;
-  heavyCampaignEligible: boolean;
-  activeWindowEdgeScore: number | null;
-  summaryJson: string | null;
-  validatedAt: string;
 }
 
 export interface ProfileSummary {

@@ -26,7 +26,6 @@ import type {
   PreflightReport,
   ServiceHeartbeat,
   ConfigImport,
-  ValidationScorecard,
   AlgoDecisionRule,
   AlgoSizeRule,
   LegState,
@@ -291,12 +290,6 @@ export interface ProfileRepository {
 export interface ProfileSettingsRepository {
   get(profileId: ProfileId): ProfileSettings | null;
   save(settings: ProfileSettings): void;
-}
-
-// ─── ValidationScorecardRepository ──────────────────────────────────────
-
-export interface ValidationScorecardRepository {
-  save(scorecard: ValidationScorecard): void;
 }
 
 // ─── ProfileSummaryRepository ───────────────────────────────────────────
