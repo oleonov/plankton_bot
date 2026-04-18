@@ -460,16 +460,15 @@ export class ResolutionModule implements RuntimeModule {
             this.deps.db
               .prepare(
                 `INSERT OR IGNORE INTO settlement_ledger
-                   (settlement_id, condition_id, position_id, token_id, family_id,
+                   (settlement_id, condition_id, position_id, token_id,
                     resolution, settlement_price, size, delta, settled_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
               )
               .run(
                 settlementId,
                 mr.conditionId,
                 String(pos.positionId),
                 String(market.tokenId),
-                null,
                 resolution,
                 settlementPrice,
                 remainingSize,

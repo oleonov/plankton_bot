@@ -48,8 +48,8 @@ export class InventoryHandler {
     db: Database.Database,
   ) {
     this.pnlLedgerInsert = db.prepare(
-      `INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
+       VALUES (?, ?, ?, ?)`,
     );
   }
 
@@ -186,7 +186,6 @@ export class InventoryHandler {
     this.pnlLedgerInsert.run(
       fill.fillId,
       existing.positionId,
-      null,
       sellRealizedPnl,
       new Date(fill.timestamp).toISOString(),
     );

@@ -40,15 +40,15 @@ export class PositionSettler {
     this.db = db;
     this.settlementInsert = db.prepare(
       `INSERT INTO settlement_ledger
-         (settlement_id, condition_id, position_id, token_id, family_id,
+         (settlement_id, condition_id, position_id, token_id,
           resolution, settlement_price, size, delta, settled_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     this.settlementInsertOrIgnore = db.prepare(
       `INSERT OR IGNORE INTO settlement_ledger
-         (settlement_id, condition_id, position_id, token_id, family_id,
+         (settlement_id, condition_id, position_id, token_id,
           resolution, settlement_price, size, delta, settled_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -88,7 +88,6 @@ export class PositionSettler {
             conditionId,
             String(position.positionId),
             String(market.tokenId),
-            null,
             ALGO_REDEEM_RESOLUTION,
             ALGO_REDEEM_SETTLEMENT_PRICE,
             position.size,
@@ -165,7 +164,6 @@ export class PositionSettler {
       resolution.conditionId,
       String(position.positionId),
       String(candidate.tokenId),
-      null,
       resolution.resolution,
       settlementPrice,
       position.size,
