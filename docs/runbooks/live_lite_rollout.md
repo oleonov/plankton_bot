@@ -26,7 +26,7 @@
 
 ## First Hour
 
-- [ ] Positions match expectations (size, direction, family)
+- [ ] Positions match expectations (size, direction, event slug within include rules)
 - [ ] No reconciliation drift detected
 - [ ] Caps not exceeded
 - [ ] No unexpected ERROR-level log entries

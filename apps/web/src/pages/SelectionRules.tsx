@@ -213,9 +213,7 @@ function CreateForm({ profileId }: CreateFormProps) {
         {create.isPending ? "Adding…" : "Add Rule"}
       </button>
       {create.isError && (
-        <span style={{ color: "var(--red)", fontSize: 12 }}>
-          {(create.error as Error).message}
-        </span>
+        <span style={{ color: "var(--red)", fontSize: 12 }}>{create.error.message}</span>
       )}
     </form>
   );
@@ -268,7 +266,7 @@ function PreviewPanel({ profileId }: PreviewPanelProps) {
           )}
           {preview.isError && (
             <div style={{ color: "var(--red)", fontSize: 12 }}>
-              Failed to load preview: {(preview.error as Error).message}
+              Failed to load preview: {preview.error.message}
             </div>
           )}
           {preview.data && (
@@ -418,9 +416,7 @@ function MatchDebugger({ profileId }: MatchDebuggerProps) {
         <div style={{ marginTop: 12, fontSize: 12 }}>
           {match.isLoading && <span style={{ color: "var(--text-dim)" }}>Checking…</span>}
           {match.isError && (
-            <span style={{ color: "var(--red)" }}>
-              Error: {(match.error as Error).message}
-            </span>
+            <span style={{ color: "var(--red)" }}>Error: {match.error.message}</span>
           )}
           {match.data && (
             <div data-testid="match-result" style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
@@ -470,7 +466,7 @@ export function SelectionRules() {
       <div className="page">
         <div className="page-title">Selection Rules</div>
         <div data-testid="error-state" style={{ color: "var(--red)", fontSize: 13 }}>
-          Failed to load: {(error as Error).message}
+          Failed to load: {error.message}
         </div>
       </div>
     );

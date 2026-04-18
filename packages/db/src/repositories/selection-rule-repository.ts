@@ -97,7 +97,7 @@ export class SelectionRuleRepository {
       if (info.changes > 0) this.bumpVersion();
       return info.changes > 0;
     });
-    return tx() as boolean;
+    return tx();
   }
 
   list(profileId: string): SelectionRule[] {

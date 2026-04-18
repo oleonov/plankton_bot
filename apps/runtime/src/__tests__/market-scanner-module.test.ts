@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { SelectionRuleEngine, createTokenId } from "@plankton/domain";
 import type {
   SelectionRule,
@@ -109,7 +109,7 @@ const silentLog = {
   debug: vi.fn(),
   fatal: vi.fn(),
   child: () => silentLog,
-} as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+} as any;  
 
 function createMockBus(): EventBus {
   return {
@@ -161,10 +161,8 @@ function buildModule(
   orderRepo: ReturnType<typeof createMockOrderRepo>;
 } {
   const discoveryGateway = opts.discoveryGateway ?? createMockDiscoveryGateway();
-  const marketRepo = (opts.marketRepo ?? createMockMarketRepo()) as ReturnType<
-    typeof createMockMarketRepo
-  >;
-  const bus = (opts.bus ?? createMockBus()) as ReturnType<typeof createMockBus>;
+  const marketRepo = (opts.marketRepo ?? createMockMarketRepo());
+  const bus = (opts.bus ?? createMockBus());
   const positionRepo = opts.positionRepo ?? createMockPositionRepo();
   const orderRepo = opts.orderRepo ?? createMockOrderRepo();
   const selectionRuleEngine = opts.selectionRuleEngine ?? SEEDED_ENGINE;

@@ -6,7 +6,6 @@ import { loadFamilyRulesYaml } from "../loader.js";
 // Resolve paths relative to this test file → packages/config/src/__tests__/
 const PKG_ROOT = path.resolve(import.meta.dirname, "../..");
 const MONOREPO_ROOT = path.resolve(PKG_ROOT, "../..");
-const TEMPLATE_PATH = path.join(MONOREPO_ROOT, "docs/family_rules_template_v1.yaml");
 const REAL_RULES_PATH = path.join(MONOREPO_ROOT, "config/family_rules.yaml");
 const TMP_DIR = path.join(PKG_ROOT, ".test-tmp");
 
@@ -26,18 +25,6 @@ function cleanup(): void {
 }
 
 describe("loadFamilyRulesYaml", () => {
-  it("loads the template YAML successfully", () => {
-    const result = loadFamilyRulesYaml(TEMPLATE_PATH);
-    expect(result.families).toHaveLength(1);
-
-    const family = result.families[0]!;
-    expect(family.identity.familyId).toBe("bitcoin-above:threshold:daily");
-    expect(family.identity.familyKey).toBe("bitcoin-above");
-    expect(family.identity.primaryCategory).toBe("crypto-btc");
-    expect(family.identity.regime).toBe("threshold");
-    expect(family.identity.strategyProfile).toBe("scalp");
-  });
-
   it("keeps production tail caps aligned with live policy", () => {
     const result = loadFamilyRulesYaml(REAL_RULES_PATH);
     const byId = new Map(result.families.map((family) => [family.identity.familyId, family]));
@@ -86,54 +73,6 @@ describe("loadFamilyRulesYaml", () => {
       tailQuarantineThresholdUsdc: 1000,
       tailQuarantineThresholdRatio: 1000,
     });
-  });
-
-  it("transforms snake_case to camelCase", () => {
-    const result = loadFamilyRulesYaml(TEMPLATE_PATH);
-    const family = result.families[0]!;
-
-    // Evidence layer
-    expect(family.evidence.evidenceStatus).toBe("confirmed");
-    expect(family.evidence.localTradeCount).toBe(2283);
-    expect(family.evidence.openTailCostUsdc).toBe(0.0);
-    expect(family.evidence.tailAdjustedPnl).toBe(698.51);
-    expect(family.evidence.bothSidedEligible).toBe(false);
-    expect(family.evidence.heavyCampaignEligible).toBe(true);
-
-    // Rules layer
-    expect(family.rules.universe.sessionMode).toBe("active-window");
-    expect(family.rules.entry.entryMode).toBe("probe-first");
-    expect(family.rules.entry.maxInitialNotionalUsdc).toBe(5.0);
-    expect(family.rules.scaleIn.defaultMaxBuysPerLeg).toBe(3);
-    expect(family.rules.exit.primaryProfitModel).toBe("sell-into-strength");
-    expect(family.rules.twoSided.allowTwoSided).toBe(false);
-    expect(family.rules.throughput).toEqual({
-      maxConcurrentOrdersPerFamily: null,
-      maxProbeInFlightPerToken: null,
-      maxEntrySignalsPerTickPerFamily: null,
-      fastLaneEnabled: null,
-      dustLaneEnabled: null,
-      queueJumpCanaryEnabled: null,
-    });
-    expect(family.rules.tailSuppression.maxOpenValueUsdc).toBe(75.0);
-    expect(family.rules.session.activeWindowsUtc).toEqual([{ start: "14:00", end: "21:00" }]);
-  });
-
-  it("injects familyId into identity, evidence, and rules", () => {
-    const result = loadFamilyRulesYaml(TEMPLATE_PATH);
-    const family = result.families[0]!;
-    const expectedId = "bitcoin-above:threshold:daily";
-
-    expect(family.identity.familyId).toBe(expectedId);
-    expect(family.evidence.familyId).toBe(expectedId);
-    expect(family.rules.familyId).toBe(expectedId);
-  });
-
-  it("strips runtimeState from v2 import schema", () => {
-    const result = loadFamilyRulesYaml(TEMPLATE_PATH);
-    const family = result.families[0]!;
-    // V2 schema strips runtime_state — it comes from DB, not YAML
-    expect(family.runtimeState).toBeUndefined();
   });
 
   it("loads multi-family YAML format", () => {

@@ -58,26 +58,16 @@ The code now expects:
 
 Do not use `live`. Use `live-lite`.
 
-### One important note about `config/family_rules.yaml`
+### Trading rules at startup
 
-For the first smoke run, the family rules file only needs to be schema-valid.
+There is no YAML config for trading rules. Two DB-backed rule sets cover everything the old `family_rules.yaml` used to express:
 
-The minimal valid contents are:
+- **Selection rules** (`control.db` → `selection_rules`): which event slugs the scanner admits. Seeded at first boot via migration 037 with `bitcoin-`, `ethereum-`, `elon-musk-` prefixes per profile.
+- **Algo rules** (`control.db` → `algo_rules`): decision / size / redeem logic. Seeded with canonical 06-spec defaults at first boot.
 
-```yaml
-version: 1
-families: []
-```
+Both rule sets are editable via the web UI (`/selection-rules`) or REST API; runtime hot-reloads on every mutation. See `docs/runbooks/selection_rules_operations.md` for details.
 
-This is enough to boot the platform and verify runtime/API/UI wiring.
-
-For real `paper` and `live-lite` runs, replace it with actual family rules or adapt:
-
-- `docs/family_rules_template_v1.yaml`
-
-> The template uses multi-family format. To set a custom starting balance for simulation/paper
-> mode, edit `global.initial_balance_usdc` in `config/family_rules.yaml`. Default is $10,000.
-> This field is ignored in live-lite mode (real Polymarket balance is used).
+To set a custom simulation/paper starting balance, use the `INITIAL_BALANCE_USDC` env var (default `10000`). This field is ignored in live-lite mode (real Polymarket balance is used).
 
 ## Recommended Files To Create
 
@@ -108,8 +98,7 @@ Use this for the first smoke run.
 RUNTIME_MODE=simulation
 LOG_LEVEL=info
 DB_PATH=./apps/runtime/data/plankton-sim.db
-FAMILY_RULES_PATH=./config/family_rules.yaml
-# Starting balance is configured in family_rules.yaml under global.initial_balance_usdc (not in env)
+INITIAL_BALANCE_USDC=10000
 PLANKTON_API_KEY=replace-with-a-long-random-string
 PLANKTON_API_PORT=3100
 ```
@@ -122,8 +111,7 @@ Use this only after the first smoke run is understood.
 RUNTIME_MODE=paper
 LOG_LEVEL=info
 DB_PATH=./apps/runtime/data/plankton-paper.db
-FAMILY_RULES_PATH=./config/family_rules.yaml
-# Starting balance is configured in family_rules.yaml under global.initial_balance_usdc (not in env)
+INITIAL_BALANCE_USDC=10000
 PLANKTON_API_KEY=replace-with-a-long-random-string
 PLANKTON_API_PORT=3100
 
@@ -140,7 +128,6 @@ Use this only after paper sign-off is clean.
 RUNTIME_MODE=live-lite
 LOG_LEVEL=info
 DB_PATH=./apps/runtime/data/plankton-live-lite.db
-FAMILY_RULES_PATH=./config/family_rules.yaml
 PLANKTON_API_KEY=replace-with-a-long-random-string
 PLANKTON_API_PORT=3100
 
@@ -149,8 +136,6 @@ POLY_API_SECRET=replace
 POLY_PASSPHRASE=replace
 
 LIVE_LITE_CONFIRM=true
-LIVE_LITE_FAMILY_ALLOWLIST=fam-xxx
-LIVE_LITE_MAX_FAMILIES=1
 LIVE_LITE_MAX_OPEN_VALUE_USDC=50
 LIVE_LITE_MAX_ORDER_USDC=10
 LIVE_LITE_MAX_ACTIVE_MARKETS=2
@@ -158,11 +143,10 @@ LIVE_LITE_MAX_ACTIVE_MARKETS=2
 
 ### Budget for simulation / paper mode
 
-The simulated starting balance is set in `config/family_rules.yaml`:
+The simulated starting balance is set via `INITIAL_BALANCE_USDC` in `.env`:
 
-```yaml
-global:
-  initial_balance_usdc: 100.00 # match your planned live-lite deposit
+```env
+INITIAL_BALANCE_USDC=100
 ```
 
 When the balance runs out, new buy orders are rejected with `INSUFFICIENT_BALANCE`. Sells return funds to the balance, so the bot can recycle capital. The balance resets on every restart. This field is ignored in live-lite mode (real Polymarket balance is used).
@@ -355,7 +339,7 @@ Run for at least 2 hours.
 Main pages:
 
 - `Overview`
-- `Families`
+- `Selection Rules`
 - `Risk`
 - `Orders/Fills`
 
@@ -365,7 +349,7 @@ Main questions:
 - are signals approved/rejected as expected?
 - are simulated orders created?
 - are simulated fills processed?
-- are positions and family states updating?
+- are positions updating coherently?
 - is reconciliation clean?
 - are there any unexpected ERROR-level logs?
 
@@ -401,8 +385,8 @@ curl -s -H "Authorization: Bearer $API_KEY" \
   > snapshots/${SESSION}-metrics-${TS}.json
 
 curl -s -H "Authorization: Bearer $API_KEY" \
-  http://localhost:3100/api/v1/families \
-  > snapshots/${SESSION}-families-${TS}.json
+  "http://localhost:3100/api/v1/selection-rules?profileId=paper" \
+  > snapshots/${SESSION}-selection-rules-${TS}.json
 
 curl -s -H "Authorization: Bearer $API_KEY" \
   "http://localhost:3100/api/v1/orders?limit=50" \
@@ -426,7 +410,7 @@ Do not move to `live-lite` if any of these happen:
 - market data remains stale for more than 5 minutes
 - active reconciliation drift
 - no signals after 30 minutes
-- obviously impossible position or family state
+- obviously impossible positions or selection-status drift
 - repeated unexpected ERROR-level log entries
 
 ### What counts as success in paper mode
@@ -436,7 +420,7 @@ Paper sign-off is good enough to move forward when:
 - signals are flowing
 - simulated orders/fills are appearing
 - positions update coherently
-- family states update coherently
+- selection rules admit/exclude markets as configured
 - reconciliation stays clean
 - no unresolved stale-data or drift problems persist
 
@@ -448,7 +432,7 @@ After the 2-hour paper run, bring back:
 - API log file
 - latest `/api/v1/status`
 - latest `/api/v1/metrics`
-- latest `/api/v1/families`
+- latest `/api/v1/selection-rules?profileId=paper`
 - latest `/api/v1/orders?limit=50`
 - latest `/api/v1/fills?limit=100`
 - latest `/api/v1/risk-events`
@@ -476,7 +460,7 @@ Use:
 The purpose of preflight is to verify:
 
 - real credentials are present
-- allowlist is defined
+- selection rules are seeded for the live-lite profile
 - caps are defined
 - current DB state does not violate the live-lite envelope
 - runtime either starts cleanly or starts paused with clear violations
@@ -485,8 +469,7 @@ The purpose of preflight is to verify:
 
 Use the narrow session-1 envelope:
 
-- `LIVE_LITE_FAMILY_ALLOWLIST=fam-xxx`
-- `LIVE_LITE_MAX_FAMILIES=1`
+- selection rules for `live-lite` profile restricted to one prefix (e.g. `bitcoin-`)
 - `LIVE_LITE_MAX_OPEN_VALUE_USDC=50`
 - `LIVE_LITE_MAX_ORDER_USDC=10`
 - `LIVE_LITE_MAX_ACTIVE_MARKETS=2`
@@ -515,7 +498,7 @@ On the UI:
 
 Operationally:
 
-- no orders or fills outside allowlist
+- no orders or fills on event slugs that don't match any include rule
 - no unexpected order rejections after resume
 - pause actually stops new placements
 
@@ -526,7 +509,7 @@ Pause and stop the session if any of these happen:
 - active reconciliation drift
 - market data stale for more than 2 minutes
 - unexpected fills
-- orders or fills outside allowlist
+- orders or fills on excluded event slugs
 - caps exceeded
 - unexpected order rejection after resume
 - runtime crash or unhandled exception
@@ -535,7 +518,7 @@ Pause and stop the session if any of these happen:
 
 1. press `Pause` in the UI
 2. verify no new orders appear
-3. quarantine a family if needed
+3. disable the offending selection rule if a narrow fix is enough
 4. stop runtime
 5. save logs and snapshots
 

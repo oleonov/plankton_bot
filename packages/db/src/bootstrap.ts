@@ -1,11 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import {
-  ProfileId,
-  PROBE_DEFAULTS,
-  resolveFamilyDeploymentSeed,
-  resolveFamilyLiveTradingPolicy,
-} from "@plankton/domain";
+import { PROBE_DEFAULTS, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 
 import { ensureControlProfiles } from "./control-profiles.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
@@ -298,40 +293,6 @@ function backfillFamilyLimitUnification(db: import("better-sqlite3").Database): 
     if (msg.includes("no such table")) return;
     throw err;
   }
-}
-
-/**
- * Repair family_deployments: ensure every (family_id, profile) pair exists.
- * Handles both fully missing families AND partially filled ones (e.g. interrupted bootstrap).
- * Idempotent — INSERT OR IGNORE skips existing rows. Wrapped in transaction for atomicity.
- */
-function backfillDeployments(db: import("better-sqlite3").Database): void {
-  if (!hasTable(db, "family_catalog")) return;
-
-  const families = db.prepare("SELECT family_id, source_type FROM family_catalog").all() as {
-    family_id: string;
-    source_type: string | null;
-  }[];
-
-  if (families.length === 0) return;
-
-  const insert = db.prepare(
-    `INSERT OR IGNORE INTO family_deployments
-       (family_id, profile, enabled, priority, created_at, updated_at)
-     VALUES (?, ?, ?, 999, datetime('now'), datetime('now'))`,
-  );
-
-  db.transaction(() => {
-    for (const { family_id, source_type } of families) {
-      for (const profile of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
-        const seed = resolveFamilyDeploymentSeed({
-          profile,
-          sourceType: source_type,
-        });
-        insert.run(family_id, profile, seed.enabled ? 1 : 0);
-      }
-    }
-  })();
 }
 
 function backfillLiveProfileSettings(db: import("better-sqlite3").Database): void {

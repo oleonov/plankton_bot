@@ -10,11 +10,7 @@ import { http, HttpResponse } from "msw";
 import { server } from "../../test/server.ts";
 import { renderWithProviders } from "../../test/test-utils.tsx";
 import { SelectionRules } from "../../pages/SelectionRules.tsx";
-import {
-  mockSelectionRules,
-  mockPreviewBuckets,
-  mockEventSlugs,
-} from "../../test/handlers.ts";
+import { mockSelectionRules } from "../../test/handlers.ts";
 
 function ok<T>(data: T) {
   return HttpResponse.json({ ok: true, data, error: null, ts: new Date().toISOString() });
@@ -418,8 +414,8 @@ describe("SelectionRules page", () => {
       });
 
       const datalist = document.getElementById("event-slugs-list");
-      const optionValues = Array.from(datalist?.querySelectorAll("option") ?? []).map((o) =>
-        (o as HTMLOptionElement).value,
+      const optionValues = Array.from(datalist?.querySelectorAll("option") ?? []).map(
+        (o) => o.value,
       );
       expect(optionValues).toContain("bitcoin-price-2026");
     });

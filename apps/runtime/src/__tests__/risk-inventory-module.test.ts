@@ -18,7 +18,6 @@ import type {
   Order,
   Signal,
   ClientOrderId,
-  NormalizedMarket,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
@@ -45,41 +44,6 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     ...overrides,
   };
 }
-
-function makeNormalizedMarket(
-  tokenId: ReturnType<typeof createTokenId>,
-  minOrderSize: number,
-): NormalizedMarket {
-  return {
-    tokenId,
-    conditionId: `cond-${String(tokenId)}`,
-    slug: `market-${String(tokenId)}`,
-    eventSlug: null,
-    question: "Test market?",
-    outcome: "YES",
-    outcomeIndex: 0,
-    regime: "threshold" as any,
-    horizon: "short",
-    endDate: null,
-    active: true,
-    tradable: true,
-    tickSize: 0.01,
-    negRisk: false,
-    bestBid: 0.19,
-    bestAsk: 0.21,
-    midPrice: 0.2,
-    spread: 0.02,
-    lastTradePrice: null,
-    lastTradeAt: null,
-    volume24h: null,
-    liquidity: null,
-    eventMarketCount: 1,
-    minOrderSize,
-    bookSource: "clob",
-    snapshotTs: Date.now(),
-  };
-}
-
 
 function createMockPositionRepo(position?: Position | Position[] | null): PositionRepository {
   const positions = Array.isArray(position) ? position : position ? [position] : [];
