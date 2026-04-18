@@ -17,7 +17,7 @@ export const auditRoutes: FastifyPluginAsync<AuditOpts> = async (app, opts) => {
       page,
       type,
       profile,
-      familyId,
+      entityId,
     } = request.query as Record<string, string | undefined>;
     const lim = Math.min(Number(limit) || 50, 200);
     const pageNum = Math.max(Number(page) || 1, 1);
@@ -38,9 +38,9 @@ export const auditRoutes: FastifyPluginAsync<AuditOpts> = async (app, opts) => {
       where += " AND t.profile = ?";
       params.push(profile);
     }
-    if (familyId) {
+    if (entityId) {
       where += " AND t.entity_id = ?";
-      params.push(familyId);
+      params.push(entityId);
     }
 
     const totalCount = (
