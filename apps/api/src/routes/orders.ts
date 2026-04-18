@@ -17,7 +17,6 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     orderId: row.order_id,
     clientOrderId: row.client_order_id,
     tokenId: row.token_id,
-    familyId: row.family_id,
     side: row.side,
     orderType: row.order_type,
     postOnly: row.post_only === 1,
@@ -39,7 +38,6 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
 
 interface OrderQuery {
   status?: string;
-  family_id?: string;
   limit?: string;
   cursor?: string;
   page?: string;
@@ -48,7 +46,7 @@ interface OrderQuery {
 export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
   app.get<{ Querystring: OrderQuery }>("/orders", async (request) => {
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
-    const { status, family_id, cursor } = request.query;
+    const { status, cursor } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
     const page = Math.max(Number(request.query.page) || 1, 1);
     const pageRequested = request.query.page != null;
@@ -60,11 +58,6 @@ export const orderRoutes: FastifyPluginAsync<OrderOpts> = async (app, opts) => {
       const statuses = status.split(",").map((s) => s.trim());
       conditions.push(`status IN (${statuses.map(() => "?").join(",")})`);
       params.push(...statuses);
-    }
-
-    if (family_id) {
-      conditions.push("family_id = ?");
-      params.push(family_id);
     }
 
     if (!pageRequested && cursor) {

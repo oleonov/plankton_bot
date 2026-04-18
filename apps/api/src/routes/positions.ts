@@ -17,7 +17,6 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta, resInfo?: 
   return {
     positionId: row.position_id,
     tokenId: row.token_id,
-    familyId: row.family_id,
     side: row.side,
     size: row.size,
     avgEntryPrice: row.avg_entry_price,
@@ -40,7 +39,6 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta, resInfo?: 
 }
 
 interface PositionQuery {
-  family_id?: string;
   dust?: string;
   status?: string;
   sort?: string;
@@ -52,18 +50,13 @@ interface PositionQuery {
 export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts) => {
   app.get<{ Querystring: PositionQuery }>("/positions", async (request) => {
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
-    const { family_id, dust, status, sort, cursor } = request.query;
+    const { dust, status, sort, cursor } = request.query;
     const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
     const page = Math.max(Number(request.query.page) || 1, 1);
     const pageRequested = request.query.page != null;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
-
-    if (family_id) {
-      conditions.push("family_id = ?");
-      params.push(family_id);
-    }
 
     if (dust === "true") {
       conditions.push("status = 'dust'");
@@ -102,10 +95,6 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     // Count without cursor/page filter
     const countConds: string[] = [];
     const countPrms: unknown[] = [];
-    if (family_id) {
-      countConds.push("family_id = ?");
-      countPrms.push(family_id);
-    }
     if (dust === "true") {
       countConds.push("status = 'dust'");
     } else if (status) {

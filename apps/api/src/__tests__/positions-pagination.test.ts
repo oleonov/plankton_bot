@@ -53,9 +53,9 @@ beforeAll(async () => {
   ];
   for (const s of seeds) {
     db.prepare(
-      `INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price,
+      `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price,
         cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
-       VALUES (?, ?, 'fam-1', 'buy', 10, 0.1, ?, 0, 'open', ?, ?)`,
+       VALUES (?, ?, 'buy', 10, 0.1, ?, 0, 'open', ?, ?)`,
     ).run(s.id, s.tok, s.cost, s.ts, s.ts);
   }
 

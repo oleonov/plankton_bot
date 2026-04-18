@@ -83,32 +83,32 @@ beforeAll(async () => {
     INSERT INTO family_rules (family_id, max_open_value_usdc, max_active_markets, max_dust_positions)
     VALUES ('fam-1', 50, 5, 3);
 
-    INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+    INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
       current_value_usdc, realized_pnl, status, opened_at, updated_at)
-    VALUES ('pos-1', 'tok-1', 'fam-1', 'buy', 100, 0.5, 50, 60, 0, 'open', '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z');
+    VALUES ('pos-1', 'tok-1', 'buy', 100, 0.5, 50, 60, 0, 'open', '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z');
 
-    INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+    INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
       current_value_usdc, realized_pnl, status, opened_at, updated_at)
-    VALUES ('pos-dust', 'tok-2', 'fam-1', 'buy', 1, 0.02, 0.02, 0.01, 0, 'dust', '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z');
+    VALUES ('pos-dust', 'tok-2', 'buy', 1, 0.02, 0.02, 0.01, 0, 'dust', '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z');
 
-    INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc,
+    INSERT INTO orders (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc,
       status, exchange_order_id, bot_run_id, created_at, updated_at)
-    VALUES ('ord-1', 'plk_abc', 'tok-1', 'fam-1', 'buy', 'GTC', 0.5, 100, 50, 'open', 'ex-1', 'run-1',
+    VALUES ('ord-1', 'plk_abc', 'tok-1', 'buy', 'GTC', 0.5, 100, 50, 'open', 'ex-1', 'run-1',
       '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
 
-    INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc,
+    INSERT INTO orders (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc,
       status, exchange_order_id, bot_run_id, created_at, updated_at)
-    VALUES ('ord-2', 'plk_def', 'tok-1', 'fam-1', 'sell', 'GTC', 0.6, 50, 30, 'filled', 'ex-2', 'run-1',
+    VALUES ('ord-2', 'plk_def', 'tok-1', 'sell', 'GTC', 0.6, 50, 30, 'filled', 'ex-2', 'run-1',
       '2026-03-14T01:00:00Z', '2026-03-14T01:00:00Z');
 
-    INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at, reconciled)
-    VALUES ('fill-1', 'ord-1', 'tok-1', 'fam-1', 'buy', 0.5, 100, 50, 0.01, '2026-03-14T00:00:00Z', 0);
+    INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, fee, filled_at, reconciled)
+    VALUES ('fill-1', 'ord-1', 'tok-1', 'buy', 0.5, 100, 50, 0.01, '2026-03-14T00:00:00Z', 0);
 
     INSERT INTO bot_runs (run_id, mode, started_at)
     VALUES ('run-1', 'simulation', '2026-03-14T00:00:00Z');
 
-    INSERT INTO markets (token_id, condition_id, slug, question, outcome, family_id, family_key, active, tick_size, neg_risk, end_date, created_at, updated_at)
-    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 'fam-1', 'test-family', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
+    INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
+    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
 
     INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
     VALUES ('market_data_source', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
@@ -238,19 +238,19 @@ describe("GET /status", () => {
     const older = new Date(Date.now() - 120_000).toISOString();
 
     conn.db.exec(`
-      INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc,
+      INSERT INTO orders (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc,
         status, exchange_order_id, bot_run_id, created_at, updated_at)
       VALUES
-        ('ord-last-min', 'plk_last_min', 'tok-1', 'fam-1', 'buy', 'GTC', 0.4, 10, 4, 'filled', 'ex-last-min', 'run-1',
+        ('ord-last-min', 'plk_last_min', 'tok-1', 'buy', 'GTC', 0.4, 10, 4, 'filled', 'ex-last-min', 'run-1',
           '${now}', '${now}'),
-        ('ord-old', 'plk_old', 'tok-1', 'fam-1', 'buy', 'GTC', 0.4, 10, 4, 'filled', 'ex-old', 'run-1',
+        ('ord-old', 'plk_old', 'tok-1', 'buy', 'GTC', 0.4, 10, 4, 'filled', 'ex-old', 'run-1',
           '${older}', '${older}');
 
-      INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+      INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
         current_value_usdc, realized_pnl, status, opened_at, updated_at)
       VALUES
-        ('pos-last-min', 'tok-3', 'fam-1', 'buy', 10, 0.4, 4, 4, 0, 'open', '${now}', '${now}'),
-        ('pos-old', 'tok-4', 'fam-1', 'buy', 10, 0.4, 4, 4, 0, 'open', '${older}', '${older}');
+        ('pos-last-min', 'tok-3', 'buy', 10, 0.4, 4, 4, 0, 'open', '${now}', '${now}'),
+        ('pos-old', 'tok-4', 'buy', 10, 0.4, 4, 4, 0, 'open', '${older}', '${older}');
     `);
 
     const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
@@ -458,11 +458,11 @@ describe("GET /status", () => {
     const now = new Date().toISOString();
     try {
       conn.db.exec(`
-        INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
-        VALUES ('fill-maker-24h', 'ord-1', 'tok-1', 'fam-1', 'buy', 0.5, 20, 10, 'maker', 0, '${now}', 0);
+        INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
+        VALUES ('fill-maker-24h', 'ord-1', 'tok-1', 'buy', 0.5, 20, 10, 'maker', 0, '${now}', 0);
 
-        INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
-        VALUES ('fill-taker-24h', 'ord-2', 'tok-1', 'fam-1', 'sell', 0.5, 10, 5, 'taker', 0.25, '${now}', 0);
+        INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
+        VALUES ('fill-taker-24h', 'ord-2', 'tok-1', 'sell', 0.5, 10, 5, 'taker', 0.25, '${now}', 0);
       `);
 
       const res = await app.inject({
@@ -664,139 +664,6 @@ describe("GET /status", () => {
   });
 });
 
-// ─── Families ───────────────────────────────────────────────────────
-
-describe("families", () => {
-  it("GET /families returns list with state", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families",
-      headers: authHeaders(),
-    });
-    const body = json(res);
-    expect(body.ok).toBe(true);
-    expect(body.data.meta.scope).toBe("all");
-    expect(body.data.items).toHaveLength(1);
-    expect(body.data.items[0].familyId).toBe("fam-1");
-    expect(body.data.items[0].state).toBeDefined();
-  });
-
-  it("GET /families includes caps from family_rules", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families",
-      headers: authHeaders(),
-    });
-    const body = json(res);
-    expect(body.data.items[0].caps).toEqual({
-      maxOpenValueUsdc: 50,
-      maxActiveMarkets: 5,
-      maxDustPositions: 3,
-    });
-  });
-
-  it("GET /families includes per-family execution telemetry for recent fills", async () => {
-    const now = new Date().toISOString();
-    try {
-      conn.db.exec(`
-        INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
-        VALUES ('fill-family-maker-24h', 'ord-1', 'tok-1', 'fam-1', 'buy', 0.5, 20, 10, 'maker', 0, '${now}', 0);
-      `);
-
-      const res = await app.inject({
-        method: "GET",
-        url: "/api/v1/families",
-        headers: authHeaders(),
-      });
-      const body = json(res);
-      expect(body.data.items[0].executionTelemetry24h.totalFills).toBe(1);
-      expect(body.data.items[0].executionTelemetry24h.makerFills).toBe(1);
-      expect(body.data.items[0].executionTelemetry24h.explicitFeesUsdc).toBe(0);
-    } finally {
-      conn.db.exec("DELETE FROM fills WHERE fill_id = 'fill-family-maker-24h'");
-    }
-  });
-
-  it("GET /families includes derived liveness", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families",
-      headers: authHeaders(),
-    });
-    const body = json(res);
-    expect(body.ok).toBe(true);
-    expect(body.data.items[0].liveness).toBe("active");
-  });
-
-  it("GET /families/:id returns detail", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families/fam-1",
-      headers: authHeaders(),
-    });
-    expect(json(res).data.familyId).toBe("fam-1");
-    expect(json(res).data.executionTelemetry24h).toBeDefined();
-    expect(json(res).data.liveness).toBe("active");
-  });
-
-  it("GET /families/:id returns 404 with error object", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families/no-such",
-      headers: authHeaders(),
-    });
-    expect(res.statusCode).toBe(404);
-    const body = json(res);
-    expect(body.ok).toBe(false);
-    expect(body.error.code).toBe("FAMILY_NOT_FOUND");
-  });
-
-  it("GET /families/:id/positions returns positions", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families/fam-1/positions",
-      headers: authHeaders(),
-    });
-    const body = json(res);
-    expect(body.ok).toBe(true);
-    expect(body.data.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it("GET /families/:id/orders returns orders", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families/fam-1/orders",
-      headers: authHeaders(),
-    });
-    expect(json(res).data.length).toBeGreaterThanOrEqual(1);
-  });
-
-  it("GET /families?scope=profile falls back to scope=all on monolithic DB", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families?scope=profile",
-      headers: authHeaders(),
-    });
-    const body = json(res);
-    expect(res.statusCode).toBe(200);
-    expect(body.ok).toBe(true);
-    expect(body.data.meta.scope).toBe("all");
-    expect(body.data.meta.profile).toBeNull();
-    expect(body.data.items).toHaveLength(1);
-  });
-
-  it("GET /families/:id returns deployment=null on monolithic DB", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families/fam-1",
-      headers: authHeaders(),
-    });
-    const body = json(res);
-    expect(res.statusCode).toBe(200);
-    expect(body.data.deployment).toBeNull();
-  });
-});
-
 // ─── Positions with filters ─────────────────────────────────────────
 
 describe("positions", () => {
@@ -811,15 +678,6 @@ describe("positions", () => {
     expect(body.data.items.length).toBe(2); // open + dust (only 2 seeded)
     expect(body.data.totalCount).toBe(2);
     expect(body.data.nextCursor).toBeNull(); // no more pages
-  });
-
-  it("GET /positions?family_id= filters by family", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/positions?family_id=fam-1",
-      headers: authHeaders(),
-    });
-    expect(json(res).data.items.length).toBe(2);
   });
 
   it("GET /positions?dust=true returns only dust positions", async () => {
@@ -846,9 +704,9 @@ describe("positions", () => {
 
   it("GET /positions default sort stays stable when only updated_at changes", async () => {
     conn.db.exec(`
-      INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+      INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
         current_value_usdc, realized_pnl, status, opened_at, updated_at)
-      VALUES ('pos-stable-order', 'tok-stable', 'fam-1', 'buy', 10, 0.1, 1, 1, 0, 'open',
+      VALUES ('pos-stable-order', 'tok-stable', 'buy', 10, 0.1, 1, 1, 0, 'open',
         '2026-03-13T00:00:00Z', '2026-03-20T00:00:00Z');
     `);
 
@@ -927,15 +785,6 @@ describe("orders", () => {
     expect(items[0].status).toBe("open");
   });
 
-  it("GET /orders?family_id= filters by family", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/orders?family_id=fam-1",
-      headers: authHeaders(),
-    });
-    expect(json(res).data.items.length).toBe(2);
-  });
-
   it("GET /orders/:id returns single order", async () => {
     const res = await app.inject({
       method: "GET",
@@ -960,15 +809,6 @@ describe("fills", () => {
     expect(body.data.items.length).toBeGreaterThanOrEqual(1);
     expect(body.data.items[0].explicitFeeUsdc).toBe(0.01);
     expect(body.data.items[0].liquidityRole).toBe("unknown");
-  });
-
-  it("GET /fills?family_id= filters by family", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/fills?family_id=fam-1",
-      headers: authHeaders(),
-    });
-    expect(json(res).data.items.length).toBe(1);
   });
 
   it("GET /fills?since= filters by date", async () => {
@@ -1083,30 +923,6 @@ describe("metrics", () => {
     expect(body.data.fills.takerCount).toBeDefined();
   });
 
-  it("GET /metrics/families returns per-family metrics", async () => {
-    const fillId = "fill-family-metrics-24h";
-    conn.db.exec(`
-      INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, liquidity_role, fee, filled_at, reconciled)
-      VALUES ('${fillId}', 'ord-2', 'tok-1', 'fam-1', 'sell', 0.55, 20, 11, 'taker', 0.12, '${new Date().toISOString()}', 0);
-    `);
-
-    try {
-      const res = await app.inject({
-        method: "GET",
-        url: "/api/v1/metrics/families",
-        headers: authHeaders(),
-      });
-      const body = json(res);
-      expect(body.data).toHaveLength(1);
-      expect(body.data[0].familyId).toBe("fam-1");
-      expect(body.data[0].familyKey).toBe("test-family");
-      expect(body.data[0].executionTelemetry24h.totalFills).toBe(1);
-      expect(body.data[0].executionTelemetry24h.takerFills).toBe(1);
-      expect(body.data[0].executionTelemetry24h.explicitFeesUsdc).toBe(0.12);
-    } finally {
-      conn.db.prepare("DELETE FROM fills WHERE fill_id = ?").run(fillId);
-    }
-  });
 });
 
 // ─── Operator actions ───────────────────────────────────────────────
@@ -1143,49 +959,6 @@ describe("operator actions", () => {
     expect(json(res).ok).toBe(true);
   });
 
-  it("POST /actions/family/:id/disable validates family exists", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/family/no-such/disable",
-      headers: { ...authHeaders(), "content-type": "application/json" },
-      payload: {},
-    });
-    expect(res.statusCode).toBe(404);
-  });
-
-  it("POST /actions/family/:id/disable inserts command for valid family", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/family/fam-1/disable",
-      headers: { ...authHeaders(), "content-type": "application/json" },
-      payload: { reason: "risk concern" },
-    });
-    const body = json(res);
-    expect(body.ok).toBe(true);
-
-    const row = conn.db
-      .prepare("SELECT * FROM operator_commands WHERE id = ?")
-      .get(body.data.commandId) as Record<string, unknown>;
-    expect(row.action).toBe("family_disable");
-    expect(row.target_id).toBe("fam-1");
-    expect(row.initiator).toBe("api_key");
-  });
-
-  it("POST /actions/family/:id/enable works", async () => {
-    const res = await app.inject({
-      method: "POST",
-      url: "/api/v1/actions/family/fam-1/enable",
-      headers: { ...authHeaders(), "content-type": "application/json" },
-      payload: {},
-    });
-    const body = json(res);
-    expect(body.ok).toBe(true);
-
-    const row = conn.db
-      .prepare("SELECT * FROM operator_commands WHERE id = ?")
-      .get(body.data.commandId) as Record<string, unknown>;
-    expect(row.action).toBe("family_enable");
-  });
 });
 
 // ─── Response envelope ──────────────────────────────────────────────
@@ -1219,8 +992,8 @@ describe("response envelope", () => {
 describe("GET /risk-events", () => {
   it("returns normalized risk events with summary and severity", async () => {
     conn.db.exec(`
-      INSERT INTO risk_events (event_type, family_id, payload, created_at)
-      VALUES ('family_quarantined', 'fam-1', '{"reason":"max exposure"}', '2026-03-14T10:00:00Z')
+      INSERT INTO risk_events (event_type, payload, created_at)
+      VALUES ('family_quarantined', '{"reason":"max exposure"}', '2026-03-14T10:00:00Z')
     `);
 
     const res = await app.inject({
@@ -1258,18 +1031,6 @@ describe("GET /risk-events", () => {
     }
   });
 
-  it("filters by family_id", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/risk-events?family_id=fam-1",
-      headers: authHeaders(),
-    });
-    const items = json(res).data.items;
-    for (const item of items) {
-      expect(item.familyId).toBe("fam-1");
-    }
-  });
-
   it("filters by event_type", async () => {
     const res = await app.inject({
       method: "GET",
@@ -1284,8 +1045,8 @@ describe("GET /risk-events", () => {
 
   it("normalizes signal_rejected events", async () => {
     conn.db.exec(`
-      INSERT INTO risk_events (event_type, family_id, payload, created_at)
-      VALUES ('signal_rejected', 'fam-1', '{"reasonCode":"max_dust_positions","rawReason":"dust 3 >= max 2"}', '2026-03-22T12:00:00Z')
+      INSERT INTO risk_events (event_type, payload, created_at)
+      VALUES ('signal_rejected', '{"reasonCode":"max_dust_positions","rawReason":"dust 3 >= max 2"}', '2026-03-22T12:00:00Z')
     `);
 
     const res = await app.inject({
@@ -1300,8 +1061,8 @@ describe("GET /risk-events", () => {
 
   it("normalizes family_reduce_only events", async () => {
     conn.db.exec(`
-      INSERT INTO risk_events (event_type, family_id, payload, created_at)
-      VALUES ('family_reduce_only', 'fam-1', '{"reason":"operator command"}', '2026-03-22T12:00:00Z')
+      INSERT INTO risk_events (event_type, payload, created_at)
+      VALUES ('family_reduce_only', '{"reason":"operator command"}', '2026-03-22T12:00:00Z')
     `);
 
     const res = await app.inject({
@@ -1316,10 +1077,9 @@ describe("GET /risk-events", () => {
 
   it("normalizes system family demotion events with previous state", async () => {
     conn.db.exec(`
-      INSERT INTO risk_events (event_type, family_id, payload, created_at)
+      INSERT INTO risk_events (event_type, payload, created_at)
       VALUES (
         'family_reduce_only',
-        'fam-1',
         '{"reason":"Auto-demotion: execution canary breach","source":"system","previousState":"scaled","newState":"reduce-only"}',
         '2026-03-22T12:00:01Z'
       )
@@ -1337,8 +1097,8 @@ describe("GET /risk-events", () => {
 
   it("normalizes family_activated events", async () => {
     conn.db.exec(`
-      INSERT INTO risk_events (event_type, family_id, payload, created_at)
-      VALUES ('family_activated', 'fam-1', '{"reason":"resumed"}', '2026-03-22T12:00:00Z')
+      INSERT INTO risk_events (event_type, payload, created_at)
+      VALUES ('family_activated', '{"reason":"resumed"}', '2026-03-22T12:00:00Z')
     `);
 
     const res = await app.inject({
@@ -1353,8 +1113,8 @@ describe("GET /risk-events", () => {
 
   it("normalizes reconciliation_drift with details (plural, not detail)", async () => {
     conn.db.exec(`
-      INSERT INTO risk_events (event_type, family_id, payload, created_at)
-      VALUES ('reconciliation_drift', NULL, '{"details":"phantom order detected","severity":"warn"}', '2026-03-22T13:00:00Z')
+      INSERT INTO risk_events (event_type, payload, created_at)
+      VALUES ('reconciliation_drift', '{"details":"phantom order detected","severity":"warn"}', '2026-03-22T13:00:00Z')
     `);
 
     const res = await app.inject({
@@ -1387,10 +1147,10 @@ describe("GET /metrics/pnl-series", () => {
     conn.db.exec(`
       DELETE FROM pnl_ledger;
       DELETE FROM fills WHERE fill_id LIKE 'f-%';
-      INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at, reconciled)
-      VALUES ('f-baseline', 'ord-1', 'tok-1', 'fam-1', 'sell', 0.6, 10, 6, 0.01, '${new Date().toISOString()}', 0);
-      INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at)
-      VALUES ('f-baseline', 'pos-1', 'fam-1', 5.0, '${new Date().toISOString()}')
+      INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, fee, filled_at, reconciled)
+      VALUES ('f-baseline', 'ord-1', 'tok-1', 'sell', 0.6, 10, 6, 0.01, '${new Date().toISOString()}', 0);
+      INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
+      VALUES ('f-baseline', 'pos-1', 5.0, '${new Date().toISOString()}')
     `);
 
     const res = await app.inject({
@@ -1426,17 +1186,17 @@ describe("GET /metrics/pnl-series", () => {
     const d2Date = day2.toISOString().slice(0, 10);
 
     conn.db.exec(`
-      INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at, reconciled)
+      INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, fee, filled_at, reconciled)
       VALUES
-        ('f-1', 'ord-1', 'tok-1', 'fam-1', 'sell', 0.6, 10, 6, 0.01, '${d1Morning}', 0),
-        ('f-2', 'ord-1', 'tok-1', 'fam-1', 'sell', 0.6, 10, 6, 0.01, '${d1Afternoon}', 0),
-        ('f-3', 'ord-1', 'tok-1', 'fam-1', 'sell', 0.6, 10, 6, 0.01, '${d2Morning}', 0);
+        ('f-1', 'ord-1', 'tok-1', 'sell', 0.6, 10, 6, 0.01, '${d1Morning}', 0),
+        ('f-2', 'ord-1', 'tok-1', 'sell', 0.6, 10, 6, 0.01, '${d1Afternoon}', 0),
+        ('f-3', 'ord-1', 'tok-1', 'sell', 0.6, 10, 6, 0.01, '${d2Morning}', 0);
 
-      INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at)
+      INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
       VALUES
-        ('f-1', 'pos-1', 'fam-1', 10.5, '${d1Morning}'),
-        ('f-2', 'pos-1', 'fam-1', -3.2, '${d1Afternoon}'),
-        ('f-3', 'pos-1', 'fam-1', 5.0,  '${d2Morning}')
+        ('f-1', 'pos-1', 10.5, '${d1Morning}'),
+        ('f-2', 'pos-1', -3.2, '${d1Afternoon}'),
+        ('f-3', 'pos-1', 5.0,  '${d2Morning}')
     `);
 
     const res = await app.inject({

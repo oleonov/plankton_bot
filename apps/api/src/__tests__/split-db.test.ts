@@ -86,20 +86,20 @@ beforeAll(async () => {
     INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
     VALUES ('execution_mode', 1, '{"value":"simulation"}', '2026-03-14T00:00:00Z');
 
-    INSERT INTO markets (token_id, condition_id, slug, question, outcome, family_id, family_key, active, tick_size, neg_risk, end_date, created_at, updated_at)
-    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 'fam-1', 'test-family', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
+    INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
+    VALUES ('tok-1', 'cond-1', 'will-btc-hit-100k', 'Will BTC hit 100k?', 'Yes', 1, 0.01, 0, '2026-04-15T00:00:00Z', '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
 
-    INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+    INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
       current_value_usdc, realized_pnl, status, opened_at, updated_at)
-    VALUES ('pos-1', 'tok-1', 'fam-1', 'buy', 100, 0.5, 50, 60, 0, 'open', '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z');
+    VALUES ('pos-1', 'tok-1', 'buy', 100, 0.5, 50, 60, 0, 'open', '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z');
 
-    INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc,
+    INSERT INTO orders (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc,
       status, exchange_order_id, bot_run_id, created_at, updated_at)
-    VALUES ('ord-1', 'plk_abc', 'tok-1', 'fam-1', 'buy', 'GTC', 0.5, 100, 50, 'open', 'ex-1', 'run-1',
+    VALUES ('ord-1', 'plk_abc', 'tok-1', 'buy', 'GTC', 0.5, 100, 50, 'open', 'ex-1', 'run-1',
       '2026-03-14T00:00:00Z', '2026-03-14T00:00:00Z');
 
-    INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at, reconciled)
-    VALUES ('fill-1', 'ord-1', 'tok-1', 'fam-1', 'buy', 0.5, 100, 50, 0.01, '2026-03-14T00:00:00Z', 0);
+    INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, fee, filled_at, reconciled)
+    VALUES ('fill-1', 'ord-1', 'tok-1', 'buy', 0.5, 100, 50, 0.01, '2026-03-14T00:00:00Z', 0);
   `);
 
   app = await buildServer({
@@ -189,98 +189,6 @@ describe("API against real split schemas", () => {
     }
   });
 
-  it("GET /families succeeds (control: catalog + rules + evidence; ledger: positions, orders)", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/v1/families", headers: auth() });
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-    expect(body.ok).toBe(true);
-    expect(body.data.items.length).toBeGreaterThanOrEqual(1);
-    expect(body.data.items[0].familyId).toBe("fam-1");
-    expect(body.data.items[0].executionTelemetry24h).toBeDefined();
-    expect(body.data.items[0].liveness).toBe("active");
-  });
-
-  it("GET /families returns uniform wrapper with items and meta", async () => {
-    const res = await app.inject({ method: "GET", url: "/api/v1/families", headers: auth() });
-    const body = res.json();
-    expect(body.ok).toBe(true);
-    expect(body.data.items).toBeDefined();
-    expect(body.data.meta).toBeDefined();
-    expect(body.data.meta.scope).toBe("all");
-    expect(body.data.items.length).toBeGreaterThanOrEqual(1);
-    expect(body.data.items[0].deployment).not.toBeNull();
-  });
-
-  it("GET /families?scope=profile filters to enabled=1 families for current profile", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families?scope=profile",
-      headers: auth(),
-    });
-    const body = res.json();
-    expect(body.ok).toBe(true);
-    expect(body.data.meta.scope).toBe("profile");
-    expect(body.data.meta.profile).toBe("simulation");
-    expect(body.data.meta.totalCatalogCount).toBeGreaterThanOrEqual(1);
-    expect(body.data.items).toHaveLength(body.data.meta.totalCatalogCount);
-    expect(body.data.items[0].deployment).toEqual({
-      enabled: true,
-      priority: 999,
-    });
-  });
-
-  it("GET /families?scope=profile excludes disabled families", async () => {
-    controlConn.db.exec(`
-      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
-      VALUES ('fam-disabled', 'disabled-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
-      VALUES ('fam-disabled', 'simulation', 0, 999, datetime('now'), datetime('now'));
-    `);
-    try {
-      const res = await app.inject({
-        method: "GET",
-        url: "/api/v1/families?scope=profile",
-        headers: auth(),
-      });
-      const body = res.json();
-      const ids = body.data.items.map((f: any) => f.familyId);
-      expect(ids).not.toContain("fam-disabled");
-      expect(body.data.meta.totalCatalogCount).toBeGreaterThan(body.data.items.length);
-    } finally {
-      controlConn.db.exec(`
-        DELETE FROM family_deployments WHERE family_id = 'fam-disabled';
-        DELETE FROM family_catalog WHERE family_id = 'fam-disabled';
-      `);
-    }
-  });
-
-  it("GET /families/:id includes deployment metadata for current profile", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families/fam-1",
-      headers: auth(),
-    });
-    const body = res.json();
-    expect(body.ok).toBe(true);
-    expect(body.data.deployment).toEqual({
-      enabled: true,
-      priority: 999,
-    });
-    expect(body.data.liveness).toBe("active");
-  });
-
-  it("GET /families/:id/positions succeeds (ledger: positions)", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/families/fam-1/positions",
-      headers: auth(),
-    });
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-    expect(body.ok).toBe(true);
-    expect(body.data.length).toBeGreaterThanOrEqual(1);
-  });
-
   it("GET /positions succeeds (ledger-only)", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/positions", headers: auth() });
     expect(res.statusCode).toBe(200);
@@ -305,21 +213,6 @@ describe("API against real split schemas", () => {
     const body = res.json();
     expect(body.data.fills.explicitFeesUsdc).toBe(0.01);
     expect(body.data.fills.unknownCount).toBe(1);
-  });
-
-  it("GET /metrics/families includes family metadata and execution telemetry", async () => {
-    const res = await app.inject({
-      method: "GET",
-      url: "/api/v1/metrics/families",
-      headers: auth(),
-    });
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-    expect(body.ok).toBe(true);
-    expect(body.data[0].familyId).toBe("fam-1");
-    expect(body.data[0].familyKey).toBe("test-family");
-    expect(body.data[0].executionTelemetry24h).toBeDefined();
-    expect(body.data[0].executionTelemetry24h.windowHours).toBe(24);
   });
 
   it("POST /actions/pause succeeds (control-only)", async () => {
@@ -388,35 +281,6 @@ describe("API against real split schemas", () => {
       .run();
   });
 
-  it("GET /families?scope=all includes disabled family with deployment.enabled=false", async () => {
-    controlConn.db.exec(`
-      INSERT OR IGNORE INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type)
-      VALUES ('fam-disabled-all', 'disabled-all-family', 'crypto', 'threshold', 'daily', 'daily-dated', 'standard', 'yaml_import');
-      INSERT OR REPLACE INTO family_deployments (family_id, profile, enabled, priority, created_at, updated_at)
-      VALUES ('fam-disabled-all', 'simulation', 0, 999, datetime('now'), datetime('now'));
-    `);
-
-    try {
-      const res = await app.inject({
-        method: "GET",
-        url: "/api/v1/families?scope=all",
-        headers: auth(),
-      });
-      const body = res.json();
-      const disabled = body.data.items.find((f: any) => f.familyId === "fam-disabled-all");
-      expect(disabled).toBeDefined();
-      expect(disabled.deployment).toEqual({
-        enabled: false,
-        priority: 999,
-      });
-    } finally {
-      controlConn.db.exec(`
-        DELETE FROM family_deployments WHERE family_id = 'fam-disabled-all';
-        DELETE FROM family_catalog WHERE family_id = 'fam-disabled-all';
-      `);
-    }
-  });
-
   it("SSE /events reads from active profile's ledger after switch", async () => {
     // Create a paper ledger with a distinct position
     const paperConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-paper.db"));
@@ -427,9 +291,9 @@ describe("API against real split schemas", () => {
       VALUES ('fam-sse', 200.0, 3, 0, 2, 5.0, 15.0, '2026-03-15T00:00:00Z');
       INSERT INTO markets (token_id, condition_id, slug, question, outcome, active, tick_size, neg_risk, end_date, created_at, updated_at)
       VALUES ('tok-sse', 'cond-sse', 'test-sse', 'SSE test?', 'Yes', 1, 0.01, 0, '2026-04-01T00:00:00Z', '2026-03-15T00:00:00Z', '2026-03-15T00:00:00Z');
-      INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc,
+      INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
         current_value_usdc, realized_pnl, status, opened_at, updated_at)
-      VALUES ('pos-sse', 'tok-sse', 'fam-sse', 'buy', 50, 0.4, 20, 25, 0, 'open', '2026-03-15T00:00:00Z', '2026-03-15T01:00:00Z');
+      VALUES ('pos-sse', 'tok-sse', 'buy', 50, 0.4, 20, 25, 0, 'open', '2026-03-15T00:00:00Z', '2026-03-15T01:00:00Z');
     `);
 
     // Switch to paper

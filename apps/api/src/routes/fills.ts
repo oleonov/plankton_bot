@@ -17,7 +17,6 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     fillId: row.fill_id,
     orderId: row.order_id,
     tokenId: row.token_id,
-    familyId: row.family_id,
     side: row.side,
     price: row.price,
     size: row.size,
@@ -36,7 +35,6 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
 }
 
 interface FillQuery {
-  family_id?: string;
   limit?: string;
   cursor?: string;
   since?: string;
@@ -46,18 +44,13 @@ interface FillQuery {
 export const fillRoutes: FastifyPluginAsync<FillOpts> = async (app, opts) => {
   app.get<{ Querystring: FillQuery }>("/fills", async (request) => {
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
-    const { family_id, cursor, since } = request.query;
+    const { cursor, since } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
     const page = Math.max(Number(request.query.page) || 1, 1);
     const pageRequested = request.query.page != null;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
-
-    if (family_id) {
-      conditions.push("family_id = ?");
-      params.push(family_id);
-    }
 
     if (since) {
       conditions.push("filled_at >= ?");

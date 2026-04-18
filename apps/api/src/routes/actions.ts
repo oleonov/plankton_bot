@@ -46,29 +46,6 @@ export const actionRoutes: FastifyPluginAsync<ActionOpts> = async (app, opts) =>
     return ok({ commandId: id, status: "enqueued" });
   });
 
-  // Family-scoped actions: single enable/disable lever.
-  for (const [path, action] of [
-    ["enable", "family_enable"],
-    ["disable", "family_disable"],
-  ] as const) {
-    app.post<{ Params: { familyId: string }; Body: { reason?: string } }>(
-      `/actions/family/:familyId/${path}`,
-      async (request) => {
-        const { familyId } = request.params;
-
-        const exists = controlDb
-          .prepare("SELECT 1 FROM family_catalog WHERE family_id = ?")
-          .get(familyId);
-        if (!exists) throw new ApiError(404, `family ${familyId} not found`, "FAMILY_NOT_FOUND");
-
-        const body = (request.body ?? {}) as { reason?: string };
-        const actor = getActor(request);
-        const id = insertCommand(controlDb, action, familyId, body.reason ?? null, actor);
-        return ok({ commandId: id, status: "enqueued" });
-      },
-    );
-  }
-
   // ── POST /actions/switch-profile ──────────────────────────────────
   app.post<{ Body: { toProfile: string; ledgerResetPolicy?: string; reason?: string } }>(
     "/actions/switch-profile",

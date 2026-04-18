@@ -8,7 +8,6 @@ interface RiskEventsOpts {
 }
 
 interface RiskEventQuery {
-  family_id?: string;
   event_type?: string;
   limit?: string;
   cursor?: string;
@@ -17,18 +16,13 @@ interface RiskEventQuery {
 
 export const riskEventsRoutes: FastifyPluginAsync<RiskEventsOpts> = async (app, opts) => {
   app.get<{ Querystring: RiskEventQuery }>("/risk-events", async (request) => {
-    const { family_id, event_type, cursor } = request.query;
+    const { event_type, cursor } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
     const page = Math.max(Number(request.query.page) || 1, 1);
     const pageRequested = request.query.page != null;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
-
-    if (family_id) {
-      conditions.push("family_id = ?");
-      params.push(family_id);
-    }
 
     if (event_type) {
       conditions.push("event_type = ?");
@@ -57,7 +51,6 @@ export const riskEventsRoutes: FastifyPluginAsync<RiskEventsOpts> = async (app, 
       .all(...queryParams) as Array<{
       id: number;
       event_type: string;
-      family_id: string | null;
       payload: string;
       created_at: string;
     }>;

@@ -18,7 +18,6 @@ import { fail } from "./errors.js";
 import { authRoutes } from "./routes/auth.js";
 import { healthRoutes } from "./routes/health.js";
 import { statusRoutes } from "./routes/status.js";
-import { familyRoutes } from "./routes/families.js";
 import { positionRoutes } from "./routes/positions.js";
 import { orderRoutes } from "./routes/orders.js";
 import { fillRoutes } from "./routes/fills.js";
@@ -146,14 +145,8 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(tradingActivityRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
 
   // Mixed routes — pass both
-  await app.register(familyRoutes, {
-    prefix: "/api/v1",
-    controlDb: deps.controlDb,
-    ledgerDb: deps.ledgerDb,
-  });
   await app.register(metricsRoutes, {
     prefix: "/api/v1",
-    controlDb: deps.controlDb,
     ledgerDb: deps.ledgerDb,
     ledgerPool: deps.ledgerPool,
   });
