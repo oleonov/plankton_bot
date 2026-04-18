@@ -14,8 +14,6 @@ CREATE TABLE IF NOT EXISTS markets (
   question                  TEXT NOT NULL,
   outcome                   TEXT NOT NULL,
   outcome_index             INTEGER,
-  family_id                 TEXT,
-  family_key                TEXT,
   regime                    TEXT,
   horizon                   TEXT,
   end_date                  TEXT,
@@ -33,7 +31,6 @@ CREATE TABLE IF NOT EXISTS markets (
   updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_markets_family_id ON markets(family_id);
 CREATE INDEX IF NOT EXISTS idx_markets_active ON markets(active);
 CREATE INDEX IF NOT EXISTS idx_markets_slug ON markets(slug);
 CREATE INDEX IF NOT EXISTS idx_markets_condition_id ON markets(condition_id);
@@ -64,7 +61,6 @@ CREATE TABLE IF NOT EXISTS orders (
   order_id           TEXT PRIMARY KEY,
   client_order_id    TEXT NOT NULL UNIQUE,
   token_id           TEXT NOT NULL,
-  family_id          TEXT,
   condition_id       TEXT NOT NULL DEFAULT '',
   side               TEXT NOT NULL,
   order_type         TEXT NOT NULL,
@@ -82,7 +78,6 @@ CREATE TABLE IF NOT EXISTS orders (
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
-CREATE INDEX IF NOT EXISTS idx_orders_family ON orders(family_id);
 CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token_id);
 CREATE INDEX IF NOT EXISTS idx_orders_client_oid ON orders(client_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_exchange_oid ON orders(exchange_order_id);
@@ -96,7 +91,6 @@ CREATE TABLE IF NOT EXISTS fills (
   fill_id      TEXT PRIMARY KEY,
   order_id     TEXT NOT NULL REFERENCES orders(order_id),
   token_id     TEXT NOT NULL,
-  family_id    TEXT,
   condition_id TEXT NOT NULL DEFAULT '',
   side         TEXT NOT NULL,
   price        REAL NOT NULL,
@@ -110,7 +104,6 @@ CREATE TABLE IF NOT EXISTS fills (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fills_order ON fills(order_id);
-CREATE INDEX IF NOT EXISTS idx_fills_family ON fills(family_id);
 CREATE INDEX IF NOT EXISTS idx_fills_token ON fills(token_id);
 CREATE INDEX IF NOT EXISTS idx_fills_filled_at ON fills(filled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_fills_unreconciled ON fills(reconciled) WHERE reconciled = 0;
@@ -121,7 +114,6 @@ CREATE INDEX IF NOT EXISTS idx_fills_unreconciled ON fills(reconciled) WHERE rec
 CREATE TABLE IF NOT EXISTS positions (
   position_id        TEXT PRIMARY KEY,
   token_id           TEXT NOT NULL,
-  family_id          TEXT,
   condition_id       TEXT NOT NULL DEFAULT '',
   side               TEXT NOT NULL,
   size               REAL NOT NULL DEFAULT 0,
@@ -137,7 +129,6 @@ CREATE TABLE IF NOT EXISTS positions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
-CREATE INDEX IF NOT EXISTS idx_positions_family ON positions(family_id);
 CREATE INDEX IF NOT EXISTS idx_positions_token ON positions(token_id);
 -- idx_positions_unique_open_per_token (partial UNIQUE on token_id WHERE
 -- status='open') is created in bootstrapLedgerDb after an idempotent repair
@@ -151,7 +142,6 @@ CREATE TABLE IF NOT EXISTS inventory_lots (
   lot_id          TEXT PRIMARY KEY,
   position_id     TEXT NOT NULL REFERENCES positions(position_id),
   token_id        TEXT NOT NULL,
-  family_id       TEXT,
   side            TEXT NOT NULL,
   size            REAL NOT NULL,
   remaining_size  REAL NOT NULL,
@@ -162,7 +152,6 @@ CREATE TABLE IF NOT EXISTS inventory_lots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_inventory_lots_position ON inventory_lots(position_id);
-CREATE INDEX IF NOT EXISTS idx_inventory_lots_family ON inventory_lots(family_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_lots_token ON inventory_lots(token_id);
 CREATE INDEX IF NOT EXISTS idx_inventory_lots_remaining
   ON inventory_lots(position_id, remaining_size) WHERE remaining_size > 0;
@@ -174,14 +163,12 @@ CREATE TABLE IF NOT EXISTS pnl_ledger (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   fill_id     TEXT NOT NULL REFERENCES fills(fill_id),
   position_id TEXT NOT NULL REFERENCES positions(position_id),
-  family_id   TEXT NOT NULL,
   delta       REAL NOT NULL,
   filled_at   TEXT NOT NULL,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_pnl_ledger_filled_at ON pnl_ledger(filled_at);
-CREATE INDEX IF NOT EXISTS idx_pnl_ledger_family ON pnl_ledger(family_id);
 
 -- ═══════════ MARKET RESOLUTIONS ═══════════
 -- From 003_market_resolutions.sql + 004 (status)
@@ -204,7 +191,6 @@ CREATE TABLE IF NOT EXISTS settlement_ledger (
   condition_id     TEXT NOT NULL REFERENCES market_resolutions(condition_id),
   position_id      TEXT NOT NULL REFERENCES positions(position_id),
   token_id         TEXT NOT NULL,
-  family_id        TEXT,
   resolution       TEXT NOT NULL,
   settlement_price REAL NOT NULL,
   size             REAL NOT NULL,
@@ -213,7 +199,6 @@ CREATE TABLE IF NOT EXISTS settlement_ledger (
   created_at       TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_settlement_family ON settlement_ledger(family_id);
 CREATE INDEX IF NOT EXISTS idx_settlement_settled_at ON settlement_ledger(settled_at);
 
 -- ═══════════ BOT RUNS ═══════════
@@ -247,12 +232,10 @@ CREATE INDEX IF NOT EXISTS idx_runtime_metrics_name_ts
 CREATE TABLE IF NOT EXISTS risk_events (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   event_type  TEXT NOT NULL,
-  family_id   TEXT,
   payload     TEXT NOT NULL,
   created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_risk_events_family ON risk_events(family_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_risk_events_type ON risk_events(event_type, created_at DESC);
 
 -- ═══════════ TRADING STATE SNAPSHOTS ═══════════
@@ -327,14 +310,12 @@ CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_profile_ts ON portfolio_snaps
 CREATE TABLE IF NOT EXISTS merge_ledger (
   merge_id       TEXT PRIMARY KEY,
   condition_id   TEXT NOT NULL,
-  family_id      TEXT NOT NULL,
   merged_amount  REAL NOT NULL,
   spread_pnl     REAL NOT NULL,
   merged_at      TEXT NOT NULL,
   created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX IF NOT EXISTS idx_merge_ledger_family ON merge_ledger(family_id);
 CREATE INDEX IF NOT EXISTS idx_merge_ledger_merged_at ON merge_ledger(merged_at);
 
 -- ═══════════ ALGO DECISION ENGINE ═══════════

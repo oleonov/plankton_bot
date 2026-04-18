@@ -20,8 +20,8 @@ describe("SqliteFillRepository.getLatestTimestamp", () => {
     // Insert a parent order row to satisfy the fills.order_id FK constraint
     conn.db
       .prepare(
-        `INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at)
-         VALUES ('ord-1', 'cloid-1', 'tok-1', 'fam-1', 'buy', 'GTC', 0.5, 10, 5, 'open', 'run-1', datetime('now'), datetime('now'))`,
+        `INSERT INTO orders (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at)
+         VALUES ('ord-1', 'cloid-1', 'tok-1', 'buy', 'GTC', 0.5, 10, 5, 'open', 'run-1', datetime('now'), datetime('now'))`,
       )
       .run();
   });

@@ -23,7 +23,6 @@ function insertOrder(db: Database.Database, overrides?: Partial<Record<string, u
     order_id: "ord-1",
     client_order_id: "cloid-1",
     token_id: "tok-1",
-    family_id: "fam-1",
     side: "buy",
     order_type: "GTC",
     price: 0.55,
@@ -36,19 +35,19 @@ function insertOrder(db: Database.Database, overrides?: Partial<Record<string, u
   };
   const row = { ...defaults, ...overrides };
   db.prepare(
-    `INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES (@order_id, @client_order_id, @token_id, @family_id, @side, @order_type, @price, @size, @size_usdc, @status, @bot_run_id, @created_at, @updated_at)`,
+    `INSERT INTO orders (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES (@order_id, @client_order_id, @token_id, @side, @order_type, @price, @size, @size_usdc, @status, @bot_run_id, @created_at, @updated_at)`,
   ).run(row);
 }
 
 function insertFill(db: Database.Database, fillId: string, orderId: string): void {
   db.prepare(
-    `INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at) VALUES (?, ?, 'tok-1', 'fam-1', 'buy', 0.55, 50, 27.5, 0, datetime('now'))`,
+    `INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, fee, filled_at) VALUES (?, ?, 'tok-1', 'buy', 0.55, 50, 27.5, 0, datetime('now'))`,
   ).run(fillId, orderId);
 }
 
 function insertPosition(db: Database.Database, positionId: string): void {
   db.prepare(
-    `INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at) VALUES (?, 'tok-1', 'fam-1', 'buy', 100, 0.55, 55, 0, 'open', datetime('now'), datetime('now'))`,
+    `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at) VALUES (?, 'tok-1', 'buy', 100, 0.55, 55, 0, 'open', datetime('now'), datetime('now'))`,
   ).run(positionId);
 }
 

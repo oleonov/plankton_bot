@@ -122,14 +122,14 @@ describe("SqliteMarketRepository", () => {
     // market with open position, not tradable
     repo.save(makeMarket({ tokenId: createTokenId("t-pos"), active: true, tradable: false }));
     db.prepare(
-      `INSERT INTO positions (position_id, token_id, condition_id, family_id, side, size, avg_entry_price, cost_basis_usdc, current_value_usdc, realized_pnl, status, entry_style, opened_at, closed_at, updated_at)
-       VALUES ('p1','t-pos','c-pos',NULL,'buy',1,0.5,0.5,0.5,0,'open','probe',datetime('now'),NULL,datetime('now'))`,
+      `INSERT INTO positions (position_id, token_id, condition_id, side, size, avg_entry_price, cost_basis_usdc, current_value_usdc, realized_pnl, status, entry_style, opened_at, closed_at, updated_at)
+       VALUES ('p1','t-pos','c-pos','buy',1,0.5,0.5,0.5,0,'open','probe',datetime('now'),NULL,datetime('now'))`,
     ).run();
     // market with open order, not tradable, no position
     repo.save(makeMarket({ tokenId: createTokenId("t-ord"), active: true, tradable: false }));
     db.prepare(
-      `INSERT INTO orders (order_id, client_order_id, token_id, condition_id, family_id, side, order_type, price, size, size_usdc, status, exchange_order_id, signal_id, signal_reason, bot_run_id, created_at, updated_at)
-       VALUES ('o1','co1','t-ord','c-ord',NULL,'buy','GTC',0.5,1,0.5,'open',NULL,NULL,NULL,'br1',datetime('now'),datetime('now'))`,
+      `INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type, price, size, size_usdc, status, exchange_order_id, signal_id, signal_reason, bot_run_id, created_at, updated_at)
+       VALUES ('o1','co1','t-ord','c-ord','buy','GTC',0.5,1,0.5,'open',NULL,NULL,NULL,'br1',datetime('now'),datetime('now'))`,
     ).run();
     // market with nothing: excluded + no legs
     repo.save(makeMarket({ tokenId: createTokenId("t-dead"), active: true, tradable: false }));

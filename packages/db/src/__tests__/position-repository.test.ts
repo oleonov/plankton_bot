@@ -244,17 +244,17 @@ describe("SqlitePositionRepository", () => {
     // Insert FK prerequisites and an inventory lot
     conn.db
       .prepare(
-        `INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES ('ord-1','cloid-1','tok-1','fam-1','buy','GTC',0.55,100,55,'open','run-1',datetime('now'),datetime('now'))`,
+        `INSERT INTO orders (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES ('ord-1','cloid-1','tok-1','buy','GTC',0.55,100,55,'open','run-1',datetime('now'),datetime('now'))`,
       )
       .run();
     conn.db
       .prepare(
-        `INSERT INTO fills (fill_id, order_id, token_id, family_id, side, price, size, size_usdc, fee, filled_at) VALUES ('fill-1','ord-1','tok-1','fam-1','buy',0.55,50,27.5,0,datetime('now'))`,
+        `INSERT INTO fills (fill_id, order_id, token_id, side, price, size, size_usdc, fee, filled_at) VALUES ('fill-1','ord-1','tok-1','buy',0.55,50,27.5,0,datetime('now'))`,
       )
       .run();
     conn.db
       .prepare(
-        `INSERT INTO inventory_lots (lot_id, position_id, token_id, family_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at) VALUES ('lot-1','pos-1','tok-1','fam-1','buy',50,50,0.55,27.5,'fill-1',datetime('now'))`,
+        `INSERT INTO inventory_lots (lot_id, position_id, token_id, side, size, remaining_size, entry_price, cost_usdc, fill_id, created_at) VALUES ('lot-1','pos-1','tok-1','buy',50,50,0.55,27.5,'fill-1',datetime('now'))`,
       )
       .run();
 
