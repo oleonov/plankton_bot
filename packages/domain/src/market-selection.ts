@@ -1,5 +1,11 @@
 import type { SelectionRuleEngine } from "./selection-rule-engine.js";
-import type { PreEntryEvaluation } from "./types.js";
+import type {
+  HealthFailReason,
+  HealthInput,
+  HealthResult,
+  HealthThresholds,
+  PreEntryEvaluation,
+} from "./types.js";
 
 export interface PreEntryInput {
   readonly eventSlug: string | null;
@@ -63,4 +69,45 @@ export function evaluateContinuation(legTradeCount: number, firstEntryFillPrice:
   if (legTradeCount >= 6) return true;
   if (firstEntryFillPrice >= 0.05 && legTradeCount >= 2) return true;
   return false;
+}
+
+/**
+ * Market-health gate for the admission pipeline.
+ *
+ * Null-tolerance is deliberately asymmetric:
+ *   - Hard fields (acceptingOrders, enableOrderBook, bestBid, bestAsk) fail
+ *     CLOSED on null — an absent affirmative signal is treated as "not alive".
+ *   - Numeric thresholds (liquidityClob, competitive, spread) fail OPEN on
+ *     null — absence is common on new or non-CLOB markets and we don't
+ *     want to reject them for that reason alone.
+ *
+ * Returns reasons in a fixed order (hard → soft) so persisted
+ * `health_fail_reasons` diffs cleanly across scans.
+ *
+ * Volume is deliberately NOT consulted here: new CLOB markets can be alive
+ * with zero volume. Volume-based gating, if ever needed, belongs in a
+ * separate "proven market" filter, not in isAlive.
+ *
+ * See docs/superpowers/specs/2026-04-18-market-health-gate-design.md §5.
+ */
+export function isAlive(market: HealthInput, thresholds: HealthThresholds): HealthResult {
+  const reasons: HealthFailReason[] = [];
+
+  if (market.acceptingOrders !== true) reasons.push("not_accepting_orders");
+  if (market.enableOrderBook !== true) reasons.push("order_book_disabled");
+  if (market.bestBid == null) reasons.push("no_bid");
+  if (market.bestAsk == null) reasons.push("no_ask");
+
+  // Numeric null-tolerance: `!= null` short-circuits when absent.
+  if (market.liquidityClob != null && market.liquidityClob < thresholds.minLiquidityClob) {
+    reasons.push("low_liquidity_clob");
+  }
+  if (market.competitive != null && market.competitive < thresholds.minCompetitive) {
+    reasons.push("low_competitive");
+  }
+  if (market.spread != null && market.spread > thresholds.maxSpread) {
+    reasons.push("wide_spread");
+  }
+
+  return { healthy: reasons.length === 0, reasons };
 }
