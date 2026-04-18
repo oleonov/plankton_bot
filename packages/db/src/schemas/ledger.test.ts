@@ -38,7 +38,9 @@ describe("ledger.db schema", () => {
     expect(names).toContain("bot_runs");
     expect(names).toContain("runtime_metrics");
     expect(names).toContain("risk_events");
-    expect(names).toContain("family_profile_runtime_state");
+    // family_runtime_state and family_profile_runtime_state dropped by migration 035
+    expect(names).not.toContain("family_runtime_state");
+    expect(names).not.toContain("family_profile_runtime_state");
   });
 
   it("does NOT contain control tables", () => {
@@ -54,27 +56,12 @@ describe("ledger.db schema", () => {
     expect(names).not.toContain("operator_commands");
   });
 
-  it("family_profile_runtime_state has no governance columns", () => {
-    const cols = db.prepare("PRAGMA table_info(family_profile_runtime_state)").all() as {
-      name: string;
-    }[];
-    const names = cols.map((c) => c.name);
-    expect(names).toContain("open_value_usdc");
-    expect(names).not.toContain("runtime_mode");
-    expect(names).not.toContain("quarantine_reason");
-    expect(names).not.toContain("effective_mode");
-    expect(names).not.toContain("derived_mode_reason");
-  });
-
-  it("family_runtime_state has no governance columns", () => {
-    const cols = db.prepare("PRAGMA table_info(family_runtime_state)").all() as {
-      name: string;
-    }[];
-    const names = cols.map((c) => c.name);
-    expect(names).toContain("open_value_usdc");
-    expect(names).not.toContain("runtime_mode");
-    expect(names).not.toContain("quarantine_reason");
-    expect(names).not.toContain("effective_mode");
-    expect(names).not.toContain("derived_mode_reason");
+  it("family_runtime_state and family_profile_runtime_state are absent (dropped by migration 035)", () => {
+    const tables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all() as { name: string }[];
+    const names = tables.map((t) => t.name);
+    expect(names).not.toContain("family_runtime_state");
+    expect(names).not.toContain("family_profile_runtime_state");
   });
 });

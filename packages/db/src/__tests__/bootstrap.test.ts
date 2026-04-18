@@ -34,7 +34,8 @@ describe("bootstrapDatabase", () => {
     expect(names).toContain("positions");
     expect(names).toContain("inventory_lots");
     expect(names).toContain("family_catalog");
-    expect(names).toContain("family_runtime_state");
+    // family_runtime_state is dropped by migration 035
+    expect(names).not.toContain("family_runtime_state");
     expect(names).toContain("operator_commands");
     expect(names).toContain("operator_actions");
     expect(names).toContain("schema_migrations");

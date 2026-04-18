@@ -44,7 +44,8 @@ describe("dual-connection infrastructure", () => {
     expect(names).toContain("orders");
     expect(names).toContain("fills");
     expect(names).toContain("positions");
-    expect(names).toContain("family_profile_runtime_state");
+    // family_profile_runtime_state dropped by migration 035
+    expect(names).not.toContain("family_profile_runtime_state");
     expect(names).not.toContain("profiles");
     expect(names).not.toContain("family_catalog");
   });
