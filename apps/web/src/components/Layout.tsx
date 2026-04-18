@@ -78,8 +78,8 @@ export function Layout() {
         <NavLink className="nav-link" to="/orders">
           Orders/Fills
         </NavLink>
-        <NavLink className="nav-link" to="/families">
-          Families
+        <NavLink className="nav-link" to="/selection-rules">
+          Selection Rules
         </NavLink>
         <NavLink className="nav-link" to="/risk">
           Risk
