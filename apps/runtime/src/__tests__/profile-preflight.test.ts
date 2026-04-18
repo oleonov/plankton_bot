@@ -20,7 +20,7 @@ const LEDGER_SQL = readFileSync(
 );
 
 const ENVELOPE: LiveLiteConfig = {
-  familyAllowlist: ["fam-a", "fam-b"],
+  familyAllowlist: [],
   maxFamilies: 2,
   maxOpenValueUsdc: 50,
   maxOrderUsdc: 10,
@@ -51,38 +51,6 @@ function seedProfileSettings(
        ON CONFLICT(profile_id) DO UPDATE SET relayer_json = excluded.relayer_json`,
     )
     .run(profile, settings.relayerJson ?? null);
-}
-
-function seedLiveFamily(
-  controlDb: DbConnection["db"],
-  opts: {
-    familyId: string;
-    primaryCategory: string;
-    feeTier?: string;
-    liveWalletRequirement?: string;
-    requiresPostOnlyForLive?: boolean;
-  },
-): void {
-  controlDb
-    .prepare(
-      `INSERT INTO family_catalog
-         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile,
-          fee_tier, live_wallet_requirement, requires_post_only_for_live)
-       VALUES (?, ?, ?, 'generic', 'short', 'daily', 'scalp', ?, ?, ?)`,
-    )
-    .run(
-      opts.familyId,
-      opts.familyId,
-      opts.primaryCategory,
-      opts.feeTier ?? "unknown",
-      opts.liveWalletRequirement ?? "relayer-required",
-      opts.requiresPostOnlyForLive === undefined ? 1 : opts.requiresPostOnlyForLive ? 1 : 0,
-    );
-  controlDb
-    .prepare(
-      "INSERT INTO family_deployments (family_id, profile, enabled) VALUES (?, 'live-lite', 1)",
-    )
-    .run(opts.familyId);
 }
 
 describe("runProfilePreflight", () => {
@@ -135,29 +103,8 @@ describe("runProfilePreflight", () => {
     expect(result.blockers).toHaveLength(0);
   });
 
-  it("live-lite fails when enabled live families exceed maxFamilies", () => {
+  it("live-lite fails when EOA mode enables a fee-enabled family (min_order check)", () => {
     seedProfile(controlConn.db, "live-lite");
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-a",
-      primaryCategory: "geopolitics",
-      feeTier: "fee-free",
-      liveWalletRequirement: "eoa-ok",
-      requiresPostOnlyForLive: false,
-    });
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-b",
-      primaryCategory: "geopolitics",
-      feeTier: "fee-free",
-      liveWalletRequirement: "eoa-ok",
-      requiresPostOnlyForLive: false,
-    });
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-c",
-      primaryCategory: "geopolitics",
-      feeTier: "fee-free",
-      liveWalletRequirement: "eoa-ok",
-      requiresPostOnlyForLive: false,
-    });
 
     const result = runProfilePreflight({
       profile: "live-lite",
@@ -166,41 +113,13 @@ describe("runProfilePreflight", () => {
       liveLiteConfig: ENVELOPE,
     });
 
-    expect(result.status).toBe("failed");
-    expect(result.blockers.some((b) => b.code === "LIVE_MAX_FAMILIES_EXCEEDED")).toBe(true);
-  });
-
-  it("live-lite fails when EOA mode enables a fee-enabled family", () => {
-    seedProfile(controlConn.db, "live-lite");
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-crypto",
-      primaryCategory: "crypto",
-      feeTier: "fee-enabled",
-      liveWalletRequirement: "relayer-required",
-      requiresPostOnlyForLive: true,
-    });
-
-    const result = runProfilePreflight({
-      profile: "live-lite",
-      ledgerDb: ledgerConn.db,
-      controlDb: controlConn.db,
-      liveLiteConfig: ENVELOPE,
-    });
-
-    expect(result.status).toBe("failed");
-    expect(result.blockers.some((b) => b.code === "LIVE_EOA_FEE_ENABLED_FAMILY")).toBe(true);
-    expect(result.blockers.some((b) => b.code === "LIVE_POST_ONLY_REQUIRED")).toBe(true);
+    // With no fee-enabled families (family tables dropped), only wallet/order checks apply
+    expect(result.status).toBe("passed");
+    expect(result.blockers).toHaveLength(0);
   });
 
   it("live-lite fails when EOA min_order_usdc is below the phase-1 floor", () => {
     seedProfile(controlConn.db, "live-lite");
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-geo",
-      primaryCategory: "geopolitics",
-      feeTier: "fee-free",
-      liveWalletRequirement: "eoa-ok",
-      requiresPostOnlyForLive: false,
-    });
 
     const result = runProfilePreflight({
       profile: "live-lite",
@@ -213,48 +132,13 @@ describe("runProfilePreflight", () => {
     expect(result.blockers.some((b) => b.code === "LIVE_MIN_ORDER_TOO_LOW")).toBe(true);
   });
 
-  it("live-lite relayer mode passes with valid relayer_json and fee-free families", () => {
+  it("live-lite relayer mode passes with valid relayer_json", () => {
     seedProfile(controlConn.db, "live-lite");
     seedProfileSettings(controlConn.db, "live-lite", {
       relayerJson: JSON.stringify({
         walletType: "proxy",
         funderAddress: "0x1111111111111111111111111111111111111111",
       }),
-    });
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-geo",
-      primaryCategory: "geopolitics",
-      feeTier: "fee-free",
-      liveWalletRequirement: "eoa-ok",
-      requiresPostOnlyForLive: false,
-    });
-
-    const result = runProfilePreflight({
-      profile: "live-lite",
-      ledgerDb: ledgerConn.db,
-      controlDb: controlConn.db,
-      relayerBuilderAuthConfigured: true,
-      liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
-    });
-
-    expect(result.status).toBe("passed");
-    expect(result.blockers).toHaveLength(0);
-  });
-
-  it("live-lite relayer mode passes with valid relayer_json and fee-enabled families", () => {
-    seedProfile(controlConn.db, "live-lite");
-    seedProfileSettings(controlConn.db, "live-lite", {
-      relayerJson: JSON.stringify({
-        walletType: "proxy",
-        funderAddress: "0x1111111111111111111111111111111111111111",
-      }),
-    });
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-crypto",
-      primaryCategory: "crypto",
-      feeTier: "fee-enabled",
-      liveWalletRequirement: "relayer-required",
-      requiresPostOnlyForLive: true,
     });
 
     const result = runProfilePreflight({
@@ -276,13 +160,6 @@ describe("runProfilePreflight", () => {
         walletType: "proxy",
       }),
     });
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-geo",
-      primaryCategory: "geopolitics",
-      feeTier: "fee-free",
-      liveWalletRequirement: "eoa-ok",
-      requiresPostOnlyForLive: false,
-    });
 
     const result = runProfilePreflight({
       profile: "live-lite",
@@ -302,13 +179,6 @@ describe("runProfilePreflight", () => {
         walletType: "proxy",
         funderAddress: "0x1111111111111111111111111111111111111111",
       }),
-    });
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-geo",
-      primaryCategory: "geopolitics",
-      feeTier: "fee-free",
-      liveWalletRequirement: "eoa-ok",
-      requiresPostOnlyForLive: false,
     });
 
     const result = runProfilePreflight({
@@ -331,13 +201,6 @@ describe("runProfilePreflight", () => {
         funderAddress: "0x1111111111111111111111111111111111111111",
       }),
     });
-    seedLiveFamily(controlConn.db, {
-      familyId: "fam-geo",
-      primaryCategory: "geopolitics",
-      feeTier: "fee-free",
-      liveWalletRequirement: "eoa-ok",
-      requiresPostOnlyForLive: false,
-    });
 
     const result = runProfilePreflight({
       profile: "live-lite",
@@ -356,15 +219,15 @@ describe("runProfilePreflight", () => {
 
     ledgerConn.db
       .prepare(
-        `INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
-         VALUES ('pos-1', 'tok-1', 'fam-a', 'buy', 100, 0.4, 40, 0, 'open', datetime('now'), datetime('now'))`,
+        `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
+         VALUES ('pos-1', 'tok-1', 'buy', 100, 0.4, 40, 0, 'open', datetime('now'), datetime('now'))`,
       )
       .run();
 
     ledgerConn.db
       .prepare(
-        `INSERT INTO orders (order_id, client_order_id, token_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at)
-         VALUES ('ord-1', 'plk_ord1', 'tok-2', 'fam-b', 'buy', 'limit', 0.5, 30, 15, 'open', 'run-1', datetime('now'), datetime('now'))`,
+        `INSERT INTO orders (order_id, client_order_id, token_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at)
+         VALUES ('ord-1', 'plk_ord1', 'tok-2', 'buy', 'GTC', 0.5, 30, 15, 'open', 'run-1', datetime('now'), datetime('now'))`,
       )
       .run();
 
@@ -379,36 +242,14 @@ describe("runProfilePreflight", () => {
     expect(result.blockers.some((b) => b.code === "EXPOSURE_EXCEEDS_CAP")).toBe(true);
   });
 
-  it("live-lite fails with NON_ALLOWLISTED_POSITION for outside family", () => {
-    seedProfile(controlConn.db, "live-lite");
-
-    ledgerConn.db
-      .prepare(
-        `INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
-         VALUES ('pos-1', 'tok-1', 'fam-outside', 'buy', 10, 0.4, 4, 0, 'open', datetime('now'), datetime('now'))`,
-      )
-      .run();
-
-    const result = runProfilePreflight({
-      profile: "live-lite",
-      ledgerDb: ledgerConn.db,
-      controlDb: controlConn.db,
-      liveLiteConfig: ENVELOPE,
-    });
-
-    expect(result.status).toBe("failed");
-    expect(result.blockers.some((b) => b.code === "NON_ALLOWLISTED_POSITION")).toBe(true);
-    expect(result.blockers.some((b) => b.message.includes("fam-outside"))).toBe(true);
-  });
-
   it("returns passed_with_warnings when exposure near cap (>80%)", () => {
     seedProfile(controlConn.db, "live-lite");
 
     // 42 is > 80% of 50 but <= 50
     ledgerConn.db
       .prepare(
-        `INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
-         VALUES ('pos-1', 'tok-1', 'fam-a', 'buy', 100, 0.42, 42, 0, 'open', datetime('now'), datetime('now'))`,
+        `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
+         VALUES ('pos-1', 'tok-1', 'buy', 100, 0.42, 42, 0, 'open', datetime('now'), datetime('now'))`,
       )
       .run();
 
@@ -424,26 +265,14 @@ describe("runProfilePreflight", () => {
     expect(result.blockers).toHaveLength(0);
   });
 
-  it("includes deployedFamilies and openPositions in info", () => {
+  it("includes openPositions in info", () => {
     seedProfile(controlConn.db, "paper");
-
-    // Add a deployed family
-    controlConn.db
-      .prepare(
-        "INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile) VALUES ('fam-a', 'fam-a', 'crypto', 'recurring', 'short', 'weekly', 'scalp')",
-      )
-      .run();
-    controlConn.db
-      .prepare(
-        "INSERT INTO family_deployments (family_id, profile, enabled) VALUES ('fam-a', 'paper', 1)",
-      )
-      .run();
 
     // Add an open position
     ledgerConn.db
       .prepare(
-        `INSERT INTO positions (position_id, token_id, family_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
-         VALUES ('pos-1', 'tok-1', 'fam-a', 'buy', 10, 0.4, 4, 0, 'open', datetime('now'), datetime('now'))`,
+        `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
+         VALUES ('pos-1', 'tok-1', 'buy', 10, 0.4, 4, 0, 'open', datetime('now'), datetime('now'))`,
       )
       .run();
 
@@ -453,7 +282,6 @@ describe("runProfilePreflight", () => {
       controlDb: controlConn.db,
     });
 
-    expect(result.info.deployedFamilies).toBe(1);
     expect(result.info.openPositions).toBe(1);
   });
 });
@@ -475,7 +303,7 @@ describe("writePreflightReport", () => {
       status: "passed",
       blockers: [],
       warnings: [],
-      info: { profile: "paper", deployedFamilies: 0, openPositions: 0 },
+      info: { profile: "paper", openPositions: 0 },
     };
 
     const reportId = writePreflightReport(controlConn.db, "paper", result);

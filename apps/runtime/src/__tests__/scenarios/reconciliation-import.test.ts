@@ -45,14 +45,13 @@ describe("Scenario: reconciliation imports missing fill", () => {
         // Insert same order into local DB as "open" — local DB doesn't know about the fill
         ctx.db
           .prepare(
-            "INSERT INTO orders (order_id, client_order_id, token_id, condition_id, family_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO orders (order_id, client_order_id, token_id, condition_id, side, order_type, price, size, size_usdc, status, bot_run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           )
           .run(
             placeResult.orderId,
             "co-recon-1",
             tokenId,
             market.conditionId,
-            "fam-recon-test",
             "buy",
             "GTC",
             0.45,
