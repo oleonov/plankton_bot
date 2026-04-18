@@ -6,6 +6,62 @@ export interface ApiEnvelope<T> {
   ts: string;
 }
 
+// ─── Selection Rules ─────────────────────────────────────────────────────────
+
+export type SelectionRuleType =
+  | "include_prefix"
+  | "exclude_prefix"
+  | "include_slug"
+  | "exclude_slug";
+
+export interface SelectionRule {
+  ruleId: string;
+  profileId: string;
+  ruleType: SelectionRuleType;
+  pattern: string;
+  enabled: boolean;
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SelectionRuleDraft {
+  ruleType: SelectionRuleType;
+  pattern: string;
+  enabled: boolean;
+  note?: string | null;
+}
+
+export interface PreviewRow {
+  conditionId: string;
+  slug: string;
+  eventSlug: string | null;
+  eventMarketCount: number;
+  winningRuleId: string | null;
+}
+
+export interface PreviewBuckets {
+  matchedInclude: PreviewRow[];
+  matchedExclude: PreviewRow[];
+  step2FallbackInclude: PreviewRow[];
+  fallbackExclude: PreviewRow[];
+}
+
+export interface MatchResult {
+  decision: "include" | "exclude" | "no_match";
+  winningRuleId: string | null;
+  finalStatus: "INCLUDE" | "EXCLUDE";
+  step2Fallback: boolean;
+}
+
+export interface EventMetric {
+  eventSlug: string;
+  realizedPnl: number;
+  unrealizedPnl: number;
+  volumeUsdc: number;
+  positionCount: number;
+}
+
 export interface ExecutionTelemetryWindow {
   windowHours: number;
   totalFills: number;

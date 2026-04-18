@@ -1,16 +1,13 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiFetch, apiPost, apiPut } from "./client.ts";
+import { apiFetch, apiPost, apiPut, apiPatch, apiDelete } from "./client.ts";
 import type {
   StatusData,
   MetricsData,
   PnlDataPoint,
   PortfolioSeriesResponse,
-  FamilyMetric,
   PositionDTO,
   OrderDTO,
   FillDTO,
-  FamilyEvidenceDTO,
-  TransitionDTO,
   RiskEventDTO,
   Paginated,
   ProfilesResponse,
@@ -20,8 +17,12 @@ import type {
   SwitchResponse,
   ControlOverviewDTO,
   TradingActivitySnapshot,
-  FamilyListResponse,
-  FamilyOptionDTO,
+  SelectionRule,
+  SelectionRuleType,
+  SelectionRuleDraft,
+  PreviewBuckets,
+  MatchResult,
+  EventMetric,
 } from "./types.ts";
 
 function withParams(
@@ -100,13 +101,6 @@ export function useTradingActivity(days = 14) {
         `/api/v1/metrics/trading-activity?days=${days}`,
       ),
     refetchInterval: 60_000,
-  });
-}
-
-export function useMetricsFamilies() {
-  return useQuery({
-    queryKey: ["metrics-families"],
-    queryFn: () => apiFetch<FamilyMetric[]>("/api/v1/metrics/families"),
   });
 }
 
@@ -192,54 +186,6 @@ export function useFills(filters: FillFilters = {}) {
   });
 }
 
-// ─── Families ───────────────────────────────────────────────────
-
-export function useFamilies() {
-  return useQuery({
-    queryKey: ["family-options"],
-    queryFn: async () => {
-      const res = await apiFetch<{ items: FamilyOptionDTO[] }>("/api/v1/families/options");
-      return res.items;
-    },
-  });
-}
-
-export function useFamiliesScoped(
-  scope: "profile" | "all",
-  page = 1,
-  limit = 50,
-  cursor?: string | null,
-) {
-  return useQuery({
-    queryKey: ["families-scoped", scope, page, limit, cursor ?? ""],
-    queryFn: () =>
-      apiFetch<FamilyListResponse>(
-        withParams("/api/v1/families", {
-          scope,
-          page,
-          cursor: cursor || undefined,
-          limit,
-        }),
-      ),
-  });
-}
-
-export function useFamilyPositions(familyId: string) {
-  return useQuery({
-    queryKey: ["families", familyId, "positions"],
-    queryFn: () => apiFetch<PositionDTO[]>(`/api/v1/families/${familyId}/positions`),
-    enabled: !!familyId,
-  });
-}
-
-export function useFamilyOrders(familyId: string) {
-  return useQuery({
-    queryKey: ["families", familyId, "orders"],
-    queryFn: () => apiFetch<Paginated<OrderDTO>>(`/api/v1/families/${familyId}/orders`),
-    enabled: !!familyId,
-  });
-}
-
 // ─── Risk Events ────────────────────────────────────────────────
 
 interface RiskEventFilters {
@@ -281,36 +227,6 @@ export function useResume() {
   return useMutation({
     mutationFn: (reason?: string) => apiPost("/api/v1/actions/resume", { reason }),
     onSuccess: () => void qc.invalidateQueries({ queryKey: ["status"] }),
-  });
-}
-
-export function useFamilyEvidence(familyId: string) {
-  return useQuery({
-    queryKey: ["families", familyId, "evidence"],
-    queryFn: () => apiFetch<FamilyEvidenceDTO | null>(`/api/v1/families/${familyId}/evidence`),
-    enabled: !!familyId,
-  });
-}
-
-export function useFamilyTransitions(familyId: string) {
-  return useQuery({
-    queryKey: ["families", familyId, "transitions"],
-    queryFn: () => apiFetch<TransitionDTO[]>(`/api/v1/families/${familyId}/transitions`),
-    enabled: !!familyId,
-  });
-}
-
-export function useFamilyAction(familyId: string, action: "enable" | "disable") {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (reason?: string) =>
-      apiPost(`/api/v1/actions/family/${familyId}/${action}`, { reason }),
-    onSuccess: async () => {
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ["families"] }),
-        qc.invalidateQueries({ queryKey: ["status"] }),
-      ]);
-    },
   });
 }
 
@@ -459,5 +375,113 @@ export function useSwitchProfile() {
       void qc.invalidateQueries({ queryKey: ["profiles"] });
       void qc.invalidateQueries({ queryKey: ["status"] });
     },
+  });
+}
+
+// ─── Selection Rules ──────────────────────────────────────────────────
+
+export function useSelectionRules(profileId: string) {
+  return useQuery({
+    queryKey: ["selection-rules", profileId],
+    queryFn: () =>
+      apiFetch<{ rules: SelectionRule[] }>(`/api/v1/selection-rules?profileId=${profileId}`),
+    select: (d) => d.rules,
+  });
+}
+
+export function useCreateSelectionRule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      profileId: string;
+      ruleType: SelectionRuleType;
+      pattern: string;
+      note?: string | null;
+    }) => apiPost<{ rule: SelectionRule }>("/api/v1/selection-rules", input),
+    onSuccess: (_data, vars) => {
+      void qc.invalidateQueries({ queryKey: ["selection-rules", vars.profileId] });
+      void qc.invalidateQueries({ queryKey: ["selection-preview", vars.profileId] });
+    },
+  });
+}
+
+export function useUpdateSelectionRule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      ruleId,
+      patch,
+    }: {
+      ruleId: string;
+      profileId: string;
+      patch: { enabled?: boolean; note?: string | null };
+    }) => apiPatch<{ rule: SelectionRule }>(`/api/v1/selection-rules/${ruleId}`, patch),
+    onSuccess: (_data, { profileId }) => {
+      void qc.invalidateQueries({ queryKey: ["selection-rules", profileId] });
+      void qc.invalidateQueries({ queryKey: ["selection-preview", profileId] });
+    },
+  });
+}
+
+export function useDeleteSelectionRule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ ruleId }: { ruleId: string; profileId: string }) =>
+      apiDelete<{ deleted: boolean; ruleId: string }>(`/api/v1/selection-rules/${ruleId}`),
+    onSuccess: (_data, { profileId }) => {
+      void qc.invalidateQueries({ queryKey: ["selection-rules", profileId] });
+      void qc.invalidateQueries({ queryKey: ["selection-preview", profileId] });
+    },
+  });
+}
+
+export function useSelectionPreview(profileId: string) {
+  return useQuery({
+    queryKey: ["selection-preview", profileId],
+    queryFn: () =>
+      apiFetch<PreviewBuckets>(`/api/v1/selection-rules/preview?profileId=${profileId}`),
+  });
+}
+
+export function useSelectionPreviewDraft() {
+  return useMutation({
+    mutationFn: ({ profileId, rules }: { profileId: string; rules: SelectionRuleDraft[] }) =>
+      apiPost<PreviewBuckets>("/api/v1/selection-rules/preview", { profileId, rules }),
+  });
+}
+
+export function useSelectionMatch(
+  profileId: string,
+  eventSlug: string,
+  marketSlug: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["selection-match", profileId, eventSlug, marketSlug],
+    queryFn: () =>
+      apiFetch<MatchResult>(
+        `/api/v1/selection-rules/match?profileId=${profileId}&eventSlug=${encodeURIComponent(eventSlug)}&marketSlug=${encodeURIComponent(marketSlug)}`,
+      ),
+    enabled,
+  });
+}
+
+export function useEventSlugOptions(profileId: string) {
+  return useQuery({
+    queryKey: ["event-slugs", profileId],
+    queryFn: () =>
+      apiFetch<{ eventSlugs: string[] }>(`/api/v1/markets/event-slugs?profileId=${profileId}`),
+    select: (d) => d.eventSlugs,
+  });
+}
+
+export function useMetricsEvents(profileId: string, limit = 20) {
+  return useQuery({
+    queryKey: ["metrics-events", profileId, limit],
+    queryFn: () =>
+      apiFetch<{ events: EventMetric[] }>(
+        `/api/v1/metrics/events?profileId=${profileId}&limit=${limit}`,
+      ),
+    select: (d) => d.events,
   });
 }
