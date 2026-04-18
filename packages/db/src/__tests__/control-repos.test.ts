@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import {
-  createScorecardId,
   createSwitchId,
   createReportId,
   createImportId,
@@ -11,7 +10,6 @@ import {
 import type {
   Profile,
   ProfileSettings,
-  ValidationScorecard,
   ProfileSummary,
   RuntimeControlState,
   SwitchRequest,
@@ -22,7 +20,6 @@ import type {
 import type { ProfileId } from "@plankton/domain";
 import { SqliteProfileRepository } from "../repositories/profile-repository.js";
 import { SqliteProfileSettingsRepository } from "../repositories/profile-settings-repository.js";
-import { SqliteValidationScorecardRepository } from "../repositories/validation-scorecard-repository.js";
 import { SqliteProfileSummaryRepository } from "../repositories/profile-summary-repository.js";
 import { SqliteRuntimeControlStateRepository } from "../repositories/runtime-control-state-repository.js";
 import { SqliteSwitchRequestRepository } from "../repositories/switch-request-repository.js";
@@ -99,35 +96,9 @@ describe("SqliteProfileSettingsRepository", () => {
   });
 });
 
-describe("SqliteValidationScorecardRepository", () => {
-  it("save persists scorecard", () => {
-    const repo = new SqliteValidationScorecardRepository(db);
-    const scorecard: ValidationScorecard = {
-      scorecardId: createScorecardId("sc-1"),
-      profile: PROFILE_SIM,
-      evidenceStatus: "confirmed",
-      evidenceScore: 85,
-      recurrenceScore: 0.9,
-      recycleScore: 0.7,
-      liveViabilityScore: null,
-      toxicityPenalty: null,
-      tradeCount: 50,
-      marketCount: 10,
-      realizedPnl: 120.5,
-      tailAdjustedPnl: 100.0,
-      bothSidedEligible: true,
-      heavyCampaignEligible: false,
-      activeWindowEdgeScore: null,
-      summaryJson: null,
-      validatedAt: NOW,
-    };
-    repo.save(scorecard);
-    const row = db
-      .prepare("SELECT scorecard_id FROM family_validation_scorecards WHERE scorecard_id = ?")
-      .get("sc-1") as { scorecard_id: string } | undefined;
-    expect(row?.scorecard_id).toBe("sc-1");
-  });
-});
+// SqliteValidationScorecardRepository tests removed — family_validation_scorecards
+// was dropped by control migration 036. The repository class and domain interface
+// remain for Phase 8 cleanup (runtime publisher still references it).
 
 describe("SqliteProfileSummaryRepository", () => {
   it("save + get round-trip", () => {

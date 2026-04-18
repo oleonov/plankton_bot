@@ -8,7 +8,6 @@ import {
 } from "@plankton/domain";
 
 import { ensureControlProfiles } from "./control-profiles.js";
-import { ensureFamilyRuleDefaultsTable } from "./family-rule-defaults.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
 import { runControlMigrations, runMigrations } from "./migrations/runner.js";
 
@@ -46,7 +45,6 @@ function readSchema(filename: string): string {
 export function bootstrapControlDb(dbPath: string): DbConnection {
   const conn = openDatabaseWithSchema(dbPath, readSchema("control.sql"));
   ensureControlProfiles(conn.db);
-  ensureFamilyRuleDefaultsTable(conn.db);
   ensureBootstrapBackfillsTable(conn.db);
   seedControlMigrationsBaseline(conn.db);
   runControlMigrations(conn.db);
@@ -57,33 +55,10 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "profile_settings", "wallet_mode", "TEXT");
   safeAddColumn(conn.db, "profile_settings", "min_order_usdc", "REAL");
   safeAddColumn(conn.db, "profile_settings", "relayer_json", "TEXT");
-  safeAddColumn(conn.db, "family_catalog", "source_type", "TEXT NOT NULL DEFAULT 'yaml_import'");
-  safeAddColumn(conn.db, "family_catalog", "origin_checksum", "TEXT");
-  safeAddColumn(conn.db, "family_catalog", "fee_tier", "TEXT NOT NULL DEFAULT 'unknown'");
-  safeAddColumn(conn.db, "family_rules", "max_concurrent_orders_per_family", "INTEGER");
-  safeAddColumn(conn.db, "family_rules", "max_probe_in_flight_per_token", "INTEGER");
-  safeAddColumn(conn.db, "family_rules", "max_entry_signals_per_tick_per_family", "INTEGER");
-  safeAddColumn(conn.db, "family_rules", "fast_lane_enabled", "INTEGER");
-  safeAddColumn(conn.db, "family_rules", "dust_lane_enabled", "INTEGER");
-  safeAddColumn(conn.db, "family_rules", "queue_jump_canary_enabled", "INTEGER");
-  safeAddColumn(
-    conn.db,
-    "family_catalog",
-    "live_wallet_requirement",
-    "TEXT NOT NULL DEFAULT 'relayer-required'",
-  );
-  safeAddColumn(
-    conn.db,
-    "family_catalog",
-    "requires_post_only_for_live",
-    "INTEGER NOT NULL DEFAULT 1",
-  );
+  // family_catalog / family_rules safeAddColumn calls removed — those tables are
+  // dropped by migration 036 and no longer exist in the schema.
 
-  // Backfill: ensure every family_catalog entry has family_deployments rows.
-  // Fixes families materialized before the accept endpoint was updated to create deployments.
-  backfillDeployments(conn.db);
   backfillLiveProfileSettings(conn.db);
-  backfillFamilyLivePolicy(conn.db);
   backfillFamilyLimitUnification(conn.db);
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
@@ -119,15 +94,20 @@ function hasTable(db: import("better-sqlite3").Database, table: string): boolean
 const CONTROL_MIGRATION_BASELINES: ControlMigrationBaseline[] = [
   {
     name: "031_flatten_family_deployments.sql",
-    // Post-031 shape: disabled_at column exists. Fresh bootstrap creates it
-    // directly; upgrade installs gain it when migration 031 runs.
-    isAlreadyApplied: (db) => hasColumn(db, "family_deployments", "disabled_at"),
+    // Post-031 shape: disabled_at column exists on family_deployments.
+    // Post-036 shape: family_deployments is gone entirely — also satisfied.
+    // Fresh bootstrap (no family_deployments) and upgrade post-036 are both handled.
+    isAlreadyApplied: (db) =>
+      !hasTable(db, "family_deployments") ||
+      hasColumn(db, "family_deployments", "disabled_at"),
   },
   {
     name: "033_drop_legacy_governance.sql",
-    // Post-033 shape: strategy_stage column is gone. Fresh bootstrap creates
-    // the slim table directly; upgrade installs rebuild via migration 033.
-    isAlreadyApplied: (db) => !hasColumn(db, "family_deployments", "strategy_stage"),
+    // Post-033 shape: strategy_stage column is gone from family_deployments.
+    // Post-036 shape: family_deployments is gone entirely — also satisfied.
+    isAlreadyApplied: (db) =>
+      !hasTable(db, "family_deployments") ||
+      !hasColumn(db, "family_deployments", "strategy_stage"),
   },
   {
     name: "034_drop_discovery_tables.sql",
@@ -137,10 +117,17 @@ const CONTROL_MIGRATION_BASELINES: ControlMigrationBaseline[] = [
   },
   {
     name: "035_drop_family_rollup_effective_mode.sql",
-    // Post-035 shape: effective_mode is gone from family_profile_rollups. Fresh
-    // bootstrap creates the slim table directly; upgrade installs drop the
-    // column via migration 035.
-    isAlreadyApplied: (db) => !hasColumn(db, "family_profile_rollups", "effective_mode"),
+    // Post-035 shape: effective_mode is gone from family_profile_rollups.
+    // Post-036 shape: family_profile_rollups is gone entirely — also satisfied.
+    isAlreadyApplied: (db) =>
+      !hasTable(db, "family_profile_rollups") ||
+      !hasColumn(db, "family_profile_rollups", "effective_mode"),
+  },
+  {
+    name: "036_drop_family_tables.sql",
+    // Post-036 shape: family_catalog is gone. Fresh bootstrap never creates it;
+    // upgrade installs drop all family_ tables when migration 036 runs.
+    isAlreadyApplied: (db) => !hasTable(db, "family_catalog"),
   },
   {
     name: "037_selection_rules.sql",
@@ -319,6 +306,8 @@ function backfillFamilyLimitUnification(db: import("better-sqlite3").Database): 
  * Idempotent — INSERT OR IGNORE skips existing rows. Wrapped in transaction for atomicity.
  */
 function backfillDeployments(db: import("better-sqlite3").Database): void {
+  if (!hasTable(db, "family_catalog")) return;
+
   const families = db.prepare("SELECT family_id, source_type FROM family_catalog").all() as {
     family_id: string;
     source_type: string | null;

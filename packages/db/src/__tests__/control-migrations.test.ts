@@ -47,6 +47,8 @@ describe("control-db migration infrastructure", () => {
     }[];
     // Fresh control.sql already reflects post-031 shape, so 031 is seeded as applied.
     expect(applied.map((r) => r.name)).toContain("031_flatten_family_deployments.sql");
+    // Fresh control.sql has no family_ tables, so 036 is also seeded as applied.
+    expect(applied.map((r) => r.name)).toContain("036_drop_family_tables.sql");
   });
 
   it("runner picks up a SQL file from an arbitrary migrationsDir", () => {

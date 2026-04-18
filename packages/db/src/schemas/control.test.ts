@@ -28,14 +28,16 @@ describe("control.db schema", () => {
     expect(names).toContain("profiles");
     expect(names).toContain("profile_settings");
     expect(names).toContain("profile_summaries");
-    expect(names).toContain("family_catalog");
-    expect(names).toContain("family_rules");
-    expect(names).toContain("family_rules_snapshot");
-    expect(names).toContain("family_deployments");
-    expect(names).toContain("family_validation_scorecards");
-    expect(names).toContain("family_validation_latest");
-    expect(names).toContain("family_profile_rollups");
-    expect(names).toContain("family_config_meta");
+    // family_ tables dropped by migration 036
+    expect(names).not.toContain("family_catalog");
+    expect(names).not.toContain("family_rules");
+    expect(names).not.toContain("family_rules_snapshot");
+    expect(names).not.toContain("family_deployments");
+    expect(names).not.toContain("family_validation_scorecards");
+    expect(names).not.toContain("family_validation_latest");
+    expect(names).not.toContain("family_profile_rollups");
+    expect(names).not.toContain("family_config_meta");
+    expect(names).not.toContain("family_evidence");
     expect(names).toContain("runtime_control_state");
     expect(names).toContain("operator_commands");
     expect(names).toContain("operator_actions");
@@ -46,25 +48,22 @@ describe("control.db schema", () => {
     expect(names).toContain("preflight_reports");
   });
 
-  it("enforces family_deployments FK to profiles", () => {
+  it("enforces profile_settings FK to profiles", () => {
     db.prepare(
       "INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')",
-    ).run();
-    db.prepare(
-      "INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type) VALUES ('fam1', 'key1', 'cat', 'binary', 'weekly', 'recurring', 'standard', 'yaml_import')",
     ).run();
 
     // Valid FK
     expect(() => {
       db.prepare(
-        "INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')",
+        "INSERT INTO profile_settings (profile_id) VALUES ('simulation')",
       ).run();
     }).not.toThrow();
 
     // Invalid FK
     expect(() => {
       db.prepare(
-        "INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'nonexistent')",
+        "INSERT INTO profile_settings (profile_id) VALUES ('nonexistent')",
       ).run();
     }).toThrow(/FOREIGN KEY/);
   });
@@ -84,20 +83,17 @@ describe("control.db schema", () => {
     }).toThrow(); // CHECK constraint: id = 1
   });
 
-  it("enforces family_deployments PK uniqueness", () => {
+  it("enforces selection_rules UNIQUE constraint on (profile_id, rule_type, pattern)", () => {
     db.prepare(
       "INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')",
     ).run();
     db.prepare(
-      "INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, source_type) VALUES ('fam1', 'key1', 'cat', 'binary', 'weekly', 'recurring', 'standard', 'yaml_import')",
-    ).run();
-    db.prepare(
-      "INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')",
+      "INSERT INTO selection_rules (rule_id, profile_id, rule_type, pattern) VALUES ('r1', 'simulation', 'include_prefix', 'elon-')",
     ).run();
 
     expect(() => {
       db.prepare(
-        "INSERT INTO family_deployments (family_id, profile) VALUES ('fam1', 'simulation')",
+        "INSERT INTO selection_rules (rule_id, profile_id, rule_type, pattern) VALUES ('r2', 'simulation', 'include_prefix', 'elon-')",
       ).run();
     }).toThrow(/UNIQUE/);
   });
