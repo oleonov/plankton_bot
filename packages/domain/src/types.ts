@@ -68,6 +68,12 @@ export interface Market {
   selectionStatus?: SelectionStatus;
   /** The winning rule ID from evaluatePreEntry, or null. */
   selectionWinningRuleId?: string | null;
+  /** Health gate verdict as of last scan. Defaults to "unknown" until first eval. */
+  healthStatus?: HealthStatus;
+  /** JSON-serialised HealthFailReason[] from last scan; null when healthy/unknown. */
+  healthFailReasons?: string | null;
+  /** ISO timestamp of last health evaluation; null until first scan. */
+  healthCheckedAt?: string | null;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
 }
@@ -458,7 +464,11 @@ export interface LegState {
   buyCount: number;
   sellCount: number;
   lastAction: "BUY" | "SELL";
-  firstTradePrice: number;
+  /**
+   * Price of the first BUY fill that opened this leg (post-entry, leg-local).
+   * Used by the continuation filter (06 spec §0 / ADR D1). NOT Gamma market-wide first trade.
+   */
+  firstEntryFillPrice: number;
   firstTradeAt: string;
   lastTradeAt: string;
   updatedAt: string;
@@ -502,8 +512,57 @@ export interface SelectionDecision {
   readonly winningRuleId: string | null;
 }
 
+// ── Market health gate ──────────────────────────────────────────────────────
+//
+// The health gate is orthogonal to the SelectionRuleEngine: operators can
+// shape admission via rules, but cannot disable health via UI. Thresholds
+// live in env, mode is an env switch (disabled | log | enforce).
+//
+// See docs/superpowers/specs/2026-04-18-market-health-gate-design.md §5.
+
+export type HealthStatus = "unknown" | "healthy" | "unhealthy";
+
+export type HealthFailReason =
+  | "not_accepting_orders"
+  | "order_book_disabled"
+  | "no_bid"
+  | "no_ask"
+  | "low_liquidity_clob"
+  | "low_competitive"
+  | "wide_spread";
+
+export type HealthMode = "disabled" | "log" | "enforce";
+
+export interface HealthThresholds {
+  readonly minLiquidityClob: number;
+  readonly minCompetitive: number;
+  readonly maxSpread: number;
+}
+
+export interface HealthGate {
+  readonly mode: HealthMode;
+  readonly thresholds: HealthThresholds;
+}
+
+export interface HealthInput {
+  readonly acceptingOrders?: boolean | null;
+  readonly enableOrderBook?: boolean | null;
+  readonly bestBid?: number | null;
+  readonly bestAsk?: number | null;
+  readonly liquidityClob?: number | null;
+  readonly competitive?: number | null;
+  readonly spread?: number | null;
+}
+
+export interface HealthResult {
+  readonly healthy: boolean;
+  readonly reasons: readonly HealthFailReason[];
+}
+
 export interface PreEntryEvaluation {
   readonly finalStatus: "INCLUDE" | "EXCLUDE";
   readonly selectionStatus: SelectionStatus;
   readonly winningRuleId: string | null;
+  readonly healthStatus: HealthStatus;
+  readonly healthReasons: readonly HealthFailReason[];
 }
