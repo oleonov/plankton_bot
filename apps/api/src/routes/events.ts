@@ -3,12 +3,11 @@
  *
  * Polls SQLite for state changes and streams events to connected clients.
  *
- * Filter: `?types=position,order,fill,family,status,metrics,risk,transitions`
+ * Filter: `?types=position,order,fill,status,metrics,risk,transitions`
  * These are coarse categories. Each maps to one or more event names:
  *   position    → position:updated
  *   order       → order:created, order:filled, order:cancelled
  *   fill        → fill:new
- *   family      → family:state_changed
  *   status      → status
  *   metrics     → metrics:snapshot
  *   risk        → risk:event
@@ -31,7 +30,6 @@ interface ChangeSnapshot {
   positions: string;
   orders: string;
   fills: string;
-  families: string;
   riskEvents: string;
   /** Composite key: changes in operator_commands OR bot_runs OR runtime_metrics trigger status events. */
   statusHash: string;
@@ -43,7 +41,6 @@ const CATEGORY_TO_EVENTS: Record<string, string[]> = {
   position: ["position:updated"],
   order: ["order:created", "order:filled", "order:cancelled"],
   fill: ["fill:new"],
-  family: ["family:state_changed"],
   status: ["status"],
   metrics: ["metrics:snapshot"],
   risk: ["risk:event"],
@@ -59,9 +56,6 @@ function takeSnapshot(controlDb: Database.Database, ledgerDb: Database.Database)
     ts: string | null;
   };
   const fill = ledgerDb.prepare("SELECT MAX(filled_at) as ts FROM fills").get() as {
-    ts: string | null;
-  };
-  const fam = ledgerDb.prepare("SELECT MAX(updated_at) as ts FROM family_runtime_state").get() as {
     ts: string | null;
   };
   const risk = ledgerDb.prepare("SELECT MAX(created_at) as ts FROM risk_events").get() as {
@@ -89,7 +83,6 @@ function takeSnapshot(controlDb: Database.Database, ledgerDb: Database.Database)
     positions: pos.ts ?? "",
     orders: ord.ts ?? "",
     fills: fill.ts ?? "",
-    families: fam.ts ?? "",
     riskEvents: risk.ts ?? "",
     statusHash: `${opCmd.ts ?? ""}|${botRun.ts ?? ""}|${reconMetric.ts ?? ""}`,
     transitions: transitionMaxTs ?? "",
@@ -159,7 +152,6 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
             sendEvent("position:updated", {
               positionId: row.position_id,
               tokenId: row.token_id,
-              familyId: row.family_id,
               status: row.status,
               size: row.size,
               avgEntryPrice: row.avg_entry_price,
@@ -184,7 +176,6 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
               orderId: row.order_id,
               clientOrderId: row.client_order_id,
               tokenId: row.token_id,
-              familyId: row.family_id,
               side: row.side,
               price: row.price,
               size: row.size,
@@ -203,28 +194,11 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
               fillId: row.fill_id,
               orderId: row.order_id,
               tokenId: row.token_id,
-              familyId: row.family_id,
               side: row.side,
               price: row.price,
               size: row.size,
               sizeUsdc: row.size_usdc,
               filledAt: row.filled_at,
-            });
-          }
-        }
-
-        if (next.families !== snapshot.families) {
-          const rows = ledgerDb
-            .prepare(
-              "SELECT * FROM family_runtime_state WHERE updated_at > ? ORDER BY updated_at DESC LIMIT 20",
-            )
-            .all(snapshot.families) as Record<string, unknown>[];
-          for (const row of rows) {
-            sendEvent("family:state_changed", {
-              familyId: row.family_id,
-              openValueUsdc: row.open_value_usdc,
-              openPositionCount: row.open_position_count,
-              updatedAt: row.updated_at,
             });
           }
         }
@@ -244,7 +218,6 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
             .all(snapshot.riskEvents) as Array<{
             id: number;
             event_type: string;
-            family_id: string | null;
             payload: string;
             created_at: string;
           }>;
