@@ -3,10 +3,71 @@
  * Each handler returns a minimal but realistic response shape.
  */
 import { http, HttpResponse } from "msw";
+import type { SelectionRule } from "../api/types.ts";
 
 function ok<T>(data: T) {
   return HttpResponse.json({ ok: true, data, error: null, ts: new Date().toISOString() });
 }
+
+// ─── Selection Rules Fixtures ─────────────────────────────────────────────────
+
+export const mockSelectionRules: SelectionRule[] = [
+  {
+    ruleId: "rule-1",
+    profileId: "simulation",
+    ruleType: "include_prefix",
+    pattern: "bitcoin-",
+    enabled: true,
+    note: "Bitcoin markets",
+    createdAt: "2026-04-18T00:00:00Z",
+    updatedAt: "2026-04-18T00:00:00Z",
+  },
+  {
+    ruleId: "rule-2",
+    profileId: "simulation",
+    ruleType: "exclude_slug",
+    pattern: "bitcoin-to-150k-by-2025",
+    enabled: true,
+    note: "Too speculative",
+    createdAt: "2026-04-18T00:00:00Z",
+    updatedAt: "2026-04-18T00:00:00Z",
+  },
+  {
+    ruleId: "rule-3",
+    profileId: "simulation",
+    ruleType: "include_prefix",
+    pattern: "elon-musk-",
+    enabled: true,
+    note: null,
+    createdAt: "2026-04-18T00:00:00Z",
+    updatedAt: "2026-04-18T00:00:00Z",
+  },
+];
+
+export const mockPreviewBuckets = {
+  matchedInclude: [
+    {
+      conditionId: "cond-1",
+      slug: "bitcoin-above-100k",
+      eventSlug: "bitcoin-price-2026",
+      eventMarketCount: 3,
+      winningRuleId: "rule-1",
+    },
+  ],
+  matchedExclude: [
+    {
+      conditionId: "cond-2",
+      slug: "bitcoin-to-150k-by-2025",
+      eventSlug: "bitcoin-price-2026",
+      eventMarketCount: 3,
+      winningRuleId: "rule-2",
+    },
+  ],
+  step2FallbackInclude: [],
+  fallbackExclude: [],
+};
+
+export const mockEventSlugs = ["bitcoin-price-2026", "elon-musk-ceo-2026", "us-election-2026"];
 
 // ─── Fixtures ────────────────────────────────────────────────────────
 
@@ -159,20 +220,55 @@ export const handlers = [
   http.get("/api/v1/profiles/:profileId/settings", () => ok(mockProfileDetail.settings)),
   http.put("/api/v1/profiles/:profileId/settings", () => ok(mockProfileDetail.settings)),
   http.get("/api/v1/control/overview", () => ok(mockControlOverview)),
-  http.get("/api/v1/families/options", () => ok({ items: [] })),
-  http.get("/api/v1/families", () =>
-    ok({
-      items: [],
-      meta: {
-        scope: "all",
-        profile: null,
-        totalCount: 0,
-        totalCatalogCount: 0,
-        hasMore: false,
-        nextCursor: null,
-      },
-    }),
-  ),
+  // Selection Rules
+  http.get("/api/v1/selection-rules", () => ok({ rules: mockSelectionRules })),
+  http.post("/api/v1/selection-rules", async ({ request }) => {
+    const body = (await request.json()) as {
+      ruleType: string;
+      pattern: string;
+      note?: string | null;
+    };
+    const newRule: SelectionRule = {
+      ruleId: `rule-new-${Date.now()}`,
+      profileId: "simulation",
+      ruleType: body.ruleType as SelectionRule["ruleType"],
+      pattern: body.pattern,
+      enabled: true,
+      note: body.note ?? null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    return ok({ rule: newRule });
+  }),
+  http.patch("/api/v1/selection-rules/:ruleId", async ({ params, request }) => {
+    const rule = mockSelectionRules.find((r) => r.ruleId === params.ruleId);
+    if (!rule) return new HttpResponse(null, { status: 404 });
+    const patch = (await request.json()) as { enabled?: boolean; note?: string | null };
+    return ok({ rule: { ...rule, ...patch, updatedAt: new Date().toISOString() } });
+  }),
+  http.delete("/api/v1/selection-rules/:ruleId", ({ params }) => {
+    return ok({ deleted: true, ruleId: params.ruleId });
+  }),
+  http.get("/api/v1/selection-rules/preview", () => ok(mockPreviewBuckets)),
+  http.post("/api/v1/selection-rules/preview", () => ok(mockPreviewBuckets)),
+  http.get("/api/v1/selection-rules/match", ({ request }) => {
+    const url = new URL(request.url);
+    const marketSlug = url.searchParams.get("marketSlug") ?? "";
+    const matched = mockSelectionRules.find(
+      (r) => r.ruleType === "include_slug" && r.pattern === marketSlug.toLowerCase(),
+    );
+    const isInclude = matched !== undefined || marketSlug.startsWith("bitcoin-");
+    return ok({
+      decision: isInclude ? "include" : "no_match",
+      winningRuleId: matched?.ruleId ?? (isInclude ? "rule-1" : null),
+      finalStatus: isInclude ? "INCLUDE" : "EXCLUDE",
+      step2Fallback: false,
+    });
+  }),
+  // Event slugs
+  http.get("/api/v1/markets/event-slugs", () => ok({ eventSlugs: mockEventSlugs })),
+  // Events metrics
+  http.get("/api/v1/metrics/events", () => ok({ events: [] })),
   http.get("/api/v1/metrics", () =>
     ok({
       positions: {},
