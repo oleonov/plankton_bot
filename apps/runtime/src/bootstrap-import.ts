@@ -7,11 +7,13 @@
  */
 
 import type Database from "better-sqlite3";
-import { ensureControlProfiles, upsertFamilyRuleDefaults } from "@plankton/db";
+import { ensureControlProfiles } from "@plankton/db";
 import { ProfileId } from "@plankton/domain";
 
 export function needsBootstrap(db: Database.Database): boolean {
-  const row = db.prepare("SELECT COUNT(*) as cnt FROM family_catalog").get() as { cnt: number };
+  const row = db
+    .prepare("SELECT COUNT(*) as cnt FROM profiles")
+    .get() as { cnt: number };
   return row.cnt === 0;
 }
 
@@ -43,7 +45,6 @@ export function syncProfileInitialBalances(
   initialBalanceUsdc: number,
 ): SyncProfileBalancesResult {
   ensureControlProfiles(db);
-  upsertFamilyRuleDefaults(db, { entry: null }, new Date().toISOString());
   let synced = 0;
   for (const profileId of [ProfileId.Simulation, ProfileId.Paper, ProfileId.LiveLite]) {
     const existing = db

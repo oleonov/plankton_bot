@@ -14,7 +14,6 @@ export { SqliteRiskEventRepository } from "./repositories/risk-event-repository.
 export { SqliteStateTransitionRepository } from "./repositories/state-transition-repository.js";
 export { SqliteProfileRepository } from "./repositories/profile-repository.js";
 export { SqliteProfileSettingsRepository } from "./repositories/profile-settings-repository.js";
-export { SqliteValidationScorecardRepository } from "./repositories/validation-scorecard-repository.js";
 export { SqliteProfileSummaryRepository } from "./repositories/profile-summary-repository.js";
 export { SqliteRuntimeControlStateRepository } from "./repositories/runtime-control-state-repository.js";
 export { SqliteSwitchRequestRepository } from "./repositories/switch-request-repository.js";
@@ -31,10 +30,5 @@ export type {
 } from "./repositories/selection-rule-repository.js";
 export { CONTROL_PROFILES, ensureControlProfiles } from "./control-profiles.js";
 export { withImmediate } from "./immediate-transaction.js";
-export { readFamilyLiveness } from "./family-liveness.js";
-export {
-  FAMILY_RULE_DEFAULTS_SCOPE,
-  ensureFamilyRuleDefaultsTable,
-  readFamilyRuleDefaults,
-  upsertFamilyRuleDefaults,
-} from "./family-rule-defaults.js";
+// Phase 8 cleanup target: readFamilyRuleDefaults stub kept for apps/api compatibility
+export { readFamilyRuleDefaults } from "./family-rule-defaults.js";
