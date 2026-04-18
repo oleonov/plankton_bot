@@ -106,7 +106,6 @@ export class AlgoRiskGateImpl implements RiskGate {
       signalId: signal.signalId,
       tokenId: signal.tokenId,
       conditionId: signal.conditionId,
-      familyId: signal.familyId,
       approved,
       rejectionReasons,
       checksPassed,

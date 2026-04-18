@@ -32,6 +32,8 @@ import { tradingActivityRoutes } from "./routes/trading-activity.js";
 import { configRoutes } from "./routes/config.js";
 import { profileRoutes } from "./routes/profiles.js";
 import { auditRoutes } from "./routes/audit.js";
+import { selectionRulesRoutes } from "./routes/selection-rules.js";
+import { marketsRoutes } from "./routes/markets.js";
 
 export interface ServerDeps {
   config: AppConfig;
@@ -153,6 +155,7 @@ export async function buildServer(deps: ServerDeps) {
     prefix: "/api/v1",
     controlDb: deps.controlDb,
     ledgerDb: deps.ledgerDb,
+    ledgerPool: deps.ledgerPool,
   });
   await app.register(profileRoutes, {
     prefix: "/api/v1",
@@ -161,6 +164,16 @@ export async function buildServer(deps: ServerDeps) {
     ledgerPool: deps.ledgerPool,
   });
   await app.register(auditRoutes, { prefix: "/api/v1", controlDb: deps.controlDb });
+  await app.register(selectionRulesRoutes, {
+    prefix: "/api/v1",
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+  });
+  await app.register(marketsRoutes, {
+    prefix: "/api/v1",
+    ledgerDb: deps.ledgerDb,
+    ledgerPool: deps.ledgerPool,
+  });
 
   // Serve web UI static files in production
   const webDistPath = resolve(dirname(fileURLToPath(import.meta.url)), "../../web/dist");

@@ -15,14 +15,13 @@
 
 import type {
   EventBus,
-  FamilyRuleBundle,
   NormalizedMarket,
   OrderRepository,
   RuntimeEventMap,
   PlaceOrderCommand,
   TokenId,
 } from "@plankton/domain";
-import { createCommandId, ENTRY_REASONS, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
+import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
 import { buildClientOrderId } from "@plankton/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
@@ -34,22 +33,14 @@ import {
 } from "./candidate-book-cache.js";
 import {
   buildRestingOrderSnapshot,
-  evaluateMarketability,
   resolveMakerOnlyPrice,
-  resolveMarketabilityPolicy,
   type MarketabilityDecision,
   type MarketabilityPolicy,
   type RestingOrderSnapshot,
 } from "./marketability.js";
 import { isGammaFallbackDustEligible } from "./book-quality-policy.js";
-import {
-  DEFAULT_HOT_LANE_POLICY,
-  resolveQueueJumpExecutionTerms,
-  type QueueJumpExecutionTerms,
-} from "../hot-lane/hot-lane-policy.js";
 
 const QUEUE_JUMP_SHARE_WINDOW_MS = 60_000;
-const MIN_QUEUE_JUMP_SHARE_SAMPLE_SIZE = 8;
 const BRIDGE_WS_BOOK_WAIT_MS = 100;
 
 interface EntryExecutionSample {
@@ -103,8 +94,7 @@ export class SignalToOrderBridge {
 
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
     const { signal } = payload;
-    const bundle: FamilyRuleBundle | null = null;
-    const resolvedMarket = await this.resolveMarket(signal, bundle);
+    const resolvedMarket = await this.resolveMarket(signal);
     const market = resolvedMarket.market;
     const executionMinNotionalUsdc = this.resolveExecutionMinNotionalUsdc();
 
@@ -118,40 +108,18 @@ export class SignalToOrderBridge {
       });
       return;
     }
-    const queueJumpTerms = bundle
-      ? resolveQueueJumpExecutionTerms({
-          signal,
-          market,
-          bundle,
-          nowMs: Date.now(),
-          executionMinNotionalUsdc,
-        })
-      : null;
-    const allowedQueueJumpTerms = this.resolveAllowedQueueJumpTerms(queueJumpTerms, signal);
-    const marketability = this.relaxMakerOnlyDustMarketability(
-      this.relaxQueueJumpMarketability(
-        this.evaluateMarketability(signal, market, bundle),
-        allowedQueueJumpTerms,
-      ),
-      signal,
+    const marketability = this.evaluateMarketability(signal, market);
+    const gammaFallbackDust = isGammaFallbackDustEligible({
+      bundle: null,
       market,
-      bundle,
+      nowMs: Date.now(),
+      signal,
       executionMinNotionalUsdc,
-    );
-    const gammaFallbackDust =
-      bundle != null &&
-      isGammaFallbackDustEligible({
-        bundle,
-        market,
-        nowMs: Date.now(),
-        signal,
-        executionMinNotionalUsdc,
-      });
+    });
     if (!marketability.approved) {
       this.log.warn(
         {
           signalId: signal.signalId,
-          familyId: signal.familyId,
           tokenId: signal.tokenId,
           reasons: marketability.rejectionReasons,
           cacheStatus: resolvedMarket.cacheStatus,
@@ -175,16 +143,13 @@ export class SignalToOrderBridge {
     const executionTerms = this.resolveExecutionTerms(
       signal,
       market,
-      bundle,
       marketability.policy,
       executionMinNotionalUsdc,
-      allowedQueueJumpTerms,
     );
     if (!executionTerms) {
       this.log.warn(
         {
           signalId: signal.signalId,
-          familyId: signal.familyId,
           tokenId: signal.tokenId,
           side: signal.side,
           suggestedPrice: signal.suggestedPrice,
@@ -222,7 +187,6 @@ export class SignalToOrderBridge {
       orderType: "GTC",
       tickSize: market.tickSize,
       negRisk: market.negRisk,
-      familyId: signal.familyId,
       sequenceInTick: signal.sequenceInTick,
       signalReason: signal.reason,
       metadata: {
@@ -252,7 +216,7 @@ export class SignalToOrderBridge {
     );
 
     if (isEntryReason(signal.reason)) {
-      this.recordEntryExecution(executionTerms.postOnly !== true);
+      this.recordEntryExecution(false);
     }
     await this.deps.bus.publish("PlaceOrderRequested", {
       command: cmd,
@@ -262,7 +226,6 @@ export class SignalToOrderBridge {
 
   private async resolveMarket(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
-    bundle: FamilyRuleBundle | null | undefined,
   ): Promise<{
     market: NormalizedMarket | null;
     cacheStatus: CandidateBookResolution["status"] | "disabled" | "base-market";
@@ -285,10 +248,8 @@ export class SignalToOrderBridge {
       };
     }
 
-    if (
-      market.bookSource === "clob" &&
-      !shouldRefreshBookBeforeConversion(signal, market, bundle, nowMs)
-    ) {
+    // Book refresh is disabled when there's no bundle — always use base market.
+    if (market.bookSource === "clob") {
       return { market, cacheStatus: "base-market" };
     }
 
@@ -336,17 +297,15 @@ export class SignalToOrderBridge {
   private resolveExecutionTerms(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
-    _bundle: FamilyRuleBundle | null | undefined,
     marketabilityPolicy: MarketabilityPolicy,
     executionMinNotionalUsdc: number | null,
-    _queueJumpTerms: QueueJumpExecutionTerms | null,
   ): { price: number; postOnly?: boolean } | null {
     if (this.deps.liveLiteGuard?.getWalletMode() !== "relayer") {
       return { price: signal.suggestedPrice };
     }
 
     // Algo-path orders use maker-safe pricing with 1-tick improvement for all signals.
-    // Family rules are not consulted — universal policy applies.
+    // Universal policy applies — no family rules consulted.
     const makerOnlyPrice = resolveMakerOnlyPrice({
       side: signal.side,
       suggestedPrice: signal.suggestedPrice,
@@ -361,96 +320,9 @@ export class SignalToOrderBridge {
     return { price: makerOnlyPrice, postOnly: true };
   }
 
-  private relaxQueueJumpMarketability(
-    decision: MarketabilityDecision,
-    queueJumpTerms: QueueJumpExecutionTerms | null,
-  ): MarketabilityDecision {
-    if (!queueJumpTerms || decision.approved) return decision;
-    const queueJumpOverrideReasons = new Set([
-      "book-one-sided",
-      "spread-unavailable",
-      "spread-too-wide",
-    ]);
-    const remainingReasons = decision.rejectionReasons.filter(
-      (reason) => !queueJumpOverrideReasons.has(reason),
-    );
-    if (remainingReasons.length === decision.rejectionReasons.length) {
-      return decision;
-    }
-    if (remainingReasons.length > 0) {
-      return {
-        ...decision,
-        rejectionReasons: remainingReasons,
-        approved: false,
-      };
-    }
-    return {
-      ...decision,
-      approved: true,
-      rejectionReasons: [],
-      checksPassed: [...decision.checksPassed, "queue-jump-marketability-override"],
-    };
-  }
-
-  private relaxMakerOnlyDustMarketability(
-    decision: MarketabilityDecision,
-    signal: RuntimeEventMap["SignalApproved"]["signal"],
-    market: NormalizedMarket,
-    bundle: FamilyRuleBundle | null | undefined,
-    executionMinNotionalUsdc: number | null,
-  ): MarketabilityDecision {
-    if (decision.approved) return decision;
-    if (!bundle) return decision;
-    if (this.deps.liveLiteGuard?.getWalletMode() !== "relayer") return decision;
-
-    const livePolicy = resolveFamilyLiveTradingPolicy(bundle.identity);
-    if (!livePolicy.requiresPostOnlyForLive) return decision;
-
-    const makerOnlyPrice = resolveMakerOnlyPrice({
-      side: signal.side,
-      suggestedPrice: signal.suggestedPrice,
-      suggestedSizeUsdc: signal.suggestedSizeUsdc,
-      signalReason: signal.reason,
-      nowMs: Date.now(),
-      executionMinNotionalUsdc,
-      market,
-      policy: {
-        ...decision.policy,
-        allowOneSidedBooks: true,
-      },
-    });
-    if (makerOnlyPrice == null) return decision;
-
-    const makerOnlyOverrideReasons = new Set([
-      "book-one-sided",
-      "spread-unavailable",
-      "spread-too-wide",
-    ]);
-    const remainingReasons = decision.rejectionReasons.filter(
-      (reason) => !makerOnlyOverrideReasons.has(reason),
-    );
-    if (remainingReasons.length === decision.rejectionReasons.length) {
-      return decision;
-    }
-    if (remainingReasons.length > 0) {
-      return {
-        ...decision,
-        rejectionReasons: remainingReasons,
-        approved: false,
-      };
-    }
-    return {
-      ...decision,
-      approved: true,
-      rejectionReasons: [],
-      checksPassed: [...decision.checksPassed, "maker-only-dust-marketability-override"],
-    };
-  }
-
   private evaluateMarketability(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
-    bundle: FamilyRuleBundle | null | undefined,
   ): MarketabilityDecision {
     // No live-lite guard means sim/paper mode — marketability not enforced
     if (!this.deps.liveLiteGuard) {
@@ -463,11 +335,8 @@ export class SignalToOrderBridge {
       };
     }
 
-    // Live-lite with or without bundle — run the gate.
-    // When bundle is null, use fallback policy (global defaults).
-    const policy = bundle
-      ? resolveMarketabilityPolicy(bundle)
-      : resolveMarketabilityPolicyFallback();
+    // No bundle — use fallback policy (global defaults).
+    const policy = resolveMarketabilityPolicyFallback();
     const restingSnapshot = this.deps.orderRepo
       ? buildRestingOrderSnapshot(this.deps.orderRepo.findOpen(), this.marketCache)
       : null;
@@ -479,7 +348,6 @@ export class SignalToOrderBridge {
       this.cooldownUntilByToken.delete(this.cooldownKey(signal.tokenId));
       this.cooldownBaselineByToken.delete(this.cooldownKey(signal.tokenId));
       void this.deps.bus.publish("CooldownBypassApplied", {
-        familyId: signal.familyId,
         tokenId: signal.tokenId,
         reason: bypassReason,
         previousCooldownUntil,
@@ -487,19 +355,6 @@ export class SignalToOrderBridge {
       });
     }
 
-    if (bundle) {
-      return evaluateMarketability({
-        signal,
-        market,
-        bundle,
-        nowMs: Date.now(),
-        restingSnapshot,
-        cooldownUntilMs,
-        executionMinNotionalUsdc: this.resolveExecutionMinNotionalUsdc(),
-      });
-    }
-
-    // No bundle — inline marketability check using fallback policy
     return this.evaluateMarketabilityWithFallbackPolicy(
       signal,
       market,
@@ -541,6 +396,9 @@ export class SignalToOrderBridge {
       checksPassed.push("cooldown-ok");
     }
 
+    // Suppress unused-variable warning for restingSnapshot (kept for future use)
+    void restingSnapshot;
+
     return {
       approved: rejectionReasons.length === 0,
       rejectionReasons,
@@ -564,40 +422,6 @@ export class SignalToOrderBridge {
     return typeof guard?.getMinEntryNotionalUsdc === "function"
       ? (guard.getMinEntryNotionalUsdc() ?? null)
       : null;
-  }
-
-  private resolveAllowedQueueJumpTerms(
-    queueJumpTerms: QueueJumpExecutionTerms | null,
-    signal: RuntimeEventMap["SignalApproved"]["signal"],
-  ): QueueJumpExecutionTerms | null {
-    if (!queueJumpTerms || !isEntryReason(signal.reason)) {
-      return queueJumpTerms;
-    }
-    this.pruneEntryExecutionSamples(Date.now());
-    const totalEntries = this.recentEntryExecutionSamples.length;
-    if (totalEntries < MIN_QUEUE_JUMP_SHARE_SAMPLE_SIZE) {
-      return queueJumpTerms;
-    }
-
-    const queueJumpEntries = this.recentEntryExecutionSamples.filter((sample) => sample.queueJump);
-    const nextShare = (queueJumpEntries.length + 1) / (totalEntries + 1);
-    if (nextShare <= DEFAULT_HOT_LANE_POLICY.queueJumpMaxEntryShare) {
-      return queueJumpTerms;
-    }
-
-    this.log.debug(
-      {
-        signalId: signal.signalId,
-        familyId: signal.familyId,
-        tokenId: signal.tokenId,
-        nextShare,
-        maxShare: DEFAULT_HOT_LANE_POLICY.queueJumpMaxEntryShare,
-        totalEntries,
-        queueJumpEntries: queueJumpEntries.length,
-      },
-      "queue-jump suppressed by entry share cap",
-    );
-    return null;
   }
 
   private recordEntryExecution(queueJump: boolean): void {
@@ -656,7 +480,6 @@ export class SignalToOrderBridge {
     this.log.warn(
       {
         orderId: payload.orderId,
-        familyId: order.familyId,
         tokenId: order.tokenId,
         unfilledCancels: nextCount,
         cooldownUntil,
@@ -718,25 +541,28 @@ export class SignalToOrderBridge {
   }
 }
 
-function shouldRefreshBookBeforeConversion(
-  signal: RuntimeEventMap["SignalApproved"]["signal"],
-  market: NormalizedMarket,
-  bundle: FamilyRuleBundle | null | undefined,
-  nowMs: number,
-): boolean {
-  if (!isEntryReason(signal.reason)) return false;
-  if (!bundle) return false;
-  const policy = resolveMarketabilityPolicy(bundle, market.tickSize);
-  const bookAgeMs = Math.max(0, nowMs - market.snapshotTs);
-  if (bookAgeMs > policy.maxBookAgeMs) return true;
-  return bundle.rules.throughput?.fastLaneEnabled === true && bookAgeMs > 5_000;
+function resolveMarketabilityPolicyFallback(): MarketabilityPolicy {
+  return {
+    tier: "fallback",
+    speedTier: "standard",
+    maxBookAgeMs: 15_000,
+    hardMaxBookAgeMs: 60_000,
+    maxEntrySpreadCents: 0.02,
+    maxWideEntrySpreadCents: 0.05,
+    minWideSpreadVolume24h: 25_000,
+    minEntryVolume24h: 5_000,
+    maxPriceImprovementCents: 0.005,
+    makerImprovementTicks: 1,
+    maxRestingBuyReservationUsdc: 5,
+    maxUnfilledOrdersPerToken: 1,
+    maxUnfilledOrdersPerMarket: 2,
+    maxUnfilledCancelsBeforeCooldown: 3,
+    unfilledCancelCooldownMs: 10 * 60_000,
+    allowOneSidedBooks: false,
+  };
 }
 
-type CooldownBypassReason =
-  | "price-moved"
-  | "spread-narrowed"
-  | "trade-recency-improved"
-  | "manual-family-fast-lane";
+type CooldownBypassReason = "price-moved" | "spread-narrowed" | "trade-recency-improved";
 
 interface CooldownBaseline {
   readonly bestBid: number | null;
@@ -801,25 +627,4 @@ function resolveOrderSize(
 
 function isEntryReason(reason: string): boolean {
   return ENTRY_REASONS.has(reason);
-}
-
-function resolveMarketabilityPolicyFallback(): MarketabilityPolicy {
-  return {
-    tier: "fallback",
-    speedTier: "standard",
-    maxBookAgeMs: 15_000,
-    hardMaxBookAgeMs: 60_000,
-    maxEntrySpreadCents: 0.02,
-    maxWideEntrySpreadCents: 0.05,
-    minWideSpreadVolume24h: 25_000,
-    minEntryVolume24h: 5_000,
-    maxPriceImprovementCents: 0.005,
-    makerImprovementTicks: 1,
-    maxRestingBuyReservationUsdc: 5,
-    maxUnfilledOrdersPerToken: 1,
-    maxUnfilledOrdersPerMarket: 2,
-    maxUnfilledCancelsBeforeCooldown: 3,
-    unfilledCancelCooldownMs: 10 * 60_000,
-    allowOneSidedBooks: false,
-  };
 }

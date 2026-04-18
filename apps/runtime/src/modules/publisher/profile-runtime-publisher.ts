@@ -6,7 +6,6 @@ import type {
 } from "@plankton/domain";
 import {
   createScorecardId,
-  createFamilyId,
   computeRecycleScore,
   computeToxicityPenalty,
   evaluateExecutionCanaryGate,
@@ -307,7 +306,6 @@ export class ProfileRuntimePublisher implements RuntimeModule {
       });
       return {
         scorecardId: createScorecardId(`sc-${randomUUID()}`),
-        familyId: createFamilyId(fid),
         profile,
         evidenceStatus: trade.tradeCount > 0 ? "partial" : "unknown",
         evidenceScore,

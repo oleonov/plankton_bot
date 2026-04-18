@@ -8,7 +8,6 @@ import { SqlitePositionRepository } from "../repositories/position-repository.js
 import {
   createPositionId,
   createTokenId,
-  createFamilyId,
   createConditionId,
 } from "@plankton/domain";
 import type { Position } from "@plankton/domain";
@@ -23,7 +22,6 @@ function makePosition(overrides?: Partial<Position>): Position {
     positionId: createPositionId("pos-1"),
     tokenId: createTokenId("tok-1"),
     conditionId: createConditionId("cond-1"),
-    familyId: createFamilyId("fam-1"),
     side: "buy",
     size: 100,
     avgEntryPrice: 0.55,
@@ -59,7 +57,6 @@ describe("SqlitePositionRepository", () => {
     expect(found).not.toBeNull();
     expect(found!.positionId).toBe("pos-1");
     expect(found!.tokenId).toBe("tok-1");
-    expect(found!.familyId).toBe("fam-1");
     expect(found!.side).toBe("buy");
     expect(found!.size).toBe(100);
     expect(found!.avgEntryPrice).toBe(0.55);
@@ -123,33 +120,6 @@ describe("SqlitePositionRepository", () => {
 
     const dust = repo.findDust();
     expect(dust).toHaveLength(2);
-  });
-
-  it("findByFamily works", () => {
-    repo.save(
-      makePosition({
-        positionId: createPositionId("p1"),
-        tokenId: createTokenId("t1"),
-        familyId: createFamilyId("fam-A"),
-      }),
-    );
-    repo.save(
-      makePosition({
-        positionId: createPositionId("p2"),
-        tokenId: createTokenId("t2"),
-        familyId: createFamilyId("fam-A"),
-      }),
-    );
-    repo.save(
-      makePosition({
-        positionId: createPositionId("p3"),
-        tokenId: createTokenId("t3"),
-        familyId: createFamilyId("fam-B"),
-      }),
-    );
-
-    expect(repo.findByFamily(createFamilyId("fam-A"))).toHaveLength(2);
-    expect(repo.findByFamily(createFamilyId("fam-B"))).toHaveLength(1);
   });
 
   it("findAll returns all statuses", () => {

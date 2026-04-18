@@ -45,7 +45,6 @@ export class MergeSettler {
       this.mergeLedgerRepo.save({
         mergeId: `merge-${candidate.conditionId}-${Date.now()}`,
         conditionId: candidate.conditionId,
-        familyId: String(candidate.familyId),
         mergedAmount: candidate.mergeAmount,
         spreadPnl,
         mergedAt: new Date().toISOString(),

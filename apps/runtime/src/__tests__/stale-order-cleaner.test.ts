@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createFamilyId, createOrderId, createConditionId } from "@plankton/domain";
+import { createTokenId, createOrderId, createConditionId } from "@plankton/domain";
 import type {
   OrderRepository,
   MarketRepository,
-  FamilyRulesProvider,
   Market,
   Order,
   ClientOrderId,
@@ -12,16 +11,13 @@ import { InProcessEventBus } from "@plankton/event-bus";
 import {
   cleanStaleEntryOrders,
   CANCEL_BACKOFF_MS,
-  DUST_LANE_ENTRY_TTL_MS,
-  DUST_LANE_EXIT_TTL_MS,
-  PROBE_LIKE_FAST_DAILY_TTL_MS,
+  PROBE_LIKE_DAILY_TTL_MS,
   PROBE_LIKE_INTRADAY_TTL_MS,
 } from "../modules/reconciliation/stale-order-cleaner.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 const TOK = createTokenId("tok-yes");
-const FAM = createFamilyId("fam-1");
 
 function createMockOrderRepo(): OrderRepository {
   return {
@@ -43,18 +39,10 @@ function createMockMarketRepo(): MarketRepository {
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
-    findByFamily: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
-  };
-}
-
-function createMockRulesProvider(): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue(null),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
+    findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -73,7 +61,6 @@ function makeOrder(overrides?: Partial<Order>): Order {
     clientOrderId: "plk_abc" as ClientOrderId,
     tokenId: TOK,
     conditionId: createConditionId("cond-1"),
-    familyId: FAM,
     side: "buy",
     orderType: "GTC",
     price: 0.3,
@@ -98,8 +85,6 @@ function makeMarket(overrides?: Partial<Market>): Market {
     eventSlug: null,
     question: "Test?",
     outcome: "YES",
-    familyId: FAM,
-    familyKey: "test",
     regime: "threshold",
     horizon: "daily",
     endDate: null,
@@ -118,21 +103,19 @@ function makeMarket(overrides?: Partial<Market>): Market {
 describe("cleanStaleEntryOrders", () => {
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
-  let rulesProvider: ReturnType<typeof createMockRulesProvider>;
   let bus: InProcessEventBus;
   let backoffMap: Map<string, number>;
 
   beforeEach(() => {
     orderRepo = createMockOrderRepo();
     marketRepo = createMockMarketRepo();
-    rulesProvider = createMockRulesProvider();
     bus = new InProcessEventBus();
     backoffMap = new Map();
   });
 
   function run() {
     return cleanStaleEntryOrders(
-      { orderRepo, marketRepo, rulesProvider, bus, log: silentLog },
+      { orderRepo, marketRepo, bus, log: silentLog },
       backoffMap,
     );
   }
@@ -160,7 +143,6 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
     expect(cancelled[0].command.orderId).toBe(order.orderId);
-    expect(cancelled[0].command.familyId).toBe(order.familyId);
   });
 
   it("does not cancel fresh open buy entry order within TTL", async () => {
@@ -220,24 +202,20 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(0);
   });
 
-  it("cancels fast-daily probe orders after the shortened TTL", async () => {
-    const twoMinutesAgo = new Date(
-      Date.now() - PROBE_LIKE_FAST_DAILY_TTL_MS - 30_000,
+  it("cancels probe-entry orders on daily horizon after the probe TTL", async () => {
+    const sixMinutesAgo = new Date(
+      Date.now() - PROBE_LIKE_DAILY_TTL_MS - 30_000,
     ).toISOString();
     const order = makeOrder({
-      createdAt: twoMinutesAgo,
+      createdAt: sixMinutesAgo,
       signalReason: "probe-entry",
     });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
     marketRepo.findByTokenId = vi.fn().mockReturnValue(
       makeMarket({
         horizon: "daily",
-        familyKey: "bitcoin-price",
       }),
     );
-    rulesProvider.getRule = vi.fn().mockReturnValue({
-      rules: { throughput: { fastLaneEnabled: true } },
-    });
 
     const cancelled: any[] = [];
     bus.subscribe("CancelOrderRequested", async (p) => {
@@ -250,60 +228,6 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(1);
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
-  });
-
-  it("keeps slow daily probe orders alive past the fast-daily TTL", async () => {
-    const twoMinutesAgo = new Date(
-      Date.now() - PROBE_LIKE_FAST_DAILY_TTL_MS - 30_000,
-    ).toISOString();
-    const order = makeOrder({
-      createdAt: twoMinutesAgo,
-      signalReason: "probe-entry",
-    });
-    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
-    marketRepo.findByTokenId = vi.fn().mockReturnValue(
-      makeMarket({
-        horizon: "daily",
-        familyKey: "bitcoin-above",
-      }),
-    );
-    rulesProvider.getRule = vi.fn().mockReturnValue({
-      rules: { throughput: { fastLaneEnabled: false } },
-    });
-
-    const result = await run();
-
-    expect(result.staleTtlCancelled).toBe(0);
-  });
-
-  it("cancels dust-lane spray entries on the dust TTL", async () => {
-    const staleAt = new Date(Date.now() - DUST_LANE_ENTRY_TTL_MS - 5_000).toISOString();
-    const order = makeOrder({
-      createdAt: staleAt,
-      signalReason: "spray-entry",
-      sizeUsdc: 0.15,
-    });
-    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
-    marketRepo.findByTokenId = vi.fn().mockReturnValue(
-      makeMarket({
-        horizon: "daily",
-        familyKey: "who-will-be-next-supreme-leader-of-iran",
-      }),
-    );
-    rulesProvider.getRule = vi.fn().mockReturnValue({
-      rules: { throughput: { dustLaneEnabled: true } },
-    });
-
-    const cancelled: any[] = [];
-    bus.subscribe("CancelOrderRequested", async (p) => {
-      cancelled.push(p);
-    });
-
-    const result = await run();
-    await bus.drain();
-
-    expect(result.staleTtlCancelled).toBe(1);
-    expect(cancelled).toHaveLength(1);
   });
 
   it("uses horizon TTL for conviction entries on intraday markets", async () => {
@@ -364,30 +288,6 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(0);
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
-  });
-
-  it("uses the shorter exit TTL for dust-lane families", async () => {
-    const staleAt = new Date(Date.now() - DUST_LANE_EXIT_TTL_MS - 5_000).toISOString();
-    const order = makeOrder({
-      side: "sell",
-      createdAt: staleAt,
-      signalReason: "repricing-exit",
-    });
-    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
-    rulesProvider.getRule = vi.fn().mockReturnValue({
-      rules: { throughput: { dustLaneEnabled: true } },
-    });
-
-    const cancelled: any[] = [];
-    bus.subscribe("CancelOrderRequested", async (p) => {
-      cancelled.push(p);
-    });
-
-    const result = await run();
-    await bus.drain();
-
-    expect(result.staleExitTtlCancelled).toBe(1);
-    expect(cancelled).toHaveLength(1);
   });
 
   // ─── Signal reason filtering ───────────────────────────────────────

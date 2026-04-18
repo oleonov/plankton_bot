@@ -14,7 +14,6 @@ import type {
   ExchangeGateway,
   FillRepository,
   OrderRepository,
-  FamilyRulesProvider,
   EventBus,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -24,7 +23,6 @@ export interface FillPollerModuleDeps {
   gateway: ExchangeGateway;
   fillRepo: FillRepository;
   orderRepo: OrderRepository;
-  rulesProvider: FamilyRulesProvider;
   bus: EventBus;
   log: Logger;
   pollIntervalMs: number;
@@ -92,7 +90,6 @@ export class FillPollerModule implements RuntimeModule {
         const result = await importExchangeFills(fills, {
           fillRepo: this.deps.fillRepo,
           orderRepo: this.deps.orderRepo,
-          rulesProvider: this.deps.rulesProvider,
           bus: this.deps.bus,
           log: this.log,
         });

@@ -11,7 +11,6 @@ import { ensureControlProfiles } from "./control-profiles.js";
 import { ensureFamilyRuleDefaultsTable } from "./family-rule-defaults.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
 import { runControlMigrations, runMigrations } from "./migrations/runner.js";
-import { normalizeFamilyRulesSnapshot } from "./repositories/family-rules-db-repository.js";
 
 export function bootstrapDatabase(dbPath: string): DbConnection {
   const conn = openDatabase(dbPath);
@@ -143,6 +142,15 @@ const CONTROL_MIGRATION_BASELINES: ControlMigrationBaseline[] = [
     // column via migration 035.
     isAlreadyApplied: (db) => !hasColumn(db, "family_profile_rollups", "effective_mode"),
   },
+  {
+    name: "037_selection_rules.sql",
+    // Post-037 shape: selection_rules table exists and runtime_control_state
+    // has selection_rules_version. Fresh bootstrap creates both directly;
+    // upgrade installs gain them when migration 037 runs.
+    isAlreadyApplied: (db) =>
+      hasTable(db, "selection_rules") &&
+      hasColumn(db, "runtime_control_state", "selection_rules_version"),
+  },
 ];
 
 function seedControlMigrationsBaseline(db: import("better-sqlite3").Database): void {
@@ -266,26 +274,25 @@ function backfillFamilyLimitUnification(db: import("better-sqlite3").Database): 
           continue;
         }
 
-        const normalized = normalizeFamilyRulesSnapshot(parsed);
         const updated = {
-          ...normalized,
-          maxActiveMarkets: maxNumber(normalized.maxActiveMarkets, PROBE_DEFAULTS.maxActiveMarkets),
-          maxDustPositions: maxNumber(normalized.maxDustPositions, PROBE_DEFAULTS.maxDustPositions),
+          ...parsed,
+          maxActiveMarkets: maxNumber(parsed.maxActiveMarkets, PROBE_DEFAULTS.maxActiveMarkets),
+          maxDustPositions: maxNumber(parsed.maxDustPositions, PROBE_DEFAULTS.maxDustPositions),
           tailQuarantineThresholdUsdc: maxNumber(
-            normalized.tailQuarantineThresholdUsdc,
+            parsed.tailQuarantineThresholdUsdc,
             PROBE_DEFAULTS.tailQuarantineThresholdUsdc,
           ),
           tailQuarantineThresholdRatio: maxNumber(
-            normalized.tailQuarantineThresholdRatio,
+            parsed.tailQuarantineThresholdRatio,
             PROBE_DEFAULTS.tailQuarantineThresholdRatio,
           ),
         };
 
         if (
-          updated.maxActiveMarkets === normalized.maxActiveMarkets &&
-          updated.maxDustPositions === normalized.maxDustPositions &&
-          updated.tailQuarantineThresholdUsdc === normalized.tailQuarantineThresholdUsdc &&
-          updated.tailQuarantineThresholdRatio === normalized.tailQuarantineThresholdRatio
+          updated.maxActiveMarkets === parsed.maxActiveMarkets &&
+          updated.maxDustPositions === parsed.maxDustPositions &&
+          updated.tailQuarantineThresholdUsdc === parsed.tailQuarantineThresholdUsdc &&
+          updated.tailQuarantineThresholdRatio === parsed.tailQuarantineThresholdRatio
         ) {
           continue;
         }

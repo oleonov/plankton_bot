@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { MarketRepository, Market } from "@plankton/domain";
-import type { TokenId, FamilyId } from "@plankton/domain";
-import { createTokenId, createFamilyId } from "@plankton/domain";
+import type { TokenId } from "@plankton/domain";
+import { createTokenId } from "@plankton/domain";
 import type { Regime } from "@plankton/domain";
 
 export class SqliteMarketRepository implements MarketRepository {
@@ -11,9 +11,11 @@ export class SqliteMarketRepository implements MarketRepository {
     this.db
       .prepare(
         `INSERT INTO markets
-         (token_id, condition_id, slug, event_slug, question, outcome, outcome_index, family_id, family_key,
-          regime, horizon, end_date, active, tradable, tick_size, neg_risk, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         (token_id, condition_id, slug, event_slug, question, outcome, outcome_index,
+          regime, horizon, end_date, active, tradable, tick_size, neg_risk,
+          event_market_count, selection_status, selection_winning_rule_id,
+          created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(token_id) DO UPDATE SET
            condition_id = excluded.condition_id,
            slug = excluded.slug,
@@ -21,8 +23,6 @@ export class SqliteMarketRepository implements MarketRepository {
            question = excluded.question,
            outcome = excluded.outcome,
            outcome_index = excluded.outcome_index,
-           family_id = excluded.family_id,
-           family_key = excluded.family_key,
            regime = excluded.regime,
            horizon = excluded.horizon,
            end_date = excluded.end_date,
@@ -30,6 +30,9 @@ export class SqliteMarketRepository implements MarketRepository {
            tradable = excluded.tradable,
            tick_size = excluded.tick_size,
            neg_risk = excluded.neg_risk,
+           event_market_count = excluded.event_market_count,
+           selection_status = excluded.selection_status,
+           selection_winning_rule_id = excluded.selection_winning_rule_id,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -40,8 +43,6 @@ export class SqliteMarketRepository implements MarketRepository {
         market.question,
         market.outcome,
         market.outcomeIndex,
-        market.familyId,
-        market.familyKey,
         market.regime,
         market.horizon,
         market.endDate,
@@ -49,6 +50,9 @@ export class SqliteMarketRepository implements MarketRepository {
         market.tradable ? 1 : 0,
         market.tickSize,
         market.negRisk ? 1 : 0,
+        market.eventMarketCount ?? 1,
+        market.selectionStatus ?? "unknown",
+        market.selectionWinningRuleId ?? null,
         market.createdAt,
         market.updatedAt,
       );
@@ -85,13 +89,6 @@ export class SqliteMarketRepository implements MarketRepository {
     return rows.map((r) => this.rowToMarket(r));
   }
 
-  findByFamily(familyId: FamilyId): Market[] {
-    const rows = this.db
-      .prepare("SELECT * FROM markets WHERE family_id = ?")
-      .all(familyId) as Record<string, unknown>[];
-    return rows.map((r) => this.rowToMarket(r));
-  }
-
   findAll(): Market[] {
     const rows = this.db.prepare("SELECT * FROM markets").all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
@@ -103,6 +100,33 @@ export class SqliteMarketRepository implements MarketRepository {
       .run(tokenId);
   }
 
+  findTrackedForPricing(): Market[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM markets
+         WHERE active = 1
+           AND (
+             tradable = 1
+             OR EXISTS (SELECT 1 FROM positions
+                        WHERE positions.token_id = markets.token_id
+                          AND positions.status IN ('open','dust'))
+             OR EXISTS (SELECT 1 FROM orders
+                        WHERE orders.token_id = markets.token_id
+                          AND orders.status IN ('pending','open'))
+           )
+         ORDER BY markets.token_id`,
+      )
+      .all() as Record<string, unknown>[];
+    return rows.map((r) => this.rowToMarket(r));
+  }
+
+  findEventMarketCountBySlug(slug: string): number | null {
+    const row = this.db
+      .prepare(`SELECT event_market_count FROM markets WHERE slug = ? LIMIT 1`)
+      .get(slug) as { event_market_count: number } | undefined;
+    return row?.event_market_count ?? null;
+  }
+
   private rowToMarket(row: Record<string, unknown>): Market {
     return {
       tokenId: createTokenId(row.token_id as string),
@@ -112,8 +136,6 @@ export class SqliteMarketRepository implements MarketRepository {
       question: row.question as string,
       outcome: row.outcome as string,
       outcomeIndex: (row.outcome_index as number) ?? null,
-      familyId: row.family_id ? createFamilyId(row.family_id as string) : null,
-      familyKey: (row.family_key as string) ?? null,
       regime: (row.regime as Regime) ?? null,
       horizon: (row.horizon as string) ?? null,
       endDate: (row.end_date as string) ?? null,
@@ -121,6 +143,9 @@ export class SqliteMarketRepository implements MarketRepository {
       tradable: row.tradable == null ? row.active === 1 : row.tradable === 1,
       tickSize: row.tick_size as number,
       negRisk: row.neg_risk === 1,
+      eventMarketCount: (row.event_market_count as number | null) ?? 1,
+      selectionStatus: (row.selection_status as import("@plankton/domain").SelectionStatus) ?? "unknown",
+      selectionWinningRuleId: (row.selection_winning_rule_id as string) ?? null,
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
     };

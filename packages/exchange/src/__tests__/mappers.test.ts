@@ -431,6 +431,38 @@ describe("mapGammaMarket", () => {
     expect(market.tokens[1]!.tokenId).toBe("tok-no");
     expect(market.tokens[1]!.outcome).toBe("No");
   });
+
+  it("eventMarketCount defaults to 1 when no eventContext is supplied (binary binary event)", () => {
+    const market = mapGammaMarket({ slug: "bitcoin-above-100k" });
+    expect(market.eventMarketCount).toBe(1);
+  });
+
+  it("eventMarketCount carries multi-market event count (e.g. Super Bowl with 30 outcomes)", () => {
+    const market = mapGammaMarket(
+      { slug: "super-bowl-winner" },
+      { slug: "super-bowl-2026", marketCount: 30 },
+    );
+    expect(market.eventMarketCount).toBe(30);
+    expect(market.eventSlug).toBe("super-bowl-2026");
+  });
+
+  it("eventContext.slug propagates to eventSlug field", () => {
+    const market = mapGammaMarket(
+      { slug: "bitcoin-above-200k" },
+      { slug: "bitcoin-price-event", marketCount: 1 },
+    );
+    expect(market.eventSlug).toBe("bitcoin-price-event");
+    expect(market.eventMarketCount).toBe(1);
+  });
+
+  it("null eventContext.slug leaves eventSlug undefined (no key set)", () => {
+    const market = mapGammaMarket(
+      { slug: "some-market" },
+      { slug: null, marketCount: 5 },
+    );
+    expect(market.eventSlug).toBeUndefined();
+    expect(market.eventMarketCount).toBe(5);
+  });
 });
 
 describe("mapGammaPricing", () => {

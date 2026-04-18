@@ -4,8 +4,6 @@ import type {
   ConditionId,
   ExchangeFill,
   ExchangeGateway,
-  FamilyRulesProvider,
-  FamilyStateRepository,
   FillRepository,
   LegStateRepository,
   MarketRepository,
@@ -14,14 +12,12 @@ import type {
   PositionRepository,
   InventoryLotRepository,
   ClientOrderId,
-  FamilyId,
   TokenId,
 } from "@plankton/domain";
-import { createFamilyId, createFillId, createOrderId, createTokenId } from "@plankton/domain";
+import { createFillId, createOrderId, createTokenId } from "@plankton/domain";
 import type { Logger } from "./logger.js";
 import { resolveOpenPositionStatus } from "./position-status.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";
-import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
 import {
   findLocalOrderForExchangeFill,
   importExchangeFills,
@@ -36,8 +32,6 @@ export interface StartupPositionAdoptionDeps {
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
   legStateRepo: LegStateRepository;
-  familyStateRepo: FamilyStateRepository;
-  rulesProvider: FamilyRulesProvider;
   log: Logger;
   db: Database.Database;
   botRunId: BotRunId;
@@ -74,7 +68,6 @@ interface SyntheticOrderSeed {
   clientOrderId: ClientOrderId;
   tokenId: Order["tokenId"];
   conditionId: ConditionId;
-  familyId: Order["familyId"];
   side: Order["side"];
   size: number;
   sizeUsdc: number;
@@ -86,7 +79,6 @@ interface StartupAdoptionCleanupResult {
   orderIds: string[];
   fillIds: string[];
   tokenIds: string[];
-  familyIds: FamilyId[];
 }
 
 const SYNTHETIC_SIGNAL_REASON = "startup-adoption";
@@ -96,16 +88,8 @@ export async function runStartupPositionAdoption(
 ): Promise<StartupPositionAdoptionResult> {
   const log = deps.log.child({ module: "startup-position-adoption" });
   const inventory = new InventoryHandler(deps.positionRepo, deps.inventoryLotRepo, log, deps.db);
-  const exposure = new FamilyExposureCalculator(
-    deps.familyStateRepo,
-    deps.positionRepo,
-    deps.inventoryLotRepo,
-    log,
-    deps.rulesProvider,
-  );
 
   const rawFills = await deps.gateway.getFills(0);
-
   const result: StartupPositionAdoptionResult = {
     scannedFills: rawFills.length,
     alreadyKnownFills: 0,
@@ -124,13 +108,10 @@ export async function runStartupPositionAdoption(
     positionsWithoutFills: [],
     details: [],
   };
-  const familiesToRecompute = new Set<string>();
-
   const cleanup = cleanupPriorStartupAdoptionArtifacts(deps);
   result.cleanedSyntheticOrders = cleanup.orderIds.length;
   result.cleanedSyntheticFills = cleanup.fillIds.length;
   result.cleanedSyntheticTokens = cleanup.tokenIds.length;
-  cleanup.familyIds.forEach((familyId) => familiesToRecompute.add(String(familyId)));
 
   const fills: ExchangeFill[] = [];
   for (const fill of rawFills) {
@@ -200,7 +181,6 @@ export async function runStartupPositionAdoption(
         clientOrderId: resolveSyntheticClientOrderId(fill, orphanGroupKey),
         tokenId: fill.tokenId,
         conditionId: market.conditionId as ConditionId,
-        familyId: market.familyId,
         side: fill.side,
         size: fill.size,
         sizeUsdc,
@@ -225,7 +205,6 @@ export async function runStartupPositionAdoption(
       const importResult = await importExchangeFills([pending.fill], {
         fillRepo: deps.fillRepo,
         orderRepo: deps.orderRepo,
-        rulesProvider: deps.rulesProvider,
         bus,
         log,
       });
@@ -247,7 +226,6 @@ export async function runStartupPositionAdoption(
         fillId: savedFill.fillId,
         tokenId: pending.fill.tokenId,
         conditionId: savedFill.conditionId,
-        familyId: localOrder.familyId,
         side: pending.fill.side,
         price: pending.fill.price,
         size: pending.fill.size,
@@ -258,9 +236,6 @@ export async function runStartupPositionAdoption(
       });
       deps.fillRepo.markReconciled([savedFill.fillId]);
 
-      if (localOrder.familyId) {
-        familiesToRecompute.add(String(localOrder.familyId));
-      }
       result.appliedFills++;
       if (!pending.localOrder) {
         result.adoptedOrphanFills++;
@@ -282,10 +257,6 @@ export async function runStartupPositionAdoption(
         "startup adoption failed while applying fill",
       );
     }
-  }
-
-  for (const familyId of familiesToRecompute) {
-    exposure.recompute(createFamilyId(familyId), true, false);
   }
 
   result.syntheticOrdersCreated = syntheticOrders.size;
@@ -409,8 +380,7 @@ function cleanupPriorStartupAdoptionArtifacts(
       `SELECT DISTINCT
          o.order_id AS order_id,
          f.fill_id AS fill_id,
-         f.token_id AS token_id,
-         f.family_id AS family_id
+         f.token_id AS token_id
        FROM orders o
        LEFT JOIN fills f ON f.order_id = o.order_id
        WHERE o.signal_reason = ?`,
@@ -419,18 +389,14 @@ function cleanupPriorStartupAdoptionArtifacts(
     order_id: string;
     fill_id: string | null;
     token_id: string | null;
-    family_id: string | null;
   }>;
 
   const orderIds = [...new Set(rows.map((row) => row.order_id))];
   const fillIds = [...new Set(rows.map((row) => row.fill_id).filter(Boolean))] as string[];
   const tokenIds = [...new Set(rows.map((row) => row.token_id).filter(Boolean))] as string[];
-  const familyIds = [...new Set(rows.map((row) => row.family_id).filter(Boolean))].map((familyId) =>
-    createFamilyId(familyId as string),
-  );
 
   if (orderIds.length === 0) {
-    return { orderIds, fillIds, tokenIds, familyIds };
+    return { orderIds, fillIds, tokenIds };
   }
 
   deps.db.transaction(() => {
@@ -453,7 +419,7 @@ function cleanupPriorStartupAdoptionArtifacts(
     "cleared prior startup adoption artifacts before recovery",
   );
 
-  return { orderIds, fillIds, tokenIds, familyIds };
+  return { orderIds, fillIds, tokenIds };
 }
 
 function deleteWhereIn(
@@ -597,7 +563,6 @@ function resolveSyntheticOrder(
     clientOrderId: seed.clientOrderId,
     tokenId: seed.tokenId,
     conditionId: seed.conditionId,
-    familyId: seed.familyId,
     side: seed.side,
     orderType: "GTC",
     postOnly: false,

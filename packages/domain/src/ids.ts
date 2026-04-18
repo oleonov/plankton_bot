@@ -7,7 +7,6 @@
 
 export type TokenId = string & { readonly __brand: "TokenId" };
 export type ConditionId = string & { readonly __brand: "ConditionId" };
-export type FamilyId = string & { readonly __brand: "FamilyId" };
 export type OrderId = string & { readonly __brand: "OrderId" };
 export type FillId = string & { readonly __brand: "FillId" };
 export type PositionId = string & { readonly __brand: "PositionId" };
@@ -28,10 +27,6 @@ export function createTokenId(raw: string): TokenId {
 
 export function createConditionId(raw: string): ConditionId {
   return raw as ConditionId;
-}
-
-export function createFamilyId(raw: string): FamilyId {
-  return raw as FamilyId;
 }
 
 export function createOrderId(raw: string): OrderId {
@@ -77,3 +72,4 @@ export type ImportId = string & { readonly __brand: "ImportId" };
 export function createImportId(raw: string): ImportId {
   return raw as ImportId;
 }
+

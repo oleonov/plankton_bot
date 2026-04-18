@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import {
-  createFamilyId,
   createPositionId,
   createTokenId,
   createConditionId,
@@ -14,7 +13,6 @@ import type { Logger } from "../../../logger.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
 
-const FAM_ID = createFamilyId("btc-threshold:scalp:daily");
 const TOK_ID = createTokenId("tok-yes");
 const COND_ID = createConditionId("cond-abc");
 
@@ -35,7 +33,6 @@ function makeLogger(): Logger {
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
     signalId: "sig-1",
-    familyId: FAM_ID,
     tokenId: TOK_ID,
     conditionId: COND_ID,
     side: "buy",
@@ -68,7 +65,6 @@ function makePositionRepo(position: Position | null = null): PositionRepository 
   return {
     save: vi.fn(),
     findByTokenId: vi.fn().mockReturnValue(position),
-    findByFamily: vi.fn().mockReturnValue([]),
     findOpen: vi.fn().mockReturnValue([]),
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
@@ -81,7 +77,6 @@ function makeOpenPosition(overrides?: Partial<Position>): Position {
     positionId: createPositionId("pos-1"),
     tokenId: TOK_ID,
     conditionId: COND_ID,
-    familyId: FAM_ID,
     side: "buy",
     size: 10,
     avgEntryPrice: 0.2,
@@ -103,7 +98,6 @@ function makeOpenBuyOrder(): Order {
     clientOrderId: "clord-1" as any,
     tokenId: TOK_ID,
     conditionId: COND_ID,
-    familyId: FAM_ID,
     side: "buy",
     orderType: "GTC",
     price: 0.5,
@@ -129,7 +123,6 @@ describe("AlgoRiskGateImpl", () => {
 
     expect(decision.approved).toBe(true);
     expect(decision.signalId).toBe(signal.signalId);
-    expect(decision.familyId).toBe(signal.familyId);
     expect(decision.rejectionReasons).toHaveLength(0);
   });
 

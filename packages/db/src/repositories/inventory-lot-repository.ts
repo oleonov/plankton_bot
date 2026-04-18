@@ -5,7 +5,6 @@ import {
   createLotId,
   createPositionId,
   createTokenId,
-  createFamilyId,
   createFillId,
 } from "@plankton/domain";
 import type { OrderSide } from "@plankton/domain";
@@ -14,7 +13,6 @@ interface LotRow {
   lot_id: string;
   position_id: string;
   token_id: string;
-  family_id: string | null;
   side: string;
   size: number;
   remaining_size: number;
@@ -29,7 +27,6 @@ function rowToLot(row: LotRow): InventoryLot {
     lotId: createLotId(row.lot_id),
     positionId: createPositionId(row.position_id),
     tokenId: createTokenId(row.token_id),
-    familyId: row.family_id ? createFamilyId(row.family_id) : null,
     side: row.side as OrderSide,
     size: row.size,
     remainingSize: row.remaining_size,
@@ -47,15 +44,14 @@ export class SqliteInventoryLotRepository implements InventoryLotRepository {
     this.db
       .prepare(
         `INSERT INTO inventory_lots
-           (lot_id, position_id, token_id, family_id, side, size,
+           (lot_id, position_id, token_id, side, size,
             remaining_size, entry_price, cost_usdc, fill_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         lot.lotId,
         lot.positionId,
         lot.tokenId,
-        lot.familyId,
         lot.side,
         lot.size,
         lot.remainingSize,

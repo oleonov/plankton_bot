@@ -8,30 +8,37 @@ PRAGMA foreign_keys = ON;
 -- From 001_initial.sql + 005 (event_slug)
 
 CREATE TABLE IF NOT EXISTS markets (
-  token_id      TEXT PRIMARY KEY,
-  condition_id  TEXT NOT NULL,
-  slug          TEXT NOT NULL,
-  question      TEXT NOT NULL,
-  outcome       TEXT NOT NULL,
-  outcome_index INTEGER,
-  family_id     TEXT,
-  family_key    TEXT,
-  regime        TEXT,
-  horizon       TEXT,
-  end_date      TEXT,
-  active        INTEGER NOT NULL DEFAULT 1,
-  tradable      INTEGER NOT NULL DEFAULT 1,
-  tick_size     REAL NOT NULL,
-  neg_risk      INTEGER NOT NULL DEFAULT 0,
-  event_slug    TEXT,
-  created_at    TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+  token_id                  TEXT PRIMARY KEY,
+  condition_id              TEXT NOT NULL,
+  slug                      TEXT NOT NULL,
+  question                  TEXT NOT NULL,
+  outcome                   TEXT NOT NULL,
+  outcome_index             INTEGER,
+  family_id                 TEXT,
+  family_key                TEXT,
+  regime                    TEXT,
+  horizon                   TEXT,
+  end_date                  TEXT,
+  active                    INTEGER NOT NULL DEFAULT 1,
+  tradable                  INTEGER NOT NULL DEFAULT 1,
+  tick_size                 REAL NOT NULL,
+  neg_risk                  INTEGER NOT NULL DEFAULT 0,
+  event_slug                TEXT,
+  event_market_count        INTEGER NOT NULL DEFAULT 1,
+  selection_status          TEXT NOT NULL DEFAULT 'unknown'
+    CHECK (selection_status IN
+      ('unknown','matched_include','matched_exclude','step2_fallback_include','fallback_exclude')),
+  selection_winning_rule_id TEXT,
+  created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_markets_family_id ON markets(family_id);
 CREATE INDEX IF NOT EXISTS idx_markets_active ON markets(active);
 CREATE INDEX IF NOT EXISTS idx_markets_slug ON markets(slug);
 CREATE INDEX IF NOT EXISTS idx_markets_condition_id ON markets(condition_id);
+CREATE INDEX IF NOT EXISTS idx_markets_selection_status ON markets(selection_status);
+CREATE INDEX IF NOT EXISTS idx_markets_tracked ON markets(active, tradable) WHERE active = 1;
 
 -- ═══════════ MARKET SNAPSHOTS ═══════════
 -- From 001_initial.sql
@@ -80,6 +87,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_token ON orders(token_id);
 CREATE INDEX IF NOT EXISTS idx_orders_client_oid ON orders(client_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_exchange_oid ON orders(exchange_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_bot_run ON orders(bot_run_id);
+CREATE INDEX IF NOT EXISTS idx_orders_token_status ON orders(token_id, status);
 
 -- ═══════════ FILLS ═══════════
 -- From 001_initial.sql

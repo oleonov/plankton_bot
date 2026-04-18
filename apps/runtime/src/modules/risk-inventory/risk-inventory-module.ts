@@ -3,11 +3,8 @@
  *
  * Subscribes to:
  *  - SignalProduced → evaluate via RiskGate → publish SignalApproved / SignalRejected
- *  - FillReceived → apply to inventory → publish PositionUpdated + FamilyExposureChanged
- *  - NormalizedMarketUpdated → mark-to-market revaluation of open positions (P2-1)
- *
- * Exposes:
- *  - getDiagnostics() → operator-facing signal/rejection stats per family (P2-2)
+ *  - FillReceived → apply to inventory → publish PositionUpdated
+ *  - NormalizedMarketUpdated → mark-to-market revaluation of open positions
  *
  * Does NOT:
  *  - place/cancel orders (execution's job)
@@ -19,14 +16,11 @@ import type Database from "better-sqlite3";
 import type {
   RuntimeModule,
   EventBus,
-  FamilyRulesProvider,
-  FamilyStateRepository,
   PositionRepository,
   InventoryLotRepository,
   OrderRepository,
   FillRepository,
   RuntimeEventMap,
-  FamilyId,
   TokenId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -34,12 +28,9 @@ import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
-import { FamilyExposureCalculator } from "./family-exposure.js";
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
-  rulesProvider: FamilyRulesProvider;
-  familyStateRepo: FamilyStateRepository;
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
   orderRepo: OrderRepository;
@@ -49,15 +40,6 @@ export interface RiskInventoryModuleDeps {
   liveLiteGuard?: LiveLiteGuard | undefined;
 }
 
-/** Per-family diagnostic counters (P2-2). */
-export interface FamilyDiagnostics {
-  signalsApproved: number;
-  signalsRejected: number;
-  lastRejectionReason: string | null;
-  lastSignalReason: string | null;
-  lastSignalAt: string | null;
-}
-
 /** Full diagnostics snapshot returned by getDiagnostics(). */
 export interface RiskDiagnostics {
   signalsProcessed: number;
@@ -65,14 +47,12 @@ export interface RiskDiagnostics {
   signalsRejected: number;
   fillsProcessed: number;
   markToMarketUpdates: number;
-  families: Record<string, FamilyDiagnostics>;
 }
 
 export class RiskInventoryModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly riskGate: AlgoRiskGateImpl;
   private readonly inventory: InventoryHandler;
-  private readonly exposure: FamilyExposureCalculator;
   private unsubs: Array<() => void> = [];
   private started = false;
   private signalsProcessed = 0;
@@ -80,9 +60,6 @@ export class RiskInventoryModule implements RuntimeModule {
   private signalsRejectedCount = 0;
   private fillsProcessed = 0;
   private mtmUpdates = 0;
-
-  /** Per-family diagnostic counters (P2-2). */
-  private readonly familyDiag = new Map<string, FamilyDiagnostics>();
 
   /** Per-token in-flight buy order counter (generalized, all buy-side commands). */
   private readonly tokenInFlight = new Map<string, number>();
@@ -106,13 +83,6 @@ export class RiskInventoryModule implements RuntimeModule {
       deps.inventoryLotRepo,
       this.log,
       deps.db,
-    );
-    this.exposure = new FamilyExposureCalculator(
-      deps.familyStateRepo,
-      deps.positionRepo,
-      deps.inventoryLotRepo,
-      this.log,
-      deps.rulesProvider,
     );
   }
 
@@ -155,41 +125,18 @@ export class RiskInventoryModule implements RuntimeModule {
     };
   }
 
-  /** Operator-facing diagnostics snapshot (P2-2). */
+  /** Operator-facing diagnostics snapshot. */
   getDiagnostics(): RiskDiagnostics {
-    const families: Record<string, FamilyDiagnostics> = {};
-    for (const [key, diag] of this.familyDiag) {
-      families[key] = { ...diag };
-    }
     return {
       signalsProcessed: this.signalsProcessed,
       signalsApproved: this.signalsApprovedCount,
       signalsRejected: this.signalsRejectedCount,
       fillsProcessed: this.fillsProcessed,
       markToMarketUpdates: this.mtmUpdates,
-      families,
     };
   }
 
-  // ─── Diagnostics helpers (P2-2) ───────────────────────────────────
-
-  private getFamilyDiag(familyId: FamilyId): FamilyDiagnostics {
-    const key = String(familyId);
-    let d = this.familyDiag.get(key);
-    if (!d) {
-      d = {
-        signalsApproved: 0,
-        signalsRejected: 0,
-        lastRejectionReason: null,
-        lastSignalReason: null,
-        lastSignalAt: null,
-      };
-      this.familyDiag.set(key, d);
-    }
-    return d;
-  }
-
-  // ─── In-flight counter helpers (B2.2) ────────────────────────────
+  // ─── In-flight counter helpers ────────────────────────────────────
 
   private incrementInFlight(command: RuntimeEventMap["PlaceOrderRequested"]["command"]): void {
     if (command.side !== "buy") return;
@@ -217,18 +164,11 @@ export class RiskInventoryModule implements RuntimeModule {
     const { signal } = payload;
     this.signalsProcessed++;
 
-    const diag = signal.familyId ? this.getFamilyDiag(signal.familyId) : null;
-    if (diag) {
-      diag.lastSignalReason = signal.reason;
-      diag.lastSignalAt = signal.generatedAt;
-    }
-
     try {
       const decision = await this.riskGate.evaluate(signal);
 
       if (decision.approved) {
         this.signalsApprovedCount++;
-        if (diag) diag.signalsApproved++;
         this.log.info(
           { signalId: signal.signalId, checks: decision.checksPassed },
           "signal approved",
@@ -239,10 +179,6 @@ export class RiskInventoryModule implements RuntimeModule {
         });
       } else {
         this.signalsRejectedCount++;
-        if (diag) {
-          diag.signalsRejected++;
-          diag.lastRejectionReason = decision.rejectionReasons.join("; ");
-        }
         this.log.info(
           { signalId: signal.signalId, reasons: decision.rejectionReasons },
           "signal rejected",
@@ -255,10 +191,6 @@ export class RiskInventoryModule implements RuntimeModule {
       }
     } catch (err) {
       this.signalsRejectedCount++;
-      if (diag) {
-        diag.signalsRejected++;
-        diag.lastRejectionReason = "internal error during risk evaluation";
-      }
       this.log.error({ err, signalId: signal.signalId }, "signal evaluation failed");
       await this.deps.bus.publish("SignalRejected", {
         signal,
@@ -278,7 +210,6 @@ export class RiskInventoryModule implements RuntimeModule {
         fillId: payload.fillId,
         tokenId: payload.tokenId,
         conditionId: payload.conditionId,
-        familyId: payload.familyId,
         side: payload.side,
         price: payload.price,
         size: payload.size,
@@ -291,19 +222,6 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.fillRepo.markReconciled([payload.fillId]);
 
       await this.deps.bus.publish("PositionUpdated", { position });
-
-      // Recompute family exposure only when familyId is known
-      if (payload.familyId) {
-        const familyState = this.exposure.recompute(payload.familyId, payload.side === "buy");
-
-        await this.deps.bus.publish("FamilyExposureChanged", {
-          familyId: payload.familyId,
-          totalExposureUsdc: familyState.openValueUsdc,
-          openPositionCount: familyState.openPositionCount,
-          familyState,
-          timestamp: Date.now(),
-        });
-      }
 
       const oid = String(payload.orderId);
       const order = this.deps.orderRepo.findById(payload.orderId);
@@ -319,7 +237,7 @@ export class RiskInventoryModule implements RuntimeModule {
     }
   }
 
-  // ─── Mark-to-market (P2-1) ────────────────────────────────────────
+  // ─── Mark-to-market ───────────────────────────────────────────────
 
   private async handleMarketUpdate(
     payload: RuntimeEventMap["NormalizedMarketUpdated"],

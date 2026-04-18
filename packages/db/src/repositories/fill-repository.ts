@@ -5,7 +5,6 @@ import {
   createFillId,
   createOrderId,
   createTokenId,
-  createFamilyId,
   createConditionId,
 } from "@plankton/domain";
 
@@ -18,15 +17,14 @@ export class SqliteFillRepository implements FillRepository {
     this.db
       .prepare(
         `INSERT INTO fills
-         (fill_id, order_id, token_id, family_id, condition_id, side, price, size,
+         (fill_id, order_id, token_id, condition_id, side, price, size,
           size_usdc, liquidity_role, fee, fee_rate_bps, filled_at, reconciled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       )
       .run(
         fill.fillId,
         fill.orderId,
         fill.tokenId,
-        fill.familyId,
         fill.conditionId,
         fill.side,
         fill.price,
@@ -121,7 +119,6 @@ export class SqliteFillRepository implements FillRepository {
       orderId: createOrderId(row.order_id as string),
       tokenId: createTokenId(row.token_id as string),
       conditionId: createConditionId(row.condition_id as string),
-      familyId: row.family_id ? createFamilyId(row.family_id as string) : null,
       side: row.side as OrderSide,
       price: row.price as number,
       size: row.size as number,

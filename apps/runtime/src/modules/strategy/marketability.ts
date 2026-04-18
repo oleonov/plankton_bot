@@ -1,4 +1,4 @@
-import type { FamilyRuleBundle, NormalizedMarket, Order, Signal } from "@plankton/domain";
+import type { NormalizedMarket, Order, Signal } from "@plankton/domain";
 import {
   Action,
   ENTRY_REASONS,
@@ -17,6 +17,54 @@ import { shouldPromoteFallbackMarketability } from "../../proven-family-policy.j
 const EPSILON = 1e-9;
 const DEFAULT_MAX_BOOK_AGE_MS = 15_000;
 const DEFAULT_HARD_MAX_BOOK_AGE_MS = 60_000;
+
+// ─── Local bundle type (Phase 6 compatibility shim) ──────────────────────────
+//
+// FamilyRuleBundle was removed from @plankton/domain in Phase 6.
+// These local interfaces preserve the shape used by evaluateMarketability so
+// that test fixtures and callers compile without changes. Phase 7 will remove
+// the bundle-taking function signatures entirely.
+
+export interface MarketabilityBundleIdentity {
+  familyKey: string;
+  primaryCategory: string;
+  regime: string;
+  horizon: string;
+  strategyProfile: string;
+  slugPattern: string | null;
+  feeTier?: string | null;
+  liveWalletRequirement?: string | null;
+  requiresPostOnlyForLive?: boolean | null;
+  [key: string]: unknown;
+}
+
+export interface MarketabilityBundleEvidence {
+  promotionState: string | null;
+  evidenceScore: number;
+  evidenceStatus: string;
+  localTradeCount: number;
+  [key: string]: unknown;
+}
+
+export interface MarketabilityBundleRules {
+  universe: { action: string };
+  throughput?: {
+    fastLaneEnabled?: boolean | null;
+    dustLaneEnabled?: boolean | null;
+    queueJumpCanaryEnabled?: boolean | null;
+    [key: string]: unknown;
+  } | null;
+  [key: string]: unknown;
+}
+
+/** Minimal bundle shape accepted by marketability functions (Phase 6 shim). */
+export interface MarketabilityBundle {
+  identity: MarketabilityBundleIdentity;
+  evidence?: MarketabilityBundleEvidence | null;
+  rules: MarketabilityBundleRules;
+}
+
+// ─── Policy types ─────────────────────────────────────────────────────────────
 
 export interface MarketabilityPolicy {
   readonly tier: "core" | "reduced" | "fallback";
@@ -137,7 +185,7 @@ const FALLBACK_POLICY: MarketabilityPolicy = {
 };
 
 export function resolveMarketabilityPolicy(
-  bundle: FamilyRuleBundle,
+  bundle: MarketabilityBundle,
   tickSize: number | null | undefined = null,
 ): MarketabilityPolicy {
   const resolvedTier = resolveFamilyMarketabilityTier({
@@ -163,7 +211,7 @@ export function resolveMarketabilityPolicy(
 }
 
 function resolveMarketabilitySpeedTier(
-  bundle: Pick<FamilyRuleBundle, "rules">,
+  bundle: Pick<MarketabilityBundle, "rules">,
   tier: MarketabilityPolicy["tier"],
 ): FamilySpeedTier {
   if (bundle.rules.throughput?.fastLaneEnabled !== true) return "standard";
@@ -183,14 +231,15 @@ export function buildRestingOrderSnapshot(
   for (const order of orders) {
     if (!isOpenBuyEntryOrder(order)) continue;
 
-    const familyKey = String(order.familyId);
+    // Phase 6: no familyId on orders; use tokenId as the grouping key
+    const groupKey = String(order.tokenId);
     const tokenKey = String(order.tokenId);
     const conditionId = marketsByToken.get(tokenKey)?.conditionId ?? `token:${tokenKey}`;
-    const marketKey = `${familyKey}|${conditionId}`;
+    const marketKey = `${groupKey}|${conditionId}`;
 
     buyEntryUsdcByFamily.set(
-      familyKey,
-      (buyEntryUsdcByFamily.get(familyKey) ?? 0) + order.sizeUsdc,
+      groupKey,
+      (buyEntryUsdcByFamily.get(groupKey) ?? 0) + order.sizeUsdc,
     );
     buyEntryCountByToken.set(tokenKey, (buyEntryCountByToken.get(tokenKey) ?? 0) + 1);
     buyEntryCountByMarket.set(marketKey, (buyEntryCountByMarket.get(marketKey) ?? 0) + 1);
@@ -202,7 +251,7 @@ export function buildRestingOrderSnapshot(
 export function evaluateMarketability(opts: {
   readonly signal: Signal;
   readonly market: NormalizedMarket;
-  readonly bundle: FamilyRuleBundle;
+  readonly bundle: MarketabilityBundle;
   readonly nowMs: number;
   readonly restingSnapshot?: RestingOrderSnapshot | null;
   readonly cooldownUntilMs?: number | null;
@@ -365,7 +414,7 @@ export function resolveOneSidedDustBuyPrice(opts: {
 }
 
 function applyFamilyActionChecks(
-  bundle: FamilyRuleBundle,
+  bundle: MarketabilityBundle,
   rejectionReasons: string[],
   checksPassed: string[],
 ): void {
@@ -387,7 +436,7 @@ function applyFamilyActionChecks(
 function applyBookChecks(
   signal: Signal,
   market: NormalizedMarket,
-  bundle: FamilyRuleBundle,
+  bundle: MarketabilityBundle,
   nowMs: number,
   policy: MarketabilityPolicy,
   rejectionReasons: string[],
@@ -430,7 +479,7 @@ function applyBookChecks(
 function applySpreadChecks(
   signal: Signal,
   market: NormalizedMarket,
-  bundle: FamilyRuleBundle,
+  bundle: MarketabilityBundle,
   nowMs: number,
   policy: MarketabilityPolicy,
   rejectionReasons: string[],
@@ -481,7 +530,7 @@ function applyRestingOrderChecks(
   opts: {
     readonly signal: Signal;
     readonly market: NormalizedMarket;
-    readonly bundle: FamilyRuleBundle;
+    readonly bundle: MarketabilityBundle;
     readonly nowMs: number;
     readonly restingSnapshot?: RestingOrderSnapshot | null;
     readonly cooldownUntilMs?: number | null;
@@ -503,10 +552,11 @@ function applyRestingOrderChecks(
     return;
   }
 
-  const familyKey = String(opts.signal.familyId);
+  // Phase 6: no familyId on Signal; use tokenId as the grouping key
+  const groupKey = String(opts.signal.tokenId);
   const tokenKey = String(opts.signal.tokenId);
-  const marketKey = `${familyKey}|${opts.market.conditionId}`;
-  const familyBuyUsdc = snapshot.buyEntryUsdcByFamily.get(familyKey) ?? 0;
+  const marketKey = `${groupKey}|${opts.market.conditionId}`;
+  const familyBuyUsdc = snapshot.buyEntryUsdcByFamily.get(groupKey) ?? 0;
   const nextFamilyBuyUsdc = familyBuyUsdc + opts.signal.suggestedSizeUsdc;
   const tokenOrderCount = snapshot.buyEntryCountByToken.get(tokenKey) ?? 0;
   const marketOrderCount = snapshot.buyEntryCountByMarket.get(marketKey) ?? 0;
@@ -573,7 +623,7 @@ function resolveSellMakerTarget(opts: {
 function buildDiagnostics(
   market: NormalizedMarket,
   signal: Signal,
-  bundle: FamilyRuleBundle,
+  bundle: MarketabilityBundle,
   nowMs: number,
   policy: MarketabilityPolicy,
   executionMinNotionalUsdc: number | null,
@@ -686,7 +736,7 @@ function isOneSidedDustPricingEligible(
 
 function isGammaFallbackDustApprovalEligible(
   signal: Pick<Signal, "side" | "reason" | "suggestedSizeUsdc">,
-  bundle: FamilyRuleBundle,
+  _bundle: MarketabilityBundle,
   market: Pick<
     NormalizedMarket,
     "bookSource" | "lastTradeAt" | "lastTradePrice" | "midPrice" | "tickSize" | "snapshotTs"
@@ -696,7 +746,6 @@ function isGammaFallbackDustApprovalEligible(
 ): boolean {
   return (
     isGammaFallbackDustEligible({
-      bundle,
       market,
       nowMs,
       signal,

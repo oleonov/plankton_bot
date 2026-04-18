@@ -36,6 +36,8 @@ export interface ClobMarket {
   readonly tickSize: number;
   /** 24-hour trading volume in USD. Null when unavailable. */
   readonly volume24h: number | null;
+  /** Number of markets in the parent Gamma event. Used for STEP 2 fallback: no_match && eventMarketCount === 1 ⇒ INCLUDE. */
+  readonly eventMarketCount: number;
 }
 
 // ─── Exchange order param / result types ──────────────────────────────────

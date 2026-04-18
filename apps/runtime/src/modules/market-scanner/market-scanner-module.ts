@@ -3,11 +3,12 @@
  *
  * Responsibilities:
  *  - Discover candidate markets from the exchange catalog
- *  - Match discovered markets against family slug patterns
- *  - Upsert matched markets into the DB as tracked markets
+ *  - Evaluate each market against the SelectionRuleEngine (Phase 4+)
+ *  - Upsert ALL discovered markets into the DB with selection_status populated
  *  - Run on startup (non-blocking) and on a configurable periodic interval
  *
  * Does NOT provide pricing -- that is MarketDataModule's job.
+ * Family matching is NO LONGER performed here (Phase 6 will remove family symbols).
  */
 
 import type {
@@ -15,54 +16,39 @@ import type {
   EventBus,
   MarketDiscoveryGateway,
   MarketRepository,
-  FamilyRulesProvider,
-  FamilyIdentity,
   Market,
   PositionRepository,
   OrderRepository,
 } from "@plankton/domain";
-import {
-  slugPatternToRegex,
-  matchesHorizon,
-  createTokenId,
-  matchesPreEntryFilter,
-} from "@plankton/domain";
+import { evaluatePreEntry, createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import { resolveFamilyAssignmentMaxDaysAhead } from "../../family-assignment-window.js";
 import { isTransientNetworkError } from "../../network-errors.js";
+import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 
 export interface MarketScannerModuleDeps {
   discoveryGateway: MarketDiscoveryGateway;
-  familyRules: FamilyRulesProvider;
   marketRepo: MarketRepository;
   bus: EventBus;
   log: Logger;
   scanIntervalMs: number;
+  selectionRuleEngine: RefreshableSelectionRuleEngine;
   /** When provided, tokens with open positions are preserved from deactivation. */
   positionRepo?: PositionRepository;
   /** When provided, tokens with open orders are preserved from deactivation. */
   orderRepo?: OrderRepository;
 }
 
-interface CompiledFamily {
-  identity: FamilyIdentity;
-  regex: RegExp;
-}
-
 export interface MarketScanResult {
   /** ClobMarkets seen from Gamma (market-level). */
   discoveredMarkets: number;
-  /** Markets passing matchesPreEntryFilter (market-level). */
-  algoEligibleMarkets: number;
-  /** Markets matching a family pattern (market-level). */
-  familyMatchedMarkets: number;
+  /** Markets whose evaluatePreEntry resolved to INCLUDE (market-level). */
+  includedMarkets: number;
   /** Token rows written to DB (token-level). */
   savedTokens: number;
   /** Tokens preserved from deactivation via open positions/orders (token-level). */
   preservedTokens: number;
   /** Token rows deactivated (token-level). */
   deactivatedTokens: number;
-  familyCount: number;
   durationMs: number;
 }
 
@@ -153,12 +139,12 @@ export class MarketScannerModule implements RuntimeModule {
     try {
       this.log.debug("scan cycle starting");
 
-      const families = this.deps.familyRules.getAllFamilies();
-      const compiled = this.compileFamilyPatterns(families);
+      // Refresh selection rules if the DB version has advanced since last tick.
+      this.deps.selectionRuleEngine.refreshIfStale();
+      const engine = this.deps.selectionRuleEngine.current;
 
       let discoveredMarkets = 0;
-      let algoEligibleMarkets = 0;
-      let familyMatchedMarkets = 0;
+      let includedMarkets = 0;
       let savedTokens = 0;
       const now = new Date().toISOString();
       const discoveredTokenIds = new Set<string>();
@@ -179,14 +165,17 @@ export class MarketScannerModule implements RuntimeModule {
       await this.deps.discoveryGateway.forEachMarketPage((pageMarkets) => {
         discoveredMarkets += pageMarkets.length;
         for (const clobMarket of pageMarkets) {
-          const algoEligible = matchesPreEntryFilter(clobMarket.eventSlug ?? null);
+          const evalResult = evaluatePreEntry(engine, {
+            eventSlug: clobMarket.eventSlug ?? null,
+            slug: clobMarket.slug,
+            eventMarketCount: clobMarket.eventMarketCount,
+          });
+
+          // tradable = INCLUDE decision (CLOB entry eligibility)
+          const tradable = evalResult.finalStatus === "INCLUDE";
+          if (tradable) includedMarkets++;
+
           const hasActiveLeg = clobMarket.tokens.some((t) => activeTokenIds.has(t.tokenId));
-
-          if (!algoEligible && !hasActiveLeg) continue;
-
-          const family = this.matchFamily(clobMarket.slug, clobMarket.endDate, compiled);
-          if (algoEligible) algoEligibleMarkets++;
-          if (family) familyMatchedMarkets++;
 
           for (const token of clobMarket.tokens) {
             const tokenId = createTokenId(token.tokenId);
@@ -199,18 +188,18 @@ export class MarketScannerModule implements RuntimeModule {
               question: clobMarket.question,
               outcome: token.outcome,
               outcomeIndex: token.outcomeIndex ?? null,
-              familyId: family?.familyId ?? null,
-              familyKey: family?.familyKey ?? null,
-              regime: family?.regime ?? null,
-              horizon: family?.horizon ?? null,
+              regime: null,
+              horizon: null,
               endDate: clobMarket.endDate || null,
               active: clobMarket.active || hasActiveLeg,
-              // `tradable` reflects CLOB entry-eligibility only; preserved rows
-              // (active=true via open leg, clobMarket.active=false) become
-              // tradable=false so MarketSelectionCache stops signalling new BUYs.
-              tradable: clobMarket.active,
+              // preserved-for-lifecycle markets become tradable=false so MarketSelectionCache
+              // stops signalling new BUYs; selection engine determines tradability otherwise.
+              tradable: clobMarket.active && tradable,
               tickSize: clobMarket.tickSize,
               negRisk: clobMarket.negRisk,
+              eventMarketCount: clobMarket.eventMarketCount,
+              selectionStatus: evalResult.selectionStatus,
+              selectionWinningRuleId: evalResult.winningRuleId,
               createdAt: now,
               updatedAt: now,
             };
@@ -237,24 +226,20 @@ export class MarketScannerModule implements RuntimeModule {
       const durationMs = this.lastSuccessfulScanMs - startMs;
       const result: MarketScanResult = {
         discoveredMarkets,
-        algoEligibleMarkets,
-        familyMatchedMarkets,
+        includedMarkets,
         savedTokens,
         preservedTokens: activeTokenIds.size,
         deactivatedTokens: deactivatedCount,
-        familyCount: families.length,
         durationMs,
       };
 
       this.log.info(
         {
           discoveredMarkets,
-          algoEligibleMarkets,
-          familyMatchedMarkets,
+          includedMarkets,
           savedTokens,
           preservedTokens: activeTokenIds.size,
           deactivatedTokens: deactivatedCount,
-          families: families.length,
           durationMs,
         },
         "scan cycle complete",
@@ -281,38 +266,5 @@ export class MarketScannerModule implements RuntimeModule {
       this.hintTimer = null;
       void this.scan().catch((err) => this.log.error({ err }, "hint-triggered scan failed"));
     }, 250);
-  }
-
-  private compileFamilyPatterns(families: FamilyIdentity[]): CompiledFamily[] {
-    const result: CompiledFamily[] = [];
-    for (const identity of families) {
-      if (!identity.slugPattern) continue;
-      result.push({
-        identity,
-        regex: slugPatternToRegex(identity.slugPattern),
-      });
-    }
-    return result;
-  }
-
-  private matchFamily(
-    slug: string,
-    endDate: string | null,
-    compiled: CompiledFamily[],
-  ): FamilyIdentity | null {
-    for (const { identity, regex } of compiled) {
-      if (
-        regex.test(slug) &&
-        matchesHorizon(
-          identity.horizon,
-          endDate,
-          new Date(),
-          resolveFamilyAssignmentMaxDaysAhead(identity),
-        )
-      ) {
-        return identity;
-      }
-    }
-    return null;
   }
 }

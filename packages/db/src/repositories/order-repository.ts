@@ -11,7 +11,6 @@ import type {
 import {
   createOrderId,
   createTokenId,
-  createFamilyId,
   createConditionId,
   createBotRunId,
 } from "@plankton/domain";
@@ -23,10 +22,10 @@ export class SqliteOrderRepository implements OrderRepository {
     this.db
       .prepare(
         `INSERT INTO orders
-         (order_id, client_order_id, token_id, family_id, condition_id, side, order_type, post_only,
+         (order_id, client_order_id, token_id, condition_id, side, order_type, post_only,
           price, size, size_usdc, status, exchange_order_id, signal_id,
           signal_reason, bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
@@ -39,7 +38,6 @@ export class SqliteOrderRepository implements OrderRepository {
         order.orderId,
         order.clientOrderId,
         order.tokenId,
-        order.familyId,
         order.conditionId,
         order.side,
         order.orderType,
@@ -128,7 +126,6 @@ export class SqliteOrderRepository implements OrderRepository {
       clientOrderId: row.client_order_id as string as ClientOrderId,
       tokenId: createTokenId(row.token_id as string),
       conditionId: createConditionId(row.condition_id as string),
-      familyId: row.family_id ? createFamilyId(row.family_id as string) : null,
       side: row.side as OrderSide,
       orderType: row.order_type as OrderType,
       postOnly: row.post_only === 1,

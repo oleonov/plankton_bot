@@ -1,9 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { InProcessEventBus } from "../event-bus.js";
-import type { Signal, Position, FamilyState } from "@plankton/domain";
+import type { Signal, Position } from "@plankton/domain";
 import {
   createTokenId,
-  createFamilyId,
   createPositionId,
   createConditionId,
 } from "@plankton/domain";
@@ -11,7 +10,6 @@ import {
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
     signalId: "sig-1",
-    familyId: createFamilyId("fam-1"),
     tokenId: createTokenId("tok-1"),
     conditionId: createConditionId("cond-1"),
     side: "buy",
@@ -32,7 +30,6 @@ function makePosition(overrides?: Partial<Position>): Position {
     positionId: createPositionId("pos-1"),
     tokenId: createTokenId("tok-1"),
     conditionId: createConditionId("cond-1"),
-    familyId: createFamilyId("fam-1"),
     side: "buy",
     size: 100,
     avgEntryPrice: 0.55,
@@ -48,22 +45,6 @@ function makePosition(overrides?: Partial<Position>): Position {
   };
 }
 
-function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
-  return {
-    familyId: createFamilyId("fam-1"),
-    openValueUsdc: 100,
-    openPositionCount: 1,
-    openDustCount: 0,
-    activeMarketCount: 2,
-    currentTailCostUsdc: 5,
-    tailAdjustedPnlLive: 10,
-    lastEntryTs: null,
-    lastExitTs: null,
-    firstNegativeTailAt: null,
-    updatedAt: new Date().toISOString(),
-    ...overrides,
-  };
-}
 
 describe("InProcessEventBus", () => {
   let bus: InProcessEventBus;
@@ -161,17 +142,13 @@ describe("InProcessEventBus", () => {
 
   it("drain waits for slow handlers", async () => {
     let resolved = false;
-    bus.subscribe("FamilyExposureChanged", async () => {
+    bus.subscribe("PositionUpdated", async () => {
       await new Promise((r) => setTimeout(r, 50));
       resolved = true;
     });
 
-    const publishPromise = bus.publish("FamilyExposureChanged", {
-      familyId: createFamilyId("fam-1"),
-      totalExposureUsdc: 100,
-      openPositionCount: 1,
-      familyState: makeFamilyState(),
-      timestamp: Date.now(),
+    const publishPromise = bus.publish("PositionUpdated", {
+      position: makePosition(),
     });
 
     // Publish is awaited inline, but drain should also work for

@@ -10,7 +10,6 @@
 import type {
   TokenId,
   ConditionId,
-  FamilyId,
   OrderId,
   FillId,
   ClientOrderId,
@@ -27,7 +26,6 @@ import type {
 import type {
   Signal,
   Position,
-  FamilyState,
   NormalizedMarket,
   ReconciliationResult,
 } from "./types.js";
@@ -49,7 +47,6 @@ export interface NormalizedMarketUpdated {
 export interface HotQuoteUpdated {
   readonly type: "HotQuoteUpdated";
   readonly tokenIds: readonly TokenId[];
-  readonly familyIds: readonly FamilyId[];
   readonly refreshedAt: number;
 }
 
@@ -105,7 +102,6 @@ export interface SignalConversionSkipped {
 
 export interface CooldownBypassApplied {
   readonly type: "CooldownBypassApplied";
-  readonly familyId: FamilyId;
   readonly tokenId: TokenId;
   readonly reason:
     | "price-moved"
@@ -118,7 +114,6 @@ export interface CooldownBypassApplied {
 
 export interface HotLaneActionApplied {
   readonly type: "HotLaneActionApplied";
-  readonly familyId: FamilyId;
   readonly tokenId: TokenId;
   readonly orderId: OrderId;
   readonly signalReason: string | null;
@@ -133,7 +128,6 @@ export interface HotLaneActionApplied {
 
 export interface HotLaneStateChanged {
   readonly type: "HotLaneStateChanged";
-  readonly familyId: FamilyId;
   readonly tokenId: TokenId;
   readonly previousState:
     | "quote-active"
@@ -181,7 +175,6 @@ export interface OrderPlaced {
   readonly price: number;
   readonly size: number;
   readonly orderType: OrderType;
-  readonly familyId: FamilyId | null;
   readonly signalReason: string | null;
   readonly timestamp: number;
 }
@@ -196,7 +189,6 @@ export interface OrderFilled {
   readonly side: OrderSide;
   readonly price: number;
   readonly size: number;
-  readonly familyId: FamilyId | null;
   readonly timestamp: number;
 }
 
@@ -207,7 +199,6 @@ export interface OrderCancelled {
   readonly tokenId: TokenId;
   readonly conditionId: ConditionId;
   readonly reason: string;
-  readonly familyId: FamilyId | null;
   readonly signalReason: string | null;
   readonly timestamp: number;
 }
@@ -220,7 +211,6 @@ export interface OrderRejected {
   readonly conditionId: ConditionId;
   readonly reason: string;
   readonly errorCode: ExchangeErrorCode;
-  readonly familyId: FamilyId | null;
   readonly signalReason: string | null;
   readonly timestamp: number;
 }
@@ -243,7 +233,6 @@ export interface FillReceived {
   readonly liquidityRole: LiquidityRole;
   readonly fee: number;
   readonly feeRateBps: number;
-  readonly familyId: FamilyId | null;
   readonly signalReason: string | null;
   readonly timestamp: number;
 }
@@ -253,16 +242,6 @@ export interface FillReceived {
 export interface PositionUpdated {
   readonly type: "PositionUpdated";
   readonly position: Position;
-}
-
-export interface FamilyExposureChanged {
-  readonly type: "FamilyExposureChanged";
-  readonly familyId: FamilyId;
-  readonly totalExposureUsdc: number;
-  readonly openPositionCount: number;
-  /** Full family runtime state snapshot at the time of the change. */
-  readonly familyState: FamilyState;
-  readonly timestamp: number;
 }
 
 // ─── Reconciliation ───────────────────────────────────────────────────────
@@ -294,7 +273,7 @@ export interface OperatorCommandApplied {
   /** Corresponds to operator_commands.id in the DB. */
   readonly commandDbId: number;
   readonly action: OperatorActionType;
-  readonly targetFamilyId: FamilyId | null;
+  readonly targetId: string | null;
   readonly reason: string | null;
   readonly initiatorType: "operator" | "system";
   readonly initiator: string | null;
@@ -323,7 +302,6 @@ export type DomainEvent =
   | OrderRejected
   | FillReceived
   | PositionUpdated
-  | FamilyExposureChanged
   | ReconciliationDriftDetected
   | ReconciliationComplete
   | RuntimePhaseChanged

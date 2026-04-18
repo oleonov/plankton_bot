@@ -1,11 +1,45 @@
 import { describe, it, expect } from "vitest";
 import { InProcessEventBus } from "@plankton/event-bus";
-import { createTokenId, type NormalizedMarket, type TokenId } from "@plankton/domain";
+import { SelectionRuleEngine, createTokenId, type NormalizedMarket, type TokenId, type SelectionRule } from "@plankton/domain";
 import { MarketSelectionCache } from "../market-selection-cache.js";
+import type { RefreshableSelectionRuleEngine } from "../../../selection-rule-engine-factory.js";
 
-// Spec v2.2 §0 Live Pre-Entry Filter is slug-prefix only:
-//   event_slug prefix in (elon-musk-, bitcoin-, ethereum-) → INCLUDE; else EXCLUDE.
-// The prior STEP 2 `distinct_outcomes=1` rule was removed in v2.2.
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeRule(
+  partial: Partial<SelectionRule> & Pick<SelectionRule, "ruleId" | "ruleType" | "pattern">,
+): SelectionRule {
+  return {
+    profileId: "simulation",
+    enabled: true,
+    note: null,
+    createdAt: "2026-04-18T00:00:00Z",
+    updatedAt: "2026-04-18T00:00:00Z",
+    ...partial,
+  };
+}
+
+/** Build a lightweight RefreshableSelectionRuleEngine stub around a real engine. */
+function makeEngine(rules: SelectionRule[]): RefreshableSelectionRuleEngine {
+  const engine = new SelectionRuleEngine(rules);
+  return {
+    refreshIfStale: () => {},
+    resolve: (eventSlug: string | null, marketSlug: string) => engine.resolve(eventSlug, marketSlug),
+    get current() {
+      return engine;
+    },
+  } as unknown as RefreshableSelectionRuleEngine;
+}
+
+/** The seeded 06-spec prefix rules — bitcoin-, elon-musk-, ethereum- */
+const SEEDED_ENGINE = makeEngine([
+  makeRule({ ruleId: "r-btc", ruleType: "include_prefix", pattern: "bitcoin-" }),
+  makeRule({ ruleId: "r-elon", ruleType: "include_prefix", pattern: "elon-musk-" }),
+  makeRule({ ruleId: "r-eth", ruleType: "include_prefix", pattern: "ethereum-" }),
+]);
+
+/** Engine with no rules — relies on STEP 2 fallback (eventMarketCount===1 ⇒ INCLUDE). */
+const EMPTY_ENGINE = makeEngine([]);
 
 function makeMarket(overrides: Partial<NormalizedMarket> & { tokenId: TokenId }): NormalizedMarket {
   return {
@@ -14,8 +48,6 @@ function makeMarket(overrides: Partial<NormalizedMarket> & { tokenId: TokenId })
     eventSlug: null,
     question: "Q",
     outcome: "Yes",
-    familyId: null,
-    familyKey: null,
     regime: null,
     horizon: null,
     endDate: null,
@@ -28,6 +60,7 @@ function makeMarket(overrides: Partial<NormalizedMarket> & { tokenId: TokenId })
     midPrice: 0.505,
     spread: 0.01,
     snapshotTs: Date.now(),
+    eventMarketCount: 1,
     ...overrides,
   };
 }
@@ -35,10 +68,12 @@ function makeMarket(overrides: Partial<NormalizedMarket> & { tokenId: TokenId })
 const TOK_A = createTokenId("tok-a");
 const TOK_B = createTokenId("tok-b");
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
 describe("MarketSelectionCache", () => {
   it("starts empty — no tokens eligible", () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     expect(cache.isEligible(TOK_A)).toBe(false);
@@ -47,11 +82,11 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
-  // ── Pre-entry: slug prefix (INCLUDE) ─────────────────────────────────────
+  // ── Pre-entry: prefix include rules ──────────────────────────────────────
 
-  it("includes token with bitcoin- prefix", async () => {
+  it("includes token matching bitcoin- prefix rule", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -60,6 +95,8 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-price-above-100k",
+          slug: "bitcoin-up",
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -70,9 +107,9 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
-  it("includes token with elon-musk- prefix", async () => {
+  it("includes token matching elon-musk- prefix rule", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -81,6 +118,8 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-elon",
           eventSlug: "elon-musk-tweet-count",
+          slug: "elon-musk-tweets-today",
+          eventMarketCount: 2,
         }),
       ],
       timestamp: Date.now(),
@@ -91,9 +130,9 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
-  it("includes token with ethereum- prefix", async () => {
+  it("includes token matching ethereum- prefix rule", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -102,6 +141,8 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-eth",
           eventSlug: "ethereum-merge-date",
+          slug: "ethereum-merge-yes",
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -114,24 +155,26 @@ describe("MarketSelectionCache", () => {
 
   it("keeps ALL tokens in a matching condition eligible regardless of outcome count", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
-    // Multiple outcomes under one condition — all share the same event_slug,
-    // so all are eligible (distinct_outcomes no longer affects selection).
     await bus.publish("NormalizedMarketUpdated", {
       markets: [
         makeMarket({
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-price-above-100k",
+          slug: "bitcoin-up",
           outcome: "Yes",
+          eventMarketCount: 2,
         }),
         makeMarket({
           tokenId: TOK_B,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-price-above-100k",
+          slug: "bitcoin-up",
           outcome: "No",
+          eventMarketCount: 2,
         }),
       ],
       timestamp: Date.now(),
@@ -143,20 +186,72 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
-  // ── Pre-entry: no matching prefix (EXCLUDE) ──────────────────────────────
+  // ── Pre-entry: STEP 2 fallback ────────────────────────────────────────────
 
-  it("excludes token when eventSlug is null (no match)", async () => {
+  it("includes single-market event via STEP 2 fallback when no rules match", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
       markets: [
         makeMarket({
           tokenId: TOK_A,
-          conditionId: "cond-unknown",
-          eventSlug: null,
-          outcome: "Yes",
+          eventSlug: "us-election-winner",
+          slug: "trump-wins",
+          eventMarketCount: 1,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    // no_match + eventMarketCount===1 → STEP 2 → INCLUDE
+    expect(cache.isEligible(TOK_A)).toBe(true);
+
+    cache.dispose();
+  });
+
+  it("excludes multi-market event via fallback_exclude when no rules match", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          eventSlug: "super-bowl-winner",
+          slug: "chiefs-win",
+          eventMarketCount: 30,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    // no_match + eventMarketCount>1 → fallback_exclude
+    expect(cache.isEligible(TOK_A)).toBe(false);
+
+    cache.dispose();
+  });
+
+  // ── Pre-entry: exclude rule ───────────────────────────────────────────────
+
+  it("excludes token when an exclude_slug rule matches", async () => {
+    const excludeEngine = makeEngine([
+      makeRule({ ruleId: "r-btc", ruleType: "include_prefix", pattern: "bitcoin-" }),
+      makeRule({ ruleId: "r-ex", ruleType: "exclude_slug", pattern: "bitcoin-spam" }),
+    ]);
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, excludeEngine);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          eventSlug: "bitcoin-price",
+          slug: "bitcoin-spam",
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -167,9 +262,11 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
-  it("excludes token when eventSlug does not match any prefix", async () => {
+  // ── Pre-entry: EXCLUDE when no prefix match ───────────────────────────────
+
+  it("excludes token when eventSlug does not match any prefix rule (multi-market)", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -178,28 +275,8 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-election",
           eventSlug: "us-election-winner",
-        }),
-      ],
-      timestamp: Date.now(),
-    });
-
-    expect(cache.isEligible(TOK_A)).toBe(false);
-
-    cache.dispose();
-  });
-
-  it("excludes single-outcome market without a matching slug prefix (v2.2 removed distinct_outcomes rule)", async () => {
-    const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
-    cache.subscribe();
-
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({
-          tokenId: TOK_A,
-          conditionId: "cond-single",
-          eventSlug: "generic-single-outcome",
-          outcome: "Yes",
+          slug: "us-election-trump",
+          eventMarketCount: 5,
         }),
       ],
       timestamp: Date.now(),
@@ -211,12 +288,11 @@ describe("MarketSelectionCache", () => {
   });
 
   // ── Tradable lifecycle ──────────────────────────────────────────────────
-  // Pre-entry eligibility gates on `tradable` (CLOB-entry-eligible), not
-  // `active` (which also flags preserved-for-lifecycle markets).
+  // Pre-entry eligibility gates on `tradable`, not `active`.
 
   it("removes non-tradable token from eligible set", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -225,6 +301,8 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-price-above-100k",
+          slug: "bitcoin-up",
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -237,8 +315,10 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-price-above-100k",
+          slug: "bitcoin-up",
           active: false,
           tradable: false,
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -251,7 +331,7 @@ describe("MarketSelectionCache", () => {
 
   it("preserved-for-lifecycle market (active=true, tradable=false) is not eligible for new entries", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -260,8 +340,10 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-price-above-100k",
+          slug: "bitcoin-up",
           active: true,
           tradable: false,
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -274,7 +356,7 @@ describe("MarketSelectionCache", () => {
 
   it("re-activates previously non-tradable token when prefix still matches", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -283,8 +365,10 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-x",
+          slug: "bitcoin-up",
           active: false,
           tradable: false,
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -297,8 +381,10 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-x",
+          slug: "bitcoin-up",
           active: true,
           tradable: true,
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -317,7 +403,7 @@ describe("MarketSelectionCache", () => {
 
   it("admits zero-activity tokens when pre-entry filter passes (historical filter omitted)", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -326,10 +412,12 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-fresh",
           eventSlug: "bitcoin-freshly-listed",
+          slug: "bitcoin-fresh-yes",
           volume24h: 0,
           liquidity: 0,
           lastTradePrice: null,
           lastTradeAt: null,
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -344,7 +432,7 @@ describe("MarketSelectionCache", () => {
 
   it("getEligibleTokenIds returns currently eligible tokens across conditions", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
 
     await bus.publish("NormalizedMarketUpdated", {
@@ -353,11 +441,15 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-x",
+          slug: "bitcoin-up",
+          eventMarketCount: 1,
         }),
         makeMarket({
           tokenId: TOK_B,
           conditionId: "cond-eth",
           eventSlug: "ethereum-x",
+          slug: "ethereum-up",
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),
@@ -373,7 +465,7 @@ describe("MarketSelectionCache", () => {
 
   it("dispose unsubscribes — further events are ignored", async () => {
     const bus = new InProcessEventBus();
-    const cache = new MarketSelectionCache(bus);
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
     cache.dispose();
 
@@ -383,6 +475,8 @@ describe("MarketSelectionCache", () => {
           tokenId: TOK_A,
           conditionId: "cond-btc",
           eventSlug: "bitcoin-x",
+          slug: "bitcoin-up",
+          eventMarketCount: 1,
         }),
       ],
       timestamp: Date.now(),

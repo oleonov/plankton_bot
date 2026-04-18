@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createFamilyId, createOrderId, createConditionId } from "@plankton/domain";
+import { createTokenId, createOrderId, createConditionId } from "@plankton/domain";
 import type {
   ExchangeGateway,
   ExchangeOrder,
@@ -15,7 +15,6 @@ import type {
   MarketRepository,
   TokenId,
   ClientOrderId,
-  FamilyRulesProvider,
   ReconciliationResult,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
@@ -25,7 +24,6 @@ import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 const TOK = createTokenId("tok-yes");
-const FAM = createFamilyId("fam-1");
 
 function createMockGateway(): ExchangeGateway {
   return {
@@ -64,14 +62,6 @@ function createMockOrderRepo(): OrderRepository {
   };
 }
 
-function createMockRulesProvider(): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue(null),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  };
-}
 
 function createMockFillRepo(): FillRepository {
   return {
@@ -93,9 +83,10 @@ function createMockMarketRepo(): MarketRepository {
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
-    findByFamily: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
+    findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -130,7 +121,6 @@ function makeLocalOrder(overrides?: Partial<Order>): Order {
     clientOrderId: "plk_abc" as ClientOrderId,
     tokenId: TOK,
     conditionId: createConditionId("cond-1"),
-    familyId: FAM,
     side: "buy",
     orderType: "GTC",
     price: 0.5,
@@ -172,7 +162,6 @@ describe("ReconciliationModule", () => {
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
-  let rulesProvider: FamilyRulesProvider;
   let mod: ReconciliationModule;
 
   beforeEach(() => {
@@ -181,14 +170,12 @@ describe("ReconciliationModule", () => {
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
     marketRepo = createMockMarketRepo();
-    rulesProvider = createMockRulesProvider();
     mod = new ReconciliationModule({
       gateway,
       bus,
       orderRepo,
       fillRepo,
       marketRepo,
-      rulesProvider,
       log: silentLog,
       reconcileIntervalMs: 60_000,
     });

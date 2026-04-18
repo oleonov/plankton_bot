@@ -5,12 +5,14 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteMarketRepository } from "../repositories/market-repository.js";
-import { createTokenId, createFamilyId } from "@plankton/domain";
+import { createTokenId } from "@plankton/domain";
 import type { Market } from "@plankton/domain";
+import type Database from "better-sqlite3";
 
 let conn: DbConnection;
 let tmpDir: string;
 let repo: SqliteMarketRepository;
+let db: Database.Database;
 
 function makeMarket(overrides?: Partial<Market>): Market {
   const now = new Date().toISOString();
@@ -22,8 +24,6 @@ function makeMarket(overrides?: Partial<Market>): Market {
     question: "Will it rain?",
     outcome: "YES" as const,
     outcomeIndex: 0,
-    familyId: createFamilyId("fam-1"),
-    familyKey: "rain-family",
     regime: "threshold",
     horizon: "daily",
     endDate: null,
@@ -40,6 +40,7 @@ function makeMarket(overrides?: Partial<Market>): Market {
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
+  db = conn.db;
   repo = new SqliteMarketRepository(conn.db);
 });
 
@@ -60,8 +61,6 @@ describe("SqliteMarketRepository", () => {
     expect(found!.slug).toBe("test-slug");
     expect(found!.question).toBe("Will it rain?");
     expect(found!.outcome).toBe("YES");
-    expect(found!.familyId).toBe("fam-1");
-    expect(found!.familyKey).toBe("rain-family");
     expect(found!.regime).toBe("threshold");
     expect(found!.active).toBe(true);
     expect(found!.tickSize).toBe(0.01);
@@ -86,18 +85,6 @@ describe("SqliteMarketRepository", () => {
     const active = repo.findActive();
     expect(active).toHaveLength(1);
     expect(active[0]!.tokenId).toBe("active-1");
-  });
-
-  it("findByFamily returns correct markets", () => {
-    repo.save(makeMarket({ tokenId: createTokenId("t1"), familyId: createFamilyId("fam-A") }));
-    repo.save(makeMarket({ tokenId: createTokenId("t2"), familyId: createFamilyId("fam-A") }));
-    repo.save(makeMarket({ tokenId: createTokenId("t3"), familyId: createFamilyId("fam-B") }));
-
-    const famA = repo.findByFamily(createFamilyId("fam-A"));
-    expect(famA).toHaveLength(2);
-
-    const famB = repo.findByFamily(createFamilyId("fam-B"));
-    expect(famB).toHaveLength(1);
   });
 
   it("findAll returns everything", () => {
@@ -129,11 +116,46 @@ describe("SqliteMarketRepository", () => {
     expect(found).toBeNull();
   });
 
-  it("handles null familyId", () => {
-    repo.save(makeMarket({ familyId: null, familyKey: null }));
+  it("findTrackedForPricing returns tradable + positions + orders preserved", () => {
+    // tradable market
+    repo.save(makeMarket({ tokenId: createTokenId("t-trad"), active: true, tradable: true }));
+    // market with open position, not tradable
+    repo.save(makeMarket({ tokenId: createTokenId("t-pos"), active: true, tradable: false }));
+    db.prepare(
+      `INSERT INTO positions (position_id, token_id, condition_id, family_id, side, size, avg_entry_price, cost_basis_usdc, current_value_usdc, realized_pnl, status, entry_style, opened_at, closed_at, updated_at)
+       VALUES ('p1','t-pos','c-pos',NULL,'buy',1,0.5,0.5,0.5,0,'open','probe',datetime('now'),NULL,datetime('now'))`,
+    ).run();
+    // market with open order, not tradable, no position
+    repo.save(makeMarket({ tokenId: createTokenId("t-ord"), active: true, tradable: false }));
+    db.prepare(
+      `INSERT INTO orders (order_id, client_order_id, token_id, condition_id, family_id, side, order_type, price, size, size_usdc, status, exchange_order_id, signal_id, signal_reason, bot_run_id, created_at, updated_at)
+       VALUES ('o1','co1','t-ord','c-ord',NULL,'buy','GTC',0.5,1,0.5,'open',NULL,NULL,NULL,'br1',datetime('now'),datetime('now'))`,
+    ).run();
+    // market with nothing: excluded + no legs
+    repo.save(makeMarket({ tokenId: createTokenId("t-dead"), active: true, tradable: false }));
 
-    const found = repo.findByTokenId(createTokenId("tok-1"));
-    expect(found!.familyId).toBeNull();
-    expect(found!.familyKey).toBeNull();
+    const rows = repo.findTrackedForPricing();
+    const ids = rows.map((r) => r.tokenId).sort();
+    expect(ids).toEqual(["t-ord", "t-pos", "t-trad"]);
+  });
+
+  it("findEventMarketCountBySlug reads event_market_count for the slug", () => {
+    // Insert directly to set event_market_count since Market interface doesn't expose it
+    db.prepare(
+      `INSERT INTO markets (token_id, condition_id, slug, question, outcome, tick_size, neg_risk, event_market_count)
+       VALUES ('t-a', 'c-a', 'bitcoin-up', 'Q?', 'YES', 0.01, 0, 7)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO markets (token_id, condition_id, slug, question, outcome, tick_size, neg_risk, event_market_count)
+       VALUES ('t-b', 'c-b', 'bitcoin-up', 'Q?', 'NO', 0.01, 0, 7)`,
+    ).run();
+    db.prepare(
+      `INSERT INTO markets (token_id, condition_id, slug, question, outcome, tick_size, neg_risk, event_market_count)
+       VALUES ('t-c', 'c-c', 'something-else', 'Q2?', 'YES', 0.01, 0, 1)`,
+    ).run();
+
+    expect(repo.findEventMarketCountBySlug("bitcoin-up")).toBe(7);
+    expect(repo.findEventMarketCountBySlug("something-else")).toBe(1);
+    expect(repo.findEventMarketCountBySlug("ghost-slug")).toBeNull();
   });
 });

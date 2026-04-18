@@ -1,4 +1,11 @@
-import type { FamilyRuleBundle, NormalizedMarket } from "@plankton/domain";
+/**
+ * outcome-selection — outcome candidate scoring and selection.
+ *
+ * FamilyRuleBundle removed in Phase 6; uses a local OutcomeSelectionBundle
+ * type. Phase 7 will remove the bundle parameter entirely.
+ */
+
+import type { EntryMode, NormalizedMarket } from "@plankton/domain";
 import {
   isGammaFallbackDustEligible,
   resolveGammaFallbackDustReferencePrice,
@@ -7,6 +14,18 @@ import {
 const MAX_ABSOLUTE_ENTRY_SPREAD = 0.03;
 const MAX_RELATIVE_ENTRY_SPREAD = 0.4;
 const CHEAP_PRICE_FLOOR = 0.01;
+
+/** Minimal bundle shape needed by outcome-selection helpers (Phase 6 shim). */
+export interface OutcomeSelectionBundle {
+  rules: {
+    entry: {
+      minEntryPrice: number;
+      maxEntryPrice: number;
+    };
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
 
 export type OutcomeCandidateRejection =
   | "missing-book"
@@ -47,17 +66,21 @@ export interface OutcomeCandidatePolicy {
 
 export function rejectOutcomeCandidate(
   market: NormalizedMarket,
-  bundle: FamilyRuleBundle,
+  bundle: OutcomeSelectionBundle,
   policy?: OutcomeCandidatePolicy,
 ): OutcomeCandidateRejection | null {
   const nowMs = policy?.nowMs ?? Date.now();
   const fallbackPrice = resolveGammaFallbackDustReferencePrice(market);
+  const entryMode = (bundle.rules.entry as Record<string, unknown>)["entryMode"] as
+    | EntryMode
+    | null
+    | undefined;
   const allowGammaFallbackDust =
     policy?.allowGammaFallbackDust === true &&
     isGammaFallbackDustEligible({
-      bundle,
       market,
       nowMs,
+      entryMode: entryMode ?? null,
       suggestedSizeUsdc: policy?.dustSuggestedSizeUsdc ?? null,
       executionMinNotionalUsdc: policy?.executionMinNotionalUsdc ?? null,
     });
@@ -114,7 +137,7 @@ export function scoreOutcomeCandidate(market: NormalizedMarket): number {
 
 export function selectFirstEntryOutcomeForCondition(
   markets: readonly NormalizedMarket[],
-  bundle: FamilyRuleBundle,
+  bundle: OutcomeSelectionBundle,
   policy?: OutcomeCandidatePolicy,
 ): OutcomeSelection {
   let best: OutcomeCandidateScore | null = null;
@@ -148,7 +171,7 @@ export function selectFirstEntryOutcomeForCondition(
 
 export function selectFirstEntryTokenForCondition(
   markets: readonly NormalizedMarket[],
-  bundle: FamilyRuleBundle,
+  bundle: OutcomeSelectionBundle,
 ): string | null {
   return selectFirstEntryOutcomeForCondition(markets, bundle).tokenId;
 }

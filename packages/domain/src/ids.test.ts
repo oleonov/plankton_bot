@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   createTokenId,
-  createFamilyId,
   createOrderId,
   createFillId,
   createPositionId,
@@ -13,7 +12,6 @@ import {
 describe("branded ID constructors", () => {
   const constructors = [
     ["TokenId", createTokenId],
-    ["FamilyId", createFamilyId],
     ["OrderId", createOrderId],
     ["FillId", createFillId],
     ["PositionId", createPositionId],

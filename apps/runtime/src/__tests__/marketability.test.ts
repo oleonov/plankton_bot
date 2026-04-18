@@ -2,12 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   createBotRunId,
   createConditionId,
-  createFamilyId,
   createOrderId,
   createTokenId,
   type ClientOrderId,
   type ConditionId,
-  type FamilyRuleBundle,
   type NormalizedMarket,
   type Order,
   type Signal,
@@ -17,20 +15,19 @@ import {
   evaluateMarketability,
   resolveMakerOnlyPrice,
   resolveMarketabilityPolicy,
+  type MarketabilityBundle,
 } from "../modules/strategy/marketability.js";
 
-const FAM_ID = createFamilyId("fam-btc");
 const TOKEN_ID = createTokenId("token-yes");
 const NOW = Date.parse("2026-04-10T15:00:00.000Z");
 
 function makeBundle(overrides?: {
-  identity?: Partial<FamilyRuleBundle["identity"]>;
-  evidence?: Partial<FamilyRuleBundle["evidence"]>;
-  rules?: Partial<FamilyRuleBundle["rules"]>;
-}): FamilyRuleBundle {
-  const bundle: FamilyRuleBundle = {
+  identity?: Partial<MarketabilityBundle["identity"]>;
+  evidence?: Partial<NonNullable<MarketabilityBundle["evidence"]>>;
+  rules?: Partial<MarketabilityBundle["rules"]>;
+}): MarketabilityBundle {
+  const bundle: MarketabilityBundle = {
     identity: {
-      familyId: FAM_ID,
       familyKey: "bitcoin-price",
       primaryCategory: "crypto-btc",
       regime: "price-range",
@@ -45,36 +42,15 @@ function makeBundle(overrides?: {
       requiresPostOnlyForLive: true,
     },
     evidence: {
-      familyId: FAM_ID,
       evidenceStatus: "confirmed",
       evidenceScore: 80,
       promotionState: "scaled",
       localTradeCount: 20,
       localMarketCount: 10,
-      localRealizedPnlFifo: 10,
-      openTailCostUsdc: 0,
-      tailAdjustedPnl: 10,
-      remoteClosedRealizedPnl: null,
-      openPositionCount: null,
-      openDustCount: null,
-      bothSidedEligible: true,
-      heavyCampaignEligible: true,
-      activeWindowEdgeScore: null,
-      recurrenceScore: null,
-      recycleScore: null,
-      liveViabilityScore: null,
-      toxicityPenalty: null,
-      lastValidatedAt: null,
-      probeSubstate: null,
-      repricingExitCount: 0,
     },
     rules: {
-      familyId: FAM_ID,
       universe: {
-        enabled: true,
         action: "trade",
-        priorityRank: 1,
-        sessionMode: "active-window",
       },
       entry: {
         entryMode: "probe-first",
@@ -143,9 +119,9 @@ function makeBundle(overrides?: {
     ...bundle,
     identity: { ...bundle.identity, ...(overrides?.identity ?? {}) },
     evidence: {
-      ...(bundle.evidence as NonNullable<FamilyRuleBundle["evidence"]>),
+      ...(bundle.evidence as NonNullable<MarketabilityBundle["evidence"]>),
       ...(overrides?.evidence ?? {}),
-    } as NonNullable<FamilyRuleBundle["evidence"]>,
+    },
     rules: { ...bundle.rules, ...(overrides?.rules ?? {}) },
   };
 }
@@ -159,8 +135,6 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     question: "Bitcoin price?",
     outcome: "YES",
     outcomeIndex: 0,
-    familyId: FAM_ID,
-    familyKey: "bitcoin-price",
     regime: "price-range",
     horizon: "daily",
     endDate: "2026-04-10T23:59:00.000Z",
@@ -177,6 +151,7 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     volume24h: 100_000,
     liquidity: 10_000,
     snapshotTs: NOW,
+    eventMarketCount: 1,
     ...overrides,
   };
 }
@@ -184,7 +159,6 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
     signalId: "sig-1",
-    familyId: FAM_ID,
     tokenId: TOKEN_ID,
     conditionId: "cond-1" as ConditionId,
     side: "buy",
@@ -206,7 +180,6 @@ function makeOrder(overrides?: Partial<Order>): Order {
     clientOrderId: "client-1" as ClientOrderId,
     tokenId: TOKEN_ID,
     conditionId: createConditionId("cond-1"),
-    familyId: FAM_ID,
     side: "buy",
     orderType: "GTC",
     postOnly: true,
@@ -287,7 +260,7 @@ describe("marketability gate", () => {
         ...makeBundle(),
         rules: {
           ...makeBundle().rules,
-          entry: { ...makeBundle().rules.entry, entryMode: "spray-first" },
+          entry: { ...(makeBundle().rules.entry as Record<string, unknown>), entryMode: "spray-first" },
           throughput: {
             ...makeBundle().rules.throughput!,
             dustLaneEnabled: true,
@@ -389,7 +362,6 @@ describe("marketability gate", () => {
     const decision = evaluateMarketability({
       signal: makeSignal({ suggestedSizeUsdc: 4, reason: "probe-entry" }),
       market: makeMarket({
-        familyKey: "ethereum-price",
         bestBid: 0.07,
         bestAsk: 0.09,
         midPrice: 0.08,
@@ -422,7 +394,6 @@ describe("marketability gate", () => {
     const decision = evaluateMarketability({
       signal: makeSignal({ suggestedSizeUsdc: 4, reason: "scale-in" }),
       market: makeMarket({
-        familyKey: "ethereum-price",
         bestBid: 0.07,
         bestAsk: 0.11,
         midPrice: 0.09,
@@ -632,7 +603,7 @@ describe("marketability policy retuning", () => {
         rules: {
           ...base.rules,
           scaleIn: {
-            ...base.rules.scaleIn,
+            ...(base.rules.scaleIn as Record<string, unknown>),
             scaleMode: "disabled",
           },
         },
@@ -645,7 +616,9 @@ describe("marketability policy retuning", () => {
     expect(policy.maxWideEntrySpreadCents).toBe(0.01);
   });
 
-  it("promotes configured fast-lane weather recyclers from fallback to reduced-fast", () => {
+  it("Phase 6 stub: weather families stay on fallback (shouldPromoteFallbackMarketability is no-op)", () => {
+    // Phase 6 stubs shouldPromoteFallbackMarketability to always return false.
+    // Weather families no longer get promoted to reduced-fast based on evidence.
     const policy = resolveMarketabilityPolicy(
       makeBundle({
         identity: {
@@ -662,10 +635,8 @@ describe("marketability policy retuning", () => {
       }),
     );
 
-    expect(policy.tier).toBe("reduced");
-    expect(policy.speedTier).toBe("reduced-fast");
-    expect(policy.maxEntrySpreadCents).toBe(0.025);
-    expect(policy.maxWideEntrySpreadCents).toBe(0.045);
+    expect(policy.tier).toBe("fallback");
+    expect(policy.speedTier).toBe("standard");
   });
 
   it("keeps disabled weather families on fallback even with fast lane enabled", () => {
@@ -687,7 +658,7 @@ describe("marketability policy retuning", () => {
         rules: {
           ...base.rules,
           scaleIn: {
-            ...base.rules.scaleIn,
+            ...(base.rules.scaleIn as Record<string, unknown>),
             scaleMode: "disabled",
           },
         },
@@ -776,7 +747,6 @@ describe("marketability policy retuning", () => {
         suggestedSizeUsdc: 4,
       }),
       market: makeMarket({
-        familyKey: "ethereum-price",
         bestBid: 0.04,
         bestAsk: 0.08,
         spread: 0.04,
@@ -812,7 +782,7 @@ describe("marketability policy retuning", () => {
       },
       rules: {
         ...makeBundle().rules,
-        entry: { ...makeBundle().rules.entry, entryMode: "spray-first" },
+        entry: { ...(makeBundle().rules.entry as Record<string, unknown>), entryMode: "spray-first" },
         throughput: {
           maxConcurrentOrdersPerFamily: 10,
           maxProbeInFlightPerToken: 2,
@@ -829,7 +799,6 @@ describe("marketability policy retuning", () => {
         suggestedSizeUsdc: 1,
       }),
       market: makeMarket({
-        familyKey: "ethereum-price",
         bestBid: null,
         bestAsk: null,
         midPrice: 0.021,

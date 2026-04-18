@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createTokenId,
-  createFamilyId,
   createFillId,
   createOrderId,
   createPositionId,
@@ -15,7 +14,6 @@ import { LegStateTrackerModule } from "../modules/leg-state/leg-state-tracker-mo
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const TOK = createTokenId("tok-abc");
-const FAM = createFamilyId("fam-1");
 const POS = createPositionId("pos-1");
 const FILL_ID = createFillId("fill-1");
 const ORDER_ID = createOrderId("order-1");
@@ -65,7 +63,6 @@ function makeFillPayload(
     liquidityRole: "maker" as const,
     fee: 0.01,
     feeRateBps: 2,
-    familyId: FAM,
     signalReason: null,
     timestamp: overrides?.timestamp ?? TIMESTAMP,
   };
@@ -75,7 +72,6 @@ function makeSettledPayload(overrides?: Partial<{ tokenId: TokenId }>) {
   return {
     positionId: POS,
     tokenId: overrides?.tokenId ?? TOK,
-    familyId: FAM,
     resolution: "YES",
     settlementPrice: 1.0,
     realizedPnl: 55,
@@ -91,7 +87,6 @@ function makePositionUpdatedPayload(size: number, overrides?: Partial<{ tokenId:
       positionId: POS,
       tokenId: overrides?.tokenId ?? TOK,
       conditionId: createConditionId("cond-1"),
-      familyId: FAM,
       side: "buy" as const,
       size,
       avgEntryPrice: 0.45,

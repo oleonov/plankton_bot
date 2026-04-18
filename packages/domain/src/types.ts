@@ -1,7 +1,6 @@
 import type {
   TokenId,
   ConditionId,
-  FamilyId,
   OrderId,
   FillId,
   PositionId,
@@ -15,20 +14,8 @@ import type {
 } from "./ids.js";
 import type {
   Regime,
-  StrategyProfile,
-  FeeTier,
-  LiveWalletRequirement,
   WalletMode,
   EvidenceStatus,
-  PromotionState,
-  Action,
-  EntryMode,
-  ExitMode,
-  ScaleMode,
-  SessionMode,
-  TwoSidedMode,
-  WeekdayBias,
-  ProfitModel,
   OrderSide,
   OrderType,
   OrderStatus,
@@ -63,8 +50,6 @@ export interface Market {
   question: string;
   outcome: string;
   outcomeIndex?: number | null;
-  familyId: FamilyId | null;
-  familyKey: string | null;
   regime: Regime | null;
   horizon: string | null;
   endDate: string | null; // ISO timestamp
@@ -79,6 +64,12 @@ export interface Market {
   tradable: boolean;
   tickSize: number;
   negRisk: boolean;
+  /** Number of markets in the parent Gamma event — persisted by scanner. Defaults to 1. */
+  eventMarketCount?: number;
+  /** Result of evaluatePreEntry for this market — persisted by scanner. */
+  selectionStatus?: SelectionStatus;
+  /** The winning rule ID from evaluatePreEntry, or null. */
+  selectionWinningRuleId?: string | null;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
 }
@@ -116,171 +107,6 @@ export interface MarketSnapshot {
   capturedAt: string; // ISO timestamp
 }
 
-// ─── Family — Identity layer ──────────────────────────────────────────────────
-
-export interface FamilyIdentity {
-  familyId: FamilyId;
-  familyKey: string;
-  primaryCategory: string;
-  regime: Regime;
-  horizon: string;
-  cadence: string;
-  strategyProfile: StrategyProfile;
-  topicKey: string | null;
-  slugPattern: string | null;
-  notes: string | null;
-  feeTier?: FeeTier | null;
-  liveWalletRequirement?: LiveWalletRequirement | null;
-  requiresPostOnlyForLive?: boolean | null;
-}
-
-// ─── Family — Evidence layer ──────────────────────────────────────────────────
-
-export interface FamilyEvidence {
-  familyId: FamilyId;
-  evidenceStatus: EvidenceStatus;
-  evidenceScore: number;
-  promotionState: PromotionState;
-  localTradeCount: number;
-  localMarketCount: number;
-  localRealizedPnlFifo: number;
-  openTailCostUsdc: number;
-  tailAdjustedPnl: number;
-  remoteClosedRealizedPnl: number | null;
-  openPositionCount: number | null;
-  openDustCount: number | null;
-  bothSidedEligible: boolean;
-  heavyCampaignEligible: boolean;
-  activeWindowEdgeScore: number | null;
-  recurrenceScore: number | null;
-  recycleScore: number | null;
-  liveViabilityScore: number | null;
-  toxicityPenalty: number | null;
-  lastValidatedAt: string | null; // ISO timestamp
-  probeSubstate: string | null;
-  repricingExitCount: number;
-}
-
-// ─── Family — Rules layer (seven sub-blocks) ──────────────────────────────────
-
-export interface TimeWindow {
-  start: string; // "HH:MM" UTC
-  end: string; // "HH:MM" UTC
-}
-
-export interface UniverseRules {
-  enabled: boolean;
-  action: Action;
-  priorityRank: number;
-  sessionMode: SessionMode;
-}
-
-export interface EntryRules {
-  entryMode: EntryMode;
-  minEntryPrice: number;
-  maxEntryPrice: number;
-  maxInitialNotionalUsdc: number;
-  allowHighPriceOneShot: boolean;
-  highPriceThreshold: number;
-  requireProvenFamilyAbovePrice: number;
-  preferredEntryBand: string | null;
-  maxProbeCountPerMarket: number | null;
-  entryCooldownSeconds: number | null;
-  maxNewMarketsPerSession: number | null;
-  probeSizeUsdc: number; // size for first buy (probe entry)
-  addSizeUsdc: number; // size for subsequent buys (scale-in)
-}
-
-export interface ScaleInRules {
-  scaleMode: ScaleMode;
-  defaultMaxBuysPerLeg: number;
-  heavyMaxBuysPerLeg: number;
-  allowHeavyCampaigns: boolean;
-  requirePositiveRecycleHistoryForScale: boolean;
-}
-
-export interface ExitRules {
-  exitMode: ExitMode;
-  primaryProfitModel: ProfitModel;
-  allowRunnerExtension: boolean;
-  preferFastRecycle: boolean;
-  resolutionHoldingAllowed: boolean;
-  resolutionBufferMinutes: number;
-  targetRoiBandLow: number | null;
-  targetRoiBandHigh: number | null;
-  maxUnmovedHoldHours: number | null;
-  maxTailHoldHours: number | null;
-}
-
-export interface TwoSidedRules {
-  allowTwoSided: boolean;
-  twoSidedMode: TwoSidedMode;
-  minActivityForTwoSided: number | null;
-  maxAdditionalEntryPrice?: number | null;
-}
-
-export interface ThroughputRules {
-  maxConcurrentOrdersPerFamily: number | null;
-  maxProbeInFlightPerToken: number | null;
-  maxEntrySignalsPerTickPerFamily: number | null;
-  fastLaneEnabled?: boolean | null;
-  dustLaneEnabled?: boolean | null;
-  queueJumpCanaryEnabled?: boolean | null;
-}
-
-export interface TailSuppressionRules {
-  maxOpenValueUsdc: number;
-  maxActiveMarkets: number;
-  maxDustPositions: number;
-  tailQuarantineThresholdUsdc: number;
-  tailQuarantineThresholdRatio: number;
-  staleTailPruneEnabled: boolean;
-  thresholdCleanupRequired: boolean;
-  autoSettleResolvedMarkets: boolean;
-}
-
-export interface SessionRules {
-  activeWindowsUtc: TimeWindow[];
-  reducedWindowsUtc: TimeWindow[];
-  weekdayBias: WeekdayBias;
-}
-
-export interface FamilyRules {
-  familyId: FamilyId;
-  universe: UniverseRules;
-  entry: EntryRules;
-  scaleIn: ScaleInRules;
-  exit: ExitRules;
-  twoSided: TwoSidedRules;
-  throughput?: ThroughputRules;
-  tailSuppression: TailSuppressionRules;
-  session: SessionRules;
-}
-
-// ─── Family — composite config (as loaded from YAML / DB) ────────────────────
-
-export interface FamilyConfig {
-  identity: FamilyIdentity;
-  evidence: FamilyEvidence;
-  rules: FamilyRules;
-}
-
-// ─── Family — Runtime State layer ─────────────────────────────────────────────
-
-export interface FamilyState {
-  familyId: FamilyId;
-  openValueUsdc: number;
-  openPositionCount: number;
-  openDustCount: number;
-  activeMarketCount: number;
-  currentTailCostUsdc: number;
-  tailAdjustedPnlLive: number;
-  lastEntryTs: string | null; // ISO timestamp
-  lastExitTs: string | null; // ISO timestamp
-  firstNegativeTailAt: string | null;
-  updatedAt: string; // ISO timestamp
-}
-
 // ─── Signal ───────────────────────────────────────────────────────────────────
 //
 // sequenceInTick: 0-based counter for signals sharing the same
@@ -289,7 +115,6 @@ export interface FamilyState {
 
 export interface Signal {
   signalId: string;
-  familyId: FamilyId | null;
   tokenId: TokenId;
   conditionId: ConditionId;
   side: OrderSide;
@@ -309,7 +134,6 @@ export interface RiskDecision {
   signalId: string;
   tokenId: TokenId;
   conditionId: ConditionId;
-  familyId: FamilyId | null;
   approved: boolean;
   rejectionReasons: string[];
   checksPassed: string[];
@@ -327,7 +151,6 @@ export interface Order {
   clientOrderId: ClientOrderId;
   tokenId: TokenId;
   conditionId: ConditionId;
-  familyId: FamilyId | null;
   side: OrderSide;
   orderType: OrderType;
   postOnly?: boolean;
@@ -352,7 +175,6 @@ export interface Fill {
   orderId: OrderId;
   tokenId: TokenId;
   conditionId: ConditionId;
-  familyId: FamilyId | null;
   side: OrderSide;
   price: number;
   size: number; // shares executed
@@ -369,7 +191,6 @@ export interface Position {
   positionId: PositionId;
   tokenId: TokenId;
   conditionId: ConditionId;
-  familyId: FamilyId | null;
   side: OrderSide;
   size: number; // current share quantity
   avgEntryPrice: number;
@@ -389,7 +210,6 @@ export interface InventoryLot {
   lotId: LotId;
   positionId: PositionId;
   tokenId: TokenId;
-  familyId: FamilyId | null;
   side: OrderSide;
   size: number; // original lot size in shares
   remainingSize: number; // shares not yet matched against a sell
@@ -438,11 +258,11 @@ export interface NormalizedMarket {
   conditionId: string;
   slug: string;
   eventSlug: string | null;
+  /** Number of markets in the parent Gamma event. Used for STEP 2 fallback: no_match && eventMarketCount === 1 ⇒ INCLUDE. */
+  eventMarketCount: number;
   question: string;
   outcome: string;
   outcomeIndex?: number | null;
-  familyId: FamilyId | null;
-  familyKey: string | null;
   regime: Regime | null;
   horizon: string | null;
   endDate: string | null;
@@ -511,20 +331,8 @@ export interface ProfileSettings {
   updatedAt: string;
 }
 
-export interface FamilyDeployment {
-  familyId: FamilyId;
-  profile: ProfileId;
-  enabled: boolean;
-  disabledAt: string | null;
-  disabledReason: string | null;
-  priority: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
 export interface ValidationScorecard {
   scorecardId: ScorecardId;
-  familyId: FamilyId;
   profile: ProfileId;
   evidenceStatus: EvidenceStatus;
   evidenceScore: number;
@@ -608,47 +416,9 @@ export interface ConfigImport {
   sourcePath: string | null;
   sourceChecksum: string;
   sourceVersion: number | null;
-  familiesAdded: number;
-  familiesUpdated: number;
-  familiesSkipped: number;
-  familiesUnchanged: number;
   resultJson: string | null;
   importedAt: string;
   importedBy: string | null;
-}
-
-export interface FamilyConfigMeta {
-  familyId: FamilyId;
-  lastImportedAt: string | null;
-  lastOperatorEditAt: string | null;
-  importChecksum: string | null;
-}
-
-export interface FamilyProfileRollup {
-  familyId: FamilyId;
-  profile: ProfileId;
-  openValueUsdc: number;
-  openPositions: number;
-  activeMarkets: number;
-  realizedPnl: number;
-  tailCostUsdc: number;
-  tailAdjustedPnl: number;
-  lastTradeAt: string | null;
-  updatedAt: string;
-}
-
-export interface FamilyProfileRuntimeState {
-  familyId: FamilyId;
-  openValueUsdc: number;
-  openPositionCount: number;
-  openDustCount: number;
-  activeMarketCount: number;
-  currentTailCostUsdc: number;
-  tailAdjustedPnlLive: number;
-  lastEntryTs: string | null;
-  lastExitTs: string | null;
-  firstNegativeTailAt: string | null;
-  updatedAt: string;
 }
 
 export interface SettlementRecord {
@@ -656,7 +426,6 @@ export interface SettlementRecord {
   conditionId: string;
   positionId: string;
   tokenId: string;
-  familyId: string;
   resolution: string;
   settlementPrice: number;
   size: number;
@@ -668,7 +437,6 @@ export interface SettlementRecord {
 export interface MergeRecord {
   mergeId: string;
   conditionId: string;
-  familyId: string;
   mergedAmount: number;
   spreadPnl: number;
   mergedAt: string;
@@ -716,4 +484,48 @@ export interface LegState {
   firstTradeAt: string;
   lastTradeAt: string;
   updatedAt: string;
+}
+
+// ─── Selection Rules ─────────────────────────────────────────────────────
+
+export type SelectionRuleType =
+  | "include_prefix"
+  | "exclude_prefix"
+  | "include_slug"
+  | "exclude_slug";
+
+export interface SelectionRule {
+  readonly ruleId: string;
+  readonly profileId: string;
+  readonly ruleType: SelectionRuleType;
+  readonly pattern: string;
+  readonly enabled: boolean;
+  readonly note: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface SelectionRuleDraft {
+  readonly ruleType: SelectionRuleType;
+  readonly pattern: string;
+  readonly enabled: boolean;
+  readonly note?: string | null;
+}
+
+export type SelectionStatus =
+  | "unknown"
+  | "matched_include"
+  | "matched_exclude"
+  | "step2_fallback_include"
+  | "fallback_exclude";
+
+export interface SelectionDecision {
+  readonly status: "include" | "exclude" | "no_match";
+  readonly winningRuleId: string | null;
+}
+
+export interface PreEntryEvaluation {
+  readonly finalStatus: "INCLUDE" | "EXCLUDE";
+  readonly selectionStatus: SelectionStatus;
+  readonly winningRuleId: string | null;
 }

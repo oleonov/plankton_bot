@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId, createFamilyId } from "@plankton/domain";
+import { createTokenId } from "@plankton/domain";
 import type {
   MarketDataGateway,
   MarketPricingLifecycleEvent,
@@ -25,8 +25,6 @@ function makeTrackedMarket(overrides?: Partial<Market>): Market {
     question: "Will BTC hit 100k?",
     outcome: "YES",
     outcomeIndex: 0,
-    familyId: createFamilyId("fam-btc"),
-    familyKey: "btc-above",
     regime: "threshold",
     horizon: "daily",
     endDate: "2026-12-31",
@@ -166,9 +164,12 @@ function createMockMarketRepo(): MarketRepository {
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn<() => Market[]>().mockReturnValue([]),
-    findByFamily: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
+    // Phase 4: market-data module calls findTrackedForPricing instead of findActive.
+    // Tests set up their tracked markets via findTrackedForPricing mock.
+    findTrackedForPricing: vi.fn<() => Market[]>().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -228,7 +229,7 @@ describe("MarketDataModule", () => {
       outcome: "NO",
     });
 
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([yesMarket, noMarket]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([yesMarket, noMarket]);
 
     const pricingMap = new Map<
       string,
@@ -273,7 +274,6 @@ describe("MarketDataModule", () => {
     expect(received[0]![0]!.lastTradePrice).toBe(0.5);
     expect(received[0]![0]!.minOrderSize).toBe(5);
     expect(received[0]![0]!.outcome).toBe("YES");
-    expect(received[0]![0]!.familyId).toBe("fam-btc");
     expect(received[0]![1]!.minOrderSize).toBe(1);
     expect(received[0]![1]!.outcome).toBe("NO");
   });
@@ -285,12 +285,12 @@ describe("MarketDataModule", () => {
         conditionId: "cond-a",
       }),
     ];
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
 
     await mod.poll();
 
-    expect(marketRepo.findActive).toHaveBeenCalledTimes(1);
+    expect(marketRepo.findTrackedForPricing).toHaveBeenCalledTimes(1);
     expect(gateway.getMarkets).not.toHaveBeenCalled();
     expect(gateway.getOrderBook).not.toHaveBeenCalled();
   });
@@ -310,7 +310,7 @@ describe("MarketDataModule", () => {
         conditionId: "cond-2",
       }),
     ];
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
 
     await mod.poll();
@@ -325,7 +325,7 @@ describe("MarketDataModule", () => {
   });
 
   it("healthCheck returns ok after successful poll", async () => {
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
 
     await mod.poll();
 
@@ -346,7 +346,7 @@ describe("MarketDataModule", () => {
       botRunId: "run-test-123",
     });
 
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
     await mod.poll();
 
     await new Promise((r) => setTimeout(r, staleMs + 10));
@@ -357,7 +357,7 @@ describe("MarketDataModule", () => {
   });
 
   it("poll does not crash on gateway failure", async () => {
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("network down"),
     );
@@ -369,7 +369,7 @@ describe("MarketDataModule", () => {
   });
 
   it("lastSuccessfulDataMs is NOT updated when getMarketPricing throws", async () => {
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("request timed out after 15000ms"),
     );
@@ -387,7 +387,7 @@ describe("MarketDataModule", () => {
       resolveFirst = resolve;
     });
 
-    (marketRepo.findActive as ReturnType<typeof vi.fn>)
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>)
       .mockReturnValueOnce(blockingPromise)
       .mockReturnValue([]);
 
@@ -397,12 +397,12 @@ describe("MarketDataModule", () => {
     resolveFirst([]);
     await Promise.all([poll1, poll2]);
 
-    expect(marketRepo.findActive).toHaveBeenCalledTimes(1);
+    expect(marketRepo.findTrackedForPricing).toHaveBeenCalledTimes(1);
   });
 
   it("start resolves immediately even when gateway is slow (non-blocking)", async () => {
     let resolvePricing!: (v: Map<string, any>) => void;
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockReturnValue(
       new Promise<Map<string, any>>((r) => {
         resolvePricing = r;
@@ -425,11 +425,11 @@ describe("MarketDataModule", () => {
   });
 
   it("start/stop lifecycle manages timer", async () => {
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([]);
 
     await mod.start();
     await new Promise((r) => setTimeout(r, 0));
-    expect(marketRepo.findActive).toHaveBeenCalledTimes(1);
+    expect(marketRepo.findTrackedForPricing).toHaveBeenCalledTimes(1);
 
     await mod.stop();
   });
@@ -441,7 +441,7 @@ describe("MarketDataModule", () => {
         conditionId: "cond-a",
       }),
     ];
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Map([
         [
@@ -504,7 +504,7 @@ describe("MarketDataModule", () => {
         conditionId: "cond-b",
       }),
     ];
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Map([
         ["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }],
@@ -569,7 +569,7 @@ describe("MarketDataModule", () => {
           conditionId: "cond-b",
         }),
       ];
-      (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+      (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
         new Map([
           ["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }],
@@ -620,7 +620,7 @@ describe("MarketDataModule", () => {
         conditionId: "cond-b",
       }),
     ];
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
     gateway.createMarketPricingStream = (handlers) => {
       stream = new FakePricingStream(handlers);
@@ -651,7 +651,7 @@ describe("MarketDataModule", () => {
         conditionId: "cond-a",
       }),
     ];
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce(
         new Map([["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }]]),
@@ -698,7 +698,7 @@ describe("MarketDataModule", () => {
         conditionId: "cond-b",
       }),
     ];
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
       new Map([
         ["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }],
@@ -782,7 +782,7 @@ describe("MarketDataModule", () => {
   });
 
   it("publishes empty snapshot when no tracked markets exist", async () => {
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([]);
 
     const received: NormalizedMarket[][] = [];
     bus.subscribe("MarketSnapshotReceived", async (p) => {
@@ -797,7 +797,7 @@ describe("MarketDataModule", () => {
   });
 
   it("poll handles missing pricing for a token gracefully", async () => {
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
       makeTrackedMarket({
         tokenId: createTokenId("tok-orphan"),
         conditionId: "cond-1",
@@ -827,7 +827,7 @@ describe("MarketDataModule", () => {
       progressEvents.push(p);
     });
 
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([]);
 
     await mod.poll();
 
@@ -842,7 +842,7 @@ describe("MarketDataModule", () => {
       progressEvents.push(p);
     });
 
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([]);
 
     await mod.poll();
 
@@ -859,7 +859,7 @@ describe("MarketDataModule", () => {
       progressEvents.push(p);
     });
 
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("network down"),
     );

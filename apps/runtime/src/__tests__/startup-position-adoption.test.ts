@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bootstrapLedgerDb,
-  SqliteFamilyStateRepository,
   SqliteFillRepository,
   SqliteInventoryLotRepository,
   SqliteLegStateRepository,
@@ -12,7 +11,6 @@ import {
 import {
   createBotRunId,
   createConditionId,
-  createFamilyId,
   createFillId,
   createLotId,
   createOrderId,
@@ -20,11 +18,9 @@ import {
   createTokenId,
   type ClientOrderId,
   type ExchangeFill,
-  type FamilyRulesProvider,
 } from "@plankton/domain";
 import { runStartupPositionAdoption } from "../startup-position-adoption.js";
 
-const FAMILY_ID = createFamilyId("fam-btc");
 const TOKEN_ID = createTokenId("tok-btc-yes");
 
 const silentLog = {
@@ -34,23 +30,6 @@ const silentLog = {
   debug: vi.fn(),
   child: () => silentLog,
 } as any;
-
-function createRulesProvider(): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue({
-      identity: { familyId: FAMILY_ID },
-      rules: {
-        tailSuppression: {
-          tailQuarantineThresholdUsdc: 1_000,
-          tailQuarantineThresholdRatio: 10,
-        },
-      },
-    }),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  } as unknown as FamilyRulesProvider;
-}
 
 function makeExchangeFill(overrides?: Partial<ExchangeFill>): ExchangeFill {
   return {
@@ -77,8 +56,6 @@ function seedMarket(repo: SqliteMarketRepository): void {
     eventSlug: "bitcoin-april",
     question: "Will BTC be above 68k?",
     outcome: "YES",
-    familyId: FAMILY_ID,
-    familyKey: "btc-above",
     regime: "threshold",
     horizon: "daily",
     endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
@@ -87,22 +64,6 @@ function seedMarket(repo: SqliteMarketRepository): void {
     tickSize: 0.01,
     negRisk: false,
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
-}
-
-function seedFamilyState(repo: SqliteFamilyStateRepository): void {
-  repo.save({
-    familyId: FAMILY_ID,
-    openValueUsdc: 0,
-    openPositionCount: 0,
-    openDustCount: 0,
-    activeMarketCount: 0,
-    currentTailCostUsdc: 0,
-    tailAdjustedPnlLive: 0,
-    lastEntryTs: null,
-    lastExitTs: null,
-    firstNegativeTailAt: null,
     updatedAt: new Date().toISOString(),
   });
 }
@@ -126,9 +87,7 @@ describe("runStartupPositionAdoption", () => {
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
     const legStateRepo = new SqliteLegStateRepository(conn.db);
-    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedMarket(marketRepo);
-    seedFamilyState(familyStateRepo);
 
     const result = await runStartupPositionAdoption({
       gateway: {
@@ -140,8 +99,6 @@ describe("runStartupPositionAdoption", () => {
       positionRepo,
       inventoryLotRepo,
       legStateRepo,
-      familyStateRepo,
-      rulesProvider: createRulesProvider(),
       log: silentLog,
       db: conn.db,
       botRunId: createBotRunId("run-1"),
@@ -160,10 +117,6 @@ describe("runStartupPositionAdoption", () => {
     expect(position).not.toBeNull();
     expect(position?.size).toBe(10);
     expect(position?.costBasisUsdc).toBe(4);
-
-    const familyState = familyStateRepo.get(FAMILY_ID);
-    expect(familyState?.openPositionCount).toBe(1);
-    expect(familyState?.openValueUsdc).toBe(4);
   });
 
   it("rebuilds the same startup-adopted state across repeated startups", async () => {
@@ -176,9 +129,7 @@ describe("runStartupPositionAdoption", () => {
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
     const legStateRepo = new SqliteLegStateRepository(conn.db);
-    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedMarket(marketRepo);
-    seedFamilyState(familyStateRepo);
 
     const gateway = {
       getFills: vi.fn().mockResolvedValue([makeExchangeFill()]),
@@ -192,8 +143,6 @@ describe("runStartupPositionAdoption", () => {
       positionRepo,
       inventoryLotRepo,
       legStateRepo,
-      familyStateRepo,
-      rulesProvider: createRulesProvider(),
       log: silentLog,
       db: conn.db,
       botRunId: createBotRunId("run-1"),
@@ -206,8 +155,6 @@ describe("runStartupPositionAdoption", () => {
       positionRepo,
       inventoryLotRepo,
       legStateRepo,
-      familyStateRepo,
-      rulesProvider: createRulesProvider(),
       log: silentLog,
       db: conn.db,
       botRunId: createBotRunId("run-2"),
@@ -231,8 +178,6 @@ describe("runStartupPositionAdoption", () => {
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
     const legStateRepo = new SqliteLegStateRepository(conn.db);
-    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
-    seedFamilyState(familyStateRepo);
 
     const result = await runStartupPositionAdoption({
       gateway: {
@@ -244,8 +189,6 @@ describe("runStartupPositionAdoption", () => {
       positionRepo,
       inventoryLotRepo,
       legStateRepo,
-      familyStateRepo,
-      rulesProvider: createRulesProvider(),
       log: silentLog,
       db: conn.db,
       botRunId: createBotRunId("run-1"),
@@ -266,9 +209,7 @@ describe("runStartupPositionAdoption", () => {
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
     const legStateRepo = new SqliteLegStateRepository(conn.db);
-    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedMarket(marketRepo);
-    seedFamilyState(familyStateRepo);
 
     const result = await runStartupPositionAdoption({
       gateway: {
@@ -280,8 +221,6 @@ describe("runStartupPositionAdoption", () => {
       positionRepo,
       inventoryLotRepo,
       legStateRepo,
-      familyStateRepo,
-      rulesProvider: createRulesProvider(),
       log: silentLog,
       db: conn.db,
       botRunId: createBotRunId("run-1"),
@@ -303,16 +242,14 @@ describe("runStartupPositionAdoption", () => {
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
     const legStateRepo = new SqliteLegStateRepository(conn.db);
-    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
     seedMarket(marketRepo);
-    seedFamilyState(familyStateRepo);
 
     orderRepo.save({
       orderId: createOrderId("bad-order"),
       clientOrderId: "adopt-bad" as ClientOrderId,
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
-      familyId: FAMILY_ID,
+
       side: "buy",
       orderType: "GTC",
       postOnly: false,
@@ -332,7 +269,7 @@ describe("runStartupPositionAdoption", () => {
       orderId: createOrderId("bad-order"),
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
-      familyId: FAMILY_ID,
+
       side: "buy",
       price: 0.9,
       size: 334.37188,
@@ -346,7 +283,7 @@ describe("runStartupPositionAdoption", () => {
       positionId: createPositionId("bad-position"),
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
-      familyId: FAMILY_ID,
+
       side: "buy",
       size: 334.37188,
       avgEntryPrice: 0.9,
@@ -363,7 +300,7 @@ describe("runStartupPositionAdoption", () => {
       lotId: createLotId("bad-lot"),
       positionId: createPositionId("bad-position"),
       tokenId: TOKEN_ID,
-      familyId: FAMILY_ID,
+
       side: "buy",
       size: 334.37188,
       remainingSize: 334.37188,
@@ -391,8 +328,6 @@ describe("runStartupPositionAdoption", () => {
       positionRepo,
       inventoryLotRepo,
       legStateRepo,
-      familyStateRepo,
-      rulesProvider: createRulesProvider(),
       log: silentLog,
       db: conn.db,
       botRunId: createBotRunId("run-1"),
@@ -416,7 +351,7 @@ describe("runStartupPositionAdoption", () => {
         clientOrderId: `coid-${orderId}` as ClientOrderId,
         tokenId: TOKEN_ID,
         conditionId: createConditionId("cond-1"),
-        familyId: FAMILY_ID,
+  
         side: "buy",
         orderType: "GTC",
         postOnly: false,
@@ -441,7 +376,7 @@ describe("runStartupPositionAdoption", () => {
         positionId: createPositionId("pos-1"),
         tokenId: TOKEN_ID,
         conditionId: createConditionId("cond-1"),
-        familyId: FAMILY_ID,
+  
         side: "buy",
         size: 10,
         avgEntryPrice: 0.42,
@@ -469,7 +404,7 @@ describe("runStartupPositionAdoption", () => {
         orderId: createOrderId("ord-seed"),
         tokenId: TOKEN_ID,
         conditionId: createConditionId("cond-1"),
-        familyId: FAMILY_ID,
+  
         side: "buy",
         price: 0.42,
         size: 10,
@@ -492,7 +427,6 @@ describe("runStartupPositionAdoption", () => {
       const positionRepo = new SqlitePositionRepository(conn.db);
       const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
       const legStateRepo = new SqliteLegStateRepository(conn.db);
-      const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
       const result = await runStartupPositionAdoption({
         gateway: { getFills: vi.fn().mockResolvedValue([]) },
         marketRepo,
@@ -501,8 +435,6 @@ describe("runStartupPositionAdoption", () => {
         positionRepo,
         inventoryLotRepo,
         legStateRepo,
-        familyStateRepo,
-        rulesProvider: createRulesProvider(),
         log: silentLog,
         db: conn.db,
         botRunId: createBotRunId("run-1"),
@@ -662,7 +594,7 @@ describe("runStartupPositionAdoption", () => {
         positionId: createPositionId("pos-dust"),
         tokenId: TOKEN_ID,
         conditionId: createConditionId("cond-1"),
-        familyId: FAMILY_ID,
+  
         side: "buy",
         size: 1,
         avgEntryPrice: 0.3,

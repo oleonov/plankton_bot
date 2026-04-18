@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@plankton/event-bus";
-import { createFamilyId, createOrderId, createTokenId, createConditionId } from "@plankton/domain";
+import { createOrderId, createTokenId, createConditionId } from "@plankton/domain";
 import type {
   ExchangeBalance,
   ExchangeFill,
@@ -9,7 +9,6 @@ import type {
   ExchangeOrder,
   ExchangeUserOrderEvent,
   ExchangeUserTradeEvent,
-  FamilyRulesProvider,
   FillRepository,
   MarketRepository,
   OrderRepository,
@@ -100,7 +99,6 @@ function createMockOrderRepo() {
   const order = {
     orderId: createOrderId("ord-local"),
     clientOrderId: "cloid-1" as any,
-    familyId: createFamilyId("fam-1"),
     tokenId: createTokenId("tok-1"),
     conditionId: createConditionId("cond-1"),
     side: "buy" as const,
@@ -129,15 +127,6 @@ function createMockOrderRepo() {
   return { repo, order };
 }
 
-function createMockRulesProvider(): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue(null),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  };
-}
-
 function createMockMarketRepo(orderTokenId: TokenId): MarketRepository {
   return {
     save: vi.fn(),
@@ -151,8 +140,6 @@ function createMockMarketRepo(orderTokenId: TokenId): MarketRepository {
             question: "question",
             outcome: "YES",
             outcomeIndex: 0,
-            familyId: createFamilyId("fam-1"),
-            familyKey: "fam-key",
             regime: "generic",
             horizon: "daily",
             endDate: null,
@@ -168,9 +155,10 @@ function createMockMarketRepo(orderTokenId: TokenId): MarketRepository {
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
-    findByFamily: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
+    findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -189,7 +177,6 @@ describe("UserOrderStreamModule", () => {
   let fillRepo: ReturnType<typeof createMockFillRepo>;
   let orderRepo: OrderRepository;
   let order: ReturnType<typeof createMockOrderRepo>["order"];
-  let rulesProvider: FamilyRulesProvider;
   let marketRepo: MarketRepository;
   let bus: InProcessEventBus;
   let mod: UserOrderStreamModule;
@@ -199,7 +186,6 @@ describe("UserOrderStreamModule", () => {
     gateway = createMockGateway(stream);
     fillRepo = createMockFillRepo();
     ({ repo: orderRepo, order } = createMockOrderRepo());
-    rulesProvider = createMockRulesProvider();
     marketRepo = createMockMarketRepo(order.tokenId);
     bus = new InProcessEventBus();
     mod = new UserOrderStreamModule({
@@ -207,7 +193,6 @@ describe("UserOrderStreamModule", () => {
       fillRepo,
       marketRepo,
       orderRepo,
-      rulesProvider,
       bus,
       log: silentLog,
       now: () => 1_700_000_000_000,
@@ -297,7 +282,6 @@ describe("UserOrderStreamModule", () => {
       price: order.price,
       size: order.size,
       orderType: order.orderType,
-      familyId: order.familyId,
       signalReason: order.signalReason,
       timestamp: Date.now(),
     });
@@ -420,7 +404,6 @@ describe("UserOrderStreamModule", () => {
       tokenId: order.tokenId,
       conditionId: order.conditionId,
       reason: "cancelled",
-      familyId: order.familyId,
       signalReason: order.signalReason,
       timestamp: Date.now(),
     });

@@ -6,7 +6,6 @@ import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteOperatorCommandRepository } from "../repositories/operator-command-repository.js";
 import { SqliteOperatorActionRepository } from "../repositories/operator-action-repository.js";
-import { createFamilyId } from "@plankton/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -201,59 +200,4 @@ describe("SqliteOperatorActionRepository", () => {
     expect(recent[1]!.action).toBe("resume");
   });
 
-  it("findByFamily returns actions for specific family", () => {
-    actionRepo.insert({
-      action: "family_disable",
-      targetType: "family",
-      targetId: "fam-1",
-      reason: "tail",
-      performedAt: "2026-01-01T00:00:00Z",
-    });
-    actionRepo.insert({
-      action: "family_enable",
-      targetType: "family",
-      targetId: "fam-1",
-      reason: null,
-      performedAt: "2026-01-02T00:00:00Z",
-    });
-    actionRepo.insert({
-      action: "family_disable",
-      targetType: "family",
-      targetId: "fam-2",
-      reason: "other",
-      performedAt: "2026-01-03T00:00:00Z",
-    });
-
-    const fam1Actions = actionRepo.findByFamily(createFamilyId("fam-1"));
-    expect(fam1Actions).toHaveLength(2);
-    // Newest first
-    expect(fam1Actions[0]!.action).toBe("family_enable");
-    expect(fam1Actions[1]!.action).toBe("family_disable");
-
-    const fam2Actions = actionRepo.findByFamily(createFamilyId("fam-2"));
-    expect(fam2Actions).toHaveLength(1);
-  });
-
-  it("findByFamily excludes non-family target types with same targetId", () => {
-    // Insert action with targetType='bot' but targetId='fam-1'
-    actionRepo.insert({
-      action: "pause",
-      targetType: "bot",
-      targetId: "fam-1",
-      reason: null,
-      performedAt: "2026-01-01T00:00:00Z",
-    });
-    // Insert action with targetType='family' and targetId='fam-1'
-    actionRepo.insert({
-      action: "family_disable",
-      targetType: "family",
-      targetId: "fam-1",
-      reason: "tail",
-      performedAt: "2026-01-02T00:00:00Z",
-    });
-
-    const actions = actionRepo.findByFamily(createFamilyId("fam-1"));
-    expect(actions).toHaveLength(1);
-    expect(actions[0]!.targetType).toBe("family");
-  });
 });

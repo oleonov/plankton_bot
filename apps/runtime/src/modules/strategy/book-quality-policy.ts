@@ -1,4 +1,4 @@
-import type { EntryMode, FamilyRuleBundle, NormalizedMarket, Signal } from "@plankton/domain";
+import type { EntryMode, NormalizedMarket, Signal } from "@plankton/domain";
 
 const EPSILON = 1e-9;
 export const DUST_TRADE_FRESHNESS_MS = 5 * 60_000;
@@ -20,15 +20,8 @@ export function hasFreshTradeActivity(
   return Math.max(0, nowMs - tradeMs) <= freshnessMs;
 }
 
-function isDustEntryMode(
-  bundle: Pick<FamilyRuleBundle, "rules">,
-  entryMode: EntryMode | null | undefined,
-): boolean {
-  return entryMode === "spray-first" || bundle.rules.throughput?.dustLaneEnabled === true;
-}
-
 export function isGammaFallbackDustEligible(opts: {
-  readonly bundle?: Pick<FamilyRuleBundle, "rules"> | null | undefined;
+  readonly bundle?: null | undefined;
   readonly market: Pick<
     NormalizedMarket,
     "bookSource" | "lastTradeAt" | "lastTradePrice" | "snapshotTs"
@@ -65,8 +58,7 @@ export function isGammaFallbackDustEligible(opts: {
 
   const inferredSizeUsdc = opts.suggestedSizeUsdc ?? null;
   if (inferredSizeUsdc == null || inferredSizeUsdc > maxDustSizeUsdc + EPSILON) return false;
-  if (!opts.bundle) return opts.entryMode === "spray-first";
-  return isDustEntryMode(opts.bundle, opts.entryMode ?? opts.bundle.rules.entry.entryMode ?? null);
+  return opts.entryMode === "spray-first";
 }
 
 export function resolveGammaFallbackDustReferencePrice(

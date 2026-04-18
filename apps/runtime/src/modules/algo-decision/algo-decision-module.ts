@@ -224,7 +224,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.tickCounter++;
     const now = Date.now();
 
-    // seqMap tracks sequence numbers: `${familyId}|${tokenId}|${side}` → next seq
+    // seqMap tracks sequence numbers: `${tokenId}|${side}` → next seq
     const seqMap = new Map<string, number>();
     const nextSeq = (key: string): number => {
       const n = seqMap.get(key) ?? 0;
@@ -354,7 +354,6 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     const signal: import("@plankton/domain").Signal = {
       signalId: randomUUID(),
-      familyId: market.familyId,
       tokenId: market.tokenId,
       conditionId: market.conditionId as ConditionId,
       side,

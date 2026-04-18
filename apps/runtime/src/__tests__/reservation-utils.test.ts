@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createBotRunId,
   createConditionId,
-  createFamilyId,
   createFillId,
   createOrderId,
   createTokenId,
@@ -13,7 +12,6 @@ import {
   getReservedSellSize,
 } from "../modules/execution/reservation-utils.js";
 
-const FAMILY_ID = createFamilyId("fam-1");
 const TOKEN_ID = createTokenId("tok-yes");
 const BOT_RUN_ID = createBotRunId("run-1");
 
@@ -23,7 +21,6 @@ function makeOrder(overrides?: Partial<Order>): Order {
     clientOrderId: "plk_ord_1" as ClientOrderId,
     tokenId: TOKEN_ID,
     conditionId: createConditionId("cond-1"),
-    familyId: FAMILY_ID,
     side: "buy",
     orderType: "GTC",
     price: 0.5,
@@ -46,7 +43,6 @@ function makeFill(orderId: string, size: number): Fill {
     orderId: createOrderId(orderId),
     tokenId: TOKEN_ID,
     conditionId: createConditionId("cond-1"),
-    familyId: FAMILY_ID,
     side: "buy",
     price: 0.5,
     size,

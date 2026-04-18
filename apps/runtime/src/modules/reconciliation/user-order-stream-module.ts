@@ -3,7 +3,6 @@ import type {
   ExchangeGateway,
   ExchangeUserOrderEvent,
   ExchangeUserTradeEvent,
-  FamilyRulesProvider,
   FillRepository,
   MarketRepository,
   Order,
@@ -58,7 +57,6 @@ export interface UserOrderStreamModuleDeps {
   marketRepo: MarketRepository;
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
-  rulesProvider: FamilyRulesProvider;
   log: Logger;
   fillCatchupOverlapMs?: number;
   orphanTtlMs?: number;
@@ -241,7 +239,6 @@ export class UserOrderStreamModule implements RuntimeModule {
     const result = await importExchangeFills([...event.fills], {
       fillRepo: this.deps.fillRepo,
       orderRepo: this.deps.orderRepo,
-      rulesProvider: this.deps.rulesProvider,
       bus: this.deps.bus,
       log: this.log,
     });
@@ -288,7 +285,6 @@ export class UserOrderStreamModule implements RuntimeModule {
         tokenId: localOrder.tokenId,
         conditionId: localOrder.conditionId,
         reason: "exchange-user-ws-cancelled",
-        familyId: localOrder.familyId,
         signalReason: localOrder.signalReason ?? null,
         timestamp: event.timestamp,
       });
@@ -323,8 +319,7 @@ export class UserOrderStreamModule implements RuntimeModule {
           gateway: this.deps.gateway,
           fillRepo: this.deps.fillRepo,
           orderRepo: this.deps.orderRepo,
-          rulesProvider: this.deps.rulesProvider,
-          bus: this.deps.bus,
+              bus: this.deps.bus,
           log: this.log,
         },
         Math.max(0, latestFillTimestamp - this.fillCatchupOverlapMs),

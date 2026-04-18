@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MergeCandidateService } from "../merge-candidate-service.js";
-import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
+import { createTokenId, createPositionId } from "@plankton/domain";
 import type {
   PositionRepository,
   OrderRepository,
@@ -62,13 +62,11 @@ describe("MergeCandidateService", () => {
       positionId: createPositionId("pos-yes"),
       tokenId: yesToken,
       size: 100,
-      familyId: createFamilyId("fam-1"),
     };
     const noPos: Partial<Position> = {
       positionId: createPositionId("pos-no"),
       tokenId: noToken,
       size: 80,
-      familyId: createFamilyId("fam-1"),
     };
 
     (positionRepo.findOpen as any).mockReturnValue([yesPos, noPos]);
@@ -112,13 +110,11 @@ describe("MergeCandidateService", () => {
       positionId: createPositionId("pos-yes"),
       tokenId: yesToken,
       size: 100,
-      familyId: createFamilyId("fam-1"),
     };
     const noPos: Partial<Position> = {
       positionId: createPositionId("pos-no"),
       tokenId: noToken,
       size: 80,
-      familyId: createFamilyId("fam-1"),
     };
 
     const yesOrder: Partial<Order> = {
@@ -173,13 +169,11 @@ describe("MergeCandidateService", () => {
       positionId: createPositionId("pos-yes"),
       tokenId: yesToken,
       size: 0.5,
-      familyId: createFamilyId("fam-1"),
     };
     const noPos: Partial<Position> = {
       positionId: createPositionId("pos-no"),
       tokenId: noToken,
       size: 0.5,
-      familyId: createFamilyId("fam-1"),
     };
 
     (positionRepo.findOpen as any).mockReturnValue([yesPos, noPos]);

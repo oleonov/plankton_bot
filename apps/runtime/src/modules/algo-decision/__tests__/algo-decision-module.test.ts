@@ -11,7 +11,7 @@ import type {
   LegState,
   RuntimeEventMap,
 } from "@plankton/domain";
-import { createTokenId, createFamilyId, createCommandId, createOrderId } from "@plankton/domain";
+import { createTokenId, createCommandId, createOrderId } from "@plankton/domain";
 import type { ConditionId } from "@plankton/domain";
 import type { Logger } from "../../../logger.js";
 
@@ -200,7 +200,7 @@ function createMockLogger(): Logger {
 
 function makeMarket(
   tokenId: string,
-  familyId: string | null,
+  _familyId: string | null,
   midPrice: number | null,
   conditionId: string = "cond-1",
 ): NormalizedMarket {
@@ -211,8 +211,6 @@ function makeMarket(
     eventSlug: null,
     question: "Test?",
     outcome: "Yes",
-    familyId: familyId !== null ? createFamilyId(familyId) : null,
-    familyKey: null,
     regime: null,
     horizon: null,
     endDate: null,
@@ -225,6 +223,7 @@ function makeMarket(
     midPrice,
     spread: 0.02,
     snapshotTs: Date.now(),
+    eventMarketCount: 1,
   };
 }
 
@@ -307,7 +306,6 @@ describe("AlgoDecisionModule", () => {
 
     expect(signalCalls.length).toBe(1);
     const signal = signalCalls[0]![1].signal as import("@plankton/domain").Signal;
-    expect(signal.familyId).toBeNull();
     expect(signal.conditionId).toBe("cond-1" as ConditionId);
 
     await mod.stop();
@@ -374,7 +372,6 @@ describe("AlgoDecisionModule", () => {
       price: 0.45,
       size: 4.67,
       orderType: "limit" as const,
-      familyId: createFamilyId(familyId),
       signalReason: "probe-entry",
       timestamp: Date.now(),
     });

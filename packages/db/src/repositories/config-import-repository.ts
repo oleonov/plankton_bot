@@ -11,17 +11,12 @@ export class SqliteConfigImportRepository implements ConfigImportRepository {
       .prepare(
         `INSERT INTO config_imports
          (import_id, source_path, source_checksum, source_version,
-          families_added, families_updated, families_skipped, families_unchanged,
           result_json, imported_at, imported_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(import_id) DO UPDATE SET
            source_path = excluded.source_path,
            source_checksum = excluded.source_checksum,
            source_version = excluded.source_version,
-           families_added = excluded.families_added,
-           families_updated = excluded.families_updated,
-           families_skipped = excluded.families_skipped,
-           families_unchanged = excluded.families_unchanged,
            result_json = excluded.result_json,
            imported_by = excluded.imported_by`,
       )
@@ -30,10 +25,6 @@ export class SqliteConfigImportRepository implements ConfigImportRepository {
         importRecord.sourcePath,
         importRecord.sourceChecksum,
         importRecord.sourceVersion,
-        importRecord.familiesAdded,
-        importRecord.familiesUpdated,
-        importRecord.familiesSkipped,
-        importRecord.familiesUnchanged,
         importRecord.resultJson,
         importRecord.importedAt,
         importRecord.importedBy,
@@ -61,10 +52,6 @@ function rowToImport(row: Record<string, unknown>): ConfigImport {
     sourcePath: (row.source_path as string) ?? null,
     sourceChecksum: row.source_checksum as string,
     sourceVersion: (row.source_version as number) ?? null,
-    familiesAdded: row.families_added as number,
-    familiesUpdated: row.families_updated as number,
-    familiesSkipped: row.families_skipped as number,
-    familiesUnchanged: row.families_unchanged as number,
     resultJson: (row.result_json as string) ?? null,
     importedAt: row.imported_at as string,
     importedBy: (row.imported_by as string) ?? null,

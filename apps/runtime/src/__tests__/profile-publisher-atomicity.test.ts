@@ -105,17 +105,11 @@ describe("ProfileRuntimePublisher atomicity", () => {
     expect(summary).toBeDefined();
     expect(summary!["paused"]).toBe(0);
 
+    // Phase 6: scorecards no longer carry family_id; query by profile
     const scorecards = controlConn.db
-      .prepare("SELECT * FROM family_validation_scorecards WHERE family_id = 'fam-1'")
+      .prepare("SELECT * FROM family_validation_scorecards WHERE profile = 'paper'")
       .all();
     expect(scorecards.length).toBe(1);
-
-    const latest = controlConn.db
-      .prepare(
-        "SELECT * FROM family_validation_latest WHERE family_id = 'fam-1' AND profile = 'paper'",
-      )
-      .get() as Record<string, unknown> | undefined;
-    expect(latest).toBeDefined();
   });
 
   it("rolls back all writes when the transaction fails mid-way", async () => {

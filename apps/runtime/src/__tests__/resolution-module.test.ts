@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
+import { createTokenId, createPositionId } from "@plankton/domain";
 import type {
   ExchangeGateway,
   MarketRepository,
@@ -7,9 +7,6 @@ import type {
   OrderRepository,
   InventoryLotRepository,
   PositionRepository,
-  FamilyRulesProvider,
-  FamilyRuleBundle,
-  FamilyId,
   TokenId,
 } from "@plankton/domain";
 import type { GammaResolutionClient } from "@plankton/exchange";
@@ -20,14 +17,11 @@ import type {
   DetectedResolution,
 } from "../modules/resolution/resolution-detector.js";
 import type { PositionSettler, SettledPosition } from "../modules/resolution/position-settler.js";
-import type { FamilyExposureCalculator } from "../modules/risk-inventory/family-exposure.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const TOK_YES = createTokenId("tok-yes");
 const TOK_NO = createTokenId("tok-no");
-const FAM = createFamilyId("fam-1");
-const FAM2 = createFamilyId("fam-2");
 const POS = createPositionId("pos-1");
 const POS2 = createPositionId("pos-2");
 const CONDITION = "condition-abc";
@@ -50,7 +44,6 @@ function makeDetectedResolution(overrides?: Partial<DetectedResolution>): Detect
         outcome: "YES",
         endDate: "2026-01-14T00:00:00Z",
         positionId: POS,
-        familyId: FAM,
       },
     ],
     ...overrides,
@@ -61,7 +54,6 @@ function makeSettledPosition(overrides?: Partial<SettledPosition>): SettledPosit
   return {
     positionId: POS,
     tokenId: TOK_YES,
-    familyId: FAM,
     resolution: "YES",
     settlementPrice: 1.0,
     realizedPnl: 0.8,
@@ -99,6 +91,8 @@ function createMockMarketRepo(): MarketRepository {
     findAll: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
+    findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   } as unknown as MarketRepository;
 }
 
@@ -125,19 +119,6 @@ function createMockResolutionRepo(): MarketResolutionRepository {
   } as unknown as MarketResolutionRepository;
 }
 
-function createMockRulesProvider(overrides?: { autoSettle?: boolean }): FamilyRulesProvider {
-  const autoSettle = overrides?.autoSettle ?? true;
-  return {
-    getRule: vi.fn<(familyId: FamilyId) => FamilyRuleBundle | null>().mockReturnValue({
-      rules: {
-        tailSuppression: { autoSettleResolvedMarkets: autoSettle },
-      },
-    } as unknown as FamilyRuleBundle),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  } as unknown as FamilyRulesProvider;
-}
 
 function createMockGammaClient(): GammaResolutionClient {
   return {
@@ -177,15 +158,6 @@ function createMockDb() {
   };
 }
 
-function createMockExposureCalculator(): FamilyExposureCalculator {
-  return {
-    recompute: vi.fn().mockReturnValue({
-      openValueUsdc: 0,
-      openPositionCount: 0,
-      openDustCount: 0,
-    }),
-  } as unknown as FamilyExposureCalculator;
-}
 
 function createMockGateway(balanceByToken?: Record<string, number>): ExchangeGateway {
   return {
@@ -226,26 +198,19 @@ describe("ResolutionModule", () => {
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let resolutionRepo: ReturnType<typeof createMockResolutionRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
-  let rulesProvider: ReturnType<typeof createMockRulesProvider>;
-  let exposureCalculator: ReturnType<typeof createMockExposureCalculator>;
   let gammaClient: ReturnType<typeof createMockGammaClient>;
   let lotRepo: ReturnType<typeof createMockLotRepo>;
   let positionRepo: ReturnType<typeof createMockPositionRepo>;
   let mockDb: ReturnType<typeof createMockDb>;
   let mod: ResolutionModule;
 
-  function createModule(overrides?: {
-    rulesProvider?: FamilyRulesProvider;
-    gateway?: ExchangeGateway;
-  }) {
+  function createModule(overrides?: { gateway?: ExchangeGateway }) {
     return new ResolutionModule({
       detector: detector as unknown as ResolutionDetector,
       settler: settler as unknown as PositionSettler,
       marketRepo: marketRepo as unknown as MarketRepository,
       resolutionRepo: resolutionRepo as unknown as MarketResolutionRepository,
       orderRepo: orderRepo as unknown as OrderRepository,
-      rulesProvider: (overrides?.rulesProvider ?? rulesProvider) as unknown as FamilyRulesProvider,
-      exposureCalculator: exposureCalculator as unknown as FamilyExposureCalculator,
       gammaClient: gammaClient as unknown as GammaResolutionClient,
       lotRepo: lotRepo as unknown as InventoryLotRepository,
       positionRepo: positionRepo as unknown as PositionRepository,
@@ -266,8 +231,6 @@ describe("ResolutionModule", () => {
     marketRepo = createMockMarketRepo();
     resolutionRepo = createMockResolutionRepo();
     orderRepo = createMockOrderRepo();
-    rulesProvider = createMockRulesProvider();
-    exposureCalculator = createMockExposureCalculator();
     gammaClient = createMockGammaClient();
     lotRepo = createMockLotRepo();
     positionRepo = createMockPositionRepo();
@@ -290,8 +253,6 @@ describe("ResolutionModule", () => {
       marketRepo: marketRepo as unknown as MarketRepository,
       resolutionRepo: resolutionRepo as unknown as MarketResolutionRepository,
       orderRepo: orderRepo as unknown as OrderRepository,
-      rulesProvider: rulesProvider as unknown as FamilyRulesProvider,
-      exposureCalculator: exposureCalculator as unknown as FamilyExposureCalculator,
       gammaClient: gammaClient as unknown as GammaResolutionClient,
       lotRepo: lotRepo as unknown as InventoryLotRepository,
       positionRepo: positionRepo as unknown as PositionRepository,
@@ -344,7 +305,6 @@ describe("ResolutionModule", () => {
           outcome: "YES",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS,
-          familyId: FAM,
         },
         {
           tokenId: TOK_NO,
@@ -353,7 +313,6 @@ describe("ResolutionModule", () => {
           outcome: "NO",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS2,
-          familyId: FAM,
         },
       ],
     });
@@ -391,72 +350,6 @@ describe("ResolutionModule", () => {
 
     const count = await mod.runCheck();
     expect(count).toBe(3);
-  });
-
-  // ─── autoSettleResolvedMarkets flag ─────────────────────────────────────
-
-  it("skips settlement when autoSettleResolvedMarkets is false", async () => {
-    const provider = createMockRulesProvider({ autoSettle: false });
-    const gateway = createMockGateway();
-    mod = createModule({ rulesProvider: provider, gateway });
-
-    const resolution = makeDetectedResolution();
-    (detector.detect as any).mockResolvedValue([resolution]);
-
-    const count = await mod.runCheck();
-
-    expect(count).toBe(0);
-    expect(settler.settle as any).not.toHaveBeenCalled();
-    expect(gateway.redeemPositions).not.toHaveBeenCalled();
-  });
-
-  it("settles only families with autoSettle enabled in mixed batch", async () => {
-    // fam-1 has autoSettle=true, fam-2 has autoSettle=false
-    const provider: FamilyRulesProvider = {
-      getRule: vi.fn((familyId: FamilyId) => {
-        const autoSettle = String(familyId) !== "fam-2";
-        return {
-          rules: { tailSuppression: { autoSettleResolvedMarkets: autoSettle } },
-        } as unknown as FamilyRuleBundle;
-      }),
-      isEnabled: vi.fn().mockReturnValue(true),
-      getAllFamilies: vi.fn().mockReturnValue([]),
-      getRulesForRegime: vi.fn().mockReturnValue([]),
-    } as unknown as FamilyRulesProvider;
-
-    mod = createModule({ rulesProvider: provider });
-
-    const resolution = makeDetectedResolution({
-      candidates: [
-        {
-          tokenId: TOK_YES,
-          conditionId: CONDITION,
-          slug: "will-x",
-          outcome: "YES",
-          endDate: "2026-01-14T00:00:00Z",
-          positionId: POS,
-          familyId: FAM,
-        },
-        {
-          tokenId: TOK_NO,
-          conditionId: CONDITION,
-          slug: "will-x",
-          outcome: "NO",
-          endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2,
-          familyId: FAM2,
-        },
-      ],
-    });
-    (detector.detect as any).mockResolvedValue([resolution]);
-    (settler.settle as any).mockReturnValue([makeSettledPosition()]);
-
-    await mod.runCheck();
-
-    // settler.settle should receive only fam-1's candidate
-    const settleArg = (settler.settle as any).mock.calls[0][0];
-    expect(settleArg.candidates).toHaveLength(1);
-    expect(settleArg.candidates[0].familyId).toBe(FAM);
   });
 
   // ─── Event publishing ──────────────────────────────────────────────────
@@ -499,63 +392,6 @@ describe("ResolutionModule", () => {
     await mod.runCheck();
 
     expect(events).toHaveLength(2);
-  });
-
-  // ─── Family exposure recomputation ──────────────────────────────────────
-
-  it("recomputes family exposure for affected families", async () => {
-    const resolution = makeDetectedResolution();
-    (detector.detect as any).mockResolvedValue([resolution]);
-
-    await mod.runCheck();
-
-    expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM, false);
-  });
-
-  it("publishes FamilyExposureChanged after recompute", async () => {
-    const resolution = makeDetectedResolution();
-    (detector.detect as any).mockResolvedValue([resolution]);
-
-    const events: unknown[] = [];
-    bus.subscribe("FamilyExposureChanged", async (e) => {
-      events.push(e);
-    });
-
-    await mod.runCheck();
-
-    expect(events).toHaveLength(1);
-    expect(events[0]).toEqual(expect.objectContaining({ familyId: FAM }));
-  });
-
-  it("deduplicates family recompute when multiple positions share a family", async () => {
-    const resolution = makeDetectedResolution({
-      candidates: [
-        {
-          tokenId: TOK_YES,
-          conditionId: CONDITION,
-          slug: "will-x",
-          outcome: "YES",
-          endDate: "2026-01-14T00:00:00Z",
-          positionId: POS,
-          familyId: FAM,
-        },
-        {
-          tokenId: TOK_NO,
-          conditionId: CONDITION,
-          slug: "will-x",
-          outcome: "NO",
-          endDate: "2026-01-14T00:00:00Z",
-          positionId: POS2,
-          familyId: FAM, // same family
-        },
-      ],
-    });
-    (detector.detect as any).mockResolvedValue([resolution]);
-
-    await mod.runCheck();
-
-    // recompute should only be called once for FAM
-    expect(exposureCalculator.recompute as any).toHaveBeenCalledTimes(1);
   });
 
   // ─── Unknown resolution guard ────────────────────────────────────────
@@ -627,9 +463,9 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution();
     (detector.detect as any).mockResolvedValue([resolution]);
     (orderRepo.findByTokenId as any).mockReturnValue([
-      { orderId: "ord-1", status: "open", familyId: FAM },
-      { orderId: "ord-2", status: "filled", familyId: FAM }, // should not be cancelled
-      { orderId: "ord-3", status: "partially-filled", familyId: FAM },
+      { orderId: "ord-1", status: "open" },
+      { orderId: "ord-2", status: "filled" }, // should not be cancelled
+      { orderId: "ord-3", status: "partially-filled" },
     ]);
 
     const cancelEvents: any[] = [];
@@ -652,7 +488,7 @@ describe("ResolutionModule", () => {
     });
     (detector.detect as any).mockResolvedValue([resolution]);
     (orderRepo.findByTokenId as any).mockReturnValue([
-      { orderId: "ord-1", status: "open", familyId: FAM },
+      { orderId: "ord-1", status: "open" },
     ]);
 
     const cancelEvents: any[] = [];
@@ -670,7 +506,7 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution();
     (detector.detectCondition as any).mockResolvedValue(resolution);
     (orderRepo.findByTokenId as any).mockReturnValue([
-      { orderId: "ord-1", status: "open", familyId: FAM, exchangeOrderId: "exch-1" },
+      { orderId: "ord-1", status: "open", exchangeOrderId: "exch-1" },
     ]);
 
     const cancelEvents: any[] = [];
@@ -708,7 +544,6 @@ describe("ResolutionModule", () => {
           outcome: "YES",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS,
-          familyId: FAM,
         },
         {
           tokenId: TOK_NO,
@@ -717,17 +552,16 @@ describe("ResolutionModule", () => {
           outcome: "NO",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS2,
-          familyId: FAM2,
         },
       ],
     });
     (detector.detect as any).mockResolvedValue([resolution]);
     (orderRepo.findByTokenId as any).mockImplementation((tokenId: TokenId) => {
       if (String(tokenId) === String(TOK_YES)) {
-        return [{ orderId: "ord-yes", status: "open", familyId: FAM }];
+        return [{ orderId: "ord-yes", status: "open" }];
       }
       if (String(tokenId) === String(TOK_NO)) {
-        return [{ orderId: "ord-no", status: "pending", familyId: FAM2, exchangeOrderId: null }];
+        return [{ orderId: "ord-no", status: "pending", exchangeOrderId: null }];
       }
       return [];
     });
@@ -761,7 +595,6 @@ describe("ResolutionModule", () => {
         type: "CancelOrderCommand",
         orderId: "ord-yes",
         reason: "market_resolved",
-        familyId: FAM,
       }),
     );
 
@@ -773,7 +606,7 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution();
     (detector.detect as any).mockResolvedValue([resolution]);
     (orderRepo.findByTokenId as any).mockReturnValue([
-      { orderId: "ord-1", status: "pending", familyId: FAM, exchangeOrderId: "exch-123" },
+      { orderId: "ord-1", status: "pending", exchangeOrderId: "exch-123" },
     ]);
 
     const cancelEvents: any[] = [];
@@ -792,7 +625,7 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution();
     (detector.detect as any).mockResolvedValue([resolution]);
     (orderRepo.findByTokenId as any).mockReturnValue([
-      { orderId: "ord-1", status: "pending", familyId: FAM, exchangeOrderId: null },
+      { orderId: "ord-1", status: "pending", exchangeOrderId: null },
     ]);
 
     const cancelEvents: any[] = [];
@@ -859,7 +692,7 @@ describe("ResolutionModule", () => {
     const resolution = makeDetectedResolution();
     (detector.detect as any).mockResolvedValue([resolution]);
     (orderRepo.findByTokenId as any).mockReturnValue([
-      { orderId: "ord-1", status: "open", familyId: FAM },
+      { orderId: "ord-1", status: "open" },
     ]);
 
     const cancelEvents: any[] = [];
@@ -961,7 +794,6 @@ describe("ResolutionModule", () => {
           outcome: "YES",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS,
-          familyId: FAM,
         },
         {
           tokenId: TOK_NO,
@@ -970,7 +802,6 @@ describe("ResolutionModule", () => {
           outcome: "NO",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS2,
-          familyId: FAM,
         },
       ],
     });
@@ -998,7 +829,6 @@ describe("ResolutionModule", () => {
           outcome: "YES",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS,
-          familyId: FAM,
         },
         {
           tokenId: TOK_NO,
@@ -1007,7 +837,6 @@ describe("ResolutionModule", () => {
           outcome: "NO",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS2,
-          familyId: FAM,
         },
       ],
     });
@@ -1061,7 +890,6 @@ describe("ResolutionModule", () => {
           outcome: "YES",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS,
-          familyId: FAM,
         },
         {
           tokenId: TOK_NO,
@@ -1070,7 +898,6 @@ describe("ResolutionModule", () => {
           outcome: "NO",
           endDate: "2026-01-14T00:00:00Z",
           positionId: POS2,
-          familyId: FAM,
         },
       ],
     });
@@ -1094,19 +921,7 @@ describe("ResolutionModule", () => {
     expect(resolutionRepo.markSettled as any).not.toHaveBeenCalled();
   });
 
-  it("calls markSettled when all families have autoSettle=false (nothing to retry)", async () => {
-    const provider = createMockRulesProvider({ autoSettle: false });
-    mod = createModule({ rulesProvider: provider });
-
-    const resolution = makeDetectedResolution();
-    (detector.detect as any).mockResolvedValue([resolution]);
-
-    await mod.runCheck();
-
-    expect(resolutionRepo.markSettled as any).toHaveBeenCalledWith(CONDITION);
-  });
-
-  it("skips deactivation and cancel on retry (resolution already exists)", async () => {
+it("skips deactivation and cancel on retry (resolution already exists)", async () => {
     // Simulate retry: findByConditionId returns existing "detected" record
     (resolutionRepo.findByConditionId as any).mockReturnValue({
       conditionId: CONDITION,
@@ -1229,7 +1044,7 @@ describe("ResolutionModule", () => {
         conditionId: CONDITION,
         slug: "will-x-happen",
         outcome: "YES",
-        familyId: FAM,
+
       },
     ]);
 
@@ -1245,12 +1060,12 @@ describe("ResolutionModule", () => {
       },
     });
 
-    // Mock: positionRepo.findByFamily returns closed position
-    (positionRepo.findByFamily as any).mockReturnValue([
+    // Mock: positionRepo.findAll returns closed position
+    (positionRepo.findAll as any).mockReturnValue([
       {
         positionId: POS,
         tokenId: TOK_YES,
-        familyId: FAM,
+
         side: "BUY",
         size: 0,
         avgEntryPrice: 0.3,
@@ -1270,7 +1085,7 @@ describe("ResolutionModule", () => {
         lotId: "lot-1",
         positionId: POS,
         tokenId: TOK_YES,
-        familyId: FAM,
+
         side: "BUY",
         size: 100,
         remainingSize: 100,
@@ -1308,8 +1123,6 @@ describe("ResolutionModule", () => {
       }),
     );
 
-    // Verify exposure was recomputed
-    expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM, false);
   });
 
   it("recoverUnresolved matches outcome labels case-insensitively when winnerTokenId is unavailable", async () => {
@@ -1331,7 +1144,7 @@ describe("ResolutionModule", () => {
         conditionId: CONDITION,
         slug: "will-x-happen",
         outcome: " Yes ",
-        familyId: FAM,
+
       },
     ]);
 
@@ -1345,11 +1158,11 @@ describe("ResolutionModule", () => {
       },
     });
 
-    (positionRepo.findByFamily as any).mockReturnValue([
+    (positionRepo.findAll as any).mockReturnValue([
       {
         positionId: POS,
         tokenId: TOK_YES,
-        familyId: FAM,
+
         side: "BUY",
         size: 0,
         avgEntryPrice: 0.3,
@@ -1368,7 +1181,7 @@ describe("ResolutionModule", () => {
         lotId: "lot-1",
         positionId: POS,
         tokenId: TOK_YES,
-        familyId: FAM,
+
         side: "BUY",
         size: 10,
         remainingSize: 10,
@@ -1411,7 +1224,7 @@ describe("ResolutionModule", () => {
         conditionId: CONDITION,
         slug: "will-x-happen",
         outcome: "YES",
-        familyId: FAM,
+
       },
     ]);
 
@@ -1451,7 +1264,7 @@ describe("ResolutionModule", () => {
         conditionId: CONDITION,
         slug: "will-x-happen",
         outcome: "YES",
-        familyId: FAM,
+
       },
     ]);
 
@@ -1546,34 +1359,15 @@ describe("ResolutionModule", () => {
       );
     });
 
-    it("recomputes family exposure after settling", async () => {
-      const settled = [
-        makeSettledPosition({ familyId: FAM, resolution: "algo-redeem", settlementPrice: 0 }),
-        makeSettledPosition({ familyId: FAM2, resolution: "algo-redeem", settlementPrice: 0 }),
-      ];
-      (settler.settleAlgoRedeem as any).mockReturnValue(settled);
-
-      await mod.start();
-      await bus.publish("RedeemRequested", {
-        conditionIds: [CONDITION],
-        timestamp: Date.now(),
-      });
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      await mod.stop();
-
-      expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM, false);
-      expect(exposureCalculator.recompute as any).toHaveBeenCalledWith(FAM2, false);
-    });
-
-    it("cancels open orders for tokens belonging to algo-redeemed conditions", async () => {
+it("cancels open orders for tokens belonging to algo-redeemed conditions", async () => {
       (marketRepo.findByConditionId as any).mockReturnValue([
-        { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", familyId: FAM, outcome: "YES" },
+        { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
       ]);
       const openOrder = {
         orderId: "ord-1" as any,
         exchangeOrderId: "exch-1",
         tokenId: TOK_YES,
-        familyId: FAM,
+
         status: "open",
         side: "buy",
       };

@@ -11,8 +11,6 @@ function makeMarket(tokenId: string, bestBid = 0.45, bestAsk = 0.55): Normalized
     eventSlug: null,
     question: "test?",
     outcome: "YES",
-    familyId: null,
-    familyKey: null,
     regime: null,
     horizon: null,
     endDate: null,
@@ -25,6 +23,7 @@ function makeMarket(tokenId: string, bestBid = 0.45, bestAsk = 0.55): Normalized
     midPrice: (bestBid + bestAsk) / 2,
     spread: bestAsk - bestBid,
     snapshotTs: Date.now(),
+    eventMarketCount: 1,
   };
 }
 

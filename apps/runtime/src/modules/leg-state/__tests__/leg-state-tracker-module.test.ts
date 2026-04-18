@@ -70,7 +70,6 @@ function makeFillPayload(
     liquidityRole: "maker",
     fee: 0,
     feeRateBps: 0,
-    familyId: "fam-test" as any,
     signalReason: null,
     timestamp: Date.now(),
     ...overrides,

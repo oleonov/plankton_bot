@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import {
-  createFamilyId,
   createScorecardId,
   createSwitchId,
   createReportId,
@@ -19,8 +18,6 @@ import type {
   PreflightReport,
   ServiceHeartbeat,
   ConfigImport,
-  FamilyConfigMeta,
-  FamilyProfileRollup,
 } from "@plankton/domain";
 import type { ProfileId } from "@plankton/domain";
 import { SqliteProfileRepository } from "../repositories/profile-repository.js";
@@ -32,11 +29,8 @@ import { SqliteSwitchRequestRepository } from "../repositories/switch-request-re
 import { SqlitePreflightReportRepository } from "../repositories/preflight-report-repository.js";
 import { SqliteServiceHeartbeatRepository } from "../repositories/service-heartbeat-repository.js";
 import { SqliteConfigImportRepository } from "../repositories/config-import-repository.js";
-import { SqliteFamilyConfigMetaRepository } from "../repositories/family-config-meta-repository.js";
-import { SqliteFamilyProfileRollupRepository } from "../repositories/family-profile-rollup-repository.js";
 
 const PROFILE_SIM = "simulation" as ProfileId;
-const FAMILY_1 = createFamilyId("fam-1");
 const NOW = "2026-03-30T12:00:00.000Z";
 
 function createControlDb(): Database.Database {
@@ -53,20 +47,11 @@ function seedProfile(db: Database.Database): void {
   ).run(PROFILE_SIM, "Simulation", "Sim profile", NOW);
 }
 
-function seedFamily(db: Database.Database): void {
-  db.prepare(
-    `INSERT INTO family_catalog
-     (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(FAMILY_1, "test-family", "crypto", "threshold", "daily", "ad-hoc", "scalp", NOW, NOW);
-}
-
 let db: Database.Database;
 
 beforeEach(() => {
   db = createControlDb();
   seedProfile(db);
-  seedFamily(db);
 });
 
 afterEach(() => {
@@ -115,11 +100,10 @@ describe("SqliteProfileSettingsRepository", () => {
 });
 
 describe("SqliteValidationScorecardRepository", () => {
-  it("save + findLatest round-trip", () => {
+  it("save persists scorecard", () => {
     const repo = new SqliteValidationScorecardRepository(db);
     const scorecard: ValidationScorecard = {
       scorecardId: createScorecardId("sc-1"),
-      familyId: FAMILY_1,
       profile: PROFILE_SIM,
       evidenceStatus: "confirmed",
       evidenceScore: 85,
@@ -138,33 +122,10 @@ describe("SqliteValidationScorecardRepository", () => {
       validatedAt: NOW,
     };
     repo.save(scorecard);
-    const found = repo.findLatest(FAMILY_1, PROFILE_SIM);
-    expect(found).toEqual(scorecard);
-  });
-
-  it("findByFamily returns all scorecards for family", () => {
-    const repo = new SqliteValidationScorecardRepository(db);
-    repo.save({
-      scorecardId: createScorecardId("sc-a"),
-      familyId: FAMILY_1,
-      profile: PROFILE_SIM,
-      evidenceStatus: "unknown",
-      evidenceScore: 0,
-      recurrenceScore: null,
-      recycleScore: null,
-      liveViabilityScore: null,
-      toxicityPenalty: null,
-      tradeCount: 0,
-      marketCount: 0,
-      realizedPnl: 0,
-      tailAdjustedPnl: 0,
-      bothSidedEligible: false,
-      heavyCampaignEligible: false,
-      activeWindowEdgeScore: null,
-      summaryJson: null,
-      validatedAt: NOW,
-    });
-    expect(repo.findByFamily(FAMILY_1)).toHaveLength(1);
+    const row = db
+      .prepare("SELECT scorecard_id FROM family_validation_scorecards WHERE scorecard_id = ?")
+      .get("sc-1") as { scorecard_id: string } | undefined;
+    expect(row?.scorecard_id).toBe("sc-1");
   });
 });
 
@@ -435,10 +396,6 @@ describe("SqliteConfigImportRepository", () => {
       sourcePath: "/config/family_rules.yaml",
       sourceChecksum: "abc123",
       sourceVersion: 1,
-      familiesAdded: 5,
-      familiesUpdated: 2,
-      familiesSkipped: 0,
-      familiesUnchanged: 10,
       resultJson: null,
       importedAt: NOW,
       importedBy: "operator",
@@ -455,10 +412,6 @@ describe("SqliteConfigImportRepository", () => {
       sourcePath: null,
       sourceChecksum: "aaa",
       sourceVersion: null,
-      familiesAdded: 0,
-      familiesUpdated: 0,
-      familiesSkipped: 0,
-      familiesUnchanged: 0,
       resultJson: null,
       importedAt: "2026-03-29T00:00:00.000Z",
       importedBy: null,
@@ -468,78 +421,10 @@ describe("SqliteConfigImportRepository", () => {
       sourcePath: null,
       sourceChecksum: "bbb",
       sourceVersion: null,
-      familiesAdded: 1,
-      familiesUpdated: 0,
-      familiesSkipped: 0,
-      familiesUnchanged: 0,
       resultJson: null,
       importedAt: "2026-03-30T00:00:00.000Z",
       importedBy: null,
     });
     expect(repo.findLatest()!.importId).toBe("imp-new");
-  });
-});
-
-describe("SqliteFamilyConfigMetaRepository", () => {
-  it("save + get round-trip", () => {
-    const repo = new SqliteFamilyConfigMetaRepository(db);
-    const meta: FamilyConfigMeta = {
-      familyId: FAMILY_1,
-      lastImportedAt: NOW,
-      lastOperatorEditAt: null,
-      importChecksum: "sha256-abc",
-    };
-    repo.save(meta);
-    const found = repo.get(FAMILY_1);
-    expect(found).toEqual(meta);
-  });
-
-  it("findOperatorEdited returns only edited families", () => {
-    const repo = new SqliteFamilyConfigMetaRepository(db);
-    repo.save({
-      familyId: FAMILY_1,
-      lastImportedAt: NOW,
-      lastOperatorEditAt: NOW,
-      importChecksum: "x",
-    });
-    expect(repo.findOperatorEdited()).toHaveLength(1);
-  });
-});
-
-describe("SqliteFamilyProfileRollupRepository", () => {
-  it("save + find round-trip", () => {
-    const repo = new SqliteFamilyProfileRollupRepository(db);
-    const rollup: FamilyProfileRollup = {
-      familyId: FAMILY_1,
-      profile: PROFILE_SIM,
-      openValueUsdc: 100,
-      openPositions: 3,
-      activeMarkets: 2,
-      realizedPnl: 50.5,
-      tailCostUsdc: 10,
-      tailAdjustedPnl: 40.5,
-      lastTradeAt: NOW,
-      updatedAt: NOW,
-    };
-    repo.save(rollup);
-    const found = repo.find(FAMILY_1, PROFILE_SIM);
-    expect(found).toEqual(rollup);
-  });
-
-  it("findByProfile returns all rollups for profile", () => {
-    const repo = new SqliteFamilyProfileRollupRepository(db);
-    repo.save({
-      familyId: FAMILY_1,
-      profile: PROFILE_SIM,
-      openValueUsdc: 0,
-      openPositions: 0,
-      activeMarkets: 0,
-      realizedPnl: 0,
-      tailCostUsdc: 0,
-      tailAdjustedPnl: 0,
-      lastTradeAt: null,
-      updatedAt: NOW,
-    });
-    expect(repo.findByProfile(PROFILE_SIM)).toHaveLength(1);
   });
 });

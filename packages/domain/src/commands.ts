@@ -9,14 +9,13 @@
  * Rules:
  *  - Pure data; no runtime behaviour.
  *  - Every command that touches the exchange carries both commandId and clientOrderId.
- *  - Family-scoped operator commands carry familyId.
  *  - PlaceOrderCommand includes tickSize and negRisk (F2 decision) so the execution
  *    engine never needs to look them up separately from the market catalog.
  *  - sequenceInTick is carried forward from the Signal (F3 decision) for audit trails.
  */
 
-import type { TokenId, ConditionId, FamilyId, OrderId, ClientOrderId, CommandId } from "./ids.js";
-import type { OrderSide, OrderType, OperatorActionType } from "./enums.js";
+import type { TokenId, ConditionId, OrderId, ClientOrderId, CommandId } from "./ids.js";
+import type { OrderSide, OrderType } from "./enums.js";
 
 // ─── Exchange Order Commands ───────────────────────────────────────────────
 
@@ -41,9 +40,8 @@ export interface PlaceOrderCommand {
   readonly tickSize: number;
   /** Neg-risk flag for this token — required by Polymarket CLOB order signing. */
   readonly negRisk: boolean;
-  readonly familyId: FamilyId | null;
   /**
-   * 0-based index within this strategy tick for the same family+token+side triple.
+   * 0-based index within this strategy tick for the same token+side triple.
    * Carried forward from Signal.sequenceInTick (F3 resolution).
    */
   readonly sequenceInTick: number;
@@ -76,7 +74,7 @@ export interface CancelOrderCommand {
     | "entry-suppress-cancel"
     | "exit-reprice-cancel"
     | "exit-ttl-cancel";
-  readonly familyId: FamilyId | null;
+  readonly familyId: null;
 }
 
 // ─── Global Operator Commands ─────────────────────────────────────────────
@@ -93,30 +91,6 @@ export interface ResumeCommand {
   readonly reason: string;
 }
 
-// ─── Family-Scoped Operator Commands ─────────────────────────────────────
-
-export interface FamilyEnableCommand {
-  readonly type: "FamilyEnableCommand";
-  readonly commandId: CommandId;
-  readonly familyId: FamilyId;
-  readonly reason: string;
-  readonly action: Extract<OperatorActionType, "family_enable">;
-}
-
-export interface FamilyDisableCommand {
-  readonly type: "FamilyDisableCommand";
-  readonly commandId: CommandId;
-  readonly familyId: FamilyId;
-  readonly reason: string;
-  readonly action: Extract<OperatorActionType, "family_disable">;
-}
-
 // ─── Discriminated Union ──────────────────────────────────────────────────
 
-export type DomainCommand =
-  | PlaceOrderCommand
-  | CancelOrderCommand
-  | PauseCommand
-  | ResumeCommand
-  | FamilyEnableCommand
-  | FamilyDisableCommand;
+export type DomainCommand = PlaceOrderCommand | CancelOrderCommand | PauseCommand | ResumeCommand;

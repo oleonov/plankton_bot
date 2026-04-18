@@ -1,4 +1,24 @@
-import type { FamilyRuleBundle } from "@plankton/domain";
+/**
+ * family-throughput — throughput policy resolution for trading families.
+ *
+ * FamilyRuleBundle is no longer a domain type (Phase 6). A local minimal
+ * interface covers the fields needed by these helpers.
+ */
+
+/** Minimal bundle shape needed by throughput helpers. */
+export interface ThroughputBundle {
+  identity: { familyKey: string };
+  rules: {
+    throughput?: {
+      maxConcurrentOrdersPerFamily?: number | null;
+      maxProbeInFlightPerToken?: number | null;
+      maxEntrySignalsPerTickPerFamily?: number | null;
+      fastLaneEnabled?: boolean | null;
+      dustLaneEnabled?: boolean | null;
+      queueJumpCanaryEnabled?: boolean | null;
+    } | null;
+  };
+}
 
 export interface FamilyThroughputPolicy {
   maxConcurrentOrdersPerFamily: number;
@@ -75,35 +95,31 @@ export function resolveFamilySpeedTierByFamilyKey(
   return "reduced-fast";
 }
 
-export function resolveFamilySpeedTier(bundle: FamilyRuleBundle): FamilySpeedTier {
+export function resolveFamilySpeedTier(bundle: ThroughputBundle): FamilySpeedTier {
   return resolveFamilySpeedTierByFamilyKey(
     bundle.identity.familyKey,
     bundle.rules.throughput?.fastLaneEnabled ?? null,
   );
 }
 
-export function isFastLaneEnabled(bundle: FamilyRuleBundle | null | undefined): boolean {
+export function isFastLaneEnabled(bundle: ThroughputBundle | null | undefined): boolean {
   return bundle?.rules.throughput?.fastLaneEnabled === true;
 }
 
-export function isDustLaneEnabled(bundle: FamilyRuleBundle | null | undefined): boolean {
+export function isDustLaneEnabled(bundle: ThroughputBundle | null | undefined): boolean {
   return bundle?.rules.throughput?.dustLaneEnabled === true;
 }
 
-export function isQueueJumpCanaryEnabled(bundle: FamilyRuleBundle | null | undefined): boolean {
+export function isQueueJumpCanaryEnabled(bundle: ThroughputBundle | null | undefined): boolean {
   return bundle?.rules.throughput?.queueJumpCanaryEnabled === true;
 }
 
-export function isHotQuoteFamily(bundle: FamilyRuleBundle | null | undefined): boolean {
+export function isHotQuoteFamily(bundle: ThroughputBundle | null | undefined): boolean {
   if (!bundle) return false;
-  return (
-    isFastLaneEnabled(bundle) ||
-    isDustLaneEnabled(bundle) ||
-    bundle.identity.strategyProfile === "event-driven"
-  );
+  return isFastLaneEnabled(bundle) || isDustLaneEnabled(bundle);
 }
 
-export function resolveFamilyThroughputPolicy(bundle: FamilyRuleBundle): FamilyThroughputPolicy {
+export function resolveFamilyThroughputPolicy(bundle: ThroughputBundle): FamilyThroughputPolicy {
   const base = defaultPolicyForFamilyKey(bundle.identity.familyKey);
   const configured = bundle.rules.throughput;
   const hasOverride =

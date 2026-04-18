@@ -1,6 +1,5 @@
-import type { OrderStatus, PromotionState, Regime, ProfileId, SwitchState } from "./enums.js";
+import type { OrderStatus, ProfileId, SwitchState } from "./enums.js";
 import type {
-  FamilyId,
   FillId,
   OrderId,
   PositionId,
@@ -10,10 +9,6 @@ import type {
   ImportId,
 } from "./ids.js";
 import type {
-  FamilyEvidence,
-  FamilyIdentity,
-  FamilyRules,
-  FamilyState,
   Fill,
   InventoryLot,
   Market,
@@ -23,10 +18,6 @@ import type {
   OperatorCommand,
   Order,
   Position,
-  FamilyDeployment,
-  FamilyConfigMeta,
-  FamilyProfileRollup,
-  FamilyProfileRuntimeState,
   Profile,
   ProfileSettings,
   ProfileSummary,
@@ -59,14 +50,27 @@ export interface MarketRepository {
   /** Find all markets currently marked active. */
   findActive(): Market[];
 
-  /** Find all markets assigned to a specific family. */
-  findByFamily(familyId: FamilyId): Market[];
-
   /** Return every market row, active or inactive. */
   findAll(): Market[];
 
   /** Mark a market as inactive (active = 0). Used when a market resolves. */
   deactivate(tokenId: TokenId): void;
+
+  /**
+   * Return all markets that need live pricing: tradable markets plus any with
+   * an open position or open/pending order. Used by the pricing loop so it
+   * never drops a market mid-trade even when `tradable` flips to false.
+   */
+  findTrackedForPricing(): Market[];
+
+  /**
+   * Look up the event_market_count stored for a given market slug.
+   * Used by the /selection-rules/match API endpoint so the debugger can
+   * evaluate STEP 2 fallback with the real event context instead of a
+   * biased constant.
+   * Returns null if no row exists for that slug.
+   */
+  findEventMarketCountBySlug(slug: string): number | null;
 }
 
 // ─── OrderRepository ─────────────────────────────────────────────────────
@@ -137,9 +141,6 @@ export interface PositionRepository {
   /** Find the position for a specific outcome token (at most one open per token). */
   findByTokenId(tokenId: TokenId): Position | null;
 
-  /** Return all positions belonging to a family. */
-  findByFamily(familyId: FamilyId): Position[];
-
   /** Return all positions whose status is open or partially filled. */
   findOpen(): Position[];
 
@@ -173,49 +174,6 @@ export interface InventoryLotRepository {
 
   /** Zero out all remaining lots for a position (market resolution settlement). */
   settleAll(positionId: PositionId): void;
-}
-
-// ─── FamilyStateRepository ───────────────────────────────────────────────
-
-export interface FamilyStateRepository {
-  /** Return the runtime state for a single family, or null if never persisted. */
-  get(familyId: FamilyId): FamilyState | null;
-
-  /** Insert or update the runtime state for a family. */
-  save(state: FamilyState): void;
-
-  /** Return runtime state for every known family. */
-  findAll(): FamilyState[];
-}
-
-// ─── FamilyRulesProvider ─────────────────────────────────────────────────
-
-/**
- * Read-only provider for family configuration.
- * Backed by the YAML rule files loaded at startup; not a writable DB table.
- */
-export interface FamilyRulesProvider {
-  /** Return the composed rule set (identity + evidence + rules) for a family. */
-  getRule(familyId: FamilyId): FamilyRuleBundle | null;
-
-  /** Return whether a family is enabled and not blocked. */
-  isEnabled(familyId: FamilyId): boolean;
-
-  /** Return the identity record for every loaded family. */
-  getAllFamilies(): FamilyIdentity[];
-
-  /** Return rule bundles whose identity.regime matches the given regime. */
-  getRulesForRegime(regime: Regime): FamilyRuleBundle[];
-}
-
-/**
- * Full resolved configuration bundle for a single family.
- * Combines identity, evidence, and operational rules.
- */
-export interface FamilyRuleBundle {
-  identity: FamilyIdentity;
-  evidence?: FamilyEvidence;
-  rules: FamilyRules;
 }
 
 // ─── MarketResolutionRepository ──────────────────────────────────────────
@@ -266,9 +224,6 @@ export interface OperatorActionRepository {
 
   /** Return the most recently applied actions, newest first. */
   findRecent(limit: number): OperatorAction[];
-
-  /** Return all audit records for a specific family, newest first. */
-  findByFamily(familyId: FamilyId): OperatorAction[];
 }
 
 // ─── MarketSnapshotRepository ───────────────────────────────────────────
@@ -287,7 +242,6 @@ export interface RiskEventRepository {
   /** Insert a risk event into the audit log. */
   insert(event: {
     eventType: string;
-    familyId: FamilyId | null;
     payload: Record<string, unknown>;
   }): void;
 
@@ -324,42 +278,6 @@ export interface StateTransitionRepository {
   findRecent(limit: number): StateTransition[];
 }
 
-// ─── FamilyEvidenceRepository ───────────────────────────────────────────
-
-export interface FamilyEvidenceRepository {
-  updateScores(
-    familyId: FamilyId,
-    scores: {
-      recurrenceScore: number | null;
-      recycleScore: number | null;
-      liveViabilityScore: number | null;
-      toxicityPenalty: number | null;
-      repricingExitCount: number;
-      scoresUpdatedAt: string;
-    },
-  ): void;
-  updatePromotionState(familyId: FamilyId, promotionState: PromotionState): void;
-  updateProbeSubstate(familyId: FamilyId, substate: string | null): void;
-  getEvidence(familyId: FamilyId): FamilyEvidence | null;
-}
-
-// ─── FamilyRulesSnapshot ────────────────────────────────────────────────
-
-export interface FamilyRulesSnapshot {
-  id: number;
-  familyId: FamilyId;
-  snapshot: string;
-  reason: string;
-  capturedAt: string;
-}
-
-// ─── FamilyRulesSnapshotRepository ──────────────────────────────────────
-
-export interface FamilyRulesSnapshotRepository {
-  save(snapshot: Omit<FamilyRulesSnapshot, "id">): void;
-  findLatest(familyId: FamilyId): FamilyRulesSnapshot | null;
-}
-
 // ─── ProfileRepository ──────────────────────────────────────────────────
 
 export interface ProfileRepository {
@@ -375,24 +293,10 @@ export interface ProfileSettingsRepository {
   save(settings: ProfileSettings): void;
 }
 
-// ─── FamilyDeploymentRepository ─────────────────────────────────────────
-
-export interface FamilyDeploymentRepository {
-  find(familyId: FamilyId, profile: ProfileId): FamilyDeployment | null;
-  findByProfile(profile: ProfileId): FamilyDeployment[];
-  findEnabled(profile: ProfileId): FamilyDeployment[];
-  save(deployment: FamilyDeployment): void;
-  enable(familyId: FamilyId, profile: ProfileId): void;
-  disable(familyId: FamilyId, profile: ProfileId, reason: string | null): void;
-}
-
 // ─── ValidationScorecardRepository ──────────────────────────────────────
 
 export interface ValidationScorecardRepository {
   save(scorecard: ValidationScorecard): void;
-  findLatest(familyId: FamilyId, profile: ProfileId): ValidationScorecard | null;
-  findByFamily(familyId: FamilyId): ValidationScorecard[];
-  findByFamilyAndProfile(familyId: FamilyId, profile: ProfileId): ValidationScorecard[];
 }
 
 // ─── ProfileSummaryRepository ───────────────────────────────────────────
@@ -423,7 +327,6 @@ export interface SwitchRequestRepository {
 
 export interface SettlementLedgerRepository {
   save(settlement: import("./types.js").SettlementRecord): void;
-  findByFamily(familyId: FamilyId): import("./types.js").SettlementRecord[];
 }
 
 // ─── MergeLedgerRepository ──────────────────────────────────────────────
@@ -431,9 +334,6 @@ export interface SettlementLedgerRepository {
 export interface MergeLedgerRepository {
   /** Record a completed inventory merge action. */
   save(merge: import("./types.js").MergeRecord): void;
-
-  /** Find merge records for a specific family. */
-  findByFamily(familyId: FamilyId): import("./types.js").MergeRecord[];
 }
 
 // ─── PreflightReportRepository ──────────────────────────────────────────
@@ -459,31 +359,6 @@ export interface ConfigImportRepository {
   save(importRecord: ConfigImport): void;
   findById(importId: ImportId): ConfigImport | null;
   findLatest(): ConfigImport | null;
-}
-
-// ─── FamilyConfigMetaRepository ─────────────────────────────────────────
-
-export interface FamilyConfigMetaRepository {
-  get(familyId: FamilyId): FamilyConfigMeta | null;
-  save(meta: FamilyConfigMeta): void;
-  findOperatorEdited(): FamilyConfigMeta[];
-}
-
-// ─── FamilyProfileRollupRepository ──────────────────────────────────────
-
-export interface FamilyProfileRollupRepository {
-  save(rollup: FamilyProfileRollup): void;
-  findByProfile(profile: ProfileId): FamilyProfileRollup[];
-  find(familyId: FamilyId, profile: ProfileId): FamilyProfileRollup | null;
-}
-
-// ─── FamilyProfileRuntimeStateRepository ────────────────────────────────
-// Lives in ledger DB — runtime-derived state per family within a profile.
-
-export interface FamilyProfileRuntimeStateRepository {
-  get(familyId: FamilyId): FamilyProfileRuntimeState | null;
-  save(state: FamilyProfileRuntimeState): void;
-  findAll(): FamilyProfileRuntimeState[];
 }
 
 // ─── AlgoRulesRepository ────────────────────────────────────────────────

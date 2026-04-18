@@ -88,7 +88,7 @@ export class PositionSettler {
             conditionId,
             String(position.positionId),
             String(market.tokenId),
-            position.familyId ?? null,
+            null,
             ALGO_REDEEM_RESOLUTION,
             ALGO_REDEEM_SETTLEMENT_PRICE,
             position.size,
@@ -109,7 +109,6 @@ export class PositionSettler {
           results.push({
             positionId: position.positionId,
             tokenId: market.tokenId,
-            familyId: position.familyId,
             resolution: ALGO_REDEEM_RESOLUTION,
             settlementPrice: ALGO_REDEEM_SETTLEMENT_PRICE,
             realizedPnl: settlementPnl,
@@ -166,7 +165,7 @@ export class PositionSettler {
       resolution.conditionId,
       String(position.positionId),
       String(candidate.tokenId),
-      position.familyId ?? null,
+      null,
       resolution.resolution,
       settlementPrice,
       position.size,
@@ -188,7 +187,6 @@ export class PositionSettler {
     return {
       positionId: position.positionId,
       tokenId: candidate.tokenId,
-      familyId: position.familyId,
       resolution: resolution.resolution,
       settlementPrice,
       realizedPnl: settlementPnl,

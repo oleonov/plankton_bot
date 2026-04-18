@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bootstrapLedgerDb,
-  SqliteFamilyStateRepository,
   SqliteFillRepository,
   SqliteInventoryLotRepository,
   SqliteLegStateRepository,
@@ -12,19 +11,16 @@ import {
 import {
   createBotRunId,
   createConditionId,
-  createFamilyId,
   createFillId,
   createOrderId,
   createPositionId,
   createTokenId,
   type ClientOrderId,
-  type FamilyRulesProvider,
   type Signal,
 } from "@plankton/domain";
 import { runStartupPositionAdoption } from "../../startup-position-adoption.js";
 import { AlgoRiskGateImpl } from "../../modules/risk-inventory/algo-risk-gate.js";
 
-const FAMILY_ID = createFamilyId("fam-btc");
 const TOKEN_ID = createTokenId("tok-btc-yes");
 const COND_ID = createConditionId("cond-btc");
 
@@ -38,27 +34,9 @@ const silentLog = {
   child: () => silentLog,
 } as any;
 
-function createRulesProvider(): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue({
-      identity: { familyId: FAMILY_ID },
-      rules: {
-        tailSuppression: {
-          tailQuarantineThresholdUsdc: 1_000,
-          tailQuarantineThresholdRatio: 10,
-        },
-      },
-    }),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  } as unknown as FamilyRulesProvider;
-}
-
 function makeProbeSignal(): Signal {
   return {
     signalId: "sig-probe",
-    familyId: FAMILY_ID,
     tokenId: TOKEN_ID,
     conditionId: COND_ID,
     side: "buy",
@@ -95,7 +73,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
     const legStateRepo = new SqliteLegStateRepository(conn.db);
-    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
 
     marketRepo.save({
       tokenId: TOKEN_ID,
@@ -104,8 +81,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       eventSlug: "bitcoin-april",
       question: "Will BTC be above 68k?",
       outcome: "YES",
-      familyId: FAMILY_ID,
-      familyKey: "btc-above",
       regime: "threshold",
       horizon: "daily",
       endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
@@ -117,26 +92,11 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       updatedAt: new Date().toISOString(),
     });
 
-    familyStateRepo.save({
-      familyId: FAMILY_ID,
-      openValueUsdc: 1.5,
-      openPositionCount: 1,
-      openDustCount: 0,
-      activeMarketCount: 1,
-      currentTailCostUsdc: 0,
-      tailAdjustedPnlLive: 0,
-      lastEntryTs: null,
-      lastExitTs: null,
-      firstNegativeTailAt: null,
-      updatedAt: new Date().toISOString(),
-    });
-
     orderRepo.save({
       orderId: createOrderId("ord-1"),
       clientOrderId: "coid-1" as ClientOrderId,
       tokenId: TOKEN_ID,
       conditionId: COND_ID,
-      familyId: FAMILY_ID,
       side: "buy",
       orderType: "GTC",
       postOnly: false,
@@ -157,7 +117,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       orderId: createOrderId("ord-1"),
       tokenId: TOKEN_ID,
       conditionId: COND_ID,
-      familyId: FAMILY_ID,
       side: "buy",
       price: 0.15,
       size: 6,
@@ -172,7 +131,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       orderId: createOrderId("ord-1"),
       tokenId: TOKEN_ID,
       conditionId: COND_ID,
-      familyId: FAMILY_ID,
       side: "buy",
       price: 0.15,
       size: 4,
@@ -187,7 +145,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       positionId: createPositionId("pos-1"),
       tokenId: TOKEN_ID,
       conditionId: COND_ID,
-      familyId: FAMILY_ID,
       side: "buy",
       size: 10,
       avgEntryPrice: 0.15,
@@ -214,8 +171,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       positionRepo,
       inventoryLotRepo,
       legStateRepo,
-      familyStateRepo,
-      rulesProvider: createRulesProvider(),
       log: silentLog,
       db: conn.db,
       botRunId: createBotRunId("run-new"),
@@ -253,7 +208,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
     const positionRepo = new SqlitePositionRepository(conn.db);
     const inventoryLotRepo = new SqliteInventoryLotRepository(conn.db);
     const legStateRepo = new SqliteLegStateRepository(conn.db);
-    const familyStateRepo = new SqliteFamilyStateRepository(conn.db);
 
     marketRepo.save({
       tokenId: TOKEN_ID,
@@ -262,8 +216,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       eventSlug: null,
       question: "Will BTC be above 68k?",
       outcome: "YES",
-      familyId: FAMILY_ID,
-      familyKey: "btc-above",
       regime: "threshold",
       horizon: "daily",
       endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
@@ -274,25 +226,11 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
-    familyStateRepo.save({
-      familyId: FAMILY_ID,
-      openValueUsdc: 0,
-      openPositionCount: 0,
-      openDustCount: 0,
-      activeMarketCount: 0,
-      currentTailCostUsdc: 0,
-      tailAdjustedPnlLive: 0,
-      lastEntryTs: null,
-      lastExitTs: null,
-      firstNegativeTailAt: null,
-      updatedAt: new Date().toISOString(),
-    });
     orderRepo.save({
       orderId: createOrderId("ord-1"),
       clientOrderId: "coid-1" as ClientOrderId,
       tokenId: TOKEN_ID,
       conditionId: COND_ID,
-      familyId: FAMILY_ID,
       side: "buy",
       orderType: "GTC",
       postOnly: false,
@@ -312,7 +250,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       orderId: createOrderId("ord-1"),
       tokenId: TOKEN_ID,
       conditionId: COND_ID,
-      familyId: FAMILY_ID,
       side: "buy",
       price: 0.15,
       size: 10,
@@ -326,7 +263,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       positionId: createPositionId("pos-1"),
       tokenId: TOKEN_ID,
       conditionId: COND_ID,
-      familyId: FAMILY_ID,
       side: "buy",
       size: 10,
       avgEntryPrice: 0.15,
@@ -348,8 +284,6 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       positionRepo,
       inventoryLotRepo,
       legStateRepo,
-      familyStateRepo,
-      rulesProvider: createRulesProvider(),
       log: silentLog,
       db: conn.db,
     };

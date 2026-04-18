@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { createFamilyId, type FamilyRuleBundle } from "@plankton/domain";
 import {
+  type ThroughputBundle,
   isFastLaneEnabled,
   resolveFamilySpeedTier,
   resolveFamilySpeedTierByFamilyKey,
@@ -10,15 +10,12 @@ import {
 
 function makeBundle(
   familyKey: string,
-  throughput?: FamilyRuleBundle["rules"]["throughput"],
-): FamilyRuleBundle {
+  throughput?: ThroughputBundle["rules"]["throughput"],
+): ThroughputBundle {
   return {
-    identity: {
-      familyId: createFamilyId(`${familyKey}:generic:daily`),
-      familyKey,
-    },
-    rules: { throughput },
-  } as FamilyRuleBundle;
+    identity: { familyKey },
+    rules: throughput !== undefined ? { throughput } : {},
+  };
 }
 
 describe("resolveFamilyThroughputPolicy", () => {

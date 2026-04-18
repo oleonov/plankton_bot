@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { FillPollerModule } from "../modules/fill-poller/fill-poller-module.js";
 import { InProcessEventBus } from "@plankton/event-bus";
-import { createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
+import { createOrderId, createTokenId } from "@plankton/domain";
 import type {
   ExchangeGateway,
   ExchangeFill,
@@ -14,7 +14,6 @@ import type {
   CancelOrderParams,
   PlaceOrderResult,
   CancelOrderResult,
-  FamilyRulesProvider,
 } from "@plankton/domain";
 
 function createMockGateway(): ExchangeGateway {
@@ -58,7 +57,6 @@ function createMockOrderRepo(): OrderRepository {
     findById: vi.fn().mockReturnValue({ orderId: createOrderId("ord-1"), size: 10 }),
     findByClientOrderId: vi.fn().mockReturnValue({
       orderId: createOrderId("ord-1"),
-      familyId: createFamilyId("fam-1"),
       size: 10,
     }),
     findByExchangeOrderId: vi.fn().mockReturnValue(null),
@@ -69,14 +67,6 @@ function createMockOrderRepo(): OrderRepository {
   };
 }
 
-function createMockRulesProvider(): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue(null),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  };
-}
 
 const silentLog = {
   info: vi.fn(),
@@ -91,7 +81,6 @@ describe("FillPollerModule", () => {
   let gateway: ReturnType<typeof createMockGateway>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
-  let rulesProvider: FamilyRulesProvider;
   let bus: InProcessEventBus;
   let mod: FillPollerModule;
 
@@ -100,13 +89,11 @@ describe("FillPollerModule", () => {
     gateway = createMockGateway();
     fillRepo = createMockFillRepo();
     orderRepo = createMockOrderRepo();
-    rulesProvider = createMockRulesProvider();
     bus = new InProcessEventBus();
     mod = new FillPollerModule({
       gateway,
       fillRepo,
       orderRepo,
-      rulesProvider,
       bus,
       log: silentLog,
       pollIntervalMs: 5000,
@@ -173,7 +160,6 @@ describe("FillPollerModule", () => {
       gateway,
       fillRepo,
       orderRepo,
-      rulesProvider,
       bus,
       log: silentLog,
       pollIntervalMs: 5000,

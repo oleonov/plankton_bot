@@ -10,18 +10,9 @@
  * leaves the open set.
  */
 
-import type {
-  OrderRepository,
-  MarketRepository,
-  EventBus,
-  Market,
-  Order,
-  FamilyRulesProvider,
-  FamilyRuleBundle,
-} from "@plankton/domain";
+import type { OrderRepository, MarketRepository, EventBus, Market, Order } from "@plankton/domain";
 import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import { isDustLaneEnabled, isFastLaneEnabled } from "../../family-throughput.js";
 
 // Horizon-aware TTLs for conviction-style entry orders.
 export const HORIZON_TTL_MS: Record<string, number> = {
@@ -32,15 +23,11 @@ export const HORIZON_TTL_MS: Record<string, number> = {
 };
 export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
 export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
-export const PROBE_LIKE_FAST_DAILY_TTL_MS = 90_000; // 90s for proven fast daily families
 export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
 export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
-export const DUST_LANE_ENTRY_TTL_MS = 15_000; // 15s for dust-lane spray orders
-export const DUST_LANE_EXIT_TTL_MS = 20_000; // 20s for fast dust exits
 export const EXIT_ORDER_TTL_MS = 60_000; // 60s
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
-export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff (reduced from 5m)
-export const DUST_CANCEL_BACKOFF_MS = 5_000; // 5s for dust-lane repricing loops
+export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff
 
 const EXIT_REASONS = new Set([
   "repricing-exit",
@@ -53,7 +40,6 @@ const EXIT_REASONS = new Set([
 export interface StaleOrderCleanerDeps {
   orderRepo: OrderRepository;
   marketRepo: MarketRepository;
-  rulesProvider: FamilyRulesProvider;
   bus: EventBus;
   log: Logger;
 }
@@ -67,9 +53,6 @@ export interface StaleCleanResult {
 /**
  * Scans open buy entry orders and publishes CancelOrderRequested for those
  * that exceed the TTL or are within the endDate safety window.
- *
- * The backoff map is caller-owned so it persists across reconciliation passes
- * within the same ReconciliationModule instance.
  */
 export async function cleanStaleEntryOrders(
   deps: StaleOrderCleanerDeps,
@@ -80,7 +63,6 @@ export async function cleanStaleEntryOrders(
 
   const openOrders = orderRepo.findOpen();
 
-  // Only BUY orders with an entry signal reason
   const entryBuys = openOrders.filter(
     (o) => o.side === "buy" && o.signalReason != null && ENTRY_REASONS.has(o.signalReason),
   );
@@ -100,17 +82,13 @@ export async function cleanStaleEntryOrders(
 
   for (const order of entryBuys) {
     const ordKey = String(order.orderId);
-
-    // Anti-churn: skip if cancel was recently attempted
     const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();
-    const bundle = order.familyId ? deps.rulesProvider.getRule(order.familyId) : null;
-    const backoffMs = resolveCancelBackoffMs(order, bundle);
+    const backoffMs = CANCEL_BACKOFF_MS;
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < backoffMs) continue;
-    const ttlMs = resolveOrderTtlMs(order, market, bundle);
+    const ttlMs = resolveOrderTtlMs(order, market);
 
-    // Check TTL
     if (ageMs > ttlMs) {
       await publishCancel(bus, order, "stale_entry_ttl");
       backoffMap.set(ordKey, now);
@@ -122,7 +100,6 @@ export async function cleanStaleEntryOrders(
       continue;
     }
 
-    // Check endDate proximity
     if (market?.endDate) {
       const endDateMs = new Date(market.endDate).getTime();
       if (endDateMs - now < ENDDATE_SAFETY_WINDOW_MS) {
@@ -145,19 +122,16 @@ export async function cleanStaleEntryOrders(
 
   for (const order of exitSells) {
     const ordKey = String(order.orderId);
-    const bundle = order.familyId ? deps.rulesProvider.getRule(order.familyId) : null;
-    const backoffMs = resolveCancelBackoffMs(order, bundle);
     const lastAttempt = backoffMap.get(ordKey);
-    if (lastAttempt != null && now - lastAttempt < backoffMs) continue;
+    if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
 
     const ageMs = now - new Date(order.createdAt).getTime();
-    const ttlMs = resolveExitOrderTtlMs(bundle);
-    if (ageMs > ttlMs) {
+    if (ageMs > EXIT_ORDER_TTL_MS) {
       await publishCancel(bus, order, "stale_exit_ttl");
       backoffMap.set(ordKey, now);
       staleExitTtlCancelled++;
       log.info(
-        { orderId: ordKey, ageMs, ttlMs, signalReason: order.signalReason },
+        { orderId: ordKey, ageMs, ttlMs: EXIT_ORDER_TTL_MS, signalReason: order.signalReason },
         "stale exit order — TTL exceeded",
       );
     }
@@ -168,56 +142,25 @@ export async function cleanStaleEntryOrders(
 
 function resolveOrderTtlMs(
   order: Pick<Order, "signalReason">,
-  market: Pick<Market, "horizon" | "familyKey"> | null,
-  bundle: FamilyRuleBundle | null,
-) {
+  market: Pick<Market, "horizon"> | null,
+): number {
   const horizon = market?.horizon ?? null;
   const horizonTtlMs =
     horizon != null ? (HORIZON_TTL_MS[horizon] ?? DEFAULT_TTL_MS) : DEFAULT_TTL_MS;
 
-  // Probe/spray orders need a much shorter leash than conviction-style orders.
-  if (order.signalReason === "probe-entry" || order.signalReason === "spray-entry") {
-    if (order.signalReason === "spray-entry" && isDustLaneEnabled(bundle)) {
-      return Math.min(horizonTtlMs, DUST_LANE_ENTRY_TTL_MS);
-    }
+  if (order.signalReason === "probe-entry") {
     if (horizon === "intraday-4h") return Math.min(horizonTtlMs, PROBE_LIKE_INTRADAY_TTL_MS);
-    if (horizon === "daily") {
-      const dailyTtlMs = isFastLaneEnabled(bundle)
-        ? PROBE_LIKE_FAST_DAILY_TTL_MS
-        : PROBE_LIKE_DAILY_TTL_MS;
-      return Math.min(horizonTtlMs, dailyTtlMs);
-    }
+    if (horizon === "daily") return Math.min(horizonTtlMs, PROBE_LIKE_DAILY_TTL_MS);
     if (horizon === "ad-hoc") return Math.min(horizonTtlMs, PROBE_LIKE_AD_HOC_TTL_MS);
-    // Generic fallback for probe-like: 10m
     return Math.min(horizonTtlMs, 10 * 60_000);
   }
 
   return horizonTtlMs;
 }
 
-function resolveExitOrderTtlMs(bundle: FamilyRuleBundle | null): number {
-  return isDustLaneEnabled(bundle) ? DUST_LANE_EXIT_TTL_MS : EXIT_ORDER_TTL_MS;
-}
-
-function resolveCancelBackoffMs(
-  order: Pick<Order, "signalReason">,
-  bundle: FamilyRuleBundle | null,
-): number {
-  if (order.signalReason === "spray-entry" && isDustLaneEnabled(bundle)) {
-    return DUST_CANCEL_BACKOFF_MS;
-  }
-  if (order.signalReason === "repricing-exit" && isDustLaneEnabled(bundle)) {
-    return DUST_CANCEL_BACKOFF_MS;
-  }
-  return CANCEL_BACKOFF_MS;
-}
-
 async function publishCancel(
   bus: EventBus,
-  order: {
-    orderId: import("@plankton/domain").OrderId;
-    familyId: import("@plankton/domain").FamilyId | null;
-  },
+  order: { orderId: import("@plankton/domain").OrderId },
   reason: "stale_entry_ttl" | "stale_entry_enddate" | "stale_exit_ttl",
 ): Promise<void> {
   await bus.publish("CancelOrderRequested", {
@@ -226,7 +169,7 @@ async function publishCancel(
       commandId: createCommandId(`stale-clean-${String(order.orderId)}-${Date.now()}`),
       orderId: order.orderId,
       reason,
-      familyId: order.familyId,
+      familyId: null,
     },
     timestamp: Date.now(),
   });

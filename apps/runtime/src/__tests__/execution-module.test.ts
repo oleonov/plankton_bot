@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createTokenId,
-  createFamilyId,
   createOrderId,
   createCommandId,
   createBotRunId,
@@ -22,7 +21,6 @@ import type {
   FillRepository,
   PlaceOrderCommand,
   CancelOrderCommand,
-  FamilyRulesProvider,
   TokenId,
   ClientOrderId,
   Order,
@@ -51,7 +49,6 @@ function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand
     orderType: "GTC",
     tickSize: 0.01,
     negRisk: false,
-    familyId: createFamilyId("fam-1"),
     sequenceInTick: 0,
     signalReason: null,
     ...overrides,
@@ -64,7 +61,7 @@ function makeCancelCmd(overrides?: Partial<CancelOrderCommand>): CancelOrderComm
     commandId: createCommandId("cancel-1"),
     orderId: createOrderId("sim-ord-1"),
     reason: "strategy_exit",
-    familyId: createFamilyId("fam-1"),
+    familyId: null,
     ...overrides,
   };
 }
@@ -100,10 +97,11 @@ function createMockMarketRepo() {
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
-    findByFamily: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     upsertAll: vi.fn(),
     deactivate: vi.fn(),
+    findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -138,7 +136,6 @@ function makePosition(overrides?: Partial<Position>): Position {
     positionId: createPositionId("pos-1"),
     tokenId: createTokenId("tok-yes"),
     conditionId: createConditionId("cond-1"),
-    familyId: createFamilyId("fam-1"),
     side: "buy",
     size: 10,
     avgEntryPrice: 0.5,
@@ -158,7 +155,6 @@ function createMockPositionRepo(position: Position | null = null): PositionRepos
   return {
     save: vi.fn(),
     findByTokenId: vi.fn().mockReturnValue(position),
-    findByFamily: vi.fn().mockReturnValue(position ? [position] : []),
     findOpen: vi.fn().mockReturnValue(position?.status === "open" ? [position] : []),
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue(position ? [position] : []),
@@ -166,33 +162,6 @@ function createMockPositionRepo(position: Position | null = null): PositionRepos
   };
 }
 
-function createMockRulesProvider(
-  identityOverrides: Record<string, unknown> = {},
-): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue({
-      identity: {
-        familyId: createFamilyId("fam-1"),
-        familyKey: "fam-1",
-        primaryCategory: "geopolitics",
-        regime: "generic",
-        horizon: "short",
-        cadence: "daily",
-        strategyProfile: "scalp",
-        topicKey: null,
-        slugPattern: null,
-        notes: null,
-        feeTier: null,
-        liveWalletRequirement: null,
-        requiresPostOnlyForLive: null,
-        ...identityOverrides,
-      },
-    }),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  } as FamilyRulesProvider;
-}
 
 const silentLog = {
   info: vi.fn(),
@@ -211,7 +180,6 @@ describe("ExecutionModule", () => {
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
   let fillRepo: ReturnType<typeof createMockFillRepo>;
-  let rulesProvider: FamilyRulesProvider;
   let mod: ExecutionModule;
 
   beforeEach(() => {
@@ -220,14 +188,12 @@ describe("ExecutionModule", () => {
     marketRepo = createMockMarketRepo();
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
-    rulesProvider = createMockRulesProvider();
     mod = new ExecutionModule({
       gateway,
       bus,
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -513,7 +479,7 @@ describe("ExecutionModule", () => {
     };
     (gateway.getFills as ReturnType<typeof vi.fn>).mockResolvedValue([mockFill]);
 
-    // importExchangeFills needs order lookup to resolve familyId + status.
+    // importExchangeFills needs order lookup to resolve status.
     // findByClientOrderId must return null for dedup check (handlePlace),
     // then return the order when called by importExchangeFills after placement.
     const savedOrder: Order = {
@@ -521,7 +487,7 @@ describe("ExecutionModule", () => {
       clientOrderId: "plk_abc123" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
       conditionId: createConditionId("cond-1"),
-      familyId: createFamilyId("fam-1"),
+
       side: "buy",
       orderType: "GTC",
       price: 0.5,
@@ -593,7 +559,7 @@ describe("ExecutionModule", () => {
       clientOrderId: "plk_abc123" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
       conditionId: createConditionId("cond-1"),
-      familyId: createFamilyId("fam-1"),
+
       side: "buy",
       orderType: "GTC",
       price: 0.5,
@@ -666,7 +632,7 @@ describe("ExecutionModule", () => {
       clientOrderId: "plk_abc123" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
       conditionId: createConditionId("cond-1"),
-      familyId: createFamilyId("fam-1"),
+
       side: "buy",
       orderType: "GTC",
       price: 0.5,
@@ -720,7 +686,7 @@ describe("ExecutionModule", () => {
       clientOrderId: "plk_abc123" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
       conditionId: createConditionId("cond-1"),
-      familyId: createFamilyId("fam-1"),
+
       side: "buy",
       orderType: "GTC",
       price: 0.5,
@@ -809,7 +775,7 @@ describe("ExecutionModule", () => {
       orderRepo,
       fillRepo,
       positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -860,7 +826,7 @@ describe("ExecutionModule", () => {
       clientOrderId: "plk_existing_sell" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
       conditionId: createConditionId("cond-1"),
-      familyId: createFamilyId("fam-1"),
+
       side: "sell",
       orderType: "GTC",
       price: 0.55,
@@ -886,7 +852,7 @@ describe("ExecutionModule", () => {
       orderRepo,
       fillRepo,
       positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -929,7 +895,7 @@ describe("ExecutionModule", () => {
       clientOrderId: "plk_existing_sell" as ClientOrderId,
       tokenId: createTokenId("tok-yes"),
       conditionId: createConditionId("cond-1"),
-      familyId: createFamilyId("fam-1"),
+
       side: "sell",
       orderType: "GTC",
       price: 0.55,
@@ -952,7 +918,7 @@ describe("ExecutionModule", () => {
       orderRepo,
       fillRepo,
       positionRepo: createMockPositionRepo(makePosition({ size: 6 })),
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1014,7 +980,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1024,7 +990,7 @@ describe("ExecutionModule", () => {
     await guardedMod.start();
 
     await bus.publish("PlaceOrderRequested", {
-      command: makePlaceCmd({ familyId: createFamilyId("fam-not-in-allowlist") }),
+      command: makePlaceCmd(),
       timestamp: Date.now(),
     });
 
@@ -1048,7 +1014,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1091,12 +1057,6 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider: createMockRulesProvider({
-        primaryCategory: "crypto",
-        feeTier: "fee-enabled",
-        liveWalletRequirement: "relayer-required",
-        requiresPostOnlyForLive: true,
-      }),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1132,12 +1092,6 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider: createMockRulesProvider({
-        primaryCategory: "crypto",
-        feeTier: "fee-enabled",
-        liveWalletRequirement: "relayer-required",
-        requiresPostOnlyForLive: true,
-      }),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1176,12 +1130,6 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider: createMockRulesProvider({
-        primaryCategory: "crypto",
-        feeTier: "fee-enabled",
-        liveWalletRequirement: "relayer-required",
-        requiresPostOnlyForLive: true,
-      }),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1217,12 +1165,6 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider: createMockRulesProvider({
-        primaryCategory: "geopolitics",
-        feeTier: "fee-free",
-        liveWalletRequirement: "eoa-ok",
-        requiresPostOnlyForLive: false,
-      }),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1258,12 +1200,6 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider: createMockRulesProvider({
-        primaryCategory: "geopolitics",
-        feeTier: "fee-free",
-        liveWalletRequirement: "eoa-ok",
-        requiresPostOnlyForLive: false,
-      }),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1299,12 +1235,6 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider: createMockRulesProvider({
-        primaryCategory: "geopolitics",
-        feeTier: "fee-free",
-        liveWalletRequirement: "eoa-ok",
-        requiresPostOnlyForLive: false,
-      }),
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1373,7 +1303,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1422,7 +1352,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1457,7 +1387,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1517,7 +1447,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => true },
@@ -1589,7 +1519,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1629,7 +1559,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1664,7 +1594,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1713,7 +1643,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1740,7 +1670,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1770,7 +1700,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1801,7 +1731,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
@@ -1850,7 +1780,7 @@ describe("ExecutionModule", () => {
       marketRepo: marketRepo as any,
       orderRepo,
       fillRepo,
-      rulesProvider,
+
       log: silentLog,
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },

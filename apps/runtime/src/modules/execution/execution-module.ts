@@ -15,7 +15,6 @@ import type {
   RuntimeModule,
   EventBus,
   ExchangeGateway,
-  FamilyRulesProvider,
   MarketRepository,
   OrderRepository,
   FillRepository,
@@ -49,7 +48,6 @@ export interface ExecutionModuleDeps {
   positionRepo?: PositionRepository | undefined;
   log: Logger;
   botRunId: BotRunId;
-  rulesProvider: FamilyRulesProvider;
   runtimeControl?: RuntimeControl | undefined;
   liveLiteGuard?: LiveLiteGuard | undefined;
   runtimeMode?: "simulation" | "paper" | "live-lite" | undefined;
@@ -198,7 +196,6 @@ export class ExecutionModule implements RuntimeModule {
         conditionId: cmd.conditionId,
         reason: "runtime-paused",
         errorCode: "RUNTIME_PAUSED",
-        familyId: cmd.familyId,
         signalReason: cmd.signalReason ?? null,
         timestamp: Date.now(),
       });
@@ -221,7 +218,6 @@ export class ExecutionModule implements RuntimeModule {
           conditionId: cmd.conditionId,
           reason: "live-lite-order-cap-exceeded",
           errorCode: "LIVE_LITE_ORDER_CAP",
-          familyId: cmd.familyId,
           signalReason: cmd.signalReason ?? null,
           timestamp: Date.now(),
         });
@@ -243,7 +239,6 @@ export class ExecutionModule implements RuntimeModule {
         conditionId: cmd.conditionId,
         reason: "market-inactive",
         errorCode: "MARKET_INACTIVE",
-        familyId: cmd.familyId,
         signalReason: cmd.signalReason ?? null,
         timestamp: Date.now(),
       });
@@ -268,7 +263,6 @@ export class ExecutionModule implements RuntimeModule {
         conditionId: cmd.conditionId,
         reason: "exchange-min-order-size-rejected",
         errorCode: ExchangeErrorCode.InvalidSize,
-        familyId: cmd.familyId,
         signalReason: cmd.signalReason ?? null,
         timestamp: Date.now(),
       });
@@ -418,7 +412,6 @@ export class ExecutionModule implements RuntimeModule {
         conditionId: cmd.conditionId,
         reason,
         errorCode: result.errorCode ?? "UNKNOWN",
-        familyId: cmd.familyId,
         signalReason: cmd.signalReason ?? null,
         timestamp: now,
       });
@@ -441,7 +434,6 @@ export class ExecutionModule implements RuntimeModule {
         conditionId: cmd.conditionId,
         reason: "gateway returned success without order id",
         errorCode: ExchangeErrorCode.Unknown,
-        familyId: cmd.familyId,
         signalReason: cmd.signalReason ?? null,
         timestamp: now,
       });
@@ -465,7 +457,6 @@ export class ExecutionModule implements RuntimeModule {
       price: cmd.price,
       size: cmd.size,
       orderType: cmd.orderType,
-      familyId: cmd.familyId,
       signalReason: cmd.signalReason ?? null,
       timestamp: now,
     });
@@ -515,7 +506,6 @@ export class ExecutionModule implements RuntimeModule {
         tokenId: cancelledOrder.tokenId,
         conditionId: cancelledOrder.conditionId,
         reason: cmd.reason,
-        familyId: cancelledOrder.familyId,
         signalReason: cancelledOrder.signalReason,
         timestamp: now,
       });
@@ -534,7 +524,6 @@ export class ExecutionModule implements RuntimeModule {
     await importExchangeFills(orderFills, {
       fillRepo: this.deps.fillRepo,
       orderRepo: this.deps.orderRepo,
-      rulesProvider: this.deps.rulesProvider,
       bus: this.deps.bus,
       log: this.log,
     });
@@ -680,7 +669,7 @@ export class ExecutionModule implements RuntimeModule {
         commandId: createCommandId(`sell-replace-${String(existingSell.orderId)}-${now}`),
         orderId: existingSell.orderId,
         reason: existingLock ? "sell_replace_retry" : "sell_replace_reprice",
-        familyId: existingSell.familyId,
+        familyId: null,
       },
       timestamp: now,
     });
@@ -733,7 +722,6 @@ export class ExecutionModule implements RuntimeModule {
       conditionId: cmd.conditionId,
       reason,
       errorCode,
-      familyId: cmd.familyId,
       signalReason: cmd.signalReason ?? null,
       timestamp: Date.now(),
     });
@@ -813,7 +801,6 @@ export class ExecutionModule implements RuntimeModule {
       clientOrderId: cmd.clientOrderId,
       tokenId: cmd.tokenId,
       conditionId: cmd.conditionId,
-      familyId: cmd.familyId,
       side: cmd.side,
       orderType: cmd.orderType,
       postOnly: cmd.postOnly === true,

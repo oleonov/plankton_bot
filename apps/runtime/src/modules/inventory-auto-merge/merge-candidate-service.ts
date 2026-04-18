@@ -5,13 +5,11 @@ import type {
   FillRepository,
   Position,
   TokenId,
-  FamilyId,
   PositionId,
 } from "@plankton/domain";
 
 export interface MergeCandidate {
   conditionId: string;
-  familyId: FamilyId;
   mergeAmount: number;
   yesTokenId: TokenId;
   noTokenId: TokenId;
@@ -66,7 +64,6 @@ export class MergeCandidateService {
       });
 
       if (!yesPos || !noPos) continue;
-      if (!yesPos.familyId) continue;
 
       // Calculate locked sizes from open SELL orders
       const yesOrders = this.orderRepo.findByTokenId(yesPos.tokenId);
@@ -105,7 +102,6 @@ export class MergeCandidateService {
       if (mergeAmount > 1) {
         candidates.push({
           conditionId,
-          familyId: yesPos.familyId,
           mergeAmount,
           yesTokenId: yesPos.tokenId,
           noTokenId: noPos.tokenId,

@@ -20,7 +20,6 @@ import type {
   FillId,
   TokenId,
   ConditionId,
-  FamilyId,
 } from "@plankton/domain";
 import { createPositionId, createLotId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -30,7 +29,6 @@ export interface FillEvent {
   fillId: FillId;
   tokenId: TokenId;
   conditionId: ConditionId;
-  familyId: FamilyId | null;
   side: "buy" | "sell";
   price: number;
   size: number;
@@ -83,7 +81,6 @@ export class InventoryHandler {
       positionId,
       tokenId: fill.tokenId,
       conditionId: fill.conditionId,
-      familyId: fill.familyId,
       side: "buy",
       size: fill.size,
       avgEntryPrice: fill.price,
@@ -103,7 +100,6 @@ export class InventoryHandler {
       lotId: createLotId(`lot-${fill.fillId}`),
       positionId,
       tokenId: fill.tokenId,
-      familyId: fill.familyId,
       side: "buy",
       size: fill.size,
       remainingSize: fill.size,
@@ -141,7 +137,6 @@ export class InventoryHandler {
       lotId: createLotId(`lot-${fill.fillId}`),
       positionId: existing.positionId,
       tokenId: fill.tokenId,
-      familyId: fill.familyId,
       side: "buy",
       size: fill.size,
       remainingSize: fill.size,
@@ -191,7 +186,7 @@ export class InventoryHandler {
     this.pnlLedgerInsert.run(
       fill.fillId,
       existing.positionId,
-      existing.familyId,
+      null,
       sellRealizedPnl,
       new Date(fill.timestamp).toISOString(),
     );

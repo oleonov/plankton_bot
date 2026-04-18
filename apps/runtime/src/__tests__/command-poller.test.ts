@@ -8,13 +8,10 @@ import {
   bootstrapDatabase,
   SqliteOperatorCommandRepository,
   SqliteOperatorActionRepository,
-  SqliteFamilyStateRepository,
-  SqliteFamilyCatalogRepository,
   SqliteStateTransitionRepository,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
-import { createFamilyId } from "@plankton/domain";
-import type { FamilyId, FamilyIdentity, OperatorActionType, ProfileId } from "@plankton/domain";
+import type { OperatorActionType, ProfileId } from "@plankton/domain";
 import { CommandPoller } from "../supervisor/command-poller.js";
 import type {
   DeploymentToggler,
@@ -28,42 +25,8 @@ let conn: DbConnection;
 let tmpDir: string;
 let cmdRepo: SqliteOperatorCommandRepository;
 let actionRepo: SqliteOperatorActionRepository;
-let familyStateRepo: SqliteFamilyStateRepository;
-let catalogRepo: SqliteFamilyCatalogRepository;
 let bus: InProcessEventBus;
 let paused: boolean;
-
-function makeIdentity(familyId: string): FamilyIdentity {
-  return {
-    familyId: createFamilyId(familyId),
-    familyKey: "test-key",
-    primaryCategory: "test",
-    regime: "threshold",
-    horizon: "daily",
-    cadence: "daily",
-    strategyProfile: "scalp",
-    topicKey: null,
-    slugPattern: null,
-    notes: null,
-  };
-}
-
-function seedFamily(familyId: string): void {
-  catalogRepo.upsert(makeIdentity(familyId));
-  familyStateRepo.save({
-    familyId: createFamilyId(familyId),
-    openValueUsdc: 0,
-    openPositionCount: 0,
-    openDustCount: 0,
-    activeMarketCount: 0,
-    currentTailCostUsdc: 0,
-    tailAdjustedPnlLive: 0,
-    lastEntryTs: null,
-    lastExitTs: null,
-    firstNegativeTailAt: null,
-    updatedAt: new Date().toISOString(),
-  });
-}
 
 function insertCommand(
   action: OperatorActionType,
@@ -92,8 +55,8 @@ function makeToggler(): DeploymentToggler & {
   disable: ReturnType<typeof vi.fn>;
 } {
   return {
-    enable: vi.fn((_familyId: FamilyId, _profile: ProfileId) => {}),
-    disable: vi.fn((_familyId: FamilyId, _profile: ProfileId, _reason: string | null) => {}),
+    enable: vi.fn((_targetId: string, _profile: ProfileId) => {}),
+    disable: vi.fn((_targetId: string, _profile: ProfileId, _reason: string | null) => {}),
   };
 }
 
@@ -102,8 +65,6 @@ beforeEach(() => {
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   cmdRepo = new SqliteOperatorCommandRepository(conn.db);
   actionRepo = new SqliteOperatorActionRepository(conn.db);
-  familyStateRepo = new SqliteFamilyStateRepository(conn.db);
-  catalogRepo = new SqliteFamilyCatalogRepository(conn.db);
   bus = new InProcessEventBus();
   paused = false;
 });
@@ -120,7 +81,6 @@ describe("CommandPoller", () => {
     return new CommandPoller({
       commandRepo: cmdRepo,
       actionRepo,
-      familyStateRepo,
       bus,
       log,
       getPaused: () => paused,
@@ -163,7 +123,6 @@ describe("CommandPoller", () => {
   // ── Family enable/disable ───────────────────────────────────────────────
 
   it("applies family_enable via DeploymentToggler and writes audit", async () => {
-    seedFamily("fam-1");
     const toggler = makeToggler();
 
     insertCommand("family_enable", "fam-1", "ready to trade");
@@ -174,7 +133,7 @@ describe("CommandPoller", () => {
 
     await poller.poll();
 
-    expect(toggler.enable).toHaveBeenCalledWith(createFamilyId("fam-1"), "paper");
+    expect(toggler.enable).toHaveBeenCalledWith("fam-1", "paper");
     expect(toggler.disable).not.toHaveBeenCalled();
 
     const actions = actionRepo.findRecent(10);
@@ -185,7 +144,6 @@ describe("CommandPoller", () => {
   });
 
   it("applies family_disable via DeploymentToggler and writes audit", async () => {
-    seedFamily("fam-1");
     const toggler = makeToggler();
 
     insertCommand("family_disable", "fam-1", "tail exceeded");
@@ -196,7 +154,7 @@ describe("CommandPoller", () => {
 
     await poller.poll();
 
-    expect(toggler.disable).toHaveBeenCalledWith(createFamilyId("fam-1"), "paper", "tail exceeded");
+    expect(toggler.disable).toHaveBeenCalledWith("fam-1", "paper", "tail exceeded");
     expect(toggler.enable).not.toHaveBeenCalled();
 
     const actions = actionRepo.findRecent(10);
@@ -227,7 +185,6 @@ describe("CommandPoller", () => {
   });
 
   it("works without deploymentToggler or activeProfile (no-op, still writes audit)", async () => {
-    seedFamily("fam-1");
     insertCommand("family_enable", "fam-1", "reason");
 
     const poller = createPoller();
@@ -240,7 +197,6 @@ describe("CommandPoller", () => {
   });
 
   it("writes state_transition for family_enable when repo is provided", async () => {
-    seedFamily("fam-1");
     const transitionRepo = new SqliteStateTransitionRepository(conn.db);
 
     insertCommand("family_enable", "fam-1", "operator enable", {
@@ -265,7 +221,6 @@ describe("CommandPoller", () => {
   });
 
   it("writes state_transition for family_disable when repo is provided", async () => {
-    seedFamily("fam-1");
     const transitionRepo = new SqliteStateTransitionRepository(conn.db);
 
     insertCommand("family_disable", "fam-1", "operator disable", {
@@ -305,11 +260,10 @@ describe("CommandPoller", () => {
     expect(events).toHaveLength(1);
   });
 
-  it("publishes OperatorCommandApplied with targetFamilyId on family_enable", async () => {
-    seedFamily("fam-1");
-    const events: Array<{ action: string; targetFamilyId: FamilyId | null }> = [];
+  it("publishes OperatorCommandApplied on family_enable", async () => {
+    const events: Array<{ action: string }> = [];
     bus.subscribe("OperatorCommandApplied", async (payload) => {
-      events.push({ action: payload.action, targetFamilyId: payload.targetFamilyId });
+      events.push({ action: payload.action });
     });
 
     insertCommand("family_enable", "fam-1", "enable");
@@ -319,13 +273,11 @@ describe("CommandPoller", () => {
 
     expect(events).toHaveLength(1);
     expect(events[0]!.action).toBe("family_enable");
-    expect(events[0]!.targetFamilyId).toEqual(createFamilyId("fam-1"));
   });
 
   // ── Multi-command processing ────────────────────────────────────────────
 
   it("processes multiple commands in one poll", async () => {
-    seedFamily("fam-1");
     const toggler = makeToggler();
     insertCommand("pause");
     insertCommand("family_disable", "fam-1", "reason");

@@ -14,7 +14,9 @@ export interface MarketFixture {
 export interface ScheduledCommand {
   atTick: number;
   action: "pause" | "resume" | "family_enable" | "family_disable";
+  /** @deprecated use targetId */
   familyId?: string;
+  targetId?: string;
   reason?: string;
 }
 

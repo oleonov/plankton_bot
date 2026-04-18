@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
   createConditionId,
-  createFamilyId,
   createOrderId,
   createTokenId,
   type ConditionId,
@@ -13,7 +12,6 @@ import {
 import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
 
-const FAMILY_ID = createFamilyId("bitcoin-price:generic:daily");
 const TOKEN_ID = createTokenId("tok-yes");
 const NOW = Date.parse("2026-04-11T10:00:00.000Z");
 
@@ -37,7 +35,7 @@ function makeEntryOrder(): Order {
     clientOrderId: "cl-1" as never,
     tokenId: TOKEN_ID,
     conditionId: "cond-1" as ConditionId,
-    familyId: FAMILY_ID,
+
     side: "buy",
     orderType: "GTC",
     postOnly: true,
@@ -57,7 +55,7 @@ function makeEntryOrder(): Order {
 function makeSignal(): Signal {
   return {
     signalId: "sig-1",
-    familyId: FAMILY_ID,
+
     tokenId: TOKEN_ID,
     conditionId: "cond-1" as ConditionId,
     side: "buy",
@@ -81,8 +79,7 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     question: "BTC daily",
     outcome: "YES",
     outcomeIndex: 0,
-    familyId: FAMILY_ID,
-    familyKey: "bitcoin-price",
+
     regime: "price-range",
     horizon: "daily",
     endDate: "2026-04-11T23:59:00.000Z",
@@ -100,6 +97,7 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     liquidity: 10_000,
     bookSource: "gamma-fallback",
     snapshotTs: Date.now(),
+    eventMarketCount: 1,
     ...overrides,
   };
 }
@@ -272,7 +270,6 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("NormalizedMarketUpdated", {
       markets: [
         makeMarket({
-          familyKey: "donald-trump-of-truth-social-posts",
           regime: "social-activity",
           bestBid: 0.04,
           bestAsk: 0.05,
@@ -287,7 +284,6 @@ describe("SignalToOrderBridge", () => {
     await bus.publish("SignalApproved", {
       signal: {
         ...makeSignal(),
-        familyId: createFamilyId("donald-trump-of-truth-social-posts:social-activity:ad-hoc"),
       },
       approvedAt: Date.now(),
     });
@@ -343,7 +339,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
-      familyId: FAMILY_ID,
       signalReason: "probe-entry",
       timestamp: Date.now(),
     });
@@ -353,7 +348,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
-      familyId: FAMILY_ID,
       signalReason: "probe-entry",
       timestamp: Date.now(),
     });
@@ -363,7 +357,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
-      familyId: FAMILY_ID,
       signalReason: "probe-entry",
       timestamp: Date.now(),
     });
@@ -422,7 +415,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
-      familyId: FAMILY_ID,
       signalReason: "probe-entry",
       timestamp: Date.now(),
     });
@@ -432,7 +424,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
-      familyId: FAMILY_ID,
       signalReason: "probe-entry",
       timestamp: Date.now(),
     });
@@ -442,7 +433,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "ttl-expired",
-      familyId: FAMILY_ID,
       signalReason: "probe-entry",
       timestamp: Date.now(),
     });
@@ -588,7 +578,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
-      familyId: FAMILY_ID,
       signalReason: "spray-entry",
       timestamp: Date.now(),
     });
@@ -598,7 +587,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
-      familyId: FAMILY_ID,
       signalReason: "spray-entry",
       timestamp: Date.now(),
     });
@@ -608,7 +596,6 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
-      familyId: FAMILY_ID,
       signalReason: "spray-entry",
       timestamp: Date.now(),
     });

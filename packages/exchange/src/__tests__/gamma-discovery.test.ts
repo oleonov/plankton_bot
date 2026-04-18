@@ -182,6 +182,34 @@ describe("GammaMarketDiscoveryGateway", () => {
     expect(calledUrl.searchParams.get("limit")).toBe("1");
   });
 
+  it("eventMarketCount is populated from event.markets.length for each nested market", async () => {
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    // One binary event (2 markets) and one multi-outcome event (30 markets)
+    const binaryMarkets = [makeGammaMarket("bin-a"), makeGammaMarket("bin-b")];
+    const multiMarkets = Array.from({ length: 30 }, (_, i) => makeGammaMarket(`multi-${i}`));
+    fetchMock.mockResolvedValueOnce(
+      mockFetchResponse([
+        makeEvent("binary-event", binaryMarkets),
+        makeEvent("multi-event", multiMarkets),
+      ]),
+    );
+
+    const markets = await gateway.discoverMarkets();
+
+    expect(markets).toHaveLength(32);
+    // Binary event markets each report eventMarketCount = 2
+    const binaryResults = markets.slice(0, 2);
+    expect(binaryResults.every((m) => m.eventMarketCount === 2)).toBe(true);
+    // Multi-market event markets each report eventMarketCount = 30
+    const multiResults = markets.slice(2);
+    expect(multiResults.every((m) => m.eventMarketCount === 30)).toBe(true);
+  });
+
   it("discoverMarkets() handles events with no nested markets", async () => {
     const gateway = new GammaMarketDiscoveryGateway({
       baseUrl: "https://test.gamma.api",

@@ -5,8 +5,7 @@
  *  1. Find open/dust positions on markets past endDate + grace period
  *  2. Confirm resolution via Gamma API
  *  3. Close positions, record settlement PnL
- *  4. Recompute family state (direct call, not event-triggered)
- *  5. Publish MarketResolved + PositionSettled events
+ *  4. Publish MarketResolved + PositionSettled events
  */
 
 import type Database from "better-sqlite3";
@@ -17,15 +16,12 @@ import type {
   MarketRepository,
   MarketResolutionRepository,
   OrderRepository,
-  FamilyRulesProvider,
   InventoryLotRepository,
   PositionRepository,
-  FamilyId,
   TokenId,
 } from "@plankton/domain";
 import { createCommandId } from "@plankton/domain";
 import type { GammaResolutionClient } from "@plankton/exchange";
-import type { FamilyExposureCalculator } from "../risk-inventory/family-exposure.js";
 import type {
   ResolutionDetector,
   ResolutionCandidate,
@@ -47,8 +43,6 @@ export interface ResolutionModuleDeps {
   marketRepo: MarketRepository;
   resolutionRepo: MarketResolutionRepository;
   orderRepo: OrderRepository;
-  rulesProvider: FamilyRulesProvider;
-  exposureCalculator: FamilyExposureCalculator;
   gammaClient: GammaResolutionClient;
   lotRepo: InventoryLotRepository;
   positionRepo: PositionRepository;
@@ -135,20 +129,6 @@ export class ResolutionModule implements RuntimeModule {
       await this.deps.bus.publish("PositionSettled", s);
     }
 
-    const affectedFamilies = new Set<FamilyId>(
-      settled.map((s) => s.familyId).filter((f): f is FamilyId => f != null),
-    );
-    for (const familyId of affectedFamilies) {
-      const updated = this.deps.exposureCalculator.recompute(familyId, false);
-      await this.deps.bus.publish("FamilyExposureChanged", {
-        familyId,
-        totalExposureUsdc: updated.openValueUsdc,
-        openPositionCount: updated.openPositionCount,
-        familyState: updated,
-        timestamp: Date.now(),
-      });
-    }
-
     if (settled.length > 0) {
       this.deps.log.info(
         { conditionIds, settledCount: settled.length },
@@ -170,28 +150,7 @@ export class ResolutionModule implements RuntimeModule {
 
     try {
       const resolutions = await this.deps.detector.detect(this.deps.graceMinutes);
-      const totalSettled = await this.processDetectedResolutions(resolutions);
-
-      // Recompute family state for affected families.
-      // FamilyExposureChanged is an OUTPUT event — not a trigger.
-      // We call the calculator directly.
-      const affectedFamilies = new Set<FamilyId>(
-        resolutions
-          .flatMap((r) => r.candidates.map((c) => c.familyId))
-          .filter((f): f is FamilyId => f != null),
-      );
-      for (const familyId of affectedFamilies) {
-        const updated = this.deps.exposureCalculator.recompute(familyId, false);
-        await this.deps.bus.publish("FamilyExposureChanged", {
-          familyId,
-          totalExposureUsdc: updated.openValueUsdc,
-          openPositionCount: updated.openPositionCount,
-          familyState: updated,
-          timestamp: Date.now(),
-        });
-      }
-
-      return totalSettled;
+      return await this.processDetectedResolutions(resolutions);
     } finally {
       this.running = false;
       void this.flushPendingHintConditions();
@@ -277,41 +236,7 @@ export class ResolutionModule implements RuntimeModule {
         continue;
       }
 
-      let eligibleCandidates = resolution.candidates.filter((c) => {
-        if (!c.familyId) return true;
-        const bundle = this.deps.rulesProvider.getRule(c.familyId);
-        if (!bundle) return true;
-        return bundle.rules.tailSuppression.autoSettleResolvedMarkets;
-      });
-
-      if (eligibleCandidates.length < resolution.candidates.length) {
-        this.deps.log.info(
-          {
-            conditionId: resolution.conditionId,
-            skipped: resolution.candidates.length - eligibleCandidates.length,
-          },
-          "skipped settlement for families with autoSettleResolvedMarkets=false",
-        );
-      }
-
-      if (eligibleCandidates.length === 0) {
-        this.deps.resolutionRepo.markSettled(resolution.conditionId);
-
-        if (!isRetry) {
-          const shouldRedeem = resolution.candidates.some((c) => {
-            if (!c.familyId) return true;
-            const bundle = this.deps.rulesProvider.getRule(c.familyId);
-            return !bundle || bundle.rules.tailSuppression.autoSettleResolvedMarkets;
-          });
-
-          if (this.deps.gateway && shouldRedeem) {
-            await this.deps.gateway.redeemPositions([resolution.conditionId]);
-          }
-
-          await this.publishMarketResolved(resolution);
-        }
-        continue;
-      }
+      let eligibleCandidates: ResolutionCandidate[] = [...resolution.candidates];
 
       const preFilterCount = eligibleCandidates.length;
       if (this.deps.gateway && eligibleCandidates.length > 0) {
@@ -445,7 +370,7 @@ export class ResolutionModule implements RuntimeModule {
           commandId: createCommandId(`res-cancel-${String(order.orderId)}`),
           orderId: order.orderId,
           reason: "market_resolved" as const,
-          familyId: order.familyId,
+          familyId: null,
         },
         timestamp: Date.now(),
       });
@@ -499,7 +424,6 @@ export class ResolutionModule implements RuntimeModule {
           : null;
 
       const resolvedAt = info.closedTime ?? new Date().toISOString();
-      const affectedFamilies = new Set<FamilyId>();
 
       // Wrap ALL writes in a single transaction for atomicity
       const runSettlement = this.deps.db.transaction(() => {
@@ -512,11 +436,10 @@ export class ResolutionModule implements RuntimeModule {
 
         for (const market of markets) {
           // Find closed positions with orphaned lots for this token
-          const allFamilyPositions = this.deps.positionRepo.findByFamily(
-            market.familyId as FamilyId,
+          const allPositions = this.deps.positionRepo.findAll().filter(
+            (p) => String(p.tokenId) === String(market.tokenId),
           );
-          const closedWithLots = allFamilyPositions.filter((p) => {
-            if (String(p.tokenId) !== String(market.tokenId)) return false;
+          const closedWithLots = allPositions.filter((p) => {
             if (p.status !== "closed") return false;
             const lots = this.deps.lotRepo.findOpen(p.positionId);
             return lots.length > 0;
@@ -546,7 +469,7 @@ export class ResolutionModule implements RuntimeModule {
                 mr.conditionId,
                 String(pos.positionId),
                 String(market.tokenId),
-                pos.familyId ?? null,
+                null,
                 resolution,
                 settlementPrice,
                 remainingSize,
@@ -563,8 +486,6 @@ export class ResolutionModule implements RuntimeModule {
               updatedAt: new Date().toISOString(),
             });
 
-            if (pos.familyId) affectedFamilies.add(pos.familyId);
-
             this.deps.log.info(
               {
                 positionId: String(pos.positionId),
@@ -578,13 +499,8 @@ export class ResolutionModule implements RuntimeModule {
       });
       runSettlement();
 
-      // Recompute family state OUTSIDE transaction (reads, not writes)
-      for (const fid of affectedFamilies) {
-        this.deps.exposureCalculator.recompute(fid, false);
-      }
-
       this.deps.log.info(
-        { conditionId: mr.conditionId, resolution, families: affectedFamilies.size },
+        { conditionId: mr.conditionId, resolution },
         "recovered unresolved condition",
       );
       recovered++;

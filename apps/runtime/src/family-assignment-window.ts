@@ -1,13 +1,11 @@
-import type { FamilyIdentity } from "@plankton/domain";
-
 /**
- * Keep long-dated deadline threshold families out of the active live universe.
- * Research showed deadline cadence can work, but threshold families outside the
- * short recycle window are structurally weak and not part of the proven
- * Plankton recurring core.
+ * family-assignment-window — stub retained for Phase 6→7 bridge.
+ *
+ * FamilyIdentity is no longer a domain type. Phase 7 will delete this file.
  */
+
 export function resolveFamilyAssignmentMaxDaysAhead(
-  family: Pick<FamilyIdentity, "horizon" | "regime">,
+  family: { horizon?: string; regime?: string },
 ): number | undefined {
   if (family.horizon === "deadline" && family.regime === "threshold") {
     return 7;

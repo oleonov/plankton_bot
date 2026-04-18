@@ -1,21 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { createFamilyId, createTokenId } from "@plankton/domain";
-import type {
-  FamilyEvidence,
-  FamilyIdentity,
-  FamilyRuleBundle,
-  FamilyRules,
-  NormalizedMarket,
-  Regime,
-} from "@plankton/domain";
+import { createTokenId } from "@plankton/domain";
+import type { NormalizedMarket, Regime } from "@plankton/domain";
+import type { OutcomeSelectionBundle } from "../modules/strategy/outcome-selection.js";
 import {
   rejectOutcomeCandidate,
   scoreOutcomeCandidate,
   selectFirstEntryOutcomeForCondition,
   selectFirstEntryTokenForCondition,
 } from "../modules/strategy/outcome-selection.js";
-
-const FAMILY_ID = createFamilyId("fam-btc");
 
 function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
   const bestBid = overrides?.bestBid ?? 0.03;
@@ -28,8 +20,6 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     question: "Will BTC reach 100k?",
     outcome: "YES",
     outcomeIndex: 0,
-    familyId: FAMILY_ID,
-    familyKey: "btc-price",
     regime: "threshold" as Regime,
     horizon: "short",
     endDate: null,
@@ -46,116 +36,25 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     minOrderSize: 5,
     bookSource: "clob",
     snapshotTs: Date.now(),
+    eventMarketCount: 1,
     ...overrides,
   };
 }
 
-function makeRules(overrides?: Partial<FamilyRules>): FamilyRules {
+function makeBundle(rulesOverrides?: {
+  entry?: Partial<OutcomeSelectionBundle["rules"]["entry"]> & Record<string, unknown>;
+  throughput?: Record<string, unknown>;
+}): OutcomeSelectionBundle {
   return {
-    familyId: FAMILY_ID,
-    universe: {
-      enabled: true,
-      action: "trade",
-      priorityRank: 1,
-      sessionMode: "active-window",
+    rules: {
+      entry: {
+        minEntryPrice: 0.01,
+        maxEntryPrice: 0.5,
+        ...rulesOverrides?.entry,
+      },
+      throughput: rulesOverrides?.throughput,
     },
-    entry: {
-      entryMode: "probe-first",
-      minEntryPrice: 0.01,
-      maxEntryPrice: 0.5,
-      maxInitialNotionalUsdc: 5,
-      allowHighPriceOneShot: false,
-      highPriceThreshold: 0.85,
-      requireProvenFamilyAbovePrice: 1,
-      preferredEntryBand: null,
-      maxProbeCountPerMarket: null,
-      entryCooldownSeconds: null,
-      maxNewMarketsPerSession: null,
-      probeSizeUsdc: 5,
-      addSizeUsdc: 4,
-    },
-    scaleIn: {
-      scaleMode: "confirm-only",
-      defaultMaxBuysPerLeg: 3,
-      heavyMaxBuysPerLeg: 5,
-      allowHeavyCampaigns: false,
-      requirePositiveRecycleHistoryForScale: false,
-    },
-    exit: {
-      exitMode: "repricing-sell",
-      primaryProfitModel: "sell-into-strength",
-      allowRunnerExtension: false,
-      preferFastRecycle: true,
-      resolutionHoldingAllowed: false,
-      resolutionBufferMinutes: 60,
-      targetRoiBandLow: 20,
-      targetRoiBandHigh: 50,
-      maxUnmovedHoldHours: null,
-      maxTailHoldHours: null,
-    },
-    twoSided: { allowTwoSided: false, twoSidedMode: "disabled", minActivityForTwoSided: null },
-    throughput: {
-      maxConcurrentOrdersPerFamily: null,
-      maxProbeInFlightPerToken: null,
-      maxEntrySignalsPerTickPerFamily: null,
-    },
-    tailSuppression: {
-      maxOpenValueUsdc: 100,
-      maxActiveMarkets: 5,
-      maxDustPositions: 3,
-      tailQuarantineThresholdUsdc: 50,
-      tailQuarantineThresholdRatio: 0.5,
-      staleTailPruneEnabled: false,
-      thresholdCleanupRequired: false,
-      autoSettleResolvedMarkets: true,
-    },
-    session: {
-      activeWindowsUtc: [{ start: "00:00", end: "23:59" }],
-      reducedWindowsUtc: [],
-      weekdayBias: "normal",
-    },
-    ...overrides,
   };
-}
-
-function makeBundle(rules?: Partial<FamilyRules>): FamilyRuleBundle {
-  const identity: FamilyIdentity = {
-    familyId: FAMILY_ID,
-    familyKey: "btc-price",
-    primaryCategory: "crypto",
-    regime: "threshold" as Regime,
-    horizon: "short",
-    cadence: "daily",
-    strategyProfile: "scalp",
-    topicKey: null,
-    slugPattern: null,
-    notes: null,
-  };
-  const evidence: FamilyEvidence = {
-    familyId: FAMILY_ID,
-    evidenceStatus: "confirmed",
-    evidenceScore: 80,
-    promotionState: "scaled",
-    localTradeCount: 10,
-    localMarketCount: 5,
-    localRealizedPnlFifo: 0,
-    openTailCostUsdc: 0,
-    tailAdjustedPnl: 0,
-    remoteClosedRealizedPnl: null,
-    openPositionCount: null,
-    openDustCount: null,
-    bothSidedEligible: false,
-    heavyCampaignEligible: false,
-    activeWindowEdgeScore: null,
-    recurrenceScore: null,
-    recycleScore: null,
-    liveViabilityScore: null,
-    toxicityPenalty: null,
-    lastValidatedAt: null,
-    probeSubstate: null,
-    repricingExitCount: 0,
-  };
-  return { identity, evidence, rules: makeRules(rules) };
 }
 
 describe("outcome selection", () => {
@@ -182,7 +81,7 @@ describe("outcome selection", () => {
 
   it("allows Gamma fallback books for dust-first micro entries with fresh trade context", () => {
     const bundle = makeBundle({
-      entry: { ...makeRules().entry, entryMode: "spray-first" },
+      entry: { entryMode: "spray-first" },
       throughput: {
         maxConcurrentOrdersPerFamily: 10,
         maxProbeInFlightPerToken: 2,
@@ -216,7 +115,7 @@ describe("outcome selection", () => {
 
   it("does not allow Gamma fallback books above the hard $0.25 dust cap", () => {
     const bundle = makeBundle({
-      entry: { ...makeRules().entry, entryMode: "spray-first" },
+      entry: { entryMode: "spray-first" },
       throughput: {
         maxConcurrentOrdersPerFamily: 10,
         maxProbeInFlightPerToken: 2,

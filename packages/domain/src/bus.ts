@@ -16,7 +16,6 @@
 import type {
   TokenId,
   ConditionId,
-  FamilyId,
   OrderId,
   FillId,
   ClientOrderId,
@@ -34,7 +33,6 @@ import type {
 import type {
   Signal,
   Position,
-  FamilyState,
   NormalizedMarket,
   ReconciliationResult,
   RiskDecision,
@@ -71,7 +69,6 @@ export interface RuntimeEventMap {
 
   HotQuoteUpdated: {
     readonly tokenIds: readonly TokenId[];
-    readonly familyIds: readonly FamilyId[];
     readonly refreshedAt: number;
   };
 
@@ -118,51 +115,10 @@ export interface RuntimeEventMap {
   };
 
   CooldownBypassApplied: {
-    readonly familyId: FamilyId | null;
     readonly tokenId: TokenId;
-    readonly reason:
-      | "price-moved"
-      | "spread-narrowed"
-      | "trade-recency-improved"
-      | "manual-family-fast-lane";
+    readonly reason: "price-moved" | "spread-narrowed" | "trade-recency-improved";
     readonly previousCooldownUntil: number;
     readonly appliedAt: number;
-  };
-
-  HotLaneActionApplied: {
-    readonly familyId: FamilyId;
-    readonly tokenId: TokenId;
-    readonly orderId: OrderId;
-    readonly signalReason: string | null;
-    readonly action:
-      | "entry-reprice-cancel"
-      | "entry-ttl-cancel"
-      | "entry-suppress-cancel"
-      | "exit-reprice-cancel"
-      | "exit-ttl-cancel";
-    readonly timestamp: number;
-  };
-
-  HotLaneStateChanged: {
-    readonly familyId: FamilyId;
-    readonly tokenId: TokenId;
-    readonly previousState:
-      | "quote-active"
-      | "needs-reprice"
-      | "cooling"
-      | "suppressed"
-      | "reactivated"
-      | null;
-    readonly nextState: "quote-active" | "needs-reprice" | "cooling" | "suppressed" | "reactivated";
-    readonly reason:
-      | "order-placed"
-      | "entry-reprice-cancel"
-      | "entry-ttl-cancel"
-      | "entry-suppress-cancel"
-      | "exit-reprice-cancel"
-      | "exit-ttl-cancel"
-      | "suppression-expired";
-    readonly timestamp: number;
   };
 
   ScanTickCompleted: {
@@ -188,7 +144,6 @@ export interface RuntimeEventMap {
     readonly price: number;
     readonly size: number;
     readonly orderType: OrderType;
-    readonly familyId: FamilyId | null;
     readonly signalReason: string | null;
     readonly timestamp: number;
   };
@@ -202,7 +157,6 @@ export interface RuntimeEventMap {
     readonly side: OrderSide;
     readonly price: number;
     readonly size: number;
-    readonly familyId: FamilyId | null;
     readonly timestamp: number;
   };
 
@@ -212,7 +166,6 @@ export interface RuntimeEventMap {
     readonly tokenId: TokenId;
     readonly conditionId: ConditionId;
     readonly reason: string;
-    readonly familyId: FamilyId | null;
     readonly signalReason: string | null;
     readonly timestamp: number;
   };
@@ -224,7 +177,6 @@ export interface RuntimeEventMap {
     readonly conditionId: ConditionId;
     readonly reason: string;
     readonly errorCode: ExchangeErrorCode;
-    readonly familyId: FamilyId | null;
     readonly signalReason: string | null;
     readonly timestamp: number;
   };
@@ -244,21 +196,12 @@ export interface RuntimeEventMap {
     readonly liquidityRole: LiquidityRole;
     readonly fee: number;
     readonly feeRateBps: number;
-    readonly familyId: FamilyId | null;
     readonly signalReason: string | null;
     readonly timestamp: number;
   };
 
   PositionUpdated: {
     readonly position: Position;
-  };
-
-  FamilyExposureChanged: {
-    readonly familyId: FamilyId;
-    readonly totalExposureUsdc: number;
-    readonly openPositionCount: number;
-    readonly familyState: FamilyState;
-    readonly timestamp: number;
   };
 
   ReconciliationDriftDetected: {
@@ -279,7 +222,6 @@ export interface RuntimeEventMap {
   OperatorCommandApplied: {
     readonly commandDbId: number;
     readonly action: OperatorActionType;
-    readonly targetFamilyId: FamilyId | null;
     readonly reason: string | null;
     readonly initiatorType: "operator" | "system";
     readonly initiator: string | null;
@@ -304,7 +246,6 @@ export interface RuntimeEventMap {
   PositionSettled: {
     readonly positionId: PositionId;
     readonly tokenId: TokenId;
-    readonly familyId: FamilyId | null;
     readonly resolution: string;
     readonly settlementPrice: number;
     readonly realizedPnl: number;

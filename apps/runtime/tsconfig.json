@@ -10,7 +10,6 @@
     { "path": "../../packages/config" },
     { "path": "../../packages/event-bus" },
     { "path": "../../packages/db" },
-    { "path": "../../packages/exchange" },
-    { "path": "../../packages/family-rules" }
+    { "path": "../../packages/exchange" }
   ]
 }

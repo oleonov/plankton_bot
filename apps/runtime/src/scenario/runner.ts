@@ -11,7 +11,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
 
-import { createFamilyRulesProvider } from "@plankton/family-rules";
 import { InProcessEventBus } from "@plankton/event-bus";
 import {
   bootstrapDatabase,
@@ -20,28 +19,25 @@ import {
   SqliteFillRepository,
   SqlitePositionRepository,
   SqliteInventoryLotRepository,
-  SqliteFamilyStateRepository,
-  SqliteFamilyCatalogRepository,
   SqliteOperatorCommandRepository,
   SqliteOperatorActionRepository,
+  SqliteAlgoRulesRepository,
+  SqliteLegStateRepository,
 } from "@plankton/db";
-import type { FamilyState } from "@plankton/domain";
-import { createBotRunId, createTokenId, slugPatternToRegex } from "@plankton/domain";
-import type { Market, ClobMarket } from "@plankton/domain";
-import type { FamilyConfig } from "@plankton/config";
+import { createBotRunId, createTokenId } from "@plankton/domain";
+import type { Market, ClobMarket, TokenId } from "@plankton/domain";
 import { SimulationMarketDataGateway, SimulationExchangeGateway } from "@plankton/exchange";
 
 import { MarketDataModule } from "../modules/market-data/market-data-module.js";
 import { NormalizationModule } from "../modules/normalization/normalization-module.js";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
-import { StrategyModule } from "../modules/strategy/strategy-module.js";
+import { AlgoDecisionModule } from "../modules/algo-decision/algo-decision-module.js";
+import type { SelectedMarketCache } from "../modules/algo-decision/algo-decision-module.js";
+import { LegStateTrackerModule } from "../modules/leg-state/leg-state-tracker-module.js";
+import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
-import { HotFamilyExecutionModule } from "../modules/hot-lane/hot-family-execution-module.js";
-import { HotQuoteBusModule } from "../modules/hot-lane/hot-quote-bus-module.js";
-import { FastExitCleanupModule } from "../modules/hot-lane/fast-exit-cleanup-module.js";
-import { HotMarketDataModule } from "../modules/hot-lane/hot-market-data-module.js";
 import { Supervisor } from "../supervisor/supervisor.js";
 import { CommandPoller } from "../supervisor/command-poller.js";
 
@@ -49,20 +45,42 @@ import type { ScenarioFixture, ScenarioResult, ScheduledCommand } from "./types.
 
 const DRAIN_TIMEOUT_MS = 5_000;
 
+/**
+ * A SelectedMarketCache that includes all tracked markets.
+ * In the scenario runner, every seeded market is eligible — there are no
+ * selection-rule filters to apply. AlgoDecisionModule uses the cache to gate
+ * new BUY entries; returning true for all markets mirrors the old "family match"
+ * gate used by StrategyModule.
+ */
+class AllMarketsCache implements SelectedMarketCache {
+  private readonly tokenIds = new Set<string>();
+
+  track(tokenId: string): void {
+    this.tokenIds.add(tokenId);
+  }
+
+  isEligible(_tokenId: TokenId): boolean {
+    return true; // All seeded markets are eligible
+  }
+
+  getEligibleTokenIds(): TokenId[] {
+    return [...this.tokenIds] as TokenId[];
+  }
+}
+
 export async function runScenario(
   fixture: ScenarioFixture,
-  familyConfigs: FamilyConfig[],
+  _familyConfigs?: unknown[], // kept for backward-compat with existing test call sites
 ): Promise<ScenarioResult> {
   if (fixture.dbPath) {
-    // Shared-DB mode: caller manages DB lifecycle
-    return await executeScenario(fixture, familyConfigs, fixture.dbPath);
+    return await executeScenario(fixture, fixture.dbPath);
   }
 
   const tmpDir = mkdtempSync(join(tmpdir(), "plankton-scenario-"));
   const dbPath = join(tmpDir, "scenario.db");
 
   try {
-    return await executeScenario(fixture, familyConfigs, dbPath);
+    return await executeScenario(fixture, dbPath);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -70,7 +88,6 @@ export async function runScenario(
 
 async function executeScenario(
   fixture: ScenarioFixture,
-  familyConfigs: FamilyConfig[],
   dbPath: string,
 ): Promise<ScenarioResult> {
   const log = pino({ level: "silent" });
@@ -83,47 +100,22 @@ async function executeScenario(
     fill: new SqliteFillRepository(conn.db),
     position: new SqlitePositionRepository(conn.db),
     inventoryLot: new SqliteInventoryLotRepository(conn.db),
-    familyState: new SqliteFamilyStateRepository(conn.db),
-    familyCatalog: new SqliteFamilyCatalogRepository(conn.db),
     operatorCommand: new SqliteOperatorCommandRepository(conn.db),
     operatorAction: new SqliteOperatorActionRepository(conn.db),
+    algoRules: new SqliteAlgoRulesRepository(conn.db),
+    legState: new SqliteLegStateRepository(conn.db),
   };
 
-  // 2. Create family rules provider and seed catalog + baseline state
-  const rulesProvider = createFamilyRulesProvider(familyConfigs);
-  const families = rulesProvider.getAllFamilies();
-  repos.familyCatalog.upsertAll(families);
-
-  for (const identity of families) {
-    const existing = repos.familyState.get(identity.familyId);
-    if (!existing) {
-      const baseline: FamilyState = {
-        familyId: identity.familyId,
-        openValueUsdc: 0,
-        openPositionCount: 0,
-        openDustCount: 0,
-        activeMarketCount: 0,
-        currentTailCostUsdc: 0,
-        tailAdjustedPnlLive: 0,
-        lastEntryTs: null,
-        lastExitTs: null,
-        firstNegativeTailAt: null,
-        updatedAt: new Date().toISOString(),
-      };
-      repos.familyState.save(baseline);
-    }
-  }
-
-  // 4. Create gateways
+  // 2. Create gateways
   const marketDataGateway = new SimulationMarketDataGateway();
   const exchangeGateway = new SimulationExchangeGateway();
 
-  // 4a. Run optional setup callback (after seeding, before modules)
+  // 3. Run optional setup callback (after seeding, before modules)
   if (fixture.setup) {
     await fixture.setup({ db: conn.db, exchangeGateway, repos });
   }
 
-  // 5. Create event bus and subscribe for counting
+  // 4. Create event bus and subscribe for counting
   const bus = new InProcessEventBus();
   const counters = {
     signals: 0,
@@ -135,48 +127,32 @@ async function executeScenario(
     reconciliationRan: false,
   };
 
-  bus.subscribe("SignalProduced", async () => {
-    counters.signals++;
-  });
-  bus.subscribe("SignalApproved", async () => {
-    counters.approved++;
-  });
-  bus.subscribe("SignalRejected", async () => {
-    counters.rejected++;
-  });
-  bus.subscribe("OrderPlaced", async () => {
-    counters.placed++;
-  });
-  bus.subscribe("OrderCancelled", async () => {
-    counters.cancelled++;
-  });
-  bus.subscribe("FillReceived", async () => {
-    counters.fills++;
-  });
-  bus.subscribe("ReconciliationComplete", async () => {
-    counters.reconciliationRan = true;
-  });
+  bus.subscribe("SignalProduced", async () => { counters.signals++; });
+  bus.subscribe("SignalApproved", async () => { counters.approved++; });
+  bus.subscribe("SignalRejected", async () => { counters.rejected++; });
+  bus.subscribe("OrderPlaced", async () => { counters.placed++; });
+  bus.subscribe("OrderCancelled", async () => { counters.cancelled++; });
+  bus.subscribe("FillReceived", async () => { counters.fills++; });
+  bus.subscribe("ReconciliationComplete", async () => { counters.reconciliationRan = true; });
 
-  // 6. Record bot run
+  // 5. Record bot run
   const botRunId = createBotRunId(`scenario-${Date.now()}`);
   conn.db
     .prepare("INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)")
     .run(botRunId, "simulation", new Date().toISOString());
 
-  // 7. Create modules (long intervals — we bypass timers)
-  // supervisorRef is set before any closure that uses it is actually called
+  // 6. Create modules
   const supervisorRef = { current: null as unknown as Supervisor };
   const runtimeControl = { isPaused: () => supervisorRef.current.isPaused() };
 
   const commandPoller = new CommandPoller({
     commandRepo: repos.operatorCommand,
     actionRepo: repos.operatorAction,
-    familyStateRepo: repos.familyState,
     bus,
     log,
     getPaused: () => supervisorRef.current.isPaused(),
     setPaused: (p) => supervisorRef.current.setPaused(p),
-    pollIntervalMs: 60_000, // Long — we poll manually
+    pollIntervalMs: 60_000,
   });
 
   const marketDataModule = new MarketDataModule({
@@ -191,7 +167,6 @@ async function executeScenario(
 
   const normalizationModule = new NormalizationModule({
     bus,
-    rulesProvider,
     marketRepo: repos.market,
     log,
   });
@@ -202,7 +177,6 @@ async function executeScenario(
     marketRepo: repos.market,
     orderRepo: repos.order,
     fillRepo: repos.fill,
-    rulesProvider,
     log,
     botRunId,
     runtimeControl,
@@ -210,8 +184,6 @@ async function executeScenario(
 
   const riskInventoryModule = new RiskInventoryModule({
     bus,
-    rulesProvider,
-    familyStateRepo: repos.familyState,
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
     orderRepo: repos.order,
@@ -227,59 +199,31 @@ async function executeScenario(
       })
     : undefined;
 
-  const strategyModule = new StrategyModule({
+  // All seeded markets are eligible (no selection-rule filtering in scenario runner)
+  const selectedMarketCache = new AllMarketsCache();
+
+  const legStateTrackerModule = new LegStateTrackerModule({
     bus,
-    rulesProvider,
-    positionRepo: repos.position,
-    orderRepo: repos.order,
-    familyStateRepo: repos.familyState,
-    candidateBookCache,
+    legStateRepo: repos.legState,
     log,
-    scanIntervalMs: 60_000,
-    runtimeControl,
   });
 
-  const hotFamilyExecutionModule = candidateBookCache
-    ? new HotFamilyExecutionModule({
-        bus,
-        rulesProvider,
-        orderRepo: repos.order,
-        candidateBookCache,
-        log,
-        policy: { hotQuoteRefreshIntervalMs: 500 },
-      })
-    : null;
-  const hotMarketDataModule = new HotMarketDataModule({
+  const algoDecisionModule = new AlgoDecisionModule({
     bus,
-    gateway: marketDataGateway,
-    rulesProvider,
-    orderRepo: repos.order,
-    positionRepo: repos.position,
-    ...(candidateBookCache ? { candidateBookCache } : {}),
+    legStateRepo: repos.legState,
+    algoRulesRepo: repos.algoRules,
+    selectedMarketCache,
+    runtimeControl,
     log,
-    policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
+    sweepIntervalMs: 60_000,
   });
-  const hotQuoteBusModule = candidateBookCache
-    ? new HotQuoteBusModule({
-        bus,
-        rulesProvider,
-        orderRepo: repos.order,
-        candidateBookCache,
-        log,
-        policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
-      })
-    : null;
-  const fastExitCleanupModule = candidateBookCache
-    ? new FastExitCleanupModule({
-        bus,
-        rulesProvider,
-        positionRepo: repos.position,
-        orderRepo: repos.order,
-        candidateBookCache,
-        log,
-        policy: { hotQuoteRefreshIntervalMs: 500 },
-      })
-    : null;
+
+  const signalToOrderBridge = new SignalToOrderBridge({
+    bus,
+    log,
+    orderRepo: repos.order,
+    candidateBookCache,
+  });
 
   const reconciliationModule = new ReconciliationModule({
     gateway: exchangeGateway,
@@ -287,51 +231,19 @@ async function executeScenario(
     orderRepo: repos.order,
     fillRepo: repos.fill,
     marketRepo: repos.market,
-    rulesProvider,
     log,
     reconcileIntervalMs: 60_000,
   });
 
-  // 8. Create supervisor and start
+  // 7. Create supervisor and start
   supervisorRef.current = new Supervisor({
     modules: [
       ["command-poller", commandPoller],
       ["market-data", marketDataModule],
       ["normalization", normalizationModule],
+      ["leg-state-tracker", legStateTrackerModule],
+      ["algo-decision", algoDecisionModule],
       ["reconciliation", reconciliationModule],
-      ["strategy", strategyModule],
-      ...(hotMarketDataModule
-        ? [
-            ["hot-market-data", hotMarketDataModule] as [
-              string,
-              import("@plankton/domain").RuntimeModule,
-            ],
-          ]
-        : []),
-      ...(hotQuoteBusModule
-        ? [
-            ["hot-quote-bus", hotQuoteBusModule] as [
-              string,
-              import("@plankton/domain").RuntimeModule,
-            ],
-          ]
-        : []),
-      ...(hotFamilyExecutionModule
-        ? [
-            ["hot-family-execution", hotFamilyExecutionModule] as [
-              string,
-              import("@plankton/domain").RuntimeModule,
-            ],
-          ]
-        : []),
-      ...(fastExitCleanupModule
-        ? [
-            ["fast-exit-cleanup", fastExitCleanupModule] as [
-              string,
-              import("@plankton/domain").RuntimeModule,
-            ],
-          ]
-        : []),
       ["risk-inventory", riskInventoryModule],
       ["execution", executionModule],
     ],
@@ -340,17 +252,12 @@ async function executeScenario(
   });
   const supervisor = supervisorRef.current;
 
+  signalToOrderBridge.subscribe();
+
   await supervisor.start();
 
-  // 8a. Pre-seed tracked markets into the market repo so the pricing loop finds them.
-  // In production, MarketScannerModule does this; in scenarios we do it from fixtures.
-  const compiledFamilies = families.map((f) => ({
-    identity: f,
-    regex: f.slugPattern ? slugPatternToRegex(f.slugPattern) : null,
-  }));
-
+  // 8. Pre-seed tracked markets into the market repo and the AllMarketsCache.
   function seedTrackedMarket(clobMarket: ClobMarket): void {
-    const matched = compiledFamilies.find((f) => f.regex?.test(clobMarket.slug));
     const now = new Date().toISOString();
     for (const token of clobMarket.tokens) {
       const market: Market = {
@@ -361,10 +268,8 @@ async function executeScenario(
         question: clobMarket.question,
         outcome: token.outcome,
         outcomeIndex: token.outcomeIndex ?? null,
-        familyId: matched?.identity.familyId ?? null,
-        familyKey: matched?.identity.familyKey ?? null,
-        regime: matched?.identity.regime ?? null,
-        horizon: matched?.identity.horizon ?? null,
+        regime: null,
+        horizon: null,
         endDate: clobMarket.endDate,
         active: clobMarket.active,
         tradable: true,
@@ -374,10 +279,10 @@ async function executeScenario(
         updatedAt: now,
       };
       repos.market.save(market);
+      selectedMarketCache.track(token.tokenId);
     }
   }
 
-  // Pre-seed from all unique markets in fixtures
   const seeded = new Set<string>();
   for (const snap of fixture.marketSnapshots) {
     if (!seeded.has(snap.market.conditionId)) {
@@ -396,14 +301,13 @@ async function executeScenario(
       for (const cmd of commands) {
         repos.operatorCommand.insert({
           action: cmd.action,
-          targetId: cmd.familyId ?? null,
+          targetId: cmd.targetId ?? cmd.familyId ?? null,
           reason: cmd.reason ?? null,
           createdAt: new Date().toISOString(),
         });
       }
     }
 
-    // Process commands
     await commandPoller.poll();
     await bus.drain(DRAIN_TIMEOUT_MS);
 
@@ -418,16 +322,17 @@ async function executeScenario(
     await marketDataModule.poll();
     await bus.drain(DRAIN_TIMEOUT_MS);
 
-    // Manually trigger strategy scan (bypass StrategyModule timer)
-    await strategyModule.tick();
+    // Trigger AlgoDecisionModule sweep for all eligible tokens
+    const eligibleTokenIds = selectedMarketCache.getEligibleTokenIds();
+    await algoDecisionModule.evaluateTokens(eligibleTokenIds);
     await bus.drain(DRAIN_TIMEOUT_MS);
   }
 
   // 10. Stop supervisor
+  signalToOrderBridge.unsubscribe();
   await supervisor.stop();
 
   // 11. Query final state from DB
-  const finalFamilyStates = repos.familyState.findAll();
   const openPositions = repos.position.findOpen();
   const dustPositions = repos.position.findDust();
 
@@ -435,8 +340,6 @@ async function executeScenario(
     openPositions.reduce((sum, p) => sum + p.realizedPnl, 0) +
     dustPositions.reduce((sum, p) => sum + p.realizedPnl, 0) +
     sumClosedRealizedPnl(conn.db);
-
-  const totalTailCostUsdc = finalFamilyStates.reduce((sum, fs) => sum + fs.currentTailCostUsdc, 0);
 
   conn.close();
 
@@ -449,14 +352,9 @@ async function executeScenario(
     fillCount: counters.fills,
     openPositionCount: openPositions.length,
     dustPositionCount: dustPositions.length,
-    familyStates: finalFamilyStates.map((fs) => ({
-      familyId: fs.familyId,
-      openValueUsdc: fs.openValueUsdc,
-      openPositionCount: fs.openPositionCount,
-      tailAdjustedPnlLive: fs.tailAdjustedPnlLive,
-    })),
+    familyStates: [],
     totalRealizedPnl,
-    totalTailCostUsdc,
+    totalTailCostUsdc: 0,
     reconciliationRan: counters.reconciliationRan,
     finalPhase: supervisor.getPhase(),
   };

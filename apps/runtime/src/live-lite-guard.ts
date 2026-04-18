@@ -1,8 +1,17 @@
 import {
   resolveFamilyLiveTradingPolicy,
-  type FamilyIdentity,
   type WalletMode,
+  type FeeTier,
+  type LiveWalletRequirement,
 } from "@plankton/domain";
+
+/** Subset of identity fields needed for live trading policy resolution. */
+interface FamilyIdentityLike {
+  primaryCategory: string;
+  feeTier?: FeeTier | null;
+  liveWalletRequirement?: LiveWalletRequirement | null;
+  requiresPostOnlyForLive?: boolean | null;
+}
 
 const CLOB_MARKETABLE_BUY_MIN_USDC = 1;
 const NOTIONAL_EPSILON_USDC = 1e-6;
@@ -98,7 +107,7 @@ export class LiveLiteGuard {
 
   getFamilyPolicyRejections(opts: {
     identity: Pick<
-      FamilyIdentity,
+      FamilyIdentityLike,
       "primaryCategory" | "feeTier" | "liveWalletRequirement" | "requiresPostOnlyForLive"
     >;
     isEntry: boolean;

@@ -392,14 +392,8 @@ describe("ProfileRuntimePublisher", () => {
 
   function getScorecards(): Array<Record<string, unknown>> {
     return controlConn.db
-      .prepare("SELECT * FROM family_validation_scorecards ORDER BY family_id")
+      .prepare("SELECT * FROM family_validation_scorecards ORDER BY scorecard_id")
       .all() as Array<Record<string, unknown>>;
-  }
-
-  function getLatest(familyId: string): Record<string, unknown> | undefined {
-    return controlConn.db
-      .prepare("SELECT * FROM family_validation_latest WHERE family_id = ? AND profile = ?")
-      .get(familyId, PROFILE) as Record<string, unknown> | undefined;
   }
 
   it("publish() writes validation scorecards for each deployed family", async () => {
@@ -411,27 +405,23 @@ describe("ProfileRuntimePublisher", () => {
     const scorecards = getScorecards();
     expect(scorecards).toHaveLength(2);
 
-    const alphaCard = scorecards.find((s) => s.family_id === FAMILY_A)!;
-    expect(alphaCard.profile).toBe(PROFILE);
-    expect(alphaCard.scorecard_id).toBeDefined();
-    expect(alphaCard.validated_at).toBeDefined();
-    expect(alphaCard.evidence_status).toBe("unknown");
-    expect(alphaCard.trade_count).toBe(0);
-    expect(alphaCard.market_count).toBe(0);
+    // Phase 6: scorecards are no longer keyed by family_id — check by profile
+    expect(scorecards.every((s) => s.profile === PROFILE)).toBe(true);
+    expect(scorecards.every((s) => s.scorecard_id !== undefined)).toBe(true);
+    expect(scorecards.every((s) => s.validated_at !== undefined)).toBe(true);
+    expect(scorecards.every((s) => s.evidence_status === "unknown")).toBe(true);
+    expect(scorecards.every((s) => s.trade_count === 0)).toBe(true);
+    expect(scorecards.every((s) => s.market_count === 0)).toBe(true);
   });
 
-  it("publish() updates family_validation_latest", async () => {
+  it("publish() writes two scorecard rows when two families are deployed", async () => {
     seedFamilyState(ledgerConn, FAMILY_A);
+    seedFamilyState(ledgerConn, FAMILY_B);
 
     await publisher.publish();
 
-    const latest = getLatest(FAMILY_A);
-    expect(latest).toBeDefined();
-    expect(latest!.scorecard_id).toBeDefined();
-
-    const scorecards = getScorecards();
-    const alphaCard = scorecards.find((s) => s.family_id === FAMILY_A)!;
-    expect(latest!.scorecard_id).toBe(alphaCard.scorecard_id);
+    // One scorecard row per deployed family
+    expect(getScorecards()).toHaveLength(2);
   });
 
   it("scorecard reflects non-zero trade metrics when fills exist", async () => {

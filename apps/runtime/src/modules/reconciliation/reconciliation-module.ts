@@ -22,7 +22,6 @@ import type {
   OrderRepository,
   FillRepository,
   MarketRepository,
-  FamilyRulesProvider,
   ReconciliationResult,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -36,7 +35,6 @@ export interface ReconciliationModuleDeps {
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
   marketRepo: MarketRepository;
-  rulesProvider: FamilyRulesProvider;
   log: Logger;
   reconcileIntervalMs: number;
 }
@@ -128,7 +126,6 @@ export class ReconciliationModule implements RuntimeModule {
           gateway: this.deps.gateway,
           fillRepo: this.deps.fillRepo,
           orderRepo: this.deps.orderRepo,
-          rulesProvider: this.deps.rulesProvider,
           bus: this.deps.bus,
           log: this.log,
         },
@@ -141,7 +138,6 @@ export class ReconciliationModule implements RuntimeModule {
         {
           orderRepo: this.deps.orderRepo,
           marketRepo: this.deps.marketRepo,
-          rulesProvider: this.deps.rulesProvider,
           bus: this.deps.bus,
           log: this.log,
         },

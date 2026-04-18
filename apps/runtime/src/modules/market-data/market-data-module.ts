@@ -203,7 +203,7 @@ export class MarketDataModule implements RuntimeModule {
         });
       }
 
-      tracked = this.deps.marketRepo.findActive();
+      tracked = this.deps.marketRepo.findTrackedForPricing();
       this.refreshTrackedMarkets(tracked);
       this.lastTrackedTokenCount = tracked.length;
       if (tracked.length === 0) {
@@ -459,8 +459,6 @@ function syncTrackedMarket(
     question: tracked.question,
     outcome: tracked.outcome,
     outcomeIndex: tracked.outcomeIndex ?? null,
-    familyId: tracked.familyId,
-    familyKey: tracked.familyKey,
     regime: tracked.regime,
     horizon: tracked.horizon,
     endDate: tracked.endDate,
@@ -479,5 +477,8 @@ function syncTrackedMarket(
     minOrderSize: current?.minOrderSize ?? null,
     bookSource: current?.bookSource ?? "unknown",
     snapshotTs: current?.snapshotTs ?? nowMs,
+    // Use the persisted eventMarketCount from the DB row (set by scanner since Phase 4).
+    // Fall back to current cached value, then to the DB default of 1.
+    eventMarketCount: tracked.eventMarketCount ?? current?.eventMarketCount ?? 1,
   };
 }

@@ -6,7 +6,7 @@ import type {
   TokenId,
   Market,
 } from "@plankton/domain";
-import { createTokenId, createFamilyId } from "@plankton/domain";
+import { createTokenId } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { MarketDataModule } from "../../modules/market-data/market-data-module.js";
 
@@ -50,8 +50,6 @@ const trackedMarket: Market = {
   eventSlug: null,
   question: "Test?",
   outcome: "YES",
-  familyId: createFamilyId("fam-1"),
-  familyKey: "test",
   regime: "threshold",
   horizon: "daily",
   endDate: "2026-12-31",
@@ -65,12 +63,15 @@ const trackedMarket: Market = {
 
 const mockMarketRepo = {
   findActive: vi.fn().mockReturnValue([trackedMarket]),
+  // Phase 4: market-data module uses findTrackedForPricing instead of findActive
+  findTrackedForPricing: vi.fn().mockReturnValue([trackedMarket]),
+  deactivate: vi.fn(),
   save: vi.fn(),
   findByTokenId: vi.fn().mockReturnValue(null),
   findByTokenIds: vi.fn().mockReturnValue([]),
   findByConditionId: vi.fn().mockReturnValue([]),
-  findByFamily: vi.fn().mockReturnValue([]),
   findAll: vi.fn().mockReturnValue([]),
+  findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
 };
 
 // ─── Scenario ─────────────────────────────────────────────────────────────

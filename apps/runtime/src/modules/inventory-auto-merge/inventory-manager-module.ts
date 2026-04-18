@@ -110,7 +110,6 @@ export class InventoryManagerModule implements RuntimeModule {
             {
               conditionId: candidate.conditionId,
               amount: candidate.mergeAmount,
-              familyId: candidate.familyId,
             },
             "inventory merge applied to ledger",
           );

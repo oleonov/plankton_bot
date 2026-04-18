@@ -3,13 +3,10 @@ import type {
   EventBus,
   OperatorCommandRepository,
   OperatorActionRepository,
-  FamilyStateRepository,
   StateTransitionRepository,
   OperatorCommand,
-  FamilyId,
   ProfileId,
 } from "@plankton/domain";
-import { createFamilyId } from "@plankton/domain";
 import type { Logger } from "../logger.js";
 
 export interface ReloadableRules {
@@ -21,14 +18,13 @@ export interface PatternRebuilder {
 }
 
 export interface DeploymentToggler {
-  enable(familyId: FamilyId, profile: ProfileId): void;
-  disable(familyId: FamilyId, profile: ProfileId, reason: string | null): void;
+  enable(targetId: string, profile: ProfileId): void;
+  disable(targetId: string, profile: ProfileId, reason: string | null): void;
 }
 
 export interface CommandPollerDeps {
   commandRepo: OperatorCommandRepository;
   actionRepo: OperatorActionRepository;
-  familyStateRepo: FamilyStateRepository;
   bus: EventBus;
   log: Logger;
   getPaused: () => boolean;
@@ -129,7 +125,6 @@ export class CommandPoller implements RuntimeModule {
       await this.deps.bus.publish("OperatorCommandApplied", {
         commandDbId: cmd.id,
         action: cmd.action,
-        targetFamilyId: cmd.targetId ? createFamilyId(cmd.targetId) : null,
         reason: cmd.reason,
         initiatorType: cmd.initiatorType,
         initiator: cmd.initiator,
@@ -156,22 +151,20 @@ export class CommandPoller implements RuntimeModule {
   }
 
   private applyFamilyEnable(cmd: OperatorCommand, now: string): void {
-    if (!cmd.targetId) throw new Error("family_enable requires targetId (familyId)");
-    const familyId = createFamilyId(cmd.targetId);
+    if (!cmd.targetId) throw new Error("family_enable requires targetId");
 
     if (this.deps.deploymentToggler && this.deps.activeProfile) {
-      this.deps.deploymentToggler.enable(familyId, this.deps.activeProfile);
+      this.deps.deploymentToggler.enable(cmd.targetId, this.deps.activeProfile);
     }
 
     this.writeAudit(cmd, "family", cmd.targetId, now);
   }
 
   private applyFamilyDisable(cmd: OperatorCommand, now: string): void {
-    if (!cmd.targetId) throw new Error("family_disable requires targetId (familyId)");
-    const familyId = createFamilyId(cmd.targetId);
+    if (!cmd.targetId) throw new Error("family_disable requires targetId");
 
     if (this.deps.deploymentToggler && this.deps.activeProfile) {
-      this.deps.deploymentToggler.disable(familyId, this.deps.activeProfile, cmd.reason ?? null);
+      this.deps.deploymentToggler.disable(cmd.targetId, this.deps.activeProfile, cmd.reason ?? null);
     }
 
     this.writeAudit(cmd, "family", cmd.targetId, now);

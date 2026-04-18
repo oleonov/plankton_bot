@@ -183,11 +183,11 @@ CREATE TABLE IF NOT EXISTS family_deployments (
 CREATE INDEX IF NOT EXISTS idx_family_deployments_profile_enabled ON family_deployments(profile, enabled);
 
 -- ═══════════ FAMILY VALIDATION SCORECARDS ═══════════
--- New table: score snapshots per (family, profile)
+-- Score snapshots per profile (Phase 6: family_id is now nullable/unused).
 
 CREATE TABLE IF NOT EXISTS family_validation_scorecards (
   scorecard_id             TEXT PRIMARY KEY,
-  family_id                TEXT NOT NULL REFERENCES family_catalog(family_id),
+  family_id                TEXT REFERENCES family_catalog(family_id),
   profile                  TEXT NOT NULL REFERENCES profiles(profile_id),
   evidence_status          TEXT NOT NULL DEFAULT 'unknown',
   evidence_score           REAL NOT NULL DEFAULT 0,
@@ -203,8 +203,7 @@ CREATE TABLE IF NOT EXISTS family_validation_scorecards (
   heavy_campaign_eligible  INTEGER NOT NULL DEFAULT 0,
   active_window_edge_score REAL,
   summary_json             TEXT,
-  validated_at             TEXT NOT NULL DEFAULT (datetime('now')),
-  UNIQUE (family_id, profile, validated_at)
+  validated_at             TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ═══════════ FAMILY VALIDATION LATEST ═══════════
@@ -248,17 +247,18 @@ CREATE TABLE IF NOT EXISTS family_config_meta (
 -- Singleton row for current runtime state
 
 CREATE TABLE IF NOT EXISTS runtime_control_state (
-  id                  INTEGER PRIMARY KEY CHECK (id = 1),
-  current_profile     TEXT REFERENCES profiles(profile_id),
-  desired_profile     TEXT REFERENCES profiles(profile_id),
-  current_switch_id   TEXT,
-  current_run_id      TEXT,
-  current_instance_id TEXT,
-  runtime_status      TEXT NOT NULL DEFAULT 'stopped',  -- stopped | starting | ready_paused | running | stopping | failed
-  paused              INTEGER NOT NULL DEFAULT 1,
-  resume_intent_at    TEXT,             -- one-shot deploy resume intent (ISO timestamp, NULL = no intent)
-  schema_version      INTEGER NOT NULL DEFAULT 1,
-  updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+  id                       INTEGER PRIMARY KEY CHECK (id = 1),
+  current_profile          TEXT REFERENCES profiles(profile_id),
+  desired_profile          TEXT REFERENCES profiles(profile_id),
+  current_switch_id        TEXT,
+  current_run_id           TEXT,
+  current_instance_id      TEXT,
+  runtime_status           TEXT NOT NULL DEFAULT 'stopped',  -- stopped | starting | ready_paused | running | stopping | failed
+  paused                   INTEGER NOT NULL DEFAULT 1,
+  resume_intent_at         TEXT,             -- one-shot deploy resume intent (ISO timestamp, NULL = no intent)
+  schema_version           INTEGER NOT NULL DEFAULT 1,
+  selection_rules_version  INTEGER NOT NULL DEFAULT 0,
+  updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ═══════════ OPERATOR COMMANDS ═══════════
@@ -406,6 +406,25 @@ CREATE TABLE IF NOT EXISTS preflight_reports (
   info_json         TEXT,
   created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ═══════════ SELECTION RULES ═══════════
+-- Per-profile market admission rules (06-spec §0 Market Selection Layer).
+
+CREATE TABLE IF NOT EXISTS selection_rules (
+  rule_id      TEXT PRIMARY KEY,
+  profile_id   TEXT NOT NULL REFERENCES profiles(profile_id) ON DELETE CASCADE,
+  rule_type    TEXT NOT NULL CHECK (rule_type IN
+                 ('include_prefix','exclude_prefix','include_slug','exclude_slug')),
+  pattern      TEXT NOT NULL CHECK (length(pattern) BETWEEN 1 AND 256),
+  enabled      INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
+  note         TEXT,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(profile_id, rule_type, pattern)
+);
+
+CREATE INDEX IF NOT EXISTS idx_selection_rules_profile_enabled
+  ON selection_rules(profile_id, enabled);
 
 -- ═══════════ ALGO DECISION ENGINE ═══════════
 

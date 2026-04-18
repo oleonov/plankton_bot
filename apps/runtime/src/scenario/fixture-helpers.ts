@@ -41,6 +41,7 @@ export function makeMarket(overrides: {
     negRisk: overrides.negRisk ?? false,
     tickSize: overrides.tickSize ?? 0.01,
     volume24h: null,
+    eventMarketCount: 1,
   };
 }
 

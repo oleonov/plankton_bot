@@ -3,7 +3,6 @@ import { ExecutionQueue } from "../modules/execution/execution-queue.js";
 import {
   createTokenId,
   createCommandId,
-  createFamilyId,
   createConditionId,
 } from "@plankton/domain";
 import type { PlaceOrderCommand, CancelOrderCommand, ClientOrderId } from "@plankton/domain";
@@ -30,7 +29,6 @@ function makePlaceCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand
     orderType: "GTC",
     tickSize: 0.01,
     negRisk: false,
-    familyId: createFamilyId("fam-1"),
     sequenceInTick: 0,
     signalReason: null,
     ...overrides,

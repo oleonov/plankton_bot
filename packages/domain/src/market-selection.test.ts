@@ -1,42 +1,57 @@
 import { describe, it, expect } from "vitest";
-import { matchesPreEntryFilter, evaluateContinuation } from "./market-selection.js";
+import { evaluatePreEntry, evaluateContinuation } from "./market-selection.js";
+import { SelectionRuleEngine } from "./selection-rule-engine.js";
+import type { SelectionRule } from "./types.js";
 
-// Spec v2.2 §0 — Live Pre-Entry Filter is slug-prefix only.
-describe("matchesPreEntryFilter", () => {
-  it("includes when eventSlug starts with elon-musk-", () => {
-    expect(matchesPreEntryFilter("elon-musk-tweet-count")).toBe(true);
+const EMPTY_ENGINE = new SelectionRuleEngine([]);
+
+function engineWith(rules: Array<Partial<SelectionRule> & Pick<SelectionRule, "ruleId" | "ruleType" | "pattern">>) {
+  return new SelectionRuleEngine(
+    rules.map((r) => ({
+      profileId: "simulation",
+      enabled: true,
+      note: null,
+      createdAt: "2026-04-18T00:00:00Z",
+      updatedAt: "2026-04-18T00:00:00Z",
+      ...r,
+    })),
+  );
+}
+
+describe("evaluatePreEntry", () => {
+  it("matched_include when rule admits", () => {
+    const engine = engineWith([{ ruleId: "r1", ruleType: "include_prefix", pattern: "bitcoin-" }]);
+    const r = evaluatePreEntry(engine, { eventSlug: "bitcoin-x", slug: "a", eventMarketCount: 3 });
+    expect(r.finalStatus).toBe("INCLUDE");
+    expect(r.selectionStatus).toBe("matched_include");
+    expect(r.winningRuleId).toBe("r1");
   });
 
-  it("includes when eventSlug starts with bitcoin-", () => {
-    expect(matchesPreEntryFilter("bitcoin-price-above-100k")).toBe(true);
+  it("matched_exclude when exclude rule hits", () => {
+    const engine = engineWith([{ ruleId: "r1", ruleType: "exclude_slug", pattern: "spam" }]);
+    const r = evaluatePreEntry(engine, { eventSlug: "any", slug: "spam", eventMarketCount: 1 });
+    expect(r.finalStatus).toBe("EXCLUDE");
+    expect(r.selectionStatus).toBe("matched_exclude");
+    expect(r.winningRuleId).toBe("r1");
   });
 
-  it("includes when eventSlug starts with ethereum-", () => {
-    expect(matchesPreEntryFilter("ethereum-merge-date")).toBe(true);
+  it("step2_fallback_include when no_match and single-market event", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, { eventSlug: "any", slug: "a", eventMarketCount: 1 });
+    expect(r.finalStatus).toBe("INCLUDE");
+    expect(r.selectionStatus).toBe("step2_fallback_include");
+    expect(r.winningRuleId).toBeNull();
   });
 
-  it("excludes when eventSlug is null", () => {
-    expect(matchesPreEntryFilter(null)).toBe(false);
+  it("fallback_exclude when no_match and multi-market event", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, { eventSlug: "any", slug: "a", eventMarketCount: 3 });
+    expect(r.finalStatus).toBe("EXCLUDE");
+    expect(r.selectionStatus).toBe("fallback_exclude");
   });
 
-  it("excludes when eventSlug does not match any prefix", () => {
-    expect(matchesPreEntryFilter("us-election-winner")).toBe(false);
-  });
-
-  it("excludes partial prefix 'elon-' (not 'elon-musk-')", () => {
-    expect(matchesPreEntryFilter("elon-fires-someone")).toBe(false);
-  });
-
-  it("excludes 'bitcoins-' (not 'bitcoin-')", () => {
-    expect(matchesPreEntryFilter("bitcoins-price")).toBe(false);
-  });
-
-  it("excludes 'etherium-' (typo, not 'ethereum-')", () => {
-    expect(matchesPreEntryFilter("etherium-price")).toBe(false);
-  });
-
-  it("excludes empty string", () => {
-    expect(matchesPreEntryFilter("")).toBe(false);
+  it("null eventSlug + step2 fallback", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, { eventSlug: null, slug: "a", eventMarketCount: 1 });
+    expect(r.finalStatus).toBe("INCLUDE");
+    expect(r.selectionStatus).toBe("step2_fallback_include");
   });
 });
 

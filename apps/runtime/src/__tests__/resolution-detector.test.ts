@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
+import { createTokenId, createPositionId } from "@plankton/domain";
 import type {
   PositionRepository,
   MarketRepository,
@@ -12,7 +12,6 @@ import { ResolutionDetector } from "../modules/resolution/resolution-detector.js
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const TOK_YES = createTokenId("tok-yes");
-const FAM = createFamilyId("fam-1");
 const POS = createPositionId("pos-1");
 const CONDITION = "condition-abc";
 const SLUG = "will-x-happen";
@@ -33,7 +32,6 @@ function makePosition(overrides?: Partial<Position>): Position {
   return {
     positionId: POS,
     tokenId: TOK_YES,
-    familyId: FAM,
     status: "open",
     side: "buy",
     size: 100,
@@ -94,6 +92,8 @@ function createMockMarketRepo(): MarketRepository {
   return {
     findByTokenIds: vi.fn().mockReturnValue([makeMarket()]),
     deactivate: vi.fn(),
+    findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   } as unknown as MarketRepository;
 }
 

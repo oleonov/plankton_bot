@@ -1,7 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   createTokenId,
-  createFamilyId,
   createFillId,
   createOrderId,
   createPositionId,
@@ -11,11 +10,6 @@ import {
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
-  FamilyRulesProvider,
-  FamilyRuleBundle,
-  FamilyRules,
-  FamilyState,
-  FamilyStateRepository,
   PositionRepository,
   InventoryLotRepository,
   OrderRepository,
@@ -23,8 +17,6 @@ import type {
   InventoryLot,
   Order,
   Signal,
-  FamilyId,
-  Regime,
   ClientOrderId,
   NormalizedMarket,
 } from "@plankton/domain";
@@ -33,14 +25,12 @@ import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-mo
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
-const FAM_ID = createFamilyId("fam-btc");
 const TOK_ID = createTokenId("tok-yes");
 const COND_ID = createConditionId("cond-btc");
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
     signalId: "sig-1",
-    familyId: FAM_ID,
     tokenId: TOK_ID,
     conditionId: COND_ID,
     side: "buy",
@@ -68,9 +58,7 @@ function makeNormalizedMarket(
     question: "Test market?",
     outcome: "YES",
     outcomeIndex: 0,
-    familyId: FAM_ID,
-    familyKey: "btc-price",
-    regime: "threshold" as Regime,
+    regime: "threshold" as any,
     horizon: "short",
     endDate: null,
     active: true,
@@ -85,162 +73,13 @@ function makeNormalizedMarket(
     lastTradeAt: null,
     volume24h: null,
     liquidity: null,
+    eventMarketCount: 1,
     minOrderSize,
     bookSource: "clob",
     snapshotTs: Date.now(),
   };
 }
 
-function makeFamilyState(overrides?: Partial<FamilyState>): FamilyState {
-  return {
-    familyId: FAM_ID,
-    openValueUsdc: 0,
-    openPositionCount: 0,
-    openDustCount: 0,
-    activeMarketCount: 0,
-    currentTailCostUsdc: 0,
-    tailAdjustedPnlLive: 0,
-    lastEntryTs: null,
-    lastExitTs: null,
-    firstNegativeTailAt: null,
-    updatedAt: new Date().toISOString(),
-    ...overrides,
-  };
-}
-
-function makeTailRules(overrides?: Record<string, unknown>) {
-  return {
-    maxOpenValueUsdc: 100,
-    maxActiveMarkets: 5,
-    maxDustPositions: 3,
-    tailQuarantineThresholdUsdc: 50,
-    tailQuarantineThresholdRatio: 0.5,
-    staleTailPruneEnabled: false,
-    thresholdCleanupRequired: false,
-    autoSettleResolvedMarkets: true,
-    ...overrides,
-  };
-}
-
-function makeRuleBundle(
-  tailOverrides?: Record<string, unknown>,
-  identityOverrides?: Partial<FamilyRuleBundle["identity"]>,
-  evidenceOverrides?: Partial<FamilyRuleBundle["evidence"]>,
-): FamilyRuleBundle {
-  return {
-    identity: {
-      familyId: FAM_ID,
-      familyKey: "btc-price",
-      primaryCategory: "crypto",
-      regime: "threshold" as Regime,
-      horizon: "short",
-      cadence: "daily",
-      strategyProfile: "scalp" as any,
-      topicKey: "btc",
-      slugPattern: "btc*",
-      notes: null,
-      ...identityOverrides,
-    },
-    evidence: {
-      familyId: FAM_ID,
-      evidenceStatus: "confirmed",
-      evidenceScore: 0.8,
-      promotionState: "scaled",
-      localTradeCount: 10,
-      localMarketCount: 3,
-      localRealizedPnlFifo: 5,
-      openTailCostUsdc: 0,
-      tailAdjustedPnl: 5,
-      remoteClosedRealizedPnl: null,
-      openPositionCount: null,
-      openDustCount: null,
-      bothSidedEligible: false,
-      heavyCampaignEligible: false,
-      activeWindowEdgeScore: null,
-      recurrenceScore: null,
-      recycleScore: null,
-      liveViabilityScore: null,
-      toxicityPenalty: null,
-      lastValidatedAt: null,
-      probeSubstate: null,
-      repricingExitCount: 0,
-      ...evidenceOverrides,
-    },
-    rules: {
-      familyId: FAM_ID,
-      universe: {
-        enabled: true,
-        action: "trade",
-        priorityRank: 1,
-        sessionMode: "active-window",
-      },
-      entry: {
-        entryMode: "probe-first",
-        minEntryPrice: 0.05,
-        maxEntryPrice: 0.95,
-        maxInitialNotionalUsdc: 10,
-        allowHighPriceOneShot: false,
-        highPriceThreshold: 0.85,
-        requireProvenFamilyAbovePrice: 0.7,
-        preferredEntryBand: null,
-        maxProbeCountPerMarket: null,
-        entryCooldownSeconds: null,
-        maxNewMarketsPerSession: null,
-        probeSizeUsdc: 5,
-        addSizeUsdc: 4,
-      },
-      scaleIn: {
-        scaleMode: "confirm-only",
-        defaultMaxBuysPerLeg: 3,
-        heavyMaxBuysPerLeg: 5,
-        allowHeavyCampaigns: false,
-        requirePositiveRecycleHistoryForScale: false,
-      },
-      exit: {
-        exitMode: "repricing-sell",
-        primaryProfitModel: "sell-into-strength",
-        allowRunnerExtension: false,
-        preferFastRecycle: true,
-        resolutionHoldingAllowed: false,
-        resolutionBufferMinutes: 60,
-        targetRoiBandLow: null,
-        targetRoiBandHigh: null,
-        maxUnmovedHoldHours: null,
-        maxTailHoldHours: null,
-      },
-      twoSided: {
-        allowTwoSided: false,
-        twoSidedMode: "disabled",
-        minActivityForTwoSided: null,
-      },
-      tailSuppression: makeTailRules(tailOverrides),
-      session: {
-        activeWindowsUtc: [],
-        reducedWindowsUtc: [],
-        weekdayBias: "normal",
-      },
-    } as FamilyRules,
-  };
-}
-
-function createMockRulesProvider(
-  bundle: FamilyRuleBundle | null = makeRuleBundle(),
-): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue(bundle),
-    isEnabled: vi.fn().mockReturnValue(bundle !== null),
-    getAllFamilies: vi.fn().mockReturnValue(bundle ? [bundle.identity] : []),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  };
-}
-
-function createMockFamilyStateRepo(state?: FamilyState): FamilyStateRepository {
-  return {
-    get: vi.fn().mockReturnValue(state ?? null),
-    save: vi.fn(),
-    findAll: vi.fn().mockReturnValue(state ? [state] : []),
-  };
-}
 
 function createMockPositionRepo(position?: Position | Position[] | null): PositionRepository {
   const positions = Array.isArray(position) ? position : position ? [position] : [];
@@ -252,7 +91,6 @@ function createMockPositionRepo(position?: Position | Position[] | null): Positi
         (tokenId: ReturnType<typeof createTokenId>) =>
           positions.find((entry) => String(entry.tokenId) === String(tokenId)) ?? null,
       ),
-    findByFamily: vi.fn().mockReturnValue(positions),
     findOpen: vi.fn().mockReturnValue(positions.filter((entry) => entry.status === "open")),
     findDust: vi.fn().mockReturnValue(positions.filter((entry) => entry.status === "dust")),
     findAll: vi.fn().mockReturnValue(positions),
@@ -300,8 +138,6 @@ const mockDb = {
 
 describe("RiskInventoryModule", () => {
   let bus: InProcessEventBus;
-  let rulesProvider: ReturnType<typeof createMockRulesProvider>;
-  let familyStateRepo: ReturnType<typeof createMockFamilyStateRepo>;
   let positionRepo: ReturnType<typeof createMockPositionRepo>;
   let lotRepo: ReturnType<typeof createMockLotRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
@@ -311,8 +147,6 @@ describe("RiskInventoryModule", () => {
   function createModule(liveLiteGuard?: LiveLiteGuard) {
     return new RiskInventoryModule({
       bus,
-      rulesProvider,
-      familyStateRepo,
       positionRepo,
       inventoryLotRepo: lotRepo,
       orderRepo,
@@ -325,8 +159,6 @@ describe("RiskInventoryModule", () => {
 
   beforeEach(() => {
     bus = new InProcessEventBus();
-    rulesProvider = createMockRulesProvider();
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState());
     positionRepo = createMockPositionRepo();
     lotRepo = createMockLotRepo();
     orderRepo = createMockOrderRepo();
@@ -366,174 +198,6 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
-  it("approves exit signal regardless of exposure limits", async () => {
-    // Max out exposure
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ openValueUsdc: 999, openPositionCount: 99 }),
-    );
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  // ─── Signal rejection: exposure limits ────────────────────────────
-
-  it("allows entry when only active family position is below the exchange minimum size", async () => {
-    const legacyToken = createTokenId("tok-legacy-open");
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 1 }));
-    rulesProvider = createMockRulesProvider(makeRuleBundle({ maxActiveMarkets: 1 }));
-    positionRepo = createMockPositionRepo({
-      positionId: createPositionId("pos-legacy-open"),
-      tokenId: legacyToken,
-      conditionId: COND_ID,
-      familyId: FAM_ID,
-      side: "buy",
-      size: 1,
-      avgEntryPrice: 0.2,
-      costBasisUsdc: 0.2,
-      currentValueUsdc: 0.2,
-      realizedPnl: 0,
-      status: "open",
-      entryStyle: null,
-      openedAt: new Date().toISOString(),
-      closedAt: null,
-      updatedAt: new Date().toISOString(),
-    });
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [makeNormalizedMarket(legacyToken, 5)],
-      timestamp: Date.now(),
-    });
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ tokenId: createTokenId("tok-new-open") }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("allows scale-in to existing market even when max active markets reached", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ activeMarketCount: 5 }));
-    // Existing position for this token — scale-in, not a new market
-    const existingPos: Position = {
-      positionId: createPositionId("pos-1"),
-      tokenId: TOK_ID,
-      conditionId: COND_ID,
-      familyId: FAM_ID,
-      side: "buy",
-      size: 10,
-      avgEntryPrice: 0.4,
-      costBasisUsdc: 4,
-      currentValueUsdc: 5,
-      realizedPnl: 0,
-      status: "open",
-      entryStyle: null,
-      openedAt: new Date().toISOString(),
-      closedAt: null,
-      updatedAt: new Date().toISOString(),
-    };
-    positionRepo = createMockPositionRepo(existingPos);
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "scale-in" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("allows entry when only dust family position is below the exchange minimum size", async () => {
-    const dustToken = createTokenId("tok-dust-legacy");
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ openDustCount: 1 }));
-    rulesProvider = createMockRulesProvider(makeRuleBundle({ maxDustPositions: 1 }));
-    positionRepo = createMockPositionRepo({
-      positionId: createPositionId("pos-dust-legacy"),
-      tokenId: dustToken,
-      conditionId: COND_ID,
-      familyId: FAM_ID,
-      side: "buy",
-      size: 1,
-      avgEntryPrice: 0.2,
-      costBasisUsdc: 0.2,
-      currentValueUsdc: 0.2,
-      realizedPnl: 0,
-      status: "dust",
-      entryStyle: null,
-      openedAt: new Date().toISOString(),
-      closedAt: null,
-      updatedAt: new Date().toISOString(),
-    });
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [makeNormalizedMarket(dustToken, 5)],
-      timestamp: Date.now(),
-    });
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ tokenId: createTokenId("tok-new-after-dust") }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("skips tail ratio check when realizedPnl is non-positive", async () => {
-    // realizedPnl = tailAdjustedPnlLive + currentTailCostUsdc = -20 + 5 = -15
-    // ratio check skipped — no division by non-positive
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ tailAdjustedPnlLive: -20, currentTailCostUsdc: 5 }),
-    );
-    mod = createModule();
-    await mod.start();
-
-    const rejected: any[] = [];
-    bus.subscribe("SignalRejected", async (p) => {
-      rejected.push(p);
-    });
-
-    await bus.publish("SignalProduced", { signal: makeSignal() });
-
-    const ratioRejection = rejected.find((r: any) => r.reason.includes("tail cost ratio"));
-    expect(ratioRejection).toBeUndefined();
-
-    await mod.stop();
-  });
-
   // ─── Fill handling: buy ───────────────────────────────────────────
 
   it("creates new position on buy fill", async () => {
@@ -542,10 +206,6 @@ describe("RiskInventoryModule", () => {
     const posUpdates: any[] = [];
     bus.subscribe("PositionUpdated", async (p) => {
       posUpdates.push(p);
-    });
-    const expChanges: any[] = [];
-    bus.subscribe("FamilyExposureChanged", async (p) => {
-      expChanges.push(p);
     });
 
     await bus.publish("FillReceived", {
@@ -561,7 +221,6 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       feeRateBps: 0,
-      familyId: FAM_ID,
       signalReason: null,
       timestamp: Date.now(),
     });
@@ -575,10 +234,6 @@ describe("RiskInventoryModule", () => {
 
     // Lot was created
     expect(lotRepo.save).toHaveBeenCalledTimes(1);
-
-    // Family exposure was updated
-    expect(expChanges).toHaveLength(1);
-    expect(familyStateRepo.save).toHaveBeenCalled();
 
     await mod.stop();
   });
@@ -604,7 +259,6 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       feeRateBps: 0,
-      familyId: FAM_ID,
       signalReason: "spray-entry",
       timestamp: Date.now(),
     });
@@ -636,7 +290,6 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       feeRateBps: 0,
-      familyId: FAM_ID,
       signalReason: "probe-entry",
       timestamp: Date.now(),
     });
@@ -652,7 +305,7 @@ describe("RiskInventoryModule", () => {
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
       conditionId: COND_ID,
-      familyId: FAM_ID,
+
       side: "buy",
       size: 10,
       avgEntryPrice: 0.4,
@@ -682,7 +335,6 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       feeRateBps: 0,
-      familyId: FAM_ID,
       signalReason: null,
       timestamp: Date.now(),
     });
@@ -703,7 +355,7 @@ describe("RiskInventoryModule", () => {
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
       conditionId: COND_ID,
-      familyId: FAM_ID,
+
       side: "buy",
       size: 10,
       avgEntryPrice: 0.4,
@@ -723,7 +375,7 @@ describe("RiskInventoryModule", () => {
       lotId: createLotId("lot-1"),
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
-      familyId: FAM_ID,
+
       side: "buy",
       size: 10,
       remainingSize: 5, // 5 remaining after consuming 5
@@ -761,7 +413,6 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0.01,
       feeRateBps: 0,
-      familyId: FAM_ID,
       signalReason: null,
       timestamp: Date.now(),
     });
@@ -784,7 +435,7 @@ describe("RiskInventoryModule", () => {
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
       conditionId: COND_ID,
-      familyId: FAM_ID,
+
       side: "buy",
       size: 10,
       avgEntryPrice: 0.4,
@@ -803,7 +454,7 @@ describe("RiskInventoryModule", () => {
       lotId: createLotId("lot-1"),
       positionId: createPositionId("pos-1"),
       tokenId: TOK_ID,
-      familyId: FAM_ID,
+
       side: "buy",
       size: 10,
       remainingSize: 0,
@@ -838,7 +489,6 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       feeRateBps: 0,
-      familyId: FAM_ID,
       signalReason: null,
       timestamp: Date.now(),
     });
@@ -849,41 +499,6 @@ describe("RiskInventoryModule", () => {
     expect(updatedPos.closedAt).not.toBeNull();
     // Realized PnL: (10 * 0.6) - (10 * 0.4) = 6 - 4 = 2
     expect(updatedPos.realizedPnl).toBeCloseTo(2, 2);
-
-    await mod.stop();
-  });
-
-  // ─── Family exposure update ───────────────────────────────────────
-
-  it("publishes FamilyExposureChanged after fill", async () => {
-    await mod.start();
-
-    const changes: any[] = [];
-    bus.subscribe("FamilyExposureChanged", async (p) => {
-      changes.push(p);
-    });
-
-    await bus.publish("FillReceived", {
-      fillId: createFillId("fill-1"),
-      orderId: createOrderId("ord-1"),
-      clientOrderId: "plk_abc" as ClientOrderId,
-      tokenId: TOK_ID,
-      conditionId: COND_ID,
-      side: "buy" as const,
-      price: 0.5,
-      size: 10,
-      sizeUsdc: 5,
-      liquidityRole: "unknown",
-      fee: 0,
-      feeRateBps: 0,
-      familyId: FAM_ID,
-      signalReason: null,
-      timestamp: Date.now(),
-    });
-
-    expect(changes).toHaveLength(1);
-    expect(changes[0].familyId).toBe(FAM_ID);
-    expect(changes[0].familyState).toBeDefined();
 
     await mod.stop();
   });
@@ -899,7 +514,6 @@ describe("RiskInventoryModule", () => {
       clientOrderId: "plk_test" as ClientOrderId,
       tokenId: TOK_ID,
       conditionId: COND_ID,
-      familyId: FAM_ID,
       side: "buy" as const,
       price: 0.5,
       size: 10,
@@ -926,7 +540,6 @@ describe("RiskInventoryModule", () => {
       clientOrderId: "plk_err" as ClientOrderId,
       tokenId: createTokenId("tok-nonexistent"),
       conditionId: COND_ID,
-      familyId: FAM_ID,
       side: "sell" as const,
       price: 0.5,
       size: 10,
@@ -984,11 +597,10 @@ describe("RiskInventoryModule", () => {
 
   // ─── Null-family signals (algo critical path) ─────────────
   //
-  // Per design spec docs/superpowers/specs/2026-04-16-remove-familyid-critical-path-design.md
-  // the algo trading path treats familyId as an optional annotation. Signals with
-  // familyId = null must flow through the risk gate using only token-level checks
-  // (open-order dedup, token in-flight limit, min order size). Family rules,
-  // FamilyState, and live-lite family allowlist MUST NOT be consulted.
+  // Per design spec: the algo trading path must flow through the risk gate
+  // using only token-level checks (open-order dedup, token in-flight limit,
+  // min order size). Family rules and live-lite family allowlist MUST NOT
+  // be consulted.
 
   describe("null-family signals", () => {
     it("approves a null-family buy signal when token-level checks pass", async () => {
@@ -1004,25 +616,11 @@ describe("RiskInventoryModule", () => {
         rejected.push(p);
       });
 
-      await bus.publish("SignalProduced", { signal: makeSignal({ familyId: null }) });
+      await bus.publish("SignalProduced", { signal: makeSignal() });
 
       expect(rejected).toHaveLength(0);
       expect(approved).toHaveLength(1);
-      expect(approved[0].signal.familyId).toBeNull();
-
-      await mod.stop();
-    });
-
-    it("does not consult rulesProvider.getRule for null-family signals", async () => {
-      mod = createModule();
-      await mod.start();
-
-      const getRuleSpy = rulesProvider.getRule as ReturnType<typeof vi.fn>;
-      getRuleSpy.mockClear();
-
-      await bus.publish("SignalProduced", { signal: makeSignal({ familyId: null }) });
-
-      expect(getRuleSpy).not.toHaveBeenCalled();
+      expect(approved[0].signal.tokenId).toBe(String(TOK_ID));
 
       await mod.stop();
     });
@@ -1035,7 +633,6 @@ describe("RiskInventoryModule", () => {
         clientOrderId: "plk_nullfam_open" as ClientOrderId,
         tokenId: TOK_ID,
         conditionId: COND_ID,
-        familyId: null,
         side: "buy",
         orderType: "GTC",
         postOnly: true,
@@ -1063,7 +660,7 @@ describe("RiskInventoryModule", () => {
         rejected.push(p);
       });
 
-      await bus.publish("SignalProduced", { signal: makeSignal({ familyId: null }) });
+      await bus.publish("SignalProduced", { signal: makeSignal() });
 
       expect(approved).toHaveLength(0);
       expect(rejected).toHaveLength(1);
@@ -1072,20 +669,19 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
-    it("skips family exposure recompute on fills with null familyId", async () => {
+    it("processes fills and creates a position", async () => {
       mod = createModule();
       await mod.start();
 
-      const exposureChanges: any[] = [];
-      bus.subscribe("FamilyExposureChanged", async (p) => {
-        exposureChanges.push(p);
+      const posUpdates: any[] = [];
+      bus.subscribe("PositionUpdated", async (p) => {
+        posUpdates.push(p);
       });
 
       await bus.publish("FillReceived", {
         fillId: createFillId("fill-nullfam"),
         orderId: createOrderId("ord-nullfam"),
         clientOrderId: "coid-nullfam" as ClientOrderId,
-        familyId: null,
         tokenId: TOK_ID,
         conditionId: COND_ID,
         side: "buy" as const,
@@ -1099,7 +695,8 @@ describe("RiskInventoryModule", () => {
         timestamp: Date.now(),
       });
 
-      expect(exposureChanges).toHaveLength(0);
+      expect(posUpdates).toHaveLength(1);
+      expect(posUpdates[0].position.size).toBe(10);
 
       await mod.stop();
     });
@@ -1127,104 +724,7 @@ describe("RiskInventoryModule", () => {
       approved.push(p);
     });
 
-    await bus.publish("SignalProduced", { signal: makeSignal() }); // familyId = FAM_ID = "fam-btc"
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("approves fee-enabled entry families in live-lite relayer mode when post-only is available", async () => {
-    rulesProvider = createMockRulesProvider(
-      makeRuleBundle(undefined, {
-        primaryCategory: "crypto",
-        feeTier: "fee-enabled",
-        liveWalletRequirement: "relayer-required",
-        requiresPostOnlyForLive: true,
-      }),
-    );
-    const liveLiteGuard = new LiveLiteGuard({
-      familyAllowlist: ["fam-btc"],
-      maxFamilies: 2,
-      maxOpenValueUsdc: 500,
-      maxOrderUsdc: 50,
-      maxActiveMarkets: 3,
-      walletMode: "relayer",
-      minOrderUsdc: 2,
-    });
-    mod = createModule(liveLiteGuard);
-    await mod.start();
-
-    const approved: any[] = [];
-    const rejected: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-    bus.subscribe("SignalRejected", async (p) => {
-      rejected.push(p);
-    });
-
     await bus.publish("SignalProduced", { signal: makeSignal() });
-
-    expect(rejected).toHaveLength(0);
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("approves signal for allowlisted family in live-lite mode", async () => {
-    rulesProvider = createMockRulesProvider(
-      makeRuleBundle(undefined, {
-        primaryCategory: "geopolitics",
-        feeTier: "fee-free",
-        liveWalletRequirement: "eoa-ok",
-        requiresPostOnlyForLive: false,
-      }),
-    );
-    const liveLiteGuard = new LiveLiteGuard({
-      familyAllowlist: ["fam-btc"],
-      maxFamilies: 2,
-      maxOpenValueUsdc: 500,
-      maxOrderUsdc: 50,
-      maxActiveMarkets: 3,
-    });
-    mod = createModule(liveLiteGuard);
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", { signal: makeSignal() }); // familyId = fam-btc
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("approves exit signal (live-lite caps no longer gate at risk module)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(
-      makeFamilyState({ openValueUsdc: 999, activeMarketCount: 99 }),
-    );
-    const liveLiteGuard = new LiveLiteGuard({
-      familyAllowlist: ["fam-btc"],
-      maxFamilies: 2,
-      maxOpenValueUsdc: 1,
-      maxOrderUsdc: 50,
-      maxActiveMarkets: 1,
-    });
-    mod = createModule(liveLiteGuard);
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
-    });
 
     expect(approved).toHaveLength(1);
 
@@ -1257,7 +757,6 @@ describe("RiskInventoryModule", () => {
       liquidityRole: "unknown",
       fee: 0,
       feeRateBps: 0,
-      familyId: FAM_ID,
       signalReason: null,
       timestamp: Date.now(),
     });
@@ -1270,180 +769,6 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
-  // ─── Tail-adjusted PnL gating ─────────────────────────────────
-
-  it("allows scale-in when tailAdjustedPnlLive <= 0 but requirePositiveRecycleHistoryForScale is false", async () => {
-    // Default bundle has requirePositiveRecycleHistoryForScale: false
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 0 }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "scale-in" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("approves heavy-scale when family is healthy (tailAdjustedPnlLive > 0)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 10 }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "heavy-scale" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("approves probe-entry when tailAdjustedPnlLive is zero (cold start)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 0 }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "probe-entry" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("approves probe-entry when tailAdjustedPnlLive < 0 (probe-only mode)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -1 }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "probe-entry" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("approves two-sided-entry when tailAdjustedPnlLive is zero (cold start)", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: 0 }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "two-sided-entry" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("allows confirm-scale for proven non-threshold families with negative tail", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -5 }));
-    rulesProvider = createMockRulesProvider(
-      makeRuleBundle(
-        undefined,
-        {
-          familyKey: "elon-musk-of-tweets",
-          primaryCategory: "other",
-          regime: "social-activity",
-          strategyProfile: "event-driven" as any,
-        },
-        {
-          evidenceStatus: "partial",
-          evidenceScore: 80,
-          localTradeCount: 250,
-        },
-      ),
-    );
-    const bundle = rulesProvider.getRule(FAM_ID)!;
-    bundle.rules.scaleIn.requirePositiveRecycleHistoryForScale = true;
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "confirm-scale" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("allows scale-in in derived probe-only when requirePositiveRecycleHistoryForScale is false", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -5 }));
-    // Default bundle has requirePositiveRecycleHistoryForScale: false
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ reason: "scale-in" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
-  it("exit signal approved under degraded tail state", async () => {
-    familyStateRepo = createMockFamilyStateRepo(makeFamilyState({ tailAdjustedPnlLive: -50 }));
-    mod = createModule();
-    await mod.start();
-
-    const approved: any[] = [];
-    bus.subscribe("SignalApproved", async (p) => {
-      approved.push(p);
-    });
-
-    await bus.publish("SignalProduced", {
-      signal: makeSignal({ side: "sell", reason: "repricing-exit" }),
-    });
-
-    expect(approved).toHaveLength(1);
-
-    await mod.stop();
-  });
-
   // ─── Wave 5: mark-to-market (P2-1) ─────────────────────────────────
 
   describe("mark-to-market (P2-1)", () => {
@@ -1452,7 +777,7 @@ describe("RiskInventoryModule", () => {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
         conditionId: COND_ID,
-        familyId: FAM_ID,
+  
         side: "buy",
         size: 100,
         avgEntryPrice: 0.05,
@@ -1479,9 +804,8 @@ describe("RiskInventoryModule", () => {
             eventSlug: null,
             question: "test?",
             outcome: "YES" as const,
-            familyId: FAM_ID,
-            familyKey: "btc",
-            regime: "threshold" as Regime,
+
+            regime: "threshold" as any,
             horizon: "daily",
             endDate: null,
             active: true,
@@ -1493,6 +817,7 @@ describe("RiskInventoryModule", () => {
             midPrice: 0.08,
             spread: 0.02,
             snapshotTs: Date.now(),
+            eventMarketCount: 1,
           },
         ],
         timestamp: Date.now(),
@@ -1514,7 +839,7 @@ describe("RiskInventoryModule", () => {
         positionId: createPositionId("pos-dustify"),
         tokenId: TOK_ID,
         conditionId: COND_ID,
-        familyId: FAM_ID,
+  
         side: "buy",
         size: 1,
         avgEntryPrice: 0.8,
@@ -1540,9 +865,8 @@ describe("RiskInventoryModule", () => {
             eventSlug: null,
             question: "test?",
             outcome: "YES" as const,
-            familyId: FAM_ID,
-            familyKey: "btc",
-            regime: "threshold" as Regime,
+
+            regime: "threshold" as any,
             horizon: "daily",
             endDate: null,
             active: true,
@@ -1554,6 +878,7 @@ describe("RiskInventoryModule", () => {
             midPrice: 0.2,
             spread: 0.02,
             snapshotTs: Date.now(),
+            eventMarketCount: 1,
           },
         ],
         timestamp: Date.now(),
@@ -1574,7 +899,7 @@ describe("RiskInventoryModule", () => {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
         conditionId: COND_ID,
-        familyId: FAM_ID,
+  
         side: "buy",
         size: 100,
         avgEntryPrice: 0.05,
@@ -1601,9 +926,8 @@ describe("RiskInventoryModule", () => {
             eventSlug: null,
             question: "test?",
             outcome: "YES" as const,
-            familyId: FAM_ID,
-            familyKey: "btc",
-            regime: "threshold" as Regime,
+
+            regime: "threshold" as any,
             horizon: "daily",
             endDate: null,
             active: true,
@@ -1615,6 +939,7 @@ describe("RiskInventoryModule", () => {
             midPrice: null,
             spread: null,
             snapshotTs: Date.now(),
+            eventMarketCount: 1,
           },
         ],
         timestamp: Date.now(),
@@ -1651,15 +976,11 @@ describe("RiskInventoryModule", () => {
       expect(diag.signalsProcessed).toBe(2);
       expect(diag.signalsApproved).toBe(1);
       expect(diag.signalsRejected).toBe(1);
-      expect(diag.families[String(FAM_ID)]).toBeDefined();
-      expect(diag.families[String(FAM_ID)]!.signalsApproved).toBe(1);
-      expect(diag.families[String(FAM_ID)]!.signalsRejected).toBe(1);
-      expect(diag.families[String(FAM_ID)]!.lastRejectionReason).toContain("internal error");
 
       await mod.stop();
     });
 
-    it("tracks last signal reason per family", async () => {
+    it("tracks last signal reason (approved signals increment counter)", async () => {
       await mod.start();
 
       await bus.publish("SignalProduced", {
@@ -1668,7 +989,8 @@ describe("RiskInventoryModule", () => {
       await bus.drain();
 
       const diag = mod.getDiagnostics();
-      expect(diag.families[String(FAM_ID)]!.lastSignalReason).toBe("probe-entry");
+      expect(diag.signalsApproved).toBe(1);
+      expect(diag.signalsProcessed).toBe(1);
 
       await mod.stop();
     });
@@ -1678,7 +1000,7 @@ describe("RiskInventoryModule", () => {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
         conditionId: COND_ID,
-        familyId: FAM_ID,
+  
         side: "buy",
         size: 100,
         avgEntryPrice: 0.05,
@@ -1704,9 +1026,8 @@ describe("RiskInventoryModule", () => {
             eventSlug: null,
             question: "test?",
             outcome: "YES" as const,
-            familyId: FAM_ID,
-            familyKey: "btc",
-            regime: "threshold" as Regime,
+
+            regime: "threshold" as any,
             horizon: "daily",
             endDate: null,
             active: true,
@@ -1718,6 +1039,7 @@ describe("RiskInventoryModule", () => {
             midPrice: 0.08,
             spread: 0.02,
             snapshotTs: Date.now(),
+            eventMarketCount: 1,
           },
         ],
         timestamp: Date.now(),
@@ -1749,7 +1071,6 @@ describe("RiskInventoryModule", () => {
 
   describe("per-family in-flight limiter", () => {
     function makePlaceOrderRequested(
-      familyId: FamilyId = FAM_ID,
       signalReason: string | null = null,
       tokenId = TOK_ID,
     ) {
@@ -1767,7 +1088,6 @@ describe("RiskInventoryModule", () => {
           orderType: "GTC" as const,
           tickSize: 0.01,
           negRisk: false,
-          familyId,
           sequenceInTick: 0,
           signalReason,
         },
@@ -1802,7 +1122,7 @@ describe("RiskInventoryModule", () => {
       });
 
       // Put 1 buy in flight for TOK_ID
-      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested("probe-entry"));
       // Reject it — decrements tokenInFlight for TOK_ID
       await bus.publish("OrderRejected", {
         commandId: createCommandId("cmd-1"),
@@ -1811,7 +1131,6 @@ describe("RiskInventoryModule", () => {
         conditionId: COND_ID,
         reason: "insufficient balance",
         errorCode: "INSUFFICIENT_BALANCE",
-        familyId: FAM_ID,
         signalReason: null,
         timestamp: Date.now(),
       });
@@ -1832,7 +1151,7 @@ describe("RiskInventoryModule", () => {
       // Mock: order is "filled" (set before FillReceived, as importExchangeFills does)
       (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue({
         orderId: createOrderId("ord-1"),
-        familyId: FAM_ID,
+  
         status: "filled",
         size: 10,
       });
@@ -1848,7 +1167,6 @@ describe("RiskInventoryModule", () => {
         liquidityRole: "unknown" as const,
         fee: 0,
         feeRateBps: 0,
-        familyId: FAM_ID,
         signalReason: null as string | null,
         timestamp: Date.now(),
       };
@@ -1918,7 +1236,7 @@ describe("RiskInventoryModule", () => {
         rejected.push(p);
       });
 
-      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested("probe-entry"));
       await bus.publish("SignalProduced", { signal: makeSignal({ reason: "probe-entry" }) });
 
       expect(rejected).toHaveLength(1);
@@ -1935,7 +1253,7 @@ describe("RiskInventoryModule", () => {
         approved.push(p);
       });
 
-      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested("probe-entry"));
       await bus.publish("SignalProduced", {
         signal: makeSignal({
           tokenId: createTokenId("tok-no"),
@@ -1958,10 +1276,10 @@ describe("RiskInventoryModule", () => {
       });
 
       const orderId = createOrderId("ord-probe");
-      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested(FAM_ID, "probe-entry"));
+      await bus.publish("PlaceOrderRequested", makePlaceOrderRequested("probe-entry"));
       (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue({
         orderId,
-        familyId: FAM_ID,
+  
         status: "filled",
         signalReason: "probe-entry",
       });
@@ -1979,7 +1297,6 @@ describe("RiskInventoryModule", () => {
         liquidityRole: "unknown",
         fee: 0,
         feeRateBps: 0,
-        familyId: FAM_ID,
         signalReason: "probe-entry",
         timestamp: Date.now(),
       });
@@ -2001,7 +1318,7 @@ describe("RiskInventoryModule", () => {
           clientOrderId: "plk_open" as ClientOrderId,
           tokenId: TOK_ID,
           conditionId: COND_ID,
-          familyId: FAM_ID,
+    
           side: "buy",
           orderType: "GTC",
           postOnly: true,

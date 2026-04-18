@@ -8,7 +8,6 @@ import { SqliteOrderRepository } from "../repositories/order-repository.js";
 import {
   createOrderId,
   createTokenId,
-  createFamilyId,
   createConditionId,
   createBotRunId,
 } from "@plankton/domain";
@@ -25,7 +24,6 @@ function makeOrder(overrides?: Partial<Order>): Order {
     clientOrderId: "cloid-1" as ClientOrderId,
     tokenId: createTokenId("tok-1"),
     conditionId: createConditionId("cond-1"),
-    familyId: createFamilyId("fam-1"),
     side: "buy",
     orderType: "GTC",
     price: 0.55,
@@ -63,7 +61,6 @@ describe("SqliteOrderRepository", () => {
     expect(found!.orderId).toBe("ord-1");
     expect(found!.clientOrderId).toBe("cloid-1");
     expect(found!.tokenId).toBe("tok-1");
-    expect(found!.familyId).toBe("fam-1");
     expect(found!.side).toBe("buy");
     expect(found!.orderType).toBe("GTC");
     expect(found!.postOnly).toBe(false);

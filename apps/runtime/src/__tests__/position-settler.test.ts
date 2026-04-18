@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createFamilyId, createPositionId } from "@plankton/domain";
+import { createTokenId, createPositionId } from "@plankton/domain";
 import type {
   PositionRepository,
   InventoryLotRepository,
@@ -16,7 +16,6 @@ import { PositionSettler } from "../modules/resolution/position-settler.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const FAM = createFamilyId("fam-1");
 const TOK_UP = createTokenId("tok-up");
 const TOK_DOWN = createTokenId("tok-down");
 const POS_UP = createPositionId("pos-up");
@@ -29,7 +28,6 @@ function makePosition(overrides?: Partial<Position>): Position {
   return {
     positionId: POS_UP,
     tokenId: TOK_UP,
-    familyId: FAM,
     status: "open",
     side: "buy",
     size: 100,
@@ -58,7 +56,6 @@ function makeCandidate(
     outcome,
     endDate: "2026-01-01T00:00:00Z",
     positionId,
-    familyId: FAM,
   };
 }
 
@@ -92,7 +89,6 @@ function createMockPositionRepo(positionMap: Map<string, Position>): PositionRep
     findOpen: vi.fn().mockReturnValue([]),
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
-    findByFamily: vi.fn().mockReturnValue([]),
     findOpenByEntryStyle: vi.fn().mockReturnValue([]),
   } as unknown as PositionRepository;
 }
@@ -239,7 +235,6 @@ describe("PositionSettler", () => {
         tokenId,
         conditionId,
         slug: "some-market",
-        familyId: FAM,
         outcome: "YES",
         tickSize: 0.01,
         negRisk: false,
@@ -255,9 +250,10 @@ describe("PositionSettler", () => {
         findByTokenId: vi.fn().mockReturnValue(null),
         findByTokenIds: vi.fn().mockReturnValue([]),
         findActive: vi.fn().mockReturnValue([]),
-        findByFamily: vi.fn().mockReturnValue([]),
         findAll: vi.fn().mockReturnValue([]),
         deactivate: vi.fn(),
+        findTrackedForPricing: vi.fn().mockReturnValue([]),
+        findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
         save: vi.fn(),
       } as unknown as MarketRepository;
     }
@@ -358,7 +354,6 @@ describe("PositionSettler", () => {
       const pos = makePosition({
         positionId: POS,
         tokenId: TOK,
-        familyId: null,
         avgEntryPrice: 0.3,
         size: 25,
       });
@@ -377,7 +372,6 @@ describe("PositionSettler", () => {
 
       const results = settler.settle(resolution);
       expect(results).toHaveLength(1);
-      expect(results[0]!.familyId).toBeNull();
 
       expect(runSpy).toHaveBeenCalledTimes(1);
       const familyIdArg = runSpy.mock.calls[0]![4];
@@ -392,7 +386,6 @@ describe("PositionSettler", () => {
       const pos = makePosition({
         positionId: POS,
         tokenId: TOK,
-        familyId: null,
         avgEntryPrice: 0.12,
         size: 50,
       });
@@ -405,7 +398,6 @@ describe("PositionSettler", () => {
                   tokenId: TOK,
                   conditionId: CONDITION,
                   slug: "some-market",
-                  familyId: null,
                   outcome: "YES",
                   tickSize: 0.01,
                   negRisk: false,
@@ -419,16 +411,16 @@ describe("PositionSettler", () => {
         findByTokenId: vi.fn().mockReturnValue(null),
         findByTokenIds: vi.fn().mockReturnValue([]),
         findActive: vi.fn().mockReturnValue([]),
-        findByFamily: vi.fn().mockReturnValue([]),
         findAll: vi.fn().mockReturnValue([]),
         deactivate: vi.fn(),
+        findTrackedForPricing: vi.fn().mockReturnValue([]),
+        findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
         save: vi.fn(),
       } as unknown as MarketRepository;
       const settler = new PositionSettler(positionRepo, lotRepo, spyDb as any, marketRepo);
 
       const results = settler.settleAlgoRedeem([CONDITION]);
       expect(results).toHaveLength(1);
-      expect(results[0]!.familyId).toBeNull();
 
       expect(runSpy).toHaveBeenCalledTimes(1);
       const familyIdArg = runSpy.mock.calls[0]![4];

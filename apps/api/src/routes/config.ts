@@ -1,13 +1,8 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import {
-  applyFamilyConfigImport,
-  computeConfigChecksum,
-  readFamilyRuleDefaults,
-} from "@plankton/db";
-import { parseFamilyRulesYaml } from "@plankton/config";
+import { readFamilyRuleDefaults } from "@plankton/db";
 import { stringify as yamlStringify } from "yaml";
-import { ok, ApiError } from "../errors.js";
+import { ok } from "../errors.js";
 
 interface ConfigOpts {
   controlDb: Database.Database;
@@ -17,51 +12,6 @@ interface ConfigOpts {
 
 export const configRoutes: FastifyPluginAsync<ConfigOpts> = async (app, opts) => {
   const db = opts.controlDb;
-
-  // ── POST /config/import ─────────────────────────────────────────────
-  app.post<{ Body: { yaml: string; dryRun?: boolean } }>("/config/import", async (request) => {
-    const body = (request.body ?? {}) as { yaml?: string; dryRun?: boolean };
-    if (!body.yaml || typeof body.yaml !== "string") {
-      throw new ApiError(400, "yaml field is required", "MISSING_FIELD");
-    }
-    const yaml = body.yaml;
-
-    let loaded;
-    try {
-      loaded = parseFamilyRulesYaml(yaml, "import");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new ApiError(400, msg, "YAML_PARSE_ERROR");
-    }
-
-    const dryRun = body.dryRun === true;
-
-    const result = dryRun
-      ? applyFamilyConfigImport(db, loaded, {
-          dryRun: true,
-          sourcePath: null,
-          sourceChecksum: computeConfigChecksum(yaml),
-          importedBy: "api",
-        })
-      : db.transaction(() =>
-          applyFamilyConfigImport(db, loaded, {
-            dryRun: false,
-            sourcePath: null,
-            sourceChecksum: computeConfigChecksum(yaml),
-            importedBy: "api",
-          }),
-        )();
-
-    if (result.conflicts.length > 0) {
-      throw new ApiError(
-        409,
-        `family_key mismatch for: ${result.conflicts.join(", ")}`,
-        "FAMILY_KEY_CONFLICT",
-      );
-    }
-
-    return ok({ ...result, dryRun, familyCount: loaded.families.length });
-  });
 
   // ── GET /config/export ──────────────────────────────────────────────
   app.get<{ Querystring: { format?: string } }>("/config/export", async (request, reply) => {

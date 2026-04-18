@@ -32,26 +32,19 @@ import {
   SqliteFillRepository,
   SqlitePositionRepository,
   SqliteInventoryLotRepository,
-  SqliteFamilyStateRepository,
-  SqliteFamilyCatalogRepository,
   SqliteOperatorCommandRepository,
   SqliteOperatorActionRepository,
   SqliteMarketSnapshotRepository,
+  SelectionRuleRepository,
   SqliteRiskEventRepository,
-  SqliteFamilyEvidenceRepository,
-  SqliteFamilyRulesSnapshotRepository,
   SqliteStateTransitionRepository,
-  SqliteFamilyDeploymentRepository,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
-import type { FamilyState } from "@plankton/domain";
 import {
   createBotRunId,
-  slugPatternToRegex,
   ENTRY_REASONS,
   resolveTradingState,
 } from "@plankton/domain";
-import { migrateOrphanedPositions } from "./universe-migration.js";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
@@ -78,7 +71,6 @@ import { StalePruningModule } from "./modules/pruning/stale-pruning-module.js";
 import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
 import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
 import { PositionSettler } from "./modules/resolution/position-settler.js";
-import { FamilyExposureCalculator } from "./modules/risk-inventory/family-exposure.js";
 import { GammaResolutionClient } from "@plankton/exchange";
 import {
   SqliteMarketResolutionRepository,
@@ -88,22 +80,16 @@ import {
 } from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
-import { DbFamilyRulesProvider } from "./db-family-rules-provider.js";
 import { maybeBootstrapFromYaml } from "./bootstrap-import.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
-import { FamilyEvidenceEngine } from "./modules/evidence/evidence-engine.js";
-import { ScoreComputer } from "./modules/evidence/score-computer.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { resolveLiveLiteMaxFamilies } from "./live-lite-envelope.js";
 import { installConsoleRedaction } from "./console-redaction.js";
-import { HotFamilyExecutionModule } from "./modules/hot-lane/hot-family-execution-module.js";
-import { HotQuoteBusModule } from "./modules/hot-lane/hot-quote-bus-module.js";
-import { FastExitCleanupModule } from "./modules/hot-lane/fast-exit-cleanup-module.js";
-import { HotMarketDataModule } from "./modules/hot-lane/hot-market-data-module.js";
+import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
 import type {
   CandidateBookRefreshObserved,
   CandidateBookUsageObserved,
@@ -230,25 +216,23 @@ async function main(): Promise<void> {
     position: new SqlitePositionRepository(ledgerConn.db),
     inventoryLot: new SqliteInventoryLotRepository(ledgerConn.db),
     mergeLedger: new SqliteMergeLedgerRepository(ledgerConn.db),
-    familyState: new SqliteFamilyStateRepository(ledgerConn.db),
     marketSnapshot: new SqliteMarketSnapshotRepository(ledgerConn.db),
     riskEvent: new SqliteRiskEventRepository(ledgerConn.db),
     // Control-side
-    familyCatalog: new SqliteFamilyCatalogRepository(controlConn.db),
     operatorCommand: new SqliteOperatorCommandRepository(controlConn.db),
     operatorAction: new SqliteOperatorActionRepository(controlConn.db),
-    familyEvidence: new SqliteFamilyEvidenceRepository(controlConn.db),
-    familyRulesSnapshot: new SqliteFamilyRulesSnapshotRepository(controlConn.db),
     stateTransition: new SqliteStateTransitionRepository(controlConn.db),
     // Algo decision engine — algoRules lives in control.db, legState in ledger.db
     algoRules: new SqliteAlgoRulesRepository(controlConn.db),
     legState: new SqliteLegStateRepository(ledgerConn.db),
   };
 
-  // 4. Family rules — DB-backed provider
-  const rulesProvider = new DbFamilyRulesProvider(controlConn.db, activeProfile);
-  const families = rulesProvider.getAllFamilies();
-  log.info({ count: families.length }, "family rules loaded from control.db");
+  // 3b. Selection rule engine — version-polled singleton for Phase 4 scanner wiring.
+  // Constructed here so it is available to the module DI graph; Phase 4 plugs it
+  // into the scanner and MarketSelectionCache. Not used by scanner yet (Phase 3).
+  const selectionRuleRepo = new SelectionRuleRepository(controlConn.db);
+  const selectionRuleEngine = new RefreshableSelectionRuleEngine(selectionRuleRepo, activeProfile);
+  log.info({ version: selectionRuleRepo.getVersion() }, "selection rule engine ready");
 
   // Read initial balance from profile_settings (control.db) instead of YAML
   const settingsRow = controlConn.db
@@ -270,49 +254,6 @@ async function main(): Promise<void> {
 
   if (runtimeMode !== "live-lite") {
     log.info({ initialBalanceUsdc, runtimeMode }, "simulated exchange balance configured");
-  }
-
-  // 5. Seed family catalog + ensure baseline runtime state
-  repos.familyCatalog.upsertAll(families);
-  log.info({ count: families.length }, "family catalog seeded");
-
-  for (const identity of families) {
-    const existing = repos.familyState.get(identity.familyId);
-    if (!existing) {
-      const baseline: FamilyState = {
-        familyId: identity.familyId,
-        openValueUsdc: 0,
-        openPositionCount: 0,
-        openDustCount: 0,
-        activeMarketCount: 0,
-        currentTailCostUsdc: 0,
-        tailAdjustedPnlLive: 0,
-        lastEntryTs: null,
-        lastExitTs: null,
-        firstNegativeTailAt: null,
-        updatedAt: new Date().toISOString(),
-      };
-      repos.familyState.save(baseline);
-    }
-  }
-  log.info("family runtime state baseline ensured");
-
-  // 5.5. Migrate orphaned positions — close positions whose market no longer
-  // matches the family's current slug pattern or horizon filter. Without this,
-  // stale positions from a previous universe (e.g. will-bitcoin-reach-*) would
-  // permanently consume family caps and block new entries.
-  const migration = migrateOrphanedPositions({
-    positionRepo: repos.position,
-    marketRepo: repos.market,
-    lotRepo: repos.inventoryLot,
-    families,
-    log,
-  });
-  if (migration.closedCount > 0) {
-    log.info(
-      { closedCount: migration.closedCount },
-      "universe migration closed orphaned positions",
-    );
   }
 
   // 6. Create event bus
@@ -459,19 +400,9 @@ async function main(): Promise<void> {
     log.warn({ alert }, "runtime infra alert recorded");
   };
 
-  // Build slug filter dynamically from rules manager so new families added via
-  // rules_reload are picked up without restart.
-  const slugFilter = (slug: string): boolean => {
-    const currentFamilies = rulesProvider.getAllFamilies();
-    return currentFamilies.some((f) => {
-      if (!f.slugPattern) return false;
-      try {
-        return slugPatternToRegex(f.slugPattern).test(slug);
-      } catch {
-        return false;
-      }
-    });
-  };
+  // Phase 6: family slug patterns removed; selection rules gate market discovery.
+  // Accept all slugs — AlgoDecisionModule + SelectedMarketCache handle eligibility.
+  const slugFilter = (_slug: string): boolean => true;
 
   const { marketDataGateway, exchangeGateway, modeLabel, marketDataSource, executionMode } =
     createGateways({
@@ -510,11 +441,11 @@ async function main(): Promise<void> {
   const discoveryGateway = new GammaMarketDiscoveryGateway();
   const marketScannerModule = new MarketScannerModule({
     discoveryGateway,
-    familyRules: rulesProvider,
     marketRepo: repos.market,
     bus,
     log,
     scanIntervalMs: 5 * 60 * 1000,
+    selectionRuleEngine,
     positionRepo: repos.position,
     orderRepo: repos.order,
   });
@@ -532,7 +463,6 @@ async function main(): Promise<void> {
 
   const normalizationModule = new NormalizationModule({
     bus,
-    rulesProvider,
     marketRepo: repos.market,
     log,
   });
@@ -541,16 +471,12 @@ async function main(): Promise<void> {
   const commandPoller = new CommandPoller({
     commandRepo: repos.operatorCommand,
     actionRepo: repos.operatorAction,
-    familyStateRepo: repos.familyState,
     bus,
     log,
     getPaused: () => supervisorRef.current.isPaused(),
     setPaused: setPausedAndPersist,
     pollIntervalMs: 5_000,
-    rulesManager: rulesProvider,
-    normalizationModule,
     stateTransitionRepo: repos.stateTransition,
-    deploymentToggler: new SqliteFamilyDeploymentRepository(controlConn.db),
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });
 
@@ -571,7 +497,6 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     fillRepo: repos.fill,
     positionRepo: repos.position,
-    rulesProvider,
     log,
     botRunId,
     runtimeControl,
@@ -585,8 +510,6 @@ async function main(): Promise<void> {
   // 7g. Risk + Inventory module
   const riskInventoryModule = new RiskInventoryModule({
     bus,
-    rulesProvider,
-    familyStateRepo: repos.familyState,
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
     orderRepo: repos.order,
@@ -646,7 +569,7 @@ async function main(): Promise<void> {
   });
 
   // 7h2. Algo decision module (replaces legacy StrategyModule in the pipeline)
-  const selectedMarketCache = new MarketSelectionCache(bus);
+  const selectedMarketCache = new MarketSelectionCache(bus, selectionRuleEngine);
   selectedMarketCache.subscribe();
   const algoDecisionModule = new AlgoDecisionModule({
     bus,
@@ -668,48 +591,6 @@ async function main(): Promise<void> {
     candidateBookCache,
   });
 
-  const hotFamilyExecutionModule = candidateBookCache
-    ? new HotFamilyExecutionModule({
-        bus,
-        rulesProvider,
-        orderRepo: repos.order,
-        candidateBookCache,
-        log,
-        policy: { hotQuoteRefreshIntervalMs: 500 },
-      })
-    : null;
-  const hotMarketDataModule = new HotMarketDataModule({
-    bus,
-    gateway: marketDataGateway,
-    rulesProvider,
-    orderRepo: repos.order,
-    positionRepo: repos.position,
-    ...(candidateBookCache ? { candidateBookCache } : {}),
-    log,
-    policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
-  });
-  const hotQuoteBusModule = candidateBookCache
-    ? new HotQuoteBusModule({
-        bus,
-        rulesProvider,
-        orderRepo: repos.order,
-        candidateBookCache,
-        log,
-        policy: { hotQuoteRefreshIntervalMs: 500, maxTokensPerCycle: 120 },
-      })
-    : null;
-  const fastExitCleanupModule = candidateBookCache
-    ? new FastExitCleanupModule({
-        bus,
-        rulesProvider,
-        positionRepo: repos.position,
-        orderRepo: repos.order,
-        candidateBookCache,
-        log,
-        policy: { hotQuoteRefreshIntervalMs: 500 },
-      })
-    : null;
-
   // 7i. Reconciliation module
   const reconciliationModule = new ReconciliationModule({
     gateway: exchangeGateway,
@@ -717,7 +598,6 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     fillRepo: repos.fill,
     marketRepo: repos.market,
-    rulesProvider,
     log,
     reconcileIntervalMs: 60_000,
   });
@@ -730,7 +610,6 @@ async function main(): Promise<void> {
           marketRepo: repos.market,
           orderRepo: repos.order,
           fillRepo: repos.fill,
-          rulesProvider,
           log,
         })
       : null;
@@ -738,23 +617,6 @@ async function main(): Promise<void> {
   // 7j. Resolution module — detect resolved markets, settle positions
   const marketResolutionRepo = new SqliteMarketResolutionRepository(ledgerConn.db);
   const gammaResolutionClient = new GammaResolutionClient();
-  const exposureCalculator = new FamilyExposureCalculator(
-    repos.familyState,
-    repos.position,
-    repos.inventoryLot,
-    log,
-    rulesProvider,
-  );
-
-  // Recompute family state after universe migration — the migration only patches
-  // position status, doesn't recompute tail cost or tail-adjusted PnL. Recomputing
-  // all families is cheap at startup and ensures no stale state persists.
-  if (migration.closedCount > 0) {
-    for (const fam of families) {
-      exposureCalculator.recompute(fam.familyId, false);
-    }
-    log.info({ families: families.length }, "family state recomputed after universe migration");
-  }
 
   const resolutionDetector = new ResolutionDetector(
     repos.position,
@@ -775,8 +637,6 @@ async function main(): Promise<void> {
     marketRepo: repos.market,
     resolutionRepo: marketResolutionRepo,
     orderRepo: repos.order,
-    rulesProvider,
-    exposureCalculator,
     gammaClient: gammaResolutionClient,
     lotRepo: repos.inventoryLot,
     positionRepo: repos.position,
@@ -795,7 +655,6 @@ async function main(): Promise<void> {
   const stalePruningModule = new StalePruningModule({
     positionRepo: repos.position,
     marketRepo: repos.market,
-    rulesProvider,
     bus,
     log,
     checkIntervalMs: 10 * 60_000, // 10 minutes
@@ -824,7 +683,6 @@ async function main(): Promise<void> {
           gateway: exchangeGateway,
           fillRepo: repos.fill,
           orderRepo: repos.order,
-          rulesProvider,
           bus,
           log,
           pollIntervalMs: config.fillPollIntervalMs,
@@ -835,26 +693,12 @@ async function main(): Promise<void> {
         })
       : null;
 
-  // 7l2. Family evidence engine — periodic ledger-side scoring for deployed families
-  const scoreComputer = new ScoreComputer(
-    ledgerConn.db,
-    controlConn.db,
-    activeProfile as import("@plankton/domain").ProfileId,
-  );
-  const evidenceEngine = new FamilyEvidenceEngine({
-    bus,
-    log,
-    scoreComputer,
-    evidenceRepo: repos.familyEvidence,
-    rulesProvider,
-  });
-
   // 7l3. Profile runtime publisher — periodic rollup of family metrics to control.db
   const profilePublisher = new ProfileRuntimePublisher({
     controlDb: controlConn.db,
     ledgerDb: ledgerConn.db,
     profile: activeProfile,
-    deployedFamilyIds: () => rulesProvider.getAllFamilies().map((f) => String(f.familyId)),
+    deployedFamilyIds: () => [],
     getPaused: () => supervisorRef.current.isPaused(),
     log,
     intervalMs: 60_000,
@@ -873,7 +717,6 @@ async function main(): Promise<void> {
     ["market-data", marketDataModule],
     ["normalization", normalizationModule],
     ["risk-inventory", riskInventoryModule],
-    ["evidence-engine", evidenceEngine],
     ["profile-publisher", profilePublisher],
     ["reconciliation", reconciliationModule],
     ...(userOrderStreamModule
@@ -886,33 +729,6 @@ async function main(): Promise<void> {
       : []),
     ["leg-state-tracker", legStateTrackerModule],
     ["algo-decision", algoDecisionModule],
-    ...(hotMarketDataModule
-      ? [
-          ["hot-market-data", hotMarketDataModule] as [
-            string,
-            import("@plankton/domain").RuntimeModule,
-          ],
-        ]
-      : []),
-    ...(hotQuoteBusModule
-      ? [["hot-quote-bus", hotQuoteBusModule] as [string, import("@plankton/domain").RuntimeModule]]
-      : []),
-    ...(hotFamilyExecutionModule
-      ? [
-          ["hot-family-execution", hotFamilyExecutionModule] as [
-            string,
-            import("@plankton/domain").RuntimeModule,
-          ],
-        ]
-      : []),
-    ...(fastExitCleanupModule
-      ? [
-          ["fast-exit-cleanup", fastExitCleanupModule] as [
-            string,
-            import("@plankton/domain").RuntimeModule,
-          ],
-        ]
-      : []),
     ["resolution", resolutionModule],
     ["stale-pruning", stalePruningModule],
     ["inventory-manager", inventoryManagerModule],
@@ -966,7 +782,7 @@ async function main(): Promise<void> {
   bus.subscribe("OperatorCommandApplied", async (ev) => {
     riskEventWriter.onOperatorCommand(
       ev.action,
-      ev.targetFamilyId,
+      null,
       ev.commandDbId,
       ev.reason,
       ev.initiatorType,
@@ -1236,20 +1052,6 @@ async function main(): Promise<void> {
 
   bus.subscribe("HotQuoteUpdated", async ({ tokenIds }) => {
     conversionWindow.hotQuoteRefreshes += tokenIds.length;
-  });
-
-  bus.subscribe("HotLaneActionApplied", async ({ action }) => {
-    conversionWindow.hotLaneActionsByType.set(
-      action,
-      (conversionWindow.hotLaneActionsByType.get(action) ?? 0) + 1,
-    );
-  });
-
-  bus.subscribe("HotLaneStateChanged", async ({ nextState }) => {
-    conversionWindow.hotLaneStatesByState.set(
-      nextState,
-      (conversionWindow.hotLaneStatesByState.get(nextState) ?? 0) + 1,
-    );
   });
 
   // Scanner-layer metrics
@@ -1523,8 +1325,6 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
     legStateRepo: repos.legState,
-    familyStateRepo: repos.familyState,
-    rulesProvider,
     log,
     db: ledgerConn.db,
     botRunId,

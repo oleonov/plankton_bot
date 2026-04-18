@@ -222,6 +222,8 @@ export function mapMarket(raw: Record<string, unknown>): ClobMarket {
     negRisk: Boolean(raw.neg_risk),
     tickSize: Number(raw.minimum_tick_size ?? raw.tick_size ?? 0.01),
     volume24h: raw.volume_num != null ? Number(raw.volume_num) : null,
+    // CLOB endpoint returns individual markets (not event-grouped); treat as single-market event.
+    eventMarketCount: 1,
   };
 }
 
@@ -305,8 +307,16 @@ export function parseStringOrArray(value: unknown): string[] {
  * Map a Gamma API market response to the domain ClobMarket type.
  * Gamma uses flat arrays `clobTokenIds[]` and `outcomes[]` that must be
  * zipped together to form the `tokens` array.
+ *
+ * @param eventContext.slug - Parent event slug (null when unknown).
+ * @param eventContext.marketCount - Total number of markets in the parent Gamma event.
+ *   Used for STEP 2 fallback: no_match && eventMarketCount === 1 ⇒ INCLUDE.
+ *   Pass `event.markets.length` at the call site.
  */
-export function mapGammaMarket(raw: Record<string, unknown>, eventSlug?: string): ClobMarket {
+export function mapGammaMarket(
+  raw: Record<string, unknown>,
+  eventContext: { slug: string | null; marketCount: number } = { slug: null, marketCount: 1 },
+): ClobMarket {
   const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
   const outcomes = parseStringOrArray(raw.outcomes);
 
@@ -321,12 +331,13 @@ export function mapGammaMarket(raw: Record<string, unknown>, eventSlug?: string)
     tokens,
     question: String(raw.question ?? ""),
     slug: String(raw.slug ?? ""),
-    ...(eventSlug != null ? { eventSlug } : {}),
+    ...(eventContext.slug != null ? { eventSlug: eventContext.slug } : {}),
     endDate: String(raw.endDate ?? ""),
     active: Boolean(raw.active),
     negRisk: Boolean(raw.negRisk),
     tickSize: Number(raw.orderPriceMinTickSize ?? 0.01),
     volume24h: raw.volume24hr != null ? Number(raw.volume24hr) : null,
+    eventMarketCount: eventContext.marketCount,
   };
 }
 

@@ -17,6 +17,7 @@ function makeMarket(overrides?: Partial<ClobMarket>): ClobMarket {
     negRisk: false,
     tickSize: 0.01,
     volume24h: null,
+    eventMarketCount: 1,
     ...overrides,
   };
 }

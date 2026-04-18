@@ -10,7 +10,6 @@ import {
   createLotId,
   createPositionId,
   createTokenId,
-  createFamilyId,
   createFillId,
 } from "@plankton/domain";
 import type { InventoryLot } from "@plankton/domain";
@@ -58,7 +57,6 @@ function makeLot(overrides?: Partial<InventoryLot>): InventoryLot {
     lotId: createLotId("lot-1"),
     positionId: createPositionId("pos-1"),
     tokenId: createTokenId("tok-1"),
-    familyId: createFamilyId("fam-1"),
     side: "buy",
     size: 50,
     remainingSize: 50,

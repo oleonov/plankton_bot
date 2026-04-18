@@ -1,23 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
-  createFamilyId,
   createTokenId,
   createPositionId,
   createConditionId,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import type {
-  FamilyRulesProvider,
-  FamilyRuleBundle,
-  FamilyRules,
   Position,
   PositionRepository,
   MarketRepository,
-  Regime,
 } from "@plankton/domain";
 import { StalePruningModule } from "../modules/pruning/stale-pruning-module.js";
 
-const FAM_ID = createFamilyId("fam-btc");
 const TOK_ID = createTokenId("tok-yes");
 
 function hoursAgo(hours: number): string {
@@ -29,129 +23,18 @@ function makePosition(overrides?: Partial<Position>): Position {
     positionId: createPositionId("pos-1"),
     tokenId: TOK_ID,
     conditionId: createConditionId("cond-1"),
-    familyId: FAM_ID,
     side: "buy",
     size: 100,
-    avgEntryPrice: 0.02, // cheap — below minEntryPrice
+    avgEntryPrice: 0.02, // cheap — below default maxPrunableEntryPrice (0.15)
     costBasisUsdc: 2,
     currentValueUsdc: null,
     realizedPnl: 0,
     status: "open",
     entryStyle: null,
-    openedAt: hoursAgo(100), // old enough to prune
+    openedAt: hoursAgo(100), // old enough to prune (default 69h)
     closedAt: null,
     updatedAt: new Date().toISOString(),
     ...overrides,
-  };
-}
-
-function makeBundle(overrides?: {
-  staleTailPruneEnabled?: boolean;
-  maxTailHoldHours?: number | null;
-  minEntryPrice?: number;
-}): FamilyRuleBundle {
-  const {
-    staleTailPruneEnabled = true,
-    maxTailHoldHours = 69,
-    minEntryPrice = 0.03,
-  } = overrides ?? {};
-
-  return {
-    identity: {
-      familyId: FAM_ID,
-      familyKey: "btc-price",
-      primaryCategory: "crypto",
-      regime: "threshold" as Regime,
-      horizon: "short",
-      cadence: "daily",
-      strategyProfile: "scalp" as any,
-      topicKey: "btc",
-      slugPattern: "btc*",
-      notes: null,
-    },
-    evidence: {
-      familyId: FAM_ID,
-      evidenceStatus: "confirmed",
-      evidenceScore: 0.8,
-      promotionState: "scaled",
-      localTradeCount: 10,
-      localMarketCount: 3,
-      localRealizedPnlFifo: 5,
-      openTailCostUsdc: 0,
-      tailAdjustedPnl: 5,
-      remoteClosedRealizedPnl: null,
-      openPositionCount: null,
-      openDustCount: null,
-      bothSidedEligible: false,
-      heavyCampaignEligible: false,
-      activeWindowEdgeScore: null,
-      recurrenceScore: null,
-      recycleScore: null,
-      liveViabilityScore: null,
-      toxicityPenalty: null,
-      lastValidatedAt: null,
-      probeSubstate: null,
-      repricingExitCount: 0,
-    },
-    rules: {
-      familyId: FAM_ID,
-      universe: {
-        enabled: true,
-        action: "trade",
-        priorityRank: 1,
-        sessionMode: "active-window",
-      },
-      entry: {
-        entryMode: "probe-first",
-        minEntryPrice,
-        maxEntryPrice: 0.95,
-        maxInitialNotionalUsdc: 10,
-        allowHighPriceOneShot: false,
-        highPriceThreshold: 0.85,
-        requireProvenFamilyAbovePrice: 0.7,
-        preferredEntryBand: null,
-        maxProbeCountPerMarket: null,
-        entryCooldownSeconds: null,
-        maxNewMarketsPerSession: null,
-        probeSizeUsdc: 5,
-        addSizeUsdc: 4,
-      },
-      scaleIn: {
-        scaleMode: "confirm-only",
-        defaultMaxBuysPerLeg: 3,
-        heavyMaxBuysPerLeg: 5,
-        allowHeavyCampaigns: false,
-        requirePositiveRecycleHistoryForScale: false,
-      },
-      exit: {
-        exitMode: "repricing-sell",
-        primaryProfitModel: "sell-into-strength",
-        allowRunnerExtension: false,
-        preferFastRecycle: true,
-        resolutionHoldingAllowed: false,
-        resolutionBufferMinutes: 60,
-        targetRoiBandLow: null,
-        targetRoiBandHigh: null,
-        maxUnmovedHoldHours: null,
-        maxTailHoldHours,
-      },
-      twoSided: { allowTwoSided: false, twoSidedMode: "disabled", minActivityForTwoSided: null },
-      tailSuppression: {
-        maxOpenValueUsdc: 100,
-        maxActiveMarkets: 5,
-        maxDustPositions: 3,
-        tailQuarantineThresholdUsdc: 50,
-        tailQuarantineThresholdRatio: 0.5,
-        staleTailPruneEnabled,
-        thresholdCleanupRequired: false,
-        autoSettleResolvedMarkets: true,
-      },
-      session: {
-        activeWindowsUtc: [],
-        reducedWindowsUtc: [],
-        weekdayBias: "normal",
-      },
-    } as FamilyRules,
   };
 }
 
@@ -164,20 +47,10 @@ const silentLog = {
   child: () => silentLog,
 } as any;
 
-function createMockRulesProvider(bundle: FamilyRuleBundle): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue(bundle),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([bundle.identity]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  };
-}
-
 function createMockPositionRepo(positions: Position[]): PositionRepository {
   return {
     save: vi.fn(),
     findByTokenId: vi.fn().mockReturnValue(null),
-    findByFamily: vi.fn().mockReturnValue(positions),
     findOpen: vi.fn().mockReturnValue(positions),
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue(positions),
@@ -192,9 +65,10 @@ function createMockMarketRepo(active = true, conditionId = "cond-test"): MarketR
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
-    findByFamily: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
+    findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
 }
 
@@ -206,12 +80,10 @@ describe("StalePruningModule", () => {
   });
 
   it("emits stale-prune signal for old cheap position", async () => {
-    const bundle = makeBundle();
-    const pos = makePosition(); // 100 hours old, avgEntryPrice 0.02 < minEntryPrice 0.03
+    const pos = makePosition(); // 100 hours old, avgEntryPrice 0.02 < default maxPrunableEntryPrice (0.15)
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,
@@ -234,13 +106,11 @@ describe("StalePruningModule", () => {
   });
 
   it("skips position not old enough", async () => {
-    const bundle = makeBundle({ maxTailHoldHours: 69 });
     const pos = makePosition({ openedAt: hoursAgo(1) }); // only 1 hour old
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,
@@ -252,17 +122,16 @@ describe("StalePruningModule", () => {
     await mod.stop();
   });
 
-  it("skips position with entry price above minEntryPrice", async () => {
-    const bundle = makeBundle({ minEntryPrice: 0.03 });
-    const pos = makePosition({ avgEntryPrice: 0.1 }); // not a cheap tail position
+  it("skips position with entry price above maxPrunableEntryPrice", async () => {
+    const pos = makePosition({ avgEntryPrice: 0.5 }); // well above default 0.15
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,
+      maxPrunableEntryPrice: 0.03,
     });
 
     const pruned = await mod.runCheck();
@@ -271,36 +140,17 @@ describe("StalePruningModule", () => {
     await mod.stop();
   });
 
-  it("skips family with staleTailPruneEnabled=false", async () => {
-    const bundle = makeBundle({ staleTailPruneEnabled: false });
-    const pos = makePosition();
+  it("respects custom maxTailHoldMs parameter", async () => {
+    // Position is only 10 hours old — won't be pruned with a 48h hold
+    const pos = makePosition({ openedAt: hoursAgo(10) });
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,
-    });
-
-    const pruned = await mod.runCheck();
-    expect(pruned).toBe(0);
-
-    await mod.stop();
-  });
-
-  it("skips family with maxTailHoldHours=null", async () => {
-    const bundle = makeBundle({ maxTailHoldHours: null });
-    const pos = makePosition();
-
-    const mod = new StalePruningModule({
-      positionRepo: createMockPositionRepo([pos]),
-      marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
-      bus,
-      log: silentLog,
-      checkIntervalMs: 60_000,
+      maxTailHoldMs: 48 * 60 * 60 * 1000, // 48h
     });
 
     const pruned = await mod.runCheck();
@@ -310,13 +160,11 @@ describe("StalePruningModule", () => {
   });
 
   it("prunes dust positions too", async () => {
-    const bundle = makeBundle();
     const pos = makePosition({ status: "dust" });
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,
@@ -329,13 +177,11 @@ describe("StalePruningModule", () => {
   });
 
   it("does not prune closed positions", async () => {
-    const bundle = makeBundle();
     const pos = makePosition({ status: "closed" });
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,
@@ -347,19 +193,17 @@ describe("StalePruningModule", () => {
     await mod.stop();
   });
 
-  it("prunes dust position with avgEntryPrice above minEntryPrice when old enough", async () => {
-    const bundle = makeBundle({ minEntryPrice: 0.03, maxTailHoldHours: 24 });
-    // avgEntryPrice 0.10 is above minEntryPrice 0.03 — previously skipped, now should prune
+  it("prunes dust position with avgEntryPrice above maxPrunableEntryPrice when old enough", async () => {
+    // Dust positions are pruned by age alone, regardless of entry price
     const pos = makePosition({
       status: "dust",
-      avgEntryPrice: 0.1,
-      openedAt: hoursAgo(48), // well past 24h maxTailHoldHours
+      avgEntryPrice: 0.5, // above default 0.15
+      openedAt: hoursAgo(100),
     });
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,
@@ -371,18 +215,16 @@ describe("StalePruningModule", () => {
     await mod.stop();
   });
 
-  it("does NOT prune open (non-dust) position with avgEntryPrice above minEntryPrice", async () => {
-    const bundle = makeBundle({ minEntryPrice: 0.03, maxTailHoldHours: 24 });
+  it("does NOT prune open (non-dust) position with avgEntryPrice above maxPrunableEntryPrice", async () => {
     const pos = makePosition({
       status: "open",
-      avgEntryPrice: 0.1, // above minEntryPrice
-      openedAt: hoursAgo(48),
+      avgEntryPrice: 0.5, // above default 0.15
+      openedAt: hoursAgo(100),
     });
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(),
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,
@@ -395,13 +237,11 @@ describe("StalePruningModule", () => {
   });
 
   it("skips positions on inactive/resolved markets", async () => {
-    const bundle = makeBundle();
     const pos = makePosition(); // would normally be pruned
 
     const mod = new StalePruningModule({
       positionRepo: createMockPositionRepo([pos]),
       marketRepo: createMockMarketRepo(false), // inactive market
-      rulesProvider: createMockRulesProvider(bundle),
       bus,
       log: silentLog,
       checkIntervalMs: 60_000,

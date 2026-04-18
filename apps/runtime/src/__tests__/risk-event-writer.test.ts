@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createFamilyId, createTokenId } from "@plankton/domain";
+import { createTokenId } from "@plankton/domain";
 import { RiskEventWriter } from "../risk-event-writer.js";
 
 describe("RiskEventWriter", () => {
@@ -14,11 +14,10 @@ describe("RiskEventWriter", () => {
   describe("onSignalRejected", () => {
     const signal = {
       signalId: "sig-1",
-      familyId: createFamilyId("fam-1"),
-      tokenId: createTokenId("tok-1"),
+      tokenId: String(createTokenId("tok-1")),
     };
 
-    it("writes first rejection for a family+reason", () => {
+    it("writes first rejection for a token+reason", () => {
       writer.onSignalRejected(signal, "dust positions 3 >= max 2", 1000);
 
       expect(repo.insert).toHaveBeenCalledTimes(1);
@@ -26,7 +25,7 @@ describe("RiskEventWriter", () => {
       expect(repo.insert.mock.calls[0]![0].payload.reasonCode).toBe("max_dust_positions");
     });
 
-    it("deduplicates same family+reason within cooldown", () => {
+    it("deduplicates same token+reason within cooldown", () => {
       writer.onSignalRejected(signal, "dust positions 3 >= max 2", 1000);
       writer.onSignalRejected(signal, "dust positions 4 >= max 2", 2000);
 
@@ -48,14 +47,14 @@ describe("RiskEventWriter", () => {
       expect(repo.insert).toHaveBeenCalledTimes(2);
     });
 
-    it("deduplicates null-family rejections per-token, not globally", () => {
-      const sigA = { signalId: "sig-a", familyId: null, tokenId: createTokenId("tok-a") };
-      const sigB = { signalId: "sig-b", familyId: null, tokenId: createTokenId("tok-b") };
+    it("deduplicates rejections per-token, not globally", () => {
+      const sigA = { signalId: "sig-a", tokenId: createTokenId("tok-a") };
+      const sigB = { signalId: "sig-b", tokenId: createTokenId("tok-b") };
 
       writer.onSignalRejected(sigA, "token-in-flight-limit", 1000);
       writer.onSignalRejected(sigB, "token-in-flight-limit", 1001);
 
-      // Both should write — different tokens despite both having null familyId
+      // Both should write — different tokens
       expect(repo.insert).toHaveBeenCalledTimes(2);
     });
 
@@ -73,42 +72,19 @@ describe("RiskEventWriter", () => {
   });
 
   describe("onOperatorCommand", () => {
-    it("writes family enable transitions", () => {
-      writer.onOperatorCommand("family_enable", createFamilyId("fam-1"), 1, "reactivating");
+    it("writes operator_command event", () => {
+      writer.onOperatorCommand("family_enable", null, 1, "reactivating");
 
       expect(repo.insert).toHaveBeenCalledTimes(1);
-      expect(repo.insert.mock.calls[0]![0].eventType).toBe("family_enabled");
+      expect(repo.insert.mock.calls[0]![0].eventType).toBe("operator_command");
+      expect(repo.insert.mock.calls[0]![0].payload.action).toBe("family_enable");
     });
 
-    it("writes family disable transitions", () => {
-      writer.onOperatorCommand("family_disable", createFamilyId("fam-1"), 1, "manual disable");
-
-      expect(repo.insert).toHaveBeenCalledTimes(1);
-      expect(repo.insert.mock.calls[0]![0].eventType).toBe("family_disabled");
-    });
-
-    it("ignores non-family commands", () => {
+    it("writes for any action including pause", () => {
       writer.onOperatorCommand("pause", null, 1, null);
 
-      expect(repo.insert).not.toHaveBeenCalled();
-    });
-
-    it("ignores unknown actions", () => {
-      writer.onOperatorCommand("unknown_action", createFamilyId("fam-1"), 1, null);
-
-      expect(repo.insert).not.toHaveBeenCalled();
-    });
-
-    it("skips system-initiated disable to avoid duplicate risk events", () => {
-      writer.onOperatorCommand(
-        "family_disable",
-        createFamilyId("fam-1"),
-        1,
-        "auto-disable",
-        "system",
-      );
-
-      expect(repo.insert).not.toHaveBeenCalled();
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+      expect(repo.insert.mock.calls[0]![0].eventType).toBe("operator_command");
     });
   });
 

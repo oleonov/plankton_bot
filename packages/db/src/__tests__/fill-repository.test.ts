@@ -10,7 +10,6 @@ import {
   createFillId,
   createOrderId,
   createTokenId,
-  createFamilyId,
   createConditionId,
 } from "@plankton/domain";
 import type { Fill } from "@plankton/domain";
@@ -47,7 +46,6 @@ function makeFill(overrides?: Partial<Fill>): Fill {
     orderId: createOrderId("ord-1"),
     tokenId: createTokenId("tok-1"),
     conditionId: createConditionId("cond-1"),
-    familyId: createFamilyId("fam-1"),
     side: "buy",
     price: 0.55,
     size: 50,

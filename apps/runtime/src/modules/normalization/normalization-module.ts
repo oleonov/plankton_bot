@@ -1,49 +1,29 @@
 /**
  * Normalization Module — consumes MarketSnapshotReceived events,
- * classifies each market into a family using slug pattern matching,
  * persists to the market catalog, and publishes NormalizedMarketUpdated.
  *
- * Classification rules:
- *  - family + regime + horizon is the selection unit (HR1)
- *  - matching is done via FamilyIdentity.slugPattern (glob → anchored regex)
- *  - unknown / unconfigured markets flow through with null family fields
- *  - unknown markets never crash the pipeline
+ * Family fields (familyId, familyKey, regime, horizon) are set to null;
+ * family matching was removed in Phase 6. AlgoDecisionModule drives
+ * selection via algoRules + SelectedMarketCache.
  */
 
-import type {
-  RuntimeModule,
-  EventBus,
-  FamilyRulesProvider,
-  MarketRepository,
-  NormalizedMarket,
-  FamilyIdentity,
-} from "@plankton/domain";
-import { slugPatternToRegex, matchesHorizon } from "@plankton/domain";
+import type { RuntimeModule, EventBus, MarketRepository, NormalizedMarket } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import { resolveFamilyAssignmentMaxDaysAhead } from "../../family-assignment-window.js";
 
 export interface NormalizationModuleDeps {
   bus: EventBus;
-  rulesProvider: FamilyRulesProvider;
   marketRepo: MarketRepository;
   log: Logger;
-}
-
-interface CompiledPattern {
-  family: FamilyIdentity;
-  regex: RegExp;
 }
 
 export class NormalizationModule implements RuntimeModule {
   private static readonly SUMMARY_LOG_WINDOW_MS = 30_000;
   private unsubscribe: (() => void) | null = null;
   private readonly log: Logger;
-  private patterns: CompiledPattern[] = [];
   private lastSummaryLogAtMs = 0;
   private summaryWindow = {
     batchCount: 0,
     normalizedMarkets: 0,
-    matchedMarkets: 0,
   };
 
   constructor(private readonly deps: NormalizationModuleDeps) {
@@ -51,13 +31,11 @@ export class NormalizationModule implements RuntimeModule {
   }
 
   async start(): Promise<void> {
-    this.buildPatternCache();
-
     this.unsubscribe = this.deps.bus.subscribe("MarketSnapshotReceived", async (payload) => {
       await this.handleSnapshot(payload);
     });
 
-    this.log.info({ patterns: this.patterns.length }, "normalization module started");
+    this.log.info("normalization module started");
   }
 
   async stop(): Promise<void> {
@@ -68,50 +46,11 @@ export class NormalizationModule implements RuntimeModule {
     this.log.info("normalization module stopped");
   }
 
-  rebuildPatterns(): void {
-    this.buildPatternCache();
-    this.log.info({ patterns: this.patterns.length }, "pattern cache rebuilt");
-  }
-
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
     return {
       ok: this.unsubscribe !== null,
       detail: this.unsubscribe ? "subscribed" : "not started",
     };
-  }
-
-  private buildPatternCache(): void {
-    const families = this.deps.rulesProvider.getAllFamilies();
-    this.patterns = [];
-
-    for (const family of families) {
-      if (!family.slugPattern) continue;
-      try {
-        this.patterns.push({ family, regex: slugPatternToRegex(family.slugPattern) });
-      } catch {
-        this.log.warn(
-          { familyId: String(family.familyId), pattern: family.slugPattern },
-          "invalid slug pattern — skipping",
-        );
-      }
-    }
-  }
-
-  private matchFamily(slug: string, endDate: string | null): FamilyIdentity | null {
-    for (const { family, regex } of this.patterns) {
-      if (
-        regex.test(slug) &&
-        matchesHorizon(
-          family.horizon,
-          endDate,
-          new Date(),
-          resolveFamilyAssignmentMaxDaysAhead(family),
-        )
-      ) {
-        return family;
-      }
-    }
-    return null;
   }
 
   private async handleSnapshot(payload: {
@@ -122,15 +61,11 @@ export class NormalizationModule implements RuntimeModule {
     const now = new Date().toISOString();
 
     for (const market of payload.markets) {
-      const family = this.matchFamily(market.slug, market.endDate);
-
       enriched.push({
         ...market,
         outcomeIndex: market.outcomeIndex ?? null,
-        familyId: family?.familyId ?? null,
-        familyKey: family?.familyKey ?? null,
-        regime: family?.regime ?? null,
-        horizon: family?.horizon ?? null,
+        regime: null,
+        horizon: null,
       });
 
       this.deps.marketRepo.save({
@@ -141,10 +76,8 @@ export class NormalizationModule implements RuntimeModule {
         question: market.question,
         outcome: market.outcome,
         outcomeIndex: market.outcomeIndex ?? null,
-        familyId: family?.familyId ?? null,
-        familyKey: family?.familyKey ?? null,
-        regime: family?.regime ?? null,
-        horizon: family?.horizon ?? null,
+        regime: null,
+        horizon: null,
         endDate: market.endDate,
         active: market.active,
         tradable: market.tradable,
@@ -155,12 +88,10 @@ export class NormalizationModule implements RuntimeModule {
       });
     }
 
-    const matchedCount = enriched.filter((m) => m.familyId !== null).length;
     this.summaryWindow.batchCount++;
     this.summaryWindow.normalizedMarkets += enriched.length;
-    this.summaryWindow.matchedMarkets += matchedCount;
 
-    this.log.debug({ total: enriched.length, matched: matchedCount }, "normalization complete");
+    this.log.debug({ total: enriched.length }, "normalization complete");
     this.logSummaryIfNeeded(payload.timestamp);
 
     await this.deps.bus.publish("NormalizedMarketUpdated", {
@@ -185,7 +116,6 @@ export class NormalizationModule implements RuntimeModule {
       {
         batches: this.summaryWindow.batchCount,
         normalizedMarkets: this.summaryWindow.normalizedMarkets,
-        matchedMarkets: this.summaryWindow.matchedMarkets,
         normalizedAvgBatchSize: Number(avgBatchSize.toFixed(2)),
         windowMs: nowMs - this.lastSummaryLogAtMs,
       },
@@ -195,7 +125,6 @@ export class NormalizationModule implements RuntimeModule {
     this.summaryWindow = {
       batchCount: 0,
       normalizedMarkets: 0,
-      matchedMarkets: 0,
     };
   }
 }

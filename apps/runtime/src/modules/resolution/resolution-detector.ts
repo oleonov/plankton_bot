@@ -9,7 +9,6 @@ import {
   type MarketRepository,
   type MarketResolutionRepository,
   type TokenId,
-  type FamilyId,
   type PositionId,
 } from "@plankton/domain";
 import type { GammaResolutionClient } from "@plankton/exchange";
@@ -22,7 +21,6 @@ export interface ResolutionCandidate {
   outcome: string;
   endDate: string;
   positionId: PositionId;
-  familyId: FamilyId | null;
 }
 
 export interface DetectedResolution {
@@ -209,7 +207,6 @@ export class ResolutionDetector {
         outcome: market.outcome,
         endDate: market.endDate,
         positionId: pos.positionId,
-        familyId: pos.familyId,
       });
     }
 
@@ -261,7 +258,6 @@ export class ResolutionDetector {
         outcome: market.outcome,
         endDate: market.endDate ?? new Date().toISOString(),
         positionId: position.positionId,
-        familyId: position.familyId,
       });
     }
     if (candidates.length === 0) return null;

@@ -1,11 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { importExchangeFills } from "../modules/reconciliation/fill-reconciler.js";
-import { createOrderId, createTokenId, createFamilyId } from "@plankton/domain";
+import { createOrderId, createTokenId } from "@plankton/domain";
 import type {
   ExchangeFill,
   FillRepository,
   OrderRepository,
-  FamilyRulesProvider,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 
@@ -22,14 +21,6 @@ function createMockFillRepo(): FillRepository {
   };
 }
 
-function createMockRulesProvider(): FamilyRulesProvider {
-  return {
-    getRule: vi.fn().mockReturnValue(null),
-    isEnabled: vi.fn().mockReturnValue(true),
-    getAllFamilies: vi.fn().mockReturnValue([]),
-    getRulesForRegime: vi.fn().mockReturnValue([]),
-  };
-}
 
 function createMockOrderRepo(): OrderRepository {
   return {
@@ -37,7 +28,6 @@ function createMockOrderRepo(): OrderRepository {
     findById: vi.fn().mockReturnValue(null),
     findByClientOrderId: vi.fn().mockReturnValue({
       orderId: createOrderId("ord-1"),
-      familyId: createFamilyId("fam-1"),
       size: 10,
     }),
     findByExchangeOrderId: vi.fn().mockReturnValue(null),
@@ -59,13 +49,11 @@ const silentLog = {
 describe("importExchangeFills", () => {
   let fillRepo: ReturnType<typeof createMockFillRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
-  let rulesProvider: ReturnType<typeof createMockRulesProvider>;
   let bus: InProcessEventBus;
 
   beforeEach(() => {
     fillRepo = createMockFillRepo();
     orderRepo = createMockOrderRepo();
-    rulesProvider = createMockRulesProvider();
     bus = new InProcessEventBus();
   });
 
@@ -88,7 +76,6 @@ describe("importExchangeFills", () => {
 
     const localOrder = {
       orderId: createOrderId("ord-1"),
-      familyId: createFamilyId("fam-1"),
       size: 10,
     };
     (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
@@ -104,7 +91,6 @@ describe("importExchangeFills", () => {
     const result = await importExchangeFills(fills, {
       fillRepo,
       orderRepo,
-      rulesProvider,
       bus,
       log: silentLog,
     });
@@ -139,7 +125,6 @@ describe("importExchangeFills", () => {
     const result = await importExchangeFills(fills, {
       fillRepo,
       orderRepo,
-      rulesProvider,
       bus,
       log: silentLog,
     });
@@ -171,7 +156,6 @@ describe("importExchangeFills", () => {
     const result = await importExchangeFills(fills, {
       fillRepo,
       orderRepo,
-      rulesProvider,
       bus,
       log: silentLog,
     });
@@ -200,14 +184,13 @@ describe("importExchangeFills", () => {
 
     const localOrder = {
       orderId: createOrderId("ord-1"),
-      familyId: createFamilyId("fam-1"),
       size: 10,
     };
     (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
     (orderRepo.findById as any).mockReturnValue(localOrder);
     (fillRepo.findByOrderId as any).mockReturnValue([{ size: 4 }]);
 
-    await importExchangeFills(fills, { fillRepo, orderRepo, rulesProvider, bus, log: silentLog });
+    await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
 
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "partially-filled");
   });
