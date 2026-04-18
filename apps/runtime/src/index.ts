@@ -693,21 +693,14 @@ async function main(): Promise<void> {
         })
       : null;
 
-  // 7l3. Profile runtime publisher — periodic rollup of family metrics to control.db
+  // 7l3. Profile runtime publisher — periodic upsert of profile_summaries + equity snapshots
   const profilePublisher = new ProfileRuntimePublisher({
     controlDb: controlConn.db,
     ledgerDb: ledgerConn.db,
     profile: activeProfile,
-    deployedFamilyIds: () => [],
     getPaused: () => supervisorRef.current.isPaused(),
     log,
     intervalMs: 60_000,
-    ...(runtimeMode === "live-lite"
-      ? {
-          setLiveActiveFamilyAllowlist: (familyIds: string[] | null) =>
-            liveLiteGuard.setDynamicFamilyAllowlist(familyIds),
-        }
-      : {}),
     ...(runtimeMode === "live-lite" ? { exchangeGateway } : {}),
   });
 

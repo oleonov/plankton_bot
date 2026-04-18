@@ -37,31 +37,15 @@ function createControlDb(): DbConnection {
       "INSERT INTO profile_settings (profile_id, initial_balance_usdc) VALUES ('paper', 1000)",
     )
     .run();
-  // Seed family_catalog entry (FK target for rollups and scorecards)
-  conn.db
-    .prepare(
-      `INSERT INTO family_catalog
-         (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
-       VALUES ('fam-1', 'test-key', 'crypto', 'neutral', 'short', 'daily', 'scalp')`,
-    )
-    .run();
   return conn;
 }
 
 function createLedgerDb(): DbConnection {
   const conn = openDatabase(":memory:");
   conn.db.exec(LEDGER_SQL);
-  // Seed a family_runtime_state row so readFamilyMetrics returns data
-  conn.db
-    .prepare(
-      `INSERT INTO family_runtime_state
-         (family_id, open_value_usdc, open_position_count, active_market_count,
-          current_tail_cost_usdc, tail_adjusted_pnl_live)
-       VALUES ('fam-1', 25.0, 2, 1, 3.0, 5.0)`,
-    )
-    .run();
   return conn;
 }
+
 
 describe("ProfileRuntimePublisher atomicity", () => {
   let controlConn: DbConnection;
@@ -75,7 +59,6 @@ describe("ProfileRuntimePublisher atomicity", () => {
       controlDb: controlConn.db,
       ledgerDb: ledgerConn.db,
       profile: "paper",
-      deployedFamilyIds: () => ["fam-1"],
       getPaused: () => false,
       log: noopLog,
       intervalMs: 999_999, // prevent auto-timer from firing
@@ -87,50 +70,40 @@ describe("ProfileRuntimePublisher atomicity", () => {
     ledgerConn.close();
   });
 
-  it("writes rollups, profile summary, and scorecards in a single publish()", async () => {
+  it("writes profile summary in a single publish()", async () => {
     await publisher.publish();
-
-    const rollup = controlConn.db
-      .prepare(
-        "SELECT * FROM family_profile_rollups WHERE family_id = 'fam-1' AND profile = 'paper'",
-      )
-      .get() as Record<string, unknown> | undefined;
-    expect(rollup).toBeDefined();
-    expect(rollup!["open_value_usdc"]).toBe(25.0);
-    expect(rollup!["open_positions"]).toBe(2);
 
     const summary = controlConn.db
       .prepare("SELECT * FROM profile_summaries WHERE profile_id = 'paper'")
       .get() as Record<string, unknown> | undefined;
     expect(summary).toBeDefined();
     expect(summary!["paused"]).toBe(0);
-
-    // Phase 6: scorecards no longer carry family_id; query by profile
-    const scorecards = controlConn.db
-      .prepare("SELECT * FROM family_validation_scorecards WHERE profile = 'paper'")
-      .all();
-    expect(scorecards.length).toBe(1);
+    expect(summary!["open_orders"]).toBe(0);
+    expect(summary!["open_positions"]).toBe(0);
   });
 
-  it("rolls back all writes when the transaction fails mid-way", async () => {
-    // Drop the scorecards table so the write fails inside the transaction
-    controlConn.db.exec("DROP TABLE family_validation_latest");
-    controlConn.db.exec("DROP TABLE family_validation_scorecards");
+  it("rolls back the write when the transaction fails", async () => {
+    // Drop profile_summaries so the write fails inside the transaction
+    controlConn.db.exec("DROP TABLE profile_summaries");
 
     await expect(publisher.publish()).rejects.toThrow();
 
-    // Rollups should NOT have been persisted (transaction rolled back)
-    const rollup = controlConn.db
-      .prepare(
-        "SELECT * FROM family_profile_rollups WHERE family_id = 'fam-1' AND profile = 'paper'",
-      )
-      .get();
-    expect(rollup).toBeUndefined();
+    // Confirm the table is gone (not re-created by a partial write)
+    const tables = controlConn.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='profile_summaries'")
+      .all();
+    expect(tables).toHaveLength(0);
+  });
 
-    // Profile summary should NOT have been persisted either
-    const summary = controlConn.db
-      .prepare("SELECT * FROM profile_summaries WHERE profile_id = 'paper'")
-      .get();
-    expect(summary).toBeUndefined();
+  it("second publish upserts — exactly one summary row", async () => {
+    await publisher.publish();
+    await publisher.publish();
+
+    const count = (
+      controlConn.db
+        .prepare("SELECT COUNT(*) as cnt FROM profile_summaries WHERE profile_id = 'paper'")
+        .get() as { cnt: number }
+    ).cnt;
+    expect(count).toBe(1);
   });
 });

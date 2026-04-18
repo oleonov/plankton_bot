@@ -1,22 +1,6 @@
-import type {
-  RuntimeModule,
-  ValidationScorecard,
-  ProfileId,
-  ExchangeGateway,
-} from "@plankton/domain";
-import {
-  createScorecardId,
-  computeRecycleScore,
-  computeToxicityPenalty,
-  evaluateExecutionCanaryGate,
-} from "@plankton/domain";
-import {
-  readFamilyLiveness,
-  SqliteValidationScorecardRepository,
-  withImmediate,
-} from "@plankton/db";
+import type { RuntimeModule, ExchangeGateway } from "@plankton/domain";
+import { withImmediate } from "@plankton/db";
 import type Database from "better-sqlite3";
-import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
 import { ValidationMetricsReader } from "./validation-metrics-reader.js";
 
@@ -24,12 +8,10 @@ export interface ProfileRuntimePublisherDeps {
   controlDb: Database.Database;
   ledgerDb: Database.Database;
   profile: string;
-  deployedFamilyIds: () => string[];
   getPaused: () => boolean;
   log: Logger;
   intervalMs?: number;
   exchangeGateway?: ExchangeGateway;
-  setLiveActiveFamilyAllowlist?: (familyIds: string[] | null) => void;
 }
 
 export class ProfileRuntimePublisher implements RuntimeModule {
@@ -62,55 +44,15 @@ export class ProfileRuntimePublisher implements RuntimeModule {
   }
 
   async publish(): Promise<void> {
-    const familyIds = this.deps.deployedFamilyIds();
-    const familyLiveness = readFamilyLiveness(this.deps.ledgerDb, familyIds);
-    const activeFamilyIds = familyIds.filter(
-      (familyId) => familyLiveness.get(familyId)?.liveness === "active",
-    );
-
-    this.deps.setLiveActiveFamilyAllowlist?.(activeFamilyIds.length > 0 ? activeFamilyIds : null);
-
     // Phase 1: Read all data OUTSIDE the transaction (no contention)
-    const familyMetrics = this.reader.readFamilyMetrics(familyIds);
     const profileMetrics = this.reader.readProfileMetrics();
     const balanceUsdc = this.computeBalance(profileMetrics.totalExposureUsdc);
     const paused = this.deps.getPaused();
     const lastPreflightStatus = this.readLastPreflightStatus();
     const walletBalanceUsdc = await this.fetchWalletBalance();
-    const scorecards = this.buildScorecards(familyIds);
 
     // Phase 2: Write everything INSIDE a single immediate transaction
     withImmediate(this.deps.controlDb, (db) => {
-      const upsertRollup = db.prepare(`
-        INSERT INTO family_profile_rollups
-          (family_id, profile, open_value_usdc, open_positions, active_markets,
-           realized_pnl, tail_cost_usdc, tail_adjusted_pnl, last_trade_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(family_id, profile) DO UPDATE SET
-          open_value_usdc   = excluded.open_value_usdc,
-          open_positions    = excluded.open_positions,
-          active_markets    = excluded.active_markets,
-          realized_pnl      = excluded.realized_pnl,
-          tail_cost_usdc    = excluded.tail_cost_usdc,
-          tail_adjusted_pnl = excluded.tail_adjusted_pnl,
-          last_trade_at     = excluded.last_trade_at,
-          updated_at        = excluded.updated_at
-      `);
-
-      for (const fm of familyMetrics) {
-        upsertRollup.run(
-          fm.familyId,
-          this.deps.profile,
-          fm.openValueUsdc,
-          fm.openPositions,
-          fm.activeMarkets,
-          fm.realizedPnl,
-          fm.tailCostUsdc,
-          fm.tailAdjustedPnl,
-          fm.lastTradeAt,
-        );
-      }
-
       db.prepare(
         `INSERT INTO profile_summaries
            (profile_id, paused, last_run_at, open_orders, open_positions,
@@ -136,30 +78,11 @@ export class ProfileRuntimePublisher implements RuntimeModule {
         walletBalanceUsdc,
         lastPreflightStatus,
       );
-
-      const txScorecardRepo = new SqliteValidationScorecardRepository(db);
-      for (const scorecard of scorecards) {
-        try {
-          txScorecardRepo.save(scorecard);
-        } catch (err: unknown) {
-          // (family_id, profile, validated_at) UNIQUE constraint can fire when
-          // two publish cycles land within the same millisecond — safe to skip
-          const msg = err instanceof Error ? err.message : "";
-          if (!msg.includes("UNIQUE constraint failed")) throw err;
-        }
-      }
     });
 
     this.writeEquitySnapshotIfDue(walletBalanceUsdc, balanceUsdc, profileMetrics);
 
-    this.deps.log.debug(
-      {
-        families: familyMetrics.length,
-        profile: this.deps.profile,
-        activeFamilies: activeFamilyIds.length,
-      },
-      "profile runtime rollups published",
-    );
+    this.deps.log.debug({ profile: this.deps.profile }, "profile runtime summary published");
   }
 
   private computeBalance(totalExposureUsdc: number): number | null {
@@ -246,87 +169,5 @@ export class ProfileRuntimePublisher implements RuntimeModule {
     this.deps.ledgerDb
       .prepare("DELETE FROM portfolio_snapshots WHERE captured_at < datetime('now', '-90 days')")
       .run();
-  }
-
-  private buildScorecards(familyIds: string[]): ValidationScorecard[] {
-    const profile = this.deps.profile as ProfileId;
-    const familyPolicyStmt = this.deps.controlDb.prepare(
-      `SELECT primary_category, fee_tier, live_wallet_requirement, requires_post_only_for_live
-       FROM family_catalog
-       WHERE family_id = ?`,
-    );
-
-    return familyIds.map((fid) => {
-      const trade = this.reader.readTradeMetrics(fid);
-      const executionTelemetry = this.reader.readExecutionTelemetry(fid);
-      const toxMetrics = this.reader.readToxicityMetrics(fid);
-      const familyPolicy = familyPolicyStmt.get(fid) as
-        | {
-            primary_category: string;
-            fee_tier: string | null;
-            live_wallet_requirement: string | null;
-            requires_post_only_for_live: number | null;
-          }
-        | undefined;
-
-      const recycleScore = computeRecycleScore({
-        tradeCount: trade.tradeCount,
-        distinctMarkets: trade.distinctMarkets,
-        tailAdjustedPnl: trade.tailAdjustedPnl,
-        repricingExits: trade.repricingExits,
-        totalNonSettlementClosed: trade.totalNonSettlementClosed,
-      });
-
-      const toxicityPenalty = computeToxicityPenalty({
-        dustCount: toxMetrics.dustCount,
-        positionCount: toxMetrics.positionCount,
-        tailCostUsdc: toxMetrics.tailCostUsdc,
-        realizedPnlUsdc: toxMetrics.realizedPnlUsdc,
-        reduceOnlyCount: toxMetrics.reduceOnlyCount,
-        weeksDeployed: 0, // family_catalog not in ledger DB; acceptable approximation
-        staleCount: toxMetrics.staleCount,
-        totalOpen: toxMetrics.totalOpen,
-      });
-
-      const evidenceScore = Math.max(0, recycleScore - toxicityPenalty);
-      const executionCanary = evaluateExecutionCanaryGate({
-        primaryCategory: familyPolicy?.primary_category ?? "other",
-        feeTier:
-          (familyPolicy?.fee_tier as import("@plankton/domain").FeeTier | null | undefined) ?? null,
-        liveWalletRequirement:
-          (familyPolicy?.live_wallet_requirement as
-            | import("@plankton/domain").LiveWalletRequirement
-            | null
-            | undefined) ?? null,
-        requiresPostOnlyForLive:
-          familyPolicy?.requires_post_only_for_live == null
-            ? null
-            : familyPolicy.requires_post_only_for_live === 1,
-        executionTelemetry,
-      });
-      return {
-        scorecardId: createScorecardId(`sc-${randomUUID()}`),
-        profile,
-        evidenceStatus: trade.tradeCount > 0 ? "partial" : "unknown",
-        evidenceScore,
-        recurrenceScore: null,
-        recycleScore,
-        liveViabilityScore: null,
-        toxicityPenalty,
-        tradeCount: trade.tradeCount,
-        marketCount: trade.distinctMarkets,
-        realizedPnl: trade.realizedPnl,
-        tailAdjustedPnl: trade.tailAdjustedPnl,
-        bothSidedEligible: false,
-        heavyCampaignEligible: false,
-        activeWindowEdgeScore: null,
-        summaryJson: JSON.stringify({
-          repricingExits: trade.repricingExits,
-          executionTelemetry24h: executionTelemetry,
-          executionCanary24h: executionCanary,
-        }),
-        validatedAt: new Date().toISOString(),
-      } satisfies ValidationScorecard;
-    });
   }
 }
