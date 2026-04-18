@@ -46,3 +46,11 @@ export function apiPost<T>(path: string, payload?: unknown): Promise<T> {
 export function apiPut<T>(path: string, payload?: unknown): Promise<T> {
   return apiMutate<T>("PUT", path, payload);
 }
+
+export function apiPatch<T>(path: string, payload?: unknown): Promise<T> {
+  return apiMutate<T>("PATCH", path, payload);
+}
+
+export function apiDelete<T>(path: string): Promise<T> {
+  return apiMutate<T>("DELETE", path);
+}
