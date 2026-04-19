@@ -5,7 +5,7 @@ import {
   PromotionState,
   resolveFamilyMarketabilityTier,
 } from "@plankton/domain";
-import { type FamilySpeedTier } from "../../family-throughput.js";
+type FamilySpeedTier = "core-fast" | "reduced-fast" | "standard";
 import {
   hasFreshTradeActivity,
   isGammaFallbackDustEligible,
