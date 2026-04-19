@@ -11,7 +11,6 @@ export * from "./runtime-control.js";
 export * from "./slug-pattern.js";
 export * from "./horizon-filter.js";
 export * from "./scoring.js";
-export * from "./promotion-blockers.js";
 export * from "./probe-defaults.js";
 export * from "./discovery-entry-policy.js";
 export * from "./deployment-defaults.js";
