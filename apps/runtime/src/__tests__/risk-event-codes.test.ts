@@ -43,8 +43,8 @@ describe("normalizeReasonCode", () => {
     expect(normalizeReasonCode("family fam-xyz not found in rules")).toBe("family_not_found");
   });
 
-  it("maps family disabled", () => {
-    expect(normalizeReasonCode("family fam-xyz is disabled")).toBe("family_disabled");
+  it("maps family disabled as deployment_disabled", () => {
+    expect(normalizeReasonCode("family fam-xyz is disabled")).toBe("deployment_disabled");
   });
 
   it("maps probe token open-order blocker", () => {

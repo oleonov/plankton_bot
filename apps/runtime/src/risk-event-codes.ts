@@ -32,7 +32,7 @@ const PREFIX_CODES: [string, string][] = [
   ["dust positions", "max_dust_positions"],
   ["probe token already has open buy order", "probe_token_open_buy_order"],
   ["not found in rules", "family_not_found"],
-  ["is disabled", "family_disabled"],
+  ["is disabled", "deployment_disabled"],
 ];
 
 export function normalizeReasonCode(rawReason: string): string {

@@ -13,9 +13,7 @@ export interface MarketFixture {
 /** An operator command to inject at a specific tick. */
 export interface ScheduledCommand {
   atTick: number;
-  action: "pause" | "resume" | "family_enable" | "family_disable";
-  /** @deprecated use targetId */
-  familyId?: string;
+  action: "pause" | "resume";
   targetId?: string;
   reason?: string;
 }
@@ -43,12 +41,6 @@ export interface ScenarioResult {
   fillCount: number;
   openPositionCount: number;
   dustPositionCount: number;
-  familyStates: Array<{
-    familyId: string;
-    openValueUsdc: number;
-    openPositionCount: number;
-    tailAdjustedPnlLive: number;
-  }>;
   totalRealizedPnl: number;
   totalTailCostUsdc: number;
   reconciliationRan: boolean;

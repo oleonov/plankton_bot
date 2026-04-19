@@ -47,10 +47,8 @@ const DRAIN_TIMEOUT_MS = 5_000;
 
 /**
  * A SelectedMarketCache that includes all tracked markets.
- * In the scenario runner, every seeded market is eligible — there are no
- * selection-rule filters to apply. AlgoDecisionModule uses the cache to gate
- * new BUY entries; returning true for all markets mirrors the old "family match"
- * gate used by StrategyModule.
+ * Scenario runs skip the selection-rule layer — every seeded market is
+ * eligible. AlgoDecisionModule uses this cache to gate new BUY entries.
  */
 class AllMarketsCache implements SelectedMarketCache {
   private readonly tokenIds = new Set<string>();
@@ -323,7 +321,7 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
       for (const cmd of commands) {
         repos.operatorCommand.insert({
           action: cmd.action,
-          targetId: cmd.targetId ?? cmd.familyId ?? null,
+          targetId: cmd.targetId ?? null,
           reason: cmd.reason ?? null,
           createdAt: new Date().toISOString(),
         });
@@ -374,7 +372,6 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     fillCount: counters.fills,
     openPositionCount: openPositions.length,
     dustPositionCount: dustPositions.length,
-    familyStates: [],
     totalRealizedPnl,
     totalTailCostUsdc: 0,
     reconciliationRan: counters.reconciliationRan,

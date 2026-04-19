@@ -45,39 +45,6 @@ beforeAll(async () => {
 
   const db = conn.db;
   db.exec(`
-    CREATE TABLE IF NOT EXISTS family_validation_scorecards (
-      scorecard_id TEXT PRIMARY KEY,
-      family_id TEXT NOT NULL,
-      profile TEXT NOT NULL,
-      evidence_status TEXT NOT NULL DEFAULT 'unknown',
-      evidence_score REAL NOT NULL DEFAULT 0,
-      recurrence_score REAL,
-      recycle_score REAL,
-      live_viability_score REAL,
-      toxicity_penalty REAL,
-      trade_count INTEGER NOT NULL DEFAULT 0,
-      market_count INTEGER NOT NULL DEFAULT 0,
-      realized_pnl REAL NOT NULL DEFAULT 0,
-      tail_adjusted_pnl REAL NOT NULL DEFAULT 0,
-      both_sided_eligible INTEGER NOT NULL DEFAULT 0,
-      heavy_campaign_eligible INTEGER NOT NULL DEFAULT 0,
-      active_window_edge_score REAL,
-      summary_json TEXT,
-      validated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS family_validation_latest (
-      family_id TEXT NOT NULL,
-      profile TEXT NOT NULL,
-      scorecard_id TEXT NOT NULL,
-      PRIMARY KEY (family_id, profile)
-    );
-
-    INSERT INTO family_catalog (family_id, family_key, primary_category, regime, horizon, cadence, strategy_profile)
-    VALUES ('fam-1', 'test-family', 'politics', 'standard', 'medium', 'daily', 'v1');
-
-    INSERT INTO family_rules (family_id, max_open_value_usdc, max_active_markets, max_dust_positions)
-    VALUES ('fam-1', 50, 5, 3);
-
     INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc,
       current_value_usdc, realized_pnl, status, opened_at, updated_at)
     VALUES ('pos-1', 'tok-1', 'buy', 100, 0.5, 50, 60, 0, 'open', '2026-03-14T00:00:00Z', '2026-03-14T01:00:00Z');

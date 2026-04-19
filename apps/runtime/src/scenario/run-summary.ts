@@ -25,15 +25,7 @@ export function formatRunSummary(name: string, result: ScenarioResult): string {
     "Financial:",
     `  realized PnL:  ${result.totalRealizedPnl.toFixed(2)}`,
     `  tail cost:     ${result.totalTailCostUsdc.toFixed(2)}`,
-    "",
-    "Families:",
   ];
-
-  for (const f of result.familyStates) {
-    lines.push(
-      `  ${f.familyId}: positions=${f.openPositionCount} value=$${f.openValueUsdc.toFixed(2)} pnl=${f.tailAdjustedPnlLive.toFixed(2)}`,
-    );
-  }
 
   lines.push("");
   lines.push(`Reconciliation ran: ${result.reconciliationRan}`);
