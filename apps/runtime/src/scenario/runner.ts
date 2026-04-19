@@ -119,7 +119,10 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     cancelled: 0,
     fills: 0,
     reconciliationRan: false,
+    placeOrderRequested: 0,
+    conversionSkipped: 0,
   };
+  const skippedConversions: ScenarioResult["skippedConversions"] = [];
 
   bus.subscribe("SignalProduced", async () => {
     counters.signals++;
@@ -141,6 +144,17 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
   });
   bus.subscribe("ReconciliationComplete", async () => {
     counters.reconciliationRan = true;
+  });
+  bus.subscribe("PlaceOrderRequested", async () => {
+    counters.placeOrderRequested++;
+  });
+  bus.subscribe("SignalConversionSkipped", async (ev) => {
+    counters.conversionSkipped++;
+    skippedConversions.push({
+      stage: ev.stage,
+      reasons: ev.reasons,
+      diagnostics: ev.diagnostics,
+    });
   });
 
   // 5. Record bot run
@@ -365,6 +379,9 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     totalTailCostUsdc: 0,
     reconciliationRan: counters.reconciliationRan,
     finalPhase: supervisor.getPhase(),
+    placeOrderRequestedCount: counters.placeOrderRequested,
+    conversionSkippedCount: counters.conversionSkipped,
+    skippedConversions,
   };
 }
 

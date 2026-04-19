@@ -53,4 +53,11 @@ export interface ScenarioResult {
   totalTailCostUsdc: number;
   reconciliationRan: boolean;
   finalPhase: string;
+  placeOrderRequestedCount: number;
+  conversionSkippedCount: number;
+  skippedConversions: Array<{
+    stage: string;
+    reasons: readonly string[];
+    diagnostics: Readonly<Record<string, unknown>> | undefined;
+  }>;
 }
