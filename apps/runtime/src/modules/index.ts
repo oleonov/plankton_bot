@@ -1,4 +1,3 @@
-export { createPlaceholderModule } from "./placeholder-module.js";
 export { MarketDataModule } from "./market-data/market-data-module.js";
 export { NormalizationModule } from "./normalization/normalization-module.js";
 export { ExecutionModule } from "./execution/execution-module.js";
