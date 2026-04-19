@@ -21,7 +21,7 @@ import type {
   PlaceOrderCommand,
   TokenId,
 } from "@plankton/domain";
-import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
+import { createCommandId, ENTRY_REASONS, isAlive } from "@plankton/domain";
 import { buildClientOrderId } from "@plankton/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
@@ -104,6 +104,31 @@ export class SignalToOrderBridge {
         "approved signal has no cached market — cannot build order command",
       );
       await this.publishConversionSkipped(signal, "market-cache-miss", ["market-cache-miss"], {
+        cacheStatus: resolvedMarket.cacheStatus,
+      });
+      return;
+    }
+    const liveness = isAlive({
+      acceptingOrders: market.acceptingOrders,
+      enableOrderBook: market.enableOrderBook,
+      bestBid: market.bestBid,
+      bestAsk: market.bestAsk,
+    });
+    if (!liveness.healthy) {
+      this.log.warn(
+        {
+          signalId: signal.signalId,
+          tokenId: signal.tokenId,
+          reasons: liveness.reasons,
+          cacheStatus: resolvedMarket.cacheStatus,
+        },
+        "approved signal skipped — market not live for order placement",
+      );
+      await this.publishConversionSkipped(signal, "hard-liveness", liveness.reasons, {
+        acceptingOrders: market.acceptingOrders,
+        enableOrderBook: market.enableOrderBook,
+        bestBid: market.bestBid,
+        bestAsk: market.bestAsk,
         cacheStatus: resolvedMarket.cacheStatus,
       });
       return;
@@ -381,8 +406,6 @@ export class SignalToOrderBridge {
       } else {
         checksPassed.push("spread-ok");
       }
-    } else if (market.bestBid == null || market.bestAsk == null) {
-      rejectionReasons.push("book-one-sided");
     } else {
       rejectionReasons.push("spread-unavailable");
     }

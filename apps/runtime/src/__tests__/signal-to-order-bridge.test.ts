@@ -617,3 +617,75 @@ describe("SignalToOrderBridge", () => {
     expect(placed).toHaveLength(1);
   });
 });
+
+describe("hard-liveness guard (before marketability)", () => {
+  function makeBridgeWithLiveLite() {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const conversionSkipped: Array<{ stage: string; reasons: readonly string[] }> = [];
+    const placeOrderRequested: unknown[] = [];
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      conversionSkipped.push(payload);
+    });
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placeOrderRequested.push(payload);
+    });
+
+    return { bus, bridge, conversionSkipped, placeOrderRequested };
+  }
+
+  it.each<[string, Partial<NormalizedMarket>, string]>([
+    ["acceptingOrders=false", { acceptingOrders: false }, "not_accepting_orders"],
+    ["enableOrderBook=false", { enableOrderBook: false }, "order_book_disabled"],
+    ["bestBid=null", { bestBid: null }, "no_bid"],
+    ["bestAsk=null", { bestAsk: null }, "no_ask"],
+  ])("%s skips with hard-liveness reason", async (_, patch, reason) => {
+    const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket(patch)],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
+    await bus.drain();
+
+    expect(conversionSkipped).toHaveLength(1);
+    expect(conversionSkipped[0]!.stage).toBe("hard-liveness");
+    expect(conversionSkipped[0]!.reasons).toContain(reason);
+    expect(placeOrderRequested).toHaveLength(0);
+  });
+
+  it("stacks reasons when multiple hard fields fail", async () => {
+    const { bus, conversionSkipped } = makeBridgeWithLiveLite();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket({ acceptingOrders: false, enableOrderBook: false })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
+    await bus.drain();
+
+    expect(conversionSkipped[0]!.reasons).toEqual(
+      expect.arrayContaining(["not_accepting_orders", "order_book_disabled"]),
+    );
+  });
+
+  it("passes through to marketability when all four hard fields are healthy", async () => {
+    const { bus, conversionSkipped } = makeBridgeWithLiveLite();
+    // Market with all healthy hard fields — spread=0 so marketability passes too
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket()],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
+    await bus.drain();
+
+    expect(conversionSkipped.filter((s) => s.stage === "hard-liveness")).toHaveLength(0);
+  });
+});
