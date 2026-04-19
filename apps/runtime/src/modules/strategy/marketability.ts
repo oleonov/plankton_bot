@@ -1,10 +1,5 @@
 import type { NormalizedMarket, Order, Signal } from "@plankton/domain";
-import {
-  Action,
-  ENTRY_REASONS,
-  PromotionState,
-  resolveFamilyMarketabilityTier,
-} from "@plankton/domain";
+import { Action, ENTRY_REASONS, PromotionState } from "@plankton/domain";
 type FamilySpeedTier = "core-fast" | "reduced-fast" | "standard";
 import {
   hasFreshTradeActivity,
@@ -12,6 +7,58 @@ import {
   resolveDustSizeCapUsdc,
   resolveGammaFallbackDustReferencePrice,
 } from "./book-quality-policy.js";
+
+type FamilyMarketabilityTier = "core" | "reduced" | "fallback";
+
+interface FamilyClassificationInput {
+  familyKey: string;
+  primaryCategory: string;
+  regime: string;
+  horizon: string;
+  strategyProfile: string;
+  slugPattern: string | null;
+  tickSize?: number | null;
+}
+
+const MICRO_TICK_SIZE_THRESHOLD = 0.001;
+
+function normalizeText(text: string | null | undefined): string {
+  return (text ?? "").trim().toLowerCase();
+}
+
+function includesAnyKeyword(text: string, needles: readonly string[]): boolean {
+  return needles.some((needle) => text.includes(needle));
+}
+
+function resolveFamilyMarketabilityTier(input: FamilyClassificationInput): FamilyMarketabilityTier {
+  const familyKey = normalizeText(input.familyKey);
+  const primaryCategory = normalizeText(input.primaryCategory);
+  const regime = normalizeText(input.regime);
+  const combined = [
+    familyKey,
+    primaryCategory,
+    regime,
+    normalizeText(input.horizon),
+    normalizeText(input.strategyProfile),
+    normalizeText(input.slugPattern),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (input.tickSize != null && input.tickSize <= MICRO_TICK_SIZE_THRESHOLD) return "fallback";
+  if (familyKey === "highest-temperature-in-london") return "fallback";
+  if (includesAnyKeyword(combined, ["truth-social", "donald-trump", "elon-musk", "tweets"])) {
+    return "core";
+  }
+  if (includesAnyKeyword(combined, ["inflation", "cpi", "crude-oil", "oil"])) return "reduced";
+  if (primaryCategory === "geopolitics" || regime === "geopolitics" || regime === "succession") {
+    return "core";
+  }
+  if (regime === "social-activity") return "core";
+  if (regime === "directional-updown") return "reduced";
+  if (primaryCategory.startsWith("crypto")) return "reduced";
+  return "fallback";
+}
 
 const EPSILON = 1e-9;
 const DEFAULT_MAX_BOOK_AGE_MS = 15_000;
