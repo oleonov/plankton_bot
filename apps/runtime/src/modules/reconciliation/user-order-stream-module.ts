@@ -319,7 +319,7 @@ export class UserOrderStreamModule implements RuntimeModule {
           gateway: this.deps.gateway,
           fillRepo: this.deps.fillRepo,
           orderRepo: this.deps.orderRepo,
-              bus: this.deps.bus,
+          bus: this.deps.bus,
           log: this.log,
         },
         Math.max(0, latestFillTimestamp - this.fillCatchupOverlapMs),

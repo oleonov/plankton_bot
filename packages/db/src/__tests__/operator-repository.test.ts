@@ -199,5 +199,4 @@ describe("SqliteOperatorActionRepository", () => {
     expect(recent[0]!.action).toBe("family_disable");
     expect(recent[1]!.action).toBe("resume");
   });
-
 });

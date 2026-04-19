@@ -68,10 +68,7 @@ class AllMarketsCache implements SelectedMarketCache {
   }
 }
 
-export async function runScenario(
-  fixture: ScenarioFixture,
-  _familyConfigs?: unknown[], // kept for backward-compat with existing test call sites
-): Promise<ScenarioResult> {
+export async function runScenario(fixture: ScenarioFixture): Promise<ScenarioResult> {
   if (fixture.dbPath) {
     return await executeScenario(fixture, fixture.dbPath);
   }
@@ -86,10 +83,7 @@ export async function runScenario(
   }
 }
 
-async function executeScenario(
-  fixture: ScenarioFixture,
-  dbPath: string,
-): Promise<ScenarioResult> {
+async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promise<ScenarioResult> {
   const log = pino({ level: "silent" });
 
   // 1. Bootstrap DB and create repos
@@ -127,13 +121,27 @@ async function executeScenario(
     reconciliationRan: false,
   };
 
-  bus.subscribe("SignalProduced", async () => { counters.signals++; });
-  bus.subscribe("SignalApproved", async () => { counters.approved++; });
-  bus.subscribe("SignalRejected", async () => { counters.rejected++; });
-  bus.subscribe("OrderPlaced", async () => { counters.placed++; });
-  bus.subscribe("OrderCancelled", async () => { counters.cancelled++; });
-  bus.subscribe("FillReceived", async () => { counters.fills++; });
-  bus.subscribe("ReconciliationComplete", async () => { counters.reconciliationRan = true; });
+  bus.subscribe("SignalProduced", async () => {
+    counters.signals++;
+  });
+  bus.subscribe("SignalApproved", async () => {
+    counters.approved++;
+  });
+  bus.subscribe("SignalRejected", async () => {
+    counters.rejected++;
+  });
+  bus.subscribe("OrderPlaced", async () => {
+    counters.placed++;
+  });
+  bus.subscribe("OrderCancelled", async () => {
+    counters.cancelled++;
+  });
+  bus.subscribe("FillReceived", async () => {
+    counters.fills++;
+  });
+  bus.subscribe("ReconciliationComplete", async () => {
+    counters.reconciliationRan = true;
+  });
 
   // 5. Record bot run
   const botRunId = createBotRunId(`scenario-${Date.now()}`);

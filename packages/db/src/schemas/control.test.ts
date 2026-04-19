@@ -55,16 +55,12 @@ describe("control.db schema", () => {
 
     // Valid FK
     expect(() => {
-      db.prepare(
-        "INSERT INTO profile_settings (profile_id) VALUES ('simulation')",
-      ).run();
+      db.prepare("INSERT INTO profile_settings (profile_id) VALUES ('simulation')").run();
     }).not.toThrow();
 
     // Invalid FK
     expect(() => {
-      db.prepare(
-        "INSERT INTO profile_settings (profile_id) VALUES ('nonexistent')",
-      ).run();
+      db.prepare("INSERT INTO profile_settings (profile_id) VALUES ('nonexistent')").run();
     }).toThrow(/FOREIGN KEY/);
   });
 

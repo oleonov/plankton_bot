@@ -8,8 +8,6 @@ import { liveLitePreflight } from "../live-lite-preflight.js";
 import type { LiveLiteConfig } from "../live-lite-guard.js";
 
 const ENVELOPE: LiveLiteConfig = {
-  familyAllowlist: [],
-  maxFamilies: 2,
   maxOpenValueUsdc: 50,
   maxOrderUsdc: 10,
   maxActiveMarkets: 5,

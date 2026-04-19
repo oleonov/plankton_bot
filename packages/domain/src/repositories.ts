@@ -1,13 +1,5 @@
 import type { OrderStatus, ProfileId, SwitchState } from "./enums.js";
-import type {
-  FillId,
-  OrderId,
-  PositionId,
-  TokenId,
-  SwitchId,
-  ReportId,
-  ImportId,
-} from "./ids.js";
+import type { FillId, OrderId, PositionId, TokenId, SwitchId, ReportId, ImportId } from "./ids.js";
 import type {
   Fill,
   InventoryLot,
@@ -239,10 +231,7 @@ export interface MarketSnapshotRepository {
 
 export interface RiskEventRepository {
   /** Insert a risk event into the audit log. */
-  insert(event: {
-    eventType: string;
-    payload: Record<string, unknown>;
-  }): void;
+  insert(event: { eventType: string; payload: Record<string, unknown> }): void;
 
   /** Count risk events since the given ISO timestamp. */
   countSince(createdAtIso: string): number;

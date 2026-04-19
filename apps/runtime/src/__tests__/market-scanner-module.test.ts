@@ -109,7 +109,7 @@ const silentLog = {
   debug: vi.fn(),
   fatal: vi.fn(),
   child: () => silentLog,
-} as any;  
+} as any;
 
 function createMockBus(): EventBus {
   return {
@@ -161,8 +161,8 @@ function buildModule(
   orderRepo: ReturnType<typeof createMockOrderRepo>;
 } {
   const discoveryGateway = opts.discoveryGateway ?? createMockDiscoveryGateway();
-  const marketRepo = (opts.marketRepo ?? createMockMarketRepo());
-  const bus = (opts.bus ?? createMockBus());
+  const marketRepo = opts.marketRepo ?? createMockMarketRepo();
+  const bus = opts.bus ?? createMockBus();
   const positionRepo = opts.positionRepo ?? createMockPositionRepo();
   const orderRepo = opts.orderRepo ?? createMockOrderRepo();
   const selectionRuleEngine = opts.selectionRuleEngine ?? SEEDED_ENGINE;
@@ -225,14 +225,18 @@ describe("MarketScannerModule", () => {
   });
 
   it("persists market with step2_fallback_include for single-market event with no rule", async () => {
-    const { mod, discoveryGateway, marketRepo } = buildModule({ selectionRuleEngine: EMPTY_ENGINE });
+    const { mod, discoveryGateway, marketRepo } = buildModule({
+      selectionRuleEngine: EMPTY_ENGINE,
+    });
     const singleMarket = makeClobMarket({
       slug: "us-election-winner",
       eventSlug: "us-election-winner",
       tokens: [{ tokenId: "tok-election", outcome: "Yes" }],
       eventMarketCount: 1,
     });
-    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([singleMarket]);
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      singleMarket,
+    ]);
 
     await mod.scan();
 
@@ -247,7 +251,9 @@ describe("MarketScannerModule", () => {
       makeRule({ ruleId: "r-btc", ruleType: "include_prefix", pattern: "bitcoin-" }),
       makeRule({ ruleId: "r-spam", ruleType: "exclude_slug", pattern: "bitcoin-spam" }),
     ]);
-    const { mod, discoveryGateway, marketRepo } = buildModule({ selectionRuleEngine: excludeEngine });
+    const { mod, discoveryGateway, marketRepo } = buildModule({
+      selectionRuleEngine: excludeEngine,
+    });
     const spamMarket = makeClobMarket({
       slug: "bitcoin-spam",
       eventSlug: "bitcoin-spam",
@@ -322,7 +328,9 @@ describe("MarketScannerModule", () => {
       tokens: [{ tokenId: "tok-inactive", outcome: "Yes" }],
       eventMarketCount: 1,
     });
-    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([inactiveMarket]);
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      inactiveMarket,
+    ]);
 
     await mod.scan();
 

@@ -4,10 +4,7 @@ import type { RiskEventRepository } from "@plankton/domain";
 export class SqliteRiskEventRepository implements RiskEventRepository {
   constructor(private readonly db: Database.Database) {}
 
-  insert(event: {
-    eventType: string;
-    payload: Record<string, unknown>;
-  }): void {
+  insert(event: { eventType: string; payload: Record<string, unknown> }): void {
     this.db
       .prepare("INSERT INTO risk_events (event_type, payload) VALUES (?, ?)")
       .run(event.eventType, JSON.stringify(event.payload));

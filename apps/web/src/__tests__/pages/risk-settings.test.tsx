@@ -17,8 +17,8 @@ describe("RiskSettings", () => {
     renderWithProviders(<RiskSettings />);
 
     expect(await screen.findByText("Daily Loss Cap (USDC)")).toBeInTheDocument();
-    expect(screen.getByText("Max Open Families")).toBeInTheDocument();
     expect(screen.getByText("Max Total Exposure (USDC)")).toBeInTheDocument();
+    expect(screen.queryByText("Max Open Families")).not.toBeInTheDocument();
   });
 
   it("typing values and clicking Save triggers mutation", async () => {

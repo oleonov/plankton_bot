@@ -2,11 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import {
-  createSwitchId,
-  createReportId,
-  createImportId,
-} from "@plankton/domain";
+import { createSwitchId, createReportId, createImportId } from "@plankton/domain";
 import type {
   Profile,
   ProfileSettings,

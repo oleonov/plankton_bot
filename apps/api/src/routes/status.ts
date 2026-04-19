@@ -18,12 +18,11 @@ interface StatusOpts {
 const startedAt = Date.now();
 
 interface LiveLiteStatus {
-  maxFamilies: number;
   maxOpenValueUsdc: number;
   maxOrderUsdc: number;
   maxActiveMarkets: number;
-  walletMode?: string;
-  minOrderUsdc?: number | null;
+  walletMode: string;
+  minOrderUsdc?: number;
 }
 
 interface InfraAlertStatusItem {
@@ -36,12 +35,6 @@ interface InfraAlertStatusItem {
 }
 
 const INFRA_ALERT_LOOKBACK_MS = 60 * 60 * 1000;
-
-function resolveLiveLiteMaxFamilies(envelope: Record<string, unknown>): number {
-  const configured = envelope.maxFamilies;
-  if (typeof configured === "number" && Number.isFinite(configured)) return configured;
-  return 100;
-}
 
 /**
  * Resolve the ledger DB for the currently active profile.
@@ -109,7 +102,6 @@ function computeTradingState(
         candidatesConsidered: number;
         blockedByResolutionBuffer: number;
         blockedByWindow: number;
-        blockedByPerFamilyTickLimit?: number;
         gammaFallbackDustSignalsProduced?: number;
         scanPrimeSkippedByPolicy?: number;
       })
@@ -139,7 +131,6 @@ function computeTradingState(
     signalActivity.candidatesConsideredLast10m = scanner.candidatesConsidered;
     signalActivity.blockedByResolutionBufferLast10m = scanner.blockedByResolutionBuffer;
     signalActivity.blockedByWindowLast10m = scanner.blockedByWindow;
-    signalActivity.blockedByPerFamilyTickLimitLast10m = scanner.blockedByPerFamilyTickLimit ?? 0;
     signalActivity.gammaFallbackDustSignalsLast10m = scanner.gammaFallbackDustSignalsProduced ?? 0;
     signalActivity.scanPrimeSkippedByPolicyLast10m = scanner.scanPrimeSkippedByPolicy ?? 0;
   }
@@ -282,7 +273,6 @@ function buildLiveLiteStatus(
         | undefined;
       const envelope = parseEnvelopeJson(settingsRow?.envelope_json);
       const liveLiteStatus: LiveLiteStatus = {
-        maxFamilies: resolveLiveLiteMaxFamilies(envelope),
         maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
         maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
         maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
@@ -338,7 +328,7 @@ export function buildStatusSnapshot(
     .get(oneMinuteAgoIso) as { cnt: number };
 
   // Count of unique condition IDs with an open or dust position (replaces family_runtime_state)
-  const activeFamilies = db
+  const openConditions = db
     .prepare(
       "SELECT COUNT(DISTINCT condition_id) as cnt FROM positions WHERE status IN ('open','dust')",
     )
@@ -562,7 +552,7 @@ export function buildStatusSnapshot(
     lastReconciliationAt: lastRecon?.ts ?? null,
     marketDataStale,
     marketDataLastUpdateAt,
-    activeFamilyCount: activeFamilies.cnt,
+    openConditionCount: openConditions.cnt,
     openOrderCount: openOrders.cnt,
     openPositionCount: openPositions.cnt,
     ordersPlacedLastMin: recentOrderCount.cnt,

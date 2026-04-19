@@ -13,7 +13,9 @@ const CONTROL_SQL = readFileSync(
 function makeDb(): Database.Database {
   const db = new Database(":memory:");
   db.exec(CONTROL_SQL);
-  db.prepare("INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')").run();
+  db.prepare(
+    "INSERT INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation')",
+  ).run();
   db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
   return db;
 }
@@ -35,7 +37,13 @@ describe("RefreshableSelectionRuleEngine", () => {
   });
 
   it("resolves correctly when seeded with rules at construction", () => {
-    repo.insert({ profileId: "simulation", ruleType: "include_prefix", pattern: "bitcoin-", enabled: true, note: null });
+    repo.insert({
+      profileId: "simulation",
+      ruleType: "include_prefix",
+      pattern: "bitcoin-",
+      enabled: true,
+      note: null,
+    });
     // Must create engine AFTER seeding so construction sees the rules
     const seededEngine = new RefreshableSelectionRuleEngine(repo, "simulation");
     const decision = seededEngine.resolve("bitcoin-price-2026", "bitcoin-up");
@@ -53,7 +61,13 @@ describe("RefreshableSelectionRuleEngine", () => {
     const before = engine.current;
 
     // Simulate an external mutation (e.g. operator API adds a rule)
-    repo.insert({ profileId: "simulation", ruleType: "include_prefix", pattern: "elon-musk-", enabled: true, note: null });
+    repo.insert({
+      profileId: "simulation",
+      ruleType: "include_prefix",
+      pattern: "elon-musk-",
+      enabled: true,
+      note: null,
+    });
 
     // Version is now ahead — refreshIfStale should rebuild
     engine.refreshIfStale();
@@ -65,7 +79,13 @@ describe("RefreshableSelectionRuleEngine", () => {
   });
 
   it("does not reload on a second refreshIfStale call after already syncing", () => {
-    repo.insert({ profileId: "simulation", ruleType: "include_prefix", pattern: "bitcoin-", enabled: true, note: null });
+    repo.insert({
+      profileId: "simulation",
+      ruleType: "include_prefix",
+      pattern: "bitcoin-",
+      enabled: true,
+      note: null,
+    });
     engine.refreshIfStale(); // first refresh picks up the new rule
     const afterFirst = engine.current;
     engine.refreshIfStale(); // version unchanged — no rebuild
@@ -73,7 +93,13 @@ describe("RefreshableSelectionRuleEngine", () => {
   });
 
   it("current getter returns delegate to engine.resolve correctly", () => {
-    repo.insert({ profileId: "simulation", ruleType: "exclude_slug", pattern: "spam-market", enabled: true, note: null });
+    repo.insert({
+      profileId: "simulation",
+      ruleType: "exclude_slug",
+      pattern: "spam-market",
+      enabled: true,
+      note: null,
+    });
     engine.refreshIfStale();
     const decision = engine.current.resolve("some-event", "spam-market");
     expect(decision.status).toBe("exclude");

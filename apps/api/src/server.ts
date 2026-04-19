@@ -28,7 +28,6 @@ import { riskEventsRoutes } from "./routes/risk-events.js";
 import { pnlSeriesRoutes } from "./routes/pnl-series.js";
 import { portfolioSeriesRoutes } from "./routes/portfolio-series.js";
 import { tradingActivityRoutes } from "./routes/trading-activity.js";
-import { configRoutes } from "./routes/config.js";
 import { profileRoutes } from "./routes/profiles.js";
 import { auditRoutes } from "./routes/audit.js";
 import { selectionRulesRoutes } from "./routes/selection-rules.js";
@@ -97,8 +96,6 @@ export async function buildServer(deps: ServerDeps) {
     ledgerDb: deps.ledgerDb,
     ledgerPool: deps.ledgerPool,
   });
-  await app.register(configRoutes, { prefix: "/api/v1", controlDb: deps.controlDb });
-
   // Status — resolves active profile's ledger via pool for consistent snapshot
   await app.register(statusRoutes, {
     prefix: "/api/v1",

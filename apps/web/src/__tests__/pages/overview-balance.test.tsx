@@ -47,10 +47,8 @@ describe("Overview Balance Card", () => {
           walletBalanceUsdc: 487,
           liveLite: {
             maxOpenValueUsdc: 100,
-            maxFamilies: 5,
             maxActiveMarkets: 10,
             maxOrderUsdc: 10,
-            familyAllowlist: [],
           },
         }),
       ),
@@ -133,7 +131,7 @@ describe("Overview Balance Card", () => {
       http.get("/api/v1/status", () =>
         ok({
           ...mockStatus,
-          activeFamilyCount: 42,
+          openConditionCount: 42,
         }),
       ),
     );
@@ -159,7 +157,6 @@ describe("Overview Balance Card", () => {
               orderId: "ord-1",
               clientOrderId: "client-1",
               tokenId: "tok-1",
-              familyId: "fam-1",
               side: "buy",
               orderType: "limit",
               postOnly: true,

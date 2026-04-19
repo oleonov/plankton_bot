@@ -1,12 +1,7 @@
 import type Database from "better-sqlite3";
 import type { InventoryLotRepository } from "@plankton/domain";
 import type { InventoryLot, PositionId, TokenId } from "@plankton/domain";
-import {
-  createLotId,
-  createPositionId,
-  createTokenId,
-  createFillId,
-} from "@plankton/domain";
+import { createLotId, createPositionId, createTokenId, createFillId } from "@plankton/domain";
 import type { OrderSide } from "@plankton/domain";
 
 interface LotRow {

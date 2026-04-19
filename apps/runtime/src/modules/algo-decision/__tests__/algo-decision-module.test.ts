@@ -323,7 +323,7 @@ describe("AlgoDecisionModule", () => {
       buyCount: 2,
       sellCount: 0,
       lastAction: "BUY",
-      firstTradePrice: 0.1,
+      firstEntryFillPrice: 0.1,
       firstTradeAt: twentyFiveMinAgo,
       lastTradeAt: twentyFiveMinAgo,
       updatedAt: twentyFiveMinAgo,
@@ -404,7 +404,7 @@ describe("AlgoDecisionModule", () => {
         buyCount: 1,
         sellCount: 5,
         lastAction: "BUY",
-        firstTradePrice: 0.03,
+        firstEntryFillPrice: 0.03,
         firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
         lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
         updatedAt: new Date().toISOString(),
@@ -433,14 +433,14 @@ describe("AlgoDecisionModule", () => {
       const tokenId = "token-cont-stop";
       const familyId = "fam-cont";
       // legState: S2 (buyCount=2), sellCount=0 → tradeCount = 2
-      // firstTradePrice = 0.03 < 0.05 → R2 fails, tradeCount < 6 → R1 fails → STOP
+      // firstEntryFillPrice = 0.03 < 0.05 → R2 fails, tradeCount < 6 → R1 fails → STOP
       // S2 state has no SELL rule in seed → no signal
       const legState: LegState = {
         tokenId: createTokenId(tokenId),
         buyCount: 2,
         sellCount: 0,
         lastAction: "BUY",
-        firstTradePrice: 0.03,
+        firstEntryFillPrice: 0.03,
         firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
         lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
         updatedAt: new Date().toISOString(),
@@ -466,14 +466,14 @@ describe("AlgoDecisionModule", () => {
       const tokenId = "token-cont-sell";
       const familyId = "fam-cont";
       // legState: S1 (buyCount=1), sellCount=0 → tradeCount = 1
-      // firstTradePrice = 0.03 < 0.05 → STOP
+      // firstEntryFillPrice = 0.03 < 0.05 → STOP
       // S1 + price >= 0.10 → D7-SELL-S1 matches
       const legState: LegState = {
         tokenId: createTokenId(tokenId),
         buyCount: 1,
         sellCount: 0,
         lastAction: "BUY",
-        firstTradePrice: 0.03,
+        firstEntryFillPrice: 0.03,
         firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
         lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
         updatedAt: new Date().toISOString(),
@@ -508,7 +508,7 @@ describe("AlgoDecisionModule", () => {
         buyCount: 1,
         sellCount: 0,
         lastAction: "BUY",
-        firstTradePrice: 0.03,
+        firstEntryFillPrice: 0.03,
         firstTradeAt: thirtyMinAgo,
         lastTradeAt: thirtyMinAgo,
         updatedAt: thirtyMinAgo,
@@ -547,7 +547,7 @@ describe("AlgoDecisionModule", () => {
         buyCount: 1,
         sellCount: 5,
         lastAction: "BUY",
-        firstTradePrice: 0.1,
+        firstEntryFillPrice: 0.1,
         firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
         lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
         updatedAt: new Date().toISOString(),
@@ -612,7 +612,7 @@ describe("AlgoDecisionModule", () => {
       buyCount: 1,
       sellCount: 0,
       lastAction: "BUY",
-      firstTradePrice: 0.1,
+      firstEntryFillPrice: 0.1,
       firstTradeAt: twoHoursAgo,
       lastTradeAt: twoHoursAgo,
       updatedAt: twoHoursAgo,
@@ -685,7 +685,7 @@ describe("AlgoDecisionModule", () => {
       };
     }
 
-    // firstTradePrice=0.10 keeps the continuation gate (R2: price>=0.05 && tradeCount>=2) passing
+    // firstEntryFillPrice=0.10 keeps the continuation gate (R2: price>=0.05 && tradeCount>=2) passing
     // so timeSinceLast gating is exercised in isolation.
     function makeTimedLegState(tokenId: string, lastTradeAtMsAgo: number): LegState {
       const ts = new Date(Date.now() - lastTradeAtMsAgo).toISOString();
@@ -694,7 +694,7 @@ describe("AlgoDecisionModule", () => {
         buyCount: 2,
         sellCount: 0,
         lastAction: "BUY",
-        firstTradePrice: 0.1,
+        firstEntryFillPrice: 0.1,
         firstTradeAt: ts,
         lastTradeAt: ts,
         updatedAt: ts,

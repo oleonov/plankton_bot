@@ -1,8 +1,7 @@
-import { useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useProfileDetail } from "../api/hooks.ts";
 import { formatAgo } from "../utils/format.ts";
-import type { ProfileDTO, DeployedFamilyDTO } from "../api/types.ts";
+import type { ProfileDTO } from "../api/types.ts";
 
 function SummaryTab({ profile }: { profile: ProfileDTO }) {
   return (
@@ -41,40 +40,9 @@ function SummaryTab({ profile }: { profile: ProfileDTO }) {
   );
 }
 
-function FamiliesTab({ families }: { families: DeployedFamilyDTO[] }) {
-  if (families.length === 0) {
-    return <div style={{ fontSize: 12, color: "var(--text-dim)" }}>No families deployed</div>;
-  }
-  return (
-    <table>
-      <thead>
-        <tr>
-          <th>Family</th>
-          <th>Category</th>
-          <th>Regime</th>
-          <th>Enabled</th>
-          <th>Priority</th>
-        </tr>
-      </thead>
-      <tbody>
-        {families.map((f) => (
-          <tr key={f.family_id}>
-            <td style={{ color: "var(--blue)" }}>{f.family_key}</td>
-            <td>{f.primary_category}</td>
-            <td>{f.regime}</td>
-            <td>{f.enabled ? "yes" : "no"}</td>
-            <td>{f.priority}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
 export function ProfileDetail() {
   const { profileId } = useParams<{ profileId: string }>();
   const { data, isLoading } = useProfileDetail(profileId ?? null);
-  const [tab, setTab] = useState<"summary" | "families">("summary");
 
   if (isLoading || !data)
     return (
@@ -93,18 +61,6 @@ export function ProfileDetail() {
       </div>
       <div className="card">
         <div className="tab-bar">
-          <div
-            className={`tab ${tab === "summary" ? "active" : ""}`}
-            onClick={() => setTab("summary")}
-          >
-            Summary
-          </div>
-          <div
-            className={`tab ${tab === "families" ? "active" : ""}`}
-            onClick={() => setTab("families")}
-          >
-            Deployed Families ({data.deployedFamilies.length})
-          </div>
           <Link to={`/profiles/${profileId}/orders`} className="tab">
             Orders
           </Link>
@@ -115,8 +71,7 @@ export function ProfileDetail() {
             Fills
           </Link>
         </div>
-        {tab === "summary" && <SummaryTab profile={data.profile} />}
-        {tab === "families" && <FamiliesTab families={data.deployedFamilies} />}
+        <SummaryTab profile={data.profile} />
       </div>
     </div>
   );

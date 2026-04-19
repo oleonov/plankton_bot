@@ -669,7 +669,6 @@ export class ExecutionModule implements RuntimeModule {
         commandId: createCommandId(`sell-replace-${String(existingSell.orderId)}-${now}`),
         orderId: existingSell.orderId,
         reason: existingLock ? "sell_replace_retry" : "sell_replace_reprice",
-        familyId: null,
       },
       timestamp: now,
     });

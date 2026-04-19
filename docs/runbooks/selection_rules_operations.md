@@ -4,12 +4,12 @@ Selection rules control which Polymarket event slugs the scanner admits into the
 
 ## Rule types
 
-| Type | Matches | Example pattern |
-|---|---|---|
-| `include_prefix` | event slugs starting with the pattern | `bitcoin-` |
-| `exclude_prefix` | event slugs starting with the pattern | `bitcoin-price-` |
-| `include_slug` | exact event slug | `bitcoin-to-150k-by-2025` |
-| `exclude_slug` | exact event slug | `bitcoin-hash-rate-all-time-high` |
+| Type             | Matches                               | Example pattern                   |
+| ---------------- | ------------------------------------- | --------------------------------- |
+| `include_prefix` | event slugs starting with the pattern | `bitcoin-`                        |
+| `exclude_prefix` | event slugs starting with the pattern | `bitcoin-price-`                  |
+| `include_slug`   | exact event slug                      | `bitcoin-to-150k-by-2025`         |
+| `exclude_slug`   | exact event slug                      | `bitcoin-hash-rate-all-time-high` |
 
 ## Resolver precedence (specificity wins)
 
@@ -65,12 +65,12 @@ Every create/update/delete writes a row to `state_transitions` with `entity_type
 
 ## Troubleshooting
 
-| Symptom | Check |
-|---|---|
-| New rule doesn't admit markets within 1 tick | `SELECT selection_rules_version, updated_at FROM runtime_control_state` — confirm version bumped; tail runtime logs for `selection-rule-engine refresh` |
-| Market excluded despite matching include rule | Look up `selection_winning_rule_id` in `markets`; another more-specific rule (e.g. `exclude_prefix`) outranks the include |
-| Excluded market still has open order | Expected — `findTrackedForPricing` keeps excluded tokens in the pricing loop while orders/positions are open so exits can complete |
-| Preview counts mismatch live `markets` table | Preview runs against the current Gamma response; `markets` reflects the last scan. Wait a tick and re-query |
+| Symptom                                       | Check                                                                                                                                                   |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New rule doesn't admit markets within 1 tick  | `SELECT selection_rules_version, updated_at FROM runtime_control_state` — confirm version bumped; tail runtime logs for `selection-rule-engine refresh` |
+| Market excluded despite matching include rule | Look up `selection_winning_rule_id` in `markets`; another more-specific rule (e.g. `exclude_prefix`) outranks the include                               |
+| Excluded market still has open order          | Expected — `findTrackedForPricing` keeps excluded tokens in the pricing loop while orders/positions are open so exits can complete                      |
+| Preview counts mismatch live `markets` table  | Preview runs against the current Gamma response; `markets` reflects the last scan. Wait a tick and re-query                                             |
 
 ## Rollback
 

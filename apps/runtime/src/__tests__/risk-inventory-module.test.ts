@@ -674,8 +674,6 @@ describe("RiskInventoryModule", () => {
 
   it("approves signal regardless of live-lite allowlist (family gate removed)", async () => {
     const liveLiteGuard = new LiveLiteGuard({
-      familyAllowlist: ["fam-other"],
-      maxFamilies: 2,
       maxOpenValueUsdc: 500,
       maxOrderUsdc: 50,
       maxActiveMarkets: 3,
@@ -741,7 +739,7 @@ describe("RiskInventoryModule", () => {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
         conditionId: COND_ID,
-  
+
         side: "buy",
         size: 100,
         avgEntryPrice: 0.05,
@@ -803,7 +801,7 @@ describe("RiskInventoryModule", () => {
         positionId: createPositionId("pos-dustify"),
         tokenId: TOK_ID,
         conditionId: COND_ID,
-  
+
         side: "buy",
         size: 1,
         avgEntryPrice: 0.8,
@@ -863,7 +861,7 @@ describe("RiskInventoryModule", () => {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
         conditionId: COND_ID,
-  
+
         side: "buy",
         size: 100,
         avgEntryPrice: 0.05,
@@ -964,7 +962,7 @@ describe("RiskInventoryModule", () => {
         positionId: createPositionId("pos-1"),
         tokenId: TOK_ID,
         conditionId: COND_ID,
-  
+
         side: "buy",
         size: 100,
         avgEntryPrice: 0.05,
@@ -1034,10 +1032,7 @@ describe("RiskInventoryModule", () => {
   // ─── Per-family in-flight limiter (B2.2) ──────────────────────────
 
   describe("per-family in-flight limiter", () => {
-    function makePlaceOrderRequested(
-      signalReason: string | null = null,
-      tokenId = TOK_ID,
-    ) {
+    function makePlaceOrderRequested(signalReason: string | null = null, tokenId = TOK_ID) {
       return {
         command: {
           type: "PlaceOrderCommand" as const,
@@ -1115,7 +1110,7 @@ describe("RiskInventoryModule", () => {
       // Mock: order is "filled" (set before FillReceived, as importExchangeFills does)
       (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue({
         orderId: createOrderId("ord-1"),
-  
+
         status: "filled",
         size: 10,
       });
@@ -1243,7 +1238,7 @@ describe("RiskInventoryModule", () => {
       await bus.publish("PlaceOrderRequested", makePlaceOrderRequested("probe-entry"));
       (orderRepo.findById as ReturnType<typeof vi.fn>).mockReturnValue({
         orderId,
-  
+
         status: "filled",
         signalReason: "probe-entry",
       });
@@ -1282,7 +1277,7 @@ describe("RiskInventoryModule", () => {
           clientOrderId: "plk_open" as ClientOrderId,
           tokenId: TOK_ID,
           conditionId: COND_ID,
-    
+
           side: "buy",
           orderType: "GTC",
           postOnly: true,

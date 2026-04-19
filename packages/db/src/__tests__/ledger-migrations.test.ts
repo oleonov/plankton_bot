@@ -9,10 +9,7 @@ let dbPath: string;
 let db: Database.Database;
 
 function readMigration(filename: string): string {
-  return readFileSync(
-    path.join(import.meta.dirname, "..", "migrations", filename),
-    "utf-8",
-  );
+  return readFileSync(path.join(import.meta.dirname, "..", "migrations", filename), "utf-8");
 }
 
 /**
@@ -58,13 +55,7 @@ function insertPosition(
     `INSERT INTO positions
        (position_id, token_id, side, status, opened_at, updated_at)
      VALUES (?, ?, 'buy', ?, ?, ?)`,
-  ).run(
-    args.positionId,
-    args.tokenId,
-    args.status,
-    args.openedAt,
-    args.updatedAt ?? args.openedAt,
-  );
+  ).run(args.positionId, args.tokenId, args.status, args.openedAt, args.updatedAt ?? args.openedAt);
 }
 
 beforeEach(() => {
@@ -193,8 +184,6 @@ describe("migration 032 — unique open position per token", () => {
     });
 
     db.exec(readMigration("032_unique_open_position_per_token.sql"));
-    expect(() =>
-      db.exec(readMigration("032_unique_open_position_per_token.sql")),
-    ).not.toThrow();
+    expect(() => db.exec(readMigration("032_unique_open_position_per_token.sql"))).not.toThrow();
   });
 });

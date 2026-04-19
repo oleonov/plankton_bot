@@ -74,7 +74,6 @@ export interface CancelOrderCommand {
     | "entry-suppress-cancel"
     | "exit-reprice-cancel"
     | "exit-ttl-cancel";
-  readonly familyId: null;
 }
 
 // ─── Global Operator Commands ─────────────────────────────────────────────

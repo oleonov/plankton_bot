@@ -5,11 +5,7 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqlitePositionRepository } from "../repositories/position-repository.js";
-import {
-  createPositionId,
-  createTokenId,
-  createConditionId,
-} from "@plankton/domain";
+import { createPositionId, createTokenId, createConditionId } from "@plankton/domain";
 import type { Position } from "@plankton/domain";
 
 let conn: DbConnection;

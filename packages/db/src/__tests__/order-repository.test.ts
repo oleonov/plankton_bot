@@ -5,12 +5,7 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteOrderRepository } from "../repositories/order-repository.js";
-import {
-  createOrderId,
-  createTokenId,
-  createConditionId,
-  createBotRunId,
-} from "@plankton/domain";
+import { createOrderId, createTokenId, createConditionId, createBotRunId } from "@plankton/domain";
 import type { Order, ClientOrderId } from "@plankton/domain";
 
 let conn: DbConnection;

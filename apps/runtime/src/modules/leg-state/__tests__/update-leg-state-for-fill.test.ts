@@ -48,7 +48,7 @@ describe("updateLegStateForFill", () => {
       buyCount: 1,
       sellCount: 0,
       lastAction: "BUY",
-      firstTradePrice: 0.42,
+      firstEntryFillPrice: 0.42,
       firstTradeAt: "2026-01-01T00:00:00Z",
       lastTradeAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:01Z",
@@ -74,7 +74,7 @@ describe("updateLegStateForFill", () => {
 
     const state = repo.get(TOKEN);
     expect(state?.buyCount).toBe(2);
-    expect(state?.firstTradePrice).toBe(0.42);
+    expect(state?.firstEntryFillPrice).toBe(0.42);
     expect(state?.firstTradeAt).toBe("2026-01-01T00:00:00Z");
     expect(state?.lastTradeAt).toBe("2026-01-02T00:00:00Z");
     expect(state?.lastAction).toBe("BUY");
@@ -102,7 +102,7 @@ describe("updateLegStateForFill", () => {
     expect(state?.sellCount).toBe(1);
     expect(state?.lastAction).toBe("SELL");
     expect(state?.lastTradeAt).toBe("2026-01-03T00:00:00Z");
-    expect(state?.firstTradePrice).toBe(0.42);
+    expect(state?.firstEntryFillPrice).toBe(0.42);
   });
 
   it("skips and warns when SELL arrives with no existing leg state", () => {

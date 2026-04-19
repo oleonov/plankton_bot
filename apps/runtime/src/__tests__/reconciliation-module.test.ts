@@ -62,7 +62,6 @@ function createMockOrderRepo(): OrderRepository {
   };
 }
 
-
 function createMockFillRepo(): FillRepository {
   return {
     save: vi.fn(),

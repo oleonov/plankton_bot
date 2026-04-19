@@ -456,10 +456,7 @@ describe("mapGammaMarket", () => {
   });
 
   it("null eventContext.slug leaves eventSlug undefined (no key set)", () => {
-    const market = mapGammaMarket(
-      { slug: "some-market" },
-      { slug: null, marketCount: 5 },
-    );
+    const market = mapGammaMarket({ slug: "some-market" }, { slug: null, marketCount: 5 });
     expect(market.eventSlug).toBeUndefined();
     expect(market.eventMarketCount).toBe(5);
   });

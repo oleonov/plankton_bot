@@ -40,5 +40,4 @@ export class ValidationMetricsReader {
       .get() as { total: number };
     return row.total;
   }
-
 }

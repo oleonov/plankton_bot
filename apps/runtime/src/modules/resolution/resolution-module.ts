@@ -370,7 +370,6 @@ export class ResolutionModule implements RuntimeModule {
           commandId: createCommandId(`res-cancel-${String(order.orderId)}`),
           orderId: order.orderId,
           reason: "market_resolved" as const,
-          familyId: null,
         },
         timestamp: Date.now(),
       });
@@ -436,9 +435,9 @@ export class ResolutionModule implements RuntimeModule {
 
         for (const market of markets) {
           // Find closed positions with orphaned lots for this token
-          const allPositions = this.deps.positionRepo.findAll().filter(
-            (p) => String(p.tokenId) === String(market.tokenId),
-          );
+          const allPositions = this.deps.positionRepo
+            .findAll()
+            .filter((p) => String(p.tokenId) === String(market.tokenId));
           const closedWithLots = allPositions.filter((p) => {
             if (p.status !== "closed") return false;
             const lots = this.deps.lotRepo.findOpen(p.positionId);

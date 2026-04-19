@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { PROBE_DEFAULTS, resolveFamilyLiveTradingPolicy } from "@plankton/domain";
 
 import { ensureControlProfiles } from "./control-profiles.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
@@ -11,23 +10,6 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
   runMigrations(conn.db);
   ensureBootstrapBackfillsTable(conn.db);
   safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
-  safeAddColumn(conn.db, "family_catalog", "source_type", "TEXT NOT NULL DEFAULT 'yaml_import'");
-  safeAddColumn(conn.db, "family_catalog", "origin_checksum", "TEXT");
-  safeAddColumn(conn.db, "family_catalog", "fee_tier", "TEXT NOT NULL DEFAULT 'unknown'");
-  safeAddColumn(
-    conn.db,
-    "family_catalog",
-    "live_wallet_requirement",
-    "TEXT NOT NULL DEFAULT 'relayer-required'",
-  );
-  safeAddColumn(
-    conn.db,
-    "family_catalog",
-    "requires_post_only_for_live",
-    "INTEGER NOT NULL DEFAULT 1",
-  );
-  backfillFamilyLivePolicy(conn.db);
-  backfillFamilyLimitUnification(conn.db);
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
   return conn;
@@ -50,11 +32,8 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "profile_settings", "wallet_mode", "TEXT");
   safeAddColumn(conn.db, "profile_settings", "min_order_usdc", "REAL");
   safeAddColumn(conn.db, "profile_settings", "relayer_json", "TEXT");
-  // family_catalog / family_rules safeAddColumn calls removed — those tables are
-  // dropped by migration 036 and no longer exist in the schema.
 
   backfillLiveProfileSettings(conn.db);
-  backfillFamilyLimitUnification(conn.db);
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
 
@@ -93,16 +72,14 @@ const CONTROL_MIGRATION_BASELINES: ControlMigrationBaseline[] = [
     // Post-036 shape: family_deployments is gone entirely — also satisfied.
     // Fresh bootstrap (no family_deployments) and upgrade post-036 are both handled.
     isAlreadyApplied: (db) =>
-      !hasTable(db, "family_deployments") ||
-      hasColumn(db, "family_deployments", "disabled_at"),
+      !hasTable(db, "family_deployments") || hasColumn(db, "family_deployments", "disabled_at"),
   },
   {
     name: "033_drop_legacy_governance.sql",
     // Post-033 shape: strategy_stage column is gone from family_deployments.
     // Post-036 shape: family_deployments is gone entirely — also satisfied.
     isAlreadyApplied: (db) =>
-      !hasTable(db, "family_deployments") ||
-      !hasColumn(db, "family_deployments", "strategy_stage"),
+      !hasTable(db, "family_deployments") || !hasColumn(db, "family_deployments", "strategy_stage"),
   },
   {
     name: "034_drop_discovery_tables.sql",
@@ -150,7 +127,6 @@ function seedControlMigrationsBaseline(db: import("better-sqlite3").Database): v
   }
 }
 
-const BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION = "2026-04-13-family-limit-unification-v1";
 const BOOTSTRAP_BACKFILL_BUY_SIZE_PRECEDENCE_V22 = "2026-04-17-buy-size-precedence-v2.2";
 
 function ensureBootstrapBackfillsTable(db: import("better-sqlite3").Database): void {
@@ -175,126 +151,6 @@ function markBootstrapBackfill(db: import("better-sqlite3").Database, name: stri
   db.prepare("INSERT OR IGNORE INTO bootstrap_backfills (name) VALUES (?)").run(name);
 }
 
-function maxNumber(current: unknown, target: number): number {
-  if (typeof current !== "number" || Number.isNaN(current)) return target;
-  return Math.max(current, target);
-}
-
-function backfillFamilyLimitUnification(db: import("better-sqlite3").Database): void {
-  if (hasBootstrapBackfill(db, BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION)) return;
-
-  try {
-    const hasFamilyRuleState = Boolean(
-      db
-        .prepare(
-          `SELECT 1
-             FROM family_rules
-            UNION ALL
-           SELECT 1
-             FROM family_rules_snapshot
-            LIMIT 1`,
-        )
-        .get(),
-    );
-    if (!hasFamilyRuleState) return;
-
-    db.transaction(() => {
-      db.prepare(
-        `UPDATE family_rules
-         SET max_active_markets = CASE
-               WHEN max_active_markets < @maxActiveMarkets THEN @maxActiveMarkets
-               ELSE max_active_markets
-             END,
-             max_dust_positions = CASE
-               WHEN max_dust_positions < @maxDustPositions THEN @maxDustPositions
-               ELSE max_dust_positions
-             END,
-             tail_quarantine_threshold_usdc = CASE
-               WHEN tail_quarantine_threshold_usdc < @tailThresholdUsdc THEN @tailThresholdUsdc
-               ELSE tail_quarantine_threshold_usdc
-             END,
-             tail_quarantine_threshold_ratio = CASE
-               WHEN tail_quarantine_threshold_ratio < @tailThresholdRatio THEN @tailThresholdRatio
-               ELSE tail_quarantine_threshold_ratio
-             END,
-             updated_at = datetime('now')
-         WHERE max_active_markets < @maxActiveMarkets
-            OR max_dust_positions < @maxDustPositions
-            OR tail_quarantine_threshold_usdc < @tailThresholdUsdc
-            OR tail_quarantine_threshold_ratio < @tailThresholdRatio`,
-      ).run({
-        maxActiveMarkets: PROBE_DEFAULTS.maxActiveMarkets,
-        maxDustPositions: PROBE_DEFAULTS.maxDustPositions,
-        tailThresholdUsdc: PROBE_DEFAULTS.tailQuarantineThresholdUsdc,
-        tailThresholdRatio: PROBE_DEFAULTS.tailQuarantineThresholdRatio,
-      });
-
-      const latestSnapshots = db
-        .prepare(
-          `SELECT s.id, s.family_id, s.snapshot, s.reason
-             FROM family_rules_snapshot s
-             JOIN (
-               SELECT family_id, MAX(captured_at) AS max_captured_at
-                 FROM family_rules_snapshot
-                GROUP BY family_id
-             ) latest
-               ON latest.family_id = s.family_id
-              AND latest.max_captured_at = s.captured_at`,
-        )
-        .all() as Array<{ id: number; family_id: string; snapshot: string; reason: string }>;
-
-      const insertSnapshot = db.prepare(
-        `INSERT INTO family_rules_snapshot (family_id, snapshot, reason, captured_at)
-         VALUES (?, ?, ?, datetime('now'))`,
-      );
-
-      for (const row of latestSnapshots) {
-        let parsed: Record<string, unknown>;
-        try {
-          parsed = JSON.parse(row.snapshot) as Record<string, unknown>;
-        } catch {
-          continue;
-        }
-
-        const updated = {
-          ...parsed,
-          maxActiveMarkets: maxNumber(parsed.maxActiveMarkets, PROBE_DEFAULTS.maxActiveMarkets),
-          maxDustPositions: maxNumber(parsed.maxDustPositions, PROBE_DEFAULTS.maxDustPositions),
-          tailQuarantineThresholdUsdc: maxNumber(
-            parsed.tailQuarantineThresholdUsdc,
-            PROBE_DEFAULTS.tailQuarantineThresholdUsdc,
-          ),
-          tailQuarantineThresholdRatio: maxNumber(
-            parsed.tailQuarantineThresholdRatio,
-            PROBE_DEFAULTS.tailQuarantineThresholdRatio,
-          ),
-        };
-
-        if (
-          updated.maxActiveMarkets === parsed.maxActiveMarkets &&
-          updated.maxDustPositions === parsed.maxDustPositions &&
-          updated.tailQuarantineThresholdUsdc === parsed.tailQuarantineThresholdUsdc &&
-          updated.tailQuarantineThresholdRatio === parsed.tailQuarantineThresholdRatio
-        ) {
-          continue;
-        }
-
-        insertSnapshot.run(
-          row.family_id,
-          JSON.stringify(updated),
-          `${row.reason}: family-limit-unification-backfill`,
-        );
-      }
-
-      markBootstrapBackfill(db, BOOTSTRAP_BACKFILL_FAMILY_LIMIT_UNIFICATION);
-    })();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("no such table")) return;
-    throw err;
-  }
-}
-
 function backfillLiveProfileSettings(db: import("better-sqlite3").Database): void {
   try {
     db.prepare(
@@ -306,43 +162,6 @@ function backfillLiveProfileSettings(db: import("better-sqlite3").Database): voi
   } catch {
     // Legacy test DBs may not have the profile_settings table.
   }
-}
-
-function backfillFamilyLivePolicy(db: import("better-sqlite3").Database): void {
-  let rows: Array<{ family_id: string; primary_category: string; fee_tier: string | null }>;
-  try {
-    rows = db
-      .prepare(
-        `SELECT family_id, primary_category, fee_tier
-       FROM family_catalog`,
-      )
-      .all() as Array<{ family_id: string; primary_category: string; fee_tier: string | null }>;
-  } catch {
-    return;
-  }
-
-  const update = db.prepare(
-    `UPDATE family_catalog
-     SET fee_tier = ?,
-         live_wallet_requirement = ?,
-         requires_post_only_for_live = ?
-     WHERE family_id = ?`,
-  );
-
-  db.transaction(() => {
-    for (const row of rows) {
-      if (row.fee_tier && row.fee_tier !== "unknown") continue;
-      const policy = resolveFamilyLiveTradingPolicy({
-        primaryCategory: row.primary_category,
-      });
-      update.run(
-        policy.feeTier,
-        policy.liveWalletRequirement,
-        policy.requiresPostOnlyForLive ? 1 : 0,
-        row.family_id,
-      );
-    }
-  })();
 }
 
 export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): void {

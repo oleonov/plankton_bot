@@ -1,12 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { bootstrapDatabase } from "../bootstrap.js";
 import { SqliteFillRepository } from "../repositories/fill-repository.js";
-import {
-  createFillId,
-  createOrderId,
-  createTokenId,
-  createConditionId,
-} from "@plankton/domain";
+import { createFillId, createOrderId, createTokenId, createConditionId } from "@plankton/domain";
 import type { Fill } from "@plankton/domain";
 import type { DbConnection } from "../connection.js";
 

@@ -144,7 +144,8 @@ export class SqliteMarketRepository implements MarketRepository {
       tickSize: row.tick_size as number,
       negRisk: row.neg_risk === 1,
       eventMarketCount: (row.event_market_count as number | null) ?? 1,
-      selectionStatus: (row.selection_status as import("@plankton/domain").SelectionStatus) ?? "unknown",
+      selectionStatus:
+        (row.selection_status as import("@plankton/domain").SelectionStatus) ?? "unknown",
       selectionWinningRuleId: (row.selection_winning_rule_id as string) ?? null,
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,

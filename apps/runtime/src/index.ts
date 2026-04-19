@@ -40,11 +40,7 @@ import {
   SqliteStateTransitionRepository,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
-import {
-  createBotRunId,
-  ENTRY_REASONS,
-  resolveTradingState,
-} from "@plankton/domain";
+import { createBotRunId, ENTRY_REASONS, resolveTradingState } from "@plankton/domain";
 import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
@@ -80,14 +76,12 @@ import {
 } from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
-import { maybeBootstrapFromYaml } from "./bootstrap-import.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
-import { resolveLiveLiteMaxFamilies } from "./live-lite-envelope.js";
 import { installConsoleRedaction } from "./console-redaction.js";
 import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
 import type {
@@ -157,19 +151,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // 2b. If control.db is empty, seed it from YAML (one-time bootstrap only).
-  try {
-    const result = maybeBootstrapFromYaml(controlConn.db, config.familyRulesPath);
-    if (result.bootstrapped) {
-      log.info({ importedFamilies: result.importedFamilies }, "control.db bootstrapped from YAML");
-    }
-  } catch (err) {
-    log.fatal({ err, path: config.familyRulesPath }, "bootstrap from YAML failed");
-    controlConn.close();
-    process.exit(1);
-  }
-
-  // 2c. Resolve active profile from control.db (falls back to RUNTIME_MODE env)
+  // 2b. Resolve active profile from control.db (falls back to RUNTIME_MODE env)
   type RuntimeMode = "simulation" | "paper" | "live-lite";
   const resolvedProfile = resolveActiveProfile(controlConn.db, config.runtimeMode);
   const activeProfile = resolvedProfile.profile;
@@ -287,7 +269,9 @@ async function main(): Promise<void> {
     }
   }
 
-  // Build live-lite envelope from control.db profile_settings (replaces env vars)
+  // Build live-lite envelope from control.db profile_settings.
+  // Per ADR D4 (docs/superpowers/specs/2026-04-18-algo-spec-freeze-adr.md), the envelope
+  // caps exposure only — admission is solely the selection-rule engine.
   const liveLiteConfig = (() => {
     if (runtimeMode !== "live-lite") return undefined;
     let envelope: Record<string, unknown> = {};
@@ -303,16 +287,8 @@ async function main(): Promise<void> {
     } else {
       log.warn("live-lite profile_settings.envelope_json is empty — using default caps");
     }
-    // Derive allowlist from enabled family_deployments for live-lite
-    const deployedFamilies = controlConn.db
-      .prepare(
-        "SELECT family_id FROM family_deployments WHERE profile = 'live-lite' AND enabled = 1",
-      )
-      .all() as { family_id: string }[];
     const minOrderUsdc = settingsRow?.min_order_usdc;
     return {
-      familyAllowlist: deployedFamilies.map((f) => f.family_id),
-      maxFamilies: resolveLiveLiteMaxFamilies(envelope, deployedFamilies.length),
       maxOpenValueUsdc: Number(envelope.maxOpenValueUsdc ?? 500),
       maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
       maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
@@ -773,13 +749,7 @@ async function main(): Promise<void> {
   });
 
   bus.subscribe("OperatorCommandApplied", async (ev) => {
-    riskEventWriter.onOperatorCommand(
-      ev.action,
-      null,
-      ev.commandDbId,
-      ev.reason,
-      ev.initiatorType,
-    );
+    riskEventWriter.onOperatorCommand(ev.action, null, ev.commandDbId, ev.reason, ev.initiatorType);
   });
 
   bus.subscribe("ReconciliationDriftDetected", async ({ details, severity, timestamp }) => {
@@ -1052,7 +1022,6 @@ async function main(): Promise<void> {
     candidatesConsidered: 0,
     blockedByResolutionBuffer: 0,
     blockedByWindow: 0,
-    blockedByPerFamilyTickLimit: 0,
     gammaFallbackDustSignalsProduced: 0,
     scanPrimeSkippedByPolicy: 0,
     lastReset: Date.now(),
@@ -1062,7 +1031,6 @@ async function main(): Promise<void> {
     scannerWindow.candidatesConsidered += ev.candidatesConsidered;
     scannerWindow.blockedByResolutionBuffer += ev.blockedByResolutionBuffer;
     scannerWindow.blockedByWindow += ev.blockedByWindow;
-    scannerWindow.blockedByPerFamilyTickLimit += ev.blockedByPerFamilyTickLimit;
     scannerWindow.gammaFallbackDustSignalsProduced += ev.gammaFallbackDustSignalsProduced;
     scannerWindow.scanPrimeSkippedByPolicy += ev.scanPrimeSkippedByPolicy;
   });
@@ -1218,7 +1186,6 @@ async function main(): Promise<void> {
       scannerWindow.candidatesConsidered = 0;
       scannerWindow.blockedByResolutionBuffer = 0;
       scannerWindow.blockedByWindow = 0;
-      scannerWindow.blockedByPerFamilyTickLimit = 0;
       scannerWindow.gammaFallbackDustSignalsProduced = 0;
       scannerWindow.scanPrimeSkippedByPolicy = 0;
       scannerWindow.lastReset = now;
@@ -1229,7 +1196,6 @@ async function main(): Promise<void> {
         candidatesConsidered: scannerWindow.candidatesConsidered,
         blockedByResolutionBuffer: scannerWindow.blockedByResolutionBuffer,
         blockedByWindow: scannerWindow.blockedByWindow,
-        blockedByPerFamilyTickLimit: scannerWindow.blockedByPerFamilyTickLimit,
         gammaFallbackDustSignalsProduced: scannerWindow.gammaFallbackDustSignalsProduced,
         scanPrimeSkippedByPolicy: scannerWindow.scanPrimeSkippedByPolicy,
       }),

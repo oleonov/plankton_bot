@@ -127,7 +127,7 @@ export const mockStatus = {
   lastReconciliationAt: "2026-03-31T00:00:00Z",
   marketDataStale: false,
   marketDataLastUpdateAt: "2026-03-31T00:00:00Z",
-  activeFamilyCount: 12,
+  openConditionCount: 12,
   openOrderCount: 2,
   openPositionCount: 10,
   ordersPlacedLastMin: 0,
@@ -176,16 +176,6 @@ export const mockProfileDetail = {
     risk_caps_json: null,
     updated_at: "2026-03-31T00:00:00Z",
   },
-  deployedFamilies: [
-    {
-      family_id: "fam-1",
-      enabled: 1,
-      priority: 1,
-      family_key: "bitcoin-above",
-      primary_category: "crypto",
-      regime: "threshold",
-    },
-  ],
 };
 
 export const mockAudit = {
@@ -250,7 +240,6 @@ export const handlers = [
     return ok({ deleted: true, ruleId: params.ruleId });
   }),
   http.get("/api/v1/selection-rules/preview", () => ok(mockPreviewBuckets)),
-  http.post("/api/v1/selection-rules/preview", () => ok(mockPreviewBuckets)),
   http.get("/api/v1/selection-rules/match", ({ request }) => {
     const url = new URL(request.url);
     const marketSlug = url.searchParams.get("marketSlug") ?? "";

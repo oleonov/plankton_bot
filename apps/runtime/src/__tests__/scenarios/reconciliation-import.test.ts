@@ -5,20 +5,12 @@ import {
   makeMarketFixture,
   resetFixtureCounters,
 } from "../../scenario/fixture-helpers.js";
-import { makeFamilyConfig } from "../../scenario/family-fixtures.js";
-
 afterEach(() => {
   resetFixtureCounters();
 });
 
 describe("Scenario: reconciliation imports missing fill", () => {
   it("imports a fill that exists on exchange but not in local DB", async () => {
-    const familyConfig = makeFamilyConfig({
-      familyId: "fam-recon-test",
-      familyKey: "recon-test",
-      slugPattern: "will-*-happen",
-    });
-
     const market = makeMarket({ slug: "will-test-happen" });
 
     const fixture = {
@@ -65,7 +57,7 @@ describe("Scenario: reconciliation imports missing fill", () => {
       },
     };
 
-    const result = await runScenario(fixture, [familyConfig]);
+    const result = await runScenario(fixture);
 
     expect(result.reconciliationRan).toBe(true);
     // Position should have been created from the imported fill

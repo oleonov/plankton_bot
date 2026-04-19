@@ -229,7 +229,10 @@ describe("MarketDataModule", () => {
       outcome: "NO",
     });
 
-    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([yesMarket, noMarket]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
+      yesMarket,
+      noMarket,
+    ]);
 
     const pricingMap = new Map<
       string,
@@ -325,7 +328,9 @@ describe("MarketDataModule", () => {
   });
 
   it("healthCheck returns ok after successful poll", async () => {
-    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeTrackedMarket(),
+    ]);
 
     await mod.poll();
 
@@ -346,7 +351,9 @@ describe("MarketDataModule", () => {
       botRunId: "run-test-123",
     });
 
-    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeTrackedMarket(),
+    ]);
     await mod.poll();
 
     await new Promise((r) => setTimeout(r, staleMs + 10));
@@ -357,7 +364,9 @@ describe("MarketDataModule", () => {
   });
 
   it("poll does not crash on gateway failure", async () => {
-    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeTrackedMarket(),
+    ]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("network down"),
     );
@@ -369,7 +378,9 @@ describe("MarketDataModule", () => {
   });
 
   it("lastSuccessfulDataMs is NOT updated when getMarketPricing throws", async () => {
-    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeTrackedMarket(),
+    ]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("request timed out after 15000ms"),
     );
@@ -402,7 +413,9 @@ describe("MarketDataModule", () => {
 
   it("start resolves immediately even when gateway is slow (non-blocking)", async () => {
     let resolvePricing!: (v: Map<string, any>) => void;
-    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeTrackedMarket(),
+    ]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockReturnValue(
       new Promise<Map<string, any>>((r) => {
         resolvePricing = r;
@@ -859,7 +872,9 @@ describe("MarketDataModule", () => {
       progressEvents.push(p);
     });
 
-    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([makeTrackedMarket()]);
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
+      makeTrackedMarket(),
+    ]);
     (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("network down"),
     );

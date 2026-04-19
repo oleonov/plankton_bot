@@ -55,7 +55,8 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const { profileId, limit } = req.query as { profileId?: string; limit?: string };
     if (!profileId) return reply.code(400).send(fail("BAD_REQUEST", "profileId required"));
     const db = ledgerPool?.get(profileId) ?? null;
-    if (!db) return reply.code(404).send(fail("LEDGER_NOT_FOUND", `no ledger for profile ${profileId}`));
+    if (!db)
+      return reply.code(404).send(fail("LEDGER_NOT_FOUND", `no ledger for profile ${profileId}`));
     const cap = Math.min(Number(limit ?? 20), 100);
     const rows = db
       .prepare(

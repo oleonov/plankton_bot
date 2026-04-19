@@ -11,8 +11,6 @@ const envSchema = z
     RUNTIME_MODE: runtimeModeSchema.optional(),
     LOG_LEVEL: logLevelSchema.default("info"),
     DB_PATH: z.string().default("./apps/runtime/data/plankton.db"),
-    BOOTSTRAP_FAMILY_RULES_PATH: z.string().optional(),
-    FAMILY_RULES_PATH: z.string().default("./config/family_rules.yaml"),
     MARKET_DATA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().int().positive().default(120_000),
     STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
@@ -82,7 +80,6 @@ export interface AppConfig {
   runtimeMode: "simulation" | "paper" | "live-lite" | undefined;
   logLevel: "debug" | "info" | "warn" | "error";
   dbPath: string;
-  familyRulesPath: string;
   marketDataPollIntervalMs: number;
   marketDataStaleThresholdMs: number;
   strategyScanIntervalMs: number;
@@ -142,7 +139,6 @@ export function loadEnv(envPath?: string): AppConfig {
     runtimeMode: env.RUNTIME_MODE,
     logLevel: env.LOG_LEVEL,
     dbPath: path.resolve(root, env.DB_PATH),
-    familyRulesPath: path.resolve(root, env.BOOTSTRAP_FAMILY_RULES_PATH ?? env.FAMILY_RULES_PATH),
     marketDataPollIntervalMs: env.MARKET_DATA_POLL_INTERVAL_MS,
     marketDataStaleThresholdMs: env.MARKET_DATA_STALE_THRESHOLD_MS,
     strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,

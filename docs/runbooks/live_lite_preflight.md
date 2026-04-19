@@ -12,16 +12,16 @@
 
 Verify these env vars are set:
 
-| Env var                         | Expected value     |
-| ------------------------------- | ------------------ |
-| `RUNTIME_MODE`                  | `live-lite`        |
-| `LIVE_LITE_CONFIRM`             | `true`             |
-| `LIVE_LITE_MAX_OPEN_VALUE_USDC` | positive number    |
-| `LIVE_LITE_MAX_ORDER_USDC`      | positive number    |
-| `LIVE_LITE_MAX_ACTIVE_MARKETS`  | positive integer   |
-| `POLY_API_KEY`                  | set                |
-| `POLY_API_SECRET`               | set                |
-| `POLY_PASSPHRASE`               | set                |
+| Env var                         | Expected value   |
+| ------------------------------- | ---------------- |
+| `RUNTIME_MODE`                  | `live-lite`      |
+| `LIVE_LITE_CONFIRM`             | `true`           |
+| `LIVE_LITE_MAX_OPEN_VALUE_USDC` | positive number  |
+| `LIVE_LITE_MAX_ORDER_USDC`      | positive number  |
+| `LIVE_LITE_MAX_ACTIVE_MARKETS`  | positive integer |
+| `POLY_API_KEY`                  | set              |
+| `POLY_API_SECRET`               | set              |
+| `POLY_PASSPHRASE`               | set              |
 
 ## DB State Verification
 

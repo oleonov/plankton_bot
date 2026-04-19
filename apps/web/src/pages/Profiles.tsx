@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useProfiles, useProfileDetail } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { formatAgo } from "../utils/format.ts";
-import type { ProfileDTO, DeployedFamilyDTO } from "../api/types.ts";
+import type { ProfileDTO } from "../api/types.ts";
 
 function SummaryTab({ profile }: { profile: ProfileDTO }) {
   return (
@@ -41,60 +41,14 @@ function SummaryTab({ profile }: { profile: ProfileDTO }) {
   );
 }
 
-function FamiliesTab({ families }: { families: DeployedFamilyDTO[] }) {
-  if (families.length === 0) {
-    return <div style={{ fontSize: 12, color: "var(--text-dim)" }}>No families deployed</div>;
-  }
-  return (
-    <table>
-      <thead>
-        <tr>
-          <th>Family</th>
-          <th>Category</th>
-          <th>Regime</th>
-          <th>Enabled</th>
-          <th>Priority</th>
-        </tr>
-      </thead>
-      <tbody>
-        {families.map((f) => (
-          <tr key={f.family_id}>
-            <td style={{ color: "var(--blue)" }}>{f.family_key}</td>
-            <td>{f.primary_category}</td>
-            <td>{f.regime}</td>
-            <td>{f.enabled ? "yes" : "no"}</td>
-            <td>{f.priority}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
-  );
-}
-
 function ProfileContent({ profileId }: { profileId: string }) {
   const { data, isLoading } = useProfileDetail(profileId);
-  const [tab, setTab] = useState<"summary" | "families">("summary");
 
   if (isLoading || !data) return <div style={{ fontSize: 12, padding: 16 }}>Loading...</div>;
 
   return (
     <div className="card">
-      <div className="tab-bar">
-        <div
-          className={`tab ${tab === "summary" ? "active" : ""}`}
-          onClick={() => setTab("summary")}
-        >
-          Summary
-        </div>
-        <div
-          className={`tab ${tab === "families" ? "active" : ""}`}
-          onClick={() => setTab("families")}
-        >
-          Deployed Families ({data.deployedFamilies.length})
-        </div>
-      </div>
-      {tab === "summary" && <SummaryTab profile={data.profile} />}
-      {tab === "families" && <FamiliesTab families={data.deployedFamilies} />}
+      <SummaryTab profile={data.profile} />
     </div>
   );
 }

@@ -67,7 +67,6 @@ function createMockOrderRepo(): OrderRepository {
   };
 }
 
-
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),

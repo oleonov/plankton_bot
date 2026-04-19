@@ -114,10 +114,7 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   function run() {
-    return cleanStaleEntryOrders(
-      { orderRepo, marketRepo, bus, log: silentLog },
-      backoffMap,
-    );
+    return cleanStaleEntryOrders({ orderRepo, marketRepo, bus, log: silentLog }, backoffMap);
   }
 
   // ─── TTL cancellation ──────────────────────────────────────────────
@@ -203,9 +200,7 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   it("cancels probe-entry orders on daily horizon after the probe TTL", async () => {
-    const sixMinutesAgo = new Date(
-      Date.now() - PROBE_LIKE_DAILY_TTL_MS - 30_000,
-    ).toISOString();
+    const sixMinutesAgo = new Date(Date.now() - PROBE_LIKE_DAILY_TTL_MS - 30_000).toISOString();
     const order = makeOrder({
       createdAt: sixMinutesAgo,
       signalReason: "probe-entry",

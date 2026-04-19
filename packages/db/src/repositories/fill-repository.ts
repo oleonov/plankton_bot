@@ -1,12 +1,7 @@
 import type Database from "better-sqlite3";
 import type { FillRepository, Fill } from "@plankton/domain";
 import type { OrderId, TokenId, FillId, OrderSide, LiquidityRole } from "@plankton/domain";
-import {
-  createFillId,
-  createOrderId,
-  createTokenId,
-  createConditionId,
-} from "@plankton/domain";
+import { createFillId, createOrderId, createTokenId, createConditionId } from "@plankton/domain";
 
 export class SqliteFillRepository implements FillRepository {
   private static readonly FIND_BY_ORDER_IDS_CHUNK_SIZE = 500;

@@ -4,9 +4,10 @@
  * FamilyIdentity is no longer a domain type. Phase 7 will delete this file.
  */
 
-export function resolveFamilyAssignmentMaxDaysAhead(
-  family: { horizon?: string; regime?: string },
-): number | undefined {
+export function resolveFamilyAssignmentMaxDaysAhead(family: {
+  horizon?: string;
+  regime?: string;
+}): number | undefined {
   if (family.horizon === "deadline" && family.regime === "threshold") {
     return 7;
   }

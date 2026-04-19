@@ -21,7 +21,8 @@ function createFakeDb(runtimeMetrics: Record<string, Record<string, unknown>>): 
           if (sql.includes("FROM orders WHERE status IN")) return { cnt: 0 };
           if (sql.includes("FROM orders WHERE created_at >=")) return { cnt: 0 };
           if (sql.includes("COUNT(DISTINCT condition_id)")) return { cnt: 0 };
-          if (sql.includes("COUNT(*) as cnt FROM positions WHERE status = 'open'")) return { cnt: 0 };
+          if (sql.includes("COUNT(*) as cnt FROM positions WHERE status = 'open'"))
+            return { cnt: 0 };
           if (sql.includes("FROM positions WHERE opened_at >=")) return { cnt: 0 };
           if (sql.includes("SUM(current_value_usdc)")) return { total: 0 };
           if (sql.includes("FROM bot_runs ORDER BY started_at DESC LIMIT 1")) {

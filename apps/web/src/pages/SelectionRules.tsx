@@ -7,6 +7,7 @@ import {
   useSelectionPreview,
   useSelectionMatch,
   useEventSlugOptions,
+  useProfiles,
 } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import type { SelectionRule, SelectionRuleType } from "../api/types.ts";
@@ -178,10 +179,7 @@ function CreateForm({ profileId }: CreateFormProps) {
           style={{ fontSize: 12, padding: "4px 8px", minWidth: 160 }}
         />
         {normalized && pattern !== normalized && (
-          <span
-            data-testid="normalized-preview"
-            style={{ fontSize: 10, color: "var(--text-dim)" }}
-          >
+          <span data-testid="normalized-preview" style={{ fontSize: 10, color: "var(--text-dim)" }}>
             normalized: {normalized}
           </span>
         )}
@@ -230,8 +228,7 @@ function PreviewPanel({ profileId }: PreviewPanelProps) {
   const preview = useSelectionPreview(profileId);
 
   const includeCount =
-    (preview.data?.matchedInclude.length ?? 0) +
-    (preview.data?.step2FallbackInclude.length ?? 0);
+    (preview.data?.matchedInclude.length ?? 0) + (preview.data?.step2FallbackInclude.length ?? 0);
   const excludeCount =
     (preview.data?.matchedExclude.length ?? 0) + (preview.data?.fallbackExclude.length ?? 0);
 
@@ -254,7 +251,9 @@ function PreviewPanel({ profileId }: PreviewPanelProps) {
       >
         {open ? "▼" : "▶"} Universe Preview
         {preview.data && (
-          <span style={{ marginLeft: 8, fontWeight: 400, fontSize: 12, color: "var(--text-muted)" }}>
+          <span
+            style={{ marginLeft: 8, fontWeight: 400, fontSize: 12, color: "var(--text-muted)" }}
+          >
             {includeCount} INCLUDE · {excludeCount} EXCLUDE
           </span>
         )}
@@ -345,7 +344,12 @@ function MatchDebugger({ profileId }: MatchDebuggerProps) {
   const [submitted, setSubmitted] = useState(false);
   const eventSlugs = useEventSlugOptions(profileId);
 
-  const match = useSelectionMatch(profileId, eventSlug, marketSlug, submitted && marketSlug.length > 0);
+  const match = useSelectionMatch(
+    profileId,
+    eventSlug,
+    marketSlug,
+    submitted && marketSlug.length > 0,
+  );
 
   function handleTest(e: React.FormEvent) {
     e.preventDefault();
@@ -451,13 +455,22 @@ function MatchDebugger({ profileId }: MatchDebuggerProps) {
 
 // ─── SelectionRules page ──────────────────────────────────────────────────────
 
-const DEFAULT_PROFILE = "simulation";
-
 export function SelectionRules() {
-  // Use query param or default profile; no ProfileContext dependency so this
-  // page stays usable without the context being wired. Operator can extend later.
-  const profileId = DEFAULT_PROFILE;
-  const { data: rules = [], isLoading, isError, error } = useSelectionRules(profileId);
+  const { data: profilesData } = useProfiles();
+  const profiles = profilesData?.profiles ?? [];
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const profileId = selectedId ?? profiles[0]?.profile_id ?? null;
+
+  const { data: rules = [], isLoading, isError, error } = useSelectionRules(profileId ?? "");
+
+  if (!profileId) {
+    return (
+      <div className="page">
+        <div className="page-title">Selection Rules</div>
+        <div style={{ color: "var(--text-dim)", fontSize: 13 }}>No profiles available.</div>
+      </div>
+    );
+  }
 
   if (isLoading) return <div className="page">Loading selection rules…</div>;
 
@@ -475,10 +488,29 @@ export function SelectionRules() {
   return (
     <div className="page">
       <div className="page-title">Selection Rules</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "0 0 8px" }}>
+        <label
+          htmlFor="selection-rules-profile"
+          style={{ fontSize: 12, color: "var(--text-muted)" }}
+        >
+          Profile:
+        </label>
+        <select
+          id="selection-rules-profile"
+          value={profileId}
+          onChange={(e) => setSelectedId(e.target.value)}
+          style={{ fontFamily: "monospace", fontSize: 12 }}
+        >
+          {profiles.map((p) => (
+            <option key={p.profile_id} value={p.profile_id}>
+              {p.display_name ?? p.profile_id}
+            </option>
+          ))}
+        </select>
+      </div>
       <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "0 0 16px" }}>
-        Rules are evaluated with specificity-wins logic: exact slug beats prefix; longer prefix wins;
-        exclude beats include at the same tier. Profile:{" "}
-        <strong style={{ fontFamily: "monospace" }}>{profileId}</strong>
+        Rules are evaluated with specificity-wins logic: exact slug beats prefix; longer prefix
+        wins; exclude beats include at the same tier.
       </p>
 
       <RulesTable rules={rules} profileId={profileId} />

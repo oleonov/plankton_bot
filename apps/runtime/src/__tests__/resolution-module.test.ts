@@ -119,7 +119,6 @@ function createMockResolutionRepo(): MarketResolutionRepository {
   } as unknown as MarketResolutionRepository;
 }
 
-
 function createMockGammaClient(): GammaResolutionClient {
   return {
     getMarketBySlug: vi.fn().mockResolvedValue(null),
@@ -157,7 +156,6 @@ function createMockDb() {
     prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
   };
 }
-
 
 function createMockGateway(balanceByToken?: Record<string, number>): ExchangeGateway {
   return {
@@ -487,9 +485,7 @@ describe("ResolutionModule", () => {
       source: "gamma-delisted",
     });
     (detector.detect as any).mockResolvedValue([resolution]);
-    (orderRepo.findByTokenId as any).mockReturnValue([
-      { orderId: "ord-1", status: "open" },
-    ]);
+    (orderRepo.findByTokenId as any).mockReturnValue([{ orderId: "ord-1", status: "open" }]);
 
     const cancelEvents: any[] = [];
     bus.subscribe("CancelOrderRequested", async (e) => {
@@ -691,9 +687,7 @@ describe("ResolutionModule", () => {
     mod = createModule({ gateway });
     const resolution = makeDetectedResolution();
     (detector.detect as any).mockResolvedValue([resolution]);
-    (orderRepo.findByTokenId as any).mockReturnValue([
-      { orderId: "ord-1", status: "open" },
-    ]);
+    (orderRepo.findByTokenId as any).mockReturnValue([{ orderId: "ord-1", status: "open" }]);
 
     const cancelEvents: any[] = [];
     bus.subscribe("CancelOrderRequested", async (e) => {
@@ -921,7 +915,7 @@ describe("ResolutionModule", () => {
     expect(resolutionRepo.markSettled as any).not.toHaveBeenCalled();
   });
 
-it("skips deactivation and cancel on retry (resolution already exists)", async () => {
+  it("skips deactivation and cancel on retry (resolution already exists)", async () => {
     // Simulate retry: findByConditionId returns existing "detected" record
     (resolutionRepo.findByConditionId as any).mockReturnValue({
       conditionId: CONDITION,
@@ -1044,7 +1038,6 @@ it("skips deactivation and cancel on retry (resolution already exists)", async (
         conditionId: CONDITION,
         slug: "will-x-happen",
         outcome: "YES",
-
       },
     ]);
 
@@ -1122,7 +1115,6 @@ it("skips deactivation and cancel on retry (resolution already exists)", async (
         currentValueUsdc: 0,
       }),
     );
-
   });
 
   it("recoverUnresolved matches outcome labels case-insensitively when winnerTokenId is unavailable", async () => {
@@ -1144,7 +1136,6 @@ it("skips deactivation and cancel on retry (resolution already exists)", async (
         conditionId: CONDITION,
         slug: "will-x-happen",
         outcome: " Yes ",
-
       },
     ]);
 
@@ -1224,7 +1215,6 @@ it("skips deactivation and cancel on retry (resolution already exists)", async (
         conditionId: CONDITION,
         slug: "will-x-happen",
         outcome: "YES",
-
       },
     ]);
 
@@ -1264,7 +1254,6 @@ it("skips deactivation and cancel on retry (resolution already exists)", async (
         conditionId: CONDITION,
         slug: "will-x-happen",
         outcome: "YES",
-
       },
     ]);
 
@@ -1359,7 +1348,7 @@ it("skips deactivation and cancel on retry (resolution already exists)", async (
       );
     });
 
-it("cancels open orders for tokens belonging to algo-redeemed conditions", async () => {
+    it("cancels open orders for tokens belonging to algo-redeemed conditions", async () => {
       (marketRepo.findByConditionId as any).mockReturnValue([
         { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
       ]);

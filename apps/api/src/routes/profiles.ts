@@ -58,19 +58,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .prepare("SELECT * FROM profile_settings WHERE profile_id = ?")
       .get(profileId);
 
-    const deployedFamilies = controlDb
-      .prepare(
-        `SELECT fd.family_id, fd.enabled, fd.priority,
-                fc.family_key, fc.primary_category, fc.regime,
-                fc.fee_tier, fc.live_wallet_requirement, fc.requires_post_only_for_live
-         FROM family_deployments fd
-         JOIN family_catalog fc ON fd.family_id = fc.family_id
-         WHERE fd.profile = ?
-         ORDER BY fd.priority, fc.family_key`,
-      )
-      .all(profileId);
-
-    return ok({ profile, settings: settings ?? null, deployedFamilies });
+    return ok({ profile, settings: settings ?? null });
   });
 
   // ── GET /profiles/:profileId/settings ────────────────────────────────
@@ -140,14 +128,13 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     Params: { profileId: string };
     Querystring: {
       status?: string;
-      family_id?: string;
       limit?: string;
       cursor?: string;
       page?: string;
     };
   }>("/profiles/:profileId/orders", async (request) => {
     const ledger = requireLedger(request.params.profileId);
-    const { status, family_id, cursor } = request.query;
+    const { status, cursor } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
     const page = Math.max(Number(request.query.page) || 1, 1);
     const pageRequested = request.query.page != null;
@@ -159,10 +146,6 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       const statuses = status.split(",").map((s) => s.trim());
       conditions.push(`status IN (${statuses.map(() => "?").join(",")})`);
       params.push(...statuses);
-    }
-    if (family_id) {
-      conditions.push("family_id = ?");
-      params.push(family_id);
     }
     if (!pageRequested && cursor) {
       conditions.push("created_at < ?");
@@ -208,18 +191,14 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
 
   app.get<{
     Params: { profileId: string };
-    Querystring: { family_id?: string; status?: string; dust?: string; sort?: string };
+    Querystring: { status?: string; dust?: string; sort?: string };
   }>("/profiles/:profileId/positions", async (request) => {
     const ledger = requireLedger(request.params.profileId);
-    const { family_id, dust, status, sort } = request.query;
+    const { dust, status, sort } = request.query;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
 
-    if (family_id) {
-      conditions.push("family_id = ?");
-      params.push(family_id);
-    }
     if (dust === "true") {
       conditions.push("status = 'dust'");
     } else if (status) {
@@ -259,7 +238,6 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
   app.get<{
     Params: { profileId: string };
     Querystring: {
-      family_id?: string;
       since?: string;
       limit?: string;
       cursor?: string;
@@ -267,7 +245,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     };
   }>("/profiles/:profileId/fills", async (request) => {
     const ledger = requireLedger(request.params.profileId);
-    const { family_id, since, cursor } = request.query;
+    const { since, cursor } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
     const page = Math.max(Number(request.query.page) || 1, 1);
     const pageRequested = request.query.page != null;
@@ -275,10 +253,6 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     const conditions: string[] = [];
     const params: unknown[] = [];
 
-    if (family_id) {
-      conditions.push("family_id = ?");
-      params.push(family_id);
-    }
     if (since) {
       conditions.push("filled_at >= ?");
       params.push(since);

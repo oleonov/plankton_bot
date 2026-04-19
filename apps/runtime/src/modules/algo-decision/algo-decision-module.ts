@@ -312,8 +312,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     // Per market-selection-layer-design.md:53, pre-entry filter is separate from
     // position management: legState tokens are gated by continuation, not eligibility.
     if (legState) {
-      const tradeCount = legState.buyCount + legState.sellCount;
-      const stop = !evaluateContinuation(tradeCount, legState.firstTradePrice);
+      const legTradeCount = legState.buyCount + legState.sellCount;
+      const stop = !evaluateContinuation(legTradeCount, legState.firstEntryFillPrice);
       if (stop || preservedOnly) {
         // STOP or preserved-only: only SELL rules are evaluated, BUY is never considered
         const sellMatch = matchRule(ctx, this.decisionRules, SELL_ONLY);

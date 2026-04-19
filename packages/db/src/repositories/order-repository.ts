@@ -8,12 +8,7 @@ import type {
   OrderSide,
   OrderType,
 } from "@plankton/domain";
-import {
-  createOrderId,
-  createTokenId,
-  createConditionId,
-  createBotRunId,
-} from "@plankton/domain";
+import { createOrderId, createTokenId, createConditionId, createBotRunId } from "@plankton/domain";
 
 export class SqliteOrderRepository implements OrderRepository {
   constructor(private readonly db: Database.Database) {}

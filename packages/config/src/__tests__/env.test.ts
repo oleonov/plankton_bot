@@ -20,8 +20,6 @@ const ALL_KEYS = [
   "RUNTIME_MODE",
   "LOG_LEVEL",
   "DB_PATH",
-  "BOOTSTRAP_FAMILY_RULES_PATH",
-  "FAMILY_RULES_PATH",
   "POLY_API_KEY",
   "POLY_API_SECRET",
   "POLY_PASSPHRASE",
@@ -78,7 +76,6 @@ describe("loadEnv", () => {
       expect(config.runtimeMode).toBeUndefined();
       expect(config.logLevel).toBe("info");
       expect(config.dbPath).toContain("plankton.db");
-      expect(config.familyRulesPath).toContain("family_rules.yaml");
       expect(config.polyApiKey).toBeUndefined();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -90,7 +87,6 @@ describe("loadEnv", () => {
       RUNTIME_MODE: "paper",
       LOG_LEVEL: "debug",
       DB_PATH: "/tmp/test.db",
-      FAMILY_RULES_PATH: "/tmp/rules.yaml",
       POLY_API_KEY: "key123",
       POLY_API_SECRET: "secret456",
       POLY_PASSPHRASE: "pass789",
@@ -105,7 +101,6 @@ describe("loadEnv", () => {
     expect(config.runtimeMode).toBe("paper");
     expect(config.logLevel).toBe("debug");
     expect(config.dbPath).toBe("/tmp/test.db");
-    expect(config.familyRulesPath).toBe("/tmp/rules.yaml");
     expect(config.polyApiKey).toBe("key123");
     expect(config.polyApiSecret).toBe("secret456");
     expect(config.polyPassphrase).toBe("pass789");
@@ -114,21 +109,6 @@ describe("loadEnv", () => {
     expect(config.polyBuilderPassphrase).toBe("builder-pass");
     expect(config.polygonRpcUrl).toBe("https://polygon-mainnet.g.alchemy.com/v2/test");
     expect(config.polygonRpcFallbackUrl).toBe("https://polygon.drpc.org");
-  });
-
-  it("BOOTSTRAP_FAMILY_RULES_PATH takes precedence over FAMILY_RULES_PATH", () => {
-    setEnvVars({
-      BOOTSTRAP_FAMILY_RULES_PATH: "/tmp/bootstrap-rules.yaml",
-      FAMILY_RULES_PATH: "/tmp/old-rules.yaml",
-    });
-    const config = loadEnv();
-    expect(config.familyRulesPath).toBe("/tmp/bootstrap-rules.yaml");
-  });
-
-  it("falls back to FAMILY_RULES_PATH when BOOTSTRAP_FAMILY_RULES_PATH is unset", () => {
-    setEnvVars({ FAMILY_RULES_PATH: "/tmp/legacy-rules.yaml" });
-    const config = loadEnv();
-    expect(config.familyRulesPath).toBe("/tmp/legacy-rules.yaml");
   });
 
   it("accepts live-lite mode without LIVE_LITE_* envelope vars", () => {

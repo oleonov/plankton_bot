@@ -16,7 +16,7 @@ const orders = {
       orderId: "ord-a",
       clientOrderId: "c-a",
       tokenId: "tok-1",
-      familyId: "fam-btc",
+
       side: "buy",
       orderType: "limit",
       postOnly: true,
@@ -37,7 +37,7 @@ const orders = {
       orderId: "ord-b",
       clientOrderId: "c-b",
       tokenId: "tok-2",
-      familyId: "fam-eth",
+
       side: "sell",
       orderType: "limit",
       postOnly: false,
@@ -58,7 +58,7 @@ const orders = {
       orderId: "ord-c",
       clientOrderId: "c-c",
       tokenId: "tok-3",
-      familyId: "fam-sol",
+
       side: "buy",
       orderType: "limit",
       postOnly: false,
@@ -85,7 +85,7 @@ const fills = {
       fillId: "fill-x",
       orderId: "ord-a",
       tokenId: "tok-1",
-      familyId: "fam-btc",
+
       side: "buy",
       price: 0.07,
       size: 57,
@@ -105,7 +105,7 @@ const fills = {
       fillId: "fill-y",
       orderId: "ord-b",
       tokenId: "tok-2",
-      familyId: "fam-eth",
+
       side: "sell",
       price: 0.22,
       size: 88,
@@ -125,7 +125,7 @@ const fills = {
       fillId: "fill-z",
       orderId: "ord-c",
       tokenId: "tok-3",
-      familyId: "fam-sol",
+
       side: "sell",
       price: 0.04,
       size: 28,
@@ -171,12 +171,12 @@ describe("Orders table sorting", () => {
 
     // Click Price → asc (0.07, 0.13, 0.22)
     await user.click(screen.getByText("Price"));
-    const asc = getColumnValues(4);
+    const asc = getColumnValues(3);
     expect(asc).toEqual(["$0.0700", "$0.1300", "$0.2200"]);
 
     // Click again → desc
     await user.click(screen.getByText(/Price/));
-    const desc = getColumnValues(4);
+    const desc = getColumnValues(3);
     expect(desc).toEqual(["$0.2200", "$0.1300", "$0.0700"]);
   });
 
@@ -188,7 +188,7 @@ describe("Orders table sorting", () => {
     await screen.findByText("Bitcoin above 60k");
 
     await user.click(screen.getByText("Size"));
-    const sizes = getColumnValues(5);
+    const sizes = getColumnValues(4);
     expect(sizes).toEqual(["57.00", "88.00", "248.00"]);
   });
 
@@ -200,7 +200,7 @@ describe("Orders table sorting", () => {
     await screen.findByText("Bitcoin above 60k");
 
     await user.click(screen.getByText("Side"));
-    const sides = getColumnValues(3);
+    const sides = getColumnValues(2);
     expect(sides).toEqual(["BUY", "BUY", "SELL"]);
   });
 });
@@ -217,12 +217,12 @@ describe("Fills table sorting", () => {
 
     // Click USDC → asc (1, 4, 19)
     await user.click(screen.getByText("USDC"));
-    const asc = getColumnValues(6);
+    const asc = getColumnValues(5);
     expect(asc).toEqual(["$1.00", "$4.00", "$19.00"]);
 
     // Click again → desc (19, 4, 1)
     await user.click(screen.getByText(/USDC/));
-    const desc = getColumnValues(6);
+    const desc = getColumnValues(5);
     expect(desc).toEqual(["$19.00", "$4.00", "$1.00"]);
   });
 
@@ -235,7 +235,7 @@ describe("Fills table sorting", () => {
     await screen.findByText("Bitcoin above 60k");
 
     await user.click(screen.getByText("Price"));
-    const prices = getColumnValues(4);
+    const prices = getColumnValues(3);
     expect(prices).toEqual(["$0.0400", "$0.0700", "$0.2200"]);
   });
 

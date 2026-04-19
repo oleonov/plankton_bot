@@ -193,9 +193,7 @@ describe("SelectionRules page", () => {
       const disabledRules = mockSelectionRules.map((r) =>
         r.ruleId === "rule-2" ? { ...r, enabled: false } : r,
       );
-      server.use(
-        http.get("/api/v1/selection-rules", () => ok({ rules: disabledRules })),
-      );
+      server.use(http.get("/api/v1/selection-rules", () => ok({ rules: disabledRules })));
 
       const patchedPayloads: unknown[] = [];
       server.use(

@@ -20,8 +20,6 @@ const LEDGER_SQL = readFileSync(
 );
 
 const ENVELOPE: LiveLiteConfig = {
-  familyAllowlist: [],
-  maxFamilies: 2,
   maxOpenValueUsdc: 50,
   maxOrderUsdc: 10,
   maxActiveMarkets: 5,

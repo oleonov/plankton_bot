@@ -169,7 +169,6 @@ async function publishCancel(
       commandId: createCommandId(`stale-clean-${String(order.orderId)}-${Date.now()}`),
       orderId: order.orderId,
       reason,
-      familyId: null,
     },
     timestamp: Date.now(),
   });

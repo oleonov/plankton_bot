@@ -31,7 +31,9 @@ export class RefreshableSelectionRuleEngine {
   }
 
   /** Delegate to the current engine's resolve. */
-  resolve(...args: Parameters<SelectionRuleEngine["resolve"]>): ReturnType<SelectionRuleEngine["resolve"]> {
+  resolve(
+    ...args: Parameters<SelectionRuleEngine["resolve"]>
+  ): ReturnType<SelectionRuleEngine["resolve"]> {
     return this.engine.resolve(...args);
   }
 

@@ -209,10 +209,7 @@ export async function importExchangeFills(
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
   for (const { ef, fillId, orderId, conditionId, sizeUsdc, signalReason } of savedFills) {
-    const resolved = buildLocalFillFromExchangeFill(
-      ef,
-      { orderId, conditionId, signalReason },
-    );
+    const resolved = buildLocalFillFromExchangeFill(ef, { orderId, conditionId, signalReason });
 
     await bus.publish("FillReceived", {
       fillId,

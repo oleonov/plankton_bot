@@ -1,15 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  createTokenId,
-  createPositionId,
-  createConditionId,
-} from "@plankton/domain";
+import { createTokenId, createPositionId, createConditionId } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
-import type {
-  Position,
-  PositionRepository,
-  MarketRepository,
-} from "@plankton/domain";
+import type { Position, PositionRepository, MarketRepository } from "@plankton/domain";
 import { StalePruningModule } from "../modules/pruning/stale-pruning-module.js";
 
 const TOK_ID = createTokenId("tok-yes");

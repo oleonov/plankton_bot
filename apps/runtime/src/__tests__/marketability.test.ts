@@ -260,7 +260,10 @@ describe("marketability gate", () => {
         ...makeBundle(),
         rules: {
           ...makeBundle().rules,
-          entry: { ...(makeBundle().rules.entry as Record<string, unknown>), entryMode: "spray-first" },
+          entry: {
+            ...(makeBundle().rules.entry as Record<string, unknown>),
+            entryMode: "spray-first",
+          },
           throughput: {
             ...makeBundle().rules.throughput!,
             dustLaneEnabled: true,
@@ -782,7 +785,10 @@ describe("marketability policy retuning", () => {
       },
       rules: {
         ...makeBundle().rules,
-        entry: { ...(makeBundle().rules.entry as Record<string, unknown>), entryMode: "spray-first" },
+        entry: {
+          ...(makeBundle().rules.entry as Record<string, unknown>),
+          entryMode: "spray-first",
+        },
         throughput: {
           maxConcurrentOrdersPerFamily: 10,
           maxProbeInFlightPerToken: 2,

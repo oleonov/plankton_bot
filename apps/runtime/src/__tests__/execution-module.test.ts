@@ -61,7 +61,6 @@ function makeCancelCmd(overrides?: Partial<CancelOrderCommand>): CancelOrderComm
     commandId: createCommandId("cancel-1"),
     orderId: createOrderId("sim-ord-1"),
     reason: "strategy_exit",
-    familyId: null,
     ...overrides,
   };
 }
@@ -161,7 +160,6 @@ function createMockPositionRepo(position: Position | null = null): PositionRepos
     findOpenByEntryStyle: vi.fn().mockReturnValue([]),
   };
 }
-
 
 const silentLog = {
   info: vi.fn(),
@@ -968,8 +966,6 @@ describe("ExecutionModule", () => {
 
   it("places order for any family (family allowlist gate removed)", async () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-allowed"],
-      maxFamilies: 10,
       maxOpenValueUsdc: 1000,
       maxOrderUsdc: 100,
       maxActiveMarkets: 10,
@@ -1002,8 +998,6 @@ describe("ExecutionModule", () => {
 
   it("rejects order exceeding max order cap (live-lite order cap)", async () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-1"],
-      maxFamilies: 10,
       maxOpenValueUsdc: 1000,
       maxOrderUsdc: 10,
       maxActiveMarkets: 10,
@@ -1043,8 +1037,6 @@ describe("ExecutionModule", () => {
 
   it("places fee-enabled EOA orders to gateway (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-1"],
-      maxFamilies: 10,
       maxOpenValueUsdc: 1000,
       maxOrderUsdc: 100,
       maxActiveMarkets: 10,
@@ -1078,8 +1070,6 @@ describe("ExecutionModule", () => {
 
   it("passes post-only relayer orders for fee-enabled families to the gateway", async () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-1"],
-      maxFamilies: 10,
       maxOpenValueUsdc: 1000,
       maxOrderUsdc: 100,
       maxActiveMarkets: 10,
@@ -1116,8 +1106,6 @@ describe("ExecutionModule", () => {
 
   it("places relayer fee-enabled orders to gateway without post-only (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-1"],
-      maxFamilies: 10,
       maxOpenValueUsdc: 1000,
       maxOrderUsdc: 100,
       maxActiveMarkets: 10,
@@ -1151,8 +1139,6 @@ describe("ExecutionModule", () => {
 
   it("places buy orders below min_order_usdc to gateway (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-1"],
-      maxFamilies: 10,
       maxOpenValueUsdc: 1000,
       maxOrderUsdc: 100,
       maxActiveMarkets: 10,
@@ -1186,8 +1172,6 @@ describe("ExecutionModule", () => {
 
   it("places relayer buy entries below CLOB marketable minimum to gateway (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-1"],
-      maxFamilies: 10,
       maxOpenValueUsdc: 1000,
       maxOrderUsdc: 100,
       maxActiveMarkets: 10,
@@ -1221,8 +1205,6 @@ describe("ExecutionModule", () => {
 
   it("allows relayer buy entries at the CLOB minimum despite floating-point drift", async () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-1"],
-      maxFamilies: 10,
       maxOpenValueUsdc: 1000,
       maxOrderUsdc: 100,
       maxActiveMarkets: 10,

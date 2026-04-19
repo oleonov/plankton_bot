@@ -96,7 +96,7 @@ export function Overview() {
   if (!status || !metrics) return <div className="page">Loading...</div>;
 
   const dustCount = metrics.positions.dust ?? 0;
-  const activeCount = status.activeFamilyCount;
+  const openConditionCount = status.openConditionCount;
   const tailAdjPnl = metrics.totalRealizedPnl - status.totalTailCostUsdc;
   const execution = status.executionTelemetry24h;
   const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
@@ -140,7 +140,7 @@ export function Overview() {
         <Link to="/selection-rules" style={{ textDecoration: "none" }}>
           <div className="card card-accent-purple" style={{ cursor: "pointer" }}>
             <div className="label">Active Markets</div>
-            <div className="value-lg text-purple">{activeCount}</div>
+            <div className="value-lg text-purple">{openConditionCount}</div>
             <div className="value-sm">
               <span style={{ fontSize: 11 }}>View selection rules</span>
             </div>
@@ -163,7 +163,6 @@ export function Overview() {
             Live-Lite Envelope
           </div>
           <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-            <span>Rules: {status.liveLite.familyAllowlist.length}</span>
             <span>Wallet: {(status.liveLite.walletMode ?? "eoa").toUpperCase()}</span>
             <span>
               Min order: $
@@ -240,11 +239,10 @@ export function Overview() {
               ? `$${execution.explicitFeesUsdc.toFixed(3)} fees · ${leakagePct?.toFixed(2) ?? "0.00"}% leakage`
               : "Awaiting execution telemetry"}
           </div>
-          <div
-            className="value-sm"
-            style={{ color: "var(--text-dim)" }}
-          >
-            {execution && execution.totalFills > 0 ? "Execution telemetry available" : "No recent fills"}
+          <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+            {execution && execution.totalFills > 0
+              ? "Execution telemetry available"
+              : "No recent fills"}
           </div>
         </div>
       </div>
@@ -325,7 +323,7 @@ export function Overview() {
             <div style={{ marginTop: 8, fontSize: 12, color: "var(--text-dim)" }}>
               {status.signalActivity?.candidatesConsideredLast10m != null &&
               status.signalActivity.candidatesConsideredLast10m > 0
-                ? `${status.signalActivity.candidatesConsideredLast10m} candidates considered — ${status.signalActivity.blockedByResolutionBufferLast10m ?? 0} in resolution buffer, ${status.signalActivity.blockedByWindowLast10m ?? 0} outside active window, ${status.signalActivity.blockedByPerFamilyTickLimitLast10m ?? 0} per-family tick limited`
+                ? `${status.signalActivity.candidatesConsideredLast10m} candidates considered — ${status.signalActivity.blockedByResolutionBufferLast10m ?? 0} in resolution buffer, ${status.signalActivity.blockedByWindowLast10m ?? 0} outside active window`
                 : "No signals produced — markets may be outside active window or in resolution buffer"}
             </div>
           )}
@@ -376,15 +374,7 @@ export function Overview() {
         </div>
         <div className="card">
           <div className="label" style={{ marginBottom: 10 }}>
-            Family Health
-          </div>
-          <div style={{ display: "flex", gap: 2, height: 18, borderRadius: 3, overflow: "hidden" }}>
-            {activeCount > 0 && (
-              <div
-                style={{ flex: activeCount, background: "var(--green)" }}
-                title={`${activeCount} active`}
-              />
-            )}
+            Open Conditions
           </div>
           <div
             style={{
@@ -397,15 +387,9 @@ export function Overview() {
           >
             <div>
               <div style={{ fontSize: 20, fontWeight: 700, color: "var(--green)" }}>
-                {activeCount}
+                {openConditionCount}
               </div>
-              <div className="value-sm">active</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text-dim)" }}>
-                {status.activeFamilyCount}
-              </div>
-              <div className="value-sm">enabled</div>
+              <div className="value-sm">open conditions</div>
             </div>
           </div>
         </div>

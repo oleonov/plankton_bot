@@ -46,7 +46,6 @@ function createLedgerDb(): DbConnection {
   return conn;
 }
 
-
 describe("ProfileRuntimePublisher atomicity", () => {
   let controlConn: DbConnection;
   let ledgerConn: DbConnection;

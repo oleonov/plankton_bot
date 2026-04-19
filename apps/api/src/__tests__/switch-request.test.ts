@@ -14,7 +14,6 @@ function testConfig(): AppConfig {
     runtimeMode: "simulation",
     logLevel: "error",
     dbPath: "",
-    familyRulesPath: "",
     marketDataPollIntervalMs: 30_000,
     marketDataStaleThresholdMs: 120_000,
     strategyScanIntervalMs: 5_000,

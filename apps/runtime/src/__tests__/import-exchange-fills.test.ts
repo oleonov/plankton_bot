@@ -1,11 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { importExchangeFills } from "../modules/reconciliation/fill-reconciler.js";
 import { createOrderId, createTokenId } from "@plankton/domain";
-import type {
-  ExchangeFill,
-  FillRepository,
-  OrderRepository,
-} from "@plankton/domain";
+import type { ExchangeFill, FillRepository, OrderRepository } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 
 function createMockFillRepo(): FillRepository {
@@ -20,7 +16,6 @@ function createMockFillRepo(): FillRepository {
     getLatestTimestamp: vi.fn().mockReturnValue(null),
   };
 }
-
 
 function createMockOrderRepo(): OrderRepository {
   return {

@@ -7,14 +7,7 @@
  *  - All timestamps are Unix milliseconds (number) unless labelled as ISO string.
  */
 
-import type {
-  TokenId,
-  ConditionId,
-  OrderId,
-  FillId,
-  ClientOrderId,
-  CommandId,
-} from "./ids.js";
+import type { TokenId, ConditionId, OrderId, FillId, ClientOrderId, CommandId } from "./ids.js";
 import type {
   OrderSide,
   OrderType,
@@ -23,12 +16,7 @@ import type {
   ExchangeErrorCode,
   RuntimePhase,
 } from "./enums.js";
-import type {
-  Signal,
-  Position,
-  NormalizedMarket,
-  ReconciliationResult,
-} from "./types.js";
+import type { Signal, Position, NormalizedMarket, ReconciliationResult } from "./types.js";
 
 // ─── Market Data ──────────────────────────────────────────────────────────
 
@@ -153,7 +141,6 @@ export interface ScanTickCompleted {
   readonly candidatesConsidered: number;
   readonly blockedByResolutionBuffer: number;
   readonly blockedByWindow: number;
-  readonly blockedByPerFamilyTickLimit: number;
   readonly gammaFallbackDustSignalsProduced: number;
   readonly scanPrimeSkippedByPolicy: number;
   readonly signalsProduced: number;

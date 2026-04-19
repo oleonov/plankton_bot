@@ -44,13 +44,13 @@ export function Audit() {
   const { data: profilesData } = useProfiles();
   const [typeFilter, setTypeFilter] = useState("");
   const [profileFilter, setProfileFilter] = useState("");
-  const [familySearch, setFamilySearch] = useState("");
+  const [entitySearch, setEntitySearch] = useState("");
   const [page, setPage] = useState(1);
 
   const { data, isLoading } = useAudit({
     type: typeFilter || undefined,
     profile: profileFilter || undefined,
-    familyId: familySearch || undefined,
+    entityId: entitySearch || undefined,
     page,
     limit: 50,
   });
@@ -100,14 +100,14 @@ export function Audit() {
           </select>
         </label>
         <label>
-          Family:
+          Entity:
           <input
-            value={familySearch}
+            value={entitySearch}
             onChange={(e) => {
-              setFamilySearch(e.target.value);
+              setEntitySearch(e.target.value);
               setPage(1);
             }}
-            placeholder="family ID..."
+            placeholder="entity ID..."
             style={{ width: 140 }}
           />
         </label>

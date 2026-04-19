@@ -9,9 +9,7 @@ let repo: SelectionRuleRepository;
 beforeEach(() => {
   db = new Database(":memory:");
   db.exec(readFileSync("src/schemas/control.sql", "utf8"));
-  db.exec(
-    "INSERT INTO profiles (profile_id, display_name) VALUES ('simulation','Simulation')",
-  );
+  db.exec("INSERT INTO profiles (profile_id, display_name) VALUES ('simulation','Simulation')");
   db.exec("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)");
   repo = new SelectionRuleRepository(db);
 });

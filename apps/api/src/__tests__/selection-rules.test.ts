@@ -21,7 +21,6 @@ function testConfig(): AppConfig {
     runtimeMode: "simulation",
     logLevel: "error",
     dbPath: "",
-    familyRulesPath: "",
     marketDataPollIntervalMs: 30_000,
     marketDataStaleThresholdMs: 120_000,
     strategyScanIntervalMs: 5_000,
@@ -69,7 +68,9 @@ beforeAll(async () => {
   // The migration does INSERT OR IGNORE but the row may be absent on a fresh in-memory DB
   // with no profiles to trigger the seeding path.
   controlConn.db
-    .prepare("INSERT OR IGNORE INTO runtime_control_state (id, selection_rules_version) VALUES (1, 0)")
+    .prepare(
+      "INSERT OR IGNORE INTO runtime_control_state (id, selection_rules_version) VALUES (1, 0)",
+    )
     .run();
 
   // Ledger DB — holds markets with event_slug / event_market_count

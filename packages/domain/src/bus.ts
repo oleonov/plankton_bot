@@ -125,7 +125,6 @@ export interface RuntimeEventMap {
     readonly candidatesConsidered: number;
     readonly blockedByResolutionBuffer: number;
     readonly blockedByWindow: number;
-    readonly blockedByPerFamilyTickLimit: number;
     readonly gammaFallbackDustSignalsProduced: number;
     readonly scanPrimeSkippedByPolicy: number;
     readonly signalsProduced: number;

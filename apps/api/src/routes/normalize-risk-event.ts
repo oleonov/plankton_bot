@@ -25,10 +25,7 @@ interface EventRule {
   summary: (payload: Record<string, unknown>) => string;
 }
 
-function summarizeFamilyModeEvent(
-  payload: Record<string, unknown>,
-  targetState: string,
-): string {
+function summarizeFamilyModeEvent(payload: Record<string, unknown>, targetState: string): string {
   if (payload.source === "system") {
     const previousState =
       typeof payload.previousState === "string" && payload.previousState.length > 0
@@ -51,8 +48,7 @@ const EVENT_RULES: Record<string, EventRule> = {
   },
   max_exposure_breach: {
     severity: "critical",
-    summary: (p) =>
-      `Exposure breach: $${p.currentExposure ?? "?"} > $${p.limit ?? "?"}`,
+    summary: (p) => `Exposure breach: $${p.currentExposure ?? "?"} > $${p.limit ?? "?"}`,
   },
   stale_signal: {
     severity: "warning",
@@ -86,9 +82,7 @@ export function normalizeRiskEvent(row: RawRiskEvent): RiskEventDTO {
 
   const rule = EVENT_RULES[row.event_type];
   const severity: SeverityLevel = rule?.severity ?? "info";
-  const summary = rule
-    ? rule.summary(payload)
-    : `${row.event_type} on system`;
+  const summary = rule ? rule.summary(payload) : `${row.event_type} on system`;
 
   return {
     id: row.id,

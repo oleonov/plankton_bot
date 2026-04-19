@@ -40,7 +40,6 @@ export function ProfilePositions() {
             <tr>
               <th>Position</th>
               <th>Market</th>
-              <th>Family</th>
               <th>Size</th>
               <th>Avg Entry</th>
               <th>Cost Basis</th>
@@ -67,7 +66,6 @@ export function ProfilePositions() {
                       outcome={p.outcome}
                     />
                   </td>
-                  <td>{p.familyId.slice(0, 12)}</td>
                   <td>{p.size.toFixed(2)}</td>
                   <td>${p.avgEntryPrice.toFixed(4)}</td>
                   <td>${p.costBasisUsdc.toFixed(2)}</td>

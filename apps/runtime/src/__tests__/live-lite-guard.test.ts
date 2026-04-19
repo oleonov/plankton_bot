@@ -2,8 +2,6 @@ import { describe, it, expect } from "vitest";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 
 const LIVE_LITE_CONFIG = {
-  familyAllowlist: ["fam-a", "fam-b"],
-  maxFamilies: 2,
   maxOpenValueUsdc: 50,
   maxOrderUsdc: 10,
   maxActiveMarkets: 2,
@@ -12,10 +10,6 @@ const LIVE_LITE_CONFIG = {
 describe("LiveLiteGuard", () => {
   describe("when config is undefined (non-live-lite mode)", () => {
     const guard = new LiveLiteGuard(undefined);
-
-    it("allows any family", () => {
-      expect(guard.isFamilyAllowed("fam-anything")).toBe(true);
-    });
 
     it("allows any order size", () => {
       expect(guard.isOrderWithinCap(9999)).toBe(true);
@@ -44,14 +38,6 @@ describe("LiveLiteGuard", () => {
 
     it("isActive returns true", () => {
       expect(guard.isActive).toBe(true);
-    });
-
-    it("allows allowlisted family", () => {
-      expect(guard.isFamilyAllowed("fam-a")).toBe(true);
-    });
-
-    it("rejects non-allowlisted family", () => {
-      expect(guard.isFamilyAllowed("fam-c")).toBe(false);
     });
 
     it("allows order within cap", () => {
@@ -84,42 +70,10 @@ describe("LiveLiteGuard", () => {
       expect(guard.isOrderAboveMin(2.99)).toBe(false);
       expect(guard.isOrderAboveMin(3)).toBe(true);
     });
-
-    it("rejects fee-enabled entry families in EOA mode", () => {
-      expect(
-        guard.getFamilyPolicyRejections({
-          identity: {
-            primaryCategory: "crypto",
-            feeTier: null,
-            liveWalletRequirement: null,
-            requiresPostOnlyForLive: null,
-          },
-          isEntry: true,
-          orderNotionalUsdc: 5,
-        }),
-      ).toEqual(["live-post-only-required", "live-eoa-fee-enabled-family-rejected"]);
-    });
-
-    it("does not apply live policy rejections to exits", () => {
-      expect(
-        guard.getFamilyPolicyRejections({
-          identity: {
-            primaryCategory: "crypto",
-            feeTier: null,
-            liveWalletRequirement: null,
-            requiresPostOnlyForLive: null,
-          },
-          isEntry: false,
-          orderNotionalUsdc: 1,
-        }),
-      ).toEqual([]);
-    });
   });
 
   describe("when custom wallet settings are present", () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-a"],
-      maxFamilies: 2,
       maxOpenValueUsdc: 50,
       maxOrderUsdc: 10,
       maxActiveMarkets: 2,
@@ -131,79 +85,11 @@ describe("LiveLiteGuard", () => {
       expect(guard.getWalletMode()).toBe("relayer");
       expect(guard.getMinOrderUsdc()).toBe(2);
       expect(guard.getMinEntryNotionalUsdc()).toBe(2);
-      expect(guard.supportsPostOnlyFamilies()).toBe(true);
-    });
-
-    it("allows post-only-required families when execution confirms post-only support", () => {
-      expect(
-        guard.getFamilyPolicyRejections({
-          identity: {
-            primaryCategory: "crypto",
-            feeTier: null,
-            liveWalletRequirement: null,
-            requiresPostOnlyForLive: null,
-          },
-          isEntry: true,
-          orderNotionalUsdc: 2.5,
-          hasPostOnlySupport: true,
-        }),
-      ).toEqual([]);
-    });
-
-    it("rejects buy orders below the configured minimum", () => {
-      expect(
-        guard.getFamilyPolicyRejections({
-          identity: {
-            primaryCategory: "geopolitics",
-            feeTier: null,
-            liveWalletRequirement: null,
-            requiresPostOnlyForLive: null,
-          },
-          isEntry: true,
-          orderNotionalUsdc: 1.5,
-        }),
-      ).toEqual(["live-min-order-usdc-rejected"]);
-    });
-
-    it("rejects spray-entry below the configured minimum", () => {
-      expect(
-        guard.getFamilyPolicyRejections({
-          identity: {
-            primaryCategory: "geopolitics",
-            feeTier: null,
-            liveWalletRequirement: null,
-            requiresPostOnlyForLive: null,
-          },
-          isEntry: true,
-          orderNotionalUsdc: 0.15,
-          hasPostOnlySupport: true,
-          signalReason: "spray-entry",
-        }),
-      ).toEqual(["live-min-order-usdc-rejected"]);
-    });
-
-    it("still rejects probe-entry below the configured minimum", () => {
-      expect(
-        guard.getFamilyPolicyRejections({
-          identity: {
-            primaryCategory: "geopolitics",
-            feeTier: null,
-            liveWalletRequirement: null,
-            requiresPostOnlyForLive: null,
-          },
-          isEntry: true,
-          orderNotionalUsdc: 0.15,
-          hasPostOnlySupport: true,
-          signalReason: "probe-entry",
-        }),
-      ).toEqual(["live-min-order-usdc-rejected"]);
     });
   });
 
   describe("when relayer mode uses the default minimum", () => {
     const guard = new LiveLiteGuard({
-      familyAllowlist: ["fam-a"],
-      maxFamilies: 2,
       maxOpenValueUsdc: 50,
       maxOrderUsdc: 10,
       maxActiveMarkets: 2,
@@ -220,8 +106,6 @@ describe("LiveLiteGuard", () => {
 
     it("keeps the marketable entry floor at $1 when the configured relayer minimum is lower", () => {
       const lowConfiguredGuard = new LiveLiteGuard({
-        familyAllowlist: ["fam-a"],
-        maxFamilies: 2,
         maxOpenValueUsdc: 50,
         maxOrderUsdc: 10,
         maxActiveMarkets: 2,
@@ -231,54 +115,6 @@ describe("LiveLiteGuard", () => {
 
       expect(lowConfiguredGuard.getMinOrderUsdc()).toBe(0.05);
       expect(lowConfiguredGuard.getMinEntryNotionalUsdc()).toBe(1);
-      expect(
-        lowConfiguredGuard.getFamilyPolicyRejections({
-          identity: {
-            primaryCategory: "geopolitics",
-            feeTier: null,
-            liveWalletRequirement: null,
-            requiresPostOnlyForLive: null,
-          },
-          isEntry: true,
-          orderNotionalUsdc: 0.6,
-          signalReason: "spray-entry",
-        }),
-      ).toEqual(["live-min-order-usdc-rejected"]);
-
-      expect(
-        lowConfiguredGuard.getFamilyPolicyRejections({
-          identity: {
-            primaryCategory: "geopolitics",
-            feeTier: null,
-            liveWalletRequirement: null,
-            requiresPostOnlyForLive: null,
-          },
-          isEntry: true,
-          orderNotionalUsdc: 0.9999999999999999,
-          signalReason: "spray-entry",
-        }),
-      ).toEqual([]);
-    });
-  });
-
-  describe("when a dynamic family allowlist is active", () => {
-    const guard = new LiveLiteGuard(LIVE_LITE_CONFIG);
-
-    it("prefers the dynamic allowlist over the configured one", () => {
-      guard.setDynamicFamilyAllowlist(["fam-b"]);
-
-      expect(guard.getConfiguredFamilyAllowlist()).toEqual(["fam-a", "fam-b"]);
-      expect(guard.getEffectiveFamilyAllowlist()).toEqual(["fam-b"]);
-      expect(guard.isFamilyAllowed("fam-a")).toBe(false);
-      expect(guard.isFamilyAllowed("fam-b")).toBe(true);
-    });
-
-    it("falls back to the configured allowlist when cleared", () => {
-      guard.setDynamicFamilyAllowlist(["fam-b"]);
-      guard.setDynamicFamilyAllowlist(null);
-
-      expect(guard.getEffectiveFamilyAllowlist()).toEqual(["fam-a", "fam-b"]);
-      expect(guard.isFamilyAllowed("fam-a")).toBe(true);
     });
   });
 });

@@ -6,12 +6,7 @@ import type Database from "better-sqlite3";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteFillRepository } from "../repositories/fill-repository.js";
-import {
-  createFillId,
-  createOrderId,
-  createTokenId,
-  createConditionId,
-} from "@plankton/domain";
+import { createFillId, createOrderId, createTokenId, createConditionId } from "@plankton/domain";
 import type { Fill } from "@plankton/domain";
 
 let conn: DbConnection;

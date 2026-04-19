@@ -18,7 +18,6 @@ function testConfig(overrides?: Partial<AppConfig>): AppConfig {
     runtimeMode: "simulation",
     logLevel: "error",
     dbPath: "",
-    familyRulesPath: "",
     marketDataPollIntervalMs: 30_000,
     marketDataStaleThresholdMs: 120_000,
     strategyScanIntervalMs: 5_000,
@@ -217,7 +216,7 @@ describe("GET /status", () => {
     expect(typeof body.data.ordersPlacedLastMin).toBe("number");
     expect(typeof body.data.positionsOpenedLastMin).toBe("number");
     expect(typeof body.data.paused).toBe("boolean");
-    expect(typeof body.data.activeFamilyCount).toBe("number");
+    expect(typeof body.data.openConditionCount).toBe("number");
     expect(typeof body.data.openOrderCount).toBe("number");
     expect(typeof body.data.openPositionCount).toBe("number");
     expect(typeof body.data.totalOpenValueUsdc).toBe("number");
@@ -530,7 +529,7 @@ describe("GET /status", () => {
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES
         ('signal_activity', 1, '{"produced":10,"approved":3,"rejected":7,"entryApproved":2,"exitApproved":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
-        ('scanner_activity', 1, '{"candidatesConsidered":20,"blockedByResolutionBuffer":2,"blockedByWindow":1,"blockedByPerFamilyTickLimit":0,"gammaFallbackDustSignalsProduced":4,"scanPrimeSkippedByPolicy":11,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
+        ('scanner_activity', 1, '{"candidatesConsidered":20,"blockedByResolutionBuffer":2,"blockedByWindow":1,"gammaFallbackDustSignalsProduced":4,"scanPrimeSkippedByPolicy":11,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
         ('signal_conversion_activity', 1, '{"converted":2,"marketabilityRejectedByReason":{"gamma-fallback-no-real-book":5},"cacheStatusByStatus":{"refresh-budget-exhausted":4,"fresh-cache":2},"exchangeAccepted":1,"exchangeRejectedByCode":{"UNKNOWN":2},"fills":1,"fillLatencyMs":{"count":1,"avgMs":1200,"minMs":1200,"p50Ms":1200,"p95Ms":1200,"maxMs":1200},"cooldownBypassByReason":{"price-moved":3},"hotQuoteRefreshes":7,"hotLaneActionsByType":{"entry-reprice-cancel":2},"hotLaneStatesByState":{"quote-active":3,"cooling":1},"queueJumpAccepted":1,"queueJumpFills":1,"gammaFallbackDustOrders":2,"gammaFallbackDustFills":1,"candidateBookRefreshAttempts":9,"candidateBookRefreshTimeouts":3,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
     `);
 
@@ -918,7 +917,6 @@ describe("metrics", () => {
     expect(body.data.fills.makerCount).toBeDefined();
     expect(body.data.fills.takerCount).toBeDefined();
   });
-
 });
 
 // ─── Operator actions ───────────────────────────────────────────────
@@ -954,7 +952,6 @@ describe("operator actions", () => {
     });
     expect(json(res).ok).toBe(true);
   });
-
 });
 
 // ─── Response envelope ──────────────────────────────────────────────

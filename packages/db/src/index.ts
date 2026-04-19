@@ -30,5 +30,3 @@ export type {
 } from "./repositories/selection-rule-repository.js";
 export { CONTROL_PROFILES, ensureControlProfiles } from "./control-profiles.js";
 export { withImmediate } from "./immediate-transaction.js";
-// Phase 8 cleanup target: readFamilyRuleDefaults stub kept for apps/api compatibility
-export { readFamilyRuleDefaults } from "./family-rule-defaults.js";

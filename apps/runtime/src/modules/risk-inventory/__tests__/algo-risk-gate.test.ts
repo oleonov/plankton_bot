@@ -250,11 +250,7 @@ describe("AlgoRiskGateImpl", () => {
       // two-sided-entry signal targets the OPPOSITE token; findByTokenId for
       // signal.tokenId returns null because the open position is on the YES
       // leg but the signal targets the NO token.
-      const gate = new AlgoRiskGateImpl(
-        makeOrderRepo(),
-        makePositionRepo(null),
-        makeLogger(),
-      );
+      const gate = new AlgoRiskGateImpl(makeOrderRepo(), makePositionRepo(null), makeLogger());
       const decision = await gate.evaluate(makeSignal({ reason: "two-sided-entry" }));
       expect(decision.approved).toBe(true);
     });
@@ -262,7 +258,9 @@ describe("AlgoRiskGateImpl", () => {
     it("approves probe-entry when position is closed (not treated as open)", async () => {
       const gate = new AlgoRiskGateImpl(
         makeOrderRepo(),
-        makePositionRepo(makeOpenPosition({ status: "closed", closedAt: new Date().toISOString() })),
+        makePositionRepo(
+          makeOpenPosition({ status: "closed", closedAt: new Date().toISOString() }),
+        ),
         makeLogger(),
       );
       const decision = await gate.evaluate(makeSignal({ reason: "probe-entry" }));
@@ -270,11 +268,7 @@ describe("AlgoRiskGateImpl", () => {
     });
 
     it("approves probe-entry when no open position exists", async () => {
-      const gate = new AlgoRiskGateImpl(
-        makeOrderRepo(),
-        makePositionRepo(null),
-        makeLogger(),
-      );
+      const gate = new AlgoRiskGateImpl(makeOrderRepo(), makePositionRepo(null), makeLogger());
       const decision = await gate.evaluate(makeSignal({ reason: "probe-entry" }));
       expect(decision.approved).toBe(true);
     });

@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { InProcessEventBus } from "@plankton/event-bus";
-import { SelectionRuleEngine, createTokenId, type NormalizedMarket, type TokenId, type SelectionRule } from "@plankton/domain";
+import {
+  SelectionRuleEngine,
+  createTokenId,
+  type NormalizedMarket,
+  type TokenId,
+  type SelectionRule,
+} from "@plankton/domain";
 import { MarketSelectionCache } from "../market-selection-cache.js";
 import type { RefreshableSelectionRuleEngine } from "../../../selection-rule-engine-factory.js";
 
@@ -24,7 +30,8 @@ function makeEngine(rules: SelectionRule[]): RefreshableSelectionRuleEngine {
   const engine = new SelectionRuleEngine(rules);
   return {
     refreshIfStale: () => {},
-    resolve: (eventSlug: string | null, marketSlug: string) => engine.resolve(eventSlug, marketSlug),
+    resolve: (eventSlug: string | null, marketSlug: string) =>
+      engine.resolve(eventSlug, marketSlug),
     get current() {
       return engine;
     },

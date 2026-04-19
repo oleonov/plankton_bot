@@ -18,7 +18,6 @@ describe("Positions page", () => {
             {
               positionId: "pos-1",
               tokenId: "tok-1",
-              familyId: "fam-1",
               side: "buy",
               size: 10,
               avgEntryPrice: 1,
@@ -58,7 +57,6 @@ describe("Positions page", () => {
             {
               positionId: "pos-closed",
               tokenId: "tok-closed",
-              familyId: "fam-closed",
               side: "buy",
               size: 0,
               avgEntryPrice: 0.02,

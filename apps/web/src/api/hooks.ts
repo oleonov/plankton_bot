@@ -19,7 +19,6 @@ import type {
   TradingActivitySnapshot,
   SelectionRule,
   SelectionRuleType,
-  SelectionRuleDraft,
   PreviewBuckets,
   MatchResult,
   EventMetric,
@@ -107,7 +106,6 @@ export function useTradingActivity(days = 14) {
 // ─── Positions ──────────────────────────────────────────────────
 
 interface PositionFilters {
-  familyId?: string;
   dust?: boolean;
   status?: string;
   sort?: string;
@@ -122,7 +120,6 @@ export function usePositions(filters: PositionFilters = {}) {
     queryFn: () =>
       apiFetch<Paginated<PositionDTO> & { totalCount: number }>(
         withParams("/api/v1/positions", {
-          family_id: filters.familyId,
           dust: filters.dust || undefined,
           status: filters.status,
           sort: filters.sort,
@@ -138,7 +135,6 @@ export function usePositions(filters: PositionFilters = {}) {
 
 interface OrderFilters {
   status?: string;
-  familyId?: string;
   limit?: number;
   cursor?: string;
   page?: number;
@@ -151,7 +147,6 @@ export function useOrders(filters: OrderFilters = {}) {
       apiFetch<Paginated<OrderDTO>>(
         withParams("/api/v1/orders", {
           status: filters.status,
-          family_id: filters.familyId,
           limit: filters.limit,
           cursor: filters.cursor,
           page: filters.page,
@@ -163,7 +158,6 @@ export function useOrders(filters: OrderFilters = {}) {
 // ─── Fills ──────────────────────────────────────────────────────
 
 interface FillFilters {
-  familyId?: string;
   since?: string;
   limit?: number;
   cursor?: string;
@@ -176,7 +170,6 @@ export function useFills(filters: FillFilters = {}) {
     queryFn: () =>
       apiFetch<Paginated<FillDTO>>(
         withParams("/api/v1/fills", {
-          family_id: filters.familyId,
           since: filters.since,
           limit: filters.limit,
           cursor: filters.cursor,
@@ -189,7 +182,6 @@ export function useFills(filters: FillFilters = {}) {
 // ─── Risk Events ────────────────────────────────────────────────
 
 interface RiskEventFilters {
-  familyId?: string;
   eventType?: string;
   limit?: number;
   cursor?: string;
@@ -202,7 +194,6 @@ export function useRiskEvents(filters: RiskEventFilters = {}) {
     queryFn: () =>
       apiFetch<Paginated<RiskEventDTO>>(
         withParams("/api/v1/risk-events", {
-          family_id: filters.familyId,
           event_type: filters.eventType,
           limit: filters.limit,
           cursor: filters.cursor,
@@ -283,7 +274,6 @@ export function useProfileOrders(profileId: string | undefined, filters: OrderFi
       apiFetch<Paginated<OrderDTO>>(
         withParams(`/api/v1/profiles/${profileId}/orders`, {
           status: filters.status,
-          family_id: filters.familyId,
           limit: filters.limit,
           cursor: filters.cursor,
           page: filters.page,
@@ -299,7 +289,6 @@ export function useProfilePositions(profileId: string | undefined, filters: Posi
     queryFn: () =>
       apiFetch<PositionDTO[]>(
         withParams(`/api/v1/profiles/${profileId}/positions`, {
-          family_id: filters.familyId,
           dust: filters.dust || undefined,
           status: filters.status,
           sort: filters.sort,
@@ -315,7 +304,6 @@ export function useProfileFills(profileId: string | undefined, filters: FillFilt
     queryFn: () =>
       apiFetch<Paginated<FillDTO>>(
         withParams(`/api/v1/profiles/${profileId}/fills`, {
-          family_id: filters.familyId,
           since: filters.since,
           limit: filters.limit,
           cursor: filters.cursor,
@@ -344,7 +332,7 @@ interface AuditFilters {
   page?: number;
   type?: string;
   profile?: string;
-  familyId?: string;
+  entityId?: string;
 }
 
 export function useAudit(filters: AuditFilters = {}) {
@@ -358,7 +346,7 @@ export function useAudit(filters: AuditFilters = {}) {
           page: filters.page,
           type: filters.type,
           profile: filters.profile,
-          familyId: filters.familyId,
+          entityId: filters.entityId,
         }),
       ),
   });
@@ -386,6 +374,7 @@ export function useSelectionRules(profileId: string) {
     queryFn: () =>
       apiFetch<{ rules: SelectionRule[] }>(`/api/v1/selection-rules?profileId=${profileId}`),
     select: (d) => d.rules,
+    enabled: Boolean(profileId),
   });
 }
 
@@ -440,13 +429,7 @@ export function useSelectionPreview(profileId: string) {
     queryKey: ["selection-preview", profileId],
     queryFn: () =>
       apiFetch<PreviewBuckets>(`/api/v1/selection-rules/preview?profileId=${profileId}`),
-  });
-}
-
-export function useSelectionPreviewDraft() {
-  return useMutation({
-    mutationFn: ({ profileId, rules }: { profileId: string; rules: SelectionRuleDraft[] }) =>
-      apiPost<PreviewBuckets>("/api/v1/selection-rules/preview", { profileId, rules }),
+    enabled: Boolean(profileId),
   });
 }
 
@@ -472,6 +455,7 @@ export function useEventSlugOptions(profileId: string) {
     queryFn: () =>
       apiFetch<{ eventSlugs: string[] }>(`/api/v1/markets/event-slugs?profileId=${profileId}`),
     select: (d) => d.eventSlugs,
+    enabled: Boolean(profileId),
   });
 }
 

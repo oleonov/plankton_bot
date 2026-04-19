@@ -237,10 +237,7 @@ export function buildRestingOrderSnapshot(
     const conditionId = marketsByToken.get(tokenKey)?.conditionId ?? `token:${tokenKey}`;
     const marketKey = `${groupKey}|${conditionId}`;
 
-    buyEntryUsdcByFamily.set(
-      groupKey,
-      (buyEntryUsdcByFamily.get(groupKey) ?? 0) + order.sizeUsdc,
-    );
+    buyEntryUsdcByFamily.set(groupKey, (buyEntryUsdcByFamily.get(groupKey) ?? 0) + order.sizeUsdc);
     buyEntryCountByToken.set(tokenKey, (buyEntryCountByToken.get(tokenKey) ?? 0) + 1);
     buyEntryCountByMarket.set(marketKey, (buyEntryCountByMarket.get(marketKey) ?? 0) + 1);
   }

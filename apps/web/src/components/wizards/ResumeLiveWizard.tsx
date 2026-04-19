@@ -14,7 +14,6 @@ export function ResumeLiveWizard({ onClose }: { onClose: () => void }) {
 
   const profile = detail?.profile;
   const settings = detail?.settings;
-  const families = detail?.deployedFamilies ?? [];
   const envelope = settings?.envelope_json ? tryParse(settings.envelope_json) : null;
   const canConfirm = confirmText === "RESUME LIVE";
 
@@ -74,10 +73,6 @@ export function ResumeLiveWizard({ onClose }: { onClose: () => void }) {
           <div className="profile-stat">
             <span className="label">Positions</span>
             <span>{profile?.open_positions ?? 0}</span>
-          </div>
-          <div className="profile-stat">
-            <span className="label">Deployed Families</span>
-            <span>{families.length}</span>
           </div>
         </div>
       )}

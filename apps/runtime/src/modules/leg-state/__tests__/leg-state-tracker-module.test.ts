@@ -106,7 +106,7 @@ describe("LegStateTrackerModule", () => {
     expect(state!.buyCount).toBe(1);
     expect(state!.sellCount).toBe(0);
     expect(state!.lastAction).toBe("BUY");
-    expect(state!.firstTradePrice).toBe(0.03);
+    expect(state!.firstEntryFillPrice).toBe(0.03);
   });
 
   it("increments buyCount on subsequent BUY fills", async () => {
@@ -119,7 +119,7 @@ describe("LegStateTrackerModule", () => {
     expect(state!.buyCount).toBe(3);
     expect(state!.sellCount).toBe(0);
     expect(state!.lastAction).toBe("BUY");
-    expect(state!.firstTradePrice).toBe(0.03);
+    expect(state!.firstEntryFillPrice).toBe(0.03);
   });
 
   // ─── FillReceived: SELL ───────────────────────────────────────────────
@@ -153,7 +153,7 @@ describe("LegStateTrackerModule", () => {
 
     expect(repo.get(TOK)!.buyCount).toBe(2);
     expect(repo.get(TOK2)!.buyCount).toBe(1);
-    expect(repo.get(TOK2)!.firstTradePrice).toBe(0.1);
+    expect(repo.get(TOK2)!.firstEntryFillPrice).toBe(0.1);
   });
 
   // ─── PositionUpdated → delete on close ────────────────────────────────
@@ -220,7 +220,7 @@ describe("LegStateTrackerModule", () => {
     const state = repo.get(TOK);
     expect(state!.buyCount).toBe(1);
     expect(state!.sellCount).toBe(0);
-    expect(state!.firstTradePrice).toBe(0.01);
+    expect(state!.firstEntryFillPrice).toBe(0.01);
   });
 
   // ─── Lifecycle ────────────────────────────────────────────────────────

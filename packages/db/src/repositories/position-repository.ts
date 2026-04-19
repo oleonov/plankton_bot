@@ -1,11 +1,7 @@
 import type Database from "better-sqlite3";
 import type { PositionRepository, Position } from "@plankton/domain";
 import type { TokenId, OrderSide, PositionStatus } from "@plankton/domain";
-import {
-  createPositionId,
-  createTokenId,
-  createConditionId,
-} from "@plankton/domain";
+import { createPositionId, createTokenId, createConditionId } from "@plankton/domain";
 
 export class SqlitePositionRepository implements PositionRepository {
   constructor(private readonly db: Database.Database) {}

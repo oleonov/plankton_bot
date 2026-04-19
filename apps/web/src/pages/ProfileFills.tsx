@@ -33,7 +33,6 @@ export function ProfileFills() {
           <tr>
             <th>Fill</th>
             <th>Market</th>
-            <th>Family</th>
             <th>Side</th>
             <th>Price</th>
             <th>Size</th>
@@ -54,7 +53,6 @@ export function ProfileFills() {
                   outcome={f.outcome}
                 />
               </td>
-              <td>{f.familyId.slice(0, 12)}</td>
               <td
                 style={{
                   color: f.side === "buy" ? "var(--green)" : "var(--red)",

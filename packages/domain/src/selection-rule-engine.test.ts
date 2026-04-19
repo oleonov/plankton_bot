@@ -2,7 +2,9 @@ import { describe, it, expect } from "vitest";
 import { SelectionRuleEngine, normalizeSelectionPattern } from "./selection-rule-engine.js";
 import type { SelectionRule } from "./types.js";
 
-function rule(partial: Partial<SelectionRule> & Pick<SelectionRule, "ruleId" | "ruleType" | "pattern">): SelectionRule {
+function rule(
+  partial: Partial<SelectionRule> & Pick<SelectionRule, "ruleId" | "ruleType" | "pattern">,
+): SelectionRule {
   return {
     profileId: "simulation",
     enabled: true,

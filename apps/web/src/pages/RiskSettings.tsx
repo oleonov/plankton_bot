@@ -5,7 +5,6 @@ interface RiskCaps {
   dailyLossCap?: number;
   dailyNotionalCap?: number;
   maxNewMarketsPerDay?: number;
-  maxOpenFamilies?: number;
   maxTotalExposureUsdc?: number;
 }
 
@@ -44,7 +43,6 @@ function RiskFormInner({
   const [dailyLossCap, setDailyLossCap] = useState(caps.dailyLossCap?.toString() ?? "");
   const [dailyNotionalCap, setDailyNotionalCap] = useState(caps.dailyNotionalCap?.toString() ?? "");
   const [maxNewMarkets, setMaxNewMarkets] = useState(caps.maxNewMarketsPerDay?.toString() ?? "");
-  const [maxFamilies, setMaxFamilies] = useState(caps.maxOpenFamilies?.toString() ?? "");
   const [maxExposure, setMaxExposure] = useState(caps.maxTotalExposureUsdc?.toString() ?? "");
 
   const handleSave = () => {
@@ -52,7 +50,6 @@ function RiskFormInner({
     if (dailyLossCap) riskCaps.dailyLossCap = Number(dailyLossCap);
     if (dailyNotionalCap) riskCaps.dailyNotionalCap = Number(dailyNotionalCap);
     if (maxNewMarkets) riskCaps.maxNewMarketsPerDay = Number(maxNewMarkets);
-    if (maxFamilies) riskCaps.maxOpenFamilies = Number(maxFamilies);
     if (maxExposure) riskCaps.maxTotalExposureUsdc = Number(maxExposure);
     update.mutate({ riskCapsJson: JSON.stringify(riskCaps) });
   };
@@ -84,15 +81,6 @@ function RiskFormInner({
             type="number"
             value={maxNewMarkets}
             onChange={(e) => setMaxNewMarkets(e.target.value)}
-            placeholder="No limit"
-          />
-        </div>
-        <div className="form-field">
-          <label>Max Open Families</label>
-          <input
-            type="number"
-            value={maxFamilies}
-            onChange={(e) => setMaxFamilies(e.target.value)}
             placeholder="No limit"
           />
         </div>

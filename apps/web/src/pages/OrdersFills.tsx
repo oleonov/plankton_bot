@@ -11,7 +11,6 @@ import type { OrderDTO, FillDTO } from "../api/types.ts";
 const orderAccessors: Record<string, (o: OrderDTO) => string | number | null> = {
   orderId: (o) => o.orderId,
   market: (o) => o.question,
-  family: (o) => o.familyId,
   side: (o) => o.side,
   price: (o) => o.price,
   size: (o) => o.size,
@@ -23,7 +22,6 @@ const orderAccessors: Record<string, (o: OrderDTO) => string | number | null> = 
 const fillAccessors: Record<string, (f: FillDTO) => string | number | null> = {
   fillId: (f) => f.fillId,
   market: (f) => f.question,
-  family: (f) => f.familyId,
   side: (f) => f.side,
   price: (f) => f.price,
   size: (f) => f.size,
@@ -108,12 +106,6 @@ export function OrdersFills() {
                   onToggle={orderSort.toggle}
                 />
                 <SortTh
-                  label="Family"
-                  sortKey="family"
-                  sort={orderSort.sort}
-                  onToggle={orderSort.toggle}
-                />
-                <SortTh
                   label="Side"
                   sortKey="side"
                   sort={orderSort.sort}
@@ -165,7 +157,6 @@ export function OrdersFills() {
                         outcome={o.outcome}
                       />
                     </td>
-                    <td>{o.familyId.slice(0, 12)}</td>
                     <td
                       style={{
                         color: o.side === "buy" ? "var(--green)" : "var(--red)",
@@ -218,12 +209,6 @@ export function OrdersFills() {
                   onToggle={fillSort.toggle}
                 />
                 <SortTh
-                  label="Family"
-                  sortKey="family"
-                  sort={fillSort.sort}
-                  onToggle={fillSort.toggle}
-                />
-                <SortTh
                   label="Side"
                   sortKey="side"
                   sort={fillSort.sort}
@@ -268,7 +253,6 @@ export function OrdersFills() {
                       outcome={f.outcome}
                     />
                   </td>
-                  <td>{f.familyId.slice(0, 12)}</td>
                   <td
                     style={{
                       color: f.side === "buy" ? "var(--green)" : "var(--red)",

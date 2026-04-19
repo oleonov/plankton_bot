@@ -6,12 +6,7 @@ import type Database from "better-sqlite3";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteInventoryLotRepository } from "../repositories/inventory-lot-repository.js";
-import {
-  createLotId,
-  createPositionId,
-  createTokenId,
-  createFillId,
-} from "@plankton/domain";
+import { createLotId, createPositionId, createTokenId, createFillId } from "@plankton/domain";
 import type { InventoryLot } from "@plankton/domain";
 
 let conn: DbConnection;

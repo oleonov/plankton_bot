@@ -1,11 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { InProcessEventBus } from "../event-bus.js";
 import type { Signal, Position } from "@plankton/domain";
-import {
-  createTokenId,
-  createPositionId,
-  createConditionId,
-} from "@plankton/domain";
+import { createTokenId, createPositionId, createConditionId } from "@plankton/domain";
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
@@ -44,7 +40,6 @@ function makePosition(overrides?: Partial<Position>): Position {
     ...overrides,
   };
 }
-
 
 describe("InProcessEventBus", () => {
   let bus: InProcessEventBus;

@@ -164,7 +164,11 @@ export class CommandPoller implements RuntimeModule {
     if (!cmd.targetId) throw new Error("family_disable requires targetId");
 
     if (this.deps.deploymentToggler && this.deps.activeProfile) {
-      this.deps.deploymentToggler.disable(cmd.targetId, this.deps.activeProfile, cmd.reason ?? null);
+      this.deps.deploymentToggler.disable(
+        cmd.targetId,
+        this.deps.activeProfile,
+        cmd.reason ?? null,
+      );
     }
 
     this.writeAudit(cmd, "family", cmd.targetId, now);

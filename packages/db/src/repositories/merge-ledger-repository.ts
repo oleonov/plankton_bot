@@ -11,12 +11,6 @@ export class SqliteMergeLedgerRepository implements MergeLedgerRepository {
            (merge_id, condition_id, merged_amount, spread_pnl, merged_at)
          VALUES (?, ?, ?, ?, ?)`,
       )
-      .run(
-        merge.mergeId,
-        merge.conditionId,
-        merge.mergedAmount,
-        merge.spreadPnl,
-        merge.mergedAt,
-      );
+      .run(merge.mergeId, merge.conditionId, merge.mergedAmount, merge.spreadPnl, merge.mergedAt);
   }
 }

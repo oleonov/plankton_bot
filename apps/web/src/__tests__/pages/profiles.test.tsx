@@ -16,11 +16,10 @@ describe("Profiles", () => {
     expect(screen.getByText("Simulation")).toBeInTheDocument();
   });
 
-  it("first tab auto-selected shows Summary content", async () => {
+  it("first tab auto-selected shows profile summary content", async () => {
     renderWithProviders(<Profiles />);
 
-    expect(await screen.findByText("Summary")).toBeInTheDocument();
-    expect(screen.getByText("Exposure")).toBeInTheDocument();
+    expect(await screen.findByText("Exposure")).toBeInTheDocument();
   });
 
   it("clicking another tab switches content", async () => {
@@ -30,18 +29,7 @@ describe("Profiles", () => {
     await screen.findByText("Live-Lite");
     await user.click(screen.getByText("Paper"));
 
-    expect(await screen.findByText("Summary")).toBeInTheDocument();
     expect(await screen.findByText("$32.06")).toBeInTheDocument();
-  });
-
-  it("shows deployed families count in sub-tab", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<Profiles />);
-
-    await screen.findByText("Live-Lite");
-    await user.click(screen.getByText("Paper"));
-
-    expect(await screen.findByText(/Deployed Families \(1\)/)).toBeInTheDocument();
   });
 
   it("only current profile shows RUNNING, others show STOPPED", async () => {
@@ -88,18 +76,5 @@ describe("Profiles", () => {
     // All 3 should show "stopped" — current profile has runtime_status=stopped
     expect(badgeTexts.filter((t) => t === "stopped")).toHaveLength(3);
     expect(badgeTexts.filter((t) => t === "running")).toHaveLength(0);
-  });
-
-  it("switching to Deployed Families sub-tab shows family table", async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<Profiles />);
-
-    await screen.findByText("Live-Lite");
-    await user.click(screen.getByText("Paper"));
-
-    const familiesTab = await screen.findByText(/Deployed Families \(1\)/);
-    await user.click(familiesTab);
-
-    expect(await screen.findByText("bitcoin-above")).toBeInTheDocument();
   });
 });

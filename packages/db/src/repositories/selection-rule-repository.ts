@@ -102,25 +102,21 @@ export class SelectionRuleRepository {
 
   list(profileId: string): SelectionRule[] {
     const rows = this.db
-      .prepare(
-        "SELECT * FROM selection_rules WHERE profile_id = ? ORDER BY rule_type, pattern",
-      )
+      .prepare("SELECT * FROM selection_rules WHERE profile_id = ? ORDER BY rule_type, pattern")
       .all(profileId) as Row[];
     return rows.map((r) => this.toDomain(r));
   }
 
   findById(ruleId: string): SelectionRule | null {
-    const row = this.db
-      .prepare("SELECT * FROM selection_rules WHERE rule_id = ?")
-      .get(ruleId) as Row | undefined;
+    const row = this.db.prepare("SELECT * FROM selection_rules WHERE rule_id = ?").get(ruleId) as
+      | Row
+      | undefined;
     return row ? this.toDomain(row) : null;
   }
 
   getVersion(): number {
     const row = this.db
-      .prepare(
-        "SELECT selection_rules_version AS v FROM runtime_control_state WHERE id = 1",
-      )
+      .prepare("SELECT selection_rules_version AS v FROM runtime_control_state WHERE id = 1")
       .get() as { v: number } | undefined;
     return row?.v ?? 0;
   }

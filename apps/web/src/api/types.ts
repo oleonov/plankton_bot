@@ -25,13 +25,6 @@ export interface SelectionRule {
   updatedAt: string;
 }
 
-export interface SelectionRuleDraft {
-  ruleType: SelectionRuleType;
-  pattern: string;
-  enabled: boolean;
-  note?: string | null;
-}
-
 export interface PreviewRow {
   conditionId: string;
   slug: string;
@@ -76,8 +69,6 @@ export interface ExecutionTelemetryWindow {
   lastFillAt: string | null;
 }
 
-export type FamilyLiveness = "active" | "dormant" | "unseen";
-
 /** GET /status */
 export interface StatusData {
   runtimeMode: string;
@@ -86,7 +77,7 @@ export interface StatusData {
   lastReconciliationAt: string | null;
   marketDataStale: boolean;
   marketDataLastUpdateAt: string | null;
-  activeFamilyCount: number;
+  openConditionCount: number;
   openOrderCount: number;
   openPositionCount: number;
   ordersPlacedLastMin: number;
@@ -101,8 +92,6 @@ export interface StatusData {
   marketDataSource: "live" | "simulation";
   executionMode: "simulation" | "live";
   liveLite?: {
-    familyAllowlist: string[];
-    maxFamilies: number;
     maxOpenValueUsdc: number;
     maxOrderUsdc: number;
     maxActiveMarkets: number;
@@ -124,7 +113,6 @@ export interface StatusData {
     candidatesConsideredLast10m?: number;
     blockedByResolutionBufferLast10m?: number;
     blockedByWindowLast10m?: number;
-    blockedByPerFamilyTickLimitLast10m?: number;
     gammaFallbackDustSignalsLast10m?: number;
     gammaFallbackDustOrdersLast10m?: number;
     gammaFallbackDustFillsLast10m?: number;
@@ -223,24 +211,10 @@ export interface TradingActivitySnapshot {
   capturedAt: string;
 }
 
-/** GET /metrics/families item */
-export interface FamilyMetric {
-  familyId: string;
-  familyKey: string;
-  feeTier?: string | null;
-  requiresPostOnlyForLive?: boolean | null;
-  openValueUsdc: number;
-  openPositionCount: number;
-  tailAdjustedPnlLive: number;
-  executionTelemetry24h?: ExecutionTelemetryWindow;
-  updatedAt: string;
-}
-
 /** GET /positions item */
 export interface PositionDTO {
   positionId: string;
   tokenId: string;
-  familyId: string;
   side: string;
   size: number;
   avgEntryPrice: number;
@@ -266,7 +240,6 @@ export interface OrderDTO {
   orderId: string;
   clientOrderId: string;
   tokenId: string;
-  familyId: string;
   side: string;
   orderType: string;
   postOnly?: boolean;
@@ -289,7 +262,6 @@ export interface FillDTO {
   fillId: string;
   orderId: string;
   tokenId: string;
-  familyId: string;
   side: string;
   price: number;
   size: number;
@@ -306,39 +278,6 @@ export interface FillDTO {
   endDate: string | null;
 }
 
-/** GET /families item */
-export interface FamilyDTO {
-  familyId: string;
-  familyKey: string;
-  primaryCategory: string;
-  regime: string;
-  horizon: string;
-  cadence: string;
-  strategyProfile: string;
-  feeTier?: string | null;
-  liveWalletRequirement?: string | null;
-  requiresPostOnlyForLive?: boolean | null;
-  liveness?: FamilyLiveness;
-  executionTelemetry24h?: ExecutionTelemetryWindow;
-  state: {
-    openValueUsdc: number;
-    openPositionCount: number;
-    openDustCount: number;
-    activeMarketCount: number;
-    currentTailCostUsdc: number;
-    tailAdjustedPnlLive: number;
-  } | null;
-  caps: {
-    maxOpenValueUsdc: number;
-    maxActiveMarkets: number;
-    maxDustPositions: number;
-  } | null;
-  deployment: {
-    enabled: boolean;
-    priority: number;
-  } | null;
-}
-
 export interface FamilyListMeta {
   scope: "profile" | "all";
   profile: string | null;
@@ -351,21 +290,10 @@ export interface FamilyListMeta {
   totalPages?: number;
 }
 
-export interface FamilyListResponse {
-  items: FamilyDTO[];
-  meta: FamilyListMeta;
-}
-
-export interface FamilyOptionDTO {
-  familyId: string;
-  familyKey: string;
-}
-
 /** GET /risk-events item */
 export interface RiskEventDTO {
   id: number;
   eventType: string;
-  familyId: string | null;
   summary: string;
   severity: "critical" | "warning" | "info";
   createdAt: string;
@@ -379,30 +307,6 @@ export interface Paginated<T> {
   page?: number;
   pageSize?: number;
   totalPages?: number;
-}
-
-/** GET /families/:id/evidence */
-export interface FamilyEvidenceDTO {
-  familyId: string;
-  evidenceStatus: string | null;
-  evidenceScore: number | null;
-  localTradeCount: number | null;
-  localMarketCount: number | null;
-  localRealizedPnlFifo: number | null;
-  openTailCostUsdc: number | null;
-  tailAdjustedPnl: number | null;
-  remoteClosedRealizedPnl: number | null;
-  openPositionCount: number | null;
-  openDustCount: number | null;
-  bothSidedEligible: boolean;
-  heavyCampaignEligible: boolean;
-  activeWindowEdgeScore: number | null;
-  recurrenceScore: number | null;
-  recycleScore: number | null;
-  liveViabilityScore: number | null;
-  toxicityPenalty: number | null;
-  lastValidatedAt: string | null;
-  repricingExitCount: number;
 }
 
 /** GET /families/:id/transitions item */
@@ -448,7 +352,6 @@ export interface ProfilesResponse {
 export interface ProfileDetailDTO {
   profile: ProfileDTO;
   settings: ProfileSettingsDTO | null;
-  deployedFamilies: DeployedFamilyDTO[];
 }
 
 export interface ProfileSettingsDTO {
@@ -460,18 +363,6 @@ export interface ProfileSettingsDTO {
   min_order_usdc?: number | null;
   relayer_json?: string | null;
   updated_at: string;
-}
-
-export interface DeployedFamilyDTO {
-  family_id: string;
-  enabled: number;
-  priority: number;
-  family_key: string;
-  primary_category: string;
-  regime: string;
-  fee_tier?: string | null;
-  live_wallet_requirement?: string | null;
-  requires_post_only_for_live?: number | null;
 }
 
 /** GET /audit item */

@@ -43,7 +43,6 @@ export function RiskEvents() {
             <th>Time</th>
             <th>Type</th>
             <th>Severity</th>
-            <th>Family</th>
             <th>Summary</th>
           </tr>
         </thead>
@@ -57,7 +56,6 @@ export function RiskEvents() {
               <td>
                 <Badge value={e.severity} type="severity" />
               </td>
-              <td>{e.familyId ?? "\u2014"}</td>
               <td>{e.summary}</td>
             </tr>
           ))}

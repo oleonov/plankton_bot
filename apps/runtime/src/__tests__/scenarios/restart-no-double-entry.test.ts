@@ -182,7 +182,7 @@ describe("Scenario: restart — no double-entry on existing open position", () =
     const seededLegState = legStateRepo.get(TOKEN_ID);
     expect(seededLegState).not.toBeNull();
     expect(seededLegState?.buyCount).toBe(2);
-    expect(seededLegState?.firstTradePrice).toBe(0.15);
+    expect(seededLegState?.firstEntryFillPrice).toBe(0.15);
     expect(seededLegState?.lastAction).toBe("BUY");
 
     // ── Act 2: even if leg_state seeding had drifted, the defensive gate
@@ -292,7 +292,10 @@ describe("Scenario: restart — no double-entry on existing open position", () =
     expect(first.seededLegStates).toBe(1);
     expect(first.alreadyPresentLegStates).toBe(0);
 
-    const second = await runStartupPositionAdoption({ ...baseDeps, botRunId: createBotRunId("r2") });
+    const second = await runStartupPositionAdoption({
+      ...baseDeps,
+      botRunId: createBotRunId("r2"),
+    });
     expect(second.seededLegStates).toBe(0);
     expect(second.alreadyPresentLegStates).toBe(1);
 

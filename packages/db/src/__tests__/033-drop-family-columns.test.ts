@@ -8,10 +8,7 @@ let tmpDir: string;
 let db: Database.Database;
 
 function readMigration(filename: string): string {
-  return readFileSync(
-    path.join(import.meta.dirname, "..", "migrations", filename),
-    "utf-8",
-  );
+  return readFileSync(path.join(import.meta.dirname, "..", "migrations", filename), "utf-8");
 }
 
 /** Minimal pre-033 ledger schema — only the tables touched by migration 033. */
@@ -178,9 +175,7 @@ const TABLES_WITH_FAMILY_ID = [
 ];
 
 function columnNames(db: Database.Database, table: string): string[] {
-  return (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
-    (c) => c.name,
-  );
+  return (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
 }
 
 beforeEach(() => {
@@ -246,10 +241,16 @@ describe("migration 033 — drop family_id columns", () => {
 
   it("migrates existing pnl_ledger rows (family_id dropped, data retained)", () => {
     // Seed prerequisite rows with foreign_keys off
-    db.prepare("INSERT INTO orders (order_id, client_order_id, token_id, bot_run_id) VALUES ('ord-1', 'coid-1', 'tok-1', 'run-1')").run();
-    db.prepare("INSERT INTO fills (fill_id, order_id, token_id) VALUES ('fill-1', 'ord-1', 'tok-1')").run();
+    db.prepare(
+      "INSERT INTO orders (order_id, client_order_id, token_id, bot_run_id) VALUES ('ord-1', 'coid-1', 'tok-1', 'run-1')",
+    ).run();
+    db.prepare(
+      "INSERT INTO fills (fill_id, order_id, token_id) VALUES ('fill-1', 'ord-1', 'tok-1')",
+    ).run();
     db.prepare("INSERT INTO positions (position_id, token_id) VALUES ('pos-1', 'tok-1')").run();
-    db.prepare("INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at) VALUES ('fill-1', 'pos-1', 'fam-a', 3.14, '2026-01-01')").run();
+    db.prepare(
+      "INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at) VALUES ('fill-1', 'pos-1', 'fam-a', 3.14, '2026-01-01')",
+    ).run();
 
     db.exec(readMigration("033_drop_family_columns.sql"));
 
@@ -262,12 +263,16 @@ describe("migration 033 — drop family_id columns", () => {
   });
 
   it("migrates existing merge_ledger rows (family_id dropped, data retained)", () => {
-    db.prepare("INSERT INTO merge_ledger (merge_id, condition_id, family_id, merged_amount, spread_pnl, merged_at) VALUES ('m-1', 'cond-1', 'fam-a', 10.0, 0.5, '2026-01-01')").run();
+    db.prepare(
+      "INSERT INTO merge_ledger (merge_id, condition_id, family_id, merged_amount, spread_pnl, merged_at) VALUES ('m-1', 'cond-1', 'fam-a', 10.0, 0.5, '2026-01-01')",
+    ).run();
 
     db.exec(readMigration("033_drop_family_columns.sql"));
 
     const row = db
-      .prepare("SELECT condition_id, merged_amount, spread_pnl FROM merge_ledger WHERE merge_id = 'm-1'")
+      .prepare(
+        "SELECT condition_id, merged_amount, spread_pnl FROM merge_ledger WHERE merge_id = 'm-1'",
+      )
       .get() as { condition_id: string; merged_amount: number; spread_pnl: number };
     expect(row.condition_id).toBe("cond-1");
     expect(row.merged_amount).toBeCloseTo(10.0);

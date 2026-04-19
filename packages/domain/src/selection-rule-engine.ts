@@ -17,8 +17,7 @@ export class SelectionRuleEngine {
 
     const exactHits = this.rules.filter(
       (r) =>
-        (r.ruleType === "include_slug" || r.ruleType === "exclude_slug") &&
-        r.pattern === normSlug,
+        (r.ruleType === "include_slug" || r.ruleType === "exclude_slug") && r.pattern === normSlug,
     );
 
     if (exactHits.length > 0) {

@@ -52,7 +52,6 @@ export function ProfileOrders() {
           <tr>
             <th>Order</th>
             <th>Market</th>
-            <th>Family</th>
             <th>Side</th>
             <th>Price</th>
             <th>Size</th>
@@ -75,7 +74,6 @@ export function ProfileOrders() {
                     outcome={o.outcome}
                   />
                 </td>
-                <td>{o.familyId.slice(0, 12)}</td>
                 <td
                   style={{
                     color: o.side === "buy" ? "var(--green)" : "var(--red)",

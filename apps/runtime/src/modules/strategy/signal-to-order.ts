@@ -224,9 +224,7 @@ export class SignalToOrderBridge {
     });
   }
 
-  private async resolveMarket(
-    signal: RuntimeEventMap["SignalApproved"]["signal"],
-  ): Promise<{
+  private async resolveMarket(signal: RuntimeEventMap["SignalApproved"]["signal"]): Promise<{
     market: NormalizedMarket | null;
     cacheStatus: CandidateBookResolution["status"] | "disabled" | "base-market";
   }> {

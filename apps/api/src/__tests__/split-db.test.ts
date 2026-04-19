@@ -20,7 +20,6 @@ function testConfig(): AppConfig {
     runtimeMode: "simulation",
     logLevel: "error",
     dbPath: "",
-    familyRulesPath: "",
     marketDataPollIntervalMs: 30_000,
     marketDataStaleThresholdMs: 120_000,
     strategyScanIntervalMs: 5_000,
@@ -132,7 +131,7 @@ describe("API against real split schemas", () => {
       VALUES ('run-live-lite-status', 'live-lite', '2026-03-16T00:00:00Z');
 
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
-      VALUES ('live_lite_envelope', 1, '{"familyAllowlist":["wrong-1","wrong-2","wrong-3"],"maxFamilies":421,"maxOpenValueUsdc":999,"maxOrderUsdc":999,"maxActiveMarkets":999,"walletMode":"eoa","minOrderUsdc":99}', '2026-03-16T00:00:00Z');
+      VALUES ('live_lite_envelope', 1, '{"maxOpenValueUsdc":999,"maxOrderUsdc":999,"maxActiveMarkets":999,"walletMode":"eoa","minOrderUsdc":99}', '2026-03-16T00:00:00Z');
     `);
 
     try {
@@ -142,7 +141,6 @@ describe("API against real split schemas", () => {
       expect(body.ok).toBe(true);
       expect(body.data.runtimeMode).toBe("live-lite");
       expect(body.data.liveLite).toEqual({
-        maxFamilies: 100,
         maxOpenValueUsdc: 500,
         maxOrderUsdc: 25,
         maxActiveMarkets: 10,
@@ -243,7 +241,7 @@ describe("API against real split schemas", () => {
     expect(body.data.runtimeMode).toBe("paper");
     expect(body.data.paused).toBe(false); // paper ledger has runtime_paused=0
     expect(body.data.totalOpenValueUsdc).toBe(100.0); // paper ledger has 100, sim has 50
-    expect(body.data.activeFamilyCount).toBe(1);
+    expect(body.data.openConditionCount).toBe(1);
 
     await freshApp.close();
     pool.closeAll();
@@ -296,7 +294,7 @@ describe("API against real split schemas", () => {
     expect(snapshot.runtimeMode).toBe("paper");
     // Paper ledger has data from both this test and previous test (shared file)
     expect(snapshot.totalOpenValueUsdc).toBeGreaterThanOrEqual(200.0);
-    expect(snapshot.activeFamilyCount).toBeGreaterThanOrEqual(1);
+    expect(snapshot.openConditionCount).toBeGreaterThanOrEqual(1);
 
     await freshApp.close();
     pool.closeAll();

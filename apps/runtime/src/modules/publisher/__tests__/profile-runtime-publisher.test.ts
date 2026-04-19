@@ -204,18 +204,18 @@ describe("ProfileRuntimePublisher", () => {
     await publisher.publish();
 
     const count1 = (
-      controlConn.db
-        .prepare("SELECT COUNT(*) as cnt FROM profile_summaries")
-        .get() as { cnt: number }
+      controlConn.db.prepare("SELECT COUNT(*) as cnt FROM profile_summaries").get() as {
+        cnt: number;
+      }
     ).cnt;
     expect(count1).toBe(1);
 
     await publisher.publish();
 
     const count2 = (
-      controlConn.db
-        .prepare("SELECT COUNT(*) as cnt FROM profile_summaries")
-        .get() as { cnt: number }
+      controlConn.db.prepare("SELECT COUNT(*) as cnt FROM profile_summaries").get() as {
+        cnt: number;
+      }
     ).cnt;
     expect(count2).toBe(1);
   });
