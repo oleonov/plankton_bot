@@ -104,7 +104,7 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
 
   // 3. Run optional setup callback (after seeding, before modules)
   if (fixture.setup) {
-    await fixture.setup({ db: conn.db, exchangeGateway, repos });
+    await fixture.setup({ db: conn.db, exchangeGateway, marketDataGateway, repos });
   }
 
   // 4. Create event bus and subscribe for counting

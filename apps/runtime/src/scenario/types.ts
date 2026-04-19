@@ -26,7 +26,12 @@ export interface ScenarioFixture {
   scheduledCommands?: ScheduledCommand[];
   ticks: number;
   /** Optional setup callback, called after DB bootstrap + seeding, before modules start. */
-  setup?: (ctx: { db: any; exchangeGateway: any; repos: any }) => void | Promise<void>;
+  setup?: (ctx: {
+    db: any;
+    exchangeGateway: any;
+    marketDataGateway: any;
+    repos: any;
+  }) => void | Promise<void>;
   /** Optional DB path — when provided, use instead of creating temp directory. Caller manages lifecycle. */
   dbPath?: string;
 }
