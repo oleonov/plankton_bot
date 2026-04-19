@@ -466,6 +466,8 @@ function syncTrackedMarket(
     tradable: tracked.tradable,
     tickSize: tracked.tickSize,
     negRisk: tracked.negRisk,
+    acceptingOrders: current?.acceptingOrders ?? false,
+    enableOrderBook: current?.enableOrderBook ?? false,
     bestBid: current?.bestBid ?? null,
     bestAsk: current?.bestAsk ?? null,
     midPrice: current?.midPrice ?? null,

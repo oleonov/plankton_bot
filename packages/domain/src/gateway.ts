@@ -118,6 +118,8 @@ export interface CancelOrderResult {
 export interface MarketPricingSnapshot {
   bestBid: number | null;
   bestAsk: number | null;
+  acceptingOrders: boolean;
+  enableOrderBook: boolean;
   lastTradePrice: number | null;
   lastTradeAt?: string | null;
   volume24h?: number | null;

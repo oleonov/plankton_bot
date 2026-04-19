@@ -19,6 +19,8 @@ export function applyPricingSnapshot(
     bestAsk,
     midPrice,
     spread,
+    acceptingOrders: pricing.acceptingOrders,
+    enableOrderBook: pricing.enableOrderBook,
     lastTradePrice: pricing.lastTradePrice ?? null,
     lastTradeAt: pricing.lastTradeAt ?? null,
     volume24h: pricing.volume24h ?? market.volume24h ?? null,
@@ -60,6 +62,8 @@ export function didMarketPricingChange(
   next: NormalizedMarket,
 ): boolean {
   return (
+    previous.acceptingOrders !== next.acceptingOrders ||
+    previous.enableOrderBook !== next.enableOrderBook ||
     previous.tickSize !== next.tickSize ||
     previous.bestBid !== next.bestBid ||
     previous.bestAsk !== next.bestAsk ||

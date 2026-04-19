@@ -269,6 +269,8 @@ export interface NormalizedMarket {
   tradable: boolean;
   tickSize: number;
   negRisk: boolean;
+  acceptingOrders: boolean;
+  enableOrderBook: boolean;
   bestBid: number | null;
   bestAsk: number | null;
   midPrice: number | null;

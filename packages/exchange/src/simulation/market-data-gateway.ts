@@ -11,6 +11,7 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
   private readonly markets = new Map<string, ClobMarket>();
   private readonly tickSizes = new Map<string, number>();
   private readonly orderBooks = new Map<string, OrderBookSnapshot>();
+  private livenessOverrides = new Map<string, { acceptingOrders?: boolean; enableOrderBook?: boolean }>();
 
   async getMarkets(_onPage?: (page: number) => Promise<void> | void): Promise<ClobMarket[]> {
     return [...this.markets.values()].filter((m) => m.active);
@@ -52,9 +53,12 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
     const result = new Map<string, MarketPricingSnapshot>();
     for (const tokenId of tokenIds) {
       const book = this.orderBooks.get(tokenId);
+      const override = this.livenessOverrides.get(tokenId);
       result.set(tokenId, {
         bestBid: book?.bestBid ?? null,
         bestAsk: book?.bestAsk ?? null,
+        acceptingOrders: override?.acceptingOrders ?? true,
+        enableOrderBook: override?.enableOrderBook ?? true,
         lastTradePrice: null,
         lastTradeAt: null,
         volume24h: null,
@@ -78,6 +82,15 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
     for (const token of market.tokens) {
       this.tickSizes.set(token.tokenId, market.tickSize);
     }
+  }
+
+  /** Override liveness flags for a token — test-only. Unset keys default to true. */
+  setLivenessOverride(
+    tokenId: TokenId,
+    patch: { acceptingOrders?: boolean; enableOrderBook?: boolean },
+  ): void {
+    const existing = this.livenessOverrides.get(String(tokenId)) ?? {};
+    this.livenessOverrides.set(String(tokenId), { ...existing, ...patch });
   }
 
   /** Set the order book for a token. */
@@ -105,5 +118,6 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
     this.markets.clear();
     this.tickSizes.clear();
     this.orderBooks.clear();
+    this.livenessOverrides.clear();
   }
 }

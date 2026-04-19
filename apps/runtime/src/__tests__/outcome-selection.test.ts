@@ -27,6 +27,8 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
     bestBid,
     bestAsk,
     midPrice: (bestBid + bestAsk) / 2,

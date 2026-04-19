@@ -702,6 +702,9 @@ function getCurrentPricing(
       liquidity: null,
       minOrderSize: null,
       bookSource: "clob" as const,
+      // Fail-closed — stream deltas spread over this snapshot; must not silently claim liveness.
+      acceptingOrders: false,
+      enableOrderBook: false,
     }
   );
 }

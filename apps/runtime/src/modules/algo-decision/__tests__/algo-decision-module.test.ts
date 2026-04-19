@@ -218,6 +218,8 @@ function makeMarket(
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
     bestBid: midPrice !== null ? midPrice - 0.01 : null,
     bestAsk: midPrice !== null ? midPrice + 0.01 : null,
     midPrice,

@@ -490,6 +490,8 @@ describe("MarketDataModule", () => {
         pricing: {
           bestBid: 0.45,
           bestAsk: 0.55,
+          acceptingOrders: true,
+          enableOrderBook: true,
           lastTradePrice: 0.5,
           bookSource: "clob",
         },
@@ -543,17 +545,38 @@ describe("MarketDataModule", () => {
     await stream!.emitUpdates([
       {
         tokenId: "tok-a",
-        pricing: { bestBid: 0.44, bestAsk: 0.56, lastTradePrice: 0.5, bookSource: "clob" },
+        pricing: {
+          bestBid: 0.44,
+          bestAsk: 0.56,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          lastTradePrice: 0.5,
+          bookSource: "clob",
+        },
       },
     ]);
     await stream!.emitUpdates([
       {
         tokenId: "tok-a",
-        pricing: { bestBid: 0.45, bestAsk: 0.55, lastTradePrice: 0.5, bookSource: "clob" },
+        pricing: {
+          bestBid: 0.45,
+          bestAsk: 0.55,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          lastTradePrice: 0.5,
+          bookSource: "clob",
+        },
       },
       {
         tokenId: "tok-b",
-        pricing: { bestBid: 0.46, bestAsk: 0.58, lastTradePrice: 0.52, bookSource: "clob" },
+        pricing: {
+          bestBid: 0.46,
+          bestAsk: 0.58,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          lastTradePrice: 0.52,
+          bookSource: "clob",
+        },
       },
     ]);
 
@@ -603,11 +626,25 @@ describe("MarketDataModule", () => {
       await stream!.emitUpdates([
         {
           tokenId: "tok-a",
-          pricing: { bestBid: 0.44, bestAsk: 0.56, lastTradePrice: 0.5, bookSource: "clob" },
+          pricing: {
+            bestBid: 0.44,
+            bestAsk: 0.56,
+            acceptingOrders: true,
+            enableOrderBook: true,
+            lastTradePrice: 0.5,
+            bookSource: "clob",
+          },
         },
         {
           tokenId: "tok-b",
-          pricing: { bestBid: 0.45, bestAsk: 0.57, lastTradePrice: 0.51, bookSource: "clob" },
+          pricing: {
+            bestBid: 0.45,
+            bestAsk: 0.57,
+            acceptingOrders: true,
+            enableOrderBook: true,
+            lastTradePrice: 0.51,
+            bookSource: "clob",
+          },
         },
       ]);
 
@@ -732,11 +769,25 @@ describe("MarketDataModule", () => {
     await stream!.emitUpdates([
       {
         tokenId: "tok-a",
-        pricing: { bestBid: 0.44, bestAsk: 0.56, lastTradePrice: 0.5, bookSource: "clob" },
+        pricing: {
+          bestBid: 0.44,
+          bestAsk: 0.56,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          lastTradePrice: 0.5,
+          bookSource: "clob",
+        },
       },
       {
         tokenId: "tok-b",
-        pricing: { bestBid: 0.45, bestAsk: 0.57, lastTradePrice: 0.51, bookSource: "clob" },
+        pricing: {
+          bestBid: 0.45,
+          bestAsk: 0.57,
+          acceptingOrders: true,
+          enableOrderBook: true,
+          lastTradePrice: 0.51,
+          bookSource: "clob",
+        },
       },
     ]);
     await stream!.emitGapForTokenIds(["tok-a"]);
@@ -886,5 +937,41 @@ describe("MarketDataModule", () => {
     expect(finalEvent!.active).toBe(false);
     expect(finalEvent!.page).toBe(0);
     expect(finalEvent!.botRunId).toBe("run-test-123");
+  });
+
+  it("propagates acceptingOrders + enableOrderBook through syncTrackedMarket", async () => {
+    const tracked = [
+      makeTrackedMarket({
+        tokenId: createTokenId("tok-t1"),
+        conditionId: "cond-t1",
+      }),
+    ];
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+
+    // Snapshot with both liveness booleans false — market not live yet.
+    const pricingMap = new Map<string, import("@plankton/domain").MarketPricingSnapshot>([
+      [
+        "tok-t1",
+        {
+          bestBid: 0.3,
+          bestAsk: 0.7,
+          acceptingOrders: false,
+          enableOrderBook: false,
+          lastTradePrice: null,
+        },
+      ],
+    ]);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(pricingMap);
+
+    const received: NormalizedMarket[] = [];
+    bus.subscribe("MarketSnapshotReceived", async (p) => {
+      received.push(...p.markets);
+    });
+
+    await mod.poll();
+
+    expect(received).toHaveLength(1);
+    expect(received[0]!.acceptingOrders).toBe(false);
+    expect(received[0]!.enableOrderBook).toBe(false);
   });
 });

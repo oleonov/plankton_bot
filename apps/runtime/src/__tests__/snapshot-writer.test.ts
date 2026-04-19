@@ -18,6 +18,8 @@ function makeMarket(tokenId: string, bestBid = 0.45, bestAsk = 0.55): Normalized
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
     bestBid,
     bestAsk,
     midPrice: (bestBid + bestAsk) / 2,

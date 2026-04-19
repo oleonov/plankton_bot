@@ -272,6 +272,10 @@ export class LiveMarketDataGateway implements MarketDataGateway {
       const marketBestBid = parseOptionalNumber(raw.bestBid);
       const marketBestAsk = parseOptionalNumber(raw.bestAsk);
 
+      // Fail-closed: undefined/null/non-boolean collapses to false.
+      const acceptingOrders = raw.acceptingOrders === true;
+      const enableOrderBook = raw.enableOrderBook === true;
+
       for (let i = 0; i < clobTokenIds.length; i++) {
         const tokenId = clobTokenIds[i]!;
         const outcomePrice =
@@ -304,6 +308,8 @@ export class LiveMarketDataGateway implements MarketDataGateway {
             i === 0 && marketBestBid !== null && marketBestAsk !== null
               ? "gamma"
               : "gamma-fallback",
+          acceptingOrders,
+          enableOrderBook,
         });
       }
     }

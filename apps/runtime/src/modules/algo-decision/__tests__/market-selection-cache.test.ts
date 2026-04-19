@@ -62,6 +62,8 @@ function makeMarket(overrides: Partial<NormalizedMarket> & { tokenId: TokenId })
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
     bestBid: 0.5,
     bestAsk: 0.51,
     midPrice: 0.505,

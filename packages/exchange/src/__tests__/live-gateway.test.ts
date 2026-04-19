@@ -1367,6 +1367,77 @@ describe("LiveMarketDataGateway", () => {
 
     stream.close();
   });
+
+  it("getMarketPricing copies acceptingOrders + enableOrderBook when both true", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          {
+            clobTokenIds: '["tok-a"]',
+            bestBid: 0.4,
+            bestAsk: 0.5,
+            acceptingOrders: true,
+            enableOrderBook: true,
+          },
+        ]),
+    });
+    try {
+      const result = await gw.getMarketPricing(["tok-a"]);
+      expect(result.get("tok-a")!.acceptingOrders).toBe(true);
+      expect(result.get("tok-a")!.enableOrderBook).toBe(true);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("getMarketPricing copies acceptingOrders + enableOrderBook as false when Gamma reports false", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          {
+            clobTokenIds: '["tok-a"]',
+            bestBid: 0.4,
+            bestAsk: 0.5,
+            acceptingOrders: false,
+            enableOrderBook: false,
+          },
+        ]),
+    });
+    try {
+      const result = await gw.getMarketPricing(["tok-a"]);
+      expect(result.get("tok-a")!.acceptingOrders).toBe(false);
+      expect(result.get("tok-a")!.enableOrderBook).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("getMarketPricing fail-closes liveness to false when fields are absent", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          {
+            clobTokenIds: '["tok-a"]',
+            bestBid: 0.4,
+            bestAsk: 0.5,
+            /* acceptingOrders and enableOrderBook omitted */
+          },
+        ]),
+    });
+    try {
+      const result = await gw.getMarketPricing(["tok-a"]);
+      expect(result.get("tok-a")!.acceptingOrders).toBe(false);
+      expect(result.get("tok-a")!.enableOrderBook).toBe(false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("SharedMarketPricingStreamHub", () => {

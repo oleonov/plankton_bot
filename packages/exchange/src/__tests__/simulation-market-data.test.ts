@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createTokenId } from "@plankton/domain";
-import type { ClobMarket } from "@plankton/domain";
+import type { ClobMarket, TokenId } from "@plankton/domain";
 import { SimulationMarketDataGateway } from "../simulation/market-data-gateway.js";
 
 function makeMarket(overrides?: Partial<ClobMarket>): ClobMarket {
@@ -106,5 +106,31 @@ describe("SimulationMarketDataGateway", () => {
   it("healthCheck returns ok", async () => {
     const health = await gw.healthCheck();
     expect(health.ok).toBe(true);
+  });
+});
+
+describe("SimulationMarketDataGateway — liveness", () => {
+  it("returns acceptingOrders=true + enableOrderBook=true by default", async () => {
+    const gw = new SimulationMarketDataGateway();
+    const out = await gw.getMarketPricing(["t1"]);
+    const snap = out.get("t1");
+    expect(snap?.acceptingOrders).toBe(true);
+    expect(snap?.enableOrderBook).toBe(true);
+  });
+
+  it("honors setLivenessOverride for acceptingOrders=false", async () => {
+    const gw = new SimulationMarketDataGateway();
+    gw.setLivenessOverride("t1" as TokenId, { acceptingOrders: false });
+    const out = await gw.getMarketPricing(["t1"]);
+    expect(out.get("t1")?.acceptingOrders).toBe(false);
+    expect(out.get("t1")?.enableOrderBook).toBe(true);
+  });
+
+  it("honors setLivenessOverride for enableOrderBook=false", async () => {
+    const gw = new SimulationMarketDataGateway();
+    gw.setLivenessOverride("t1" as TokenId, { enableOrderBook: false });
+    const out = await gw.getMarketPricing(["t1"]);
+    expect(out.get("t1")?.enableOrderBook).toBe(false);
+    expect(out.get("t1")?.acceptingOrders).toBe(true);
   });
 });
