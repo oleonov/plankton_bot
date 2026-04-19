@@ -12,7 +12,6 @@ import {
   resolveDustSizeCapUsdc,
   resolveGammaFallbackDustReferencePrice,
 } from "./book-quality-policy.js";
-import { shouldPromoteFallbackMarketability } from "../../proven-family-policy.js";
 
 const EPSILON = 1e-9;
 const DEFAULT_MAX_BOOK_AGE_MS = 15_000;
@@ -197,10 +196,7 @@ export function resolveMarketabilityPolicy(
     slugPattern: bundle.identity.slugPattern,
     tickSize,
   });
-  const tier =
-    resolvedTier === "fallback" && shouldPromoteFallbackMarketability(bundle, tickSize)
-      ? "reduced"
-      : resolvedTier;
+  const tier = resolvedTier;
   const speedTier = resolveMarketabilitySpeedTier(bundle, tier);
 
   if (tier === "core") return speedTier === "core-fast" ? CORE_FAST_POLICY : CORE_POLICY;
