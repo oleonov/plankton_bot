@@ -108,7 +108,7 @@ export interface MarketSnapshot {
 // ─── Signal ───────────────────────────────────────────────────────────────────
 //
 // sequenceInTick: 0-based counter for signals sharing the same
-// familyId + tokenId + side within one scanner tick (F3 resolution).
+// tokenId + side within one scanner tick (F3 resolution).
 // Required for deterministic buildClientOrderId deduplication.
 
 export interface Signal {
@@ -121,7 +121,7 @@ export interface Signal {
   suggestedSizeUsdc: number; // USDC notional (= suggestedSize × suggestedPrice)
   reason: SignalReason;
   strategyTick: number; // epoch ms of the scanner tick
-  sequenceInTick: number; // 0-based within tick for same family+token+side
+  sequenceInTick: number; // 0-based within tick for same token+side
   decisionRuleId: string | null;
   generatedAt: string; // ISO timestamp
 }

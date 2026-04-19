@@ -2,8 +2,8 @@
  * PositionSettler — closes positions on resolved markets and records
  * settlement PnL in the settlement_ledger table.
  *
- * Uses existing "closed" status (not a new "settled" variant) to avoid
- * blast radius across family-exposure, position-repository, and strategy code.
+ * Uses the existing "closed" status (not a new "settled" variant) to avoid
+ * churn in position-repository and strategy code that reads position status.
  * Resolution context is preserved in market_resolutions + settlement_ledger.
  */
 

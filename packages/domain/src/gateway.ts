@@ -275,7 +275,7 @@ export interface MarketDataGateway {
 
   /**
    * Optional live pricing stream for gateways that support push-based updates.
-   * Hot-family execution uses this to reduce dependence on the slow global poll.
+   * Token-level hot-quote execution uses this to reduce dependence on the slow global poll.
    */
   createMarketPricingStream?(
     handlers: Readonly<{

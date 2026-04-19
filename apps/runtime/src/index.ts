@@ -1,7 +1,7 @@
 /**
  * Plankton Runtime — composition root and entrypoint.
  *
- * Wires config, DB, family rules, event bus, supervisor, and modules.
+ * Wires config, DB, selection rules, algo rules, event bus, supervisor, and modules.
  * Does NOT implement exchange, strategy, risk, or market-data logic.
  */
 

@@ -60,7 +60,7 @@ Do not use `live`. Use `live-lite`.
 
 ### Trading rules at startup
 
-There is no YAML config for trading rules. Two DB-backed rule sets cover everything the old `family_rules.yaml` used to express:
+There is no YAML config for trading rules. Two DB-backed rule sets cover everything the old `family_rules.yaml` used to express (selection rules + algo rules):
 
 - **Selection rules** (`control.db` → `selection_rules`): which event slugs the scanner admits. Seeded at first boot via migration 037 with `bitcoin-`, `ethereum-`, `elon-musk-` prefixes per profile.
 - **Algo rules** (`control.db` → `algo_rules`): decision / size / redeem logic. Seeded with canonical 06-spec defaults at first boot.

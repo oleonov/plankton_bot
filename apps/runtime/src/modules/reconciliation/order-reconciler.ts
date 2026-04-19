@@ -6,7 +6,8 @@
  *  - Unknown exchange orders: orders on the exchange with no local record
  *
  * Exchange is source of truth. Phantom local orders are marked cancelled.
- * Unknown exchange orders are logged but not fabricated locally (we lack familyId).
+ * Unknown exchange orders are logged but not fabricated locally — we only
+ * track orders we placed.
  */
 
 import type { ExchangeGateway, OrderRepository } from "@plankton/domain";

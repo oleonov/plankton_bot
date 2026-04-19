@@ -103,8 +103,6 @@ function runLiveLiteChecks(
     }
   }
 
-  // familyAllowlist is no longer enforced on positions/orders (family_id column dropped)
-
   // Combined exposure
   const positionValue = db
     .prepare(

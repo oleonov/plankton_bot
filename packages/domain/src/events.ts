@@ -91,11 +91,7 @@ export interface SignalConversionSkipped {
 export interface CooldownBypassApplied {
   readonly type: "CooldownBypassApplied";
   readonly tokenId: TokenId;
-  readonly reason:
-    | "price-moved"
-    | "spread-narrowed"
-    | "trade-recency-improved"
-    | "manual-family-fast-lane";
+  readonly reason: "price-moved" | "spread-narrowed" | "trade-recency-improved";
   readonly previousCooldownUntil: number;
   readonly appliedAt: number;
 }

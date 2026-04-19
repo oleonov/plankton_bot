@@ -4,12 +4,12 @@
  */
 
 export function matchesHorizon(
-  familyHorizon: string,
+  horizon: string,
   endDate: string | null,
   referenceDate: Date,
   maxDaysAhead?: number,
 ): boolean {
-  return isWithinAssignmentWindow(familyHorizon, endDate, referenceDate, maxDaysAhead);
+  return isWithinAssignmentWindow(horizon, endDate, referenceDate, maxDaysAhead);
 }
 
 type HorizonWindow = { minHours: number; maxDays: number };

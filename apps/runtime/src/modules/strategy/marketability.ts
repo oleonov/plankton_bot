@@ -86,7 +86,7 @@ export interface MarketabilityPolicy {
 }
 
 export interface RestingOrderSnapshot {
-  readonly buyEntryUsdcByFamily: ReadonlyMap<string, number>;
+  readonly buyEntryUsdcByToken: ReadonlyMap<string, number>;
   readonly buyEntryCountByToken: ReadonlyMap<string, number>;
   readonly buyEntryCountByMarket: ReadonlyMap<string, number>;
 }
@@ -224,25 +224,24 @@ export function buildRestingOrderSnapshot(
   orders: readonly Order[],
   marketsByToken: ReadonlyMap<string, Pick<NormalizedMarket, "conditionId">>,
 ): RestingOrderSnapshot {
-  const buyEntryUsdcByFamily = new Map<string, number>();
+  const buyEntryUsdcByToken = new Map<string, number>();
   const buyEntryCountByToken = new Map<string, number>();
   const buyEntryCountByMarket = new Map<string, number>();
 
   for (const order of orders) {
     if (!isOpenBuyEntryOrder(order)) continue;
 
-    // Phase 6: no familyId on orders; use tokenId as the grouping key
     const groupKey = String(order.tokenId);
     const tokenKey = String(order.tokenId);
     const conditionId = marketsByToken.get(tokenKey)?.conditionId ?? `token:${tokenKey}`;
     const marketKey = `${groupKey}|${conditionId}`;
 
-    buyEntryUsdcByFamily.set(groupKey, (buyEntryUsdcByFamily.get(groupKey) ?? 0) + order.sizeUsdc);
+    buyEntryUsdcByToken.set(groupKey, (buyEntryUsdcByToken.get(groupKey) ?? 0) + order.sizeUsdc);
     buyEntryCountByToken.set(tokenKey, (buyEntryCountByToken.get(tokenKey) ?? 0) + 1);
     buyEntryCountByMarket.set(marketKey, (buyEntryCountByMarket.get(marketKey) ?? 0) + 1);
   }
 
-  return { buyEntryUsdcByFamily, buyEntryCountByToken, buyEntryCountByMarket };
+  return { buyEntryUsdcByToken, buyEntryCountByToken, buyEntryCountByMarket };
 }
 
 export function evaluateMarketability(opts: {
@@ -549,16 +548,15 @@ function applyRestingOrderChecks(
     return;
   }
 
-  // Phase 6: no familyId on Signal; use tokenId as the grouping key
   const groupKey = String(opts.signal.tokenId);
   const tokenKey = String(opts.signal.tokenId);
   const marketKey = `${groupKey}|${opts.market.conditionId}`;
-  const familyBuyUsdc = snapshot.buyEntryUsdcByFamily.get(groupKey) ?? 0;
-  const nextFamilyBuyUsdc = familyBuyUsdc + opts.signal.suggestedSizeUsdc;
+  const tokenBuyUsdc = snapshot.buyEntryUsdcByToken.get(groupKey) ?? 0;
+  const nextTokenBuyUsdc = tokenBuyUsdc + opts.signal.suggestedSizeUsdc;
   const tokenOrderCount = snapshot.buyEntryCountByToken.get(tokenKey) ?? 0;
   const marketOrderCount = snapshot.buyEntryCountByMarket.get(marketKey) ?? 0;
 
-  if (nextFamilyBuyUsdc > policy.maxRestingBuyReservationUsdc + EPSILON) {
+  if (nextTokenBuyUsdc > policy.maxRestingBuyReservationUsdc + EPSILON) {
     rejectionReasons.push("resting-family-reservation-cap");
   } else {
     checksPassed.push("resting-family-reservation-ok");

@@ -28,7 +28,7 @@ export function emptyExecutionTelemetry(): ExecutionTelemetrySnapshot {
   };
 }
 
-function buildWhere(options: { sinceIso?: string; familyIds?: string[] }): {
+function buildWhere(options: { sinceIso?: string }): {
   where: string;
   params: unknown[];
 } {
@@ -38,11 +38,6 @@ function buildWhere(options: { sinceIso?: string; familyIds?: string[] }): {
   if (options.sinceIso) {
     conditions.push("filled_at >= ?");
     params.push(options.sinceIso);
-  }
-
-  if (options.familyIds && options.familyIds.length > 0) {
-    conditions.push(`family_id IN (${options.familyIds.map(() => "?").join(",")})`);
-    params.push(...options.familyIds);
   }
 
   if (conditions.length === 0) return { where: "", params: [] };
