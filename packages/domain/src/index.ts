@@ -9,7 +9,6 @@ export * from "./repositories.js";
 export * from "./bus.js";
 export * from "./runtime-control.js";
 export * from "./slug-pattern.js";
-export * from "./horizon-filter.js";
 export * from "./discovery-entry-policy.js";
 export * from "./trading-state.js";
 export * from "./algo-engine.js";
