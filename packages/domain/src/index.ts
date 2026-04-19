@@ -12,7 +12,6 @@ export * from "./slug-pattern.js";
 export * from "./horizon-filter.js";
 export * from "./probe-defaults.js";
 export * from "./discovery-entry-policy.js";
-export * from "./deployment-defaults.js";
 export * from "./trading-state.js";
 export * from "./algo-engine.js";
 export * from "./market-selection.js";
