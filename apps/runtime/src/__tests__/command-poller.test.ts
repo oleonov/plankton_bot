@@ -8,16 +8,11 @@ import {
   bootstrapDatabase,
   SqliteOperatorCommandRepository,
   SqliteOperatorActionRepository,
-  SqliteStateTransitionRepository,
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
-import type { OperatorActionType, ProfileId } from "@plankton/domain";
+import type { OperatorActionType } from "@plankton/domain";
 import { CommandPoller } from "../supervisor/command-poller.js";
-import type {
-  DeploymentToggler,
-  PatternRebuilder,
-  ReloadableRules,
-} from "../supervisor/command-poller.js";
+import type { PatternRebuilder, ReloadableRules } from "../supervisor/command-poller.js";
 
 const log = pino({ level: "silent" });
 
@@ -48,16 +43,6 @@ function insertCommand(
     });
   }
   return cmdRepo.insert(base);
-}
-
-function makeToggler(): DeploymentToggler & {
-  enable: ReturnType<typeof vi.fn>;
-  disable: ReturnType<typeof vi.fn>;
-} {
-  return {
-    enable: vi.fn((_targetId: string, _profile: ProfileId) => {}),
-    disable: vi.fn((_targetId: string, _profile: ProfileId, _reason: string | null) => {}),
-  };
 }
 
 beforeEach(() => {
@@ -120,130 +105,6 @@ describe("CommandPoller", () => {
     expect(paused).toBe(false);
   });
 
-  // ── Family enable/disable ───────────────────────────────────────────────
-
-  it("applies family_enable via DeploymentToggler and writes audit", async () => {
-    const toggler = makeToggler();
-
-    insertCommand("family_enable", "fam-1", "ready to trade");
-    const poller = createPoller({
-      deploymentToggler: toggler,
-      activeProfile: "paper",
-    });
-
-    await poller.poll();
-
-    expect(toggler.enable).toHaveBeenCalledWith("fam-1", "paper");
-    expect(toggler.disable).not.toHaveBeenCalled();
-
-    const actions = actionRepo.findRecent(10);
-    expect(actions).toHaveLength(1);
-    expect(actions[0]!.action).toBe("family_enable");
-    expect(actions[0]!.targetType).toBe("family");
-    expect(actions[0]!.targetId).toBe("fam-1");
-  });
-
-  it("applies family_disable via DeploymentToggler and writes audit", async () => {
-    const toggler = makeToggler();
-
-    insertCommand("family_disable", "fam-1", "tail exceeded");
-    const poller = createPoller({
-      deploymentToggler: toggler,
-      activeProfile: "paper",
-    });
-
-    await poller.poll();
-
-    expect(toggler.disable).toHaveBeenCalledWith("fam-1", "paper", "tail exceeded");
-    expect(toggler.enable).not.toHaveBeenCalled();
-
-    const actions = actionRepo.findRecent(10);
-    expect(actions).toHaveLength(1);
-    expect(actions[0]!.action).toBe("family_disable");
-    expect(actions[0]!.targetType).toBe("family");
-  });
-
-  it("rejects family_enable without targetId", async () => {
-    insertCommand("family_enable", undefined, "reason");
-    const poller = createPoller({ deploymentToggler: makeToggler(), activeProfile: "paper" });
-
-    await poller.poll();
-
-    // rejected commands don't write audit entries
-    expect(cmdRepo.getPending()).toHaveLength(0);
-    expect(actionRepo.findRecent(10)).toHaveLength(0);
-  });
-
-  it("rejects family_disable without targetId", async () => {
-    insertCommand("family_disable", undefined, "reason");
-    const poller = createPoller({ deploymentToggler: makeToggler(), activeProfile: "paper" });
-
-    await poller.poll();
-
-    expect(cmdRepo.getPending()).toHaveLength(0);
-    expect(actionRepo.findRecent(10)).toHaveLength(0);
-  });
-
-  it("works without deploymentToggler or activeProfile (no-op, still writes audit)", async () => {
-    insertCommand("family_enable", "fam-1", "reason");
-
-    const poller = createPoller();
-    await poller.poll();
-
-    expect(cmdRepo.getPending()).toHaveLength(0);
-    const actions = actionRepo.findRecent(10);
-    expect(actions).toHaveLength(1);
-    expect(actions[0]!.action).toBe("family_enable");
-  });
-
-  it("writes state_transition for family_enable when repo is provided", async () => {
-    const transitionRepo = new SqliteStateTransitionRepository(conn.db);
-
-    insertCommand("family_enable", "fam-1", "operator enable", {
-      initiatorType: "operator",
-      initiator: "admin-user",
-    });
-    const poller = createPoller({
-      deploymentToggler: makeToggler(),
-      stateTransitionRepo: transitionRepo,
-      activeProfile: "paper",
-    });
-
-    await poller.poll();
-
-    const transitions = transitionRepo.findByEntity("family", "fam-1");
-    expect(transitions).toHaveLength(1);
-    expect(transitions[0]!.fromState).toBe("disabled");
-    expect(transitions[0]!.toState).toBe("enabled");
-    expect(transitions[0]!.triggerType).toBe("operator");
-    expect(transitions[0]!.initiator).toBe("admin-user");
-    expect(transitions[0]!.profile).toBe("paper");
-  });
-
-  it("writes state_transition for family_disable when repo is provided", async () => {
-    const transitionRepo = new SqliteStateTransitionRepository(conn.db);
-
-    insertCommand("family_disable", "fam-1", "operator disable", {
-      initiatorType: "operator",
-      initiator: "admin-user",
-    });
-    const poller = createPoller({
-      deploymentToggler: makeToggler(),
-      stateTransitionRepo: transitionRepo,
-      activeProfile: "paper",
-    });
-
-    await poller.poll();
-
-    const transitions = transitionRepo.findByEntity("family", "fam-1");
-    expect(transitions).toHaveLength(1);
-    expect(transitions[0]!.fromState).toBe("enabled");
-    expect(transitions[0]!.toState).toBe("disabled");
-    expect(transitions[0]!.triggerType).toBe("operator");
-    expect(transitions[0]!.initiator).toBe("admin-user");
-    expect(transitions[0]!.profile).toBe("paper");
-  });
-
   // ── Event publishing ────────────────────────────────────────────────────
 
   it("publishes OperatorCommandApplied event on success", async () => {
@@ -260,34 +121,20 @@ describe("CommandPoller", () => {
     expect(events).toHaveLength(1);
   });
 
-  it("publishes OperatorCommandApplied on family_enable", async () => {
-    const events: Array<{ action: string }> = [];
-    bus.subscribe("OperatorCommandApplied", async (payload) => {
-      events.push({ action: payload.action });
-    });
-
-    insertCommand("family_enable", "fam-1", "enable");
-    const poller = createPoller({ deploymentToggler: makeToggler(), activeProfile: "paper" });
-
-    await poller.poll();
-
-    expect(events).toHaveLength(1);
-    expect(events[0]!.action).toBe("family_enable");
-  });
-
   // ── Multi-command processing ────────────────────────────────────────────
 
   it("processes multiple commands in one poll", async () => {
-    const toggler = makeToggler();
     insertCommand("pause");
-    insertCommand("family_disable", "fam-1", "reason");
+    insertCommand("resume");
 
-    const poller = createPoller({ deploymentToggler: toggler, activeProfile: "paper" });
+    const poller = createPoller();
     await poller.poll();
 
-    expect(paused).toBe(true);
-    expect(toggler.disable).toHaveBeenCalledOnce();
+    expect(paused).toBe(false);
     expect(cmdRepo.getPending()).toHaveLength(0);
+
+    const actions = actionRepo.findRecent(10);
+    expect(actions.map((a) => a.action).sort()).toEqual(["pause", "resume"]);
   });
 
   it("concurrent poll calls are serialized by guard", async () => {
@@ -338,6 +185,52 @@ describe("CommandPoller", () => {
       expect(cmdRepo.getPending()).toHaveLength(0);
       const actions = actionRepo.findRecent(10);
       expect(actions).toHaveLength(0); // rejected commands don't write audit
+    });
+  });
+
+  // ── Deprecated family actions ────────────────────────────────────────────
+
+  describe("deprecated family actions", () => {
+    function readStatus(id: number): string {
+      const row = conn.db
+        .prepare("SELECT status FROM operator_commands WHERE id = ?")
+        .get(id) as { status: string } | undefined;
+      if (!row) throw new Error(`command id ${id} not found`);
+      return row.status;
+    }
+
+    it("rejects queued family_enable, marks status=rejected, no OperatorCommandApplied", async () => {
+      const events: Array<{ action: string }> = [];
+      bus.subscribe("OperatorCommandApplied", async (payload) => {
+        events.push({ action: payload.action });
+      });
+
+      const id = insertCommand("family_enable", "fam-1", "legacy operator payload");
+      const poller = createPoller();
+
+      await poller.poll();
+
+      expect(readStatus(id)).toBe("rejected");
+      expect(cmdRepo.getPending()).toHaveLength(0);
+      expect(actionRepo.findRecent(10)).toHaveLength(0);
+      expect(events).toHaveLength(0);
+    });
+
+    it("rejects queued family_disable, marks status=rejected, no OperatorCommandApplied", async () => {
+      const events: Array<{ action: string }> = [];
+      bus.subscribe("OperatorCommandApplied", async (payload) => {
+        events.push({ action: payload.action });
+      });
+
+      const id = insertCommand("family_disable", "fam-1", "legacy operator payload");
+      const poller = createPoller();
+
+      await poller.poll();
+
+      expect(readStatus(id)).toBe("rejected");
+      expect(cmdRepo.getPending()).toHaveLength(0);
+      expect(actionRepo.findRecent(10)).toHaveLength(0);
+      expect(events).toHaveLength(0);
     });
   });
 });

@@ -5,7 +5,6 @@ import type {
   OperatorActionRepository,
   StateTransitionRepository,
   OperatorCommand,
-  ProfileId,
 } from "@plankton/domain";
 import type { Logger } from "../logger.js";
 
@@ -15,11 +14,6 @@ export interface ReloadableRules {
 
 export interface PatternRebuilder {
   rebuildPatterns(): void;
-}
-
-export interface DeploymentToggler {
-  enable(targetId: string, profile: ProfileId): void;
-  disable(targetId: string, profile: ProfileId, reason: string | null): void;
 }
 
 export interface CommandPollerDeps {
@@ -34,8 +28,6 @@ export interface CommandPollerDeps {
   rulesManager?: ReloadableRules;
   normalizationModule?: PatternRebuilder;
   stateTransitionRepo?: StateTransitionRepository;
-  deploymentToggler?: DeploymentToggler;
-  activeProfile?: ProfileId;
 }
 
 export class CommandPoller implements RuntimeModule {
@@ -100,14 +92,6 @@ export class CommandPoller implements RuntimeModule {
           this.writeAudit(cmd, "bot", "runtime", now);
           break;
 
-        case "family_enable":
-          this.applyFamilyEnable(cmd, now);
-          break;
-
-        case "family_disable":
-          this.applyFamilyDisable(cmd, now);
-          break;
-
         case "rules_reload":
           this.applyRulesReload(now);
           this.writeAudit(cmd, "bot", "runtime", now);
@@ -130,48 +114,10 @@ export class CommandPoller implements RuntimeModule {
         initiator: cmd.initiator,
         appliedAt: Date.now(),
       });
-
-      if (cmd.targetId && (cmd.action === "family_enable" || cmd.action === "family_disable")) {
-        this.deps.stateTransitionRepo?.insert({
-          entityType: "family",
-          entityId: cmd.targetId,
-          profile: this.deps.activeProfile ?? null,
-          fromState: cmd.action === "family_enable" ? "disabled" : "enabled",
-          toState: cmd.action === "family_enable" ? "enabled" : "disabled",
-          triggerType: cmd.initiatorType,
-          initiator: cmd.initiator ?? null,
-          reason: cmd.reason ?? `${cmd.action} applied`,
-          scoresSnapshot: null,
-        });
-      }
     } catch (err) {
       this.log.error({ id: cmd.id, action: cmd.action, err }, "command failed -- rejecting");
       this.deps.commandRepo.updateStatus(cmd.id, "rejected", now);
     }
-  }
-
-  private applyFamilyEnable(cmd: OperatorCommand, now: string): void {
-    if (!cmd.targetId) throw new Error("family_enable requires targetId");
-
-    if (this.deps.deploymentToggler && this.deps.activeProfile) {
-      this.deps.deploymentToggler.enable(cmd.targetId, this.deps.activeProfile);
-    }
-
-    this.writeAudit(cmd, "family", cmd.targetId, now);
-  }
-
-  private applyFamilyDisable(cmd: OperatorCommand, now: string): void {
-    if (!cmd.targetId) throw new Error("family_disable requires targetId");
-
-    if (this.deps.deploymentToggler && this.deps.activeProfile) {
-      this.deps.deploymentToggler.disable(
-        cmd.targetId,
-        this.deps.activeProfile,
-        cmd.reason ?? null,
-      );
-    }
-
-    this.writeAudit(cmd, "family", cmd.targetId, now);
   }
 
   private applyRulesReload(_now: string): void {

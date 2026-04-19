@@ -453,7 +453,6 @@ async function main(): Promise<void> {
     setPaused: setPausedAndPersist,
     pollIntervalMs: 5_000,
     stateTransitionRepo: repos.stateTransition,
-    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });
 
   // 7f. Execution module
