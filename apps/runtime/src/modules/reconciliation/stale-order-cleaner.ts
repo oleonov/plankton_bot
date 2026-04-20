@@ -33,7 +33,6 @@ const EXIT_REASONS = new Set([
   "repricing-exit",
   "medium-hold-exit",
   "tail-prune",
-  "stale-prune",
   "reduce-only",
 ]);
 

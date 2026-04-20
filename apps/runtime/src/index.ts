@@ -63,7 +63,6 @@ import { ReconciliationModule } from "./modules/reconciliation/reconciliation-mo
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
 import { UserOrderStreamModule } from "./modules/reconciliation/user-order-stream-module.js";
 import { InventoryManagerModule } from "./modules/inventory-auto-merge/inventory-manager-module.js";
-import { StalePruningModule } from "./modules/pruning/stale-pruning-module.js";
 import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
 import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
 import { PositionSettler } from "./modules/resolution/position-settler.js";
@@ -588,29 +587,24 @@ async function main(): Promise<void> {
     ...(runtimeMode === "live-lite" && exchangeGateway ? { gateway: exchangeGateway } : {}),
   });
 
-  // 7k. Stale tail pruning module
-  const stalePruningModule = new StalePruningModule({
-    positionRepo: repos.position,
-    marketRepo: repos.market,
-    bus,
-    log,
-    checkIntervalMs: 10 * 60_000, // 10 minutes
-  });
-
-  // 7k2. Inventory Auto-Merge (P3-1)
-  const inventoryManagerModule = new InventoryManagerModule({
-    bus,
-    gateway: exchangeGateway,
-    positionRepo: repos.position,
-    orderRepo: repos.order,
-    marketRepo: repos.market,
-    fillRepo: repos.fill,
-    lotRepo: repos.inventoryLot,
-    mergeLedgerRepo: repos.mergeLedger,
-    db: ledgerConn.db,
-    log,
-    sweepIntervalMs: config.inventorySweepIntervalMs,
-  });
+  // 7k. Inventory Auto-Merge (P3-1) — Polymarket-specific USDC-release operational
+  // extension. Not in spec §0; gated behind ENABLE_INVENTORY_AUTO_MERGE=true.
+  // See docs/adr/002-inventory-auto-merge.md.
+  const inventoryManagerModule = config.enableInventoryAutoMerge
+    ? new InventoryManagerModule({
+        bus,
+        gateway: exchangeGateway,
+        positionRepo: repos.position,
+        orderRepo: repos.order,
+        marketRepo: repos.market,
+        fillRepo: repos.fill,
+        lotRepo: repos.inventoryLot,
+        mergeLedgerRepo: repos.mergeLedger,
+        db: ledgerConn.db,
+        log,
+        sweepIntervalMs: config.inventorySweepIntervalMs,
+      })
+    : null;
 
   // 7l. Fill poller module — fast-interval fill detection (paper/live-lite only;
   // simulation mode uses inline checkForFills after each placement)
@@ -660,8 +654,14 @@ async function main(): Promise<void> {
     ["leg-state-tracker", legStateTrackerModule],
     ["algo-decision", algoDecisionModule],
     ["resolution", resolutionModule],
-    ["stale-pruning", stalePruningModule],
-    ["inventory-manager", inventoryManagerModule],
+    ...(inventoryManagerModule
+      ? [
+          ["inventory-manager", inventoryManagerModule] as [
+            string,
+            import("@plankton/domain").RuntimeModule,
+          ],
+        ]
+      : []),
     ...(fillPollerModule
       ? [["fill-poller", fillPollerModule] as [string, import("@plankton/domain").RuntimeModule]]
       : []),

@@ -15,6 +15,7 @@ function testConfig(): AppConfig {
     marketDataStaleThresholdMs: 120_000,
     strategyScanIntervalMs: 5_000,
     fillPollIntervalMs: 5_000,
+    enableInventoryAutoMerge: false,
     executionMaxConcurrency: 4,
     polyApiKey: undefined,
     polyApiSecret: undefined,
