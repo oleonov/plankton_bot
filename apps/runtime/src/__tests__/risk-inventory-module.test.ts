@@ -202,37 +202,6 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
-  it("sets entryStyle='spray' on new position from spray-entry fill", async () => {
-    await mod.start();
-
-    const posUpdates: any[] = [];
-    bus.subscribe("PositionUpdated", async (p) => {
-      posUpdates.push(p);
-    });
-
-    await bus.publish("FillReceived", {
-      fillId: createFillId("fill-spray"),
-      orderId: createOrderId("ord-spray"),
-      clientOrderId: "plk_spray" as ClientOrderId,
-      tokenId: TOK_ID,
-      conditionId: COND_ID,
-      side: "buy" as const,
-      price: 0.5,
-      size: 10,
-      sizeUsdc: 5,
-      liquidityRole: "unknown",
-      fee: 0,
-      feeRateBps: 0,
-      signalReason: "spray-entry",
-      timestamp: Date.now(),
-    });
-
-    expect(posUpdates).toHaveLength(1);
-    expect(posUpdates[0].position.entryStyle).toBe("spray");
-
-    await mod.stop();
-  });
-
   it("sets entryStyle='probe' on new position from probe-entry fill", async () => {
     await mod.start();
 

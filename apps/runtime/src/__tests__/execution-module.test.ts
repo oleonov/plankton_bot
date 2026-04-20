@@ -1193,7 +1193,7 @@ describe("ExecutionModule", () => {
     await guardedMod.start();
 
     await bus.publish("PlaceOrderRequested", {
-      command: makePlaceCmd({ price: 0.12, size: 5, signalReason: "spray-entry" }),
+      command: makePlaceCmd({ price: 0.12, size: 5, signalReason: "probe-entry" }),
       timestamp: Date.now(),
     });
 
@@ -1226,7 +1226,7 @@ describe("ExecutionModule", () => {
     await guardedMod.start();
 
     await bus.publish("PlaceOrderRequested", {
-      command: makePlaceCmd({ price: 0.09, size: 1 / 0.09, signalReason: "spray-entry" }),
+      command: makePlaceCmd({ price: 0.09, size: 1 / 0.09, signalReason: "probe-entry" }),
       timestamp: Date.now(),
     });
 

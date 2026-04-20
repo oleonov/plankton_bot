@@ -448,7 +448,7 @@ function rebuildTokenPosition(db: Database.Database, tokenId: string, log: Logge
     )
     .all(tokenId) as Array<{
     position_id: string;
-    entry_style: "spray" | "probe" | null;
+    entry_style: "probe" | null;
     opened_at: string;
   }>;
 

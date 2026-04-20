@@ -146,7 +146,7 @@ describe("cleanStaleEntryOrders", () => {
     const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
     const order = makeOrder({
       createdAt: twoMinutesAgo,
-      signalReason: "spray-entry",
+      signalReason: "probe-entry",
     });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
 
@@ -452,7 +452,7 @@ describe("cleanStaleEntryOrders", () => {
     const thirtyMinFromNow = new Date(Date.now() + 30 * 60_000).toISOString();
     const order = makeOrder({
       createdAt: sevenHoursAgo,
-      signalReason: "spray-entry",
+      signalReason: "probe-entry",
     });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
     marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket({ endDate: thirtyMinFromNow }));
@@ -476,7 +476,7 @@ describe("cleanStaleEntryOrders", () => {
 
   it("handles all entry signal reasons", async () => {
     const sevenHoursAgo = new Date(Date.now() - 7 * 60 * 60_000).toISOString();
-    const reasons = ["probe-entry", "spray-entry", "confirm-scale", "scale-in", "heavy-scale"];
+    const reasons = ["probe-entry", "confirm-scale", "scale-in", "heavy-scale"];
     const orders = reasons.map((r, i) =>
       makeOrder({
         orderId: createOrderId(`ord-${i}`),

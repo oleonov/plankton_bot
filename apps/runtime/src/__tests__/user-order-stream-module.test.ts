@@ -109,7 +109,7 @@ function createMockOrderRepo() {
     status: "open" as const,
     exchangeOrderId: "ord-exch-1",
     signalId: null,
-    signalReason: "spray-entry",
+    signalReason: "probe-entry",
     botRunId: "run-1" as any,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),

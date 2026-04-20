@@ -532,7 +532,7 @@ describe("SignalToOrderBridge", () => {
     const bus = new InProcessEventBus();
     const order = {
       ...makeEntryOrder(),
-      signalReason: "spray-entry",
+      signalReason: "probe-entry",
       price: 0.03,
       sizeUsdc: 0.15,
     };
@@ -580,7 +580,7 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
-      signalReason: "spray-entry",
+      signalReason: "probe-entry",
       timestamp: Date.now(),
     });
     await bus.publish("OrderCancelled", {
@@ -589,7 +589,7 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
-      signalReason: "spray-entry",
+      signalReason: "probe-entry",
       timestamp: Date.now(),
     });
     await bus.publish("OrderCancelled", {
@@ -598,13 +598,13 @@ describe("SignalToOrderBridge", () => {
       tokenId: TOKEN_ID,
       conditionId: createConditionId("cond-1"),
       reason: "entry-reprice-cancel",
-      signalReason: "spray-entry",
+      signalReason: "probe-entry",
       timestamp: Date.now(),
     });
     await bus.publish("SignalApproved", {
       signal: {
         ...makeSignal(),
-        reason: "spray-entry",
+        reason: "probe-entry",
         suggestedSizeUsdc: 0.15,
         suggestedSize: 3.75,
         suggestedPrice: 0.035,

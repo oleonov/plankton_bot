@@ -203,19 +203,6 @@ describe("AlgoRiskGateImpl", () => {
       expect(decision.rejectionReasons).toContain("open_position_exists");
     });
 
-    it("rejects spray-entry when open position exists for token", async () => {
-      const gate = new AlgoRiskGateImpl(
-        makeOrderRepo(),
-        makePositionRepo(makeOpenPosition()),
-        makeLogger(),
-      );
-      const signal = makeSignal({ reason: "spray-entry" });
-      const decision = await gate.evaluate(signal);
-
-      expect(decision.approved).toBe(false);
-      expect(decision.rejectionReasons).toContain("open_position_exists");
-    });
-
     it("rejects probe-entry when a dust position exists (not closed)", async () => {
       const gate = new AlgoRiskGateImpl(
         makeOrderRepo(),

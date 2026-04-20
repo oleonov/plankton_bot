@@ -94,7 +94,7 @@ export class SqlitePositionRepository implements PositionRepository {
       currentValueUsdc: (row.current_value_usdc as number) ?? null,
       realizedPnl: row.realized_pnl as number,
       status: row.status as PositionStatus,
-      entryStyle: (row.entry_style as "spray" | "probe") ?? null,
+      entryStyle: (row.entry_style as "probe") ?? null,
       openedAt: row.opened_at as string,
       closedAt: (row.closed_at as string) ?? null,
       updatedAt: row.updated_at as string,

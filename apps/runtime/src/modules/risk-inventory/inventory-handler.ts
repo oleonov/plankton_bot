@@ -88,7 +88,7 @@ export class InventoryHandler {
       currentValueUsdc: fill.sizeUsdc,
       realizedPnl: 0,
       status: "open",
-      entryStyle: fill.signalReason === "spray-entry" ? "spray" : "probe",
+      entryStyle: "probe",
       openedAt: now,
       closedAt: null,
       updatedAt: now,

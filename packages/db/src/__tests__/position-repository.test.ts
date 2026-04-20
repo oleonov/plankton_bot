@@ -271,15 +271,6 @@ describe("SqlitePositionRepository", () => {
     expect(repo.findByTokenId(createTokenId("nonexistent"))).toBeNull();
   });
 
-  it("persists and loads entryStyle='spray'", () => {
-    const pos = makePosition({ entryStyle: "spray" });
-    repo.save(pos);
-
-    const found = repo.findByTokenId(createTokenId("tok-1"));
-    expect(found).not.toBeNull();
-    expect(found!.entryStyle).toBe("spray");
-  });
-
   it("persists and loads entryStyle='probe'", () => {
     const pos = makePosition({
       positionId: createPositionId("pos-probe"),

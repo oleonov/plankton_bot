@@ -11,7 +11,7 @@ import type { Logger } from "../../logger.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
-const NEW_ENTRY_REASONS = new Set<string>([SignalReason.ProbeEntry, SignalReason.SprayEntry]);
+const NEW_ENTRY_REASONS = new Set<string>([SignalReason.ProbeEntry]);
 
 function isBuySignal(signal: Signal): boolean {
   return signal.side === "buy";

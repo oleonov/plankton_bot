@@ -196,7 +196,7 @@ export interface Position {
   currentValueUsdc: number | null;
   realizedPnl: number;
   status: PositionStatus;
-  entryStyle: "spray" | "probe" | null;
+  entryStyle: "probe" | null;
   openedAt: string; // ISO timestamp
   closedAt: string | null; // ISO timestamp
   updatedAt: string; // ISO timestamp
