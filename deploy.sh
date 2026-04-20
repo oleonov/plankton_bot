@@ -50,7 +50,6 @@ ssh ${SERVER_USER}@${SERVER_HOST} "mkdir -p ${SERVER_PATH}/config"
 scp /tmp/${IMAGE_NAME}.tar.gz ${SERVER_USER}@${SERVER_HOST}:/tmp/
 scp docker-compose.yml ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}/
 scp .env.production ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}/.env.production
-scp config/family_rules.yaml ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}/config/
 
 # Step 4: Capture current bot state and write resume intent if running
 echo -e "\n${GREEN}[4/6] Capturing current bot state...${NC}"
