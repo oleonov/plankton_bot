@@ -314,8 +314,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (legState) {
       const legTradeCount = legState.buyCount + legState.sellCount;
       const stop = !evaluateContinuation(legTradeCount, legState.firstEntryFillPrice);
-      if (stop || preservedOnly) {
-        // STOP or preserved-only: only SELL rules are evaluated, BUY is never considered
+      if (stop) return null; // spec §0: fail continuation → full STOP (no more signals)
+      if (preservedOnly) {
+        // preserved-only: market de-listed for new entries, exit-only via SELL
         const sellMatch = matchRule(ctx, this.decisionRules, SELL_ONLY);
         if (!sellMatch) return null;
         return this.buildSignal(market, sellMatch, ctx, buyCount, now, nextSeq);

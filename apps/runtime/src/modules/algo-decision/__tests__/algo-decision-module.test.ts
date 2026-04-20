@@ -464,12 +464,13 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
-    it("emits SELL on STOP path when SELL rule matches", async () => {
+    it("STOP path emits nothing even when a SELL rule would match (spec §0 hard stop)", async () => {
       const tokenId = "token-cont-sell";
       const familyId = "fam-cont";
       // legState: S1 (buyCount=1), sellCount=0 → tradeCount = 1
       // firstEntryFillPrice = 0.03 < 0.05 → STOP
-      // S1 + price >= 0.10 → D7-SELL-S1 matches
+      // S1 + price >= 0.10 would normally match D7-SELL-S1, but STOP now blocks
+      // ALL signals (spec §0: fail-continuation → full STOP, not SELL-only).
       const legState: LegState = {
         tokenId: createTokenId(tokenId),
         buyCount: 1,
@@ -492,9 +493,38 @@ describe("AlgoDecisionModule", () => {
 
       const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
       const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
-      expect(signalCalls.length).toBe(1);
-      expect(signalCalls[0]![1].signal.side).toBe("sell");
-      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D7-SELL-S1");
+      expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+
+    it("boundary: legTradeCount=6 → continuation passes → normal decision flow", async () => {
+      const tokenId = "token-cont-boundary";
+      const familyId = "fam-cont";
+      // legTradeCount = 6 (R1 threshold) → continuation=true → normal flow
+      const legState: LegState = {
+        tokenId: createTokenId(tokenId),
+        buyCount: 3,
+        sellCount: 3,
+        lastAction: "SELL",
+        firstEntryFillPrice: 0.03,
+        firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      legStateRepo = createMockLegStateRepo([legState]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, familyId, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBeGreaterThanOrEqual(1);
 
       await mod.stop();
     });
