@@ -62,7 +62,7 @@ Migration 037 seeds exactly the three spec prefixes (`bitcoin-`, `ethereum-`, `e
 
 ## Non-goals
 
-- **Not** a rewrite of the pre-entry filter semantics. Spec §0 STEP 1 + STEP 2 remain the algorithmic rule; extended matchers only change *which* set of prefixes/slugs is considered "STEP 1".
+- **Not** a rewrite of the pre-entry filter semantics. Spec §0 STEP 1 + STEP 2 remain the algorithmic rule; extended matchers only change _which_ set of prefixes/slugs is considered "STEP 1".
 - **Not** a new rule type. D1 explicitly forbids growing the enum in place.
 - **Not** a market-data filter. The engine runs after the scanner normalises an event; pre-scanner filtering (e.g. `tagId`, `volume24h`) is separate and covered by other ADRs.
 - **Not** a risk control. Rules cannot encode size, price, or wallet constraints — those live in the risk gate, not the selection engine.

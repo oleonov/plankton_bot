@@ -33,7 +33,7 @@ operator-configured envelope are rejected with
 
 Simulation and paper modes remain unchanged — they pass through
 `LiveLiteGuard` as `isActive = false` and bypass the checks entirely. The
-intent is *not* to change spec behaviour; it is to close the gap between
+intent is _not_ to change spec behaviour; it is to close the gap between
 preflight-at-launch and runtime-during-session for the one profile where
 real money is at risk.
 

@@ -75,5 +75,5 @@ This keeps the USDC-denominated envelope caps honest: an entry targeting `$X` of
 
 - **Not** a design for tick-better-than-best. If we later want to join-or-improve, it requires a dedicated ADR with empirical justification.
 - **Not** a maker-side timing policy. Relayer `postOnly` is a correctness guard, not a fill-rate optimiser. Adaptive order lifetime / reprice intervals are out of scope.
-- **Not** a defence of spec §7 as the optimal policy. It is a *deliberate* operational choice to keep paper and live identical; if replay shows it's leaving PnL on the table, the remedy is a new ADR, not a silent drift.
+- **Not** a defence of spec §7 as the optimal policy. It is a _deliberate_ operational choice to keep paper and live identical; if replay shows it's leaving PnL on the table, the remedy is a new ADR, not a silent drift.
 - **Not** a change to `signal.suggestedSize` semantics — SELL path already ignores it-as-USDC because sells are token-sized by leg state.

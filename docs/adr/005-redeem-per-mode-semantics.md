@@ -8,7 +8,7 @@
 
 ## Context
 
-Spec §8 defines `REDEEM` as an algorithm action on the position lifecycle. It describes *when* to redeem (resolved-or-algo-triggered conditions) but not *how* — the spec is silent on whether redemption is an on-chain call, an internal ledger close, or both. That gap is an infrastructure concern.
+Spec §8 defines `REDEEM` as an algorithm action on the position lifecycle. It describes _when_ to redeem (resolved-or-algo-triggered conditions) but not _how_ — the spec is silent on whether redemption is an on-chain call, an internal ledger close, or both. That gap is an infrastructure concern.
 
 The runtime supports three modes (`simulation`, `paper`, `live-lite`) and already resolves the REDEEM call site per mode:
 
@@ -40,7 +40,7 @@ The runtime implements REDEEM with **per-mode semantics**:
 
 ### D3. Paper mode does not attempt a gateway call
 
-The decision to gate `gateway:` on `runtimeMode === "live-lite"` in `apps/runtime/src/index.ts:587` is deliberate: in paper we have a real Polymarket data gateway for price feeds, but *exercising* on-chain redeem would either require a private key we shouldn't ship or produce meaningless no-op behaviour. Neither adds signal. The cleanest mapping is "no gateway → no attempt."
+The decision to gate `gateway:` on `runtimeMode === "live-lite"` in `apps/runtime/src/index.ts:587` is deliberate: in paper we have a real Polymarket data gateway for price feeds, but _exercising_ on-chain redeem would either require a private key we shouldn't ship or produce meaningless no-op behaviour. Neither adds signal. The cleanest mapping is "no gateway → no attempt."
 
 ### D4. Idempotency
 
