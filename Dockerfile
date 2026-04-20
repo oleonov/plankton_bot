@@ -95,9 +95,6 @@ COPY --from=builder /app/packages/event-bus/package.json ./packages/event-bus/pa
 COPY --from=builder /app/packages/exchange/dist ./packages/exchange/dist
 COPY --from=builder /app/packages/exchange/package.json ./packages/exchange/package.json
 
-# Copy production DB preparation tooling for controlled ops rollouts.
-COPY --from=builder /app/scripts/prepare-hard-mode-db.ts ./scripts/prepare-hard-mode-db.ts
-
 # Note: DB migrations (.sql files) are already in packages/db/dist/migrations/
 # because the db package build script copies them there (see packages/db/package.json).
 
