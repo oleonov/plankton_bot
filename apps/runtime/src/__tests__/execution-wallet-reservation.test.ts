@@ -164,7 +164,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
   // Helper: collect OrderRejected events published on the bus.
   function collectRejections(b: InProcessEventBus): Array<{ reason: string; errorCode: string }> {
     const rejected: Array<{ reason: string; errorCode: string }> = [];
-    b.subscribe("OrderRejected", (p) => {
+    b.subscribe("OrderRejected", async (p) => {
       rejected.push({ reason: p.reason, errorCode: p.errorCode as string });
     });
     return rejected;
@@ -307,7 +307,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       runtimeControl: { isPaused: () => false },
       controlDb,
       activeProfile: "paper" as any,
-      walletBufferPct: 0.10,
+      walletBufferPct: 0.1,
     });
 
     await mod.start();

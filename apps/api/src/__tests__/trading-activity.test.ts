@@ -34,6 +34,7 @@ function testConfig(overrides?: Partial<AppConfig>): AppConfig {
     planktonAuthUsername: undefined,
     planktonAuthPassword: undefined,
     planktonSessionSecret: undefined,
+    allowSellSizeClamp: true,
     trustProxy: false,
     ...overrides,
   };

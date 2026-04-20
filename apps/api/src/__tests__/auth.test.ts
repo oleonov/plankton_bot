@@ -43,6 +43,7 @@ function testConfig(overrides?: Partial<AppConfig>): AppConfig {
     planktonAuthUsername: TEST_USERNAME,
     planktonAuthPassword: TEST_PASSWORD,
     planktonSessionSecret: TEST_SESSION_SECRET,
+    allowSellSizeClamp: true,
     trustProxy: false,
     ...overrides,
   };

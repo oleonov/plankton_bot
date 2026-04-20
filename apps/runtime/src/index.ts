@@ -478,6 +478,7 @@ async function main(): Promise<void> {
     maxConcurrency: config.executionMaxConcurrency,
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
+    allowSellSizeClamp: config.allowSellSizeClamp,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });

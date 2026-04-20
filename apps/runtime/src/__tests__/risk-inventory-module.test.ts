@@ -5,7 +5,6 @@ import {
   createOrderId,
   createPositionId,
   createLotId,
-  createCommandId,
   createConditionId,
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";

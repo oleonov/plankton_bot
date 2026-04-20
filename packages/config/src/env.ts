@@ -13,7 +13,11 @@ const envSchema = z
     DB_PATH: z.string().default("./apps/runtime/data/plankton.db"),
     MARKET_DATA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().int().positive().default(120_000),
-    MARKET_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
+    MARKET_SCAN_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(5 * 60 * 1000),
     GAMMA_TAG_ID: z.coerce.number().int().positive().optional(),
     STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(12_000),
     FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
@@ -25,6 +29,10 @@ const envSchema = z
     EXECUTION_MAX_CONCURRENCY: z.coerce.number().int().positive().default(16),
     EXECUTION_WALLET_BUFFER_PCT: z.coerce.number().nonnegative().max(1).default(0.03),
     EXECUTION_WALLET_BUFFER_MIN_USDC: z.coerce.number().nonnegative().default(0.25),
+    ALLOW_SELL_SIZE_CLAMP: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((v) => v === "true"),
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
     POLY_PASSPHRASE: z.string().optional(),
@@ -99,6 +107,7 @@ export interface AppConfig {
   executionMaxConcurrency: number;
   executionWalletBufferPct: number;
   executionWalletBufferMinUsdc: number;
+  allowSellSizeClamp: boolean;
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
   polyPassphrase: string | undefined;
@@ -163,6 +172,7 @@ export function loadEnv(envPath?: string): AppConfig {
     executionMaxConcurrency: env.EXECUTION_MAX_CONCURRENCY,
     executionWalletBufferPct: env.EXECUTION_WALLET_BUFFER_PCT,
     executionWalletBufferMinUsdc: env.EXECUTION_WALLET_BUFFER_MIN_USDC,
+    allowSellSizeClamp: env.ALLOW_SELL_SIZE_CLAMP,
     polyApiKey: env.POLY_API_KEY,
     polyApiSecret: env.POLY_API_SECRET,
     polyPassphrase: env.POLY_PASSPHRASE,

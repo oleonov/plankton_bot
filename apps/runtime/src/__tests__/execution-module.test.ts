@@ -778,6 +778,10 @@ describe("ExecutionModule", () => {
       botRunId: BOT_RUN_ID,
       runtimeControl: { isPaused: () => false },
       maxConcurrency: 1,
+      // Pin to pre-ADR-008 reject semantics so the reservation-rejection
+      // path is exercised directly. ADR-008 clamp behavior is covered in
+      // execution-sell-clamp.test.ts.
+      allowSellSizeClamp: false,
     });
 
     await reserveMod.start();
@@ -1122,10 +1126,12 @@ describe("ExecutionModule", () => {
     const positionRepo = {
       save: vi.fn(),
       findByTokenId: vi.fn().mockReturnValue(null),
-      findOpen: vi.fn().mockReturnValue([
-        makePosition({ tokenId: createTokenId("tok-a"), costBasisUsdc: 1 }),
-        makePosition({ tokenId: createTokenId("tok-b"), costBasisUsdc: 1 }),
-      ]),
+      findOpen: vi
+        .fn()
+        .mockReturnValue([
+          makePosition({ tokenId: createTokenId("tok-a"), costBasisUsdc: 1 }),
+          makePosition({ tokenId: createTokenId("tok-b"), costBasisUsdc: 1 }),
+        ]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
       findOpenByEntryStyle: vi.fn().mockReturnValue([]),
@@ -1172,10 +1178,12 @@ describe("ExecutionModule", () => {
     const positionRepo = {
       save: vi.fn(),
       findByTokenId: vi.fn().mockReturnValue(null),
-      findOpen: vi.fn().mockReturnValue([
-        makePosition({ tokenId: createTokenId("tok-a"), costBasisUsdc: 1 }),
-        makePosition({ tokenId: createTokenId("tok-b"), costBasisUsdc: 1 }),
-      ]),
+      findOpen: vi
+        .fn()
+        .mockReturnValue([
+          makePosition({ tokenId: createTokenId("tok-a"), costBasisUsdc: 1 }),
+          makePosition({ tokenId: createTokenId("tok-b"), costBasisUsdc: 1 }),
+        ]),
       findDust: vi.fn().mockReturnValue([]),
       findAll: vi.fn().mockReturnValue([]),
       findOpenByEntryStyle: vi.fn().mockReturnValue([]),

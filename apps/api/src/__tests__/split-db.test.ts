@@ -38,6 +38,7 @@ function testConfig(): AppConfig {
     planktonAuthUsername: undefined,
     planktonAuthPassword: undefined,
     planktonSessionSecret: undefined,
+    allowSellSizeClamp: true,
     trustProxy: false,
   };
 }

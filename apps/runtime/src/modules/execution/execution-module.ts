@@ -59,6 +59,7 @@ export interface ExecutionModuleDeps {
   activeProfile?: ProfileId | undefined;
   walletBufferPct?: number | undefined;
   walletBufferMinUsdc?: number | undefined;
+  allowSellSizeClamp?: boolean | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -77,6 +78,7 @@ export class ExecutionModule implements RuntimeModule {
   >();
   private readonly gatewayRejects: Array<{ ts: number; code: string }> = [];
   private readonly internalReservationRejects: number[] = [];
+  private sellSizeClamps = 0;
   private readonly queue: ExecutionQueue | null;
   private readonly acceptedCommandAt = new Map<string, number>();
   private placeCompleted = 0;
@@ -140,6 +142,7 @@ export class ExecutionModule implements RuntimeModule {
     cancelReplacePendingCount: number;
     gatewayRejectsLast10mByCode: Record<string, number>;
     internalReservationRejectsLast10m: number;
+    sellSizeClamps: number;
   } {
     const queue = this.queue?.diagnostics;
     const reservations = this.getReservationSnapshot();
@@ -173,6 +176,7 @@ export class ExecutionModule implements RuntimeModule {
       cancelReplacePendingCount: this.sellReplaceLocks.size,
       gatewayRejectsLast10mByCode: this.getGatewayRejectsLast10mByCode(),
       internalReservationRejectsLast10m: this.getInternalReservationRejectsLast10m(),
+      sellSizeClamps: this.sellSizeClamps,
     };
   }
 
@@ -338,32 +342,55 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
-    const reservationRejection = this.getReservationRejection(cmd, notional);
-    if (reservationRejection) {
+    const decision = this.getReservationDecision(cmd, notional);
+    if (decision.kind === "reject") {
       this.recordInternalReservationReject();
-      this.log.debug(reservationRejection.details, reservationRejection.message);
-      await this.rejectOrder(
-        cmd,
-        reservationRejection.reason,
-        ExchangeErrorCode.InsufficientBalance,
-      );
+      this.log.debug(decision.details, decision.message);
+      await this.rejectOrder(cmd, decision.reason, ExchangeErrorCode.InsufficientBalance);
       return;
     }
 
-    this.pendingReservations.set(String(cmd.commandId), {
-      tokenId: cmd.tokenId,
-      side: cmd.side,
-      size: cmd.size,
-      price: cmd.price,
+    let effectiveCmd = cmd;
+    if (decision.kind === "clamp") {
+      const clampedCmd: PlaceOrderCommand = { ...cmd, size: decision.newSize };
+      const postClampMinCheck = this.getMinOrderSizeRejection(clampedCmd);
+      if (postClampMinCheck) {
+        this.recordInternalReservationReject();
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            tokenId: cmd.tokenId,
+            intentSize: cmd.size,
+            clampedSize: decision.newSize,
+            minOrderSize: postClampMinCheck.minOrderSize,
+          },
+          "sell order rejected — clamped size below exchange minimum",
+        );
+        await this.rejectOrder(cmd, "clamped-below-min-order-size", ExchangeErrorCode.InvalidSize);
+        return;
+      }
+      this.sellSizeClamps++;
+      this.log.info(
+        { commandId: cmd.commandId, ...decision.details },
+        "sell order size clamped to available position (ADR-008)",
+      );
+      effectiveCmd = clampedCmd;
+    }
+
+    this.pendingReservations.set(String(effectiveCmd.commandId), {
+      tokenId: effectiveCmd.tokenId,
+      side: effectiveCmd.side,
+      size: effectiveCmd.size,
+      price: effectiveCmd.price,
     });
-    this.acceptedCommandAt.set(String(cmd.commandId), Date.now());
+    this.acceptedCommandAt.set(String(effectiveCmd.commandId), Date.now());
 
     if (this.queue) {
-      this.queue.enqueue(cmd);
+      this.queue.enqueue(effectiveCmd);
       return;
     }
 
-    await this.executeCommand(cmd);
+    await this.executeCommand(effectiveCmd);
   }
 
   // ─── Cancel order handler ─────────────────────────────────────────────
@@ -583,25 +610,34 @@ export class ExecutionModule implements RuntimeModule {
     );
   }
 
-  private getReservationRejection(
+  private getReservationDecision(
     cmd: PlaceOrderCommand,
     notional: number,
-  ): {
-    reason: string;
-    message: string;
-    details: Record<string, unknown>;
-  } | null {
+  ):
+    | { kind: "accept" }
+    | {
+        kind: "reject";
+        reason: string;
+        message: string;
+        details: Record<string, unknown>;
+      }
+    | {
+        kind: "clamp";
+        newSize: number;
+        details: Record<string, unknown>;
+      } {
     const reservations = this.getReservationSnapshot();
 
     if (cmd.side === "buy") {
       const walletBalance = this.getWalletBalanceUsdc();
-      if (walletBalance == null) return null;
+      if (walletBalance == null) return { kind: "accept" };
 
       const walletBuffer = this.getWalletBufferUsdc(walletBalance);
       const availableBalance = walletBalance - reservations.reservedBuyUsdc - walletBuffer;
-      if (availableBalance + 1e-9 >= notional) return null;
+      if (availableBalance + 1e-9 >= notional) return { kind: "accept" };
 
       return {
+        kind: "reject",
         reason: "reserved-usdc-limit",
         message: "order skipped — insufficient wallet balance after open-order reservations",
         details: {
@@ -614,11 +650,12 @@ export class ExecutionModule implements RuntimeModule {
       };
     }
 
-    if (!this.deps.positionRepo) return null;
+    if (!this.deps.positionRepo) return { kind: "accept" };
 
     const position = this.deps.positionRepo.findByTokenId(cmd.tokenId);
     if (!position || position.status !== "open") {
       return {
+        kind: "reject",
         reason: "reserved-token-limit",
         message: "sell order skipped — no open position for token",
         details: { tokenId: cmd.tokenId, orderSize: cmd.size },
@@ -627,9 +664,25 @@ export class ExecutionModule implements RuntimeModule {
 
     const reservedSell = getReservedSellSize(reservations, cmd.tokenId);
     const availableSize = position.size - reservedSell;
-    if (availableSize + 1e-9 >= cmd.size) return null;
+    if (availableSize + 1e-9 >= cmd.size) return { kind: "accept" };
+
+    const clampEnabled = this.deps.allowSellSizeClamp !== false;
+    if (clampEnabled && availableSize > ExecutionModule.SIZE_EPSILON_SHARES) {
+      return {
+        kind: "clamp",
+        newSize: availableSize,
+        details: {
+          tokenId: cmd.tokenId,
+          positionSize: position.size,
+          reservedSell,
+          availableSize,
+          intentSize: cmd.size,
+        },
+      };
+    }
 
     return {
+      kind: "reject",
       reason: "reserved-token-limit",
       message: "sell order skipped — token balance already reserved by open sell orders",
       details: {
@@ -652,8 +705,7 @@ export class ExecutionModule implements RuntimeModule {
 
   private getWalletBufferUsdc(walletBalance: number): number {
     const pct = this.deps.walletBufferPct ?? ExecutionModule.DEFAULT_WALLET_BUFFER_RATIO;
-    const minUsdc =
-      this.deps.walletBufferMinUsdc ?? ExecutionModule.DEFAULT_MIN_WALLET_BUFFER_USDC;
+    const minUsdc = this.deps.walletBufferMinUsdc ?? ExecutionModule.DEFAULT_MIN_WALLET_BUFFER_USDC;
     return Math.max(minUsdc, walletBalance * pct);
   }
 
