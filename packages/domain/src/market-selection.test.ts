@@ -112,7 +112,7 @@ const HEALTHY: HealthInput = {
 };
 
 describe("isAlive", () => {
-  it("healthy when all four hard signals pass", () => {
+  it("healthy when all three hard signals pass", () => {
     expect(isAlive(HEALTHY)).toEqual({ healthy: true, reasons: [] });
   });
 
@@ -122,11 +122,14 @@ describe("isAlive", () => {
     ["enableOrderBook false", { enableOrderBook: false }, "order_book_disabled"],
     ["enableOrderBook null", { enableOrderBook: null }, "order_book_disabled"],
     ["no bestBid", { bestBid: null }, "no_bid"],
-    ["no bestAsk", { bestAsk: null }, "no_ask"],
   ])("%s → unhealthy with reason %s", (_label, patch, reason) => {
     const result = isAlive({ ...HEALTHY, ...patch });
     expect(result.healthy).toBe(false);
     expect(result.reasons).toContain(reason);
+  });
+
+  it("healthy with bestAsk=null (one-sided book — SELL skipped at bridge stage)", () => {
+    expect(isAlive({ ...HEALTHY, bestAsk: null })).toEqual({ healthy: true, reasons: [] });
   });
 
   it("reasons are ordered hard-only deterministically", () => {
@@ -140,7 +143,6 @@ describe("isAlive", () => {
       "not_accepting_orders",
       "order_book_disabled",
       "no_bid",
-      "no_ask",
     ]);
   });
 });

@@ -646,7 +646,6 @@ describe("hard-liveness guard (before execution)", () => {
     ["acceptingOrders=false", { acceptingOrders: false }, "not_accepting_orders"],
     ["enableOrderBook=false", { enableOrderBook: false }, "order_book_disabled"],
     ["bestBid=null", { bestBid: null }, "no_bid"],
-    ["bestAsk=null", { bestAsk: null }, "no_ask"],
   ])("%s skips with hard-liveness reason", async (_, patch, reason) => {
     const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
     await bus.publish("NormalizedMarketUpdated", {
@@ -660,6 +659,21 @@ describe("hard-liveness guard (before execution)", () => {
     expect(conversionSkipped[0]!.stage).toBe("hard-liveness");
     expect(conversionSkipped[0]!.reasons).toContain(reason);
     expect(placeOrderRequested).toHaveLength(0);
+  });
+
+  it("BUY signal with bestAsk=null → places order at bestBid (one-sided book)", async () => {
+    const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeMarket({ bestAsk: null, bestBid: 0.03 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
+    await bus.drain();
+
+    expect(conversionSkipped.filter((s) => s.stage === "hard-liveness")).toHaveLength(0);
+    expect(placeOrderRequested).toHaveLength(1);
+    const cmd = (placeOrderRequested[0] as { command: { price: number } }).command;
+    expect(cmd.price).toBe(0.03);
   });
 
   it("stacks reasons when multiple hard fields fail", async () => {
@@ -676,7 +690,7 @@ describe("hard-liveness guard (before execution)", () => {
     );
   });
 
-  it("passes through to execution when all four hard fields are healthy", async () => {
+  it("passes through to execution when all three hard fields are healthy", async () => {
     const { bus, conversionSkipped } = makeBridgeWithLiveLite();
     await bus.publish("NormalizedMarketUpdated", {
       markets: [makeMarket()],

@@ -518,8 +518,7 @@ export type HealthStatus = "unknown" | "healthy" | "unhealthy";
 export type HealthFailReason =
   | "not_accepting_orders"
   | "order_book_disabled"
-  | "no_bid"
-  | "no_ask";
+  | "no_bid";
 
 export interface HealthInput {
   readonly acceptingOrders?: boolean | null;

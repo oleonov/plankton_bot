@@ -64,6 +64,5 @@ export function isAlive(market: HealthInput): HealthResult {
   if (market.acceptingOrders !== true) reasons.push("not_accepting_orders");
   if (market.enableOrderBook !== true) reasons.push("order_book_disabled");
   if (market.bestBid == null) reasons.push("no_bid");
-  if (market.bestAsk == null) reasons.push("no_ask");
   return { healthy: reasons.length === 0, reasons };
 }
