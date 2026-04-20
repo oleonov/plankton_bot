@@ -11,7 +11,10 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
   private readonly markets = new Map<string, ClobMarket>();
   private readonly tickSizes = new Map<string, number>();
   private readonly orderBooks = new Map<string, OrderBookSnapshot>();
-  private livenessOverrides = new Map<string, { acceptingOrders?: boolean; enableOrderBook?: boolean }>();
+  private livenessOverrides = new Map<
+    string,
+    { acceptingOrders?: boolean; enableOrderBook?: boolean }
+  >();
 
   async getMarkets(_onPage?: (page: number) => Promise<void> | void): Promise<ClobMarket[]> {
     return [...this.markets.values()].filter((m) => m.active);

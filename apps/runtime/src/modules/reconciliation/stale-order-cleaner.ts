@@ -29,12 +29,7 @@ export const EXIT_ORDER_TTL_MS = 60_000; // 60s
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff
 
-const EXIT_REASONS = new Set([
-  "repricing-exit",
-  "medium-hold-exit",
-  "tail-prune",
-  "reduce-only",
-]);
+const EXIT_REASONS = new Set(["repricing-exit", "medium-hold-exit", "tail-prune", "reduce-only"]);
 
 export interface StaleOrderCleanerDeps {
   orderRepo: OrderRepository;

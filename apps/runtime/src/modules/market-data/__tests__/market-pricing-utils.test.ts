@@ -61,15 +61,11 @@ describe("applyPricingSnapshot — liveness fields", () => {
 
 describe("didMarketPricingChange — liveness fields", () => {
   it("returns true when only acceptingOrders differs", () => {
-    expect(
-      didMarketPricingChange(baseMarket(), baseMarket({ acceptingOrders: false })),
-    ).toBe(true);
+    expect(didMarketPricingChange(baseMarket(), baseMarket({ acceptingOrders: false }))).toBe(true);
   });
 
   it("returns true when only enableOrderBook differs", () => {
-    expect(
-      didMarketPricingChange(baseMarket(), baseMarket({ enableOrderBook: false })),
-    ).toBe(true);
+    expect(didMarketPricingChange(baseMarket(), baseMarket({ enableOrderBook: false }))).toBe(true);
   });
 
   it("returns false when both equal and nothing else changed", () => {

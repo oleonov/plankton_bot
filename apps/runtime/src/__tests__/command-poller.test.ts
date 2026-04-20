@@ -211,9 +211,9 @@ describe("CommandPoller", () => {
 
       await poller.poll();
 
-      const row = conn.db
-        .prepare("SELECT status FROM operator_commands WHERE id = ?")
-        .get(id) as { status: string } | undefined;
+      const row = conn.db.prepare("SELECT status FROM operator_commands WHERE id = ?").get(id) as
+        | { status: string }
+        | undefined;
       expect(row?.status).toBe("rejected");
       expect(cmdRepo.getPending()).toHaveLength(0);
       expect(actionRepo.findRecent(10)).toHaveLength(0);

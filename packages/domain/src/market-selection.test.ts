@@ -139,10 +139,6 @@ describe("isAlive", () => {
       bestBid: null,
       bestAsk: null,
     };
-    expect(isAlive(all).reasons).toEqual([
-      "not_accepting_orders",
-      "order_book_disabled",
-      "no_bid",
-    ]);
+    expect(isAlive(all).reasons).toEqual(["not_accepting_orders", "order_book_disabled", "no_bid"]);
   });
 });

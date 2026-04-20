@@ -224,10 +224,7 @@ describe("Hard-STOP after continuation-filter fail (spec §0)", () => {
   let algoRulesRepo: AlgoRulesRepository;
   let log: Logger;
 
-  function buildModule(
-    legStateRepo: LegStateRepository,
-    selectedMarketCache: SelectedMarketCache,
-  ) {
+  function buildModule(legStateRepo: LegStateRepository, selectedMarketCache: SelectedMarketCache) {
     return new AlgoDecisionModule({
       bus: bus as unknown as EventBus,
       legStateRepo,

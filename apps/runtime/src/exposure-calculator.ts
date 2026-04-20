@@ -20,9 +20,7 @@ export function calculateTotalExposure(
   orderRepo: OrderRepository,
   additionalNotional = 0,
 ): number {
-  const positionCostBasis = positionRepo
-    .findOpen()
-    .reduce((sum, p) => sum + p.costBasisUsdc, 0);
+  const positionCostBasis = positionRepo.findOpen().reduce((sum, p) => sum + p.costBasisUsdc, 0);
   const openBuyNotional = orderRepo.sumOpenBuyNotional();
   return positionCostBasis + openBuyNotional + additionalNotional;
 }
