@@ -73,11 +73,11 @@ describe("RiskEventWriter", () => {
 
   describe("onOperatorCommand", () => {
     it("writes operator_command event", () => {
-      writer.onOperatorCommand("family_enable", null, 1, "reactivating");
+      writer.onOperatorCommand("rules_reload", null, 1, "reloading rules");
 
       expect(repo.insert).toHaveBeenCalledTimes(1);
       expect(repo.insert.mock.calls[0]![0].eventType).toBe("operator_command");
-      expect(repo.insert.mock.calls[0]![0].payload.action).toBe("family_enable");
+      expect(repo.insert.mock.calls[0]![0].payload.action).toBe("rules_reload");
     });
 
     it("writes for any action including pause", () => {

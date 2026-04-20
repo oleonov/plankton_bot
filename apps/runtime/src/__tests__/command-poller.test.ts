@@ -188,46 +188,33 @@ describe("CommandPoller", () => {
     });
   });
 
-  // ── Deprecated family actions ────────────────────────────────────────────
+  // ── Unknown / legacy actions ─────────────────────────────────────────────
 
-  describe("deprecated family actions", () => {
-    function readStatus(id: number): string {
+  describe("unknown action", () => {
+    it("rejects unrecognized action strings, marks status=rejected, no audit, no OperatorCommandApplied", async () => {
+      const events: Array<{ action: string }> = [];
+      bus.subscribe("OperatorCommandApplied", async (payload) => {
+        events.push({ action: payload.action });
+      });
+
+      // Simulate a stale row whose action string is not in the current enum
+      // (e.g. from an older schema or operator typo). The cast is deliberate —
+      // the whole point of the test is that the poller rejects unrecognized
+      // strings the type system would normally block.
+      const id = cmdRepo.insert({
+        action: "legacy_unknown_action" as unknown as OperatorActionType,
+        targetId: null,
+        reason: "stale payload",
+        createdAt: new Date().toISOString(),
+      });
+      const poller = createPoller();
+
+      await poller.poll();
+
       const row = conn.db
         .prepare("SELECT status FROM operator_commands WHERE id = ?")
         .get(id) as { status: string } | undefined;
-      if (!row) throw new Error(`command id ${id} not found`);
-      return row.status;
-    }
-
-    it("rejects queued family_enable, marks status=rejected, no OperatorCommandApplied", async () => {
-      const events: Array<{ action: string }> = [];
-      bus.subscribe("OperatorCommandApplied", async (payload) => {
-        events.push({ action: payload.action });
-      });
-
-      const id = insertCommand("family_enable", "fam-1", "legacy operator payload");
-      const poller = createPoller();
-
-      await poller.poll();
-
-      expect(readStatus(id)).toBe("rejected");
-      expect(cmdRepo.getPending()).toHaveLength(0);
-      expect(actionRepo.findRecent(10)).toHaveLength(0);
-      expect(events).toHaveLength(0);
-    });
-
-    it("rejects queued family_disable, marks status=rejected, no OperatorCommandApplied", async () => {
-      const events: Array<{ action: string }> = [];
-      bus.subscribe("OperatorCommandApplied", async (payload) => {
-        events.push({ action: payload.action });
-      });
-
-      const id = insertCommand("family_disable", "fam-1", "legacy operator payload");
-      const poller = createPoller();
-
-      await poller.poll();
-
-      expect(readStatus(id)).toBe("rejected");
+      expect(row?.status).toBe("rejected");
       expect(cmdRepo.getPending()).toHaveLength(0);
       expect(actionRepo.findRecent(10)).toHaveLength(0);
       expect(events).toHaveLength(0);

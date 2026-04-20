@@ -174,8 +174,6 @@ export const ENTRY_REASONS: ReadonlySet<string> = new Set([
 export const OperatorActionType = {
   Pause: "pause",
   Resume: "resume",
-  FamilyEnable: "family_enable",
-  FamilyDisable: "family_disable",
   RulesReload: "rules_reload",
 } as const;
 export type OperatorActionType = (typeof OperatorActionType)[keyof typeof OperatorActionType];

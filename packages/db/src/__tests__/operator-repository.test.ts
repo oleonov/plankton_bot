@@ -51,8 +51,8 @@ describe("SqliteOperatorCommandRepository", () => {
       createdAt: "2026-01-01T00:00:00Z",
     });
     cmdRepo.insert({
-      action: "family_disable",
-      targetId: "fam-1",
+      action: "rules_reload",
+      targetId: null,
       reason: "reason-2",
       createdAt: "2026-01-01T00:01:00Z",
     });
@@ -62,8 +62,8 @@ describe("SqliteOperatorCommandRepository", () => {
     expect(pending[0]!.action).toBe("pause");
     expect(pending[0]!.status).toBe("pending");
     expect(pending[0]!.appliedAt).toBeNull();
-    expect(pending[1]!.action).toBe("family_disable");
-    expect(pending[1]!.targetId).toBe("fam-1");
+    expect(pending[1]!.action).toBe("rules_reload");
+    expect(pending[1]!.targetId).toBeNull();
   });
 
   it("updateStatus marks as applied", () => {
@@ -82,8 +82,8 @@ describe("SqliteOperatorCommandRepository", () => {
 
   it("updateStatus marks as rejected", () => {
     const id = cmdRepo.insert({
-      action: "family_enable",
-      targetId: "fam-1",
+      action: "rules_reload",
+      targetId: null,
       reason: "test",
       createdAt: "2026-01-01T00:00:00Z",
     });
@@ -96,8 +96,8 @@ describe("SqliteOperatorCommandRepository", () => {
 
   it("round-trips initiatorType and initiator", () => {
     cmdRepo.insert({
-      action: "family_enable",
-      targetId: "fam-1",
+      action: "rules_reload",
+      targetId: null,
       reason: "auto-promote",
       createdAt: "2026-01-01T00:00:00Z",
       initiatorType: "system",
@@ -137,8 +137,8 @@ describe("SqliteOperatorCommandRepository", () => {
       createdAt: "2026-01-01T00:01:00Z",
     });
     cmdRepo.insert({
-      action: "family_disable",
-      targetId: "fam-1",
+      action: "rules_reload",
+      targetId: null,
       reason: null,
       createdAt: "2026-01-01T00:02:00Z",
     });
@@ -148,7 +148,7 @@ describe("SqliteOperatorCommandRepository", () => {
 
     const pending = cmdRepo.getPending();
     expect(pending).toHaveLength(1);
-    expect(pending[0]!.action).toBe("family_disable");
+    expect(pending[0]!.action).toBe("rules_reload");
   });
 });
 
@@ -187,16 +187,16 @@ describe("SqliteOperatorActionRepository", () => {
       performedAt: "2026-01-02T00:00:00Z",
     });
     actionRepo.insert({
-      action: "family_disable",
-      targetType: "family",
-      targetId: "fam-1",
-      reason: "tail exceeded",
+      action: "rules_reload",
+      targetType: "bot",
+      targetId: "runtime",
+      reason: "rules updated",
       performedAt: "2026-01-03T00:00:00Z",
     });
 
     const recent = actionRepo.findRecent(2);
     expect(recent).toHaveLength(2);
-    expect(recent[0]!.action).toBe("family_disable");
+    expect(recent[0]!.action).toBe("rules_reload");
     expect(recent[1]!.action).toBe("resume");
   });
 });

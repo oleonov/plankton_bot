@@ -225,7 +225,7 @@ export interface InventoryLot {
 export interface OperatorCommand {
   id: number;
   action: OperatorActionType;
-  targetId: string | null; // familyId for family-scoped commands; null for global
+  targetId: string | null; // currently always null — all live actions are global; kept for compatibility with legacy (rejected) scoped commands
   reason: string | null;
   status: CommandStatus;
   createdAt: string; // ISO timestamp
