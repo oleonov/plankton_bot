@@ -102,7 +102,6 @@ function computeTradingState(
         candidatesConsidered: number;
         blockedByResolutionBuffer: number;
         blockedByWindow: number;
-        gammaFallbackDustSignalsProduced?: number;
         scanPrimeSkippedByPolicy?: number;
       })
     : null;
@@ -131,14 +130,13 @@ function computeTradingState(
     signalActivity.candidatesConsideredLast10m = scanner.candidatesConsidered;
     signalActivity.blockedByResolutionBufferLast10m = scanner.blockedByResolutionBuffer;
     signalActivity.blockedByWindowLast10m = scanner.blockedByWindow;
-    signalActivity.gammaFallbackDustSignalsLast10m = scanner.gammaFallbackDustSignalsProduced ?? 0;
     signalActivity.scanPrimeSkippedByPolicyLast10m = scanner.scanPrimeSkippedByPolicy ?? 0;
   }
 
   if (signalConversionRow?.labels) {
     const conversion = JSON.parse(signalConversionRow.labels) as {
       converted?: number;
-      marketabilityRejectedByReason?: Record<string, number>;
+      conversionSkippedByReason?: Record<string, number>;
       cacheStatusByStatus?: Record<string, number>;
       exchangeAccepted?: number;
       exchangeRejectedByCode?: Record<string, number>;
@@ -150,14 +148,9 @@ function computeTradingState(
       hotLaneStatesByState?: Record<string, number>;
       queueJumpAccepted?: number;
       queueJumpFills?: number;
-      gammaFallbackDustOrders?: number;
-      gammaFallbackDustFills?: number;
-      candidateBookRefreshAttempts?: number;
-      candidateBookRefreshTimeouts?: number;
     };
     signalActivity.signalsConvertedLast10m = conversion.converted ?? 0;
-    signalActivity.marketabilityRejectedLast10mByReason =
-      conversion.marketabilityRejectedByReason ?? {};
+    signalActivity.conversionSkippedLast10mByReason = conversion.conversionSkippedByReason ?? {};
     signalActivity.cacheStatusLast10mByStatus = conversion.cacheStatusByStatus ?? {};
     signalActivity.exchangeAcceptedLast10m = conversion.exchangeAccepted ?? 0;
     signalActivity.exchangeRejectedLast10mByCode = conversion.exchangeRejectedByCode ?? {};
@@ -169,12 +162,6 @@ function computeTradingState(
     signalActivity.hotLaneStatesLast10mByState = conversion.hotLaneStatesByState ?? {};
     signalActivity.queueJumpAcceptedLast10m = conversion.queueJumpAccepted ?? 0;
     signalActivity.queueJumpFillsLast10m = conversion.queueJumpFills ?? 0;
-    signalActivity.gammaFallbackDustOrdersLast10m = conversion.gammaFallbackDustOrders ?? 0;
-    signalActivity.gammaFallbackDustFillsLast10m = conversion.gammaFallbackDustFills ?? 0;
-    signalActivity.candidateBookRefreshAttemptsLast10m =
-      conversion.candidateBookRefreshAttempts ?? 0;
-    signalActivity.candidateBookRefreshTimeoutsLast10m =
-      conversion.candidateBookRefreshTimeouts ?? 0;
   }
 
   const tradingState = resolveTradingState({

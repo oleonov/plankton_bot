@@ -84,10 +84,6 @@ import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { installConsoleRedaction } from "./console-redaction.js";
 import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
-import type {
-  CandidateBookRefreshObserved,
-  CandidateBookUsageObserved,
-} from "./modules/strategy/candidate-book-cache.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -495,44 +491,10 @@ async function main(): Promise<void> {
   });
 
   // 7h. Strategy module
-  const candidateBookRefreshWindow = {
-    attempts: 0,
-    timeouts: 0,
-    lastReset: Date.now(),
-  };
-  const candidateBookUsageWindow = {
-    bridgeRefreshLatenciesMs: [] as number[],
-    bridgeRestBookFetchCount: 0,
-  };
-  const handleCandidateBookRefreshObserved = (event: CandidateBookRefreshObserved): void => {
-    if (event.outcome === "attempted") {
-      candidateBookRefreshWindow.attempts += event.tokenCount;
-      if (event.source === "bridge-refresh") {
-        candidateBookUsageWindow.bridgeRestBookFetchCount += event.tokenCount;
-        conversionWindow.bridgeRestBookFetchCount += event.tokenCount;
-      }
-    }
-    if (event.outcome === "refresh-budget-exhausted" || event.outcome === "refresh-failed") {
-      candidateBookRefreshWindow.timeouts += event.tokenCount;
-    }
-    if (event.source === "bridge-refresh" && event.durationMs != null) {
-      candidateBookUsageWindow.bridgeRefreshLatenciesMs.push(event.durationMs);
-      conversionWindow.bridgeBookRefreshLatenciesMs.push(event.durationMs);
-    }
-  };
-  const handleCandidateBookUsageObserved = (event: CandidateBookUsageObserved): void => {
-    if (event.type === "ws-hit") {
-      conversionWindow.candidateBookCacheWsHits++;
-      return;
-    }
-    conversionWindow.candidateBookCacheRestFallbacks++;
-  };
   const candidateBookCache = marketDataGateway.getOrderBooks
     ? new CandidateBookCache({
         gateway: { getOrderBooks: marketDataGateway.getOrderBooks.bind(marketDataGateway) },
         log: log.child({ module: "candidate-book-cache" }),
-        onRefreshObserved: handleCandidateBookRefreshObserved,
-        onUsageObserved: handleCandidateBookUsageObserved,
       })
     : undefined;
   // 7h1. Leg state tracker — maintains leg_states from fills/positions/settlements.
@@ -860,7 +822,7 @@ async function main(): Promise<void> {
   const SIGNAL_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
   const conversionWindow = {
     converted: 0,
-    marketabilityRejectedByReason: new Map<string, number>(),
+    conversionSkippedByReason: new Map<string, number>(),
     cacheStatusByStatus: new Map<string, number>(),
     exchangeAccepted: 0,
     exchangeRejectedByCode: new Map<string, number>(),
@@ -872,16 +834,9 @@ async function main(): Promise<void> {
     hotLaneStatesByState: new Map<string, number>(),
     queueJumpAccepted: 0,
     queueJumpFills: 0,
-    gammaFallbackDustOrders: 0,
-    gammaFallbackDustFills: 0,
-    candidateBookCacheWsHits: 0,
-    candidateBookCacheRestFallbacks: 0,
-    bridgeBookRefreshLatenciesMs: [] as number[],
-    bridgeRestBookFetchCount: 0,
     lastReset: Date.now(),
   };
   const entryOrderPlacedAtMsByOrderId = new Map<string, number>();
-  const gammaFallbackDustClientOrderIds = new Set<string>();
 
   bus.subscribe("SignalProduced", async () => {
     signalWindow.produced++;
@@ -907,9 +862,9 @@ async function main(): Promise<void> {
 
   bus.subscribe("SignalConversionSkipped", async ({ reasons, diagnostics }) => {
     for (const reason of reasons.length > 0 ? reasons : ["conversion-skipped"]) {
-      conversionWindow.marketabilityRejectedByReason.set(
+      conversionWindow.conversionSkippedByReason.set(
         reason,
-        (conversionWindow.marketabilityRejectedByReason.get(reason) ?? 0) + 1,
+        (conversionWindow.conversionSkippedByReason.get(reason) ?? 0) + 1,
       );
     }
     const cacheStatus = diagnostics["cacheStatus"];
@@ -931,16 +886,6 @@ async function main(): Promise<void> {
         cacheStatus,
         (conversionWindow.cacheStatusByStatus.get(cacheStatus) ?? 0) + 1,
       );
-    }
-    const marketData =
-      command.metadata?.["marketData"] &&
-      typeof command.metadata["marketData"] === "object" &&
-      command.metadata["marketData"] != null
-        ? (command.metadata["marketData"] as Record<string, unknown>)
-        : null;
-    if (marketData?.["gammaFallbackDust"] === true) {
-      conversionWindow.gammaFallbackDustOrders++;
-      gammaFallbackDustClientOrderIds.add(String(command.clientOrderId));
     }
   });
 
@@ -976,11 +921,6 @@ async function main(): Promise<void> {
     if (ENTRY_REASONS.has(signalReason ?? "")) {
       conversionWindow.fills++;
     }
-  });
-
-  bus.subscribe("FillReceived", async ({ clientOrderId }) => {
-    if (!gammaFallbackDustClientOrderIds.has(String(clientOrderId))) return;
-    conversionWindow.gammaFallbackDustFills++;
   });
 
   bus.subscribe("FillReceived", async ({ orderId, signalReason }) => {
@@ -1021,7 +961,6 @@ async function main(): Promise<void> {
     candidatesConsidered: 0,
     blockedByResolutionBuffer: 0,
     blockedByWindow: 0,
-    gammaFallbackDustSignalsProduced: 0,
     scanPrimeSkippedByPolicy: 0,
     lastReset: Date.now(),
   };
@@ -1030,7 +969,6 @@ async function main(): Promise<void> {
     scannerWindow.candidatesConsidered += ev.candidatesConsidered;
     scannerWindow.blockedByResolutionBuffer += ev.blockedByResolutionBuffer;
     scannerWindow.blockedByWindow += ev.blockedByWindow;
-    scannerWindow.gammaFallbackDustSignalsProduced += ev.gammaFallbackDustSignalsProduced;
     scannerWindow.scanPrimeSkippedByPolicy += ev.scanPrimeSkippedByPolicy;
   });
 
@@ -1070,7 +1008,7 @@ async function main(): Promise<void> {
     }
     if (now - conversionWindow.lastReset > SIGNAL_WINDOW_MS) {
       conversionWindow.converted = 0;
-      conversionWindow.marketabilityRejectedByReason.clear();
+      conversionWindow.conversionSkippedByReason.clear();
       conversionWindow.cacheStatusByStatus.clear();
       conversionWindow.exchangeAccepted = 0;
       conversionWindow.exchangeRejectedByCode.clear();
@@ -1082,16 +1020,6 @@ async function main(): Promise<void> {
       conversionWindow.hotLaneStatesByState.clear();
       conversionWindow.queueJumpAccepted = 0;
       conversionWindow.queueJumpFills = 0;
-      conversionWindow.gammaFallbackDustOrders = 0;
-      conversionWindow.gammaFallbackDustFills = 0;
-      conversionWindow.candidateBookCacheWsHits = 0;
-      conversionWindow.candidateBookCacheRestFallbacks = 0;
-      conversionWindow.bridgeBookRefreshLatenciesMs = [];
-      conversionWindow.bridgeRestBookFetchCount = 0;
-      gammaFallbackDustClientOrderIds.clear();
-      candidateBookRefreshWindow.attempts = 0;
-      candidateBookRefreshWindow.timeouts = 0;
-      candidateBookRefreshWindow.lastReset = now;
       conversionWindow.lastReset = now;
     }
     pruneEntryFillLatencyTracker(entryOrderPlacedAtMsByOrderId, now);
@@ -1109,9 +1037,7 @@ async function main(): Promise<void> {
     upsertSignalConversionActivity(
       JSON.stringify({
         converted: conversionWindow.converted,
-        marketabilityRejectedByReason: Object.fromEntries(
-          conversionWindow.marketabilityRejectedByReason,
-        ),
+        conversionSkippedByReason: Object.fromEntries(conversionWindow.conversionSkippedByReason),
         cacheStatusByStatus: Object.fromEntries(conversionWindow.cacheStatusByStatus),
         exchangeAccepted: conversionWindow.exchangeAccepted,
         exchangeRejectedByCode: Object.fromEntries(conversionWindow.exchangeRejectedByCode),
@@ -1123,14 +1049,6 @@ async function main(): Promise<void> {
         hotLaneStatesByState: Object.fromEntries(conversionWindow.hotLaneStatesByState),
         queueJumpAccepted: conversionWindow.queueJumpAccepted,
         queueJumpFills: conversionWindow.queueJumpFills,
-        gammaFallbackDustOrders: conversionWindow.gammaFallbackDustOrders,
-        gammaFallbackDustFills: conversionWindow.gammaFallbackDustFills,
-        candidateBookCacheWsHits: conversionWindow.candidateBookCacheWsHits,
-        candidateBookCacheRestFallbacks: conversionWindow.candidateBookCacheRestFallbacks,
-        bridgeBookRefreshMs: summarizeFillLatency(conversionWindow.bridgeBookRefreshLatenciesMs),
-        bridgeRestBookFetchCount: conversionWindow.bridgeRestBookFetchCount,
-        candidateBookRefreshAttempts: candidateBookRefreshWindow.attempts,
-        candidateBookRefreshTimeouts: candidateBookRefreshWindow.timeouts,
         windowStartMs: conversionWindow.lastReset,
       }),
       new Date().toISOString(),
@@ -1185,7 +1103,6 @@ async function main(): Promise<void> {
       scannerWindow.candidatesConsidered = 0;
       scannerWindow.blockedByResolutionBuffer = 0;
       scannerWindow.blockedByWindow = 0;
-      scannerWindow.gammaFallbackDustSignalsProduced = 0;
       scannerWindow.scanPrimeSkippedByPolicy = 0;
       scannerWindow.lastReset = now;
     }
@@ -1195,7 +1112,6 @@ async function main(): Promise<void> {
         candidatesConsidered: scannerWindow.candidatesConsidered,
         blockedByResolutionBuffer: scannerWindow.blockedByResolutionBuffer,
         blockedByWindow: scannerWindow.blockedByWindow,
-        gammaFallbackDustSignalsProduced: scannerWindow.gammaFallbackDustSignalsProduced,
         scanPrimeSkippedByPolicy: scannerWindow.scanPrimeSkippedByPolicy,
       }),
       new Date().toISOString(),

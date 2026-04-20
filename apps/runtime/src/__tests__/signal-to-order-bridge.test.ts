@@ -226,7 +226,7 @@ describe("SignalToOrderBridge", () => {
     expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
   });
 
-  it("refreshes stale clob books for hot entry families before marketability rejection", async () => {
+  it("uses base market for stale clob books without refresh (no bundle)", async () => {
     const bus = new InProcessEventBus();
     const refreshedEntry = {
       tokenId: String(TOKEN_ID),
@@ -618,7 +618,7 @@ describe("SignalToOrderBridge", () => {
   });
 });
 
-describe("hard-liveness guard (before marketability)", () => {
+describe("hard-liveness guard (before execution)", () => {
   function makeBridgeWithLiveLite() {
     const bus = new InProcessEventBus();
     const bridge = new SignalToOrderBridge({
@@ -676,9 +676,8 @@ describe("hard-liveness guard (before marketability)", () => {
     );
   });
 
-  it("passes through to marketability when all four hard fields are healthy", async () => {
+  it("passes through to execution when all four hard fields are healthy", async () => {
     const { bus, conversionSkipped } = makeBridgeWithLiveLite();
-    // Market with all healthy hard fields — spread=0 so marketability passes too
     await bus.publish("NormalizedMarketUpdated", {
       markets: [makeMarket()],
       timestamp: Date.now(),

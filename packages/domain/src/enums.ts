@@ -52,25 +52,6 @@ export const EvidenceStatus = {
 } as const;
 export type EvidenceStatus = (typeof EvidenceStatus)[keyof typeof EvidenceStatus];
 
-export const PromotionState = {
-  ProbeOnly: "probe-only",
-  Scaled: "scaled",
-  Restricted: "restricted",
-  ReduceOnly: "reduce-only",
-  Quarantine: "quarantine",
-} as const;
-export type PromotionState = (typeof PromotionState)[keyof typeof PromotionState];
-
-// ─── Family runtime / rules ───────────────────────────────────────────────────
-
-export const Action = {
-  Trade: "trade",
-  Monitor: "monitor",
-  ReduceOnly: "reduce-only",
-  Blocked: "blocked",
-} as const;
-export type Action = (typeof Action)[keyof typeof Action];
-
 // ─── Entry / exit / scale / session policy enums ─────────────────────────────
 
 export const EntryMode = {

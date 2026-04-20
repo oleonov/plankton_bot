@@ -496,16 +496,16 @@ describe("GET /status", () => {
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES
         ('signal_activity', 1, '{"produced":10,"approved":3,"rejected":7,"entryApproved":2,"exitApproved":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
-        ('scanner_activity', 1, '{"candidatesConsidered":20,"blockedByResolutionBuffer":2,"blockedByWindow":1,"gammaFallbackDustSignalsProduced":4,"scanPrimeSkippedByPolicy":11,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
-        ('signal_conversion_activity', 1, '{"converted":2,"marketabilityRejectedByReason":{"gamma-fallback-no-real-book":5},"cacheStatusByStatus":{"refresh-budget-exhausted":4,"fresh-cache":2},"exchangeAccepted":1,"exchangeRejectedByCode":{"UNKNOWN":2},"fills":1,"fillLatencyMs":{"count":1,"avgMs":1200,"minMs":1200,"p50Ms":1200,"p95Ms":1200,"maxMs":1200},"cooldownBypassByReason":{"price-moved":3},"hotQuoteRefreshes":7,"hotLaneActionsByType":{"entry-reprice-cancel":2},"hotLaneStatesByState":{"quote-active":3,"cooling":1},"queueJumpAccepted":1,"queueJumpFills":1,"gammaFallbackDustOrders":2,"gammaFallbackDustFills":1,"candidateBookRefreshAttempts":9,"candidateBookRefreshTimeouts":3,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
+        ('scanner_activity', 1, '{"candidatesConsidered":20,"blockedByResolutionBuffer":2,"blockedByWindow":1,"scanPrimeSkippedByPolicy":11,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
+        ('signal_conversion_activity', 1, '{"converted":2,"conversionSkippedByReason":{"token-cooling-down":5},"cacheStatusByStatus":{"refresh-budget-exhausted":4,"fresh-cache":2},"exchangeAccepted":1,"exchangeRejectedByCode":{"UNKNOWN":2},"fills":1,"fillLatencyMs":{"count":1,"avgMs":1200,"minMs":1200,"p50Ms":1200,"p95Ms":1200,"maxMs":1200},"cooldownBypassByReason":{"price-moved":3},"hotQuoteRefreshes":7,"hotLaneActionsByType":{"entry-reprice-cancel":2},"hotLaneStatesByState":{"quote-active":3,"cooling":1},"queueJumpAccepted":1,"queueJumpFills":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
     `);
 
     const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
     const signalActivity = json(res).data.signalActivity;
 
     expect(signalActivity.signalsConvertedLast10m).toBe(2);
-    expect(signalActivity.marketabilityRejectedLast10mByReason).toEqual({
-      "gamma-fallback-no-real-book": 5,
+    expect(signalActivity.conversionSkippedLast10mByReason).toEqual({
+      "token-cooling-down": 5,
     });
     expect(signalActivity.cacheStatusLast10mByStatus).toEqual({
       "refresh-budget-exhausted": 4,
@@ -531,12 +531,7 @@ describe("GET /status", () => {
     });
     expect(signalActivity.queueJumpAcceptedLast10m).toBe(1);
     expect(signalActivity.queueJumpFillsLast10m).toBe(1);
-    expect(signalActivity.gammaFallbackDustSignalsLast10m).toBe(4);
     expect(signalActivity.scanPrimeSkippedByPolicyLast10m).toBe(11);
-    expect(signalActivity.gammaFallbackDustOrdersLast10m).toBe(2);
-    expect(signalActivity.gammaFallbackDustFillsLast10m).toBe(1);
-    expect(signalActivity.candidateBookRefreshAttemptsLast10m).toBe(9);
-    expect(signalActivity.candidateBookRefreshTimeoutsLast10m).toBe(3);
 
     conn.db.exec(
       `DELETE FROM runtime_metrics WHERE metric_name IN ('signal_activity', 'scanner_activity', 'signal_conversion_activity')`,

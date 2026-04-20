@@ -137,7 +137,6 @@ export interface ScanTickCompleted {
   readonly candidatesConsidered: number;
   readonly blockedByResolutionBuffer: number;
   readonly blockedByWindow: number;
-  readonly gammaFallbackDustSignalsProduced: number;
   readonly scanPrimeSkippedByPolicy: number;
   readonly signalsProduced: number;
   readonly entrySignals: number;

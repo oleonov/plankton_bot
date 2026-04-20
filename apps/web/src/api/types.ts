@@ -113,14 +113,9 @@ export interface StatusData {
     candidatesConsideredLast10m?: number;
     blockedByResolutionBufferLast10m?: number;
     blockedByWindowLast10m?: number;
-    gammaFallbackDustSignalsLast10m?: number;
-    gammaFallbackDustOrdersLast10m?: number;
-    gammaFallbackDustFillsLast10m?: number;
     scanPrimeSkippedByPolicyLast10m?: number;
-    candidateBookRefreshAttemptsLast10m?: number;
-    candidateBookRefreshTimeoutsLast10m?: number;
     signalsConvertedLast10m?: number;
-    marketabilityRejectedLast10mByReason?: Record<string, number>;
+    conversionSkippedLast10mByReason?: Record<string, number>;
     cacheStatusLast10mByStatus?: Record<string, number>;
     exchangeAcceptedLast10m?: number;
     exchangeRejectedLast10mByCode?: Record<string, number>;
