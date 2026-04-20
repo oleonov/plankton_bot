@@ -275,14 +275,28 @@ function safeAddColumn(
 }
 
 export function bootstrapLedgerDb(dbPath: string): DbConnection {
-  const conn = openDatabaseWithSchema(dbPath, readSchema("ledger.sql"));
+  // Upgrade an existing ledger before exec'ing the full schema: the schema
+  // declares CREATE INDEX on columns (selection_status, tradable, …) that
+  // pre-selection-rules DBs don't have yet. ALTER TABLE ADD COLUMN first so
+  // `openDatabaseWithSchema` doesn't fail the index build on a missing column.
+  const conn = openDatabase(dbPath);
+  safeAddColumn(conn.db, "markets", "outcome_index", "INTEGER");
+  safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
+  safeAddColumn(conn.db, "markets", "event_market_count", "INTEGER NOT NULL DEFAULT 1");
+  safeAddColumn(
+    conn.db,
+    "markets",
+    "selection_status",
+    "TEXT NOT NULL DEFAULT 'unknown' " +
+      "CHECK (selection_status IN " +
+      "('unknown','matched_include','matched_exclude','step2_fallback_include','fallback_exclude'))",
+  );
+  safeAddColumn(conn.db, "markets", "selection_winning_rule_id", "TEXT");
+  conn.db.exec(readSchema("ledger.sql"));
   safeAddColumn(conn.db, "orders", "post_only", "INTEGER NOT NULL DEFAULT 0");
   safeAddColumn(conn.db, "fills", "liquidity_role", "TEXT NOT NULL DEFAULT 'unknown'");
   safeAddColumn(conn.db, "fills", "fee_rate_bps", "REAL NOT NULL DEFAULT 0");
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
-  // Existing DBs predate tradable. Default to 1 so preserved rows stay eligible
-  // until the next scan cycle rewrites them with the authoritative clob flag.
-  safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
   ensureUniqueOpenPositionIndex(conn.db);
   return conn;
 }
