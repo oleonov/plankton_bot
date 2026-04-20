@@ -32,6 +32,7 @@ import { createCommandId, createOrderId, ExchangeErrorCode } from "@plankton/dom
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
@@ -222,6 +223,47 @@ export class ExecutionModule implements RuntimeModule {
           timestamp: Date.now(),
         });
         return;
+      }
+
+      // Live-lite steady-state caps (ADR-009): runtime enforcement of the
+      // same open-value + active-markets envelope that preflight checks at
+      // startup. Only applied to BUY — SELL reduces exposure.
+      if (cmd.side === "buy" && this.deps.positionRepo) {
+        const totalExposureAfter = calculateTotalExposure(
+          this.deps.positionRepo,
+          this.deps.orderRepo,
+          notional,
+        );
+        if (this.deps.liveLiteGuard.wouldExceedOpenValueCap(totalExposureAfter, 0)) {
+          this.log.warn(
+            { commandId: cmd.commandId, totalExposureAfter },
+            "order rejected — exceeds live-lite open-value cap",
+          );
+          await this.rejectOrder(
+            cmd,
+            "live-lite-open-value-cap-exceeded",
+            ExchangeErrorCode.LivePolicyBlocked,
+          );
+          return;
+        }
+
+        const openMarkets = countActiveOpenMarkets(this.deps.positionRepo);
+        const wouldBeNewMarket = !openMarkets.has(String(cmd.tokenId));
+        if (
+          wouldBeNewMarket &&
+          this.deps.liveLiteGuard.wouldExceedActiveMarketsCap(openMarkets.size, 1)
+        ) {
+          this.log.warn(
+            { commandId: cmd.commandId, activeMarkets: openMarkets.size },
+            "order rejected — exceeds live-lite active-markets cap",
+          );
+          await this.rejectOrder(
+            cmd,
+            "live-lite-active-markets-cap-exceeded",
+            ExchangeErrorCode.LivePolicyBlocked,
+          );
+          return;
+        }
       }
     }
 

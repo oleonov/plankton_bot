@@ -1035,6 +1035,177 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
+  it("rejects BUY when positions + open buys + new notional > maxOpenValueUsdc (ADR-009)", async () => {
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 15,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+    });
+    const positionRepo = createMockPositionRepo(
+      makePosition({ costBasisUsdc: 8, tokenId: createTokenId("tok-a") }),
+    );
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(7);
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    // 8 (positions) + 7 (open buys) + 1 (new) = 16 > 15 → reject
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 1, size: 1 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("live-lite-open-value-cap-exceeded");
+
+    await guardedMod.stop();
+  });
+
+  it("allows BUY when within open-value cap (ADR-009)", async () => {
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 100,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+    });
+    const positionRepo = createMockPositionRepo(
+      makePosition({ costBasisUsdc: 8, tokenId: createTokenId("tok-a") }),
+    );
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(7);
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ price: 1, size: 1 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await guardedMod.stop();
+  });
+
+  it("rejects BUY on new market when active-markets cap reached (ADR-009)", async () => {
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 2,
+    });
+    const positionRepo = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findOpen: vi.fn().mockReturnValue([
+        makePosition({ tokenId: createTokenId("tok-a"), costBasisUsdc: 1 }),
+        makePosition({ tokenId: createTokenId("tok-b"), costBasisUsdc: 1 }),
+      ]),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    } as PositionRepository;
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    // BUY on tok-c (new market) with 2 already open → 3 > 2 → reject
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ tokenId: createTokenId("tok-c"), price: 0.5, size: 2 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("live-lite-active-markets-cap-exceeded");
+
+    await guardedMod.stop();
+  });
+
+  it("allows BUY on existing market even at active-markets cap (ADR-009 scale-in path)", async () => {
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 2,
+    });
+    const positionRepo = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findOpen: vi.fn().mockReturnValue([
+        makePosition({ tokenId: createTokenId("tok-a"), costBasisUsdc: 1 }),
+        makePosition({ tokenId: createTokenId("tok-b"), costBasisUsdc: 1 }),
+      ]),
+      findDust: vi.fn().mockReturnValue([]),
+      findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    } as PositionRepository;
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    // BUY on tok-a (already open) → no new market, passes
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ tokenId: createTokenId("tok-a"), price: 0.5, size: 2 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await guardedMod.stop();
+  });
+
   it("places fee-enabled EOA orders to gateway (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
       maxOpenValueUsdc: 1000,
