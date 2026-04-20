@@ -83,13 +83,6 @@ export const SessionMode = {
 } as const;
 export type SessionMode = (typeof SessionMode)[keyof typeof SessionMode];
 
-export const TwoSidedMode = {
-  Disabled: "disabled",
-  Selective: "selective",
-  Active: "active",
-} as const;
-export type TwoSidedMode = (typeof TwoSidedMode)[keyof typeof TwoSidedMode];
-
 export const WeekdayBias = {
   Normal: "normal",
   Preferred: "preferred",
@@ -161,7 +154,6 @@ export const SignalReason = {
   HeavyScale: "heavy-scale",
   RepricingExit: "repricing-exit",
   MediumHoldExit: "medium-hold-exit",
-  TwoSidedEntry: "two-sided-entry",
   TailPrune: "tail-prune",
   ReduceOnly: "reduce-only",
   Operator: "operator",
@@ -175,7 +167,6 @@ export const ENTRY_REASONS: ReadonlySet<string> = new Set([
   SignalReason.ConfirmScale,
   SignalReason.ScaleIn,
   SignalReason.HeavyScale,
-  SignalReason.TwoSidedEntry,
 ]);
 
 // ─── Operator ─────────────────────────────────────────────────────────────────
@@ -253,7 +244,6 @@ export type DeploymentStage = (typeof DeploymentStage)[keyof typeof DeploymentSt
 export const StrategyStage = {
   ProbeOnly: "probe-only",
   Scaled: "scaled",
-  BothSided: "both-sided",
 } as const;
 export type StrategyStage = (typeof StrategyStage)[keyof typeof StrategyStage];
 
