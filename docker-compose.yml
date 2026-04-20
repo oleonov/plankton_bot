@@ -5,27 +5,11 @@ services:
     working_dir: /app
     volumes:
       - plankton-data:/app/apps/runtime/data
-      - ./config:/app/config:ro
     restart: unless-stopped
     env_file: .env.production
     mem_limit: 450m
     environment:
       - NODE_OPTIONS=--max-old-space-size=384
-
-  plankton-discovery:
-    image: plankton:latest
-    command: ["node", "apps/discovery/dist/worker.js"]
-    working_dir: /app
-    volumes:
-      - plankton-data:/app/apps/runtime/data
-      - ./config:/app/config:ro
-    restart: unless-stopped
-    depends_on:
-      - plankton-runtime
-    env_file: .env.production
-    mem_limit: 768m
-    environment:
-      - NODE_OPTIONS=--max-old-space-size=640
 
   plankton-api:
     image: plankton:latest
@@ -35,7 +19,6 @@ services:
       - "3100:3100"
     volumes:
       - plankton-data:/app/apps/runtime/data
-      - ./config:/app/config:ro
     restart: unless-stopped
     depends_on:
       - plankton-runtime

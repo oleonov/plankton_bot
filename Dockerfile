@@ -17,7 +17,6 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY scripts/install-git-hooks.mjs scripts/install-git-hooks.mjs
 COPY apps/api/package.json apps/api/package.json
 COPY apps/runtime/package.json apps/runtime/package.json
-COPY apps/discovery/package.json apps/discovery/package.json
 COPY apps/runtime-manager/package.json apps/runtime-manager/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/config/package.json packages/config/package.json
@@ -25,14 +24,13 @@ COPY packages/db/package.json packages/db/package.json
 COPY packages/domain/package.json packages/domain/package.json
 COPY packages/event-bus/package.json packages/event-bus/package.json
 COPY packages/exchange/package.json packages/exchange/package.json
-COPY packages/family-rules/package.json packages/family-rules/package.json
 
 RUN pnpm install --frozen-lockfile
 
 # Ensure all workspace node_modules dirs exist (pnpm may skip empty ones)
-RUN mkdir -p apps/api/node_modules apps/runtime/node_modules apps/discovery/node_modules apps/runtime-manager/node_modules apps/web/node_modules \
+RUN mkdir -p apps/api/node_modules apps/runtime/node_modules apps/runtime-manager/node_modules apps/web/node_modules \
     packages/config/node_modules packages/db/node_modules packages/domain/node_modules \
-    packages/event-bus/node_modules packages/exchange/node_modules packages/family-rules/node_modules
+    packages/event-bus/node_modules packages/exchange/node_modules
 
 # ─── Builder ──────────────────────────────────────────────────────────────────
 FROM base AS builder
@@ -46,7 +44,6 @@ COPY --from=deps /app/packages/db/node_modules ./packages/db/node_modules
 COPY --from=deps /app/packages/domain/node_modules ./packages/domain/node_modules
 COPY --from=deps /app/packages/event-bus/node_modules ./packages/event-bus/node_modules
 COPY --from=deps /app/packages/exchange/node_modules ./packages/exchange/node_modules
-COPY --from=deps /app/packages/family-rules/node_modules ./packages/family-rules/node_modules
 
 # Copy source
 COPY . .
@@ -72,22 +69,18 @@ COPY --from=builder /app/pnpm-workspace.yaml ./
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps/api/node_modules ./apps/api/node_modules
 COPY --from=deps /app/apps/runtime/node_modules ./apps/runtime/node_modules
-COPY --from=deps /app/apps/discovery/node_modules ./apps/discovery/node_modules
 COPY --from=deps /app/apps/runtime-manager/node_modules ./apps/runtime-manager/node_modules
 COPY --from=deps /app/packages/config/node_modules ./packages/config/node_modules
 COPY --from=deps /app/packages/db/node_modules ./packages/db/node_modules
 COPY --from=deps /app/packages/domain/node_modules ./packages/domain/node_modules
 COPY --from=deps /app/packages/event-bus/node_modules ./packages/event-bus/node_modules
 COPY --from=deps /app/packages/exchange/node_modules ./packages/exchange/node_modules
-COPY --from=deps /app/packages/family-rules/node_modules ./packages/family-rules/node_modules
 
 # Copy compiled output — preserves monorepo layout
 COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/apps/runtime/dist ./apps/runtime/dist
 COPY --from=builder /app/apps/runtime/package.json ./apps/runtime/package.json
-COPY --from=builder /app/apps/discovery/dist ./apps/discovery/dist
-COPY --from=builder /app/apps/discovery/package.json ./apps/discovery/package.json
 COPY --from=builder /app/apps/runtime-manager/dist ./apps/runtime-manager/dist
 COPY --from=builder /app/apps/runtime-manager/package.json ./apps/runtime-manager/package.json
 COPY --from=builder /app/apps/web/dist ./apps/web/dist
@@ -101,11 +94,6 @@ COPY --from=builder /app/packages/event-bus/dist ./packages/event-bus/dist
 COPY --from=builder /app/packages/event-bus/package.json ./packages/event-bus/package.json
 COPY --from=builder /app/packages/exchange/dist ./packages/exchange/dist
 COPY --from=builder /app/packages/exchange/package.json ./packages/exchange/package.json
-COPY --from=builder /app/packages/family-rules/dist ./packages/family-rules/dist
-COPY --from=builder /app/packages/family-rules/package.json ./packages/family-rules/package.json
-
-# Copy default family rules (operator can override via volume mount)
-COPY --from=builder /app/config ./config
 
 # Copy production DB preparation tooling for controlled ops rollouts.
 COPY --from=builder /app/scripts/prepare-hard-mode-db.ts ./scripts/prepare-hard-mode-db.ts

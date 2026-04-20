@@ -91,7 +91,7 @@ cd ${SERVER_PATH}
 # No separate "down" step — if the script dies after load but before up,
 # the old containers keep running with the old image.
 echo "Replacing containers (force-recreate)..."
-docker-compose --env-file .env.production up -d --force-recreate
+docker-compose --env-file .env.production up -d --force-recreate --remove-orphans
 
 echo "Cleaning up..."
 rm /tmp/${IMAGE_NAME}.tar.gz
