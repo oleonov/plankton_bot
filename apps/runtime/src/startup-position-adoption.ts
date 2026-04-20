@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type {
   BotRunId,
   ConditionId,
+  EventBus,
   ExchangeFill,
   ExchangeGateway,
   FillRepository,
@@ -192,7 +193,16 @@ export async function runStartupPositionAdoption(
     pendingFills.push({ fill, localOrder: null, orphanGroupKey });
   }
 
-  const bus = { publish: async () => {} } as any;
+  // Startup adoption replays historical fills from the exchange to rebuild
+  // local inventory; the downstream FillReceived handlers (risk gate, signal
+  // bridge) must not react to that replay as if the fills were live. A typed
+  // no-op bus satisfies importExchangeFills's EventBus contract while dropping
+  // the publish side-effect on the floor.
+  const bus: EventBus = {
+    publish: async () => {},
+    subscribe: () => () => {},
+    drain: async () => {},
+  };
 
   for (const pending of pendingFills) {
     const localOrder =
