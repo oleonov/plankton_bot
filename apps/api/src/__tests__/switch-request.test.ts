@@ -16,6 +16,7 @@ function testConfig(): AppConfig {
     dbPath: "",
     marketDataPollIntervalMs: 30_000,
     marketDataStaleThresholdMs: 120_000,
+    marketScanIntervalMs: 300_000,
     strategyScanIntervalMs: 5_000,
     fillPollIntervalMs: 5_000,
     enableInventoryAutoMerge: false,

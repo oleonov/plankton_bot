@@ -9,9 +9,14 @@ describe("speedup config vars", () => {
     delete process.env.EXECUTION_MAX_CONCURRENCY;
   });
 
-  it("defaults STRATEGY_SCAN_INTERVAL_MS to 5000", () => {
+  it("defaults STRATEGY_SCAN_INTERVAL_MS to 12000", () => {
     const config = loadEnv();
-    expect(config.strategyScanIntervalMs).toBe(5000);
+    expect(config.strategyScanIntervalMs).toBe(12000);
+  });
+
+  it("defaults MARKET_SCAN_INTERVAL_MS to 5 minutes", () => {
+    const config = loadEnv();
+    expect(config.marketScanIntervalMs).toBe(5 * 60 * 1000);
   });
 
   it("defaults FILL_POLL_INTERVAL_MS to 5000", () => {

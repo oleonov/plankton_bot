@@ -415,7 +415,7 @@ async function main(): Promise<void> {
     marketRepo: repos.market,
     bus,
     log,
-    scanIntervalMs: 5 * 60 * 1000,
+    scanIntervalMs: config.marketScanIntervalMs,
     selectionRuleEngine,
     positionRepo: repos.position,
     orderRepo: repos.order,
@@ -514,7 +514,7 @@ async function main(): Promise<void> {
     selectedMarketCache,
     runtimeControl,
     log,
-    sweepIntervalMs: 12_000,
+    sweepIntervalMs: config.strategyScanIntervalMs,
   });
 
   // Standalone SignalToOrderBridge — wired here so it is active when AlgoDecisionModule

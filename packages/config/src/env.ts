@@ -13,7 +13,8 @@ const envSchema = z
     DB_PATH: z.string().default("./apps/runtime/data/plankton.db"),
     MARKET_DATA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().int().positive().default(120_000),
-    STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
+    MARKET_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
+    STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(12_000),
     FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     INVENTORY_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
     ENABLE_INVENTORY_AUTO_MERGE: z
@@ -86,6 +87,7 @@ export interface AppConfig {
   dbPath: string;
   marketDataPollIntervalMs: number;
   marketDataStaleThresholdMs: number;
+  marketScanIntervalMs: number;
   strategyScanIntervalMs: number;
   fillPollIntervalMs: number;
   inventorySweepIntervalMs?: number;
@@ -146,6 +148,7 @@ export function loadEnv(envPath?: string): AppConfig {
     dbPath: path.resolve(root, env.DB_PATH),
     marketDataPollIntervalMs: env.MARKET_DATA_POLL_INTERVAL_MS,
     marketDataStaleThresholdMs: env.MARKET_DATA_STALE_THRESHOLD_MS,
+    marketScanIntervalMs: env.MARKET_SCAN_INTERVAL_MS,
     strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,
     fillPollIntervalMs: env.FILL_POLL_INTERVAL_MS,
     inventorySweepIntervalMs: env.INVENTORY_SWEEP_INTERVAL_MS,
