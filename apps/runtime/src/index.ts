@@ -406,10 +406,13 @@ async function main(): Promise<void> {
     .run(botRunId, runtimeMode, new Date().toISOString());
   log.info({ botRunId, mode: runtimeMode }, "bot run recorded");
 
-  // 7d. Market scanner (discovery via Gamma API)
-  // TODO: pass tagId for server-side narrowing once we have a category→tagId mapping.
-  // Without it, discovery broad-crawls all active Gamma markets then filters locally.
-  const discoveryGateway = new GammaMarketDiscoveryGateway();
+  // 7d. Market scanner (discovery via Gamma API).
+  // When GAMMA_TAG_ID is set, the scanner narrows to that tag server-side
+  // (5–10× fewer markets crawled). When unset, the scanner broad-crawls all
+  // active Gamma events and relies on selection rules for local filtering.
+  const discoveryGateway = new GammaMarketDiscoveryGateway(
+    config.gammaTagId !== undefined ? { tagId: config.gammaTagId } : {},
+  );
   const marketScannerModule = new MarketScannerModule({
     discoveryGateway,
     marketRepo: repos.market,

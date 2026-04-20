@@ -14,6 +14,7 @@ const envSchema = z
     MARKET_DATA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().int().positive().default(120_000),
     MARKET_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(5 * 60 * 1000),
+    GAMMA_TAG_ID: z.coerce.number().int().positive().optional(),
     STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(12_000),
     FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     INVENTORY_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
@@ -90,6 +91,7 @@ export interface AppConfig {
   marketDataPollIntervalMs: number;
   marketDataStaleThresholdMs: number;
   marketScanIntervalMs: number;
+  gammaTagId?: number | undefined;
   strategyScanIntervalMs: number;
   fillPollIntervalMs: number;
   inventorySweepIntervalMs?: number;
@@ -153,6 +155,7 @@ export function loadEnv(envPath?: string): AppConfig {
     marketDataPollIntervalMs: env.MARKET_DATA_POLL_INTERVAL_MS,
     marketDataStaleThresholdMs: env.MARKET_DATA_STALE_THRESHOLD_MS,
     marketScanIntervalMs: env.MARKET_SCAN_INTERVAL_MS,
+    gammaTagId: env.GAMMA_TAG_ID,
     strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,
     fillPollIntervalMs: env.FILL_POLL_INTERVAL_MS,
     inventorySweepIntervalMs: env.INVENTORY_SWEEP_INTERVAL_MS,
