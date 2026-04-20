@@ -22,6 +22,8 @@ const envSchema = z
       .default("false")
       .transform((v) => v === "true"),
     EXECUTION_MAX_CONCURRENCY: z.coerce.number().int().positive().default(16),
+    EXECUTION_WALLET_BUFFER_PCT: z.coerce.number().nonnegative().max(1).default(0.03),
+    EXECUTION_WALLET_BUFFER_MIN_USDC: z.coerce.number().nonnegative().default(0.25),
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
     POLY_PASSPHRASE: z.string().optional(),
@@ -93,6 +95,8 @@ export interface AppConfig {
   inventorySweepIntervalMs?: number;
   enableInventoryAutoMerge: boolean;
   executionMaxConcurrency: number;
+  executionWalletBufferPct: number;
+  executionWalletBufferMinUsdc: number;
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
   polyPassphrase: string | undefined;
@@ -154,6 +158,8 @@ export function loadEnv(envPath?: string): AppConfig {
     inventorySweepIntervalMs: env.INVENTORY_SWEEP_INTERVAL_MS,
     enableInventoryAutoMerge: env.ENABLE_INVENTORY_AUTO_MERGE,
     executionMaxConcurrency: env.EXECUTION_MAX_CONCURRENCY,
+    executionWalletBufferPct: env.EXECUTION_WALLET_BUFFER_PCT,
+    executionWalletBufferMinUsdc: env.EXECUTION_WALLET_BUFFER_MIN_USDC,
     polyApiKey: env.POLY_API_KEY,
     polyApiSecret: env.POLY_API_SECRET,
     polyPassphrase: env.POLY_PASSPHRASE,

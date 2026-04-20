@@ -473,6 +473,8 @@ async function main(): Promise<void> {
     liveLiteGuard,
     runtimeMode,
     maxConcurrency: config.executionMaxConcurrency,
+    walletBufferPct: config.executionWalletBufferPct,
+    walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });

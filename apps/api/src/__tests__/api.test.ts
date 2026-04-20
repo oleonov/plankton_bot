@@ -25,6 +25,8 @@ function testConfig(overrides?: Partial<AppConfig>): AppConfig {
     fillPollIntervalMs: 5_000,
     enableInventoryAutoMerge: false,
     executionMaxConcurrency: 4,
+    executionWalletBufferPct: 0.03,
+    executionWalletBufferMinUsdc: 0.25,
     polyApiKey: undefined,
     polyApiSecret: undefined,
     polyPassphrase: undefined,

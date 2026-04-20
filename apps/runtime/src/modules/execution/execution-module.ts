@@ -57,11 +57,13 @@ export interface ExecutionModuleDeps {
     prepare(sql: string): { get(...args: unknown[]): unknown };
   };
   activeProfile?: ProfileId | undefined;
+  walletBufferPct?: number | undefined;
+  walletBufferMinUsdc?: number | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
-  private static readonly WALLET_BUFFER_RATIO = 0.03;
-  private static readonly MIN_WALLET_BUFFER_USDC = 0.25;
+  private static readonly DEFAULT_WALLET_BUFFER_RATIO = 0.03;
+  private static readonly DEFAULT_MIN_WALLET_BUFFER_USDC = 0.25;
   private static readonly SELL_REPLACE_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
   private static readonly SIZE_EPSILON_SHARES = 1e-9;
 
@@ -649,10 +651,10 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private getWalletBufferUsdc(walletBalance: number): number {
-    return Math.max(
-      ExecutionModule.MIN_WALLET_BUFFER_USDC,
-      walletBalance * ExecutionModule.WALLET_BUFFER_RATIO,
-    );
+    const pct = this.deps.walletBufferPct ?? ExecutionModule.DEFAULT_WALLET_BUFFER_RATIO;
+    const minUsdc =
+      this.deps.walletBufferMinUsdc ?? ExecutionModule.DEFAULT_MIN_WALLET_BUFFER_USDC;
+    return Math.max(minUsdc, walletBalance * pct);
   }
 
   private getMinOrderSizeRejection(cmd: PlaceOrderCommand): { minOrderSize: number } | null {
