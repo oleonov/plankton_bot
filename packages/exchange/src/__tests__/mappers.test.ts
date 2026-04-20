@@ -393,6 +393,26 @@ describe("mapGammaMarket", () => {
     expect(market.tickSize).toBe(0.0001);
   });
 
+  // ADR-007: lifetime `volumeNum` is the source for the `volume24h` field
+  // (historical-universe-filter proxy for spec §0 R1 `trade_count > 0`).
+  it("ADR-007: maps Gamma `volumeNum` (lifetime) into `volume24h`", () => {
+    const market = mapGammaMarket({
+      volumeNum: 1_568_499.88,
+      volume24hr: 5_733.78, // rolling 24h — MUST be ignored for this field
+    });
+    expect(market.volume24h).toBe(1_568_499.88);
+  });
+
+  it("ADR-007: `volume24h` is null when `volumeNum` is absent (CLOB-path emulation)", () => {
+    const market = mapGammaMarket({});
+    expect(market.volume24h).toBeNull();
+  });
+
+  it("ADR-007: `volume24h` is 0 when `volumeNum` is 0 (never-traded market)", () => {
+    const market = mapGammaMarket({ volumeNum: 0 });
+    expect(market.volume24h).toBe(0);
+  });
+
   it("handles missing fields with defaults", () => {
     const market = mapGammaMarket({});
 

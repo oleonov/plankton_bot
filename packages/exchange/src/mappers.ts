@@ -336,7 +336,14 @@ export function mapGammaMarket(
     active: Boolean(raw.active),
     negRisk: Boolean(raw.negRisk),
     tickSize: Number(raw.orderPriceMinTickSize ?? 0.01),
-    volume24h: raw.volume24hr != null ? Number(raw.volume24hr) : null,
+    // Gamma exposes two distinct volume fields:
+    //   • `volumeNum`  — lifetime cumulative volume (USDC)
+    //   • `volume24hr` — rolling 24h window
+    // Spec §0 R1 requires `trade_count > 0` (lifetime). `volumeNum > 0` is our
+    // proxy — see ADR-007. `volume24hr` would false-exclude older markets
+    // with no recent activity. The domain field name is kept as `volume24h`
+    // for backward-compat; ADR-007 documents the semantic.
+    volume24h: raw.volumeNum != null ? Number(raw.volumeNum) : null,
     eventMarketCount: eventContext.marketCount,
   };
 }

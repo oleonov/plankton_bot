@@ -265,7 +265,12 @@ export class LiveMarketDataGateway implements MarketDataGateway {
         parseOptionalIsoTimestamp(raw.last_trade_at) ??
         parseOptionalIsoTimestamp(raw.updatedAt) ??
         parseOptionalIsoTimestamp(raw.updated_at);
-      const volume24h = parseOptionalNumber(raw.volume24hr);
+      // ADR-007: Historical Universe Filter uses lifetime volume as the
+      // `trade_count > 0` proxy. Gamma exposes:
+      //   • `volumeNum`  — lifetime cumulative (use this)
+      //   • `volume24hr` — rolling 24h (would false-exclude dormant markets)
+      // Domain field name kept as `volume24h` for backward-compat; see ADR-007.
+      const volume24h = parseOptionalNumber(raw.volumeNum);
       const liquidity = parseOptionalNumber(raw.liquidity);
 
       // Gamma provides market-level bestBid/bestAsk (for the first outcome token).
