@@ -42,7 +42,7 @@ describe("RiskEventWriter", () => {
 
     it("writes different reason codes independently", () => {
       writer.onSignalRejected(signal, "dust positions 3 >= max 2", 1000);
-      writer.onSignalRejected(signal, "family-in-flight-limit", 1001);
+      writer.onSignalRejected(signal, "active markets 4 >= max 4", 1001);
 
       expect(repo.insert).toHaveBeenCalledTimes(2);
     });
@@ -51,8 +51,8 @@ describe("RiskEventWriter", () => {
       const sigA = { signalId: "sig-a", tokenId: createTokenId("tok-a") };
       const sigB = { signalId: "sig-b", tokenId: createTokenId("tok-b") };
 
-      writer.onSignalRejected(sigA, "token-in-flight-limit", 1000);
-      writer.onSignalRejected(sigB, "token-in-flight-limit", 1001);
+      writer.onSignalRejected(sigA, "dust positions 3 >= max 2", 1000);
+      writer.onSignalRejected(sigB, "dust positions 3 >= max 2", 1001);
 
       // Both should write — different tokens
       expect(repo.insert).toHaveBeenCalledTimes(2);

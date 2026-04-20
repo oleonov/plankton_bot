@@ -151,20 +151,33 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.approved).toBe(true);
   });
 
-  it("rejects buy when token in-flight limit exceeded (>=1)", async () => {
-    const getTokenInFlightCount = vi.fn().mockReturnValue(1);
+  it("rejects buy when order size is below the per-token minimum", async () => {
+    const resolveMinOrderSize = vi.fn().mockReturnValue(5);
     const gate = new AlgoRiskGateImpl(
       makeOrderRepo(),
       makePositionRepo(),
       makeLogger(),
-      undefined,
-      getTokenInFlightCount,
+      resolveMinOrderSize,
     );
-    const signal = makeSignal({ side: "buy", reason: "probe-entry" });
+    const signal = makeSignal({ suggestedSize: 1 });
     const decision = await gate.evaluate(signal);
 
     expect(decision.approved).toBe(false);
-    expect(decision.rejectionReasons).toContain("token-in-flight-limit");
+    expect(decision.rejectionReasons.some((r) => r.includes("below min"))).toBe(true);
+  });
+
+  it("approves buy when order size meets the per-token minimum", async () => {
+    const resolveMinOrderSize = vi.fn().mockReturnValue(5);
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(),
+      makeLogger(),
+      resolveMinOrderSize,
+    );
+    const signal = makeSignal({ suggestedSize: 10 });
+    const decision = await gate.evaluate(signal);
+
+    expect(decision.approved).toBe(true);
   });
 
   it("includes tokenId and conditionId in RiskDecision", async () => {

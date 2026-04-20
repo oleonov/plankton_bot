@@ -3,8 +3,6 @@ import { normalizeReasonCode } from "../risk-event-codes.js";
 
 describe("normalizeReasonCode", () => {
   it("maps static reason strings verbatim", () => {
-    expect(normalizeReasonCode("family-in-flight-limit")).toBe("family_in_flight_limit");
-    expect(normalizeReasonCode("probe-token-in-flight-limit")).toBe("probe_token_in_flight_limit");
     expect(normalizeReasonCode("live-lite-open-value-cap-exceeded")).toBe(
       "live_lite_open_value_cap",
     );

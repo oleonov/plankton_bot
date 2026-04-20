@@ -10,6 +10,7 @@
  *  - place/cancel orders (execution's job)
  *  - decide what trades to make (strategy's job)
  *  - reconcile with exchange (reconciliation's job)
+ *  - dedup signals (algo-decision-module's pendingEntries map does this)
  */
 
 import type Database from "better-sqlite3";
@@ -21,7 +22,6 @@ import type {
   OrderRepository,
   FillRepository,
   RuntimeEventMap,
-  TokenId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
@@ -61,22 +61,13 @@ export class RiskInventoryModule implements RuntimeModule {
   private fillsProcessed = 0;
   private mtmUpdates = 0;
 
-  /** Per-token in-flight buy order counter (generalized, all buy-side commands). */
-  private readonly tokenInFlight = new Map<string, number>();
   /** Latest known exchange minimum share size per token from live market updates. */
   private readonly tokenMinOrderSize = new Map<string, number>();
 
-  /** Orders already decremented from in-flight (prevents double-decrement on multi-fill orders). */
-  private readonly inFlightDecremented = new Set<string>();
-
   constructor(private readonly deps: RiskInventoryModuleDeps) {
     this.log = deps.log.child({ module: "risk-inventory" });
-    this.riskGate = new AlgoRiskGateImpl(
-      deps.orderRepo,
-      deps.positionRepo,
-      this.log,
-      (tid) => this.getLatestMinOrderSize(tid),
-      (tid) => this.getTokenInFlightCount(tid),
+    this.riskGate = new AlgoRiskGateImpl(deps.orderRepo, deps.positionRepo, this.log, (tid) =>
+      this.getLatestMinOrderSize(tid),
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,
@@ -91,18 +82,6 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.bus.subscribe("SignalProduced", (p) => this.handleSignal(p)),
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFill(p)),
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
-      this.deps.bus.subscribe("PlaceOrderRequested", (p) => {
-        this.incrementInFlight(p.command);
-        return Promise.resolve();
-      }),
-      this.deps.bus.subscribe("OrderRejected", (p) => {
-        this.decrementTokenInFlight(String(p.tokenId));
-        return Promise.resolve();
-      }),
-      this.deps.bus.subscribe("OrderCancelled", (p) => {
-        this.decrementTokenInFlight(String(p.tokenId));
-        return Promise.resolve();
-      }),
     );
     this.started = true;
     this.log.info("risk-inventory module started");
@@ -134,22 +113,6 @@ export class RiskInventoryModule implements RuntimeModule {
       fillsProcessed: this.fillsProcessed,
       markToMarketUpdates: this.mtmUpdates,
     };
-  }
-
-  // ─── In-flight counter helpers ────────────────────────────────────
-
-  private incrementInFlight(command: RuntimeEventMap["PlaceOrderRequested"]["command"]): void {
-    if (command.side !== "buy") return;
-    const key = String(command.tokenId);
-    this.tokenInFlight.set(key, (this.tokenInFlight.get(key) ?? 0) + 1);
-  }
-
-  private decrementTokenInFlight(tokenId: string): void {
-    this.tokenInFlight.set(tokenId, Math.max(0, (this.tokenInFlight.get(tokenId) ?? 0) - 1));
-  }
-
-  private getTokenInFlightCount(tokenId: TokenId): number {
-    return this.tokenInFlight.get(String(tokenId)) ?? 0;
   }
 
   private getLatestMinOrderSize(
@@ -222,13 +185,6 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.fillRepo.markReconciled([payload.fillId]);
 
       await this.deps.bus.publish("PositionUpdated", { position });
-
-      const oid = String(payload.orderId);
-      const order = this.deps.orderRepo.findById(payload.orderId);
-      if (order && order.status === "filled" && !this.inFlightDecremented.has(oid)) {
-        this.inFlightDecremented.add(oid);
-        this.decrementTokenInFlight(String(payload.tokenId));
-      }
     } catch (err) {
       this.log.error(
         { err, fillId: payload.fillId, tokenId: payload.tokenId },
