@@ -464,7 +464,7 @@ export interface LegState {
    * Price of the first BUY fill that opened this leg (post-entry, leg-local).
    * Used by the continuation filter (06 spec §0 / ADR D1). NOT Gamma market-wide first trade.
    */
-  firstEntryFillPrice: number;
+  firstTradePrice: number;
   firstTradeAt: string;
   lastTradeAt: string;
   updatedAt: string;

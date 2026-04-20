@@ -42,9 +42,9 @@ export function evaluatePreEntry(
   };
 }
 
-export function evaluateContinuation(legTradeCount: number, firstEntryFillPrice: number): boolean {
+export function evaluateContinuation(legTradeCount: number, firstTradePrice: number): boolean {
   if (legTradeCount >= 6) return true;
-  if (firstEntryFillPrice >= 0.05 && legTradeCount >= 2) return true;
+  if (firstTradePrice >= 0.05 && legTradeCount >= 2) return true;
   return false;
 }
 

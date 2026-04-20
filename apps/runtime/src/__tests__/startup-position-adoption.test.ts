@@ -474,7 +474,7 @@ describe("runStartupPositionAdoption", () => {
       expect(state?.buyCount).toBe(1);
       expect(state?.sellCount).toBe(0);
       expect(state?.lastAction).toBe("BUY");
-      expect(state?.firstEntryFillPrice).toBe(0.42);
+      expect(state?.firstTradePrice).toBe(0.42);
       expect(state?.firstTradeAt).toBe("2026-04-01T00:00:00Z");
     });
 
@@ -529,7 +529,7 @@ describe("runStartupPositionAdoption", () => {
       expect(state?.lastTradeAt).toBe("2026-04-03T00:00:00Z");
     });
 
-    it("uses first BUY fill for firstEntryFillPrice (ordered by filled_at ASC, fill_id ASC)", async () => {
+    it("uses first BUY fill for firstTradePrice (ordered by filled_at ASC, fill_id ASC)", async () => {
       const conn = bootstrapLedgerDb(":memory:");
       connections.push(conn);
       const { fillRepo, positionRepo } = primeLedger(conn);
@@ -541,7 +541,7 @@ describe("runStartupPositionAdoption", () => {
       const { legStateRepo } = await runRebuild(conn);
 
       const state = legStateRepo.get(TOKEN_ID);
-      expect(state?.firstEntryFillPrice).toBe(0.42);
+      expect(state?.firstTradePrice).toBe(0.42);
       expect(state?.firstTradeAt).toBe("2026-04-01T00:00:00Z");
     });
 
@@ -568,7 +568,7 @@ describe("runStartupPositionAdoption", () => {
       const { legStateRepo } = await runRebuild(conn);
 
       const state = legStateRepo.get(TOKEN_ID);
-      expect(state?.firstEntryFillPrice).toBe(0.37);
+      expect(state?.firstTradePrice).toBe(0.37);
     });
 
     it("seeds leg_state for dust positions (not just open)", async () => {

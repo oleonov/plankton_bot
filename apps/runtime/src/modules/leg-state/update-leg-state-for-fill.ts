@@ -35,7 +35,7 @@ export function updateLegStateForFill(
         buyCount: 1,
         sellCount: 0,
         lastAction: "BUY",
-        firstEntryFillPrice: fill.price,
+        firstTradePrice: fill.price,
         firstTradeAt: fill.filledAt,
         lastTradeAt: fill.filledAt,
         updatedAt: now,

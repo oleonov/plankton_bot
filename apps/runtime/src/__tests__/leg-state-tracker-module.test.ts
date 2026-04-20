@@ -108,7 +108,7 @@ function makeLegState(overrides?: Partial<LegState>): LegState {
     buyCount: 1,
     sellCount: 0,
     lastAction: "BUY",
-    firstEntryFillPrice: 0.45,
+    firstTradePrice: 0.45,
     firstTradeAt: "2026-01-15T10:00:00.000Z",
     lastTradeAt: "2026-01-15T10:00:00.000Z",
     updatedAt: "2026-01-15T10:00:00.000Z",
@@ -143,7 +143,7 @@ describe("LegStateTrackerModule", () => {
     expect(upserted.buyCount).toBe(1);
     expect(upserted.sellCount).toBe(0);
     expect(upserted.lastAction).toBe("BUY");
-    expect(upserted.firstEntryFillPrice).toBe(0.45);
+    expect(upserted.firstTradePrice).toBe(0.45);
     expect(upserted.firstTradeAt).toBe(new Date(TIMESTAMP).toISOString());
     expect(upserted.lastTradeAt).toBe(new Date(TIMESTAMP).toISOString());
   });
@@ -163,7 +163,7 @@ describe("LegStateTrackerModule", () => {
     expect(upserted.buyCount).toBe(2);
     expect(upserted.sellCount).toBe(0);
     expect(upserted.lastAction).toBe("BUY");
-    expect(upserted.firstEntryFillPrice).toBe(existing.firstEntryFillPrice);
+    expect(upserted.firstTradePrice).toBe(existing.firstTradePrice);
     expect(upserted.firstTradeAt).toBe(existing.firstTradeAt);
   });
 

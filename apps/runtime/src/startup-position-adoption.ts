@@ -365,12 +365,12 @@ function rebuildLegStatesFromLedger(
     // exchange fill lacks a usable price. Fall back to the canonical
     // position's avg_entry_price so the leg_state reflects economic reality.
     const seeded = deps.legStateRepo.get(tokenId);
-    if (seeded && seeded.firstEntryFillPrice === 0) {
+    if (seeded && seeded.firstTradePrice === 0) {
       const position = deps.positionRepo.findByTokenId(tokenId);
       if (position && position.avgEntryPrice > 0) {
         deps.legStateRepo.upsert({
           ...seeded,
-          firstEntryFillPrice: position.avgEntryPrice,
+          firstTradePrice: position.avgEntryPrice,
           updatedAt: now,
         });
       }

@@ -18,7 +18,7 @@ function makeLegState(overrides: Partial<LegState>): LegState {
     buyCount: 0,
     sellCount: 0,
     lastAction: "BUY",
-    firstEntryFillPrice: 0.03,
+    firstTradePrice: 0.03,
     firstTradeAt: "2026-01-01T00:00:00Z",
     lastTradeAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",

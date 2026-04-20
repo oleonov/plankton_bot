@@ -67,22 +67,22 @@ describe("evaluatePreEntry", () => {
 });
 
 describe("evaluateContinuation", () => {
-  it("continues when tradeCount >= 6 regardless of firstEntryFillPrice", () => {
+  it("continues when tradeCount >= 6 regardless of firstTradePrice", () => {
     expect(evaluateContinuation(6, 0.01)).toBe(true);
     expect(evaluateContinuation(10, 0.03)).toBe(true);
   });
 
-  it("continues when firstEntryFillPrice >= 0.05 and tradeCount >= 2", () => {
+  it("continues when firstTradePrice >= 0.05 and tradeCount >= 2", () => {
     expect(evaluateContinuation(2, 0.05)).toBe(true);
     expect(evaluateContinuation(3, 0.1)).toBe(true);
   });
 
-  it("stops when tradeCount < 6 and firstEntryFillPrice < 0.05", () => {
+  it("stops when tradeCount < 6 and firstTradePrice < 0.05", () => {
     expect(evaluateContinuation(5, 0.04)).toBe(false);
     expect(evaluateContinuation(1, 0.01)).toBe(false);
   });
 
-  it("stops when firstEntryFillPrice >= 0.05 but tradeCount < 2", () => {
+  it("stops when firstTradePrice >= 0.05 but tradeCount < 2", () => {
     expect(evaluateContinuation(1, 0.05)).toBe(false);
     expect(evaluateContinuation(0, 0.1)).toBe(false);
   });
@@ -95,11 +95,11 @@ describe("evaluateContinuation", () => {
     expect(evaluateContinuation(6, 0.01)).toBe(true);
   });
 
-  it("continues at exactly firstEntryFillPrice=0.05 and tradeCount=2", () => {
+  it("continues at exactly firstTradePrice=0.05 and tradeCount=2", () => {
     expect(evaluateContinuation(2, 0.05)).toBe(true);
   });
 
-  it("stops at firstEntryFillPrice=0.049 and tradeCount=2", () => {
+  it("stops at firstTradePrice=0.049 and tradeCount=2", () => {
     expect(evaluateContinuation(2, 0.049)).toBe(false);
   });
 });

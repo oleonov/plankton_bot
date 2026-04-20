@@ -313,7 +313,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // position management: legState tokens are gated by continuation, not eligibility.
     if (legState) {
       const legTradeCount = legState.buyCount + legState.sellCount;
-      const stop = !evaluateContinuation(legTradeCount, legState.firstEntryFillPrice);
+      const stop = !evaluateContinuation(legTradeCount, legState.firstTradePrice);
       if (stop) return null; // spec §0: fail continuation → full STOP (no more signals)
       if (preservedOnly) {
         // preserved-only: market de-listed for new entries, exit-only via SELL
