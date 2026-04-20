@@ -508,9 +508,25 @@ export function SelectionRules() {
           ))}
         </select>
       </div>
-      <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "0 0 16px" }}>
+      <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "0 0 8px" }}>
         Rules are evaluated with specificity-wins logic: exact slug beats prefix; longer prefix
         wins; exclude beats include at the same tier.
+      </p>
+      <p
+        style={{
+          color: "var(--text-muted)",
+          fontSize: 12,
+          margin: "0 0 16px",
+          padding: "6px 8px",
+          border: "1px solid var(--border-dim)",
+          borderRadius: 4,
+        }}
+      >
+        Heads up: canonical spec §0 STEP 1 only defines <code>include_prefix</code> seeded with
+        three prefixes (bitcoin, ethereum, elon-musk). <code>exclude_prefix</code>,{" "}
+        <code>include_slug</code>, <code>exclude_slug</code>, and precedence are operator
+        extensions frozen in ADR-004. Review any rule beyond the seeded prefixes before shipping
+        to live-lite.
       </p>
 
       <RulesTable rules={rules} profileId={profileId} />

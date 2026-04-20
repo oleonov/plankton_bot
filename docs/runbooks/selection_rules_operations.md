@@ -2,6 +2,8 @@
 
 Selection rules control which Polymarket event slugs the scanner admits into the trading universe. They live in `control.db` and hot-reload into the runtime within one scan tick of a mutation — no restart required.
 
+> **Spec scope.** Canonical spec §0 STEP 1 describes only `include_prefix` seeded with `bitcoin-`, `ethereum-`, `elon-musk-` (migration 037 seeds exactly these). `exclude_prefix`, `include_slug`, `exclude_slug`, precedence, and the STEP 2 `eventMarketCount === 1` fallback are **operator extensions** frozen in [ADR-004](../adr/004-selection-engine-extended-matchers.md). Review any rule beyond the three seeded prefixes before enabling in live-lite — the engine has no "spec-safe mode" and a bad `exclude_prefix` can shrink the universe to zero.
+
 ## Rule types
 
 | Type             | Matches                               | Example pattern                   |
