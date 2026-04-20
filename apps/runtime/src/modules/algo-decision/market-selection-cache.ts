@@ -9,9 +9,10 @@ import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine
 // not `active`: preserved-for-lifecycle markets (active=true, tradable=false)
 // keep flowing pricing for SELL/REDEEM but are excluded from new-entry gating.
 //
-// The Historical Universe Filter (`trade_count > 0`) is intentionally omitted
-// per docs/superpowers/specs/2026-04-16-market-selection-layer-design.md §1.1
-// — Gamma exposes no trade_count field and the design forbids proxies.
+// Historical Universe Filter (spec §0 R1, `trade_count > 0`) — Gamma exposes
+// no `trade_count` field; we use lifetime volume (`volumeNum`) as a proxy per
+// ADR-007. `volume24h === 0` (lifetime never traded) → excluded. `null`
+// (unknown, e.g. CLOB path) → not blocked.
 export class MarketSelectionCache implements SelectedMarketCache {
   private readonly eligible = new Set<string>();
   private unsub: (() => void) | null = null;
@@ -30,6 +31,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
           market.slug,
           market.eventMarketCount,
           market.tradable,
+          market.volume24h ?? null,
         );
       }
     });
@@ -54,8 +56,16 @@ export class MarketSelectionCache implements SelectedMarketCache {
     slug: string,
     eventMarketCount: number,
     tradable: boolean,
+    volumeLifetime: number | null,
   ): void {
     if (!tradable) {
+      this.eligible.delete(tokenId);
+      return;
+    }
+    // ADR-007: Historical Universe Filter (spec §0 R1). `volumeLifetime === 0`
+    // means the market has never traded — proxy for `trade_count > 0`. `null`
+    // is treated as unknown (not blocking) — typical for CLOB-path markets.
+    if (volumeLifetime != null && volumeLifetime === 0) {
       this.eligible.delete(tokenId);
       return;
     }

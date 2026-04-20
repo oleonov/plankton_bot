@@ -119,9 +119,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // start so the operator sees a clean config error rather than a deferred
     // runtime crash.
     if (!this.decisionRules.some((r) => r.ruleId === "FALLBACK")) {
-      throw new Error(
-        "FALLBACK rule missing from algo_decision_rules — supervisor cannot start",
-      );
+      throw new Error("FALLBACK rule missing from algo_decision_rules — supervisor cannot start");
     }
 
     this.unsubs.push(

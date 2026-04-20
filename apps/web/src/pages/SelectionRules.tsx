@@ -524,9 +524,8 @@ export function SelectionRules() {
       >
         Heads up: canonical spec §0 STEP 1 only defines <code>include_prefix</code> seeded with
         three prefixes (bitcoin, ethereum, elon-musk). <code>exclude_prefix</code>,{" "}
-        <code>include_slug</code>, <code>exclude_slug</code>, and precedence are operator
-        extensions frozen in ADR-004. Review any rule beyond the seeded prefixes before shipping
-        to live-lite.
+        <code>include_slug</code>, <code>exclude_slug</code>, and precedence are operator extensions
+        frozen in ADR-004. Review any rule beyond the seeded prefixes before shipping to live-lite.
       </p>
 
       <RulesTable rules={rules} profileId={profileId} />

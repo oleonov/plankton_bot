@@ -404,13 +404,14 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
-  // ── Historical Universe Filter (intentionally omitted) ─────────────────
+  // ── Historical Universe Filter (spec §0 R1, ADR-007) ──────────────────
   //
-  // Spec §0 defines `trade_count > 0 → INCLUDE; Fallback EXCLUDE`. Runtime
-  // intentionally drops this gate per the market-selection-layer-design doc
-  // §1.1 — Gamma does not provide trade_count and the design forbids proxies.
+  // Spec §0 R1: `trade_count > 0 → INCLUDE; Fallback EXCLUDE`. Gamma exposes
+  // no `trade_count`; ADR-007 uses lifetime volume (`volumeNum`) as a proxy,
+  // surfaced on `NormalizedMarket.volume24h` (legacy field name). The cache
+  // blocks on `volume24h === 0` and treats `null` as unknown (not blocking).
 
-  it("admits zero-activity tokens when pre-entry filter passes (historical filter omitted)", async () => {
+  it("excludes zero-lifetime-volume token even when a prefix rule matches (ADR-007)", async () => {
     const bus = new InProcessEventBus();
     const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
     cache.subscribe();
@@ -426,6 +427,54 @@ describe("MarketSelectionCache", () => {
           liquidity: 0,
           lastTradePrice: null,
           lastTradeAt: null,
+          eventMarketCount: 1,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(cache.isEligible(TOK_A)).toBe(false);
+
+    cache.dispose();
+  });
+
+  it("includes non-zero-lifetime-volume single-market event via STEP 2 fallback (ADR-007)", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          conditionId: "cond-lifetime",
+          eventSlug: "us-election-winner",
+          slug: "trump-wins",
+          volume24h: 100,
+          eventMarketCount: 1,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(cache.isEligible(TOK_A)).toBe(true);
+
+    cache.dispose();
+  });
+
+  it("includes token when lifetime volume is unknown (null) — unknown ≠ zero (ADR-007)", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          conditionId: "cond-clob",
+          eventSlug: "us-election-winner",
+          slug: "trump-wins",
+          volume24h: null,
           eventMarketCount: 1,
         }),
       ],
