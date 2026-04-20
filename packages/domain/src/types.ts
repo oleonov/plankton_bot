@@ -291,7 +291,7 @@ export interface MarketResolution {
   resolution: string;
   resolvedAt: string; // ISO timestamp
   detectedAt: string; // ISO timestamp
-  source: "gamma-api" | "gamma-delisted" | "manual";
+  source: "gamma-api" | "gamma-delisted" | "manual" | "algo";
   rawResponse: string | null; // JSON for debugging
   status: "detected" | "settled";
 }
@@ -515,10 +515,7 @@ export interface SelectionDecision {
 
 export type HealthStatus = "unknown" | "healthy" | "unhealthy";
 
-export type HealthFailReason =
-  | "not_accepting_orders"
-  | "order_book_disabled"
-  | "no_bid";
+export type HealthFailReason = "not_accepting_orders" | "order_book_disabled" | "no_bid";
 
 export interface HealthInput {
   readonly acceptingOrders?: boolean | null;

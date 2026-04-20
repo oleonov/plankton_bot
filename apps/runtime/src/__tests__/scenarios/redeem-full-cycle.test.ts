@@ -16,8 +16,10 @@
  *   S2: buyCount≥2  && lastAction="BUY"
  *
  * FK note: settlement_ledger.condition_id references market_resolutions.
- * Each test seeds a market_resolutions row so the FK is satisfied when
- * PositionSettler writes the settlement entry.
+ * ResolutionModule.handleAlgoRedeem upserts a `source="algo"` resolution row
+ * before calling PositionSettler so the FK is satisfied on a cold path (no
+ * prior Gamma-detected resolution). These tests deliberately do NOT seed
+ * market_resolutions themselves — that would hide the FK bug.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -31,12 +33,7 @@ import {
   SqliteOrderRepository,
   SqlitePositionRepository,
 } from "@plankton/db";
-import {
-  createConditionId,
-  createPositionId,
-  createTokenId,
-  type TokenId,
-} from "@plankton/domain";
+import { createConditionId, createPositionId, createTokenId, type TokenId } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 
 import { AlgoDecisionModule } from "../../modules/algo-decision/algo-decision-module.js";
@@ -145,22 +142,15 @@ async function buildFixture(opts: {
     updatedAt: now,
   });
 
-  // Seed market_resolutions row — required by settlement_ledger FK
-  resolutionRepo.save({
-    conditionId: String(conditionId),
-    resolution: "algo-redeem",
-    resolvedAt: now,
-    detectedAt: now,
-    source: "gamma-api",
-    rawResponse: null,
-    status: "detected",
-  });
+  // Intentionally do NOT seed market_resolutions — the module under test
+  // must upsert it itself via resolutionRepo.save(source: "algo") before
+  // calling PositionSettler, or the settlement_ledger FK will reject.
 
   // Seed open position
   positionRepo.save({
     positionId,
     tokenId,
-    conditionId: String(conditionId),
+    conditionId,
     side: "buy",
     size: opts.size,
     avgEntryPrice: opts.avgEntryPrice,
@@ -192,8 +182,12 @@ async function buildFixture(opts: {
   const settledEvents: Array<{ positionId: unknown; resolution: string; settlementPrice: number }> =
     [];
 
-  bus.subscribe("RedeemRequested", async (p) => redeemEvents.push(p));
-  bus.subscribe("PositionSettled", async (p) => settledEvents.push(p));
+  bus.subscribe("RedeemRequested", async (p) => {
+    redeemEvents.push(p);
+  });
+  bus.subscribe("PositionSettled", async (p) => {
+    settledEvents.push(p);
+  });
 
   const marketCache = new AllTokensCache();
   marketCache.track(String(tokenId));
@@ -242,19 +236,22 @@ async function buildFixture(opts: {
         eventSlug: null,
         question: "Will this redeem?",
         outcome: "YES",
+        regime: null,
+        horizon: null,
         midPrice: opts.avgEntryPrice,
         bestBid: Math.max(opts.avgEntryPrice - 0.01, 0.001),
         bestAsk: opts.avgEntryPrice + 0.01,
         spread: 0.02,
-        bids: [],
-        asks: [],
         active: true,
         tradable: true,
+        acceptingOrders: true,
+        enableOrderBook: true,
         tickSize: 0.01,
         negRisk: false,
         endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
         volume24h: null,
         eventMarketCount: 1,
+        snapshotTs: Date.now(),
       },
     ],
     timestamp: Date.now(),
@@ -344,6 +341,16 @@ describe("Scenario: REDEEM full cycle (spec §8)", () => {
     expect(ledgerRow!.resolution).toBe("algo-redeem");
     expect(ledgerRow!.settlement_price).toBe(0);
     expect(ledgerRow!.delta).toBeCloseTo(-1.0, 5);
+
+    // ── Assert market_resolutions row was upserted by handleAlgoRedeem ───────
+    // FK regression: settlement_ledger.condition_id references this row. The
+    // test does not seed it manually — the module must write it.
+    const mrRow = conn.db
+      .prepare("SELECT source, resolution FROM market_resolutions WHERE condition_id = ?")
+      .get(String(CONDITION_ID)) as { source: string; resolution: string } | undefined;
+    expect(mrRow).toBeDefined();
+    expect(mrRow!.source).toBe("algo");
+    expect(mrRow!.resolution).toBe("algo-redeem");
 
     await teardown();
   });

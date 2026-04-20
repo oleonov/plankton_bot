@@ -34,6 +34,21 @@ export interface ScenarioFixture {
   }) => void | Promise<void>;
   /** Optional DB path — when provided, use instead of creating temp directory. Caller manages lifecycle. */
   dbPath?: string;
+  /** Optional per-tick timing hook; called with the wall-clock duration of the tick in ms. */
+  onTick?: (tick: number, durationMs: number) => void;
+  /**
+   * Optional wall-clock cap. When set, the tick loop exits as soon as
+   * (Date.now() - loopStart) ≥ maxDurationMs, even if `ticks` iterations
+   * have not completed. Use with a large `ticks` value when running a
+   * duration-bounded soak.
+   */
+  maxDurationMs?: number;
+  /**
+   * Optional sleep (ms) inserted between ticks AFTER the tick body runs.
+   * Enables wall-clock-paced soaks (e.g. 60s between ticks to emulate
+   * production poll cadence). Default: 0 (back-to-back, burst mode).
+   */
+  tickDelayMs?: number;
 }
 
 /** Aggregated results collected after a scenario run. */

@@ -124,6 +124,25 @@ export class ResolutionModule implements RuntimeModule {
       }
     }
 
+    // settlement_ledger.condition_id FK references market_resolutions. On the
+    // normal resolution path the row is written by processDetectedResolutions;
+    // on the algo-redeem path there is no Gamma-detected resolution, so we
+    // must upsert a row marked source="algo" before settleAlgoRedeem or the
+    // FK will reject the settlement write. ON CONFLICT DO NOTHING preserves
+    // any pre-existing row written by a later market resolution.
+    const now = new Date().toISOString();
+    for (const conditionId of conditionIds) {
+      this.deps.resolutionRepo.save({
+        conditionId,
+        resolution: "algo-redeem",
+        resolvedAt: now,
+        detectedAt: now,
+        source: "algo",
+        rawResponse: null,
+        status: "detected",
+      });
+    }
+
     const settled = this.deps.settler.settleAlgoRedeem(conditionIds);
     for (const s of settled) {
       await this.deps.bus.publish("PositionSettled", s);

@@ -25,11 +25,10 @@ import {
   createConditionId,
   createOrderId,
   createFillId,
-  createCommandId,
   OrderSide,
   LiquidityRole,
 } from "@plankton/domain";
-import type { FillReceived } from "@plankton/domain";
+import type { ClientOrderId, FillReceived } from "@plankton/domain";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -61,7 +60,7 @@ function buildFillEvent(
     type: "FillReceived",
     fillId: createFillId(`fill-soak-${seq}`),
     orderId: createOrderId(`ord-soak-${seq}`),
-    clientOrderId: `cloid-soak-${seq}` as ReturnType<typeof createCommandId>,
+    clientOrderId: `cloid-soak-${seq}` as ClientOrderId,
     tokenId,
     conditionId: createConditionId(`cond-soak-${tokenIdx % TOKEN_COUNT}`),
     side: (seq % 2 === 0 ? "buy" : "sell") as OrderSide,
@@ -117,7 +116,7 @@ describe("throughput soak", () => {
       const latencySamples: number[] = [];
       let writeCount = 0;
 
-      bus.subscribe("FillReceived", async (payload: FillReceived) => {
+      bus.subscribe("FillReceived", async (payload) => {
         const receiveAt = performance.now();
         insertStmt.run(writeCount, payload.fillId, payload.tokenId, payload.price);
         writeCount++;

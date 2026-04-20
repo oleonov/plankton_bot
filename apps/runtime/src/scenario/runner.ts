@@ -314,7 +314,13 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
   // 9. Tick loop
   const scheduledByTick = groupCommandsByTick(fixture.scheduledCommands ?? []);
 
+  const loopStart = Date.now();
   for (let tick = 0; tick < fixture.ticks; tick++) {
+    if (fixture.maxDurationMs != null && Date.now() - loopStart >= fixture.maxDurationMs) {
+      break;
+    }
+    const tickStart = performance.now();
+
     // Inject scheduled commands for this tick
     const commands = scheduledByTick.get(tick);
     if (commands) {
@@ -346,6 +352,14 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     const eligibleTokenIds = selectedMarketCache.getEligibleTokenIds();
     await algoDecisionModule.evaluateTokens(eligibleTokenIds);
     await bus.drain(DRAIN_TIMEOUT_MS);
+
+    if (fixture.onTick) {
+      fixture.onTick(tick, performance.now() - tickStart);
+    }
+
+    if (fixture.tickDelayMs && fixture.tickDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, fixture.tickDelayMs));
+    }
   }
 
   // 10. Stop supervisor
