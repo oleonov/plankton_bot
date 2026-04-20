@@ -114,6 +114,16 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.buySizeRules = this.deps.algoRulesRepo.getSizeRules("BUY");
     this.sellSizeRules = this.deps.algoRulesRepo.getSizeRules("SELL");
 
+    // Fail-closed at startup: without a FALLBACK decision rule, evaluateDecision
+    // will throw on every sweep once an unmatched state appears. Refuse to
+    // start so the operator sees a clean config error rather than a deferred
+    // runtime crash.
+    if (!this.decisionRules.some((r) => r.ruleId === "FALLBACK")) {
+      throw new Error(
+        "FALLBACK rule missing from algo_decision_rules — supervisor cannot start",
+      );
+    }
+
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("OrderPlaced", (p) => this.handleOrderPlaced(p)),
