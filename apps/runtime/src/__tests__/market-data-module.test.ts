@@ -160,6 +160,7 @@ class FakePricingStream implements MarketPricingStream {
 function createMockMarketRepo(): MarketRepository {
   return {
     save: vi.fn(),
+    saveBatch: vi.fn(),
     findByTokenId: vi.fn().mockReturnValue(null),
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),

@@ -164,6 +164,7 @@ export class MarketScannerModule implements RuntimeModule {
 
       await this.deps.discoveryGateway.forEachMarketPage((pageMarkets) => {
         discoveredMarkets += pageMarkets.length;
+        const pageBatch: Market[] = [];
         for (const clobMarket of pageMarkets) {
           const evalResult = evaluatePreEntry(engine, {
             eventSlug: clobMarket.eventSlug ?? null,
@@ -180,7 +181,7 @@ export class MarketScannerModule implements RuntimeModule {
           for (const token of clobMarket.tokens) {
             const tokenId = createTokenId(token.tokenId);
             discoveredTokenIds.add(String(tokenId));
-            const market: Market = {
+            pageBatch.push({
               tokenId,
               conditionId: clobMarket.conditionId,
               slug: clobMarket.slug,
@@ -202,10 +203,12 @@ export class MarketScannerModule implements RuntimeModule {
               selectionWinningRuleId: evalResult.winningRuleId,
               createdAt: now,
               updatedAt: now,
-            };
-            this.deps.marketRepo.save(market);
-            savedTokens++;
+            });
           }
+        }
+        if (pageBatch.length > 0) {
+          this.deps.marketRepo.saveBatch(pageBatch);
+          savedTokens += pageBatch.length;
         }
       });
 

@@ -4,13 +4,7 @@ import type { TokenId } from "@plankton/domain";
 import { createTokenId } from "@plankton/domain";
 import type { Regime } from "@plankton/domain";
 
-export class SqliteMarketRepository implements MarketRepository {
-  constructor(private readonly db: Database.Database) {}
-
-  save(market: Market): void {
-    this.db
-      .prepare(
-        `INSERT INTO markets
+const UPSERT_MARKET_SQL = `INSERT INTO markets
          (token_id, condition_id, slug, event_slug, question, outcome, outcome_index,
           regime, horizon, end_date, active, tradable, tick_size, neg_risk,
           event_market_count, selection_status, selection_winning_rule_id,
@@ -33,29 +27,63 @@ export class SqliteMarketRepository implements MarketRepository {
            event_market_count = excluded.event_market_count,
            selection_status = excluded.selection_status,
            selection_winning_rule_id = excluded.selection_winning_rule_id,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        market.tokenId,
-        market.conditionId,
-        market.slug,
-        market.eventSlug,
-        market.question,
-        market.outcome,
-        market.outcomeIndex,
-        market.regime,
-        market.horizon,
-        market.endDate,
-        market.active ? 1 : 0,
-        market.tradable ? 1 : 0,
-        market.tickSize,
-        market.negRisk ? 1 : 0,
-        market.eventMarketCount ?? 1,
-        market.selectionStatus ?? "unknown",
-        market.selectionWinningRuleId ?? null,
-        market.createdAt,
-        market.updatedAt,
+           updated_at = excluded.updated_at`;
+
+export class SqliteMarketRepository implements MarketRepository {
+  private upsertStmt: Database.Statement | null = null;
+  private upsertManyTx:
+    | ((
+        markets: readonly Market[],
+        bind: (stmt: Database.Statement, market: Market) => void,
+      ) => void)
+    | null = null;
+
+  constructor(private readonly db: Database.Database) {}
+
+  private getUpsertStmt(): Database.Statement {
+    if (!this.upsertStmt) this.upsertStmt = this.db.prepare(UPSERT_MARKET_SQL);
+    return this.upsertStmt;
+  }
+
+  private bindUpsert(stmt: Database.Statement, market: Market): void {
+    stmt.run(
+      market.tokenId,
+      market.conditionId,
+      market.slug,
+      market.eventSlug,
+      market.question,
+      market.outcome,
+      market.outcomeIndex,
+      market.regime,
+      market.horizon,
+      market.endDate,
+      market.active ? 1 : 0,
+      market.tradable ? 1 : 0,
+      market.tickSize,
+      market.negRisk ? 1 : 0,
+      market.eventMarketCount ?? 1,
+      market.selectionStatus ?? "unknown",
+      market.selectionWinningRuleId ?? null,
+      market.createdAt,
+      market.updatedAt,
+    );
+  }
+
+  save(market: Market): void {
+    this.bindUpsert(this.getUpsertStmt(), market);
+  }
+
+  saveBatch(markets: readonly Market[]): void {
+    if (markets.length === 0) return;
+    const stmt = this.getUpsertStmt();
+    if (!this.upsertManyTx) {
+      this.upsertManyTx = this.db.transaction(
+        (batch: readonly Market[], bind: (stmt: Database.Statement, market: Market) => void) => {
+          for (const m of batch) bind(stmt, m);
+        },
       );
+    }
+    this.upsertManyTx(markets, this.bindUpsert.bind(this));
   }
 
   findByTokenId(tokenId: TokenId): Market | null {

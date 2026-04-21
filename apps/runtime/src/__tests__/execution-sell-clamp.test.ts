@@ -90,6 +90,7 @@ function createMockGateway(): ExchangeGateway {
 function createMockMarketRepo() {
   return {
     save: vi.fn(),
+    saveBatch: vi.fn(),
     findByTokenId: vi.fn().mockReturnValue({ active: true }),
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),

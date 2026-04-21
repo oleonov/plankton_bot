@@ -69,6 +69,7 @@ const mockMarketRepo = {
   iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
   deactivateMissing: vi.fn().mockReturnValue(0),
   save: vi.fn(),
+  saveBatch: vi.fn(),
   findByTokenId: vi.fn().mockReturnValue(null),
   findByTokenIds: vi.fn().mockReturnValue([]),
   findByConditionId: vi.fn().mockReturnValue([]),

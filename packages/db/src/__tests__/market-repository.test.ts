@@ -139,6 +139,27 @@ describe("SqliteMarketRepository", () => {
     expect(ids).toEqual(["t-ord", "t-pos", "t-trad"]);
   });
 
+  it("saveBatch inserts all markets and upserts duplicates in a single transaction", () => {
+    repo.saveBatch([
+      makeMarket({ tokenId: createTokenId("b-1"), slug: "s-1" }),
+      makeMarket({ tokenId: createTokenId("b-2"), slug: "s-2", outcome: "NO" }),
+      makeMarket({ tokenId: createTokenId("b-3"), slug: "s-3" }),
+    ]);
+    expect(repo.findAll()).toHaveLength(3);
+
+    repo.saveBatch([
+      makeMarket({ tokenId: createTokenId("b-1"), slug: "s-1", question: "updated" }),
+      makeMarket({ tokenId: createTokenId("b-4"), slug: "s-4" }),
+    ]);
+    expect(repo.findAll()).toHaveLength(4);
+    expect(repo.findByTokenId(createTokenId("b-1"))!.question).toBe("updated");
+  });
+
+  it("saveBatch is a no-op for empty input", () => {
+    repo.saveBatch([]);
+    expect(repo.findAll()).toHaveLength(0);
+  });
+
   it("findEventMarketCountBySlug reads event_market_count for the slug", () => {
     // Insert directly to set event_market_count since Market interface doesn't expose it
     db.prepare(

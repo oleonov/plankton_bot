@@ -130,6 +130,7 @@ function createMockOrderRepo() {
 function createMockMarketRepo(orderTokenId: TokenId): MarketRepository {
   return {
     save: vi.fn(),
+    saveBatch: vi.fn(),
     findByTokenId: vi.fn().mockImplementation((tokenId: TokenId) =>
       String(tokenId) === String(orderTokenId)
         ? {

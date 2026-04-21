@@ -29,6 +29,13 @@ export interface MarketRepository {
   /** Insert or update a market record. tokenId is the primary key. */
   save(market: Market): void;
 
+  /**
+   * Batch upsert in a single SQL transaction with a cached prepared statement.
+   * Scanner write path: replaces per-token `save()` calls with one commit per
+   * page to reduce commit count and allocation churn during the scan cycle.
+   */
+  saveBatch(markets: readonly Market[]): void;
+
   /** Find a market by its CLOB token ID (primary key). */
   findByTokenId(tokenId: TokenId): Market | null;
 
