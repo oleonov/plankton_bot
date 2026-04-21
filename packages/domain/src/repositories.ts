@@ -41,11 +41,31 @@ export interface MarketRepository {
   /** Find all markets currently marked active. */
   findActive(): Market[];
 
+  /**
+   * Iterate token IDs of every active market one at a time (cursor-based).
+   * Preferred over `findActive()` during large scans to avoid materialising the
+   * full tracked slice (~115k Market objects) simultaneously with other scan
+   * state — reduces scanner transient peak anon-rss by ~70 MB per cycle.
+   */
+  iterateActiveTokenIds(): IterableIterator<TokenId>;
+
   /** Return every market row, active or inactive. */
   findAll(): Market[];
 
   /** Mark a market as inactive (active = 0). Used when a market resolves. */
   deactivate(tokenId: TokenId): void;
+
+  /**
+   * Deactivate every currently-active market whose token_id is NOT in
+   * `discoveredTokenIds` AND NOT in `preservedTokenIds`, in a single SQL batch.
+   * Returns the count of rows deactivated. Preferred over scanner-side loops
+   * because it avoids loading Market rows into JS only to write them back.
+   */
+  deactivateMissing(
+    discoveredTokenIds: ReadonlySet<string>,
+    preservedTokenIds: ReadonlySet<string>,
+    updatedAt: string,
+  ): number;
 
   /**
    * Return all markets that need live pricing: tradable markets plus any with

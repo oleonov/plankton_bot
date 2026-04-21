@@ -89,6 +89,13 @@ export class SqliteMarketRepository implements MarketRepository {
     return rows.map((r) => this.rowToMarket(r));
   }
 
+  *iterateActiveTokenIds(): IterableIterator<TokenId> {
+    const stmt = this.db.prepare("SELECT token_id FROM markets WHERE active = 1");
+    for (const row of stmt.iterate() as Iterable<{ token_id: string }>) {
+      yield createTokenId(row.token_id);
+    }
+  }
+
   findAll(): Market[] {
     const rows = this.db.prepare("SELECT * FROM markets").all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
@@ -98,6 +105,32 @@ export class SqliteMarketRepository implements MarketRepository {
     this.db
       .prepare(`UPDATE markets SET active = 0, updated_at = datetime('now') WHERE token_id = ?`)
       .run(tokenId);
+  }
+
+  deactivateMissing(
+    discoveredTokenIds: ReadonlySet<string>,
+    preservedTokenIds: ReadonlySet<string>,
+    updatedAt: string,
+  ): number {
+    const staleTokenIds: string[] = [];
+    for (const tokenId of this.iterateActiveTokenIds()) {
+      const key = String(tokenId);
+      if (discoveredTokenIds.has(key)) continue;
+      if (preservedTokenIds.has(key)) continue;
+      staleTokenIds.push(key);
+    }
+    if (staleTokenIds.length === 0) return 0;
+
+    const updateStmt = this.db.prepare(
+      `UPDATE markets SET active = 0, updated_at = ? WHERE token_id = ?`,
+    );
+    const tx = this.db.transaction((ids: readonly string[]) => {
+      for (const id of ids) {
+        updateStmt.run(updatedAt, id);
+      }
+    });
+    tx(staleTokenIds);
+    return staleTokenIds.length;
   }
 
   findTrackedForPricing(): Market[] {

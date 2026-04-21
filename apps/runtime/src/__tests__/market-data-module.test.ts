@@ -166,6 +166,8 @@ function createMockMarketRepo(): MarketRepository {
     findActive: vi.fn<() => Market[]>().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
+    iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
+    deactivateMissing: vi.fn().mockReturnValue(0),
     // Phase 4: market-data module calls findTrackedForPricing instead of findActive.
     // Tests set up their tracked markets via findTrackedForPricing mock.
     findTrackedForPricing: vi.fn<() => Market[]>().mockReturnValue([]),

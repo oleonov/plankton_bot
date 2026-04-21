@@ -32,6 +32,23 @@ export interface NormalizedMarketUpdated {
   readonly timestamp: number;
 }
 
+/**
+ * Fires whenever the market-data module recomputes its tracked-universe
+ * snapshot (polling cadence), with per-token diff against the prior cycle.
+ * Consumers (SignalToOrderBridge, RiskInventoryModule, MarketSelectionCache)
+ * subscribe to drop per-token state for tokens that have exited the tracked
+ * universe. Unlike NormalizedMarketUpdated — whose `markets` field is a delta
+ * on the stream path and a full slice on the polling path — this event is
+ * explicitly diff-shaped and emitted only by the single authoritative source.
+ */
+export interface TrackedMarketsChanged {
+  readonly type: "TrackedMarketsChanged";
+  readonly addedTokenIds: readonly TokenId[];
+  readonly removedTokenIds: readonly TokenId[];
+  readonly activeTokenIds: readonly TokenId[];
+  readonly timestamp: number;
+}
+
 export interface HotQuoteUpdated {
   readonly type: "HotQuoteUpdated";
   readonly tokenIds: readonly TokenId[];
@@ -267,6 +284,7 @@ export interface OperatorCommandApplied {
 export type DomainEvent =
   | MarketSnapshotReceived
   | NormalizedMarketUpdated
+  | TrackedMarketsChanged
   | HotQuoteUpdated
   | MarketResolvedHint
   | NewMarketDiscoveredHint

@@ -45,6 +45,13 @@ export class SnapshotWriter {
     if (timestamp - this.lastPruneAt > this.config.pruneIntervalMs) {
       const cutoff = new Date(timestamp - this.config.pruneTtlMs).toISOString();
       this.repo.prune(cutoff);
+      // Mirror the DB prune in memory: drop tokens we haven't written beyond
+      // the TTL. Without this, lastWrittenAt grew unbounded across tracked-
+      // universe churn even though the DB rows were gone.
+      const cutoffMs = timestamp - this.config.pruneTtlMs;
+      for (const [tokenId, writtenAt] of this.lastWrittenAt) {
+        if (writtenAt < cutoffMs) this.lastWrittenAt.delete(tokenId);
+      }
       this.lastPruneAt = timestamp;
     }
   }

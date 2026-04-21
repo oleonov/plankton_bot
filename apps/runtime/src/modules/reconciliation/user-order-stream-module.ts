@@ -91,6 +91,7 @@ export class UserOrderStreamModule implements RuntimeModule {
   private stream: ManagedUserEventStream | null = null;
   private started = false;
   private catchupInFlight = false;
+  private seenPruneTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(private readonly deps: UserOrderStreamModuleDeps) {
     this.log = deps.log.child({ module: "user-order-stream" });
@@ -102,6 +103,18 @@ export class UserOrderStreamModule implements RuntimeModule {
 
   async start(): Promise<void> {
     this.started = true;
+    // Defense-in-depth: own the dedupe-map prune cadence instead of relying
+    // solely on the external 30s getMetricsSnapshot() poll. DEDUPE_TTL_MS is
+    // 1h, so pruning every 5 minutes is more than enough; unref'ed so tests
+    // and shutdown aren't blocked.
+    this.seenPruneTimer = setInterval(
+      () => {
+        this.pruneSeenEventKeys(this.now());
+        this.pruneExpiredOrphans(this.now());
+      },
+      5 * 60 * 1000,
+    );
+    if (typeof this.seenPruneTimer.unref === "function") this.seenPruneTimer.unref();
     this.unsubs.push(
       this.deps.bus.subscribe("OrderPlaced", async () => {
         this.refreshSubscribedConditions();
@@ -153,6 +166,10 @@ export class UserOrderStreamModule implements RuntimeModule {
   async stop(): Promise<void> {
     this.stream?.close();
     this.stream = null;
+    if (this.seenPruneTimer) {
+      clearInterval(this.seenPruneTimer);
+      this.seenPruneTimer = null;
+    }
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
     this.started = false;

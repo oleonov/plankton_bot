@@ -1178,6 +1178,7 @@ async function main(): Promise<void> {
 
     signalToOrderBridge.unsubscribe();
     selectedMarketCache.dispose();
+    candidateBookCache?.dispose();
 
     if (statePublisherRef.current) {
       statePublisherRef.current.stopHeartbeatLoop();

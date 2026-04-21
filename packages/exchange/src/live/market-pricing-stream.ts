@@ -97,6 +97,15 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     const next = normalizeTokenIds(tokenIds);
     if (arraysEqual(this.desiredTokenIds, next)) return;
     this.desiredTokenIds = next;
+    // Prune pricing entries for tokens that dropped out of the desired set.
+    // Previously pricingByToken only cleared on close() or full desired=[];
+    // individual token churn left stale entries forever.
+    if (next.length > 0 && this.pricingByToken.size > 0) {
+      const desiredSet = new Set(next);
+      for (const tokenKey of [...this.pricingByToken.keys()]) {
+        if (!desiredSet.has(tokenKey)) this.pricingByToken.delete(tokenKey);
+      }
+    }
     if (this.closed) return;
     this.syncShards();
   }

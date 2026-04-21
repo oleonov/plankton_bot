@@ -24,6 +24,7 @@ import type {
   Market,
   NormalizedMarket,
 } from "@plankton/domain";
+import { createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { isTransientNetworkError } from "../../network-errors.js";
 import {
@@ -204,7 +205,8 @@ export class MarketDataModule implements RuntimeModule {
       }
 
       tracked = this.deps.marketRepo.findTrackedForPricing();
-      this.refreshTrackedMarkets(tracked);
+      const trackedDiff = this.refreshTrackedMarkets(tracked);
+      await this.publishTrackedMarketsChanged(trackedDiff);
       this.lastTrackedTokenCount = tracked.length;
       if (tracked.length === 0) {
         this.lastFallbackPollCount = 0;
@@ -381,19 +383,43 @@ export class MarketDataModule implements RuntimeModule {
     }
   }
 
-  private refreshTrackedMarkets(tracked: readonly Market[]): void {
+  private refreshTrackedMarkets(tracked: readonly Market[]): {
+    added: string[];
+    removed: string[];
+    active: string[];
+  } {
+    const previousTokenIds = new Set(this.trackedMarketsByToken.keys());
     const nextTokenIds = new Set<string>();
+    const added: string[] = [];
     for (const market of tracked) {
       const tokenKey = String(market.tokenId);
       nextTokenIds.add(tokenKey);
       this.trackedMarketsByToken.set(tokenKey, market);
+      if (!previousTokenIds.has(tokenKey)) added.push(tokenKey);
     }
+    const removed: string[] = [];
     for (const tokenId of [...this.trackedMarketsByToken.keys()]) {
       if (nextTokenIds.has(tokenId)) continue;
       this.trackedMarketsByToken.delete(tokenId);
       this.marketCache.delete(tokenId);
       this.lastPricingUpdateAtByToken.delete(tokenId);
+      removed.push(tokenId);
     }
+    return { added, removed, active: [...nextTokenIds] };
+  }
+
+  private async publishTrackedMarketsChanged(diff: {
+    added: string[];
+    removed: string[];
+    active: string[];
+  }): Promise<void> {
+    if (diff.added.length === 0 && diff.removed.length === 0) return;
+    await this.deps.bus.publish("TrackedMarketsChanged", {
+      addedTokenIds: diff.added.map((t) => createTokenId(t)),
+      removedTokenIds: diff.removed.map((t) => createTokenId(t)),
+      activeTokenIds: diff.active.map((t) => createTokenId(t)),
+      timestamp: Date.now(),
+    });
   }
 
   private countTrackedGammaFallbackMarkets(): number {

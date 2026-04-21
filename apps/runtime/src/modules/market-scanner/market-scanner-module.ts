@@ -209,18 +209,14 @@ export class MarketScannerModule implements RuntimeModule {
         }
       });
 
-      // Deactivate tracked markets not in latest scan AND without open positions/orders
-      let deactivatedCount = 0;
-      const previouslyActive = this.deps.marketRepo.findActive();
-      for (const existing of previouslyActive) {
-        if (
-          !discoveredTokenIds.has(String(existing.tokenId)) &&
-          !activeTokenIds.has(String(existing.tokenId))
-        ) {
-          this.deps.marketRepo.save({ ...existing, active: false, updatedAt: now });
-          deactivatedCount++;
-        }
-      }
+      // Deactivate tracked markets not in latest scan AND without open positions/orders.
+      // Uses repo-side cursor + batch update to avoid materialising the full active
+      // Market slice (~75 MB peak under full universe) alongside discoveredTokenIds.
+      const deactivatedCount = this.deps.marketRepo.deactivateMissing(
+        discoveredTokenIds,
+        activeTokenIds,
+        now,
+      );
 
       this.lastSuccessfulScanMs = Date.now();
       const durationMs = this.lastSuccessfulScanMs - startMs;

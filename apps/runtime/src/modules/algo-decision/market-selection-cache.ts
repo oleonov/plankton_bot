@@ -16,6 +16,7 @@ import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine
 export class MarketSelectionCache implements SelectedMarketCache {
   private readonly eligible = new Set<string>();
   private unsub: (() => void) | null = null;
+  private trackedUnsub: (() => void) | null = null;
 
   constructor(
     private readonly bus: EventBus,
@@ -35,11 +36,22 @@ export class MarketSelectionCache implements SelectedMarketCache {
         );
       }
     });
+    // Drop eligibility for tokens that exit the tracked universe so `eligible`
+    // doesn't accumulate ghost entries from vanished tokens. The existing
+    // NormalizedMarketUpdated handler self-cleans on non-tradable/volume=0/!INCLUDE
+    // but never sees tokens that simply stopped being tracked.
+    this.trackedUnsub = this.bus.subscribe("TrackedMarketsChanged", async (payload) => {
+      for (const tokenId of payload.removedTokenIds) {
+        this.eligible.delete(String(tokenId));
+      }
+    });
   }
 
   dispose(): void {
     this.unsub?.();
     this.unsub = null;
+    this.trackedUnsub?.();
+    this.trackedUnsub = null;
   }
 
   isEligible(tokenId: TokenId): boolean {

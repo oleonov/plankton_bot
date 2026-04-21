@@ -61,6 +61,7 @@ export class SignalToOrderBridge {
   subscribe(): void {
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
       this.deps.bus.subscribe("SignalApproved", (p) => this.handleApproved(p)),
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFillReceived(p)),
       this.deps.bus.subscribe("OrderCancelled", (p) => this.handleOrderCancelled(p)),
@@ -77,6 +78,21 @@ export class SignalToOrderBridge {
   ): Promise<void> {
     for (const m of payload.markets) {
       this.marketCache.set(String(m.tokenId), m);
+    }
+  }
+
+  private async handleTrackedMarketsChanged(
+    payload: RuntimeEventMap["TrackedMarketsChanged"],
+  ): Promise<void> {
+    // Drop per-token state the moment market-data stops tracking a token.
+    // Historically these maps only shrank on a successful fill or a cooldown
+    // bypass — long-tail tokens leaked forever. See plans/2026-04-21-memory-leak-cleanup.md Task 4.
+    for (const tokenId of payload.removedTokenIds) {
+      const key = this.cooldownKey(tokenId);
+      this.marketCache.delete(key);
+      this.unfilledCancelCountByToken.delete(key);
+      this.cooldownUntilByToken.delete(key);
+      this.cooldownBaselineByToken.delete(key);
     }
   }
 
@@ -366,6 +382,14 @@ export class SignalToOrderBridge {
     const key = this.cooldownKey(signal.tokenId);
     const cooldownUntilMs = this.cooldownUntilByToken.get(key) ?? null;
     if (cooldownUntilMs == null || cooldownUntilMs <= Date.now()) {
+      // Natural expiry path: evict the cooldown trio so stale per-token state
+      // doesn't pile up for tokens we stop trading. Fill / bypass handlers
+      // already delete explicitly; this closes the common path.
+      if (cooldownUntilMs != null) {
+        this.cooldownUntilByToken.delete(key);
+        this.cooldownBaselineByToken.delete(key);
+        this.unfilledCancelCountByToken.delete(key);
+      }
       return { cooldownUntilMs: null, bypassReason: null, previousCooldownUntil: null };
     }
 

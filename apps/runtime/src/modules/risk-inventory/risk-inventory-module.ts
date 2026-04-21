@@ -82,9 +82,18 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.bus.subscribe("SignalProduced", (p) => this.handleSignal(p)),
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFill(p)),
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
     );
     this.started = true;
     this.log.info("risk-inventory module started");
+  }
+
+  private async handleTrackedMarketsChanged(
+    payload: RuntimeEventMap["TrackedMarketsChanged"],
+  ): Promise<void> {
+    for (const tokenId of payload.removedTokenIds) {
+      this.tokenMinOrderSize.delete(String(tokenId));
+    }
   }
 
   async stop(): Promise<void> {

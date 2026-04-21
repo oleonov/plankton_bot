@@ -24,7 +24,21 @@ import type {
 import { createFillId, createOrderId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
+// Bounded FIFO cache that dedupes orphan-fill log warnings. Without a cap
+// the Set grew unbounded over uptime (prod crash loop exposed this). 5000
+// entries ≈ tens of KB; beyond that we accept the rare duplicate warning.
+const ORPHAN_LOG_MAX = 5000;
 const loggedOrphanFillIds = new Set<string>();
+
+function rememberOrphanFillId(fillId: string): boolean {
+  if (loggedOrphanFillIds.has(fillId)) return false;
+  if (loggedOrphanFillIds.size >= ORPHAN_LOG_MAX) {
+    const oldest = loggedOrphanFillIds.values().next().value;
+    if (oldest !== undefined) loggedOrphanFillIds.delete(oldest);
+  }
+  loggedOrphanFillIds.add(fillId);
+  return true;
+}
 
 const CATEGORY_RATES: Record<string, number> = {
   crypto: 0.072,
@@ -174,8 +188,7 @@ export async function importExchangeFills(
       skipped++;
       const msg = `fill ${ef.fillId} has no matching local order (clientOrderId: ${ef.clientOrderId}, orderId: ${ef.orderId}) — skipped`;
       details.push(msg);
-      if (!loggedOrphanFillIds.has(ef.fillId)) {
-        loggedOrphanFillIds.add(ef.fillId);
+      if (rememberOrphanFillId(ef.fillId)) {
         log.warn({ fillId: ef.fillId }, msg);
       } else {
         log.debug({ fillId: ef.fillId }, "orphan fill already logged — suppressing repeat warning");

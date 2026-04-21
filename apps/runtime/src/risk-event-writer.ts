@@ -7,6 +7,9 @@ export interface RiskEventWriterConfig {
 
 export class RiskEventWriter {
   private readonly cooldown = new Map<string, number>();
+  // Opportunistic prune cadence: walk the cooldown map on every ~1000 calls.
+  // Entries are small but grow 1:1 with (tokenId × reasonCode) pairs seen.
+  private callsSinceLastPrune = 0;
 
   constructor(
     private readonly repo: RiskEventRepository,
@@ -34,6 +37,19 @@ export class RiskEventWriter {
       },
     });
     this.cooldown.set(key, rejectedAt);
+
+    this.callsSinceLastPrune++;
+    if (this.callsSinceLastPrune >= 1000) {
+      this.pruneExpired(rejectedAt);
+      this.callsSinceLastPrune = 0;
+    }
+  }
+
+  private pruneExpired(nowMs: number): void {
+    const ttl = this.config.rejectCooldownMs;
+    for (const [key, ts] of this.cooldown) {
+      if (nowMs - ts > ttl) this.cooldown.delete(key);
+    }
   }
 
   onOperatorCommand(

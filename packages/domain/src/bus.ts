@@ -67,6 +67,13 @@ export interface RuntimeEventMap {
     readonly timestamp: number;
   };
 
+  TrackedMarketsChanged: {
+    readonly addedTokenIds: readonly TokenId[];
+    readonly removedTokenIds: readonly TokenId[];
+    readonly activeTokenIds: readonly TokenId[];
+    readonly timestamp: number;
+  };
+
   HotQuoteUpdated: {
     readonly tokenIds: readonly TokenId[];
     readonly refreshedAt: number;

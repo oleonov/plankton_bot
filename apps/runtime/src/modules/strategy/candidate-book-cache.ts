@@ -46,6 +46,8 @@ interface CandidateBookCacheDeps {
   readonly refreshBatchWindowMs?: number;
   readonly refreshBudgetPerWindow?: number;
   readonly refreshBudgetWindowMs?: number;
+  readonly pruneIntervalMs?: number;
+  readonly pruneMaxAgeMs?: number;
   readonly onRefreshObserved?: ((event: CandidateBookRefreshObserved) => void) | undefined;
   readonly onUsageObserved?: ((event: CandidateBookUsageObserved) => void) | undefined;
 }
@@ -54,6 +56,7 @@ const DEFAULT_MAX_AGE_MS = 3_000;
 const DEFAULT_REFRESH_BATCH_WINDOW_MS = 10;
 const DEFAULT_REFRESH_BUDGET_PER_WINDOW = 8;
 const DEFAULT_REFRESH_BUDGET_WINDOW_MS = 1_000;
+const DEFAULT_PRUNE_INTERVAL_MS = 60_000;
 
 export class CandidateBookCache {
   private entries = new Map<string, CandidateBookCacheEntry>();
@@ -69,21 +72,33 @@ export class CandidateBookCache {
     }
   >();
   private flushTimer: ReturnType<typeof setTimeout> | null = null;
+  private pruneTimer: ReturnType<typeof setInterval> | null = null;
   private refreshWindowStartedAtMs = 0;
   private refreshesInWindow = 0;
   private readonly maxAgeMs: number;
   private readonly refreshBatchWindowMs: number;
   private readonly refreshBudgetPerWindow: number;
   private readonly refreshBudgetWindowMs: number;
+  private readonly pruneIntervalMs: number;
+  private readonly pruneMaxAgeMs: number;
 
   constructor(private readonly deps: CandidateBookCacheDeps) {
     this.maxAgeMs = deps.maxAgeMs ?? DEFAULT_MAX_AGE_MS;
     this.refreshBatchWindowMs = deps.refreshBatchWindowMs ?? DEFAULT_REFRESH_BATCH_WINDOW_MS;
     this.refreshBudgetPerWindow = deps.refreshBudgetPerWindow ?? DEFAULT_REFRESH_BUDGET_PER_WINDOW;
     this.refreshBudgetWindowMs = deps.refreshBudgetWindowMs ?? DEFAULT_REFRESH_BUDGET_WINDOW_MS;
+    this.pruneIntervalMs = deps.pruneIntervalMs ?? DEFAULT_PRUNE_INTERVAL_MS;
+    this.pruneMaxAgeMs = deps.pruneMaxAgeMs ?? this.maxAgeMs * 10;
+    this.pruneTimer = setInterval(() => this.pruneStaleEntries(), this.pruneIntervalMs);
+    // unref so the timer never holds the Node event loop open during tests/shutdown.
+    if (typeof this.pruneTimer.unref === "function") this.pruneTimer.unref();
   }
 
   dispose(): void {
+    if (this.pruneTimer) {
+      clearInterval(this.pruneTimer);
+      this.pruneTimer = null;
+    }
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = null;
@@ -100,6 +115,24 @@ export class CandidateBookCache {
       }
     }
     this.waitersByToken.clear();
+    // Release retained OrderBookSnapshot references (the historical leak source).
+    this.entries.clear();
+  }
+
+  /** Exposed for deterministic tests; production just lets the interval fire. */
+  pruneStaleEntries(nowMs: number = Date.now()): number {
+    if (this.entries.size === 0) return 0;
+    let removed = 0;
+    for (const [tokenId, entry] of this.entries) {
+      if (nowMs - entry.cachedAtMs > this.pruneMaxAgeMs) {
+        this.entries.delete(tokenId);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      this.deps.log.debug({ removed, remaining: this.entries.size }, "candidate book cache pruned");
+    }
+    return removed;
   }
 
   prime(tokenIds: readonly string[]): Promise<Map<string, CandidateBookCacheEntry>> {

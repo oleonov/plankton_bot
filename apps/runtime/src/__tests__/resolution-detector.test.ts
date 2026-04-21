@@ -92,6 +92,8 @@ function createMockMarketRepo(): MarketRepository {
   return {
     findByTokenIds: vi.fn().mockReturnValue([makeMarket()]),
     deactivate: vi.fn(),
+    iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
+    deactivateMissing: vi.fn().mockReturnValue(0),
     findTrackedForPricing: vi.fn().mockReturnValue([]),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   } as unknown as MarketRepository;

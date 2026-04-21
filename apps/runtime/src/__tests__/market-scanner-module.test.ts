@@ -95,8 +95,10 @@ function createMockMarketRepo(): MarketRepository {
     findByTokenIds: vi.fn().mockReturnValue([]),
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
+    iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
+    deactivateMissing: vi.fn().mockReturnValue(0),
     findTrackedForPricing: vi.fn().mockReturnValue([]),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
@@ -467,24 +469,6 @@ describe("MarketScannerModule", () => {
   // ── Deactivation sweep ────────────────────────────────────────────────────
 
   it("scan() deactivates previously-active markets not in latest discovery", async () => {
-    const staleMarket: Market = {
-      tokenId: createTokenId("tok-old"),
-      conditionId: "cond-old",
-      slug: "bitcoin-above-50k-on-jan-1",
-      eventSlug: null,
-      question: "Will BTC be above 50k on Jan 1?",
-      outcome: "YES",
-      regime: "threshold",
-      horizon: "daily",
-      endDate: "2026-01-01",
-      active: true,
-      tradable: true,
-      tickSize: 0.01,
-      negRisk: false,
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-01T00:00:00Z",
-    };
-
     const freshMarket = makeClobMarket({
       conditionId: "cond-new",
       slug: "bitcoin-above-100k",
@@ -494,38 +478,24 @@ describe("MarketScannerModule", () => {
 
     const { mod, discoveryGateway, marketRepo } = buildModule();
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([freshMarket]);
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([staleMarket]);
+    // New cursor-based path: scanner calls deactivateMissing directly; we just
+    // assert it was invoked with the right (discovered, preserved) sets.
+    (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mockReturnValue(1);
 
     await mod.scan();
 
     const saveCalls = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls;
     expect((saveCalls[0]![0] as Market).tokenId).toBe("tok-new-yes");
     expect((saveCalls[0]![0] as Market).active).toBe(true);
-    const deactivated = saveCalls[1]![0] as Market;
-    expect(deactivated.tokenId).toBe("tok-old");
-    expect(deactivated.active).toBe(false);
+
+    expect(marketRepo.deactivateMissing).toHaveBeenCalledTimes(1);
+    const [discovered, preserved] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock
+      .calls[0]!;
+    expect((discovered as Set<string>).has("tok-new-yes")).toBe(true);
+    expect((preserved as Set<string>).size).toBe(0);
   });
 
   it("deactivation sweep preserves market with open position", async () => {
-    const staleMarket: Market = {
-      tokenId: createTokenId("tok-old"),
-      conditionId: "cond-old",
-      slug: "some-obscure-market",
-      eventSlug: null,
-      question: "Old market?",
-      outcome: "Yes",
-      outcomeIndex: null,
-      regime: null,
-      horizon: null,
-      endDate: "2026-01-01",
-      active: true,
-      tradable: true,
-      tickSize: 0.01,
-      negRisk: false,
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-01T00:00:00Z",
-    };
-
     const positionRepo = createMockPositionRepo();
     (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
       { tokenId: createTokenId("tok-old"), status: "open" },
@@ -533,35 +503,15 @@ describe("MarketScannerModule", () => {
 
     const { mod, discoveryGateway, marketRepo } = buildModule({ positionRepo });
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([staleMarket]);
+    (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mockReturnValue(0);
 
     await mod.scan();
 
-    const saveCalls = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls;
-    const deactivations = saveCalls.filter((c: unknown[]) => (c[0] as Market).active === false);
-    expect(deactivations).toHaveLength(0);
+    const [, preserved] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect((preserved as Set<string>).has("tok-old")).toBe(true);
   });
 
   it("deactivation sweep preserves market with open order", async () => {
-    const staleMarket: Market = {
-      tokenId: createTokenId("tok-pending"),
-      conditionId: "cond-pending",
-      slug: "another-market",
-      eventSlug: null,
-      question: "Pending order market?",
-      outcome: "Yes",
-      outcomeIndex: null,
-      regime: null,
-      horizon: null,
-      endDate: "2026-06-01",
-      active: true,
-      tradable: true,
-      tickSize: 0.01,
-      negRisk: false,
-      createdAt: "2026-01-01T00:00:00Z",
-      updatedAt: "2026-01-01T00:00:00Z",
-    };
-
     const orderRepo = createMockOrderRepo();
     (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
       { tokenId: createTokenId("tok-pending"), status: "open" },
@@ -569,45 +519,26 @@ describe("MarketScannerModule", () => {
 
     const { mod, discoveryGateway, marketRepo } = buildModule({ orderRepo });
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([staleMarket]);
+    (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mockReturnValue(0);
 
     await mod.scan();
 
-    const saveCalls = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls;
-    const deactivations = saveCalls.filter((c: unknown[]) => (c[0] as Market).active === false);
-    expect(deactivations).toHaveLength(0);
+    const [, preserved] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect((preserved as Set<string>).has("tok-pending")).toBe(true);
   });
 
   it("deactivation sweep deactivates stale market with no open positions or orders", async () => {
-    const staleMarket: Market = {
-      tokenId: createTokenId("tok-stale"),
-      conditionId: "cond-stale",
-      slug: "expired-market",
-      eventSlug: null,
-      question: "Expired?",
-      outcome: "Yes",
-      outcomeIndex: null,
-      regime: null,
-      horizon: null,
-      endDate: "2025-01-01",
-      active: true,
-      tradable: true,
-      tickSize: 0.01,
-      negRisk: false,
-      createdAt: "2025-01-01T00:00:00Z",
-      updatedAt: "2025-01-01T00:00:00Z",
-    };
-
     const { mod, discoveryGateway, marketRepo } = buildModule();
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
-    (marketRepo.findActive as ReturnType<typeof vi.fn>).mockReturnValue([staleMarket]);
+    (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mockReturnValue(1);
 
     await mod.scan();
 
-    const saveCalls = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls;
-    expect(saveCalls).toHaveLength(1);
-    expect((saveCalls[0]![0] as Market).tokenId).toBe("tok-stale");
-    expect((saveCalls[0]![0] as Market).active).toBe(false);
+    expect(marketRepo.deactivateMissing).toHaveBeenCalledTimes(1);
+    const [discovered, preserved] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock
+      .calls[0]!;
+    expect((discovered as Set<string>).size).toBe(0);
+    expect((preserved as Set<string>).size).toBe(0);
   });
 
   it("open-leg market returned as inactive by Gamma is saved as active", async () => {

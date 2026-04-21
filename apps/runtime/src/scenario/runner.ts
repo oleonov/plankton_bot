@@ -365,6 +365,7 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
   // 10. Stop supervisor
   signalToOrderBridge.unsubscribe();
   await supervisor.stop();
+  candidateBookCache?.dispose();
 
   // 11. Query final state from DB
   const openPositions = repos.position.findOpen();
