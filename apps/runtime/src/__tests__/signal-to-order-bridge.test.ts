@@ -701,4 +701,77 @@ describe("hard-liveness guard (before execution)", () => {
 
     expect(conversionSkipped.filter((s) => s.stage === "hard-liveness")).toHaveLength(0);
   });
+
+  // Reason-specific log routing: expected flag-only races (acceptingOrders /
+  // enableOrderBook) log at debug; anomalies like `no_bid` stay at warn so
+  // operators see genuine data-inconsistency signals.
+  describe("log level routing", () => {
+    function makeCaptureLogger() {
+      const child = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        debug: vi.fn(),
+        fatal: vi.fn(),
+        trace: vi.fn(),
+        child: vi.fn(),
+      };
+      child.child = vi.fn(() => child);
+      const root = {
+        ...child,
+        child: vi.fn(() => child),
+      };
+      return { root, child };
+    }
+
+    function makeBridgeWithCaptureLogger() {
+      const { root, child } = makeCaptureLogger();
+      const bus = new InProcessEventBus();
+      const bridge = new SignalToOrderBridge({
+        bus,
+        log: root as never,
+        liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      });
+      bridge.subscribe();
+      return { bus, child };
+    }
+
+    it("logs at debug when only acceptingOrders/enableOrderBook fail", async () => {
+      const { bus, child } = makeBridgeWithCaptureLogger();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ acceptingOrders: false, enableOrderBook: false })],
+        timestamp: Date.now(),
+      });
+      await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
+      await bus.drain();
+
+      expect(child.debug).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reasons: expect.arrayContaining(["not_accepting_orders", "order_book_disabled"]),
+        }),
+        "approved signal skipped — market not live for order placement",
+      );
+      expect(child.warn).not.toHaveBeenCalledWith(
+        expect.anything(),
+        "approved signal skipped — market not live for order placement",
+      );
+    });
+
+    it("logs at warn when no_bid is in the reasons (data anomaly)", async () => {
+      const { bus, child } = makeBridgeWithCaptureLogger();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ bestBid: null })],
+        timestamp: Date.now(),
+      });
+      await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
+      await bus.drain();
+
+      expect(child.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ reasons: expect.arrayContaining(["no_bid"]) }),
+        "approved signal skipped — market not live for order placement",
+      );
+    });
+  });
 });

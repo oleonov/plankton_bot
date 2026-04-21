@@ -805,6 +805,156 @@ describe("AlgoDecisionModule", () => {
     });
   });
 
+  describe("hard-liveness gate for new entries", () => {
+    it("skips SignalProduced when a new-entry market has acceptingOrders=false", async () => {
+      const tokenId = "token-not-accepting";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      const market = { ...makeMarket(tokenId, null, 0.45), acceptingOrders: false };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+
+    it("skips SignalProduced when a new-entry market has enableOrderBook=false", async () => {
+      const tokenId = "token-book-off";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      const market = { ...makeMarket(tokenId, null, 0.45), enableOrderBook: false };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+
+    // Guards the shared `isAlive` contract against a malformed NormalizedMarket:
+    // normal market-data path keeps `midPrice` and `bestBid` in sync, but the
+    // gate must still reject if that invariant breaks (e.g. a future pricing
+    // fallback populates midPrice from lastTradePrice while bestBid is null).
+    it("skips SignalProduced on inconsistent market with midPrice set but bestBid null", async () => {
+      const tokenId = "token-no-bid";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      const market = { ...makeMarket(tokenId, null, 0.45), bestBid: null };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+
+    // REDEEM uses a separate (NegRisk-contract) pipeline that does NOT go
+    // through the signal-to-order bridge, so it must still fire even when
+    // the CLOB has dropped liveness.
+    it("still emits RedeemRequested for an S2 legged token when market is unhealthy", async () => {
+      const tokenId = "token-redeem-unhealthy";
+      const conditionId = "cond-redeem-unhealthy";
+      const twentyFiveMinAgo = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+      const legState: LegState = {
+        tokenId: createTokenId(tokenId),
+        buyCount: 2,
+        sellCount: 0, // S2 + price<0.05 + holdDuration ≤ 3600s → REDEEM-S2
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: twentyFiveMinAgo,
+        lastTradeAt: twentyFiveMinAgo,
+        updatedAt: twentyFiveMinAgo,
+      };
+      legStateRepo = createMockLegStateRepo([legState]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      // Unhealthy market (acceptingOrders=false) — gate must still let REDEEM through.
+      const market = {
+        ...makeMarket(tokenId, null, 0.03, conditionId),
+        acceptingOrders: false,
+      };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(redeemCalls.length).toBe(1);
+      expect(
+        (redeemCalls[0]![1] as import("@plankton/domain").RuntimeEventMap["RedeemRequested"])
+          .conditionIds,
+      ).toContain(conditionId);
+      expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+
+    // CLOB signals (BUY scale-in / SELL exit) would be rejected by the bridge's
+    // own `isAlive` check regardless of side, so suppress them upstream — no
+    // point allocating signals that can't reach the exchange.
+    it("suppresses CLOB SELL for open-position token when market acceptingOrders=false", async () => {
+      const tokenId = "token-sell-suppressed";
+      const legState: LegState = {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 5, // S1, tradeCount=6 → continuation passes
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      legStateRepo = createMockLegStateRepo([legState]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      // S1 + price 0.15 would normally match D7-SELL-S1, but acceptingOrders=false
+      // means the bridge would reject the resulting SELL order — suppress here.
+      const market = {
+        ...makeMarket(tokenId, null, 0.15),
+        acceptingOrders: false,
+        tradable: false, // preserved-only branch (SELL-only)
+      };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+  });
+
   it("emits Fallback BUY signal with suggestedSizeUsdc=2.10 for OTHER-state token", async () => {
     const tokenId = "token-other-state";
     const familyId = "fam-other";

@@ -119,15 +119,23 @@ export class SignalToOrderBridge {
       bestAsk: market.bestAsk,
     });
     if (!liveness.healthy) {
-      this.log.warn(
-        {
-          signalId: signal.signalId,
-          tokenId: signal.tokenId,
-          reasons: liveness.reasons,
-          cacheStatus: resolvedMarket.cacheStatus,
-        },
-        "approved signal skipped — market not live for order placement",
+      // Reason-specific routing: expected flag-only races (upstream algo-decision
+      // gate already drops most of these, but a pricing flip between ticks can
+      // still sneak through) log at debug; anomalies like `no_bid` — where
+      // algo-decision saw a midPrice yet bestBid is null — stay at warn so
+      // operators see genuine data-inconsistency signals.
+      const onlyExpectedFlags = liveness.reasons.every(
+        (r) => r === "not_accepting_orders" || r === "order_book_disabled",
       );
+      const diag = {
+        signalId: signal.signalId,
+        tokenId: signal.tokenId,
+        reasons: liveness.reasons,
+        cacheStatus: resolvedMarket.cacheStatus,
+      };
+      const msg = "approved signal skipped — market not live for order placement";
+      if (onlyExpectedFlags) this.log.debug(diag, msg);
+      else this.log.warn(diag, msg);
       await this.publishConversionSkipped(signal, "hard-liveness", liveness.reasons, {
         acceptingOrders: market.acceptingOrders,
         enableOrderBook: market.enableOrderBook,

@@ -35,6 +35,7 @@ import {
   resolveSignalReason,
   evaluateContinuation,
   matchRule,
+  isAlive,
 } from "@plankton/domain";
 import type { EvalContext } from "@plankton/domain";
 import type { RuntimeControl } from "@plankton/domain";
@@ -308,6 +309,15 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (redeemResult) {
       return { type: "redeem", conditionId: market.conditionId };
     }
+
+    // Hard-liveness gate for CLOB signals. REDEEM (above) uses a separate
+    // NegRisk contract path and is allowed on unhealthy markets. Any other
+    // signal — new-entry BUY, scale-in BUY, exit SELL — must traverse the
+    // signal-to-order bridge, which calls this same `isAlive` and rejects
+    // regardless of side. Suppress here to eliminate allocation churn from
+    // producing signals the bridge will reject anyway. Shared `isAlive` keeps
+    // the two gates in lockstep so they can't drift.
+    if (!isAlive(market).healthy) return null;
 
     // Preserved-for-lifecycle gate: market has an open leg but the CLOB no
     // longer accepts new entries (tradable=false). Per spec v2.2 §0 the
