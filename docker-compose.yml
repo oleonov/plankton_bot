@@ -7,9 +7,9 @@ services:
       - plankton-data:/app/apps/runtime/data
     restart: unless-stopped
     env_file: .env.production
-    mem_limit: 450m
+    mem_limit: 520m
     environment:
-      - NODE_OPTIONS=--max-old-space-size=384
+      - NODE_OPTIONS=--max-old-space-size=448
 
   plankton-api:
     image: plankton:latest
