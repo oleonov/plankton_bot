@@ -1335,10 +1335,12 @@ async function main(): Promise<void> {
 
   // 11. Start
   try {
-    await supervisor.start();
-
-    // Start paused, then check for deploy resume intent
+    // Default to paused BEFORE modules run so the command-poller (first module)
+    // can legitimately flip us to resumed by applying a pending cmd. Setting
+    // paused=true AFTER supervisor.start() clobbered any such resume.
     setPausedAndPersist(true);
+
+    await supervisor.start();
 
     // Publish runtime state to control.db for cross-service visibility
     const instanceId = randomUUID();
@@ -1350,6 +1352,12 @@ async function main(): Promise<void> {
     });
     statePublisherRef.current = statePublisher;
     statePublisher.publishStartup();
+    // publishStartup hardcodes paused=1; reconcile to the supervisor's actual
+    // state so a resume applied by the command-poller during start() survives
+    // in runtime_control_state as well.
+    if (!supervisor.isPaused()) {
+      statePublisher.publishRunning();
+    }
     statePublisher.startHeartbeatLoop(15_000);
 
     // Evaluate resume intent (read+cleared earlier, before preflight exit paths)
@@ -1369,6 +1377,8 @@ async function main(): Promise<void> {
         { reason: intentResult.reason, ageMs: intentResult.ageMs },
         "resume intent skipped — staying paused",
       );
+    } else if (!supervisor.isPaused()) {
+      log.info({ mode: runtimeMode }, "runtime resumed via pending command");
     } else {
       log.info({ mode: runtimeMode }, "runtime started PAUSED — no resume intent");
     }
