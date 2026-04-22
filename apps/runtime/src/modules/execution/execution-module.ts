@@ -33,6 +33,7 @@ import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
+import { hasWalletBuyBudget, resolveWalletBuyBudget } from "../../wallet-buy-budget.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
@@ -63,8 +64,6 @@ export interface ExecutionModuleDeps {
 }
 
 export class ExecutionModule implements RuntimeModule {
-  private static readonly DEFAULT_WALLET_BUFFER_RATIO = 0.03;
-  private static readonly DEFAULT_MIN_WALLET_BUFFER_USDC = 0.25;
   private static readonly SELL_REPLACE_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
   private static readonly SIZE_EPSILON_SHARES = 1e-9;
 
@@ -146,7 +145,15 @@ export class ExecutionModule implements RuntimeModule {
   } {
     const queue = this.queue?.diagnostics;
     const reservations = this.getReservationSnapshot();
-    const walletBalance = this.getWalletBalanceUsdc();
+    const walletBudget = resolveWalletBuyBudget(
+      {
+        controlDb: this.deps.controlDb,
+        activeProfile: this.deps.activeProfile,
+        walletBufferPct: this.deps.walletBufferPct,
+        walletBufferMinUsdc: this.deps.walletBufferMinUsdc,
+      },
+      reservations.reservedBuyUsdc,
+    );
     return {
       pendingCount: this.pendingCount,
       queueDepth: queue?.queueDepth ?? 0,
@@ -162,14 +169,9 @@ export class ExecutionModule implements RuntimeModule {
           : null,
       reservedBuyUsdc: Number(reservations.reservedBuyUsdc.toFixed(6)),
       freeUsdcForNewOrders:
-        walletBalance != null
+        walletBudget
           ? Number(
-              Math.max(
-                0,
-                walletBalance -
-                  reservations.reservedBuyUsdc -
-                  this.getWalletBufferUsdc(walletBalance),
-              ).toFixed(6),
+              Math.max(0, walletBudget.freeUsdcForNewOrders).toFixed(6),
             )
           : null,
       reservedSellTokenCount: reservations.reservedSellByToken.size,
@@ -629,22 +631,26 @@ export class ExecutionModule implements RuntimeModule {
     const reservations = this.getReservationSnapshot();
 
     if (cmd.side === "buy") {
-      const walletBalance = this.getWalletBalanceUsdc();
-      if (walletBalance == null) return { kind: "accept" };
-
-      const walletBuffer = this.getWalletBufferUsdc(walletBalance);
-      const availableBalance = walletBalance - reservations.reservedBuyUsdc - walletBuffer;
-      if (availableBalance + 1e-9 >= notional) return { kind: "accept" };
+      const walletBudget = resolveWalletBuyBudget(
+        {
+          controlDb: this.deps.controlDb,
+          activeProfile: this.deps.activeProfile,
+          walletBufferPct: this.deps.walletBufferPct,
+          walletBufferMinUsdc: this.deps.walletBufferMinUsdc,
+        },
+        reservations.reservedBuyUsdc,
+      );
+      if (hasWalletBuyBudget(walletBudget, notional)) return { kind: "accept" };
 
       return {
         kind: "reject",
         reason: "reserved-usdc-limit",
         message: "order skipped — insufficient wallet balance after open-order reservations",
         details: {
-          wallet: walletBalance,
+          wallet: walletBudget?.walletBalanceUsdc ?? null,
           reservedBuy: reservations.reservedBuyUsdc,
-          walletBuffer,
-          available: availableBalance,
+          walletBuffer: walletBudget?.walletBufferUsdc ?? null,
+          available: walletBudget?.freeUsdcForNewOrders ?? null,
           order: notional,
         },
       };
@@ -694,21 +700,6 @@ export class ExecutionModule implements RuntimeModule {
       },
     };
   }
-
-  private getWalletBalanceUsdc(): number | null {
-    if (!this.deps.controlDb || !this.deps.activeProfile) return null;
-    const walletRow = this.deps.controlDb
-      .prepare("SELECT wallet_balance_usdc FROM profile_summaries WHERE profile_id = ?")
-      .get(this.deps.activeProfile) as { wallet_balance_usdc: number | null } | undefined;
-    return walletRow?.wallet_balance_usdc ?? null;
-  }
-
-  private getWalletBufferUsdc(walletBalance: number): number {
-    const pct = this.deps.walletBufferPct ?? ExecutionModule.DEFAULT_WALLET_BUFFER_RATIO;
-    const minUsdc = this.deps.walletBufferMinUsdc ?? ExecutionModule.DEFAULT_MIN_WALLET_BUFFER_USDC;
-    return Math.max(minUsdc, walletBalance * pct);
-  }
-
   private getMinOrderSizeRejection(cmd: PlaceOrderCommand): { minOrderSize: number } | null {
     const minOrderSize = this.resolveCommandMinOrderSize(cmd);
     if (

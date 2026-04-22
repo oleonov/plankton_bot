@@ -22,12 +22,14 @@ import type {
   OrderRepository,
   FillRepository,
   RuntimeEventMap,
+  ProfileId,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
+import type { WalletBudgetControlDb } from "../../wallet-buy-budget.js";
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
@@ -38,6 +40,10 @@ export interface RiskInventoryModuleDeps {
   log: Logger;
   db: Database.Database;
   liveLiteGuard?: LiveLiteGuard | undefined;
+  controlDb?: WalletBudgetControlDb | undefined;
+  activeProfile?: ProfileId | undefined;
+  walletBufferPct?: number | undefined;
+  walletBufferMinUsdc?: number | undefined;
 }
 
 /** Full diagnostics snapshot returned by getDiagnostics(). */
@@ -68,6 +74,12 @@ export class RiskInventoryModule implements RuntimeModule {
     this.log = deps.log.child({ module: "risk-inventory" });
     this.riskGate = new AlgoRiskGateImpl(deps.orderRepo, deps.positionRepo, this.log, (tid) =>
       this.getLatestMinOrderSize(tid),
+      {
+        controlDb: deps.controlDb,
+        activeProfile: deps.activeProfile,
+        walletBufferPct: deps.walletBufferPct,
+        walletBufferMinUsdc: deps.walletBufferMinUsdc,
+      },
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,

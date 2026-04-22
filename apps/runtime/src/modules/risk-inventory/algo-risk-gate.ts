@@ -9,6 +9,11 @@ import {
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
+import {
+  hasWalletBuyBudget,
+  resolveWalletBuyBudget,
+  type WalletBuyBudgetConfig,
+} from "../../wallet-buy-budget.js";
 
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
 const NEW_ENTRY_REASONS = new Set<string>([SignalReason.ProbeEntry]);
@@ -29,6 +34,7 @@ export class AlgoRiskGateImpl implements RiskGate {
     private readonly positionRepo: PositionRepository,
     private readonly log: Logger,
     private readonly resolveMinOrderSize?: (tokenId: TokenId) => number | null,
+    private readonly walletBudget?: WalletBuyBudgetConfig,
   ) {}
 
   async evaluate(signal: Signal): Promise<RiskDecision> {
@@ -78,6 +84,16 @@ export class AlgoRiskGateImpl implements RiskGate {
       return this.decision(signal, false, rejected, passed);
     }
     passed.push("min_order_size_ok");
+
+    const walletBudget = resolveWalletBuyBudget(
+      this.walletBudget ?? {},
+      this.orderRepo.sumOpenBuyNotional(),
+    );
+    if (!hasWalletBuyBudget(walletBudget, signal.suggestedSizeUsdc)) {
+      rejected.push("wallet_buy_budget_exhausted");
+      return this.decision(signal, false, rejected, passed);
+    }
+    passed.push("wallet_buy_budget_ok");
 
     return this.decision(signal, true, rejected, passed);
   }

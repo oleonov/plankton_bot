@@ -72,6 +72,18 @@ function makePositionRepo(position: Position | null = null): PositionRepository 
   };
 }
 
+function createMockControlDb(walletBalance: number | null) {
+  return {
+    prepare: vi.fn().mockReturnValue({
+      get: vi
+        .fn()
+        .mockReturnValue(
+          walletBalance != null ? { wallet_balance_usdc: walletBalance } : undefined,
+        ),
+    }),
+  };
+}
+
 function makeOpenPosition(overrides?: Partial<Position>): Position {
   return {
     positionId: createPositionId("pos-1"),
@@ -187,6 +199,46 @@ describe("AlgoRiskGateImpl", () => {
 
     expect(decision.tokenId).toBe(TOK_ID);
     expect(decision.conditionId).toBe(COND_ID);
+  });
+
+  it("rejects buy when wallet buy budget is exhausted", async () => {
+    const orderRepo = makeOrderRepo();
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(8);
+    const gate = new AlgoRiskGateImpl(
+      orderRepo,
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(10),
+        activeProfile: "paper" as any,
+      },
+    );
+
+    const decision = await gate.evaluate(makeSignal({ suggestedSizeUsdc: 2 }));
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("wallet_buy_budget_exhausted");
+  });
+
+  it("approves buy when wallet buy budget can cover the signal", async () => {
+    const orderRepo = makeOrderRepo();
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(2);
+    const gate = new AlgoRiskGateImpl(
+      orderRepo,
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(10),
+        activeProfile: "paper" as any,
+      },
+    );
+
+    const decision = await gate.evaluate(makeSignal({ suggestedSizeUsdc: 2 }));
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("wallet_buy_budget_ok");
   });
 
   describe("open-position defense (restart double-entry guard)", () => {

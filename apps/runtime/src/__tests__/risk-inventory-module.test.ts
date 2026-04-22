@@ -97,6 +97,18 @@ const mockDb = {
   prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
 } as any;
 
+function createMockControlDb(walletBalance: number | null) {
+  return {
+    prepare: vi.fn().mockReturnValue({
+      get: vi
+        .fn()
+        .mockReturnValue(
+          walletBalance != null ? { wallet_balance_usdc: walletBalance } : undefined,
+        ),
+    }),
+  };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────
 
 describe("RiskInventoryModule", () => {
@@ -107,7 +119,10 @@ describe("RiskInventoryModule", () => {
   let fillRepo: { markReconciled: ReturnType<typeof vi.fn> };
   let mod: RiskInventoryModule;
 
-  function createModule(liveLiteGuard?: LiveLiteGuard) {
+  function createModule(
+    liveLiteGuard?: LiveLiteGuard,
+    overrides: Partial<ConstructorParameters<typeof RiskInventoryModule>[0]> = {},
+  ) {
     return new RiskInventoryModule({
       bus,
       positionRepo,
@@ -117,6 +132,7 @@ describe("RiskInventoryModule", () => {
       log: silentLog,
       db: mockDb,
       liveLiteGuard,
+      ...overrides,
     });
   }
 
@@ -157,6 +173,35 @@ describe("RiskInventoryModule", () => {
 
     expect(approved).toHaveLength(1);
     expect(approved[0].signal.signalId).toBe("sig-1");
+
+    await mod.stop();
+  });
+
+  it("rejects BUY before SignalApproved when wallet buy budget is exhausted", async () => {
+    orderRepo = createMockOrderRepo();
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(8);
+    mod = createModule(undefined, {
+      controlDb: createMockControlDb(10),
+      activeProfile: "paper" as any,
+    });
+    await mod.start();
+
+    const approved: any[] = [];
+    const rejected: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ suggestedSizeUsdc: 2, suggestedSize: 4 }),
+    });
+
+    expect(approved).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toContain("wallet_buy_budget_exhausted");
 
     await mod.stop();
   });

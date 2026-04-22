@@ -26,6 +26,8 @@ import type {
   RuntimeEventMap,
   TokenId,
   ConditionId,
+  OrderRepository,
+  ProfileId,
 } from "@plankton/domain";
 import {
   deriveState,
@@ -40,6 +42,11 @@ import {
 import type { EvalContext } from "@plankton/domain";
 import type { RuntimeControl } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import {
+  hasWalletBuyBudget,
+  resolveWalletBuyBudget,
+  type WalletBudgetControlDb,
+} from "../../wallet-buy-budget.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -72,8 +79,13 @@ export interface AlgoDecisionModuleDeps {
   bus: EventBus;
   legStateRepo: LegStateRepository;
   algoRulesRepo: AlgoRulesRepository;
+  orderRepo?: Pick<OrderRepository, "sumOpenBuyNotional"> | undefined;
   selectedMarketCache: SelectedMarketCache;
   runtimeControl?: RuntimeControl;
+  controlDb?: WalletBudgetControlDb | undefined;
+  activeProfile?: ProfileId | undefined;
+  walletBufferPct?: number | undefined;
+  walletBufferMinUsdc?: number | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -243,6 +255,13 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (this.deps.runtimeControl?.isPaused()) return;
     this.tickCounter++;
     const now = Date.now();
+    let reservedBuyUsdc = this.deps.orderRepo?.sumOpenBuyNotional() ?? 0;
+    const walletBudgetConfig = {
+      controlDb: this.deps.controlDb,
+      activeProfile: this.deps.activeProfile,
+      walletBufferPct: this.deps.walletBufferPct,
+      walletBufferMinUsdc: this.deps.walletBufferMinUsdc,
+    };
 
     // seqMap tracks sequence numbers: `${tokenId}|${side}` → next seq
     const seqMap = new Map<string, number>();
@@ -261,6 +280,18 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (result.type === "redeem") {
         redeemConditionIds.add(result.conditionId);
       } else {
+        if (
+          result.signal.side === "buy" &&
+          !hasWalletBuyBudget(
+            resolveWalletBuyBudget(walletBudgetConfig, reservedBuyUsdc),
+            result.signal.suggestedSizeUsdc,
+          )
+        ) {
+          continue;
+        }
+        if (result.signal.side === "buy") {
+          reservedBuyUsdc += result.signal.suggestedSizeUsdc;
+        }
         signals.push(result.signal);
       }
     }

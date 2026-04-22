@@ -10,6 +10,7 @@ import type {
   NormalizedMarket,
   LegState,
   RuntimeEventMap,
+  OrderRepository,
 } from "@plankton/domain";
 import { createTokenId, createCommandId, createOrderId } from "@plankton/domain";
 import type { ConditionId } from "@plankton/domain";
@@ -198,6 +199,24 @@ function createMockLogger(): Logger {
   } as unknown as Logger;
 }
 
+function createMockOrderRepo(openBuyNotional = 0): Pick<OrderRepository, "sumOpenBuyNotional"> {
+  return {
+    sumOpenBuyNotional: vi.fn().mockReturnValue(openBuyNotional),
+  };
+}
+
+function createMockControlDb(walletBalance: number | null) {
+  return {
+    prepare: vi.fn().mockReturnValue({
+      get: vi
+        .fn()
+        .mockReturnValue(
+          walletBalance != null ? { wallet_balance_usdc: walletBalance } : undefined,
+        ),
+    }),
+  };
+}
+
 function makeMarket(
   tokenId: string,
   _familyId: string | null,
@@ -236,6 +255,7 @@ describe("AlgoDecisionModule", () => {
   let legStateRepo: LegStateRepository;
   let algoRulesRepo: AlgoRulesRepository;
   let selectedMarketCache: SelectedMarketCache;
+  let orderRepo: Pick<OrderRepository, "sumOpenBuyNotional">;
   let log: Logger;
 
   function buildModule(
@@ -245,6 +265,7 @@ describe("AlgoDecisionModule", () => {
       bus: bus as unknown as EventBus,
       legStateRepo,
       algoRulesRepo,
+      orderRepo,
       selectedMarketCache,
       log,
       sweepIntervalMs: 60_000,
@@ -257,6 +278,7 @@ describe("AlgoDecisionModule", () => {
     legStateRepo = createMockLegStateRepo();
     algoRulesRepo = createMockAlgoRulesRepo();
     selectedMarketCache = createMockSelectedMarketCache();
+    orderRepo = createMockOrderRepo();
     log = createMockLogger();
   });
 
@@ -950,6 +972,92 @@ describe("AlgoDecisionModule", () => {
       const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
       const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
       expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+  });
+
+  describe("wallet buy budget gate", () => {
+    it("skips SignalProduced for new entry when wallet buy budget is exhausted", async () => {
+      const tokenId = "token-wallet-blocked";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      orderRepo = createMockOrderRepo(8);
+
+      const mod = buildModule({
+        controlDb: createMockControlDb(10),
+        activeProfile: "paper" as any,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+
+    it("caps BUY emissions within one sweep to available wallet budget", async () => {
+      const tokenIds = ["token-wallet-1", "token-wallet-2", "token-wallet-3"];
+      selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+      orderRepo = createMockOrderRepo(0);
+
+      const mod = buildModule({
+        controlDb: createMockControlDb(5),
+        activeProfile: "paper" as any,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: tokenIds.map((tokenId) => makeMarket(tokenId, null, 0.45)),
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(2);
+      expect(signalCalls.every(([, payload]) => payload.signal.side === "buy")).toBe(true);
+
+      await mod.stop();
+    });
+
+    it("does not block SELL when wallet buy budget is exhausted", async () => {
+      const tokenId = "token-wallet-sell";
+      orderRepo = createMockOrderRepo(8);
+      const legState: LegState = {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 5,
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      legStateRepo = createMockLegStateRepo([legState]);
+
+      const mod = buildModule({
+        controlDb: createMockControlDb(10),
+        activeProfile: "paper" as any,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [{ ...makeMarket(tokenId, null, 0.15), tradable: false }],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.side).toBe("sell");
 
       await mod.stop();
     });

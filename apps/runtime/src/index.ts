@@ -539,6 +539,10 @@ async function main(): Promise<void> {
     log,
     db: ledgerConn.db,
     liveLiteGuard,
+    controlDb: controlConn.db,
+    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
+    walletBufferPct: config.executionWalletBufferPct,
+    walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
   });
 
   // 7h. Strategy module
@@ -563,8 +567,13 @@ async function main(): Promise<void> {
     bus,
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
+    orderRepo: repos.order,
     selectedMarketCache,
     runtimeControl,
+    controlDb: controlConn.db,
+    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
+    walletBufferPct: config.executionWalletBufferPct,
+    walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
   });
