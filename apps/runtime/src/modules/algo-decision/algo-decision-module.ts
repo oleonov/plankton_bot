@@ -63,9 +63,12 @@ export interface SelectedMarketCache {
 
 interface PendingEntry {
   tokenId: string;
-  clientOrderId: string;
-  orderId: string;
-  placedAt: number;
+  signalId: string;
+  sizeUsdc: number;
+  reservedAt: number;
+  persisted: boolean;
+  clientOrderId: string | null;
+  orderId: string | null;
 }
 
 type TokenEvalResult =
@@ -138,6 +141,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
+      this.deps.bus.subscribe("SignalRejected", (p) => this.handleSignalRejected(p)),
+      this.deps.bus.subscribe("SignalConversionSkipped", (p) => this.handleSignalConversionSkipped(p)),
+      this.deps.bus.subscribe("PlaceOrderRequested", (p) => this.handlePlaceOrderRequested(p)),
       this.deps.bus.subscribe("OrderPlaced", (p) => this.handleOrderPlaced(p)),
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFillReceived(p)),
       this.deps.bus.subscribe("OrderCancelled", (p) => this.handleOrderCancelled(p)),
@@ -200,23 +206,42 @@ export class AlgoDecisionModule implements RuntimeModule {
   private async handleOrderPlaced(payload: RuntimeEventMap["OrderPlaced"]): Promise<void> {
     if (payload.side !== "buy") return;
     const tokenId = String(payload.tokenId);
-    const clientOrderId = String(payload.clientOrderId);
-    const orderId = String(payload.orderId);
-    const entry: PendingEntry = {
-      tokenId,
-      clientOrderId,
-      orderId,
-      placedAt: payload.timestamp,
-    };
-    this.pendingEntries.set(tokenId, entry);
-    this.clientOrderToToken.set(clientOrderId, tokenId);
-    this.orderIdToToken.set(orderId, tokenId);
+    const existing = this.pendingEntries.get(tokenId);
+    if (!existing) return;
+    existing.persisted = true;
+    existing.clientOrderId = String(payload.clientOrderId);
+    existing.orderId = String(payload.orderId);
+    this.clientOrderToToken.set(existing.clientOrderId, tokenId);
+    this.orderIdToToken.set(existing.orderId, tokenId);
+  }
+
+  private async handlePlaceOrderRequested(
+    payload: RuntimeEventMap["PlaceOrderRequested"],
+  ): Promise<void> {
+    if (payload.command.side !== "buy") return;
+    const tokenId = String(payload.command.tokenId);
+    const existing = this.pendingEntries.get(tokenId);
+    if (!existing) return;
+    existing.clientOrderId = String(payload.command.clientOrderId);
+    this.clientOrderToToken.set(existing.clientOrderId, tokenId);
   }
 
   private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {
     if (payload.side !== "buy") return;
     const tokenId = String(payload.tokenId);
     this.clearPendingByTokenId(tokenId);
+  }
+
+  private async handleSignalRejected(
+    payload: RuntimeEventMap["SignalRejected"],
+  ): Promise<void> {
+    this.clearPendingByTokenId(String(payload.signal.tokenId));
+  }
+
+  private async handleSignalConversionSkipped(
+    payload: RuntimeEventMap["SignalConversionSkipped"],
+  ): Promise<void> {
+    this.clearPendingByTokenId(String(payload.signal.tokenId));
   }
 
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
@@ -255,7 +280,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (this.deps.runtimeControl?.isPaused()) return;
     this.tickCounter++;
     const now = Date.now();
-    let reservedBuyUsdc = this.deps.orderRepo?.sumOpenBuyNotional() ?? 0;
+    let reservedBuyUsdc =
+      (this.deps.orderRepo?.sumOpenBuyNotional() ?? 0) + this.getPendingReservedBuyUsdc();
     const walletBudgetConfig = {
       controlDb: this.deps.controlDb,
       activeProfile: this.deps.activeProfile,
@@ -290,6 +316,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           continue;
         }
         if (result.signal.side === "buy") {
+          this.reservePendingSignal(result.signal, now);
           reservedBuyUsdc += result.signal.suggestedSizeUsdc;
         }
         signals.push(result.signal);
@@ -436,7 +463,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private pruneExpiredPending(): void {
     const cutoff = Date.now() - PENDING_ENTRY_TIMEOUT_MS;
     for (const [tokenId, entry] of this.pendingEntries) {
-      if (entry.placedAt < cutoff) {
+      if (entry.reservedAt < cutoff) {
         this.clearPendingByTokenId(tokenId);
       }
     }
@@ -446,7 +473,27 @@ export class AlgoDecisionModule implements RuntimeModule {
     const entry = this.pendingEntries.get(tokenId);
     if (!entry) return;
     this.pendingEntries.delete(tokenId);
-    this.clientOrderToToken.delete(entry.clientOrderId);
-    this.orderIdToToken.delete(entry.orderId);
+    if (entry.clientOrderId) this.clientOrderToToken.delete(entry.clientOrderId);
+    if (entry.orderId) this.orderIdToToken.delete(entry.orderId);
+  }
+
+  private reservePendingSignal(signal: import("@plankton/domain").Signal, now: number): void {
+    this.pendingEntries.set(String(signal.tokenId), {
+      tokenId: String(signal.tokenId),
+      signalId: signal.signalId,
+      sizeUsdc: signal.suggestedSizeUsdc,
+      reservedAt: now,
+      persisted: false,
+      clientOrderId: null,
+      orderId: null,
+    });
+  }
+
+  private getPendingReservedBuyUsdc(): number {
+    let reservedBuyUsdc = 0;
+    for (const entry of this.pendingEntries.values()) {
+      if (!entry.persisted) reservedBuyUsdc += entry.sizeUsdc;
+    }
+    return reservedBuyUsdc;
   }
 }

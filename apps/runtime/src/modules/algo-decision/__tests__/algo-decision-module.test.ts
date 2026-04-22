@@ -378,7 +378,7 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
-  it("skips tokens with pending entries", async () => {
+  it("skips tokens that already have a signal-time pending BUY reservation", async () => {
     const tokenId = "token-pending";
     const familyId = "fam-3";
     selectedMarketCache = createMockSelectedMarketCache([tokenId]);
@@ -386,27 +386,16 @@ describe("AlgoDecisionModule", () => {
     const mod = buildModule();
     await mod.start();
 
-    // Simulate a buy order placed for this token
-    await (bus as any).emit("OrderPlaced", {
-      commandId: createCommandId("cmd-1"),
-      clientOrderId: "clt-1" as any,
-      orderId: createOrderId("ord-1"),
-      tokenId: createTokenId(tokenId),
-      side: "buy" as const,
-      price: 0.45,
-      size: 4.67,
-      orderType: "limit" as const,
-      signalReason: "probe-entry",
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, familyId, 0.45)],
       timestamp: Date.now(),
     });
 
-    // Reset publish mock so we only see calls from market update
+    // Reset publish mock so we only see calls from the second market update.
     (bus.publish as ReturnType<typeof vi.fn>).mockClear();
 
-    // Now market update arrives — should NOT emit SignalProduced for this token
-    const market = makeMarket(tokenId, familyId, 0.45);
     await (bus as any).emit("NormalizedMarketUpdated", {
-      markets: [market],
+      markets: [makeMarket(tokenId, familyId, 0.45)],
       timestamp: Date.now(),
     });
 
@@ -1027,6 +1016,34 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("carries pending BUY reservations across successive market-update batches", async () => {
+      const tokenIds = ["token-wallet-a", "token-wallet-b", "token-wallet-c"];
+      selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+      orderRepo = createMockOrderRepo(0);
+
+      const mod = buildModule({
+        controlDb: createMockControlDb(5),
+        activeProfile: "paper" as any,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: tokenIds.slice(0, 2).map((tokenId) => makeMarket(tokenId, null, 0.45)),
+        timestamp: Date.now(),
+      });
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenIds[2]!, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(2);
+
+      await mod.stop();
+    });
+
     it("does not block SELL when wallet buy budget is exhausted", async () => {
       const tokenId = "token-wallet-sell";
       orderRepo = createMockOrderRepo(8);
@@ -1058,6 +1075,104 @@ describe("AlgoDecisionModule", () => {
       );
       expect(signalCalls.length).toBe(1);
       expect(signalCalls[0]![1].signal.side).toBe("sell");
+
+      await mod.stop();
+    });
+
+    it("clears a signal-time reservation when risk rejects the signal", async () => {
+      const tokenId = "token-wallet-retry";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([ev]) => ev === "SignalProduced",
+      )?.[1].signal as import("@plankton/domain").Signal;
+      expect(firstSignal).toBeDefined();
+
+      await (bus as any).emit("SignalRejected", {
+        signal: firstSignal,
+        reason: "wallet_buy_budget_exhausted",
+        rejectedAt: Date.now(),
+      });
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(1);
+
+      await mod.stop();
+    });
+
+    it("clears a signal-time reservation when execution rejects the converted order", async () => {
+      const tokenId = "token-wallet-order-reject";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([ev]) => ev === "SignalProduced",
+      )?.[1].signal as import("@plankton/domain").Signal;
+      expect(firstSignal).toBeDefined();
+
+      await (bus as any).emit("PlaceOrderRequested", {
+        command: {
+          type: "PlaceOrderCommand",
+          commandId: createCommandId("cmd-wallet-order-reject"),
+          clientOrderId: "plk_wallet_order_reject" as any,
+          source: "strategy",
+          tokenId: createTokenId(tokenId),
+          conditionId: "cond-1" as ConditionId,
+          side: "buy",
+          size: firstSignal.suggestedSize,
+          price: firstSignal.suggestedPrice,
+          orderType: "GTC",
+          tickSize: 0.01,
+          negRisk: false,
+          sequenceInTick: 0,
+          signalReason: firstSignal.reason,
+        },
+        timestamp: Date.now(),
+      });
+      await (bus as any).emit("OrderRejected", {
+        commandId: createCommandId("cmd-wallet-order-reject"),
+        clientOrderId: "plk_wallet_order_reject" as any,
+        tokenId: createTokenId(tokenId),
+        conditionId: "cond-1" as ConditionId,
+        reason: "reserved-usdc-limit",
+        errorCode: "INSUFFICIENT_BALANCE",
+        signalReason: firstSignal.reason,
+        timestamp: Date.now(),
+      });
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(1);
 
       await mod.stop();
     });
