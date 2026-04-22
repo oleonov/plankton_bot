@@ -9,7 +9,9 @@ services:
     env_file: .env.production
     mem_limit: 520m
     environment:
-      - NODE_OPTIONS=--max-old-space-size=448
+      # --heapsnapshot-signal=SIGUSR2 lets ops dump a heap snapshot on demand
+      # (docker kill -s SIGUSR2 plankton-plankton-runtime-1) for leak triage.
+      - NODE_OPTIONS=--max-old-space-size=448 --heapsnapshot-signal=SIGUSR2
 
   plankton-api:
     image: plankton:latest

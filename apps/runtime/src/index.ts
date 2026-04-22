@@ -1170,6 +1170,24 @@ async function main(): Promise<void> {
     }
   }, 30_000);
 
+  // Memory-usage breakdown log — helps locate the source of the post-resume
+  // RSS climb that has been tripping the 520 MiB cgroup OOM. Distinguishes
+  // V8 heap (rss-arrayBuffers-external ~ heap) from off-heap native buffers
+  // (arrayBuffers — WebSocket messages) and other external memory.
+  setInterval(() => {
+    const mu = process.memoryUsage();
+    log.info(
+      {
+        rssMb: Math.round(mu.rss / 1024 / 1024),
+        heapUsedMb: Math.round(mu.heapUsed / 1024 / 1024),
+        heapTotalMb: Math.round(mu.heapTotal / 1024 / 1024),
+        externalMb: Math.round(mu.external / 1024 / 1024),
+        arrayBuffersMb: Math.round(mu.arrayBuffers / 1024 / 1024),
+      },
+      "process.memoryUsage",
+    );
+  }, 60_000).unref();
+
   // 7q. Wire SignalToOrderBridge subscriptions (not a RuntimeModule — subscribe directly)
   signalToOrderBridge.subscribe();
 
