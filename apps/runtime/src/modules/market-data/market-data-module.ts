@@ -35,6 +35,11 @@ import {
 
 const STREAM_FALLBACK_MIN_STALE_MS = 15_000;
 const STREAM_UPDATE_COALESCE_MS = 100;
+// Shard fan-out: one WS disconnect can fire 20× onGapDetected in quick succession,
+// one per shard. Coalesce the warn log into a single line per burst. State
+// updates (pendingGapTokenIds, forceFullPoll) stay synchronous so the next
+// poll still picks up every gap.
+const GAP_LOG_DEBOUNCE_MS = 250;
 
 export interface MarketDataStreamActivitySnapshot {
   readonly wsEnabled: boolean;
@@ -86,6 +91,11 @@ export class MarketDataModule implements RuntimeModule {
   private lastFallbackPollCount = 0;
   private readonly pendingStreamUpdatesByToken = new Map<string, MarketPricingStreamUpdate>();
   private streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  private gapLogTimer: ReturnType<typeof setTimeout> | null = null;
+  private gapLogBurstShardCount = 0;
+  private gapLogBurstTokenCount = 0;
+  private gapLogBurstForceFullPoll = false;
+  private readonly gapLogBurstReasons = new Set<string>();
 
   constructor(private readonly deps: MarketDataModuleDeps) {
     this.log = deps.log.child({ module: "market-data" });
@@ -112,14 +122,7 @@ export class MarketDataModule implements RuntimeModule {
               this.pendingGapTokenIds.add(tokenId);
             }
           }
-          this.log.warn(
-            {
-              reason,
-              tokenCount: normalizedTokenIds.length,
-              forceFullPoll: normalizedTokenIds.length === 0,
-            },
-            "market-data stream gap detected",
-          );
+          this.queueGapLog(reason, normalizedTokenIds.length);
         },
       });
     }
@@ -139,10 +142,44 @@ export class MarketDataModule implements RuntimeModule {
       clearTimeout(this.streamFlushTimer);
       this.streamFlushTimer = null;
     }
+    if (this.gapLogTimer) {
+      clearTimeout(this.gapLogTimer);
+      this.gapLogTimer = null;
+      this.flushGapLog();
+    }
     await this.flushPendingStreamUpdates();
     this.stream?.close();
     this.stream = null;
     this.log.info("market-data module stopped");
+  }
+
+  private queueGapLog(reason: string, tokenCount: number): void {
+    this.gapLogBurstShardCount += 1;
+    this.gapLogBurstTokenCount += tokenCount;
+    this.gapLogBurstReasons.add(reason);
+    if (tokenCount === 0) this.gapLogBurstForceFullPoll = true;
+    if (this.gapLogTimer) return;
+    this.gapLogTimer = setTimeout(() => {
+      this.gapLogTimer = null;
+      this.flushGapLog();
+    }, GAP_LOG_DEBOUNCE_MS);
+  }
+
+  private flushGapLog(): void {
+    if (this.gapLogBurstShardCount === 0) return;
+    this.log.warn(
+      {
+        reasons: [...this.gapLogBurstReasons],
+        shardCount: this.gapLogBurstShardCount,
+        tokenCount: this.gapLogBurstTokenCount,
+        forceFullPoll: this.gapLogBurstForceFullPoll,
+      },
+      "market-data stream gap detected",
+    );
+    this.gapLogBurstShardCount = 0;
+    this.gapLogBurstTokenCount = 0;
+    this.gapLogBurstForceFullPoll = false;
+    this.gapLogBurstReasons.clear();
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {

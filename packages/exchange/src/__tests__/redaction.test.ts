@@ -45,6 +45,23 @@ describe("redaction", () => {
     expect(redacted).toContain("orderID: ord-1");
   });
 
+  it("redacts JSON-stringified credentials (clob-client leak shape)", () => {
+    const text =
+      '{"method":"POST","url":"/order","headers":{"POLY_API_KEY":"api-key-value","POLY_PASSPHRASE":"passphrase-value","POLY_SIGNATURE":"sig-value","POLY_BUILDER_API_KEY":"builder-key","Authorization":"Bearer bearer-value"}}';
+
+    const redacted = redactText(text);
+
+    expect(redacted).not.toContain("api-key-value");
+    expect(redacted).not.toContain("passphrase-value");
+    expect(redacted).not.toContain("sig-value");
+    expect(redacted).not.toContain("builder-key");
+    expect(redacted).not.toContain("bearer-value");
+    expect(redacted).toContain("********");
+    // Non-sensitive values should survive
+    expect(redacted).toContain('"method":"POST"');
+    expect(redacted).toContain('"url":"/order"');
+  });
+
   it("sanitizes axios-like errors while preserving exchange error data", () => {
     const err = new Error("Request failed");
     Object.assign(err, {

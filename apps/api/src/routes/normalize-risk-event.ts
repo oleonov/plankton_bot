@@ -67,10 +67,7 @@ const EVENT_RULES: Record<string, EventRule> = {
   },
 };
 
-function summarizeLegacyFamilyMode(
-  payload: Record<string, unknown>,
-  targetState: string,
-): string {
+function summarizeLegacyFamilyMode(payload: Record<string, unknown>, targetState: string): string {
   const reason = typeof payload.reason === "string" ? payload.reason : "no reason";
   const source = typeof payload.source === "string" ? payload.source : null;
   const previousState =

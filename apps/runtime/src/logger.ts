@@ -55,6 +55,10 @@ export function createLogger(level: string, mode?: string): Logger {
   const opts: LoggerOptions = {
     level,
     redact: { paths: [...REDACT_PATHS], censor: "********" },
+    // Pino's default JSON.stringify of a native DOMException serializes its 25
+    // enum constants (INDEX_SIZE_ERR..DATA_CLONE_ERR) + the full cause graph —
+    // ~800 B per log. stdSerializers.err keeps only name/message/stack/code.
+    serializers: { err: pino.stdSerializers.err },
     ...(mode ? { base: { mode } } : {}),
   };
 
