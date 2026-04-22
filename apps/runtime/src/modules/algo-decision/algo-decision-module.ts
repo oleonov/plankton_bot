@@ -142,7 +142,9 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
       this.deps.bus.subscribe("SignalRejected", (p) => this.handleSignalRejected(p)),
-      this.deps.bus.subscribe("SignalConversionSkipped", (p) => this.handleSignalConversionSkipped(p)),
+      this.deps.bus.subscribe("SignalConversionSkipped", (p) =>
+        this.handleSignalConversionSkipped(p),
+      ),
       this.deps.bus.subscribe("PlaceOrderRequested", (p) => this.handlePlaceOrderRequested(p)),
       this.deps.bus.subscribe("OrderPlaced", (p) => this.handleOrderPlaced(p)),
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFillReceived(p)),
@@ -232,9 +234,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.clearPendingByTokenId(tokenId);
   }
 
-  private async handleSignalRejected(
-    payload: RuntimeEventMap["SignalRejected"],
-  ): Promise<void> {
+  private async handleSignalRejected(payload: RuntimeEventMap["SignalRejected"]): Promise<void> {
     this.clearPendingByTokenId(String(payload.signal.tokenId));
   }
 
