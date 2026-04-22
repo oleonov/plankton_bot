@@ -20,6 +20,11 @@ import {
 const CLOB_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION = 500;
 const METRICS_WINDOW_MS = 10 * 60 * 1000;
+// Cap per-window latency samples. Each reconnect can burst thousands of samples
+// (one per WS event × ~500 tokens/shard × 20 shards). Under a reconnect storm
+// the window doesn't rotate (still <10 min) so samples accumulate into tens of
+// MB before rotation. The cap keeps p50/p95 accuracy while bounding memory.
+const MAX_LATENCY_SAMPLES_PER_WINDOW = 10_000;
 const HEARTBEAT_PING = "PING";
 const HEARTBEAT_PONG = "PONG";
 const PING_INTERVAL_MS = 10_000;
@@ -206,6 +211,10 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     }
     if (latencySamplesMs.length > 0) {
       this.window.latencySamplesMs.push(...latencySamplesMs);
+      const overflow = this.window.latencySamplesMs.length - MAX_LATENCY_SAMPLES_PER_WINDOW;
+      if (overflow > 0) {
+        this.window.latencySamplesMs.splice(0, overflow);
+      }
     }
     if (bookEventCount > 0) {
       this.window.bookEventsReceived += bookEventCount;

@@ -984,4 +984,31 @@ describe("AlgoDecisionModule", () => {
 
     await mod.stop();
   });
+
+  it("evicts marketCache entries when TrackedMarketsChanged removes tokens", async () => {
+    const keptToken = "token-kept";
+    const droppedToken = "token-dropped";
+    selectedMarketCache = createMockSelectedMarketCache([keptToken, droppedToken]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(keptToken, null, 0.45), makeMarket(droppedToken, null, 0.45)],
+      timestamp: Date.now(),
+    });
+
+    expect((await mod.healthCheck()).detail).toContain("markets=2");
+
+    await (bus as any).emit("TrackedMarketsChanged", {
+      addedTokenIds: [],
+      removedTokenIds: [createTokenId(droppedToken)],
+      activeTokenIds: [createTokenId(keptToken)],
+      timestamp: Date.now(),
+    });
+
+    expect((await mod.healthCheck()).detail).toContain("markets=1");
+
+    await mod.stop();
+  });
 });

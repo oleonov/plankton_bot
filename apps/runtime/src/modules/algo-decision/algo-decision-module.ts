@@ -125,6 +125,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
       this.deps.bus.subscribe("OrderPlaced", (p) => this.handleOrderPlaced(p)),
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFillReceived(p)),
       this.deps.bus.subscribe("OrderCancelled", (p) => this.handleOrderCancelled(p)),
@@ -172,6 +173,16 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
     const tokenIds = payload.markets.filter((m) => m.active).map((m) => m.tokenId);
     await this.evaluateTokens(tokenIds);
+  }
+
+  private async handleTrackedMarketsChanged(
+    payload: RuntimeEventMap["TrackedMarketsChanged"],
+  ): Promise<void> {
+    // Tokens leaving the tracked universe never get a final NormalizedMarketUpdated
+    // delivery, so marketCache would retain them forever. Evict on scanner churn.
+    for (const tokenId of payload.removedTokenIds) {
+      this.marketCache.delete(String(tokenId));
+    }
   }
 
   private async handleOrderPlaced(payload: RuntimeEventMap["OrderPlaced"]): Promise<void> {

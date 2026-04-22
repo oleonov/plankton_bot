@@ -306,9 +306,12 @@ export class MarketDataModule implements RuntimeModule {
 
       this.lastSuccessfulDataMs = now;
       this.forceFullPoll = false;
-      for (const tokenId of tokenIdsToPoll) {
-        this.pendingGapTokenIds.delete(tokenId);
-      }
+      // A successful poll means every tracked token is either freshly priced
+      // (just fetched) or still considered fresh by the stream. Drop the full
+      // gap set instead of only the polled subset — otherwise entries for
+      // tokens that weren't repolled linger forever and keep forcing future
+      // polls to the full 9735-token batch.
+      this.pendingGapTokenIds.clear();
       this.log.info({ tokenCount: markets.length }, "poll cycle complete");
 
       await this.deps.bus.publish("MarketSnapshotReceived", {

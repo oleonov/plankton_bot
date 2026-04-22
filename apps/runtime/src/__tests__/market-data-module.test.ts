@@ -662,6 +662,34 @@ describe("MarketDataModule", () => {
     }
   });
 
+  it("clears pendingGapTokenIds after a successful poll so stale entries don't accumulate", async () => {
+    const tracked = [makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" })];
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }]]),
+    );
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+    });
+
+    // Seed the gap set with tracked tok-a plus a ghost token that isn't tracked.
+    // Without the clear(), the ghost entry would linger in pendingGapTokenIds forever.
+    await stream!.emitGapForTokenIds(["tok-a", "tok-ghost-1", "tok-ghost-2"]);
+    expect((mod as unknown as { pendingGapTokenIds: Set<string> }).pendingGapTokenIds.size).toBe(3);
+
+    await mod.poll();
+
+    expect((mod as unknown as { pendingGapTokenIds: Set<string> }).pendingGapTokenIds.size).toBe(0);
+
+    await mod.stop();
+  });
+
   it("poll forces a full REST refresh after a stream gap", async () => {
     const tracked = [
       makeTrackedMarket({
