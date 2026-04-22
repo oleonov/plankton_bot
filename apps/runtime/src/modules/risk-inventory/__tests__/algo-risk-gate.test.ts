@@ -204,16 +204,10 @@ describe("AlgoRiskGateImpl", () => {
   it("rejects buy when wallet buy budget is exhausted", async () => {
     const orderRepo = makeOrderRepo();
     (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(8);
-    const gate = new AlgoRiskGateImpl(
-      orderRepo,
-      makePositionRepo(),
-      makeLogger(),
-      undefined,
-      {
-        controlDb: createMockControlDb(10),
-        activeProfile: "paper" as any,
-      },
-    );
+    const gate = new AlgoRiskGateImpl(orderRepo, makePositionRepo(), makeLogger(), undefined, {
+      controlDb: createMockControlDb(10),
+      activeProfile: "paper" as any,
+    });
 
     const decision = await gate.evaluate(makeSignal({ suggestedSizeUsdc: 2 }));
 
@@ -224,16 +218,10 @@ describe("AlgoRiskGateImpl", () => {
   it("approves buy when wallet buy budget can cover the signal", async () => {
     const orderRepo = makeOrderRepo();
     (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(2);
-    const gate = new AlgoRiskGateImpl(
-      orderRepo,
-      makePositionRepo(),
-      makeLogger(),
-      undefined,
-      {
-        controlDb: createMockControlDb(10),
-        activeProfile: "paper" as any,
-      },
-    );
+    const gate = new AlgoRiskGateImpl(orderRepo, makePositionRepo(), makeLogger(), undefined, {
+      controlDb: createMockControlDb(10),
+      activeProfile: "paper" as any,
+    });
 
     const decision = await gate.evaluate(makeSignal({ suggestedSizeUsdc: 2 }));
 

@@ -168,12 +168,9 @@ export class ExecutionModule implements RuntimeModule {
           ? Math.round(this.cancelLatencyTotalMs / this.cancelCompleted)
           : null,
       reservedBuyUsdc: Number(reservations.reservedBuyUsdc.toFixed(6)),
-      freeUsdcForNewOrders:
-        walletBudget
-          ? Number(
-              Math.max(0, walletBudget.freeUsdcForNewOrders).toFixed(6),
-            )
-          : null,
+      freeUsdcForNewOrders: walletBudget
+        ? Number(Math.max(0, walletBudget.freeUsdcForNewOrders).toFixed(6))
+        : null,
       reservedSellTokenCount: reservations.reservedSellByToken.size,
       cancelReplacePendingCount: this.sellReplaceLocks.size,
       gatewayRejectsLast10mByCode: this.getGatewayRejectsLast10mByCode(),
