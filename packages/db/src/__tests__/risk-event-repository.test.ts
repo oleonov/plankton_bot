@@ -37,12 +37,12 @@ describe("SqliteRiskEventRepository", () => {
 
   it("insert multiple events", () => {
     repo.insert({
-      eventType: "family_quarantined",
-      payload: { reason: "operator command" },
+      eventType: "reconciliation_drift",
+      payload: { details: "phantom order", severity: "warn" },
     });
     repo.insert({
-      eventType: "family_activated",
-      payload: { reason: "resumed" },
+      eventType: "max_exposure_breach",
+      payload: { currentExposure: 612.5, limit: 500 },
     });
 
     const count = conn.db.prepare("SELECT COUNT(*) as c FROM risk_events").get() as { c: number };

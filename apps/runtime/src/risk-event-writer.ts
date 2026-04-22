@@ -3,6 +3,7 @@ import { normalizeReasonCode } from "./risk-event-codes.js";
 
 export interface RiskEventWriterConfig {
   rejectCooldownMs: number;
+  exposureBreachCooldownMs: number;
 }
 
 export class RiskEventWriter {
@@ -10,6 +11,7 @@ export class RiskEventWriter {
   // Opportunistic prune cadence: walk the cooldown map on every ~1000 calls.
   // Entries are small but grow 1:1 with (tokenId × reasonCode) pairs seen.
   private callsSinceLastPrune = 0;
+  private lastExposureBreachAt: number | null = null;
 
   constructor(
     private readonly repo: RiskEventRepository,
@@ -52,23 +54,37 @@ export class RiskEventWriter {
     }
   }
 
-  onOperatorCommand(
-    action: string,
-    _targetId: string | null,
-    commandDbId: number,
-    reason: string | null,
-    initiatorType?: string,
-  ): void {
-    this.repo.insert({
-      eventType: "operator_command",
-      payload: { action, commandDbId, reason, initiatorType: initiatorType ?? null },
-    });
-  }
-
   onReconciliationDrift(details: string, severity: string, timestamp: number): void {
     this.repo.insert({
       eventType: "reconciliation_drift",
       payload: { details, severity, timestamp },
     });
+  }
+
+  /**
+   * Emit max_exposure_breach when the shared exposure formula (open positions
+   * cost basis + open buy-order notional — see `calculateTotalExposure`) has
+   * crossed the live-lite envelope cap. Pre-trade risk checks already reject
+   * signals that WOULD breach; this fires only when the cap is already
+   * exceeded by current state (post-reconciliation adjustments, stale buy
+   * orders, or drift from the pre-trade model), which is an
+   * operator-actionable anomaly.
+   */
+  onExposureBreach(currentExposureUsdc: number, limitUsdc: number, nowMs: number): void {
+    if (currentExposureUsdc <= limitUsdc) return;
+    if (
+      this.lastExposureBreachAt !== null &&
+      nowMs - this.lastExposureBreachAt < this.config.exposureBreachCooldownMs
+    ) {
+      return;
+    }
+    this.repo.insert({
+      eventType: "max_exposure_breach",
+      payload: {
+        currentExposure: Number(currentExposureUsdc.toFixed(4)),
+        limit: limitUsdc,
+      },
+    });
+    this.lastExposureBreachAt = nowMs;
   }
 }

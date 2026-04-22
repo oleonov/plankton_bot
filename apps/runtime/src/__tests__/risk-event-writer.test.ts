@@ -8,7 +8,10 @@ describe("RiskEventWriter", () => {
 
   beforeEach(() => {
     repo = { insert: vi.fn(), countSince: vi.fn(() => 0) };
-    writer = new RiskEventWriter(repo, { rejectCooldownMs: 15 * 60 * 1000 });
+    writer = new RiskEventWriter(repo, {
+      rejectCooldownMs: 15 * 60 * 1000,
+      exposureBreachCooldownMs: 15 * 60 * 1000,
+    });
   });
 
   describe("onSignalRejected", () => {
@@ -71,27 +74,43 @@ describe("RiskEventWriter", () => {
     });
   });
 
-  describe("onOperatorCommand", () => {
-    it("writes operator_command event", () => {
-      writer.onOperatorCommand("rules_reload", null, 1, "reloading rules");
-
-      expect(repo.insert).toHaveBeenCalledTimes(1);
-      expect(repo.insert.mock.calls[0]![0].eventType).toBe("operator_command");
-      expect(repo.insert.mock.calls[0]![0].payload.action).toBe("rules_reload");
-    });
-
-    it("writes for any action including pause", () => {
-      writer.onOperatorCommand("pause", null, 1, null);
-
-      expect(repo.insert).toHaveBeenCalledTimes(1);
-      expect(repo.insert.mock.calls[0]![0].eventType).toBe("operator_command");
-    });
-  });
-
   describe("onReconciliationDrift", () => {
     it("writes every occurrence without dedup", () => {
       writer.onReconciliationDrift("phantom order", "warn", 1000);
       writer.onReconciliationDrift("phantom order", "warn", 1001);
+
+      expect(repo.insert).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("onExposureBreach", () => {
+    it("does not write when current exposure is at or below the cap", () => {
+      writer.onExposureBreach(500, 500, 1000);
+      writer.onExposureBreach(499.99, 500, 1001);
+
+      expect(repo.insert).not.toHaveBeenCalled();
+    });
+
+    it("writes a max_exposure_breach event when exposure exceeds the cap", () => {
+      writer.onExposureBreach(612.345, 500, 1000);
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+      const call = repo.insert.mock.calls[0]![0];
+      expect(call.eventType).toBe("max_exposure_breach");
+      expect(call.payload.currentExposure).toBe(612.345);
+      expect(call.payload.limit).toBe(500);
+    });
+
+    it("deduplicates repeat breaches within the cooldown window", () => {
+      writer.onExposureBreach(550, 500, 1000);
+      writer.onExposureBreach(560, 500, 1000 + 5 * 60 * 1000);
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+    });
+
+    it("writes again after the cooldown expires", () => {
+      writer.onExposureBreach(550, 500, 1000);
+      writer.onExposureBreach(560, 500, 1000 + 15 * 60 * 1000 + 1);
 
       expect(repo.insert).toHaveBeenCalledTimes(2);
     });

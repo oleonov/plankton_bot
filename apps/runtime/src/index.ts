@@ -74,6 +74,7 @@ import {
   SqliteLegStateRepository,
 } from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
+import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
 import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
@@ -706,22 +707,36 @@ async function main(): Promise<void> {
     snapshotWriter.onSnapshot(markets, timestamp);
   });
 
-  // 7o. Persist risk events — deduplicated signal rejections, operator commands, drift
+  // 7o. Persist risk events — deduplicated signal rejections, drift, exposure breach.
+  // Operator commands (pause/resume) go to operator_commands + state_transitions
+  // tables elsewhere, not to risk_events.
   const riskEventWriter = new RiskEventWriter(repos.riskEvent, {
     rejectCooldownMs: 15 * 60 * 1000,
+    exposureBreachCooldownMs: 15 * 60 * 1000,
   });
 
   bus.subscribe("SignalRejected", async ({ signal, reason, rejectedAt }) => {
     riskEventWriter.onSignalRejected(signal, reason, rejectedAt);
   });
 
-  bus.subscribe("OperatorCommandApplied", async (ev) => {
-    riskEventWriter.onOperatorCommand(ev.action, null, ev.commandDbId, ev.reason, ev.initiatorType);
-  });
-
   bus.subscribe("ReconciliationDriftDetected", async ({ details, severity, timestamp }) => {
     riskEventWriter.onReconciliationDrift(details, severity, timestamp);
   });
+
+  // Post-reconciliation exposure check: pre-trade caps stop new signals that
+  // would breach, but stale buy orders, reconciliation adjustments, or drift
+  // from the pre-trade model can still push actual exposure over the envelope.
+  // Uses the shared calculateTotalExposure formula (open positions cost basis
+  // + open buy-order notional) — same as preflight and ExecutionModule — to
+  // stay consistent with the rest of the exposure-cap plumbing. Emits only in
+  // live-lite mode.
+  if (liveLiteConfig) {
+    const exposureCap = liveLiteConfig.maxOpenValueUsdc;
+    bus.subscribe("ReconciliationComplete", async () => {
+      const total = calculateTotalExposure(repos.position, repos.order);
+      riskEventWriter.onExposureBreach(total, exposureCap, Date.now());
+    });
+  }
 
   const deletePollProgress = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'market_data_poll_progress'",

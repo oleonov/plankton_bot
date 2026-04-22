@@ -122,6 +122,9 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
     let snapshot = takeSnapshot(controlDb, activeLedger());
     let alive = true;
     let metricsTickCount = 0;
+    // Heartbeat: emit an SSE comment every N data-ticks so idle connections
+    // don't get killed by proxies / browsers when no DB changes occur.
+    let heartbeatTickCount = 0;
 
     const sendEvent = (type: string, data: unknown) => {
       if (allowedEvents && !allowedEvents.has(type)) return;
@@ -229,6 +232,14 @@ export const eventsRoutes: FastifyPluginAsync<EventsOpts> = async (app, opts) =>
         // Emit transitions when new state transitions appear
         if (next.transitions !== snapshot.transitions) {
           sendEvent("transitions", { latestAt: next.transitions });
+        }
+
+        // Heartbeat every ~15s (7 ticks at 2s interval) — an SSE comment line
+        // keeps idle connections alive through proxies / browser timeouts.
+        heartbeatTickCount++;
+        if (heartbeatTickCount >= 7) {
+          heartbeatTickCount = 0;
+          reply.raw.write(":ping\n\n");
         }
 
         // Emit metrics:snapshot every ~30s (15 ticks at 2s interval)

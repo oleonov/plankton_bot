@@ -953,7 +953,7 @@ describe("GET /risk-events", () => {
   it("returns normalized risk events with summary and severity", async () => {
     conn.db.exec(`
       INSERT INTO risk_events (event_type, payload, created_at)
-      VALUES ('family_quarantined', '{"reason":"max exposure"}', '2026-03-14T10:00:00Z')
+      VALUES ('max_exposure_breach', '{"currentExposure":612.5,"limit":500}', '2026-03-14T10:00:00Z')
     `);
 
     const res = await app.inject({
@@ -966,7 +966,7 @@ describe("GET /risk-events", () => {
     expect(body.data.items.length).toBeGreaterThanOrEqual(1);
 
     const first = body.data.items[0];
-    expect(first.summary).toContain("quarantined");
+    expect(first.summary).toContain("Exposure breach");
     expect(first.severity).toBe("critical");
     expect(first).not.toHaveProperty("payload");
     expect(first.createdAt).toBeDefined();
@@ -994,12 +994,12 @@ describe("GET /risk-events", () => {
   it("filters by event_type", async () => {
     const res = await app.inject({
       method: "GET",
-      url: "/api/v1/risk-events?event_type=family_quarantined",
+      url: "/api/v1/risk-events?event_type=max_exposure_breach",
       headers: authHeaders(),
     });
     const items = json(res).data.items;
     for (const item of items) {
-      expect(item.eventType).toBe("family_quarantined");
+      expect(item.eventType).toBe("max_exposure_breach");
     }
   });
 
@@ -1019,56 +1019,58 @@ describe("GET /risk-events", () => {
     expect(body.data.items[0].summary).toContain("dust 3 >= max 2");
   });
 
-  it("normalizes family_reduce_only events", async () => {
+  it("falls back to info severity and a generic summary for unknown event types", async () => {
     conn.db.exec(`
       INSERT INTO risk_events (event_type, payload, created_at)
-      VALUES ('family_reduce_only', '{"reason":"operator command"}', '2026-03-22T12:00:00Z')
+      VALUES ('future_event_type', '{"note":"whatever"}', '2026-03-22T12:00:00Z')
     `);
 
     const res = await app.inject({
       method: "GET",
-      url: "/api/v1/risk-events",
+      url: "/api/v1/risk-events?event_type=future_event_type",
       headers: authHeaders(),
     });
     const body = json(res);
-    expect(body.data.items[0].severity).toBe("warning");
-    expect(body.data.items[0].summary).toContain("reduce-only");
+    expect(body.data.items[0].severity).toBe("info");
+    expect(body.data.items[0].summary).toBe("future_event_type on system");
   });
 
-  it("normalizes system family demotion events with previous state", async () => {
+  it("preserves legacy family auto-demotion (source:system) transitions in summary", async () => {
     conn.db.exec(`
       INSERT INTO risk_events (event_type, payload, created_at)
       VALUES (
         'family_reduce_only',
-        '{"reason":"Auto-demotion: execution canary breach","source":"system","previousState":"scaled","newState":"reduce-only"}',
-        '2026-03-22T12:00:01Z'
+        '{"source":"system","previousState":"scaled","newState":"reduce-only","reason":"execution canary breach"}',
+        '2026-03-22T14:00:00Z'
       )
     `);
 
     const res = await app.inject({
       method: "GET",
-      url: "/api/v1/risk-events",
+      url: "/api/v1/risk-events?event_type=family_reduce_only",
       headers: authHeaders(),
     });
     const body = json(res);
+    expect(body.data.items[0].severity).toBe("warning");
     expect(body.data.items[0].summary).toContain("auto-demoted");
     expect(body.data.items[0].summary).toContain("scaled -> reduce-only");
+    expect(body.data.items[0].summary).toContain("execution canary breach");
   });
 
-  it("normalizes family_activated events", async () => {
+  it("renders legacy family_reduce_only rows without source as operator-triggered", async () => {
     conn.db.exec(`
       INSERT INTO risk_events (event_type, payload, created_at)
-      VALUES ('family_activated', '{"reason":"resumed"}', '2026-03-22T12:00:00Z')
+      VALUES ('family_reduce_only', '{"reason":"operator command"}', '2026-03-22T14:01:00Z')
     `);
 
     const res = await app.inject({
       method: "GET",
-      url: "/api/v1/risk-events",
+      url: "/api/v1/risk-events?event_type=family_reduce_only",
       headers: authHeaders(),
     });
     const body = json(res);
-    expect(body.data.items[0].severity).toBe("info");
-    expect(body.data.items[0].summary).toContain("activated");
+    expect(body.data.items[0].summary).toContain("reduce-only");
+    expect(body.data.items[0].summary).not.toContain("auto-demoted");
   });
 
   it("normalizes reconciliation_drift with details (plural, not detail)", async () => {

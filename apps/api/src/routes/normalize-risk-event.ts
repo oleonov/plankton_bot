@@ -25,34 +25,10 @@ interface EventRule {
   summary: (payload: Record<string, unknown>) => string;
 }
 
-function summarizeFamilyModeEvent(payload: Record<string, unknown>, targetState: string): string {
-  if (payload.source === "system") {
-    const previousState =
-      typeof payload.previousState === "string" && payload.previousState.length > 0
-        ? `${payload.previousState} -> `
-        : "";
-    return `auto-demoted ${previousState}${targetState}: ${payload.reason ?? "no reason"}`;
-  }
-
-  if (targetState === "quarantine") {
-    return `quarantined: ${payload.reason ?? "no reason"}`;
-  }
-
-  return `set to ${targetState}: ${payload.reason ?? "no reason"}`;
-}
-
 const EVENT_RULES: Record<string, EventRule> = {
-  family_quarantined: {
-    severity: "critical",
-    summary: (p) => summarizeFamilyModeEvent(p, "quarantine"),
-  },
   max_exposure_breach: {
     severity: "critical",
     summary: (p) => `Exposure breach: $${p.currentExposure ?? "?"} > $${p.limit ?? "?"}`,
-  },
-  stale_signal: {
-    severity: "warning",
-    summary: (p) => `Stale signal: ${p.signalName ?? "unknown"}`,
   },
   reconciliation_drift: {
     severity: "warning",
@@ -67,15 +43,61 @@ const EVENT_RULES: Record<string, EventRule> = {
       return reason;
     },
   },
+  // Legacy/deprecated event types — kept for backward-compat so historical rows
+  // in risk_events render with a readable summary and sensible severity.
+  // These types are no longer emitted by the runtime, but preserve the
+  // original operator-facing fields (source, previousState, newState) so that
+  // auto-demotion transitions like `scaled -> reduce-only` stay visible in the
+  // UI/API when browsing history.
+  family_quarantined: {
+    severity: "critical",
+    summary: (p) => summarizeLegacyFamilyMode(p, "quarantine"),
+  },
   family_reduce_only: {
     severity: "warning",
-    summary: (p) => summarizeFamilyModeEvent(p, "reduce-only"),
+    summary: (p) => summarizeLegacyFamilyMode(p, "reduce-only"),
   },
   family_activated: {
     severity: "info",
-    summary: (p) => `activated: ${p.reason ?? "no reason"}`,
+    summary: (p) => summarizeLegacyFamilyMode(p, "active"),
+  },
+  stale_signal: {
+    severity: "warning",
+    summary: (p) => `Stale signal: ${p.signalName ?? "unknown"}`,
   },
 };
+
+function summarizeLegacyFamilyMode(
+  payload: Record<string, unknown>,
+  targetState: string,
+): string {
+  const reason = typeof payload.reason === "string" ? payload.reason : "no reason";
+  const source = typeof payload.source === "string" ? payload.source : null;
+  const previousState =
+    typeof payload.previousState === "string" && payload.previousState.length > 0
+      ? payload.previousState
+      : null;
+  const newState =
+    typeof payload.newState === "string" && payload.newState.length > 0
+      ? payload.newState
+      : targetState;
+
+  // Canonical historical shape for auto-demotion used source:"system" together
+  // with previousState/newState. Preserve that exact rendering so historical
+  // rows keep the `auto-demoted <from> -> <to>: <reason>` operator context.
+  if (source === "system") {
+    const transition = previousState ? `${previousState} -> ${newState}` : newState;
+    return `auto-demoted ${transition}: ${reason}`;
+  }
+
+  if (previousState && previousState !== newState) {
+    return `${previousState} -> ${newState}: ${reason}`;
+  }
+
+  if (targetState === "quarantine") return `quarantined: ${reason}`;
+  if (targetState === "active") return `activated: ${reason}`;
+  return `set to ${newState}: ${reason}`;
+}
 
 export function normalizeRiskEvent(row: RawRiskEvent): RiskEventDTO {
   const payload = JSON.parse(row.payload) as Record<string, unknown>;

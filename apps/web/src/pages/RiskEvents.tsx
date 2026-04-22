@@ -33,8 +33,12 @@ export function RiskEvents() {
         >
           <option value="">All types</option>
           <option value="max_exposure_breach">Exposure Breach</option>
-          <option value="stale_signal">Stale Signal</option>
           <option value="reconciliation_drift">Recon Drift</option>
+          <option value="signal_rejected">Signal Rejected</option>
+          <option value="stale_signal">Stale Signal (legacy)</option>
+          <option value="family_quarantined">Family Quarantined (legacy)</option>
+          <option value="family_reduce_only">Family Reduce-Only (legacy)</option>
+          <option value="family_activated">Family Activated (legacy)</option>
         </select>
       </div>
       <table>
