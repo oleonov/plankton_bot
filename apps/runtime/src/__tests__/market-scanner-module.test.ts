@@ -107,6 +107,11 @@ function createMockMarketRepo(): MarketRepository {
     deactivate: vi.fn(),
     deactivateMissing: vi.fn().mockReturnValue(0),
     findTrackedForPricing: vi.fn().mockReturnValue([]),
+    findTrackedForPricingTiered: vi.fn().mockReturnValue({
+      executionCritical: [],
+      entryCandidates: [],
+      discoveryOnly: [],
+    }),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
 }
@@ -566,6 +571,11 @@ describe("MarketScannerModule", () => {
       deactivate: vi.fn(),
       deactivateMissing: vi.fn().mockReturnValue(0),
       findTrackedForPricing: vi.fn().mockReturnValue([]),
+      findTrackedForPricingTiered: vi.fn().mockReturnValue({
+        executionCritical: [],
+        entryCandidates: [],
+        discoveryOnly: [],
+      }),
       findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
     };
     const { mod } = buildModule({ discoveryGateway, marketRepo });

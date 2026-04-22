@@ -54,6 +54,53 @@ const envSchema = z
       .enum(["true", "false"])
       .default("false")
       .transform((v) => v === "true"),
+    // Task 1 — bounded pricing universe
+    MARKET_DATA_MAX_TRACKED_TOKENS: z.coerce.number().int().min(100).max(5_000).default(1_000),
+    MARKET_DATA_MAX_WS_SHARDS: z.coerce.number().int().min(1).max(20).default(2),
+    MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(10_000)
+      .max(600_000)
+      .default(60_000),
+    MARKET_DATA_DISCOVERY_BATCH_SIZE: z.coerce.number().int().min(50).max(500).default(200),
+    // Task 2 — CLOB axios agent pool bounds
+    CLOB_AXIOS_MAX_SOCKETS: z.coerce.number().int().min(1).max(32).default(8),
+    CLOB_AXIOS_MAX_FREE_SOCKETS: z.coerce.number().int().min(0).max(16).default(2),
+    CLOB_AXIOS_IDLE_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(120_000).default(30_000),
+    // Task 3 — bounded ingress queue
+    MARKET_DATA_INGRESS_QUEUE_MAX: z.coerce.number().int().min(32).max(2_048).default(256),
+    MARKET_DATA_INGRESS_LAG_WARN_MS: z.coerce.number().int().min(500).max(10_000).default(2_000),
+    MARKET_DATA_INGRESS_OVERFLOW_POLICY: z
+      .enum(["drop-oldest", "reconnect"])
+      .default("drop-oldest"),
+    // Task 4 — reconnect backoff + breakers
+    MARKET_DATA_RECONNECT_BASE_MS: z.coerce.number().int().min(100).max(10_000).default(1_000),
+    MARKET_DATA_RECONNECT_MAX_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
+    MARKET_DATA_SHARD_BREAKER_RECONNECTS_PER_MIN: z.coerce
+      .number()
+      .int()
+      .min(3)
+      .max(60)
+      .default(10),
+    MARKET_DATA_SHARD_BREAKER_OPEN_MS: z.coerce
+      .number()
+      .int()
+      .min(10_000)
+      .max(600_000)
+      .default(120_000),
+    MARKET_DATA_SHARD_BREAKER_OPEN_MAX_MS: z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(1_800_000)
+      .default(600_000),
+    MARKET_DATA_CIRCUIT_SHARD_OPEN_PERCENT: z.coerce.number().int().min(20).max(100).default(50),
+    MARKET_DATA_CIRCUIT_OPEN_SHARD_FLOOR: z.coerce.number().int().min(1).max(20).default(3),
+    MARKET_DATA_CIRCUIT_OPEN_MS: z.coerce.number().int().min(10_000).max(600_000).default(120_000),
+    MARKET_DATA_STREAM_STABLE_MS: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
+    // Task 5 — capped rolling poll fallback
+    MARKET_DATA_FALLBACK_BATCH_SIZE: z.coerce.number().int().min(100).max(1_000).default(500),
   })
   .superRefine((data, ctx) => {
     // When RUNTIME_MODE is undefined, mode comes from control.db — skip env validation
@@ -124,6 +171,31 @@ export interface AppConfig {
   planktonAuthPassword: string | undefined;
   planktonSessionSecret: string | undefined;
   trustProxy: boolean;
+  // Task 1
+  marketDataMaxTrackedTokens: number;
+  marketDataMaxWsShards: number;
+  marketDataDiscoveryPollIntervalMs: number;
+  marketDataDiscoveryBatchSize: number;
+  // Task 2
+  clobAxiosMaxSockets: number;
+  clobAxiosMaxFreeSockets: number;
+  clobAxiosIdleTimeoutMs: number;
+  // Task 3
+  marketDataIngressQueueMax: number;
+  marketDataIngressLagWarnMs: number;
+  marketDataIngressOverflowPolicy: "drop-oldest" | "reconnect";
+  // Task 4
+  marketDataReconnectBaseMs: number;
+  marketDataReconnectMaxMs: number;
+  marketDataShardBreakerReconnectsPerMin: number;
+  marketDataShardBreakerOpenMs: number;
+  marketDataShardBreakerOpenMaxMs: number;
+  marketDataCircuitShardOpenPercent: number;
+  marketDataCircuitOpenShardFloor: number;
+  marketDataCircuitOpenMs: number;
+  marketDataStreamStableMs: number;
+  // Task 5
+  marketDataFallbackBatchSize: number;
 }
 
 function findMonorepoRoot(): string {
@@ -189,5 +261,25 @@ export function loadEnv(envPath?: string): AppConfig {
     planktonAuthPassword: env.PLANKTON_AUTH_PASSWORD,
     planktonSessionSecret: env.PLANKTON_SESSION_SECRET,
     trustProxy: env.TRUST_PROXY,
+    marketDataMaxTrackedTokens: env.MARKET_DATA_MAX_TRACKED_TOKENS,
+    marketDataMaxWsShards: env.MARKET_DATA_MAX_WS_SHARDS,
+    marketDataDiscoveryPollIntervalMs: env.MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS,
+    marketDataDiscoveryBatchSize: env.MARKET_DATA_DISCOVERY_BATCH_SIZE,
+    clobAxiosMaxSockets: env.CLOB_AXIOS_MAX_SOCKETS,
+    clobAxiosMaxFreeSockets: env.CLOB_AXIOS_MAX_FREE_SOCKETS,
+    clobAxiosIdleTimeoutMs: env.CLOB_AXIOS_IDLE_TIMEOUT_MS,
+    marketDataIngressQueueMax: env.MARKET_DATA_INGRESS_QUEUE_MAX,
+    marketDataIngressLagWarnMs: env.MARKET_DATA_INGRESS_LAG_WARN_MS,
+    marketDataIngressOverflowPolicy: env.MARKET_DATA_INGRESS_OVERFLOW_POLICY,
+    marketDataReconnectBaseMs: env.MARKET_DATA_RECONNECT_BASE_MS,
+    marketDataReconnectMaxMs: env.MARKET_DATA_RECONNECT_MAX_MS,
+    marketDataShardBreakerReconnectsPerMin: env.MARKET_DATA_SHARD_BREAKER_RECONNECTS_PER_MIN,
+    marketDataShardBreakerOpenMs: env.MARKET_DATA_SHARD_BREAKER_OPEN_MS,
+    marketDataShardBreakerOpenMaxMs: env.MARKET_DATA_SHARD_BREAKER_OPEN_MAX_MS,
+    marketDataCircuitShardOpenPercent: env.MARKET_DATA_CIRCUIT_SHARD_OPEN_PERCENT,
+    marketDataCircuitOpenShardFloor: env.MARKET_DATA_CIRCUIT_OPEN_SHARD_FLOOR,
+    marketDataCircuitOpenMs: env.MARKET_DATA_CIRCUIT_OPEN_MS,
+    marketDataStreamStableMs: env.MARKET_DATA_STREAM_STABLE_MS,
+    marketDataFallbackBatchSize: env.MARKET_DATA_FALLBACK_BATCH_SIZE,
   };
 }

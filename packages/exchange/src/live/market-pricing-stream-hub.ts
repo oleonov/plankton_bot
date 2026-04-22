@@ -25,6 +25,36 @@ interface StreamHandlers {
 
 interface SharedMarketPricingStreamHubDeps {
   readonly createWebSocket: (url: string) => MarketDataWebSocketLike;
+  /**
+   * Per-shard subscription ceiling. The gateway derives this from
+   * `min(500, ceil(maxTokens / maxShards))` so the stream itself can treat
+   * the value as the authoritative chunk size.
+   */
+  readonly maxSubscriptionsPerConnection?: number;
+  /** Max items in the per-shard ingress queue. Forwarded to LiveMarketPricingStream. */
+  readonly queueMax?: number;
+  /** Lag-warning threshold in ms. Forwarded to LiveMarketPricingStream. */
+  readonly lagWarnMs?: number;
+  /** Overflow policy. Forwarded to LiveMarketPricingStream. */
+  readonly overflowPolicy?: "drop-oldest" | "reconnect";
+  /** Base reconnect delay ms. Forwarded to LiveMarketPricingStream. */
+  readonly reconnectBaseMs?: number;
+  /** Max reconnect delay ms cap. Forwarded to LiveMarketPricingStream. */
+  readonly reconnectMaxMs?: number;
+  /** Per-shard breaker: max reconnects per 60s window. Forwarded to LiveMarketPricingStream. */
+  readonly shardBreakerReconnectsPerMin?: number;
+  /** Per-shard breaker initial open window ms. Forwarded to LiveMarketPricingStream. */
+  readonly shardBreakerOpenMs?: number;
+  /** Per-shard breaker max open window ms. Forwarded to LiveMarketPricingStream. */
+  readonly shardBreakerOpenMaxMs?: number;
+  /** Stream-level quorum percent threshold. Forwarded to LiveMarketPricingStream. */
+  readonly circuitShardOpenPercent?: number;
+  /** Stream-level quorum absolute floor. Forwarded to LiveMarketPricingStream. */
+  readonly circuitOpenShardFloor?: number;
+  /** Stream-level circuit open duration ms. Forwarded to LiveMarketPricingStream. */
+  readonly circuitOpenMs?: number;
+  /** Stable uptime ms before breaker closes. Forwarded to LiveMarketPricingStream. */
+  readonly streamStableMs?: number;
 }
 
 interface StreamViewState {
@@ -47,6 +77,31 @@ export class SharedMarketPricingStreamHub {
   constructor(deps: SharedMarketPricingStreamHubDeps) {
     this.lowLevelStream = new LiveMarketPricingStream({
       createWebSocket: deps.createWebSocket,
+      ...(deps.maxSubscriptionsPerConnection !== undefined
+        ? { maxSubscriptionsPerConnection: deps.maxSubscriptionsPerConnection }
+        : {}),
+      ...(deps.queueMax !== undefined ? { queueMax: deps.queueMax } : {}),
+      ...(deps.lagWarnMs !== undefined ? { lagWarnMs: deps.lagWarnMs } : {}),
+      ...(deps.overflowPolicy !== undefined ? { overflowPolicy: deps.overflowPolicy } : {}),
+      ...(deps.reconnectBaseMs !== undefined ? { reconnectBaseMs: deps.reconnectBaseMs } : {}),
+      ...(deps.reconnectMaxMs !== undefined ? { reconnectMaxMs: deps.reconnectMaxMs } : {}),
+      ...(deps.shardBreakerReconnectsPerMin !== undefined
+        ? { shardBreakerReconnectsPerMin: deps.shardBreakerReconnectsPerMin }
+        : {}),
+      ...(deps.shardBreakerOpenMs !== undefined
+        ? { shardBreakerOpenMs: deps.shardBreakerOpenMs }
+        : {}),
+      ...(deps.shardBreakerOpenMaxMs !== undefined
+        ? { shardBreakerOpenMaxMs: deps.shardBreakerOpenMaxMs }
+        : {}),
+      ...(deps.circuitShardOpenPercent !== undefined
+        ? { circuitShardOpenPercent: deps.circuitShardOpenPercent }
+        : {}),
+      ...(deps.circuitOpenShardFloor !== undefined
+        ? { circuitOpenShardFloor: deps.circuitOpenShardFloor }
+        : {}),
+      ...(deps.circuitOpenMs !== undefined ? { circuitOpenMs: deps.circuitOpenMs } : {}),
+      ...(deps.streamStableMs !== undefined ? { streamStableMs: deps.streamStableMs } : {}),
       handlers: {
         onUpdates: async (updates) => {
           await this.dispatchUpdates(updates);

@@ -172,6 +172,11 @@ function createMockMarketRepo(): MarketRepository {
     // Phase 4: market-data module calls findTrackedForPricing instead of findActive.
     // Tests set up their tracked markets via findTrackedForPricing mock.
     findTrackedForPricing: vi.fn<() => Market[]>().mockReturnValue([]),
+    findTrackedForPricingTiered: vi.fn().mockReturnValue({
+      executionCritical: [],
+      entryCandidates: [],
+      discoveryOnly: [],
+    }),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
   };
 }
@@ -717,7 +722,10 @@ describe("MarketDataModule", () => {
     await stream!.emitGap();
     await mod.poll();
 
-    expect(gateway.getMarketPricing).toHaveBeenCalledWith(["tok-a", "tok-b"]);
+    expect(gateway.getMarketPricing).toHaveBeenCalledWith(
+      ["tok-a", "tok-b"],
+      expect.objectContaining({ timeoutMs: expect.any(Number) }),
+    );
     expect(mod.getMetricsSnapshot().wsEventGapDetected).toBe(1);
 
     await mod.stop();
@@ -824,7 +832,10 @@ describe("MarketDataModule", () => {
     await stream!.emitGapForTokenIds(["tok-a"]);
     await mod.poll();
 
-    expect(gateway.getMarketPricing).toHaveBeenCalledWith(["tok-a"]);
+    expect(gateway.getMarketPricing).toHaveBeenCalledWith(
+      ["tok-a"],
+      expect.objectContaining({ timeoutMs: expect.any(Number) }),
+    );
 
     await mod.stop();
   });

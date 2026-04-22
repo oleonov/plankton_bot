@@ -94,6 +94,56 @@ export interface LiveMarketDataConfig {
    */
   slugFilter?: ((slug: string) => boolean) | undefined;
   createWebSocket?: ((url: string) => MarketDataWebSocketLike) | undefined;
+  /**
+   * Target tradable-universe size (MARKET_DATA_MAX_TRACKED_TOKENS). Combined
+   * with `maxWsShards` to derive per-shard subscription size:
+   * `min(500, ceil(maxTokens / maxShards))`. If omitted, the stream falls
+   * back to the internal 500/shard default.
+   */
+  maxTokens?: number | undefined;
+  /** Hard cap on concurrent WS shards. Default: 20. */
+  maxWsShards?: number | undefined;
+  /** Max items in the per-shard ingress queue. Default: 256. */
+  queueMax?: number | undefined;
+  /** Emit a lag warning when drain-to-empty takes longer than this (ms). Default: 2000. */
+  lagWarnMs?: number | undefined;
+  /** Overflow policy on full queue. Default: "drop-oldest". */
+  overflowPolicy?: "drop-oldest" | "reconnect" | undefined;
+  /** Base reconnect delay ms. Default: 1000. */
+  reconnectBaseMs?: number | undefined;
+  /** Max reconnect delay ms cap. Default: 30000. */
+  reconnectMaxMs?: number | undefined;
+  /** Per-shard breaker: max reconnects per 60s window before opening. Default: 10. */
+  shardBreakerReconnectsPerMin?: number | undefined;
+  /** Per-shard breaker initial open window ms. Default: 120000. */
+  shardBreakerOpenMs?: number | undefined;
+  /** Per-shard breaker max open window ms (exponential cap). Default: 600000. */
+  shardBreakerOpenMaxMs?: number | undefined;
+  /** Stream-level quorum percent threshold (0–100). Default: 50. */
+  circuitShardOpenPercent?: number | undefined;
+  /** Stream-level quorum absolute floor of open shards required. Default: 3. */
+  circuitOpenShardFloor?: number | undefined;
+  /** Stream-level circuit open duration ms. Default: 120000. */
+  circuitOpenMs?: number | undefined;
+  /** Stable uptime ms before a breaker closes. Default: 30000. */
+  streamStableMs?: number | undefined;
+}
+
+/**
+ * Derives the per-shard subscription ceiling from config:
+ * `min(500, ceil(maxTokens / maxShards))`. The 500/shard ceiling is
+ * Polymarket's documented per-socket cap and is preserved inside the stream
+ * so a misconfigured env cannot put 5k tokens on one socket.
+ * Returns undefined when neither knob is supplied — stream keeps its default.
+ */
+export function deriveMaxSubscriptionsPerConnection(
+  maxTokens: number | undefined,
+  maxWsShards: number | undefined,
+): number | undefined {
+  if (maxTokens === undefined || maxWsShards === undefined) return undefined;
+  if (maxTokens <= 0 || maxWsShards <= 0) return undefined;
+  const target = Math.ceil(maxTokens / maxWsShards);
+  return Math.min(500, Math.max(1, target));
 }
 
 function chunkItems<T>(items: readonly T[], chunkSize: number): T[][] {
@@ -119,8 +169,37 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     this.client = config.client;
     this.slugFilter = config.slugFilter;
     this.createWebSocket = config.createWebSocket ?? defaultMarketDataWebSocketFactory;
+    const derivedChunkSize = deriveMaxSubscriptionsPerConnection(
+      config.maxTokens,
+      config.maxWsShards,
+    );
     this.sharedMarketStreamHub = new SharedMarketPricingStreamHub({
       createWebSocket: this.createWebSocket,
+      ...(derivedChunkSize !== undefined
+        ? { maxSubscriptionsPerConnection: derivedChunkSize }
+        : {}),
+      ...(config.queueMax !== undefined ? { queueMax: config.queueMax } : {}),
+      ...(config.lagWarnMs !== undefined ? { lagWarnMs: config.lagWarnMs } : {}),
+      ...(config.overflowPolicy !== undefined ? { overflowPolicy: config.overflowPolicy } : {}),
+      ...(config.reconnectBaseMs !== undefined ? { reconnectBaseMs: config.reconnectBaseMs } : {}),
+      ...(config.reconnectMaxMs !== undefined ? { reconnectMaxMs: config.reconnectMaxMs } : {}),
+      ...(config.shardBreakerReconnectsPerMin !== undefined
+        ? { shardBreakerReconnectsPerMin: config.shardBreakerReconnectsPerMin }
+        : {}),
+      ...(config.shardBreakerOpenMs !== undefined
+        ? { shardBreakerOpenMs: config.shardBreakerOpenMs }
+        : {}),
+      ...(config.shardBreakerOpenMaxMs !== undefined
+        ? { shardBreakerOpenMaxMs: config.shardBreakerOpenMaxMs }
+        : {}),
+      ...(config.circuitShardOpenPercent !== undefined
+        ? { circuitShardOpenPercent: config.circuitShardOpenPercent }
+        : {}),
+      ...(config.circuitOpenShardFloor !== undefined
+        ? { circuitOpenShardFloor: config.circuitOpenShardFloor }
+        : {}),
+      ...(config.circuitOpenMs !== undefined ? { circuitOpenMs: config.circuitOpenMs } : {}),
+      ...(config.streamStableMs !== undefined ? { streamStableMs: config.streamStableMs } : {}),
     });
   }
 
@@ -135,8 +214,9 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     let pageNum = 0;
 
     do {
+      // Timeout enforced by axios.defaults.timeout (45 s, set in apps/runtime/src/index.ts).
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const page: any = await this.withTimeout(this.client.getMarkets(cursor), 30_000);
+      const page: any = await this.client.getMarkets(cursor);
       pageNum++;
       // The SDK swallows axios errors and returns { error: "..." } instead of throwing.
       // Detect this and surface it so the poll is treated as a failure.
@@ -159,7 +239,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
   async getMarket(conditionId: string): Promise<ClobMarket | null> {
     try {
-      const raw = await this.withTimeout(this.client.getMarket(conditionId), 10_000);
+      const raw = await this.client.getMarket(conditionId);
       if (!raw) return null;
       return mapMarket(raw as Record<string, unknown>);
     } catch {
@@ -169,7 +249,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
   async getOrderBook(tokenId: TokenId): Promise<OrderBookSnapshot> {
     try {
-      const raw = await this.withTimeout(this.client.getOrderBook(String(tokenId)), 10_000);
+      const raw = await this.client.getOrderBook(String(tokenId));
       return mapOrderBook(tokenId, raw as Record<string, unknown>);
     } catch {
       return mapOrderBook(tokenId, {});
@@ -206,23 +286,28 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
   async getTickSize(tokenId: TokenId): Promise<number> {
     try {
-      const raw = await this.withTimeout(this.client.getTickSize(String(tokenId)), 10_000);
+      const raw = await this.client.getTickSize(String(tokenId));
       return Number(raw);
     } catch {
       return 0.01;
     }
   }
 
-  async getMarketPricing(tokenIds: string[]): Promise<Map<string, MarketPricingSnapshot>> {
+  async getMarketPricing(
+    tokenIds: string[],
+    opts?: { timeoutMs?: number },
+  ): Promise<Map<string, MarketPricingSnapshot>> {
     if (tokenIds.length === 0) return new Map();
 
     const result = new Map<string, MarketPricingSnapshot>();
+    // Default to 15 s (legacy behaviour) when no caller-supplied timeout.
+    const timeoutMs = opts?.timeoutMs ?? 15_000;
 
     const batches = buildTokenIdBatches(GAMMA_PRICING_BASE_URL, tokenIds, MAX_URL_LENGTH);
     for (const batch of batches) {
       const params = batch.map((id) => `clob_token_ids=${id}`).join("&");
       const url = `${GAMMA_PRICING_BASE_URL}?${params}`;
-      const response = await this.fetchWithRetry(url, undefined, 15_000);
+      const response = await this.fetchWithRetry(url, undefined, timeoutMs);
       if (!response.ok) {
         await drainResponseBody(response);
         throw new Error(`Gamma pricing request failed: ${response.status} ${response.statusText}`);
@@ -325,27 +410,11 @@ export class LiveMarketDataGateway implements MarketDataGateway {
   async healthCheck(): Promise<{ ok: boolean; latencyMs: number }> {
     const start = Date.now();
     try {
-      await this.withTimeout(this.client.getOk(), 10_000);
+      await this.client.getOk();
       return { ok: true, latencyMs: Date.now() - start };
     } catch {
       return { ok: false, latencyMs: Date.now() - start };
     }
-  }
-
-  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`request timed out after ${ms}ms`)), ms);
-      promise.then(
-        (val) => {
-          clearTimeout(timer);
-          resolve(val);
-        },
-        (err) => {
-          clearTimeout(timer);
-          reject(err instanceof Error ? err : new Error(String(err)));
-        },
-      );
-    });
   }
 
   private async fetchWithRetry(

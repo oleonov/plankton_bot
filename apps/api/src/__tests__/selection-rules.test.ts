@@ -11,6 +11,7 @@ import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import type { LedgerPool } from "../ledger-pool.js";
 import { buildServer } from "../server.js";
+import { MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
 // ─── Test config ────────────────────────────────────────────────────────────
 
@@ -41,6 +42,7 @@ function testConfig(): AppConfig {
     planktonSessionSecret: undefined,
     allowSellSizeClamp: true,
     trustProxy: false,
+    ...MARKET_DATA_TEST_DEFAULTS,
   };
 }
 

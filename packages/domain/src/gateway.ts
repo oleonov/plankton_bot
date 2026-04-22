@@ -160,6 +160,56 @@ export type MarketPricingLifecycleEvent =
       readonly active: boolean;
       readonly tokenIds: readonly TokenId[];
       readonly timestamp: number;
+    }
+  | {
+      /**
+       * Emitted when the ingress queue for a shard overflows and the `drop-oldest`
+       * policy is active. The `tokenIds` are extracted from the dropped message so
+       * callers can trigger a poll-fallback for those tokens.
+       */
+      readonly type: "queue_overflow";
+      readonly shardId: number;
+      readonly droppedCount: number;
+      readonly tokenIds: readonly string[];
+      readonly timestamp: number;
+    }
+  | {
+      /**
+       * Emitted when a single shard's circuit breaker opens due to too many
+       * reconnects in 60 s. Only that shard's tokens are affected; other shards
+       * keep streaming. The shard will attempt a half-open reconnect after
+       * `reopenAtMs`.
+       */
+      readonly type: "shard_circuit_open";
+      readonly shardId: number;
+      readonly tokenIds: readonly string[];
+      readonly reopenAtMs: number;
+    }
+  | {
+      /**
+       * Emitted when a shard's circuit breaker closes after a successful half-open
+       * reconnect that stayed stable for STREAM_STABLE_MS.
+       */
+      readonly type: "shard_circuit_closed";
+      readonly shardId: number;
+      readonly tokenIds: readonly string[];
+    }
+  | {
+      /**
+       * Emitted when the stream-level quorum guard opens: enough shards are in
+       * breaker state simultaneously (AND: percent threshold AND absolute floor).
+       * MarketDataModule degrades to poll-only until `stream_circuit_closed`.
+       */
+      readonly type: "stream_circuit_open";
+      readonly reopenAtMs: number;
+      readonly reason?: string;
+    }
+  | {
+      /**
+       * Emitted when the stream-level circuit breaker closes after quorum falls
+       * below threshold and the recovered shard stays stable for STREAM_STABLE_MS.
+       */
+      readonly type: "stream_circuit_closed";
     };
 
 export interface MarketPricingStreamLatencySummary {
@@ -188,6 +238,12 @@ export interface MarketPricingStreamMetricsSnapshot {
   readonly narrowRefCountLeaks?: number;
   readonly marketResolvedEvents?: number;
   readonly newMarketEvents?: number;
+  /** Per-shard ingress queue depth at the time of snapshot (aggregate across all shards). */
+  readonly queueDepth?: number;
+  /** Peak queue depth observed since stream start (per-shard high-water mark, summed). */
+  readonly maxQueueDepth?: number;
+  /** Total number of overflow evictions across all shards since stream start. */
+  readonly queueOverflows?: number;
 }
 
 export interface MarketPricingStream {
@@ -270,8 +326,16 @@ export interface MarketDataGateway {
    * Fetch pricing for a set of tracked tokens.
    * Returns a map of tokenId → pricing snapshot.
    * Used by the fast pricing loop (Phase 1: Gamma-backed).
+   *
+   * @param opts.timeoutMs - Per-request abort timeout in ms. When omitted the
+   *   gateway uses its own default (45 s for live, 0 for simulation).
+   *   Pass `Math.min(30_000, 5_000 + tokenIds.length * 10)` to scale timeout
+   *   proportionally to batch size (Task 5).
    */
-  getMarketPricing(tokenIds: string[]): Promise<Map<string, MarketPricingSnapshot>>;
+  getMarketPricing(
+    tokenIds: string[],
+    opts?: { timeoutMs?: number },
+  ): Promise<Map<string, MarketPricingSnapshot>>;
 
   /**
    * Optional live pricing stream for gateways that support push-based updates.

@@ -30,6 +30,34 @@ export interface CreateGatewaysInput {
         details?: Record<string, unknown> | undefined;
       }) => void)
     | undefined;
+  /** Target tradable-universe size. Combined with maxWsShards to derive per-shard chunk size. */
+  marketDataMaxTrackedTokens?: number | undefined;
+  /** Hard cap on concurrent WS shards. Reads from env config. */
+  marketDataMaxWsShards?: number | undefined;
+  /** Max items in the per-shard ingress queue. Reads from env config. */
+  marketDataIngressQueueMax?: number | undefined;
+  /** Lag-warning threshold in ms. Reads from env config. */
+  marketDataIngressLagWarnMs?: number | undefined;
+  /** Overflow policy on full queue. Reads from env config. */
+  marketDataIngressOverflowPolicy?: "drop-oldest" | "reconnect" | undefined;
+  /** Base reconnect delay ms for exponential backoff. */
+  marketDataReconnectBaseMs?: number | undefined;
+  /** Max reconnect delay ms cap. */
+  marketDataReconnectMaxMs?: number | undefined;
+  /** Per-shard breaker: max reconnects per 60s window. */
+  marketDataShardBreakerReconnectsPerMin?: number | undefined;
+  /** Per-shard breaker initial open window ms. */
+  marketDataShardBreakerOpenMs?: number | undefined;
+  /** Per-shard breaker max open window ms. */
+  marketDataShardBreakerOpenMaxMs?: number | undefined;
+  /** Stream-level quorum percent of open shards (0–100). */
+  marketDataCircuitShardOpenPercent?: number | undefined;
+  /** Stream-level quorum absolute floor of open shards. */
+  marketDataCircuitOpenShardFloor?: number | undefined;
+  /** Stream-level circuit open duration ms. */
+  marketDataCircuitOpenMs?: number | undefined;
+  /** Stable uptime ms before a breaker closes. */
+  marketDataStreamStableMs?: number | undefined;
 }
 
 export interface CreateGatewaysResult {
@@ -50,6 +78,20 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     slugFilter,
     initialBalanceUsdc,
     onInfraAlert,
+    marketDataMaxTrackedTokens,
+    marketDataMaxWsShards,
+    marketDataIngressQueueMax,
+    marketDataIngressLagWarnMs,
+    marketDataIngressOverflowPolicy,
+    marketDataReconnectBaseMs,
+    marketDataReconnectMaxMs,
+    marketDataShardBreakerReconnectsPerMin,
+    marketDataShardBreakerOpenMs,
+    marketDataShardBreakerOpenMaxMs,
+    marketDataCircuitShardOpenPercent,
+    marketDataCircuitOpenShardFloor,
+    marketDataCircuitOpenMs,
+    marketDataStreamStableMs,
   } = input;
 
   if (runtimeMode === "simulation") {
@@ -68,9 +110,28 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     throw new Error(`polyClient is required for ${runtimeMode} mode`);
   }
 
+  const liveMarketDataConfig = {
+    client: polyClient,
+    slugFilter,
+    maxTokens: marketDataMaxTrackedTokens,
+    maxWsShards: marketDataMaxWsShards,
+    queueMax: marketDataIngressQueueMax,
+    lagWarnMs: marketDataIngressLagWarnMs,
+    overflowPolicy: marketDataIngressOverflowPolicy,
+    reconnectBaseMs: marketDataReconnectBaseMs,
+    reconnectMaxMs: marketDataReconnectMaxMs,
+    shardBreakerReconnectsPerMin: marketDataShardBreakerReconnectsPerMin,
+    shardBreakerOpenMs: marketDataShardBreakerOpenMs,
+    shardBreakerOpenMaxMs: marketDataShardBreakerOpenMaxMs,
+    circuitShardOpenPercent: marketDataCircuitShardOpenPercent,
+    circuitOpenShardFloor: marketDataCircuitOpenShardFloor,
+    circuitOpenMs: marketDataCircuitOpenMs,
+    streamStableMs: marketDataStreamStableMs,
+  };
+
   if (runtimeMode === "paper") {
     return {
-      marketDataGateway: new LiveMarketDataGateway({ client: polyClient, slugFilter }),
+      marketDataGateway: new LiveMarketDataGateway(liveMarketDataConfig),
       exchangeGateway: new SimulationExchangeGateway(
         initialBalanceUsdc !== undefined ? { initialBalanceUsdc } : undefined,
       ),
@@ -89,7 +150,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     ...(onInfraAlert ? { onInfraAlert } : {}),
   };
   return {
-    marketDataGateway: new LiveMarketDataGateway({ client: polyClient, slugFilter }),
+    marketDataGateway: new LiveMarketDataGateway(liveMarketDataConfig),
     exchangeGateway: new LiveExchangeGateway(liveExchangeConfig),
     modeLabel: "live-lite",
     marketDataSource: "live",

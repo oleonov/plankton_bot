@@ -27,6 +27,7 @@ export { SimulationMarketDataGateway } from "./simulation/market-data-gateway.js
 export { LiveExchangeGateway, type LiveExchangeConfig } from "./live/exchange-gateway.js";
 export { LiveMarketDataGateway, type LiveMarketDataConfig } from "./live/market-data-gateway.js";
 export { type UserEventStreamAuth } from "./live/user-event-stream.js";
+export { buildClobAxiosAgent, type ClobAxiosAgentOptions } from "./live/axios-agent.js";
 
 // Gamma discovery + resolution
 export { GammaMarketDiscoveryGateway, type GammaDiscoveryConfig } from "./gamma/index.js";

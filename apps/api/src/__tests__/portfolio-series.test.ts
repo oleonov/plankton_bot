@@ -3,7 +3,7 @@ import { bootstrapDatabase } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { buildServer } from "../server.js";
-import { stubLedgerPool } from "./test-helpers.js";
+import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
 const TEST_API_KEY = "test-key-portfolio-series";
 
@@ -32,6 +32,7 @@ function testConfig(): AppConfig {
     planktonSessionSecret: undefined,
     allowSellSizeClamp: true,
     trustProxy: false,
+    ...MARKET_DATA_TEST_DEFAULTS,
   };
 }
 

@@ -1,8 +1,16 @@
 import type Database from "better-sqlite3";
-import type { MarketRepository, Market } from "@plankton/domain";
+import type { MarketRepository, Market, TrackedForPricing } from "@plankton/domain";
 import type { TokenId } from "@plankton/domain";
 import { createTokenId } from "@plankton/domain";
 import type { Regime } from "@plankton/domain";
+
+// Rank for entry-candidate ordering: lower rank = higher priority.
+// Only these three statuses are ever WS-subscribed as entry-candidates.
+const SELECTION_STATUS_RANK: Record<string, number> = {
+  matched_include: 0,
+  step2_fallback_include: 1,
+  unknown: 2,
+};
 
 const UPSERT_MARKET_SQL = `INSERT INTO markets
          (token_id, condition_id, slug, event_slug, question, outcome, outcome_index,
@@ -179,6 +187,81 @@ export class SqliteMarketRepository implements MarketRepository {
       )
       .all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToMarket(r));
+  }
+
+  findTrackedForPricingTiered(opts: { maxTokens: number }): TrackedForPricing {
+    // Single SQL scan: pull every market that is either execution-critical
+    // (open position/order, regardless of selection_status — safety invariant)
+    // or an active+tradable entry candidate with a non-excluded selection status.
+    // `matched_exclude` / `fallback_exclude` are intentionally kept out of the
+    // tradable universe so they cannot consume entryCandidates/discoveryOnly
+    // budget.
+    const rows = this.db
+      .prepare(
+        `SELECT m.*,
+                CASE WHEN (
+                  EXISTS (SELECT 1 FROM positions
+                          WHERE positions.token_id = m.token_id
+                            AND positions.status IN ('open','dust'))
+                  OR EXISTS (SELECT 1 FROM orders
+                             WHERE orders.token_id = m.token_id
+                               AND orders.status IN ('pending','open'))
+                ) THEN 1 ELSE 0 END AS is_critical
+         FROM markets m
+         WHERE m.active = 1
+           AND (
+             (
+               m.tradable = 1
+               AND (
+                 m.selection_status IS NULL
+                 OR m.selection_status NOT IN ('matched_exclude','fallback_exclude')
+               )
+             )
+             OR EXISTS (SELECT 1 FROM positions
+                        WHERE positions.token_id = m.token_id
+                          AND positions.status IN ('open','dust'))
+             OR EXISTS (SELECT 1 FROM orders
+                        WHERE orders.token_id = m.token_id
+                          AND orders.status IN ('pending','open'))
+           )
+         ORDER BY m.updated_at DESC`,
+      )
+      .all() as (Record<string, unknown> & { is_critical: number })[];
+
+    const executionCritical: Market[] = [];
+    const tradableOnly: Market[] = [];
+
+    for (const row of rows) {
+      if (row.is_critical === 1) {
+        executionCritical.push(this.rowToMarket(row));
+      } else {
+        tradableOnly.push(this.rowToMarket(row));
+      }
+    }
+
+    // Deduplicate: execution-critical markets may also be tradable.
+    const criticalIds = new Set(executionCritical.map((m) => String(m.tokenId)));
+
+    // Sort tradable-only by selection_status rank ASC then updated_at DESC.
+    // (SQL ORDER BY updated_at DESC is already applied above; we re-sort here
+    // to layer selection_status rank on top while keeping updated_at as the
+    // tiebreaker within the same rank.) Candidates with an unmapped status
+    // would have already been filtered by the SQL WHERE (excluded statuses
+    // removed there); the `?? 99` guard below is defensive-only.
+    const candidates = tradableOnly.filter((m) => !criticalIds.has(String(m.tokenId)));
+    candidates.sort((a, b) => {
+      const rankA = SELECTION_STATUS_RANK[a.selectionStatus ?? "unknown"] ?? 99;
+      const rankB = SELECTION_STATUS_RANK[b.selectionStatus ?? "unknown"] ?? 99;
+      if (rankA !== rankB) return rankA - rankB;
+      // Within same rank: newer first (already sorted by updated_at DESC from SQL)
+      return a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0;
+    });
+
+    const remaining = Math.max(0, opts.maxTokens - executionCritical.length);
+    const entryCandidates = candidates.slice(0, remaining);
+    const discoveryOnly = candidates.slice(remaining);
+
+    return { executionCritical, entryCandidates, discoveryOnly };
   }
 
   findEventMarketCountBySlug(slug: string): number | null {

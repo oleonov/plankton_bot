@@ -763,18 +763,12 @@ describe("LiveMarketDataGateway", () => {
     await expect(gw.getMarkets()).rejects.toThrow("CLOB SDK error: read ECONNRESET");
   });
 
-  it("getMarkets rejects when client hangs beyond timeout", async () => {
-    vi.useFakeTimers();
-    try {
-      client.getMarkets.mockReturnValue(new Promise(() => {})); // never resolves
-      const promise = gw.getMarkets();
-      // Attach rejection handler before advancing timers to avoid unhandled rejection
-      const assertion = expect(promise).rejects.toThrow("request timed out");
-      await vi.advanceTimersByTimeAsync(30_000);
-      await assertion;
-    } finally {
-      vi.useRealTimers();
-    }
+  it("getMarkets rejects when SDK rejects", async () => {
+    // withTimeout was deleted (Task 6 — Promise.race did not abort the axios request).
+    // Real timeout enforcement is via axios.defaults.timeout (45 s, set at runtime init).
+    // Here we verify that a plain SDK rejection propagates correctly.
+    client.getMarkets.mockRejectedValue(new Error("axios timeout"));
+    await expect(gw.getMarkets()).rejects.toThrow("axios timeout");
   });
 
   it("getOrderBook returns empty book on SDK failure", async () => {
@@ -786,20 +780,16 @@ describe("LiveMarketDataGateway", () => {
     expect(book.bestBid).toBeNull();
   });
 
-  it("getOrderBook returns empty book when client hangs beyond timeout", async () => {
-    vi.useFakeTimers();
-    try {
-      client.getOrderBook.mockReturnValue(new Promise(() => {})); // never resolves
-      const tokenId = createTokenId("tok-1");
-      const promise = gw.getOrderBook(tokenId);
-      await vi.advanceTimersByTimeAsync(10_000);
-      const book = await promise;
-      expect(book.bids).toEqual([]);
-      expect(book.asks).toEqual([]);
-      expect(book.bestBid).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("getOrderBook returns empty book when SDK rejects", async () => {
+    // withTimeout was deleted (Task 6 — Promise.race did not abort the axios request).
+    // Real timeout enforcement is via axios.defaults.timeout (45 s, set at runtime init).
+    // Here we verify that an SDK rejection (e.g. axios timeout) returns the empty-book fallback.
+    client.getOrderBook.mockRejectedValue(new Error("axios timeout"));
+    const tokenId = createTokenId("tok-1");
+    const book = await gw.getOrderBook(tokenId);
+    expect(book.bids).toEqual([]);
+    expect(book.asks).toEqual([]);
+    expect(book.bestBid).toBeNull();
   });
 
   it("getTickSize returns default 0.01 on SDK failure", async () => {
@@ -1173,48 +1163,51 @@ describe("LiveMarketDataGateway", () => {
       timestamp: "1766789471958",
     });
 
-    expect(updates).toEqual([
-      {
-        tokenId: "tok-stream",
-        bestBid: 0.07,
-        bestAsk: 0.09,
-        lastTradePrice: null,
-        hasBook: false,
-        tickSize: null,
-      },
-      {
-        tokenId: "tok-stream",
-        bestBid: 0.07,
-        bestAsk: 0.09,
-        lastTradePrice: 0.08,
-        hasBook: false,
-        tickSize: null,
-      },
-      {
-        tokenId: "tok-stream",
-        bestBid: 0.07,
-        bestAsk: 0.09,
-        lastTradePrice: 0.08,
-        hasBook: true,
-        tickSize: null,
-      },
-      {
-        tokenId: "tok-stream",
-        bestBid: 0.1,
-        bestAsk: 0.12,
-        lastTradePrice: 0.08,
-        hasBook: false,
-        tickSize: null,
-      },
-      {
-        tokenId: "tok-stream",
-        bestBid: 0.1,
-        bestAsk: 0.12,
-        lastTradePrice: 0.08,
-        hasBook: false,
-        tickSize: 0.05,
-      },
-    ]);
+    // The ingress queue drains asynchronously; waitFor lets all 5 items process.
+    await vi.waitFor(() => {
+      expect(updates).toEqual([
+        {
+          tokenId: "tok-stream",
+          bestBid: 0.07,
+          bestAsk: 0.09,
+          lastTradePrice: null,
+          hasBook: false,
+          tickSize: null,
+        },
+        {
+          tokenId: "tok-stream",
+          bestBid: 0.07,
+          bestAsk: 0.09,
+          lastTradePrice: 0.08,
+          hasBook: false,
+          tickSize: null,
+        },
+        {
+          tokenId: "tok-stream",
+          bestBid: 0.07,
+          bestAsk: 0.09,
+          lastTradePrice: 0.08,
+          hasBook: true,
+          tickSize: null,
+        },
+        {
+          tokenId: "tok-stream",
+          bestBid: 0.1,
+          bestAsk: 0.12,
+          lastTradePrice: 0.08,
+          hasBook: false,
+          tickSize: null,
+        },
+        {
+          tokenId: "tok-stream",
+          bestBid: 0.1,
+          bestAsk: 0.12,
+          lastTradePrice: 0.08,
+          hasBook: false,
+          tickSize: 0.05,
+        },
+      ]);
+    });
 
     stream.close();
   });
@@ -1399,27 +1392,30 @@ describe("LiveMarketDataGateway", () => {
       timestamp: "1766789469958",
     });
 
-    expect(lifecycleEvents).toEqual([
-      {
-        type: "market_resolved",
-        conditionId: "cond-1",
-        marketId: "market-1",
-        slug: "market-one",
-        tokenIds: [createTokenId("tok-stream")],
-        winningTokenId: createTokenId("tok-stream"),
-        timestamp: 1766789469958,
-      },
-      {
-        type: "new_market",
-        conditionId: "cond-2",
-        marketId: "market-2",
-        slug: "market-two",
-        question: "Will two happen?",
-        active: true,
-        tokenIds: [createTokenId("tok-new")],
-        timestamp: 1766789469958,
-      },
-    ]);
+    // The ingress queue drains asynchronously; waitFor lets both items process.
+    await vi.waitFor(() => {
+      expect(lifecycleEvents).toEqual([
+        {
+          type: "market_resolved",
+          conditionId: "cond-1",
+          marketId: "market-1",
+          slug: "market-one",
+          tokenIds: [createTokenId("tok-stream")],
+          winningTokenId: createTokenId("tok-stream"),
+          timestamp: 1766789469958,
+        },
+        {
+          type: "new_market",
+          conditionId: "cond-2",
+          marketId: "market-2",
+          slug: "market-two",
+          question: "Will two happen?",
+          active: true,
+          tokenIds: [createTokenId("tok-new")],
+          timestamp: 1766789469958,
+        },
+      ]);
+    });
 
     stream.close();
   });

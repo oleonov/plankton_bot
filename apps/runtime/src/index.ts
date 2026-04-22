@@ -32,6 +32,12 @@ const _origLookup: any = dns.lookup;
 import axiosDefault from "axios";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (axiosDefault as any).defaults.timeout = 45_000;
+// Install a bounded https.Agent on the global axios singleton so CLOB SDK calls
+// use a capped connection pool with a per-socket idle timeout. httpAgent is
+// deliberately left unset — that field expects http.Agent, and CLOB/Gamma are
+// HTTPS-only. Mixing an https.Agent into httpAgent is a type error that would
+// break any future plain-HTTP consumer.
+import { buildClobAxiosAgent } from "@plankton/exchange";
 
 import { randomUUID } from "node:crypto";
 import process from "node:process";
@@ -146,6 +152,14 @@ async function main(): Promise<void> {
   const config = loadEnv();
   const log = createLogger(config.logLevel, config.runtimeMode);
   log.info({ mode: config.runtimeMode }, "plankton runtime starting (env mode)");
+
+  // Install bounded https.Agent on the global axios singleton (covers all CLOB SDK calls).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (axiosDefault as any).defaults.httpsAgent = buildClobAxiosAgent({
+    maxSockets: config.clobAxiosMaxSockets,
+    maxFreeSockets: config.clobAxiosMaxFreeSockets,
+    idleTimeoutMs: config.clobAxiosIdleTimeoutMs,
+  });
 
   // 2. Bootstrap DBs
   const controlDbPath =
@@ -399,6 +413,20 @@ async function main(): Promise<void> {
       slugFilter,
       initialBalanceUsdc,
       onInfraAlert: runtimeMode === "live-lite" ? recordInfraAlert : undefined,
+      marketDataMaxTrackedTokens: config.marketDataMaxTrackedTokens,
+      marketDataMaxWsShards: config.marketDataMaxWsShards,
+      marketDataIngressQueueMax: config.marketDataIngressQueueMax,
+      marketDataIngressLagWarnMs: config.marketDataIngressLagWarnMs,
+      marketDataIngressOverflowPolicy: config.marketDataIngressOverflowPolicy,
+      marketDataReconnectBaseMs: config.marketDataReconnectBaseMs,
+      marketDataReconnectMaxMs: config.marketDataReconnectMaxMs,
+      marketDataShardBreakerReconnectsPerMin: config.marketDataShardBreakerReconnectsPerMin,
+      marketDataShardBreakerOpenMs: config.marketDataShardBreakerOpenMs,
+      marketDataShardBreakerOpenMaxMs: config.marketDataShardBreakerOpenMaxMs,
+      marketDataCircuitShardOpenPercent: config.marketDataCircuitShardOpenPercent,
+      marketDataCircuitOpenShardFloor: config.marketDataCircuitOpenShardFloor,
+      marketDataCircuitOpenMs: config.marketDataCircuitOpenMs,
+      marketDataStreamStableMs: config.marketDataStreamStableMs,
     });
   log.info({ mode: modeLabel }, "gateways created");
   if (runtimeMode === "live-lite") {
@@ -447,6 +475,10 @@ async function main(): Promise<void> {
     pollIntervalMs: config.marketDataPollIntervalMs,
     staleThresholdMs: config.marketDataStaleThresholdMs,
     botRunId: String(botRunId),
+    maxTrackedTokens: config.marketDataMaxTrackedTokens,
+    discoveryPollIntervalMs: config.marketDataDiscoveryPollIntervalMs,
+    discoveryBatchSize: config.marketDataDiscoveryBatchSize,
+    fallbackBatchSize: config.marketDataFallbackBatchSize,
   });
 
   const normalizationModule = new NormalizationModule({

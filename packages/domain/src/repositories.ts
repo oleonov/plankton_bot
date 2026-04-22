@@ -25,6 +25,20 @@ import type {
 
 // ─── MarketRepository ────────────────────────────────────────────────────
 
+/**
+ * Tiered result from `findTrackedForPricingTiered`.
+ * `executionCritical + entryCandidates` feed the WS stream (bounded by maxTokens).
+ * `discoveryOnly` is polled via Gamma in rolling batches.
+ */
+export interface TrackedForPricing {
+  /** Markets with open/dust positions or pending/open orders — never dropped from WS. */
+  executionCritical: Market[];
+  /** Active+tradable markets up to the remaining cap after executionCritical. */
+  entryCandidates: Market[];
+  /** Active+tradable markets beyond the cap — polled via discovery loop, not WS. */
+  discoveryOnly: Market[];
+}
+
 export interface MarketRepository {
   /** Insert or update a market record. tokenId is the primary key. */
   save(market: Market): void;
@@ -78,8 +92,39 @@ export interface MarketRepository {
    * Return all markets that need live pricing: tradable markets plus any with
    * an open position or open/pending order. Used by the pricing loop so it
    * never drops a market mid-trade even when `tradable` flips to false.
+   *
+   * @deprecated Use `findTrackedForPricingTiered` instead — this flat version
+   *   returns the unbounded tradable universe and is kept only for existing tests
+   *   and simulation/paper mode compatibility.
    */
   findTrackedForPricing(): Market[];
+
+  /**
+   * Return markets split into three tiers for bounded pricing subscription.
+   *
+   * **Tier semantics (v1 — available columns only):**
+   *
+   * 1. `executionCritical` — markets with an open/dust position OR pending/open
+   *    order. Always included regardless of the cap. Expected cardinality 0–50.
+   *
+   * 2. `entryCandidates` — `active=1 AND tradable=1` markets NOT in
+   *    executionCritical, ordered by:
+   *    - `selection_status` priority: `matched_include` (0) >
+   *      `step2_fallback_include` (1) > `unknown` (2)
+   *    - `updated_at DESC` within the same tier
+   *    Filled greedily up to `maxTokens - executionCritical.length`.
+   *    When `executionCritical.length >= maxTokens`, `entryCandidates` is empty.
+   *
+   * 3. `discoveryOnly` — every remaining `active=1 AND tradable=1` market not
+   *    in the first two tiers. No LIMIT — caller polls in rolling batches.
+   *
+   * Ranking uses only columns present in `markets` (`ledger.sql:10-32`).
+   * No join to `market_snapshots`. Liquidity-aware ranking is a follow-up.
+   *
+   * @param opts.maxTokens - Total WS-tier cap: `executionCritical + entryCandidates ≤ maxTokens`
+   *   (executionCritical is never dropped even if it exceeds maxTokens alone).
+   */
+  findTrackedForPricingTiered(opts: { maxTokens: number }): TrackedForPricing;
 
   /**
    * Look up the event_market_count stored for a given market slug.

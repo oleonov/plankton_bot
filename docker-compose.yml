@@ -7,7 +7,7 @@ services:
       - plankton-data:/app/apps/runtime/data
     restart: unless-stopped
     env_file: .env.production
-    mem_limit: 520m
+    mem_limit: 640m
     environment:
       # --heapsnapshot-signal=SIGUSR2 lets ops dump a heap snapshot on demand
       # (docker kill -s SIGUSR2 plankton-plankton-runtime-1) for leak triage.

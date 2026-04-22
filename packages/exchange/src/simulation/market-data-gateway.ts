@@ -52,7 +52,10 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
     return this.tickSizes.get(tokenId) ?? 0.01;
   }
 
-  async getMarketPricing(tokenIds: string[]): Promise<Map<string, MarketPricingSnapshot>> {
+  async getMarketPricing(
+    tokenIds: string[],
+    _opts?: { timeoutMs?: number },
+  ): Promise<Map<string, MarketPricingSnapshot>> {
     const result = new Map<string, MarketPricingSnapshot>();
     for (const tokenId of tokenIds) {
       const book = this.orderBooks.get(tokenId);

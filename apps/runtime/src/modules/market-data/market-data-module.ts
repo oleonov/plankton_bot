@@ -73,10 +73,23 @@ export interface MarketDataModuleDeps {
   pollIntervalMs: number;
   staleThresholdMs: number;
   botRunId?: string;
+  /** Max tokens subscribed via WebSocket (executionCritical + entryCandidates). Default: unbounded (legacy). */
+  maxTrackedTokens?: number;
+  /** Interval in ms between discovery-tier poll batches. Default: 60_000. */
+  discoveryPollIntervalMs?: number;
+  /** Number of discovery-tier tokens to poll per batch cycle. Default: 200. */
+  discoveryBatchSize?: number;
+  /**
+   * Safety cap for the main poll batch under forceFullPoll (Task 5).
+   * If the priority tier somehow exceeds this limit, the batch is trimmed and
+   * a warning is logged. Default: 500.
+   */
+  fallbackBatchSize?: number;
 }
 
 export class MarketDataModule implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
+  private discoveryPollTimer: ReturnType<typeof setInterval> | null = null;
   private stream: MarketPricingStream | null = null;
   private polling = false;
   private lastSuccessfulDataMs = 0;
@@ -96,6 +109,27 @@ export class MarketDataModule implements RuntimeModule {
   private gapLogBurstTokenCount = 0;
   private gapLogBurstForceFullPoll = false;
   private readonly gapLogBurstReasons = new Set<string>();
+  /** Discovery-tier markets (beyond WS cap) — polled in rolling batches. */
+  private discoveryTier: Market[] = [];
+  private discoveryCursor = 0;
+  /**
+   * Token ids from the last discovery poll batch. Discovery snapshots flow
+   * into downstream caches (MarketSelectionCache, SignalToOrderBridge) via
+   * NormalizedMarketUpdated, but those caches only evict on
+   * TrackedMarketsChanged.removedTokenIds. We remember the previous batch so
+   * we can emit targeted eviction when the rolling cursor moves on, keeping
+   * downstream cache footprint bounded to (WS tier + current discovery batch).
+   */
+  private lastDiscoveryBatchTokenIds: Set<string> = new Set();
+  /**
+   * True when the stream-level circuit breaker is open — the module degrades to
+   * poll-only mode, polling the full WS-tier each cycle. Readable by Task 5.
+   */
+  private _streamDegradedMode = false;
+
+  get streamDegradedMode(): boolean {
+    return this._streamDegradedMode;
+  }
 
   constructor(private readonly deps: MarketDataModuleDeps) {
     this.log = deps.log.child({ module: "market-data" });
@@ -131,12 +165,24 @@ export class MarketDataModule implements RuntimeModule {
     this.timer = setInterval(() => {
       this.poll().catch((err) => this.log.error({ err }, "poll cycle error"));
     }, this.deps.pollIntervalMs);
+
+    // Discovery poll loop: separate channel for tokens beyond the WS cap.
+    const discoveryIntervalMs = this.deps.discoveryPollIntervalMs ?? 60_000;
+    this.discoveryPollTimer = setInterval(() => {
+      this.pollDiscoveryBatch().catch((err) =>
+        this.log.error({ err }, "discovery poll cycle error"),
+      );
+    }, discoveryIntervalMs);
   }
 
   async stop(): Promise<void> {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.discoveryPollTimer) {
+      clearInterval(this.discoveryPollTimer);
+      this.discoveryPollTimer = null;
     }
     if (this.streamFlushTimer) {
       clearTimeout(this.streamFlushTimer);
@@ -148,6 +194,9 @@ export class MarketDataModule implements RuntimeModule {
       this.flushGapLog();
     }
     await this.flushPendingStreamUpdates();
+    // Evict any tokens from the final discovery batch so downstream caches
+    // don't retain the tail across restarts / supervisor rotation.
+    await this.flushDiscoveryBatchEviction(new Set(), Date.now());
     this.stream?.close();
     this.stream = null;
     this.log.info("market-data module stopped");
@@ -241,7 +290,24 @@ export class MarketDataModule implements RuntimeModule {
         });
       }
 
-      tracked = this.deps.marketRepo.findTrackedForPricing();
+      // Determine tracked WS-tier markets (executionCritical + entryCandidates).
+      if (this.deps.maxTrackedTokens != null) {
+        const tiered = this.deps.marketRepo.findTrackedForPricingTiered({
+          maxTokens: this.deps.maxTrackedTokens,
+        });
+        // Merge WS tier into a flat list for the existing poll machinery.
+        tracked = [...tiered.executionCritical, ...tiered.entryCandidates];
+        // Discovery tier refreshed each poll cycle so cursor stays valid.
+        this.discoveryTier = tiered.discoveryOnly;
+        if (this.discoveryCursor >= this.discoveryTier.length) {
+          this.discoveryCursor = 0;
+        }
+      } else {
+        // Legacy flat path (simulation / tests that don't set maxTrackedTokens).
+        tracked = this.deps.marketRepo.findTrackedForPricing();
+        this.discoveryTier = [];
+      }
+
       const trackedDiff = this.refreshTrackedMarkets(tracked);
       await this.publishTrackedMarketsChanged(trackedDiff);
       this.lastTrackedTokenCount = tracked.length;
@@ -260,18 +326,35 @@ export class MarketDataModule implements RuntimeModule {
       }
 
       const tokenIds = tracked.map((m) => String(m.tokenId));
+      // Feed only WS-tier (executionCritical + entryCandidates) to the stream.
       this.stream?.setTokenIds(tokenIds);
       const now = Date.now();
       const fallbackStaleMs = Math.max(STREAM_FALLBACK_MIN_STALE_MS, this.deps.pollIntervalMs * 3);
-      tokenIdsToPoll =
-        this.stream == null || this.forceFullPoll
-          ? tokenIds
-          : tokenIds.filter((tokenId) => {
-              if (this.pendingGapTokenIds.has(tokenId)) return true;
-              const cached = this.marketCache.get(tokenId);
-              const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
-              return cached == null || now - lastUpdatedAt > fallbackStaleMs;
-            });
+
+      if (this.stream == null || this.forceFullPoll) {
+        // Under forceFullPoll (gap/circuit-open), only poll the priority tier
+        // (executionCritical + entryCandidates) — `tracked` already contains
+        // exactly those tokens. Discovery staleness is tolerable; it has its
+        // own rolling timer. Apply a defensive cap in case Task 1 bounds are
+        // exceeded for any reason.
+        tokenIdsToPoll = [...tokenIds];
+        const cap = this.deps.fallbackBatchSize ?? 500;
+        if (tokenIdsToPoll.length > cap) {
+          this.log.warn(
+            { tokenCount: tokenIdsToPoll.length, cap },
+            "priority-tier poll batch exceeds fallbackBatchSize cap — trimming",
+          );
+          tokenIdsToPoll = tokenIdsToPoll.slice(0, cap);
+        }
+      } else {
+        tokenIdsToPoll = tokenIds.filter((tokenId) => {
+          if (this.pendingGapTokenIds.has(tokenId)) return true;
+          const cached = this.marketCache.get(tokenId);
+          const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
+          return cached == null || now - lastUpdatedAt > fallbackStaleMs;
+        });
+      }
+
       this.lastStaleTokenCount = tokenIdsToPoll.length;
       this.lastFallbackPollCount = tokenIdsToPoll.length;
       this.log.debug(
@@ -284,9 +367,11 @@ export class MarketDataModule implements RuntimeModule {
         "fetching pricing for tracked markets",
       );
 
+      // Scale timeout proportionally to batch size: base 5 s + 10 ms/token, cap 30 s.
+      const timeoutMs = Math.min(30_000, 5_000 + tokenIdsToPoll.length * 10);
       const pricingMap =
         tokenIdsToPoll.length > 0
-          ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll)
+          ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll, { timeoutMs })
           : new Map<string, import("@plankton/domain").MarketPricingSnapshot>();
       const markets: NormalizedMarket[] = [];
 
@@ -343,6 +428,101 @@ export class MarketDataModule implements RuntimeModule {
       }
       this.polling = false;
     }
+  }
+
+  /**
+   * Poll a rolling batch from the discovery tier via Gamma REST.
+   * Advances `discoveryCursor` so each invocation covers a different slice.
+   *
+   * Discovery tokens are NOT in the WS stream and are deliberately kept out
+   * of `trackedMarketsByToken` / `marketCache` / `lastPricingUpdateAtByToken`
+   * to avoid WS-tier retention growing without bound. Instead we build
+   * NormalizedMarket snapshots on the fly and publish them so downstream
+   * modules (Normalization, AlgoDecision, SignalToOrder) see fresh pricing.
+   */
+  private async pollDiscoveryBatch(): Promise<void> {
+    if (this.discoveryTier.length === 0) {
+      // Even when the discovery tier has emptied out (scanner withdrew it, or
+      // selection rules narrowed the universe), we must still flush any
+      // tokens from the previous batch so they don't linger in downstream
+      // caches forever.
+      await this.flushDiscoveryBatchEviction(new Set(), Date.now());
+      return;
+    }
+    const batchSize = this.deps.discoveryBatchSize ?? 200;
+    const cursor = this.discoveryCursor % this.discoveryTier.length;
+    const batch = this.discoveryTier.slice(cursor, cursor + batchSize);
+    const tokenIds = batch.map((m) => String(m.tokenId));
+    const marketByToken = new Map<string, Market>();
+    for (const market of batch) {
+      marketByToken.set(String(market.tokenId), market);
+    }
+    this.discoveryCursor = (cursor + batch.length) % this.discoveryTier.length;
+
+    try {
+      const pricingMap = await this.deps.gateway.getMarketPricing(tokenIds);
+      const nowMs = Date.now();
+      const snapshots: NormalizedMarket[] = [];
+      for (const [tokenId, pricing] of pricingMap) {
+        const market = marketByToken.get(tokenId);
+        if (market == null) continue;
+        const baseMarket = syncTrackedMarket(null, market, nowMs);
+        snapshots.push(applyPricingSnapshot(baseMarket, pricing, nowMs));
+      }
+      this.log.debug(
+        {
+          batchSize: batch.length,
+          cursor,
+          discoveryTotal: this.discoveryTier.length,
+          publishedCount: snapshots.length,
+        },
+        "discovery poll batch complete",
+      );
+      if (snapshots.length > 0) {
+        await this.deps.bus.publish("MarketSnapshotReceived", {
+          markets: snapshots,
+          timestamp: nowMs,
+        });
+      }
+
+      await this.flushDiscoveryBatchEviction(new Set(tokenIds), nowMs);
+    } catch (err) {
+      this.log.warn({ err }, "discovery poll batch failed");
+    }
+  }
+
+  /**
+   * Emit TrackedMarketsChanged.removedTokenIds for previous-batch tokens that
+   * are neither in the current batch nor in the WS tier so downstream caches
+   * (MarketSelectionCache, SignalToOrderBridge, AlgoDecision sweep) stay
+   * bounded to (WS tier + current discovery batch). Called after each
+   * successful discovery poll AND on lifecycle edges where the batch would
+   * otherwise be left dangling (empty discovery tier, module stop).
+   */
+  private async flushDiscoveryBatchEviction(
+    currentBatchTokens: ReadonlySet<string>,
+    nowMs: number,
+  ): Promise<void> {
+    if (this.lastDiscoveryBatchTokenIds.size === 0) {
+      this.lastDiscoveryBatchTokenIds = new Set(currentBatchTokens);
+      return;
+    }
+    const wsTier = new Set(this.trackedMarketsByToken.keys());
+    const removedTokenIds: string[] = [];
+    for (const prev of this.lastDiscoveryBatchTokenIds) {
+      if (!currentBatchTokens.has(prev) && !wsTier.has(prev)) {
+        removedTokenIds.push(prev);
+      }
+    }
+    if (removedTokenIds.length > 0) {
+      await this.deps.bus.publish("TrackedMarketsChanged", {
+        addedTokenIds: [],
+        removedTokenIds: removedTokenIds.map((t) => createTokenId(t)),
+        activeTokenIds: [...wsTier].map((t) => createTokenId(t)),
+        timestamp: nowMs,
+      });
+    }
+    this.lastDiscoveryBatchTokenIds = new Set(currentBatchTokens);
   }
 
   private async handleStreamUpdates(updates: readonly MarketPricingStreamUpdate[]): Promise<void> {
@@ -411,6 +591,68 @@ export class MarketDataModule implements RuntimeModule {
         });
         continue;
       }
+      // queue_overflow: route affected tokens to poll-fallback (Task 3 + Task 4 alignment).
+      // Dropped WS updates cannot be recovered from the queue — the next poll
+      // cycle must refetch fresh pricing for each affected token.
+      if (event.type === "queue_overflow") {
+        if (event.tokenIds.length > 0) {
+          this.log.warn(
+            { shardId: event.shardId, tokenCount: event.tokenIds.length },
+            "ws ingress queue overflow — routing tokens to poll-fallback",
+          );
+          for (const tokenId of event.tokenIds) {
+            this.pendingGapTokenIds.add(tokenId);
+          }
+        }
+        continue;
+      }
+
+      // shard_circuit_open: merge shard's tokens into pendingGapTokenIds so the
+      // next poll cycle fetches fresh pricing for them via Gamma REST.
+      // Other shards keep streaming — only this shard's tokens degrade to poll.
+      if (event.type === "shard_circuit_open") {
+        this.log.warn(
+          {
+            shardId: event.shardId,
+            tokenCount: event.tokenIds.length,
+            reopenAtMs: event.reopenAtMs,
+          },
+          "shard circuit breaker opened — routing tokens to poll-fallback",
+        );
+        for (const tokenId of event.tokenIds) {
+          this.pendingGapTokenIds.add(tokenId);
+        }
+        continue;
+      }
+
+      // shard_circuit_closed: natural reconciliation drains pendingGapTokenIds
+      // on the next successful poll — no extra action needed here.
+      if (event.type === "shard_circuit_closed") {
+        this.log.info(
+          { shardId: event.shardId, tokenCount: event.tokenIds.length },
+          "shard circuit breaker closed — resuming WS streaming",
+        );
+        continue;
+      }
+
+      // stream_circuit_open: degrade to full poll-only for the WS-tier.
+      if (event.type === "stream_circuit_open") {
+        this.log.warn(
+          { reopenAtMs: event.reopenAtMs, reason: event.reason },
+          "stream circuit breaker opened — degrading to poll-only mode",
+        );
+        this._streamDegradedMode = true;
+        this.forceFullPoll = true;
+        continue;
+      }
+
+      // stream_circuit_closed: restore normal WS-primary mode.
+      if (event.type === "stream_circuit_closed") {
+        this.log.info("stream circuit breaker closed — resuming WS-primary mode");
+        this._streamDegradedMode = false;
+        continue;
+      }
+
       await this.deps.bus.publish("NewMarketDiscoveredHint", {
         conditionId: event.conditionId,
         marketId: event.marketId,
@@ -444,6 +686,16 @@ export class MarketDataModule implements RuntimeModule {
       this.marketCache.delete(tokenId);
       this.lastPricingUpdateAtByToken.delete(tokenId);
       removed.push(tokenId);
+    }
+    // Defensive sweep: any entry in the aux caches that isn't in the current
+    // WS tier is an orphan (e.g., from past discovery-tier leaks or renames).
+    // Keep these maps bounded to the WS tier — discovery snapshots are
+    // published on the fly and must not leave residue here.
+    for (const tokenId of [...this.marketCache.keys()]) {
+      if (!nextTokenIds.has(tokenId)) this.marketCache.delete(tokenId);
+    }
+    for (const tokenId of [...this.lastPricingUpdateAtByToken.keys()]) {
+      if (!nextTokenIds.has(tokenId)) this.lastPricingUpdateAtByToken.delete(tokenId);
     }
     return { added, removed, active: [...nextTokenIds] };
   }
