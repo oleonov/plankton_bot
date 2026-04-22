@@ -20,6 +20,7 @@
     "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/builder-signing-sdk": "^0.0.8",
     "@polymarket/clob-client": "^4.0.0",
+    "axios": "0.27.2",
     "ethers": "^5.7.1",
     "pino": "^9.6.0",
     "viem": "^2.47.10"

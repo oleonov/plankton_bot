@@ -20,6 +20,19 @@ const _origLookup: any = dns.lookup;
   return _origLookup(hostname, opts, maybeCb);
 };
 
+// Force a ceiling timeout on every axios request so the CLOB SDK (which uses
+// the global axios import) always releases its socket on stuck calls. The
+// gateway's own Promise.race timeout only races at the JS level — it does
+// not abort the underlying axios request, leaving the response body stuck
+// in the kernel Recv-Q and the socket in CLOSE-WAIT (2026-04-22 leak hunt).
+// Axios's native timeout uses its own AbortController and actually tears
+// down the socket when it fires.
+// axios@0.27.x's CJS default export confuses TS's ESM default inference, so
+// we cast to the AxiosStatic shape instead of relying on the typed default.
+import axiosDefault from "axios";
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(axiosDefault as any).defaults.timeout = 45_000;
+
 import { randomUUID } from "node:crypto";
 import process from "node:process";
 import { loadEnv } from "@plankton/config";
