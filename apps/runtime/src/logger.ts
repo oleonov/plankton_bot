@@ -14,8 +14,8 @@ export const compactErrSerializer: SerializerFn = (err: unknown) => {
 
 function serializeErr(err: unknown, seen: WeakSet<object>): unknown {
   if (err == null || typeof err !== "object") return err;
-  if (seen.has(err as object)) return "[Circular]";
-  seen.add(err as object);
+  if (seen.has(err)) return "[Circular]";
+  seen.add(err);
   const e = err as Record<string, unknown> & { constructor?: { name?: string } };
   const out: Record<string, unknown> = {
     type: e.constructor?.name ?? "Error",
