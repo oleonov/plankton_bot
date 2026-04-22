@@ -1,6 +1,34 @@
-import pino, { type LoggerOptions } from "pino";
+import pino, { type LoggerOptions, type SerializerFn } from "pino";
 
 export type Logger = pino.Logger;
+
+// Compact error serializer that whitelists the fields operators actually need.
+// pino.stdSerializers.err iterates `for (key in err)` and adds every enumerable
+// own property back, which for native DOMException means re-inflating the 25
+// enum constants (INDEX_SIZE_ERR..DATA_CLONE_ERR). We keep only name, message,
+// stack, code, cause (recursive), and aggregated errors — everything else is
+// ballast.
+export const compactErrSerializer: SerializerFn = (err: unknown) => {
+  return serializeErr(err, new WeakSet());
+};
+
+function serializeErr(err: unknown, seen: WeakSet<object>): unknown {
+  if (err == null || typeof err !== "object") return err;
+  if (seen.has(err as object)) return "[Circular]";
+  seen.add(err as object);
+  const e = err as Record<string, unknown> & { constructor?: { name?: string } };
+  const out: Record<string, unknown> = {
+    type: e.constructor?.name ?? "Error",
+    message: typeof e.message === "string" ? e.message : undefined,
+    stack: typeof e.stack === "string" ? e.stack : undefined,
+  };
+  if (e.code != null) out.code = e.code;
+  if (e.cause != null) out.cause = serializeErr(e.cause, seen);
+  if (Array.isArray(e.errors)) {
+    out.errors = e.errors.map((sub) => serializeErr(sub, seen));
+  }
+  return out;
+}
 
 const REDACT_PATHS = [
   "authorization",
@@ -55,10 +83,11 @@ export function createLogger(level: string, mode?: string): Logger {
   const opts: LoggerOptions = {
     level,
     redact: { paths: [...REDACT_PATHS], censor: "********" },
-    // Pino's default JSON.stringify of a native DOMException serializes its 25
-    // enum constants (INDEX_SIZE_ERR..DATA_CLONE_ERR) + the full cause graph —
-    // ~800 B per log. stdSerializers.err keeps only name/message/stack/code.
-    serializers: { err: pino.stdSerializers.err },
+    // Custom err serializer — whitelist type/message/stack/code/cause/errors.
+    // pino.stdSerializers.err would re-add native DOMException's 25 enum
+    // constants (INDEX_SIZE_ERR..DATA_CLONE_ERR) via its for-in loop, which
+    // inflates every scan-timeout log by ~600 B.
+    serializers: { err: compactErrSerializer },
     ...(mode ? { base: { mode } } : {}),
   };
 
