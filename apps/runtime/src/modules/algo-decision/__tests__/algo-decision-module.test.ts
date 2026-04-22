@@ -12,7 +12,7 @@ import type {
   RuntimeEventMap,
   OrderRepository,
 } from "@plankton/domain";
-import { createTokenId, createCommandId, createOrderId } from "@plankton/domain";
+import { createTokenId, createCommandId } from "@plankton/domain";
 import type { ConditionId } from "@plankton/domain";
 import type { Logger } from "../../../logger.js";
 
