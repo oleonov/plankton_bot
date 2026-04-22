@@ -1,3 +1,4 @@
+import { drainResponseBody } from "../live/market-data-gateway.js";
 import { isTransientNetworkError, sleep } from "../network-errors.js";
 
 /**
@@ -72,9 +73,13 @@ export class GammaResolutionClient {
         });
 
         // 404 = not found, 422 = endpoint doesn't accept this ID format
-        if (response.status === 404 || response.status === 422) return null;
+        if (response.status === 404 || response.status === 422) {
+          await drainResponseBody(response);
+          return null;
+        }
 
         if (!response.ok) {
+          await drainResponseBody(response);
           throw new Error(`Gamma API responded with ${response.status}: ${response.statusText}`);
         }
 

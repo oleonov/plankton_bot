@@ -190,6 +190,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
         15_000,
       );
       if (!response.ok) {
+        await drainResponseBody(response);
         throw new Error(`CLOB books request failed: ${response.status} ${response.statusText}`);
       }
 
@@ -223,6 +224,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
       const url = `${GAMMA_PRICING_BASE_URL}?${params}`;
       const response = await this.fetchWithRetry(url, undefined, 15_000);
       if (!response.ok) {
+        await drainResponseBody(response);
         throw new Error(`Gamma pricing request failed: ${response.status} ${response.statusText}`);
       }
 
@@ -353,7 +355,11 @@ export class LiveMarketDataGateway implements MarketDataGateway {
   ): Promise<Response> {
     for (let attempt = 1; attempt <= FETCH_MAX_RETRIES; attempt++) {
       try {
-        return await this.withTimeout(fetch(input, init), timeoutMs);
+        // AbortSignal.timeout aborts the underlying undici request so the
+        // TCP socket is released on timeout. Promise.race leaves it orphaned
+        // with the response body stuck in Recv-Q until kernel GC — see
+        // CLOSE-WAIT leak investigation 2026-04-22.
+        return await fetch(input, { ...init, signal: AbortSignal.timeout(timeoutMs) });
       } catch (err) {
         if (attempt === FETCH_MAX_RETRIES || !isTransientNetworkError(err)) {
           throw err;
@@ -362,5 +368,20 @@ export class LiveMarketDataGateway implements MarketDataGateway {
       }
     }
     throw new Error("unreachable");
+  }
+}
+
+/**
+ * Drain a Response body so its underlying socket is released back to the pool
+ * instead of sitting in CLOSE-WAIT with unread bytes in the kernel Recv-Q.
+ * Call before throwing / returning early on a non-OK response.
+ */
+export async function drainResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Ignore — the socket will be reclaimed when the Response is GC'd, the
+    // cancel() just speeds it up. Don't let a drain failure mask the real
+    // response error.
   }
 }

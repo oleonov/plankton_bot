@@ -88,8 +88,11 @@ async function fetchExternalPortfolioSeries(
   url.searchParams.set("fidelity", fidelity);
 
   try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
+    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      return null;
+    }
     const data = (await res.json()) as ExternalPnlPoint[];
     if (!Array.isArray(data) || data.length === 0) return null;
 

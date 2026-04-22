@@ -985,6 +985,62 @@ describe("LiveMarketDataGateway", () => {
     }
   });
 
+  it("getMarketPricing drains response body on HTTP error to release socket", async () => {
+    const cancelMock = vi.fn().mockResolvedValue(undefined);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: "Internal Server Error",
+      body: { cancel: cancelMock },
+    });
+
+    try {
+      await expect(gw.getMarketPricing(["tok-1"])).rejects.toThrow(
+        "Gamma pricing request failed: 500",
+      );
+      expect(cancelMock).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("getOrderBooks drains response body on HTTP error to release socket", async () => {
+    const cancelMock = vi.fn().mockResolvedValue(undefined);
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 502,
+      statusText: "Bad Gateway",
+      body: { cancel: cancelMock },
+    });
+
+    try {
+      await expect(gw.getOrderBooks(["tok-1"])).rejects.toThrow("CLOB books request failed: 502");
+      expect(cancelMock).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("fetchWithRetry passes AbortSignal.timeout to fetch so sockets release on timeout", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve([]),
+    });
+    globalThis.fetch = fetchMock;
+
+    try {
+      await gw.getMarketPricing(["tok-1"]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const init = fetchMock.mock.calls[0]![1] as RequestInit | undefined;
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("getMarketPricing does not call CLOB books endpoint", async () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn().mockResolvedValue({
