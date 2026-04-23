@@ -238,6 +238,18 @@ function readInfraAlerts(db: Database.Database): InfraAlertStatusItem[] {
   return [...deduped.values()];
 }
 
+function readOpenDriftCount(db: Database.Database): number | null {
+  try {
+    const row = db
+      .prepare("SELECT COUNT(*) AS cnt FROM position_drifts WHERE status = 'open'")
+      .get() as { cnt: number } | undefined;
+    return row?.cnt ?? 0;
+  } catch {
+    // Legacy/test DBs may not have the drift table yet.
+    return null;
+  }
+}
+
 function buildLiveLiteStatus(
   runtimeMode: string,
   controlDb?: Database.Database,
@@ -394,10 +406,13 @@ export function buildStatusSnapshot(
       "SELECT captured_at FROM runtime_metrics WHERE metric_name = 'reconciliation_clean' ORDER BY captured_at DESC LIMIT 1",
     )
     .get() as { captured_at: string } | undefined;
-
-  const reconciliationDriftDetected = lastDrift
-    ? !lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at)
-    : false;
+  const openDriftCount = readOpenDriftCount(db);
+  const reconciliationDriftDetected =
+    openDriftCount !== null
+      ? openDriftCount > 0
+      : lastDrift
+        ? !lastCleanRecon || new Date(lastDrift.captured_at) > new Date(lastCleanRecon.captured_at)
+        : false;
 
   const paused = pausedMetric?.value === 1;
 

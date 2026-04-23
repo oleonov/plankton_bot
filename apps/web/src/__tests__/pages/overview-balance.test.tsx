@@ -19,23 +19,28 @@ describe("Overview Balance Card", () => {
   it("shows virtual balance for paper mode", async () => {
     renderWithProviders(<Overview />);
 
-    // mockStatus: balanceUsdc = 69.70, initialBalanceUsdc = 100
-    expect(await screen.findByText("$69.70")).toBeInTheDocument();
-    expect(screen.getByText(/\$100\.00/)).toBeInTheDocument();
+    const card = await screen.findByTestId("overview-balance-card");
+    expect(within(card).getByText("Portfolio")).toBeInTheDocument();
+    expect(within(card).getByText("Available to trade")).toBeInTheDocument();
+    // mockStatus: balanceUsdc = 69.70, totalCurrentValueUsdc = 15.87, initialBalanceUsdc = 100
+    expect(within(card).getByText("$85.57")).toBeInTheDocument();
+    expect(within(card).getByText("$69.70")).toBeInTheDocument();
+    expect(within(card).getByText(/\$100\.00/)).toBeInTheDocument();
   });
 
-  it("shows if-close-all value", async () => {
+  it("shows if-close-all value as the main portfolio number", async () => {
     renderWithProviders(<Overview />);
 
-    expect(await screen.findByText(/\$85\.57 if close all/i)).toBeInTheDocument();
+    const card = await screen.findByTestId("overview-balance-card");
+    expect(within(card).getByText("$85.57")).toBeInTheDocument();
+    expect(within(card).queryByText(/if close all/i)).not.toBeInTheDocument();
   });
 
   it("shows invested / initial for paper mode", async () => {
     renderWithProviders(<Overview />);
 
-    expect(
-      await screen.findByText(/\$32\.06 cost basis \/ \$100\.00 initial/i),
-    ).toBeInTheDocument();
+    const card = await screen.findByTestId("overview-balance-card");
+    expect(within(card).getByText(/\$32\.06 cost basis \/ \$100\.00 initial/i)).toBeInTheDocument();
   });
 
   it("shows wallet balance for live-lite mode with green accent", async () => {
@@ -56,9 +61,13 @@ describe("Overview Balance Card", () => {
 
     renderWithProviders(<Overview />);
 
-    // Wallet balance shown
-    expect(await screen.findByText("$487.00")).toBeInTheDocument();
-    expect(screen.getByText(/\$32\.06 cost basis \/ \$100\.00 cap/i)).toBeInTheDocument();
+    const card = await screen.findByTestId("overview-balance-card");
+    expect(within(card).getByText("Portfolio")).toBeInTheDocument();
+    expect(within(card).getByText("Available to trade")).toBeInTheDocument();
+    // Wallet balance stays in the right rail, portfolio headline becomes if-close-all.
+    expect(within(card).getByText("$502.87")).toBeInTheDocument();
+    expect(within(card).getByText("$487.00")).toBeInTheDocument();
+    expect(within(card).getByText(/\$32\.06 cost basis \/ \$100\.00 cap/i)).toBeInTheDocument();
   });
 
   it("shows dash when balance is null", async () => {
@@ -74,7 +83,8 @@ describe("Overview Balance Card", () => {
     );
 
     renderWithProviders(<Overview />);
-    expect((await screen.findAllByText("—")).length).toBeGreaterThanOrEqual(1);
+    const card = await screen.findByTestId("overview-balance-card");
+    expect(within(card).getAllByText("—").length).toBeGreaterThanOrEqual(1);
   });
 
   it("shows 24h execution quality telemetry", async () => {

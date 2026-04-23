@@ -11,7 +11,10 @@ function jsonMetric(labels: Record<string, unknown>): { labels: string } {
   return { labels: JSON.stringify(labels) };
 }
 
-function createFakeDb(runtimeMetrics: Record<string, Record<string, unknown>>): Database.Database {
+function createFakeDb(
+  runtimeMetrics: Record<string, Record<string, unknown>>,
+  options?: { openDriftCount?: number; driftTableMissing?: boolean },
+): Database.Database {
   const lastMarketDataIso = new Date().toISOString();
 
   return {
@@ -35,8 +38,22 @@ function createFakeDb(runtimeMetrics: Record<string, Record<string, unknown>>): 
           }
           if (sql.includes("metric_name = 'market_data_source'")) return undefined;
           if (sql.includes("metric_name = 'execution_mode'")) return undefined;
-          if (sql.includes("metric_name = 'reconciliation_drift'")) return undefined;
-          if (sql.includes("metric_name = 'reconciliation_clean'")) return undefined;
+          if (sql.includes("metric_name = 'reconciliation_drift'")) {
+            return runtimeMetrics.reconciliation_drift
+              ? { captured_at: "2026-04-24T10:00:00Z" }
+              : undefined;
+          }
+          if (sql.includes("metric_name = 'reconciliation_clean'")) {
+            return runtimeMetrics.reconciliation_clean
+              ? { captured_at: "2026-04-24T09:00:00Z" }
+              : undefined;
+          }
+          if (sql.includes("FROM position_drifts WHERE status = 'open'")) {
+            if (options?.driftTableMissing) {
+              throw new Error("no such table: position_drifts");
+            }
+            return { cnt: options?.openDriftCount ?? 0 };
+          }
           if (sql.includes("metric_name = 'market_data_poll_progress'")) return undefined;
           if (sql.includes("SUM(realized_pnl)")) return { total: 0 };
           if (sql.includes("metric_name = 'execution_queue'")) return undefined;
@@ -207,5 +224,34 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
       gammaFallbackExecutionCriticalCount: 1,
       gammaFallbackEntryCandidateCount: 3,
     });
+  });
+
+  it("derives reconciliationDriftDetected from open drift rows instead of stale metrics", () => {
+    const snapshot = buildStatusSnapshot(
+      createFakeDb(
+        {
+          reconciliation_drift: {},
+          reconciliation_clean: {},
+        },
+        { openDriftCount: 0 },
+      ),
+      120_000,
+    );
+
+    expect(snapshot.reconciliationDriftDetected).toBe(false);
+  });
+
+  it("falls back to metric chronology when the drift table is unavailable", () => {
+    const snapshot = buildStatusSnapshot(
+      createFakeDb(
+        {
+          reconciliation_drift: {},
+        },
+        { driftTableMissing: true },
+      ),
+      120_000,
+    );
+
+    expect(snapshot.reconciliationDriftDetected).toBe(true);
   });
 });

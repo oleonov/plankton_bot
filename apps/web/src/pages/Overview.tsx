@@ -56,6 +56,13 @@ function formatExecutionRejects(rejects?: Record<string, number>): string | null
 function BalanceCard({ status }: { status: import("../api/types.ts").StatusData }) {
   const isLive = status.runtimeMode === "live-lite";
   const dim = { color: "var(--text-dim)" };
+  const headerLabelStyle = {
+    color: "var(--text-muted)",
+    fontSize: 12,
+    fontWeight: 500,
+    textTransform: "none" as const,
+    letterSpacing: 0,
+  };
 
   // Top number: wallet balance (live-lite) or virtual balance (paper/sim)
   const topBalance = isLive ? status.walletBalanceUsdc : status.balanceUsdc;
@@ -68,15 +75,47 @@ function BalanceCard({ status }: { status: import("../api/types.ts").StatusData 
   const cap = isLive ? status.liveLite?.maxOpenValueUsdc : status.initialBalanceUsdc;
 
   return (
-    <div className={`card ${isLive ? "card-accent-green" : ""}`}>
-      <div className="label" style={isLive ? undefined : dim}>
-        Balance
-      </div>
-      <div className="value-lg" style={isLive ? { color: "var(--green)" } : dim}>
-        {formatUsd(topBalance)}
-      </div>
-      <div className="value-sm" style={dim}>
-        {ifCloseAll != null ? `${formatUsd(ifCloseAll)} if close all` : ""}
+    <div
+      className={`card ${isLive ? "card-accent-green" : ""}`}
+      data-testid="overview-balance-card"
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 16,
+          marginBottom: 10,
+        }}
+      >
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={headerLabelStyle}>Portfolio</div>
+          <div
+            className="value-lg"
+            style={{
+              fontSize: 32,
+              lineHeight: 1.1,
+              marginTop: 8,
+              color: isLive ? "var(--green)" : "var(--text)",
+            }}
+          >
+            {formatUsd(ifCloseAll)}
+          </div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0, paddingTop: 2 }}>
+          <div style={headerLabelStyle}>Available to trade</div>
+          <div
+            className="value-lg"
+            style={{
+              marginTop: 8,
+              fontSize: 24,
+              lineHeight: 1.1,
+              color: isLive ? "var(--green)" : "var(--text)",
+            }}
+          >
+            {formatUsd(topBalance)}
+          </div>
+        </div>
       </div>
       <div className="value-sm" style={dim}>
         {cap != null
