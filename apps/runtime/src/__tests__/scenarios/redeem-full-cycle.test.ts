@@ -211,7 +211,7 @@ async function buildFixture(opts: {
     marketRepo,
     resolutionRepo,
     orderRepo,
-    gammaClient: (opts.gammaClient ?? makeNullGammaClient()) as any,
+    gammaClient: opts.gammaClient ?? makeNullGammaClient(),
     lotRepo,
     positionRepo,
     db: db.db,
