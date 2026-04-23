@@ -3,22 +3,26 @@ import type {
   MarketPricingStreamUpdate,
   NormalizedMarket,
 } from "@plankton/domain";
+import { deriveExecutableTopOfBook } from "../../executable-price.js";
 
 export function applyPricingSnapshot(
   market: NormalizedMarket,
   pricing: MarketPricingSnapshot,
   nowMs: number,
 ): NormalizedMarket {
-  const bestBid = pricing.bestBid ?? null;
-  const bestAsk = pricing.bestAsk ?? null;
-  const midPrice = bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null;
-  const spread = bestBid != null && bestAsk != null ? bestAsk - bestBid : null;
+  const topOfBook = deriveExecutableTopOfBook(
+    {
+      bestBid: pricing.bestBid ?? null,
+      bestAsk: pricing.bestAsk ?? null,
+    },
+    market.tickSize,
+  );
   return {
     ...market,
-    bestBid,
-    bestAsk,
-    midPrice,
-    spread,
+    bestBid: topOfBook.bestBid,
+    bestAsk: topOfBook.bestAsk,
+    midPrice: topOfBook.midPrice,
+    spread: topOfBook.spread,
     acceptingOrders: pricing.acceptingOrders,
     enableOrderBook: pricing.enableOrderBook,
     lastTradePrice: pricing.lastTradePrice ?? null,
@@ -36,22 +40,31 @@ export function applyStreamUpdate(
   update: MarketPricingStreamUpdate,
   nowMs: number,
 ): NormalizedMarket {
-  const nextMarket = applyPricingSnapshot(market, update.pricing, nowMs);
   const marketWithTickSize =
     update.tickSize != null
       ? {
-          ...nextMarket,
+          ...market,
           tickSize: update.tickSize,
         }
-      : nextMarket;
-  if (!update.book) return marketWithTickSize;
+      : market;
+  const nextMarket = applyPricingSnapshot(marketWithTickSize, update.pricing, nowMs);
+  if (!update.book) return nextMarket;
+  const topOfBook = deriveExecutableTopOfBook(
+    {
+      bestBid: update.book.bestBid,
+      bestAsk: update.book.bestAsk,
+      bids: update.book.bids,
+      asks: update.book.asks,
+    },
+    marketWithTickSize.tickSize,
+  );
   return {
-    ...marketWithTickSize,
-    bestBid: update.book.bestBid,
-    bestAsk: update.book.bestAsk,
-    midPrice: update.book.midPrice,
-    spread: update.book.spread,
-    minOrderSize: update.book.minOrderSize ?? marketWithTickSize.minOrderSize ?? null,
+    ...nextMarket,
+    bestBid: topOfBook.bestBid,
+    bestAsk: topOfBook.bestAsk,
+    midPrice: topOfBook.midPrice,
+    spread: topOfBook.spread,
+    minOrderSize: update.book.minOrderSize ?? nextMarket.minOrderSize ?? null,
     bookSource: "clob",
     snapshotTs: update.book.timestamp,
   };

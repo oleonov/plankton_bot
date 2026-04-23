@@ -147,7 +147,7 @@ describe("CandidateBookCache", () => {
     }
   });
 
-  it("preserves the base bestBid when a fresher book is ask-only", () => {
+  it("preserves the base executable book when a fresher top-of-book is non-executable", () => {
     const market = {
       tokenId: createTokenId("tok-a"),
       conditionId: "cond-a",
@@ -189,10 +189,66 @@ describe("CandidateBookCache", () => {
     });
 
     expect(next.bestBid).toBe(0.04);
-    expect(next.bestAsk).toBe(0.001);
+    expect(next.bestAsk).toBe(0.05);
     expect(next.midPrice).toBe(0.045);
-    expect(next.spread).toBe(0.01);
+    expect(next.spread).toBeCloseTo(0.01);
     expect(next.bookSource).toBe("clob");
     expect(next.snapshotTs).toBe(2);
+  });
+
+  it("uses the first deeper executable levels when the raw top-of-book is invalid", () => {
+    const market = {
+      tokenId: createTokenId("tok-a"),
+      conditionId: "cond-a",
+      slug: "market-a",
+      eventSlug: null,
+      eventMarketCount: 1,
+      question: "Question",
+      outcome: "YES",
+      outcomeIndex: 0,
+      regime: "price-range",
+      horizon: "daily",
+      endDate: null,
+      active: true,
+      tradable: true,
+      tickSize: 0.001,
+      negRisk: false,
+      acceptingOrders: true,
+      enableOrderBook: true,
+      bestBid: 0.1,
+      bestAsk: 0.9,
+      midPrice: 0.5,
+      spread: 0.8,
+      snapshotTs: 1,
+      bookSource: "gamma",
+    } as const;
+    const next = applyOrderBookToMarket(market, {
+      tokenId: "tok-a",
+      snapshotTs: 2,
+      cachedAtMs: 2,
+      sourcePolledAtMs: 2,
+      bookSource: "clob",
+      sourceKind: "ws",
+      book: makeBook("tok-a", {
+        bids: [
+          { price: 0.0005, size: 10 },
+          { price: 0.001, size: 9 },
+        ],
+        asks: [
+          { price: 1, size: 10 },
+          { price: 0.999, size: 9 },
+        ],
+        bestBid: 0.0005,
+        bestAsk: 1,
+        midPrice: 0.50025,
+        spread: 0.9995,
+      }),
+    });
+
+    expect(next.bestBid).toBe(0.001);
+    expect(next.bestAsk).toBe(0.999);
+    expect(next.midPrice).toBe(0.5);
+    expect(next.spread).toBe(0.998);
+    expect(next.bookSource).toBe("clob");
   });
 });

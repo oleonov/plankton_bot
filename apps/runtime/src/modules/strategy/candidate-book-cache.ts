@@ -1,5 +1,6 @@
 import type { Logger } from "../../logger.js";
 import type { NormalizedMarket, OrderBookSnapshot } from "@plankton/domain";
+import { deriveExecutableTopOfBook } from "../../executable-price.js";
 
 export interface CandidateBookGateway {
   getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>>;
@@ -387,15 +388,26 @@ export function applyOrderBookToMarket(
   market: NormalizedMarket,
   entry: CandidateBookCacheEntry,
 ): NormalizedMarket {
-  const bestBid = entry.book.bestBid ?? market.bestBid;
-  const bestAsk = entry.book.bestAsk ?? market.bestAsk;
+  const topOfBook = deriveExecutableTopOfBook(
+    {
+      bestBid: entry.book.bestBid,
+      bestAsk: entry.book.bestAsk,
+      bids: entry.book.bids,
+      asks: entry.book.asks,
+    },
+    market.tickSize,
+  );
+  const bestBid = topOfBook.bestBid ?? market.bestBid;
+  const bestAsk = topOfBook.bestAsk ?? market.bestAsk;
+  const midPrice = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : market.midPrice;
+  const spread = bestBid !== null && bestAsk !== null ? bestAsk - bestBid : market.spread;
 
   return {
     ...market,
     bestBid,
     bestAsk,
-    midPrice: entry.book.midPrice ?? market.midPrice,
-    spread: entry.book.spread ?? market.spread,
+    midPrice,
+    spread,
     minOrderSize: entry.book.minOrderSize ?? market.minOrderSize ?? null,
     bookSource: entry.bookSource,
     snapshotTs: entry.snapshotTs,

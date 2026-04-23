@@ -1,6 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { applyPricingSnapshot, didMarketPricingChange } from "../market-pricing-utils.js";
-import type { MarketPricingSnapshot, NormalizedMarket, TokenId } from "@plankton/domain";
+import {
+  applyPricingSnapshot,
+  applyStreamUpdate,
+  didMarketPricingChange,
+} from "../market-pricing-utils.js";
+import type {
+  MarketPricingSnapshot,
+  MarketPricingStreamUpdate,
+  NormalizedMarket,
+  TokenId,
+} from "@plankton/domain";
 
 const baseMarket = (overrides: Partial<NormalizedMarket> = {}): NormalizedMarket => ({
   tokenId: "t1" as TokenId,
@@ -70,5 +79,53 @@ describe("didMarketPricingChange — liveness fields", () => {
 
   it("returns false when both equal and nothing else changed", () => {
     expect(didMarketPricingChange(baseMarket(), baseMarket())).toBe(false);
+  });
+});
+
+describe("applyPricingSnapshot — executable top-of-book", () => {
+  it("drops non-executable scalar quotes before they reach the normalized market", () => {
+    const next = applyPricingSnapshot(
+      baseMarket({ tickSize: 0.001 }),
+      baseSnapshot({ bestBid: 0.0005, bestAsk: 1 }),
+      100,
+    );
+
+    expect(next.bestBid).toBeNull();
+    expect(next.bestAsk).toBeNull();
+    expect(next.midPrice).toBeNull();
+    expect(next.spread).toBeNull();
+  });
+});
+
+describe("applyStreamUpdate — executable top-of-book", () => {
+  it("uses the first deeper executable book levels when the raw top-of-book is invalid", () => {
+    const update: MarketPricingStreamUpdate = {
+      tokenId: "t1",
+      pricing: baseSnapshot({ bestBid: 0.0005, bestAsk: 1, bookSource: "clob" }),
+      book: {
+        tokenId: "t1" as TokenId,
+        bids: [
+          { price: 0.0005, size: 100 },
+          { price: 0.001, size: 90 },
+        ],
+        asks: [
+          { price: 1, size: 100 },
+          { price: 0.999, size: 90 },
+        ],
+        bestBid: 0.0005,
+        bestAsk: 1,
+        midPrice: 0.50025,
+        spread: 0.9995,
+        timestamp: 1234,
+      },
+    };
+
+    const next = applyStreamUpdate(baseMarket({ tickSize: 0.001 }), update, 100);
+
+    expect(next.bestBid).toBe(0.001);
+    expect(next.bestAsk).toBe(0.999);
+    expect(next.midPrice).toBe(0.5);
+    expect(next.spread).toBe(0.998);
+    expect(next.snapshotTs).toBe(1234);
   });
 });
