@@ -670,7 +670,7 @@ describe("MarketDataModule", () => {
     }
   });
 
-  it("treats quiet clob-tracked tokens as silent before routing them to fallback polling", async () => {
+  it("keeps quiet clob-tracked tokens silent while the stream stays healthy", async () => {
     vi.useFakeTimers();
     try {
       const tracked = [
@@ -689,6 +689,8 @@ describe("MarketDataModule", () => {
       await vi.waitFor(() => {
         expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
       });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
 
       await stream!.emitUpdates([
@@ -705,17 +707,19 @@ describe("MarketDataModule", () => {
         },
       ]);
 
-      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
       await mod.poll();
 
       expect(gateway.getMarketPricing).not.toHaveBeenCalled();
       expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(0);
       expect(mod.getMetricsSnapshot().silentTrackedTokenCount).toBe(1);
 
-      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      await vi.advanceTimersByTimeAsync(12 * 60_000);
       await mod.poll();
 
-      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      expect(gateway.getMarketPricing).not.toHaveBeenCalled();
+      expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(0);
+      expect(mod.getMetricsSnapshot().silentTrackedTokenCount).toBe(1);
 
       await mod.stop();
     } finally {

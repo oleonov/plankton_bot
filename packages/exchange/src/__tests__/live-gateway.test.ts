@@ -472,6 +472,52 @@ describe("LiveExchangeGateway", () => {
     expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
   });
 
+  it("redeemPositions accepts an empty wait result when postcheck balances are already zero", async () => {
+    const wait = vi.fn().mockResolvedValue(null);
+    const settlementClient = {
+      execute: vi.fn().mockResolvedValue({ wait }),
+    };
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "0" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0x8888888888888888888888888888888888888888888888888888888888888888";
+    await expect(gw.redeemPositions([conditionId])).resolves.toBeUndefined();
+
+    expect(wait).toHaveBeenCalledTimes(1);
+    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
+  });
+
+  it("redeemPositions keeps pending state when wait result is empty and balances remain non-zero", async () => {
+    const wait = vi.fn().mockResolvedValue(null);
+    const settlementClient = {
+      execute: vi.fn().mockResolvedValue({ wait }),
+    };
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "1000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0x9999999999999999999999999999999999999999999999999999999999999999";
+    await expect(gw.redeemPositions([conditionId])).rejects.toThrow(
+      "Settlement transaction failed or returned empty result",
+    );
+
+    expect(wait).toHaveBeenCalledTimes(1);
+    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(true);
+  });
+
   it("redeemPositions reports polygon rpc upstream failures as infra alerts", async () => {
     const settlementClient = {
       execute: vi

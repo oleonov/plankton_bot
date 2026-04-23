@@ -351,6 +351,14 @@ export class MarketDataModule implements RuntimeModule {
         STREAM_FALLBACK_MIN_STALE_MS,
         this.deps.pollIntervalMs * 3,
       );
+      const streamMetrics = this.stream?.getMetricsSnapshot?.() ?? null;
+      const clobQuietPollingRelaxed =
+        this.stream != null &&
+        !this._streamDegradedMode &&
+        streamMetrics != null &&
+        streamMetrics.shardCount > 0 &&
+        streamMetrics.wsEventsReceived > 0 &&
+        streamMetrics.wsEventGapDetected === 0;
       let silentTrackedTokenCount = 0;
 
       if (this.stream == null || this.forceFullPoll) {
@@ -375,7 +383,11 @@ export class MarketDataModule implements RuntimeModule {
           const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
           if (cached == null) return true;
           const ageMs = now - lastUpdatedAt;
-          const refreshBudgetMs = getTrackedTokenRefreshBudgetMs(cached, this.deps.pollIntervalMs);
+          const refreshBudgetMs = getTrackedTokenRefreshBudgetMs(
+            cached,
+            this.deps.pollIntervalMs,
+            clobQuietPollingRelaxed,
+          );
           if (ageMs > refreshBudgetMs) return true;
           if (ageMs > fallbackHardStaleMs) {
             silentTrackedTokenCount += 1;
@@ -428,7 +440,10 @@ export class MarketDataModule implements RuntimeModule {
       // tokens that weren't repolled linger forever and keep forcing future
       // polls to the full 9735-token batch.
       this.pendingGapTokenIds.clear();
-      this.log.info({ tokenCount: markets.length }, "poll cycle complete");
+      this.log.info(
+        { tokenCount: markets.length, polledTokenCount: tokenIdsToPoll.length },
+        "poll cycle complete",
+      );
 
       await this.deps.bus.publish("MarketSnapshotReceived", {
         markets,
@@ -827,8 +842,12 @@ function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[]
 function getTrackedTokenRefreshBudgetMs(
   market: Pick<NormalizedMarket, "bookSource">,
   pollIntervalMs: number,
+  clobQuietPollingRelaxed: boolean,
 ): number {
   if (market.bookSource === "clob") {
+    if (clobQuietPollingRelaxed) {
+      return Number.POSITIVE_INFINITY;
+    }
     return Math.max(STREAM_QUIET_CLOB_REFRESH_MIN_STALE_MS, pollIntervalMs * 12);
   }
   return Math.max(STREAM_GAMMA_REFRESH_MIN_STALE_MS, pollIntervalMs * 6);

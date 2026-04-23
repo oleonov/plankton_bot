@@ -635,12 +635,6 @@ export class LiveExchangeGateway implements ExchangeGateway {
     const conditionIds = requests.map((r) => r.conditionId);
     const responseShape = describeShape(response);
 
-    const clearPending = () => {
-      for (const request of requests) {
-        this.recentRedeemSubmissions.delete(request.conditionId);
-      }
-    };
-
     const waitStartedAt = Date.now();
     try {
       const confirmation = (waitForConfirmation as () => Promise<unknown>).call(response);
@@ -663,6 +657,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
           resultValue: result === null ? "null" : "undefined",
           responseShape,
         });
+        if (await this.verifySettlementBalancesCleared(requests, "redeem_postcheck_after_empty")) {
+          this.clearPendingRedeemSubmissions(requests);
+          return;
+        }
         throw new Error("Settlement transaction failed or returned empty result");
       }
 
@@ -672,6 +670,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
         elapsedMs,
         resultShape: describeShape(result),
       });
+      this.clearPendingRedeemSubmissions(requests);
     } catch (err) {
       const elapsedMs = Date.now() - waitStartedAt;
       const message = err instanceof Error ? err.message : String(err);
@@ -687,9 +686,63 @@ export class LiveExchangeGateway implements ExchangeGateway {
           responseShape,
         });
       }
+      if (
+        message !== "Settlement transaction failed or returned empty result" &&
+        (await this.verifySettlementBalancesCleared(requests, "redeem_postcheck_after_wait_error"))
+      ) {
+        this.clearPendingRedeemSubmissions(requests);
+        return;
+      }
       throw err;
-    } finally {
-      clearPending();
+    }
+  }
+
+  private clearPendingRedeemSubmissions(requests: readonly SettlementRequest[]): void {
+    for (const request of requests) {
+      this.recentRedeemSubmissions.delete(request.conditionId);
+    }
+  }
+
+  private async verifySettlementBalancesCleared(
+    requests: readonly SettlementRequest[],
+    lifecycle: "redeem_postcheck_after_empty" | "redeem_postcheck_after_wait_error",
+  ): Promise<boolean> {
+    const redeemRequests = requests.filter((request) => {
+      return request.precheckTokenIds != null && request.precheckTokenIds.length > 0;
+    });
+    if (redeemRequests.length === 0) return false;
+
+    try {
+      const postcheck = await Promise.all(
+        redeemRequests.map(async (request) => {
+          const tokenIds = request.precheckTokenIds!;
+          const balances = await Promise.all(
+            tokenIds.map((tokenId) => this.getRawPositionBalance(tokenId)),
+          );
+          return {
+            conditionId: request.conditionId,
+            tokenIds,
+            balances: balances.map((balance) => balance.toString()),
+            allZero: balances.every((balance) => balance === 0n),
+          };
+        }),
+      );
+      const allZero = postcheck.every((entry) => entry.allZero);
+      logSettlementLifecycle({
+        lifecycle,
+        conditionIds: postcheck.map((entry) => entry.conditionId),
+        postcheck,
+        verifiedCleared: allZero,
+      });
+      return allZero;
+    } catch (err) {
+      logSettlementLifecycle({
+        lifecycle,
+        conditionIds: redeemRequests.map((request) => request.conditionId),
+        verifiedCleared: false,
+        postcheckError: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
   }
 
