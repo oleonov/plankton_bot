@@ -58,10 +58,7 @@ interface RedeemFailureEntry {
   readonly failureCount: number;
 }
 
-type AlgoRedeemDeferralReason =
-  | "before_end_date"
-  | "gamma_unresolved"
-  | "gamma_lookup_failed";
+type AlgoRedeemDeferralReason = "before_end_date" | "gamma_unresolved" | "gamma_lookup_failed";
 
 export interface ResolutionModuleDeps {
   detector: ResolutionDetector;
@@ -337,9 +334,11 @@ export class ResolutionModule implements RuntimeModule {
           endMs: market.endDate ? new Date(market.endDate).getTime() : NaN,
         }))
         .filter((market) => Number.isFinite(market.endMs));
-      const latestEnd = datedMarkets.reduce<
-        { readonly slug: string; readonly endDate: string; readonly endMs: number } | null
-      >((latest, current) => {
+      const latestEnd = datedMarkets.reduce<{
+        readonly slug: string;
+        readonly endDate: string;
+        readonly endMs: number;
+      } | null>((latest, current) => {
         if (!current.endDate) return latest;
         if (!latest || current.endMs > latest.endMs) {
           return {
