@@ -765,4 +765,45 @@ describe("MarketScannerModule", () => {
       vi.useRealTimers();
     }
   });
+
+  it("suppresses hint-triggered full scans while a successful scan is still fresh", async () => {
+    vi.useFakeTimers();
+    try {
+      const realBus = new InProcessEventBus();
+      const discoveryGateway = createMockDiscoveryGateway();
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      const mod = new MarketScannerModule({
+        discoveryGateway,
+        marketRepo: createMockMarketRepo(),
+        bus: realBus,
+        log: silentLog,
+        scanIntervalMs: 300_000,
+        selectionRuleEngine: SEEDED_ENGINE,
+      });
+      const scanSpy = vi.spyOn(mod, "scan").mockResolvedValue(undefined);
+
+      await mod.start();
+      scanSpy.mockClear();
+      (mod as unknown as { lastSuccessfulScanMs: number }).lastSuccessfulScanMs = Date.now();
+
+      await realBus.publish("NewMarketDiscoveredHint", {
+        conditionId: "cond-3",
+        marketId: "market-3",
+        slug: "new-market-3",
+        question: "Will Z happen?",
+        active: true,
+        tokenIds: [createTokenId("tok-3")],
+        timestamp: Date.now(),
+      });
+      await realBus.drain();
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(scanSpy).not.toHaveBeenCalled();
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

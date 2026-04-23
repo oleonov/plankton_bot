@@ -25,6 +25,9 @@ import type { Logger } from "../../logger.js";
 import { isTransientNetworkError } from "../../network-errors.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 
+const HINT_SCAN_DEBOUNCE_MS = 250;
+const HINT_SCAN_MIN_INTERVAL_MS = 60_000;
+
 export interface MarketScannerModuleDeps {
   discoveryGateway: MarketDiscoveryGateway;
   marketRepo: MarketRepository;
@@ -260,10 +263,23 @@ export class MarketScannerModule implements RuntimeModule {
   }
 
   private scheduleHintScan(): void {
+    const now = Date.now();
+    if (
+      this.lastSuccessfulScanMs > 0 &&
+      now - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
     if (this.hintTimer) return;
     this.hintTimer = setTimeout(() => {
       this.hintTimer = null;
+      if (
+        this.lastSuccessfulScanMs > 0 &&
+        Date.now() - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
+      ) {
+        return;
+      }
       void this.scan().catch((err) => this.log.error({ err }, "hint-triggered scan failed"));
-    }, 250);
+    }, HINT_SCAN_DEBOUNCE_MS);
   }
 }
