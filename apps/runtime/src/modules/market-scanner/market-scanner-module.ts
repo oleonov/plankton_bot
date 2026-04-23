@@ -277,8 +277,7 @@ export class MarketScannerModule implements RuntimeModule {
 
   private hasFreshSuccessfulScan(nowMs = Date.now()): boolean {
     return (
-      this.lastSuccessfulScanMs > 0 &&
-      nowMs - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
+      this.lastSuccessfulScanMs > 0 && nowMs - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
     );
   }
 }
