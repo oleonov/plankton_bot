@@ -673,7 +673,9 @@ describe("MarketDataModule", () => {
   it("treats quiet clob-tracked tokens as silent before routing them to fallback polling", async () => {
     vi.useFakeTimers();
     try {
-      const tracked = [makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" })];
+      const tracked = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" }),
+      ];
       (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
         new Map([["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }]]),
