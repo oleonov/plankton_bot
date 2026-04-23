@@ -91,6 +91,8 @@ import {
   SqliteMergeLedgerRepository,
   SqliteAlgoRulesRepository,
   SqliteLegStateRepository,
+  SqliteSettlementLedgerRepository,
+  SqlitePositionDriftRepository,
 } from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
@@ -221,6 +223,8 @@ async function main(): Promise<void> {
     position: new SqlitePositionRepository(ledgerConn.db),
     inventoryLot: new SqliteInventoryLotRepository(ledgerConn.db),
     mergeLedger: new SqliteMergeLedgerRepository(ledgerConn.db),
+    settlementLedger: new SqliteSettlementLedgerRepository(ledgerConn.db),
+    positionDrift: new SqlitePositionDriftRepository(ledgerConn.db),
     marketSnapshot: new SqliteMarketSnapshotRepository(ledgerConn.db),
     riskEvent: new SqliteRiskEventRepository(ledgerConn.db),
     // Control-side
@@ -597,6 +601,8 @@ async function main(): Promise<void> {
     marketRepo: repos.market,
     log,
     reconcileIntervalMs: 60_000,
+    settlementLedgerRepo: repos.settlementLedger,
+    driftRepo: repos.positionDrift,
   });
 
   const userOrderStreamModule =

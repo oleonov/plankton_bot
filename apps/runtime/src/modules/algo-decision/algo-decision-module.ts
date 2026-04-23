@@ -73,7 +73,7 @@ interface PendingEntry {
 
 type TokenEvalResult =
   | { type: "redeem"; conditionId: string }
-  | { type: "signal"; signal: import("@plankton/domain").Signal }
+  | { type: "signal"; signal: import("@plankton/domain").Signal; market: NormalizedMarket }
   | null;
 
 // ─── Deps ────────────────────────────────────────────────────────────────────
@@ -298,7 +298,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     };
 
     const redeemConditionIds = new Set<string>();
-    const signals: import("@plankton/domain").Signal[] = [];
+    const signals: Array<{ signal: import("@plankton/domain").Signal; market: NormalizedMarket }> =
+      [];
 
     for (const tokenId of tokenIds) {
       const result = this.evaluateToken(String(tokenId) as TokenId, now, nextSeq);
@@ -319,7 +320,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           this.reservePendingSignal(result.signal, now);
           reservedBuyUsdc += result.signal.suggestedSizeUsdc;
         }
-        signals.push(result.signal);
+        signals.push({ signal: result.signal, market: result.market });
       }
     }
 
@@ -331,8 +332,8 @@ export class AlgoDecisionModule implements RuntimeModule {
       });
     }
 
-    for (const signal of signals) {
-      await this.deps.bus.publish("SignalProduced", { signal });
+    for (const { signal, market } of signals) {
+      await this.deps.bus.publish("SignalProduced", { signal, market });
     }
   }
 
@@ -455,7 +456,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       generatedAt: new Date(now).toISOString(),
     };
 
-    return { type: "signal", signal };
+    return { type: "signal", signal, market };
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────

@@ -17,6 +17,7 @@ import type {
   Order,
   Signal,
   ClientOrderId,
+  NormalizedMarket,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
@@ -42,6 +43,33 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     generatedAt: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
+  return {
+    tokenId: TOK_ID,
+    conditionId: String(COND_ID),
+    slug: "test",
+    eventSlug: null,
+    question: "test?",
+    outcome: "YES",
+    regime: "threshold" as any,
+    horizon: "daily",
+    endDate: null,
+    active: true,
+    tradable: true,
+    tickSize: 0.01,
+    negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
+    bestBid: 0.49,
+    bestAsk: 0.51,
+    midPrice: 0.5,
+    spread: 0.02,
+    snapshotTs: Date.now(),
+    eventMarketCount: 1,
+    ...overrides,
+  } as NormalizedMarket;
 }
 
 function createMockPositionRepo(position?: Position | Position[] | null): PositionRepository {
@@ -169,10 +197,57 @@ describe("RiskInventoryModule", () => {
       approved.push(p);
     });
 
-    await bus.publish("SignalProduced", { signal: makeSignal() });
+    await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
 
     expect(approved).toHaveLength(1);
     expect(approved[0].signal.signalId).toBe("sig-1");
+
+    await mod.stop();
+  });
+
+  // Phase 2.A: the market snapshot observed at signal generation must pass
+  // through unchanged to SignalApproved / SignalRejected, so the downstream
+  // bridge re-evaluates liveness against the same snapshot the pre-entry gate
+  // already accepted.
+  it("forwards SignalProduced.market unchanged to SignalApproved", async () => {
+    await mod.start();
+
+    const approved: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+
+    const embedded = makeMarket({ bestBid: 0.42, bestAsk: 0.44, midPrice: 0.43 });
+    await bus.publish("SignalProduced", { signal: makeSignal(), market: embedded });
+
+    expect(approved).toHaveLength(1);
+    expect(approved[0].market).toBe(embedded);
+
+    await mod.stop();
+  });
+
+  it("forwards SignalProduced.market unchanged to SignalRejected", async () => {
+    orderRepo = createMockOrderRepo();
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(8);
+    mod = createModule(undefined, {
+      controlDb: createMockControlDb(10),
+      activeProfile: "paper" as any,
+    });
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    const embedded = makeMarket({ bestBid: 0.42, bestAsk: 0.44 });
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ suggestedSizeUsdc: 2, suggestedSize: 4 }),
+      market: embedded,
+    });
+
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].market).toBe(embedded);
 
     await mod.stop();
   });
@@ -197,6 +272,7 @@ describe("RiskInventoryModule", () => {
 
     await bus.publish("SignalProduced", {
       signal: makeSignal({ suggestedSizeUsdc: 2, suggestedSize: 4 }),
+      market: makeMarket(),
     });
 
     expect(approved).toHaveLength(0);
@@ -544,7 +620,7 @@ describe("RiskInventoryModule", () => {
       approved.push(p);
     });
 
-    await bus.publish("SignalProduced", { signal: makeSignal() });
+    await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
 
     expect(approved).toHaveLength(0);
   });
@@ -564,7 +640,7 @@ describe("RiskInventoryModule", () => {
       rejected.push(p);
     });
 
-    await bus.publish("SignalProduced", { signal: makeSignal() });
+    await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
 
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toContain("internal error");
@@ -593,7 +669,7 @@ describe("RiskInventoryModule", () => {
         rejected.push(p);
       });
 
-      await bus.publish("SignalProduced", { signal: makeSignal() });
+      await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
 
       expect(rejected).toHaveLength(0);
       expect(approved).toHaveLength(1);
@@ -637,7 +713,7 @@ describe("RiskInventoryModule", () => {
         rejected.push(p);
       });
 
-      await bus.publish("SignalProduced", { signal: makeSignal() });
+      await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
 
       expect(approved).toHaveLength(0);
       expect(rejected).toHaveLength(1);
@@ -699,7 +775,7 @@ describe("RiskInventoryModule", () => {
       approved.push(p);
     });
 
-    await bus.publish("SignalProduced", { signal: makeSignal() });
+    await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
 
     expect(approved).toHaveLength(1);
 
@@ -941,7 +1017,7 @@ describe("RiskInventoryModule", () => {
       await mod.start();
 
       // Approve a probe-entry
-      await bus.publish("SignalProduced", { signal: makeSignal() });
+      await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
       await bus.drain();
 
       // Reject by making orderRepo.findByTokenId throw (triggers internal error path)
@@ -950,6 +1026,7 @@ describe("RiskInventoryModule", () => {
       });
       await bus.publish("SignalProduced", {
         signal: makeSignal({ signalId: "sig-2" }),
+        market: makeMarket(),
       });
       await bus.drain();
 
@@ -966,6 +1043,7 @@ describe("RiskInventoryModule", () => {
 
       await bus.publish("SignalProduced", {
         signal: makeSignal({ reason: "probe-entry" }),
+        market: makeMarket(),
       });
       await bus.drain();
 
@@ -1038,7 +1116,7 @@ describe("RiskInventoryModule", () => {
     it("healthCheck includes approved/rejected/mtm counts", async () => {
       await mod.start();
 
-      await bus.publish("SignalProduced", { signal: makeSignal() });
+      await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
       await bus.drain();
 
       const h = await mod.healthCheck();

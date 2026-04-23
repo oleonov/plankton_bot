@@ -10,6 +10,7 @@ import type {
   OperatorCommand,
   Order,
   Position,
+  PositionDrift,
   Profile,
   ProfileSettings,
   ProfileSummary,
@@ -21,6 +22,7 @@ import type {
   AlgoDecisionRule,
   AlgoSizeRule,
   LegState,
+  SettlementRecord,
 } from "./types.js";
 
 // ─── MarketRepository ────────────────────────────────────────────────────
@@ -380,7 +382,15 @@ export interface SwitchRequestRepository {
 // ─── SettlementLedgerRepository ─────────────────────────────────────────
 
 export interface SettlementLedgerRepository {
-  save(settlement: import("./types.js").SettlementRecord): void;
+  save(settlement: SettlementRecord): void;
+
+  /**
+   * Return algo-redeem settlement rows with `settled_at > cutoffIso`.
+   * Filters entirely inside `settlement_ledger` on the stable `resolution`
+   * column so mutable `market_resolutions.source` updates cannot hide
+   * historical algo-redeem rows from the drift detector.
+   */
+  findAlgoRedeemSettlementsSince(cutoffIso: string): SettlementRecord[];
 }
 
 // ─── MergeLedgerRepository ──────────────────────────────────────────────
@@ -388,6 +398,19 @@ export interface SettlementLedgerRepository {
 export interface MergeLedgerRepository {
   /** Record a completed inventory merge action. */
   save(merge: import("./types.js").MergeRecord): void;
+}
+
+// ─── PositionDriftRepository ────────────────────────────────────────────
+
+export interface PositionDriftRepository {
+  /** Upsert a drift row keyed on settlementId (idempotent across reconciliation ticks). */
+  upsert(drift: PositionDrift): void;
+
+  /** Return drifts whose status is "open", newest first. */
+  findOpen(): PositionDrift[];
+
+  /** Mark a drift as resolved (balance cleared on-chain). */
+  markResolved(settlementId: string, resolvedAtIso: string): void;
 }
 
 // ─── PreflightReportRepository ──────────────────────────────────────────

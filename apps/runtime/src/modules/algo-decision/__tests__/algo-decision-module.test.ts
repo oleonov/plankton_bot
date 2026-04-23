@@ -308,6 +308,10 @@ describe("AlgoDecisionModule", () => {
     expect(signal.suggestedSizeUsdc).toBeCloseTo(2.1, 5);
     expect(signal.conditionId).toBe("cond-1");
 
+    // Phase 2.A: payload embeds the NormalizedMarket snapshot observed by the
+    // pre-entry hard-liveness gate so the bridge downstream can re-use it.
+    expect(signalCalls[0]![1].market).toBe(market);
+
     await mod.stop();
   });
 

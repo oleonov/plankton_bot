@@ -201,6 +201,26 @@ CREATE TABLE IF NOT EXISTS settlement_ledger (
 
 CREATE INDEX IF NOT EXISTS idx_settlement_settled_at ON settlement_ledger(settled_at);
 
+-- ═══════════ POSITION DRIFTS ═══════════
+-- From 037_position_drifts.sql — Phase 3.A independent on-chain-vs-local sensor.
+
+CREATE TABLE IF NOT EXISTS position_drifts (
+  settlement_id     TEXT PRIMARY KEY REFERENCES settlement_ledger(settlement_id),
+  token_id          TEXT NOT NULL,
+  condition_id      TEXT NOT NULL,
+  detected_at       TEXT NOT NULL,
+  on_chain_balance  TEXT NOT NULL,
+  last_checked_at   TEXT NOT NULL,
+  status            TEXT NOT NULL CHECK (status IN ('open','resolved')),
+  created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_position_drifts_status
+  ON position_drifts(status, detected_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_position_drifts_token
+  ON position_drifts(token_id);
+
 -- ═══════════ BOT RUNS ═══════════
 -- From 001_initial.sql
 

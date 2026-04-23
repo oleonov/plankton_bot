@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { InProcessEventBus } from "../event-bus.js";
-import type { Signal, Position } from "@plankton/domain";
+import type { Signal, Position, NormalizedMarket } from "@plankton/domain";
 import { createTokenId, createPositionId, createConditionId } from "@plankton/domain";
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
@@ -19,6 +19,32 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     generatedAt: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function makeMarket(): NormalizedMarket {
+  return {
+    tokenId: createTokenId("tok-1"),
+    conditionId: "cond-1",
+    slug: "test",
+    eventSlug: null,
+    question: "test?",
+    outcome: "YES",
+    regime: "threshold" as any,
+    horizon: "daily",
+    endDate: null,
+    active: true,
+    tradable: true,
+    tickSize: 0.01,
+    negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
+    bestBid: 0.54,
+    bestAsk: 0.56,
+    midPrice: 0.55,
+    spread: 0.02,
+    snapshotTs: Date.now(),
+    eventMarketCount: 1,
+  } as NormalizedMarket;
 }
 
 function makePosition(overrides?: Partial<Position>): Position {
@@ -55,7 +81,7 @@ describe("InProcessEventBus", () => {
     bus.subscribe("SignalProduced", async (p) => {
       received.push(p.signal);
     });
-    await bus.publish("SignalProduced", { signal });
+    await bus.publish("SignalProduced", { signal, market: makeMarket() });
 
     expect(received).toEqual([signal]);
   });
@@ -78,7 +104,7 @@ describe("InProcessEventBus", () => {
   });
 
   it("resolves without error when no subscribers exist", async () => {
-    await expect(bus.publish("SignalProduced", { signal: makeSignal() })).resolves.toBeUndefined();
+    await expect(bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() })).resolves.toBeUndefined();
   });
 
   it("stops calling handler after unsubscribe", async () => {
@@ -112,7 +138,7 @@ describe("InProcessEventBus", () => {
       calls.push(1);
     });
 
-    await expect(bus.publish("SignalProduced", { signal: makeSignal() })).resolves.toBeUndefined();
+    await expect(bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() })).resolves.toBeUndefined();
 
     expect(calls).toEqual([1]);
     spy.mockRestore();
@@ -125,7 +151,7 @@ describe("InProcessEventBus", () => {
     bus.subscribe("SignalProduced", async () => {
       throw err;
     });
-    await bus.publish("SignalProduced", { signal: makeSignal() });
+    await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
 
     expect(spy).toHaveBeenCalledWith(err);
     spy.mockRestore();
@@ -159,7 +185,7 @@ describe("InProcessEventBus", () => {
     });
 
     // Fire-and-forget publish so handler is inflight
-    void bus.publish("SignalProduced", { signal: makeSignal() });
+    void bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
 
     const start = Date.now();
     await bus.drain(50);

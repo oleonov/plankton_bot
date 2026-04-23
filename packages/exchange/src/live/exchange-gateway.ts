@@ -80,7 +80,45 @@ type SettlementTransaction = {
 type SettlementRequest = {
   conditionId: string;
   tx: SettlementTransaction;
+  /** Phase 1.A REDEEM instrumentation — per-outcome-token balances read at build time. */
+  precheckTokenIds?: readonly string[];
+  /** Phase 1.A REDEEM instrumentation — decimal strings to preserve bigint precision in logs. */
+  precheckBalances?: readonly string[];
 };
+
+/** Lifecycle diagnostics for REDEEM/MERGE paths. Stdout JSON — picked up by docker log capture. */
+function logSettlementLifecycle(event: Record<string, unknown>): void {
+  // eslint-disable-next-line no-console
+  console.log(JSON.stringify({ source: "exchange-gateway", ...event }));
+}
+
+/** Summarize an arbitrary value for log output without dumping full contents. */
+function describeShape(value: unknown): Record<string, unknown> {
+  if (value === null) return { type: "null" };
+  if (value === undefined) return { type: "undefined" };
+  const type = typeof value;
+  if (type !== "object") return { type, value: String(value).slice(0, 128) };
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj);
+  const summary: Record<string, unknown> = { type: "object", keys };
+  for (const probe of ["txHash", "hash", "transactionHash", "blockNumber", "gasUsed", "status"]) {
+    if (probe in obj) {
+      const v = obj[probe];
+      summary[probe] = typeof v === "object" ? describeShape(v) : v;
+    }
+  }
+  if ("receipt" in obj && obj.receipt && typeof obj.receipt === "object") {
+    const r = obj.receipt as Record<string, unknown>;
+    summary.receipt = {
+      keys: Object.keys(r),
+      status: r.status,
+      blockNumber: r.blockNumber,
+      gasUsed: r.gasUsed,
+      transactionHash: r.transactionHash,
+    };
+  }
+  return summary;
+}
 
 export class LiveExchangeGateway implements ExchangeGateway {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -250,12 +288,17 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return Number(raw?.balance ?? 0) / ATOMIC_UNIT_DIVISOR;
   }
 
+  async getOutcomeTokenBalance(tokenId: TokenId): Promise<bigint> {
+    return this.getRawPositionBalance(String(tokenId));
+  }
+
   async redeemPositions(conditionIds: string[]): Promise<void> {
     const settlementExecute = this.getSettlementExecuteMethod();
     if (settlementExecute) {
       const requests = await this.buildRedeemRequests(conditionIds);
       if (requests.length === 0) return;
 
+      const submitStartedAt = Date.now();
       try {
         const response = await settlementExecute(
           requests.map((request) => request.tx),
@@ -265,8 +308,25 @@ export class LiveExchangeGateway implements ExchangeGateway {
         for (const request of requests) {
           this.recentRedeemSubmissions.set(request.conditionId, submittedAt);
         }
+        logSettlementLifecycle({
+          lifecycle: "redeem_submit_response",
+          conditionIds: requests.map((r) => r.conditionId),
+          elapsedMs: submittedAt - submitStartedAt,
+          responseShape: describeShape(response),
+        });
         await this.observeSettlementExecution(response, requests);
       } catch (e) {
+        logSettlementLifecycle({
+          lifecycle: "redeem_submit_error",
+          conditionIds: requests.map((r) => r.conditionId),
+          elapsedMs: Date.now() - submitStartedAt,
+          errorMessage: e instanceof Error ? e.message : String(e),
+          errorName: e instanceof Error ? e.name : undefined,
+          revertReason:
+            e && typeof e === "object" && "reason" in e
+              ? (e as { reason?: unknown }).reason
+              : undefined,
+        });
         this.reportInfraAlert(e);
         console.error(
           `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
@@ -457,17 +517,34 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private async buildRedeemRequest(conditionId: string): Promise<SettlementRequest | null> {
     const market = await this.client.getMarket(conditionId);
     const tokenIds = this.extractMarketTokenIds(market);
-    if (tokenIds.length === 0) return null;
+    if (tokenIds.length === 0) {
+      logSettlementLifecycle({ lifecycle: "redeem_skip_no_tokens", conditionId });
+      return null;
+    }
 
     const chainId = this.getChainId();
     const contracts = getContractConfig(chainId);
     const balances = await Promise.all(
       tokenIds.map((tokenId) => this.getRawPositionBalance(tokenId)),
     );
+    const balanceStrings = balances.map((b) => b.toString());
 
     if (balances.every((balance) => balance === 0n)) {
+      logSettlementLifecycle({
+        lifecycle: "redeem_skip_already_zero",
+        conditionId,
+        tokenIds,
+        balances: balanceStrings,
+      });
       return null;
     }
+
+    logSettlementLifecycle({
+      lifecycle: "redeem_precheck",
+      conditionId,
+      tokenIds,
+      balances: balanceStrings,
+    });
 
     const isNegRisk = this.extractNegRisk(market);
     if (isNegRisk) {
@@ -483,6 +560,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
           data,
           value: "0",
         },
+        precheckTokenIds: tokenIds,
+        precheckBalances: balanceStrings,
       };
     }
 
@@ -505,6 +584,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
         data,
         value: "0",
       },
+      precheckTokenIds: tokenIds,
+      precheckBalances: balanceStrings,
     };
   }
 
@@ -551,12 +632,16 @@ export class LiveExchangeGateway implements ExchangeGateway {
     const waitForConfirmation = Reflect.get(response, "wait");
     if (typeof waitForConfirmation !== "function") return;
 
+    const conditionIds = requests.map((r) => r.conditionId);
+    const responseShape = describeShape(response);
+
     const clearPending = () => {
       for (const request of requests) {
         this.recentRedeemSubmissions.delete(request.conditionId);
       }
     };
 
+    const waitStartedAt = Date.now();
     try {
       const confirmation = (waitForConfirmation as () => Promise<unknown>).call(response);
       const result = await Promise.race([
@@ -568,9 +653,41 @@ export class LiveExchangeGateway implements ExchangeGateway {
         }),
       ]);
 
+      const elapsedMs = Date.now() - waitStartedAt;
+
       if (!result) {
+        logSettlementLifecycle({
+          lifecycle: "redeem_empty_result",
+          conditionIds,
+          elapsedMs,
+          resultValue: result === null ? "null" : "undefined",
+          responseShape,
+        });
         throw new Error("Settlement transaction failed or returned empty result");
       }
+
+      logSettlementLifecycle({
+        lifecycle: "redeem_wait_result",
+        conditionIds,
+        elapsedMs,
+        resultShape: describeShape(result),
+      });
+    } catch (err) {
+      const elapsedMs = Date.now() - waitStartedAt;
+      const message = err instanceof Error ? err.message : String(err);
+      if (
+        message !== "Settlement transaction failed or returned empty result" // already logged above
+      ) {
+        logSettlementLifecycle({
+          lifecycle: "redeem_wait_error",
+          conditionIds,
+          elapsedMs,
+          errorMessage: message,
+          errorName: err instanceof Error ? err.name : undefined,
+          responseShape,
+        });
+      }
+      throw err;
     } finally {
       clearPending();
     }

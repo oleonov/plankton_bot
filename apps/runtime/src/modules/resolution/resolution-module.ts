@@ -37,6 +37,27 @@ function normalizeOutcomeLabel(value: string): string {
 
 const SETTLEMENT_BALANCE_DUST_THRESHOLD = 1 / 1_000_000;
 
+// Per-conditionId circuit-breaker for the algo-triggered on-chain redeem path.
+// Baseline was up to 14 consecutive gateway calls per failing conditionId per
+// window (see audit B8/2); this table caps that at 3 attempts before the
+// circuit opens fully for an hour.
+//
+// Back-off grows with failureCount; at count >= 3 the circuit is considered
+// open and further gateway calls are suppressed entirely until
+// CIRCUIT_OPEN_COOLDOWN_MS has passed since the last failure.
+const REDEEM_BACKOFF_MS_BY_COUNT: readonly number[] = [
+  0, // count=0 (no prior failure) — no back-off
+  60_000, // count=1 — 1 min
+  5 * 60_000, // count=2 — 5 min
+];
+const REDEEM_CIRCUIT_OPEN_COOLDOWN_MS = 60 * 60_000;
+const REDEEM_CIRCUIT_OPEN_THRESHOLD = 3;
+
+interface RedeemFailureEntry {
+  readonly failedAt: number;
+  readonly failureCount: number;
+}
+
 export interface ResolutionModuleDeps {
   detector: ResolutionDetector;
   settler: PositionSettler;
@@ -65,6 +86,7 @@ export class ResolutionModule implements RuntimeModule {
   private unsubs: Array<() => void> = [];
   private readonly pendingHintConditionIds = new Set<string>();
   private readonly hintedCancelledOrderIds = new Set<string>();
+  private readonly redeemFailures = new Map<string, RedeemFailureEntry>();
   private running = false;
   private wsHintConsumed = 0;
 
@@ -106,11 +128,44 @@ export class ResolutionModule implements RuntimeModule {
     this.deps.log.info({ conditionIds }, "algo-triggered redeem requested");
 
     if (this.deps.gateway) {
-      try {
-        await this.deps.gateway.redeemPositions([...conditionIds]);
-        this.deps.log.info({ conditionIds }, "algo-triggered on-chain redeem submitted");
-      } catch (err) {
-        this.deps.log.error({ err, conditionIds }, "algo-triggered on-chain redeem failed");
+      const now = Date.now();
+      const { gatewayTargets, suppressed } = this.partitionRedeemTargets(conditionIds, now);
+
+      if (suppressed.length > 0) {
+        this.deps.log.warn(
+          { conditionIds: suppressed, cooldownMs: REDEEM_CIRCUIT_OPEN_COOLDOWN_MS },
+          "algo_redeem_circuit_open",
+        );
+      }
+
+      // Phase 3.B: drop already-redeemed conditions before calling the gateway.
+      // The root-cause of many `algo-triggered on-chain redeem failed` events
+      // is a prior tx that already drained the balance; re-submitting triggers
+      // a revert. Drift detector (Phase 3.A) is the primary safety net for
+      // any missed case.
+      const targetsNeedingRedeem = await this.filterAlreadyRedeemed(gatewayTargets);
+
+      // Invoke the gateway one conditionId at a time. The underlying
+      // settlementExecute is a single relayer call per request, so wrapping a
+      // multi-condition batch in one try/catch would record a failure against
+      // every id in the batch when only one actually reverted — poisoning the
+      // per-conditionId circuit for innocent markets. Submitting per condition
+      // keeps success/failure strictly scoped to its own id.
+      for (const conditionId of targetsNeedingRedeem) {
+        try {
+          await this.deps.gateway.redeemPositions([conditionId]);
+          this.deps.log.info(
+            { conditionIds: [conditionId] },
+            "algo-triggered on-chain redeem submitted",
+          );
+          this.redeemFailures.delete(conditionId);
+        } catch (err) {
+          this.recordRedeemFailure([conditionId], Date.now());
+          this.deps.log.error(
+            { err, conditionIds: [conditionId] },
+            "algo-triggered on-chain redeem failed",
+          );
+        }
       }
     }
 
@@ -160,6 +215,83 @@ export class ResolutionModule implements RuntimeModule {
     return {
       resolutionWsHintsConsumed: this.wsHintConsumed,
     };
+  }
+
+  /**
+   * Phase 3.B — skip conditions whose outcome-token balances are already zero
+   * on-chain. A previous redeem succeeded (or there was nothing to redeem);
+   * re-submitting would revert and trip the circuit. On balance-check error,
+   * fall through to the gateway so the circuit still records real failures.
+   */
+  private async filterAlreadyRedeemed(conditionIds: readonly string[]): Promise<string[]> {
+    if (conditionIds.length === 0) return [];
+    const gateway = this.deps.gateway!;
+    const needsRedeem: string[] = [];
+    for (const conditionId of conditionIds) {
+      const markets = this.deps.marketRepo.findByConditionId(conditionId);
+      if (markets.length === 0) {
+        needsRedeem.push(conditionId);
+        continue;
+      }
+      let allZero = true;
+      for (const market of markets) {
+        try {
+          const balance = await gateway.getOutcomeTokenBalance(market.tokenId);
+          if (balance !== 0n) {
+            allZero = false;
+            break;
+          }
+        } catch (err) {
+          this.deps.log.warn(
+            { conditionId, tokenId: String(market.tokenId), err },
+            "algo_redeem_precheck_failed",
+          );
+          allZero = false;
+          break;
+        }
+      }
+      if (allZero) {
+        this.deps.log.info({ conditionId }, "algo_redeem_skipped_already_redeemed");
+        this.redeemFailures.delete(conditionId);
+      } else {
+        needsRedeem.push(conditionId);
+      }
+    }
+    return needsRedeem;
+  }
+
+  private partitionRedeemTargets(
+    conditionIds: readonly string[],
+    now: number,
+  ): { gatewayTargets: string[]; suppressed: string[] } {
+    const gatewayTargets: string[] = [];
+    const suppressed: string[] = [];
+    for (const conditionId of conditionIds) {
+      if (this.isRedeemCircuitOpen(conditionId, now)) suppressed.push(conditionId);
+      else gatewayTargets.push(conditionId);
+    }
+    return { gatewayTargets, suppressed };
+  }
+
+  private isRedeemCircuitOpen(conditionId: string, now: number): boolean {
+    const entry = this.redeemFailures.get(conditionId);
+    if (!entry) return false;
+    const sinceFailure = now - entry.failedAt;
+    if (entry.failureCount >= REDEEM_CIRCUIT_OPEN_THRESHOLD) {
+      return sinceFailure < REDEEM_CIRCUIT_OPEN_COOLDOWN_MS;
+    }
+    const backoff = REDEEM_BACKOFF_MS_BY_COUNT[entry.failureCount] ?? 0;
+    return sinceFailure < backoff;
+  }
+
+  private recordRedeemFailure(conditionIds: readonly string[], now: number): void {
+    for (const conditionId of conditionIds) {
+      const prev = this.redeemFailures.get(conditionId);
+      this.redeemFailures.set(conditionId, {
+        failedAt: now,
+        failureCount: (prev?.failureCount ?? 0) + 1,
+      });
+    }
   }
 
   /** Exposed for testing. */

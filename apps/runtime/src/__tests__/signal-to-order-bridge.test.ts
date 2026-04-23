@@ -156,6 +156,7 @@ describe("SignalToOrderBridge", () => {
     });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
+      market: makeMarket({ minOrderSize: 5 }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -216,6 +217,7 @@ describe("SignalToOrderBridge", () => {
     });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
+      market: makeMarket({ minOrderSize: 5, bookSource: "gamma-fallback" }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -287,6 +289,15 @@ describe("SignalToOrderBridge", () => {
       signal: {
         ...makeSignal(),
       },
+      market: makeMarket({
+        regime: "social-activity",
+        bestBid: 0.04,
+        bestAsk: 0.05,
+        midPrice: 0.045,
+        spread: 0.01,
+        bookSource: "clob",
+        snapshotTs: Date.now() - 30_000,
+      }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -364,6 +375,7 @@ describe("SignalToOrderBridge", () => {
     });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
+      market,
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -452,6 +464,13 @@ describe("SignalToOrderBridge", () => {
     });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
+      market: makeMarket({
+        bestBid: 0.04,
+        bestAsk: 0.05,
+        midPrice: 0.045,
+        spread: 0.01,
+        bookSource: "clob",
+      }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -515,6 +534,7 @@ describe("SignalToOrderBridge", () => {
     });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
+      market: makeMarket({ minOrderSize: 5, bookSource: "clob" }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -609,6 +629,16 @@ describe("SignalToOrderBridge", () => {
         suggestedSize: 3.75,
         suggestedPrice: 0.035,
       },
+      market: makeMarket({
+        bestBid: 0.03,
+        bestAsk: 0.04,
+        midPrice: 0.035,
+        spread: 0.01,
+        tickSize: 0.01,
+        bookSource: "clob",
+        lastTradePrice: 0.04,
+        lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+      }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -648,11 +678,11 @@ describe("hard-liveness guard (before execution)", () => {
     ["bestBid=null", { bestBid: null }, "no_bid"],
   ])("%s skips with hard-liveness reason", async (_, patch, reason) => {
     const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [makeMarket(patch)],
-      timestamp: Date.now(),
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket(patch),
+      approvedAt: Date.now(),
     });
-    await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
     await bus.drain();
 
     expect(conversionSkipped).toHaveLength(1);
@@ -663,11 +693,11 @@ describe("hard-liveness guard (before execution)", () => {
 
   it("BUY signal with bestAsk=null → places order at bestBid (one-sided book)", async () => {
     const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [makeMarket({ bestAsk: null, bestBid: 0.03 })],
-      timestamp: Date.now(),
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestAsk: null, bestBid: 0.03 }),
+      approvedAt: Date.now(),
     });
-    await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
     await bus.drain();
 
     expect(conversionSkipped.filter((s) => s.stage === "hard-liveness")).toHaveLength(0);
@@ -678,11 +708,11 @@ describe("hard-liveness guard (before execution)", () => {
 
   it("stacks reasons when multiple hard fields fail", async () => {
     const { bus, conversionSkipped } = makeBridgeWithLiveLite();
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [makeMarket({ acceptingOrders: false, enableOrderBook: false })],
-      timestamp: Date.now(),
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ acceptingOrders: false, enableOrderBook: false }),
+      approvedAt: Date.now(),
     });
-    await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
     await bus.drain();
 
     expect(conversionSkipped[0]!.reasons).toEqual(
@@ -692,14 +722,63 @@ describe("hard-liveness guard (before execution)", () => {
 
   it("passes through to execution when all three hard fields are healthy", async () => {
     const { bus, conversionSkipped } = makeBridgeWithLiveLite();
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket(),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(conversionSkipped.filter((s) => s.stage === "hard-liveness")).toHaveLength(0);
+  });
+
+  // Phase 2.A: embedded market snapshot on SignalApproved is the authoritative
+  // source for the bridge's liveness + base pricing. These two tests pin the
+  // invariant that eviction-between-approval-and-bridge no longer surfaces as
+  // `market-cache-miss`, and that a no_bid in the embedded snapshot is
+  // attributed as `hard-liveness` rather than mis-routed through the cache
+  // path.
+  it("market evicted from cache between approval and bridge build → uses embedded snapshot, no cache-miss", async () => {
+    const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
+
+    // Populate cache, then evict (simulates TrackedMarketsChanged between
+    // SignalProduced and bridge build).
     await bus.publish("NormalizedMarketUpdated", {
       markets: [makeMarket()],
       timestamp: Date.now(),
     });
-    await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
+    await bus.publish("TrackedMarketsChanged", {
+      addedTokenIds: [],
+      removedTokenIds: [TOKEN_ID],
+      activeTokenIds: [],
+      timestamp: Date.now(),
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket(),
+      approvedAt: Date.now(),
+    });
     await bus.drain();
 
-    expect(conversionSkipped.filter((s) => s.stage === "hard-liveness")).toHaveLength(0);
+    expect(conversionSkipped.filter((s) => s.stage === "market-cache-miss")).toHaveLength(0);
+    expect(placeOrderRequested).toHaveLength(1);
+  });
+
+  it("no_bid in embedded snapshot → rejects with stage=hard-liveness, not stage=market-cache-miss", async () => {
+    const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: null }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(conversionSkipped).toHaveLength(1);
+    expect(conversionSkipped[0]!.stage).toBe("hard-liveness");
+    expect(conversionSkipped[0]!.reasons).toContain("no_bid");
+    expect(placeOrderRequested).toHaveLength(0);
   });
 
   // Reason-specific log routing: expected flag-only races (acceptingOrders /
@@ -739,11 +818,11 @@ describe("hard-liveness guard (before execution)", () => {
     it("logs at debug when only acceptingOrders/enableOrderBook fail", async () => {
       const { bus, child } = makeBridgeWithCaptureLogger();
 
-      await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeMarket({ acceptingOrders: false, enableOrderBook: false })],
-        timestamp: Date.now(),
+      await bus.publish("SignalApproved", {
+        signal: makeSignal(),
+        market: makeMarket({ acceptingOrders: false, enableOrderBook: false }),
+        approvedAt: Date.now(),
       });
-      await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
       await bus.drain();
 
       expect(child.debug).toHaveBeenCalledWith(
@@ -761,11 +840,11 @@ describe("hard-liveness guard (before execution)", () => {
     it("logs at warn when no_bid is in the reasons (data anomaly)", async () => {
       const { bus, child } = makeBridgeWithCaptureLogger();
 
-      await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeMarket({ bestBid: null })],
-        timestamp: Date.now(),
+      await bus.publish("SignalApproved", {
+        signal: makeSignal(),
+        market: makeMarket({ bestBid: null }),
+        approvedAt: Date.now(),
       });
-      await bus.publish("SignalApproved", { signal: makeSignal(), approvedAt: Date.now() });
       await bus.drain();
 
       expect(child.warn).toHaveBeenCalledWith(

@@ -425,6 +425,14 @@ export interface ExchangeGateway {
   getPositionBalance(tokenId: TokenId): Promise<number>;
 
   /**
+   * Fetch the raw on-chain outcome-token balance (atomic units, bigint) for
+   * drift detection. Kept distinct from `getPositionBalance` so the reconciler
+   * can reason about bigint precision directly without floating-point rounding
+   * obscuring sub-atomic-unit balances.
+   */
+  getOutcomeTokenBalance(tokenId: TokenId): Promise<bigint>;
+
+  /**
    * Redeem winning shares for a list of markets (conditions).
    * Polymarket-specific: typically calls FixedProductMarketMaker.redeem()
    * or ClobClient.redeem().

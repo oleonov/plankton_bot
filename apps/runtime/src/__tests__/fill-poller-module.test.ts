@@ -30,6 +30,7 @@ function createMockGateway(): ExchangeGateway {
     getFills: vi.fn<(sinceMs: number) => Promise<ExchangeFill[]>>().mockResolvedValue([]),
     getBalances: vi.fn<() => Promise<ExchangeBalance[]>>().mockResolvedValue([]),
     getPositionBalance: vi.fn<(t: TokenId) => Promise<number>>().mockResolvedValue(0),
+    getOutcomeTokenBalance: vi.fn<(t: TokenId) => Promise<bigint>>().mockResolvedValue(0n),
     redeemPositions: vi.fn<(conditionIds: string[]) => Promise<void>>().mockResolvedValue(),
     mergePositions: vi
       .fn<(merges: { conditionId: string; amount: number }[]) => Promise<void>>()

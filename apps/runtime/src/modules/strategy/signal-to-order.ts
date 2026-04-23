@@ -97,55 +97,66 @@ export class SignalToOrderBridge {
   }
 
   private async handleApproved(payload: RuntimeEventMap["SignalApproved"]): Promise<void> {
-    const { signal } = payload;
-    const resolvedMarket = await this.resolveMarket(signal);
-    const market = resolvedMarket.market;
+    const { signal, market: embeddedMarket } = payload;
 
-    if (!market) {
+    // Primary source: the NormalizedMarket snapshot captured at signal-generation
+    // time in algo-decision-module. This is the same snapshot the pre-entry
+    // gate's `isAlive` already accepted, so re-running `isAlive` here cannot
+    // flip state from "healthy" to "no_bid" due to a book transition between
+    // `SignalProduced` and the bridge build. `marketCache.get` stays as a
+    // defensive fallback for events that may be in-flight during rollout of
+    // this change; it can be removed once all in-flight events drain.
+    const baseMarket = embeddedMarket ?? this.marketCache.get(String(signal.tokenId));
+
+    if (!baseMarket) {
       this.log.warn(
         { signalId: signal.signalId, tokenId: signal.tokenId },
         "approved signal has no cached market — cannot build order command",
       );
       await this.publishConversionSkipped(signal, "market-cache-miss", ["market-cache-miss"], {
-        cacheStatus: resolvedMarket.cacheStatus,
+        cacheStatus: "disabled",
       });
       return;
     }
 
-    const liveness = isAlive({
-      acceptingOrders: market.acceptingOrders,
-      enableOrderBook: market.enableOrderBook,
-      bestBid: market.bestBid,
-      bestAsk: market.bestAsk,
+    // Hard-liveness on the embedded snapshot. Same function, same semantics as
+    // algo-decision-module.ts:389 — eliminates the residual tail where the
+    // book transitioned to `no_bid` in the gap between pre-entry and bridge.
+    const embeddedLiveness = isAlive({
+      acceptingOrders: baseMarket.acceptingOrders,
+      enableOrderBook: baseMarket.enableOrderBook,
+      bestBid: baseMarket.bestBid,
+      bestAsk: baseMarket.bestAsk,
     });
-    if (!liveness.healthy) {
-      // Reason-specific routing: expected flag-only races (upstream algo-decision
-      // gate already drops most of these, but a pricing flip between ticks can
-      // still sneak through) log at debug; anomalies like `no_bid` — where
-      // algo-decision saw a midPrice yet bestBid is null — stay at warn so
-      // operators see genuine data-inconsistency signals.
-      const onlyExpectedFlags = liveness.reasons.every(
+    if (!embeddedLiveness.healthy) {
+      const onlyExpectedFlags = embeddedLiveness.reasons.every(
         (r) => r === "not_accepting_orders" || r === "order_book_disabled",
       );
       const diag = {
         signalId: signal.signalId,
         tokenId: signal.tokenId,
-        reasons: liveness.reasons,
-        cacheStatus: resolvedMarket.cacheStatus,
+        reasons: embeddedLiveness.reasons,
+        cacheStatus: "embedded",
       };
       const msg = "approved signal skipped — market not live for order placement";
       if (onlyExpectedFlags) this.log.debug(diag, msg);
       else this.log.warn(diag, msg);
-      await this.publishConversionSkipped(signal, "hard-liveness", liveness.reasons, {
-        acceptingOrders: market.acceptingOrders,
-        enableOrderBook: market.enableOrderBook,
-        bestBid: market.bestBid,
-        bestAsk: market.bestAsk,
-        cacheStatus: resolvedMarket.cacheStatus,
+      await this.publishConversionSkipped(signal, "hard-liveness", embeddedLiveness.reasons, {
+        acceptingOrders: baseMarket.acceptingOrders,
+        enableOrderBook: baseMarket.enableOrderBook,
+        bestBid: baseMarket.bestBid,
+        bestAsk: baseMarket.bestAsk,
+        cacheStatus: "embedded",
       });
       return;
     }
 
+    // Pricing: optionally fold in a fresher candidate book on top of the
+    // embedded base so the order price reflects the newest observed top of
+    // book. If the fresh book is unavailable or disabled, fall back to the
+    // embedded snapshot's bestBid/bestAsk.
+    const pricing = await this.resolvePricingMarket(signal, baseMarket);
+    const market = pricing.market;
     const cooldown = this.resolveCooldownState(signal, market);
     if (cooldown.bypassReason && cooldown.previousCooldownUntil != null) {
       this.cooldownUntilByToken.delete(this.cooldownKey(signal.tokenId));
@@ -159,7 +170,7 @@ export class SignalToOrderBridge {
     }
     if (cooldown.cooldownUntilMs != null && cooldown.cooldownUntilMs > Date.now()) {
       await this.publishConversionSkipped(signal, "marketability", ["token-cooling-down"], {
-        cacheStatus: resolvedMarket.cacheStatus,
+        cacheStatus: pricing.cacheStatus,
         cooldownUntil: cooldown.cooldownUntilMs,
       });
       return;
@@ -174,7 +185,7 @@ export class SignalToOrderBridge {
           side: signal.side,
           bestBid: market.bestBid,
           bestAsk: market.bestAsk,
-          cacheStatus: resolvedMarket.cacheStatus,
+          cacheStatus: pricing.cacheStatus,
         },
         "approved signal skipped — no bestBid/bestAsk for execution price",
       );
@@ -182,7 +193,7 @@ export class SignalToOrderBridge {
         signal,
         "execution-terms",
         ["execution-price-unavailable"],
-        { cacheStatus: resolvedMarket.cacheStatus },
+        { cacheStatus: pricing.cacheStatus },
       );
       return;
     }
@@ -210,7 +221,7 @@ export class SignalToOrderBridge {
       sequenceInTick: signal.sequenceInTick,
       signalReason: signal.reason,
       metadata: {
-        cacheStatus: resolvedMarket.cacheStatus,
+        cacheStatus: pricing.cacheStatus,
         marketData: {
           bookSource: market.bookSource ?? "unknown",
           minOrderSize: market.minOrderSize ?? null,
@@ -236,30 +247,36 @@ export class SignalToOrderBridge {
     });
   }
 
-  private async resolveMarket(signal: RuntimeEventMap["SignalApproved"]["signal"]): Promise<{
-    market: NormalizedMarket | null;
-    cacheStatus: CandidateBookResolution["status"] | "disabled" | "base-market";
+  /**
+   * Return a pricing-oriented market snapshot for a signal: the embedded
+   * base (already accepted by the pre-entry hard-liveness gate) optionally
+   * overlaid with a fresher `CandidateBookCache` entry for bestBid/bestAsk.
+   *
+   * Liveness is NOT re-checked here — that already happened on the embedded
+   * snapshot upstream. This lookup is purely for order pricing freshness.
+   */
+  private async resolvePricingMarket(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    baseMarket: NormalizedMarket,
+  ): Promise<{
+    market: NormalizedMarket;
+    cacheStatus: CandidateBookResolution["status"] | "disabled" | "base-market" | "embedded";
   }> {
-    const market = this.marketCache.get(String(signal.tokenId));
-    if (!market) {
-      return { market: null, cacheStatus: "disabled" };
-    }
-
     if (!this.deps.candidateBookCache) {
-      return { market, cacheStatus: "disabled" };
+      return { market: baseMarket, cacheStatus: "disabled" };
     }
 
     const nowMs = Date.now();
     const freshEntry = this.deps.candidateBookCache.getFreshEntry(String(signal.tokenId), nowMs);
     if (freshEntry) {
       return {
-        market: applyOrderBookToMarket(market, freshEntry),
+        market: applyOrderBookToMarket(baseMarket, freshEntry),
         cacheStatus: "fresh-cache",
       };
     }
 
-    if (market.bookSource === "clob") {
-      return { market, cacheStatus: "base-market" };
+    if (baseMarket.bookSource === "clob") {
+      return { market: baseMarket, cacheStatus: "base-market" };
     }
 
     const wsEntry = await this.deps.candidateBookCache.waitForFreshEntry(
@@ -269,7 +286,7 @@ export class SignalToOrderBridge {
     );
     if (wsEntry) {
       return {
-        market: applyOrderBookToMarket(market, wsEntry),
+        market: applyOrderBookToMarket(baseMarket, wsEntry),
         cacheStatus: "fresh-cache",
       };
     }
@@ -280,12 +297,12 @@ export class SignalToOrderBridge {
     );
     if (resolution.entry) {
       return {
-        market: applyOrderBookToMarket(market, resolution.entry),
+        market: applyOrderBookToMarket(baseMarket, resolution.entry),
         cacheStatus: resolution.status,
       };
     }
 
-    return { market, cacheStatus: resolution.status };
+    return { market: baseMarket, cacheStatus: resolution.status };
   }
 
   private async publishConversionSkipped(

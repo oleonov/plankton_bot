@@ -81,6 +81,7 @@ function createMockGateway(): ExchangeGateway {
     getFills: vi.fn<(sinceMs: number) => Promise<ExchangeFill[]>>().mockResolvedValue([]),
     getBalances: vi.fn<() => Promise<ExchangeBalance[]>>().mockResolvedValue([]),
     getPositionBalance: vi.fn<(tokenId: TokenId) => Promise<number>>().mockResolvedValue(0),
+    getOutcomeTokenBalance: vi.fn<(tokenId: TokenId) => Promise<bigint>>().mockResolvedValue(0n),
     redeemPositions: vi.fn<(conditionIds: string[]) => Promise<void>>().mockResolvedValue(),
     mergePositions: vi
       .fn<(merges: { conditionId: string; amount: number }[]) => Promise<void>>()
@@ -965,6 +966,57 @@ describe("ExecutionModule", () => {
     expect(replaceMod.getDiagnostics().cancelReplacePendingCount).toBe(0);
 
     await replaceMod.stop();
+  });
+
+  it("below-min-size rejection log carries full diagnostic field set (pre-clamp path)", async () => {
+    const scopedLog = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+      fatal: vi.fn(),
+      child: () => scopedLog,
+    } as any;
+
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 42 })),
+      log: scopedLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await mod2.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("cmd-below-min-pre-clamp"),
+        side: "buy",
+        size: 2,
+        tickSize: 0.01,
+        metadata: { marketData: { minOrderSize: 5 } },
+      }),
+      timestamp: Date.now(),
+    });
+
+    const warnCalls = scopedLog.warn.mock.calls as Array<[Record<string, unknown>, string]>;
+    const hit = warnCalls.find(([, msg]) => msg === "order rejected — below exchange minimum size");
+    expect(hit, "expected below-min-size warn log").toBeTruthy();
+    expect(hit![0]).toMatchObject({
+      side: "buy",
+      originalSize: 2,
+      clampedSize: null,
+      minOrderSize: 5,
+      positionSize: 42,
+      tickSize: 0.01,
+      reason: "below_min_size",
+      phase: "pre-clamp",
+    });
+
+    await mod2.stop();
   });
 
   // ─── Live-lite allowlist (removed) ──────────────────────────────────────────

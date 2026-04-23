@@ -188,6 +188,10 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     return 0;
   }
 
+  async getOutcomeTokenBalance(_tokenId: TokenId): Promise<bigint> {
+    return 0n;
+  }
+
   async redeemPositions(_conditionIds: string[]): Promise<void> {
     // No-op in simulation
   }

@@ -100,15 +100,18 @@ export interface RuntimeEventMap {
 
   SignalProduced: {
     readonly signal: Signal;
+    readonly market: NormalizedMarket;
   };
 
   SignalApproved: {
     readonly signal: Signal;
+    readonly market: NormalizedMarket;
     readonly approvedAt: number;
   };
 
   SignalRejected: {
     readonly signal: Signal;
+    readonly market: NormalizedMarket;
     readonly reason: string;
     readonly rejectedAt: number;
   };
@@ -213,6 +216,14 @@ export interface RuntimeEventMap {
     readonly details: string;
     readonly severity: "warn" | "critical";
     readonly timestamp: number;
+  };
+
+  PositionDriftDetected: {
+    readonly settlementId: string;
+    readonly tokenId: TokenId;
+    readonly conditionId: ConditionId;
+    readonly onChainBalance: string;
+    readonly detectedAt: number;
   };
 
   ReconciliationComplete: {

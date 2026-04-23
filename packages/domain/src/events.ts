@@ -81,17 +81,26 @@ export interface NewMarketDiscoveredHint {
 export interface SignalProduced {
   readonly type: "SignalProduced";
   readonly signal: Signal;
+  /**
+   * Snapshot of the market observed at signal-generation time. Downstream
+   * consumers (risk-inventory → signal-to-order bridge) re-evaluate
+   * `isAlive(market)` against this snapshot so the same liveness check the
+   * pre-entry gate used cannot drift between publish and bridge build.
+   */
+  readonly market: NormalizedMarket;
 }
 
 export interface SignalApproved {
   readonly type: "SignalApproved";
   readonly signal: Signal;
+  readonly market: NormalizedMarket;
   readonly approvedAt: number;
 }
 
 export interface SignalRejected {
   readonly type: "SignalRejected";
   readonly signal: Signal;
+  readonly market: NormalizedMarket;
   readonly reason: string;
   readonly rejectedAt: number;
 }
@@ -252,6 +261,23 @@ export interface ReconciliationDriftDetected {
   readonly timestamp: number;
 }
 
+/**
+ * The local `settlement_ledger` says a position was algo-redeemed, but the
+ * on-chain outcome-token balance at the ledger's `token_id` is still > 0.
+ *
+ * `settlementId` is the natural key — FK to `settlement_ledger.settlement_id`
+ * and the `position_drifts` primary key. `onChainBalance` is a decimal string
+ * so the raw bigint survives JSON / the in-process bus without precision loss.
+ */
+export interface PositionDriftDetected {
+  readonly type: "PositionDriftDetected";
+  readonly settlementId: string;
+  readonly tokenId: TokenId;
+  readonly conditionId: ConditionId;
+  readonly onChainBalance: string;
+  readonly detectedAt: number;
+}
+
 export interface ReconciliationComplete {
   readonly type: "ReconciliationComplete";
   readonly result: ReconciliationResult;
@@ -303,6 +329,7 @@ export type DomainEvent =
   | FillReceived
   | PositionUpdated
   | ReconciliationDriftDetected
+  | PositionDriftDetected
   | ReconciliationComplete
   | RuntimePhaseChanged
   | OperatorCommandApplied;

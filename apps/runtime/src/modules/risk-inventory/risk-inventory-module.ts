@@ -148,7 +148,7 @@ export class RiskInventoryModule implements RuntimeModule {
   // ─── Signal evaluation ────────────────────────────────────────────
 
   private async handleSignal(payload: RuntimeEventMap["SignalProduced"]): Promise<void> {
-    const { signal } = payload;
+    const { signal, market } = payload;
     this.signalsProcessed++;
 
     try {
@@ -162,6 +162,7 @@ export class RiskInventoryModule implements RuntimeModule {
         );
         await this.deps.bus.publish("SignalApproved", {
           signal,
+          market,
           approvedAt: Date.now(),
         });
       } else {
@@ -172,6 +173,7 @@ export class RiskInventoryModule implements RuntimeModule {
         );
         await this.deps.bus.publish("SignalRejected", {
           signal,
+          market,
           reason: decision.rejectionReasons.join("; "),
           rejectedAt: Date.now(),
         });
@@ -181,6 +183,7 @@ export class RiskInventoryModule implements RuntimeModule {
       this.log.error({ err, signalId: signal.signalId }, "signal evaluation failed");
       await this.deps.bus.publish("SignalRejected", {
         signal,
+        market,
         reason: "internal error during risk evaluation",
         rejectedAt: Date.now(),
       });

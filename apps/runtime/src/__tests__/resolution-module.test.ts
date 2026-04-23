@@ -159,10 +159,16 @@ function createMockDb() {
   };
 }
 
-function createMockGateway(balanceByToken?: Record<string, number>): ExchangeGateway {
+function createMockGateway(
+  balanceByToken?: Record<string, number>,
+  outcomeBalanceByToken?: Record<string, bigint>,
+): ExchangeGateway {
   return {
     getPositionBalance: vi.fn(async (tokenId: TokenId) => {
       return balanceByToken?.[String(tokenId)] ?? 0;
+    }),
+    getOutcomeTokenBalance: vi.fn(async (tokenId: TokenId) => {
+      return outcomeBalanceByToken?.[String(tokenId)] ?? 0n;
     }),
     placeOrder: vi.fn(),
     cancelOrder: vi.fn(),
@@ -1348,6 +1354,300 @@ describe("ResolutionModule", () => {
         expect.objectContaining({ conditionIds: [CONDITION] }),
         "algo-triggered on-chain redeem failed",
       );
+    });
+
+    // Phase 2.B: per-conditionId back-off + circuit breaker. The production
+    // baseline showed the same conditionId hitting the gateway up to 14× per
+    // 24 h window; these tests pin the 3-failure → 1-hour lockout contract.
+    describe("circuit breaker (Phase 2.B)", () => {
+      it("opens circuit after 3 consecutive failures; 4th call skips gateway and still settles locally", async () => {
+        const gateway = createMockGateway();
+        (gateway.redeemPositions as any).mockRejectedValue(new Error("relayer down"));
+        mod = createModule({ gateway });
+
+        const settled = [makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 })];
+        (settler.settleAlgoRedeem as any).mockReturnValue(settled);
+
+        await mod.start();
+
+        // Fire 3 failing attempts, separated enough that the per-attempt
+        // back-off (1 min / 5 min) doesn't suppress them.
+        const baseline = Date.now();
+        let tick = baseline;
+        vi.useFakeTimers();
+        vi.setSystemTime(tick);
+        for (let i = 0; i < 3; i++) {
+          await (mod as any).handleAlgoRedeem([CONDITION]);
+          tick += 10 * 60_000;
+          vi.setSystemTime(tick);
+        }
+        expect(gateway.redeemPositions).toHaveBeenCalledTimes(3);
+
+        // 4th attempt within 1h should be suppressed (circuit open).
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        expect(gateway.redeemPositions).toHaveBeenCalledTimes(3);
+        expect(log.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionIds: [CONDITION] }),
+          "algo_redeem_circuit_open",
+        );
+
+        // Local settle must still run on every attempt.
+        expect(settler.settleAlgoRedeem as any).toHaveBeenCalledTimes(4);
+
+        vi.useRealTimers();
+        await mod.stop();
+      });
+
+      it("resets circuit after a successful gateway call", async () => {
+        const gateway = createMockGateway();
+        mod = createModule({ gateway });
+
+        vi.useFakeTimers();
+        const baseline = Date.now();
+        let tick = baseline;
+        vi.setSystemTime(tick);
+
+        // Two failures raise failureCount to 2.
+        (gateway.redeemPositions as any)
+          .mockRejectedValueOnce(new Error("relayer down"))
+          .mockRejectedValueOnce(new Error("relayer down"))
+          .mockResolvedValueOnce(undefined);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        tick += 6 * 60_000; // > 5 min back-off
+        vi.setSystemTime(tick);
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        tick += 6 * 60_000;
+        vi.setSystemTime(tick);
+
+        // Third attempt succeeds → circuit entry must be cleared.
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+
+        // After reset, two more failures within < 1m must still be throttled
+        // (failureCount goes 0→1 again on the next failure; back-off kicks in).
+        (gateway.redeemPositions as any).mockRejectedValue(new Error("relayer down"));
+        tick += 1_000;
+        vi.setSystemTime(tick);
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        // Now failureCount=1; a retry < 1 min later must be suppressed by
+        // the back-off table (not the full circuit, since count < 3).
+        const callCountAfterFirstPostResetFailure = (gateway.redeemPositions as any).mock.calls
+          .length;
+        tick += 30_000;
+        vi.setSystemTime(tick);
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        expect((gateway.redeemPositions as any).mock.calls.length).toBe(
+          callCountAfterFirstPostResetFailure,
+        );
+
+        vi.useRealTimers();
+        await mod.stop();
+      });
+
+      it("honors per-attempt back-off window (1m after 1st, 5m after 2nd)", async () => {
+        const gateway = createMockGateway();
+        (gateway.redeemPositions as any).mockRejectedValue(new Error("relayer down"));
+        mod = createModule({ gateway });
+
+        vi.useFakeTimers();
+        const baseline = Date.now();
+        let tick = baseline;
+        vi.setSystemTime(tick);
+
+        await mod.start();
+
+        // 1st attempt → fails.
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        expect(gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+        // Retry 30 s later → within 1 min back-off, gateway is skipped.
+        tick += 30_000;
+        vi.setSystemTime(tick);
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        expect(gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+        // After 61 s → back-off expired, gateway called again.
+        tick += 31_000;
+        vi.setSystemTime(tick);
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        expect(gateway.redeemPositions).toHaveBeenCalledTimes(2);
+
+        // Now failureCount=2 → 5 min back-off. 4 min later: suppressed.
+        tick += 4 * 60_000;
+        vi.setSystemTime(tick);
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        expect(gateway.redeemPositions).toHaveBeenCalledTimes(2);
+
+        // 6 min later: allowed again.
+        tick += 2 * 60_000;
+        vi.setSystemTime(tick);
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        expect(gateway.redeemPositions).toHaveBeenCalledTimes(3);
+
+        vi.useRealTimers();
+        await mod.stop();
+      });
+    });
+
+    // Phase 3.B: skip gateway.redeemPositions when outcome-token balance is
+    // already zero (already-redeemed or nothing-to-redeem). Local settle is
+    // idempotent and still runs; drift detector is the primary safety net.
+    describe("already-redeemed pre-check (Phase 3.B)", () => {
+      it("skips gateway.redeemPositions when all outcome-token balances are zero", async () => {
+        const gateway = createMockGateway(undefined, { "tok-yes": 0n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockReturnValue([
+          { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
+        ]);
+        const settled = [makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 })];
+        (settler.settleAlgoRedeem as any).mockReturnValue(settled);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+
+        expect(gateway.getOutcomeTokenBalance as any).toHaveBeenCalledWith(TOK_YES);
+        expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+        // Local settle still runs (idempotent).
+        expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+      });
+
+      it("still calls gateway.redeemPositions when at least one outcome-token balance is non-zero", async () => {
+        const gateway = createMockGateway(undefined, { "tok-yes": 0n, "tok-no": 12345n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockReturnValue([
+          { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
+          { tokenId: TOK_NO, conditionId: CONDITION, slug: "x", outcome: "NO" },
+        ]);
+        (settler.settleAlgoRedeem as any).mockReturnValue([]);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+
+        expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION]);
+      });
+
+      it("partitions a mixed batch — only already-redeemed conditions are skipped", async () => {
+        const COND_A = "cond-a";
+        const COND_B = "cond-b";
+        const TOK_A = createTokenId("tok-a");
+        const TOK_B = createTokenId("tok-b");
+        const gateway = createMockGateway(undefined, { "tok-a": 0n, "tok-b": 500n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockImplementation((cid: string) => {
+          if (cid === COND_A) return [{ tokenId: TOK_A, conditionId: COND_A, slug: "a", outcome: "YES" }];
+          if (cid === COND_B) return [{ tokenId: TOK_B, conditionId: COND_B, slug: "b", outcome: "YES" }];
+          return [];
+        });
+        (settler.settleAlgoRedeem as any).mockReturnValue([]);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([COND_A, COND_B]);
+        await mod.stop();
+
+        expect(gateway.redeemPositions as any).toHaveBeenCalledWith([COND_B]);
+        expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([COND_A, COND_B]);
+      });
+
+      it("falls through to gateway when the balance check throws (conservative)", async () => {
+        const gateway = createMockGateway();
+        (gateway.getOutcomeTokenBalance as any).mockRejectedValue(new Error("rpc timeout"));
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockReturnValue([
+          { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
+        ]);
+        (settler.settleAlgoRedeem as any).mockReturnValue([]);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+
+        expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION]);
+        expect(log.warn).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionId: CONDITION, tokenId: String(TOK_YES) }),
+          "algo_redeem_precheck_failed",
+        );
+      });
+
+      it("routes to the gateway when no markets are known for a conditionId", async () => {
+        const gateway = createMockGateway();
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockReturnValue([]);
+        (settler.settleAlgoRedeem as any).mockReturnValue([]);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+
+        expect(gateway.getOutcomeTokenBalance as any).not.toHaveBeenCalled();
+        expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION]);
+      });
+
+      it("isolates per-conditionId failure bookkeeping across a multi-id batch", async () => {
+        const COND_A = "cond-a";
+        const COND_B = "cond-b";
+        const TOK_A = createTokenId("tok-a");
+        const TOK_B = createTokenId("tok-b");
+        const gateway = createMockGateway(undefined, { "tok-a": 7n, "tok-b": 11n });
+        // Gateway fails for COND_A (called first), succeeds for COND_B.
+        (gateway.redeemPositions as any)
+          .mockRejectedValueOnce(new Error("relayer revert on cond-a"))
+          .mockResolvedValueOnce(undefined);
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockImplementation((cid: string) => {
+          if (cid === COND_A) return [{ tokenId: TOK_A, conditionId: COND_A, slug: "a", outcome: "YES" }];
+          if (cid === COND_B) return [{ tokenId: TOK_B, conditionId: COND_B, slug: "b", outcome: "YES" }];
+          return [];
+        });
+        (settler.settleAlgoRedeem as any).mockReturnValue([]);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([COND_A, COND_B]);
+        await mod.stop();
+
+        // Gateway called once per conditionId — not once for the whole batch.
+        expect(gateway.redeemPositions as any).toHaveBeenCalledTimes(2);
+        expect(gateway.redeemPositions as any).toHaveBeenNthCalledWith(1, [COND_A]);
+        expect(gateway.redeemPositions as any).toHaveBeenNthCalledWith(2, [COND_B]);
+
+        // Only the failing id accrues a failure entry; the sibling stays clean.
+        expect((mod as any).redeemFailures.get(COND_A)?.failureCount).toBe(1);
+        expect((mod as any).redeemFailures.has(COND_B)).toBe(false);
+      });
+
+      it("clears redeem-failure bookkeeping when pre-check skips the gateway", async () => {
+        const gateway = createMockGateway(undefined, { "tok-yes": 0n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockReturnValue([
+          { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
+        ]);
+        (settler.settleAlgoRedeem as any).mockReturnValue([]);
+
+        await mod.start();
+
+        // Seed a stale failure entry outside of any active back-off window
+        // so partitionRedeemTargets still routes the id to gatewayTargets.
+        (mod as any).redeemFailures.set(CONDITION, {
+          failedAt: Date.now() - 2 * 60 * 60_000,
+          failureCount: 2,
+        });
+
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+
+        expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+        expect((mod as any).redeemFailures.has(CONDITION)).toBe(false);
+
+        await mod.stop();
+      });
     });
 
     it("cancels open orders for tokens belonging to algo-redeemed conditions", async () => {

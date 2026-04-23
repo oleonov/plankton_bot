@@ -23,11 +23,17 @@ import type {
   FillRepository,
   MarketRepository,
   ReconciliationResult,
+  SettlementLedgerRepository,
+  PositionDriftRepository,
 } from "@plankton/domain";
+import { createTokenId, createConditionId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
 import { cleanStaleEntryOrders } from "./stale-order-cleaner.js";
+
+const DRIFT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_DRIFT_INTERVAL_MS = 5 * 60 * 1000;
 
 export interface ReconciliationModuleDeps {
   gateway: ExchangeGateway;
@@ -37,13 +43,24 @@ export interface ReconciliationModuleDeps {
   marketRepo: MarketRepository;
   log: Logger;
   reconcileIntervalMs: number;
+  /**
+   * Optional settlement ledger + drift repo + gateway balance accessor.
+   * When all three are provided, a periodic drift check compares algo-redeem
+   * settlements in the last 24h against on-chain outcome-token balances.
+   */
+  settlementLedgerRepo?: SettlementLedgerRepository;
+  driftRepo?: PositionDriftRepository;
+  /** Drift detection cadence. Defaults to 5 minutes. */
+  driftIntervalMs?: number;
 }
 
 export class ReconciliationModule implements RuntimeModule {
   private readonly log: Logger;
   private unsubs: Array<() => void> = [];
   private timer: ReturnType<typeof setInterval> | null = null;
+  private driftTimer: ReturnType<typeof setInterval> | null = null;
   private reconciling = false;
+  private driftRunning = false;
   private started = false;
   private runCount = 0;
   private lastRunAt: number | null = null;
@@ -67,6 +84,16 @@ export class ReconciliationModule implements RuntimeModule {
       );
     }, this.deps.reconcileIntervalMs);
 
+    if (this.driftCheckEnabled()) {
+      const intervalMs = this.deps.driftIntervalMs ?? DEFAULT_DRIFT_INTERVAL_MS;
+      this.driftTimer = setInterval(() => {
+        this.runDriftCheck().catch((err) =>
+          this.log.error({ err }, "periodic drift check error"),
+        );
+      }, intervalMs);
+      this.log.info({ driftIntervalMs: intervalMs }, "position drift detection enabled");
+    }
+
     this.started = true;
     this.log.info(
       { reconcileIntervalMs: this.deps.reconcileIntervalMs },
@@ -78,6 +105,10 @@ export class ReconciliationModule implements RuntimeModule {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.driftTimer) {
+      clearInterval(this.driftTimer);
+      this.driftTimer = null;
     }
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
@@ -226,5 +257,114 @@ export class ReconciliationModule implements RuntimeModule {
       clean: true,
       details: [],
     };
+  }
+
+  private driftCheckEnabled(): boolean {
+    return !!(this.deps.settlementLedgerRepo && this.deps.driftRepo);
+  }
+
+  /**
+   * Exposed for testing. Compares recent algo-redeem settlement rows against
+   * their on-chain outcome-token balance; non-zero balances mean the redeem
+   * transaction never cleared the position and a drift is persisted.
+   */
+  async runDriftCheck(): Promise<number> {
+    if (!this.driftCheckEnabled()) return 0;
+    if (this.driftRunning) return 0;
+    this.driftRunning = true;
+    try {
+      return await this.doRunDriftCheck();
+    } finally {
+      this.driftRunning = false;
+    }
+  }
+
+  private async doRunDriftCheck(): Promise<number> {
+    const ledgerRepo = this.deps.settlementLedgerRepo!;
+    const driftRepo = this.deps.driftRepo!;
+    const now = Date.now();
+    const cutoffIso = new Date(now - DRIFT_LOOKBACK_MS).toISOString();
+
+    const recent = ledgerRepo.findAlgoRedeemSettlementsSince(cutoffIso);
+    const seenSettlementIds = new Set<string>();
+    let driftsPublished = 0;
+
+    for (const row of recent) {
+      seenSettlementIds.add(row.settlementId);
+      driftsPublished += await this.checkRowForDrift(row, driftRepo, now);
+    }
+
+    // Sweep still-open drifts whose ledger row has aged out of the 24 h
+    // lookback. Without this, a drift opened >24 h ago whose on-chain balance
+    // has since cleared would stay `open` forever — markResolved() would never
+    // run because the ledger row no longer enters the loop above.
+    for (const open of driftRepo.findOpen()) {
+      if (seenSettlementIds.has(open.settlementId)) continue;
+      driftsPublished += await this.checkRowForDrift(
+        {
+          settlementId: open.settlementId,
+          tokenId: open.tokenId,
+          conditionId: open.conditionId,
+        },
+        driftRepo,
+        now,
+      );
+    }
+
+    return driftsPublished;
+  }
+
+  private async checkRowForDrift(
+    row: { settlementId: string; tokenId: string; conditionId: string },
+    driftRepo: PositionDriftRepository,
+    now: number,
+  ): Promise<number> {
+    const tokenId = createTokenId(row.tokenId);
+    let balance: bigint;
+    try {
+      balance = await this.deps.gateway.getOutcomeTokenBalance(tokenId);
+    } catch (err) {
+      this.log.warn(
+        { err, tokenId: row.tokenId, conditionId: row.conditionId },
+        "drift check gateway read failed",
+      );
+      return 0;
+    }
+
+    const nowIso = new Date(now).toISOString();
+    if (balance === 0n) {
+      driftRepo.markResolved(row.settlementId, nowIso);
+      return 0;
+    }
+
+    const balanceStr = balance.toString();
+    driftRepo.upsert({
+      settlementId: row.settlementId,
+      tokenId: row.tokenId,
+      conditionId: row.conditionId,
+      detectedAt: nowIso,
+      onChainBalance: balanceStr,
+      lastCheckedAt: nowIso,
+      status: "open",
+    });
+
+    await this.deps.bus.publish("PositionDriftDetected", {
+      settlementId: row.settlementId,
+      tokenId,
+      conditionId: createConditionId(row.conditionId),
+      onChainBalance: balanceStr,
+      detectedAt: now,
+    });
+
+    this.log.warn(
+      {
+        settlementId: row.settlementId,
+        tokenId: row.tokenId,
+        conditionId: row.conditionId,
+        onChainBalance: balanceStr,
+      },
+      "position_drift_detected",
+    );
+    return 1;
   }
 }

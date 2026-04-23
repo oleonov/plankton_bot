@@ -298,8 +298,14 @@ export class ExecutionModule implements RuntimeModule {
         {
           commandId: cmd.commandId,
           tokenId: cmd.tokenId,
-          size: cmd.size,
+          side: cmd.side,
+          originalSize: cmd.size,
+          clampedSize: null,
           minOrderSize: minOrderSizeRejection.minOrderSize,
+          positionSize: this.deps.positionRepo?.findByTokenId(cmd.tokenId)?.size ?? null,
+          tickSize: cmd.tickSize,
+          reason: "below_min_size",
+          phase: "pre-clamp",
         },
         "order rejected — below exchange minimum size",
       );
@@ -359,9 +365,14 @@ export class ExecutionModule implements RuntimeModule {
           {
             commandId: cmd.commandId,
             tokenId: cmd.tokenId,
-            intentSize: cmd.size,
+            side: cmd.side,
+            originalSize: cmd.size,
             clampedSize: decision.newSize,
             minOrderSize: postClampMinCheck.minOrderSize,
+            positionSize: this.deps.positionRepo?.findByTokenId(cmd.tokenId)?.size ?? null,
+            tickSize: cmd.tickSize,
+            reason: "below_min_size",
+            phase: "post-clamp",
           },
           "sell order rejected — clamped size below exchange minimum",
         );

@@ -21,6 +21,8 @@ export { SqlitePreflightReportRepository } from "./repositories/preflight-report
 export { SqliteServiceHeartbeatRepository } from "./repositories/service-heartbeat-repository.js";
 export { SqliteConfigImportRepository } from "./repositories/config-import-repository.js";
 export { SqliteMergeLedgerRepository } from "./repositories/merge-ledger-repository.js";
+export { SqliteSettlementLedgerRepository } from "./repositories/settlement-ledger-repository.js";
+export { SqlitePositionDriftRepository } from "./repositories/position-drift-repository.js";
 export { SqliteAlgoRulesRepository } from "./repositories/algo-rules-repository.js";
 export { SqliteLegStateRepository } from "./repositories/leg-state-repository.js";
 export { SelectionRuleRepository } from "./repositories/selection-rule-repository.js";

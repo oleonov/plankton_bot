@@ -423,6 +423,17 @@ export interface MergeRecord {
   createdAt?: string;
 }
 
+export interface PositionDrift {
+  settlementId: string;
+  tokenId: string;
+  conditionId: string;
+  detectedAt: string;
+  onChainBalance: string;
+  lastCheckedAt: string;
+  status: "open" | "resolved";
+  createdAt?: string;
+}
+
 // ─── Algo Decision Engine Types ─────────────────────────────────────────
 
 export interface AlgoDecisionRule {

@@ -16,6 +16,11 @@ import type {
   TokenId,
   ClientOrderId,
   ReconciliationResult,
+  SettlementLedgerRepository,
+  PositionDriftRepository,
+  PositionDrift,
+  SettlementRecord,
+  RuntimeEventMap,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
@@ -41,6 +46,7 @@ function createMockGateway(): ExchangeGateway {
     getFills: vi.fn<(sinceMs: number) => Promise<ExchangeFill[]>>().mockResolvedValue([]),
     getBalances: vi.fn<() => Promise<ExchangeBalance[]>>().mockResolvedValue([]),
     getPositionBalance: vi.fn<(tokenId: TokenId) => Promise<number>>().mockResolvedValue(0),
+    getOutcomeTokenBalance: vi.fn<(tokenId: TokenId) => Promise<bigint>>().mockResolvedValue(0n),
     redeemPositions: vi.fn<(conditionIds: string[]) => Promise<void>>().mockResolvedValue(),
     mergePositions: vi
       .fn<(merges: { conditionId: string; amount: number }[]) => Promise<void>>()
@@ -804,5 +810,335 @@ describe("ReconciliationModule", () => {
       const secondCallSince = (gateway.getFills as any).mock.calls[1][0];
       expect(secondCallSince).toBeGreaterThan(0);
     });
+  });
+});
+
+// ─── Phase 3.A: Position drift detection ───────────────────────────────────
+
+describe("ReconciliationModule — position drift detection (Phase 3.A)", () => {
+  function createMockSettlementLedgerRepo(
+    rows: SettlementRecord[] = [],
+  ): SettlementLedgerRepository {
+    return {
+      save: vi.fn(),
+      findAlgoRedeemSettlementsSince: vi.fn().mockReturnValue(rows),
+    };
+  }
+
+  function createMockDriftRepo(): PositionDriftRepository & {
+    upsertCalls: PositionDrift[];
+    resolvedIds: string[];
+  } {
+    const upsertCalls: PositionDrift[] = [];
+    const resolvedIds: string[] = [];
+    return {
+      upsertCalls,
+      resolvedIds,
+      upsert: vi.fn((drift: PositionDrift) => {
+        upsertCalls.push(drift);
+      }),
+      findOpen: vi.fn().mockReturnValue([]),
+      markResolved: vi.fn((id: string) => {
+        resolvedIds.push(id);
+      }),
+    };
+  }
+
+  function makeAlgoRedeemRow(overrides?: Partial<SettlementRecord>): SettlementRecord {
+    return {
+      settlementId: "algo-redeem-cond-A-tok-1",
+      conditionId: "cond-A",
+      positionId: "pos-1",
+      tokenId: "tok-1",
+      resolution: "algo-redeem",
+      settlementPrice: 0,
+      size: 10,
+      delta: -5,
+      settledAt: new Date().toISOString(),
+      ...overrides,
+    };
+  }
+
+  it("publishes PositionDriftDetected when on-chain balance is non-zero", async () => {
+    const row = makeAlgoRedeemRow();
+    const ledgerRepo = createMockSettlementLedgerRepo([row]);
+    const driftRepo = createMockDriftRepo();
+    const gateway = {
+      placeOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      cancelAllOrders: vi.fn(),
+      getOpenOrders: vi.fn().mockResolvedValue([]),
+      getOpenOrdersForToken: vi.fn().mockResolvedValue([]),
+      getFills: vi.fn().mockResolvedValue([]),
+      getBalances: vi.fn().mockResolvedValue([]),
+      getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(12345n),
+      redeemPositions: vi.fn().mockResolvedValue(undefined),
+      mergePositions: vi.fn().mockResolvedValue(undefined),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+    } as unknown as ExchangeGateway;
+    const bus = new InProcessEventBus();
+    const events: RuntimeEventMap["PositionDriftDetected"][] = [];
+    bus.subscribe("PositionDriftDetected", async (e) => {
+      events.push(e);
+    });
+
+    const mod = new ReconciliationModule({
+      gateway,
+      bus,
+      orderRepo: {
+        save: vi.fn(),
+        findById: vi.fn(),
+        findByClientOrderId: vi.fn(),
+        findByExchangeOrderId: vi.fn(),
+        findOpen: vi.fn().mockReturnValue([]),
+        findByTokenId: vi.fn(),
+        updateStatus: vi.fn(),
+        sumOpenBuyNotional: vi.fn().mockReturnValue(0),
+      } as unknown as OrderRepository,
+      fillRepo: {} as FillRepository,
+      marketRepo: {} as MarketRepository,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      settlementLedgerRepo: ledgerRepo,
+      driftRepo,
+    });
+
+    const count = await mod.runDriftCheck();
+
+    expect(count).toBe(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]!.settlementId).toBe(row.settlementId);
+    expect(events[0]!.onChainBalance).toBe("12345");
+    expect(String(events[0]!.tokenId)).toBe("tok-1");
+    expect(String(events[0]!.conditionId)).toBe("cond-A");
+    expect(driftRepo.upsertCalls).toHaveLength(1);
+    expect(driftRepo.upsertCalls[0]!.status).toBe("open");
+    expect(driftRepo.upsertCalls[0]!.onChainBalance).toBe("12345");
+  });
+
+  it("emits nothing when on-chain balance is zero and marks prior drift resolved", async () => {
+    const row = makeAlgoRedeemRow();
+    const ledgerRepo = createMockSettlementLedgerRepo([row]);
+    const driftRepo = createMockDriftRepo();
+    const gateway = {
+      placeOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      cancelAllOrders: vi.fn(),
+      getOpenOrders: vi.fn().mockResolvedValue([]),
+      getOpenOrdersForToken: vi.fn().mockResolvedValue([]),
+      getFills: vi.fn().mockResolvedValue([]),
+      getBalances: vi.fn().mockResolvedValue([]),
+      getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(0n),
+      redeemPositions: vi.fn(),
+      mergePositions: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+    } as unknown as ExchangeGateway;
+    const bus = new InProcessEventBus();
+    const events: RuntimeEventMap["PositionDriftDetected"][] = [];
+    bus.subscribe("PositionDriftDetected", async (e) => {
+      events.push(e);
+    });
+
+    const mod = new ReconciliationModule({
+      gateway,
+      bus,
+      orderRepo: {} as OrderRepository,
+      fillRepo: {} as FillRepository,
+      marketRepo: {} as MarketRepository,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      settlementLedgerRepo: ledgerRepo,
+      driftRepo,
+    });
+
+    const count = await mod.runDriftCheck();
+
+    expect(count).toBe(0);
+    expect(events).toHaveLength(0);
+    expect(driftRepo.upsertCalls).toHaveLength(0);
+    expect(driftRepo.resolvedIds).toEqual([row.settlementId]);
+  });
+
+  it("ignores non-algo-redeem rows — ledger accessor filters them out", async () => {
+    // findAlgoRedeemSettlementsSince is the sole query path; repository
+    // guarantees only resolution = 'algo-redeem' rows are returned.
+    const ledgerRepo = createMockSettlementLedgerRepo([]);
+    const driftRepo = createMockDriftRepo();
+    const gateway = {
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(99n),
+      placeOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      cancelAllOrders: vi.fn(),
+      getOpenOrders: vi.fn(),
+      getOpenOrdersForToken: vi.fn(),
+      getFills: vi.fn(),
+      getBalances: vi.fn(),
+      getPositionBalance: vi.fn(),
+      redeemPositions: vi.fn(),
+      mergePositions: vi.fn(),
+      healthCheck: vi.fn(),
+    } as unknown as ExchangeGateway;
+    const bus = new InProcessEventBus();
+    const events: RuntimeEventMap["PositionDriftDetected"][] = [];
+    bus.subscribe("PositionDriftDetected", async (e) => {
+      events.push(e);
+    });
+
+    const mod = new ReconciliationModule({
+      gateway,
+      bus,
+      orderRepo: {} as OrderRepository,
+      fillRepo: {} as FillRepository,
+      marketRepo: {} as MarketRepository,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      settlementLedgerRepo: ledgerRepo,
+      driftRepo,
+    });
+
+    const count = await mod.runDriftCheck();
+
+    expect(count).toBe(0);
+    expect(events).toHaveLength(0);
+    expect(gateway.getOutcomeTokenBalance).not.toHaveBeenCalled();
+  });
+
+  it("skips drift tracking entirely when deps are not wired", async () => {
+    const gateway = {
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(100n),
+      placeOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      cancelAllOrders: vi.fn(),
+      getOpenOrders: vi.fn(),
+      getOpenOrdersForToken: vi.fn(),
+      getFills: vi.fn(),
+      getBalances: vi.fn(),
+      getPositionBalance: vi.fn(),
+      redeemPositions: vi.fn(),
+      mergePositions: vi.fn(),
+      healthCheck: vi.fn(),
+    } as unknown as ExchangeGateway;
+
+    const mod = new ReconciliationModule({
+      gateway,
+      bus: new InProcessEventBus(),
+      orderRepo: {} as OrderRepository,
+      fillRepo: {} as FillRepository,
+      marketRepo: {} as MarketRepository,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+    });
+
+    const count = await mod.runDriftCheck();
+    expect(count).toBe(0);
+    expect(gateway.getOutcomeTokenBalance).not.toHaveBeenCalled();
+  });
+
+  it("re-checks still-open drifts whose ledger row has aged out of the 24h lookback", async () => {
+    // Ledger reports nothing in the window — the open drift was opened >24h
+    // ago — but driftRepo.findOpen() still has the stale `open` row. The
+    // sweep must re-check the on-chain balance and close the drift if it has
+    // since cleared; otherwise any old drift stays open forever.
+    const stale: PositionDrift = {
+      settlementId: "algo-redeem-cond-old-tok-old",
+      tokenId: "tok-old",
+      conditionId: "cond-old",
+      detectedAt: "2025-01-01T00:00:00.000Z",
+      onChainBalance: "500",
+      lastCheckedAt: "2025-01-01T00:00:00.000Z",
+      status: "open",
+    };
+    const ledgerRepo = createMockSettlementLedgerRepo([]);
+    const driftRepo = createMockDriftRepo();
+    (driftRepo.findOpen as any).mockReturnValue([stale]);
+    const gateway = {
+      placeOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      cancelAllOrders: vi.fn(),
+      getOpenOrders: vi.fn().mockResolvedValue([]),
+      getOpenOrdersForToken: vi.fn().mockResolvedValue([]),
+      getFills: vi.fn().mockResolvedValue([]),
+      getBalances: vi.fn().mockResolvedValue([]),
+      getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(0n),
+      redeemPositions: vi.fn(),
+      mergePositions: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+    } as unknown as ExchangeGateway;
+
+    const mod = new ReconciliationModule({
+      gateway,
+      bus: new InProcessEventBus(),
+      orderRepo: {} as OrderRepository,
+      fillRepo: {} as FillRepository,
+      marketRepo: {} as MarketRepository,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      settlementLedgerRepo: ledgerRepo,
+      driftRepo,
+    });
+
+    await mod.runDriftCheck();
+
+    expect(gateway.getOutcomeTokenBalance).toHaveBeenCalledTimes(1);
+    expect(driftRepo.resolvedIds).toEqual([stale.settlementId]);
+  });
+
+  it("refreshes an aged-out open drift that still has non-zero balance without double-counting it", async () => {
+    // Same settlementId is returned from both ledger lookback and findOpen;
+    // the sweep must not run the balance check twice or re-emit the event.
+    const row = makeAlgoRedeemRow();
+    const existingOpen: PositionDrift = {
+      settlementId: row.settlementId,
+      tokenId: row.tokenId,
+      conditionId: row.conditionId,
+      detectedAt: "2026-04-20T00:00:00.000Z",
+      onChainBalance: "200",
+      lastCheckedAt: "2026-04-20T00:00:00.000Z",
+      status: "open",
+    };
+    const ledgerRepo = createMockSettlementLedgerRepo([row]);
+    const driftRepo = createMockDriftRepo();
+    (driftRepo.findOpen as any).mockReturnValue([existingOpen]);
+    const gateway = {
+      placeOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      cancelAllOrders: vi.fn(),
+      getOpenOrders: vi.fn().mockResolvedValue([]),
+      getOpenOrdersForToken: vi.fn().mockResolvedValue([]),
+      getFills: vi.fn().mockResolvedValue([]),
+      getBalances: vi.fn().mockResolvedValue([]),
+      getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(77n),
+      redeemPositions: vi.fn(),
+      mergePositions: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+    } as unknown as ExchangeGateway;
+    const bus = new InProcessEventBus();
+    const events: RuntimeEventMap["PositionDriftDetected"][] = [];
+    bus.subscribe("PositionDriftDetected", async (e) => {
+      events.push(e);
+    });
+
+    const mod = new ReconciliationModule({
+      gateway,
+      bus,
+      orderRepo: {} as OrderRepository,
+      fillRepo: {} as FillRepository,
+      marketRepo: {} as MarketRepository,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      settlementLedgerRepo: ledgerRepo,
+      driftRepo,
+    });
+
+    await mod.runDriftCheck();
+
+    // Balance fetched once, not twice — the sweep de-dupes on settlementId.
+    expect(gateway.getOutcomeTokenBalance).toHaveBeenCalledTimes(1);
+    expect(events).toHaveLength(1);
+    expect(driftRepo.upsertCalls).toHaveLength(1);
   });
 });

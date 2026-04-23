@@ -21,6 +21,7 @@ import { statusRoutes } from "./routes/status.js";
 import { positionRoutes } from "./routes/positions.js";
 import { orderRoutes } from "./routes/orders.js";
 import { fillRoutes } from "./routes/fills.js";
+import { driftRoutes } from "./routes/drift.js";
 import { metricsRoutes } from "./routes/metrics.js";
 import { actionRoutes } from "./routes/actions.js";
 import { eventsRoutes } from "./routes/events.js";
@@ -119,6 +120,12 @@ export async function buildServer(deps: ServerDeps) {
     ledgerPool: deps.ledgerPool,
   });
   await app.register(fillRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+  });
+  await app.register(driftRoutes, {
     prefix: "/api/v1",
     db: deps.ledgerDb,
     controlDb: deps.controlDb,
