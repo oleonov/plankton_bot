@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId } from "@plankton/domain";
-import type { MarketRepository, NormalizedMarket, Market } from "@plankton/domain";
+import type { NormalizedMarket } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { NormalizationModule } from "../modules/normalization/normalization-module.js";
 
@@ -38,28 +38,6 @@ function makeNormalizedMarket(overrides?: Partial<NormalizedMarket>): Normalized
   };
 }
 
-function createMockMarketRepo(): MarketRepository {
-  return {
-    save: vi.fn(),
-    saveBatch: vi.fn(),
-    findByTokenId: vi.fn().mockReturnValue(null),
-    findByTokenIds: vi.fn().mockReturnValue([]),
-    findByConditionId: vi.fn().mockReturnValue([]),
-    findActive: vi.fn().mockReturnValue([]),
-    findAll: vi.fn().mockReturnValue([]),
-    deactivate: vi.fn(),
-    iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
-    deactivateMissing: vi.fn().mockReturnValue(0),
-    findTrackedForPricing: vi.fn().mockReturnValue([]),
-    findTrackedForPricingTiered: vi.fn().mockReturnValue({
-      executionCritical: [],
-      entryCandidates: [],
-      discoveryOnly: [],
-    }),
-    findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
-  };
-}
-
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -73,19 +51,16 @@ const silentLog = {
 
 describe("NormalizationModule", () => {
   let bus: InProcessEventBus;
-  let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let mod: NormalizationModule;
 
   beforeEach(() => {
     bus = new InProcessEventBus();
-    marketRepo = createMockMarketRepo();
     silentLog.info.mockClear();
     silentLog.warn.mockClear();
     silentLog.error.mockClear();
     silentLog.debug.mockClear();
     mod = new NormalizationModule({
       bus,
-      marketRepo,
       log: silentLog,
     });
   });
@@ -165,7 +140,7 @@ describe("NormalizationModule", () => {
     await mod.stop();
   });
 
-  it("persists each market to the market repository", async () => {
+  it("does not write snapshots back into the market repository", async () => {
     await mod.start();
 
     await bus.publish("MarketSnapshotReceived", {
@@ -179,13 +154,10 @@ describe("NormalizationModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(marketRepo.save).toHaveBeenCalledTimes(2);
-
-    const firstSave = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
-    expect(firstSave.slug).toBe("btc-above-100k-price");
-
-    const secondSave = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[1]![0] as Market;
-    expect(secondSave.slug).toBe("some-other-market");
+    expect(silentLog.debug).toHaveBeenCalledWith(
+      expect.objectContaining({ total: 2 }),
+      "normalization complete",
+    );
 
     await mod.stop();
   });
@@ -205,7 +177,6 @@ describe("NormalizationModule", () => {
     });
 
     expect(received).toHaveLength(0);
-    expect(marketRepo.save).not.toHaveBeenCalled();
   });
 
   it("preserves pricing data through normalization", async () => {

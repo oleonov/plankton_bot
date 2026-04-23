@@ -187,7 +187,6 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
 
   const normalizationModule = new NormalizationModule({
     bus,
-    marketRepo: repos.market,
     log,
   });
 

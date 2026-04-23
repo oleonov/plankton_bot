@@ -1,18 +1,21 @@
 /**
- * Normalization Module — consumes MarketSnapshotReceived events,
- * persists to the market catalog, and publishes NormalizedMarketUpdated.
+ * Normalization Module — consumes MarketSnapshotReceived events and publishes
+ * NormalizedMarketUpdated.
+ *
+ * It must not write snapshots back into `markets`. Scanner owns catalog fields
+ * such as selection_status/tradable. Re-persisting stream snapshots here
+ * clobbers that catalog state and destabilizes the WS pricing tier.
  *
  * Family fields (familyId, familyKey, regime, horizon) are set to null;
  * family matching was removed in Phase 6. AlgoDecisionModule drives
  * selection via algoRules + SelectedMarketCache.
  */
 
-import type { RuntimeModule, EventBus, MarketRepository, NormalizedMarket } from "@plankton/domain";
+import type { RuntimeModule, EventBus, NormalizedMarket } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 export interface NormalizationModuleDeps {
   bus: EventBus;
-  marketRepo: MarketRepository;
   log: Logger;
 }
 
@@ -58,7 +61,6 @@ export class NormalizationModule implements RuntimeModule {
     readonly timestamp: number;
   }): Promise<void> {
     const enriched: NormalizedMarket[] = [];
-    const now = new Date().toISOString();
 
     for (const market of payload.markets) {
       enriched.push({
@@ -66,25 +68,6 @@ export class NormalizationModule implements RuntimeModule {
         outcomeIndex: market.outcomeIndex ?? null,
         regime: null,
         horizon: null,
-      });
-
-      this.deps.marketRepo.save({
-        tokenId: market.tokenId,
-        conditionId: market.conditionId,
-        slug: market.slug,
-        eventSlug: market.eventSlug,
-        question: market.question,
-        outcome: market.outcome,
-        outcomeIndex: market.outcomeIndex ?? null,
-        regime: null,
-        horizon: null,
-        endDate: market.endDate,
-        active: market.active,
-        tradable: market.tradable,
-        tickSize: market.tickSize,
-        negRisk: market.negRisk,
-        createdAt: now,
-        updatedAt: now,
       });
     }
 

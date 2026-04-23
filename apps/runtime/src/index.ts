@@ -487,7 +487,6 @@ async function main(): Promise<void> {
 
   const normalizationModule = new NormalizationModule({
     bus,
-    marketRepo: repos.market,
     log,
   });
 
