@@ -727,6 +727,131 @@ describe("MarketDataModule", () => {
     }
   });
 
+  it("keeps quiet gamma-sourced tracked tokens silent while the stream stays healthy", async () => {
+    vi.useFakeTimers();
+    try {
+      const tracked = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" }),
+      ];
+      (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map([
+          [
+            "tok-a",
+            {
+              bestBid: 0.4,
+              bestAsk: 0.6,
+              acceptingOrders: true,
+              enableOrderBook: true,
+              lastTradePrice: 0.5,
+              minOrderSize: 1,
+              bookSource: "gamma",
+            },
+          ],
+        ]),
+      );
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+      await stream!.emitLifecycleEvents([
+        {
+          type: "new_market",
+          conditionId: "cond-new",
+          marketId: "market-new",
+          slug: "market-new",
+          question: "Will new market happen?",
+          active: true,
+          tokenIds: [createTokenId("tok-z")],
+          timestamp: Date.now(),
+        },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).not.toHaveBeenCalled();
+      expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(0);
+      expect(mod.getMetricsSnapshot().silentTrackedTokenCount).toBe(1);
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("re-polls quiet gamma-sourced tracked tokens after a stream gap", async () => {
+    vi.useFakeTimers();
+    try {
+      const tracked = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" }),
+      ];
+      (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map([
+          [
+            "tok-a",
+            {
+              bestBid: 0.4,
+              bestAsk: 0.6,
+              acceptingOrders: true,
+              enableOrderBook: true,
+              lastTradePrice: 0.5,
+              minOrderSize: 1,
+              bookSource: "gamma",
+            },
+          ],
+        ]),
+      );
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+      await stream!.emitLifecycleEvents([
+        {
+          type: "new_market",
+          conditionId: "cond-new",
+          marketId: "market-new",
+          slug: "market-new",
+          question: "Will new market happen?",
+          active: true,
+          tokenIds: [createTokenId("tok-z")],
+          timestamp: Date.now(),
+        },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      await stream!.emitGap();
+      await vi.advanceTimersByTimeAsync(300);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(1);
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("clears pendingGapTokenIds after a successful poll so stale entries don't accumulate", async () => {
     const tracked = [makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" })];
     (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);

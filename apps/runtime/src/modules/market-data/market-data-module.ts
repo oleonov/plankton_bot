@@ -352,7 +352,7 @@ export class MarketDataModule implements RuntimeModule {
         this.deps.pollIntervalMs * 3,
       );
       const streamMetrics = this.stream?.getMetricsSnapshot?.() ?? null;
-      const clobQuietPollingRelaxed =
+      const quietWsTierPollingRelaxed =
         this.stream != null &&
         !this._streamDegradedMode &&
         streamMetrics != null &&
@@ -383,10 +383,12 @@ export class MarketDataModule implements RuntimeModule {
           const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
           if (cached == null) return true;
           const ageMs = now - lastUpdatedAt;
+          const tokenSubscribedOnHealthyWsTier =
+            quietWsTierPollingRelaxed && this.wsTierRoleByToken.has(tokenId);
           const refreshBudgetMs = getTrackedTokenRefreshBudgetMs(
             cached,
             this.deps.pollIntervalMs,
-            clobQuietPollingRelaxed,
+            tokenSubscribedOnHealthyWsTier,
           );
           if (ageMs > refreshBudgetMs) return true;
           if (ageMs > fallbackHardStaleMs) {
@@ -842,12 +844,16 @@ function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[]
 function getTrackedTokenRefreshBudgetMs(
   market: Pick<NormalizedMarket, "bookSource">,
   pollIntervalMs: number,
-  clobQuietPollingRelaxed: boolean,
+  tokenSubscribedOnHealthyWsTier: boolean,
 ): number {
+  if (
+    tokenSubscribedOnHealthyWsTier &&
+    market.bookSource != null &&
+    market.bookSource !== "unknown"
+  ) {
+    return Number.POSITIVE_INFINITY;
+  }
   if (market.bookSource === "clob") {
-    if (clobQuietPollingRelaxed) {
-      return Number.POSITIVE_INFINITY;
-    }
     return Math.max(STREAM_QUIET_CLOB_REFRESH_MIN_STALE_MS, pollIntervalMs * 12);
   }
   return Math.max(STREAM_GAMMA_REFRESH_MIN_STALE_MS, pollIntervalMs * 6);
