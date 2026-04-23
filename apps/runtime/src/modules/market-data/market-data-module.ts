@@ -70,6 +70,12 @@ export interface MarketDataFallbackReasonCounts {
   streamUnavailable: number;
 }
 
+export interface MarketDataTrackedDiffCounts {
+  added: number;
+  removed: number;
+  unchanged: number;
+}
+
 export interface MarketDataStreamActivitySnapshot {
   readonly wsEnabled: boolean;
   readonly windowStartMs: number | null;
@@ -88,6 +94,9 @@ export interface MarketDataStreamActivitySnapshot {
   readonly fallbackPollCount: number;
   readonly fallbackReasonCounts: MarketDataFallbackReasonCounts;
   readonly fallbackRoleCounts: MarketDataTrackedRoleCounts;
+  readonly trackedDiffCounts: MarketDataTrackedDiffCounts;
+  readonly cachedTrackedTokenCountAtPollStart: number;
+  readonly pricingHitCountLastPoll: number;
   readonly fullBookTokenCount: number;
   readonly bookEventsReceived: number;
   readonly narrowSubscribeCount: number;
@@ -144,6 +153,9 @@ export class MarketDataModule implements RuntimeModule {
   private lastFallbackPollCount = 0;
   private lastFallbackReasonCounts: MarketDataFallbackReasonCounts = zeroFallbackReasonCounts();
   private lastFallbackRoleCounts: MarketDataTrackedRoleCounts = zeroTrackedRoleCounts();
+  private lastTrackedDiffCounts: MarketDataTrackedDiffCounts = zeroTrackedDiffCounts();
+  private lastCachedTrackedTokenCountAtPollStart = 0;
+  private lastPricingHitCount = 0;
   private readonly wsTierRoleByToken = new Map<string, WsTierRole>();
   private readonly pendingStreamUpdatesByToken = new Map<string, MarketPricingStreamUpdate>();
   private streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -314,6 +326,9 @@ export class MarketDataModule implements RuntimeModule {
       fallbackPollCount: this.lastFallbackPollCount,
       fallbackReasonCounts: this.lastFallbackReasonCounts,
       fallbackRoleCounts: this.lastFallbackRoleCounts,
+      trackedDiffCounts: this.lastTrackedDiffCounts,
+      cachedTrackedTokenCountAtPollStart: this.lastCachedTrackedTokenCountAtPollStart,
+      pricingHitCountLastPoll: this.lastPricingHitCount,
       fullBookTokenCount: streamMetrics?.fullBookTokenCount ?? 0,
       bookEventsReceived: streamMetrics?.bookEventsReceived ?? 0,
       narrowSubscribeCount: streamMetrics?.narrowSubscribeCount ?? 0,
@@ -369,6 +384,11 @@ export class MarketDataModule implements RuntimeModule {
       }
 
       const trackedDiff = this.refreshTrackedMarkets(tracked);
+      this.lastTrackedDiffCounts = {
+        added: trackedDiff.added.length,
+        removed: trackedDiff.removed.length,
+        unchanged: tracked.length - trackedDiff.added.length,
+      };
       await this.publishTrackedMarketsChanged(trackedDiff);
       this.lastTrackedTokenCount = tracked.length;
       if (tracked.length === 0) {
@@ -377,6 +397,9 @@ export class MarketDataModule implements RuntimeModule {
         this.lastSilentTrackedTokenCount = 0;
         this.lastFallbackReasonCounts = zeroFallbackReasonCounts();
         this.lastFallbackRoleCounts = zeroTrackedRoleCounts();
+        this.lastTrackedDiffCounts = zeroTrackedDiffCounts();
+        this.lastCachedTrackedTokenCountAtPollStart = 0;
+        this.lastPricingHitCount = 0;
         this.stream?.setTokenIds([]);
         this.log.debug("no active tracked markets — skipping pricing, waiting for scanner");
         // Do NOT update lastSuccessfulDataMs — no tracked markets means
@@ -405,6 +428,7 @@ export class MarketDataModule implements RuntimeModule {
         streamMetrics.wsEventsReceived > 0 &&
         streamMetrics.wsEventGapDetected === 0;
       let silentTrackedTokenCount = 0;
+      let cachedTrackedTokenCountAtPollStart = 0;
       const fallbackReasonCounts = zeroFallbackReasonCounts();
       const fallbackRoleCounts = zeroTrackedRoleCounts();
 
@@ -439,6 +463,9 @@ export class MarketDataModule implements RuntimeModule {
             return true;
           }
           const cached = this.marketCache.get(tokenId);
+          if (cached != null) {
+            cachedTrackedTokenCountAtPollStart += 1;
+          }
           const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
           const lastAttemptedAt = this.lastPricingAttemptAtByToken.get(tokenId) ?? 0;
           if (cached == null) {
@@ -480,6 +507,7 @@ export class MarketDataModule implements RuntimeModule {
       this.lastFallbackPollCount = tokenIdsToPoll.length;
       this.lastFallbackReasonCounts = fallbackReasonCounts;
       this.lastFallbackRoleCounts = fallbackRoleCounts;
+      this.lastCachedTrackedTokenCountAtPollStart = cachedTrackedTokenCountAtPollStart;
       this.log.debug(
         {
           trackedCount: tracked.length,
@@ -488,6 +516,8 @@ export class MarketDataModule implements RuntimeModule {
           fallbackPollCount: tokenIdsToPoll.length,
           fallbackReasonCounts,
           fallbackRoleCounts,
+          trackedDiffCounts: this.lastTrackedDiffCounts,
+          cachedTrackedTokenCountAtPollStart,
           forceFullPoll: this.forceFullPoll,
         },
         "fetching pricing for tracked markets",
@@ -499,6 +529,7 @@ export class MarketDataModule implements RuntimeModule {
         tokenIdsToPoll.length > 0
           ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll, { timeoutMs })
           : new Map<string, import("@plankton/domain").MarketPricingSnapshot>();
+      this.lastPricingHitCount = pricingMap.size;
       for (const tokenId of tokenIdsToPoll) {
         this.lastPricingAttemptAtByToken.set(tokenId, now);
       }
@@ -527,7 +558,13 @@ export class MarketDataModule implements RuntimeModule {
       // polls to the full 9735-token batch.
       this.pendingGapTokenIds.clear();
       this.log.info(
-        { tokenCount: markets.length, polledTokenCount: tokenIdsToPoll.length },
+        {
+          tokenCount: markets.length,
+          polledTokenCount: tokenIdsToPoll.length,
+          pricingHitCount: pricingMap.size,
+          trackedDiffCounts: this.lastTrackedDiffCounts,
+          cachedTrackedTokenCountAtPollStart,
+        },
         "poll cycle complete",
       );
 
@@ -973,6 +1010,14 @@ function zeroTrackedBookSourceCounts(): MarketDataTrackedBookSourceCounts {
     gamma: 0,
     gammaFallback: 0,
     other: 0,
+  };
+}
+
+function zeroTrackedDiffCounts(): MarketDataTrackedDiffCounts {
+  return {
+    added: 0,
+    removed: 0,
+    unchanged: 0,
   };
 }
 
