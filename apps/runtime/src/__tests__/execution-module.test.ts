@@ -358,6 +358,59 @@ describe("ExecutionModule", () => {
     await mod.stop();
   });
 
+  it("rejects BUY before gateway when price is below the market tick", async () => {
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        price: 0.0005,
+        tickSize: 0.001,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: "invalid-order-price",
+      errorCode: "INVALID_PRICE",
+    });
+
+    await mod.stop();
+  });
+
+  it("rejects SELL before gateway when price is above the market upper bound", async () => {
+    await mod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        side: "sell",
+        price: 1,
+        tickSize: 0.001,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]).toMatchObject({
+      reason: "invalid-order-price",
+      errorCode: "INVALID_PRICE",
+    });
+
+    await mod.stop();
+  });
+
   // ─── Deduplication ────────────────────────────────────────────────
 
   it("skips duplicate commandId (idempotency)", async () => {
@@ -1126,7 +1179,7 @@ describe("ExecutionModule", () => {
 
     // 8 (positions) + 7 (open buys) + 1 (new) = 16 > 15 → reject
     await bus.publish("PlaceOrderRequested", {
-      command: makePlaceCmd({ price: 1, size: 1 }),
+      command: makePlaceCmd({ price: 0.5, size: 2, tickSize: 0.001 }),
       timestamp: Date.now(),
     });
 
@@ -1163,7 +1216,7 @@ describe("ExecutionModule", () => {
     await guardedMod.start();
 
     await bus.publish("PlaceOrderRequested", {
-      command: makePlaceCmd({ price: 1, size: 1 }),
+      command: makePlaceCmd({ price: 0.5, size: 2, tickSize: 0.001 }),
       timestamp: Date.now(),
     });
 

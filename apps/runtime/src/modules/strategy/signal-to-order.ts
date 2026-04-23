@@ -28,6 +28,10 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import {
+  validateExecutablePrice,
+  type ExecutablePriceValidationFailureReason,
+} from "../../executable-price.js";
+import {
   applyOrderBookToMarket,
   type CandidateBookCache,
   type CandidateBookResolution,
@@ -177,7 +181,7 @@ export class SignalToOrderBridge {
     }
 
     const executionTerms = this.resolveExecutionTerms(signal, market);
-    if (!executionTerms) {
+    if (executionTerms.kind === "unavailable") {
       this.log.warn(
         {
           signalId: signal.signalId,
@@ -195,6 +199,29 @@ export class SignalToOrderBridge {
         ["execution-price-unavailable"],
         { cacheStatus: pricing.cacheStatus },
       );
+      return;
+    }
+    if (executionTerms.kind === "invalid") {
+      this.log.warn(
+        {
+          signalId: signal.signalId,
+          tokenId: signal.tokenId,
+          side: signal.side,
+          price: executionTerms.price,
+          tickSize: executionTerms.tickSize,
+          validationReason: executionTerms.validationReason,
+          cacheStatus: pricing.cacheStatus,
+        },
+        "approved signal skipped — invalid execution price",
+      );
+      await this.publishConversionSkipped(signal, "execution-terms", ["execution-price-invalid"], {
+        cacheStatus: pricing.cacheStatus,
+        price: executionTerms.price,
+        tickSize: executionTerms.tickSize,
+        minPrice: executionTerms.minPrice,
+        maxPrice: executionTerms.maxPrice,
+        validationReason: executionTerms.validationReason,
+      });
       return;
     }
 
@@ -327,11 +354,22 @@ export class SignalToOrderBridge {
   private resolveExecutionTerms(
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
-  ): { price: number; postOnly?: boolean } | null {
+  ): ExecutionTermsResolution {
     const price = signal.side === "buy" ? market.bestBid : market.bestAsk;
-    if (price == null || !Number.isFinite(price) || price <= 0) return null;
+    if (price == null || !Number.isFinite(price) || price <= 0) return { kind: "unavailable" };
+    const validation = validateExecutablePrice(price, market.tickSize);
+    if (!validation.ok) {
+      return {
+        kind: "invalid",
+        price,
+        tickSize: validation.tickSize,
+        minPrice: validation.minPrice,
+        maxPrice: validation.maxPrice,
+        validationReason: validation.reason,
+      };
+    }
     const isRelayer = this.deps.liveLiteGuard?.getWalletMode() === "relayer";
-    return isRelayer ? { price, postOnly: true } : { price };
+    return isRelayer ? { kind: "ok", price, postOnly: true } : { kind: "ok", price };
   }
 
   private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {
@@ -509,3 +547,15 @@ function resolveOrderSize(
 function isEntryReason(reason: string): boolean {
   return ENTRY_REASONS.has(reason);
 }
+
+type ExecutionTermsResolution =
+  | { kind: "ok"; price: number; postOnly?: boolean }
+  | { kind: "unavailable" }
+  | {
+      kind: "invalid";
+      price: number;
+      tickSize: number;
+      minPrice: number;
+      maxPrice: number;
+      validationReason: ExecutablePriceValidationFailureReason;
+    };

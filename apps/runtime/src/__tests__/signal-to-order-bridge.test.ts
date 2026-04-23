@@ -350,6 +350,94 @@ describe("SignalToOrderBridge", () => {
     expect(placed[0]!.command.price).toBe(0.05);
   });
 
+  it("skips BUY when the executable price is below the market tick", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: unknown[] = [];
+    const skipped: Array<{ reasons: readonly string[]; diagnostics: Record<string, unknown> }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload as (typeof skipped)[number]);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({
+        tickSize: 0.001,
+        bestBid: 0.0005,
+        bestAsk: 0.001,
+        midPrice: 0.00075,
+        spread: 0.0005,
+        bookSource: "clob",
+      }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("execution-price-invalid");
+    expect(skipped[0]!.diagnostics).toMatchObject({
+      price: 0.0005,
+      tickSize: 0.001,
+      validationReason: "price-below-min-tick",
+    });
+  });
+
+  it("skips SELL when the executable price is above the upper market bound", async () => {
+    const bus = new InProcessEventBus();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+    });
+    bridge.subscribe();
+
+    const placed: unknown[] = [];
+    const skipped: Array<{ reasons: readonly string[]; diagnostics: Record<string, unknown> }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload as (typeof skipped)[number]);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell" },
+      market: makeMarket({
+        tickSize: 0.001,
+        bestBid: 0.999,
+        bestAsk: 1,
+        midPrice: 0.9995,
+        spread: 0.001,
+        bookSource: "clob",
+      }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("execution-price-invalid");
+    expect(skipped[0]!.diagnostics).toMatchObject({
+      price: 1,
+      tickSize: 0.001,
+      validationReason: "price-above-max-bound",
+    });
+  });
+
   it("uses base market for stale clob books without refresh (no bundle)", async () => {
     const bus = new InProcessEventBus();
     const refreshedEntry = {

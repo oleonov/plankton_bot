@@ -33,6 +33,7 @@ import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
+import { validateExecutablePrice } from "../../executable-price.js";
 import { hasWalletBuyBudget, resolveWalletBuyBudget } from "../../wallet-buy-budget.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
@@ -208,6 +209,45 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    // Market active check: reject orders on deactivated/resolved markets
+    const market = this.deps.marketRepo.findByTokenId(cmd.tokenId);
+    if (market && !market.active) {
+      this.log.warn(
+        { commandId: cmd.commandId, tokenId: cmd.tokenId },
+        "order rejected — market inactive",
+      );
+      await this.deps.bus.publish("OrderRejected", {
+        commandId: cmd.commandId,
+        clientOrderId: cmd.clientOrderId,
+        tokenId: cmd.tokenId,
+        conditionId: cmd.conditionId,
+        reason: "market-inactive",
+        errorCode: "MARKET_INACTIVE",
+        signalReason: cmd.signalReason ?? null,
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
+    const invalidPriceRejection = this.getInvalidPriceRejection(cmd);
+    if (invalidPriceRejection) {
+      this.log.warn(
+        {
+          commandId: cmd.commandId,
+          tokenId: cmd.tokenId,
+          side: cmd.side,
+          price: cmd.price,
+          tickSize: invalidPriceRejection.tickSize,
+          minPrice: invalidPriceRejection.minPrice,
+          maxPrice: invalidPriceRejection.maxPrice,
+          validationReason: invalidPriceRejection.reason,
+        },
+        "order rejected — invalid execution price",
+      );
+      await this.rejectOrder(cmd, "invalid-order-price", ExchangeErrorCode.InvalidPrice);
+      return;
+    }
+
     const notional = cmd.price * cmd.size;
 
     // Live-lite order cap check (Layer 4)
@@ -270,26 +310,6 @@ export class ExecutionModule implements RuntimeModule {
           return;
         }
       }
-    }
-
-    // Market active check: reject orders on deactivated/resolved markets
-    const market = this.deps.marketRepo.findByTokenId(cmd.tokenId);
-    if (market && !market.active) {
-      this.log.warn(
-        { commandId: cmd.commandId, tokenId: cmd.tokenId },
-        "order rejected — market inactive",
-      );
-      await this.deps.bus.publish("OrderRejected", {
-        commandId: cmd.commandId,
-        clientOrderId: cmd.clientOrderId,
-        tokenId: cmd.tokenId,
-        conditionId: cmd.conditionId,
-        reason: "market-inactive",
-        errorCode: "MARKET_INACTIVE",
-        signalReason: cmd.signalReason ?? null,
-        timestamp: Date.now(),
-      });
-      return;
     }
 
     const minOrderSizeRejection = this.getMinOrderSizeRejection(cmd);
@@ -719,6 +739,22 @@ export class ExecutionModule implements RuntimeModule {
       return null;
     }
     return { minOrderSize };
+  }
+
+  private getInvalidPriceRejection(cmd: PlaceOrderCommand): {
+    reason: string;
+    tickSize: number;
+    minPrice: number;
+    maxPrice: number;
+  } | null {
+    const validation = validateExecutablePrice(cmd.price, cmd.tickSize);
+    if (validation.ok) return null;
+    return {
+      reason: validation.reason,
+      tickSize: validation.tickSize,
+      minPrice: validation.minPrice,
+      maxPrice: validation.maxPrice,
+    };
   }
 
   private resolveCommandMinOrderSize(cmd: PlaceOrderCommand): number | null {
