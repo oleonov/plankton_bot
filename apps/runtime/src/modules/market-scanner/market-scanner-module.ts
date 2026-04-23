@@ -76,8 +76,11 @@ export class MarketScannerModule implements RuntimeModule {
         this.scheduleHintScan();
       }),
     );
-    // Fire first scan without blocking startup
-    this.scan().catch((err) => this.log.error({ err }, "initial scan failed"));
+    // Fire the first background scan only when startup didn't already complete
+    // a fresh blocking scan immediately beforehand.
+    if (!this.hasFreshSuccessfulScan()) {
+      this.scan().catch((err) => this.log.error({ err }, "initial scan failed"));
+    }
     this.timer = setInterval(() => {
       this.scan().catch((err) => this.log.error({ err }, "scan cycle error"));
     }, this.deps.scanIntervalMs);
@@ -263,23 +266,19 @@ export class MarketScannerModule implements RuntimeModule {
   }
 
   private scheduleHintScan(): void {
-    const now = Date.now();
-    if (
-      this.lastSuccessfulScanMs > 0 &&
-      now - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
-    ) {
-      return;
-    }
+    if (this.hasFreshSuccessfulScan()) return;
     if (this.hintTimer) return;
     this.hintTimer = setTimeout(() => {
       this.hintTimer = null;
-      if (
-        this.lastSuccessfulScanMs > 0 &&
-        Date.now() - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
-      ) {
-        return;
-      }
+      if (this.hasFreshSuccessfulScan()) return;
       void this.scan().catch((err) => this.log.error({ err }, "hint-triggered scan failed"));
     }, HINT_SCAN_DEBOUNCE_MS);
+  }
+
+  private hasFreshSuccessfulScan(nowMs = Date.now()): boolean {
+    return (
+      this.lastSuccessfulScanMs > 0 &&
+      nowMs - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
+    );
   }
 }

@@ -911,6 +911,20 @@ describe("MarketDataModule", () => {
         timeoutMs: 5_010,
       });
       expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(1);
+      expect(mod.getMetricsSnapshot().fallbackReasonCounts).toEqual({
+        pendingGap: 0,
+        missingCache: 0,
+        unknownSourceRefresh: 1,
+        knownSourceRefresh: 0,
+        forceFullPoll: 0,
+        streamUnavailable: 0,
+      });
+      expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
+        executionCritical: 1,
+        entryCandidate: 0,
+        legacy: 0,
+        unassigned: 0,
+      });
 
       await vi.advanceTimersByTimeAsync(120_000);
       await mod.poll();
@@ -983,6 +997,20 @@ describe("MarketDataModule", () => {
         timeoutMs: 5_010,
       });
       expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(1);
+      expect(mod.getMetricsSnapshot().fallbackReasonCounts).toEqual({
+        pendingGap: 0,
+        missingCache: 0,
+        unknownSourceRefresh: 1,
+        knownSourceRefresh: 0,
+        forceFullPoll: 0,
+        streamUnavailable: 0,
+      });
+      expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
+        executionCritical: 1,
+        entryCandidate: 0,
+        legacy: 0,
+        unassigned: 0,
+      });
 
       await mod.stop();
     } finally {
@@ -1050,6 +1078,20 @@ describe("MarketDataModule", () => {
       expect.objectContaining({ timeoutMs: expect.any(Number) }),
     );
     expect(mod.getMetricsSnapshot().wsEventGapDetected).toBe(1);
+    expect(mod.getMetricsSnapshot().fallbackReasonCounts).toEqual({
+      pendingGap: 0,
+      missingCache: 0,
+      unknownSourceRefresh: 0,
+      knownSourceRefresh: 0,
+      forceFullPoll: 2,
+      streamUnavailable: 0,
+    });
+    expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
+      executionCritical: 0,
+      entryCandidate: 0,
+      legacy: 2,
+      unassigned: 0,
+    });
 
     await mod.stop();
   });

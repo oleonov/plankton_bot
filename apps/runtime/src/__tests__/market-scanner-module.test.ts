@@ -711,6 +711,30 @@ describe("MarketScannerModule", () => {
     await mod.stop();
   });
 
+  it("skips duplicate initial scan on start when a fresh startup scan already ran", async () => {
+    const realBus = new InProcessEventBus();
+    const discoveryGateway = createMockDiscoveryGateway();
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const mod = new MarketScannerModule({
+      discoveryGateway,
+      marketRepo: createMockMarketRepo(),
+      bus: realBus,
+      log: silentLog,
+      scanIntervalMs: 300_000,
+      selectionRuleEngine: SEEDED_ENGINE,
+    });
+    const scanSpy = vi.spyOn(mod, "scan").mockResolvedValue(undefined);
+    (mod as unknown as { lastSuccessfulScanMs: number }).lastSuccessfulScanMs = Date.now();
+
+    await mod.start();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(scanSpy).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
   it("consumes new-market WS hints with debounce and updates hint metrics", async () => {
     vi.useFakeTimers();
     try {
