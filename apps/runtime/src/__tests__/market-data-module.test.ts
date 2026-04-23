@@ -852,6 +852,144 @@ describe("MarketDataModule", () => {
     }
   });
 
+  it("does not re-poll quiet unknown entry-candidate tokens every cycle on a healthy stream", async () => {
+    vi.useFakeTimers();
+    try {
+      const executionCritical = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-exec"), conditionId: "cond-exec" }),
+      ];
+      const entryCandidates = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-entry"), conditionId: "cond-entry" }),
+      ];
+      (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+        executionCritical,
+        entryCandidates,
+        discoveryOnly: [],
+      });
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+      mod = new MarketDataModule({
+        gateway,
+        marketRepo,
+        bus,
+        log: silentLog,
+        pollIntervalMs: 5_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-123",
+        maxTrackedTokens: 2,
+      });
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+      await stream!.emitLifecycleEvents([
+        {
+          type: "new_market",
+          conditionId: "cond-new",
+          marketId: "market-new",
+          slug: "market-new",
+          question: "Will new market happen?",
+          active: true,
+          tokenIds: [createTokenId("tok-z")],
+          timestamp: Date.now(),
+        },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-exec"], {
+        timeoutMs: 5_010,
+      });
+      expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(2);
+      expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-exec", "tok-entry"], {
+        timeoutMs: 5_020,
+      });
+      expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(2);
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still re-polls quiet unknown execution-critical tokens on the short safety budget", async () => {
+    vi.useFakeTimers();
+    try {
+      const executionCritical = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-exec"), conditionId: "cond-exec" }),
+      ];
+      (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+        executionCritical,
+        entryCandidates: [],
+        discoveryOnly: [],
+      });
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+      mod = new MarketDataModule({
+        gateway,
+        marketRepo,
+        bus,
+        log: silentLog,
+        pollIntervalMs: 5_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-123",
+        maxTrackedTokens: 1,
+      });
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+      await stream!.emitLifecycleEvents([
+        {
+          type: "new_market",
+          conditionId: "cond-new",
+          marketId: "market-new",
+          slug: "market-new",
+          question: "Will new market happen?",
+          active: true,
+          tokenIds: [createTokenId("tok-z")],
+          timestamp: Date.now(),
+        },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(20_000);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-exec"], {
+        timeoutMs: 5_010,
+      });
+      expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(1);
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("clears pendingGapTokenIds after a successful poll so stale entries don't accumulate", async () => {
     const tracked = [makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" })];
     (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);

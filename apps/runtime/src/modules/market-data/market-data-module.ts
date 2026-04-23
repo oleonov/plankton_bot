@@ -36,6 +36,9 @@ import {
 const STREAM_FALLBACK_MIN_STALE_MS = 15_000;
 const STREAM_GAMMA_REFRESH_MIN_STALE_MS = 30_000;
 const STREAM_QUIET_CLOB_REFRESH_MIN_STALE_MS = 60_000;
+const STREAM_UNKNOWN_EXECUTION_CRITICAL_REFRESH_MIN_STALE_MS = 15_000;
+const STREAM_UNKNOWN_ENTRY_CANDIDATE_REFRESH_MIN_STALE_MS = 120_000;
+const STREAM_UNKNOWN_LEGACY_REFRESH_MIN_STALE_MS = 30_000;
 const STREAM_UPDATE_COALESCE_MS = 100;
 // Shard fan-out: one WS disconnect can fire 20× onGapDetected in quick succession,
 // one per shard. Coalesce the warn log into a single line per burst. State
@@ -103,6 +106,7 @@ export class MarketDataModule implements RuntimeModule {
   private readonly marketCache = new Map<string, NormalizedMarket>();
   private readonly trackedMarketsByToken = new Map<string, Market>();
   private readonly lastPricingUpdateAtByToken = new Map<string, number>();
+  private readonly lastPricingAttemptAtByToken = new Map<string, number>();
   private readonly pendingGapTokenIds = new Set<string>();
   private readonly log: Logger;
   private forceFullPoll = false;
@@ -381,14 +385,20 @@ export class MarketDataModule implements RuntimeModule {
           if (this.pendingGapTokenIds.has(tokenId)) return true;
           const cached = this.marketCache.get(tokenId);
           const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
+          const lastAttemptedAt = this.lastPricingAttemptAtByToken.get(tokenId) ?? 0;
           if (cached == null) return true;
-          const ageMs = now - lastUpdatedAt;
-          const tokenSubscribedOnHealthyWsTier =
-            quietWsTierPollingRelaxed && this.wsTierRoleByToken.has(tokenId);
+          const role = this.wsTierRoleByToken.get(tokenId);
+          const refreshReferenceAt =
+            cached.bookSource == null || cached.bookSource === "unknown"
+              ? Math.max(lastUpdatedAt, lastAttemptedAt)
+              : lastUpdatedAt;
+          const ageMs = now - refreshReferenceAt;
+          const tokenSubscribedOnHealthyWsTier = quietWsTierPollingRelaxed && role != null;
           const refreshBudgetMs = getTrackedTokenRefreshBudgetMs(
             cached,
             this.deps.pollIntervalMs,
             tokenSubscribedOnHealthyWsTier,
+            role,
           );
           if (ageMs > refreshBudgetMs) return true;
           if (ageMs > fallbackHardStaleMs) {
@@ -418,6 +428,9 @@ export class MarketDataModule implements RuntimeModule {
         tokenIdsToPoll.length > 0
           ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll, { timeoutMs })
           : new Map<string, import("@plankton/domain").MarketPricingSnapshot>();
+      for (const tokenId of tokenIdsToPoll) {
+        this.lastPricingAttemptAtByToken.set(tokenId, now);
+      }
       const markets: NormalizedMarket[] = [];
 
       for (const market of tracked) {
@@ -745,6 +758,9 @@ export class MarketDataModule implements RuntimeModule {
     for (const tokenId of [...this.lastPricingUpdateAtByToken.keys()]) {
       if (!nextTokenIds.has(tokenId)) this.lastPricingUpdateAtByToken.delete(tokenId);
     }
+    for (const tokenId of [...this.lastPricingAttemptAtByToken.keys()]) {
+      if (!nextTokenIds.has(tokenId)) this.lastPricingAttemptAtByToken.delete(tokenId);
+    }
     for (const tokenId of [...this.wsTierRoleByToken.keys()]) {
       if (!nextTokenIds.has(tokenId)) this.wsTierRoleByToken.delete(tokenId);
     }
@@ -842,10 +858,20 @@ function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[]
 }
 
 function getTrackedTokenRefreshBudgetMs(
-  market: Pick<NormalizedMarket, "bookSource">,
+  market: { bookSource?: string | null },
   pollIntervalMs: number,
   tokenSubscribedOnHealthyWsTier: boolean,
+  role?: WsTierRole,
 ): number {
+  if (market.bookSource == null || market.bookSource === "unknown") {
+    if (role === "executionCritical") {
+      return Math.max(STREAM_UNKNOWN_EXECUTION_CRITICAL_REFRESH_MIN_STALE_MS, pollIntervalMs * 3);
+    }
+    if (role === "entryCandidate") {
+      return Math.max(STREAM_UNKNOWN_ENTRY_CANDIDATE_REFRESH_MIN_STALE_MS, pollIntervalMs * 24);
+    }
+    return Math.max(STREAM_UNKNOWN_LEGACY_REFRESH_MIN_STALE_MS, pollIntervalMs * 6);
+  }
   if (
     tokenSubscribedOnHealthyWsTier &&
     market.bookSource != null &&
