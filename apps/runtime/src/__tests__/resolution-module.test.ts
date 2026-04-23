@@ -1314,7 +1314,7 @@ describe("ResolutionModule", () => {
       expect(settledEvents[0]!.settlementPrice).toBe(0);
     });
 
-    it("submits on-chain redeem and still settles locally when gateway is present", async () => {
+    it("submits on-chain redeem and settles locally when gateway succeeds", async () => {
       const gateway = createMockGateway();
       mod = createModule({ gateway });
 
@@ -1333,7 +1333,7 @@ describe("ResolutionModule", () => {
       expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
     });
 
-    it("still settles locally when on-chain redeem throws", async () => {
+    it("does not settle locally when on-chain redeem throws", async () => {
       const gateway = createMockGateway();
       (gateway.redeemPositions as any).mockRejectedValue(new Error("relayer down"));
       mod = createModule({ gateway });
@@ -1349,10 +1349,14 @@ describe("ResolutionModule", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       await mod.stop();
 
-      expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+      expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
       expect(log.error).toHaveBeenCalledWith(
         expect.objectContaining({ conditionIds: [CONDITION] }),
         "algo-triggered on-chain redeem failed",
+      );
+      expect(log.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ conditionIds: [CONDITION] }),
+        "algo-triggered redeem skipped local settlement until on-chain redeem succeeds",
       );
     });
 
@@ -1360,7 +1364,7 @@ describe("ResolutionModule", () => {
     // baseline showed the same conditionId hitting the gateway up to 14× per
     // 24 h window; these tests pin the 3-failure → 1-hour lockout contract.
     describe("circuit breaker (Phase 2.B)", () => {
-      it("opens circuit after 3 consecutive failures; 4th call skips gateway and still settles locally", async () => {
+      it("opens circuit after 3 consecutive failures; 4th call skips gateway and does not settle locally", async () => {
         const gateway = createMockGateway();
         (gateway.redeemPositions as any).mockRejectedValue(new Error("relayer down"));
         mod = createModule({ gateway });
@@ -1391,8 +1395,7 @@ describe("ResolutionModule", () => {
           "algo_redeem_circuit_open",
         );
 
-        // Local settle must still run on every attempt.
-        expect(settler.settleAlgoRedeem as any).toHaveBeenCalledTimes(4);
+        expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
 
         vi.useRealTimers();
         await mod.stop();
@@ -1491,8 +1494,8 @@ describe("ResolutionModule", () => {
     });
 
     // Phase 3.B: skip gateway.redeemPositions when outcome-token balance is
-    // already zero (already-redeemed or nothing-to-redeem). Local settle is
-    // idempotent and still runs; drift detector is the primary safety net.
+    // already zero (already-redeemed or nothing-to-redeem). Local settle only
+    // proceeds for already-redeemed or successfully submitted conditions.
     describe("already-redeemed pre-check (Phase 3.B)", () => {
       it("skips gateway.redeemPositions when all outcome-token balances are zero", async () => {
         const gateway = createMockGateway(undefined, { "tok-yes": 0n });
@@ -1510,7 +1513,7 @@ describe("ResolutionModule", () => {
 
         expect(gateway.getOutcomeTokenBalance as any).toHaveBeenCalledWith(TOK_YES);
         expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
-        // Local settle still runs (idempotent).
+        // Already-redeemed conditions are still safe to close locally.
         expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
       });
 
@@ -1625,6 +1628,7 @@ describe("ResolutionModule", () => {
         // Only the failing id accrues a failure entry; the sibling stays clean.
         expect((mod as any).redeemFailures.get(COND_A)?.failureCount).toBe(1);
         expect((mod as any).redeemFailures.has(COND_B)).toBe(false);
+        expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([COND_B]);
       });
 
       it("clears redeem-failure bookkeeping when pre-check skips the gateway", async () => {

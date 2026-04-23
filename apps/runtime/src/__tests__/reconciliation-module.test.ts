@@ -879,8 +879,12 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
     } as unknown as ExchangeGateway;
     const bus = new InProcessEventBus();
     const events: RuntimeEventMap["PositionDriftDetected"][] = [];
+    const retries: RuntimeEventMap["RedeemRequested"][] = [];
     bus.subscribe("PositionDriftDetected", async (e) => {
       events.push(e);
+    });
+    bus.subscribe("RedeemRequested", async (e) => {
+      retries.push(e);
     });
 
     const mod = new ReconciliationModule({
@@ -915,6 +919,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
     expect(driftRepo.upsertCalls).toHaveLength(1);
     expect(driftRepo.upsertCalls[0]!.status).toBe("open");
     expect(driftRepo.upsertCalls[0]!.onChainBalance).toBe("12345");
+    expect(retries).toEqual([{ conditionIds: ["cond-A"], timestamp: expect.any(Number) }]);
   });
 
   it("emits nothing when on-chain balance is zero and marks prior drift resolved", async () => {
@@ -937,8 +942,12 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
     } as unknown as ExchangeGateway;
     const bus = new InProcessEventBus();
     const events: RuntimeEventMap["PositionDriftDetected"][] = [];
+    const retries: RuntimeEventMap["RedeemRequested"][] = [];
     bus.subscribe("PositionDriftDetected", async (e) => {
       events.push(e);
+    });
+    bus.subscribe("RedeemRequested", async (e) => {
+      retries.push(e);
     });
 
     const mod = new ReconciliationModule({
@@ -957,6 +966,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
 
     expect(count).toBe(0);
     expect(events).toHaveLength(0);
+    expect(retries).toHaveLength(0);
     expect(driftRepo.upsertCalls).toHaveLength(0);
     expect(driftRepo.resolvedIds).toEqual([row.settlementId]);
   });
@@ -982,8 +992,12 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
     } as unknown as ExchangeGateway;
     const bus = new InProcessEventBus();
     const events: RuntimeEventMap["PositionDriftDetected"][] = [];
+    const retries: RuntimeEventMap["RedeemRequested"][] = [];
     bus.subscribe("PositionDriftDetected", async (e) => {
       events.push(e);
+    });
+    bus.subscribe("RedeemRequested", async (e) => {
+      retries.push(e);
     });
 
     const mod = new ReconciliationModule({
@@ -1118,8 +1132,12 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
     } as unknown as ExchangeGateway;
     const bus = new InProcessEventBus();
     const events: RuntimeEventMap["PositionDriftDetected"][] = [];
+    const retries: RuntimeEventMap["RedeemRequested"][] = [];
     bus.subscribe("PositionDriftDetected", async (e) => {
       events.push(e);
+    });
+    bus.subscribe("RedeemRequested", async (e) => {
+      retries.push(e);
     });
 
     const mod = new ReconciliationModule({
@@ -1139,6 +1157,60 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
     // Balance fetched once, not twice — the sweep de-dupes on settlementId.
     expect(gateway.getOutcomeTokenBalance).toHaveBeenCalledTimes(1);
     expect(events).toHaveLength(1);
+    expect(retries).toEqual([{ conditionIds: [row.conditionId], timestamp: expect.any(Number) }]);
     expect(driftRepo.upsertCalls).toHaveLength(1);
+  });
+
+  it("re-queues on-chain redeem at most once per conditionId per drift pass", async () => {
+    const rows = [
+      makeAlgoRedeemRow({
+        settlementId: "algo-redeem-cond-A-tok-1",
+        tokenId: "tok-1",
+        conditionId: "cond-A",
+      }),
+      makeAlgoRedeemRow({
+        settlementId: "algo-redeem-cond-A-tok-2",
+        tokenId: "tok-2",
+        conditionId: "cond-A",
+      }),
+    ];
+    const ledgerRepo = createMockSettlementLedgerRepo(rows);
+    const driftRepo = createMockDriftRepo();
+    const gateway = {
+      placeOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      cancelAllOrders: vi.fn(),
+      getOpenOrders: vi.fn().mockResolvedValue([]),
+      getOpenOrdersForToken: vi.fn().mockResolvedValue([]),
+      getFills: vi.fn().mockResolvedValue([]),
+      getBalances: vi.fn().mockResolvedValue([]),
+      getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(55n),
+      redeemPositions: vi.fn(),
+      mergePositions: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+    } as unknown as ExchangeGateway;
+    const bus = new InProcessEventBus();
+    const retries: RuntimeEventMap["RedeemRequested"][] = [];
+    bus.subscribe("RedeemRequested", async (e) => {
+      retries.push(e);
+    });
+
+    const mod = new ReconciliationModule({
+      gateway,
+      bus,
+      orderRepo: {} as OrderRepository,
+      fillRepo: {} as FillRepository,
+      marketRepo: {} as MarketRepository,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      settlementLedgerRepo: ledgerRepo,
+      driftRepo,
+    });
+
+    await mod.runDriftCheck();
+
+    expect(retries).toEqual([{ conditionIds: ["cond-A"], timestamp: expect.any(Number) }]);
+    expect(driftRepo.upsertCalls).toHaveLength(2);
   });
 });

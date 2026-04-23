@@ -34,6 +34,8 @@ import {
 } from "./market-pricing-utils.js";
 
 const STREAM_FALLBACK_MIN_STALE_MS = 15_000;
+const STREAM_GAMMA_REFRESH_MIN_STALE_MS = 30_000;
+const STREAM_QUIET_CLOB_REFRESH_MIN_STALE_MS = 60_000;
 const STREAM_UPDATE_COALESCE_MS = 100;
 // Shard fan-out: one WS disconnect can fire 20× onGapDetected in quick succession,
 // one per shard. Coalesce the warn log into a single line per burst. State
@@ -53,6 +55,7 @@ export interface MarketDataStreamActivitySnapshot {
   readonly wsEventGapDetected: number;
   readonly wsLatencyMs: MarketPricingStreamMetricsSnapshot["wsLatencyMs"];
   readonly staleTokenCount: number;
+  readonly silentTrackedTokenCount: number;
   readonly fallbackPollCount: number;
   readonly fullBookTokenCount: number;
   readonly bookEventsReceived: number;
@@ -63,7 +66,11 @@ export interface MarketDataStreamActivitySnapshot {
   readonly newMarketEvents: number;
   readonly gammaFallbackCount: number;
   readonly gammaFallbackTrackedTokenCount: number;
+  readonly gammaFallbackExecutionCriticalCount: number;
+  readonly gammaFallbackEntryCandidateCount: number;
 }
+
+type WsTierRole = "executionCritical" | "entryCandidate" | "legacy";
 
 export interface MarketDataModuleDeps {
   gateway: MarketDataGateway;
@@ -101,7 +108,9 @@ export class MarketDataModule implements RuntimeModule {
   private forceFullPoll = false;
   private lastTrackedTokenCount = 0;
   private lastStaleTokenCount = 0;
+  private lastSilentTrackedTokenCount = 0;
   private lastFallbackPollCount = 0;
+  private readonly wsTierRoleByToken = new Map<string, WsTierRole>();
   private readonly pendingStreamUpdatesByToken = new Map<string, MarketPricingStreamUpdate>();
   private streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private gapLogTimer: ReturnType<typeof setTimeout> | null = null;
@@ -247,7 +256,7 @@ export class MarketDataModule implements RuntimeModule {
 
   getMetricsSnapshot(): MarketDataStreamActivitySnapshot {
     const streamMetrics = this.stream?.getMetricsSnapshot?.() ?? null;
-    const gammaFallbackCount = this.countTrackedGammaFallbackMarkets();
+    const gammaFallbackCounts = this.countTrackedGammaFallbackMarkets();
     return {
       wsEnabled: this.stream != null,
       windowStartMs: streamMetrics?.windowStartMs ?? null,
@@ -260,6 +269,7 @@ export class MarketDataModule implements RuntimeModule {
       wsEventGapDetected: streamMetrics?.wsEventGapDetected ?? 0,
       wsLatencyMs: streamMetrics?.wsLatencyMs ?? null,
       staleTokenCount: this.lastStaleTokenCount,
+      silentTrackedTokenCount: this.lastSilentTrackedTokenCount,
       fallbackPollCount: this.lastFallbackPollCount,
       fullBookTokenCount: streamMetrics?.fullBookTokenCount ?? 0,
       bookEventsReceived: streamMetrics?.bookEventsReceived ?? 0,
@@ -268,8 +278,10 @@ export class MarketDataModule implements RuntimeModule {
       narrowRefCountLeaks: streamMetrics?.narrowRefCountLeaks ?? 0,
       marketResolvedEvents: streamMetrics?.marketResolvedEvents ?? 0,
       newMarketEvents: streamMetrics?.newMarketEvents ?? 0,
-      gammaFallbackCount,
-      gammaFallbackTrackedTokenCount: gammaFallbackCount,
+      gammaFallbackCount: gammaFallbackCounts.total,
+      gammaFallbackTrackedTokenCount: gammaFallbackCounts.total,
+      gammaFallbackExecutionCriticalCount: gammaFallbackCounts.executionCritical,
+      gammaFallbackEntryCandidateCount: gammaFallbackCounts.entryCandidate,
     };
   }
 
@@ -295,6 +307,10 @@ export class MarketDataModule implements RuntimeModule {
         const tiered = this.deps.marketRepo.findTrackedForPricingTiered({
           maxTokens: this.deps.maxTrackedTokens,
         });
+        this.syncWsTierRoles({
+          executionCritical: tiered.executionCritical,
+          entryCandidates: tiered.entryCandidates,
+        });
         // Merge WS tier into a flat list for the existing poll machinery.
         tracked = [...tiered.executionCritical, ...tiered.entryCandidates];
         // Discovery tier refreshed each poll cycle so cursor stays valid.
@@ -306,6 +322,7 @@ export class MarketDataModule implements RuntimeModule {
         // Legacy flat path (simulation / tests that don't set maxTrackedTokens).
         tracked = this.deps.marketRepo.findTrackedForPricing();
         this.discoveryTier = [];
+        this.syncWsTierRoles({ legacy: tracked });
       }
 
       const trackedDiff = this.refreshTrackedMarkets(tracked);
@@ -314,6 +331,7 @@ export class MarketDataModule implements RuntimeModule {
       if (tracked.length === 0) {
         this.lastFallbackPollCount = 0;
         this.lastStaleTokenCount = 0;
+        this.lastSilentTrackedTokenCount = 0;
         this.stream?.setTokenIds([]);
         this.log.debug("no active tracked markets — skipping pricing, waiting for scanner");
         // Do NOT update lastSuccessfulDataMs — no tracked markets means
@@ -329,7 +347,11 @@ export class MarketDataModule implements RuntimeModule {
       // Feed only WS-tier (executionCritical + entryCandidates) to the stream.
       this.stream?.setTokenIds(tokenIds);
       const now = Date.now();
-      const fallbackStaleMs = Math.max(STREAM_FALLBACK_MIN_STALE_MS, this.deps.pollIntervalMs * 3);
+      const fallbackHardStaleMs = Math.max(
+        STREAM_FALLBACK_MIN_STALE_MS,
+        this.deps.pollIntervalMs * 3,
+      );
+      let silentTrackedTokenCount = 0;
 
       if (this.stream == null || this.forceFullPoll) {
         // Under forceFullPoll (gap/circuit-open), only poll the priority tier
@@ -351,16 +373,25 @@ export class MarketDataModule implements RuntimeModule {
           if (this.pendingGapTokenIds.has(tokenId)) return true;
           const cached = this.marketCache.get(tokenId);
           const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
-          return cached == null || now - lastUpdatedAt > fallbackStaleMs;
+          if (cached == null) return true;
+          const ageMs = now - lastUpdatedAt;
+          const refreshBudgetMs = getTrackedTokenRefreshBudgetMs(cached, this.deps.pollIntervalMs);
+          if (ageMs > refreshBudgetMs) return true;
+          if (ageMs > fallbackHardStaleMs) {
+            silentTrackedTokenCount += 1;
+          }
+          return false;
         });
       }
 
       this.lastStaleTokenCount = tokenIdsToPoll.length;
+      this.lastSilentTrackedTokenCount = silentTrackedTokenCount;
       this.lastFallbackPollCount = tokenIdsToPoll.length;
       this.log.debug(
         {
           trackedCount: tracked.length,
           tokenCount: tokenIds.length,
+          silentTrackedTokenCount,
           fallbackPollCount: tokenIdsToPoll.length,
           forceFullPoll: this.forceFullPoll,
         },
@@ -697,6 +728,9 @@ export class MarketDataModule implements RuntimeModule {
     for (const tokenId of [...this.lastPricingUpdateAtByToken.keys()]) {
       if (!nextTokenIds.has(tokenId)) this.lastPricingUpdateAtByToken.delete(tokenId);
     }
+    for (const tokenId of [...this.wsTierRoleByToken.keys()]) {
+      if (!nextTokenIds.has(tokenId)) this.wsTierRoleByToken.delete(tokenId);
+    }
     return { added, removed, active: [...nextTokenIds] };
   }
 
@@ -714,14 +748,40 @@ export class MarketDataModule implements RuntimeModule {
     });
   }
 
-  private countTrackedGammaFallbackMarkets(): number {
-    let count = 0;
+  private countTrackedGammaFallbackMarkets(): {
+    total: number;
+    executionCritical: number;
+    entryCandidate: number;
+  } {
+    let total = 0;
+    let executionCritical = 0;
+    let entryCandidate = 0;
     for (const tokenId of this.trackedMarketsByToken.keys()) {
       if (this.marketCache.get(tokenId)?.bookSource === "gamma-fallback") {
-        count++;
+        total++;
+        const role = this.wsTierRoleByToken.get(tokenId);
+        if (role === "executionCritical") executionCritical++;
+        else if (role === "entryCandidate") entryCandidate++;
       }
     }
-    return count;
+    return { total, executionCritical, entryCandidate };
+  }
+
+  private syncWsTierRoles(args: {
+    executionCritical?: readonly Market[];
+    entryCandidates?: readonly Market[];
+    legacy?: readonly Market[];
+  }): void {
+    this.wsTierRoleByToken.clear();
+    for (const market of args.executionCritical ?? []) {
+      this.wsTierRoleByToken.set(String(market.tokenId), "executionCritical");
+    }
+    for (const market of args.entryCandidates ?? []) {
+      this.wsTierRoleByToken.set(String(market.tokenId), "entryCandidate");
+    }
+    for (const market of args.legacy ?? []) {
+      this.wsTierRoleByToken.set(String(market.tokenId), "legacy");
+    }
   }
 
   private shouldDegradeToCachedStreamState(
@@ -762,6 +822,16 @@ function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[]
   return [
     ...new Set(tokenIds.map((tokenId) => tokenId.trim()).filter((tokenId) => tokenId.length > 0)),
   ];
+}
+
+function getTrackedTokenRefreshBudgetMs(
+  market: Pick<NormalizedMarket, "bookSource">,
+  pollIntervalMs: number,
+): number {
+  if (market.bookSource === "clob") {
+    return Math.max(STREAM_QUIET_CLOB_REFRESH_MIN_STALE_MS, pollIntervalMs * 12);
+  }
+  return Math.max(STREAM_GAMMA_REFRESH_MIN_STALE_MS, pollIntervalMs * 6);
 }
 
 function syncTrackedMarket(

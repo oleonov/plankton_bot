@@ -629,6 +629,8 @@ describe("MarketDataModule", () => {
       await vi.waitFor(() => {
         expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
       });
+      clearInterval((mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer!);
+      (mod as unknown as { timer: ReturnType<typeof setInterval> | null }).timer = null;
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
 
       await stream!.emitUpdates([
@@ -660,6 +662,58 @@ describe("MarketDataModule", () => {
 
       expect(gateway.getMarketPricing).not.toHaveBeenCalled();
       expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(0);
+      expect(mod.getMetricsSnapshot().silentTrackedTokenCount).toBe(0);
+
+      await mod.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats quiet clob-tracked tokens as silent before routing them to fallback polling", async () => {
+    vi.useFakeTimers();
+    try {
+      const tracked = [makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" })];
+      (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map([["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }]]),
+      );
+      gateway.createMarketPricingStream = (handlers) => {
+        stream = new FakePricingStream(handlers);
+        return stream;
+      };
+
+      await mod.start();
+      await vi.waitFor(() => {
+        expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
+      });
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockClear();
+
+      await stream!.emitUpdates([
+        {
+          tokenId: "tok-a",
+          pricing: {
+            bestBid: 0.44,
+            bestAsk: 0.56,
+            acceptingOrders: true,
+            enableOrderBook: true,
+            lastTradePrice: 0.5,
+            bookSource: "clob",
+          },
+        },
+      ]);
+
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).not.toHaveBeenCalled();
+      expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(0);
+      expect(mod.getMetricsSnapshot().silentTrackedTokenCount).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      await mod.poll();
+
+      expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
 
       await mod.stop();
     } finally {

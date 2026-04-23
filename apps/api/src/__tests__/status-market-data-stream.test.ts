@@ -88,6 +88,7 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
             maxMs: 320,
           },
           staleTokenCount: 14,
+          silentTrackedTokenCount: 27,
           fallbackPollCount: 14,
           fullBookTokenCount: 7,
           bookEventsReceived: 45,
@@ -98,6 +99,8 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
           newMarketEvents: 3,
           gammaFallbackCount: 4,
           gammaFallbackTrackedTokenCount: 4,
+          gammaFallbackExecutionCriticalCount: 1,
+          gammaFallbackEntryCandidateCount: 3,
         },
       }),
       120_000,
@@ -122,6 +125,7 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
         maxMs: 320,
       },
       staleTokenCount: 14,
+      silentTrackedTokenCount: 27,
       fallbackPollCount: 14,
       fullBookTokenCount: 7,
       bookEventsReceived: 45,
@@ -132,6 +136,8 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
       newMarketEvents: 3,
       gammaFallbackCount: 4,
       gammaFallbackTrackedTokenCount: 4,
+      gammaFallbackExecutionCriticalCount: 1,
+      gammaFallbackEntryCandidateCount: 3,
     });
   });
 });

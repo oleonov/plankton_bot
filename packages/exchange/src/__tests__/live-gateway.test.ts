@@ -1432,13 +1432,14 @@ describe("LiveMarketDataGateway", () => {
     socket.emitOpen();
 
     const burst = 15_000;
+    const baseTimestamp = Date.now();
     for (let i = 0; i < burst; i++) {
       socket.emitJson({
         event_type: "best_bid_ask",
         asset_id: "tok-a",
         best_bid: "0.10",
         best_ask: "0.12",
-        timestamp: String(1766789469958 + i),
+        timestamp: String(baseTimestamp + i),
       });
     }
 
@@ -1447,6 +1448,32 @@ describe("LiveMarketDataGateway", () => {
     expect(snapshot!.wsEventsReceived).toBe(burst);
     expect(snapshot!.wsLatencyMs?.count).toBeLessThanOrEqual(10_000);
     expect(snapshot!.wsLatencyMs?.count).toBeGreaterThan(0);
+
+    stream.close();
+  });
+
+  it("ignores stale WS timestamps when computing latency metrics", async () => {
+    const socket = new FakeMarketSocket();
+    gw = new LiveMarketDataGateway({
+      client,
+      createWebSocket: () => socket,
+    });
+
+    const stream = gw.createMarketPricingStream({ onUpdates: vi.fn() });
+    stream.setTokenIds(["tok-a"]);
+    socket.emitOpen();
+
+    socket.emitJson({
+      event_type: "best_bid_ask",
+      asset_id: "tok-a",
+      best_bid: "0.10",
+      best_ask: "0.12",
+      timestamp: new Date(Date.now() - 10 * 60_000).toISOString(),
+    });
+
+    const snapshot = stream.getMetricsSnapshot?.();
+    expect(snapshot).toBeDefined();
+    expect(snapshot!.wsLatencyMs).toBeNull();
 
     stream.close();
   });

@@ -1304,7 +1304,13 @@ function noteLatencySample(samples: number[], timestamp: unknown, nowMs: number)
   if (!eventAtIso) return;
   const eventAtMs = Date.parse(eventAtIso);
   if (!Number.isFinite(eventAtMs)) return;
-  const latencyMs = Math.max(0, nowMs - eventAtMs);
+  // Polymarket's WS payload timestamp is not a strict transport timestamp for
+  // every event shape; some snapshot-style events can carry very old source
+  // times. Treat only near-real-time samples as latency proxies and discard
+  // ancient/future-skewed values so the metric stays operationally useful.
+  const ageMs = nowMs - eventAtMs;
+  if (ageMs < -5_000 || ageMs > 60_000) return;
+  const latencyMs = Math.max(0, ageMs);
   samples.push(latencyMs);
 }
 

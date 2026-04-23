@@ -285,11 +285,12 @@ export class ReconciliationModule implements RuntimeModule {
 
     const recent = ledgerRepo.findAlgoRedeemSettlementsSince(cutoffIso);
     const seenSettlementIds = new Set<string>();
+    const requeuedConditionIds = new Set<string>();
     let driftsPublished = 0;
 
     for (const row of recent) {
       seenSettlementIds.add(row.settlementId);
-      driftsPublished += await this.checkRowForDrift(row, driftRepo, now);
+      driftsPublished += await this.checkRowForDrift(row, driftRepo, now, requeuedConditionIds);
     }
 
     // Sweep still-open drifts whose ledger row has aged out of the 24 h
@@ -306,6 +307,7 @@ export class ReconciliationModule implements RuntimeModule {
         },
         driftRepo,
         now,
+        requeuedConditionIds,
       );
     }
 
@@ -316,6 +318,7 @@ export class ReconciliationModule implements RuntimeModule {
     row: { settlementId: string; tokenId: string; conditionId: string },
     driftRepo: PositionDriftRepository,
     now: number,
+    requeuedConditionIds: Set<string>,
   ): Promise<number> {
     const tokenId = createTokenId(row.tokenId);
     let balance: bigint;
@@ -353,6 +356,14 @@ export class ReconciliationModule implements RuntimeModule {
       onChainBalance: balanceStr,
       detectedAt: now,
     });
+
+    if (!requeuedConditionIds.has(row.conditionId)) {
+      requeuedConditionIds.add(row.conditionId);
+      await this.deps.bus.publish("RedeemRequested", {
+        conditionIds: [row.conditionId],
+        timestamp: now,
+      });
+    }
 
     this.log.warn(
       {

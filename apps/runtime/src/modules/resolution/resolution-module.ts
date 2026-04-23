@@ -127,6 +127,8 @@ export class ResolutionModule implements RuntimeModule {
     if (conditionIds.length === 0) return;
     this.deps.log.info({ conditionIds }, "algo-triggered redeem requested");
 
+    let settleableConditionIds = [...conditionIds];
+
     if (this.deps.gateway) {
       const now = Date.now();
       const { gatewayTargets, suppressed } = this.partitionRedeemTargets(conditionIds, now);
@@ -143,7 +145,9 @@ export class ResolutionModule implements RuntimeModule {
       // is a prior tx that already drained the balance; re-submitting triggers
       // a revert. Drift detector (Phase 3.A) is the primary safety net for
       // any missed case.
-      const targetsNeedingRedeem = await this.filterAlreadyRedeemed(gatewayTargets);
+      const { targetsNeedingRedeem, alreadyRedeemed } =
+        await this.filterAlreadyRedeemed(gatewayTargets);
+      const successfullyRedeemed: string[] = [];
 
       // Invoke the gateway one conditionId at a time. The underlying
       // settlementExecute is a single relayer call per request, so wrapping a
@@ -159,6 +163,7 @@ export class ResolutionModule implements RuntimeModule {
             "algo-triggered on-chain redeem submitted",
           );
           this.redeemFailures.delete(conditionId);
+          successfullyRedeemed.push(conditionId);
         } catch (err) {
           this.recordRedeemFailure([conditionId], Date.now());
           this.deps.log.error(
@@ -166,6 +171,18 @@ export class ResolutionModule implements RuntimeModule {
             "algo-triggered on-chain redeem failed",
           );
         }
+      }
+
+      settleableConditionIds = [...alreadyRedeemed, ...successfullyRedeemed];
+
+      const skippedLocalSettlement = conditionIds.filter(
+        (conditionId) => !settleableConditionIds.includes(conditionId),
+      );
+      if (skippedLocalSettlement.length > 0) {
+        this.deps.log.warn(
+          { conditionIds: skippedLocalSettlement },
+          "algo-triggered redeem skipped local settlement until on-chain redeem succeeds",
+        );
       }
     }
 
@@ -185,8 +202,12 @@ export class ResolutionModule implements RuntimeModule {
     // must upsert a row marked source="algo" before settleAlgoRedeem or the
     // FK will reject the settlement write. ON CONFLICT DO NOTHING preserves
     // any pre-existing row written by a later market resolution.
+    if (settleableConditionIds.length === 0) {
+      return;
+    }
+
     const now = new Date().toISOString();
-    for (const conditionId of conditionIds) {
+    for (const conditionId of settleableConditionIds) {
       this.deps.resolutionRepo.save({
         conditionId,
         resolution: "algo-redeem",
@@ -198,14 +219,14 @@ export class ResolutionModule implements RuntimeModule {
       });
     }
 
-    const settled = this.deps.settler.settleAlgoRedeem(conditionIds);
+    const settled = this.deps.settler.settleAlgoRedeem(settleableConditionIds);
     for (const s of settled) {
       await this.deps.bus.publish("PositionSettled", s);
     }
 
     if (settled.length > 0) {
       this.deps.log.info(
-        { conditionIds, settledCount: settled.length },
+        { conditionIds: settleableConditionIds, settledCount: settled.length },
         "algo-triggered redeem settled local positions",
       );
     }
@@ -223,10 +244,15 @@ export class ResolutionModule implements RuntimeModule {
    * re-submitting would revert and trip the circuit. On balance-check error,
    * fall through to the gateway so the circuit still records real failures.
    */
-  private async filterAlreadyRedeemed(conditionIds: readonly string[]): Promise<string[]> {
-    if (conditionIds.length === 0) return [];
+  private async filterAlreadyRedeemed(
+    conditionIds: readonly string[],
+  ): Promise<{ targetsNeedingRedeem: string[]; alreadyRedeemed: string[] }> {
+    if (conditionIds.length === 0) {
+      return { targetsNeedingRedeem: [], alreadyRedeemed: [] };
+    }
     const gateway = this.deps.gateway!;
     const needsRedeem: string[] = [];
+    const alreadyRedeemed: string[] = [];
     for (const conditionId of conditionIds) {
       const markets = this.deps.marketRepo.findByConditionId(conditionId);
       if (markets.length === 0) {
@@ -253,11 +279,12 @@ export class ResolutionModule implements RuntimeModule {
       if (allZero) {
         this.deps.log.info({ conditionId }, "algo_redeem_skipped_already_redeemed");
         this.redeemFailures.delete(conditionId);
+        alreadyRedeemed.push(conditionId);
       } else {
         needsRedeem.push(conditionId);
       }
     }
-    return needsRedeem;
+    return { targetsNeedingRedeem: needsRedeem, alreadyRedeemed };
   }
 
   private partitionRedeemTargets(
