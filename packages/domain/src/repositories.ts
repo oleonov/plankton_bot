@@ -113,7 +113,8 @@ export interface MarketRepository {
    *    executionCritical, ordered by:
    *    - `selection_status` priority: `matched_include` (0) >
    *      `step2_fallback_include` (1) > `unknown` (2)
-   *    - `updated_at DESC` within the same tier
+   *    - `created_at DESC` within the same tier
+   *    - `token_id ASC` as a deterministic tie-break
    *    Filled greedily up to `maxTokens - executionCritical.length`.
    *    When `executionCritical.length >= maxTokens`, `entryCandidates` is empty.
    *

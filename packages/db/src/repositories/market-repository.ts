@@ -224,7 +224,7 @@ export class SqliteMarketRepository implements MarketRepository {
                         WHERE orders.token_id = m.token_id
                           AND orders.status IN ('pending','open'))
            )
-         ORDER BY m.updated_at DESC`,
+         ORDER BY m.created_at DESC, m.token_id ASC`,
       )
       .all() as (Record<string, unknown> & { is_critical: number })[];
 
@@ -242,19 +242,20 @@ export class SqliteMarketRepository implements MarketRepository {
     // Deduplicate: execution-critical markets may also be tradable.
     const criticalIds = new Set(executionCritical.map((m) => String(m.tokenId)));
 
-    // Sort tradable-only by selection_status rank ASC then updated_at DESC.
-    // (SQL ORDER BY updated_at DESC is already applied above; we re-sort here
-    // to layer selection_status rank on top while keeping updated_at as the
-    // tiebreaker within the same rank.) Candidates with an unmapped status
-    // would have already been filtered by the SQL WHERE (excluded statuses
-    // removed there); the `?? 99` guard below is defensive-only.
+    // Sort tradable-only by selection_status rank ASC, then created_at DESC,
+    // then token_id ASC. Scanner rewrites updated_at on every full scan pass,
+    // so using updated_at here would churn the WS tier even when the universe
+    // itself is stable, forcing the pricing loop to repoll a new unknown set
+    // every few seconds.
     const candidates = tradableOnly.filter((m) => !criticalIds.has(String(m.tokenId)));
     candidates.sort((a, b) => {
       const rankA = SELECTION_STATUS_RANK[a.selectionStatus ?? "unknown"] ?? 99;
       const rankB = SELECTION_STATUS_RANK[b.selectionStatus ?? "unknown"] ?? 99;
       if (rankA !== rankB) return rankA - rankB;
-      // Within same rank: newer first (already sorted by updated_at DESC from SQL)
-      return a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0;
+      if (a.createdAt !== b.createdAt) {
+        return a.createdAt < b.createdAt ? 1 : -1;
+      }
+      return String(a.tokenId).localeCompare(String(b.tokenId));
     });
 
     const remaining = Math.max(0, opts.maxTokens - executionCritical.length);

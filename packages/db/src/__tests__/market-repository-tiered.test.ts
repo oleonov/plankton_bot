@@ -24,9 +24,10 @@ const NOW_BASE = "2026-01-01T00:00:00.000Z";
 
 function makeMarket(
   tokenId: string,
-  overrides: Partial<Market> & { updatedAt?: string } = {},
+  overrides: Partial<Market> & { createdAt?: string; updatedAt?: string } = {},
 ): Market {
-  const now = overrides.updatedAt ?? NOW_BASE;
+  const createdAt = overrides.createdAt ?? NOW_BASE;
+  const updatedAt = overrides.updatedAt ?? NOW_BASE;
   return {
     tokenId: createTokenId(tokenId),
     conditionId: `cond-${tokenId}`,
@@ -42,8 +43,8 @@ function makeMarket(
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
-    createdAt: NOW_BASE,
-    updatedAt: now,
+    createdAt,
+    updatedAt,
     ...overrides,
   };
 }
@@ -196,22 +197,25 @@ describe("findTrackedForPricingTiered", () => {
     expect(String(result.entryCandidates[2]!.tokenId)).toBe("u-1"); // rank 2
   });
 
-  it("within same selection_status tier, newer updated_at wins", () => {
+  it("within same selection_status tier, newer created_at wins", () => {
     repo.save(
       makeMarket("mi-old", {
         selectionStatus: "matched_include",
+        createdAt: "2026-01-01T00:00:00Z",
         updatedAt: "2026-01-01T00:00:00Z",
       }),
     );
     repo.save(
       makeMarket("mi-new", {
         selectionStatus: "matched_include",
+        createdAt: "2026-01-05T00:00:00Z",
         updatedAt: "2026-01-05T00:00:00Z",
       }),
     );
     repo.save(
       makeMarket("mi-mid", {
         selectionStatus: "matched_include",
+        createdAt: "2026-01-03T00:00:00Z",
         updatedAt: "2026-01-03T00:00:00Z",
       }),
     );
@@ -221,6 +225,36 @@ describe("findTrackedForPricingTiered", () => {
     expect(ids[0]).toBe("mi-new");
     expect(ids[1]).toBe("mi-mid");
     expect(ids[2]).toBe("mi-old");
+  });
+
+  it("uses token_id as a deterministic tie-break when selection rank and timestamps match", () => {
+    repo.save(
+      makeMarket("mi-b", {
+        selectionStatus: "matched_include",
+        createdAt: "2026-01-05T00:00:00Z",
+        updatedAt: "2026-02-01T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeMarket("mi-a", {
+        selectionStatus: "matched_include",
+        createdAt: "2026-01-05T00:00:00Z",
+        updatedAt: "2026-02-01T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeMarket("mi-c", {
+        selectionStatus: "matched_include",
+        createdAt: "2026-01-05T00:00:00Z",
+        updatedAt: "2026-02-01T00:00:00Z",
+      }),
+    );
+
+    const first = repo.findTrackedForPricingTiered({ maxTokens: 2 });
+    const second = repo.findTrackedForPricingTiered({ maxTokens: 2 });
+
+    expect(first.entryCandidates.map((m) => String(m.tokenId))).toEqual(["mi-a", "mi-b"]);
+    expect(second.entryCandidates.map((m) => String(m.tokenId))).toEqual(["mi-a", "mi-b"]);
   });
 
   it("discovery: no limit — returns all remaining tradable markets beyond cap", () => {
@@ -287,7 +321,8 @@ describe("findTrackedForPricingTiered", () => {
         makeMarket(`trad-lg-${i}`, {
           tradable: true,
           selectionStatus: i < 500 ? "matched_include" : "unknown",
-          updatedAt: new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString(),
+          createdAt: new Date(Date.UTC(2026, 0, 1) + i * 1000).toISOString(),
+          updatedAt: "2026-02-01T00:00:00Z",
         }),
       );
     }
