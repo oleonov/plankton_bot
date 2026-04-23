@@ -1360,6 +1360,127 @@ describe("ResolutionModule", () => {
       );
     });
 
+    describe("redeemability guard", () => {
+      it("defers algo-redeem before market endDate and leaves orders untouched", async () => {
+        const gateway = createMockGateway(undefined, { "tok-yes": 1n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockImplementation((conditionId: string) =>
+          conditionId === CONDITION
+            ? [
+                {
+                  tokenId: TOK_YES,
+                  conditionId,
+                  slug: "future-market",
+                  outcome: "YES",
+                  endDate: new Date(Date.now() + 60_000).toISOString(),
+                },
+              ]
+            : [],
+        );
+        (orderRepo.findByTokenId as any).mockReturnValue([
+          {
+            orderId: "ord-1",
+            exchangeOrderId: "ex-1",
+            tokenId: TOK_YES,
+            status: "open",
+            side: "buy",
+          },
+        ]);
+
+        const cancels: Array<Record<string, unknown>> = [];
+        const unsub = bus.subscribe("CancelOrderRequested", async (payload) => {
+          cancels.push(payload as unknown as Record<string, unknown>);
+        });
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+        unsub();
+
+        expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+        expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+        expect(cancels).toHaveLength(0);
+        expect(log.info).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionId: CONDITION, reason: "before_end_date" }),
+          "algo_redeem_deferred_not_redeemable",
+        );
+      });
+
+      it("defers algo-redeem after endDate until Gamma reports the market closed", async () => {
+        const gateway = createMockGateway(undefined, { "tok-yes": 1n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockImplementation((conditionId: string) =>
+          conditionId === CONDITION
+            ? [
+                {
+                  tokenId: TOK_YES,
+                  conditionId,
+                  slug: "ended-market",
+                  outcome: "YES",
+                  endDate: new Date(Date.now() - 60_000).toISOString(),
+                },
+              ]
+            : [],
+        );
+        (gammaClient.getMarketBySlug as any).mockResolvedValue({
+          closed: false,
+          closedTime: null,
+          rawPayload: {},
+          umaResolutionStatus: null,
+        });
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+
+        expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+        expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+        expect(gammaClient.getMarketBySlug as any).toHaveBeenCalledWith("ended-market");
+        expect(log.info).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionId: CONDITION, reason: "gamma_unresolved" }),
+          "algo_redeem_deferred_not_redeemable",
+        );
+      });
+
+      it("allows algo-redeem after endDate once Gamma reports the market closed", async () => {
+        const gateway = createMockGateway(undefined, { "tok-yes": 1n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockImplementation((conditionId: string) =>
+          conditionId === CONDITION
+            ? [
+                {
+                  tokenId: TOK_YES,
+                  conditionId,
+                  slug: "closed-market",
+                  outcome: "YES",
+                  endDate: new Date(Date.now() - 60_000).toISOString(),
+                },
+              ]
+            : [],
+        );
+        (gammaClient.getMarketBySlug as any).mockResolvedValue({
+          closed: true,
+          closedTime: new Date().toISOString(),
+          rawPayload: {},
+          umaResolutionStatus: "resolved",
+        });
+        (settler.settleAlgoRedeem as any).mockReturnValue([
+          makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 }),
+        ]);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+
+        expect(gammaClient.getMarketBySlug as any).toHaveBeenCalledWith("closed-market");
+        expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION]);
+        expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+      });
+    });
+
     // Phase 2.B: per-conditionId back-off + circuit breaker. The production
     // baseline showed the same conditionId hitting the gateway up to 14× per
     // 24 h window; these tests pin the 3-failure → 1-hour lockout contract.
@@ -1525,6 +1646,12 @@ describe("ResolutionModule", () => {
           { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
           { tokenId: TOK_NO, conditionId: CONDITION, slug: "x", outcome: "NO" },
         ]);
+        (gammaClient.getMarketBySlug as any).mockResolvedValue({
+          closed: true,
+          closedTime: new Date().toISOString(),
+          rawPayload: {},
+          umaResolutionStatus: "resolved",
+        });
         (settler.settleAlgoRedeem as any).mockReturnValue([]);
 
         await mod.start();
@@ -1549,6 +1676,12 @@ describe("ResolutionModule", () => {
             return [{ tokenId: TOK_B, conditionId: COND_B, slug: "b", outcome: "YES" }];
           return [];
         });
+        (gammaClient.getMarketBySlug as any).mockResolvedValue({
+          closed: true,
+          closedTime: new Date().toISOString(),
+          rawPayload: {},
+          umaResolutionStatus: "resolved",
+        });
         (settler.settleAlgoRedeem as any).mockReturnValue([]);
 
         await mod.start();
@@ -1567,6 +1700,12 @@ describe("ResolutionModule", () => {
         (marketRepo.findByConditionId as any).mockReturnValue([
           { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
         ]);
+        (gammaClient.getMarketBySlug as any).mockResolvedValue({
+          closed: true,
+          closedTime: new Date().toISOString(),
+          rawPayload: {},
+          umaResolutionStatus: "resolved",
+        });
         (settler.settleAlgoRedeem as any).mockReturnValue([]);
 
         await mod.start();
@@ -1613,6 +1752,12 @@ describe("ResolutionModule", () => {
           if (cid === COND_B)
             return [{ tokenId: TOK_B, conditionId: COND_B, slug: "b", outcome: "YES" }];
           return [];
+        });
+        (gammaClient.getMarketBySlug as any).mockResolvedValue({
+          closed: true,
+          closedTime: new Date().toISOString(),
+          rawPayload: {},
+          umaResolutionStatus: "resolved",
         });
         (settler.settleAlgoRedeem as any).mockReturnValue([]);
 

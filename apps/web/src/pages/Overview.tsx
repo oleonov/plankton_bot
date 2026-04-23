@@ -108,7 +108,7 @@ function BalanceCard({ status }: { status: import("../api/types.ts").StatusData 
             className="value-lg"
             style={{
               marginTop: 8,
-              fontSize: 24,
+              fontSize: 16,
               lineHeight: 1.1,
               color: isLive ? "var(--green)" : "var(--text)",
             }}

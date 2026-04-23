@@ -109,6 +109,8 @@ async function buildFixture(opts: {
   avgEntryPrice: number;
   holdAgoSeconds: number;
   gateway?: any;
+  gammaClient?: any;
+  endDate?: string;
 }): Promise<RedeemFixture> {
   const { db, tokenId, conditionId, positionId } = opts;
 
@@ -133,7 +135,7 @@ async function buildFixture(opts: {
     outcome: "YES",
     regime: null,
     horizon: null,
-    endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    endDate: opts.endDate ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
     active: true,
     tradable: true,
     tickSize: 0.01,
@@ -209,7 +211,7 @@ async function buildFixture(opts: {
     marketRepo,
     resolutionRepo,
     orderRepo,
-    gammaClient: makeNullGammaClient() as any,
+    gammaClient: (opts.gammaClient ?? makeNullGammaClient()) as any,
     lotRepo,
     positionRepo,
     db: db.db,
@@ -409,6 +411,7 @@ describe("Scenario: REDEEM full cycle (spec §8)", () => {
       redeemPositions: vi.fn().mockResolvedValue(undefined),
       hasPendingRedeemSubmission: vi.fn().mockReturnValue(false),
       getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(1n),
       placeOrder: vi.fn(),
       cancelOrder: vi.fn(),
       cancelAllOrders: vi.fn(),
@@ -418,6 +421,15 @@ describe("Scenario: REDEEM full cycle (spec §8)", () => {
       getBalances: vi.fn().mockResolvedValue([]),
       mergePositions: vi.fn().mockResolvedValue(undefined),
       healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 0 }),
+    };
+    const mockGammaClient = {
+      getMarketBySlug: vi.fn().mockResolvedValue({
+        closed: true,
+        closedTime: new Date().toISOString(),
+        rawPayload: {},
+        umaResolutionStatus: "resolved",
+      }),
+      getMarketById: vi.fn().mockResolvedValue(null),
     };
 
     const { settledEvents, teardown } = await buildFixture({
@@ -430,6 +442,8 @@ describe("Scenario: REDEEM full cycle (spec §8)", () => {
       avgEntryPrice: 0.01, // < 0.05
       holdAgoSeconds: 300, // 5 min
       gateway: mockGateway,
+      gammaClient: mockGammaClient,
+      endDate: new Date(Date.now() - 60_000).toISOString(),
     });
 
     // On-chain gateway must have been called with the condition ID

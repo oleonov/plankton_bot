@@ -58,6 +58,11 @@ interface RedeemFailureEntry {
   readonly failureCount: number;
 }
 
+type AlgoRedeemDeferralReason =
+  | "before_end_date"
+  | "gamma_unresolved"
+  | "gamma_lookup_failed";
+
 export interface ResolutionModuleDeps {
   detector: ResolutionDetector;
   settler: PositionSettler;
@@ -147,6 +152,13 @@ export class ResolutionModule implements RuntimeModule {
       // any missed case.
       const { targetsNeedingRedeem, alreadyRedeemed } =
         await this.filterAlreadyRedeemed(gatewayTargets);
+      const { redeemableTargets, deferred } = await this.filterConfirmedRedeemable(
+        targetsNeedingRedeem,
+        now,
+      );
+      for (const entry of deferred) {
+        this.deps.log.info(entry, "algo_redeem_deferred_not_redeemable");
+      }
       const successfullyRedeemed: string[] = [];
 
       // Invoke the gateway one conditionId at a time. The underlying
@@ -155,7 +167,7 @@ export class ResolutionModule implements RuntimeModule {
       // every id in the batch when only one actually reverted — poisoning the
       // per-conditionId circuit for innocent markets. Submitting per condition
       // keeps success/failure strictly scoped to its own id.
-      for (const conditionId of targetsNeedingRedeem) {
+      for (const conditionId of redeemableTargets) {
         try {
           await this.deps.gateway.redeemPositions([conditionId]);
           this.deps.log.info(
@@ -189,7 +201,7 @@ export class ResolutionModule implements RuntimeModule {
     // Cancel any open orders on tokens we're about to settle so they don't
     // fill after the leg terminates. Mirrors cancelOpenOrders in the normal
     // resolution path.
-    for (const conditionId of conditionIds) {
+    for (const conditionId of settleableConditionIds) {
       const markets = this.deps.marketRepo.findByConditionId(conditionId);
       for (const market of markets) {
         await this.cancelOpenOrders(market.tokenId);
@@ -285,6 +297,87 @@ export class ResolutionModule implements RuntimeModule {
       }
     }
     return { targetsNeedingRedeem: needsRedeem, alreadyRedeemed };
+  }
+
+  private async filterConfirmedRedeemable(
+    conditionIds: readonly string[],
+    now: number,
+  ): Promise<{
+    redeemableTargets: string[];
+    deferred: Array<{
+      readonly conditionId: string;
+      readonly reason: AlgoRedeemDeferralReason;
+      readonly slug?: string;
+      readonly endDate?: string;
+    }>;
+  }> {
+    if (conditionIds.length === 0) {
+      return { redeemableTargets: [], deferred: [] };
+    }
+
+    const redeemableTargets: string[] = [];
+    const deferred: Array<{
+      readonly conditionId: string;
+      readonly reason: AlgoRedeemDeferralReason;
+      readonly slug?: string;
+      readonly endDate?: string;
+    }> = [];
+
+    for (const conditionId of conditionIds) {
+      const markets = this.deps.marketRepo.findByConditionId(conditionId);
+      if (markets.length === 0) {
+        redeemableTargets.push(conditionId);
+        continue;
+      }
+
+      const datedMarkets = markets
+        .map((market) => ({
+          slug: market.slug,
+          endDate: market.endDate,
+          endMs: market.endDate ? new Date(market.endDate).getTime() : NaN,
+        }))
+        .filter((market) => Number.isFinite(market.endMs));
+      const latestEnd = datedMarkets.reduce<
+        { readonly slug: string; readonly endDate: string; readonly endMs: number } | null
+      >((latest, current) => {
+        if (!current.endDate) return latest;
+        if (!latest || current.endMs > latest.endMs) {
+          return {
+            slug: current.slug,
+            endDate: current.endDate,
+            endMs: current.endMs,
+          };
+        }
+        return latest;
+      }, null);
+
+      if (latestEnd && latestEnd.endMs > now) {
+        deferred.push({
+          conditionId,
+          reason: "before_end_date",
+          slug: latestEnd.slug,
+          endDate: latestEnd.endDate,
+        });
+        continue;
+      }
+
+      const slug = markets[0]!.slug;
+      try {
+        const info = await this.deps.gammaClient.getMarketBySlug(slug);
+        if (!info?.closed) {
+          deferred.push({ conditionId, reason: "gamma_unresolved", slug });
+          continue;
+        }
+      } catch (err) {
+        this.deps.log.warn({ conditionId, slug, err }, "algo_redeem_gamma_lookup_failed");
+        deferred.push({ conditionId, reason: "gamma_lookup_failed", slug });
+        continue;
+      }
+
+      redeemableTargets.push(conditionId);
+    }
+
+    return { redeemableTargets, deferred };
   }
 
   private partitionRedeemTargets(
