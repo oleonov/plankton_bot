@@ -228,6 +228,128 @@ describe("SignalToOrderBridge", () => {
     expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
   });
 
+  it("preserves embedded BUY price when a fresher candidate book is ask-only", async () => {
+    const bus = new InProcessEventBus();
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => ({
+        tokenId: String(TOKEN_ID),
+        snapshotTs: Date.now(),
+        cachedAtMs: Date.now(),
+        sourcePolledAtMs: Date.now(),
+        bookSource: "clob" as const,
+        sourceKind: "ws" as const,
+        book: {
+          tokenId: TOKEN_ID,
+          bids: [],
+          asks: [{ price: 0.001, size: 10 }],
+          bestBid: null,
+          bestAsk: 0.001,
+          midPrice: null,
+          spread: null,
+          timestamp: Date.now(),
+        },
+      })),
+      waitForFreshEntry: vi.fn(async () => null),
+      getFreshOrRefresh: vi.fn(async () => ({ status: "refreshed" as const, entry: null })),
+    } as unknown as CandidateBookCache;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+      candidateBookCache,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number } }> = [];
+    const skipped: Array<{ reasons: readonly string[] }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({
+        bestBid: 0.04,
+        bestAsk: 0.05,
+        midPrice: 0.045,
+        spread: 0.01,
+        bookSource: "gamma-fallback",
+      }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.04);
+  });
+
+  it("preserves embedded SELL price when a fresher candidate book is bid-only", async () => {
+    const bus = new InProcessEventBus();
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => ({
+        tokenId: String(TOKEN_ID),
+        snapshotTs: Date.now(),
+        cachedAtMs: Date.now(),
+        sourcePolledAtMs: Date.now(),
+        bookSource: "clob" as const,
+        sourceKind: "ws" as const,
+        book: {
+          tokenId: TOKEN_ID,
+          bids: [{ price: 0.06, size: 10 }],
+          asks: [],
+          bestBid: 0.06,
+          bestAsk: null,
+          midPrice: null,
+          spread: null,
+          timestamp: Date.now(),
+        },
+      })),
+      waitForFreshEntry: vi.fn(async () => null),
+      getFreshOrRefresh: vi.fn(async () => ({ status: "refreshed" as const, entry: null })),
+    } as unknown as CandidateBookCache;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+      candidateBookCache,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number } }> = [];
+    const skipped: Array<{ reasons: readonly string[] }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell" },
+      market: makeMarket({
+        bestBid: 0.04,
+        bestAsk: 0.05,
+        midPrice: 0.045,
+        spread: 0.01,
+        bookSource: "gamma-fallback",
+      }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.05);
+  });
+
   it("uses base market for stale clob books without refresh (no bundle)", async () => {
     const bus = new InProcessEventBus();
     const refreshedEntry = {

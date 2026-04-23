@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createTokenId, type OrderBookSnapshot } from "@plankton/domain";
 import {
+  applyOrderBookToMarket,
   CandidateBookCache,
   type CandidateBookGateway,
 } from "../modules/strategy/candidate-book-cache.js";
@@ -144,5 +145,54 @@ describe("CandidateBookCache", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("preserves the base bestBid when a fresher book is ask-only", () => {
+    const market = {
+      tokenId: createTokenId("tok-a"),
+      conditionId: "cond-a",
+      slug: "market-a",
+      eventSlug: null,
+      eventMarketCount: 1,
+      question: "Question",
+      outcome: "YES",
+      outcomeIndex: 0,
+      regime: "price-range",
+      horizon: "daily",
+      endDate: null,
+      active: true,
+      tradable: true,
+      tickSize: 0.01,
+      negRisk: false,
+      acceptingOrders: true,
+      enableOrderBook: true,
+      bestBid: 0.04,
+      bestAsk: 0.05,
+      midPrice: 0.045,
+      spread: 0.01,
+      snapshotTs: 1,
+      bookSource: "gamma",
+    } as const;
+    const next = applyOrderBookToMarket(market, {
+      tokenId: "tok-a",
+      snapshotTs: 2,
+      cachedAtMs: 2,
+      sourcePolledAtMs: 2,
+      bookSource: "clob",
+      sourceKind: "ws",
+      book: makeBook("tok-a", {
+        bestBid: null,
+        bestAsk: 0.001,
+        midPrice: null,
+        spread: null,
+      }),
+    });
+
+    expect(next.bestBid).toBe(0.04);
+    expect(next.bestAsk).toBe(0.001);
+    expect(next.midPrice).toBe(0.045);
+    expect(next.spread).toBe(0.01);
+    expect(next.bookSource).toBe("clob");
+    expect(next.snapshotTs).toBe(2);
   });
 });

@@ -387,12 +387,15 @@ export function applyOrderBookToMarket(
   market: NormalizedMarket,
   entry: CandidateBookCacheEntry,
 ): NormalizedMarket {
+  const bestBid = entry.book.bestBid ?? market.bestBid;
+  const bestAsk = entry.book.bestAsk ?? market.bestAsk;
+
   return {
     ...market,
-    bestBid: entry.book.bestBid,
-    bestAsk: entry.book.bestAsk,
-    midPrice: entry.book.midPrice,
-    spread: entry.book.spread,
+    bestBid,
+    bestAsk,
+    midPrice: entry.book.midPrice ?? market.midPrice,
+    spread: entry.book.spread ?? market.spread,
     minOrderSize: entry.book.minOrderSize ?? market.minOrderSize ?? null,
     bookSource: entry.bookSource,
     snapshotTs: entry.snapshotTs,
