@@ -1540,8 +1540,10 @@ describe("ResolutionModule", () => {
         mod = createModule({ gateway });
 
         (marketRepo.findByConditionId as any).mockImplementation((cid: string) => {
-          if (cid === COND_A) return [{ tokenId: TOK_A, conditionId: COND_A, slug: "a", outcome: "YES" }];
-          if (cid === COND_B) return [{ tokenId: TOK_B, conditionId: COND_B, slug: "b", outcome: "YES" }];
+          if (cid === COND_A)
+            return [{ tokenId: TOK_A, conditionId: COND_A, slug: "a", outcome: "YES" }];
+          if (cid === COND_B)
+            return [{ tokenId: TOK_B, conditionId: COND_B, slug: "b", outcome: "YES" }];
           return [];
         });
         (settler.settleAlgoRedeem as any).mockReturnValue([]);
@@ -1603,8 +1605,10 @@ describe("ResolutionModule", () => {
         mod = createModule({ gateway });
 
         (marketRepo.findByConditionId as any).mockImplementation((cid: string) => {
-          if (cid === COND_A) return [{ tokenId: TOK_A, conditionId: COND_A, slug: "a", outcome: "YES" }];
-          if (cid === COND_B) return [{ tokenId: TOK_B, conditionId: COND_B, slug: "b", outcome: "YES" }];
+          if (cid === COND_A)
+            return [{ tokenId: TOK_A, conditionId: COND_A, slug: "a", outcome: "YES" }];
+          if (cid === COND_B)
+            return [{ tokenId: TOK_B, conditionId: COND_B, slug: "b", outcome: "YES" }];
           return [];
         });
         (settler.settleAlgoRedeem as any).mockReturnValue([]);

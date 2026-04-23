@@ -28,7 +28,7 @@ The following runtime behaviors are **not described** by `06/07`:
 Two directions were considered:
 
 - **2a — drop the extensions.** Ship only what `06/07` prescribes. Immediate consequence: no protection against stuck entry orders, no cooldown-driven damping on a degenerate fill rate, no bound on accidental taker fills in relayer mode, no admission control on books that are transitioning between healthy and `no_bid`.
-- **2b — keep the extensions and freeze them as explicit *operational policy*.** The code does not represent them as reconstructed canonical behavior; compliance artifacts and audits label them as policy.
+- **2b — keep the extensions and freeze them as explicit _operational policy_.** The code does not represent them as reconstructed canonical behavior; compliance artifacts and audits label them as policy.
 
 Option 2b matches the current runtime. Option 2a is a behavioral regression against operational data (`2026-04-23-algo-followups-and-prod-observations.md §B1, B2, B3, B6`): removing hard-liveness alone would re-admit 348 bridge-stage events / 24 h that the current runtime short-circuits.
 
@@ -50,7 +50,7 @@ No code change ships with this ADR. This is a classification decision, not an im
 Every doc artifact that previously implied any of these behaviors were derived from `06/07` must be corrected. Concretely:
 
 - Any "reconstructed canonical" claim for TTL / cancel / repost / cooldown / maker `postOnly` / hard-liveness in the compliance matrix and in `07_structural_gap_resolutions.md` is withdrawn. These items are **operational policy** with the author of record being the runtime implementation itself.
-- `06_algorithm_spec.md` is **not** edited. The spec remains the canonical algorithm description; these extensions are acknowledged as additive runtime policy that sits *on top of* the spec.
+- `06_algorithm_spec.md` is **not** edited. The spec remains the canonical algorithm description; these extensions are acknowledged as additive runtime policy that sits _on top of_ the spec.
 - Future audits must cross-reference this ADR when touching any of the three areas above, rather than implying the behavior flows from the spec.
 
 ### D3 — Parameter ownership stays with the code

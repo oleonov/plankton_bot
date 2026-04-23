@@ -104,7 +104,9 @@ describe("InProcessEventBus", () => {
   });
 
   it("resolves without error when no subscribers exist", async () => {
-    await expect(bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() })).resolves.toBeUndefined();
+    await expect(
+      bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() }),
+    ).resolves.toBeUndefined();
   });
 
   it("stops calling handler after unsubscribe", async () => {
@@ -138,7 +140,9 @@ describe("InProcessEventBus", () => {
       calls.push(1);
     });
 
-    await expect(bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() })).resolves.toBeUndefined();
+    await expect(
+      bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() }),
+    ).resolves.toBeUndefined();
 
     expect(calls).toEqual([1]);
     spy.mockRestore();

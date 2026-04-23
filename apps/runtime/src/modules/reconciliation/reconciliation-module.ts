@@ -87,9 +87,7 @@ export class ReconciliationModule implements RuntimeModule {
     if (this.driftCheckEnabled()) {
       const intervalMs = this.deps.driftIntervalMs ?? DEFAULT_DRIFT_INTERVAL_MS;
       this.driftTimer = setInterval(() => {
-        this.runDriftCheck().catch((err) =>
-          this.log.error({ err }, "periodic drift check error"),
-        );
+        this.runDriftCheck().catch((err) => this.log.error({ err }, "periodic drift check error"));
       }, intervalMs);
       this.log.info({ driftIntervalMs: intervalMs }, "position drift detection enabled");
     }
