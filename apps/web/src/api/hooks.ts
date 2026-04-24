@@ -133,6 +133,41 @@ export function usePositions(filters: PositionFilters = {}) {
   });
 }
 
+// Aggregating fetcher — walks cursor pages until `nextCursor` is null so that
+// client-side filters/search/counts/pagination see the complete ledger, not
+// just the first page. Caps iterations at `maxPages * pageSize` to keep a
+// broken backend from pinning the browser.
+interface AllPositionsResult {
+  items: PositionDTO[];
+  totalCount: number;
+  truncated: boolean;
+}
+
+export function useAllPositions(
+  opts: { pageSize?: number; maxPages?: number } = {},
+) {
+  const pageSize = opts.pageSize ?? 500;
+  const maxPages = opts.maxPages ?? 20;
+  return useQuery({
+    queryKey: ["positions-all", { pageSize, maxPages }],
+    queryFn: async (): Promise<AllPositionsResult> => {
+      const items: PositionDTO[] = [];
+      let cursor: string | undefined;
+      for (let i = 0; i < maxPages; i++) {
+        const batch = await apiFetch<Paginated<PositionDTO> & { totalCount: number }>(
+          withParams("/api/v1/positions", { limit: pageSize, cursor }),
+        );
+        items.push(...batch.items);
+        if (!batch.nextCursor) {
+          return { items, totalCount: items.length, truncated: false };
+        }
+        cursor = batch.nextCursor;
+      }
+      return { items, totalCount: items.length, truncated: true };
+    },
+  });
+}
+
 // ─── Orders ─────────────────────────────────────────────────────
 
 interface OrderFilters {
@@ -164,6 +199,7 @@ interface FillFilters {
   limit?: number;
   cursor?: string;
   page?: number;
+  tokenId?: string;
 }
 
 export function useFills(filters: FillFilters = {}) {
@@ -176,6 +212,7 @@ export function useFills(filters: FillFilters = {}) {
           limit: filters.limit,
           cursor: filters.cursor,
           page: filters.page,
+          tokenId: filters.tokenId,
         }),
       ),
   });

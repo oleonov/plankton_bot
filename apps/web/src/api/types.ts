@@ -259,6 +259,12 @@ export interface TradingActivitySnapshot {
   capturedAt: string;
 }
 
+/** S0–S3 phase derived server-side from leg_states + position status. */
+export type PositionPhase = "S0" | "S1" | "S2" | "S3";
+
+/** Last leg-action as recorded by leg_states; null when no fills yet. */
+export type PositionLastAction = "BUY" | "SELL" | null;
+
 /** GET /positions item */
 export interface PositionDTO {
   positionId: string;
@@ -281,6 +287,11 @@ export interface PositionDTO {
   endDate: string | null;
   resolution: string | null;
   resolutionStatus: string | null;
+  phase: PositionPhase;
+  buyCount: number;
+  sellCount: number;
+  lastAction: PositionLastAction;
+  lastActionAt: string | null;
 }
 
 /** GET /orders item */

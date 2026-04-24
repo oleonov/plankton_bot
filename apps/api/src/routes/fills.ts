@@ -39,18 +39,24 @@ interface FillQuery {
   cursor?: string;
   since?: string;
   page?: string;
+  tokenId?: string;
 }
 
 export const fillRoutes: FastifyPluginAsync<FillOpts> = async (app, opts) => {
   app.get<{ Querystring: FillQuery }>("/fills", async (request) => {
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
-    const { cursor, since } = request.query;
+    const { cursor, since, tokenId } = request.query;
     const limit = Math.min(Number(request.query.limit) || 50, 200);
     const page = Math.max(Number(request.query.page) || 1, 1);
     const pageRequested = request.query.page != null;
 
     const conditions: string[] = [];
     const params: unknown[] = [];
+
+    if (tokenId) {
+      conditions.push("token_id = ?");
+      params.push(tokenId);
+    }
 
     if (since) {
       conditions.push("filled_at >= ?");

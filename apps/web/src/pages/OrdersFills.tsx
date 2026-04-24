@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useOrders, useFills } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
@@ -30,7 +31,9 @@ const fillAccessors: Record<string, (f: FillDTO) => string | number | null> = {
 };
 
 export function OrdersFills() {
-  const [tab, setTab] = useState<"orders" | "fills">("orders");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab: "orders" | "fills" = searchParams.get("tab") === "fills" ? "fills" : "orders";
+  const tokenIdParam = searchParams.get("tokenId") ?? "";
   const [orderStatus, setOrderStatus] = useState("");
   const [page, setPage] = useState(1);
   const orderSort = useSort();
@@ -39,7 +42,15 @@ export function OrdersFills() {
   const orders = useOrders(
     tab === "orders" ? { status: orderStatus || undefined, limit: 50, page } : {},
   );
-  const fills = useFills(tab === "fills" ? { limit: 50, page } : {});
+  const fills = useFills(
+    tab === "fills" ? { limit: 50, page, tokenId: tokenIdParam || undefined } : {},
+  );
+
+  const clearTokenFilter = () => {
+    const next = new URLSearchParams(searchParams);
+    next.delete("tokenId");
+    setSearchParams(next);
+  };
   const activeData = tab === "orders" ? orders.data : fills.data;
   const totalCount = activeData?.totalCount ?? 0;
   const pageStart = totalCount > 0 ? (page - 1) * 50 + 1 : 0;
@@ -53,7 +64,10 @@ export function OrdersFills() {
         <div
           className={`tab ${tab === "orders" ? "active" : ""}`}
           onClick={() => {
-            setTab("orders");
+            const next = new URLSearchParams(searchParams);
+            next.delete("tab");
+            next.delete("tokenId");
+            setSearchParams(next);
             setPage(1);
           }}
         >
@@ -62,7 +76,9 @@ export function OrdersFills() {
         <div
           className={`tab ${tab === "fills" ? "active" : ""}`}
           onClick={() => {
-            setTab("fills");
+            const next = new URLSearchParams(searchParams);
+            next.set("tab", "fills");
+            setSearchParams(next);
             setPage(1);
           }}
         >
@@ -85,6 +101,38 @@ export function OrdersFills() {
             <option value="filled">Filled</option>
             <option value="cancelled">Cancelled</option>
           </select>
+        )}
+        {tab === "fills" && tokenIdParam && (
+          <div
+            data-testid="fills-token-filter"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "4px 10px",
+              borderRadius: 999,
+              background: "var(--surface-elevated, #1a2230)",
+              fontSize: 12,
+            }}
+          >
+            <span style={{ color: "var(--text-dim)" }}>Token:</span>
+            <code style={{ fontSize: 11 }}>{tokenIdParam.slice(0, 12)}…</code>
+            <button
+              type="button"
+              onClick={clearTokenFilter}
+              aria-label="Clear token filter"
+              style={{
+                background: "transparent",
+                border: 0,
+                color: "var(--text-dim)",
+                cursor: "pointer",
+                fontSize: 14,
+                padding: 0,
+              }}
+            >
+              ×
+            </button>
+          </div>
         )}
       </div>
 

@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { ok, ApiError } from "../errors.js";
 import { buildMarketMetaMap, getMetaOrEmpty, buildResolutionMap } from "../enrich-market.js";
+import { buildLegStateMap, getLegStateOrEmpty } from "../enrich-leg-state.js";
 import { toDto as orderToDto } from "./orders.js";
 import { toDto as positionToDto } from "./positions.js";
 import { toDto as fillToDto } from "./fills.js";
@@ -230,12 +231,15 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .map((m) => m.conditionId)
       .filter(Boolean) as string[];
     const resMap = buildResolutionMap(ledger, conditionIds);
+    const legMap = buildLegStateMap(ledger, tokenIds);
 
     return ok(
       rows.map((r) => {
-        const meta = getMetaOrEmpty(metaMap, r.token_id as string);
+        const tokenId = r.token_id as string;
+        const meta = getMetaOrEmpty(metaMap, tokenId);
         const resInfo = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
-        return positionToDto(r, meta, resInfo);
+        const leg = getLegStateOrEmpty(legMap, tokenId);
+        return positionToDto(r, meta, resInfo, leg);
       }),
     );
   });

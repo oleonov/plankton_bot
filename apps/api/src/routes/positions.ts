@@ -5,6 +5,8 @@ import { ok, ApiError } from "../errors.js";
 import type { MarketMeta } from "../enrich-market.js";
 import { buildMarketMetaMap, getMetaOrEmpty, buildResolutionMap } from "../enrich-market.js";
 import type { ResolutionInfo } from "../enrich-market.js";
+import type { LegStateInfo } from "../enrich-leg-state.js";
+import { buildLegStateMap, getLegStateOrEmpty, derivePhase } from "../enrich-leg-state.js";
 import { resolveActiveLedger } from "./status.js";
 
 interface PositionOpts {
@@ -13,7 +15,14 @@ interface PositionOpts {
   ledgerPool?: LedgerPool;
 }
 
-export function toDto(row: Record<string, unknown>, meta: MarketMeta, resInfo?: ResolutionInfo) {
+export function toDto(
+  row: Record<string, unknown>,
+  meta: MarketMeta,
+  resInfo?: ResolutionInfo,
+  leg?: LegStateInfo,
+) {
+  const legState = leg ?? { buyCount: 0, sellCount: 0, lastAction: null, lastActionAt: null };
+  const status = String(row.status ?? "");
   return {
     positionId: row.position_id,
     tokenId: row.token_id,
@@ -35,6 +44,11 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta, resInfo?: 
     endDate: meta.endDate,
     resolution: resInfo?.resolution ?? null,
     resolutionStatus: resInfo?.resolutionStatus ?? null,
+    phase: derivePhase(status, legState),
+    buyCount: legState.buyCount,
+    sellCount: legState.sellCount,
+    lastAction: legState.lastAction,
+    lastActionAt: legState.lastActionAt,
   };
 }
 
@@ -51,7 +65,7 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
   app.get<{ Querystring: PositionQuery }>("/positions", async (request) => {
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
     const { dust, status, sort, cursor } = request.query;
-    const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 200);
+    const limit = Math.min(Math.max(Number(request.query.limit) || 50, 1), 1000);
     const page = Math.max(Number(request.query.page) || 1, 1);
     const pageRequested = request.query.page != null;
 
@@ -124,6 +138,7 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       .map((m) => m.conditionId)
       .filter(Boolean) as string[];
     const resMap = buildResolutionMap(opts.db, conditionIds);
+    const legMap = buildLegStateMap(db, tokenIds);
 
     const lastRow = rows[rows.length - 1];
     const nextCursor =
@@ -133,9 +148,11 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
 
     return ok({
       items: rows.map((r) => {
-        const meta = getMetaOrEmpty(metaMap, r.token_id as string);
+        const tokenId = r.token_id as string;
+        const meta = getMetaOrEmpty(metaMap, tokenId);
         const res = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
-        return toDto(r, meta, res);
+        const leg = getLegStateOrEmpty(legMap, tokenId);
+        return toDto(r, meta, res, leg);
       }),
       nextCursor,
       totalCount,
@@ -155,11 +172,14 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
         `position ${request.params.positionId} not found`,
         "POSITION_NOT_FOUND",
       );
-    const metaMap = buildMarketMetaMap(db, [row.token_id as string]);
-    const meta = getMetaOrEmpty(metaMap, row.token_id as string);
+    const tokenId = row.token_id as string;
+    const metaMap = buildMarketMetaMap(db, [tokenId]);
+    const meta = getMetaOrEmpty(metaMap, tokenId);
     const conditionIds = meta.conditionId ? [meta.conditionId] : [];
     const resMap = buildResolutionMap(db, conditionIds);
     const resInfo = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
-    return ok(toDto(row, meta, resInfo));
+    const legMap = buildLegStateMap(db, [tokenId]);
+    const leg = getLegStateOrEmpty(legMap, tokenId);
+    return ok(toDto(row, meta, resInfo, leg));
   });
 };
