@@ -69,10 +69,12 @@ export class PositionSettler {
     const marketRepo = this.marketRepo;
     const results: SettledPosition[] = [];
     const resolvedAt = new Date().toISOString();
+    const nowMs = Date.now();
 
     const runSettlement = this.db.transaction(() => {
       for (const conditionId of conditionIds) {
         const markets = marketRepo.findByConditionId(conditionId);
+        if (!isPastEndDateCondition(markets, nowMs)) continue;
         for (const market of markets) {
           const position = this.positionRepo.findByTokenId(market.tokenId);
           if (!position || position.status === "closed") continue;
@@ -193,4 +195,14 @@ export class PositionSettler {
       timestamp: Date.now(),
     };
   }
+}
+
+function isPastEndDateCondition(markets: readonly { endDate?: string | null }[], nowMs: number) {
+  if (markets.length === 0) return false;
+  for (const market of markets) {
+    if (!market.endDate) return false;
+    const endMs = Date.parse(market.endDate);
+    if (!Number.isFinite(endMs) || endMs > nowMs) return false;
+  }
+  return true;
 }

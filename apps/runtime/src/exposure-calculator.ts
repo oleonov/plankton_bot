@@ -14,17 +14,21 @@
  */
 
 import type { OrderRepository, PositionRepository } from "@plankton/domain";
+import { findActivePositions } from "./active-positions.js";
 
 export function calculateTotalExposure(
   positionRepo: PositionRepository,
   orderRepo: OrderRepository,
   additionalNotional = 0,
 ): number {
-  const positionCostBasis = positionRepo.findOpen().reduce((sum, p) => sum + p.costBasisUsdc, 0);
+  const positionCostBasis = findActivePositions(positionRepo).reduce(
+    (sum, p) => sum + p.costBasisUsdc,
+    0,
+  );
   const openBuyNotional = orderRepo.sumOpenBuyNotional();
   return positionCostBasis + openBuyNotional + additionalNotional;
 }
 
 export function countActiveOpenMarkets(positionRepo: PositionRepository): Set<string> {
-  return new Set(positionRepo.findOpen().map((p) => String(p.tokenId)));
+  return new Set(findActivePositions(positionRepo).map((p) => String(p.tokenId)));
 }

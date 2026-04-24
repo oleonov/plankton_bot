@@ -9,7 +9,7 @@
  *
  *   2. Preflight (ProfilePreflight):
  *      raw SQL in `apps/runtime/src/profile-preflight.ts runLiveLiteChecks`:
- *        SELECT SUM(cost_basis_usdc) FROM positions WHERE status = 'open'
+ *        SELECT SUM(cost_basis_usdc) FROM positions WHERE status IN ('open','dust')
  *        SELECT SUM(size_usdc)      FROM orders    WHERE side = 'buy' AND status IN
  *                                                       ('open','pending','partially-filled')
  *
@@ -51,7 +51,7 @@ import { calculateTotalExposure } from "../exposure-calculator.js";
 function preflightExposure(db: import("better-sqlite3").Database): number {
   const pos = db
     .prepare(
-      "SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status = 'open'",
+      "SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status IN ('open','dust')",
     )
     .get() as { total: number };
   const buy = db
@@ -173,7 +173,7 @@ describe("exposure formula parity (runtime helper ↔ preflight SQL)", () => {
     expect(runtime).toBeCloseTo(7.25, 5);
   });
 
-  it("closed positions and filled/cancelled orders are excluded by BOTH paths", () => {
+  it("closed positions and filled/cancelled orders are excluded; dust remains active exposure", () => {
     const { db, positionRepo, orderRepo } = open();
 
     // Real contributors
@@ -188,6 +188,7 @@ describe("exposure formula parity (runtime helper ↔ preflight SQL)", () => {
         closedAt: new Date().toISOString(),
       }),
     );
+    // Dust is still live wallet inventory and remains part of exposure.
     positionRepo.save(makeOpenPosition({ costBasisUsdc: 999, status: "dust" }));
     orderRepo.save(makeOpenBuyOrder({ sizeUsdc: 999, status: "filled" as OrderStatus }));
     orderRepo.save(makeOpenBuyOrder({ sizeUsdc: 999, status: "cancelled" as OrderStatus }));
@@ -196,7 +197,7 @@ describe("exposure formula parity (runtime helper ↔ preflight SQL)", () => {
     const runtime = calculateTotalExposure(positionRepo, orderRepo);
     const preflight = preflightExposure(db);
     expect(runtime).toBe(preflight);
-    expect(runtime).toBeCloseTo(8, 5); // 5 + 3
+    expect(runtime).toBeCloseTo(1007, 5); // 5 open + 999 dust + 3 open buy
   });
 
   it("sell orders are excluded from exposure", () => {

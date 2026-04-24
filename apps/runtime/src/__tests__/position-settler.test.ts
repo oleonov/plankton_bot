@@ -230,7 +230,11 @@ describe("PositionSettler", () => {
   });
 
   describe("settleAlgoRedeem", () => {
-    function makeMarket(tokenId: TokenId, conditionId: string): Market {
+    function makeMarket(
+      tokenId: TokenId,
+      conditionId: string,
+      overrides: Partial<Market> = {},
+    ): Market {
       return {
         tokenId,
         conditionId,
@@ -241,6 +245,7 @@ describe("PositionSettler", () => {
         endDate: "2026-01-01T00:00:00Z",
         active: true,
         updatedAt: "2026-01-01T00:00:00Z",
+        ...overrides,
       } as unknown as Market;
     }
 
@@ -302,6 +307,37 @@ describe("PositionSettler", () => {
       // realized PnL accumulates prior + settlement delta
       expect(saved.realizedPnl).toBeCloseTo(1.5 + -6, 5);
       expect((lotRepo.settleAll as any).mock.calls.length).toBe(1);
+    });
+
+    it("does not algo-redeem positions before market endDate", () => {
+      const pos = makePosition({
+        positionId: POS_UP,
+        tokenId: TOK_UP,
+        avgEntryPrice: 0.027,
+        size: 67.28,
+        realizedPnl: 0,
+      });
+      const positionMap = new Map([["tok-up", pos]]);
+      const positionRepo = createMockPositionRepo(positionMap);
+      const marketRepo = createMockMarketRepo(
+        new Map([
+          [
+            CONDITION,
+            [
+              makeMarket(TOK_UP, CONDITION, {
+                endDate: new Date(Date.now() + 86_400_000).toISOString(),
+              }),
+            ],
+          ],
+        ]),
+      );
+      const settler = new PositionSettler(positionRepo, lotRepo, db as any, marketRepo);
+
+      const results = settler.settleAlgoRedeem([CONDITION]);
+
+      expect(results).toHaveLength(0);
+      expect((positionRepo.save as any).mock.calls.length).toBe(0);
+      expect((lotRepo.settleAll as any).mock.calls.length).toBe(0);
     });
 
     it("skips closed positions idempotently", () => {

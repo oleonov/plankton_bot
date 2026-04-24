@@ -17,12 +17,12 @@ export class ValidationMetricsReader {
       .get() as { cnt: number };
 
     const positions = this.ledgerDb
-      .prepare("SELECT COUNT(*) as cnt FROM positions WHERE status = 'open'")
+      .prepare("SELECT COUNT(*) as cnt FROM positions WHERE status IN ('open','dust')")
       .get() as { cnt: number };
 
     const exposure = this.ledgerDb
       .prepare(
-        "SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status = 'open'",
+        "SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status IN ('open','dust')",
       )
       .get() as { total: number };
 

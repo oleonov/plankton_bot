@@ -127,7 +127,7 @@ export class ProfileRuntimePublisher implements RuntimeModule {
     const positionValue = (
       this.deps.ledgerDb
         .prepare(
-          "SELECT COALESCE(SUM(current_value_usdc), 0) as total FROM positions WHERE status = 'open'",
+          "SELECT COALESCE(SUM(current_value_usdc), 0) as total FROM positions WHERE status IN ('open','dust')",
         )
         .get() as { total: number }
     ).total;

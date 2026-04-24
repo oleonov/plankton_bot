@@ -7,6 +7,7 @@ import type {
   TokenId,
   PositionId,
 } from "@plankton/domain";
+import { findActivePositions } from "../../active-positions.js";
 
 export interface MergeCandidate {
   conditionId: string;
@@ -26,7 +27,7 @@ export class MergeCandidateService {
   ) {}
 
   public findMergeCandidates(): MergeCandidate[] {
-    const openPositions = this.positionRepo.findOpen();
+    const openPositions = findActivePositions(this.positionRepo);
     if (openPositions.length === 0) return [];
 
     // Map positions by conditionId

@@ -28,6 +28,17 @@ export { LiveExchangeGateway, type LiveExchangeConfig } from "./live/exchange-ga
 export { LiveMarketDataGateway, type LiveMarketDataConfig } from "./live/market-data-gateway.js";
 export { type UserEventStreamAuth } from "./live/user-event-stream.js";
 export { buildClobAxiosAgent, type ClobAxiosAgentOptions } from "./live/axios-agent.js";
+export {
+  PolymarketDataPositionReader,
+  aggregatePolymarketPositions,
+  fetchPolymarketPositions,
+  normalizePolymarketPosition,
+  type FetchLike,
+  type FetchPolymarketPositionsOptions,
+  type PolymarketDataPosition,
+  type PolymarketPositionAggregate,
+  type PolymarketPositionReader,
+} from "./polymarket-data-api.js";
 
 // Gamma discovery + resolution
 export { GammaMarketDiscoveryGateway, type GammaDiscoveryConfig } from "./gamma/index.js";

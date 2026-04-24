@@ -31,6 +31,10 @@ import type { Logger } from "../../logger.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
 import { cleanStaleEntryOrders } from "./stale-order-cleaner.js";
+import {
+  runWalletPositionSentinel,
+  type WalletPositionSentinelDeps,
+} from "./wallet-position-sentinel.js";
 
 const DRIFT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DRIFT_INTERVAL_MS = 5 * 60 * 1000;
@@ -59,6 +63,13 @@ export interface ReconciliationModuleDeps {
    * cleaner falls back to the ADR-013 constant.
    */
   exitOrderTtlMs?: () => number;
+  /**
+   * Live-lite wallet↔ledger sentinel. Detects impossible local state where
+   * Polymarket still reports shares for a token, but the local position is
+   * already closed before market endDate. It never repairs or pauses runtime;
+   * it emits critical drift so the root cause remains visible.
+   */
+  walletPositionSentinel?: WalletPositionSentinelDeps;
 }
 
 export class ReconciliationModule implements RuntimeModule {
@@ -190,7 +201,19 @@ export class ReconciliationModule implements RuntimeModule {
         allDetails.push(`stale exit TTL cancels: ${staleResult.staleExitTtlCancelled}`);
       }
 
-      // 4. Build result
+      // 4. Wallet↔ledger sentinel
+      const walletResult = this.deps.walletPositionSentinel
+        ? await runWalletPositionSentinel(this.deps.walletPositionSentinel, ranAt)
+        : { driftCount: 0, details: [], closedLivePositions: [] };
+      allDetails.push(...walletResult.details);
+      if (walletResult.driftCount > 0) {
+        this.log.error(
+          { drifts: walletResult.closedLivePositions },
+          "wallet position sentinel detected locally closed live positions",
+        );
+      }
+
+      // 5. Build result
       const clean =
         orderResult.phantomsCancelled === 0 &&
         orderResult.unknownExchangeOrders === 0 &&
@@ -199,7 +222,8 @@ export class ReconciliationModule implements RuntimeModule {
         orderResult.staleCancelFailed === 0 &&
         staleResult.staleTtlCancelled === 0 &&
         staleResult.staleEndDateCancelled === 0 &&
-        staleResult.staleExitTtlCancelled === 0;
+        staleResult.staleExitTtlCancelled === 0 &&
+        walletResult.driftCount === 0;
 
       const result: ReconciliationResult = {
         ranAt,
@@ -207,7 +231,7 @@ export class ReconciliationModule implements RuntimeModule {
         openOrdersLocal: orderResult.localOpenCount,
         missingFills: fillResult.missingFillsImported,
         phantomOrders: orderResult.phantomsCancelled,
-        positionDriftCount: 0,
+        positionDriftCount: walletResult.driftCount,
         clean,
         details: allDetails,
       };
@@ -216,10 +240,12 @@ export class ReconciliationModule implements RuntimeModule {
       this.lastRunAt = ranAt;
       this.lastResult = result;
 
-      // 5. Publish events
+      // 6. Publish events
       if (!clean) {
         const severity =
-          fillResult.missingFillsImported > 0 ? ("critical" as const) : ("warn" as const);
+          fillResult.missingFillsImported > 0 || walletResult.driftCount > 0
+            ? ("critical" as const)
+            : ("warn" as const);
         await this.deps.bus.publish("ReconciliationDriftDetected", {
           details: allDetails.join("; "),
           severity,
@@ -242,6 +268,7 @@ export class ReconciliationModule implements RuntimeModule {
           staleEntryTtl: staleResult.staleTtlCancelled,
           staleEntryEndDate: staleResult.staleEndDateCancelled,
           staleExitTtl: staleResult.staleExitTtlCancelled,
+          walletPositionDrifts: walletResult.driftCount,
         },
         "reconciliation pass complete",
       );

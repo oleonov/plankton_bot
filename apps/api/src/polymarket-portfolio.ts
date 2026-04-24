@@ -1,6 +1,10 @@
 import type Database from "better-sqlite3";
+import {
+  aggregatePolymarketPositions,
+  fetchPolymarketPositions,
+  type PolymarketPositionAggregate,
+} from "@plankton/exchange";
 
-const POLYMARKET_POSITIONS_URL = "https://data-api.polymarket.com/positions";
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 
 export interface PolymarketPositionPortfolio {
@@ -13,41 +17,9 @@ export interface PolymarketPositionPortfolio {
   capturedAt: string;
 }
 
-interface PolymarketPositionAggregate {
-  positionValueUsdc: number;
-  positionCount: number;
-  costBasisUsdc: number;
-  capturedAt: string;
-}
-
 interface CachedAggregate {
   expiresAtMs: number;
   value: PolymarketPositionAggregate;
-}
-
-type RawPolymarketPosition = Record<string, unknown>;
-
-function numericField(raw: RawPolymarketPosition, field: string): number {
-  const value = raw[field];
-  const parsed = typeof value === "number" ? value : Number(value ?? 0);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function aggregatePositions(
-  positions: RawPolymarketPosition[],
-  capturedAt: string,
-): PolymarketPositionAggregate {
-  return positions.reduce<PolymarketPositionAggregate>(
-    (acc, position) => {
-      const size = numericField(position, "size");
-      if (size <= 0) return acc;
-      acc.positionCount += 1;
-      acc.positionValueUsdc += numericField(position, "currentValue");
-      acc.costBasisUsdc += numericField(position, "initialValue");
-      return acc;
-    },
-    { positionValueUsdc: 0, positionCount: 0, costBasisUsdc: 0, capturedAt },
-  );
 }
 
 export function resolveLiveLiteFunderAddress(
@@ -111,25 +83,8 @@ export class PolymarketPortfolioReader {
     funderAddress: string,
     capturedAt: string,
   ): Promise<PolymarketPositionAggregate | null> {
-    const url = new URL(POLYMARKET_POSITIONS_URL);
-    url.searchParams.set("user", funderAddress);
-    url.searchParams.set("sizeThreshold", "0");
-
-    try {
-      const res = await fetch(url, {
-        headers: { Accept: "application/json", "User-Agent": "poly-plankton/1.0" },
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!res.ok) {
-        await res.body?.cancel().catch(() => undefined);
-        return null;
-      }
-
-      const data = (await res.json()) as unknown;
-      if (!Array.isArray(data)) return null;
-      return aggregatePositions(data as RawPolymarketPosition[], capturedAt);
-    } catch {
-      return null;
-    }
+    const positions = await fetchPolymarketPositions(funderAddress);
+    if (!positions) return null;
+    return aggregatePolymarketPositions(positions, capturedAt);
   }
 }

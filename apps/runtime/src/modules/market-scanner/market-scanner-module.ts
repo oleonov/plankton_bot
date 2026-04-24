@@ -22,6 +22,7 @@ import type {
 } from "@plankton/domain";
 import { evaluatePreEntry, createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { findActivePositions } from "../../active-positions.js";
 import { isTransientNetworkError } from "../../network-errors.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 
@@ -158,7 +159,7 @@ export class MarketScannerModule implements RuntimeModule {
       // Build set of tokens with open positions/orders for preservation
       const activeTokenIds = new Set<string>();
       if (this.deps.positionRepo) {
-        for (const pos of this.deps.positionRepo.findOpen()) {
+        for (const pos of findActivePositions(this.deps.positionRepo)) {
           activeTokenIds.add(String(pos.tokenId));
         }
       }

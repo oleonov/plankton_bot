@@ -1,5 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createOrderId, createConditionId } from "@plankton/domain";
+import {
+  createTokenId,
+  createOrderId,
+  createConditionId,
+  createPositionId,
+} from "@plankton/domain";
 import type {
   ExchangeGateway,
   ExchangeOrder,
@@ -21,7 +26,9 @@ import type {
   PositionDrift,
   SettlementRecord,
   RuntimeEventMap,
+  Position,
 } from "@plankton/domain";
+import type { PolymarketPositionReader } from "@plankton/exchange";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
 import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
@@ -767,6 +774,90 @@ describe("ReconciliationModule", () => {
 
       expect(drifts).toHaveLength(1);
       expect(drifts[0]!.severity).toBe("warn");
+    });
+
+    it("publishes critical drift when wallet sentinel finds locally closed live inventory", async () => {
+      const futureEndDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+      const closedPosition: Position = {
+        positionId: createPositionId("pos-wallet-drift"),
+        tokenId: TOK,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        size: 0,
+        avgEntryPrice: 0.1,
+        costBasisUsdc: 0,
+        currentValueUsdc: 0,
+        realizedPnl: -1,
+        status: "closed",
+        entryStyle: "probe",
+        openedAt: new Date(Date.now() - 60_000).toISOString(),
+        closedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const walletReader: PolymarketPositionReader = {
+        read: vi.fn().mockResolvedValue([
+          {
+            tokenId: String(TOK),
+            size: 10,
+            currentValueUsdc: 2,
+            initialValueUsdc: 1,
+            slug: null,
+            marketSlug: null,
+            outcome: "Yes",
+            raw: {},
+          },
+        ]),
+      };
+      marketRepo.findByTokenId = vi.fn().mockReturnValue({
+        tokenId: TOK,
+        conditionId: "cond-1",
+        slug: "wallet-drift-market",
+        endDate: futureEndDate,
+      });
+      const localLog = {
+        ...silentLog,
+        error: vi.fn(),
+        child: () => localLog,
+      };
+      const drifts: Array<{ severity: string; details: string }> = [];
+      bus.subscribe("ReconciliationDriftDetected", async (p) => {
+        drifts.push({ severity: p.severity, details: p.details });
+      });
+
+      const driftMod = new ReconciliationModule({
+        gateway,
+        bus,
+        orderRepo,
+        fillRepo,
+        marketRepo,
+        log: localLog,
+        reconcileIntervalMs: 60_000,
+        walletPositionSentinel: {
+          reader: walletReader,
+          positionRepo: {
+            findAll: vi.fn().mockReturnValue([closedPosition]),
+          } as unknown as import("@plankton/domain").PositionRepository,
+          marketRepo,
+          log: localLog,
+        },
+      });
+
+      const result = await driftMod.runReconciliation();
+      await bus.drain();
+
+      expect(result.clean).toBe(false);
+      expect(result.positionDriftCount).toBe(1);
+      expect(drifts).toHaveLength(1);
+      expect(drifts[0]!.severity).toBe("critical");
+      expect(drifts[0]!.details).toContain("wallet-live-position-closed-locally");
+      expect(localLog.error).toHaveBeenCalledWith(
+        expect.objectContaining({
+          drifts: expect.arrayContaining([
+            expect.objectContaining({ positionId: "pos-wallet-drift" }),
+          ]),
+        }),
+        "wallet position sentinel detected locally closed live positions",
+      );
     });
   });
 

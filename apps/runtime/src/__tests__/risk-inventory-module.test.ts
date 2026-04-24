@@ -949,6 +949,68 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
+    it("reclassifies dust positions back to open on mark-to-market", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-reopen"),
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+
+        side: "buy",
+        size: 67.28,
+        avgEntryPrice: 0.027,
+        costBasisUsdc: 1.81656,
+        currentValueUsdc: 0.49,
+        realizedPnl: 0,
+        status: "dust",
+        entryStyle: null,
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule();
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          {
+            tokenId: TOK_ID,
+            conditionId: "c1",
+            slug: "test",
+            eventSlug: null,
+            question: "test?",
+            outcome: "YES" as const,
+
+            regime: "threshold" as any,
+            horizon: "daily",
+            endDate: null,
+            active: true,
+            tradable: true,
+            tickSize: 0.001,
+            negRisk: false,
+            acceptingOrders: true,
+            enableOrderBook: true,
+            bestBid: 0.075,
+            bestAsk: 0.077,
+            midPrice: 0.076,
+            spread: 0.002,
+            snapshotTs: Date.now(),
+            eventMarketCount: 1,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls.length).toBeGreaterThanOrEqual(1);
+      const savedPos = saveCalls[saveCalls.length - 1][0];
+      expect(savedPos.currentValueUsdc).toBeCloseTo(5.11328, 5);
+      expect(savedPos.status).toBe("open");
+
+      await mod.stop();
+    });
+
     it("skips positions without live price data", async () => {
       const pos: Position = {
         positionId: createPositionId("pos-1"),

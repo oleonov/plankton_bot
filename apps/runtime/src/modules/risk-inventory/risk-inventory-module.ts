@@ -26,6 +26,7 @@ import type {
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import { findActivePositions } from "../../active-positions.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
@@ -241,8 +242,8 @@ export class RiskInventoryModule implements RuntimeModule {
     }
     if (priceMap.size === 0) return;
 
-    // Revalue open positions that have a live price
-    const openPositions = this.deps.positionRepo.findOpen();
+    // Revalue all non-closed wallet inventory; dust can become open again.
+    const openPositions = findActivePositions(this.deps.positionRepo);
     let updated = 0;
     for (const pos of openPositions) {
       const livePrice = priceMap.get(String(pos.tokenId));

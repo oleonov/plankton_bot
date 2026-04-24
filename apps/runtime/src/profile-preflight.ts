@@ -48,7 +48,7 @@ export function runProfilePreflight(opts: {
   }
 
   const posCount = opts.ledgerDb
-    .prepare("SELECT COUNT(*) as cnt FROM positions WHERE status = 'open'")
+    .prepare("SELECT COUNT(*) as cnt FROM positions WHERE status IN ('open','dust')")
     .get() as { cnt: number };
   info.openPositions = posCount.cnt;
 
@@ -106,7 +106,7 @@ function runLiveLiteChecks(
   // Combined exposure
   const positionValue = db
     .prepare(
-      "SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status = 'open'",
+      "SELECT COALESCE(SUM(cost_basis_usdc), 0) as total FROM positions WHERE status IN ('open','dust')",
     )
     .get() as { total: number };
 
@@ -126,7 +126,9 @@ function runLiveLiteChecks(
 
   // Active markets count
   const activeMarkets = db
-    .prepare("SELECT COUNT(DISTINCT token_id) as cnt FROM positions WHERE status = 'open'")
+    .prepare(
+      "SELECT COUNT(DISTINCT token_id) as cnt FROM positions WHERE status IN ('open','dust')",
+    )
     .get() as { cnt: number };
   if (activeMarkets.cnt > envelope.maxActiveMarkets) {
     blockers.push({

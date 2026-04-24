@@ -347,7 +347,7 @@ export function buildStatusSnapshot(
   // Open exposure from positions; tail cost is no longer tracked in a summary table
   const totalExposure = db
     .prepare(
-      "SELECT COALESCE(SUM(current_value_usdc),0) as total FROM positions WHERE status = 'open'",
+      "SELECT COALESCE(SUM(current_value_usdc),0) as total FROM positions WHERE status IN ('open','dust')",
     )
     .get() as { total: number };
 
@@ -481,7 +481,7 @@ export function buildStatusSnapshot(
   const totalCurrentValueUsdc = (
     db
       .prepare(
-        "SELECT COALESCE(SUM(current_value_usdc), 0) as total FROM positions WHERE status = 'open'",
+        "SELECT COALESCE(SUM(current_value_usdc), 0) as total FROM positions WHERE status IN ('open','dust')",
       )
       .get() as { total: number }
   ).total;

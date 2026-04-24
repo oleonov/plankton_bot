@@ -61,7 +61,7 @@ import {
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import { createBotRunId, ENTRY_REASONS, resolveTradingState } from "@plankton/domain";
-import { GammaMarketDiscoveryGateway } from "@plankton/exchange";
+import { GammaMarketDiscoveryGateway, PolymarketDataPositionReader } from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
 import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
@@ -629,6 +629,16 @@ async function main(): Promise<void> {
       executionPolicyProvider.refreshIfStale();
       return executionPolicyProvider.snapshot().exitOrderTtlMs;
     },
+    ...(runtimeMode === "live-lite" && traderAddress
+      ? {
+          walletPositionSentinel: {
+            reader: new PolymarketDataPositionReader(traderAddress),
+            positionRepo: repos.position,
+            marketRepo: repos.market,
+            log,
+          },
+        }
+      : {}),
   });
 
   const userOrderStreamModule =

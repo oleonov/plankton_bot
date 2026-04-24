@@ -85,6 +85,9 @@ importers:
       "@plankton/domain":
         specifier: workspace:*
         version: link:../../packages/domain
+      "@plankton/exchange":
+        specifier: workspace:*
+        version: link:../../packages/exchange
       better-sqlite3:
         specifier: ^12.8.0
         version: 12.8.0
