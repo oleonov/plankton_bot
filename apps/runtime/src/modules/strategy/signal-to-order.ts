@@ -431,9 +431,7 @@ export class SignalToOrderBridge {
         ...(executionTerms.pricingDiagnostics
           ? { pricingDiagnostics: executionTerms.pricingDiagnostics }
           : {}),
-        ...(executionTerms.pricingShadow
-          ? { pricingShadow: executionTerms.pricingShadow }
-          : {}),
+        ...(executionTerms.pricingShadow ? { pricingShadow: executionTerms.pricingShadow } : {}),
       },
       "signal converted to order command",
     );
@@ -475,8 +473,10 @@ export class SignalToOrderBridge {
     if (!observations || !profileId) return;
     const { signal, clientOrderId, market, policy, executionTerms, canary, skippedReason } = params;
     try {
-      const { selectedPrice, diagnostics, boundedOutcome } =
-        summarizeExecutionTerms(executionTerms, policy.pricing.mode);
+      const { selectedPrice, diagnostics, boundedOutcome } = summarizeExecutionTerms(
+        executionTerms,
+        policy.pricing.mode,
+      );
       const row: ExecutionPolicyObservation = {
         profileId: String(profileId),
         signalId: signal.signalId,
@@ -679,7 +679,12 @@ export class SignalToOrderBridge {
         };
       }
       return isRelayer
-        ? { kind: "ok", price: outcome.price, postOnly: true, pricingDiagnostics: outcome.diagnostics }
+        ? {
+            kind: "ok",
+            price: outcome.price,
+            postOnly: true,
+            pricingDiagnostics: outcome.diagnostics,
+          }
         : { kind: "ok", price: outcome.price, pricingDiagnostics: outcome.diagnostics };
     }
 
@@ -931,14 +936,7 @@ type ExecutionTermsResolution =
   | { kind: "skip-wide-spread"; diagnostics: BoundedMidpointDiagnostics }
   | { kind: "skip-one-sided"; diagnostics: BoundedMidpointDiagnostics };
 
-export type DeadSideBucket =
-  | "<0"
-  | "<1m"
-  | "1-5m"
-  | "5-15m"
-  | "15-60m"
-  | "1-4h"
-  | ">4h";
+export type DeadSideBucket = "<0" | "<1m" | "1-5m" | "5-15m" | "15-60m" | "1-4h" | ">4h";
 
 export interface DeadSideCanary {
   bestBid: number | null;

@@ -89,25 +89,27 @@ Bearer-auth is required for PATCH; GET is readable by any authenticated session.
 // profile_settings.execution_policy_json
 {
   "version": 1,
-  "entryPriceCeiling": 0.75,          // ADR-013 D1, BUY skip above this price
-  "exitOrderTtlMs": 300000,           // ADR-013 D2, stale exit SELL cancel threshold
-  "deadSideGuard": {                  // audit 2026-04-24
-    "mode": "observe",                // off | observe | enforce
-    "askCeiling": 0.02,               // BUY skipped if bestAsk ≤ this AND mode=enforce AND near-end
-    "maxTimeToEndMs": 120000          // near-end window used for enforce-mode rejections
+  "entryPriceCeiling": 0.75, // ADR-013 D1, BUY skip above this price
+  "exitOrderTtlMs": 300000, // ADR-013 D2, stale exit SELL cancel threshold
+  "deadSideGuard": {
+    // audit 2026-04-24
+    "mode": "observe", // off | observe | enforce
+    "askCeiling": 0.02, // BUY skipped if bestAsk ≤ this AND mode=enforce AND near-end
+    "maxTimeToEndMs": 120000, // near-end window used for enforce-mode rejections
   },
-  "pricing": {                        // ADR-014
-    "mode": "edge",                   // edge | bounded-midpoint
+  "pricing": {
+    // ADR-014
+    "mode": "edge", // edge | bounded-midpoint
     "maxEntrySpreadTicks": 20,
     "maxExitSpreadTicks": 40,
     "maxImprovementTicks": 10,
-    "wideSpreadPolicy": "edge",       // edge | skip
-    "oneSidedPolicy": "edge"          // edge | skip
+    "wideSpreadPolicy": "edge", // edge | skip
+    "oneSidedPolicy": "edge", // edge | skip
   },
   "telemetry": {
-    "deadSideCanary": true,           // emit shadow markers on every BUY with bestAsk ≤ askCeiling
-    "pricingShadow": true             // compute bounded-midpoint price in edge mode for canary logs
-  }
+    "deadSideCanary": true, // emit shadow markers on every BUY with bestAsk ≤ askCeiling
+    "pricingShadow": true, // compute bounded-midpoint price in edge mode for canary logs
+  },
 }
 ```
 

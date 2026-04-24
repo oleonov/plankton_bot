@@ -100,7 +100,9 @@ describe("control-db migration infrastructure", () => {
       const parsed = JSON.parse(row.execution_policy_json!) as {
         deadSideGuard: { mode: string };
       };
-      expect(parsed.deadSideGuard.mode).toBe(row.profile_id === "live-lite" ? "enforce" : "observe");
+      expect(parsed.deadSideGuard.mode).toBe(
+        row.profile_id === "live-lite" ? "enforce" : "observe",
+      );
     }
   });
 });

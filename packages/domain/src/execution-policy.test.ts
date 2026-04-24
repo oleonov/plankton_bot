@@ -66,9 +66,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
 
   it("clamps-to-default on out-of-range numbers (no silent clip)", () => {
     // entryPriceCeiling bounds are [0.05, 0.99]
-    const { policy, issues } = parseExecutionPolicyJson(
-      JSON.stringify({ entryPriceCeiling: 5 }),
-    );
+    const { policy, issues } = parseExecutionPolicyJson(JSON.stringify({ entryPriceCeiling: 5 }));
     expect(policy.entryPriceCeiling).toBe(DEFAULT_EXECUTION_POLICY.entryPriceCeiling);
     expect(issues.some((i) => i.includes("entryPriceCeiling"))).toBe(true);
   });
@@ -90,9 +88,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.pricing.maxEntrySpreadTicks).toBe(
       DEFAULT_EXECUTION_POLICY.pricing.maxEntrySpreadTicks,
     );
-    expect(policy.pricing.wideSpreadPolicy).toBe(
-      DEFAULT_EXECUTION_POLICY.pricing.wideSpreadPolicy,
-    );
+    expect(policy.pricing.wideSpreadPolicy).toBe(DEFAULT_EXECUTION_POLICY.pricing.wideSpreadPolicy);
   });
 
   it("rejects deadSideGuard as array or scalar with an issue", () => {

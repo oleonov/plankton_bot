@@ -4,9 +4,7 @@ import type {
   ExecutionPolicyObservationRepository,
 } from "@plankton/domain";
 
-export class SqliteExecutionPolicyObservationRepository
-  implements ExecutionPolicyObservationRepository
-{
+export class SqliteExecutionPolicyObservationRepository implements ExecutionPolicyObservationRepository {
   constructor(private readonly db: Database) {}
 
   insert(obs: ExecutionPolicyObservation): void {

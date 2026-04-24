@@ -176,9 +176,7 @@ export class ReconciliationModule implements RuntimeModule {
           marketRepo: this.deps.marketRepo,
           bus: this.deps.bus,
           log: this.log,
-          ...(this.deps.exitOrderTtlMs
-            ? { exitOrderTtlMs: this.deps.exitOrderTtlMs() }
-            : {}),
+          ...(this.deps.exitOrderTtlMs ? { exitOrderTtlMs: this.deps.exitOrderTtlMs() } : {}),
         },
         this.staleBackoffMap,
       );

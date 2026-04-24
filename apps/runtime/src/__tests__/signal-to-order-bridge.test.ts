@@ -1127,7 +1127,7 @@ describe("entry-price ceiling guard (ADR-013)", () => {
     const sellSignal: Signal = { ...makeSignal(), side: "sell", reason: "repricing-exit" };
     await bus.publish("SignalApproved", {
       signal: sellSignal,
-      market: makeMarket({ bestBid: 0.85, bestAsk: 0.90, midPrice: 0.875 }),
+      market: makeMarket({ bestBid: 0.85, bestAsk: 0.9, midPrice: 0.875 }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -2125,7 +2125,6 @@ describe("ADR-015 execution policy observations", () => {
     // In edge mode the chosen bestBid is recorded as the would-have-been price.
     expect(rows[0]!.selectedPrice).toBe(0.5);
   });
-
 });
 
 // ─── ADR-015 telemetry flag gating ───────────────────────────────────────────
@@ -2272,9 +2271,7 @@ describe("ADR-015 telemetry flags", () => {
     });
     await bus.drain();
 
-    const canaryLog = info.mock.calls.find(
-      (c) => c[1] === "dead-side-near-end canary observation",
-    );
+    const canaryLog = info.mock.calls.find((c) => c[1] === "dead-side-near-end canary observation");
     expect(canaryLog).toBeUndefined();
   });
 
@@ -2305,9 +2302,7 @@ describe("ADR-015 telemetry flags", () => {
     });
     await bus.drain();
 
-    const canaryLog = info.mock.calls.find(
-      (c) => c[1] === "dead-side-near-end canary observation",
-    );
+    const canaryLog = info.mock.calls.find((c) => c[1] === "dead-side-near-end canary observation");
     expect(canaryLog).toBeDefined();
   });
 });

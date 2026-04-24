@@ -1,9 +1,5 @@
 import { useState } from "react";
-import {
-  useProfiles,
-  useExecutionPolicy,
-  useUpdateExecutionPolicy,
-} from "../api/hooks.ts";
+import { useProfiles, useExecutionPolicy, useUpdateExecutionPolicy } from "../api/hooks.ts";
 import type {
   DeadSideGuardMode,
   ExecutionPolicyDTO,
@@ -22,8 +18,7 @@ function ExecutionPolicyForm({ profileId }: { profileId: string }) {
   const { data, isLoading, dataUpdatedAt } = useExecutionPolicy(profileId);
   const update = useUpdateExecutionPolicy(profileId);
 
-  if (isLoading || !data)
-    return <div style={{ fontSize: 12, padding: 16 }}>Loading...</div>;
+  if (isLoading || !data) return <div style={{ fontSize: 12, padding: 16 }}>Loading...</div>;
 
   return (
     <ExecutionPolicyFormInner
@@ -47,33 +42,25 @@ function ExecutionPolicyFormInner({
   issues: string[];
   update: ReturnType<typeof useUpdateExecutionPolicy>;
 }) {
-  const [entryPriceCeiling, setEntryPriceCeiling] = useState(
-    policy.entryPriceCeiling.toString(),
-  );
+  const [entryPriceCeiling, setEntryPriceCeiling] = useState(policy.entryPriceCeiling.toString());
   const [exitOrderTtlMs, setExitOrderTtlMs] = useState(policy.exitOrderTtlMs.toString());
 
   const [dsgMode, setDsgMode] = useState<DeadSideGuardMode>(policy.deadSideGuard.mode);
-  const [dsgAskCeiling, setDsgAskCeiling] = useState(
-    policy.deadSideGuard.askCeiling.toString(),
-  );
+  const [dsgAskCeiling, setDsgAskCeiling] = useState(policy.deadSideGuard.askCeiling.toString());
   const [dsgMaxTime, setDsgMaxTime] = useState(policy.deadSideGuard.maxTimeToEndMs.toString());
 
   const [pricingMode, setPricingMode] = useState<PricingMode>(policy.pricing.mode);
   const [maxEntrySpread, setMaxEntrySpread] = useState(
     policy.pricing.maxEntrySpreadTicks.toString(),
   );
-  const [maxExitSpread, setMaxExitSpread] = useState(
-    policy.pricing.maxExitSpreadTicks.toString(),
-  );
+  const [maxExitSpread, setMaxExitSpread] = useState(policy.pricing.maxExitSpreadTicks.toString());
   const [maxImprovement, setMaxImprovement] = useState(
     policy.pricing.maxImprovementTicks.toString(),
   );
   const [wideSpread, setWideSpread] = useState<PricingSpreadPolicy>(
     policy.pricing.wideSpreadPolicy,
   );
-  const [oneSided, setOneSided] = useState<PricingOneSidedPolicy>(
-    policy.pricing.oneSidedPolicy,
-  );
+  const [oneSided, setOneSided] = useState<PricingOneSidedPolicy>(policy.pricing.oneSidedPolicy);
 
   const [deadSideCanary, setDeadSideCanary] = useState(policy.telemetry.deadSideCanary);
   const [pricingShadow, setPricingShadow] = useState(policy.telemetry.pricingShadow);
@@ -189,11 +176,7 @@ function ExecutionPolicyFormInner({
         </div>
         <div className="form-field">
           <label>Max Time To End (ms)</label>
-          <input
-            type="number"
-            value={dsgMaxTime}
-            onChange={(e) => setDsgMaxTime(e.target.value)}
-          />
+          <input type="number" value={dsgMaxTime} onChange={(e) => setDsgMaxTime(e.target.value)} />
         </div>
 
         <div
@@ -302,9 +285,7 @@ function ExecutionPolicyFormInner({
             <span style={{ marginLeft: 8, color: "var(--green)", fontSize: 11 }}>Saved</span>
           )}
           {errorMessage && (
-            <span style={{ marginLeft: 8, color: "var(--red)", fontSize: 11 }}>
-              {errorMessage}
-            </span>
+            <span style={{ marginLeft: 8, color: "var(--red)", fontSize: 11 }}>{errorMessage}</span>
           )}
         </div>
       </div>

@@ -358,8 +358,7 @@ export function resolveBoundedMidpointPrice(input: BoundedMidpointInput): Bounde
     side === "buy"
       ? edgePrice + maxImprovementTicks * tickSize
       : edgePrice - maxImprovementTicks * tickSize;
-  const noCrossPrice =
-    side === "buy" ? oppositeEdge - tickSize : oppositeEdge + tickSize;
+  const noCrossPrice = side === "buy" ? oppositeEdge - tickSize : oppositeEdge + tickSize;
 
   let finalPrice: number;
   if (side === "buy") {
@@ -375,7 +374,8 @@ export function resolveBoundedMidpointPrice(input: BoundedMidpointInput): Bounde
   // Re-snap after clamps — improvementCapPrice is on-grid by construction, but
   // noCrossPrice composition can push off grid on fp-residue edge cases. A
   // final side-aware snap is cheap and keeps validateExecutablePrice happy.
-  finalPrice = side === "buy" ? floorToTick(finalPrice, tickSize) : ceilToTick(finalPrice, tickSize);
+  finalPrice =
+    side === "buy" ? floorToTick(finalPrice, tickSize) : ceilToTick(finalPrice, tickSize);
 
   const validation = validateExecutablePrice(finalPrice, tickSize);
   const diag = buildDiagnostics(
