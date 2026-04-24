@@ -475,9 +475,7 @@ describe("PositionsPage — cursor aggregation across pages", () => {
     await waitFor(() => {
       expect(callIndex).toBeGreaterThanOrEqual(2);
     });
-    expect(
-      screen.queryByTestId("positions-truncated-notice"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("positions-truncated-notice")).not.toBeInTheDocument();
   });
 
   it("stops at the safety cap and surfaces a truncation notice", async () => {
@@ -503,9 +501,7 @@ describe("PositionsPage — cursor aggregation across pages", () => {
 
     renderWithProviders(<Positions />);
 
-    expect(
-      await screen.findByTestId("positions-truncated-notice"),
-    ).toBeInTheDocument();
+    expect(await screen.findByTestId("positions-truncated-notice")).toBeInTheDocument();
   });
 });
 

@@ -65,10 +65,7 @@ export function buildLegStateMap(
   return result;
 }
 
-export function getLegStateOrEmpty(
-  map: Map<string, LegStateInfo>,
-  tokenId: string,
-): LegStateInfo {
+export function getLegStateOrEmpty(map: Map<string, LegStateInfo>, tokenId: string): LegStateInfo {
   return map.get(tokenId) ?? EMPTY_LEG_STATE;
 }
 
@@ -82,10 +79,7 @@ export function getLegStateOrEmpty(
  * Counter does NOT reset after partial sells followed by a new buy
  * (README §"State machine").
  */
-export function derivePhase(
-  positionStatus: string,
-  leg: LegStateInfo,
-): Phase {
+export function derivePhase(positionStatus: string, leg: LegStateInfo): Phase {
   if (positionStatus === "closed" || positionStatus === "dust") return "S0";
   if (leg.buyCount === 0 && leg.sellCount === 0) return "S0";
   if (leg.lastAction === "SELL") return "S3";

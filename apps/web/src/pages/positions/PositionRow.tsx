@@ -24,7 +24,14 @@ interface Props {
   onSelect: (p: PositionDTO) => void;
 }
 
-export function PositionRow({ position: p, density, selected, showBuys, showPct, onSelect }: Props) {
+export function PositionRow({
+  position: p,
+  density,
+  selected,
+  showBuys,
+  showPct,
+  onSelect,
+}: Props) {
   const pnl = getPositionTotalPnl(p);
   const endsMs = endsMsFrom(p.endDate);
   const mstate = deriveMarketState(p.status);

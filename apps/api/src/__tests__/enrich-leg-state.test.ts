@@ -181,10 +181,7 @@ describe("getLegStateOrEmpty", () => {
 
   it("returns the stored leg state when token exists", () => {
     const map = new Map([
-      [
-        "tok-a",
-        { buyCount: 1, sellCount: 0, lastAction: "BUY" as const, lastActionAt: null },
-      ],
+      ["tok-a", { buyCount: 1, sellCount: 0, lastAction: "BUY" as const, lastActionAt: null }],
     ]);
     expect(getLegStateOrEmpty(map, "tok-a").buyCount).toBe(1);
   });

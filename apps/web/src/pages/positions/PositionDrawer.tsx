@@ -70,7 +70,10 @@ function DrawerBody({ position, onClose }: { position: PositionDTO; onClose: () 
     <>
       <header>
         <div>
-          <div className="p2-mono" style={{ fontSize: 10, color: "var(--p2-fg-dim)", letterSpacing: ".08em" }}>
+          <div
+            className="p2-mono"
+            style={{ fontSize: 10, color: "var(--p2-fg-dim)", letterSpacing: ".08em" }}
+          >
             {position.positionId}
           </div>
           <div style={{ fontSize: 14, marginTop: 2, color: "var(--p2-fg-strong)" }}>
@@ -81,17 +84,11 @@ function DrawerBody({ position, onClose }: { position: PositionDTO; onClose: () 
               <span className="p2-ic" style={{ color: drawerIconColor(position.phase) }}>
                 <PhaseIcon phase={position.phase} />
               </span>
-              <span
-                className="p2-lbl"
-                style={{ color: drawerLabelColor(position.phase) }}
-              >
+              <span className="p2-lbl" style={{ color: drawerLabelColor(position.phase) }}>
                 {meta.label}
               </span>
             </span>
-            <span
-              className="p2-mono"
-              style={{ color: "var(--p2-fg-dim)", fontSize: 10 }}
-            >
+            <span className="p2-mono" style={{ color: "var(--p2-fg-dim)", fontSize: 10 }}>
               · {position.phase} · buy_count={position.buyCount}, last={position.lastAction ?? "—"}
             </span>
           </div>

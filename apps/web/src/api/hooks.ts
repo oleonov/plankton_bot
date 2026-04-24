@@ -143,9 +143,7 @@ interface AllPositionsResult {
   truncated: boolean;
 }
 
-export function useAllPositions(
-  opts: { pageSize?: number; maxPages?: number } = {},
-) {
+export function useAllPositions(opts: { pageSize?: number; maxPages?: number } = {}) {
   const pageSize = opts.pageSize ?? 500;
   const maxPages = opts.maxPages ?? 20;
   return useQuery({

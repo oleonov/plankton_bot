@@ -140,22 +140,26 @@ export function groupPositions(rows: PositionDTO[], groupBy: GroupBy): GroupBuck
   const now = Date.now();
 
   if (groupBy === "lastAction") {
-    list.sort((a, b) => lastActionMinutes(a.lastActionAt, now) - lastActionMinutes(b.lastActionAt, now));
-    return bucketize(list, [
-      { key: "Active now", test: (m) => m < 15 },
-      { key: "Recent (last hour)", test: (m) => m >= 15 && m < 60 },
-      { key: "Today", test: (m) => m >= 60 && m < 24 * 60 },
-      { key: "Older", test: (m) => m >= 24 * 60 },
-    ], (p) => lastActionMinutes(p.lastActionAt, now));
+    list.sort(
+      (a, b) => lastActionMinutes(a.lastActionAt, now) - lastActionMinutes(b.lastActionAt, now),
+    );
+    return bucketize(
+      list,
+      [
+        { key: "Active now", test: (m) => m < 15 },
+        { key: "Recent (last hour)", test: (m) => m >= 15 && m < 60 },
+        { key: "Today", test: (m) => m >= 60 && m < 24 * 60 },
+        { key: "Older", test: (m) => m >= 24 * 60 },
+      ],
+      (p) => lastActionMinutes(p.lastActionAt, now),
+    );
   }
 
   if (groupBy === "phase") {
-    return PHASE_ORDER
-      .map((phase) => ({
-        key: `${PHASE_META[phase].label} (${phase})`,
-        items: list.filter((p) => p.phase === phase),
-      }))
-      .filter((g) => g.items.length > 0);
+    return PHASE_ORDER.map((phase) => ({
+      key: `${PHASE_META[phase].label} (${phase})`,
+      items: list.filter((p) => p.phase === phase),
+    })).filter((g) => g.items.length > 0);
   }
 
   if (groupBy === "pnl") {
@@ -170,12 +174,16 @@ export function groupPositions(rows: PositionDTO[], groupBy: GroupBy): GroupBuck
 
   // ends
   list.sort((a, b) => endsMsFrom(a.endDate, now) - endsMsFrom(b.endDate, now));
-  return bucketize(list, [
-    { key: "Expired", test: (m) => m < 0 },
-    { key: "Closing < 1h", test: (m) => m >= 0 && m < 3_600_000 },
-    { key: "Closing today", test: (m) => m >= 3_600_000 && m < 24 * 3_600_000 },
-    { key: "Later", test: (m) => m >= 24 * 3_600_000 },
-  ], (p) => endsMsFrom(p.endDate, now));
+  return bucketize(
+    list,
+    [
+      { key: "Expired", test: (m) => m < 0 },
+      { key: "Closing < 1h", test: (m) => m >= 0 && m < 3_600_000 },
+      { key: "Closing today", test: (m) => m >= 3_600_000 && m < 24 * 3_600_000 },
+      { key: "Later", test: (m) => m >= 24 * 3_600_000 },
+    ],
+    (p) => endsMsFrom(p.endDate, now),
+  );
 }
 
 function bucketize(

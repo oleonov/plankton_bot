@@ -59,11 +59,15 @@ export function PositionsPage() {
     [filtered, safePage],
   );
 
-  const groups = useMemo(() => groupPositions(pageSlice, tweaks.groupBy), [pageSlice, tweaks.groupBy]);
+  const groups = useMemo(
+    () => groupPositions(pageSlice, tweaks.groupBy),
+    [pageSlice, tweaks.groupBy],
+  );
 
   const pageStart = filteredCount > 0 ? (safePage - 1) * PAGE_SIZE + 1 : 0;
   const pageEnd = pageStart + pageSlice.length - 1;
-  const pageInfo = filteredCount > 0 ? `${pageStart}\u2013${pageEnd} of ${filteredCount}` : undefined;
+  const pageInfo =
+    filteredCount > 0 ? `${pageStart}\u2013${pageEnd} of ${filteredCount}` : undefined;
 
   return (
     <div className="positions-v2" data-testid="positions-v2">
@@ -104,8 +108,8 @@ export function PositionsPage() {
           data-testid="positions-truncated-notice"
           role="status"
         >
-          Showing the first 10,000 positions. Additional rows are hidden — narrow filters or
-          contact support if your ledger exceeds this cap.
+          Showing the first 10,000 positions. Additional rows are hidden — narrow filters or contact
+          support if your ledger exceeds this cap.
         </div>
       ) : null}
 
@@ -131,7 +135,9 @@ export function PositionsPage() {
               {groups.length === 0 ? (
                 <tr>
                   <td colSpan={9} className="p2-empty-table">
-                    {rows.length === 0 ? "No positions." : "No positions match the current filters."}
+                    {rows.length === 0
+                      ? "No positions."
+                      : "No positions match the current filters."}
                   </td>
                 </tr>
               ) : (

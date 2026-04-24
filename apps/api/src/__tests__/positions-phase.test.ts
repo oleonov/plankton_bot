@@ -62,7 +62,13 @@ function seedPosition(
     `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price,
       cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
      VALUES (?, ?, 'buy', 10, 0.1, 2.10, 0, ?, ?, ?)`,
-  ).run(opts.id, opts.tok, opts.status ?? "open", opts.ts ?? "2026-04-20T10:00:00Z", opts.ts ?? "2026-04-20T10:00:00Z");
+  ).run(
+    opts.id,
+    opts.tok,
+    opts.status ?? "open",
+    opts.ts ?? "2026-04-20T10:00:00Z",
+    opts.ts ?? "2026-04-20T10:00:00Z",
+  );
 }
 
 function seedLegState(
