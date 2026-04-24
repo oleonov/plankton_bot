@@ -374,10 +374,18 @@ export class AlgoDecisionModule implements RuntimeModule {
       holdDurationSeconds,
     };
 
-    // Redeem check first — if conditions met, skip signal generation
+    // Redeem check first — if conditions met, skip signal generation.
+    // Pre-gate on endDate: on-chain redeemPositions() reverts before market
+    // resolution, and ResolutionModule's downstream filterConfirmedRedeemable
+    // defers such cases — but emitting RedeemRequested anyway spams the bus
+    // and writes defer-log noise every eval tick. Suppress at the source.
+    // Missing endDate → allow through (downstream still gates on Gamma).
     const redeemResult = evaluateRedeem(ctx, this.decisionRules);
     if (redeemResult) {
-      return { type: "redeem", conditionId: market.conditionId };
+      const endMs = market.endDate ? new Date(market.endDate).getTime() : NaN;
+      if (!Number.isFinite(endMs) || endMs <= now) {
+        return { type: "redeem", conditionId: market.conditionId };
+      }
     }
 
     // Hard-liveness gate for CLOB signals. REDEEM (above) uses a separate

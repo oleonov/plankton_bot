@@ -124,6 +124,11 @@ async function buildFixture(opts: {
 
   const now = new Date().toISOString();
   const firstTradeAt = new Date(Date.now() - opts.holdAgoSeconds * 1000).toISOString();
+  // REDEEM rule only applies to resolved markets — the algo-decision module
+  // pre-gates on endDate <= now before emitting RedeemRequested (on-chain
+  // redeemPositions() reverts before resolution). Default fixture endDate
+  // must be in the past for the scenario to reflect a redeemable state.
+  const endDate = opts.endDate ?? new Date(Date.now() - 60_000).toISOString();
 
   // Seed market
   marketRepo.save({
@@ -135,7 +140,7 @@ async function buildFixture(opts: {
     outcome: "YES",
     regime: null,
     horizon: null,
-    endDate: opts.endDate ?? new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    endDate,
     active: true,
     tradable: true,
     tickSize: 0.01,
@@ -250,7 +255,7 @@ async function buildFixture(opts: {
         enableOrderBook: true,
         tickSize: 0.01,
         negRisk: false,
-        endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        endDate,
         volume24h: null,
         eventMarketCount: 1,
         snapshotTs: Date.now(),

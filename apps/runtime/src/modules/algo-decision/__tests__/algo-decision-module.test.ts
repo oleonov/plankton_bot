@@ -382,6 +382,119 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("does NOT emit RedeemRequested when market endDate is in the future", async () => {
+    // On-chain redeemPositions() reverts before UMA resolution, so emitting
+    // RedeemRequested against a live market is pure bus noise. Gate keeps it off.
+    const tokenId = "token-redeem-live";
+    const conditionId = "cond-redeem-live";
+
+    const twentyFiveMinAgo = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 2,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: twentyFiveMinAgo,
+      lastTradeAt: twentyFiveMinAgo,
+      updatedAt: twentyFiveMinAgo,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    const market = {
+      ...makeMarket(tokenId, null, 0.03, conditionId),
+      endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    };
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
+    expect(redeemCalls.length).toBe(0);
+
+    await mod.stop();
+  });
+
+  it("emits RedeemRequested when market endDate is in the past", async () => {
+    const tokenId = "token-redeem-past";
+    const conditionId = "cond-redeem-past";
+
+    const twentyFiveMinAgo = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 2,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: twentyFiveMinAgo,
+      lastTradeAt: twentyFiveMinAgo,
+      updatedAt: twentyFiveMinAgo,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    const market = {
+      ...makeMarket(tokenId, null, 0.03, conditionId),
+      endDate: new Date(Date.now() - 60_000).toISOString(),
+    };
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
+    expect(redeemCalls.length).toBe(1);
+    expect(
+      (redeemCalls[0]![1] as import("@plankton/domain").RuntimeEventMap["RedeemRequested"])
+        .conditionIds,
+    ).toContain(conditionId);
+
+    await mod.stop();
+  });
+
+  it("emits RedeemRequested when market endDate is null (downstream gamma-gate handles it)", async () => {
+    // Missing endDate → passthrough; ResolutionModule's filterConfirmedRedeemable
+    // still queries Gamma and defers if unresolved.
+    const tokenId = "token-redeem-null";
+    const conditionId = "cond-redeem-null";
+
+    const twentyFiveMinAgo = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 2,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: twentyFiveMinAgo,
+      lastTradeAt: twentyFiveMinAgo,
+      updatedAt: twentyFiveMinAgo,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    const market = makeMarket(tokenId, null, 0.03, conditionId); // endDate: null
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
+    expect(redeemCalls.length).toBe(1);
+
+    await mod.stop();
+  });
+
   it("skips tokens that already have a signal-time pending BUY reservation", async () => {
     const tokenId = "token-pending";
     const familyId = "fam-3";

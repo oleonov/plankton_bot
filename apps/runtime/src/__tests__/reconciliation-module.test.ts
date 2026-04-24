@@ -901,7 +901,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
         sumOpenBuyNotional: vi.fn().mockReturnValue(0),
       } as unknown as OrderRepository,
       fillRepo: {} as FillRepository,
-      marketRepo: {} as MarketRepository,
+      marketRepo: createMockMarketRepo(),
       log: silentLog,
       reconcileIntervalMs: 60_000,
       settlementLedgerRepo: ledgerRepo,
@@ -955,7 +955,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
       bus,
       orderRepo: {} as OrderRepository,
       fillRepo: {} as FillRepository,
-      marketRepo: {} as MarketRepository,
+      marketRepo: createMockMarketRepo(),
       log: silentLog,
       reconcileIntervalMs: 60_000,
       settlementLedgerRepo: ledgerRepo,
@@ -1005,7 +1005,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
       bus,
       orderRepo: {} as OrderRepository,
       fillRepo: {} as FillRepository,
-      marketRepo: {} as MarketRepository,
+      marketRepo: createMockMarketRepo(),
       log: silentLog,
       reconcileIntervalMs: 60_000,
       settlementLedgerRepo: ledgerRepo,
@@ -1040,7 +1040,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
       bus: new InProcessEventBus(),
       orderRepo: {} as OrderRepository,
       fillRepo: {} as FillRepository,
-      marketRepo: {} as MarketRepository,
+      marketRepo: createMockMarketRepo(),
       log: silentLog,
       reconcileIntervalMs: 60_000,
     });
@@ -1087,7 +1087,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
       bus: new InProcessEventBus(),
       orderRepo: {} as OrderRepository,
       fillRepo: {} as FillRepository,
-      marketRepo: {} as MarketRepository,
+      marketRepo: createMockMarketRepo(),
       log: silentLog,
       reconcileIntervalMs: 60_000,
       settlementLedgerRepo: ledgerRepo,
@@ -1145,7 +1145,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
       bus,
       orderRepo: {} as OrderRepository,
       fillRepo: {} as FillRepository,
-      marketRepo: {} as MarketRepository,
+      marketRepo: createMockMarketRepo(),
       log: silentLog,
       reconcileIntervalMs: 60_000,
       settlementLedgerRepo: ledgerRepo,
@@ -1201,7 +1201,7 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
       bus,
       orderRepo: {} as OrderRepository,
       fillRepo: {} as FillRepository,
-      marketRepo: {} as MarketRepository,
+      marketRepo: createMockMarketRepo(),
       log: silentLog,
       reconcileIntervalMs: 60_000,
       settlementLedgerRepo: ledgerRepo,
@@ -1212,5 +1212,81 @@ describe("ReconciliationModule — position drift detection (Phase 3.A)", () => 
 
     expect(retries).toEqual([{ conditionIds: ["cond-A"], timestamp: expect.any(Number) }]);
     expect(driftRepo.upsertCalls).toHaveLength(2);
+  });
+
+  it("resolves (not-a-drift) non-zero balance against a still-live market (endDate > now)", async () => {
+    // An algo-redeem ledger row with non-zero on-chain balance would normally
+    // be a drift — but if the market's endDate is in the future, the position
+    // is simply still live (e.g. user re-entered the token after a prior
+    // local settle). Do NOT publish PositionDriftDetected, do NOT requeue
+    // RedeemRequested, and resolve the stale drift row so the open sweep
+    // stops refreshing it forever.
+    const row = makeAlgoRedeemRow();
+    const ledgerRepo = createMockSettlementLedgerRepo([row]);
+    const driftRepo = createMockDriftRepo();
+    const gateway = {
+      placeOrder: vi.fn(),
+      cancelOrder: vi.fn(),
+      cancelAllOrders: vi.fn(),
+      getOpenOrders: vi.fn().mockResolvedValue([]),
+      getOpenOrdersForToken: vi.fn().mockResolvedValue([]),
+      getFills: vi.fn().mockResolvedValue([]),
+      getBalances: vi.fn().mockResolvedValue([]),
+      getPositionBalance: vi.fn().mockResolvedValue(0),
+      getOutcomeTokenBalance: vi.fn().mockResolvedValue(12345n),
+      redeemPositions: vi.fn(),
+      mergePositions: vi.fn(),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 1 }),
+    } as unknown as ExchangeGateway;
+    const bus = new InProcessEventBus();
+    const driftEvents: RuntimeEventMap["PositionDriftDetected"][] = [];
+    const retries: RuntimeEventMap["RedeemRequested"][] = [];
+    bus.subscribe("PositionDriftDetected", async (e) => {
+      driftEvents.push(e);
+    });
+    bus.subscribe("RedeemRequested", async (e) => {
+      retries.push(e);
+    });
+
+    const liveMarketRepo = createMockMarketRepo();
+    (liveMarketRepo.findByConditionId as ReturnType<typeof vi.fn>).mockReturnValue([
+      {
+        tokenId: createTokenId("tok-1"),
+        conditionId: "cond-A",
+        slug: "live-market",
+        eventSlug: null,
+        question: "Live?",
+        outcome: "YES",
+        regime: null,
+        horizon: null,
+        endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        active: true,
+        tradable: true,
+        tickSize: 0.01,
+        negRisk: false,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ]);
+
+    const mod = new ReconciliationModule({
+      gateway,
+      bus,
+      orderRepo: {} as OrderRepository,
+      fillRepo: {} as FillRepository,
+      marketRepo: liveMarketRepo,
+      log: silentLog,
+      reconcileIntervalMs: 60_000,
+      settlementLedgerRepo: ledgerRepo,
+      driftRepo,
+    });
+
+    const count = await mod.runDriftCheck();
+
+    expect(count).toBe(0);
+    expect(driftEvents).toHaveLength(0);
+    expect(retries).toHaveLength(0);
+    expect(driftRepo.upsertCalls).toHaveLength(0);
+    expect(driftRepo.resolvedIds).toEqual([row.settlementId]);
   });
 });

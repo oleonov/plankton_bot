@@ -142,20 +142,44 @@ export class ResolutionModule implements RuntimeModule {
         );
       }
 
+      // Local endDate pre-gate. A transiently-zero on-chain balance on a
+      // still-live market (endDate in future) must never promote a condition
+      // into alreadyRedeemed and thereby into an `algo-redeem` settlement row
+      // — later fills re-grow the balance and the drift detector then treats
+      // the live position as drift forever. Gamma check is left to the full
+      // filterConfirmedRedeemable call below (for post-endDate targets only).
+      const { live: deferredByEndDate, pastEndDate: eligibleByEndDate } = this.partitionByEndDate(
+        gatewayTargets,
+        now,
+      );
+      for (const entry of deferredByEndDate) {
+        this.deps.log.info(entry, "algo_redeem_deferred_not_redeemable");
+      }
       // Phase 3.B: drop already-redeemed conditions before calling the gateway.
       // The root-cause of many `algo-triggered on-chain redeem failed` events
       // is a prior tx that already drained the balance; re-submitting triggers
       // a revert. Drift detector (Phase 3.A) is the primary safety net for
       // any missed case.
       const { targetsNeedingRedeem, alreadyRedeemed } =
-        await this.filterAlreadyRedeemed(gatewayTargets);
+        await this.filterAlreadyRedeemed(eligibleByEndDate);
+      // Gamma-gate BOTH paths before promoting to settlement. A transiently-
+      // zero on-chain balance on a post-endDate market whose Gamma status is
+      // still unresolved (UMA lag, dispute, …) must not create an algo-redeem
+      // ledger row: later fills re-grow the balance and the drift detector
+      // then treats the live position as drift forever. Running
+      // filterConfirmedRedeemable across the combined set keeps the Gamma
+      // check single-pass without leaking either branch.
+      const combinedForGamma = [...targetsNeedingRedeem, ...alreadyRedeemed];
       const { redeemableTargets, deferred } = await this.filterConfirmedRedeemable(
-        targetsNeedingRedeem,
+        combinedForGamma,
         now,
       );
       for (const entry of deferred) {
         this.deps.log.info(entry, "algo_redeem_deferred_not_redeemable");
       }
+      const redeemableSet = new Set(redeemableTargets);
+      const gammaConfirmedNeedsRedeem = targetsNeedingRedeem.filter((c) => redeemableSet.has(c));
+      const gammaConfirmedAlreadyRedeemed = alreadyRedeemed.filter((c) => redeemableSet.has(c));
       const successfullyRedeemed: string[] = [];
 
       // Invoke the gateway one conditionId at a time. The underlying
@@ -164,7 +188,7 @@ export class ResolutionModule implements RuntimeModule {
       // every id in the batch when only one actually reverted — poisoning the
       // per-conditionId circuit for innocent markets. Submitting per condition
       // keeps success/failure strictly scoped to its own id.
-      for (const conditionId of redeemableTargets) {
+      for (const conditionId of gammaConfirmedNeedsRedeem) {
         try {
           await this.deps.gateway.redeemPositions([conditionId]);
           this.deps.log.info(
@@ -182,13 +206,16 @@ export class ResolutionModule implements RuntimeModule {
         }
       }
 
-      settleableConditionIds = [...alreadyRedeemed, ...successfullyRedeemed];
+      settleableConditionIds = [...gammaConfirmedAlreadyRedeemed, ...successfullyRedeemed];
 
       const skippedLocalSettlement = conditionIds.filter(
         (conditionId) => !settleableConditionIds.includes(conditionId),
       );
       if (skippedLocalSettlement.length > 0) {
-        this.deps.log.warn(
+        // info, not warn: deferred (before_end_date / gamma_unresolved) is the
+        // common case; true problems already surface via algo_redeem_circuit_open
+        // (warn) and algo-triggered on-chain redeem failed (error).
+        this.deps.log.info(
           { conditionIds: skippedLocalSettlement },
           "algo-triggered redeem skipped local settlement until on-chain redeem succeeds",
         );
@@ -377,6 +404,61 @@ export class ResolutionModule implements RuntimeModule {
     }
 
     return { redeemableTargets, deferred };
+  }
+
+  /**
+   * Local-only endDate partition. Does not call Gamma. If a market for the
+   * condition has its `endDate` still in the future, the condition cannot be
+   * redeemed on-chain, AND its on-chain balance (zero or otherwise) must not
+   * drive a local algo-redeem settlement — those rows later mislead the drift
+   * detector when new fills re-grow the balance.
+   */
+  private partitionByEndDate(
+    conditionIds: readonly string[],
+    now: number,
+  ): {
+    live: Array<{
+      readonly conditionId: string;
+      readonly reason: AlgoRedeemDeferralReason;
+      readonly slug?: string;
+      readonly endDate?: string;
+    }>;
+    pastEndDate: string[];
+  } {
+    const live: Array<{
+      readonly conditionId: string;
+      readonly reason: AlgoRedeemDeferralReason;
+      readonly slug?: string;
+      readonly endDate?: string;
+    }> = [];
+    const pastEndDate: string[] = [];
+    for (const conditionId of conditionIds) {
+      const markets = this.deps.marketRepo.findByConditionId(conditionId);
+      if (markets.length === 0) {
+        pastEndDate.push(conditionId);
+        continue;
+      }
+      let liveEntry: { slug: string; endDate: string } | null = null;
+      for (const market of markets) {
+        if (!market.endDate) continue;
+        const endMs = new Date(market.endDate).getTime();
+        if (Number.isFinite(endMs) && endMs > now) {
+          liveEntry = { slug: market.slug, endDate: market.endDate };
+          break;
+        }
+      }
+      if (liveEntry) {
+        live.push({
+          conditionId,
+          reason: "before_end_date",
+          slug: liveEntry.slug,
+          endDate: liveEntry.endDate,
+        });
+      } else {
+        pastEndDate.push(conditionId);
+      }
+    }
+    return { live, pastEndDate };
   }
 
   private partitionRedeemTargets(

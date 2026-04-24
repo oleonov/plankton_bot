@@ -1354,7 +1354,7 @@ describe("ResolutionModule", () => {
         expect.objectContaining({ conditionIds: [CONDITION] }),
         "algo-triggered on-chain redeem failed",
       );
-      expect(log.warn).toHaveBeenCalledWith(
+      expect(log.info).toHaveBeenCalledWith(
         expect.objectContaining({ conditionIds: [CONDITION] }),
         "algo-triggered redeem skipped local settlement until on-chain redeem succeeds",
       );
@@ -1625,6 +1625,16 @@ describe("ResolutionModule", () => {
         (marketRepo.findByConditionId as any).mockReturnValue([
           { tokenId: TOK_YES, conditionId: CONDITION, slug: "x", outcome: "YES" },
         ]);
+        // Gamma must confirm the market is actually resolved before the
+        // already-redeemed branch is allowed to settle locally — otherwise a
+        // transiently-zero balance on an unresolved market would create a
+        // bogus algo-redeem ledger row (Finding 1).
+        (gammaClient.getMarketBySlug as any).mockResolvedValue({
+          closed: true,
+          closedTime: new Date().toISOString(),
+          rawPayload: {},
+          umaResolutionStatus: "resolved",
+        });
         const settled = [makeSettledPosition({ resolution: "algo-redeem", settlementPrice: 0 })];
         (settler.settleAlgoRedeem as any).mockReturnValue(settled);
 
@@ -1636,6 +1646,77 @@ describe("ResolutionModule", () => {
         expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
         // Already-redeemed conditions are still safe to close locally.
         expect(settler.settleAlgoRedeem as any).toHaveBeenCalledWith([CONDITION]);
+      });
+
+      it("does NOT locally settle a post-endDate gamma-unresolved market even when balance is zero", async () => {
+        // Finding 1 regression: a transiently-zero on-chain balance on a
+        // market that has passed its endDate but whose UMA/Gamma state still
+        // reports closed=false (resolution lag, active dispute, …) MUST NOT
+        // promote the condition into `alreadyRedeemed` → algo-redeem ledger.
+        // If a later fill re-grows the balance, the drift detector would
+        // otherwise treat the re-grown balance as drift against a bogus row
+        // that we ourselves wrote.
+        const gateway = createMockGateway(undefined, { "tok-yes": 0n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockReturnValue([
+          {
+            tokenId: TOK_YES,
+            conditionId: CONDITION,
+            slug: "unresolved-market",
+            outcome: "YES",
+            endDate: new Date(Date.now() - 60_000).toISOString(),
+          },
+        ]);
+        (gammaClient.getMarketBySlug as any).mockResolvedValue({
+          closed: false,
+          closedTime: null,
+          rawPayload: {},
+          umaResolutionStatus: null,
+        });
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+
+        expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+        expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+        expect(log.info).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionId: CONDITION, reason: "gamma_unresolved" }),
+          "algo_redeem_deferred_not_redeemable",
+        );
+      });
+
+      it("does NOT locally settle a live-endDate market even when on-chain balance is zero", async () => {
+        // Defense-in-depth for the drift-spam scenario: a transiently-zero
+        // on-chain balance on a market whose endDate is still in the future
+        // must never promote the condition into `alreadyRedeemed` — otherwise
+        // the next fill would leave the position open against an algo-redeem
+        // ledger row and trigger false position_drift_detected on every tick.
+        const gateway = createMockGateway(undefined, { "tok-yes": 0n });
+        mod = createModule({ gateway });
+
+        (marketRepo.findByConditionId as any).mockReturnValue([
+          {
+            tokenId: TOK_YES,
+            conditionId: CONDITION,
+            slug: "live-market",
+            outcome: "YES",
+            endDate: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+          },
+        ]);
+
+        await mod.start();
+        await (mod as any).handleAlgoRedeem([CONDITION]);
+        await mod.stop();
+
+        expect(gateway.getOutcomeTokenBalance as any).not.toHaveBeenCalled();
+        expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+        expect(settler.settleAlgoRedeem as any).not.toHaveBeenCalled();
+        expect(log.info).toHaveBeenCalledWith(
+          expect.objectContaining({ conditionId: CONDITION, reason: "before_end_date" }),
+          "algo_redeem_deferred_not_redeemable",
+        );
       });
 
       it("still calls gateway.redeemPositions when at least one outcome-token balance is non-zero", async () => {

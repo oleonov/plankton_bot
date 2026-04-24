@@ -338,6 +338,16 @@ export class ReconciliationModule implements RuntimeModule {
       return 0;
     }
 
+    // A non-zero balance against an `algo-redeem` ledger row is only drift
+    // if the market is actually redeemable. For not-yet-resolved markets the
+    // position is simply still live (e.g. re-entered after a prior local
+    // settle) — do NOT flag it, do NOT requeue RedeemRequested. markResolved
+    // closes any pre-existing row so it stops re-entering the open sweep.
+    if (this.isMarketNotYetRedeemable(row.conditionId, now)) {
+      driftRepo.markResolved(row.settlementId, nowIso);
+      return 0;
+    }
+
     const balanceStr = balance.toString();
     driftRepo.upsert({
       settlementId: row.settlementId,
@@ -375,5 +385,16 @@ export class ReconciliationModule implements RuntimeModule {
       "position_drift_detected",
     );
     return 1;
+  }
+
+  private isMarketNotYetRedeemable(conditionId: string, now: number): boolean {
+    const markets = this.deps.marketRepo.findByConditionId(conditionId);
+    if (markets.length === 0) return false;
+    for (const market of markets) {
+      if (!market.endDate) continue;
+      const endMs = new Date(market.endDate).getTime();
+      if (Number.isFinite(endMs) && endMs > now) return true;
+    }
+    return false;
   }
 }
