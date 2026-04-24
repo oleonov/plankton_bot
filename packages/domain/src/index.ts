@@ -14,3 +14,12 @@ export * from "./algo-engine.js";
 export * from "./market-selection.js";
 export { SelectionRuleEngine, normalizeSelectionPattern } from "./selection-rule-engine.js";
 export type { PreEntryInput } from "./market-selection.js";
+export {
+  DEFAULT_EXECUTION_POLICY,
+  DEFAULT_DEAD_SIDE_GUARD,
+  DEFAULT_PRICING_POLICY,
+  DEFAULT_TELEMETRY,
+  parseExecutionPolicyJson,
+  serializeExecutionPolicy,
+} from "./execution-policy.js";
+export type { ParseResult } from "./execution-policy.js";

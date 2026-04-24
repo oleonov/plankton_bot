@@ -52,6 +52,13 @@ export interface ReconciliationModuleDeps {
   driftRepo?: PositionDriftRepository;
   /** Drift detection cadence. Defaults to 5 minutes. */
   driftIntervalMs?: number;
+  /**
+   * ADR-015 — per-call hook to read the current `exitOrderTtlMs` from the
+   * execution policy snapshot. Passed through to `cleanStaleEntryOrders` so
+   * operator edits take effect without a runtime restart. When omitted, the
+   * cleaner falls back to the ADR-013 constant.
+   */
+  exitOrderTtlMs?: () => number;
 }
 
 export class ReconciliationModule implements RuntimeModule {
@@ -169,6 +176,9 @@ export class ReconciliationModule implements RuntimeModule {
           marketRepo: this.deps.marketRepo,
           bus: this.deps.bus,
           log: this.log,
+          ...(this.deps.exitOrderTtlMs
+            ? { exitOrderTtlMs: this.deps.exitOrderTtlMs() }
+            : {}),
         },
         this.staleBackoffMap,
       );

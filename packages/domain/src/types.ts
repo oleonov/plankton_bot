@@ -328,7 +328,51 @@ export interface ProfileSettings {
   walletMode?: WalletMode | null;
   minOrderUsdc?: number | null;
   relayerJson?: string | null;
+  /**
+   * ADR-015: DB-backed execution policy. JSON payload shaped by
+   * `ExecutionPolicy` in this module. Null = runtime uses code defaults.
+   */
+  executionPolicyJson?: string | null;
   updatedAt: string;
+}
+
+/**
+ * ADR-015 — DB-backed execution policy, stored per profile in
+ * `profile_settings.execution_policy_json`. Supersedes the env-based
+ * operator path documented in ADR-014. Pricing formula itself is unchanged.
+ */
+export type ExecutionPricingMode = "edge" | "bounded-midpoint";
+export type ExecutionWideSpreadPolicy = "edge" | "skip";
+export type ExecutionOneSidedPolicy = "edge" | "skip";
+export type DeadSideGuardMode = "off" | "observe" | "enforce";
+
+export interface DeadSideGuardPolicy {
+  mode: DeadSideGuardMode;
+  askCeiling: number;
+  maxTimeToEndMs: number;
+}
+
+export interface ExecutionPricingPolicy {
+  mode: ExecutionPricingMode;
+  maxEntrySpreadTicks: number;
+  maxExitSpreadTicks: number;
+  maxImprovementTicks: number;
+  wideSpreadPolicy: ExecutionWideSpreadPolicy;
+  oneSidedPolicy: ExecutionOneSidedPolicy;
+}
+
+export interface ExecutionPolicyTelemetry {
+  deadSideCanary: boolean;
+  pricingShadow: boolean;
+}
+
+export interface ExecutionPolicy {
+  version: number;
+  entryPriceCeiling: number;
+  exitOrderTtlMs: number;
+  deadSideGuard: DeadSideGuardPolicy;
+  pricing: ExecutionPricingPolicy;
+  telemetry: ExecutionPolicyTelemetry;
 }
 
 export interface ProfileSummary {
@@ -352,6 +396,8 @@ export interface RuntimeControlState {
   runtimeStatus: RuntimeStatus;
   paused: boolean;
   schemaVersion: number;
+  /** ADR-015: bumped on every execution_policy_json write; drives runtime hot-reload. */
+  executionPolicyVersion?: number;
   updatedAt: string;
 }
 
@@ -431,6 +477,39 @@ export interface PositionDrift {
   onChainBalance: string;
   lastCheckedAt: string;
   status: "open" | "resolved";
+  createdAt?: string;
+}
+
+/**
+ * ADR-015 — one row per BUY/SELL signal that reaches execution-term
+ * resolution (or is dead-side-enforce-skipped). Powers SQL + dashboard
+ * comparison of edge vs bounded-midpoint pricing and dead-side buckets
+ * over 24-72h rollout windows. Append-only; runtime never updates rows.
+ */
+export interface ExecutionPolicyObservation {
+  profileId: string;
+  signalId: string | null;
+  clientOrderId: string | null;
+  tokenId: string;
+  marketSlug: string | null;
+  side: "BUY" | "SELL";
+  signalReason: string | null;
+  selectedPricingMode: "edge" | "bounded-midpoint";
+  selectedPrice: number | null;
+  edgePrice: number | null;
+  boundedPrice: number | null;
+  boundedOutcome: "ok" | "edge-fallback" | "skip" | "invalid" | "not-computed";
+  spreadTicks: number | null;
+  improvementTicks: number | null;
+  deadSideObserved: boolean;
+  deadSideBucket: string | null;
+  deadSideEnforceHit: boolean;
+  deadSideX60: boolean;
+  deadSideX120: boolean;
+  deadSideX300: boolean;
+  deadSideX900: boolean;
+  timeToEndMs: number | null;
+  skippedReason: string | null;
   createdAt?: string;
 }
 

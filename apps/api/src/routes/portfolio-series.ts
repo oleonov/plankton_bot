@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { ok } from "../errors.js";
 import { resolveInitialBalanceUsdc } from "../initial-balance.js";
+import { resolveLiveLiteFunderAddress } from "../polymarket-portfolio.js";
 
 interface PortfolioSeriesOpts {
   db: Database.Database;
@@ -29,24 +30,6 @@ const INTERVAL_WINDOW_MS: Partial<Record<"1d" | "1w" | "1m" | "all", number>> = 
   "1w": 7 * 24 * 60 * 60 * 1000,
   "1m": 30 * 24 * 60 * 60 * 1000,
 };
-
-function resolveLiveLiteFunderAddress(
-  controlDb: Database.Database | undefined,
-  profileId: string,
-): string | null {
-  if (!controlDb) return null;
-  try {
-    const row = controlDb
-      .prepare("SELECT relayer_json FROM profile_settings WHERE profile_id = ?")
-      .get(profileId) as { relayer_json: string | null } | undefined;
-    if (!row?.relayer_json) return null;
-    const parsed = JSON.parse(row.relayer_json) as Record<string, unknown>;
-    const funder = parsed["funderAddress"] ?? parsed["funder"] ?? parsed["profileAddress"] ?? null;
-    return typeof funder === "string" && /^0x[a-fA-F0-9]{40}$/.test(funder) ? funder : null;
-  } catch {
-    return null;
-  }
-}
 
 function resolveProfileStart(
   controlDb: Database.Database | undefined,

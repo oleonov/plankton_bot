@@ -5,6 +5,11 @@ import type { LedgerPool } from "../ledger-pool.js";
 import { computeExecutionTelemetry } from "../execution-telemetry.js";
 import { ok } from "../errors.js";
 import { resolveInitialBalanceUsdc } from "../initial-balance.js";
+import {
+  PolymarketPortfolioReader,
+  resolveLiveLiteFunderAddress,
+} from "../polymarket-portfolio.js";
+import type { PolymarketPositionPortfolio } from "../polymarket-portfolio.js";
 
 interface StatusOpts {
   db: Database.Database;
@@ -33,6 +38,12 @@ interface InfraAlertStatusItem {
   details?: Record<string, unknown> | null;
   lastSeenAt: string;
 }
+
+type StatusSnapshot = Record<string, unknown> & {
+  runtimeMode?: unknown;
+  walletBalanceUsdc?: unknown;
+  polymarketPortfolio?: PolymarketPositionPortfolio | null;
+};
 
 const INFRA_ALERT_LOOKBACK_MS = 60 * 60 * 1000;
 
@@ -566,6 +577,7 @@ export function buildStatusSnapshot(
     walletBalanceUsdc,
     totalCurrentValueUsdc,
     totalRealizedPnl,
+    polymarketPortfolio: null,
     marketDataSource: mdSource
       ? ((JSON.parse(mdSource.labels) as { value?: string }).value ?? "simulation")
       : "simulation",
@@ -589,20 +601,43 @@ export function buildStatusSnapshot(
 
 export { resolveActiveLedger };
 
+async function readPolymarketPortfolio(
+  snapshot: StatusSnapshot,
+  controlDb: Database.Database | undefined,
+  reader: PolymarketPortfolioReader,
+): Promise<PolymarketPositionPortfolio | null> {
+  if (snapshot.runtimeMode !== "live-lite") return null;
+  if (
+    typeof snapshot.walletBalanceUsdc !== "number" ||
+    !Number.isFinite(snapshot.walletBalanceUsdc)
+  ) {
+    return null;
+  }
+
+  const funderAddress = resolveLiveLiteFunderAddress(controlDb, "live-lite");
+  if (!funderAddress) return null;
+  return reader.read(funderAddress, snapshot.walletBalanceUsdc);
+}
+
 export const statusRoutes: FastifyPluginAsync<StatusOpts> = async (app, opts) => {
   const staleMs = opts.marketDataStaleThresholdMs ?? 120_000;
+  const portfolioReader = new PolymarketPortfolioReader();
 
   app.get("/status", async () => {
     const { db, profile } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
-    return ok(
-      buildStatusSnapshot(
-        db,
-        staleMs,
-        profile,
-        opts.controlDb,
-        opts.envMode,
-        opts.defaultInitialBalanceUsdc,
-      ),
+    const snapshot = buildStatusSnapshot(
+      db,
+      staleMs,
+      profile,
+      opts.controlDb,
+      opts.envMode,
+      opts.defaultInitialBalanceUsdc,
     );
+    const polymarketPortfolio = await readPolymarketPortfolio(
+      snapshot,
+      opts.controlDb,
+      portfolioReader,
+    );
+    return ok({ ...snapshot, polymarketPortfolio });
   });
 };

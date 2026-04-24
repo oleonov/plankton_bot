@@ -15,6 +15,7 @@ import { ProfileOrders } from "./pages/ProfileOrders.tsx";
 import { ProfilePositions } from "./pages/ProfilePositions.tsx";
 import { ProfileFills } from "./pages/ProfileFills.tsx";
 import { RiskSettings } from "./pages/RiskSettings.tsx";
+import { ExecutionSettings } from "./pages/ExecutionSettings.tsx";
 import { ProfileSettings } from "./pages/ProfileSettings.tsx";
 import { Audit } from "./pages/Audit.tsx";
 
@@ -45,6 +46,7 @@ export function App() {
                 <Route path="/profiles/:profileId/fills" element={<ProfileFills />} />
                 <Route path="/settings" element={<Navigate to="/settings/risk" replace />} />
                 <Route path="/settings/risk" element={<RiskSettings />} />
+                <Route path="/settings/execution" element={<ExecutionSettings />} />
                 <Route path="/settings/profiles/:profileId" element={<ProfileSettings />} />
                 <Route path="/audit" element={<Audit />} />
               </Route>

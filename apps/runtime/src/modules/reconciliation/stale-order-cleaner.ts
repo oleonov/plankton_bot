@@ -25,7 +25,12 @@ export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
 export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
 export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
 export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
-export const EXIT_ORDER_TTL_MS = 60_000; // 60s
+// ADR-013: bumped from 60s to 300s. 60s TTL was cancelling repricing-exit SELLs
+// before the book had a chance to catch the order — most losing legs in prod
+// never got a SELL fill. 300s gives the stacking order real life without
+// letting stale prices linger indefinitely; stale-state is still bounded by
+// `EXIT_ORDER_TTL_MS + reconciliation interval`.
+export const EXIT_ORDER_TTL_MS = 300_000; // 5m
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff
 
@@ -36,6 +41,13 @@ export interface StaleOrderCleanerDeps {
   marketRepo: MarketRepository;
   bus: EventBus;
   log: Logger;
+  /**
+   * ADR-015: exit-order TTL is read per-call so operator edits to
+   * `execution_policy_json.exitOrderTtlMs` take effect without runtime
+   * restart. Falls back to the ADR-013 constant `EXIT_ORDER_TTL_MS`
+   * when the caller doesn't thread a policy source in (scripts, tests).
+   */
+  exitOrderTtlMs?: number;
 }
 
 export interface StaleCleanResult {
@@ -53,6 +65,7 @@ export async function cleanStaleEntryOrders(
   backoffMap: Map<string, number>,
 ): Promise<StaleCleanResult> {
   const { orderRepo, marketRepo, bus, log } = deps;
+  const exitTtlMs = deps.exitOrderTtlMs ?? EXIT_ORDER_TTL_MS;
   const now = Date.now();
 
   const openOrders = orderRepo.findOpen();
@@ -120,12 +133,12 @@ export async function cleanStaleEntryOrders(
     if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
 
     const ageMs = now - new Date(order.createdAt).getTime();
-    if (ageMs > EXIT_ORDER_TTL_MS) {
+    if (ageMs > exitTtlMs) {
       await publishCancel(bus, order, "stale_exit_ttl");
       backoffMap.set(ordKey, now);
       staleExitTtlCancelled++;
       log.info(
-        { orderId: ordKey, ageMs, ttlMs: EXIT_ORDER_TTL_MS, signalReason: order.signalReason },
+        { orderId: ordKey, ageMs, ttlMs: exitTtlMs, signalReason: order.signalReason },
         "stale exit order — TTL exceeded",
       );
     }

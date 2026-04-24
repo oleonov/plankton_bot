@@ -36,20 +36,31 @@ describe("Overview Balance Card", () => {
     expect(within(card).queryByText(/if close all/i)).not.toBeInTheDocument();
   });
 
-  it("shows invested / initial for paper mode", async () => {
+  it("shows position value / initial for paper mode", async () => {
     renderWithProviders(<Overview />);
 
     const card = await screen.findByTestId("overview-balance-card");
-    expect(within(card).getByText(/\$32\.06 cost basis \/ \$100\.00 initial/i)).toBeInTheDocument();
+    expect(
+      within(card).getByText(/\$32\.06 position value \/ \$100\.00 initial/i),
+    ).toBeInTheDocument();
   });
 
-  it("shows wallet balance for live-lite mode with green accent", async () => {
+  it("shows Polymarket wallet portfolio for live-lite mode with green accent", async () => {
     server.use(
       http.get("/api/v1/status", () =>
         ok({
           ...mockStatus,
           runtimeMode: "live-lite",
           walletBalanceUsdc: 487,
+          polymarketPortfolio: {
+            portfolioUsdc: 549.51,
+            availableUsdc: 487,
+            positionValueUsdc: 62.51,
+            positionCount: 23,
+            costBasisUsdc: 50.04,
+            source: "polymarket",
+            capturedAt: "2026-04-24T13:25:55.000Z",
+          },
           liveLite: {
             maxOpenValueUsdc: 100,
             maxActiveMarkets: 10,
@@ -64,10 +75,34 @@ describe("Overview Balance Card", () => {
     const card = await screen.findByTestId("overview-balance-card");
     expect(within(card).getByText("Portfolio")).toBeInTheDocument();
     expect(within(card).getByText("Available to trade")).toBeInTheDocument();
-    // Wallet balance stays in the right rail, portfolio headline becomes if-close-all.
+    expect(within(card).getByText("$549.51")).toBeInTheDocument();
+    expect(within(card).getByText("$487.00")).toBeInTheDocument();
+    expect(within(card).getByText(/\$62\.51 position value \/ \$100\.00 cap/i)).toBeInTheDocument();
+  });
+
+  it("falls back to local if-close-all when Polymarket portfolio is unavailable", async () => {
+    server.use(
+      http.get("/api/v1/status", () =>
+        ok({
+          ...mockStatus,
+          runtimeMode: "live-lite",
+          walletBalanceUsdc: 487,
+          polymarketPortfolio: null,
+          liveLite: {
+            maxOpenValueUsdc: 100,
+            maxActiveMarkets: 10,
+            maxOrderUsdc: 10,
+          },
+        }),
+      ),
+    );
+
+    renderWithProviders(<Overview />);
+
+    const card = await screen.findByTestId("overview-balance-card");
     expect(within(card).getByText("$502.87")).toBeInTheDocument();
     expect(within(card).getByText("$487.00")).toBeInTheDocument();
-    expect(within(card).getByText(/\$32\.06 cost basis \/ \$100\.00 cap/i)).toBeInTheDocument();
+    expect(within(card).getByText(/\$32\.06 position value \/ \$100\.00 cap/i)).toBeInTheDocument();
   });
 
   it("shows dash when balance is null", async () => {

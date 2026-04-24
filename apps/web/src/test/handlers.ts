@@ -139,6 +139,7 @@ export const mockStatus = {
   walletBalanceUsdc: null,
   totalCurrentValueUsdc: 15.87,
   totalRealizedPnl: 1.76,
+  polymarketPortfolio: null,
   marketDataSource: "live",
   executionMode: "simulation",
   reconciliationDriftDetected: false,

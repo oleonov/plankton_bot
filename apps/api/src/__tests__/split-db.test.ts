@@ -3,7 +3,7 @@
  * (bootstrapControlDb + bootstrapLedgerDb) to catch "no such table" errors
  * that the legacy monolithic-DB tests cannot detect.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -168,6 +168,61 @@ describe("API against real split schemas", () => {
     }
   });
 
+  it("GET /status uses Polymarket wallet positions for live-lite portfolio", async () => {
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify([
+          { asset: "tok-open", size: 10, currentValue: 4.25, initialValue: 3.5 },
+          { asset: "tok-closed-locally", size: 20, currentValue: 8.5, initialValue: 7 },
+          { asset: "tok-zero", size: 0, currentValue: 99, initialValue: 99 },
+        ]),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    controlConn.db.exec(`
+      INSERT OR REPLACE INTO profiles (profile_id, display_name) VALUES ('live-lite', 'Live Lite');
+      INSERT OR REPLACE INTO profile_settings (profile_id, relayer_json)
+      VALUES ('live-lite', '{"walletType":"proxy","funderAddress":"0xf00df00df00df00df00df00df00df00df00df00d"}');
+      INSERT OR REPLACE INTO profile_summaries
+        (profile_id, paused, open_orders, open_positions, total_exposure_usdc, balance_usdc, wallet_balance_usdc)
+      VALUES ('live-lite', 0, 0, 0, 0, NULL, 0.34);
+    `);
+    ledgerConn.db.exec(`
+      INSERT INTO bot_runs (run_id, mode, started_at)
+      VALUES ('run-live-lite-portfolio', 'live-lite', '2026-03-17T00:00:00Z');
+    `);
+
+    try {
+      const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: auth() });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+
+      expect(body.data.polymarketPortfolio).toMatchObject({
+        portfolioUsdc: 13.09,
+        availableUsdc: 0.34,
+        positionValueUsdc: 12.75,
+        positionCount: 2,
+        costBasisUsdc: 10.5,
+        source: "polymarket",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(String(fetchMock.mock.calls[0]![0])).toContain("data-api.polymarket.com/positions");
+    } finally {
+      globalThis.fetch = originalFetch;
+      controlConn.db.exec(`
+        DELETE FROM profile_summaries WHERE profile_id = 'live-lite';
+        DELETE FROM profile_settings WHERE profile_id = 'live-lite';
+        DELETE FROM profiles WHERE profile_id = 'live-lite';
+      `);
+      ledgerConn.db.exec(`
+        DELETE FROM bot_runs WHERE run_id = 'run-live-lite-portfolio';
+      `);
+    }
+  });
+
   it("GET /positions succeeds (ledger-only)", async () => {
     const res = await app.inject({ method: "GET", url: "/api/v1/positions", headers: auth() });
     expect(res.statusCode).toBe(200);
@@ -312,5 +367,76 @@ describe("API against real split schemas", () => {
         "UPDATE runtime_control_state SET current_profile = 'simulation', updated_at = datetime('now') WHERE id = 1",
       )
       .run();
+  });
+
+  // ── ADR-015 — GET /profiles/:id/execution-policy ─────────────────────────
+  //
+  // Regression: the handler used to 404 when `profile_settings` had no row,
+  // even though the profile existed in `profiles`. On a fresh control.db the
+  // seed helper fills the rows, so a baseline GET must return the seeded
+  // policy. And if an operator ever deletes the settings row, the handler
+  // must still return DEFAULT_EXECUTION_POLICY rather than 404.
+
+  it("GET /execution-policy returns seeded policy on fresh control.db", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.policy.deadSideGuard.mode).toBe("observe");
+    expect(body.data.issues).toEqual([]);
+  });
+
+  it("GET /execution-policy falls back to defaults when profile_settings row is missing", async () => {
+    // Wipe the settings row for paper but keep the profile — mimics a broken
+    // upgrade that skipped the seed. Handler must return defaults, not 404.
+    controlConn.db.prepare("DELETE FROM profile_settings WHERE profile_id = 'paper'").run();
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/api/v1/profiles/paper/execution-policy",
+        headers: auth(),
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.ok).toBe(true);
+      expect(body.data.policy.deadSideGuard.mode).toBe("observe");
+    } finally {
+      // Re-seed so later tests don't see a NULL row.
+      controlConn.db
+        .prepare(
+          `INSERT OR IGNORE INTO profile_settings (profile_id, execution_policy_json, updated_at)
+             VALUES ('paper', ?, datetime('now'))`,
+        )
+        .run(
+          JSON.stringify({
+            version: 1,
+            entryPriceCeiling: 0.75,
+            exitOrderTtlMs: 15000,
+            deadSideGuard: { mode: "observe", askCeiling: 0.02, maxTimeToEndMs: 120000 },
+            pricing: {
+              mode: "edge",
+              maxEntrySpreadTicks: 10,
+              maxExitSpreadTicks: 10,
+              maxImprovementTicks: 1,
+              wideSpreadPolicy: "edge",
+              oneSidedPolicy: "edge",
+            },
+            telemetry: { deadSideCanary: true, pricingShadow: true },
+          }),
+        );
+    }
+  });
+
+  it("GET /execution-policy still returns 404 when the profile itself does not exist", async () => {
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/profiles/unknown-profile/execution-policy",
+      headers: auth(),
+    });
+    expect(res.statusCode).toBe(404);
   });
 });

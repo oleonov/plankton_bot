@@ -80,4 +80,27 @@ describe("control-db migration infrastructure", () => {
     // Second call is guaranteed idempotent — no throw.
     expect(() => runControlMigrations(conn.db)).not.toThrow();
   });
+
+  it("fresh bootstrap seeds profile_settings.execution_policy_json for every profile", () => {
+    // Regression: migration 038 is marked applied by column existence on fresh
+    // installs, so its UPDATE path never runs. ensureDefaultExecutionPolicy
+    // must seed the JSON payload independently.
+    conn = bootstrapControlDb(path.join(tmpDir, "control.db"));
+    const rows = conn.db
+      .prepare(
+        `SELECT p.profile_id, s.execution_policy_json
+           FROM profiles p
+           LEFT JOIN profile_settings s USING (profile_id)`,
+      )
+      .all() as Array<{ profile_id: string; execution_policy_json: string | null }>;
+
+    expect(rows.length).toBeGreaterThanOrEqual(3);
+    for (const row of rows) {
+      expect(row.execution_policy_json).not.toBeNull();
+      const parsed = JSON.parse(row.execution_policy_json!) as {
+        deadSideGuard: { mode: string };
+      };
+      expect(parsed.deadSideGuard.mode).toBe(row.profile_id === "live-lite" ? "enforce" : "observe");
+    }
+  });
 });

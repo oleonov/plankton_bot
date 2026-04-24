@@ -15,7 +15,10 @@ export { SqliteStateTransitionRepository } from "./repositories/state-transition
 export { SqliteProfileRepository } from "./repositories/profile-repository.js";
 export { SqliteProfileSettingsRepository } from "./repositories/profile-settings-repository.js";
 export { SqliteProfileSummaryRepository } from "./repositories/profile-summary-repository.js";
-export { SqliteRuntimeControlStateRepository } from "./repositories/runtime-control-state-repository.js";
+export {
+  SqliteRuntimeControlStateRepository,
+  readExecutionPolicyVersion,
+} from "./repositories/runtime-control-state-repository.js";
 export { SqliteSwitchRequestRepository } from "./repositories/switch-request-repository.js";
 export { SqlitePreflightReportRepository } from "./repositories/preflight-report-repository.js";
 export { SqliteServiceHeartbeatRepository } from "./repositories/service-heartbeat-repository.js";
@@ -23,6 +26,7 @@ export { SqliteConfigImportRepository } from "./repositories/config-import-repos
 export { SqliteMergeLedgerRepository } from "./repositories/merge-ledger-repository.js";
 export { SqliteSettlementLedgerRepository } from "./repositories/settlement-ledger-repository.js";
 export { SqlitePositionDriftRepository } from "./repositories/position-drift-repository.js";
+export { SqliteExecutionPolicyObservationRepository } from "./repositories/execution-policy-observation-repository.js";
 export { SqliteAlgoRulesRepository } from "./repositories/algo-rules-repository.js";
 export { SqliteLegStateRepository } from "./repositories/leg-state-repository.js";
 export { SelectionRuleRepository } from "./repositories/selection-rule-repository.js";
@@ -30,5 +34,9 @@ export type {
   SelectionRuleInsert,
   SelectionRulePatch,
 } from "./repositories/selection-rule-repository.js";
-export { CONTROL_PROFILES, ensureControlProfiles } from "./control-profiles.js";
+export {
+  CONTROL_PROFILES,
+  ensureControlProfiles,
+  ensureDefaultExecutionPolicy,
+} from "./control-profiles.js";
 export { withImmediate } from "./immediate-transaction.js";

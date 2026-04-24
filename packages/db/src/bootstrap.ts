@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { ensureControlProfiles } from "./control-profiles.js";
+import { ensureControlProfiles, ensureDefaultExecutionPolicy } from "./control-profiles.js";
 import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
 import { runControlMigrations, runMigrations } from "./migrations/runner.js";
 
@@ -32,8 +32,16 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "profile_settings", "wallet_mode", "TEXT");
   safeAddColumn(conn.db, "profile_settings", "min_order_usdc", "REAL");
   safeAddColumn(conn.db, "profile_settings", "relayer_json", "TEXT");
+  safeAddColumn(conn.db, "profile_settings", "execution_policy_json", "TEXT");
+  safeAddColumn(
+    conn.db,
+    "runtime_control_state",
+    "execution_policy_version",
+    "INTEGER NOT NULL DEFAULT 0",
+  );
 
   backfillLiveProfileSettings(conn.db);
+  ensureDefaultExecutionPolicy(conn.db);
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
 
@@ -109,6 +117,16 @@ const CONTROL_MIGRATION_BASELINES: ControlMigrationBaseline[] = [
     isAlreadyApplied: (db) =>
       hasTable(db, "selection_rules") &&
       hasColumn(db, "runtime_control_state", "selection_rules_version"),
+  },
+  {
+    name: "038_execution_policy.sql",
+    // Post-038 shape: profile_settings has execution_policy_json and
+    // runtime_control_state has execution_policy_version. Fresh bootstrap
+    // creates both directly; upgrade installs gain them when migration 038
+    // runs. Seed of initial JSON payloads is idempotent on re-run.
+    isAlreadyApplied: (db) =>
+      hasColumn(db, "profile_settings", "execution_policy_json") &&
+      hasColumn(db, "runtime_control_state", "execution_policy_version"),
   },
 ];
 

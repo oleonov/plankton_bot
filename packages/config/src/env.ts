@@ -101,6 +101,10 @@ const envSchema = z
     MARKET_DATA_STREAM_STABLE_MS: z.coerce.number().int().min(5_000).max(300_000).default(30_000),
     // Task 5 — capped rolling poll fallback
     MARKET_DATA_FALLBACK_BATCH_SIZE: z.coerce.number().int().min(100).max(1_000).default(500),
+    // ADR-015 — DEAD_SIDE_GUARD_* and EXECUTION_PRICING_* env vars were removed.
+    // Dead-side guard + pricing policy now live in `profile_settings.execution_policy_json`
+    // and hot-reload via `runtime_control_state.execution_policy_version`. See
+    // docs/adr/015-db-backed-execution-policy.md.
   })
   .superRefine((data, ctx) => {
     // When RUNTIME_MODE is undefined, mode comes from control.db — skip env validation

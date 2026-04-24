@@ -54,6 +54,7 @@ import {
   SqliteOperatorCommandRepository,
   SqliteOperatorActionRepository,
   SqliteMarketSnapshotRepository,
+  SqliteProfileSettingsRepository,
   SelectionRuleRepository,
   SqliteRiskEventRepository,
   SqliteStateTransitionRepository,
@@ -75,6 +76,7 @@ import { ExecutionModule } from "./modules/execution/execution-module.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
 import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
+import { ExecutionPolicyProvider } from "./execution-policy-provider.js";
 import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
 import { LegStateTrackerModule } from "./modules/leg-state/leg-state-tracker-module.js";
@@ -93,6 +95,7 @@ import {
   SqliteLegStateRepository,
   SqliteSettlementLedgerRepository,
   SqlitePositionDriftRepository,
+  SqliteExecutionPolicyObservationRepository,
 } from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
@@ -581,14 +584,34 @@ async function main(): Promise<void> {
     sweepIntervalMs: config.strategyScanIntervalMs,
   });
 
+  // ADR-015: DB-backed execution policy. The provider polls
+  // `runtime_control_state.execution_policy_version` and hot-swaps the
+  // snapshot when operators edit `profile_settings.execution_policy_json`.
+  const profileSettingsRepo = new SqliteProfileSettingsRepository(controlConn.db);
+  const executionPolicyProvider = new ExecutionPolicyProvider({
+    controlDb: controlConn.db,
+    profileSettingsRepo,
+    log,
+    profileId: activeProfile as import("@plankton/domain").ProfileId,
+  });
+
   // Standalone SignalToOrderBridge — wired here so it is active when AlgoDecisionModule
   // is used. bridge.subscribe() is called after all modules are wired (below).
+  const executionPolicyObservationRepo = new SqliteExecutionPolicyObservationRepository(
+    ledgerConn.db,
+  );
   const signalToOrderBridge = new SignalToOrderBridge({
     bus,
     log,
     orderRepo: repos.order,
     liveLiteGuard,
     candidateBookCache,
+    policy: () => {
+      executionPolicyProvider.refreshIfStale();
+      return executionPolicyProvider.snapshot();
+    },
+    observations: executionPolicyObservationRepo,
+    profileId: activeProfile as import("@plankton/domain").ProfileId,
   });
 
   // 7i. Reconciliation module
@@ -602,6 +625,10 @@ async function main(): Promise<void> {
     reconcileIntervalMs: 60_000,
     settlementLedgerRepo: repos.settlementLedger,
     driftRepo: repos.positionDrift,
+    exitOrderTtlMs: () => {
+      executionPolicyProvider.refreshIfStale();
+      return executionPolicyProvider.snapshot().exitOrderTtlMs;
+    },
   });
 
   const userOrderStreamModule =

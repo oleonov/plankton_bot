@@ -22,6 +22,8 @@ import type {
   PreviewBuckets,
   MatchResult,
   EventMetric,
+  ExecutionPolicyDTO,
+  ExecutionPolicyResponse,
 } from "./types.ts";
 
 function withParams(
@@ -261,6 +263,28 @@ export function useUpdateProfileSettings(profileId: string) {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ["profiles"] });
       void qc.invalidateQueries({ queryKey: ["profiles", profileId] });
+    },
+  });
+}
+
+// ─── Execution Policy (ADR-015) ───────────────────────────────────────
+
+export function useExecutionPolicy(profileId: string | null) {
+  return useQuery({
+    queryKey: ["profiles", profileId, "execution-policy"],
+    queryFn: () =>
+      apiFetch<ExecutionPolicyResponse>(`/api/v1/profiles/${profileId}/execution-policy`),
+    enabled: !!profileId,
+  });
+}
+
+export function useUpdateExecutionPolicy(profileId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: Partial<ExecutionPolicyDTO>) =>
+      apiPatch<ExecutionPolicyResponse>(`/api/v1/profiles/${profileId}/execution-policy`, patch),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["profiles", profileId, "execution-policy"] });
     },
   });
 }

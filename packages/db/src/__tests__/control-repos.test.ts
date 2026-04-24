@@ -16,6 +16,7 @@ import type {
 import type { ProfileId } from "@plankton/domain";
 import { SqliteProfileRepository } from "../repositories/profile-repository.js";
 import { SqliteProfileSettingsRepository } from "../repositories/profile-settings-repository.js";
+import { readExecutionPolicyVersion } from "../repositories/runtime-control-state-repository.js";
 import { SqliteProfileSummaryRepository } from "../repositories/profile-summary-repository.js";
 import { SqliteRuntimeControlStateRepository } from "../repositories/runtime-control-state-repository.js";
 import { SqliteSwitchRequestRepository } from "../repositories/switch-request-repository.js";
@@ -84,11 +85,100 @@ describe("SqliteProfileSettingsRepository", () => {
       walletMode: null,
       minOrderUsdc: null,
       relayerJson: null,
+      executionPolicyJson: null,
       updatedAt: NOW,
     };
     repo.save(settings);
     const found = repo.get(PROFILE_SIM);
     expect(found).toEqual(settings);
+  });
+
+  describe("ADR-015: execution_policy_version bump", () => {
+    function seedControlRow(): void {
+      db.prepare(
+        `INSERT INTO runtime_control_state (id, current_profile, runtime_status, paused, schema_version, updated_at)
+         VALUES (1, ?, 'stopped', 1, 1, ?)`,
+      ).run(PROFILE_SIM, NOW);
+    }
+
+    function baseSettings(overrides: Partial<ProfileSettings> = {}): ProfileSettings {
+      return {
+        profileId: PROFILE_SIM,
+        initialBalanceUsdc: 10000,
+        envelopeJson: null,
+        riskCapsJson: null,
+        walletMode: null,
+        minOrderUsdc: null,
+        relayerJson: null,
+        executionPolicyJson: null,
+        updatedAt: NOW,
+        ...overrides,
+      };
+    }
+
+    it("bumps version when policy JSON transitions null → value", () => {
+      seedControlRow();
+      const repo = new SqliteProfileSettingsRepository(db);
+      expect(readExecutionPolicyVersion(db)).toBe(0);
+      repo.save(baseSettings({ executionPolicyJson: null }));
+      expect(readExecutionPolicyVersion(db)).toBe(0);
+      repo.save(baseSettings({ executionPolicyJson: '{"entryPriceCeiling":0.5}' }));
+      expect(readExecutionPolicyVersion(db)).toBe(1);
+    });
+
+    it("bumps version on byte-level policy JSON change", () => {
+      seedControlRow();
+      const repo = new SqliteProfileSettingsRepository(db);
+      repo.save(baseSettings({ executionPolicyJson: '{"entryPriceCeiling":0.5}' }));
+      expect(readExecutionPolicyVersion(db)).toBe(1);
+      repo.save(baseSettings({ executionPolicyJson: '{"entryPriceCeiling":0.6}' }));
+      expect(readExecutionPolicyVersion(db)).toBe(2);
+    });
+
+    it("does NOT bump when policy JSON is unchanged", () => {
+      seedControlRow();
+      const repo = new SqliteProfileSettingsRepository(db);
+      const json = '{"entryPriceCeiling":0.5}';
+      repo.save(baseSettings({ executionPolicyJson: json }));
+      expect(readExecutionPolicyVersion(db)).toBe(1);
+      repo.save(baseSettings({ executionPolicyJson: json }));
+      expect(readExecutionPolicyVersion(db)).toBe(1);
+    });
+
+    it("does NOT bump when only non-policy fields change", () => {
+      seedControlRow();
+      const repo = new SqliteProfileSettingsRepository(db);
+      const json = '{"entryPriceCeiling":0.5}';
+      repo.save(baseSettings({ executionPolicyJson: json, envelopeJson: '{"a":1}' }));
+      expect(readExecutionPolicyVersion(db)).toBe(1);
+      repo.save(baseSettings({ executionPolicyJson: json, envelopeJson: '{"a":2}' }));
+      expect(readExecutionPolicyVersion(db)).toBe(1);
+    });
+
+    it("bumps on value → null transition (revert to defaults)", () => {
+      seedControlRow();
+      const repo = new SqliteProfileSettingsRepository(db);
+      repo.save(baseSettings({ executionPolicyJson: '{"entryPriceCeiling":0.5}' }));
+      expect(readExecutionPolicyVersion(db)).toBe(1);
+      repo.save(baseSettings({ executionPolicyJson: null }));
+      expect(readExecutionPolicyVersion(db)).toBe(2);
+    });
+  });
+});
+
+describe("readExecutionPolicyVersion", () => {
+  it("returns 0 when runtime_control_state row is missing", () => {
+    expect(readExecutionPolicyVersion(db)).toBe(0);
+  });
+
+  it("returns 0 when column is missing (legacy DB)", () => {
+    const legacy = new Database(":memory:");
+    legacy.exec(`
+      CREATE TABLE runtime_control_state (id INTEGER PRIMARY KEY CHECK (id = 1));
+      INSERT INTO runtime_control_state (id) VALUES (1);
+    `);
+    expect(readExecutionPolicyVersion(legacy)).toBe(0);
+    legacy.close();
   });
 });
 
@@ -144,6 +234,7 @@ describe("SqliteRuntimeControlStateRepository", () => {
       runtimeStatus: "stopped",
       paused: true,
       schemaVersion: 1,
+      executionPolicyVersion: 0,
       updatedAt: NOW,
     };
     repo.save(state);

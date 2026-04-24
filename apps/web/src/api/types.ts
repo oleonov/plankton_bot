@@ -47,6 +47,48 @@ export interface MatchResult {
   step2Fallback: boolean;
 }
 
+// ─── Execution Policy (ADR-015) ──────────────────────────────────────────────
+
+export type DeadSideGuardMode = "observe" | "enforce" | "off";
+export type PricingMode = "edge" | "bounded-midpoint";
+export type PricingSpreadPolicy = "edge" | "skip";
+export type PricingOneSidedPolicy = "edge" | "skip";
+
+export interface DeadSideGuardPolicy {
+  mode: DeadSideGuardMode;
+  askCeiling: number;
+  maxTimeToEndMs: number;
+}
+
+export interface ExecutionPricingPolicy {
+  mode: PricingMode;
+  maxEntrySpreadTicks: number;
+  maxExitSpreadTicks: number;
+  maxImprovementTicks: number;
+  wideSpreadPolicy: PricingSpreadPolicy;
+  oneSidedPolicy: PricingOneSidedPolicy;
+}
+
+export interface ExecutionTelemetryPolicy {
+  deadSideCanary: boolean;
+  pricingShadow: boolean;
+}
+
+export interface ExecutionPolicyDTO {
+  version: 1;
+  entryPriceCeiling: number;
+  exitOrderTtlMs: number;
+  deadSideGuard: DeadSideGuardPolicy;
+  pricing: ExecutionPricingPolicy;
+  telemetry: ExecutionTelemetryPolicy;
+}
+
+export interface ExecutionPolicyResponse {
+  policy: ExecutionPolicyDTO;
+  version: number;
+  issues: string[];
+}
+
 export interface EventMetric {
   eventSlug: string;
   realizedPnl: number;
@@ -69,6 +111,16 @@ export interface ExecutionTelemetryWindow {
   lastFillAt: string | null;
 }
 
+export interface PolymarketPortfolioStatus {
+  portfolioUsdc: number;
+  availableUsdc: number;
+  positionValueUsdc: number;
+  positionCount: number;
+  costBasisUsdc: number;
+  source: "polymarket";
+  capturedAt: string;
+}
+
 /** GET /status */
 export interface StatusData {
   runtimeMode: string;
@@ -89,6 +141,7 @@ export interface StatusData {
   walletBalanceUsdc: number | null;
   totalCurrentValueUsdc: number;
   totalRealizedPnl: number;
+  polymarketPortfolio: PolymarketPortfolioStatus | null;
   marketDataSource: "live" | "simulation";
   executionMode: "simulation" | "live";
   liveLite?: {

@@ -14,14 +14,15 @@ CREATE TABLE IF NOT EXISTS profiles (
 );
 
 CREATE TABLE IF NOT EXISTS profile_settings (
-  profile_id           TEXT PRIMARY KEY REFERENCES profiles(profile_id),
-  initial_balance_usdc REAL,
-  envelope_json        TEXT,
-  risk_caps_json       TEXT,
-  wallet_mode          TEXT,
-  min_order_usdc       REAL,
-  relayer_json         TEXT,
-  updated_at           TEXT NOT NULL DEFAULT (datetime('now'))
+  profile_id             TEXT PRIMARY KEY REFERENCES profiles(profile_id),
+  initial_balance_usdc   REAL,
+  envelope_json          TEXT,
+  risk_caps_json         TEXT,
+  wallet_mode            TEXT,
+  min_order_usdc         REAL,
+  relayer_json           TEXT,
+  execution_policy_json  TEXT,
+  updated_at             TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS profile_summaries (
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS runtime_control_state (
   resume_intent_at         TEXT,             -- one-shot deploy resume intent (ISO timestamp, NULL = no intent)
   schema_version           INTEGER NOT NULL DEFAULT 1,
   selection_rules_version  INTEGER NOT NULL DEFAULT 0,
+  execution_policy_version INTEGER NOT NULL DEFAULT 0,
   updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

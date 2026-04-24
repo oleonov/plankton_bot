@@ -11,6 +11,7 @@ import type {
   Order,
   Position,
   PositionDrift,
+  ExecutionPolicyObservation,
   Profile,
   ProfileSettings,
   ProfileSummary,
@@ -412,6 +413,14 @@ export interface PositionDriftRepository {
 
   /** Mark a drift as resolved (balance cleared on-chain). */
   markResolved(settlementId: string, resolvedAtIso: string): void;
+}
+
+/**
+ * ADR-015 — append-only observation writer. One row per execution-term
+ * resolution (or enforce-skip). No update/delete paths by design.
+ */
+export interface ExecutionPolicyObservationRepository {
+  insert(obs: ExecutionPolicyObservation): void;
 }
 
 // ─── PreflightReportRepository ──────────────────────────────────────────

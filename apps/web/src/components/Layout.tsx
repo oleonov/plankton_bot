@@ -45,6 +45,7 @@ function SettingsDropdown() {
           <button onClick={() => go("/control")}>Control Center</button>
           <button onClick={() => go("/profiles")}>Profiles</button>
           <button onClick={() => go("/settings/risk")}>Risk Settings</button>
+          <button onClick={() => go("/settings/execution")}>Execution Settings</button>
           <button onClick={() => go("/audit")}>Audit Log</button>
         </div>
       )}

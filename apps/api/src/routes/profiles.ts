@@ -6,6 +6,13 @@ import { toDto as orderToDto } from "./orders.js";
 import { toDto as positionToDto } from "./positions.js";
 import { toDto as fillToDto } from "./fills.js";
 import type { LedgerPool } from "../ledger-pool.js";
+import {
+  DEFAULT_EXECUTION_POLICY,
+  parseExecutionPolicyJson,
+  serializeExecutionPolicy,
+  type ExecutionPolicy,
+} from "@plankton/domain";
+import { readExecutionPolicyVersion } from "@plankton/db";
 
 interface ProfilesOpts {
   controlDb: Database.Database;
@@ -350,5 +357,115 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       .prepare("SELECT * FROM profile_settings WHERE profile_id = ?")
       .get(profileId);
     return ok(updated);
+  });
+
+  // ── GET /profiles/:profileId/execution-policy ────────────────────────
+  //
+  // ADR-015 — returns the current policy snapshot + version. Invalid JSON
+  // persisted by an earlier bad write still parses to defaults here so the
+  // UI can always render a form; `issues` surfaces the validation output so
+  // the caller can warn the operator.
+  app.get<{ Params: { profileId: string } }>(
+    "/profiles/:profileId/execution-policy",
+    async (request) => {
+      const { profileId } = request.params;
+      const profileRow = controlDb
+        .prepare("SELECT 1 FROM profiles WHERE profile_id = ?")
+        .get(profileId) as { 1: number } | undefined;
+      if (!profileRow) {
+        throw new ApiError(404, `profile ${profileId} not found`, "PROFILE_NOT_FOUND");
+      }
+      const row = controlDb
+        .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
+        .get(profileId) as { execution_policy_json: string | null } | undefined;
+      const { policy, issues } = parseExecutionPolicyJson(row?.execution_policy_json ?? null);
+      const version = readExecutionPolicyVersion(controlDb);
+      return ok({ policy, version, issues });
+    },
+  );
+
+  // ── PATCH /profiles/:profileId/execution-policy ──────────────────────
+  //
+  // ADR-015 — accepts a full or partial policy object, merges on top of the
+  // current stored payload, validates via `parseExecutionPolicyJson`, and
+  // persists. On any validation issue the request is rejected with 400 so
+  // the operator sees the problem instead of silently getting defaults.
+  // The repository (runtime path) bumps `execution_policy_version` on byte
+  // change; here we bump it inline to stay consistent.
+  app.patch<{
+    Params: { profileId: string };
+    Body: Partial<ExecutionPolicy>;
+  }>("/profiles/:profileId/execution-policy", async (request) => {
+    const { profileId } = request.params;
+    const patch = (request.body ?? {}) as Record<string, unknown>;
+
+    const existsRow = controlDb
+      .prepare("SELECT 1 FROM profile_settings WHERE profile_id = ?")
+      .get(profileId) as { 1: number } | undefined;
+    if (!existsRow) {
+      throw new ApiError(404, `profile ${profileId} not found`, "PROFILE_NOT_FOUND");
+    }
+
+    const currentRow = controlDb
+      .prepare("SELECT execution_policy_json FROM profile_settings WHERE profile_id = ?")
+      .get(profileId) as { execution_policy_json: string | null } | undefined;
+    const current = parseExecutionPolicyJson(currentRow?.execution_policy_json ?? null).policy;
+
+    // Deep-merge: nested objects (deadSideGuard/pricing/telemetry) merge
+    // field-by-field so a PATCH touching only `deadSideGuard.mode` preserves
+    // `askCeiling` and `maxTimeToEndMs`. Unrelated top-level fields carry over
+    // from `current`.
+    const candidate: ExecutionPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      ...current,
+      ...(patch as Partial<ExecutionPolicy>),
+      deadSideGuard: {
+        ...current.deadSideGuard,
+        ...((patch.deadSideGuard as Partial<ExecutionPolicy["deadSideGuard"]> | undefined) ?? {}),
+      },
+      pricing: {
+        ...current.pricing,
+        ...((patch.pricing as Partial<ExecutionPolicy["pricing"]> | undefined) ?? {}),
+      },
+      telemetry: {
+        ...current.telemetry,
+        ...((patch.telemetry as Partial<ExecutionPolicy["telemetry"]> | undefined) ?? {}),
+      },
+    };
+
+    const parsed = parseExecutionPolicyJson(serializeExecutionPolicy(candidate));
+    if (parsed.issues.length > 0) {
+      throw new ApiError(
+        400,
+        `invalid execution policy: ${parsed.issues.join("; ")}`,
+        "INVALID_EXECUTION_POLICY",
+      );
+    }
+
+    const nextJson = serializeExecutionPolicy(parsed.policy);
+    const prevJson = currentRow?.execution_policy_json ?? null;
+
+    const applyWrite = controlDb.transaction(() => {
+      controlDb
+        .prepare(
+          `UPDATE profile_settings
+              SET execution_policy_json = ?, updated_at = datetime('now')
+            WHERE profile_id = ?`,
+        )
+        .run(nextJson, profileId);
+      if (nextJson !== prevJson) {
+        controlDb
+          .prepare(
+            `UPDATE runtime_control_state
+                SET execution_policy_version = COALESCE(execution_policy_version, 0) + 1
+              WHERE id = 1`,
+          )
+          .run();
+      }
+    });
+    applyWrite();
+
+    const version = readExecutionPolicyVersion(controlDb);
+    return ok({ policy: parsed.policy, version, issues: parsed.issues });
   });
 };
