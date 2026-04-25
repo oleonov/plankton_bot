@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { bootstrapControlDb } from "../bootstrap.js";
@@ -49,6 +49,8 @@ describe("control-db migration infrastructure", () => {
     expect(applied.map((r) => r.name)).toContain("031_flatten_family_deployments.sql");
     // Fresh control.sql has no family_ tables, so 036 is also seeded as applied.
     expect(applied.map((r) => r.name)).toContain("036_drop_family_tables.sql");
+    // Fresh control.sql has no legacy archive tables, so 039 is also seeded as applied.
+    expect(applied.map((r) => r.name)).toContain("039_drop_legacy_archive_tables.sql");
   });
 
   it("runner picks up a SQL file from an arbitrary migrationsDir", () => {
@@ -79,6 +81,58 @@ describe("control-db migration infrastructure", () => {
     conn = bootstrapControlDb(path.join(tmpDir, "control.db"));
     // Second call is guaranteed idempotent — no throw.
     expect(() => runControlMigrations(conn.db)).not.toThrow();
+  });
+
+  it("migration 039 drops legacy archive tables", () => {
+    const db = new Database(path.join(tmpDir, "archive-cleanup.db"));
+    try {
+      db.exec(`
+        CREATE TABLE archive_candidate_observation_markets_034 (id INTEGER);
+        CREATE TABLE archive_candidate_observations_034 (id INTEGER);
+        CREATE TABLE archive_family_candidates_034 (id INTEGER);
+        CREATE TABLE archive_discovery_runs_034 (id INTEGER);
+        CREATE TABLE archive_promotion_proposals_034 (id INTEGER);
+        CREATE TABLE archive_family_deployments_031 (id INTEGER);
+        CREATE TABLE archive_family_deployments_033 (id INTEGER);
+      `);
+
+      const sql = readFileSync(
+        path.join(
+          import.meta.dirname,
+          "..",
+          "migrations-control",
+          "039_drop_legacy_archive_tables.sql",
+        ),
+        "utf-8",
+      );
+      db.exec(sql);
+
+      const archiveTables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'archive_%'")
+        .all() as Array<{ name: string }>;
+      expect(archiveTables).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("bootstrapControlDb applies migration 039 when any legacy archive table remains", () => {
+    const dbPath = path.join(tmpDir, "control-partial-archives.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("039_drop_legacy_archive_tables.sql");
+    conn.db.exec("CREATE TABLE archive_discovery_runs_034 (id INTEGER)");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const archiveTable = conn.db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'archive_discovery_runs_034'",
+      )
+      .get();
+    expect(archiveTable).toBeUndefined();
   });
 
   it("fresh bootstrap seeds profile_settings.execution_policy_json for every profile", () => {

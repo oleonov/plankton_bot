@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_market_snapshots_token_ts
   ON market_snapshots(token_id, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_snapshots_captured_at
+  ON market_snapshots(captured_at);
 
 -- ═══════════ ORDERS ═══════════
 -- From 001_initial.sql + 007 (signal_reason)
@@ -259,6 +261,8 @@ CREATE INDEX IF NOT EXISTS idx_execution_policy_observations_profile_ts
 
 CREATE INDEX IF NOT EXISTS idx_execution_policy_observations_token_ts
   ON execution_policy_observations(token_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_execution_policy_observations_created_at
+  ON execution_policy_observations(created_at);
 
 -- ═══════════ BOT RUNS ═══════════
 -- From 001_initial.sql
@@ -284,6 +288,8 @@ CREATE TABLE IF NOT EXISTS runtime_metrics (
 
 CREATE INDEX IF NOT EXISTS idx_runtime_metrics_name_ts
   ON runtime_metrics(metric_name, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_runtime_metrics_captured_at
+  ON runtime_metrics(captured_at);
 
 -- ═══════════ RISK EVENTS ═══════════
 -- From 001_initial.sql
@@ -296,6 +302,7 @@ CREATE TABLE IF NOT EXISTS risk_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_risk_events_type ON risk_events(event_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_risk_events_created_at ON risk_events(created_at);
 
 -- ═══════════ TRADING STATE SNAPSHOTS ═══════════
 -- From 014_trading_state_snapshots.sql
@@ -326,6 +333,7 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
   captured_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_profile_ts ON portfolio_snapshots(profile, captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_captured_at ON portfolio_snapshots(captured_at);
 
 -- ═══════════ MERGE LEDGER ═══════════
 -- From 021_merge_ledger.sql

@@ -128,6 +128,19 @@ const CONTROL_MIGRATION_BASELINES: ControlMigrationBaseline[] = [
       hasColumn(db, "profile_settings", "execution_policy_json") &&
       hasColumn(db, "runtime_control_state", "execution_policy_version"),
   },
+  {
+    name: "039_drop_legacy_archive_tables.sql",
+    // Post-039 shape: rollback archive tables created by old family/discovery
+    // migrations are gone. Fresh bootstrap never creates them.
+    isAlreadyApplied: (db) =>
+      !hasTable(db, "archive_candidate_observation_markets_034") &&
+      !hasTable(db, "archive_candidate_observations_034") &&
+      !hasTable(db, "archive_family_candidates_034") &&
+      !hasTable(db, "archive_discovery_runs_034") &&
+      !hasTable(db, "archive_promotion_proposals_034") &&
+      !hasTable(db, "archive_family_deployments_031") &&
+      !hasTable(db, "archive_family_deployments_033"),
+  },
 ];
 
 function seedControlMigrationsBaseline(db: import("better-sqlite3").Database): void {

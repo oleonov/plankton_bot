@@ -85,6 +85,7 @@ import { ResolutionModule } from "./modules/resolution/resolution-module.js";
 import { UserOrderStreamModule } from "./modules/reconciliation/user-order-stream-module.js";
 import { InventoryManagerModule } from "./modules/inventory-auto-merge/inventory-manager-module.js";
 import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
+import { LedgerRetentionModule } from "./modules/retention/ledger-retention-module.js";
 import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
 import { PositionSettler } from "./modules/resolution/position-settler.js";
 import { GammaResolutionClient } from "@plankton/exchange";
@@ -104,6 +105,7 @@ import { resolveActiveProfile } from "./profile-boot.js";
 import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
+import { RuntimeMetricWriter } from "./runtime-metric-writer.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { installConsoleRedaction } from "./console-redaction.js";
@@ -276,18 +278,12 @@ async function main(): Promise<void> {
   const supervisorRef = { current: null as unknown as Supervisor };
   const statePublisherRef = { current: null as RuntimeStatePublisher | null };
   const runtimeControl = { isPaused: () => supervisorRef.current.isPaused() };
+  const runtimeMetrics = new RuntimeMetricWriter(ledgerConn.db);
 
   // Persist pause state to runtime_metrics so the API can read it
-  const deletePauseMetric = ledgerConn.db.prepare(
-    "DELETE FROM runtime_metrics WHERE metric_name = 'runtime_paused'",
-  );
-  const insertPauseMetric = ledgerConn.db.prepare(
-    "INSERT INTO runtime_metrics (metric_name, value, captured_at) VALUES ('runtime_paused', ?, ?)",
-  );
-  const persistPauseState = ledgerConn.db.transaction((paused: boolean) => {
-    deletePauseMetric.run();
-    insertPauseMetric.run(paused ? 1 : 0, new Date().toISOString());
-  });
+  const persistPauseState = (paused: boolean) => {
+    runtimeMetrics.writeLatest("runtime_paused", paused ? 1 : 0);
+  };
 
   function setPausedAndPersist(paused: boolean): void {
     supervisorRef.current.setPaused(paused);
@@ -398,11 +394,7 @@ async function main(): Promise<void> {
     details?: Record<string, unknown> | undefined;
   }): void => {
     const now = new Date().toISOString();
-    ledgerConn.db
-      .prepare(
-        "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('infra_alert', 1, ?, ?)",
-      )
-      .run(JSON.stringify(alert), now);
+    runtimeMetrics.writeEvent("infra_alert", 1, JSON.stringify(alert), now);
     log.warn({ alert }, "runtime infra alert recorded");
   };
 
@@ -508,12 +500,19 @@ async function main(): Promise<void> {
   // 7f. Execution module
 
   // Persist two-part mode for API/web consumption
-  const upsertModeMetric = ledgerConn.db.prepare(
-    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
-  );
   const modeNow = new Date().toISOString();
-  upsertModeMetric.run("market_data_source", JSON.stringify({ value: marketDataSource }), modeNow);
-  upsertModeMetric.run("execution_mode", JSON.stringify({ value: executionMode }), modeNow);
+  runtimeMetrics.writeLatest(
+    "market_data_source",
+    1,
+    JSON.stringify({ value: marketDataSource }),
+    modeNow,
+  );
+  runtimeMetrics.writeLatest(
+    "execution_mode",
+    1,
+    JSON.stringify({ value: executionMode }),
+    modeNow,
+  );
 
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
@@ -737,6 +736,10 @@ async function main(): Promise<void> {
     intervalMs: 60_000,
     ...(runtimeMode === "live-lite" ? { exchangeGateway } : {}),
   });
+  const ledgerRetentionModule = new LedgerRetentionModule({
+    db: ledgerConn.db,
+    log,
+  });
 
   const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
@@ -745,6 +748,7 @@ async function main(): Promise<void> {
     ["normalization", normalizationModule],
     ["risk-inventory", riskInventoryModule],
     ["profile-publisher", profilePublisher],
+    ["ledger-retention", ledgerRetentionModule],
     ["reconciliation", reconciliationModule],
     ...(userOrderStreamModule
       ? [
@@ -771,25 +775,34 @@ async function main(): Promise<void> {
     ["execution", executionModule],
   ];
 
-  // 7m. Persist key timestamps to runtime_metrics for API consumption
-  const upsertMetric = ledgerConn.db.prepare(`
-    INSERT INTO runtime_metrics (metric_name, value, captured_at)
-    VALUES (?, 1, ?)
-  `);
-
   bus.subscribe("ReconciliationDriftDetected", async () => {
-    upsertMetric.run("reconciliation_drift", new Date().toISOString());
+    runtimeMetrics.writeLatest("reconciliation_drift");
   });
 
   bus.subscribe("ReconciliationComplete", async ({ result }) => {
-    upsertMetric.run("last_reconciliation", new Date(result.ranAt).toISOString());
+    runtimeMetrics.writeLatest(
+      "last_reconciliation",
+      1,
+      null,
+      new Date(result.ranAt).toISOString(),
+    );
     if (result.clean) {
-      upsertMetric.run("reconciliation_clean", new Date(result.ranAt).toISOString());
+      runtimeMetrics.writeLatest(
+        "reconciliation_clean",
+        1,
+        null,
+        new Date(result.ranAt).toISOString(),
+      );
     }
   });
 
   bus.subscribe("MarketSnapshotReceived", async ({ timestamp }) => {
-    upsertMetric.run("market_data_last_update", new Date(timestamp).toISOString());
+    runtimeMetrics.writeLatest(
+      "market_data_last_update",
+      1,
+      null,
+      new Date(timestamp).toISOString(),
+    );
   });
 
   // 7n. Persist downsampled market snapshots (5-min per token, 7-day TTL)
@@ -1430,11 +1443,12 @@ async function main(): Promise<void> {
       minOrderUsdc: liveLiteGuard.getMinOrderUsdc(),
       ...(relayerConfig ? { relayer: relayerConfig } : {}),
     };
-    ledgerConn.db
-      .prepare(
-        "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, 1, ?, ?)",
-      )
-      .run("live_lite_envelope", JSON.stringify(liveLiteStatus), new Date().toISOString());
+    runtimeMetrics.writeLatest(
+      "live_lite_envelope",
+      1,
+      JSON.stringify(liveLiteStatus),
+      new Date().toISOString(),
+    );
   }
 
   if (runtimeMode === "live-lite" && liveLiteGuard.getWalletMode() === "relayer") {

@@ -187,3 +187,55 @@ describe("migration 032 — unique open position per token", () => {
     expect(() => db.exec(readMigration("032_unique_open_position_per_token.sql"))).not.toThrow();
   });
 });
+
+describe("migration 039 — retention indexes", () => {
+  it("creates date indexes used by retention cleanup", () => {
+    db.exec(`
+      DROP TABLE positions;
+      CREATE TABLE market_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_id TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      );
+      CREATE TABLE runtime_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metric_name TEXT NOT NULL,
+        value REAL NOT NULL,
+        labels TEXT,
+        captured_at TEXT NOT NULL
+      );
+      CREATE TABLE execution_policy_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE risk_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE portfolio_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      );
+    `);
+
+    db.exec(readMigration("039_retention_indexes.sql"));
+
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all() as Array<{
+      name: string;
+    }>;
+    expect(indexes.map((idx) => idx.name)).toEqual(
+      expect.arrayContaining([
+        "idx_market_snapshots_captured_at",
+        "idx_runtime_metrics_captured_at",
+        "idx_execution_policy_observations_created_at",
+        "idx_risk_events_created_at",
+        "idx_portfolio_snapshots_captured_at",
+      ]),
+    );
+  });
+});
