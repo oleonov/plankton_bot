@@ -31,7 +31,7 @@
   color: var(--p2-fg);
   font-family: "Inter", system-ui, sans-serif;
   font-size: 13px;
-  padding: 4px 0 80px;
+  padding: 4px 16px 80px;
 }
 
 .positions-v2 .p2-mono {
@@ -684,115 +684,6 @@
   font-size: 11px;
   font-family: "JetBrains Mono", ui-monospace, monospace;
   padding: 8px 0;
-}
-
-/* tweaks panel */
-.positions-v2 .p2-tweaksFab {
-  position: fixed;
-  bottom: 16px;
-  right: 16px;
-  z-index: 29;
-  background: #0c1219;
-  border: 1px solid var(--p2-border);
-  color: var(--p2-fg-mute);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 11px;
-  padding: 6px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.positions-v2 .p2-tweaksFab:hover {
-  color: #fff;
-  border-color: #2e3b4c;
-}
-.positions-v2 .p2-tweaks {
-  position: fixed;
-  bottom: 56px;
-  right: 16px;
-  width: 280px;
-  background: #0c1219;
-  border: 1px solid var(--p2-border);
-  border-radius: 8px;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-  z-index: 30;
-  overflow: hidden;
-}
-.positions-v2 .p2-tweaks header {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--p2-border);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.positions-v2 .p2-tweaks header .p2-t {
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  color: var(--p2-fg-strong);
-  text-transform: uppercase;
-}
-.positions-v2 .p2-tweaks header .p2-close {
-  margin-left: auto;
-  color: var(--p2-fg-mute);
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-  font-size: 18px;
-  line-height: 1;
-}
-.positions-v2 .p2-tweaks .p2-sec {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--p2-border-soft);
-}
-.positions-v2 .p2-tweaks .p2-sec:last-child {
-  border-bottom: 0;
-}
-.positions-v2 .p2-tweaks .p2-lbl {
-  font-size: 10px;
-  text-transform: uppercase;
-  color: var(--p2-fg-dim);
-  letter-spacing: 0.08em;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  margin-bottom: 6px;
-}
-.positions-v2 .p2-seg {
-  display: flex;
-  gap: 2px;
-  background: #0a0e14;
-  border: 1px solid #1b232e;
-  border-radius: 4px;
-  padding: 2px;
-}
-.positions-v2 .p2-seg button {
-  flex: 1;
-  background: transparent;
-  border: 0;
-  color: var(--p2-fg-mute);
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 11px;
-  padding: 4px 6px;
-  border-radius: 3px;
-  cursor: pointer;
-  text-transform: capitalize;
-}
-.positions-v2 .p2-seg button.on {
-  background: #1a222d;
-  color: #fff;
-}
-.positions-v2 .p2-check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 0;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 11.5px;
-  color: var(--p2-fg);
-  cursor: pointer;
-}
-.positions-v2 .p2-check input {
-  accent-color: var(--p2-accent);
 }
 
 /* header above toolbar */

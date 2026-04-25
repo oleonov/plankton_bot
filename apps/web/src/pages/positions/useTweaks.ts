@@ -1,11 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import type { Density, GroupBy } from "./lib.ts";
+import type { GroupBy } from "./lib.ts";
 
 export interface Tweaks {
-  density: Density;
   groupBy: GroupBy;
-  showPhaseBuyCount: boolean;
-  showPnLPercent: boolean;
   hideClosedByDefault: boolean;
   hideDust: boolean;
 }
@@ -13,11 +10,8 @@ export interface Tweaks {
 export const TWEAKS_STORAGE_KEY = "plankton.positions.tweaks.v1";
 
 export const DEFAULT_TWEAKS: Tweaks = {
-  density: "default",
   groupBy: "lastAction",
-  showPhaseBuyCount: false,
-  showPnLPercent: true,
-  hideClosedByDefault: false,
+  hideClosedByDefault: true,
   hideDust: false,
 };
 

@@ -13,11 +13,18 @@ import {
 import { PositionDrawer } from "./PositionDrawer.tsx";
 import { PositionRow } from "./PositionRow.tsx";
 import { PositionsToolbar } from "./PositionsToolbar.tsx";
-import { TweaksPanel } from "./TweaksPanel.tsx";
 import { useTweaks } from "./useTweaks.ts";
+import type { Density } from "./lib.ts";
 import "./positions.css";
 
 const PAGE_SIZE = 50;
+
+// Display knobs locked to the operator-approved layout. They used to live in a
+// floating Tweaks panel — that surface was removed; only the toolbar-driven
+// prefs (groupBy, hideClosed, hideDust) remain user-configurable.
+const ROW_DENSITY: Density = "spacious";
+const SHOW_PHASE_BUY_COUNT = false;
+const SHOW_PNL_PERCENT = true;
 
 export function PositionsPage() {
   const [tweaks, updateTweak] = useTweaks();
@@ -146,9 +153,9 @@ export function PositionsPage() {
                     key={g.key}
                     label={g.key}
                     items={g.items}
-                    density={tweaks.density}
-                    showBuys={tweaks.showPhaseBuyCount}
-                    showPct={tweaks.showPnLPercent}
+                    density={ROW_DENSITY}
+                    showBuys={SHOW_PHASE_BUY_COUNT}
+                    showPct={SHOW_PNL_PERCENT}
                     selectedId={selected?.positionId ?? null}
                     onSelect={setSelected}
                   />
@@ -167,7 +174,6 @@ export function PositionsPage() {
       />
 
       <PositionDrawer position={selected} onClose={() => setSelected(null)} />
-      <TweaksPanel tweaks={tweaks} onUpdate={updateTweak} />
     </div>
   );
 }
@@ -175,7 +181,7 @@ export function PositionsPage() {
 interface GroupFragmentProps {
   label: string;
   items: PositionDTO[];
-  density: ReturnType<typeof useTweaks>[0]["density"];
+  density: Density;
   showBuys: boolean;
   showPct: boolean;
   selectedId: string | null;

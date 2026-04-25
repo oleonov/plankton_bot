@@ -124,6 +124,14 @@ function seedPositions(items: PositionDTO[] = FIXTURES) {
 
 beforeEach(() => {
   window.localStorage.clear();
+  // Most assertions in this file pre-date the hideClosedByDefault flip and
+  // assume closed positions stay visible. Seed an explicit `false` so they
+  // see the original behaviour; the dedicated "default hides closed" test
+  // clears localStorage itself to pick up the new default.
+  window.localStorage.setItem(
+    TWEAKS_STORAGE_KEY,
+    JSON.stringify({ ...DEFAULT_TWEAKS, hideClosedByDefault: false }),
+  );
 });
 
 describe("PositionsPage — redesign", () => {
@@ -167,16 +175,20 @@ describe("PositionsPage — redesign", () => {
     expect(screen.getByText("Will ETH flip SOL?")).toBeInTheDocument();
   });
 
-  it("Hide closed removes closed positions", async () => {
+  it("Hide closed is on by default and toggling it reveals closed positions", async () => {
+    // Reset the per-suite seed so we exercise the actual app default.
+    window.localStorage.clear();
     seedPositions();
     renderWithProviders(<Positions />);
-    await screen.findByText("Will XRP win?");
+    // BTC is open and visible immediately; XRP is closed and hidden by default.
+    await screen.findByText("Will BTC be above $100k?");
+    expect(screen.queryByText("Will XRP win?")).not.toBeInTheDocument();
 
     const user = userEvent.setup();
     const closedToggle = screen.getByLabelText(/Hide closed/);
     await user.click(closedToggle);
 
-    expect(screen.queryByText("Will XRP win?")).not.toBeInTheDocument();
+    expect(screen.getByText("Will XRP win?")).toBeInTheDocument();
     expect(screen.getByText("Will BTC be above $100k?")).toBeInTheDocument();
   });
 
@@ -198,6 +210,8 @@ describe("PositionsPage — redesign", () => {
     renderWithProviders(<Positions />);
     await screen.findByText("Will BTC be above $100k?");
 
+    // beforeEach seeds hideClosedByDefault=false; clicking flips it to true
+    // and that flip must round-trip through localStorage.
     const user = userEvent.setup();
     await user.click(screen.getByLabelText(/Hide closed/));
 
@@ -259,23 +273,12 @@ describe("PositionsPage — redesign", () => {
     });
   });
 
-  it("opens the Tweaks panel from the FAB and toggles density", async () => {
+  it("does not render a Tweaks FAB anymore", async () => {
     seedPositions();
     renderWithProviders(<Positions />);
     await screen.findByText("Will BTC be above $100k?");
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /Tweaks/i }));
-    const panel = screen.getByRole("dialog", { name: /Tweaks/i });
-    const compactBtn = within(panel).getByRole("button", { name: /compact/i });
-    await user.click(compactBtn);
-
-    await waitFor(() => {
-      const raw = window.localStorage.getItem(TWEAKS_STORAGE_KEY);
-      expect(raw).not.toBeNull();
-      const parsed = JSON.parse(raw!) as Record<string, unknown>;
-      expect(parsed.density).toBe("compact");
-    });
+    expect(screen.queryByRole("button", { name: /Tweaks/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: /Tweaks/i })).not.toBeInTheDocument();
   });
 
   it("encodes negative PnL with U+2212 minus, not hyphen", async () => {

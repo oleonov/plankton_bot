@@ -1,13 +1,23 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { screen } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
 import { renderWithProviders } from "../../test/test-utils.tsx";
 import { server } from "../../test/server.ts";
 import { Positions } from "../../pages/Positions.tsx";
+import { TWEAKS_STORAGE_KEY, DEFAULT_TWEAKS } from "../../pages/positions/useTweaks.ts";
 
 function ok<T>(data: T) {
   return HttpResponse.json({ ok: true, data, error: null, ts: new Date().toISOString() });
 }
+
+beforeEach(() => {
+  // Hide-closed defaults to true now; opt out so the closed-position
+  // realised-PnL assertion still finds the row.
+  window.localStorage.setItem(
+    TWEAKS_STORAGE_KEY,
+    JSON.stringify({ ...DEFAULT_TWEAKS, hideClosedByDefault: false }),
+  );
+});
 
 describe("Positions page", () => {
   it("shows total pnl for open positions, not realized-only pnl", async () => {
