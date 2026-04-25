@@ -1,6 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { LegStateTrackerModule } from "../leg-state-tracker-module.js";
-import type { LegStateRepository, LegState, RuntimeEventMap } from "@plankton/domain";
+import type {
+  LegStateRepository,
+  LegState,
+  LegStateTransition,
+  LegStateTransitionRepository,
+  RuntimeEventMap,
+} from "@plankton/domain";
 import { createTokenId, createOrderId, deriveState } from "@plankton/domain";
 import type { Logger } from "../../../logger.js";
 
@@ -38,6 +44,18 @@ function createMockLegStateRepo(): LegStateRepository {
       store.delete(tokenId);
     }),
     getAll: vi.fn(() => [...store.values()]),
+  };
+}
+
+function createMockTransitionRepo(): LegStateTransitionRepository {
+  const store: LegStateTransition[] = [];
+  return {
+    insert: vi.fn((transition) => {
+      store.push({ ...transition, id: store.length + 1, createdAt: "2026-01-01T00:00:00Z" });
+      return true;
+    }),
+    findByTokenId: vi.fn(() => store),
+    findByPositionId: vi.fn(() => store),
   };
 }
 
@@ -167,6 +185,40 @@ describe("LegStateTrackerModule", () => {
       position: { tokenId: TOK, size: 0, status: "closed" } as any,
     });
 
+    expect(repo.get(TOK)).toBeNull();
+  });
+
+  it("records audited CLEAR transition before deleting a zero-sized position", async () => {
+    const transitionRepo = createMockTransitionRepo();
+    mod = new LegStateTrackerModule({
+      bus: bus as any,
+      legStateRepo: repo,
+      legStateTransitionRepo: transitionRepo,
+      log,
+    });
+
+    await mod.start();
+    await bus.publish("FillReceived", makeFillPayload({ side: "buy", price: 0.03 }));
+    await bus.publish("PositionUpdated", {
+      position: {
+        positionId: "pos-1",
+        tokenId: TOK,
+        size: 0,
+        status: "closed",
+        updatedAt: "2026-01-02T00:00:00Z",
+      } as any,
+    });
+
+    expect(transitionRepo.insert).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        tokenId: TOK,
+        positionId: "pos-1",
+        fromPhase: "S1",
+        toPhase: "S0",
+        action: "CLEAR",
+        reason: "position_size_zero",
+      }),
+    );
     expect(repo.get(TOK)).toBeNull();
   });
 

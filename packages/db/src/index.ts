@@ -29,6 +29,7 @@ export { SqlitePositionDriftRepository } from "./repositories/position-drift-rep
 export { SqliteExecutionPolicyObservationRepository } from "./repositories/execution-policy-observation-repository.js";
 export { SqliteAlgoRulesRepository } from "./repositories/algo-rules-repository.js";
 export { SqliteLegStateRepository } from "./repositories/leg-state-repository.js";
+export { SqliteLegStateTransitionRepository } from "./repositories/leg-state-transition-repository.js";
 export { SelectionRuleRepository } from "./repositories/selection-rule-repository.js";
 export type {
   SelectionRuleInsert,

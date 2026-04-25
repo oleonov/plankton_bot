@@ -94,6 +94,7 @@ import {
   SqliteMergeLedgerRepository,
   SqliteAlgoRulesRepository,
   SqliteLegStateRepository,
+  SqliteLegStateTransitionRepository,
   SqliteSettlementLedgerRepository,
   SqlitePositionDriftRepository,
   SqliteExecutionPolicyObservationRepository,
@@ -110,6 +111,7 @@ import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { installConsoleRedaction } from "./console-redaction.js";
 import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
+import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-state-transition-backfill.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -239,6 +241,7 @@ async function main(): Promise<void> {
     // Algo decision engine — algoRules lives in control.db, legState in ledger.db
     algoRules: new SqliteAlgoRulesRepository(controlConn.db),
     legState: new SqliteLegStateRepository(ledgerConn.db),
+    legStateTransition: new SqliteLegStateTransitionRepository(ledgerConn.db),
   };
 
   // 3b. Selection rule engine — version-polled singleton for Phase 4 scanner wiring.
@@ -562,6 +565,10 @@ async function main(): Promise<void> {
   const legStateTrackerModule = new LegStateTrackerModule({
     bus,
     legStateRepo: repos.legState,
+    legStateTransitionRepo: repos.legStateTransition,
+    positionRepo: repos.position,
+    transitionBackfill: () =>
+      backfillLegStateTransitionsFromLedger(ledgerConn.db, repos.legStateTransition, log),
     log,
   });
 

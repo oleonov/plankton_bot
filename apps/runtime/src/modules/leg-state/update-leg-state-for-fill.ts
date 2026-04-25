@@ -1,4 +1,17 @@
-import type { LegStateRepository, TokenId } from "@plankton/domain";
+import { deriveState } from "@plankton/domain";
+import type {
+  ClientOrderId,
+  ConditionId,
+  FillId,
+  LegPhase,
+  LegState,
+  LegStateRepository,
+  LegStateTransitionAction,
+  LegStateTransitionRepository,
+  OrderId,
+  PositionId,
+  TokenId,
+} from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 export interface LegStateFillInput {
@@ -6,6 +19,18 @@ export interface LegStateFillInput {
   side: "buy" | "sell";
   price: number;
   filledAt: string;
+  fillId?: FillId | null;
+  orderId?: OrderId | null;
+  clientOrderId?: ClientOrderId | null;
+  conditionId?: ConditionId | null;
+  positionId?: PositionId | null;
+  size?: number | null;
+  sizeUsdc?: number | null;
+}
+
+export interface LegStateTransitionAuditOptions {
+  transitionRepo?: LegStateTransitionRepository | undefined;
+  reason?: string;
 }
 
 /**
@@ -25,12 +50,48 @@ export function updateLegStateForFill(
   fill: LegStateFillInput,
   log: Logger,
   now: string,
+  audit: LegStateTransitionAuditOptions = {},
 ): void {
   const existing = repo.get(fill.tokenId);
+  const next = nextLegStateForFill(existing, fill, now);
 
+  if (!next) {
+    log.warn(
+      { tokenId: String(fill.tokenId) },
+      "SELL fill received with no open leg state — skipping",
+    );
+    return;
+  }
+
+  repo.upsert(next);
+  recordLegStateTransition({
+    transitionRepo: audit.transitionRepo,
+    tokenId: fill.tokenId,
+    positionId: fill.positionId ?? null,
+    fillId: fill.fillId ?? null,
+    orderId: fill.orderId ?? null,
+    clientOrderId: fill.clientOrderId ?? null,
+    conditionId: fill.conditionId ?? null,
+    fromState: existing,
+    toState: next,
+    action: fill.side === "buy" ? "BUY" : "SELL",
+    price: fill.price,
+    size: fill.size ?? null,
+    sizeUsdc: fill.sizeUsdc ?? null,
+    reason: audit.reason ?? "fill_received",
+    occurredAt: fill.filledAt,
+    log,
+  });
+}
+
+export function nextLegStateForFill(
+  existing: LegState | null,
+  fill: LegStateFillInput,
+  now: string,
+): LegState | null {
   if (fill.side === "buy") {
     if (!existing) {
-      repo.upsert({
+      return {
         tokenId: fill.tokenId,
         buyCount: 1,
         sellCount: 0,
@@ -39,31 +100,135 @@ export function updateLegStateForFill(
         firstTradeAt: fill.filledAt,
         lastTradeAt: fill.filledAt,
         updatedAt: now,
-      });
-      return;
+      };
     }
-    repo.upsert({
+    return {
       ...existing,
       buyCount: existing.buyCount + 1,
       lastAction: "BUY",
       lastTradeAt: fill.filledAt,
       updatedAt: now,
-    });
-    return;
+    };
   }
 
-  if (!existing) {
-    log.warn(
-      { tokenId: String(fill.tokenId) },
-      "SELL fill received with no open leg state — skipping",
-    );
-    return;
-  }
-  repo.upsert({
+  if (!existing) return null;
+
+  return {
     ...existing,
     sellCount: existing.sellCount + 1,
     lastAction: "SELL",
     lastTradeAt: fill.filledAt,
     updatedAt: now,
+  };
+}
+
+export function recordLegStateClearTransition(args: {
+  transitionRepo?: LegStateTransitionRepository | undefined;
+  tokenId: TokenId;
+  existing: LegState | null;
+  positionId?: PositionId | null;
+  action: Extract<LegStateTransitionAction, "CLEAR" | "SETTLE">;
+  reason: string;
+  occurredAt: string;
+  log: Logger;
+}): void {
+  if (!args.existing) return;
+
+  recordLegStateTransition({
+    transitionRepo: args.transitionRepo,
+    tokenId: args.tokenId,
+    positionId: args.positionId ?? null,
+    fillId: null,
+    orderId: null,
+    clientOrderId: null,
+    conditionId: null,
+    fromState: args.existing,
+    toState: null,
+    action: args.action,
+    price: null,
+    size: null,
+    sizeUsdc: null,
+    reason: args.reason,
+    occurredAt: args.occurredAt,
+    log: args.log,
   });
+}
+
+export function deriveLegPhase(state: LegState | null): LegPhase {
+  const algoState = deriveState(state);
+  return algoState === "OTHER" ? "S0" : algoState;
+}
+
+function legCounts(state: LegState | null): { buyCount: number; sellCount: number } {
+  return {
+    buyCount: state?.buyCount ?? 0,
+    sellCount: state?.sellCount ?? 0,
+  };
+}
+
+function recordLegStateTransition(args: {
+  transitionRepo?: LegStateTransitionRepository | undefined;
+  tokenId: TokenId;
+  positionId: PositionId | null;
+  fillId: FillId | null;
+  orderId: OrderId | null;
+  clientOrderId: ClientOrderId | null;
+  conditionId: ConditionId | null;
+  fromState: LegState | null;
+  toState: LegState | null;
+  action: LegStateTransitionAction;
+  price: number | null;
+  size: number | null;
+  sizeUsdc: number | null;
+  reason: string;
+  occurredAt: string;
+  log: Logger;
+}): void {
+  if (!args.transitionRepo) return;
+
+  const fromPhase = deriveLegPhase(args.fromState);
+  const toPhase = deriveLegPhase(args.toState);
+  const fromCounts = legCounts(args.fromState);
+  const toCounts = legCounts(args.toState);
+
+  try {
+    const inserted = args.transitionRepo.insert({
+      tokenId: args.tokenId,
+      positionId: args.positionId,
+      fillId: args.fillId,
+      orderId: args.orderId,
+      clientOrderId: args.clientOrderId,
+      conditionId: args.conditionId,
+      fromPhase,
+      toPhase,
+      action: args.action,
+      price: args.price,
+      size: args.size,
+      sizeUsdc: args.sizeUsdc,
+      fromBuyCount: fromCounts.buyCount,
+      fromSellCount: fromCounts.sellCount,
+      toBuyCount: toCounts.buyCount,
+      toSellCount: toCounts.sellCount,
+      reason: args.reason,
+      occurredAt: args.occurredAt,
+    });
+    if (!inserted) return;
+    args.log.info(
+      {
+        tokenId: String(args.tokenId),
+        positionId: args.positionId ? String(args.positionId) : null,
+        fillId: args.fillId ? String(args.fillId) : null,
+        fromPhase,
+        toPhase,
+        action: args.action,
+        reason: args.reason,
+      },
+      "leg phase transition recorded",
+    );
+  } catch (err) {
+    args.log.warn(
+      { err, tokenId: String(args.tokenId), action: args.action, reason: args.reason },
+      "failed to record leg phase transition",
+    );
+  }
 }

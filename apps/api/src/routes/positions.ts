@@ -61,6 +61,10 @@ interface PositionQuery {
   page?: string;
 }
 
+interface PhaseTransitionQuery {
+  limit?: string;
+}
+
 export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts) => {
   app.get<{ Querystring: PositionQuery }>("/positions", async (request) => {
     const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
@@ -182,4 +186,63 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     const leg = getLegStateOrEmpty(legMap, tokenId);
     return ok(toDto(row, meta, resInfo, leg));
   });
+
+  app.get<{ Params: { positionId: string }; Querystring: PhaseTransitionQuery }>(
+    "/positions/:positionId/phase-transitions",
+    async (request) => {
+      const { db } = resolveActiveLedger(opts.db, opts.controlDb, opts.ledgerPool);
+      const row = db
+        .prepare("SELECT position_id, token_id FROM positions WHERE position_id = ?")
+        .get(request.params.positionId) as { position_id: string; token_id: string } | undefined;
+      if (!row) {
+        throw new ApiError(
+          404,
+          `position ${request.params.positionId} not found`,
+          "POSITION_NOT_FOUND",
+        );
+      }
+
+      const limit = Math.min(Math.max(Number(request.query.limit) || 200, 1), 500);
+      const items = db
+        .prepare(
+          `SELECT *
+             FROM leg_state_transitions
+            WHERE position_id = ? OR token_id = ?
+            ORDER BY occurred_at DESC, id DESC
+            LIMIT ?`,
+        )
+        .all(row.position_id, row.token_id, limit) as Record<string, unknown>[];
+
+      return ok({
+        positionId: row.position_id,
+        tokenId: row.token_id,
+        items: items.map(toPhaseTransitionDto),
+      });
+    },
+  );
 };
+
+function toPhaseTransitionDto(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    tokenId: row.token_id,
+    positionId: row.position_id,
+    fillId: row.fill_id,
+    orderId: row.order_id,
+    clientOrderId: row.client_order_id,
+    conditionId: row.condition_id,
+    fromPhase: row.from_phase,
+    toPhase: row.to_phase,
+    action: row.action,
+    price: row.price,
+    size: row.size,
+    sizeUsdc: row.size_usdc,
+    fromBuyCount: row.from_buy_count,
+    fromSellCount: row.from_sell_count,
+    toBuyCount: row.to_buy_count,
+    toSellCount: row.to_sell_count,
+    reason: row.reason,
+    occurredAt: row.occurred_at,
+    createdAt: row.created_at,
+  };
+}

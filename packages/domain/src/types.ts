@@ -560,6 +560,32 @@ export interface LegState {
   updatedAt: string;
 }
 
+export type LegPhase = "S0" | "S1" | "S2" | "S3" | "S4";
+export type LegStateTransitionAction = "BUY" | "SELL" | "CLEAR" | "SETTLE";
+
+export interface LegStateTransition {
+  id: number;
+  tokenId: TokenId;
+  positionId: PositionId | null;
+  fillId: FillId | null;
+  orderId: OrderId | null;
+  clientOrderId: ClientOrderId | null;
+  conditionId: ConditionId | null;
+  fromPhase: LegPhase;
+  toPhase: LegPhase;
+  action: LegStateTransitionAction;
+  price: number | null;
+  size: number | null;
+  sizeUsdc: number | null;
+  fromBuyCount: number;
+  fromSellCount: number;
+  toBuyCount: number;
+  toSellCount: number;
+  reason: string;
+  occurredAt: string;
+  createdAt: string;
+}
+
 // ─── Selection Rules ─────────────────────────────────────────────────────
 
 export type SelectionRuleType =

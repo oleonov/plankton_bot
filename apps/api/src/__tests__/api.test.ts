@@ -733,6 +733,37 @@ describe("positions", () => {
     expect(json(res).data.positionId).toBe("pos-1");
   });
 
+  it("GET /positions/:id/phase-transitions returns phase audit trail", async () => {
+    conn.db.exec(`
+      INSERT INTO leg_state_transitions
+        (token_id, position_id, fill_id, order_id, client_order_id, condition_id,
+         from_phase, to_phase, action, price, size, size_usdc,
+         from_buy_count, from_sell_count, to_buy_count, to_sell_count,
+         reason, occurred_at)
+      VALUES
+        ('tok-1', 'pos-1', 'fill-audit-1', 'ord-1', 'coid-audit-1', 'cond-1',
+         'S0', 'S1', 'BUY', 0.05, 10, 0.5, 0, 0, 1, 0, 'test', '2026-03-14T00:00:00Z');
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/positions/pos-1/phase-transitions",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+
+    expect(body.ok).toBe(true);
+    expect(body.data.items).toHaveLength(1);
+    expect(body.data.items[0]).toMatchObject({
+      fromPhase: "S0",
+      toPhase: "S1",
+      action: "BUY",
+      fillId: "fill-audit-1",
+    });
+
+    conn.db.exec(`DELETE FROM leg_state_transitions WHERE fill_id = 'fill-audit-1'`);
+  });
+
   it("GET /positions/:id returns 404 for unknown", async () => {
     const res = await app.inject({
       method: "GET",

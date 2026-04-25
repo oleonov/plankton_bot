@@ -23,6 +23,7 @@ import type {
   AlgoDecisionRule,
   AlgoSizeRule,
   LegState,
+  LegStateTransition,
   SettlementRecord,
 } from "./types.js";
 
@@ -462,4 +463,12 @@ export interface LegStateRepository {
   upsert(state: LegState): void;
   delete(tokenId: TokenId): void;
   getAll(): LegState[];
+}
+
+// ─── LegStateTransitionRepository ───────────────────────────────────────
+
+export interface LegStateTransitionRepository {
+  insert(transition: Omit<LegStateTransition, "id" | "createdAt">): boolean;
+  findByTokenId(tokenId: TokenId, limit?: number): LegStateTransition[];
+  findByPositionId(positionId: PositionId, limit?: number): LegStateTransition[];
 }
