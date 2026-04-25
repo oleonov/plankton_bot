@@ -170,9 +170,7 @@ export class RiskInventoryModule implements RuntimeModule {
    * rejected with `resolution_tracker_unavailable` rather than risking a
    * placement on a market that may be silently resolved.
    */
-  private evaluateBuyAdmission(
-    market: RuntimeEventMap["SignalProduced"]["market"],
-  ): string | null {
+  private evaluateBuyAdmission(market: RuntimeEventMap["SignalProduced"]["market"]): string | null {
     const tracker = this.deps.resolutionTracker;
     if (tracker) {
       if (!tracker.healthy()) return "resolution_tracker_unavailable";

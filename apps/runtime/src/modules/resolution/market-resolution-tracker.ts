@@ -103,9 +103,7 @@ export class MarketResolutionTracker {
     }
   }
 
-  private async handleResolvedHint(
-    payload: RuntimeEventMap["MarketResolvedHint"],
-  ): Promise<void> {
+  private async handleResolvedHint(payload: RuntimeEventMap["MarketResolvedHint"]): Promise<void> {
     if (!this.resolvedConditions.has(payload.conditionId)) {
       this.resolvedConditions.add(payload.conditionId);
       this.log.info(

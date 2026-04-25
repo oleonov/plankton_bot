@@ -284,10 +284,12 @@ describe("RiskInventoryModule", () => {
 
   // ─── BUY admission guard (canPlaceBuyOrder + resolution tracker) ──
 
-  function makeStubTracker(opts: {
-    healthy?: boolean;
-    resolved?: ReadonlySet<string>;
-  } = {}) {
+  function makeStubTracker(
+    opts: {
+      healthy?: boolean;
+      resolved?: ReadonlySet<string>;
+    } = {},
+  ) {
     return {
       healthy: () => opts.healthy ?? true,
       isResolved: (cid: string) => (opts.resolved ?? new Set<string>()).has(cid),

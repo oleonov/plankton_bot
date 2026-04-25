@@ -27,10 +27,7 @@ describe("startResolutionHealthWatcher", () => {
     });
 
     expect(metricsWriter.writeLatest).toHaveBeenCalledTimes(1);
-    expect(metricsWriter.writeLatest).toHaveBeenCalledWith(
-      RESOLUTION_TRACKER_HEALTHY_METRIC,
-      1,
-    );
+    expect(metricsWriter.writeLatest).toHaveBeenCalledWith(RESOLUTION_TRACKER_HEALTHY_METRIC, 1);
     expect(recordInfraAlert).not.toHaveBeenCalled();
 
     watcher.stop();
@@ -45,10 +42,7 @@ describe("startResolutionHealthWatcher", () => {
       intervalMs: 60_000,
     });
 
-    expect(metricsWriter.writeLatest).toHaveBeenCalledWith(
-      RESOLUTION_TRACKER_HEALTHY_METRIC,
-      0,
-    );
+    expect(metricsWriter.writeLatest).toHaveBeenCalledWith(RESOLUTION_TRACKER_HEALTHY_METRIC, 0);
     expect(recordInfraAlert).toHaveBeenCalledTimes(1);
     expect(recordInfraAlert).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -2315,10 +2315,12 @@ describe("ADR-015 telemetry flags", () => {
   });
 
   describe("BUY admission guard (defense-in-depth)", () => {
-    function makeStubTracker(opts: {
-      healthy?: boolean;
-      resolved?: ReadonlySet<string>;
-    } = {}) {
+    function makeStubTracker(
+      opts: {
+        healthy?: boolean;
+        resolved?: ReadonlySet<string>;
+      } = {},
+    ) {
       return {
         healthy: () => opts.healthy ?? true,
         isResolved: (cid: string) => (opts.resolved ?? new Set<string>()).has(cid),

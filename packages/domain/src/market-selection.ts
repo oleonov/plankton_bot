@@ -107,10 +107,7 @@ export interface BuyPlacementResult {
  * Resolved-market blocking is handled separately by `MarketResolutionTracker`
  * because resolution arrives as an event, not a NormalizedMarket field.
  */
-export function canPlaceBuyOrder(
-  market: BuyPlacementInput,
-  nowMs: number,
-): BuyPlacementResult {
+export function canPlaceBuyOrder(market: BuyPlacementInput, nowMs: number): BuyPlacementResult {
   const reasons: BuyPlacementBlockReason[] = [];
   if (market.active !== true) reasons.push("market_inactive");
   if (market.tradable !== true) reasons.push("market_not_tradable");
