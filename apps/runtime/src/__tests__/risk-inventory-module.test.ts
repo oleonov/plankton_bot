@@ -282,6 +282,109 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  // ─── BUY admission guard (canPlaceBuyOrder + resolution tracker) ──
+
+  function makeStubTracker(opts: {
+    healthy?: boolean;
+    resolved?: ReadonlySet<string>;
+  } = {}) {
+    return {
+      healthy: () => opts.healthy ?? true,
+      isResolved: (cid: string) => (opts.resolved ?? new Set<string>()).has(cid),
+    };
+  }
+
+  async function runBuyAdmission(opts: {
+    market?: Partial<NormalizedMarket>;
+    signal?: Partial<Signal>;
+    tracker?: ReturnType<typeof makeStubTracker>;
+    now?: number;
+  }) {
+    mod = createModule(undefined, {
+      ...(opts.tracker ? { resolutionTracker: opts.tracker as any } : {}),
+      ...(opts.now != null ? { now: () => opts.now! } : {}),
+    });
+    await mod.start();
+
+    const approved: any[] = [];
+    const rejected: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal(opts.signal),
+      market: makeMarket(opts.market),
+    });
+
+    await mod.stop();
+    return { approved, rejected };
+  }
+
+  it("rejects BUY with reason market_ended when endDate ≤ now", async () => {
+    const now = Date.parse("2026-04-25T12:00:00Z");
+    const { approved, rejected } = await runBuyAdmission({
+      now,
+      market: { endDate: "2026-04-25T11:00:00Z" },
+    });
+    expect(approved).toHaveLength(0);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("market_ended");
+  });
+
+  it("rejects BUY with reason market_inactive when active=false", async () => {
+    const { approved, rejected } = await runBuyAdmission({ market: { active: false } });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("market_inactive");
+  });
+
+  it("rejects BUY with reason market_not_tradable when tradable=false", async () => {
+    const { approved, rejected } = await runBuyAdmission({ market: { tradable: false } });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("market_not_tradable");
+  });
+
+  it("rejects BUY with reason market_not_alive when bestBid is null", async () => {
+    const { approved, rejected } = await runBuyAdmission({ market: { bestBid: null } });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("market_not_alive");
+  });
+
+  it("rejects BUY with reason market_resolved when tracker says so", async () => {
+    const tracker = makeStubTracker({ resolved: new Set([String(COND_ID)]) });
+    const { approved, rejected } = await runBuyAdmission({ tracker });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("market_resolved");
+  });
+
+  it("rejects BUY fail-closed with reason resolution_tracker_unavailable when tracker is unhealthy", async () => {
+    const tracker = makeStubTracker({ healthy: false });
+    const { approved, rejected } = await runBuyAdmission({ tracker });
+    expect(approved).toHaveLength(0);
+    expect(rejected[0].reason).toBe("resolution_tracker_unavailable");
+  });
+
+  it("admits BUY when tracker is healthy and condition not resolved and lifecycle is fine", async () => {
+    const tracker = makeStubTracker({ resolved: new Set(["other-condition"]) });
+    const { approved, rejected } = await runBuyAdmission({ tracker });
+    expect(rejected).toHaveLength(0);
+    expect(approved).toHaveLength(1);
+  });
+
+  it("does NOT block SELL signals on resolved/ended/inactive markets (BUY-only gate)", async () => {
+    const tracker = makeStubTracker({ resolved: new Set([String(COND_ID)]) });
+    const { approved, rejected } = await runBuyAdmission({
+      tracker,
+      signal: { side: "sell" },
+      market: { active: false, tradable: false, endDate: "2025-01-01T00:00:00Z" },
+    });
+    expect(rejected).toHaveLength(0);
+    expect(approved).toHaveLength(1);
+  });
+
   // ─── Fill handling: buy ───────────────────────────────────────────
 
   it("creates new position on buy fill", async () => {

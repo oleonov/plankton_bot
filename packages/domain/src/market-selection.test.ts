@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { evaluatePreEntry, evaluateContinuation, isAlive } from "./market-selection.js";
+import {
+  canPlaceBuyOrder,
+  evaluatePreEntry,
+  evaluateContinuation,
+  isAlive,
+  type BuyPlacementInput,
+} from "./market-selection.js";
 import { SelectionRuleEngine } from "./selection-rule-engine.js";
 import type { SelectionRule, HealthInput, HealthFailReason } from "./types.js";
 
@@ -140,5 +146,78 @@ describe("isAlive", () => {
       bestAsk: null,
     };
     expect(isAlive(all).reasons).toEqual(["not_accepting_orders", "order_book_disabled", "no_bid"]);
+  });
+});
+
+describe("canPlaceBuyOrder", () => {
+  const NOW = Date.parse("2026-04-25T12:00:00Z");
+  const HEALTHY_LIVE: BuyPlacementInput = {
+    active: true,
+    tradable: true,
+    endDate: "2026-05-01T00:00:00Z",
+    acceptingOrders: true,
+    enableOrderBook: true,
+    bestBid: 0.5,
+    bestAsk: 0.52,
+  };
+
+  it("allows BUY on a fully eligible market", () => {
+    const r = canPlaceBuyOrder(HEALTHY_LIVE, NOW);
+    expect(r).toEqual({ allowed: true, reasons: [] });
+  });
+
+  it("allows BUY when endDate is null (no expiry)", () => {
+    const r = canPlaceBuyOrder({ ...HEALTHY_LIVE, endDate: null }, NOW);
+    expect(r.allowed).toBe(true);
+  });
+
+  it("blocks BUY when endDate is in the past", () => {
+    const r = canPlaceBuyOrder({ ...HEALTHY_LIVE, endDate: "2026-04-25T11:00:00Z" }, NOW);
+    expect(r.allowed).toBe(false);
+    expect(r.reasons).toContain("market_ended");
+  });
+
+  it("blocks BUY exactly at endDate (boundary inclusive)", () => {
+    const r = canPlaceBuyOrder({ ...HEALTHY_LIVE, endDate: "2026-04-25T12:00:00Z" }, NOW);
+    expect(r.reasons).toContain("market_ended");
+  });
+
+  it("blocks BUY when active=false", () => {
+    const r = canPlaceBuyOrder({ ...HEALTHY_LIVE, active: false }, NOW);
+    expect(r.reasons).toContain("market_inactive");
+  });
+
+  it("blocks BUY when tradable=false", () => {
+    const r = canPlaceBuyOrder({ ...HEALTHY_LIVE, tradable: false }, NOW);
+    expect(r.reasons).toContain("market_not_tradable");
+  });
+
+  it("blocks BUY when isAlive returns unhealthy", () => {
+    const r = canPlaceBuyOrder({ ...HEALTHY_LIVE, bestBid: null }, NOW);
+    expect(r.reasons).toContain("market_not_alive");
+  });
+
+  it("aggregates multiple block reasons in fixed order", () => {
+    const r = canPlaceBuyOrder(
+      {
+        ...HEALTHY_LIVE,
+        active: false,
+        tradable: false,
+        endDate: "2026-04-25T11:00:00Z",
+        bestBid: null,
+      },
+      NOW,
+    );
+    expect(r.reasons).toEqual([
+      "market_inactive",
+      "market_not_tradable",
+      "market_ended",
+      "market_not_alive",
+    ]);
+  });
+
+  it("treats malformed endDate as no expiry rather than parse-as-NaN block", () => {
+    const r = canPlaceBuyOrder({ ...HEALTHY_LIVE, endDate: "not-a-date" }, NOW);
+    expect(r.allowed).toBe(true);
   });
 });

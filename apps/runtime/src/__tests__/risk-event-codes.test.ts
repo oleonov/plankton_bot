@@ -51,6 +51,17 @@ describe("normalizeReasonCode", () => {
     );
   });
 
+  it("maps BUY admission guard reasons to themselves (identity)", () => {
+    expect(normalizeReasonCode("resolution_tracker_unavailable")).toBe(
+      "resolution_tracker_unavailable",
+    );
+    expect(normalizeReasonCode("market_resolved")).toBe("market_resolved");
+    expect(normalizeReasonCode("market_ended")).toBe("market_ended");
+    expect(normalizeReasonCode("market_inactive")).toBe("market_inactive");
+    expect(normalizeReasonCode("market_not_tradable")).toBe("market_not_tradable");
+    expect(normalizeReasonCode("market_not_alive")).toBe("market_not_alive");
+  });
+
   it("returns unknown_rejection for unrecognized strings", () => {
     expect(normalizeReasonCode("some future rejection reason")).toBe("unknown_rejection");
   });

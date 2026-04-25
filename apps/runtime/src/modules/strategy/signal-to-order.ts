@@ -27,12 +27,18 @@ import type {
   PlaceOrderCommand,
   TokenId,
 } from "@plankton/domain";
-import { createCommandId, ENTRY_REASONS, isAlive } from "@plankton/domain";
+import {
+  canPlaceBuyOrderForMarket,
+  createCommandId,
+  ENTRY_REASONS,
+  isAlive,
+} from "@plankton/domain";
 import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId } from "@plankton/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import {
   resolveBoundedMidpointPrice,
   validateExecutablePrice,
@@ -80,6 +86,15 @@ export interface SignalToOrderBridgeDeps {
   observations?: ExecutionPolicyObservationRepository;
   /** Denormalized on each observation row for cross-profile aggregation. */
   profileId?: ProfileId;
+  /**
+   * Defense-in-depth BUY-side guard. Mirrors the check that
+   * RiskInventoryModule.handleSignal already runs upstream, so a stale market
+   * snapshot or in-flight resolution between approval and bridge cannot leak
+   * a placement onto a no-longer-eligible market. Optional for tests.
+   */
+  resolutionTracker?: MarketResolutionTracker;
+  /** Override for tests; defaults to Date.now. */
+  now?: () => number;
 }
 
 export class SignalToOrderBridge {
@@ -97,6 +112,27 @@ export class SignalToOrderBridge {
 
   private getPolicy(): ExecutionPolicy {
     return this.deps.policy ? this.deps.policy() : DEFAULT_EXECUTION_POLICY;
+  }
+
+  private now(): number {
+    return this.deps.now ? this.deps.now() : Date.now();
+  }
+
+  /**
+   * BUY-side admission re-check on the freshest snapshot the bridge owns.
+   * Mirrors RiskInventoryModule.evaluateBuyAdmission — same precedence
+   * (tracker availability → resolution → market lifecycle), same reason
+   * codes. Returns null when the BUY is admitted.
+   */
+  private evaluateBuyAdmission(market: NormalizedMarket): string | null {
+    const tracker = this.deps.resolutionTracker;
+    if (tracker) {
+      if (!tracker.healthy()) return "resolution_tracker_unavailable";
+      if (tracker.isResolved(market.conditionId)) return "market_resolved";
+    }
+    const placement = canPlaceBuyOrderForMarket(market, this.now());
+    if (!placement.allowed) return placement.reasons[0] ?? "market_not_alive";
+    return null;
   }
 
   subscribe(): void {
@@ -161,6 +197,41 @@ export class SignalToOrderBridge {
         cacheStatus: "disabled",
       });
       return;
+    }
+
+    // BUY-side admission guard (defense-in-depth). RiskInventoryModule already
+    // ran the same check upstream, but the bridge sees the freshest snapshot
+    // (post candidate-book merge) and the resolution tracker may have flipped
+    // a condition to resolved between approval and conversion.
+    //
+    // Prefer the cached snapshot here: NormalizedMarketUpdated may have arrived
+    // after SignalApproved and flipped `active`/`tradable`/`endDate` — the
+    // embedded snapshot is frozen at signal-generation time and would miss it.
+    // Fall back to embedded if no cache entry exists yet.
+    if (signal.side === "buy") {
+      const cachedMarket = this.marketCache.get(String(signal.tokenId));
+      const admissionMarket = cachedMarket ?? baseMarket;
+      const cacheStatus = cachedMarket ? "fresh" : "embedded";
+      const buyBlock = this.evaluateBuyAdmission(admissionMarket);
+      if (buyBlock) {
+        this.log.info(
+          {
+            signalId: signal.signalId,
+            tokenId: String(signal.tokenId),
+            reason: buyBlock,
+            cacheStatus,
+          },
+          "approved BUY skipped — market not eligible for placement",
+        );
+        await this.publishConversionSkipped(signal, "marketability", [buyBlock], {
+          conditionId: admissionMarket.conditionId,
+          active: admissionMarket.active,
+          tradable: admissionMarket.tradable,
+          endDate: admissionMarket.endDate,
+          cacheStatus,
+        });
+        return;
+      }
     }
 
     // Hard-liveness on the embedded snapshot. Same function, same semantics as

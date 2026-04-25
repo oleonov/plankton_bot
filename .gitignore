@@ -21,6 +21,10 @@ research/data/*.db-wal
 research/data/*.db-shm
 research/data/docs/
 research_plankton/data/
+research_old/
+
+# Local trade DB pulled for ad-hoc analysis (never committed)
+/plankton_trades.db
 
 # WAL artifacts anywhere
 *.db-wal

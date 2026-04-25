@@ -1,5 +1,11 @@
 import type { SelectionRuleEngine } from "./selection-rule-engine.js";
-import type { HealthFailReason, HealthInput, HealthResult, PreEntryEvaluation } from "./types.js";
+import type {
+  HealthFailReason,
+  HealthInput,
+  HealthResult,
+  NormalizedMarket,
+  PreEntryEvaluation,
+} from "./types.js";
 
 export interface PreEntryInput {
   readonly eventSlug: string | null;
@@ -65,4 +71,74 @@ export function isAlive(market: HealthInput): HealthResult {
   if (market.enableOrderBook !== true) reasons.push("order_book_disabled");
   if (market.bestBid == null) reasons.push("no_bid");
   return { healthy: reasons.length === 0, reasons };
+}
+
+// Reason codes emitted by `canPlaceBuyOrder` and the BUY-side guards in
+// risk-inventory + signal-to-order. Stable strings — both runtime modules
+// and dashboards key off them, so changes are breaking.
+export type BuyPlacementBlockReason =
+  | "market_inactive"
+  | "market_not_tradable"
+  | "market_ended"
+  | "market_not_alive";
+
+export interface BuyPlacementInput {
+  readonly active: boolean;
+  readonly tradable: boolean;
+  readonly endDate: string | null;
+  readonly acceptingOrders?: boolean | null;
+  readonly enableOrderBook?: boolean | null;
+  readonly bestBid?: number | null;
+  readonly bestAsk?: number | null;
+}
+
+export interface BuyPlacementResult {
+  readonly allowed: boolean;
+  readonly reasons: readonly BuyPlacementBlockReason[];
+}
+
+/**
+ * BUY-side admission gate: blocks NEW BUY placements (probe-entry, scale-in,
+ * heavy-scale) on markets that have already ended, gone inactive, lost
+ * tradability, or aren't physically capable of accepting an order. SELL and
+ * REDEEM paths must NOT call this — they have their own (often inverted)
+ * lifecycle requirements.
+ *
+ * Resolved-market blocking is handled separately by `MarketResolutionTracker`
+ * because resolution arrives as an event, not a NormalizedMarket field.
+ */
+export function canPlaceBuyOrder(
+  market: BuyPlacementInput,
+  nowMs: number,
+): BuyPlacementResult {
+  const reasons: BuyPlacementBlockReason[] = [];
+  if (market.active !== true) reasons.push("market_inactive");
+  if (market.tradable !== true) reasons.push("market_not_tradable");
+  if (market.endDate != null) {
+    const endMs = Date.parse(market.endDate);
+    if (Number.isFinite(endMs) && endMs <= nowMs) reasons.push("market_ended");
+  }
+  const liveness = isAlive(market);
+  if (!liveness.healthy) reasons.push("market_not_alive");
+  return { allowed: reasons.length === 0, reasons };
+}
+
+// Convenience overload for callers that already have a NormalizedMarket
+// rather than the unstructured input shape — keeps callsites tidy.
+export function canPlaceBuyOrderForMarket(
+  market: NormalizedMarket,
+  nowMs: number,
+): BuyPlacementResult {
+  return canPlaceBuyOrder(
+    {
+      active: market.active,
+      tradable: market.tradable,
+      endDate: market.endDate,
+      acceptingOrders: market.acceptingOrders,
+      enableOrderBook: market.enableOrderBook,
+      bestBid: market.bestBid,
+      bestAsk: market.bestAsk,
+    },
+    nowMs,
+  );
 }

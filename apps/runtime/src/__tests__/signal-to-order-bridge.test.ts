@@ -91,7 +91,10 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
 
     regime: "price-range",
     horizon: "daily",
-    endDate: "2026-04-11T23:59:00.000Z",
+    // Far-future default so the BUY admission guard does not see the market as
+    // ended in tests that use the real wall clock. Tests asserting end-of-life
+    // behavior override `endDate` explicitly.
+    endDate: "2099-12-31T23:59:00.000Z",
     active: true,
     tradable: true,
     tickSize: 0.01,
@@ -891,6 +894,9 @@ describe("hard-liveness guard (before execution)", () => {
     return { bus, bridge, conversionSkipped, placeOrderRequested };
   }
 
+  // SELL signals exercise the hard-liveness path directly (BUY admission only
+  // runs for `side === "buy"` and collapses these reasons to `market_not_alive`
+  // upstream of hard-liveness — see BUY admission guard tests below).
   it.each<[string, Partial<NormalizedMarket>, string]>([
     ["acceptingOrders=false", { acceptingOrders: false }, "not_accepting_orders"],
     ["enableOrderBook=false", { enableOrderBook: false }, "order_book_disabled"],
@@ -898,7 +904,7 @@ describe("hard-liveness guard (before execution)", () => {
   ])("%s skips with hard-liveness reason", async (_, patch, reason) => {
     const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
     await bus.publish("SignalApproved", {
-      signal: makeSignal(),
+      signal: { ...makeSignal(), side: "sell" },
       market: makeMarket(patch),
       approvedAt: Date.now(),
     });
@@ -928,7 +934,7 @@ describe("hard-liveness guard (before execution)", () => {
   it("stacks reasons when multiple hard fields fail", async () => {
     const { bus, conversionSkipped } = makeBridgeWithLiveLite();
     await bus.publish("SignalApproved", {
-      signal: makeSignal(),
+      signal: { ...makeSignal(), side: "sell" },
       market: makeMarket({ acceptingOrders: false, enableOrderBook: false }),
       approvedAt: Date.now(),
     });
@@ -988,7 +994,7 @@ describe("hard-liveness guard (before execution)", () => {
     const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
 
     await bus.publish("SignalApproved", {
-      signal: makeSignal(),
+      signal: { ...makeSignal(), side: "sell" },
       market: makeMarket({ bestBid: null }),
       approvedAt: Date.now(),
     });
@@ -1038,7 +1044,7 @@ describe("hard-liveness guard (before execution)", () => {
       const { bus, child } = makeBridgeWithCaptureLogger();
 
       await bus.publish("SignalApproved", {
-        signal: makeSignal(),
+        signal: { ...makeSignal(), side: "sell" },
         market: makeMarket({ acceptingOrders: false, enableOrderBook: false }),
         approvedAt: Date.now(),
       });
@@ -1060,7 +1066,7 @@ describe("hard-liveness guard (before execution)", () => {
       const { bus, child } = makeBridgeWithCaptureLogger();
 
       await bus.publish("SignalApproved", {
-        signal: makeSignal(),
+        signal: { ...makeSignal(), side: "sell" },
         market: makeMarket({ bestBid: null }),
         approvedAt: Date.now(),
       });
@@ -1220,7 +1226,11 @@ describe("dead-side-near-end guard", () => {
     });
   });
 
-  it("enforce mode also rejects AFTER endDate (upper-bound only, no lower bound)", async () => {
+  it("post-endDate BUY is blocked by BUY admission before dead-side guard runs", async () => {
+    // Originally tested that dead-side `enforce` mode also rejects post-endDate.
+    // That property still holds, but the BUY admission guard (defense-in-depth)
+    // now catches post-endDate BUYs earlier with `marketability/market_ended`,
+    // making the dead-side path unreachable for this scenario.
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
     const { bus, skipped, placed } = makeBridge({ mode: "enforce" });
@@ -1233,8 +1243,8 @@ describe("dead-side-near-end guard", () => {
 
     expect(placed).toHaveLength(0);
     expect(skipped).toHaveLength(1);
-    expect(skipped[0]!.reasons).toContain("dead-side-near-end");
-    expect(skipped[0]!.diagnostics).toMatchObject({ secondsToEnd: -30 });
+    expect(skipped[0]!.stage).toBe("marketability");
+    expect(skipped[0]!.reasons).toContain("market_ended");
   });
 
   it("observe mode logs the hit but still places the order", async () => {
@@ -1766,7 +1776,10 @@ describe("dead-side shadow canary (audit 2026-04-24)", () => {
     });
   });
 
-  it("emits canary for post-end BUY with bucket='<0' and all shadowHits true", async () => {
+  it("post-end BUY skips canary because BUY admission blocks before dead-side runs", async () => {
+    // The BUY admission guard now blocks post-endDate BUYs at `marketability`
+    // before the dead-side canary code runs. The previous canary semantics for
+    // bucket='<0' are unreachable for BUYs in production.
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
     const { bus, infoSpy, placed } = makeBridgeWithCapture({ mode: "observe" });
@@ -1777,13 +1790,8 @@ describe("dead-side shadow canary (audit 2026-04-24)", () => {
     });
     await bus.drain();
 
-    expect(placed).toHaveLength(1);
-    const log = findCanaryLog(infoSpy);
-    expect(log).toMatchObject({
-      bucket: "<0",
-      secondsToEnd: -30,
-      shadowHits: { x60_000: true, x120_000: true, x300_000: true, x900_000: true },
-    });
+    expect(placed).toHaveLength(0);
+    expect(findCanaryLog(infoSpy)).toBeUndefined();
   });
 
   it("enforce mode emits canary but does NOT skip when outside configured X (long-dated BUY)", async () => {
@@ -2304,5 +2312,169 @@ describe("ADR-015 telemetry flags", () => {
 
     const canaryLog = info.mock.calls.find((c) => c[1] === "dead-side-near-end canary observation");
     expect(canaryLog).toBeDefined();
+  });
+
+  describe("BUY admission guard (defense-in-depth)", () => {
+    function makeStubTracker(opts: {
+      healthy?: boolean;
+      resolved?: ReadonlySet<string>;
+    } = {}) {
+      return {
+        healthy: () => opts.healthy ?? true,
+        isResolved: (cid: string) => (opts.resolved ?? new Set<string>()).has(cid),
+      };
+    }
+
+    async function runApproved(opts: {
+      tracker?: ReturnType<typeof makeStubTracker>;
+      market?: Partial<NormalizedMarket>;
+      now?: number;
+      side?: "buy" | "sell";
+    }) {
+      const bus = new InProcessEventBus();
+      const bridge = new SignalToOrderBridge({
+        bus,
+        log: makeLogger(),
+        liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+        ...(opts.tracker ? { resolutionTracker: opts.tracker as any } : {}),
+        ...(opts.now != null ? { now: () => opts.now! } : {}),
+      });
+      bridge.subscribe();
+
+      const placed: unknown[] = [];
+      const skipped: Array<{
+        stage: string;
+        reasons: readonly string[];
+        diagnostics: Record<string, unknown>;
+      }> = [];
+      bus.subscribe("PlaceOrderRequested", async (p) => {
+        placed.push(p);
+      });
+      bus.subscribe("SignalConversionSkipped", async (p) => {
+        skipped.push(p);
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: { ...makeSignal(), side: opts.side ?? "buy" },
+        market: makeMarket(opts.market),
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      bridge.unsubscribe();
+      return { placed, skipped };
+    }
+
+    it("skips BUY with marketability/market_ended when endDate ≤ now", async () => {
+      const now = Date.parse("2026-04-25T12:00:00Z");
+      const { placed, skipped } = await runApproved({
+        now,
+        market: { endDate: "2026-04-25T11:00:00Z" },
+      });
+      expect(placed).toHaveLength(0);
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]!.stage).toBe("marketability");
+      expect(skipped[0]!.reasons).toEqual(["market_ended"]);
+    });
+
+    it("skips BUY with market_inactive when active=false", async () => {
+      const { placed, skipped } = await runApproved({ market: { active: false } });
+      expect(placed).toHaveLength(0);
+      expect(skipped[0]!.reasons).toEqual(["market_inactive"]);
+    });
+
+    it("skips BUY with market_resolved when tracker has the condition", async () => {
+      const tracker = makeStubTracker({ resolved: new Set(["cond-1"]) });
+      const { placed, skipped } = await runApproved({ tracker });
+      expect(placed).toHaveLength(0);
+      expect(skipped[0]!.reasons).toEqual(["market_resolved"]);
+    });
+
+    it("skips BUY fail-closed with resolution_tracker_unavailable when tracker is unhealthy", async () => {
+      const tracker = makeStubTracker({ healthy: false });
+      const { placed, skipped } = await runApproved({ tracker });
+      expect(placed).toHaveLength(0);
+      expect(skipped[0]!.reasons).toEqual(["resolution_tracker_unavailable"]);
+    });
+
+    it("does NOT block SELL signals on resolved/inactive markets (BUY-only guard)", async () => {
+      const tracker = makeStubTracker({ resolved: new Set(["cond-1"]) });
+      const { skipped } = await runApproved({
+        tracker,
+        side: "sell",
+        market: { active: false, endDate: "2025-01-01T00:00:00Z" },
+      });
+      // SELL goes through the regular pipeline; we only assert the BUY-side
+      // guard didn't fire. Downstream stages (hard-liveness, execution-terms)
+      // may legitimately reject a SELL, so we don't assert placed.
+      const buyGuardSkip = skipped.find((s) =>
+        s.reasons.some((r) =>
+          ["market_ended", "market_inactive", "market_not_tradable", "market_resolved"].includes(r),
+        ),
+      );
+      expect(buyGuardSkip).toBeUndefined();
+    });
+
+    it("admits BUY when tracker is healthy and lifecycle is fine", async () => {
+      const tracker = makeStubTracker();
+      const { placed, skipped } = await runApproved({ tracker });
+      const marketabilitySkip = skipped.find((s) => s.stage === "marketability");
+      expect(marketabilitySkip).toBeUndefined();
+      expect(placed.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // Regression: bridge previously checked only the embedded snapshot frozen
+    // at signal-generation time. A NormalizedMarketUpdated arriving after
+    // SignalApproved (e.g. operator paused the market) would be ignored and
+    // the BUY would be placed on a now-inactive market.
+    it("blocks BUY on cached active=false even when embedded snapshot still has active=true", async () => {
+      const bus = new InProcessEventBus();
+      const bridge = new SignalToOrderBridge({
+        bus,
+        log: makeLogger(),
+        liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      });
+      bridge.subscribe();
+
+      const placed: unknown[] = [];
+      const skipped: Array<{
+        stage: string;
+        reasons: readonly string[];
+        diagnostics: Record<string, unknown>;
+      }> = [];
+      bus.subscribe("PlaceOrderRequested", async (p) => {
+        placed.push(p);
+      });
+      bus.subscribe("SignalConversionSkipped", async (p) => {
+        skipped.push(p);
+      });
+
+      // Cache flips `active` to false AFTER the (yet-to-arrive) approved signal
+      // would have been generated. Bridge must prefer this over the embedded
+      // snapshot for the lifecycle gate.
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ active: false })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      await bus.publish("SignalApproved", {
+        signal: { ...makeSignal(), side: "buy" },
+        market: makeMarket({ active: true }),
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      bridge.unsubscribe();
+
+      expect(placed).toHaveLength(0);
+      expect(skipped).toHaveLength(1);
+      expect(skipped[0]!.stage).toBe("marketability");
+      expect(skipped[0]!.reasons).toEqual(["market_inactive"]);
+      expect(skipped[0]!.diagnostics).toMatchObject({
+        active: false,
+        cacheStatus: "fresh",
+      });
+    });
   });
 });

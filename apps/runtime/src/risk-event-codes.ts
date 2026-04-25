@@ -22,6 +22,17 @@ const STATIC_CODES: Record<string, string> = {
   "sell-replace-lock-active": "sell_replace_lock_active",
   "sell-replace-lock-retry": "sell_replace_lock_retry",
   "sell-replace-pending": "sell_replace_pending",
+  // BUY-side admission guard codes. Reason strings already arrive in canonical
+  // snake_case form (see packages/domain/src/market-selection.ts +
+  // signal-to-order.ts:evaluateBuyAdmission), so the mapping is identity —
+  // listed here so they don't fall through to `unknown_rejection` and break
+  // /status counters, SQL audits, and per-code cooldowns.
+  resolution_tracker_unavailable: "resolution_tracker_unavailable",
+  market_resolved: "market_resolved",
+  market_ended: "market_ended",
+  market_inactive: "market_inactive",
+  market_not_tradable: "market_not_tradable",
+  market_not_alive: "market_not_alive",
 };
 
 const PREFIX_CODES: [string, string][] = [

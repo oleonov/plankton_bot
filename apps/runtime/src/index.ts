@@ -88,6 +88,8 @@ import { FillPollerModule } from "./modules/fill-poller/fill-poller-module.js";
 import { LedgerRetentionModule } from "./modules/retention/ledger-retention-module.js";
 import { ResolutionDetector } from "./modules/resolution/resolution-detector.js";
 import { PositionSettler } from "./modules/resolution/position-settler.js";
+import { MarketResolutionTracker } from "./modules/resolution/market-resolution-tracker.js";
+import { startResolutionHealthWatcher } from "./modules/resolution/resolution-health-watcher.js";
 import { GammaResolutionClient } from "@plankton/exchange";
 import {
   SqliteMarketResolutionRepository,
@@ -251,6 +253,10 @@ async function main(): Promise<void> {
   const selectionRuleEngine = new RefreshableSelectionRuleEngine(selectionRuleRepo, activeProfile);
   log.info({ version: selectionRuleRepo.getVersion() }, "selection rule engine ready");
 
+  // 3c. MarketResolutionRepo — owned by ResolutionModule but constructed early
+  // so MarketResolutionTracker can seed from it before any module is wired.
+  const marketResolutionRepo = new SqliteMarketResolutionRepository(ledgerConn.db);
+
   // Read initial balance from profile_settings (control.db) instead of YAML
   const settingsRow = controlConn.db
     .prepare(
@@ -276,12 +282,62 @@ async function main(): Promise<void> {
   // 6. Create event bus
   const bus = new InProcessEventBus();
 
+  // 6a. RuntimeMetricWriter + infra-alert sink — needed before tracker wiring
+  // so the BUY-admission fail-closed path can report through the standard
+  // `infra_alert` channel (surfaced in /status and the web banner).
+  const runtimeMetrics = new RuntimeMetricWriter(ledgerConn.db);
+  const recordInfraAlert = (alert: {
+    code: string;
+    severity: "warning" | "error";
+    source: string;
+    message: string;
+    details?: Record<string, unknown> | undefined;
+  }): void => {
+    const now = new Date().toISOString();
+    runtimeMetrics.writeEvent("infra_alert", 1, JSON.stringify(alert), now);
+    log.warn({ alert }, "runtime infra alert recorded");
+  };
+
+  // 6b. MarketResolutionTracker — early service. Seeded from the resolutions
+  // table and subscribed to the bus BEFORE any publisher of
+  // MarketResolved/MarketResolvedHint is constructed, so no resolution
+  // event can be lost in the start-up window. Powers the BUY-side admission
+  // guard in RiskInventoryModule and SignalToOrderBridge (fail-closed when
+  // init fails — every BUY rejected with `resolution_tracker_unavailable`).
+  const marketResolutionTracker = new MarketResolutionTracker(marketResolutionRepo, log);
+  try {
+    marketResolutionTracker.init();
+  } catch (err) {
+    // Degraded fail-closed mode: keep runtime up so SELL/REDEEM still work,
+    // but raise a loud operator signal. The banner stays sticky thanks to
+    // periodic re-emission below; per-BUY rejection metrics already flow
+    // through RiskEventWriter → risk_events.
+    recordInfraAlert({
+      code: "resolution_tracker_unavailable",
+      severity: "error",
+      source: "market-resolution-tracker",
+      message:
+        "BUY orders blocked: resolution tracker init failed — investigate ledger DB or restart runtime",
+      details: { error: err instanceof Error ? err.message : String(err) },
+    });
+  }
+  marketResolutionTracker.subscribe(bus);
+
+  // 6c. Periodic health re-emission so the infra_alert banner stays sticky
+  // (default lookback is 60m) and `entry_guard_resolution_tracker_healthy`
+  // remains a fresh telemetry sample.
+  startResolutionHealthWatcher({
+    tracker: marketResolutionTracker,
+    metricsWriter: runtimeMetrics,
+    recordInfraAlert,
+    intervalMs: 30 * 60 * 1000,
+  });
+
   // 7. Build modules
   // supervisorRef is set before any closure that uses it is actually called
   const supervisorRef = { current: null as unknown as Supervisor };
   const statePublisherRef = { current: null as RuntimeStatePublisher | null };
   const runtimeControl = { isPaused: () => supervisorRef.current.isPaused() };
-  const runtimeMetrics = new RuntimeMetricWriter(ledgerConn.db);
 
   // Persist pause state to runtime_metrics so the API can read it
   const persistPauseState = (paused: boolean) => {
@@ -388,18 +444,6 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   }
-
-  const recordInfraAlert = (alert: {
-    code: string;
-    severity: "warning" | "error";
-    source: string;
-    message: string;
-    details?: Record<string, unknown> | undefined;
-  }): void => {
-    const now = new Date().toISOString();
-    runtimeMetrics.writeEvent("infra_alert", 1, JSON.stringify(alert), now);
-    log.warn({ alert }, "runtime infra alert recorded");
-  };
 
   // Phase 6: family slug patterns removed; selection rules gate market discovery.
   // Accept all slugs — AlgoDecisionModule + SelectedMarketCache handle eligibility.
@@ -551,6 +595,7 @@ async function main(): Promise<void> {
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
+    resolutionTracker: marketResolutionTracker,
   });
 
   // 7h. Strategy module
@@ -618,6 +663,7 @@ async function main(): Promise<void> {
     },
     observations: executionPolicyObservationRepo,
     profileId: activeProfile as import("@plankton/domain").ProfileId,
+    resolutionTracker: marketResolutionTracker,
   });
 
   // 7i. Reconciliation module
@@ -659,8 +705,11 @@ async function main(): Promise<void> {
         })
       : null;
 
-  // 7j. Resolution module — detect resolved markets, settle positions
-  const marketResolutionRepo = new SqliteMarketResolutionRepository(ledgerConn.db);
+  // 7j. Resolution module — detect resolved markets, settle positions.
+  // Note: `marketResolutionRepo` and `marketResolutionTracker` are constructed
+  // earlier (alongside the repos block) so they are available to
+  // RiskInventoryModule and SignalToOrderBridge upstream. The Gamma client and
+  // detector live with the resolution module that owns them.
   const gammaResolutionClient = new GammaResolutionClient();
 
   const resolutionDetector = new ResolutionDetector(
