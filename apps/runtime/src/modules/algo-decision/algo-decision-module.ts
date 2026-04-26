@@ -628,10 +628,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     return { type: "signal", signal, market };
   }
 
-  private recordDecisionSignal(
-    signal: DecisionSignalLog,
-    emissionFacts: EmissionFacts,
-  ): void {
+  private recordDecisionSignal(signal: DecisionSignalLog, emissionFacts: EmissionFacts): void {
     try {
       this.deps.decisionSignalLogRepo?.insert(signal);
     } catch (err) {
