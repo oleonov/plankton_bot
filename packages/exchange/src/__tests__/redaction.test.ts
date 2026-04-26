@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { redactSensitive, redactText, sanitizeErrorMessage } from "../redaction.js";
+import {
+  redactSensitive,
+  redactText,
+  sanitizeErrorDetails,
+  sanitizeErrorMessage,
+} from "../redaction.js";
 
 describe("redaction", () => {
   it("redacts sensitive nested SDK request config fields", () => {
@@ -81,10 +86,17 @@ describe("redaction", () => {
     });
 
     const sanitized = sanitizeErrorMessage(err);
+    const details = sanitizeErrorDetails(err);
 
     expect(sanitized).toContain("not enough balance / allowance");
     expect(sanitized).toContain("43130000");
     expect(sanitized).not.toContain("api-key-value");
     expect(sanitized).not.toContain("builder-signature-value");
+    expect(details).toMatchObject({
+      status: 400,
+      responseBody: {
+        error: expect.stringContaining("not enough balance / allowance"),
+      },
+    });
   });
 });

@@ -13,8 +13,9 @@ export class SqliteFillRepository implements FillRepository {
       .prepare(
         `INSERT INTO fills
          (fill_id, order_id, token_id, condition_id, side, price, size,
-          size_usdc, liquidity_role, fee, fee_rate_bps, filled_at, reconciled)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+          size_usdc, liquidity_role, fee, fee_rate_bps, signal_id, decision_rule_id,
+          signal_timestamp, filled_at, reconciled)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
       )
       .run(
         fill.fillId,
@@ -28,6 +29,9 @@ export class SqliteFillRepository implements FillRepository {
         fill.liquidityRole,
         fill.fee,
         fill.feeRateBps,
+        fill.signalId ?? null,
+        fill.decisionRuleId ?? null,
+        fill.signalTimestamp ?? null,
         fill.filledAt,
       );
   }
@@ -121,6 +125,9 @@ export class SqliteFillRepository implements FillRepository {
       liquidityRole: row.liquidity_role as LiquidityRole,
       fee: row.fee as number,
       feeRateBps: (row.fee_rate_bps as number) ?? 0,
+      signalId: (row.signal_id as string) ?? null,
+      decisionRuleId: (row.decision_rule_id as string) ?? null,
+      signalTimestamp: (row.signal_timestamp as string) ?? null,
       filledAt: row.filled_at as string,
     };
   }

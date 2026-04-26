@@ -39,6 +39,10 @@ beforeEach(() => {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE decision_signal_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      signal_timestamp TEXT NOT NULL
+    );
     CREATE TABLE trading_state_snapshots (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       captured_at TEXT NOT NULL
@@ -111,6 +115,12 @@ describe("LedgerRetentionModule", () => {
     db.prepare("INSERT INTO market_snapshots (token_id, captured_at) VALUES ('tok', ?)").run(
       "2026-04-24T00:00:00.000Z",
     );
+    db.prepare("INSERT INTO decision_signal_log (signal_timestamp) VALUES (?)").run(
+      "2025-12-01T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO decision_signal_log (signal_timestamp) VALUES (?)").run(
+      "2026-04-24T00:00:00.000Z",
+    );
     db.prepare("INSERT INTO orders (order_id, created_at) VALUES ('ord-old', ?)").run(
       "2025-01-01T00:00:00.000Z",
     );
@@ -131,6 +141,7 @@ describe("LedgerRetentionModule", () => {
 
     expect(count("runtime_metrics")).toBe(1);
     expect(count("market_snapshots")).toBe(1);
+    expect(count("decision_signal_log")).toBe(1);
     expect(count("orders")).toBe(1);
     expect(count("positions")).toBe(1);
     expect(count("fills")).toBe(1);

@@ -164,5 +164,29 @@ describe("dual-connection infrastructure", () => {
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all() as { name: string }[];
     expect(tables.length).toBeGreaterThan(0);
+    const orderColumns = conn2.db.prepare("PRAGMA table_info(orders)").all() as Array<{
+      name: string;
+    }>;
+    expect(orderColumns.map((c) => c.name)).toEqual(
+      expect.arrayContaining([
+        "decision_rule_id",
+        "signal_timestamp",
+        "exchange_error_code",
+        "exchange_error_message",
+        "exchange_error_payload",
+      ]),
+    );
+    const fillColumns = conn2.db.prepare("PRAGMA table_info(fills)").all() as Array<{
+      name: string;
+    }>;
+    expect(fillColumns.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["signal_id", "decision_rule_id", "signal_timestamp"]),
+    );
+    const observationColumns = conn2.db
+      .prepare("PRAGMA table_info(execution_policy_observations)")
+      .all() as Array<{ name: string }>;
+    expect(observationColumns.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["decision_rule_id"]),
+    );
   });
 });

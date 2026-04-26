@@ -68,6 +68,34 @@ describe("SqliteOrderRepository", () => {
     expect(found!.botRunId).toBe("run-1");
   });
 
+  it("round-trips signal and exchange reject telemetry", () => {
+    repo.save(
+      makeOrder({
+        status: "rejected",
+        signalId: "sig-1",
+        decisionRuleId: "D5",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+        exchangeErrorCode: "INSUFFICIENT_BALANCE",
+        exchangeErrorMessage: "not enough balance",
+        exchangeErrorPayload: JSON.stringify({ status: 400, responseBody: { error: "bad" } }),
+      }),
+    );
+
+    const found = repo.findById(createOrderId("ord-1"));
+    expect(found).toMatchObject({
+      status: "rejected",
+      signalId: "sig-1",
+      decisionRuleId: "D5",
+      signalTimestamp: "2026-04-26T00:00:00.000Z",
+      exchangeErrorCode: "INSUFFICIENT_BALANCE",
+      exchangeErrorMessage: "not enough balance",
+    });
+    expect(JSON.parse(found!.exchangeErrorPayload!)).toMatchObject({
+      status: 400,
+      responseBody: { error: "bad" },
+    });
+  });
+
   it("findByClientOrderId works", () => {
     repo.save(makeOrder());
 

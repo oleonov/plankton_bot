@@ -107,6 +107,7 @@ export interface PlaceOrderResult {
   readonly orderId?: string;
   readonly errorCode?: ExchangeErrorCode;
   readonly errorMessage?: string;
+  readonly errorDetails?: Readonly<Record<string, unknown>> | null;
 }
 
 export interface CancelOrderResult {

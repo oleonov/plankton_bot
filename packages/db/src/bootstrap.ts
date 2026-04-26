@@ -324,9 +324,18 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   );
   safeAddColumn(conn.db, "markets", "selection_winning_rule_id", "TEXT");
   conn.db.exec(readSchema("ledger.sql"));
+  safeAddColumn(conn.db, "orders", "decision_rule_id", "TEXT");
+  safeAddColumn(conn.db, "orders", "signal_timestamp", "TEXT");
+  safeAddColumn(conn.db, "orders", "exchange_error_code", "TEXT");
+  safeAddColumn(conn.db, "orders", "exchange_error_message", "TEXT");
+  safeAddColumn(conn.db, "orders", "exchange_error_payload", "TEXT");
   safeAddColumn(conn.db, "orders", "post_only", "INTEGER NOT NULL DEFAULT 0");
+  safeAddColumn(conn.db, "fills", "signal_id", "TEXT");
+  safeAddColumn(conn.db, "fills", "decision_rule_id", "TEXT");
+  safeAddColumn(conn.db, "fills", "signal_timestamp", "TEXT");
   safeAddColumn(conn.db, "fills", "liquidity_role", "TEXT NOT NULL DEFAULT 'unknown'");
   safeAddColumn(conn.db, "fills", "fee_rate_bps", "REAL NOT NULL DEFAULT 0");
+  safeAddColumn(conn.db, "execution_policy_observations", "decision_rule_id", "TEXT");
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
   ensureUniqueOpenPositionIndex(conn.db);
   return conn;

@@ -126,6 +126,19 @@ export interface Signal {
   generatedAt: string; // ISO timestamp
 }
 
+export interface DecisionSignalLog {
+  signalId: string;
+  tokenId: TokenId;
+  conditionId: ConditionId;
+  side: "BUY" | "SELL" | "REDEEM";
+  decisionRuleId: string | null;
+  state: "OTHER" | "S1" | "S2" | "S3";
+  price: number;
+  buyCount: number;
+  timeSinceLastSeconds: number | null;
+  signalTimestamp: string;
+}
+
 // ─── Risk Decision ────────────────────────────────────────────────────────────
 
 export interface RiskDecision {
@@ -159,6 +172,11 @@ export interface Order {
   exchangeOrderId: string | null;
   signalId: string | null;
   signalReason: string | null;
+  decisionRuleId?: string | null;
+  signalTimestamp?: string | null;
+  exchangeErrorCode?: string | null;
+  exchangeErrorMessage?: string | null;
+  exchangeErrorPayload?: string | null;
   botRunId: BotRunId;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
@@ -180,6 +198,9 @@ export interface Fill {
   liquidityRole: LiquidityRole;
   fee: number;
   feeRateBps: number;
+  signalId?: string | null;
+  decisionRuleId?: string | null;
+  signalTimestamp?: string | null;
   filledAt: string; // ISO timestamp
 }
 
@@ -490,6 +511,7 @@ export interface ExecutionPolicyObservation {
   profileId: string;
   signalId: string | null;
   clientOrderId: string | null;
+  decisionRuleId: string | null;
   tokenId: string;
   marketSlug: string | null;
   side: "BUY" | "SELL";

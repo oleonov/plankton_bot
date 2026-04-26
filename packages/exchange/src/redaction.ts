@@ -37,6 +37,27 @@ export function sanitizeErrorMessage(err: unknown): string {
   return redactText(details.join(" | "));
 }
 
+export function sanitizeErrorDetails(err: unknown): Record<string, unknown> {
+  if (err instanceof Error) {
+    const maybeRecord = err as Error & {
+      code?: unknown;
+      response?: { data?: unknown; status?: unknown; statusText?: unknown };
+      config?: { url?: unknown; method?: unknown };
+    };
+    return redactSensitive({
+      name: err.name,
+      message: err.message,
+      code: maybeRecord.code ?? null,
+      status: maybeRecord.response?.status ?? null,
+      statusText: maybeRecord.response?.statusText ?? null,
+      responseBody: maybeRecord.response?.data ?? null,
+      method: maybeRecord.config?.method ?? null,
+      url: maybeRecord.config?.url ?? null,
+    }) as Record<string, unknown>;
+  }
+  return { value: redactSensitive(err) };
+}
+
 export function sanitizeLogArg(arg: unknown): unknown {
   if (typeof arg === "string") return redactText(arg);
   return redactSensitive(arg);

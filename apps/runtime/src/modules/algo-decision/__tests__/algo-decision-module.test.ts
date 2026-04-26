@@ -11,6 +11,8 @@ import type {
   LegState,
   RuntimeEventMap,
   OrderRepository,
+  DecisionSignalLogRepository,
+  RiskEventRepository,
 } from "@plankton/domain";
 import { createTokenId, createCommandId } from "@plankton/domain";
 import type { ConditionId } from "@plankton/domain";
@@ -339,6 +341,57 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("persists BUY/SELL decision signal telemetry", async () => {
+    const tokenId = "token-sell";
+    const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 1,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: nowIso,
+      lastTradeAt: nowIso,
+      updatedAt: nowIso,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+    const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-sell"), tradable: false }],
+      timestamp: Date.now(),
+    });
+
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0]).toMatchObject({
+      tokenId: createTokenId(tokenId),
+      conditionId: "cond-sell",
+      side: "SELL",
+      decisionRuleId: "D7-SELL-S1",
+      state: "S1",
+      price: 0.15,
+      buyCount: 1,
+    });
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "signal_emitted",
+      payload: expect.objectContaining({
+        tokenId,
+        conditionId: "cond-sell",
+        side: "SELL",
+        decisionRuleId: "D7-SELL-S1",
+        state: "S1",
+        firstTradePrice: 0.1,
+        legTradeCount: 2,
+      }),
+    });
+
+    await mod.stop();
+  });
+
   it("emits RedeemRequested when REDEEM conditions are met", async () => {
     const tokenId = "token-redeem";
     const familyId = "fam-2";
@@ -357,8 +410,10 @@ describe("AlgoDecisionModule", () => {
       updatedAt: twentyFiveMinAgo,
     };
     legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
 
-    const mod = buildModule();
+    const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
     await mod.start();
 
     // Price 0.03 < 0.05 + holdDuration ~1500s ≤ 3600s threshold → REDEEM-S2 fires
@@ -378,6 +433,28 @@ describe("AlgoDecisionModule", () => {
         .conditionIds,
     ).toContain(conditionId);
     expect(signalCalls.length).toBe(0);
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0]).toMatchObject({
+      tokenId: createTokenId(tokenId),
+      conditionId,
+      side: "REDEEM",
+      decisionRuleId: "REDEEM-S2",
+      state: "S2",
+      price: 0.03,
+      buyCount: 2,
+    });
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "signal_emitted",
+      payload: expect.objectContaining({
+        tokenId,
+        conditionId,
+        side: "REDEEM",
+        decisionRuleId: "REDEEM-S2",
+        state: "S2",
+        firstTradePrice: 0.1,
+        legTradeCount: 2,
+      }),
+    });
 
     await mod.stop();
   });
@@ -400,8 +477,9 @@ describe("AlgoDecisionModule", () => {
       updatedAt: twentyFiveMinAgo,
     };
     legStateRepo = createMockLegStateRepo([legState]);
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
 
-    const mod = buildModule();
+    const mod = buildModule({ riskEventRepo });
     await mod.start();
 
     const market = {
@@ -416,6 +494,25 @@ describe("AlgoDecisionModule", () => {
     const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
     const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
     expect(redeemCalls.length).toBe(0);
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "signal_suppressed",
+      payload: expect.objectContaining({
+        tokenId,
+        conditionId,
+        side: "REDEEM",
+        decisionRuleId: "REDEEM-S2",
+        reasonCode: "redeem-before-end-date",
+        state: "S2",
+        firstTradePrice: 0.1,
+        legTradeCount: 2,
+      }),
+    });
+    const emittedRedeem = vi
+      .mocked(riskEventRepo.insert)
+      .mock.calls.some(
+        ([event]) => event.eventType === "signal_emitted" && event.payload.side === "REDEEM",
+      );
+    expect(emittedRedeem).toBe(false);
 
     await mod.stop();
   });
@@ -576,8 +673,9 @@ describe("AlgoDecisionModule", () => {
         updatedAt: new Date().toISOString(),
       };
       legStateRepo = createMockLegStateRepo([legState]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
 
-      const mod = buildModule();
+      const mod = buildModule({ riskEventRepo });
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
@@ -588,6 +686,16 @@ describe("AlgoDecisionModule", () => {
       const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
       const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
       expect(signalCalls.length).toBe(0);
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          tokenId,
+          reasonCode: "continuation-stop",
+          state: "S2",
+          firstTradePrice: 0.03,
+          legTradeCount: 2,
+        }),
+      });
 
       await mod.stop();
     });

@@ -22,7 +22,7 @@ import type {
 } from "@plankton/domain";
 import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
-import { sanitizeLogArg } from "../redaction.js";
+import { redactSensitive, sanitizeLogArg } from "../redaction.js";
 import {
   mapOpenOrder,
   mapTrade,
@@ -175,13 +175,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
           success: false,
           errorCode: "UNKNOWN",
           errorMessage: "exchange returned no order id",
+          errorDetails: { responseBody: redactSensitive(result) },
         };
       }
 
       return { success: true, orderId };
     } catch (err) {
-      const { code, message } = classifyError(err);
-      return { success: false, errorCode: code, errorMessage: message };
+      const { code, message, details } = classifyError(err);
+      return { success: false, errorCode: code, errorMessage: message, errorDetails: details };
     }
   }
 

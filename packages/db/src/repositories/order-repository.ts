@@ -19,14 +19,22 @@ export class SqliteOrderRepository implements OrderRepository {
         `INSERT INTO orders
          (order_id, client_order_id, token_id, condition_id, side, order_type, post_only,
           price, size, size_usdc, status, exchange_order_id, signal_id,
-          signal_reason, bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          signal_reason, decision_rule_id, signal_timestamp, exchange_error_code,
+          exchange_error_message, exchange_error_payload, bot_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
            post_only = excluded.post_only,
            size = excluded.size,
            size_usdc = excluded.size_usdc,
+           signal_id = excluded.signal_id,
+           signal_reason = excluded.signal_reason,
+           decision_rule_id = excluded.decision_rule_id,
+           signal_timestamp = excluded.signal_timestamp,
+           exchange_error_code = excluded.exchange_error_code,
+           exchange_error_message = excluded.exchange_error_message,
+           exchange_error_payload = excluded.exchange_error_payload,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -44,6 +52,11 @@ export class SqliteOrderRepository implements OrderRepository {
         order.exchangeOrderId,
         order.signalId,
         order.signalReason,
+        order.decisionRuleId ?? null,
+        order.signalTimestamp ?? null,
+        order.exchangeErrorCode ?? null,
+        order.exchangeErrorMessage ?? null,
+        order.exchangeErrorPayload ?? null,
         order.botRunId,
         order.createdAt,
         order.updatedAt,
@@ -131,6 +144,11 @@ export class SqliteOrderRepository implements OrderRepository {
       exchangeOrderId: (row.exchange_order_id as string) ?? null,
       signalId: (row.signal_id as string) ?? null,
       signalReason: (row.signal_reason as string) ?? null,
+      decisionRuleId: (row.decision_rule_id as string) ?? null,
+      signalTimestamp: (row.signal_timestamp as string) ?? null,
+      exchangeErrorCode: (row.exchange_error_code as string) ?? null,
+      exchangeErrorMessage: (row.exchange_error_message as string) ?? null,
+      exchangeErrorPayload: (row.exchange_error_payload as string) ?? null,
       botRunId: createBotRunId(row.bot_run_id as string),
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,

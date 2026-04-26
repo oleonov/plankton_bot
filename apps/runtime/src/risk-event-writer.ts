@@ -19,7 +19,12 @@ export class RiskEventWriter {
   ) {}
 
   onSignalRejected(
-    signal: { signalId: string; tokenId: string },
+    signal: {
+      signalId: string;
+      tokenId: string;
+      side?: string | null;
+      decisionRuleId?: string | null;
+    },
     reason: string,
     rejectedAt: number,
   ): void {
@@ -33,9 +38,12 @@ export class RiskEventWriter {
       eventType: "signal_rejected",
       payload: {
         reasonCode,
+        reason,
         rawReason: reason,
         signalId: signal.signalId,
         tokenId: signal.tokenId,
+        side: signal.side ?? null,
+        decisionRuleId: signal.decisionRuleId ?? null,
       },
     });
     this.cooldown.set(key, rejectedAt);
@@ -45,6 +53,43 @@ export class RiskEventWriter {
       this.pruneExpired(rejectedAt);
       this.callsSinceLastPrune = 0;
     }
+  }
+
+  onOrderRejected(event: {
+    commandId: string;
+    clientOrderId: string;
+    tokenId: string;
+    conditionId: string;
+    reason: string;
+    errorCode: string;
+    signalReason: string | null;
+    side?: string | null;
+    signalId?: string | null;
+    decisionRuleId?: string | null;
+    signalTimestamp?: string | null;
+    exchangeErrorMessage?: string | null;
+    exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
+    timestamp: number;
+  }): void {
+    this.repo.insert({
+      eventType: "order_rejected",
+      payload: {
+        commandId: event.commandId,
+        clientOrderId: event.clientOrderId,
+        tokenId: event.tokenId,
+        conditionId: event.conditionId,
+        reason: event.reason,
+        errorCode: event.errorCode,
+        signalReason: event.signalReason,
+        side: event.side ?? null,
+        signalId: event.signalId ?? null,
+        decisionRuleId: event.decisionRuleId ?? null,
+        signalTimestamp: event.signalTimestamp ?? null,
+        exchangeErrorMessage: event.exchangeErrorMessage ?? null,
+        exchangeErrorDetails: event.exchangeErrorDetails ?? null,
+        timestamp: event.timestamp,
+      },
+    });
   }
 
   private pruneExpired(nowMs: number): void {

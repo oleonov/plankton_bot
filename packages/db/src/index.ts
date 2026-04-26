@@ -27,6 +27,7 @@ export { SqliteMergeLedgerRepository } from "./repositories/merge-ledger-reposit
 export { SqliteSettlementLedgerRepository } from "./repositories/settlement-ledger-repository.js";
 export { SqlitePositionDriftRepository } from "./repositories/position-drift-repository.js";
 export { SqliteExecutionPolicyObservationRepository } from "./repositories/execution-policy-observation-repository.js";
+export { SqliteDecisionSignalLogRepository } from "./repositories/decision-signal-log-repository.js";
 export { SqliteAlgoRulesRepository } from "./repositories/algo-rules-repository.js";
 export { SqliteLegStateRepository } from "./repositories/leg-state-repository.js";
 export { SqliteLegStateTransitionRepository } from "./repositories/leg-state-transition-repository.js";

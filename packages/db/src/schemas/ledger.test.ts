@@ -38,6 +38,7 @@ describe("ledger.db schema", () => {
     expect(names).toContain("bot_runs");
     expect(names).toContain("runtime_metrics");
     expect(names).toContain("risk_events");
+    expect(names).toContain("decision_signal_log");
     // family_runtime_state and family_profile_runtime_state dropped by migration 035
     expect(names).not.toContain("family_runtime_state");
     expect(names).not.toContain("family_profile_runtime_state");
@@ -63,5 +64,28 @@ describe("ledger.db schema", () => {
     const names = tables.map((t) => t.name);
     expect(names).not.toContain("family_runtime_state");
     expect(names).not.toContain("family_profile_runtime_state");
+  });
+
+  it("creates P0 telemetry columns", () => {
+    const orderColumns = db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>;
+    expect(orderColumns.map((c) => c.name)).toEqual(
+      expect.arrayContaining([
+        "decision_rule_id",
+        "signal_timestamp",
+        "exchange_error_code",
+        "exchange_error_message",
+        "exchange_error_payload",
+      ]),
+    );
+
+    const fillColumns = db.prepare("PRAGMA table_info(fills)").all() as Array<{ name: string }>;
+    expect(fillColumns.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["signal_id", "decision_rule_id", "signal_timestamp"]),
+    );
+
+    const observationColumns = db
+      .prepare("PRAGMA table_info(execution_policy_observations)")
+      .all() as Array<{ name: string }>;
+    expect(observationColumns.map((c) => c.name)).toContain("decision_rule_id");
   });
 });

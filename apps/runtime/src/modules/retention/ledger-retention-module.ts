@@ -32,6 +32,7 @@ export interface LedgerRetentionConfig {
   runtimeMetricsTtlMs?: number;
   marketSnapshotsTtlMs?: number;
   executionPolicyObservationsTtlMs?: number;
+  decisionSignalLogTtlMs?: number;
   tradingStateSnapshotsTtlMs?: number;
   portfolioSnapshotsTtlMs?: number;
   riskEventsTtlMs?: number;
@@ -63,6 +64,7 @@ const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
   runtimeMetricsTtlMs: 30 * DAY_MS,
   marketSnapshotsTtlMs: 7 * DAY_MS,
   executionPolicyObservationsTtlMs: 90 * DAY_MS,
+  decisionSignalLogTtlMs: 90 * DAY_MS,
   tradingStateSnapshotsTtlMs: 14 * DAY_MS,
   portfolioSnapshotsTtlMs: 90 * DAY_MS,
   riskEventsTtlMs: 180 * DAY_MS,
@@ -209,6 +211,12 @@ export class LedgerRetentionModule implements RuntimeModule {
         "execution_policy_observations",
         "created_at",
         nowMs - this.config.executionPolicyObservationsTtlMs,
+      ),
+      this.deleteOlderThanTask(
+        "decision_signal_log",
+        "decision_signal_log",
+        "signal_timestamp",
+        nowMs - this.config.decisionSignalLogTtlMs,
       ),
       this.deleteOlderThanTask(
         "trading_state_snapshots",

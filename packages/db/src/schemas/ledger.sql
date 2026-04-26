@@ -74,6 +74,11 @@ CREATE TABLE IF NOT EXISTS orders (
   exchange_order_id  TEXT,
   signal_id          TEXT,
   signal_reason      TEXT,
+  decision_rule_id   TEXT,
+  signal_timestamp   TEXT,
+  exchange_error_code    TEXT,
+  exchange_error_message TEXT,
+  exchange_error_payload TEXT,
   bot_run_id         TEXT NOT NULL,
   created_at         TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
@@ -85,6 +90,33 @@ CREATE INDEX IF NOT EXISTS idx_orders_client_oid ON orders(client_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_exchange_oid ON orders(exchange_order_id);
 CREATE INDEX IF NOT EXISTS idx_orders_bot_run ON orders(bot_run_id);
 CREATE INDEX IF NOT EXISTS idx_orders_token_status ON orders(token_id, status);
+
+-- ═══════════ DECISION SIGNAL LOG ═══════════
+-- From 041_decision_signal_telemetry.sql
+
+CREATE TABLE IF NOT EXISTS decision_signal_log (
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+  signal_id                TEXT NOT NULL,
+  token_id                 TEXT NOT NULL,
+  condition_id             TEXT NOT NULL DEFAULT '',
+  side                     TEXT NOT NULL,
+  decision_rule_id         TEXT,
+  state                    TEXT NOT NULL,
+  price                    REAL NOT NULL,
+  buy_count                INTEGER NOT NULL,
+  time_since_last_seconds  REAL,
+  signal_timestamp         TEXT NOT NULL,
+  created_at               TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_signal_log_ts
+  ON decision_signal_log(signal_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_signal_log_side_rule_ts
+  ON decision_signal_log(side, decision_rule_id, signal_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_signal_log_token_ts
+  ON decision_signal_log(token_id, signal_timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_decision_signal_log_signal_id
+  ON decision_signal_log(signal_id);
 
 -- ═══════════ FILLS ═══════════
 -- From 001_initial.sql
@@ -101,6 +133,9 @@ CREATE TABLE IF NOT EXISTS fills (
   liquidity_role TEXT NOT NULL DEFAULT 'unknown',
   fee          REAL NOT NULL DEFAULT 0,
   fee_rate_bps REAL NOT NULL DEFAULT 0,
+  signal_id    TEXT,
+  decision_rule_id TEXT,
+  signal_timestamp TEXT,
   reconciled   INTEGER NOT NULL DEFAULT 0,
   filled_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -233,6 +268,7 @@ CREATE TABLE IF NOT EXISTS execution_policy_observations (
   profile_id               TEXT NOT NULL,
   signal_id                TEXT,
   client_order_id          TEXT,
+  decision_rule_id         TEXT,
   token_id                 TEXT NOT NULL,
   market_slug              TEXT,
   side                     TEXT NOT NULL,

@@ -159,6 +159,7 @@ describe("LiveExchangeGateway", () => {
 
     expect(result.success).toBe(false);
     expect(result.errorCode).toBe("INSUFFICIENT_BALANCE");
+    expect(result.errorDetails).toMatchObject({ name: "Error", message: "Insufficient balance" });
   });
 
   it("placeOrder rejects empty SDK success payload without order id", async () => {

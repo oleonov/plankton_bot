@@ -100,6 +100,7 @@ import {
   SqliteSettlementLedgerRepository,
   SqlitePositionDriftRepository,
   SqliteExecutionPolicyObservationRepository,
+  SqliteDecisionSignalLogRepository,
 } from "@plankton/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
@@ -236,6 +237,7 @@ async function main(): Promise<void> {
     positionDrift: new SqlitePositionDriftRepository(ledgerConn.db),
     marketSnapshot: new SqliteMarketSnapshotRepository(ledgerConn.db),
     riskEvent: new SqliteRiskEventRepository(ledgerConn.db),
+    decisionSignalLog: new SqliteDecisionSignalLogRepository(ledgerConn.db),
     // Control-side
     operatorCommand: new SqliteOperatorCommandRepository(controlConn.db),
     operatorAction: new SqliteOperatorActionRepository(controlConn.db),
@@ -625,6 +627,8 @@ async function main(): Promise<void> {
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
     orderRepo: repos.order,
+    decisionSignalLogRepo: repos.decisionSignalLog,
+    riskEventRepo: repos.riskEvent,
     selectedMarketCache,
     runtimeControl,
     controlDb: controlConn.db,
@@ -882,6 +886,10 @@ async function main(): Promise<void> {
 
   bus.subscribe("SignalRejected", async ({ signal, reason, rejectedAt }) => {
     riskEventWriter.onSignalRejected(signal, reason, rejectedAt);
+  });
+
+  bus.subscribe("OrderRejected", async (event) => {
+    riskEventWriter.onOrderRejected(event);
   });
 
   bus.subscribe("ReconciliationDriftDetected", async ({ details, severity, timestamp }) => {

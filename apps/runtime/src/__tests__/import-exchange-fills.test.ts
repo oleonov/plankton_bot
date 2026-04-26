@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { importExchangeFills } from "../modules/reconciliation/fill-reconciler.js";
-import { createOrderId, createTokenId } from "@plankton/domain";
+import { createConditionId, createOrderId, createTokenId } from "@plankton/domain";
 import type { ExchangeFill, FillRepository, OrderRepository } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 
@@ -71,6 +71,11 @@ describe("importExchangeFills", () => {
 
     const localOrder = {
       orderId: createOrderId("ord-1"),
+      conditionId: createConditionId("cond-1"),
+      signalId: "sig-1",
+      signalReason: "repricing-exit",
+      decisionRuleId: "D5",
+      signalTimestamp: "2026-04-26T00:00:00.000Z",
       size: 10,
     };
     (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
@@ -93,8 +98,14 @@ describe("importExchangeFills", () => {
     expect(result.imported).toBe(1);
     expect(result.skipped).toBe(0);
     expect(fillRepo.save).toHaveBeenCalledTimes(1);
+    expect((fillRepo.save as any).mock.calls[0][0]).toMatchObject({
+      signalId: "sig-1",
+      decisionRuleId: "D5",
+      signalTimestamp: "2026-04-26T00:00:00.000Z",
+    });
     expect(received).toHaveLength(1);
     expect(received[0].fillId).toBe("fill-1");
+    expect(received[0].decisionRuleId).toBe("D5");
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "filled");
   });
 

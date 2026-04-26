@@ -481,6 +481,9 @@ export class SignalToOrderBridge {
       negRisk: market.negRisk,
       sequenceInTick: signal.sequenceInTick,
       signalReason: signal.reason,
+      signalId: signal.signalId,
+      decisionRuleId: signal.decisionRuleId,
+      signalTimestamp: signal.generatedAt,
       metadata: {
         cacheStatus: pricing.cacheStatus,
         marketData: {
@@ -552,6 +555,7 @@ export class SignalToOrderBridge {
         profileId: String(profileId),
         signalId: signal.signalId,
         clientOrderId,
+        decisionRuleId: signal.decisionRuleId,
         tokenId: String(signal.tokenId),
         marketSlug: market.slug ?? null,
         side: signal.side === "buy" ? "BUY" : "SELL",

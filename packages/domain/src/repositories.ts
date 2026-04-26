@@ -22,6 +22,7 @@ import type {
   ConfigImport,
   AlgoDecisionRule,
   AlgoSizeRule,
+  DecisionSignalLog,
   LegState,
   LegStateTransition,
   SettlementRecord,
@@ -167,6 +168,10 @@ export interface OrderRepository {
 
   /** Sum the notional (size_usdc) of all open buy orders. */
   sumOpenBuyNotional(): number;
+}
+
+export interface DecisionSignalLogRepository {
+  insert(signal: DecisionSignalLog): void;
 }
 
 // ─── FillRepository ──────────────────────────────────────────────────────

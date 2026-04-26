@@ -18,6 +18,8 @@ describe("RiskEventWriter", () => {
     const signal = {
       signalId: "sig-1",
       tokenId: String(createTokenId("tok-1")),
+      side: "sell",
+      decisionRuleId: "D5",
     };
 
     it("writes first rejection for a token+reason", () => {
@@ -26,6 +28,9 @@ describe("RiskEventWriter", () => {
       expect(repo.insert).toHaveBeenCalledTimes(1);
       expect(repo.insert.mock.calls[0]![0].eventType).toBe("signal_rejected");
       expect(repo.insert.mock.calls[0]![0].payload.reasonCode).toBe("max_dust_positions");
+      expect(repo.insert.mock.calls[0]![0].payload.reason).toBe("dust positions 3 >= max 2");
+      expect(repo.insert.mock.calls[0]![0].payload.side).toBe("sell");
+      expect(repo.insert.mock.calls[0]![0].payload.decisionRuleId).toBe("D5");
     });
 
     it("deduplicates same token+reason within cooldown", () => {
@@ -80,6 +85,38 @@ describe("RiskEventWriter", () => {
       writer.onReconciliationDrift("phantom order", "warn", 1001);
 
       expect(repo.insert).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("onOrderRejected", () => {
+    it("writes every rejected order with exchange diagnostics", () => {
+      writer.onOrderRejected({
+        commandId: "cmd-1",
+        clientOrderId: "cloid-1",
+        tokenId: "tok-1",
+        conditionId: "cond-1",
+        reason: "exchange-insufficient-balance-or-allowance",
+        errorCode: "INSUFFICIENT_BALANCE",
+        signalReason: "repricing-exit",
+        side: "sell",
+        signalId: "sig-1",
+        decisionRuleId: "D5",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+        exchangeErrorMessage: "not enough balance",
+        exchangeErrorDetails: { status: 400, responseBody: { error: "not enough balance" } },
+        timestamp: 1000,
+      });
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+      expect(repo.insert.mock.calls[0]![0]).toMatchObject({
+        eventType: "order_rejected",
+        payload: {
+          errorCode: "INSUFFICIENT_BALANCE",
+          side: "sell",
+          decisionRuleId: "D5",
+          exchangeErrorDetails: { status: 400 },
+        },
+      });
     });
   });
 

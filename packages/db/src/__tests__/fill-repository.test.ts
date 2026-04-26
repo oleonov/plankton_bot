@@ -79,6 +79,24 @@ describe("SqliteFillRepository", () => {
     expect(found[0]!.fee).toBe(0.01);
   });
 
+  it("round-trips signal telemetry copied from the source order", () => {
+    insertOrder(conn.db);
+    repo.save(
+      makeFill({
+        signalId: "sig-1",
+        decisionRuleId: "D7",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+      }),
+    );
+
+    const [found] = repo.findByOrderId(createOrderId("ord-1"));
+    expect(found).toMatchObject({
+      signalId: "sig-1",
+      decisionRuleId: "D7",
+      signalTimestamp: "2026-04-26T00:00:00.000Z",
+    });
+  });
+
   it("findByTokenId works", () => {
     insertOrder(conn.db, { order_id: "ord-A", client_order_id: "c-A", token_id: "tok-A" });
     insertOrder(conn.db, { order_id: "ord-B", client_order_id: "c-B", token_id: "tok-B" });

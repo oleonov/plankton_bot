@@ -186,6 +186,12 @@ export interface RuntimeEventMap {
     readonly reason: string;
     readonly errorCode: ExchangeErrorCode;
     readonly signalReason: string | null;
+    readonly side?: string | null;
+    readonly signalId?: string | null;
+    readonly decisionRuleId?: string | null;
+    readonly signalTimestamp?: string | null;
+    readonly exchangeErrorMessage?: string | null;
+    readonly exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
     readonly timestamp: number;
   };
 
@@ -205,6 +211,9 @@ export interface RuntimeEventMap {
     readonly fee: number;
     readonly feeRateBps: number;
     readonly signalReason: string | null;
+    readonly signalId?: string | null;
+    readonly decisionRuleId?: string | null;
+    readonly signalTimestamp?: string | null;
     readonly timestamp: number;
   };
 

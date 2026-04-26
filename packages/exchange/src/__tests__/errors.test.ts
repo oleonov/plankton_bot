@@ -28,6 +28,7 @@ describe("classifyError", () => {
 
     expect(result.code).toBe("INSUFFICIENT_BALANCE");
     expect(result.message).toContain("not enough balance / allowance");
+    expect(result.details).toMatchObject({ status: 400 });
     expect(result.message).not.toContain("api-key-value");
     expect(result.message).not.toContain("builder-signature-value");
   });

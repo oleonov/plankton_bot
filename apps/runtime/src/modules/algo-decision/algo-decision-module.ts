@@ -28,6 +28,9 @@ import type {
   ConditionId,
   OrderRepository,
   ProfileId,
+  DecisionSignalLog,
+  DecisionSignalLogRepository,
+  RiskEventRepository,
 } from "@plankton/domain";
 import {
   deriveState,
@@ -76,6 +79,26 @@ type TokenEvalResult =
   | { type: "signal"; signal: import("@plankton/domain").Signal; market: NormalizedMarket }
   | null;
 
+type EmissionFacts = {
+  firstTradePrice: number | null;
+  legTradeCount: number;
+};
+
+type SuppressionFacts = {
+  tokenId: TokenId;
+  conditionId: string | null;
+  reasonCode: string;
+  reasons?: readonly string[];
+  side?: "BUY" | "SELL" | "REDEEM" | null;
+  decisionRuleId?: string | null;
+  state: DecisionSignalLog["state"];
+  price: number | null;
+  buyCount: number;
+  timeSinceLastSeconds: number | null;
+  emissionFacts: EmissionFacts;
+  timestamp: string;
+};
+
 // ─── Deps ────────────────────────────────────────────────────────────────────
 
 export interface AlgoDecisionModuleDeps {
@@ -83,6 +106,8 @@ export interface AlgoDecisionModuleDeps {
   legStateRepo: LegStateRepository;
   algoRulesRepo: AlgoRulesRepository;
   orderRepo?: Pick<OrderRepository, "sumOpenBuyNotional"> | undefined;
+  decisionSignalLogRepo?: DecisionSignalLogRepository | undefined;
+  riskEventRepo?: RiskEventRepository | undefined;
   selectedMarketCache: SelectedMarketCache;
   runtimeControl?: RuntimeControl;
   controlDb?: WalletBudgetControlDb | undefined;
@@ -343,25 +368,72 @@ export class AlgoDecisionModule implements RuntimeModule {
     now: number,
     nextSeq: (key: string) => number,
   ): TokenEvalResult {
-    const market = this.marketCache.get(String(tokenId));
-    if (!market) return null;
-
-    const price = market.midPrice;
-    if (price === null || price === undefined) return null;
-
     const legState = this.deps.legStateRepo.get(tokenId);
+    const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
+
+    // Avoid emitting suppression telemetry for the full unselected market
+    // universe delivered by NormalizedMarketUpdated; it is selection-layer noise.
+    if (!legState && !selectedForEntry) return null;
+
     const state = deriveState(legState);
-
-    // Skip tokens with no position that aren't in the selected market cache
-    if (!legState && !this.deps.selectedMarketCache.isEligible(tokenId)) return null;
-
-    // Skip tokens that already have a pending buy order in-flight
-    if (!legState && this.pendingEntries.has(String(tokenId))) return null;
-
     const buyCount = legState?.buyCount ?? 0;
+    const emissionFacts: EmissionFacts = {
+      firstTradePrice: legState?.firstTradePrice ?? null,
+      legTradeCount: (legState?.buyCount ?? 0) + (legState?.sellCount ?? 0),
+    };
     const timeSinceLastSeconds = legState
       ? (now - new Date(legState.lastTradeAt).getTime()) / 1000
       : null;
+
+    const market = this.marketCache.get(String(tokenId));
+    if (!market) {
+      this.recordDecisionSuppressed({
+        tokenId,
+        conditionId: null,
+        reasonCode: "market-cache-miss",
+        state,
+        price: null,
+        buyCount,
+        timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+      });
+      return null;
+    }
+
+    const price = market.midPrice;
+    if (price === null || price === undefined) {
+      this.recordDecisionSuppressed({
+        tokenId,
+        conditionId: market.conditionId,
+        reasonCode: "mid-price-unavailable",
+        state,
+        price: null,
+        buyCount,
+        timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+      });
+      return null;
+    }
+
+    // Skip tokens that already have a pending buy order in-flight
+    if (!legState && this.pendingEntries.has(String(tokenId))) {
+      this.recordDecisionSuppressed({
+        tokenId,
+        conditionId: market.conditionId,
+        reasonCode: "pending-buy-order",
+        side: "BUY",
+        state,
+        price,
+        buyCount,
+        timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+      });
+      return null;
+    }
+
     const holdDurationSeconds = legState
       ? (now - new Date(legState.firstTradeAt).getTime()) / 1000
       : null;
@@ -384,8 +456,39 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (redeemResult) {
       const endMs = market.endDate ? new Date(market.endDate).getTime() : NaN;
       if (!Number.isFinite(endMs) || endMs <= now) {
+        this.recordDecisionSignal(
+          {
+            signalId: randomUUID(),
+            tokenId,
+            conditionId: market.conditionId as ConditionId,
+            side: "REDEEM",
+            decisionRuleId: redeemResult.ruleId,
+            state,
+            price,
+            buyCount,
+            timeSinceLastSeconds,
+            signalTimestamp: new Date(now).toISOString(),
+          },
+          {
+            firstTradePrice: emissionFacts.firstTradePrice,
+            legTradeCount: emissionFacts.legTradeCount,
+          },
+        );
         return { type: "redeem", conditionId: market.conditionId };
       }
+      this.recordDecisionSuppressed({
+        tokenId,
+        conditionId: market.conditionId,
+        reasonCode: "redeem-before-end-date",
+        side: "REDEEM",
+        decisionRuleId: redeemResult.ruleId,
+        state,
+        price,
+        buyCount,
+        timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+      });
     }
 
     // Hard-liveness gate for CLOB signals. REDEEM (above) uses a separate
@@ -395,7 +498,22 @@ export class AlgoDecisionModule implements RuntimeModule {
     // regardless of side. Suppress here to eliminate allocation churn from
     // producing signals the bridge will reject anyway. Shared `isAlive` keeps
     // the two gates in lockstep so they can't drift.
-    if (!isAlive(market).healthy) return null;
+    const liveness = isAlive(market);
+    if (!liveness.healthy) {
+      this.recordDecisionSuppressed({
+        tokenId,
+        conditionId: market.conditionId,
+        reasonCode: "market-not-live",
+        reasons: liveness.reasons,
+        state,
+        price,
+        buyCount,
+        timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+      });
+      return null;
+    }
 
     // Preserved-for-lifecycle gate: market has an open leg but the CLOB no
     // longer accepts new entries (tradable=false). Per spec v2.2 §0 the
@@ -408,20 +526,46 @@ export class AlgoDecisionModule implements RuntimeModule {
     // Per market-selection-layer-design.md:53, pre-entry filter is separate from
     // position management: legState tokens are gated by continuation, not eligibility.
     if (legState) {
-      const legTradeCount = legState.buyCount + legState.sellCount;
-      const stop = !evaluateContinuation(legTradeCount, legState.firstTradePrice);
-      if (stop) return null; // spec §0: fail continuation → full STOP (no more signals)
+      const stop = !evaluateContinuation(emissionFacts.legTradeCount, legState.firstTradePrice);
+      if (stop) {
+        this.recordDecisionSuppressed({
+          tokenId,
+          conditionId: market.conditionId,
+          reasonCode: "continuation-stop",
+          state,
+          price,
+          buyCount,
+          timeSinceLastSeconds,
+          emissionFacts,
+          timestamp: new Date(now).toISOString(),
+        });
+        return null; // spec §0: fail continuation → full STOP (no more signals)
+      }
       if (preservedOnly) {
         // preserved-only: market de-listed for new entries, exit-only via SELL
         const sellMatch = matchRule(ctx, this.decisionRules, SELL_ONLY);
-        if (!sellMatch) return null;
-        return this.buildSignal(market, sellMatch, ctx, buyCount, now, nextSeq);
+        if (!sellMatch) {
+          this.recordDecisionSuppressed({
+            tokenId,
+            conditionId: market.conditionId,
+            reasonCode: "preserved-only-no-sell-rule",
+            side: "SELL",
+            state,
+            price,
+            buyCount,
+            timeSinceLastSeconds,
+            emissionFacts,
+            timestamp: new Date(now).toISOString(),
+          });
+          return null;
+        }
+        return this.buildSignal(market, sellMatch, ctx, buyCount, now, nextSeq, emissionFacts);
       }
     }
 
     // Decide action + size
     const decision = evaluateDecision(ctx, this.decisionRules);
-    return this.buildSignal(market, decision, ctx, buyCount, now, nextSeq);
+    return this.buildSignal(market, decision, ctx, buyCount, now, nextSeq, emissionFacts);
   }
 
   private buildSignal(
@@ -431,6 +575,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     buyCount: number,
     now: number,
     nextSeq: (key: string) => number,
+    emissionFacts: EmissionFacts,
   ): TokenEvalResult {
     const sizeRules = decision.action === "BUY" ? this.buySizeRules : this.sellSizeRules;
     const nthBuy = buyCount + 1;
@@ -464,7 +609,89 @@ export class AlgoDecisionModule implements RuntimeModule {
       generatedAt: new Date(now).toISOString(),
     };
 
+    this.recordDecisionSignal(
+      {
+        signalId: signal.signalId,
+        tokenId: signal.tokenId,
+        conditionId: signal.conditionId,
+        side: side === "buy" ? "BUY" : "SELL",
+        decisionRuleId: signal.decisionRuleId,
+        state: ctx.state,
+        price: ctx.price,
+        buyCount,
+        timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+        signalTimestamp: signal.generatedAt,
+      },
+      emissionFacts,
+    );
+
     return { type: "signal", signal, market };
+  }
+
+  private recordDecisionSignal(
+    signal: DecisionSignalLog,
+    emissionFacts: EmissionFacts,
+  ): void {
+    try {
+      this.deps.decisionSignalLogRepo?.insert(signal);
+    } catch (err) {
+      this.log.warn(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId), side: signal.side },
+        "failed to persist decision signal telemetry",
+      );
+    }
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType: "signal_emitted",
+        payload: {
+          signalId: signal.signalId,
+          tokenId: String(signal.tokenId),
+          conditionId: String(signal.conditionId),
+          side: signal.side,
+          decisionRuleId: signal.decisionRuleId,
+          state: signal.state,
+          price: signal.price,
+          buyCount: signal.buyCount,
+          timeSinceLastSeconds: signal.timeSinceLastSeconds,
+          firstTradePrice: emissionFacts.firstTradePrice,
+          legTradeCount: emissionFacts.legTradeCount,
+          signalTimestamp: signal.signalTimestamp,
+        },
+      });
+    } catch (err) {
+      this.log.warn(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId), side: signal.side },
+        "failed to persist signal_emitted risk event",
+      );
+    }
+  }
+
+  private recordDecisionSuppressed(facts: SuppressionFacts): void {
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType: "signal_suppressed",
+        payload: {
+          tokenId: String(facts.tokenId),
+          conditionId: facts.conditionId,
+          reasonCode: facts.reasonCode,
+          reasons: facts.reasons ?? null,
+          side: facts.side ?? null,
+          decisionRuleId: facts.decisionRuleId ?? null,
+          state: facts.state,
+          price: facts.price,
+          buyCount: facts.buyCount,
+          timeSinceLastSeconds: facts.timeSinceLastSeconds,
+          firstTradePrice: facts.emissionFacts.firstTradePrice,
+          legTradeCount: facts.emissionFacts.legTradeCount,
+          signalTimestamp: facts.timestamp,
+        },
+      });
+    } catch (err) {
+      this.log.warn(
+        { err, tokenId: String(facts.tokenId), reasonCode: facts.reasonCode },
+        "failed to persist signal_suppressed risk event",
+      );
+    }
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────

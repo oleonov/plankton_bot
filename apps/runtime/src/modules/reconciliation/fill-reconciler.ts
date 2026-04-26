@@ -83,7 +83,10 @@ export function findLocalOrderForExchangeFill(
 
 export function buildLocalFillFromExchangeFill(
   fill: ExchangeFill,
-  localOrder: Pick<Order, "orderId" | "conditionId" | "signalReason">,
+  localOrder: Pick<
+    Order,
+    "orderId" | "conditionId" | "signalId" | "signalReason" | "decisionRuleId" | "signalTimestamp"
+  >,
   primaryCategory?: string,
 ): {
   fill: Fill;
@@ -118,6 +121,9 @@ export function buildLocalFillFromExchangeFill(
       liquidityRole: fill.liquidityRole,
       fee,
       feeRateBps: fill.feeRateBps,
+      signalId: localOrder.signalId ?? null,
+      decisionRuleId: localOrder.decisionRuleId ?? null,
+      signalTimestamp: localOrder.signalTimestamp ?? null,
       filledAt: new Date(fill.timestamp).toISOString(),
     },
     fillId,
@@ -172,6 +178,9 @@ export async function importExchangeFills(
     conditionId: ConditionId;
     sizeUsdc: number;
     signalReason: string | null;
+    signalId: string | null;
+    decisionRuleId: string | null;
+    signalTimestamp: string | null;
   }> = [];
 
   // Phase 1: Save fills to DB
@@ -208,6 +217,9 @@ export async function importExchangeFills(
       conditionId: localOrder.conditionId,
       sizeUsdc: resolved.sizeUsdc,
       signalReason: resolved.signalReason,
+      signalId: localOrder.signalId ?? null,
+      decisionRuleId: localOrder.decisionRuleId ?? null,
+      signalTimestamp: localOrder.signalTimestamp ?? null,
     });
 
     const msg = `fill imported: ${ef.fillId} (order: ${ef.orderId}, side: ${ef.side}, size: ${ef.size}, role: ${ef.liquidityRole}, fee: ${resolved.fill.fee.toFixed(6)})`;
@@ -221,8 +233,9 @@ export async function importExchangeFills(
   }
 
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
-  for (const { ef, fillId, orderId, conditionId, sizeUsdc, signalReason } of savedFills) {
-    const resolved = buildLocalFillFromExchangeFill(ef, { orderId, conditionId, signalReason });
+  for (const saved of savedFills) {
+    const { ef, fillId, orderId, conditionId, sizeUsdc, signalReason } = saved;
+    const resolved = buildLocalFillFromExchangeFill(ef, saved);
 
     await bus.publish("FillReceived", {
       fillId,
@@ -238,6 +251,9 @@ export async function importExchangeFills(
       fee: resolved.fill.fee,
       feeRateBps: ef.feeRateBps,
       signalReason,
+      signalId: saved.signalId,
+      decisionRuleId: saved.decisionRuleId,
+      signalTimestamp: saved.signalTimestamp,
       timestamp: ef.timestamp,
     });
   }

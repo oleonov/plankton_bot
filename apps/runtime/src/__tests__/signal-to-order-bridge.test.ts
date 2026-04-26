@@ -1907,6 +1907,7 @@ describe("ADR-015 execution policy observations", () => {
     const row = rows[0]!;
     expect(row.profileId).toBe(String(PROFILE_ID));
     expect(row.signalId).toBe("sig-1");
+    expect(row.decisionRuleId).toBeNull();
     expect(row.clientOrderId).toBe(placed[0]!.command.clientOrderId);
     expect(row.tokenId).toBe(String(TOKEN_ID));
     expect(row.side).toBe("BUY");

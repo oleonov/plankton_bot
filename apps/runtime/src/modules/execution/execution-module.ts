@@ -196,16 +196,7 @@ export class ExecutionModule implements RuntimeModule {
   private async handlePlace(cmd: PlaceOrderCommand): Promise<void> {
     if (this.deps.runtimeControl?.isPaused()) {
       this.log.warn({ commandId: cmd.commandId }, "order rejected — runtime paused");
-      await this.deps.bus.publish("OrderRejected", {
-        commandId: cmd.commandId,
-        clientOrderId: cmd.clientOrderId,
-        tokenId: cmd.tokenId,
-        conditionId: cmd.conditionId,
-        reason: "runtime-paused",
-        errorCode: "RUNTIME_PAUSED",
-        signalReason: cmd.signalReason ?? null,
-        timestamp: Date.now(),
-      });
+      await this.rejectOrder(cmd, "runtime-paused", ExchangeErrorCode.RuntimePaused);
       return;
     }
 
@@ -216,16 +207,7 @@ export class ExecutionModule implements RuntimeModule {
         { commandId: cmd.commandId, tokenId: cmd.tokenId },
         "order rejected — market inactive",
       );
-      await this.deps.bus.publish("OrderRejected", {
-        commandId: cmd.commandId,
-        clientOrderId: cmd.clientOrderId,
-        tokenId: cmd.tokenId,
-        conditionId: cmd.conditionId,
-        reason: "market-inactive",
-        errorCode: "MARKET_INACTIVE",
-        signalReason: cmd.signalReason ?? null,
-        timestamp: Date.now(),
-      });
+      await this.rejectOrder(cmd, "market-inactive", ExchangeErrorCode.MarketInactive);
       return;
     }
 
@@ -257,16 +239,11 @@ export class ExecutionModule implements RuntimeModule {
           { commandId: cmd.commandId, notional },
           "order rejected — exceeds live-lite order cap",
         );
-        await this.deps.bus.publish("OrderRejected", {
-          commandId: cmd.commandId,
-          clientOrderId: cmd.clientOrderId,
-          tokenId: cmd.tokenId,
-          conditionId: cmd.conditionId,
-          reason: "live-lite-order-cap-exceeded",
-          errorCode: "LIVE_LITE_ORDER_CAP",
-          signalReason: cmd.signalReason ?? null,
-          timestamp: Date.now(),
-        });
+        await this.rejectOrder(
+          cmd,
+          "live-lite-order-cap-exceeded",
+          ExchangeErrorCode.LiveLiteOrderCap,
+        );
         return;
       }
 
@@ -329,16 +306,11 @@ export class ExecutionModule implements RuntimeModule {
         },
         "order rejected — below exchange minimum size",
       );
-      await this.deps.bus.publish("OrderRejected", {
-        commandId: cmd.commandId,
-        clientOrderId: cmd.clientOrderId,
-        tokenId: cmd.tokenId,
-        conditionId: cmd.conditionId,
-        reason: "exchange-min-order-size-rejected",
-        errorCode: ExchangeErrorCode.InvalidSize,
-        signalReason: cmd.signalReason ?? null,
-        timestamp: Date.now(),
-      });
+      await this.rejectOrder(
+        cmd,
+        "exchange-min-order-size-rejected",
+        ExchangeErrorCode.InvalidSize,
+      );
       return;
     }
 
@@ -496,24 +468,26 @@ export class ExecutionModule implements RuntimeModule {
     const now = Date.now();
 
     if (!result.success) {
-      this.recordGatewayReject(result.errorCode ?? ExchangeErrorCode.Unknown);
+      const errorCode = result.errorCode ?? ExchangeErrorCode.Unknown;
+      this.recordGatewayReject(errorCode);
       const reason = this.gatewayRejectReason(result.errorCode, result.errorMessage);
       this.log.warn(
-        { commandId: cmd.commandId, errorCode: result.errorCode },
+        { commandId: cmd.commandId, errorCode, exchangeErrorDetails: result.errorDetails ?? null },
         "order rejected by gateway",
       );
 
-      const rejectedOrder = this.buildOrder(cmd, "rejected", null);
+      const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
+        errorCode,
+        errorMessage: result.errorMessage ?? reason,
+        errorDetails: result.errorDetails ?? null,
+      });
       this.deps.orderRepo.save(rejectedOrder);
 
-      await this.deps.bus.publish("OrderRejected", {
-        commandId: cmd.commandId,
-        clientOrderId: cmd.clientOrderId,
-        tokenId: cmd.tokenId,
-        conditionId: cmd.conditionId,
+      await this.publishOrderRejected(cmd, {
         reason,
-        errorCode: result.errorCode ?? "UNKNOWN",
-        signalReason: cmd.signalReason ?? null,
+        errorCode,
+        exchangeErrorMessage: result.errorMessage ?? null,
+        exchangeErrorDetails: result.errorDetails ?? null,
         timestamp: now,
       });
       return;
@@ -525,17 +499,19 @@ export class ExecutionModule implements RuntimeModule {
         "gateway reported success without order id -- treating as rejection",
       );
 
-      const rejectedOrder = this.buildOrder(cmd, "rejected", null);
+      const exchangeErrorDetails = { responseBody: null, reason: "missing-order-id" };
+      const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
+        errorCode: ExchangeErrorCode.Unknown,
+        errorMessage: "gateway returned success without order id",
+        errorDetails: exchangeErrorDetails,
+      });
       this.deps.orderRepo.save(rejectedOrder);
 
-      await this.deps.bus.publish("OrderRejected", {
-        commandId: cmd.commandId,
-        clientOrderId: cmd.clientOrderId,
-        tokenId: cmd.tokenId,
-        conditionId: cmd.conditionId,
+      await this.publishOrderRejected(cmd, {
         reason: "gateway returned success without order id",
         errorCode: ExchangeErrorCode.Unknown,
-        signalReason: cmd.signalReason ?? null,
+        exchangeErrorMessage: "gateway returned success without order id",
+        exchangeErrorDetails,
         timestamp: now,
       });
       return;
@@ -845,15 +821,34 @@ export class ExecutionModule implements RuntimeModule {
     reason: string,
     errorCode: ExchangeErrorCode,
   ): Promise<void> {
+    await this.publishOrderRejected(cmd, { reason, errorCode, timestamp: Date.now() });
+  }
+
+  private async publishOrderRejected(
+    cmd: PlaceOrderCommand,
+    params: {
+      reason: string;
+      errorCode: ExchangeErrorCode;
+      timestamp: number;
+      exchangeErrorMessage?: string | null;
+      exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
+    },
+  ): Promise<void> {
     await this.deps.bus.publish("OrderRejected", {
       commandId: cmd.commandId,
       clientOrderId: cmd.clientOrderId,
       tokenId: cmd.tokenId,
       conditionId: cmd.conditionId,
-      reason,
-      errorCode,
+      reason: params.reason,
+      errorCode: params.errorCode,
       signalReason: cmd.signalReason ?? null,
-      timestamp: Date.now(),
+      side: cmd.side,
+      signalId: cmd.signalId ?? null,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+      signalTimestamp: cmd.signalTimestamp ?? null,
+      exchangeErrorMessage: params.exchangeErrorMessage ?? null,
+      exchangeErrorDetails: params.exchangeErrorDetails ?? null,
+      timestamp: params.timestamp,
     });
   }
 
@@ -922,6 +917,11 @@ export class ExecutionModule implements RuntimeModule {
     cmd: PlaceOrderCommand,
     status: "open" | "rejected",
     exchangeOrderId: string | null,
+    exchangeError?: {
+      errorCode: string;
+      errorMessage: string | null;
+      errorDetails: Readonly<Record<string, unknown>> | null;
+    },
   ): Order {
     const now = new Date().toISOString();
     return {
@@ -939,11 +939,27 @@ export class ExecutionModule implements RuntimeModule {
       sizeUsdc: cmd.size * cmd.price,
       status,
       exchangeOrderId,
-      signalId: null,
+      signalId: cmd.signalId ?? null,
       signalReason: cmd.signalReason ?? null,
+      decisionRuleId: cmd.decisionRuleId ?? null,
+      signalTimestamp: cmd.signalTimestamp ?? null,
+      exchangeErrorCode: exchangeError?.errorCode ?? null,
+      exchangeErrorMessage: exchangeError?.errorMessage ?? null,
+      exchangeErrorPayload: stringifyExchangeErrorPayload(exchangeError?.errorDetails ?? null),
       botRunId: this.deps.botRunId,
       createdAt: now,
       updatedAt: now,
     };
+  }
+}
+
+function stringifyExchangeErrorPayload(
+  payload: Readonly<Record<string, unknown>> | null,
+): string | null {
+  if (!payload) return null;
+  try {
+    return JSON.stringify(payload);
+  } catch {
+    return JSON.stringify({ unserializable: true });
   }
 }

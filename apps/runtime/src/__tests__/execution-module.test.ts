@@ -277,6 +277,7 @@ describe("ExecutionModule", () => {
       success: false,
       errorCode: "INSUFFICIENT_BALANCE",
       errorMessage: "no funds",
+      errorDetails: { status: 400, responseBody: { error: "no funds" } },
     });
 
     await mod.start();
@@ -287,17 +288,29 @@ describe("ExecutionModule", () => {
     });
 
     await bus.publish("PlaceOrderRequested", {
-      command: makePlaceCmd(),
+      command: makePlaceCmd({
+        signalId: "sig-1",
+        decisionRuleId: "D5",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+      }),
       timestamp: Date.now(),
     });
 
     expect(rejected).toHaveLength(1);
     expect(rejected[0].errorCode).toBe("INSUFFICIENT_BALANCE");
     expect(rejected[0].reason).toBe("no funds");
+    expect(rejected[0].decisionRuleId).toBe("D5");
+    expect(rejected[0].exchangeErrorDetails).toMatchObject({
+      status: 400,
+      responseBody: { error: "no funds" },
+    });
 
     // Rejected order should still be persisted
     const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
     expect(savedOrder.status).toBe("rejected");
+    expect(savedOrder.decisionRuleId).toBe("D5");
+    expect(savedOrder.exchangeErrorCode).toBe("INSUFFICIENT_BALANCE");
+    expect(savedOrder.exchangeErrorPayload).toContain("no funds");
 
     await mod.stop();
   });
