@@ -262,6 +262,33 @@ describe("runWalletPositionSentinel", () => {
     expect(result.activePositionDrifts).toHaveLength(0);
   });
 
+  it("does not flag a sub-epsilon local position absent from Polymarket as inverse drift", async () => {
+    // Mirror of the v138 direct-loop fix on the inverse path: data-api can
+    // round/omit balances under 1e-3, so a tiny local-active row without a
+    // remote row must not surface as drift.
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 0.0005,
+            costBasisUsdc: 0.0001,
+            currentValueUsdc: 0.0001,
+            realizedPnl: 0,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.missingRemotePositions).toHaveLength(0);
+  });
+
   it("does not flag a missing-remote local position once market endDate has passed", async () => {
     // Past-endDate non-zero local balance is the redeem path's job, not the
     // wallet sentinel's: surfacing it here would double-count drift on every

@@ -46,9 +46,31 @@ const cohort = db
     m.event_slug,
     m.end_date,
     m.selection_status,
+    -- Position-scoped first BUY: a re-opened token would otherwise inherit
+    -- the entry price of the original (now-closed) position. Constraining by
+    -- opened_at..closed_at keeps each closed-position row bucketed by the
+    -- price of the BUY that actually opened *this* position.
+    -- Three subtleties:
+    --   (a) fills.filled_at is truncated to seconds while positions.opened_at
+    --       carries ms — a 2-second grace absorbs that gap without letting an
+    --       old fill leak into a later position's window (re-opens land >> 2s
+    --       after the previous close).
+    --   (b) closed_at appears in two formats — ISO ("...T...Z") for the SELL/
+    --       dust path, and "YYYY-MM-DD HH:MM:SS+00" (note the bare "+00" tz)
+    --       for the redeem/resolution path. SQLite's datetime() parser rejects
+    --       the bare "+00" suffix and returns NULL, so direct datetime()
+    --       comparison silently drops every redeem-closed row. Normalize via
+    --       replace(T→space) + substr(1,19) instead — both formats reduce to
+    --       the same "YYYY-MM-DD HH:MM:SS" prefix that compares lexically.
+    --   (c) for redeem-closed rows the resolution timestamp can land *before*
+    --       the local position's opened_at clock-wise; in that case there is
+    --       no BUY in the window and first_buy_price stays NULL/unknown.
     (SELECT f.price
        FROM fills f
-       WHERE f.token_id = p.token_id AND f.side = 'buy'
+       WHERE f.token_id = p.token_id
+         AND f.side = 'buy'
+         AND datetime(f.filled_at) >= datetime(p.opened_at, '-2 seconds')
+         AND datetime(f.filled_at) <= substr(replace(p.closed_at, 'T', ' '), 1, 19)
        ORDER BY f.filled_at ASC
        LIMIT 1) AS first_buy_price
   FROM positions p

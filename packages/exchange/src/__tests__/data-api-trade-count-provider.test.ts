@@ -234,6 +234,28 @@ describe("DataApiTradeCountProvider", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
 
+  it("treats different caps as separate cache entries (cap=6 cached cannot satisfy cap=10)", async () => {
+    // Saturated cap=6 response: actual count is unknowable but ≥6.
+    // A subsequent cap=10 lookup MUST refetch — otherwise we silently
+    // undercount when the threshold tunes upward.
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => Array(6).fill({}) } as Response)
+      .mockResolvedValueOnce({ ok: true, json: async () => Array(8).fill({}) } as Response);
+    const provider = new DataApiTradeCountProvider({ fetchImpl });
+
+    expect(await provider.countTrades(CID, 6)).toBe(6);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    expect(await provider.countTrades(CID, 10)).toBe(8);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect((fetchImpl.mock.calls[1]![0] as URL).searchParams.get("limit")).toBe("10");
+
+    // Original cap=6 entry is still cached and reused.
+    expect(await provider.countTrades(CID, 6)).toBe(6);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
   it("respects custom baseUrl", async () => {
     const fetchImpl = makeFetch([]);
     const provider = new DataApiTradeCountProvider({

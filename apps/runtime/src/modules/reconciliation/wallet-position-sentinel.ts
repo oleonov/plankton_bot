@@ -141,6 +141,11 @@ export async function runWalletPositionSentinel(
     const active = latestActivePosition(localPositions);
     if (!active) continue;
     if (active.status !== "open" && active.status !== "dust") continue;
+    // Same data-api 4-decimal rounding gap that gated the direct-mismatch path:
+    // a sub-epsilon local balance can read as zero remotely without that being
+    // a real drift. Skipping here keeps the inverse-direction branch from
+    // re-introducing the v138 false-positive class for tiny dust rows.
+    if (active.size <= SIZE_DRIFT_EPSILON) continue;
 
     const market = deps.marketRepo.findByTokenId(createTokenId(tokenIdStr));
     // Skip markets that have already ended — redemption is the legitimate

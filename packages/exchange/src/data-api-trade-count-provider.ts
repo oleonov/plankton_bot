@@ -94,7 +94,7 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
   }
 
   async countTrades(conditionId: ConditionId, cap: number): Promise<number | null> {
-    const cached = this.readCache(conditionId);
+    const cached = this.readCache(conditionId, cap);
     if (cached !== null) {
       if (cached.kind === "neg") {
         this.observer?.({ type: "cache_hit", conditionId });
@@ -117,7 +117,7 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
       });
       if (!res.ok) {
         await res.body?.cancel().catch(() => undefined);
-        this.writeNegativeCache(conditionId);
+        this.writeNegativeCache(conditionId, cap);
         this.observer?.({
           type: "fetch_error",
           conditionId,
@@ -128,7 +128,7 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
       }
       const data = (await res.json()) as unknown;
       if (!Array.isArray(data)) {
-        this.writeNegativeCache(conditionId);
+        this.writeNegativeCache(conditionId, cap);
         this.observer?.({
           type: "fetch_error",
           conditionId,
@@ -138,7 +138,7 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
         return null;
       }
       const count = Math.min(data.length, cap);
-      this.writeCache(conditionId, count);
+      this.writeCache(conditionId, cap, count);
       this.observer?.({
         type: "fetch_ok",
         conditionId,
@@ -147,7 +147,7 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
       });
       return count;
     } catch (err) {
-      this.writeNegativeCache(conditionId);
+      this.writeNegativeCache(conditionId, cap);
       this.observer?.({
         type: "fetch_error",
         conditionId,
@@ -179,27 +179,40 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
     await Promise.all(Array.from({ length: workers }, () => worker()));
   }
 
-  private readCache(conditionId: ConditionId): CacheEntry | null {
-    const entry = this.cache.get(conditionId);
+  // Cache key includes `cap` because the upstream response is `min(actual, cap)`:
+  // a cap=6 cached value of 6 cannot satisfy a cap=10 lookup (actual could be 7+).
+  // Prod always passes cap=6 today, so this is defense-in-depth — but a future
+  // tuning that lifts the cap would silently undercount until TTL otherwise.
+  private cacheKey(conditionId: ConditionId, cap: number): string {
+    return `${conditionId}:${cap}`;
+  }
+
+  private readCache(conditionId: ConditionId, cap: number): CacheEntry | null {
+    const key = this.cacheKey(conditionId, cap);
+    const entry = this.cache.get(key);
     if (!entry) return null;
     const ttl = entry.kind === "ok" ? this.cacheTtlMs : this.negativeCacheTtlMs;
     if (this.now() - entry.fetchedAtMs >= ttl) {
-      this.cache.delete(conditionId);
+      this.cache.delete(key);
       return null;
     }
-    this.cache.delete(conditionId);
-    this.cache.set(conditionId, entry);
+    this.cache.delete(key);
+    this.cache.set(key, entry);
     return entry;
   }
 
-  private writeCache(conditionId: ConditionId, count: number): void {
+  private writeCache(conditionId: ConditionId, cap: number, count: number): void {
     this.evictIfFull();
-    this.cache.set(conditionId, { kind: "ok", count, fetchedAtMs: this.now() });
+    this.cache.set(this.cacheKey(conditionId, cap), {
+      kind: "ok",
+      count,
+      fetchedAtMs: this.now(),
+    });
   }
 
-  private writeNegativeCache(conditionId: ConditionId): void {
+  private writeNegativeCache(conditionId: ConditionId, cap: number): void {
     this.evictIfFull();
-    this.cache.set(conditionId, { kind: "neg", fetchedAtMs: this.now() });
+    this.cache.set(this.cacheKey(conditionId, cap), { kind: "neg", fetchedAtMs: this.now() });
   }
 
   private evictIfFull(): void {
