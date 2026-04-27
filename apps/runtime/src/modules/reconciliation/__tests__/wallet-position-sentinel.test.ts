@@ -150,6 +150,33 @@ describe("runWalletPositionSentinel", () => {
     expect(result.details[0]).toContain("wallet-live-position-size-mismatch");
   });
 
+  it("does not flag a 4-decimal data-api rounding gap as size mismatch", async () => {
+    // Observed in prod 2026-04-27: local 17.882648 vs remote 17.8826,
+    // remoteCurrentValueUsdc=$0.0089. The 0.000048 gap is data-api
+    // truncating to 4 decimals — must not surface as drift.
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 17.8826, currentValueUsdc: 0.0089 })]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 17.882648,
+            costBasisUsdc: 1,
+            currentValueUsdc: 0.0089,
+            realizedPnl: 0,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.activePositionDrifts).toHaveLength(0);
+  });
+
   it("does not flag closed positions after market endDate", async () => {
     const result = await runWalletPositionSentinel(
       {

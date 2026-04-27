@@ -4,7 +4,11 @@ import type { PolymarketDataPosition, PolymarketPositionReader } from "@plankton
 import type { Logger } from "../../logger.js";
 
 const MIN_REMOTE_SIZE = 1e-9;
-const SIZE_DRIFT_EPSILON = 1e-6;
+// Polymarket data-api returns size with 4 decimals; local DB stores 6.
+// 1e-3 is the smallest absolute tolerance that absorbs every legitimate
+// rounding gap without masking real shortfalls (a real share-count drift
+// at $0.50/token is worth ≥ $0.0005, which is below our minimum order size).
+const SIZE_DRIFT_EPSILON = 1e-3;
 
 export interface WalletPositionSentinelResult {
   driftCount: number;
