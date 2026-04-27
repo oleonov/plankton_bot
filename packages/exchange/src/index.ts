@@ -28,10 +28,7 @@ export { LiveExchangeGateway, type LiveExchangeConfig } from "./live/exchange-ga
 export { LiveMarketDataGateway, type LiveMarketDataConfig } from "./live/market-data-gateway.js";
 export { type UserEventStreamAuth } from "./live/user-event-stream.js";
 export { buildClobAxiosAgent, type ClobAxiosAgentOptions } from "./live/axios-agent.js";
-export {
-  installClobErrorSanitizer,
-  sanitizeAxiosError,
-} from "./live/clob-error-sanitizer.js";
+export { installClobErrorSanitizer, sanitizeAxiosError } from "./live/clob-error-sanitizer.js";
 export {
   PolymarketDataPositionReader,
   aggregatePolymarketPositions,

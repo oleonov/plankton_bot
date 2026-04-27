@@ -188,7 +188,12 @@ export class InventoryHandler {
     }
     sellRealizedPnl -= fill.fee;
 
-    return this.saveSellOutcome(existing, fill, sellRealizedPnl, this.lotRepo.findOpen(existing.positionId));
+    return this.saveSellOutcome(
+      existing,
+      fill,
+      sellRealizedPnl,
+      this.lotRepo.findOpen(existing.positionId),
+    );
   }
 
   private tryRepairPartiallyAppliedSellFill(
@@ -243,7 +248,8 @@ export class InventoryHandler {
       0,
     );
     const newRealizedPnl = existing.realizedPnl + sellRealizedPnl;
-    const status = remainingSize <= 0 ? "closed" : resolveOpenPositionStatus(remainingSize * fill.price);
+    const status =
+      remainingSize <= 0 ? "closed" : resolveOpenPositionStatus(remainingSize * fill.price);
     const remainingAvgPrice = remainingSize > 0 ? remainingCostBasis / remainingSize : 0;
 
     const updated: Position = {

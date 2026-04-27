@@ -199,9 +199,7 @@ describe("runWalletPositionSentinel", () => {
     const result = await runWalletPositionSentinel(
       {
         reader: reader([]),
-        positionRepo: positionRepo([
-          makePosition({ status: "dust", size: 0.5, closedAt: null }),
-        ]),
+        positionRepo: positionRepo([makePosition({ status: "dust", size: 0.5, closedAt: null })]),
         marketRepo: marketRepo(makeMarket()),
         log,
       },

@@ -100,7 +100,9 @@ describe("PATCH /runtime/policy", () => {
     expect(body.data.changed).toBe(true);
 
     const recorded = controlConn.db
-      .prepare("SELECT action, reason FROM operator_commands WHERE action LIKE 'set_continuation_mode:%' ORDER BY id DESC LIMIT 1")
+      .prepare(
+        "SELECT action, reason FROM operator_commands WHERE action LIKE 'set_continuation_mode:%' ORDER BY id DESC LIMIT 1",
+      )
       .get() as { action: string; reason: string } | undefined;
     expect(recorded?.action).toBe("set_continuation_mode:market_wide");
     expect(recorded?.reason).toBe("test flip");

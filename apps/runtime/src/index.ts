@@ -43,7 +43,9 @@ import { buildClobAxiosAgent, installClobErrorSanitizer } from "@plankton/exchan
 // crash that stringify, masking real exchange errors as a generic
 // "Converting circular structure to JSON" TypeError. The interceptor strips
 // the agent fields from rejected errors before the SDK sees them.
-installClobErrorSanitizer(axiosDefault as unknown as Parameters<typeof installClobErrorSanitizer>[0]);
+installClobErrorSanitizer(
+  axiosDefault as unknown as Parameters<typeof installClobErrorSanitizer>[0],
+);
 
 import { randomUUID } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";

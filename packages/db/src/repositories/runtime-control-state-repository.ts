@@ -60,7 +60,7 @@ function rowToState(row: Record<string, unknown>): RuntimeControlState {
     paused: row.paused === 1,
     schemaVersion: row.schema_version as number,
     executionPolicyVersion: (row.execution_policy_version as number) ?? 0,
-    continuationMode: ((row.continuation_mode as ContinuationMode) ?? "leg_local"),
+    continuationMode: (row.continuation_mode as ContinuationMode) ?? "leg_local",
     continuationModeVersion: (row.continuation_mode_version as number) ?? 0,
     updatedAt: row.updated_at as string,
   };
@@ -113,7 +113,9 @@ export function setContinuationMode(
   const tx = db.transaction(() => {
     db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
     const before = db
-      .prepare("SELECT continuation_mode AS m, continuation_mode_version AS v FROM runtime_control_state WHERE id = 1")
+      .prepare(
+        "SELECT continuation_mode AS m, continuation_mode_version AS v FROM runtime_control_state WHERE id = 1",
+      )
       .get() as { m: string; v: number };
     if (before.m === mode) {
       return { changed: false, version: before.v };

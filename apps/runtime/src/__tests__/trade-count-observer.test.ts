@@ -62,9 +62,7 @@ describe("buildTradeCountObserver", () => {
   it("emits trade_count_fetch_ok with latency on a successful fetch and does not log", () => {
     const observer = buildTradeCountObserver({
       log: stubs.log as unknown as Parameters<typeof buildTradeCountObserver>[0]["log"],
-      metrics: stubs.metrics as unknown as Parameters<
-        typeof buildTradeCountObserver
-      >[0]["metrics"],
+      metrics: stubs.metrics as unknown as Parameters<typeof buildTradeCountObserver>[0]["metrics"],
     });
 
     const event: TradeCountFetchEvent = {
@@ -87,9 +85,7 @@ describe("buildTradeCountObserver", () => {
   it("emits trade_count_fetch_err with error+latency and warn-logs on failure", () => {
     const observer = buildTradeCountObserver({
       log: stubs.log as unknown as Parameters<typeof buildTradeCountObserver>[0]["log"],
-      metrics: stubs.metrics as unknown as Parameters<
-        typeof buildTradeCountObserver
-      >[0]["metrics"],
+      metrics: stubs.metrics as unknown as Parameters<typeof buildTradeCountObserver>[0]["metrics"],
     });
 
     observer({
@@ -118,9 +114,7 @@ describe("buildTradeCountObserver", () => {
   it("ignores cache_hit and cache_miss events", () => {
     const observer = buildTradeCountObserver({
       log: stubs.log as unknown as Parameters<typeof buildTradeCountObserver>[0]["log"],
-      metrics: stubs.metrics as unknown as Parameters<
-        typeof buildTradeCountObserver
-      >[0]["metrics"],
+      metrics: stubs.metrics as unknown as Parameters<typeof buildTradeCountObserver>[0]["metrics"],
     });
 
     observer({ type: "cache_hit", conditionId: COND, count: 5 });
@@ -133,9 +127,7 @@ describe("buildTradeCountObserver", () => {
   it("falls back to nulls when error event lacks latency or error string", () => {
     const observer = buildTradeCountObserver({
       log: stubs.log as unknown as Parameters<typeof buildTradeCountObserver>[0]["log"],
-      metrics: stubs.metrics as unknown as Parameters<
-        typeof buildTradeCountObserver
-      >[0]["metrics"],
+      metrics: stubs.metrics as unknown as Parameters<typeof buildTradeCountObserver>[0]["metrics"],
     });
 
     observer({ type: "fetch_error", conditionId: COND });

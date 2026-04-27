@@ -35,11 +35,7 @@ describe("DataApiTradeCountProvider", () => {
     expect(url.hostname).toBe("data-api.polymarket.com");
     expect(url.searchParams.get("market")).toBe(CID);
     expect(url.searchParams.get("limit")).toBe("6");
-    expect(events.map((e) => e.type)).toEqual([
-      "cache_miss",
-      "fetch_ok",
-      "cache_hit",
-    ]);
+    expect(events.map((e) => e.type)).toEqual(["cache_miss", "fetch_ok", "cache_hit"]);
   });
 
   it("returns 0 for empty arrays", async () => {
@@ -226,11 +222,7 @@ describe("DataApiTradeCountProvider", () => {
       prefetchConcurrency: 4,
       negativeCacheTtlMs: 30_000,
     });
-    const ids = [
-      createConditionId("0xa"),
-      createConditionId("0xb"),
-      createConditionId("0xc"),
-    ];
+    const ids = [createConditionId("0xa"), createConditionId("0xb"), createConditionId("0xc")];
     await provider.prefetch(ids, 6);
     expect(fetchImpl).toHaveBeenCalledTimes(3);
 

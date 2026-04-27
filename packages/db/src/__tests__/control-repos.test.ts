@@ -311,7 +311,9 @@ describe("SqliteRuntimeControlStateRepository", () => {
       legacy.exec(
         "CREATE TABLE runtime_control_state (id INTEGER PRIMARY KEY, runtime_status TEXT)",
       );
-      legacy.prepare("INSERT INTO runtime_control_state (id, runtime_status) VALUES (1, 'stopped')").run();
+      legacy
+        .prepare("INSERT INTO runtime_control_state (id, runtime_status) VALUES (1, 'stopped')")
+        .run();
       expect(readContinuationMode(legacy)).toBe("leg_local");
       expect(readContinuationModeVersion(legacy)).toBe(0);
       legacy.close();

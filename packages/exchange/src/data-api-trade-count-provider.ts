@@ -80,8 +80,7 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
   constructor(options: DataApiTradeCountProviderOptions = {}) {
     this.baseUrl = options.baseUrl ?? DATA_API_DEFAULT_BASE_URL;
     this.cacheTtlMs = options.cacheTtlMs ?? DATA_API_DEFAULT_CACHE_TTL_MS;
-    this.negativeCacheTtlMs =
-      options.negativeCacheTtlMs ?? DATA_API_DEFAULT_NEGATIVE_CACHE_TTL_MS;
+    this.negativeCacheTtlMs = options.negativeCacheTtlMs ?? DATA_API_DEFAULT_NEGATIVE_CACHE_TTL_MS;
     this.timeoutMs = options.timeoutMs ?? DATA_API_DEFAULT_TIMEOUT_MS;
     this.maxCacheEntries = options.maxCacheEntries ?? DATA_API_DEFAULT_MAX_CACHE_ENTRIES;
     this.prefetchConcurrency = Math.max(

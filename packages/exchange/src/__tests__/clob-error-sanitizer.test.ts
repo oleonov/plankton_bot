@@ -13,10 +13,7 @@
  * serialization succeeds and the real error reaches our classifier.
  */
 import { describe, it, expect } from "vitest";
-import {
-  installClobErrorSanitizer,
-  sanitizeAxiosError,
-} from "../live/clob-error-sanitizer.js";
+import { installClobErrorSanitizer, sanitizeAxiosError } from "../live/clob-error-sanitizer.js";
 
 function buildCircularConfig(): Record<string, unknown> {
   const agent: Record<string, unknown> = { keepAlive: true };

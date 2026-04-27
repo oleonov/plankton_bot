@@ -129,11 +129,10 @@ In `evaluateToken` at the post-entry continuation gate
 (`apps/runtime/src/modules/algo-decision/algo-decision-module.ts`):
 
 ```ts
-const { count: tradeCount, source: tradeCountSource } =
-  await this.resolveContinuationTradeCount(
-    market.conditionId as ConditionId,
-    emissionFacts.legTradeCount,
-  );
+const { count: tradeCount, source: tradeCountSource } = await this.resolveContinuationTradeCount(
+  market.conditionId as ConditionId,
+  emissionFacts.legTradeCount,
+);
 const stop = !evaluateContinuation(tradeCount, legState.firstTradePrice);
 ```
 
