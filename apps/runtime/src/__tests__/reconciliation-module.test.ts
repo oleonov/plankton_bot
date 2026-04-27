@@ -852,11 +852,11 @@ describe("ReconciliationModule", () => {
       expect(drifts[0]!.details).toContain("wallet-live-position-closed-locally");
       expect(localLog.error).toHaveBeenCalledWith(
         expect.objectContaining({
-          drifts: expect.arrayContaining([
+          closedLive: expect.arrayContaining([
             expect.objectContaining({ positionId: "pos-wallet-drift" }),
           ]),
         }),
-        "wallet position sentinel detected locally closed live positions",
+        "wallet position sentinel detected drift",
       );
     });
   });

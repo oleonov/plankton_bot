@@ -179,10 +179,33 @@ describe("mapTrade", () => {
       orderId: "ord-top",
       tokenId: "tok-yes",
       side: "buy",
-      size: 43.5,
       price: 0.11,
       liquidityRole: "taker",
     });
+    expect(fills[0]!.size).toBeCloseTo(40.71252, 5);
+    expect(fills[0]!.sizeUsdc).toBeCloseTo(4.785, 6);
+  });
+
+  it("maps taker BUY fills to wallet net shares, not gross order shares", () => {
+    const fills = mapTradeToPersonalFills(
+      {
+        id: "prod-btc-range-fill",
+        taker_order_id: "ord-prod",
+        asset_id: "73976077398962667521435505129491282127737376858530335388935291503156562864432",
+        side: "BUY",
+        size: "1170",
+        price: "0.001",
+        fee_rate_bps: "1000",
+        match_time: "2026-04-26T14:04:48.000Z",
+        maker_address: "0xf00df00df00df00df00df00df00df00df00df00d",
+        trader_side: "TAKER",
+      },
+      "0xf00df00df00df00df00df00df00df00df00df00d",
+    );
+
+    expect(fills).toHaveLength(1);
+    expect(fills[0]!.size).toBeCloseTo(1085.84424, 5);
+    expect(fills[0]!.sizeUsdc).toBeCloseTo(1.17, 6);
   });
 
   it("extracts our maker fills from nested maker_orders instead of the top-level row", () => {

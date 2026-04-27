@@ -1,5 +1,14 @@
 import type { OrderStatus, ProfileId, SwitchState } from "./enums.js";
-import type { FillId, OrderId, PositionId, TokenId, SwitchId, ReportId, ImportId } from "./ids.js";
+import type {
+  FillId,
+  OrderId,
+  PositionId,
+  TokenId,
+  SwitchId,
+  ReportId,
+  ImportId,
+  ConditionId,
+} from "./ids.js";
 import type {
   Fill,
   InventoryLot,
@@ -476,4 +485,35 @@ export interface LegStateTransitionRepository {
   insert(transition: Omit<LegStateTransition, "id" | "createdAt">): boolean;
   findByTokenId(tokenId: TokenId, limit?: number): LegStateTransition[];
   findByPositionId(positionId: PositionId, limit?: number): LegStateTransition[];
+}
+
+// ─── MarketTradeCountProvider ───────────────────────────────────────────
+
+/**
+ * ADR-016: market-wide trade-count provider for Post-Entry Continuation Filter.
+ *
+ * Returns a best-effort count of executed trades per condition_id, capped at
+ * `cap`. The cap matches R1's `>= 6` threshold so the provider can early-exit
+ * after enough rows are observed and never needs to page further.
+ *
+ * Contract:
+ *  - Returns the actual count when the underlying source confirms it is < cap.
+ *  - Returns `cap` when the source confirms there are at least `cap` trades
+ *    (further trades are irrelevant to the gate).
+ *  - Returns `0` for empty/unknown markets where the source replied successfully.
+ *  - Returns `null` on transient failure (network, timeout, parse error). The
+ *    caller decides the fallback (currently: revert to per-leg trade count
+ *    under ADR-010 D1 as graceful degradation).
+ *
+ * Implementations must be safe for concurrent use across legs in a single sweep.
+ */
+export interface MarketTradeCountProvider {
+  countTrades(conditionId: ConditionId, cap: number): Promise<number | null>;
+  /**
+   * Optional batch warmer. The default implementation is `Promise.all` over
+   * `countTrades`, but providers can override to coalesce or rate-limit calls.
+   * Callers must not assume per-id ordering or completion semantics — only
+   * that, when the returned promise resolves, the cache is populated.
+   */
+  prefetch?(conditionIds: readonly ConditionId[], cap: number): Promise<void>;
 }

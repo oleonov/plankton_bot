@@ -16,7 +16,12 @@ import type {
   OrderSide,
   LiquidityRole,
 } from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
+import {
+  computePolymarketBuyShareFee,
+  computePolymarketTakerFeeUsdc,
+  createTokenId,
+  resolvePolymarketTakerFeeRate,
+} from "@plankton/domain";
 
 // ─── Side mapping ────────────────────────────────────────────────────────
 
@@ -79,20 +84,31 @@ function buildExchangeFill(input: {
   timestamp: unknown;
 }): ExchangeFill {
   const price = Number(input.price ?? 0);
-  const size = Number(input.size ?? 0);
+  const grossSize = Number(input.size ?? 0);
   const feeRateBps = Number(input.feeRateBps ?? 0);
+  const side = toDomainSide(input.side);
+  const feeRate = resolvePolymarketTakerFeeRate({ feeRateBps });
+  const shareFee =
+    input.liquidityRole === "taker" && side === "buy"
+      ? computePolymarketBuyShareFee({ grossSize, price, feeRate })
+      : 0;
+  const size = grossSize - shareFee;
+  const sizeUsdc = grossSize * price;
 
   const fee =
-    input.liquidityRole === "maker" ? 0 : size * (feeRateBps / 10_000) * price * (1 - price);
+    input.liquidityRole === "maker"
+      ? 0
+      : computePolymarketTakerFeeUsdc({ grossSize, price, feeRate });
 
   return {
     fillId: input.fillId,
     orderId: input.orderId,
     clientOrderId: input.clientOrderId ?? "",
     tokenId: createTokenId(input.tokenId),
-    side: toDomainSide(input.side),
+    side,
     price,
     size,
+    sizeUsdc,
     liquidityRole: input.liquidityRole,
     fee,
     feeRateBps,

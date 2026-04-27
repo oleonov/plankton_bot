@@ -175,14 +175,16 @@ describe("PositionsPage — redesign", () => {
     expect(screen.getByText("Will ETH flip SOL?")).toBeInTheDocument();
   });
 
-  it("Hide closed is on by default and toggling it reveals closed positions", async () => {
+  it("Hide closed is on by default, hides only closed, and keeps dust visible", async () => {
     // Reset the per-suite seed so we exercise the actual app default.
     window.localStorage.clear();
     seedPositions();
     renderWithProviders(<Positions />);
     // BTC is open and visible immediately; XRP is closed and hidden by default.
+    // Dust is controlled by the separate Hide dust toggle, not by Hide closed.
     await screen.findByText("Will BTC be above $100k?");
     expect(screen.queryByText("Will XRP win?")).not.toBeInTheDocument();
+    expect(screen.getByText("Will SOL crash?")).toBeInTheDocument();
 
     const user = userEvent.setup();
     const closedToggle = screen.getByLabelText(/Hide closed/);

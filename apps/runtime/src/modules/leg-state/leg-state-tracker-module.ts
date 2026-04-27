@@ -36,7 +36,60 @@ export class LegStateTrackerModule implements RuntimeModule {
       this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
       this.deps.bus.subscribe("PositionSettled", (p) => this.handleSettled(p)),
     );
+    this.cleanupOrphanLegStates();
     this.log.info("leg-state-tracker module started");
+  }
+
+  /**
+   * Sweep stale leg_states whose token has no open position. The leg-state
+   * tracker is started AFTER risk-inventory in the supervisor, so any
+   * PositionUpdated emitted by `replayUnreconciledFills` (during
+   * RiskInventoryModule.start) fires before this module's subscriptions
+   * exist — leaving leg rows that reference closed positions. Without this
+   * sweep, AlgoDecisionModule keeps emitting D7 SELL signals against
+   * size-0 positions, which ExecutionModule then rejects as
+   * `reserved-token-limit` once per scan tick.
+   */
+  private cleanupOrphanLegStates(): void {
+    const positionRepo = this.deps.positionRepo;
+    if (!positionRepo) return;
+
+    const allLegs = this.deps.legStateRepo.getAll();
+    let cleared = 0;
+    for (const leg of allLegs) {
+      const position = positionRepo.findByTokenId(leg.tokenId);
+      // Treat `dust` like `closed`: a dust position carries shares too small to
+      // sell (rejected as below CLOB min). Keeping the leg state alive feeds
+      // AlgoDecisionModule a recurring D7 SELL that ExecutionModule then
+      // rejects on every sweep — same failure mode as orphan legs on closed
+      // positions, just dressed up as a non-zero size.
+      if (
+        position &&
+        position.status !== "closed" &&
+        position.status !== "dust" &&
+        position.size > 0
+      )
+        continue;
+
+      recordLegStateClearTransition({
+        transitionRepo: this.deps.legStateTransitionRepo,
+        tokenId: leg.tokenId,
+        existing: leg,
+        positionId: position?.positionId ?? null,
+        action: "CLEAR",
+        reason: "orphan_leg_cleanup_at_startup",
+        occurredAt: new Date().toISOString(),
+        log: this.log,
+      });
+      this.deps.legStateRepo.delete(leg.tokenId);
+      cleared++;
+    }
+    if (cleared > 0) {
+      this.log.warn(
+        { cleared, scanned: allLegs.length },
+        "leg-state-tracker swept orphan leg states at startup",
+      );
+    }
   }
 
   async stop(): Promise<void> {

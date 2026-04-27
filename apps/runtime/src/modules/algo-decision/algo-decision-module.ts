@@ -15,6 +15,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type Database from "better-sqlite3";
 import type {
   EventBus,
   RuntimeModule,
@@ -31,6 +32,8 @@ import type {
   DecisionSignalLog,
   DecisionSignalLogRepository,
   RiskEventRepository,
+  MarketTradeCountProvider,
+  ContinuationMode,
 } from "@plankton/domain";
 import {
   deriveState,
@@ -42,6 +45,7 @@ import {
   matchRule,
   isAlive,
 } from "@plankton/domain";
+import { readContinuationMode, readContinuationModeVersion } from "@plankton/db";
 import type { EvalContext } from "@plankton/domain";
 import type { RuntimeControl } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -76,13 +80,33 @@ interface PendingEntry {
 
 type TokenEvalResult =
   | { type: "redeem"; conditionId: string }
-  | { type: "signal"; signal: import("@plankton/domain").Signal; market: NormalizedMarket }
+  | {
+      type: "signal";
+      signal: import("@plankton/domain").Signal;
+      market: NormalizedMarket;
+      // Deferred persistence of decision_signal_log + signal_emitted risk_event.
+      // The wallet-budget filter in `evaluateTokensInner` may drop the signal
+      // after `evaluateToken` returns; only call this once the signal is
+      // committed to the emit queue, otherwise telemetry overcounts emissions
+      // by the silently-dropped tail and operators cannot trust
+      // signal_emitted/signal_suppressed parity.
+      commitLog: () => void;
+    }
   | null;
 
 type EmissionFacts = {
   firstTradePrice: number | null;
   legTradeCount: number;
 };
+
+/**
+ * ADR-016: which source the continuation gate consulted for `trade_count`.
+ *  - `market_wide` — fresh value from `MarketTradeCountProvider`.
+ *  - `leg_local_fallback` — provider returned `null` (network/timeout/parse);
+ *    we degraded to ADR-010 D1 (per-leg `buyCount + sellCount`).
+ *  - `leg_local` — operator policy is `leg_local`; provider was not consulted.
+ */
+type TradeCountSource = "market_wide" | "leg_local_fallback" | "leg_local";
 
 type SuppressionFacts = {
   tokenId: TokenId;
@@ -97,6 +121,8 @@ type SuppressionFacts = {
   timeSinceLastSeconds: number | null;
   emissionFacts: EmissionFacts;
   timestamp: string;
+  tradeCount?: number | null;
+  tradeCountSource?: TradeCountSource | null;
 };
 
 // ─── Deps ────────────────────────────────────────────────────────────────────
@@ -114,6 +140,13 @@ export interface AlgoDecisionModuleDeps {
   activeProfile?: ProfileId | undefined;
   walletBufferPct?: number | undefined;
   walletBufferMinUsdc?: number | undefined;
+  /**
+   * ADR-016 dependency. When provided AND the runtime_control_state policy is
+   * `market_wide`, the post-entry continuation gate consults this provider
+   * instead of the per-leg `buyCount + sellCount`. `null` returns from the
+   * provider degrade transparently to leg-local (logged in suppression facts).
+   */
+  tradeCountProvider?: MarketTradeCountProvider | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -122,6 +155,33 @@ export interface AlgoDecisionModuleDeps {
 
 const PENDING_ENTRY_TIMEOUT_MS = 120_000;
 const SELL_ONLY = new Set(["SELL"]);
+/**
+ * ADR-016: trade-count cap passed to the provider; matches R1 (`>= 6`) so the
+ * provider can early-exit and never has to page beyond a single response.
+ */
+const CONTINUATION_TRADE_COUNT_CAP = 6;
+/**
+ * Cooperative yield interval inside the per-token evaluation loop. Sweep ticks
+ * over 1000+ tokens were holding the event loop for hundreds of ms, delaying
+ * AbortSignal timers behind their deadline. Yielding every 50 tokens keeps
+ * loop p99 in baseline range without measurably affecting throughput
+ * (one setImmediate hop per 50 token evaluations is cheap).
+ */
+const EVALUATE_YIELD_BATCH = 50;
+const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
+const MAX_SUPPRESSION_DEDUPE_KEYS = 50_000;
+const DEDUPED_SUPPRESSION_REASONS = new Set([
+  "market-cache-miss",
+  "mid-price-unavailable",
+  "pending-buy-order",
+  "redeem-before-end-date",
+  "market-not-live",
+  // continuation-stop is sticky: once a leg fails R1 it fails on every sweep
+  // tick (≈1/sec) until the leg clears. Without dedupe, a handful of stuck
+  // legs floods decision_signal_log with thousands of identical rows per hour
+  // and drowns the genuine signal stream operators look at.
+  "continuation-stop",
+]);
 
 export class AlgoDecisionModule implements RuntimeModule {
   private readonly log: Logger;
@@ -138,11 +198,24 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly pendingEntries = new Map<string, PendingEntry>(); // tokenId → entry
   private readonly clientOrderToToken = new Map<string, string>(); // clientOrderId → tokenId
   private readonly orderIdToToken = new Map<string, string>(); // orderId → tokenId
+  private readonly suppressionDedupe = new Map<string, number>();
 
   private tickCounter = 0;
   private unsubs: Array<() => void> = [];
   private sweepHandle: ReturnType<typeof setInterval> | null = null;
   private started = false;
+  // Skip-on-overlap guard for evaluateTokens. The same pass can be triggered
+  // from `setInterval(sweep)` and from `handleMarketUpdate`/`handleNormalizedMarketUpdated`
+  // back-to-back within one tick. Without this gate, market_wide prefetch fan-out
+  // multiplies (N concurrent passes × prefetchConcurrency) and starves the
+  // event loop — exactly the failure mode that auto-rolled back P8 canary #1.
+  // Skipping (rather than queuing) is safe: marketCache is updated synchronously
+  // by handlers, and the next sweep tick picks up the new state.
+  private evaluating = false;
+
+  // ADR-016 — operator policy + last-seen version for hot-reload.
+  private continuationMode: ContinuationMode = "leg_local";
+  private continuationModeVersion = -1;
 
   constructor(private readonly deps: AlgoDecisionModuleDeps) {
     this.log = deps.log.child({ module: "algo-decision" });
@@ -162,6 +235,16 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (!this.decisionRules.some((r) => r.ruleId === "FALLBACK")) {
       throw new Error("FALLBACK rule missing from algo_decision_rules — supervisor cannot start");
     }
+
+    this.refreshContinuationMode();
+    this.log.info(
+      {
+        continuationMode: this.continuationMode,
+        continuationModeVersion: Math.max(this.continuationModeVersion, 0),
+        tradeCountProviderAttached: !!this.deps.tradeCountProvider,
+      },
+      "algo-decision continuation_mode loaded",
+    );
 
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
@@ -283,6 +366,33 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   // ─── Sweep ─────────────────────────────────────────────────────────────────
 
+  /**
+   * ADR-016: hot-reload `continuation_mode` from `runtime_control_state`.
+   * Cheap version-poll first; only re-reads the mode column when the version
+   * has bumped. Errors and missing columns degrade silently to `leg_local`
+   * via `readContinuationMode/Version`'s try/catch.
+   *
+   * Tests that pass a structural `WalletBudgetControlDb` mock satisfy
+   * `readContinuationMode/Version`'s `db.prepare(...).get(...)` shape; the
+   * cast is honest since production always wires the real `Database`.
+   */
+  private refreshContinuationMode(): void {
+    if (!this.deps.controlDb) return;
+    const db = this.deps.controlDb as unknown as Database.Database;
+    const newVersion = readContinuationModeVersion(db);
+    if (newVersion === this.continuationModeVersion) return;
+    const newMode = readContinuationMode(db);
+    const previous = this.continuationMode;
+    this.continuationMode = newMode;
+    this.continuationModeVersion = newVersion;
+    if (previous !== newMode && this.started) {
+      this.log.info(
+        { previous, current: newMode, version: newVersion },
+        "continuation_mode_changed",
+      );
+    }
+  }
+
   /** Prune stale pending entries and evaluate all eligible tokens. */
   async sweep(): Promise<void> {
     if (this.deps.runtimeControl?.isPaused()) return;
@@ -303,6 +413,17 @@ export class AlgoDecisionModule implements RuntimeModule {
   /** Evaluate a list of token IDs in one pass, emit signals and redeem events. */
   async evaluateTokens(tokenIds: readonly TokenId[]): Promise<void> {
     if (this.deps.runtimeControl?.isPaused()) return;
+    if (this.evaluating) return;
+    this.evaluating = true;
+    try {
+      await this.evaluateTokensInner(tokenIds);
+    } finally {
+      this.evaluating = false;
+    }
+  }
+
+  private async evaluateTokensInner(tokenIds: readonly TokenId[]): Promise<void> {
+    this.refreshContinuationMode();
     this.tickCounter++;
     const now = Date.now();
     let reservedBuyUsdc =
@@ -322,12 +443,27 @@ export class AlgoDecisionModule implements RuntimeModule {
       return n;
     };
 
+    // ADR-016: in `market_wide` mode, batch-warm the trade-count cache for
+    // all tokens that already have a leg (continuation gate is the only
+    // consumer). Serial cache-misses inside the per-token loop would stack
+    // ~75ms × N latency on the sweep; one parallel prefetch collapses it.
+    await this.prefetchContinuationTradeCounts(tokenIds);
+
     const redeemConditionIds = new Set<string>();
     const signals: Array<{ signal: import("@plankton/domain").Signal; market: NormalizedMarket }> =
       [];
 
+    // Yield to the event loop every EVALUATE_YIELD_BATCH tokens. evaluateToken
+    // is mostly synchronous (DB reads + pure rules) and the sweep can hold the
+    // loop for hundreds of ms across 1000+ tokens, blocking AbortSignal timers
+    // and other I/O callbacks. setImmediate yields after macro-tasks drain.
+    let processed = 0;
     for (const tokenId of tokenIds) {
-      const result = this.evaluateToken(String(tokenId) as TokenId, now, nextSeq);
+      if (processed > 0 && processed % EVALUATE_YIELD_BATCH === 0) {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      processed++;
+      const result = await this.evaluateToken(String(tokenId) as TokenId, now, nextSeq);
       if (!result) continue;
       if (result.type === "redeem") {
         redeemConditionIds.add(result.conditionId);
@@ -345,6 +481,12 @@ export class AlgoDecisionModule implements RuntimeModule {
           this.reservePendingSignal(result.signal, now);
           reservedBuyUsdc += result.signal.suggestedSizeUsdc;
         }
+        // Budget passed (or non-buy): persist decision_signal_log /
+        // signal_emitted now, BEFORE pushing onto the emit queue. The actual
+        // SignalProduced publish happens after the loop; recording here
+        // guarantees every queued signal has matching telemetry without
+        // booking emissions for signals dropped above.
+        result.commitLog();
         signals.push({ signal: result.signal, market: result.market });
       }
     }
@@ -362,12 +504,71 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
   }
 
+  /**
+   * Batch-warm the continuation trade-count cache for tokens with an open leg.
+   * Tokens without a leg never reach the continuation gate, so we skip them.
+   * `prefetch` is optional on the interface; if absent we fall back to per-token
+   * `countTrades` calls inside `evaluateToken` (cache will still help on
+   * subsequent ticks within the TTL).
+   */
+  private async prefetchContinuationTradeCounts(tokenIds: readonly TokenId[]): Promise<void> {
+    if (this.continuationMode !== "market_wide") return;
+    const provider = this.deps.tradeCountProvider;
+    if (!provider) return;
+
+    const conditionIds: ConditionId[] = [];
+    const seen = new Set<string>();
+    for (const tokenId of tokenIds) {
+      const ls = this.deps.legStateRepo.get(tokenId);
+      if (!ls) continue;
+      const market = this.marketCache.get(String(tokenId));
+      if (!market) continue;
+      const cid = market.conditionId as ConditionId;
+      if (seen.has(cid)) continue;
+      seen.add(cid);
+      conditionIds.push(cid);
+    }
+    if (conditionIds.length === 0) return;
+
+    if (provider.prefetch) {
+      await provider.prefetch(conditionIds, CONTINUATION_TRADE_COUNT_CAP);
+    } else {
+      await Promise.all(
+        conditionIds.map((id) => provider.countTrades(id, CONTINUATION_TRADE_COUNT_CAP)),
+      );
+    }
+  }
+
+  /**
+   * ADR-016: resolve `trade_count` for the continuation gate. In `market_wide`
+   * mode, consult the provider; null returns degrade to leg-local under D1.
+   * In `leg_local` mode (or when no provider is wired), use the legacy
+   * per-leg `buyCount + sellCount`. The chosen source is returned so
+   * suppression telemetry can flag fallback paths for the operator.
+   */
+  private async resolveContinuationTradeCount(
+    conditionId: ConditionId,
+    legLocalCount: number,
+  ): Promise<{ count: number; source: TradeCountSource }> {
+    if (this.continuationMode === "leg_local" || !this.deps.tradeCountProvider) {
+      return { count: legLocalCount, source: "leg_local" };
+    }
+    const fetched = await this.deps.tradeCountProvider.countTrades(
+      conditionId,
+      CONTINUATION_TRADE_COUNT_CAP,
+    );
+    if (fetched === null) {
+      return { count: legLocalCount, source: "leg_local_fallback" };
+    }
+    return { count: fetched, source: "market_wide" };
+  }
+
   /** Evaluate a single token. Returns a signal, redeem, or null. */
-  private evaluateToken(
+  private async evaluateToken(
     tokenId: TokenId,
     now: number,
     nextSeq: (key: string) => number,
-  ): TokenEvalResult {
+  ): Promise<TokenEvalResult> {
     const legState = this.deps.legStateRepo.get(tokenId);
     const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
 
@@ -526,7 +727,12 @@ export class AlgoDecisionModule implements RuntimeModule {
     // Per market-selection-layer-design.md:53, pre-entry filter is separate from
     // position management: legState tokens are gated by continuation, not eligibility.
     if (legState) {
-      const stop = !evaluateContinuation(emissionFacts.legTradeCount, legState.firstTradePrice);
+      const { count: tradeCount, source: tradeCountSource } =
+        await this.resolveContinuationTradeCount(
+          market.conditionId as ConditionId,
+          emissionFacts.legTradeCount,
+        );
+      const stop = !evaluateContinuation(tradeCount, legState.firstTradePrice);
       if (stop) {
         this.recordDecisionSuppressed({
           tokenId,
@@ -538,6 +744,8 @@ export class AlgoDecisionModule implements RuntimeModule {
           timeSinceLastSeconds,
           emissionFacts,
           timestamp: new Date(now).toISOString(),
+          tradeCount,
+          tradeCountSource,
         });
         return null; // spec §0: fail continuation → full STOP (no more signals)
       }
@@ -609,23 +817,30 @@ export class AlgoDecisionModule implements RuntimeModule {
       generatedAt: new Date(now).toISOString(),
     };
 
-    this.recordDecisionSignal(
-      {
-        signalId: signal.signalId,
-        tokenId: signal.tokenId,
-        conditionId: signal.conditionId,
-        side: side === "buy" ? "BUY" : "SELL",
-        decisionRuleId: signal.decisionRuleId,
-        state: ctx.state,
-        price: ctx.price,
-        buyCount,
-        timeSinceLastSeconds: ctx.timeSinceLastSeconds,
-        signalTimestamp: signal.generatedAt,
-      },
-      emissionFacts,
-    );
+    // Defer telemetry until the wallet-budget filter in `evaluateTokensInner`
+    // has decided to keep this signal. Recording at construction time
+    // overcounts decision_signal_log/signal_emitted by every tail-end signal
+    // that gets silently dropped for lack of BUY headroom, breaking the
+    // emitted-vs-suppressed accounting operators rely on.
+    const commitLog = (): void => {
+      this.recordDecisionSignal(
+        {
+          signalId: signal.signalId,
+          tokenId: signal.tokenId,
+          conditionId: signal.conditionId,
+          side: side === "buy" ? "BUY" : "SELL",
+          decisionRuleId: signal.decisionRuleId,
+          state: ctx.state,
+          price: ctx.price,
+          buyCount,
+          timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+          signalTimestamp: signal.generatedAt,
+        },
+        emissionFacts,
+      );
+    };
 
-    return { type: "signal", signal, market };
+    return { type: "signal", signal, market, commitLog };
   }
 
   private recordDecisionSignal(signal: DecisionSignalLog, emissionFacts: EmissionFacts): void {
@@ -664,6 +879,8 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private recordDecisionSuppressed(facts: SuppressionFacts): void {
+    if (!this.shouldPersistSuppressionEvent(facts)) return;
+
     try {
       this.deps.riskEventRepo?.insert({
         eventType: "signal_suppressed",
@@ -680,6 +897,9 @@ export class AlgoDecisionModule implements RuntimeModule {
           timeSinceLastSeconds: facts.timeSinceLastSeconds,
           firstTradePrice: facts.emissionFacts.firstTradePrice,
           legTradeCount: facts.emissionFacts.legTradeCount,
+          tradeCount: facts.tradeCount ?? null,
+          tradeCountSource: facts.tradeCountSource ?? null,
+          continuationMode: this.continuationMode,
           signalTimestamp: facts.timestamp,
         },
       });
@@ -688,6 +908,41 @@ export class AlgoDecisionModule implements RuntimeModule {
         { err, tokenId: String(facts.tokenId), reasonCode: facts.reasonCode },
         "failed to persist signal_suppressed risk event",
       );
+    }
+  }
+
+  private shouldPersistSuppressionEvent(facts: SuppressionFacts): boolean {
+    if (!DEDUPED_SUPPRESSION_REASONS.has(facts.reasonCode)) return true;
+
+    const eventAt = Date.parse(facts.timestamp);
+    const now = Number.isFinite(eventAt) ? eventAt : Date.now();
+    const key = [
+      facts.reasonCode,
+      String(facts.tokenId),
+      facts.conditionId ?? "",
+      facts.side ?? "",
+      this.continuationMode,
+    ].join("|");
+    const lastAt = this.suppressionDedupe.get(key);
+    if (lastAt != null && now - lastAt < NOISY_SUPPRESSION_DEDUPE_MS) return false;
+
+    this.suppressionDedupe.set(key, now);
+    if (this.suppressionDedupe.size > MAX_SUPPRESSION_DEDUPE_KEYS) {
+      this.pruneSuppressionDedupe(now);
+    }
+    return true;
+  }
+
+  private pruneSuppressionDedupe(now: number): void {
+    for (const [key, lastAt] of this.suppressionDedupe) {
+      if (now - lastAt >= NOISY_SUPPRESSION_DEDUPE_MS) {
+        this.suppressionDedupe.delete(key);
+      }
+    }
+    while (this.suppressionDedupe.size > MAX_SUPPRESSION_DEDUPE_KEYS) {
+      const oldestKey = this.suppressionDedupe.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.suppressionDedupe.delete(oldestKey);
     }
   }
 

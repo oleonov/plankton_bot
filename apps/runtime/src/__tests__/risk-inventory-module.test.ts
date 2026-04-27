@@ -6,6 +6,7 @@ import {
   createPositionId,
   createLotId,
   createConditionId,
+  createBotRunId,
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -18,8 +19,15 @@ import type {
   Signal,
   ClientOrderId,
   NormalizedMarket,
+  Fill,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
+import {
+  bootstrapDatabase,
+  SqliteInventoryLotRepository,
+  SqlitePositionRepository,
+  type DbConnection,
+} from "@plankton/db";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
@@ -112,6 +120,106 @@ function createMockOrderRepo(order?: Order | null): OrderRepository {
   };
 }
 
+function seedRealSellFillFixture(
+  conn: DbConnection,
+  overrides?: {
+    positionId?: string;
+    orderId?: string;
+    clientOrderId?: string;
+    buyFillId?: string;
+    sellFillId?: string;
+    runId?: string;
+    now?: string;
+  },
+): {
+  positionId: ReturnType<typeof createPositionId>;
+  buyFillId: ReturnType<typeof createFillId>;
+  sellFillId: ReturnType<typeof createFillId>;
+} {
+  const now = overrides?.now ?? "2026-04-27T00:00:00.000Z";
+  const runId = overrides?.runId ?? "run-real-sell";
+  const orderId = overrides?.orderId ?? "ord-real-sell";
+  const clientOrderId = overrides?.clientOrderId ?? "coid-real-sell";
+  const positionId = createPositionId(overrides?.positionId ?? "pos-real-sell");
+  const buyFillId = createFillId(overrides?.buyFillId ?? "fill-buy-real-sell");
+  const sellFillId = createFillId(overrides?.sellFillId ?? "fill-sell-real-sell");
+
+  conn.db
+    .prepare("INSERT INTO bot_runs (run_id, mode, started_at) VALUES (?, ?, ?)")
+    .run(createBotRunId(runId), "test", now);
+  conn.db
+    .prepare(
+      `INSERT INTO orders
+         (order_id, client_order_id, token_id, condition_id, side, order_type, price,
+          size, size_usdc, status, bot_run_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      orderId,
+      clientOrderId,
+      TOK_ID,
+      COND_ID,
+      "buy",
+      "GTC",
+      0.4,
+      10,
+      4,
+      "filled",
+      runId,
+      now,
+      now,
+    );
+  conn.db
+    .prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc,
+          liquidity_role, fee, fee_rate_bps, filled_at, reconciled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(buyFillId, orderId, TOK_ID, COND_ID, "buy", 0.4, 10, 4, "maker", 0, 0, now, 1);
+  conn.db
+    .prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc,
+          liquidity_role, fee, fee_rate_bps, filled_at, reconciled)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(sellFillId, orderId, TOK_ID, COND_ID, "sell", 0.6, 10, 6, "maker", 0, 0, now, 0);
+
+  const positionRepo = new SqlitePositionRepository(conn.db);
+  const lotRepo = new SqliteInventoryLotRepository(conn.db);
+  positionRepo.save({
+    positionId,
+    tokenId: TOK_ID,
+    conditionId: COND_ID,
+    side: "buy",
+    size: 10,
+    avgEntryPrice: 0.4,
+    costBasisUsdc: 4,
+    currentValueUsdc: 5,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: null,
+    openedAt: now,
+    closedAt: null,
+    updatedAt: now,
+  });
+  lotRepo.save({
+    lotId: createLotId(`lot-${buyFillId}`),
+    positionId,
+    tokenId: TOK_ID,
+    side: "buy",
+    size: 10,
+    remainingSize: 10,
+    entryPrice: 0.4,
+    costUsdc: 4,
+    fillId: buyFillId,
+    createdAt: now,
+  });
+
+  return { positionId, buyFillId, sellFillId };
+}
+
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -121,8 +229,15 @@ const silentLog = {
   child: () => silentLog,
 } as any;
 
+function immediateTransaction<T extends (...args: any[]) => any>(fn: T): T & { immediate: T } {
+  const tx = ((...args: Parameters<T>) => fn(...args)) as T & { immediate: T };
+  tx.immediate = tx;
+  return tx;
+}
+
 const mockDb = {
   prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
+  transaction: vi.fn((fn) => immediateTransaction(fn)),
 } as any;
 
 function createMockControlDb(walletBalance: number | null) {
@@ -144,7 +259,10 @@ describe("RiskInventoryModule", () => {
   let positionRepo: ReturnType<typeof createMockPositionRepo>;
   let lotRepo: ReturnType<typeof createMockLotRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
-  let fillRepo: { markReconciled: ReturnType<typeof vi.fn> };
+  let fillRepo: {
+    markReconciled: ReturnType<typeof vi.fn>;
+    findUnreconciled: ReturnType<typeof vi.fn>;
+  };
   let mod: RiskInventoryModule;
 
   function createModule(
@@ -169,7 +287,7 @@ describe("RiskInventoryModule", () => {
     positionRepo = createMockPositionRepo();
     lotRepo = createMockLotRepo();
     orderRepo = createMockOrderRepo();
-    fillRepo = { markReconciled: vi.fn() };
+    fillRepo = { markReconciled: vi.fn(), findUnreconciled: vi.fn().mockReturnValue([]) };
     mod = createModule();
   });
 
@@ -423,6 +541,40 @@ describe("RiskInventoryModule", () => {
 
     // Lot was created
     expect(lotRepo.save).toHaveBeenCalledTimes(1);
+
+    await mod.stop();
+  });
+
+  it("uses cash notional per net share as entry cost when BUY fees reduce wallet size", async () => {
+    await mod.start();
+
+    await bus.publish("FillReceived", {
+      fillId: createFillId("fill-net-buy"),
+      orderId: createOrderId("ord-net-buy"),
+      clientOrderId: "plk_net_buy" as ClientOrderId,
+      tokenId: TOK_ID,
+      conditionId: COND_ID,
+      side: "buy" as const,
+      price: 0.001,
+      size: 1085.84424,
+      sizeUsdc: 1.17,
+      liquidityRole: "taker",
+      fee: 0.08415576,
+      feeRateBps: 1000,
+      signalReason: null,
+      timestamp: Date.now(),
+    });
+
+    const savedPosition = (positionRepo.save as ReturnType<typeof vi.fn>).mock
+      .calls[0]![0] as Position;
+    const savedLot = (lotRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as InventoryLot;
+    const effectiveEntry = 1.17 / 1085.84424;
+
+    expect(savedPosition.size).toBeCloseTo(1085.84424, 5);
+    expect(savedPosition.costBasisUsdc).toBeCloseTo(1.17, 6);
+    expect(savedPosition.avgEntryPrice).toBeCloseTo(effectiveEntry, 8);
+    expect(savedLot.entryPrice).toBeCloseTo(effectiveEntry, 8);
+    expect(savedLot.costUsdc).toBeCloseTo(1.17, 6);
 
     await mod.stop();
   });
@@ -714,6 +866,227 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  it("replays unreconciled fills on start before live trading resumes", async () => {
+    const existingPos: Position = {
+      positionId: createPositionId("pos-unreconciled"),
+      tokenId: TOK_ID,
+      conditionId: COND_ID,
+      side: "buy",
+      size: 10,
+      avgEntryPrice: 0.4,
+      costBasisUsdc: 4,
+      currentValueUsdc: 5,
+      realizedPnl: 0,
+      status: "open",
+      entryStyle: null,
+      openedAt: new Date().toISOString(),
+      closedAt: null,
+      updatedAt: new Date().toISOString(),
+    };
+    positionRepo = createMockPositionRepo(existingPos);
+    const consumedLot: InventoryLot = {
+      lotId: createLotId("lot-unreconciled"),
+      positionId: existingPos.positionId,
+      tokenId: TOK_ID,
+      side: "buy",
+      size: 10,
+      remainingSize: 0,
+      entryPrice: 0.4,
+      costUsdc: 4,
+      fillId: createFillId("fill-buy-unreconciled"),
+      createdAt: new Date().toISOString(),
+    };
+    (lotRepo.consumeFifo as ReturnType<typeof vi.fn>).mockReturnValue([
+      { lot: consumedLot, consumed: 10 },
+    ]);
+    (lotRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([]);
+    fillRepo.findUnreconciled.mockReturnValue([
+      {
+        fillId: createFillId("fill-unreconciled-sell"),
+        orderId: createOrderId("ord-unreconciled-sell"),
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "sell",
+        price: 0.6,
+        size: 10,
+        sizeUsdc: 6,
+        liquidityRole: "unknown",
+        fee: 0,
+        feeRateBps: 0,
+        signalId: null,
+        decisionRuleId: null,
+        signalTimestamp: null,
+        filledAt: "2026-04-27T00:05:51.000Z",
+      } satisfies Fill,
+    ]);
+
+    mod = createModule();
+    await mod.start();
+
+    expect(positionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        positionId: existingPos.positionId,
+        size: 0,
+        status: "closed",
+        realizedPnl: 2,
+      }),
+    );
+    expect(fillRepo.markReconciled).toHaveBeenCalledWith([createFillId("fill-unreconciled-sell")]);
+
+    await mod.stop();
+  });
+
+  it("applies sell fills against legacy pnl ledger family columns", async () => {
+    const conn = bootstrapDatabase(":memory:");
+    try {
+      const now = "2026-04-27T00:00:00.000Z";
+      const { positionId, buyFillId, sellFillId } = seedRealSellFillFixture(conn, {
+        positionId: "pos-legacy-pnl",
+        orderId: "ord-legacy-pnl",
+        clientOrderId: "coid-legacy-pnl",
+        buyFillId: "fill-buy-legacy",
+        sellFillId: "fill-sell-legacy",
+        runId: "run-legacy-pnl",
+        now,
+      });
+      conn.db.exec(`
+        DROP TABLE pnl_ledger;
+        CREATE TABLE pnl_ledger (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          fill_id     TEXT NOT NULL REFERENCES fills(fill_id),
+          position_id TEXT NOT NULL REFERENCES positions(position_id),
+          family_id   TEXT NOT NULL,
+          delta       REAL NOT NULL,
+          filled_at   TEXT NOT NULL,
+          created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+      `);
+
+      const localBus = new InProcessEventBus();
+      const localFillRepo = {
+        markReconciled: vi.fn(),
+        findUnreconciled: vi.fn().mockReturnValue([]),
+      };
+      const localModule = new RiskInventoryModule({
+        bus: localBus,
+        positionRepo: new SqlitePositionRepository(conn.db),
+        inventoryLotRepo: new SqliteInventoryLotRepository(conn.db),
+        orderRepo: createMockOrderRepo(),
+        fillRepo: localFillRepo,
+        log: silentLog,
+        db: conn.db,
+      });
+      await localModule.start();
+
+      await localBus.publish("FillReceived", {
+        fillId: sellFillId,
+        orderId: createOrderId("ord-legacy-pnl"),
+        clientOrderId: "coid-sell-legacy" as ClientOrderId,
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "sell" as const,
+        price: 0.6,
+        size: 10,
+        sizeUsdc: 6,
+        liquidityRole: "maker",
+        fee: 0,
+        feeRateBps: 0,
+        signalReason: null,
+        timestamp: new Date(now).getTime(),
+      });
+
+      const lot = conn.db
+        .prepare("SELECT remaining_size FROM inventory_lots WHERE fill_id = ?")
+        .get(buyFillId) as { remaining_size: number };
+      const position = conn.db
+        .prepare("SELECT size, status, realized_pnl FROM positions WHERE position_id = ?")
+        .get(positionId) as { size: number; status: string; realized_pnl: number };
+      const pnl = conn.db
+        .prepare("SELECT family_id, delta FROM pnl_ledger WHERE fill_id = ?")
+        .get(sellFillId) as { family_id: string; delta: number };
+
+      expect(lot.remaining_size).toBe(0);
+      expect(position).toMatchObject({ size: 0, status: "closed", realized_pnl: 2 });
+      expect(pnl).toEqual({ family_id: "legacy", delta: 2 });
+      expect(localFillRepo.markReconciled).toHaveBeenCalledWith([sellFillId]);
+
+      await localModule.stop();
+    } finally {
+      conn.close();
+    }
+  });
+
+  it("rolls back FIFO lot consumption when sell fill persistence fails", async () => {
+    const conn = bootstrapDatabase(":memory:");
+    try {
+      const now = "2026-04-27T00:00:00.000Z";
+      const { positionId, buyFillId, sellFillId } = seedRealSellFillFixture(conn, {
+        positionId: "pos-failing-pnl",
+        orderId: "ord-failing-pnl",
+        clientOrderId: "coid-failing-pnl",
+        buyFillId: "fill-buy-failing-pnl",
+        sellFillId: "fill-sell-failing-pnl",
+        runId: "run-failing-pnl",
+        now,
+      });
+      conn.db.exec(`
+        CREATE TRIGGER fail_pnl_insert
+        BEFORE INSERT ON pnl_ledger
+        BEGIN
+          SELECT RAISE(FAIL, 'forced pnl failure');
+        END;
+      `);
+
+      const localBus = new InProcessEventBus();
+      const localFillRepo = {
+        markReconciled: vi.fn(),
+        findUnreconciled: vi.fn().mockReturnValue([]),
+      };
+      const localModule = new RiskInventoryModule({
+        bus: localBus,
+        positionRepo: new SqlitePositionRepository(conn.db),
+        inventoryLotRepo: new SqliteInventoryLotRepository(conn.db),
+        orderRepo: createMockOrderRepo(),
+        fillRepo: localFillRepo,
+        log: silentLog,
+        db: conn.db,
+      });
+      await localModule.start();
+
+      await localBus.publish("FillReceived", {
+        fillId: sellFillId,
+        orderId: createOrderId("ord-failing-pnl"),
+        clientOrderId: "coid-sell-failing-pnl" as ClientOrderId,
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "sell" as const,
+        price: 0.6,
+        size: 10,
+        sizeUsdc: 6,
+        liquidityRole: "maker",
+        fee: 0,
+        feeRateBps: 0,
+        signalReason: null,
+        timestamp: new Date(now).getTime(),
+      });
+
+      const lot = conn.db
+        .prepare("SELECT remaining_size FROM inventory_lots WHERE fill_id = ?")
+        .get(buyFillId) as { remaining_size: number };
+      const position = conn.db
+        .prepare("SELECT size, status FROM positions WHERE position_id = ?")
+        .get(positionId) as { size: number; status: string };
+
+      expect(lot.remaining_size).toBe(10);
+      expect(position).toMatchObject({ size: 10, status: "open" });
+      expect(localFillRepo.markReconciled).not.toHaveBeenCalled();
+
+      await localModule.stop();
+    } finally {
+      conn.close();
+    }
+  });
+
   // ─── Unsubscribe on stop ──────────────────────────────────────────
 
   it("does not process events after stop", async () => {
@@ -950,7 +1323,7 @@ describe("RiskInventoryModule", () => {
       mod = createModule();
       await mod.start();
 
-      // Market moves from 0.05 to 0.08 → new value = 100 * 0.08 = 8.0
+      // Market moves from 0.05 to 0.07 sellable bid → new value = 100 * 0.07 = 7.0
       await bus.publish("NormalizedMarketUpdated", {
         markets: [
           {
@@ -986,8 +1359,79 @@ describe("RiskInventoryModule", () => {
       const saveCalls = (positionRepo.save as any).mock.calls;
       expect(saveCalls.length).toBeGreaterThanOrEqual(1);
       const savedPos = saveCalls[saveCalls.length - 1][0];
-      expect(savedPos.currentValueUsdc).toBeCloseTo(8.0, 2);
+      expect(savedPos.currentValueUsdc).toBeCloseTo(7.0, 2);
       expect(savedPos.status).toBe("open");
+
+      await mod.stop();
+    });
+
+    it("values long inventory at the sellable side instead of midpoint", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-wide-spread"),
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "buy",
+        size: 100,
+        avgEntryPrice: 0.05,
+        costBasisUsdc: 5,
+        currentValueUsdc: 5,
+        realizedPnl: 0,
+        status: "open",
+        entryStyle: null,
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule();
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ bestBid: 0.07, bestAsk: 0.09, midPrice: 0.08 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls.length).toBeGreaterThanOrEqual(1);
+      const savedPos = saveCalls[saveCalls.length - 1][0];
+      expect(savedPos.currentValueUsdc).toBeCloseTo(7.0, 2);
+
+      await mod.stop();
+    });
+
+    it("marks long inventory as zero value when no best bid exists", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-no-bid"),
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "buy",
+        size: 2100,
+        avgEntryPrice: 0.001,
+        costBasisUsdc: 2.1,
+        currentValueUsdc: 3.15,
+        realizedPnl: 0,
+        status: "open",
+        entryStyle: null,
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule();
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ bestBid: null, bestAsk: 0.001, midPrice: null })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls.length).toBeGreaterThanOrEqual(1);
+      const savedPos = saveCalls[saveCalls.length - 1][0];
+      expect(savedPos.currentValueUsdc).toBe(0);
+      expect(savedPos.status).toBe("dust");
 
       await mod.stop();
     });
@@ -1048,7 +1492,7 @@ describe("RiskInventoryModule", () => {
       const saveCalls = (positionRepo.save as any).mock.calls;
       expect(saveCalls.length).toBeGreaterThanOrEqual(1);
       const savedPos = saveCalls[saveCalls.length - 1][0];
-      expect(savedPos.currentValueUsdc).toBeCloseTo(0.2, 2);
+      expect(savedPos.currentValueUsdc).toBeCloseTo(0.19, 2);
       expect(savedPos.status).toBe("dust");
 
       await mod.stop();
@@ -1110,7 +1554,7 @@ describe("RiskInventoryModule", () => {
       const saveCalls = (positionRepo.save as any).mock.calls;
       expect(saveCalls.length).toBeGreaterThanOrEqual(1);
       const savedPos = saveCalls[saveCalls.length - 1][0];
-      expect(savedPos.currentValueUsdc).toBeCloseTo(5.11328, 5);
+      expect(savedPos.currentValueUsdc).toBeCloseTo(5.046, 5);
       expect(savedPos.status).toBe("open");
 
       await mod.stop();

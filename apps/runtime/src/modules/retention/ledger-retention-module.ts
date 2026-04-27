@@ -35,6 +35,7 @@ export interface LedgerRetentionConfig {
   decisionSignalLogTtlMs?: number;
   tradingStateSnapshotsTtlMs?: number;
   portfolioSnapshotsTtlMs?: number;
+  signalTelemetryRiskEventsTtlMs?: number;
   riskEventsTtlMs?: number;
   criticalRiskEventsTtlMs?: number;
   checkpointIntervalMs?: number;
@@ -58,20 +59,21 @@ const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
 const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
-  intervalMs: HOUR_MS,
+  intervalMs: 5 * 60 * 1000,
   batchSize: 5_000,
-  maxDeletedRowsPerRun: 100_000,
+  maxDeletedRowsPerRun: 50_000,
   runtimeMetricsTtlMs: 30 * DAY_MS,
   marketSnapshotsTtlMs: 7 * DAY_MS,
   executionPolicyObservationsTtlMs: 90 * DAY_MS,
   decisionSignalLogTtlMs: 90 * DAY_MS,
   tradingStateSnapshotsTtlMs: 14 * DAY_MS,
   portfolioSnapshotsTtlMs: 90 * DAY_MS,
-  riskEventsTtlMs: 180 * DAY_MS,
-  criticalRiskEventsTtlMs: 365 * DAY_MS,
-  checkpointIntervalMs: 24 * HOUR_MS,
-  checkpointMinDeletedRows: 100_000,
-  runOnStart: false,
+  signalTelemetryRiskEventsTtlMs: 14 * DAY_MS,
+  riskEventsTtlMs: 90 * DAY_MS,
+  criticalRiskEventsTtlMs: 90 * DAY_MS,
+  checkpointIntervalMs: HOUR_MS,
+  checkpointMinDeletedRows: 50_000,
+  runOnStart: true,
 };
 
 type DeleteTask = {
@@ -229,6 +231,13 @@ export class LedgerRetentionModule implements RuntimeModule {
         "portfolio_snapshots",
         "captured_at",
         nowMs - this.config.portfolioSnapshotsTtlMs,
+      ),
+      this.deleteOlderThanTask(
+        "risk_events.signal_telemetry",
+        "risk_events",
+        "created_at",
+        nowMs - this.config.signalTelemetryRiskEventsTtlMs,
+        "event_type IN ('signal_suppressed', 'signal_emitted')",
       ),
       this.deleteOlderThanTask(
         "risk_events.non_critical",

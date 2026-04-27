@@ -88,6 +88,8 @@ export interface ExchangeFill {
   readonly side: OrderSide;
   readonly price: number;
   readonly size: number;
+  /** Cash notional paid/received when it differs from wallet share size × price. */
+  readonly sizeUsdc?: number;
   readonly liquidityRole: LiquidityRole;
   readonly fee: number;
   readonly feeRateBps: number;

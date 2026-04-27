@@ -2,7 +2,8 @@
  * Scenario fixture and result types for deterministic end-to-end validation.
  */
 
-import type { ClobMarket, PriceLevel } from "@plankton/domain";
+import type { ClobMarket, MarketTradeCountProvider, PriceLevel } from "@plankton/domain";
+import type Database from "better-sqlite3";
 
 /** A single market snapshot to feed into the simulation gateway. */
 export interface MarketFixture {
@@ -49,6 +50,19 @@ export interface ScenarioFixture {
    * production poll cadence). Default: 0 (back-to-back, burst mode).
    */
   tickDelayMs?: number;
+  /**
+   * ADR-016: optional control-DB handle wired into AlgoDecisionModule. When
+   * provided, the module reads `continuation_mode` and the version from this
+   * DB on every sweep, exactly as in production. Caller bootstraps and seeds
+   * it (typical usage: in-memory DB with `control.sql` schema applied).
+   */
+  controlDb?: Database.Database;
+  /**
+   * ADR-016: optional `MarketTradeCountProvider` injected into
+   * AlgoDecisionModule. Required when the scenario runs under
+   * `continuation_mode = 'market_wide'`; ignored otherwise.
+   */
+  tradeCountProvider?: MarketTradeCountProvider;
 }
 
 /** Aggregated results collected after a scenario run. */

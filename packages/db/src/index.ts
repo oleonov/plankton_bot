@@ -18,6 +18,9 @@ export { SqliteProfileSummaryRepository } from "./repositories/profile-summary-r
 export {
   SqliteRuntimeControlStateRepository,
   readExecutionPolicyVersion,
+  readContinuationMode,
+  readContinuationModeVersion,
+  setContinuationMode,
 } from "./repositories/runtime-control-state-repository.js";
 export { SqliteSwitchRequestRepository } from "./repositories/switch-request-repository.js";
 export { SqlitePreflightReportRepository } from "./repositories/preflight-report-repository.js";

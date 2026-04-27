@@ -29,6 +29,10 @@ export { LiveMarketDataGateway, type LiveMarketDataConfig } from "./live/market-
 export { type UserEventStreamAuth } from "./live/user-event-stream.js";
 export { buildClobAxiosAgent, type ClobAxiosAgentOptions } from "./live/axios-agent.js";
 export {
+  installClobErrorSanitizer,
+  sanitizeAxiosError,
+} from "./live/clob-error-sanitizer.js";
+export {
   PolymarketDataPositionReader,
   aggregatePolymarketPositions,
   fetchPolymarketPositions,
@@ -39,6 +43,17 @@ export {
   type PolymarketPositionAggregate,
   type PolymarketPositionReader,
 } from "./polymarket-data-api.js";
+export {
+  DataApiTradeCountProvider,
+  DATA_API_DEFAULT_BASE_URL,
+  DATA_API_DEFAULT_CACHE_TTL_MS,
+  DATA_API_DEFAULT_TIMEOUT_MS,
+  DATA_API_DEFAULT_MAX_CACHE_ENTRIES,
+  DATA_API_DEFAULT_PREFETCH_CONCURRENCY,
+  type DataApiTradeCountProviderOptions,
+  type TradeCountFetchEvent,
+  type TradeCountObserver,
+} from "./data-api-trade-count-provider.js";
 
 // Gamma discovery + resolution
 export { GammaMarketDiscoveryGateway, type GammaDiscoveryConfig } from "./gamma/index.js";

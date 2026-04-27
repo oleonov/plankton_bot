@@ -2,8 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bootstrapDatabase } from "../bootstrap.js";
-import type { DbConnection } from "../connection.js";
+import { bootstrapControlDb, bootstrapDatabase, bootstrapLedgerDb } from "../bootstrap.js";
+import { RUNTIME_BUSY_TIMEOUT_MS, type DbConnection } from "../connection.js";
+
+function readBusyTimeout(db: import("better-sqlite3").Database): number {
+  const row = db.pragma("busy_timeout") as Array<{ timeout: number }>;
+  return row[0]!.timeout;
+}
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -70,5 +75,45 @@ describe("bootstrapDatabase", () => {
       )
       .all() as { name: string }[];
     expect(tables).toHaveLength(0);
+  });
+
+  it("returns a connection at the runtime busy_timeout (not the bootstrap budget)", () => {
+    // The bootstrap window opens at 600s for DDL/CREATE INDEX, but the
+    // returned connection is reused for the entire process lifetime — leaving
+    // 600s in place would let a runtime/API query stall the event loop for
+    // 10 minutes behind a write lock.
+    expect(readBusyTimeout(conn.db)).toBe(RUNTIME_BUSY_TIMEOUT_MS);
+  });
+});
+
+describe("bootstrapControlDb busy_timeout scoping", () => {
+  it("returns a connection at the runtime busy_timeout after bootstrap DDL", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "plankton-control-bootstrap-"));
+    try {
+      const c = bootstrapControlDb(path.join(dir, "control.db"));
+      try {
+        expect(readBusyTimeout(c.db)).toBe(RUNTIME_BUSY_TIMEOUT_MS);
+      } finally {
+        c.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("bootstrapLedgerDb busy_timeout scoping", () => {
+  it("returns a connection at the runtime busy_timeout after bootstrap DDL", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-bootstrap-"));
+    try {
+      const c = bootstrapLedgerDb(path.join(dir, "ledger.db"));
+      try {
+        expect(readBusyTimeout(c.db)).toBe(RUNTIME_BUSY_TIMEOUT_MS);
+      } finally {
+        c.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

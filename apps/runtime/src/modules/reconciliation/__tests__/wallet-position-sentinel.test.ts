@@ -126,12 +126,150 @@ describe("runWalletPositionSentinel", () => {
     expect(result.driftCount).toBe(0);
   });
 
+  it("detects active local inventory whose size diverges from Polymarket", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 1135.84424, currentValueUsdc: 1.7037 })]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 1220,
+            costBasisUsdc: 2.62,
+            currentValueUsdc: 2.44,
+            realizedPnl: 0,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.details[0]).toContain("wallet-live-position-size-mismatch");
+  });
+
   it("does not flag closed positions after market endDate", async () => {
     const result = await runWalletPositionSentinel(
       {
         reader: reader([makeRemote()]),
         positionRepo: positionRepo([makePosition()]),
         marketRepo: marketRepo(makeMarket({ endDate: "2026-04-24T00:00:00.000Z" })),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+  });
+
+  it("flags an open local position whose token is absent from Polymarket positions", async () => {
+    // Local DB still believes we own shares; wallet returns no row at all.
+    // Without this branch, the loop would skip the token and the drift would
+    // remain invisible — matching the production gap in finding #2.
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 50,
+            costBasisUsdc: 5,
+            currentValueUsdc: 4.5,
+            realizedPnl: 0,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.missingRemotePositions).toHaveLength(1);
+    expect(result.missingRemotePositions[0]!.localStatus).toBe("open");
+    expect(result.missingRemotePositions[0]!.localSize).toBe(50);
+    expect(result.missingRemotePositions[0]!.remoteSize).toBe(0);
+    expect(result.details[0]).toContain("wallet-local-position-missing-remote");
+  });
+
+  it("flags a dust local position absent from Polymarket while market is live", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({ status: "dust", size: 0.5, closedAt: null }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.missingRemotePositions[0]!.localStatus).toBe("dust");
+  });
+
+  it("treats a remote dust row (size <= MIN_REMOTE_SIZE) as missing for inverse-direction drift", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 1e-12, currentValueUsdc: 0 })]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 30,
+            costBasisUsdc: 3,
+            currentValueUsdc: 2.7,
+            realizedPnl: 0,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.missingRemotePositions).toHaveLength(1);
+    expect(result.activePositionDrifts).toHaveLength(0);
+  });
+
+  it("does not flag a missing-remote local position once market endDate has passed", async () => {
+    // Past-endDate non-zero local balance is the redeem path's job, not the
+    // wallet sentinel's: surfacing it here would double-count drift on every
+    // resolved market until the redeem ledger row clears it.
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 10,
+            costBasisUsdc: 1,
+            currentValueUsdc: 0.9,
+            realizedPnl: 0,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket({ endDate: "2026-04-24T00:00:00.000Z" })),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.missingRemotePositions).toHaveLength(0);
+  });
+
+  it("does not flag a closed-locally position when remote also has nothing", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([makePosition()]),
+        marketRepo: marketRepo(makeMarket()),
         log,
       },
       NOW,

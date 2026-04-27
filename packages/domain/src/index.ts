@@ -12,6 +12,7 @@ export * from "./slug-pattern.js";
 export * from "./trading-state.js";
 export * from "./algo-engine.js";
 export * from "./market-selection.js";
+export * from "./polymarket-fees.js";
 export { SelectionRuleEngine, normalizeSelectionPattern } from "./selection-rule-engine.js";
 export type { PreEntryInput } from "./market-selection.js";
 export {

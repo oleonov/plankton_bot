@@ -14,6 +14,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { withImmediate } from "@plankton/db";
 import type {
   RuntimeModule,
   EventBus,
@@ -23,6 +24,7 @@ import type {
   FillRepository,
   RuntimeEventMap,
   ProfileId,
+  ClientOrderId,
 } from "@plankton/domain";
 import { canPlaceBuyOrderForMarket } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -39,7 +41,7 @@ export interface RiskInventoryModuleDeps {
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
   orderRepo: OrderRepository;
-  fillRepo: Pick<FillRepository, "markReconciled">;
+  fillRepo: Pick<FillRepository, "findUnreconciled" | "markReconciled">;
   log: Logger;
   db: Database.Database;
   liveLiteGuard?: LiveLiteGuard | undefined;
@@ -111,6 +113,7 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
     );
+    await this.replayUnreconciledFills();
     this.started = true;
     this.log.info("risk-inventory module started");
   }
@@ -120,6 +123,34 @@ export class RiskInventoryModule implements RuntimeModule {
   ): Promise<void> {
     for (const tokenId of payload.removedTokenIds) {
       this.tokenMinOrderSize.delete(String(tokenId));
+    }
+  }
+
+  private async replayUnreconciledFills(): Promise<void> {
+    const fills = this.deps.fillRepo.findUnreconciled();
+    if (fills.length === 0) return;
+
+    this.log.warn({ count: fills.length }, "replaying unreconciled fills before startup");
+    for (const fill of fills) {
+      await this.handleFill({
+        fillId: fill.fillId,
+        orderId: fill.orderId,
+        clientOrderId: `replay-${fill.fillId}` as ClientOrderId,
+        tokenId: fill.tokenId,
+        conditionId: fill.conditionId,
+        side: fill.side,
+        price: fill.price,
+        size: fill.size,
+        sizeUsdc: fill.sizeUsdc,
+        liquidityRole: fill.liquidityRole,
+        fee: fill.fee,
+        feeRateBps: fill.feeRateBps,
+        signalReason: null,
+        signalId: fill.signalId ?? null,
+        decisionRuleId: fill.decisionRuleId ?? null,
+        signalTimestamp: fill.signalTimestamp ?? null,
+        timestamp: new Date(fill.filledAt).getTime(),
+      });
     }
   }
 
@@ -252,20 +283,22 @@ export class RiskInventoryModule implements RuntimeModule {
     this.fillsProcessed++;
 
     try {
-      const position = this.inventory.applyFill({
-        fillId: payload.fillId,
-        tokenId: payload.tokenId,
-        conditionId: payload.conditionId,
-        side: payload.side,
-        price: payload.price,
-        size: payload.size,
-        sizeUsdc: payload.sizeUsdc,
-        fee: payload.fee,
-        signalReason: payload.signalReason,
-        timestamp: payload.timestamp,
+      const position = withImmediate(this.deps.db, () => {
+        const applied = this.inventory.applyFill({
+          fillId: payload.fillId,
+          tokenId: payload.tokenId,
+          conditionId: payload.conditionId,
+          side: payload.side,
+          price: payload.price,
+          size: payload.size,
+          sizeUsdc: payload.sizeUsdc,
+          fee: payload.fee,
+          signalReason: payload.signalReason,
+          timestamp: payload.timestamp,
+        });
+        this.deps.fillRepo.markReconciled([payload.fillId]);
+        return applied;
       });
-
-      this.deps.fillRepo.markReconciled([payload.fillId]);
 
       await this.deps.bus.publish("PositionUpdated", { position });
     } catch (err) {
@@ -281,7 +314,8 @@ export class RiskInventoryModule implements RuntimeModule {
   private async handleMarketUpdate(
     payload: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
-    // Build lookup: tokenId → live midPrice
+    // Build lookup: tokenId → price that can be realized by selling long inventory now.
+    // No bid means no immediately sellable value; never keep a stale positive mark.
     const priceMap = new Map<string, number>();
     for (const m of payload.markets) {
       if (
@@ -291,9 +325,7 @@ export class RiskInventoryModule implements RuntimeModule {
       ) {
         this.tokenMinOrderSize.set(String(m.tokenId), m.minOrderSize);
       }
-      if (m.midPrice !== null) {
-        priceMap.set(String(m.tokenId), m.midPrice);
-      }
+      priceMap.set(String(m.tokenId), m.bestBid ?? 0);
     }
     if (priceMap.size === 0) return;
 

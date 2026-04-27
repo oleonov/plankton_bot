@@ -171,6 +171,53 @@ describe("importExchangeFills", () => {
     expect(result.details).toHaveLength(1);
   });
 
+  // Regression for "taker BUY orders never reach `filled`": Polymarket deducts
+  // the share-side fee from gross at fill time, so `fill.size` is NET shares
+  // while `order.size` is GROSS shares. Without compensation, the cumulative
+  // sum of `fill.size` never catches up to `order.size`. The order is then
+  // stuck `partially-filled`, its full sizeUsdc continues to be reserved by
+  // `OrderRepository.sumOpenBuyNotional()`, and new BUY budget silently dries
+  // up over uptime.
+  it("marks taker BUY filled when cumulative NET fill.size is below GROSS order.size", async () => {
+    const fills: ExchangeFill[] = [
+      {
+        fillId: "fill-taker-buy",
+        orderId: "ord-1",
+        clientOrderId: "co-1",
+        tokenId: createTokenId("tok-1"),
+        side: "buy",
+        price: 0.95,
+        // Gross 100 - shareFee 0.095 = 99.905 NET shares delivered.
+        size: 99.905,
+        sizeUsdc: 95, // gross USDC = grossSize × price = 100 × 0.95
+        liquidityRole: "taker",
+        fee: 95 * 0.02 * (1 - 0.95), // 0.095 USDC, irrelevant to status logic
+        feeRateBps: 200,
+        timestamp: Date.now(),
+      },
+    ];
+
+    const localOrder = {
+      orderId: createOrderId("ord-1"),
+      size: 100, // gross shares originally requested
+    };
+    (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
+    (orderRepo.findById as any).mockReturnValue(localOrder);
+    (fillRepo.findByOrderId as any).mockReturnValue([
+      {
+        side: "buy",
+        size: 99.905,
+        price: 0.95,
+        sizeUsdc: 95,
+        liquidityRole: "taker",
+      },
+    ]);
+
+    await importExchangeFills(fills, { fillRepo, orderRepo, bus, log: silentLog });
+
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "filled");
+  });
+
   it("sets partially-filled when cumulative < order size", async () => {
     const fills: ExchangeFill[] = [
       {

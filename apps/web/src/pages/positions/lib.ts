@@ -28,7 +28,7 @@ export function getPositionTotalPnl(p: PositionDTO): number {
 
 /** Derive client-side market-state tag from position status. */
 export function deriveMarketState(status: string): MarketState {
-  return status === "closed" || status === "dust" ? "closed" : "open";
+  return status === "closed" ? "closed" : "open";
 }
 
 /** Derive resolution tag from server fields + endDate urgency. */

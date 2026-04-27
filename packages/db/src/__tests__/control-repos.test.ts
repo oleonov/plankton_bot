@@ -16,7 +16,12 @@ import type {
 import type { ProfileId } from "@plankton/domain";
 import { SqliteProfileRepository } from "../repositories/profile-repository.js";
 import { SqliteProfileSettingsRepository } from "../repositories/profile-settings-repository.js";
-import { readExecutionPolicyVersion } from "../repositories/runtime-control-state-repository.js";
+import {
+  readContinuationMode,
+  readContinuationModeVersion,
+  readExecutionPolicyVersion,
+  setContinuationMode,
+} from "../repositories/runtime-control-state-repository.js";
 import { SqliteProfileSummaryRepository } from "../repositories/profile-summary-repository.js";
 import { SqliteRuntimeControlStateRepository } from "../repositories/runtime-control-state-repository.js";
 import { SqliteSwitchRequestRepository } from "../repositories/switch-request-repository.js";
@@ -235,6 +240,8 @@ describe("SqliteRuntimeControlStateRepository", () => {
       paused: true,
       schemaVersion: 1,
       executionPolicyVersion: 0,
+      continuationMode: "leg_local",
+      continuationModeVersion: 0,
       updatedAt: NOW,
     };
     repo.save(state);
@@ -269,6 +276,56 @@ describe("SqliteRuntimeControlStateRepository", () => {
     const found = repo.get()!;
     expect(found.runtimeStatus).toBe("running");
     expect(found.paused).toBe(false);
+  });
+
+  describe("ADR-016: continuation_mode toggle", () => {
+    it("defaults to leg_local with version 0", () => {
+      db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+      expect(readContinuationMode(db)).toBe("leg_local");
+      expect(readContinuationModeVersion(db)).toBe(0);
+    });
+
+    it("setContinuationMode bumps version on change", () => {
+      const first = setContinuationMode(db, "market_wide");
+      expect(first).toEqual({ changed: true, version: 1 });
+      expect(readContinuationMode(db)).toBe("market_wide");
+      expect(readContinuationModeVersion(db)).toBe(1);
+    });
+
+    it("setContinuationMode is idempotent on same value", () => {
+      setContinuationMode(db, "market_wide");
+      const second = setContinuationMode(db, "market_wide");
+      expect(second).toEqual({ changed: false, version: 1 });
+      expect(readContinuationModeVersion(db)).toBe(1);
+    });
+
+    it("flipping back to leg_local bumps version again", () => {
+      setContinuationMode(db, "market_wide");
+      const back = setContinuationMode(db, "leg_local");
+      expect(back).toEqual({ changed: true, version: 2 });
+      expect(readContinuationMode(db)).toBe("leg_local");
+    });
+
+    it("readers return safe defaults on legacy DB without column", () => {
+      const legacy = new Database(":memory:");
+      legacy.exec(
+        "CREATE TABLE runtime_control_state (id INTEGER PRIMARY KEY, runtime_status TEXT)",
+      );
+      legacy.prepare("INSERT INTO runtime_control_state (id, runtime_status) VALUES (1, 'stopped')").run();
+      expect(readContinuationMode(legacy)).toBe("leg_local");
+      expect(readContinuationModeVersion(legacy)).toBe(0);
+      legacy.close();
+    });
+
+    it("rejects unknown mode values via CHECK constraint", () => {
+      expect(() =>
+        db
+          .prepare(
+            "INSERT INTO runtime_control_state (id, continuation_mode) VALUES (1, 'unknown_mode') ON CONFLICT(id) DO UPDATE SET continuation_mode='unknown_mode'",
+          )
+          .run(),
+      ).toThrow(/CHECK constraint failed|constraint failed/);
+    });
   });
 });
 

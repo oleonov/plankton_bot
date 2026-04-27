@@ -132,8 +132,8 @@ describe("deriveMarketState + deriveResolutionTag", () => {
   it("closed status → closed market", () => {
     expect(deriveMarketState("closed")).toBe("closed");
   });
-  it("dust status → closed market", () => {
-    expect(deriveMarketState("dust")).toBe("closed");
+  it("dust status → open market (kept visible until truly closed)", () => {
+    expect(deriveMarketState("dust")).toBe("open");
   });
   it("open status → open market", () => {
     expect(deriveMarketState("open")).toBe("open");

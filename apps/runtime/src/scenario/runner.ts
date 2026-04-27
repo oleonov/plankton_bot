@@ -236,6 +236,8 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     runtimeControl,
     log,
     sweepIntervalMs: 60_000,
+    ...(fixture.controlDb ? { controlDb: fixture.controlDb } : {}),
+    ...(fixture.tradeCountProvider ? { tradeCountProvider: fixture.tradeCountProvider } : {}),
   });
 
   const signalToOrderBridge = new SignalToOrderBridge({

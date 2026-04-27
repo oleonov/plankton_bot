@@ -5,7 +5,10 @@ import type {
   LegState,
   LegStateTransition,
   LegStateTransitionRepository,
+  Position,
+  PositionRepository,
   RuntimeEventMap,
+  TokenId,
 } from "@plankton/domain";
 import { createTokenId, createOrderId, deriveState } from "@plankton/domain";
 import type { Logger } from "../../../logger.js";
@@ -288,6 +291,168 @@ describe("LegStateTrackerModule", () => {
   it("healthCheck returns ok", async () => {
     const health = await mod.healthCheck();
     expect(health.ok).toBe(true);
+  });
+
+  // ─── Startup orphan-leg cleanup ────────────────────────────────────────────
+
+  describe("cleanupOrphanLegStates", () => {
+    function makeOpenPosition(tokenId: TokenId, size = 10): Position {
+      return {
+        positionId: `pos-${String(tokenId)}` as any,
+        tokenId,
+        conditionId: "cond-x" as any,
+        side: "buy",
+        size,
+        avgEntryPrice: 0.05,
+        costBasisUsdc: size * 0.05,
+        currentValueUsdc: size * 0.05,
+        realizedPnl: 0,
+        status: "open",
+        entryStyle: "probe",
+        openedAt: "2026-04-25T00:00:00Z",
+        closedAt: null,
+        updatedAt: "2026-04-25T00:00:00Z",
+      };
+    }
+
+    function makeClosedPosition(tokenId: TokenId): Position {
+      return {
+        ...makeOpenPosition(tokenId, 0),
+        size: 0,
+        status: "closed",
+        currentValueUsdc: 0,
+        closedAt: "2026-04-27T07:15:43Z",
+        updatedAt: "2026-04-27T07:15:43Z",
+      };
+    }
+
+    function makePositionRepo(positions: Map<string, Position>): PositionRepository {
+      return {
+        findByTokenId: vi.fn((tokenId) => positions.get(String(tokenId)) ?? null),
+        findById: vi.fn(() => null),
+        findAll: vi.fn(() => [...positions.values()]),
+        save: vi.fn(),
+      } as unknown as PositionRepository;
+    }
+
+    function seedLeg(repo: LegStateRepository, tokenId: TokenId): void {
+      repo.upsert({
+        tokenId,
+        buyCount: 1,
+        sellCount: 1,
+        lastAction: "SELL",
+        firstTradePrice: 0.1,
+        firstTradeAt: "2026-04-25T00:00:00Z",
+        lastTradeAt: "2026-04-27T00:05:51Z",
+        updatedAt: "2026-04-27T00:05:51Z",
+      });
+    }
+
+    it("clears orphan leg whose token has no position at all", async () => {
+      seedLeg(repo, TOK);
+      const positionRepo = makePositionRepo(new Map());
+
+      mod = new LegStateTrackerModule({
+        bus: bus as any,
+        legStateRepo: repo,
+        positionRepo,
+        log,
+      });
+      await mod.start();
+
+      expect(repo.get(TOK)).toBeNull();
+    });
+
+    it("clears orphan leg whose position is closed (mirrors prod orphan-after-replay scenario)", async () => {
+      seedLeg(repo, TOK);
+      const positions = new Map([[String(TOK), makeClosedPosition(TOK)]]);
+      const positionRepo = makePositionRepo(positions);
+
+      mod = new LegStateTrackerModule({
+        bus: bus as any,
+        legStateRepo: repo,
+        positionRepo,
+        log,
+      });
+      await mod.start();
+
+      expect(repo.get(TOK)).toBeNull();
+    });
+
+    it("preserves leg whose position is still open with size > 0", async () => {
+      seedLeg(repo, TOK);
+      const positions = new Map([[String(TOK), makeOpenPosition(TOK, 10)]]);
+      const positionRepo = makePositionRepo(positions);
+
+      mod = new LegStateTrackerModule({
+        bus: bus as any,
+        legStateRepo: repo,
+        positionRepo,
+        log,
+      });
+      await mod.start();
+
+      expect(repo.get(TOK)).not.toBeNull();
+    });
+
+    it("records audited CLEAR transition with reason orphan_leg_cleanup_at_startup", async () => {
+      seedLeg(repo, TOK);
+      const positions = new Map([[String(TOK), makeClosedPosition(TOK)]]);
+      const transitionRepo = createMockTransitionRepo();
+
+      mod = new LegStateTrackerModule({
+        bus: bus as any,
+        legStateRepo: repo,
+        legStateTransitionRepo: transitionRepo,
+        positionRepo: makePositionRepo(positions),
+        log,
+      });
+      await mod.start();
+
+      expect(transitionRepo.insert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tokenId: TOK,
+          action: "CLEAR",
+          reason: "orphan_leg_cleanup_at_startup",
+        }),
+      );
+    });
+
+    it("is a no-op when positionRepo is not provided", async () => {
+      seedLeg(repo, TOK);
+      mod = new LegStateTrackerModule({
+        bus: bus as any,
+        legStateRepo: repo,
+        log,
+      });
+      await mod.start();
+
+      expect(repo.get(TOK)).not.toBeNull();
+    });
+
+    it("clears orphan leg whose position has status 'dust' (below CLOB min, can't be sold)", async () => {
+      // Regression: dust positions still have size > 0 but can't be liquidated
+      // (below the exchange minimum). Without this case, AlgoDecisionModule
+      // keeps emitting D7 SELL on every sweep and ExecutionModule rejects
+      // them — same orphan-leg failure mode as closed positions, just with a
+      // non-zero size on the position row.
+      seedLeg(repo, TOK);
+      const dust: Position = {
+        ...makeOpenPosition(TOK, 0.0001),
+        status: "dust",
+      };
+      const positions = new Map([[String(TOK), dust]]);
+
+      mod = new LegStateTrackerModule({
+        bus: bus as any,
+        legStateRepo: repo,
+        positionRepo: makePositionRepo(positions),
+        log,
+      });
+      await mod.start();
+
+      expect(repo.get(TOK)).toBeNull();
+    });
   });
 
   // ─── Batch C: Full-cycle state transition (BUY → BUY → SELL → BUY) ──────────

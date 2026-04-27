@@ -147,7 +147,7 @@ describe("LedgerRetentionModule", () => {
     expect(count("fills")).toBe(1);
   });
 
-  it("keeps critical reconciliation risk events longer than regular events", async () => {
+  it("caps critical and regular risk events at the same 90-day TTL", async () => {
     db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
       "signal_rejected",
       "{}",
@@ -157,6 +157,11 @@ describe("LedgerRetentionModule", () => {
       "reconciliation_drift",
       '{"severity":"critical"}',
       "2025-10-01T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "reconciliation_drift",
+      '{"severity":"critical"}',
+      "2026-03-01T00:00:00.000Z",
     );
 
     const mod = new LedgerRetentionModule({
@@ -171,5 +176,53 @@ describe("LedgerRetentionModule", () => {
       event_type: string;
     }>;
     expect(rows).toEqual([{ event_type: "reconciliation_drift" }]);
+  });
+
+  it("deletes signal telemetry risk events after 14 days", async () => {
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "signal_suppressed",
+      "{}",
+      "2026-04-01T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "signal_emitted",
+      "{}",
+      "2026-04-01T00:00:00.000Z",
+    );
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "signal_rejected",
+      "{}",
+      "2026-04-01T00:00:00.000Z",
+    );
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db.prepare("SELECT event_type FROM risk_events").all() as Array<{
+      event_type: string;
+    }>;
+    expect(rows).toEqual([{ event_type: "signal_rejected" }]);
+  });
+
+  it("runs retention immediately on start by default", async () => {
+    insertMetric("market_data_last_update", "2026-04-24T00:00:00.000Z");
+    insertMetric("market_data_last_update", "2026-04-24T01:00:00.000Z");
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.start();
+
+    expect(count("runtime_metrics")).toBe(1);
+
+    await mod.stop();
   });
 });

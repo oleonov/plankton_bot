@@ -52,3 +52,12 @@ config/*.bak
 # Git worktrees
 .worktrees/
 /.claude/worktrees/*
+
+# pnpm content-addressed store (created by `pnpm install` in this dir)
+.pnpm-store/
+
+# Stale scheduler lock — recreated on demand by /loop machinery
+.claude/scheduled_tasks.lock
+
+# Local coverage baseline snapshot (regenerate locally; never committed)
+baseline-coverage.txt

@@ -54,6 +54,9 @@ CREATE TABLE IF NOT EXISTS runtime_control_state (
   schema_version           INTEGER NOT NULL DEFAULT 1,
   selection_rules_version  INTEGER NOT NULL DEFAULT 0,
   execution_policy_version INTEGER NOT NULL DEFAULT 0,
+  continuation_mode        TEXT NOT NULL DEFAULT 'leg_local'
+    CHECK (continuation_mode IN ('leg_local', 'market_wide')),
+  continuation_mode_version INTEGER NOT NULL DEFAULT 0,
   updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

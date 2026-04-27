@@ -2,16 +2,23 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { ensureControlProfiles, ensureDefaultExecutionPolicy } from "./control-profiles.js";
-import { openDatabase, openDatabaseWithSchema, type DbConnection } from "./connection.js";
+import {
+  BOOTSTRAP_BUSY_TIMEOUT_MS,
+  openDatabase,
+  openDatabaseWithSchema,
+  setRuntimeBusyTimeout,
+  type DbConnection,
+} from "./connection.js";
 import { runControlMigrations, runMigrations } from "./migrations/runner.js";
 
 export function bootstrapDatabase(dbPath: string): DbConnection {
-  const conn = openDatabase(dbPath);
+  const conn = openDatabase(dbPath, { busyTimeoutMs: BOOTSTRAP_BUSY_TIMEOUT_MS });
   runMigrations(conn.db);
   ensureBootstrapBackfillsTable(conn.db);
   safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
+  setRuntimeBusyTimeout(conn);
   return conn;
 }
 
@@ -20,7 +27,9 @@ function readSchema(filename: string): string {
 }
 
 export function bootstrapControlDb(dbPath: string): DbConnection {
-  const conn = openDatabaseWithSchema(dbPath, readSchema("control.sql"));
+  const conn = openDatabaseWithSchema(dbPath, readSchema("control.sql"), {
+    busyTimeoutMs: BOOTSTRAP_BUSY_TIMEOUT_MS,
+  });
   ensureControlProfiles(conn.db);
   ensureBootstrapBackfillsTable(conn.db);
   seedControlMigrationsBaseline(conn.db);
@@ -45,6 +54,7 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
 
+  setRuntimeBusyTimeout(conn);
   return conn;
 }
 
@@ -140,6 +150,15 @@ const CONTROL_MIGRATION_BASELINES: ControlMigrationBaseline[] = [
       !hasTable(db, "archive_promotion_proposals_034") &&
       !hasTable(db, "archive_family_deployments_031") &&
       !hasTable(db, "archive_family_deployments_033"),
+  },
+  {
+    name: "040_continuation_mode.sql",
+    // Post-040 shape: runtime_control_state has continuation_mode +
+    // continuation_mode_version. Fresh bootstrap creates both directly
+    // via control.sql; upgrade installs gain them via this migration.
+    isAlreadyApplied: (db) =>
+      hasColumn(db, "runtime_control_state", "continuation_mode") &&
+      hasColumn(db, "runtime_control_state", "continuation_mode_version"),
   },
 ];
 
@@ -310,7 +329,7 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   // declares CREATE INDEX on columns (selection_status, tradable, …) that
   // pre-selection-rules DBs don't have yet. ALTER TABLE ADD COLUMN first so
   // `openDatabaseWithSchema` doesn't fail the index build on a missing column.
-  const conn = openDatabase(dbPath);
+  const conn = openDatabase(dbPath, { busyTimeoutMs: BOOTSTRAP_BUSY_TIMEOUT_MS });
   safeAddColumn(conn.db, "markets", "outcome_index", "INTEGER");
   safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
   safeAddColumn(conn.db, "markets", "event_market_count", "INTEGER NOT NULL DEFAULT 1");
@@ -338,6 +357,7 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "execution_policy_observations", "decision_rule_id", "TEXT");
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
   ensureUniqueOpenPositionIndex(conn.db);
+  setRuntimeBusyTimeout(conn);
   return conn;
 }
 

@@ -88,10 +88,9 @@ export class SqliteFillRepository implements FillRepository {
   }
 
   findUnreconciled(): Fill[] {
-    const rows = this.db.prepare("SELECT * FROM fills WHERE reconciled = 0").all() as Record<
-      string,
-      unknown
-    >[];
+    const rows = this.db
+      .prepare("SELECT * FROM fills WHERE reconciled = 0 ORDER BY filled_at ASC, fill_id ASC")
+      .all() as Record<string, unknown>[];
     return rows.map((r) => this.rowToFill(r));
   }
 

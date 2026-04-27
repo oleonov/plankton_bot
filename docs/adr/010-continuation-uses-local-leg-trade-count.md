@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted — 2026-04-23
+Amended by [ADR-016 — Market-wide continuation mode (opt-in, hot-reloadable)](./016-market-wide-continuation-mode.md) — 2026-04-26.
+
+The decision below remains the **default** (`continuation_mode = "leg_local"`) and applies to every install where the operator has not flipped the new toggle. ADR-016 introduces an opt-in `market_wide` mode that consults `data-api.polymarket.com` for the canonical, market-level `trade_count`. The two modes coexist; `null` returns from the new provider degrade per-decision back to the `leg_local` arithmetic described here.
+
+Originally accepted — 2026-04-23.
 
 ## Context
 
@@ -64,15 +68,18 @@ Negative / neutral:
 This ADR should be revisited if any of the following change:
 
 - Polymarket publishes a first-class per-market `trade_count` field on Gamma `/markets`, CLOB `/markets`, or a dedicated aggregate-stats endpoint.
-- Operational data shows continuation misfiring in a way attributable to the local-vs-market gap (rather than to orthogonal execution-quality issues).
+- Operational data shows continuation misfiring in a way attributable to the local-vs-market gap (rather than to orthogonal execution-quality issues). _(Triggered 2026-04-26 — see ADR-016.)_
 - Product explicitly prioritises market-level continuation semantics over runtime independence from data-api.
 
 ## See also
 
 - `research_plankton/plankton-analysis/06_algorithm_spec.md` — canonical spec (read-only).
+- `docs/adr/016-market-wide-continuation-mode.md` — opt-in `market_wide` mode that amends this ADR; the default `leg_local` path documented here is unchanged.
 - `packages/domain/src/market-selection.ts:45` — `evaluateContinuation(legTradeCount, firstTradePrice)`.
-- `apps/runtime/src/modules/algo-decision/algo-decision-module.ts:402` — runtime call site passing `legState.buyCount + legState.sellCount`.
+- `apps/runtime/src/modules/algo-decision/algo-decision-module.ts` — runtime call site (`evaluateToken` continuation gate).
 - `docs/audits/2026-04-23-gamma-trade-count-probe.md` — empirical probe establishing that no first-class field exists.
 - `docs/audits/2026-04-23-algo-followups-and-prod-observations.md §A1` — audit finding this ADR resolves.
 - `docs/audits/2026-04-23-algo-followups-remediation-plan.md §Phase 3.C` — remediation plan step.
+- `docs/audits/2026-04-26-pnl-loss-investigation-and-plan.md` §2.3, §2.9 — empirical evidence triggering ADR-016.
+- `docs/audits/2026-04-26-continuation-spec-alignment-plan.md` — P0–P8 plan implementing the ADR-016 path.
 - `docs/adr/007-historical-filter-volume-proxy.md` — sibling waiver for the historical-universe `trade_count` usage (A2).

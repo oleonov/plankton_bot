@@ -4,11 +4,21 @@ import type { PolymarketDataPosition, PolymarketPositionReader } from "@plankton
 import type { Logger } from "../../logger.js";
 
 const MIN_REMOTE_SIZE = 1e-9;
+const SIZE_DRIFT_EPSILON = 1e-6;
 
 export interface WalletPositionSentinelResult {
   driftCount: number;
   details: string[];
   closedLivePositions: ClosedLivePositionDrift[];
+  activePositionDrifts: ActivePositionSizeDrift[];
+  /**
+   * Local has an open/dust position with size > 0, but Polymarket reports
+   * either no row for the token or a zero/dust balance — and the market is
+   * still live (endDate in the future or unknown). Means we believe we own
+   * shares the wallet does not actually hold; root cause stays visible
+   * because the sentinel never repairs state.
+   */
+  missingRemotePositions: MissingRemotePositionDrift[];
 }
 
 export interface ClosedLivePositionDrift {
@@ -19,6 +29,25 @@ export interface ClosedLivePositionDrift {
   remoteSize: number;
   remoteCurrentValueUsdc: number;
   endDate: string;
+}
+
+export interface ActivePositionSizeDrift {
+  tokenId: TokenId;
+  positionId: string;
+  slug: string | null;
+  localSize: number;
+  remoteSize: number;
+  remoteCurrentValueUsdc: number;
+}
+
+export interface MissingRemotePositionDrift {
+  tokenId: TokenId;
+  positionId: string;
+  slug: string | null;
+  localStatus: "open" | "dust";
+  localSize: number;
+  remoteSize: number;
+  endDate: string | null;
 }
 
 export interface WalletPositionSentinelDeps {
@@ -36,6 +65,8 @@ export async function runWalletPositionSentinel(
     driftCount: 0,
     details: [],
     closedLivePositions: [],
+    activePositionDrifts: [],
+    missingRemotePositions: [],
   };
 
   let remotePositions: PolymarketDataPosition[] | null;
@@ -48,13 +79,37 @@ export async function runWalletPositionSentinel(
   if (!remotePositions) return empty;
 
   const localByToken = groupPositionsByToken(deps.positionRepo.findAll());
-  const drifts: ClosedLivePositionDrift[] = [];
+  const closedDrifts: ClosedLivePositionDrift[] = [];
+  const activeDrifts: ActivePositionSizeDrift[] = [];
+  const missingRemoteDrifts: MissingRemotePositionDrift[] = [];
+
+  // Tokens for which Polymarket reports a meaningful position. Used below to
+  // detect the inverse case (local active/dust but no remote row) without
+  // double-counting tokens that already produced an active-size mismatch.
+  const remoteTokensWithSize = new Set<string>();
 
   for (const remote of remotePositions) {
     if (remote.size <= MIN_REMOTE_SIZE) continue;
+    remoteTokensWithSize.add(remote.tokenId);
 
     const localPositions = localByToken.get(remote.tokenId);
-    if (!localPositions || hasActivePosition(localPositions)) continue;
+    if (!localPositions) continue;
+
+    const active = latestActivePosition(localPositions);
+    if (active) {
+      if (Math.abs(active.size - remote.size) > SIZE_DRIFT_EPSILON) {
+        const market = deps.marketRepo.findByTokenId(createTokenId(remote.tokenId));
+        activeDrifts.push({
+          tokenId: createTokenId(remote.tokenId),
+          positionId: String(active.positionId),
+          slug: market?.slug ?? remote.slug ?? remote.marketSlug,
+          localSize: active.size,
+          remoteSize: remote.size,
+          remoteCurrentValueUsdc: remote.currentValueUsdc,
+        });
+      }
+      continue;
+    }
 
     const closed = latestPosition(localPositions);
     if (!closed || closed.status !== "closed") continue;
@@ -62,7 +117,7 @@ export async function runWalletPositionSentinel(
     const market = deps.marketRepo.findByTokenId(createTokenId(remote.tokenId));
     if (!market?.endDate || !isFutureEndDate(market.endDate, nowMs)) continue;
 
-    drifts.push({
+    closedDrifts.push({
       tokenId: createTokenId(remote.tokenId),
       positionId: String(closed.positionId),
       slug: market.slug ?? remote.slug ?? remote.marketSlug,
@@ -73,10 +128,43 @@ export async function runWalletPositionSentinel(
     });
   }
 
+  // Inverse direction: local DB still believes we own shares, but the wallet
+  // does not. Skipped for closed/already-resolved local rows (those go through
+  // the closed-vs-live branch above) and for markets past endDate (a redeem
+  // path will collapse them; no useful drift signal there).
+  for (const [tokenIdStr, localPositions] of localByToken) {
+    if (remoteTokensWithSize.has(tokenIdStr)) continue;
+    const active = latestActivePosition(localPositions);
+    if (!active) continue;
+    if (active.status !== "open" && active.status !== "dust") continue;
+
+    const market = deps.marketRepo.findByTokenId(createTokenId(tokenIdStr));
+    // Skip markets that have already ended — redemption is the legitimate
+    // sink for those local rows; non-zero balance there is handled by the
+    // settlement-ledger drift detector, not the wallet sentinel.
+    if (market?.endDate && !isFutureEndDate(market.endDate, nowMs)) continue;
+
+    missingRemoteDrifts.push({
+      tokenId: createTokenId(tokenIdStr),
+      positionId: String(active.positionId),
+      slug: market?.slug ?? null,
+      localStatus: active.status,
+      localSize: active.size,
+      remoteSize: 0,
+      endDate: market?.endDate ?? null,
+    });
+  }
+
   return {
-    driftCount: drifts.length,
-    details: drifts.map(formatDriftDetail),
-    closedLivePositions: drifts,
+    driftCount: closedDrifts.length + activeDrifts.length + missingRemoteDrifts.length,
+    details: [
+      ...closedDrifts.map(formatClosedDriftDetail),
+      ...activeDrifts.map(formatActiveDriftDetail),
+      ...missingRemoteDrifts.map(formatMissingRemoteDriftDetail),
+    ],
+    closedLivePositions: closedDrifts,
+    activePositionDrifts: activeDrifts,
+    missingRemotePositions: missingRemoteDrifts,
   };
 }
 
@@ -94,10 +182,6 @@ function groupPositionsByToken(positions: readonly Position[]): Map<string, Posi
   return byToken;
 }
 
-function hasActivePosition(positions: readonly Position[]): boolean {
-  return positions.some((position) => position.status !== "closed" && position.size > 0);
-}
-
 function latestPosition(positions: readonly Position[]): Position | null {
   let latest: Position | null = null;
   for (const position of positions) {
@@ -108,12 +192,18 @@ function latestPosition(positions: readonly Position[]): Position | null {
   return latest;
 }
 
+function latestActivePosition(positions: readonly Position[]): Position | null {
+  return latestPosition(
+    positions.filter((position) => position.status !== "closed" && position.size > 0),
+  );
+}
+
 function isFutureEndDate(endDate: string, nowMs: number): boolean {
   const endMs = Date.parse(endDate);
   return Number.isFinite(endMs) && endMs > nowMs;
 }
 
-function formatDriftDetail(drift: ClosedLivePositionDrift): string {
+function formatClosedDriftDetail(drift: ClosedLivePositionDrift): string {
   return [
     "wallet-live-position-closed-locally",
     `token=${String(drift.tokenId)}`,
@@ -122,5 +212,30 @@ function formatDriftDetail(drift: ClosedLivePositionDrift): string {
     `remoteSize=${drift.remoteSize}`,
     `remoteValue=${drift.remoteCurrentValueUsdc}`,
     `endDate=${drift.endDate}`,
+  ].join(" ");
+}
+
+function formatActiveDriftDetail(drift: ActivePositionSizeDrift): string {
+  return [
+    "wallet-live-position-size-mismatch",
+    `token=${String(drift.tokenId)}`,
+    `position=${drift.positionId}`,
+    `slug=${drift.slug ?? "unknown"}`,
+    `localSize=${drift.localSize}`,
+    `remoteSize=${drift.remoteSize}`,
+    `remoteValue=${drift.remoteCurrentValueUsdc}`,
+  ].join(" ");
+}
+
+function formatMissingRemoteDriftDetail(drift: MissingRemotePositionDrift): string {
+  return [
+    "wallet-local-position-missing-remote",
+    `token=${String(drift.tokenId)}`,
+    `position=${drift.positionId}`,
+    `slug=${drift.slug ?? "unknown"}`,
+    `localStatus=${drift.localStatus}`,
+    `localSize=${drift.localSize}`,
+    `remoteSize=${drift.remoteSize}`,
+    `endDate=${drift.endDate ?? "unknown"}`,
   ].join(" ");
 }

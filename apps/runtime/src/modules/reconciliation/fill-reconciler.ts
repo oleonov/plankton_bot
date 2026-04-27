@@ -21,7 +21,7 @@ import type {
   ClientOrderId,
   Order,
 } from "@plankton/domain";
-import { createFillId, createOrderId } from "@plankton/domain";
+import { createFillId, createOrderId, resolvePolymarketTakerFeeRate } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 // Bounded FIFO cache that dedupes orphan-fill log warnings. Without a cap
@@ -39,14 +39,6 @@ function rememberOrphanFillId(fillId: string): boolean {
   loggedOrphanFillIds.add(fillId);
   return true;
 }
-
-const CATEGORY_RATES: Record<string, number> = {
-  crypto: 0.072,
-  sports: 0.03,
-  finance: 0.04,
-  politics: 0.04,
-  geopolitics: 0,
-};
 
 // ─── Shared fill import (DRY) ─────────────────────────────────────────────
 
@@ -97,16 +89,17 @@ export function buildLocalFillFromExchangeFill(
   signalReason: string | null;
 } {
   const fillId = createFillId(fill.fillId);
-  const sizeUsdc = fill.size * fill.price;
+  const sizeUsdc = fill.sizeUsdc ?? fill.size * fill.price;
 
-  // Use category-based rate if available, otherwise fallback to the rate from the exchange
-  const category = primaryCategory?.toLowerCase();
-  const rate =
-    category && CATEGORY_RATES[category] !== undefined
-      ? CATEGORY_RATES[category]
-      : (fill.feeRateBps ?? 0) / 10_000;
+  const rate = resolvePolymarketTakerFeeRate({
+    feeRateBps: fill.feeRateBps ?? 0,
+    category: primaryCategory,
+  });
 
-  const fee = fill.liquidityRole === "maker" ? 0 : fill.size * rate * fill.price * (1 - fill.price);
+  const fee =
+    fill.liquidityRole === "maker"
+      ? 0
+      : fill.fee || fill.size * rate * fill.price * (1 - fill.price);
 
   return {
     fill: {
@@ -134,17 +127,57 @@ export function buildLocalFillFromExchangeFill(
   };
 }
 
+// Sub-share rounding tolerance when comparing cumulative filled against
+// `order.size`. Polymarket prices come at tick=0.01 / 0.001 / 0.0001 and the
+// share-fee model multiplies through tiny rates, so direct equality on
+// JS doubles can leave us ~1e-12 short of the gross target on a perfectly
+// filled BUY. 1e-9 shares is well below the per-fill min and avoids spurious
+// `partially-filled`.
+const FILL_GROSS_EPSILON = 1e-9;
+
+/**
+ * Recover GROSS shares from a fill row. Polymarket taker BUY deducts the
+ * share-side fee from gross at fill time — `fill.size` is NET shares for that
+ * case (see `packages/exchange/src/mappers.ts:91-95`), while `fill.sizeUsdc`
+ * is always GROSS USDC (`= grossSize × price`). Recover gross shares from
+ * `sizeUsdc / price` for taker BUY; every other shape (`maker`, `unknown`,
+ * any SELL) already stores gross in `fill.size`.
+ *
+ * Without this, `cumulativeFilled >= localOrder.size` is never true for a
+ * fully-executed taker BUY: the order stays `partially-filled` forever, and
+ * `OrderRepository.sumOpenBuyNotional()` keeps reserving its full notional
+ * — silently strangling new BUY budget over uptime.
+ */
+function grossFillSize(fill: {
+  readonly side: "buy" | "sell";
+  readonly size: number;
+  readonly price: number;
+  readonly sizeUsdc?: number;
+  readonly liquidityRole?: string;
+}): number {
+  if (
+    fill.side === "buy" &&
+    fill.liquidityRole === "taker" &&
+    typeof fill.sizeUsdc === "number" &&
+    fill.sizeUsdc > 0 &&
+    fill.price > 0
+  ) {
+    return fill.sizeUsdc / fill.price;
+  }
+  return fill.size;
+}
+
 export function updateOrderStatusFromPersistedFills(
   orderRepo: Pick<OrderRepository, "findById" | "updateStatus">,
   fillRepo: Pick<FillRepository, "findByOrderId">,
   orderId: OrderId,
 ): void {
   const allFills = fillRepo.findByOrderId(orderId);
-  const cumulativeFilled = allFills.reduce((sum, fill) => sum + fill.size, 0);
+  const cumulativeFilled = allFills.reduce((sum, fill) => sum + grossFillSize(fill), 0);
   const localOrder = orderRepo.findById(orderId);
   if (!localOrder) return;
 
-  if (cumulativeFilled >= localOrder.size) {
+  if (cumulativeFilled + FILL_GROSS_EPSILON >= localOrder.size) {
     orderRepo.updateStatus(orderId, "filled");
   } else if (cumulativeFilled > 0) {
     orderRepo.updateStatus(orderId, "partially-filled");

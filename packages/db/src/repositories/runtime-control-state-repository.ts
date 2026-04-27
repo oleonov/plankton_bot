@@ -1,5 +1,9 @@
 import type Database from "better-sqlite3";
-import type { RuntimeControlStateRepository, RuntimeControlState } from "@plankton/domain";
+import type {
+  ContinuationMode,
+  RuntimeControlStateRepository,
+  RuntimeControlState,
+} from "@plankton/domain";
 import { createSwitchId } from "@plankton/domain";
 import type { ProfileId, RuntimeStatus } from "@plankton/domain";
 
@@ -56,8 +60,74 @@ function rowToState(row: Record<string, unknown>): RuntimeControlState {
     paused: row.paused === 1,
     schemaVersion: row.schema_version as number,
     executionPolicyVersion: (row.execution_policy_version as number) ?? 0,
+    continuationMode: ((row.continuation_mode as ContinuationMode) ?? "leg_local"),
+    continuationModeVersion: (row.continuation_mode_version as number) ?? 0,
     updatedAt: row.updated_at as string,
   };
+}
+
+/**
+ * ADR-016: read-only helper paired with `readExecutionPolicyVersion` above.
+ * Returns 0 when the column is absent so legacy DBs short-circuit to default.
+ */
+export function readContinuationModeVersion(db: import("better-sqlite3").Database): number {
+  try {
+    const row = db
+      .prepare("SELECT continuation_mode_version AS v FROM runtime_control_state WHERE id = 1")
+      .get() as { v: number } | undefined;
+    return row?.v ?? 0;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("no such column") || msg.includes("no such table")) return 0;
+    throw err;
+  }
+}
+
+/**
+ * ADR-016: read the current continuation mode. Falls back to 'leg_local' when
+ * the column is missing (legacy DB) so the runtime preserves ADR-010 behavior.
+ */
+export function readContinuationMode(db: import("better-sqlite3").Database): ContinuationMode {
+  try {
+    const row = db
+      .prepare("SELECT continuation_mode AS m FROM runtime_control_state WHERE id = 1")
+      .get() as { m: string } | undefined;
+    if (row?.m === "market_wide") return "market_wide";
+    return "leg_local";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "";
+    if (msg.includes("no such column") || msg.includes("no such table")) return "leg_local";
+    throw err;
+  }
+}
+
+/**
+ * ADR-016: operator toggle. Updates the mode and bumps the version atomically
+ * so polling consumers detect the change on their next tick. Idempotent: when
+ * the requested mode equals the current one, the version is NOT bumped.
+ */
+export function setContinuationMode(
+  db: import("better-sqlite3").Database,
+  mode: ContinuationMode,
+): { changed: boolean; version: number } {
+  const tx = db.transaction(() => {
+    db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    const before = db
+      .prepare("SELECT continuation_mode AS m, continuation_mode_version AS v FROM runtime_control_state WHERE id = 1")
+      .get() as { m: string; v: number };
+    if (before.m === mode) {
+      return { changed: false, version: before.v };
+    }
+    db.prepare(
+      `UPDATE runtime_control_state
+         SET continuation_mode = ?,
+             continuation_mode_version = continuation_mode_version + 1,
+             updated_at = datetime('now')
+       WHERE id = 1`,
+    ).run(mode);
+    return { changed: true, version: before.v + 1 };
+  });
+  return tx();
 }
 
 /**

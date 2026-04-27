@@ -37,9 +37,16 @@ import axiosDefault from "axios";
 // deliberately left unset — that field expects http.Agent, and CLOB/Gamma are
 // HTTPS-only. Mixing an https.Agent into httpAgent is a type error that would
 // break any future plain-HTTP consumer.
-import { buildClobAxiosAgent } from "@plankton/exchange";
+import { buildClobAxiosAgent, installClobErrorSanitizer } from "@plankton/exchange";
+// CLOB SDK serializes axios error.config (which holds the keep-alive
+// https.Agent) via JSON.stringify before re-throwing. Circular socket refs
+// crash that stringify, masking real exchange errors as a generic
+// "Converting circular structure to JSON" TypeError. The interceptor strips
+// the agent fields from rejected errors before the SDK sees them.
+installClobErrorSanitizer(axiosDefault as unknown as Parameters<typeof installClobErrorSanitizer>[0]);
 
 import { randomUUID } from "node:crypto";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 import process from "node:process";
 import { loadEnv } from "@plankton/config";
 import { InProcessEventBus } from "@plankton/event-bus";
@@ -61,12 +68,17 @@ import {
 } from "@plankton/db";
 import type { DbConnection } from "@plankton/db";
 import { createBotRunId, ENTRY_REASONS, resolveTradingState } from "@plankton/domain";
-import { GammaMarketDiscoveryGateway, PolymarketDataPositionReader } from "@plankton/exchange";
+import {
+  DataApiTradeCountProvider,
+  GammaMarketDiscoveryGateway,
+  PolymarketDataPositionReader,
+} from "@plankton/exchange";
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
 import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
 
 import { createLogger } from "./logger.js";
+import { buildTradeCountObserver } from "./trade-count-observer.js";
 import { Supervisor } from "./supervisor/supervisor.js";
 import { CommandPoller } from "./supervisor/command-poller.js";
 import { MarketDataModule } from "./modules/market-data/market-data-module.js";
@@ -622,6 +634,15 @@ async function main(): Promise<void> {
   // 7h2. Algo decision module (replaces legacy StrategyModule in the pipeline)
   const selectedMarketCache = new MarketSelectionCache(bus, selectionRuleEngine);
   selectedMarketCache.subscribe();
+
+  // ADR-016 — market-wide trade-count provider for the post-entry continuation
+  // gate. Always constructed (cheap, no I/O until consulted); the gate only
+  // calls it when `runtime_control_state.continuation_mode = 'market_wide'`.
+  const tradeCountLog = log.child({ module: "data-api-trade-count-provider" });
+  const tradeCountProvider = new DataApiTradeCountProvider({
+    observer: buildTradeCountObserver({ log: tradeCountLog, metrics: runtimeMetrics }),
+  });
+
   const algoDecisionModule = new AlgoDecisionModule({
     bus,
     legStateRepo: repos.legState,
@@ -635,6 +656,7 @@ async function main(): Promise<void> {
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
+    tradeCountProvider,
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
   });
@@ -806,6 +828,13 @@ async function main(): Promise<void> {
     ["market-scanner", marketScannerModule],
     ["market-data", marketDataModule],
     ["normalization", normalizationModule],
+    // leg-state-tracker MUST start before risk-inventory: risk-inventory's
+    // start() runs replayUnreconciledFills, which publishes PositionUpdated
+    // for each replayed fill. If leg-state-tracker hasn't subscribed yet,
+    // those events are lost and any leg row whose closing PositionUpdated
+    // came from a replay stays orphaned, driving D7 SELL spam against a
+    // closed position.
+    ["leg-state-tracker", legStateTrackerModule],
     ["risk-inventory", riskInventoryModule],
     ["profile-publisher", profilePublisher],
     ["ledger-retention", ledgerRetentionModule],
@@ -818,7 +847,6 @@ async function main(): Promise<void> {
           ],
         ]
       : []),
-    ["leg-state-tracker", legStateTrackerModule],
     ["algo-decision", algoDecisionModule],
     ["resolution", resolutionModule],
     ...(inventoryManagerModule
@@ -1360,6 +1388,25 @@ async function main(): Promise<void> {
       "process.memoryUsage",
     );
   }, 60_000).unref();
+
+  // Event-loop lag instrumentation — the P8 canary auto-rolled back because
+  // AbortSignal.timeout(2s) callbacks were firing ~30s late under sweep
+  // pressure. Without this metric the symptom was indistinguishable from a
+  // network egress problem. resolution=20ms keeps the histogram cheap.
+  const loopLag = monitorEventLoopDelay({ resolution: 20 });
+  loopLag.enable();
+  setInterval(() => {
+    log.info(
+      {
+        p50Ms: Math.round(loopLag.percentile(50) / 1e6),
+        p95Ms: Math.round(loopLag.percentile(95) / 1e6),
+        p99Ms: Math.round(loopLag.percentile(99) / 1e6),
+        maxMs: Math.round(loopLag.max / 1e6),
+      },
+      "event_loop_lag",
+    );
+    loopLag.reset();
+  }, 30_000).unref();
 
   // 7q. Wire SignalToOrderBridge subscriptions (not a RuntimeModule — subscribe directly)
   signalToOrderBridge.subscribe();

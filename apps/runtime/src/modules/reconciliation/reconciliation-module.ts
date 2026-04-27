@@ -204,12 +204,22 @@ export class ReconciliationModule implements RuntimeModule {
       // 4. Wallet↔ledger sentinel
       const walletResult = this.deps.walletPositionSentinel
         ? await runWalletPositionSentinel(this.deps.walletPositionSentinel, ranAt)
-        : { driftCount: 0, details: [], closedLivePositions: [] };
+        : {
+            driftCount: 0,
+            details: [],
+            closedLivePositions: [],
+            activePositionDrifts: [],
+            missingRemotePositions: [],
+          };
       allDetails.push(...walletResult.details);
       if (walletResult.driftCount > 0) {
         this.log.error(
-          { drifts: walletResult.closedLivePositions },
-          "wallet position sentinel detected locally closed live positions",
+          {
+            closedLive: walletResult.closedLivePositions,
+            activeMismatch: walletResult.activePositionDrifts,
+            missingRemote: walletResult.missingRemotePositions,
+          },
+          "wallet position sentinel detected drift",
         );
       }
 

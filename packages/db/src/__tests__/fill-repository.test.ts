@@ -176,6 +176,16 @@ describe("SqliteFillRepository", () => {
     expect(repo.findUnreconciled()).toHaveLength(2);
   });
 
+  it("findUnreconciled returns fills in chronological replay order", () => {
+    insertOrder(conn.db);
+
+    repo.save(makeFill({ fillId: createFillId("f-new"), filledAt: "2026-01-03T00:00:00Z" }));
+    repo.save(makeFill({ fillId: createFillId("f-old"), filledAt: "2026-01-01T00:00:00Z" }));
+    repo.save(makeFill({ fillId: createFillId("f-mid"), filledAt: "2026-01-02T00:00:00Z" }));
+
+    expect(repo.findUnreconciled().map((fill) => fill.fillId)).toEqual(["f-old", "f-mid", "f-new"]);
+  });
+
   it("markReconciled marks fills and they no longer appear in findUnreconciled", () => {
     insertOrder(conn.db);
 

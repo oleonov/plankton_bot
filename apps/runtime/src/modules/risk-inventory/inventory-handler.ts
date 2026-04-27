@@ -22,6 +22,7 @@ import type {
   ConditionId,
 } from "@plankton/domain";
 import { createPositionId, createLotId } from "@plankton/domain";
+import { withImmediate } from "@plankton/db";
 import type { Logger } from "../../logger.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 
@@ -45,12 +46,9 @@ export class InventoryHandler {
     private readonly positionRepo: PositionRepository,
     private readonly lotRepo: InventoryLotRepository,
     private readonly log: Logger,
-    db: Database.Database,
+    private readonly db: Database.Database,
   ) {
-    this.pnlLedgerInsert = db.prepare(
-      `INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
-       VALUES (?, ?, ?, ?)`,
-    );
+    this.pnlLedgerInsert = db.prepare(resolvePnlLedgerInsertSql(db));
   }
 
   /**
@@ -58,10 +56,12 @@ export class InventoryHandler {
    * Throws if a sell fill exceeds available inventory.
    */
   applyFill(fill: FillEvent): Position {
-    if (fill.side === "buy") {
-      return this.applyBuyFill(fill);
-    }
-    return this.applySellFill(fill);
+    return withImmediate(this.db, () => {
+      if (fill.side === "buy") {
+        return this.applyBuyFill(fill);
+      }
+      return this.applySellFill(fill);
+    });
   }
 
   private applyBuyFill(fill: FillEvent): Position {
@@ -76,6 +76,7 @@ export class InventoryHandler {
   private createNewPosition(fill: FillEvent): Position {
     const now = new Date().toISOString();
     const positionId = createPositionId(`pos-${fill.tokenId}-${Date.now()}`);
+    const unitCost = fill.size > 0 ? fill.sizeUsdc / fill.size : fill.price;
 
     const position: Position = {
       positionId,
@@ -83,7 +84,7 @@ export class InventoryHandler {
       conditionId: fill.conditionId,
       side: "buy",
       size: fill.size,
-      avgEntryPrice: fill.price,
+      avgEntryPrice: unitCost,
       costBasisUsdc: fill.sizeUsdc,
       currentValueUsdc: fill.sizeUsdc,
       realizedPnl: 0,
@@ -103,7 +104,7 @@ export class InventoryHandler {
       side: "buy",
       size: fill.size,
       remainingSize: fill.size,
-      entryPrice: fill.price,
+      entryPrice: unitCost,
       costUsdc: fill.sizeUsdc,
       fillId: fill.fillId,
       createdAt: now,
@@ -120,6 +121,7 @@ export class InventoryHandler {
     const newSize = existing.size + fill.size;
     const newCostBasis = existing.costBasisUsdc + fill.sizeUsdc;
     const newAvgPrice = newCostBasis / newSize;
+    const unitCost = fill.size > 0 ? fill.sizeUsdc / fill.size : fill.price;
 
     const updated: Position = {
       ...existing,
@@ -140,7 +142,7 @@ export class InventoryHandler {
       side: "buy",
       size: fill.size,
       remainingSize: fill.size,
-      entryPrice: fill.price,
+      entryPrice: unitCost,
       costUsdc: fill.sizeUsdc,
       fillId: fill.fillId,
       createdAt: now,
@@ -168,21 +170,65 @@ export class InventoryHandler {
       );
     }
 
-    // Consume FIFO lots
-    const consumed = this.lotRepo.consumeFifo(existing.positionId, fill.size);
+    let consumed: { lot: InventoryLot; consumed: number }[];
+    try {
+      consumed = this.lotRepo.consumeFifo(existing.positionId, fill.size);
+    } catch (err) {
+      const repaired = this.tryRepairPartiallyAppliedSellFill(existing, fill, err);
+      if (repaired) return repaired;
+      throw err;
+    }
 
     // Calculate realized PnL from consumed lots
     let sellRealizedPnl = 0;
-    let consumedCostBasis = 0;
     for (const { lot, consumed: qty } of consumed) {
       const lotCost = qty * lot.entryPrice;
       const lotRevenue = qty * fill.price;
       sellRealizedPnl += lotRevenue - lotCost;
-      consumedCostBasis += lotCost;
     }
     sellRealizedPnl -= fill.fee;
 
-    // Persist realized PnL delta for historical series
+    return this.saveSellOutcome(existing, fill, sellRealizedPnl, this.lotRepo.findOpen(existing.positionId));
+  }
+
+  private tryRepairPartiallyAppliedSellFill(
+    existing: Position,
+    fill: FillEvent,
+    err: unknown,
+  ): Position | null {
+    if (!isInsufficientInventoryError(err)) return null;
+
+    const remainingLots = this.lotRepo.findOpen(existing.positionId);
+    const remainingSize = remainingLots.reduce((sum, lot) => sum + lot.remainingSize, 0);
+    const expectedRemainingSize = Math.max(0, existing.size - fill.size);
+    if (!nearlyEqual(remainingSize, expectedRemainingSize)) return null;
+
+    const remainingCostBasis = remainingLots.reduce(
+      (sum, lot) => sum + lot.remainingSize * lot.entryPrice,
+      0,
+    );
+    const consumedCostBasis = Math.max(0, existing.costBasisUsdc - remainingCostBasis);
+    const sellRealizedPnl = fill.size * fill.price - consumedCostBasis - fill.fee;
+
+    this.log.warn(
+      {
+        positionId: existing.positionId,
+        fillId: fill.fillId,
+        remainingSize,
+        expectedRemainingSize,
+      },
+      "repairing partially applied sell fill",
+    );
+
+    return this.saveSellOutcome(existing, fill, sellRealizedPnl, remainingLots);
+  }
+
+  private saveSellOutcome(
+    existing: Position,
+    fill: FillEvent,
+    sellRealizedPnl: number,
+    remainingLots: InventoryLot[],
+  ): Position {
     this.pnlLedgerInsert.run(
       fill.fillId,
       existing.positionId,
@@ -191,33 +237,21 @@ export class InventoryHandler {
     );
 
     const now = new Date().toISOString();
-    const newSize = existing.size - fill.size;
-    const newCostBasis = existing.costBasisUsdc - consumedCostBasis;
+    const remainingSize = remainingLots.reduce((sum, lot) => sum + lot.remainingSize, 0);
+    const remainingCostBasis = remainingLots.reduce(
+      (sum, lot) => sum + lot.remainingSize * lot.entryPrice,
+      0,
+    );
     const newRealizedPnl = existing.realizedPnl + sellRealizedPnl;
-
-    // Determine new status
-    let status: "open" | "closed" | "dust";
-    if (newSize <= 0) {
-      status = "closed";
-    } else {
-      status = resolveOpenPositionStatus(newSize * fill.price);
-    }
-
-    // Recompute avg entry price from remaining lots
-    const remainingLots = this.lotRepo.findOpen(existing.positionId);
-    let remainingAvgPrice = existing.avgEntryPrice;
-    if (remainingLots.length > 0) {
-      const totalRemaining = remainingLots.reduce((s, l) => s + l.remainingSize, 0);
-      const totalCost = remainingLots.reduce((s, l) => s + l.remainingSize * l.entryPrice, 0);
-      remainingAvgPrice = totalRemaining > 0 ? totalCost / totalRemaining : 0;
-    }
+    const status = remainingSize <= 0 ? "closed" : resolveOpenPositionStatus(remainingSize * fill.price);
+    const remainingAvgPrice = remainingSize > 0 ? remainingCostBasis / remainingSize : 0;
 
     const updated: Position = {
       ...existing,
-      size: Math.max(0, newSize),
+      size: remainingSize,
       avgEntryPrice: remainingAvgPrice,
-      costBasisUsdc: Math.max(0, newCostBasis),
-      currentValueUsdc: newSize > 0 ? newSize * fill.price : null,
+      costBasisUsdc: remainingCostBasis,
+      currentValueUsdc: remainingSize > 0 ? remainingSize * fill.price : null,
       realizedPnl: newRealizedPnl,
       status,
       closedAt: status === "closed" ? now : existing.closedAt,
@@ -236,5 +270,35 @@ export class InventoryHandler {
     );
 
     return updated;
+  }
+}
+
+function isInsufficientInventoryError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes("Insufficient inventory");
+}
+
+function nearlyEqual(left: number, right: number): boolean {
+  return Math.abs(left - right) < 1e-6;
+}
+
+function resolvePnlLedgerInsertSql(db: Database.Database): string {
+  if (hasPnlLedgerFamilyId(db)) {
+    return `INSERT INTO pnl_ledger (fill_id, position_id, family_id, delta, filled_at)
+            VALUES (?, ?, 'legacy', ?, ?)`;
+  }
+
+  return `INSERT INTO pnl_ledger (fill_id, position_id, delta, filled_at)
+          VALUES (?, ?, ?, ?)`;
+}
+
+function hasPnlLedgerFamilyId(db: Database.Database): boolean {
+  try {
+    const statement = db.prepare("PRAGMA table_info(pnl_ledger)") as { all?: () => unknown[] };
+    if (typeof statement.all !== "function") return false;
+    return (statement.all() as Array<{ name?: string }>).some(
+      (column) => column.name === "family_id",
+    );
+  } catch {
+    return false;
   }
 }

@@ -30,6 +30,7 @@ import { pnlSeriesRoutes } from "./routes/pnl-series.js";
 import { portfolioSeriesRoutes } from "./routes/portfolio-series.js";
 import { tradingActivityRoutes } from "./routes/trading-activity.js";
 import { profileRoutes } from "./routes/profiles.js";
+import { runtimePolicyRoutes } from "./routes/runtime-policy.js";
 import { auditRoutes } from "./routes/audit.js";
 import { selectionRulesRoutes } from "./routes/selection-rules.js";
 import { marketsRoutes } from "./routes/markets.js";
@@ -159,6 +160,10 @@ export async function buildServer(deps: ServerDeps) {
     controlDb: deps.controlDb,
     ledgerDb: deps.ledgerDb,
     ledgerPool: deps.ledgerPool,
+  });
+  await app.register(runtimePolicyRoutes, {
+    prefix: "/api/v1",
+    controlDb: deps.controlDb,
   });
   await app.register(auditRoutes, { prefix: "/api/v1", controlDb: deps.controlDb });
   await app.register(selectionRulesRoutes, {

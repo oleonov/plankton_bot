@@ -408,6 +408,13 @@ export interface ProfileSummary {
   updatedAt: string;
 }
 
+/**
+ * ADR-016: Post-Entry Continuation Filter mode.
+ *  - `leg_local`   → ADR-010 D1 behavior (legState.buyCount + sellCount).
+ *  - `market_wide` → spec-aligned trade_count via DataApiTradeCountProvider.
+ */
+export type ContinuationMode = "leg_local" | "market_wide";
+
 export interface RuntimeControlState {
   currentProfile: ProfileId | null;
   desiredProfile: ProfileId | null;
@@ -419,6 +426,10 @@ export interface RuntimeControlState {
   schemaVersion: number;
   /** ADR-015: bumped on every execution_policy_json write; drives runtime hot-reload. */
   executionPolicyVersion?: number;
+  /** ADR-016: continuation gate mode. */
+  continuationMode?: ContinuationMode;
+  /** ADR-016: bumped on every continuation_mode write; drives runtime hot-reload. */
+  continuationModeVersion?: number;
   updatedAt: string;
 }
 

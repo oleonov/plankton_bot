@@ -219,6 +219,74 @@ function createMockControlDb(walletBalance: number | null) {
   };
 }
 
+/**
+ * ADR-016 — richer control-db mock that pattern-matches on the SQL string so
+ * a single instance answers wallet-balance, continuation-mode, and
+ * continuation-mode-version queries from `WalletBudgetControlDb`,
+ * `readContinuationMode`, and `readContinuationModeVersion` respectively.
+ *
+ * Mutate via `setMode` to simulate an operator flip; the helper bumps the
+ * version automatically so the runtime's hot-reload poller observes a change.
+ */
+function createContinuationControlDb(opts: {
+  walletBalanceUsdc?: number | null;
+  continuationMode?: "leg_local" | "market_wide";
+  continuationModeVersion?: number;
+}) {
+  const state = {
+    walletBalanceUsdc: opts.walletBalanceUsdc ?? null,
+    continuationMode: opts.continuationMode ?? "leg_local",
+    continuationModeVersion: opts.continuationModeVersion ?? 0,
+  };
+  const db = {
+    prepare: vi.fn((sql: string) => ({
+      get: vi.fn(() => {
+        if (sql.includes("continuation_mode_version")) {
+          return { v: state.continuationModeVersion };
+        }
+        if (sql.includes("continuation_mode AS m")) {
+          return { m: state.continuationMode };
+        }
+        if (sql.includes("wallet_balance_usdc")) {
+          return state.walletBalanceUsdc != null
+            ? { wallet_balance_usdc: state.walletBalanceUsdc }
+            : undefined;
+        }
+        return undefined;
+      }),
+    })),
+  };
+  return {
+    db,
+    setMode(next: "leg_local" | "market_wide") {
+      if (state.continuationMode === next) return;
+      state.continuationMode = next;
+      state.continuationModeVersion += 1;
+    },
+    state,
+  };
+}
+
+function createMockTradeCountProvider(returnValue: number | null = null) {
+  const countCalls: Array<{ conditionId: string; cap: number }> = [];
+  const prefetchCalls: Array<{ conditionIds: readonly string[]; cap: number }> = [];
+  let nextValue: number | null = returnValue;
+  return {
+    countTrades: vi.fn(async (conditionId: string, cap: number) => {
+      countCalls.push({ conditionId, cap });
+      return nextValue;
+    }),
+    prefetch: vi.fn(async (conditionIds: readonly string[], cap: number) => {
+      prefetchCalls.push({ conditionIds: [...conditionIds], cap });
+    }),
+    countCalls,
+    prefetchCalls,
+    setReturnValue(value: number | null) {
+      nextValue = value;
+    },
+  };
+}
+
 function makeMarket(
   tokenId: string,
   _familyId: string | null,
@@ -868,6 +936,244 @@ describe("AlgoDecisionModule", () => {
     });
   });
 
+  // ADR-016 — opt-in `market_wide` continuation mode.
+  describe("ADR-016 market_wide continuation mode", () => {
+    const SHARED_CONDITION_ID = "cond-adr016";
+
+    function legAtBuy1(tokenId: string, firstTradePrice = 0.03): LegState {
+      return {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 0,
+        lastAction: "BUY",
+        firstTradePrice,
+        firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+    }
+
+    it("market_wide + provider returns 6 → continuation passes; signal fires where leg-local would STOP", async () => {
+      // Under leg_local, legTradeCount=1 + firstTradePrice=0.03 → STOP, no signal.
+      // Under market_wide, provider returns 6 → R1 passes → decision flow runs
+      // and emits a signal. (The specific decision-rule that wins is exercised
+      // by sibling tests; what's under test here is the gate flip.)
+      const tokenId = "token-mw-pass";
+      const familyId = "fam-mw";
+      legStateRepo = createMockLegStateRepo([legAtBuy1(tokenId)]);
+
+      const controlDb = createContinuationControlDb({
+        continuationMode: "market_wide",
+        continuationModeVersion: 1,
+      });
+      const provider = createMockTradeCountProvider(6);
+
+      const mod = buildModule({ controlDb: controlDb.db, tradeCountProvider: provider });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(1);
+      // Provider was consulted (prefetch path or per-token countTrades).
+      expect(provider.prefetchCalls.length + provider.countCalls.length).toBeGreaterThanOrEqual(1);
+
+      await mod.stop();
+    });
+
+    it("market_wide + provider returns 1 → STOP; suppression carries source=market_wide", async () => {
+      const tokenId = "token-mw-stop";
+      const familyId = "fam-mw";
+      legStateRepo = createMockLegStateRepo([legAtBuy1(tokenId)]);
+
+      const controlDb = createContinuationControlDb({
+        continuationMode: "market_wide",
+        continuationModeVersion: 1,
+      });
+      const provider = createMockTradeCountProvider(1);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({
+        controlDb: controlDb.db,
+        tradeCountProvider: provider,
+        riskEventRepo,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      expect(publishCalls.filter(([ev]) => ev === "SignalProduced").length).toBe(0);
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          tokenId,
+          reasonCode: "continuation-stop",
+          tradeCount: 1,
+          tradeCountSource: "market_wide",
+          continuationMode: "market_wide",
+          legTradeCount: 1,
+        }),
+      });
+
+      await mod.stop();
+    });
+
+    it("market_wide + provider returns null → fallback to leg-local; suppression source=leg_local_fallback", async () => {
+      const tokenId = "token-mw-fallback";
+      const familyId = "fam-mw";
+      legStateRepo = createMockLegStateRepo([legAtBuy1(tokenId)]);
+
+      const controlDb = createContinuationControlDb({
+        continuationMode: "market_wide",
+        continuationModeVersion: 1,
+      });
+      const provider = createMockTradeCountProvider(null);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({
+        controlDb: controlDb.db,
+        tradeCountProvider: provider,
+        riskEventRepo,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        timestamp: Date.now(),
+      });
+
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          tokenId,
+          reasonCode: "continuation-stop",
+          tradeCount: 1,
+          tradeCountSource: "leg_local_fallback",
+          continuationMode: "market_wide",
+        }),
+      });
+
+      await mod.stop();
+    });
+
+    it("leg_local mode (default): provider is not consulted; suppression source=leg_local", async () => {
+      const tokenId = "token-ll";
+      const familyId = "fam-mw";
+      legStateRepo = createMockLegStateRepo([legAtBuy1(tokenId)]);
+
+      const controlDb = createContinuationControlDb({
+        continuationMode: "leg_local",
+        continuationModeVersion: 0,
+      });
+      const provider = createMockTradeCountProvider(6);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({
+        controlDb: controlDb.db,
+        tradeCountProvider: provider,
+        riskEventRepo,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        timestamp: Date.now(),
+      });
+
+      // Provider must not be consulted in leg_local mode.
+      expect(provider.countCalls.length).toBe(0);
+      expect(provider.prefetchCalls.length).toBe(0);
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          reasonCode: "continuation-stop",
+          tradeCount: 1,
+          tradeCountSource: "leg_local",
+          continuationMode: "leg_local",
+        }),
+      });
+
+      await mod.stop();
+    });
+
+    it("hot-reload: bumping continuation_mode_version flips the active mode on the next tick", async () => {
+      const tokenId = "token-hot-reload";
+      const familyId = "fam-mw";
+      legStateRepo = createMockLegStateRepo([legAtBuy1(tokenId)]);
+
+      const controlDb = createContinuationControlDb({
+        continuationMode: "leg_local",
+        continuationModeVersion: 0,
+      });
+      const provider = createMockTradeCountProvider(6);
+
+      const mod = buildModule({ controlDb: controlDb.db, tradeCountProvider: provider });
+      await mod.start();
+
+      // Tick 1 — leg_local: provider must not be consulted.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        timestamp: Date.now(),
+      });
+      expect(provider.countCalls.length).toBe(0);
+      expect(provider.prefetchCalls.length).toBe(0);
+
+      // Operator flips the mode → version bumps to 1.
+      controlDb.setMode("market_wide");
+
+      // Tick 2 — refreshContinuationMode picks up v=1, switches to market_wide.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        timestamp: Date.now(),
+      });
+      expect(provider.prefetchCalls.length + provider.countCalls.length).toBeGreaterThanOrEqual(1);
+
+      await mod.stop();
+    });
+
+    it("prefetch: deduplicates conditionIds across legState tokens; skips tokens with no legState", async () => {
+      const tokenA = "token-pre-a";
+      const tokenB = "token-pre-b";
+      const tokenC = "token-pre-c"; // no legState
+      const familyId = "fam-mw";
+      // Two open-leg tokens share one conditionId so the prefetch list dedupes to size 1.
+      legStateRepo = createMockLegStateRepo([legAtBuy1(tokenA), legAtBuy1(tokenB)]);
+      selectedMarketCache = createMockSelectedMarketCache([tokenC]);
+
+      const controlDb = createContinuationControlDb({
+        continuationMode: "market_wide",
+        continuationModeVersion: 1,
+      });
+      const provider = createMockTradeCountProvider(2);
+
+      const mod = buildModule({ controlDb: controlDb.db, tradeCountProvider: provider });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          makeMarket(tokenA, familyId, 0.15, SHARED_CONDITION_ID),
+          makeMarket(tokenB, familyId, 0.15, SHARED_CONDITION_ID),
+          makeMarket(tokenC, familyId, 0.15, "cond-no-leg"),
+        ],
+        timestamp: Date.now(),
+      });
+
+      expect(provider.prefetchCalls.length).toBe(1);
+      expect(provider.prefetchCalls[0]!.conditionIds).toEqual([SHARED_CONDITION_ID]);
+      expect(provider.prefetchCalls[0]!.cap).toBe(6);
+
+      await mod.stop();
+    });
+  });
+
   it("REDEEM does not fire when holdDuration exceeds 3600s even if price<0.05 and state is S1/S2", async () => {
     const tokenId = "token-redeem-expired";
     const familyId = "fam-redeem-exp";
@@ -1062,6 +1368,81 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("dedupes noisy signal_suppressed risk events within one suppression window", async () => {
+      const tokenId = "token-not-accepting-dedupe";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      const market = { ...makeMarket(tokenId, null, 0.45), acceptingOrders: false };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const suppressedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) =>
+            event.eventType === "signal_suppressed" &&
+            event.payload.reasonCode === "market-not-live",
+        );
+      expect(suppressedCalls).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    // Regression: continuation-stop is sticky — a leg that fails R1/R2 fails
+    // identically on every sweep tick, so without dedupe a handful of stuck
+    // legs floods decision_signal_log/risk_events ~1/sec. The dedupe set must
+    // include "continuation-stop" or the operator can no longer read the log.
+    it("dedupes continuation-stop suppressions within one suppression window", async () => {
+      const tokenId = "token-cont-dedupe";
+      const familyId = "fam-cont-dedupe";
+      const legState: LegState = {
+        tokenId: createTokenId(tokenId),
+        buyCount: 2,
+        sellCount: 0,
+        lastAction: "BUY",
+        firstTradePrice: 0.03, // below 0.05 → R2 fails, tradeCount<6 → R1 fails → STOP
+        firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      legStateRepo = createMockLegStateRepo([legState]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      const market = makeMarket(tokenId, familyId, 0.45);
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const suppressedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) =>
+            event.eventType === "signal_suppressed" &&
+            event.payload.reasonCode === "continuation-stop",
+        );
+      expect(suppressedCalls).toHaveLength(1);
+
+      await mod.stop();
+    });
+
     it("skips SignalProduced when a new-entry market has enableOrderBook=false", async () => {
       const tokenId = "token-book-off";
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);
@@ -1212,6 +1593,46 @@ describe("AlgoDecisionModule", () => {
         ([ev]) => ev === "SignalProduced",
       );
       expect(signalCalls.length).toBe(0);
+
+      await mod.stop();
+    });
+
+    // Regression: decision_signal_log + signal_emitted used to be written
+    // inside `buildSignal` (before the wallet-budget filter). When budget was
+    // exhausted, we silently dropped the SignalProduced publish but still
+    // booked the emission row, so signal_emitted overcounted by every dropped
+    // tail-end signal. Operators reading
+    //   COUNT(signal_emitted) vs COUNT(SignalProduced)
+    // saw fictitious "missing" emissions and stopped trusting the ledger.
+    it("does not record decision_signal_log or signal_emitted when wallet budget drops the signal", async () => {
+      const tokenId = "token-wallet-no-telemetry";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      orderRepo = createMockOrderRepo(8);
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({
+        controlDb: createMockControlDb(10),
+        activeProfile: "paper" as any,
+        decisionSignalLogRepo,
+        riskEventRepo,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls.length).toBe(0);
+      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+      const signalEmittedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([event]) => event.eventType === "signal_emitted");
+      expect(signalEmittedCalls).toHaveLength(0);
 
       await mod.stop();
     });
