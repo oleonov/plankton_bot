@@ -603,7 +603,12 @@ describe("ResolutionModule", () => {
     );
 
     // Pending order without exchange ID is locally cancelled
-    expect(orderRepo.updateStatus as any).toHaveBeenCalledWith("ord-no", "cancelled");
+    expect(orderRepo.updateStatus as any).toHaveBeenCalledWith(
+      "ord-no",
+      "cancelled",
+      undefined,
+      "market_resolved",
+    );
   });
 
   it("publishes CancelOrderRequested for pending orders that have an exchange ID", async () => {
@@ -640,7 +645,12 @@ describe("ResolutionModule", () => {
     await mod.runCheck();
 
     expect(cancelEvents).toHaveLength(0);
-    expect(orderRepo.updateStatus as any).toHaveBeenCalledWith("ord-1", "cancelled");
+    expect(orderRepo.updateStatus as any).toHaveBeenCalledWith(
+      "ord-1",
+      "cancelled",
+      undefined,
+      "market_resolved",
+    );
   });
 
   // ─── Balance verification (gateway-based settlement gate) ───────────────

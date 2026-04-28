@@ -707,7 +707,7 @@ export class ResolutionModule implements RuntimeModule {
       // Pending orders without an exchange-assigned ID cannot be cancelled
       // on the exchange — just deactivate them locally.
       if (order.status === "pending" && !order.exchangeOrderId) {
-        this.deps.orderRepo.updateStatus(order.orderId, "cancelled");
+        this.deps.orderRepo.updateStatus(order.orderId, "cancelled", undefined, "market_resolved");
         opts?.rememberCancelledOrderIds?.add(String(order.orderId));
         this.deps.log.info(
           { orderId: String(order.orderId), tokenId: String(tokenId) },

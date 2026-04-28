@@ -323,7 +323,12 @@ describe("UserOrderStreamModule", () => {
     await stream.emitOrder(cancellation);
     await stream.emitOrder(cancellation);
 
-    expect(orderRepo.updateStatus).toHaveBeenCalledWith(order.orderId, "cancelled", "ord-exch-1");
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+      order.orderId,
+      "cancelled",
+      "ord-exch-1",
+      "exchange-user-ws-cancelled",
+    );
     expect(cancelled).toHaveLength(1);
     expect(mod.getMetricsSnapshot().dedupeHits).toBe(1);
   });

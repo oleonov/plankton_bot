@@ -35,6 +35,25 @@ function orderNotionalUsdc(order: Pick<OrderDTO, "price" | "size">): number {
   return order.price * order.size;
 }
 
+function formatCancelReason(reason: string): string {
+  const labels: Record<string, string> = {
+    stale_entry_ttl: "TTL timeout",
+    stale_exit_ttl: "exit TTL",
+    stale_entry_enddate: "end-date guard",
+    market_resolved: "market resolved",
+    "exchange-user-ws-cancelled": "exchange cancel",
+    phantom_missing_on_exchange: "missing on exchange",
+    "entry-reprice-cancel": "entry reprice",
+    "entry-ttl-cancel": "entry TTL",
+    "entry-suppress-cancel": "entry suppressed",
+    "exit-reprice-cancel": "exit reprice",
+    "exit-ttl-cancel": "exit TTL",
+    sell_replace_reprice: "sell reprice",
+    sell_replace_retry: "sell retry",
+  };
+  return labels[reason] ?? reason.replace(/[-_]/g, " ");
+}
+
 export function OrdersFills() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tab: "orders" | "fills" = searchParams.get("tab") === "fills" ? "fills" : "orders";
@@ -233,6 +252,14 @@ export function OrdersFills() {
                       >
                         <Badge value={o.status} />
                         {o.postOnly ? <Badge value="post-only" /> : null}
+                        {o.status === "cancelled" && o.cancelReason ? (
+                          <span
+                            title={o.cancelReason}
+                            style={{ color: "var(--text-dim)", fontSize: 11 }}
+                          >
+                            {formatCancelReason(o.cancelReason)}
+                          </span>
+                        ) : null}
                       </div>
                     </td>
                     <td style={{ color: ends.color, fontSize: 12 }}>{ends.text}</td>

@@ -169,6 +169,7 @@ export interface Order {
   size: number; // shares
   sizeUsdc: number; // notional
   status: OrderStatus;
+  cancelReason?: string | null;
   exchangeOrderId: string | null;
   signalId: string | null;
   signalReason: string | null;

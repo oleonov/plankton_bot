@@ -60,7 +60,7 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
         continue;
       }
 
-      orderRepo.updateStatus(local.orderId, "cancelled");
+      orderRepo.updateStatus(local.orderId, "cancelled", undefined, "phantom_missing_on_exchange");
       phantomsCancelled++;
       const msg = `phantom order cancelled: ${local.orderId} (exchange: ${local.exchangeOrderId})`;
       details.push(msg);

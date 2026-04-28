@@ -783,7 +783,12 @@ describe("ExecutionModule", () => {
     });
 
     expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
-    expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("sim-ord-1"), "cancelled");
+    expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+      createOrderId("sim-ord-1"),
+      "cancelled",
+      undefined,
+      "strategy_exit",
+    );
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].reason).toBe("strategy_exit");
 

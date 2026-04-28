@@ -349,6 +349,7 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "orders", "exchange_error_message", "TEXT");
   safeAddColumn(conn.db, "orders", "exchange_error_payload", "TEXT");
   safeAddColumn(conn.db, "orders", "post_only", "INTEGER NOT NULL DEFAULT 0");
+  safeAddColumn(conn.db, "orders", "cancel_reason", "TEXT");
   safeAddColumn(conn.db, "fills", "signal_id", "TEXT");
   safeAddColumn(conn.db, "fills", "decision_rule_id", "TEXT");
   safeAddColumn(conn.db, "fills", "signal_timestamp", "TEXT");

@@ -261,6 +261,25 @@ describe("GET /status", () => {
     expect(updatedOrder?.postOnly).toBe(true);
   });
 
+  it("orders include cancellation reason metadata", async () => {
+    conn.db
+      .prepare("UPDATE orders SET status = 'cancelled', cancel_reason = ? WHERE order_id = 'ord-2'")
+      .run("stale_entry_ttl");
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/orders?status=cancelled",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+
+    expect(body.ok).toBe(true);
+    const updatedOrder = body.data.items.find(
+      (item: { orderId: string }) => item.orderId === "ord-2",
+    );
+    expect(updatedOrder?.cancelReason).toBe("stale_entry_ttl");
+  });
+
   it("paused reflects runtime_paused metric", async () => {
     // No runtime_paused metric yet → paused=false
     const res1 = await app.inject({

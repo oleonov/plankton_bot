@@ -306,6 +306,7 @@ export interface OrderDTO {
   size: number;
   sizeUsdc: number;
   status: string;
+  cancelReason: string | null;
   createdAt: string;
   updatedAt: string;
   slug: string | null;

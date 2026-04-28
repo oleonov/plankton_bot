@@ -24,6 +24,7 @@ export function toDto(row: Record<string, unknown>, meta: MarketMeta) {
     size: row.size,
     sizeUsdc: row.size_usdc,
     status: row.status,
+    cancelReason: row.cancel_reason ?? null,
     exchangeOrderId: row.exchange_order_id,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

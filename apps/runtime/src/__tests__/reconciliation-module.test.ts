@@ -277,7 +277,12 @@ describe("ReconciliationModule", () => {
 
       expect(result.phantomOrders).toBe(1);
       expect(result.clean).toBe(false);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(local.orderId, "cancelled");
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+        local.orderId,
+        "cancelled",
+        undefined,
+        "phantom_missing_on_exchange",
+      );
     });
 
     it("does not cancel local orders that exist on exchange", async () => {
@@ -361,7 +366,12 @@ describe("ReconciliationModule", () => {
 
       expect(result.phantomsCancelled).toBe(1);
       expect(result.phantomsSkippedGrace).toBe(0);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(old.orderId, "cancelled");
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+        old.orderId,
+        "cancelled",
+        undefined,
+        "phantom_missing_on_exchange",
+      );
     });
 
     it("stale exchange order is still auto-cancelled (regression)", async () => {
@@ -446,7 +456,12 @@ describe("ReconciliationModule", () => {
 
       expect(result.phantomsCancelled).toBe(1);
       expect(result.phantomsSkippedGrace).toBe(0);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(old.orderId, "cancelled");
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+        old.orderId,
+        "cancelled",
+        undefined,
+        "phantom_missing_on_exchange",
+      );
     });
   });
 
@@ -484,7 +499,12 @@ describe("ReconciliationModule", () => {
       const result = await mod.runReconciliation();
 
       expect(result.phantomOrders).toBe(1);
-      expect(orderRepo.updateStatus).toHaveBeenCalledWith(local.orderId, "cancelled");
+      expect(orderRepo.updateStatus).toHaveBeenCalledWith(
+        local.orderId,
+        "cancelled",
+        undefined,
+        "phantom_missing_on_exchange",
+      );
     });
   });
 

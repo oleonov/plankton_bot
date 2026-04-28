@@ -162,6 +162,28 @@ function getColumnValues(colIndex: number): string[] {
 }
 
 describe("Orders table sorting", () => {
+  it("renders cancellation reason in the status column", async () => {
+    server.use(
+      http.get("/api/v1/orders", () =>
+        ok({
+          items: [
+            {
+              ...orders.items[0],
+              status: "cancelled",
+              cancelReason: "stale_entry_ttl",
+            },
+          ],
+          nextCursor: null,
+        }),
+      ),
+    );
+
+    renderWithProviders(<OrdersFills />);
+
+    await screen.findByText("Bitcoin above 60k");
+    expect(screen.getByText("TTL timeout")).toBeInTheDocument();
+  });
+
   it("sorts by Price ascending then descending", { timeout: 15_000 }, async () => {
     setupOrders();
     const user = userEvent.setup();

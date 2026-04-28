@@ -293,6 +293,7 @@ export class UserOrderStreamModule implements RuntimeModule {
         localOrder.orderId,
         nextStatus ?? currentStatus,
         event.orderId,
+        nextStatus === "cancelled" ? "exchange-user-ws-cancelled" : undefined,
       );
     }
 

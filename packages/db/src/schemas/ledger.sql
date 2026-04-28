@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS orders (
   size               REAL NOT NULL,
   size_usdc          REAL NOT NULL,
   status             TEXT NOT NULL DEFAULT 'pending',
+  cancel_reason      TEXT,
   exchange_order_id  TEXT,
   signal_id          TEXT,
   signal_reason      TEXT,

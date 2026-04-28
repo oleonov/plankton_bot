@@ -172,8 +172,13 @@ export interface OrderRepository {
   /** Return all orders for a specific outcome token. */
   findByTokenId(tokenId: TokenId): Order[];
 
-  /** Update the status (and optionally exchange_order_id) of an existing order. */
-  updateStatus(id: OrderId, status: OrderStatus, exchangeOrderId?: string): void;
+  /** Update the status, exchange_order_id, and cancellation reason of an existing order. */
+  updateStatus(
+    id: OrderId,
+    status: OrderStatus,
+    exchangeOrderId?: string,
+    cancelReason?: string,
+  ): void;
 
   /** Sum the notional (size_usdc) of all open buy orders. */
   sumOpenBuyNotional(): number;

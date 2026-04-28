@@ -19,9 +19,9 @@ export class SqliteOrderRepository implements OrderRepository {
         `INSERT INTO orders
          (order_id, client_order_id, token_id, condition_id, side, order_type, post_only,
           price, size, size_usdc, status, exchange_order_id, signal_id,
-          signal_reason, decision_rule_id, signal_timestamp, exchange_error_code,
+          signal_reason, cancel_reason, decision_rule_id, signal_timestamp, exchange_error_code,
           exchange_error_message, exchange_error_payload, bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
@@ -30,6 +30,7 @@ export class SqliteOrderRepository implements OrderRepository {
            size_usdc = excluded.size_usdc,
            signal_id = excluded.signal_id,
            signal_reason = excluded.signal_reason,
+           cancel_reason = excluded.cancel_reason,
            decision_rule_id = excluded.decision_rule_id,
            signal_timestamp = excluded.signal_timestamp,
            exchange_error_code = excluded.exchange_error_code,
@@ -52,6 +53,7 @@ export class SqliteOrderRepository implements OrderRepository {
         order.exchangeOrderId,
         order.signalId,
         order.signalReason,
+        order.cancelReason ?? null,
         order.decisionRuleId ?? null,
         order.signalTimestamp ?? null,
         order.exchangeErrorCode ?? null,
@@ -99,24 +101,33 @@ export class SqliteOrderRepository implements OrderRepository {
     return rows.map((r) => this.rowToOrder(r));
   }
 
-  updateStatus(id: OrderId, status: OrderStatus, exchangeOrderId?: string): void {
+  updateStatus(
+    id: OrderId,
+    status: OrderStatus,
+    exchangeOrderId?: string,
+    cancelReason?: string,
+  ): void {
+    const assignments = ["status = ?", "updated_at = datetime('now')"];
+    const params: unknown[] = [status];
+
     if (exchangeOrderId !== undefined) {
-      this.db
-        .prepare(
-          `UPDATE orders
-           SET status = ?, exchange_order_id = ?, updated_at = datetime('now')
-           WHERE order_id = ?`,
-        )
-        .run(status, exchangeOrderId, id);
-    } else {
-      this.db
-        .prepare(
-          `UPDATE orders
-           SET status = ?, updated_at = datetime('now')
-           WHERE order_id = ?`,
-        )
-        .run(status, id);
+      assignments.push("exchange_order_id = ?");
+      params.push(exchangeOrderId);
     }
+
+    if (cancelReason !== undefined) {
+      assignments.push("cancel_reason = ?");
+      params.push(cancelReason);
+    }
+
+    params.push(id);
+    this.db
+      .prepare(
+        `UPDATE orders
+         SET ${assignments.join(", ")}
+         WHERE order_id = ?`,
+      )
+      .run(...params);
   }
 
   sumOpenBuyNotional(): number {
@@ -141,6 +152,7 @@ export class SqliteOrderRepository implements OrderRepository {
       size: row.size as number,
       sizeUsdc: row.size_usdc as number,
       status: row.status as OrderStatus,
+      cancelReason: (row.cancel_reason as string) ?? null,
       exchangeOrderId: (row.exchange_order_id as string) ?? null,
       signalId: (row.signal_id as string) ?? null,
       signalReason: (row.signal_reason as string) ?? null,

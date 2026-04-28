@@ -207,6 +207,16 @@ describe("SqliteOrderRepository", () => {
     expect(found!.exchangeOrderId).toBe("exch-123");
   });
 
+  it("updateStatus records cancellation reason", () => {
+    repo.save(makeOrder());
+
+    repo.updateStatus(createOrderId("ord-1"), "cancelled", undefined, "stale_entry_ttl");
+
+    const found = repo.findById(createOrderId("ord-1"));
+    expect(found!.status).toBe("cancelled");
+    expect(found!.cancelReason).toBe("stale_entry_ttl");
+  });
+
   it("persists and retrieves signalReason", () => {
     repo.save(makeOrder({ signalReason: "repricing-exit" }));
 
