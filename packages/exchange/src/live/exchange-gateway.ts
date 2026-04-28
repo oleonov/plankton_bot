@@ -298,9 +298,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
       return cached.info;
     }
     try {
-      const raw = (await this.client.getClobMarketInfo(conditionId)) as
-        | { fd?: { r?: number; e?: number; to?: boolean } }
-        | null;
+      const raw = (await this.client.getClobMarketInfo(conditionId)) as {
+        fd?: { r?: number; e?: number; to?: boolean };
+      } | null;
       const fd = raw?.fd;
       // Mirror @polymarket/clob-client-v2@1.0.2 behavior: when fd.e is absent
       // or non-finite, the SDK caches `result.fd?.e ?? 0`. We do the same so

@@ -170,8 +170,7 @@ export async function runStartupPositionAdoption(
     // we want gross — `fill.sizeUsdc` (gross from the mapper) when present,
     // otherwise reconstruct from `fill.grossSize * fill.price`, falling
     // back to `fill.size * fill.price` only on legacy/simulation paths.
-    const sizeUsdc =
-      fill.sizeUsdc ?? (fill.grossSize ?? fill.size) * fill.price;
+    const sizeUsdc = fill.sizeUsdc ?? (fill.grossSize ?? fill.size) * fill.price;
 
     if (existing) {
       const totalSize = existing.size + fill.size;

@@ -47,9 +47,7 @@ export interface ClobClientCtorOptions {
 }
 
 export interface PolymarketClientFactoryDeps {
-  createBuilderConfig?: (
-    config: ConstructorParameters<typeof RelayerBuilderConfig>[0],
-  ) => unknown;
+  createBuilderConfig?: (config: ConstructorParameters<typeof RelayerBuilderConfig>[0]) => unknown;
   createClobClient?: (options: ClobClientCtorOptions) => unknown;
   createWallet?: (privateKey: string) => unknown;
   createSettlementClient?: (config: {
@@ -93,8 +91,7 @@ function createRelayerBuilderConfig(
   relayerConfig: PolymarketRelayerConfig,
   deps: PolymarketClientFactoryDeps,
 ): unknown {
-  const createConfig =
-    deps.createBuilderConfig ?? ((config) => new RelayerBuilderConfig(config));
+  const createConfig = deps.createBuilderConfig ?? ((config) => new RelayerBuilderConfig(config));
 
   if (relayerConfig.builder?.mode === "local") {
     return createConfig({
