@@ -92,6 +92,7 @@ export class FillPollerModule implements RuntimeModule {
           orderRepo: this.deps.orderRepo,
           bus: this.deps.bus,
           log: this.log,
+          gateway: this.deps.gateway,
         });
 
         // Advance watermark to latest fill timestamp

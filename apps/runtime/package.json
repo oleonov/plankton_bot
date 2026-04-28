@@ -19,7 +19,7 @@
     "@plankton/exchange": "workspace:*",
     "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/builder-signing-sdk": "^0.0.8",
-    "@polymarket/clob-client": "^4.0.0",
+    "@polymarket/clob-client-v2": "^1.0.2",
     "axios": "0.27.2",
     "ethers": "^5.7.1",
     "pino": "^9.6.0",

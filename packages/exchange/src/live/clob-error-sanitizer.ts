@@ -2,7 +2,7 @@
  * Strips circular references from axios error config before the CLOB SDK
  * tries to JSON.stringify it.
  *
- * @polymarket/clob-client@4.22.8 logs request errors via:
+ * @polymarket/clob-client-v2@1.0.2 logs request errors via:
  *   console.error("[CLOB Client] request error", JSON.stringify({
  *     status, statusText, data, config: err.response.config,
  *   }))
@@ -13,6 +13,9 @@
  * console.error fires. The TypeError propagates out of the SDK in place of
  * the real HTTP error, masking root causes like "not enough balance" with
  * a generic UNKNOWN classification.
+ *
+ * V2 SDK keeps the same axios-based transport, so the same circular-reference
+ * trap applies — sanitizer is reused unchanged.
  *
  * The interceptor mutates the live error object (axios reuses references),
  * dropping the agent fields. Functions on `transform*`/`adapter` are also

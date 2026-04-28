@@ -17,11 +17,18 @@ import type {
   FillId,
   ConditionId,
   ExchangeFill,
+  MarketFeeInfo,
   OrderId,
   ClientOrderId,
   Order,
 } from "@plankton/domain";
-import { createFillId, createOrderId, resolvePolymarketTakerFeeRate } from "@plankton/domain";
+import {
+  createFillId,
+  createOrderId,
+  computePolymarketBuyShareFee,
+  computePolymarketTakerFeeUsdc,
+  resolvePolymarketTakerFeeRate,
+} from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 // Bounded FIFO cache that dedupes orphan-fill log warnings. Without a cap
@@ -47,6 +54,13 @@ export interface ImportFillsDeps {
   orderRepo: OrderRepository;
   bus: EventBus;
   log: Logger;
+  /**
+   * Optional V2 fee-metadata gateway. When present, the reconciler resolves
+   * per-condition `MarketFeeInfo` once per import batch and feeds it into
+   * the fee math, so the V1 category-fallback table is only used when the
+   * exchange has no fee metadata.
+   */
+  gateway?: Pick<ExchangeGateway, "getMarketFeeInfo">;
 }
 
 export interface ImportFillsResult {
@@ -80,6 +94,7 @@ export function buildLocalFillFromExchangeFill(
     "orderId" | "conditionId" | "signalId" | "signalReason" | "decisionRuleId" | "signalTimestamp"
   >,
   primaryCategory?: string,
+  feeInfo?: MarketFeeInfo | null,
 ): {
   fill: Fill;
   fillId: FillId;
@@ -89,17 +104,38 @@ export function buildLocalFillFromExchangeFill(
   signalReason: string | null;
 } {
   const fillId = createFillId(fill.fillId);
-  const sizeUsdc = fill.sizeUsdc ?? fill.size * fill.price;
 
-  const rate = resolvePolymarketTakerFeeRate({
+  const { rate, exponent } = resolvePolymarketTakerFeeRate({
     feeRateBps: fill.feeRateBps ?? 0,
     category: primaryCategory,
+    feeInfo,
   });
 
+  // Re-derive net shares from gross when V2 fee metadata is authoritative.
+  // The mapper baked in a V1-style share fee from `feeRateBps`; if V2 reports
+  // a different rate/exponent (or the fill payload omitted bps), the wallet
+  // share count is wrong unless we recompute from the gross size.
+  const grossSize: number =
+    Number.isFinite(fill.grossSize) && (fill.grossSize ?? 0) > 0
+      ? (fill.grossSize as number)
+      : fill.size;
+  const useV2 = !!feeInfo;
+  const recomputedShareFee =
+    useV2 && fill.liquidityRole === "taker" && fill.side === "buy"
+      ? computePolymarketBuyShareFee({ grossSize, price: fill.price, rate, exponent })
+      : null;
+  const size = recomputedShareFee !== null ? grossSize - recomputedShareFee : fill.size;
+
+  const sizeUsdc = fill.sizeUsdc ?? grossSize * fill.price;
+
+  const recomputedFeeUsdc =
+    useV2 && fill.liquidityRole !== "maker"
+      ? computePolymarketTakerFeeUsdc({ grossSize, price: fill.price, rate, exponent })
+      : null;
   const fee =
     fill.liquidityRole === "maker"
       ? 0
-      : fill.fee || fill.size * rate * fill.price * (1 - fill.price);
+      : (recomputedFeeUsdc ?? (fill.fee || grossSize * rate * fill.price * (1 - fill.price)));
 
   return {
     fill: {
@@ -109,7 +145,7 @@ export function buildLocalFillFromExchangeFill(
       conditionId: localOrder.conditionId,
       side: fill.side,
       price: fill.price,
-      size: fill.size,
+      size,
       sizeUsdc,
       liquidityRole: fill.liquidityRole,
       fee,
@@ -195,10 +231,19 @@ export async function importExchangeFills(
   fills: ExchangeFill[],
   deps: ImportFillsDeps,
 ): Promise<ImportFillsResult> {
-  const { fillRepo, orderRepo, bus, log } = deps;
+  const { fillRepo, orderRepo, bus, log, gateway } = deps;
   let imported = 0;
   let skipped = 0;
   const details: string[] = [];
+
+  const feeInfoByCondition = new Map<string, MarketFeeInfo | null>();
+  async function resolveFeeInfo(conditionId: string): Promise<MarketFeeInfo | null> {
+    if (!gateway?.getMarketFeeInfo) return null;
+    if (feeInfoByCondition.has(conditionId)) return feeInfoByCondition.get(conditionId) ?? null;
+    const info = await gateway.getMarketFeeInfo(conditionId);
+    feeInfoByCondition.set(conditionId, info);
+    return info;
+  }
 
   // Track which orders received new fills for status update
   const ordersWithNewFills = new Set<string>();
@@ -238,7 +283,8 @@ export async function importExchangeFills(
       continue;
     }
 
-    const resolved = buildLocalFillFromExchangeFill(ef, localOrder);
+    const feeInfo = await resolveFeeInfo(localOrder.conditionId);
+    const resolved = buildLocalFillFromExchangeFill(ef, localOrder, undefined, feeInfo);
 
     fillRepo.save(resolved.fill);
     imported++;
@@ -268,7 +314,8 @@ export async function importExchangeFills(
   // Phase 3: Publish FillReceived events (handlers now see correct order status)
   for (const saved of savedFills) {
     const { ef, fillId, orderId, conditionId, sizeUsdc, signalReason } = saved;
-    const resolved = buildLocalFillFromExchangeFill(ef, saved);
+    const feeInfo = feeInfoByCondition.get(String(conditionId)) ?? null;
+    const resolved = buildLocalFillFromExchangeFill(ef, saved, undefined, feeInfo);
 
     await bus.publish("FillReceived", {
       fillId,
@@ -278,7 +325,7 @@ export async function importExchangeFills(
       conditionId,
       side: ef.side,
       price: ef.price,
-      size: ef.size,
+      size: resolved.fill.size,
       sizeUsdc,
       liquidityRole: ef.liquidityRole,
       fee: resolved.fill.fee,
@@ -326,6 +373,7 @@ export async function reconcileFills(
     orderRepo,
     bus,
     log,
+    gateway,
   });
 
   return {

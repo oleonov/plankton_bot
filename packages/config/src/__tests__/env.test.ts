@@ -26,6 +26,7 @@ const ALL_KEYS = [
   "POLY_BUILDER_API_KEY",
   "POLY_BUILDER_SECRET",
   "POLY_BUILDER_PASSPHRASE",
+  "POLY_BUILDER_CODE",
   "POLY_PRIVATE_KEY",
   "POLYGON_RPC_URL",
   "POLYGON_RPC_FALLBACK_URL",
@@ -93,6 +94,7 @@ describe("loadEnv", () => {
       POLY_BUILDER_API_KEY: "builder-key",
       POLY_BUILDER_SECRET: "builder-secret",
       POLY_BUILDER_PASSPHRASE: "builder-pass",
+      POLY_BUILDER_CODE: `0x${"a".repeat(64)}`,
       POLYGON_RPC_URL: "https://polygon-mainnet.g.alchemy.com/v2/test",
       POLYGON_RPC_FALLBACK_URL: "https://polygon.drpc.org",
     });
@@ -107,6 +109,7 @@ describe("loadEnv", () => {
     expect(config.polyBuilderApiKey).toBe("builder-key");
     expect(config.polyBuilderSecret).toBe("builder-secret");
     expect(config.polyBuilderPassphrase).toBe("builder-pass");
+    expect(config.polyBuilderCode).toBe(`0x${"a".repeat(64)}`);
     expect(config.polygonRpcUrl).toBe("https://polygon-mainnet.g.alchemy.com/v2/test");
     expect(config.polygonRpcFallbackUrl).toBe("https://polygon.drpc.org");
   });
@@ -179,6 +182,36 @@ describe("loadEnv", () => {
       POLY_PRIVATE_KEY: "not-a-valid-key",
     });
     expect(() => loadEnv()).toThrow("0x-prefixed 32-byte hex");
+  });
+
+  it("rejects malformed POLY_BUILDER_CODE", () => {
+    setEnvVars({ POLY_BUILDER_CODE: "not-bytes32" });
+    expect(() => loadEnv(emptyEnvPath)).toThrow(
+      "POLY_BUILDER_CODE must be a 0x-prefixed 32-byte hex value",
+    );
+  });
+
+  it("accepts a valid POLY_BUILDER_CODE", () => {
+    setEnvVars({ POLY_BUILDER_CODE: `0x${"f".repeat(64)}` });
+    const config = loadEnv(emptyEnvPath);
+    expect(config.polyBuilderCode).toBe(`0x${"f".repeat(64)}`);
+  });
+
+  it("treats empty POLY_BUILDER_CODE= as undefined (template default, not regex failure)", () => {
+    // .env.example / .env.production.example ship the key with an empty value
+    // so operators see it. Empty string must collapse to undefined so config
+    // parse succeeds and the live-lite preflight gate handles the missing key.
+    setEnvVars({ POLY_BUILDER_CODE: "" });
+    expect(() => loadEnv(emptyEnvPath)).not.toThrow();
+    const config = loadEnv(emptyEnvPath);
+    expect(config.polyBuilderCode).toBeUndefined();
+  });
+
+  it("treats whitespace-only POLY_BUILDER_CODE as undefined", () => {
+    setEnvVars({ POLY_BUILDER_CODE: "   " });
+    expect(() => loadEnv(emptyEnvPath)).not.toThrow();
+    const config = loadEnv(emptyEnvPath);
+    expect(config.polyBuilderCode).toBeUndefined();
   });
 
   // LIVE_LITE_* envelope tests removed — envelope caps moved to profile_settings in control.db

@@ -22,6 +22,7 @@ function createMockClient() {
     getMarket: vi.fn(),
     getOrderBook: vi.fn(),
     getTickSize: vi.fn(),
+    getClobMarketInfo: vi.fn(),
   };
 }
 
@@ -669,6 +670,76 @@ describe("LiveExchangeGateway", () => {
     client.getOk.mockRejectedValue(new Error("down"));
     const health = await gw.healthCheck();
     expect(health.ok).toBe(false);
+  });
+
+  describe("getMarketFeeInfo TTL cache", () => {
+    const conditionId = "0xcond";
+
+    it("returns rate/exponent/takerOnly from fd block on first call", async () => {
+      client.getClobMarketInfo.mockResolvedValueOnce({ fd: { r: 0.04, e: 1, to: false } });
+      const info = await gw.getMarketFeeInfo(conditionId);
+      expect(info).toEqual({ rate: 0.04, exponent: 1, takerOnly: false });
+      expect(client.getClobMarketInfo).toHaveBeenCalledOnce();
+    });
+
+    it("returns null when fd is absent", async () => {
+      client.getClobMarketInfo.mockResolvedValueOnce({});
+      const info = await gw.getMarketFeeInfo(conditionId);
+      expect(info).toBeNull();
+    });
+
+    it("defaults exponent to 0 when fd.e is absent (matches SDK `fd?.e ?? 0`)", async () => {
+      client.getClobMarketInfo.mockResolvedValueOnce({ fd: { r: 0.04, to: true } });
+      const info = await gw.getMarketFeeInfo(conditionId);
+      expect(info).toEqual({ rate: 0.04, exponent: 0, takerOnly: true });
+    });
+
+    it("defaults exponent to 0 when fd.e is non-finite (NaN)", async () => {
+      client.getClobMarketInfo.mockResolvedValueOnce({ fd: { r: 0.04, e: NaN, to: false } });
+      const info = await gw.getMarketFeeInfo(conditionId);
+      expect(info).toEqual({ rate: 0.04, exponent: 0, takerOnly: false });
+    });
+
+    it("serves repeated calls from cache while TTL is fresh", async () => {
+      client.getClobMarketInfo.mockResolvedValueOnce({ fd: { r: 0.04, e: 1, to: false } });
+      const a = await gw.getMarketFeeInfo(conditionId);
+      const b = await gw.getMarketFeeInfo(conditionId);
+      expect(a).toEqual(b);
+      expect(client.getClobMarketInfo).toHaveBeenCalledOnce();
+    });
+
+    it("re-fetches after the hit TTL expires", async () => {
+      const start = 1_700_000_000_000;
+      vi.spyOn(Date, "now").mockReturnValue(start);
+      client.getClobMarketInfo
+        .mockResolvedValueOnce({ fd: { r: 0.04, e: 1, to: false } })
+        .mockResolvedValueOnce({ fd: { r: 0.05, e: 1, to: true } });
+
+      await gw.getMarketFeeInfo(conditionId);
+      vi.spyOn(Date, "now").mockReturnValue(start + 5 * 60_000 + 1);
+      const second = await gw.getMarketFeeInfo(conditionId);
+      expect(second).toEqual({ rate: 0.05, exponent: 1, takerOnly: true });
+      expect(client.getClobMarketInfo).toHaveBeenCalledTimes(2);
+    });
+
+    it("negatively caches transient failures with a short TTL and re-fetches after it", async () => {
+      const start = 1_700_000_000_000;
+      vi.spyOn(Date, "now").mockReturnValue(start);
+      client.getClobMarketInfo
+        .mockRejectedValueOnce(new Error("transient"))
+        .mockResolvedValueOnce({ fd: { r: 0.04, e: 1, to: false } });
+
+      const first = await gw.getMarketFeeInfo(conditionId);
+      const cached = await gw.getMarketFeeInfo(conditionId);
+      expect(first).toBeNull();
+      expect(cached).toBeNull();
+      expect(client.getClobMarketInfo).toHaveBeenCalledOnce();
+
+      vi.spyOn(Date, "now").mockReturnValue(start + 30_000 + 1);
+      const refreshed = await gw.getMarketFeeInfo(conditionId);
+      expect(refreshed).toEqual({ rate: 0.04, exponent: 1, takerOnly: false });
+      expect(client.getClobMarketInfo).toHaveBeenCalledTimes(2);
+    });
   });
 });
 

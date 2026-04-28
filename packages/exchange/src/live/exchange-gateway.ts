@@ -1,11 +1,11 @@
 /**
- * Live ExchangeGateway — wraps @polymarket/clob-client for order lifecycle.
+ * Live ExchangeGateway — wraps @polymarket/clob-client-v2 for order lifecycle.
  *
  * The SDK ClobClient is accepted as `unknown` in the public config interface
  * to prevent SDK types from leaking into @plankton/domain consumers.
  */
 
-import { getContractConfig } from "@polymarket/clob-client";
+import { getContractConfig } from "@polymarket/clob-client-v2";
 import type {
   ExchangeGateway,
   PlaceOrderParams,
@@ -15,6 +15,7 @@ import type {
   ExchangeOrder,
   ExchangeFill,
   ExchangeBalance,
+  MarketFeeInfo,
   TokenId,
   ExchangeUserEventStream,
   ExchangeUserOrderEvent,
@@ -141,6 +142,15 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private warnedMergeUnsupported = false;
   private readonly recentRedeemSubmissions = new Map<string, number>();
   private readonly recentInfraAlerts = new Map<string, number>();
+  // V2 fee metadata cache with separate TTLs for hits vs misses so a transient
+  // CLOB error cannot permanently disable V2 fee metadata for a market.
+  // `info: null` is a valid hit (`fd` block legitimately absent).
+  private readonly marketFeeInfoCache = new Map<
+    string,
+    { info: MarketFeeInfo | null; expiresAt: number }
+  >();
+  private static readonly FEE_INFO_TTL_HIT_MS = 5 * 60_000;
+  private static readonly FEE_INFO_TTL_MISS_MS = 30_000;
 
   constructor(config: LiveExchangeConfig) {
     this.client = config.client;
@@ -278,6 +288,44 @@ export class LiveExchangeGateway implements ExchangeGateway {
       return [mapBalance(raw as Record<string, unknown>)];
     } catch {
       return [];
+    }
+  }
+
+  async getMarketFeeInfo(conditionId: string): Promise<MarketFeeInfo | null> {
+    const now = Date.now();
+    const cached = this.marketFeeInfoCache.get(conditionId);
+    if (cached && cached.expiresAt > now) {
+      return cached.info;
+    }
+    try {
+      const raw = (await this.client.getClobMarketInfo(conditionId)) as
+        | { fd?: { r?: number; e?: number; to?: boolean } }
+        | null;
+      const fd = raw?.fd;
+      // Mirror @polymarket/clob-client-v2@1.0.2 behavior: when fd.e is absent
+      // or non-finite, the SDK caches `result.fd?.e ?? 0`. We do the same so
+      // our local fee math agrees with the SDK's view of the market.
+      const info: MarketFeeInfo | null =
+        fd && Number.isFinite(fd.r)
+          ? {
+              rate: Number(fd.r ?? 0),
+              exponent: Number.isFinite(fd.e) ? Number(fd.e) : 0,
+              takerOnly: !!fd.to,
+            }
+          : null;
+      this.marketFeeInfoCache.set(conditionId, {
+        info,
+        expiresAt: now + LiveExchangeGateway.FEE_INFO_TTL_HIT_MS,
+      });
+      return info;
+    } catch {
+      // Short negative TTL: a transient CLOB failure must not permanently
+      // disable V2 fee metadata for this condition.
+      this.marketFeeInfoCache.set(conditionId, {
+        info: null,
+        expiresAt: now + LiveExchangeGateway.FEE_INFO_TTL_MISS_MS,
+      });
+      return null;
     }
   }
 
@@ -757,7 +805,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     }
 
     process.emitWarning(
-      `LiveExchangeGateway ${kind}Positions skipped: installed @polymarket/clob-client does not expose a ${kind} API`,
+      `LiveExchangeGateway ${kind}Positions skipped: installed @polymarket/clob-client-v2 does not expose a ${kind} API`,
       {
         code: kind === "redeem" ? "PLANKTON_REDEEM_UNSUPPORTED" : "PLANKTON_MERGE_UNSUPPORTED",
       },

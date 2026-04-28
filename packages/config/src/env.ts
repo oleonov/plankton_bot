@@ -39,6 +39,18 @@ const envSchema = z
     POLY_BUILDER_API_KEY: z.string().optional(),
     POLY_BUILDER_SECRET: z.string().optional(),
     POLY_BUILDER_PASSPHRASE: z.string().optional(),
+    // V2 CLOB builder attribution — bytes32 from Polymarket Builder Profile.
+    // Replaces HMAC builder credentials for order signing in V2.
+    // Empty string (POLY_BUILDER_CODE= in .env templates) is normalized to
+    // undefined so the regex doesn't fire before live-lite preflight can
+    // surface a friendly LIVE_BUILDER_CODE_MISSING error.
+    POLY_BUILDER_CODE: z.preprocess(
+      (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+      z
+        .string()
+        .regex(/^0x[0-9a-fA-F]{64}$/, "POLY_BUILDER_CODE must be a 0x-prefixed 32-byte hex value")
+        .optional(),
+    ),
     POLY_PRIVATE_KEY: z.string().optional(),
     POLYMARKET_RELAYER_URL: z.string().url().default("https://relayer-v2.polymarket.com"),
     POLYGON_RPC_URL: z.string().url().default("https://polygon-rpc.com"),
@@ -165,6 +177,7 @@ export interface AppConfig {
   polyBuilderApiKey?: string | undefined;
   polyBuilderSecret?: string | undefined;
   polyBuilderPassphrase?: string | undefined;
+  polyBuilderCode?: string | undefined;
   polyPrivateKey: string | undefined;
   polymarketRelayerUrl?: string | undefined;
   polygonRpcUrl?: string | undefined;
@@ -255,6 +268,7 @@ export function loadEnv(envPath?: string): AppConfig {
     polyBuilderApiKey: env.POLY_BUILDER_API_KEY,
     polyBuilderSecret: env.POLY_BUILDER_SECRET,
     polyBuilderPassphrase: env.POLY_BUILDER_PASSPHRASE,
+    polyBuilderCode: env.POLY_BUILDER_CODE,
     polyPrivateKey: env.POLY_PRIVATE_KEY,
     polymarketRelayerUrl: env.POLYMARKET_RELAYER_URL,
     polygonRpcUrl: env.POLYGON_RPC_URL,

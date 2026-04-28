@@ -87,10 +87,10 @@ function buildExchangeFill(input: {
   const grossSize = Number(input.size ?? 0);
   const feeRateBps = Number(input.feeRateBps ?? 0);
   const side = toDomainSide(input.side);
-  const feeRate = resolvePolymarketTakerFeeRate({ feeRateBps });
+  const { rate, exponent } = resolvePolymarketTakerFeeRate({ feeRateBps });
   const shareFee =
     input.liquidityRole === "taker" && side === "buy"
-      ? computePolymarketBuyShareFee({ grossSize, price, feeRate })
+      ? computePolymarketBuyShareFee({ grossSize, price, rate, exponent })
       : 0;
   const size = grossSize - shareFee;
   const sizeUsdc = grossSize * price;
@@ -98,7 +98,7 @@ function buildExchangeFill(input: {
   const fee =
     input.liquidityRole === "maker"
       ? 0
-      : computePolymarketTakerFeeUsdc({ grossSize, price, feeRate });
+      : computePolymarketTakerFeeUsdc({ grossSize, price, rate, exponent });
 
   return {
     fillId: input.fillId,
@@ -108,6 +108,7 @@ function buildExchangeFill(input: {
     side,
     price,
     size,
+    grossSize,
     sizeUsdc,
     liquidityRole: input.liquidityRole,
     fee,

@@ -611,6 +611,7 @@ export class ExecutionModule implements RuntimeModule {
       orderRepo: this.deps.orderRepo,
       bus: this.deps.bus,
       log: this.log,
+      gateway: this.deps.gateway,
     });
   }
 

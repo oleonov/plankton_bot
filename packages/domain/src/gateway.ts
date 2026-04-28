@@ -87,7 +87,13 @@ export interface ExchangeFill {
   readonly tokenId: TokenId;
   readonly side: OrderSide;
   readonly price: number;
+  /** Net shares delivered to the wallet (after taker BUY share fee deduction). */
   readonly size: number;
+  /** Pre-fee gross shares as reported by the exchange. Mappers should populate
+   *  this from the raw fill payload so downstream (fill-reconciler) can
+   *  re-derive net size with authoritative V2 fee metadata. Falls back to
+   *  `size` when omitted (legacy / simulation paths). */
+  readonly grossSize?: number;
   /** Cash notional paid/received when it differs from wallet share size × price. */
   readonly sizeUsdc?: number;
   readonly liquidityRole: LiquidityRole;
@@ -464,4 +470,28 @@ export interface ExchangeGateway {
 
   /** Validate connectivity and API credentials. */
   healthCheck(): Promise<{ readonly ok: boolean; readonly latencyMs: number }>;
+
+  /**
+   * Fetch V2 fee metadata for a market by condition id.
+   * Returns `null` when the gateway cannot fetch (simulation) or when the
+   * exchange has no fee metadata for the condition. Implementations should
+   * cache the value per condition since fee metadata is static.
+   */
+  getMarketFeeInfo?(conditionId: string): Promise<MarketFeeInfo | null>;
+}
+
+/**
+ * V2 fee metadata derived from CLOB `/clob-market/{conditionId}` `fd` block.
+ *
+ *   platformFeeRate = rate * (price * (1 - price))^exponent
+ *
+ * - `rate` (`fd.r`) — base fee multiplier (already a fraction, not bps)
+ * - `exponent` (`fd.e`) — exponent applied to `price * (1 - price)`. For most
+ *   categories this is `1`, which collapses to V1 fee math.
+ * - `takerOnly` (`fd.to`) — when true, makers pay no fees.
+ */
+export interface MarketFeeInfo {
+  readonly rate: number;
+  readonly exponent: number;
+  readonly takerOnly: boolean;
 }

@@ -26,7 +26,7 @@ import {
 import { updateLegStateForFill } from "./modules/leg-state/update-leg-state-for-fill.js";
 
 export interface StartupPositionAdoptionDeps {
-  gateway: Pick<ExchangeGateway, "getFills">;
+  gateway: Pick<ExchangeGateway, "getFills" | "getMarketFeeInfo">;
   marketRepo: MarketRepository;
   orderRepo: OrderRepository;
   fillRepo: FillRepository;
@@ -164,7 +164,14 @@ export async function runStartupPositionAdoption(
 
     const orphanGroupKey = buildOrphanGroupKey(fill);
     const existing = syntheticSeeds.get(orphanGroupKey);
-    const sizeUsdc = fill.size * fill.price;
+    // Prefer gross notional from the exchange fill: for taker BUY in V2,
+    // `fill.size` is post-fee net shares, so `size * price` would be net
+    // notional. The synthetic seed represents what was actually traded, so
+    // we want gross — `fill.sizeUsdc` (gross from the mapper) when present,
+    // otherwise reconstruct from `fill.grossSize * fill.price`, falling
+    // back to `fill.size * fill.price` only on legacy/simulation paths.
+    const sizeUsdc =
+      fill.sizeUsdc ?? (fill.grossSize ?? fill.size) * fill.price;
 
     if (existing) {
       const totalSize = existing.size + fill.size;
@@ -217,6 +224,7 @@ export async function runStartupPositionAdoption(
         orderRepo: deps.orderRepo,
         bus,
         log,
+        gateway: deps.gateway,
       });
 
       if (importResult.imported === 0) {
@@ -238,7 +246,7 @@ export async function runStartupPositionAdoption(
         conditionId: savedFill.conditionId,
         side: pending.fill.side,
         price: pending.fill.price,
-        size: pending.fill.size,
+        size: savedFill.size,
         sizeUsdc: savedFill.sizeUsdc,
         fee: savedFill.fee,
         signalReason: localOrder.signalReason ?? SYNTHETIC_SIGNAL_REASON,

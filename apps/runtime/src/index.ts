@@ -419,6 +419,7 @@ async function main(): Promise<void> {
         polyBuilderApiKey?: string;
         polyBuilderSecret?: string;
         polyBuilderPassphrase?: string;
+        polyBuilderCode?: string;
       };
       const polymarketClientConfig = {
         polyApiKey: config.polyApiKey,
@@ -427,6 +428,7 @@ async function main(): Promise<void> {
         polyBuilderApiKey: configWithBuilder.polyBuilderApiKey,
         polyBuilderSecret: configWithBuilder.polyBuilderSecret,
         polyBuilderPassphrase: configWithBuilder.polyBuilderPassphrase,
+        polyBuilderCode: configWithBuilder.polyBuilderCode,
         polyPrivateKey: config.polyPrivateKey,
         polymarketRelayerUrl:
           (config as typeof config & { polymarketRelayerUrl?: string }).polymarketRelayerUrl ??
@@ -1509,6 +1511,8 @@ async function main(): Promise<void> {
       !!(config as typeof config & { polyBuilderApiKey?: string }).polyBuilderApiKey &&
       !!(config as typeof config & { polyBuilderSecret?: string }).polyBuilderSecret &&
       !!(config as typeof config & { polyBuilderPassphrase?: string }).polyBuilderPassphrase,
+    polyBuilderCodeConfigured: !!(config as typeof config & { polyBuilderCode?: string })
+      .polyBuilderCode,
     ...(liveLiteConfig ? { liveLiteConfig } : {}),
   });
   writePreflightReport(controlConn.db, activeProfile, preflightResult, activeSwitchRow?.switch_id);

@@ -27,6 +27,7 @@ export function runProfilePreflight(opts: {
   controlDb: Database.Database;
   liveLiteConfig?: LiveLiteConfig;
   relayerBuilderAuthConfigured?: boolean;
+  polyBuilderCodeConfigured?: boolean;
 }): ProfilePreflightResult {
   const blockers: PreflightBlocker[] = [];
   const warnings: PreflightWarning[] = [];
@@ -37,11 +38,13 @@ export function runProfilePreflight(opts: {
     info.walletMode = liveLiteGuard.getWalletMode();
     info.minOrderUsdc = liveLiteGuard.getMinOrderUsdc();
     info.relayerBuilderAuthConfigured = opts.relayerBuilderAuthConfigured ?? false;
+    info.polyBuilderCodeConfigured = opts.polyBuilderCodeConfigured ?? false;
     runLiveLiteChecks(
       opts.ledgerDb,
       opts.controlDb,
       opts.liveLiteConfig,
       opts.relayerBuilderAuthConfigured ?? false,
+      opts.polyBuilderCodeConfigured ?? false,
       blockers,
       warnings,
     );
@@ -63,6 +66,7 @@ function runLiveLiteChecks(
   controlDb: Database.Database,
   envelope: LiveLiteConfig,
   relayerBuilderAuthConfigured: boolean,
+  polyBuilderCodeConfigured: boolean,
   blockers: PreflightBlocker[],
   warnings: PreflightWarning[],
 ): void {
@@ -72,6 +76,14 @@ function runLiveLiteChecks(
   const settingsRow = controlDb
     .prepare("SELECT relayer_json FROM profile_settings WHERE profile_id = 'live-lite'")
     .get() as { relayer_json: string | null } | undefined;
+
+  if (!polyBuilderCodeConfigured) {
+    blockers.push({
+      code: "LIVE_BUILDER_CODE_MISSING",
+      message:
+        "live-lite mode requires POLY_BUILDER_CODE (V2 builder attribution bytes32) — set it in .env",
+    });
+  }
 
   if (walletMode === "eoa" && (minOrderUsdc == null || minOrderUsdc < 0.5)) {
     blockers.push({

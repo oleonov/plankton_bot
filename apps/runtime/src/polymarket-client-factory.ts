@@ -1,4 +1,4 @@
-import { BuilderConfig } from "@polymarket/builder-signing-sdk";
+import { BuilderConfig as RelayerBuilderConfig } from "@polymarket/builder-signing-sdk";
 import type { WalletMode } from "@plankton/domain";
 import {
   parseRelayerConfigJson,
@@ -10,9 +10,13 @@ export interface PolymarketClientConfig {
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
   polyPassphrase: string | undefined;
+  // HMAC creds — required by @polymarket/builder-relayer-client@0.0.8 RelayClient.
+  // V2 CLOB no longer uses them for order signing — see `polyBuilderCode`.
   polyBuilderApiKey: string | undefined;
   polyBuilderSecret: string | undefined;
   polyBuilderPassphrase: string | undefined;
+  // V2 CLOB builder attribution — bytes32 from Polymarket Builder Profile.
+  polyBuilderCode: string | undefined;
   polyPrivateKey: string | undefined;
   polymarketRelayerUrl: string;
   polygonRpcUrl: string;
@@ -32,9 +36,21 @@ export interface SettlementClientLike {
   execute(txns: unknown[], metadata: string): Promise<unknown>;
 }
 
+export interface ClobClientCtorOptions {
+  host: string;
+  chain: number;
+  signer?: unknown;
+  creds?: { key: string; secret: string; passphrase: string };
+  signatureType?: 1 | 2;
+  funderAddress?: string;
+  builderConfig?: { builderCode: string };
+}
+
 export interface PolymarketClientFactoryDeps {
-  createBuilderConfig?: (config: ConstructorParameters<typeof BuilderConfig>[0]) => unknown;
-  createClobClient?: (...args: unknown[]) => unknown;
+  createBuilderConfig?: (
+    config: ConstructorParameters<typeof RelayerBuilderConfig>[0],
+  ) => unknown;
+  createClobClient?: (options: ClobClientCtorOptions) => unknown;
   createWallet?: (privateKey: string) => unknown;
   createSettlementClient?: (config: {
     relayerUrl: string;
@@ -69,12 +85,16 @@ function resolveWalletAddress(wallet: unknown): string | null {
   return typeof candidate === "string" && candidate.trim().length > 0 ? candidate : null;
 }
 
-function createBuilderConfig(
+// Builds BuilderConfig from @polymarket/builder-signing-sdk for the relayer
+// settlement client (RelayClient still requires HMAC builder auth in v0.0.8).
+// CLOB V2 order-signing no longer uses this — it uses `polyBuilderCode` instead.
+function createRelayerBuilderConfig(
   config: PolymarketClientConfig,
   relayerConfig: PolymarketRelayerConfig,
   deps: PolymarketClientFactoryDeps,
 ): unknown {
-  const createConfig = deps.createBuilderConfig ?? ((config) => new BuilderConfig(config));
+  const createConfig =
+    deps.createBuilderConfig ?? ((config) => new RelayerBuilderConfig(config));
 
   if (relayerConfig.builder?.mode === "local") {
     return createConfig({
@@ -126,23 +146,27 @@ export async function createPolymarketClient(
   input: PolymarketClientFactoryInput,
   deps: PolymarketClientFactoryDeps = {},
 ): Promise<PolymarketClientResult> {
-  const host = input.host ?? "https://clob.polymarket.com";
+  const host = input.host ?? "https://clob-v2.polymarket.com";
   const chainId = input.chainId ?? 137;
 
   if (!deps.createClobClient || !deps.createWallet) {
-    const { ClobClient } = await import("@polymarket/clob-client");
+    const { ClobClient } = await import("@polymarket/clob-client-v2");
     const { Wallet } = await import("ethers");
-    const ClobClientCtor = ClobClient as unknown as new (...args: unknown[]) => unknown;
+    const ClobClientCtor = ClobClient as unknown as new (options: unknown) => unknown;
     deps = {
       ...deps,
-      createClobClient: deps.createClobClient ?? ((...args) => new ClobClientCtor(...args)),
+      createClobClient: deps.createClobClient ?? ((options) => new ClobClientCtor(options)),
       createWallet: deps.createWallet ?? ((privateKey) => new Wallet(privateKey)),
     };
   }
 
+  const builderCodeOption = input.config.polyBuilderCode
+    ? { builderConfig: { builderCode: input.config.polyBuilderCode } }
+    : {};
+
   if (input.runtimeMode === "paper") {
     return {
-      client: deps.createClobClient!(host, chainId),
+      client: deps.createClobClient!({ host, chain: chainId, ...builderCodeOption }),
       settlementClient: null,
       relayerConfig: null,
       traderAddress: null,
@@ -155,7 +179,13 @@ export async function createPolymarketClient(
 
   if ((input.walletMode ?? "eoa") !== "relayer") {
     return {
-      client: deps.createClobClient!(host, chainId, signer, creds),
+      client: deps.createClobClient!({
+        host,
+        chain: chainId,
+        signer,
+        creds,
+        ...builderCodeOption,
+      }),
       settlementClient: null,
       relayerConfig: null,
       traderAddress: resolveWalletAddress(signer),
@@ -173,7 +203,9 @@ export async function createPolymarketClient(
   }
 
   const relayerConfig = parsed.value;
-  const builderConfig = createBuilderConfig(input.config, relayerConfig, deps);
+  // RelayerBuilderConfig from @polymarket/builder-signing-sdk — only used by
+  // RelayClient (settlement). Not passed to V2 ClobClient.
+  const relayerBuilderConfig = createRelayerBuilderConfig(input.config, relayerConfig, deps);
   const settlementClient = await createSettlementClient(
     {
       relayerUrl: input.config.polymarketRelayerUrl,
@@ -181,24 +213,22 @@ export async function createPolymarketClient(
       privateKey: requireString(input.config.polyPrivateKey, "POLY_PRIVATE_KEY"),
       rpcUrl: input.config.polygonRpcUrl,
       rpcFallbackUrl: input.config.polygonRpcFallbackUrl,
-      builderConfig,
+      builderConfig: relayerBuilderConfig,
       walletType: relayerConfig.walletType,
     },
     deps,
   );
 
   return {
-    client: deps.createClobClient!(
+    client: deps.createClobClient!({
       host,
-      chainId,
+      chain: chainId,
       signer,
       creds,
-      resolveRelayerSignatureType(relayerConfig),
-      relayerConfig.funderAddress,
-      undefined,
-      undefined,
-      builderConfig,
-    ),
+      signatureType: resolveRelayerSignatureType(relayerConfig),
+      funderAddress: relayerConfig.funderAddress,
+      ...builderCodeOption,
+    }),
     settlementClient,
     relayerConfig,
     traderAddress: relayerConfig.funderAddress,
@@ -254,7 +284,7 @@ async function createSettlementClient(
     config.relayerUrl,
     config.chainId,
     walletClient,
-    config.builderConfig as BuilderConfig | undefined,
+    config.builderConfig as RelayerBuilderConfig | undefined,
     config.walletType === "proxy" ? RelayerTxType.PROXY : RelayerTxType.SAFE,
   );
 }

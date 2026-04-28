@@ -1,5 +1,5 @@
 /**
- * Live MarketDataGateway — wraps @polymarket/clob-client for market catalog
+ * Live MarketDataGateway — wraps @polymarket/clob-client-v2 for market catalog
  * and order book reads.
  *
  * The SDK ClobClient is accepted as `unknown` in the public config interface
@@ -28,7 +28,8 @@ import {
 } from "./market-data-stream-shared.js";
 
 const GAMMA_PRICING_BASE_URL = "https://gamma-api.polymarket.com/markets";
-const CLOB_ORDER_BOOKS_URL = "https://clob.polymarket.com/books";
+const DEFAULT_CLOB_HOST = "https://clob-v2.polymarket.com";
+const BOOKS_PATH = "/books";
 const BOOKS_BATCH_SIZE = 200;
 
 // Transport-safety threshold to avoid 414 URI Too Large.
@@ -161,12 +162,18 @@ const END_CURSOR = "LTE=";
 export class LiveMarketDataGateway implements MarketDataGateway {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private readonly client: any;
+  private readonly clobHost: string;
   private readonly slugFilter: ((slug: string) => boolean) | undefined;
   private readonly createWebSocket: (url: string) => MarketDataWebSocketLike;
   private readonly sharedMarketStreamHub: SharedMarketPricingStreamHub;
 
   constructor(config: LiveMarketDataConfig) {
     this.client = config.client;
+    const clientHost =
+      typeof (config.client as { host?: unknown } | null)?.host === "string"
+        ? (config.client as { host: string }).host
+        : undefined;
+    this.clobHost = (clientHost ?? DEFAULT_CLOB_HOST).replace(/\/+$/, "");
     this.slugFilter = config.slugFilter;
     this.createWebSocket = config.createWebSocket ?? defaultMarketDataWebSocketFactory;
     const derivedChunkSize = deriveMaxSubscriptionsPerConnection(
@@ -259,9 +266,10 @@ export class LiveMarketDataGateway implements MarketDataGateway {
   async getOrderBooks(tokenIds: string[]): Promise<Map<string, OrderBookSnapshot>> {
     const result = new Map<string, OrderBookSnapshot>();
     const batches = chunkItems(tokenIds, BOOKS_BATCH_SIZE);
+    const url = `${this.clobHost}${BOOKS_PATH}`;
     for (const batch of batches) {
       const response = await this.fetchWithRetry(
-        CLOB_ORDER_BOOKS_URL,
+        url,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },

@@ -96,6 +96,7 @@ describe("runProfilePreflight", () => {
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: true,
     });
     expect(result.status).toBe("passed");
     expect(result.blockers).toHaveLength(0);
@@ -109,6 +110,7 @@ describe("runProfilePreflight", () => {
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: true,
     });
 
     // With no fee-enabled families (family tables dropped), only wallet/order checks apply
@@ -124,10 +126,26 @@ describe("runProfilePreflight", () => {
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       liveLiteConfig: { ...ENVELOPE, minOrderUsdc: 0.4 },
+      polyBuilderCodeConfigured: true,
     });
 
     expect(result.status).toBe("failed");
     expect(result.blockers.some((b) => b.code === "LIVE_MIN_ORDER_TOO_LOW")).toBe(true);
+  });
+
+  it("live-lite fails when POLY_BUILDER_CODE is not configured", () => {
+    seedProfile(controlConn.db, "live-lite");
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: false,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.blockers.some((b) => b.code === "LIVE_BUILDER_CODE_MISSING")).toBe(true);
   });
 
   it("live-lite relayer mode passes with valid relayer_json", () => {
@@ -144,6 +162,7 @@ describe("runProfilePreflight", () => {
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       relayerBuilderAuthConfigured: true,
+      polyBuilderCodeConfigured: true,
       liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
     });
 
@@ -163,6 +182,7 @@ describe("runProfilePreflight", () => {
       profile: "live-lite",
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
+      polyBuilderCodeConfigured: true,
       liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
     });
 
@@ -184,6 +204,7 @@ describe("runProfilePreflight", () => {
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       relayerBuilderAuthConfigured: true,
+      polyBuilderCodeConfigured: true,
       liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.04 },
     });
 
@@ -205,6 +226,7 @@ describe("runProfilePreflight", () => {
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       relayerBuilderAuthConfigured: false,
+      polyBuilderCodeConfigured: true,
       liveLiteConfig: { ...ENVELOPE, walletMode: "relayer", minOrderUsdc: 0.05 },
     });
 
@@ -234,6 +256,7 @@ describe("runProfilePreflight", () => {
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: true,
     });
 
     expect(result.status).toBe("failed");
@@ -256,6 +279,7 @@ describe("runProfilePreflight", () => {
       ledgerDb: ledgerConn.db,
       controlDb: controlConn.db,
       liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: true,
     });
 
     expect(result.status).toBe("passed_with_warnings");

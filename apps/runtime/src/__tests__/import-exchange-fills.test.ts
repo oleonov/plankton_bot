@@ -218,6 +218,75 @@ describe("importExchangeFills", () => {
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "filled");
   });
 
+  // Regression for "RiskInventory built positions from raw exchange size":
+  // FillReceived.size must equal the V2-recomputed net size (`resolved.fill.size`)
+  // so the persisted fill, the published event, and the inventory replay all
+  // agree on share count. Pre-fix, the publish path used `ef.size`, drifting
+  // the in-memory inventory away from the DB after V2 fee recompute.
+  it("publishes FillReceived.size as V2-recomputed net (not raw ef.size)", async () => {
+    const fills: ExchangeFill[] = [
+      {
+        fillId: "fill-v2",
+        orderId: "ord-1",
+        clientOrderId: "co-1",
+        tokenId: createTokenId("tok-1"),
+        side: "buy",
+        price: 0.5,
+        // mapper-baked size = gross to simulate an exchange that didn't
+        // pre-deduct share fees (V2 reconciler is responsible for net).
+        size: 100,
+        grossSize: 100,
+        liquidityRole: "taker",
+        fee: 0,
+        feeRateBps: 0,
+        timestamp: Date.now(),
+      },
+    ];
+
+    const localOrder = {
+      orderId: createOrderId("ord-1"),
+      conditionId: createConditionId("cond-v2"),
+      signalId: null,
+      signalReason: null,
+      decisionRuleId: null,
+      signalTimestamp: null,
+      size: 100,
+    };
+    (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
+    (orderRepo.findById as any).mockReturnValue(localOrder);
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 98, sizeUsdc: 50 }]);
+
+    // V2 feeInfo: rate=0.04, e=1, p=0.5 → platformFeeRate = 0.01.
+    // shareFee = 100 * 0.01 / 0.5 = 2 → net size = 98.
+    const gateway = {
+      getMarketFeeInfo: vi.fn().mockResolvedValue({
+        rate: 0.04,
+        exponent: 1,
+        takerOnly: false,
+      }),
+    } as any;
+
+    const received: any[] = [];
+    bus.subscribe("FillReceived", async (p) => {
+      received.push(p);
+    });
+
+    await importExchangeFills(fills, {
+      fillRepo,
+      orderRepo,
+      bus,
+      log: silentLog,
+      gateway,
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].size).toBeCloseTo(98, 9);
+    expect(received[0].fee).toBeCloseTo(1, 9); // 100 * 0.01
+    // Sanity: persisted size matches published size.
+    const savedFill = (fillRepo.save as any).mock.calls[0][0];
+    expect(savedFill.size).toBeCloseTo(received[0].size, 9);
+  });
+
   it("sets partially-filled when cumulative < order size", async () => {
     const fills: ExchangeFill[] = [
       {

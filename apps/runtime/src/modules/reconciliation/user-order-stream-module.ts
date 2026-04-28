@@ -258,6 +258,7 @@ export class UserOrderStreamModule implements RuntimeModule {
       orderRepo: this.deps.orderRepo,
       bus: this.deps.bus,
       log: this.log,
+      gateway: this.deps.gateway,
     });
     this.window.wsFills += result.imported;
     if (result.skipped > 0) {
