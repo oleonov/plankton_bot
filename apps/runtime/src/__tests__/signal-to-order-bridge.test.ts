@@ -183,6 +183,47 @@ describe("SignalToOrderBridge", () => {
     });
   });
 
+  it("uses simulation pricing directly instead of waiting for a candidate-book refresh", async () => {
+    const bus = new InProcessEventBus();
+    const candidateBookCache = {
+      getFreshEntry: vi.fn(() => null),
+      waitForFreshEntry: vi.fn(async () => null),
+      getFreshOrRefresh: vi.fn(async () => ({ status: "refreshed" as const, entry: null })),
+    } as unknown as CandidateBookCache;
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+      candidateBookCache,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number } }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({
+        bestBid: 0.04,
+        bestAsk: 0.05,
+        midPrice: 0.045,
+        spread: 0.01,
+        bookSource: "simulation",
+      }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.04);
+    expect(candidateBookCache.waitForFreshEntry as any).not.toHaveBeenCalled();
+    expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
+  });
+
   it("waits briefly for a WS-backed candidate book before falling back to REST refresh", async () => {
     const bus = new InProcessEventBus();
     const wsEntry = {

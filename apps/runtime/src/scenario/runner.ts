@@ -350,11 +350,6 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     await marketDataModule.poll();
     await bus.drain(DRAIN_TIMEOUT_MS);
 
-    // Trigger AlgoDecisionModule sweep for all eligible tokens
-    const eligibleTokenIds = selectedMarketCache.getEligibleTokenIds();
-    await algoDecisionModule.evaluateTokens(eligibleTokenIds);
-    await bus.drain(DRAIN_TIMEOUT_MS);
-
     if (fixture.onTick) {
       fixture.onTick(tick, performance.now() - tickStart);
     }

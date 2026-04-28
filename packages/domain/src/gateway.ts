@@ -403,6 +403,13 @@ export interface ExchangeGateway {
   getFills(sinceMs: number): Promise<ExchangeFill[]>;
 
   /**
+   * Optional fast path for gateways that can fetch fills for one order directly.
+   * Execution uses this in simulation/paper immediate-fill mode to avoid scanning
+   * the full fill history after every placed order.
+   */
+  getFillsForOrder?(orderId: string): Promise<ExchangeFill[]>;
+
+  /**
    * Optional authenticated user stream for order lifecycle and fills.
    * Runtime uses this as the realtime path while keeping polling as fallback.
    */

@@ -2,13 +2,15 @@
  * ADR-016 end-to-end scenario harness — continuation gate under `market_wide`.
  *
  * Drives the full module pipeline (Supervisor + AlgoDecisionModule + downstream)
- * against a pre-seeded leg whose per-leg trade count is 1 and `firstTradePrice`
+ * against pre-seeded legs whose per-leg trade count is 2 and `firstTradePrice`
  * is 0.03 — the exact shape that ADR-010's leg-local continuation rejects (R1
- * fail: count<6; R2 fail: price<0.05).
+ * fail: count<6; R2 fail: price<0.05). `lastTradeAt` is current so D4 does not
+ * match the expensive binary side; this scenario isolates continuation behavior,
+ * not the P1 SELL-on-STOP bypass.
  *
  * Two passes prove the gate flip end-to-end:
- *   1. `leg_local` (ADR-010, default) — continuation STOPs every tick, no
- *      SignalProduced events fire downstream.
+ *   1. `leg_local` (ADR-010, default) — continuation STOPs every tick and no
+ *      SELL rule matches, so no SignalProduced events fire downstream.
  *   2. `market_wide` (ADR-016, opt-in) with a stub provider returning ≥6 —
  *      continuation passes, and the FALLBACK decision rule emits at least one
  *      SignalProduced through the runtime, exercising the same code path the
@@ -61,29 +63,29 @@ const YES_TOKEN = "yes-cm-test-token";
 const NO_TOKEN = "no-cm-test-token";
 
 /**
- * Pre-seed BOTH outcome legs at `buyCount=1, firstTradePrice=0.03` so neither
+ * Pre-seed BOTH outcome legs at `buyCount=2, firstTradePrice=0.03` so neither
  * token can reach `evaluateDecision` via the no-leg eligibility path. With
  * a leg present on both sides, the only thing that varies between the two
  * runs is the continuation gate.
  */
 function seedBothLegsForStop(repos: { legState: { upsert: (s: unknown) => void } }): void {
-  const past = new Date(Date.now() - 60_000).toISOString();
+  const now = new Date().toISOString();
   for (const tok of [YES_TOKEN, NO_TOKEN]) {
     repos.legState.upsert({
       tokenId: createTokenId(tok),
-      buyCount: 1,
+      buyCount: 2,
       sellCount: 0,
       lastAction: "BUY",
       firstTradePrice: 0.03,
-      firstTradeAt: past,
-      lastTradeAt: past,
-      updatedAt: past,
+      firstTradeAt: now,
+      lastTradeAt: now,
+      updatedAt: now,
     });
   }
 }
 
 describe("Scenario: ADR-016 continuation_mode end-to-end", () => {
-  it("leg_local (default) — pre-seeded leg with count=1 + firstTradePrice=0.03 → STOP every tick (no signals)", async () => {
+  it("leg_local (default) — pre-seeded leg with count=2 + firstTradePrice=0.03 → STOP every tick (no signals)", async () => {
     const controlDb = bootControlDb();
     // Default mode is `leg_local`; no flip needed.
     try {

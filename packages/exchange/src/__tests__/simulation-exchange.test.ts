@@ -38,6 +38,23 @@ describe("SimulationExchangeGateway (immediate fill)", () => {
     expect(fills[0]!.price).toBe(0.5);
   });
 
+  it("returns fills for one order without scanning unrelated order history", async () => {
+    const first = await gw.placeOrder(makeParams({ clientOrderId: "c1", tokenId: createTokenId("tok-A") }));
+    const second = await gw.placeOrder(
+      makeParams({ clientOrderId: "c2", tokenId: createTokenId("tok-B") }),
+    );
+
+    const firstFills = await gw.getFillsForOrder(first.orderId!);
+    const secondFills = await gw.getFillsForOrder(second.orderId!);
+    const missingFills = await gw.getFillsForOrder("missing-order");
+
+    expect(firstFills).toHaveLength(1);
+    expect(firstFills[0]!.tokenId).toBe("tok-A");
+    expect(secondFills).toHaveLength(1);
+    expect(secondFills[0]!.tokenId).toBe("tok-B");
+    expect(missingFills).toHaveLength(0);
+  });
+
   it("deducts balance on buy", async () => {
     await gw.placeOrder(makeParams({ size: 100, price: 0.5 }));
     const balances = await gw.getBalances();

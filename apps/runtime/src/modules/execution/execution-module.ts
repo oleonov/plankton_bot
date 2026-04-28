@@ -27,6 +27,7 @@ import type {
   ProfileId,
   TokenId,
   PositionRepository,
+  ExchangeFill,
 } from "@plankton/domain";
 import { createCommandId, createOrderId, ExchangeErrorCode } from "@plankton/domain";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
@@ -41,6 +42,10 @@ import {
   getReservedSellSize,
   type PendingReservation,
 } from "./reservation-utils.js";
+
+type OrderFillLookupGateway = ExchangeGateway & {
+  getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
+};
 
 export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
@@ -545,7 +550,7 @@ export class ExecutionModule implements RuntimeModule {
       this.deps.runtimeMode === "simulation" ||
       this.deps.runtimeMode === "paper"
     ) {
-      await this.checkForFills(orderId, cmd);
+      await this.checkForFills(orderId);
     }
   }
 
@@ -593,9 +598,12 @@ export class ExecutionModule implements RuntimeModule {
 
   // ─── Fill detection ───────────────────────────────────────────────────
 
-  private async checkForFills(orderId: OrderId, _cmd: PlaceOrderCommand): Promise<void> {
-    const allFills = await this.deps.gateway.getFills(0);
-    const orderFills = allFills.filter((f) => f.orderId === String(orderId));
+  private async checkForFills(orderId: OrderId): Promise<void> {
+    const orderIdStr = String(orderId);
+    const gateway = this.deps.gateway as OrderFillLookupGateway;
+    const orderFills = gateway.getFillsForOrder
+      ? await gateway.getFillsForOrder(orderIdStr)
+      : (await gateway.getFills(0)).filter((f) => f.orderId === orderIdStr);
     if (orderFills.length === 0) return;
 
     await importExchangeFills(orderFills, {

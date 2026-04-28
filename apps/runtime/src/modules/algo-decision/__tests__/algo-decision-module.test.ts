@@ -768,13 +768,12 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
-    it("STOP path emits nothing even when a SELL rule would match (spec §0 hard stop)", async () => {
+    it("STOP path still emits SELL when an existing-leg SELL rule matches", async () => {
       const tokenId = "token-cont-sell";
       const familyId = "fam-cont";
       // legState: S1 (buyCount=1), sellCount=0 → tradeCount = 1
       // firstTradePrice = 0.03 < 0.05 → STOP
-      // S1 + price >= 0.10 would normally match D7-SELL-S1, but STOP now blocks
-      // ALL signals (spec §0: fail-continuation → full STOP, not SELL-only).
+      // S1 + price >= 0.10 matches D7-SELL-S1 and must remain reachable as an exit.
       const legState: LegState = {
         tokenId: createTokenId(tokenId),
         buyCount: 1,
@@ -786,6 +785,91 @@ describe("AlgoDecisionModule", () => {
         updatedAt: new Date().toISOString(),
       };
       legStateRepo = createMockLegStateRepo([legState]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, familyId, 0.15)],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.side).toBe("sell");
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D7-SELL-S1");
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_emitted",
+        payload: expect.objectContaining({
+          tokenId,
+          side: "SELL",
+          decisionRuleId: "D7-SELL-S1",
+          continuationStop: true,
+          tradeCount: 1,
+          tradeCountSource: "leg_local",
+        }),
+      });
+
+      await mod.stop();
+    });
+
+    it("does not force SELL priority when continuation passes", async () => {
+      const tokenId = "token-cont-pass-sell-match";
+      const familyId = "fam-cont";
+      // tradeCount=2 and firstTradePrice=0.05 → continuation passes.
+      // FALLBACK BUY and SELL-LATE both match; when not in STOP, the unchanged
+      // evaluateDecision order must decide the action instead of the STOP-only
+      // SELL bypass forcing a SELL.
+      const legState: LegState = {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 1,
+        lastAction: "BUY",
+        firstTradePrice: 0.05,
+        firstTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        lastTradeAt: new Date(Date.now() - 60_000).toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      legStateRepo = createMockLegStateRepo([legState]);
+      algoRulesRepo = {
+        getDecisionRules: vi.fn(() => [
+          {
+            id: 100,
+            priority: 10,
+            ruleId: "FALLBACK",
+            stateCondition: "ANY",
+            priceOperator: null,
+            priceValue: null,
+            timeSinceLastOperator: null,
+            timeSinceLastSeconds: null,
+            buyCountMin: null,
+            buyCountMax: null,
+            holdDurationOperator: null,
+            holdDurationSeconds: null,
+            action: "BUY",
+          },
+          {
+            id: 101,
+            priority: 20,
+            ruleId: "SELL-LATE",
+            stateCondition: "S1",
+            priceOperator: ">=",
+            priceValue: 0.1,
+            timeSinceLastOperator: null,
+            timeSinceLastSeconds: null,
+            buyCountMin: null,
+            buyCountMax: null,
+            holdDurationOperator: null,
+            holdDurationSeconds: null,
+            action: "SELL",
+          },
+        ]),
+        getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+          actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+        ),
+      };
 
       const mod = buildModule();
       await mod.start();
@@ -797,7 +881,9 @@ describe("AlgoDecisionModule", () => {
 
       const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
       const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
-      expect(signalCalls.length).toBe(0);
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.side).toBe("buy");
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("FALLBACK");
 
       await mod.stop();
     });
@@ -972,7 +1058,7 @@ describe("AlgoDecisionModule", () => {
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        markets: [makeMarket(tokenId, familyId, 0.05, SHARED_CONDITION_ID)],
         timestamp: Date.now(),
       });
 
@@ -1005,7 +1091,7 @@ describe("AlgoDecisionModule", () => {
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        markets: [makeMarket(tokenId, familyId, 0.05, SHARED_CONDITION_ID)],
         timestamp: Date.now(),
       });
 
@@ -1046,7 +1132,7 @@ describe("AlgoDecisionModule", () => {
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        markets: [makeMarket(tokenId, familyId, 0.05, SHARED_CONDITION_ID)],
         timestamp: Date.now(),
       });
 
@@ -1084,7 +1170,7 @@ describe("AlgoDecisionModule", () => {
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenId, familyId, 0.15, SHARED_CONDITION_ID)],
+        markets: [makeMarket(tokenId, familyId, 0.05, SHARED_CONDITION_ID)],
         timestamp: Date.now(),
       });
 

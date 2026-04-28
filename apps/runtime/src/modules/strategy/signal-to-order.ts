@@ -614,7 +614,7 @@ export class SignalToOrderBridge {
       };
     }
 
-    if (baseMarket.bookSource === "clob") {
+    if (canUseBaseMarketForPricing(baseMarket)) {
       return { market: baseMarket, cacheStatus: "base-market" };
     }
 
@@ -942,6 +942,10 @@ function buildCooldownBaseline(market: NormalizedMarket | null): CooldownBaselin
     tickSize: market?.tickSize ?? 0.01,
     snapshotTs: market?.snapshotTs ?? Date.now(),
   };
+}
+
+function canUseBaseMarketForPricing(market: NormalizedMarket): boolean {
+  return market.bookSource === "clob" || market.bookSource === "simulation";
 }
 
 function resolveCooldownBypassReason(

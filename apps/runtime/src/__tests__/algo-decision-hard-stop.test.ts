@@ -1,14 +1,12 @@
 /**
- * Scenario: Hard-STOP after continuation-filter fail (spec §0).
+ * Scenario: continuation-filter STOP on post-entry decisions.
  *
  * evaluateContinuation(legTradeCount, firstTradePrice) returns false when:
  *   R1: legTradeCount < 6 AND firstTradePrice < 0.05
  *   R2: legTradeCount < 2 (regardless of price)
  *
- * On fail → AlgoDecisionModule.evaluateToken() must return null — no BUY, no
- * SELL signal published. No operator-resume path exists (removed in Phase 3.2);
- * the gate is recalculated deterministically from legState fields each sweep.
- * Position exits only via REDEEM (spec §8) or market-resolution.
+ * On fail → AlgoDecisionModule.evaluateToken() must suppress BUY/scale-in.
+ * Existing-leg SELL exits remain reachable through the same SELL rules.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -219,7 +217,7 @@ function makeLegState(
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
-describe("Hard-STOP after continuation-filter fail (spec §0)", () => {
+describe("Continuation STOP after post-entry filter fail", () => {
   let bus: ReturnType<typeof createMockBus>;
   let algoRulesRepo: AlgoRulesRepository;
   let log: Logger;
@@ -252,10 +250,10 @@ describe("Hard-STOP after continuation-filter fail (spec §0)", () => {
     const mod = buildModule(legStateRepo, selectedMarketCache);
     await mod.start();
 
-    // Use a price that would normally trigger FALLBACK BUY (0.45) so we
-    // can confirm that STOP occurs despite a matching BUY rule.
+    // Use a price below the SELL rule so we can confirm STOP blocks the
+    // matching FALLBACK BUY without testing the SELL bypass path.
     await (bus as any).emit("NormalizedMarketUpdated", {
-      markets: [makeMarket(tokenId, 0.45)],
+      markets: [makeMarket(tokenId, 0.05)],
       timestamp: Date.now(),
     });
 
@@ -280,7 +278,7 @@ describe("Hard-STOP after continuation-filter fail (spec §0)", () => {
     const mod = buildModule(legStateRepo, selectedMarketCache);
     await mod.start();
 
-    const market = makeMarket(tokenId, 0.45);
+    const market = makeMarket(tokenId, 0.05);
 
     // First sweep
     await (bus as any).emit("NormalizedMarketUpdated", {
@@ -357,10 +355,10 @@ describe("Hard-STOP after continuation-filter fail (spec §0)", () => {
     await mod.stop();
   });
 
-  it("STOP blocks SELL even when a SELL rule would otherwise match (spec §0 no partial signals)", async () => {
+  it("STOP does not block SELL when an existing-leg SELL rule matches", async () => {
     // buyCount=1, sellCount=0, firstTradePrice=0.03 → STOP
     // Price 0.15 >= 0.1 → D7-SELL-S1 would normally fire for S1 state
-    // Hard STOP must suppress it — return null, not SELL signal
+    // STOP suppresses BUY/scale-in, but exit SELL remains reachable.
     const tokenId = "token-stop-sell-blocked";
     const legState = makeLegState(tokenId, 1, 0, 0.03);
     const legStateRepo = createMockLegStateRepo([legState]);
@@ -378,7 +376,9 @@ describe("Hard-STOP after continuation-filter fail (spec §0)", () => {
     const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
     const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
 
-    expect(signalCalls.length).toBe(0);
+    expect(signalCalls.length).toBe(1);
+    expect(signalCalls[0]![1].signal.side).toBe("sell");
+    expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D7-SELL-S1");
 
     await mod.stop();
   });

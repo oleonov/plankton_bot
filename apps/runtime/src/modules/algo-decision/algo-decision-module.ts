@@ -94,11 +94,6 @@ type TokenEvalResult =
     }
   | null;
 
-type EmissionFacts = {
-  firstTradePrice: number | null;
-  legTradeCount: number;
-};
-
 /**
  * ADR-016: which source the continuation gate consulted for `trade_count`.
  *  - `market_wide` — fresh value from `MarketTradeCountProvider`.
@@ -107,6 +102,20 @@ type EmissionFacts = {
  *  - `leg_local` — operator policy is `leg_local`; provider was not consulted.
  */
 type TradeCountSource = "market_wide" | "leg_local_fallback" | "leg_local";
+
+type EmissionFacts = {
+  firstTradePrice: number | null;
+  legTradeCount: number;
+  continuationStop?: boolean | null;
+  continuationTradeCount?: number | null;
+  continuationTradeCountSource?: TradeCountSource | null;
+};
+
+type ContinuationFacts = {
+  tradeCount: number;
+  tradeCountSource: TradeCountSource;
+  stop: boolean;
+};
 
 type SuppressionFacts = {
   tokenId: TokenId;
@@ -723,17 +732,30 @@ export class AlgoDecisionModule implements RuntimeModule {
     // eligibility reasons (slug mismatch, etc.) do not force SELL-only.
     const preservedOnly = legState !== null && !market.tradable;
 
-    // Post-entry continuation gate — only applies when we have a leg.
-    // Per market-selection-layer-design.md:53, pre-entry filter is separate from
-    // position management: legState tokens are gated by continuation, not eligibility.
+    // Post-entry continuation gate — only applies when we have a leg. It blocks
+    // further entry/scale-in decisions, but SELL exits use the same D2/D4/D5/D7
+    // rules and must remain reachable for existing inventory.
     if (legState) {
       const { count: tradeCount, source: tradeCountSource } =
         await this.resolveContinuationTradeCount(
           market.conditionId as ConditionId,
           emissionFacts.legTradeCount,
         );
-      const stop = !evaluateContinuation(tradeCount, legState.firstTradePrice);
-      if (stop) {
+      const continuationFacts: ContinuationFacts = {
+        tradeCount,
+        tradeCountSource,
+        stop: !evaluateContinuation(tradeCount, legState.firstTradePrice),
+      };
+      if (continuationFacts.stop) {
+        const sellMatch = matchRule(ctx, this.decisionRules, SELL_ONLY);
+        if (sellMatch) {
+          return this.buildSignal(market, sellMatch, ctx, buyCount, now, nextSeq, {
+            ...emissionFacts,
+            continuationStop: true,
+            continuationTradeCount: continuationFacts.tradeCount,
+            continuationTradeCountSource: continuationFacts.tradeCountSource,
+          });
+        }
         this.recordDecisionSuppressed({
           tokenId,
           conditionId: market.conditionId,
@@ -744,10 +766,10 @@ export class AlgoDecisionModule implements RuntimeModule {
           timeSinceLastSeconds,
           emissionFacts,
           timestamp: new Date(now).toISOString(),
-          tradeCount,
-          tradeCountSource,
+          tradeCount: continuationFacts.tradeCount,
+          tradeCountSource: continuationFacts.tradeCountSource,
         });
-        return null; // spec §0: fail continuation → full STOP (no more signals)
+        return null;
       }
       if (preservedOnly) {
         // preserved-only: market de-listed for new entries, exit-only via SELL
@@ -764,6 +786,8 @@ export class AlgoDecisionModule implements RuntimeModule {
             timeSinceLastSeconds,
             emissionFacts,
             timestamp: new Date(now).toISOString(),
+            tradeCount: continuationFacts.tradeCount,
+            tradeCountSource: continuationFacts.tradeCountSource,
           });
           return null;
         }
@@ -867,6 +891,10 @@ export class AlgoDecisionModule implements RuntimeModule {
           timeSinceLastSeconds: signal.timeSinceLastSeconds,
           firstTradePrice: emissionFacts.firstTradePrice,
           legTradeCount: emissionFacts.legTradeCount,
+          continuationStop: emissionFacts.continuationStop ?? null,
+          tradeCount: emissionFacts.continuationTradeCount ?? null,
+          tradeCountSource: emissionFacts.continuationTradeCountSource ?? null,
+          continuationMode: this.continuationMode,
           signalTimestamp: signal.signalTimestamp,
         },
       });

@@ -24,6 +24,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
   private fillCounter = 0;
   private readonly orders = new Map<string, ExchangeOrder>();
   private readonly fills: ExchangeFill[] = [];
+  private readonly fillsByOrderId = new Map<string, ExchangeFill[]>();
   private readonly clientOrderIds = new Set<string>();
   private balanceUsdc: number;
   private lockedUsdc = 0;
@@ -88,7 +89,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
         feeRateBps: this.feeRate * 10_000,
         timestamp: now,
       };
-      this.fills.push(fill);
+      this.recordFill(fill);
 
       if (params.side === "buy") {
         this.balanceUsdc -= params.size * params.price + fee;
@@ -178,6 +179,10 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     return this.fills.filter((f) => f.timestamp >= sinceMs);
   }
 
+  async getFillsForOrder(orderId: string): Promise<ExchangeFill[]> {
+    return [...(this.fillsByOrderId.get(orderId) ?? [])];
+  }
+
   async getBalances(): Promise<ExchangeBalance[]> {
     return [
       { asset: "USDC", available: this.balanceUsdc - this.lockedUsdc, locked: this.lockedUsdc },
@@ -229,7 +234,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
       feeRateBps: this.feeRate * 10_000,
       timestamp: Date.now(),
     };
-    this.fills.push(fill);
+    this.recordFill(fill);
 
     const newFilled = order.sizeFilled + size;
     const newRemaining = order.sizeTotal - newFilled;
@@ -256,10 +261,21 @@ export class SimulationExchangeGateway implements ExchangeGateway {
   reset(initialBalanceUsdc = 10_000): void {
     this.orders.clear();
     this.fills.length = 0;
+    this.fillsByOrderId.clear();
     this.clientOrderIds.clear();
     this.orderCounter = 0;
     this.fillCounter = 0;
     this.balanceUsdc = initialBalanceUsdc;
     this.lockedUsdc = 0;
+  }
+
+  private recordFill(fill: ExchangeFill): void {
+    this.fills.push(fill);
+    const fillsForOrder = this.fillsByOrderId.get(fill.orderId);
+    if (fillsForOrder) {
+      fillsForOrder.push(fill);
+      return;
+    }
+    this.fillsByOrderId.set(fill.orderId, [fill]);
   }
 }
