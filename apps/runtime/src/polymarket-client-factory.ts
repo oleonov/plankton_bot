@@ -143,7 +143,7 @@ export async function createPolymarketClient(
   input: PolymarketClientFactoryInput,
   deps: PolymarketClientFactoryDeps = {},
 ): Promise<PolymarketClientResult> {
-  const host = input.host ?? "https://clob-v2.polymarket.com";
+  const host = input.host ?? "https://clob.polymarket.com";
   const chainId = input.chainId ?? 137;
 
   if (!deps.createClobClient || !deps.createWallet) {

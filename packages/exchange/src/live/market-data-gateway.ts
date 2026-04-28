@@ -28,7 +28,7 @@ import {
 } from "./market-data-stream-shared.js";
 
 const GAMMA_PRICING_BASE_URL = "https://gamma-api.polymarket.com/markets";
-const DEFAULT_CLOB_HOST = "https://clob-v2.polymarket.com";
+const DEFAULT_CLOB_HOST = "https://clob.polymarket.com";
 const BOOKS_PATH = "/books";
 const BOOKS_BATCH_SIZE = 200;
 

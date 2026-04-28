@@ -36,7 +36,7 @@ describe("createPolymarketClient", () => {
     expect(result.relayerConfig).toBeNull();
     expect(result.userWsAuth).toBeNull();
     expect(createClobClient).toHaveBeenCalledWith({
-      host: "https://clob-v2.polymarket.com",
+      host: "https://clob.polymarket.com",
       chain: 137,
       builderConfig: { builderCode: BUILDER_CODE },
     });
@@ -57,7 +57,7 @@ describe("createPolymarketClient", () => {
     );
 
     expect(createClobClient).toHaveBeenCalledWith({
-      host: "https://clob-v2.polymarket.com",
+      host: "https://clob.polymarket.com",
       chain: 137,
     });
   });
@@ -90,7 +90,7 @@ describe("createPolymarketClient", () => {
     });
     expect(createWallet).toHaveBeenCalledWith(baseConfig.polyPrivateKey);
     expect(createClobClient).toHaveBeenCalledWith({
-      host: "https://clob-v2.polymarket.com",
+      host: "https://clob.polymarket.com",
       chain: 137,
       signer,
       creds: {
@@ -160,7 +160,7 @@ describe("createPolymarketClient", () => {
       },
     });
     expect(createClobClient).toHaveBeenCalledWith({
-      host: "https://clob-v2.polymarket.com",
+      host: "https://clob.polymarket.com",
       chain: 137,
       signer,
       creds: {
@@ -217,7 +217,7 @@ describe("createPolymarketClient", () => {
       },
     });
     expect(createClobClient).toHaveBeenCalledWith({
-      host: "https://clob-v2.polymarket.com",
+      host: "https://clob.polymarket.com",
       chain: 137,
       signer,
       creds: {
