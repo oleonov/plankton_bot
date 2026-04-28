@@ -192,6 +192,21 @@ describe("Orders table sorting", () => {
     expect(sizes).toEqual(["57.00", "88.00", "248.00"]);
   });
 
+  it("renders and sorts by Notional ascending", async () => {
+    setupOrders();
+    const user = userEvent.setup();
+    renderWithProviders(<OrdersFills />);
+
+    await screen.findByText("Bitcoin above 60k");
+
+    expect(screen.getByText("Notional")).toBeInTheDocument();
+    expect(screen.getByText("$3.99")).toBeInTheDocument();
+
+    await user.click(screen.getByText("Notional"));
+    const notionals = getColumnValues(5);
+    expect(notionals).toEqual(["$3.99", "$19.36", "$32.24"]);
+  });
+
   it("sorts by Side ascending", async () => {
     setupOrders();
     const user = userEvent.setup();

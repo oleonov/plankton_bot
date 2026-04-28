@@ -4,7 +4,11 @@ import { useProfileOrders } from "../api/hooks.ts";
 import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
-import { formatTimeLeft, formatTimestamp } from "../utils/format.ts";
+import { formatTimeLeft, formatTimestamp, formatUsd } from "../utils/format.ts";
+
+function orderNotionalUsdc(order: { price: number; size: number }): number {
+  return order.price * order.size;
+}
 
 export function ProfileOrders() {
   const { profileId } = useParams<{ profileId: string }>();
@@ -55,6 +59,7 @@ export function ProfileOrders() {
             <th>Side</th>
             <th>Price</th>
             <th>Size</th>
+            <th>Notional</th>
             <th>Status</th>
             <th>Ends</th>
             <th>Updated</th>
@@ -84,6 +89,7 @@ export function ProfileOrders() {
                 </td>
                 <td>${o.price.toFixed(4)}</td>
                 <td>{o.size.toFixed(2)}</td>
+                <td>{formatUsd(orderNotionalUsdc(o))}</td>
                 <td>
                   <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                     <Badge value={o.status} />

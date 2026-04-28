@@ -5,7 +5,7 @@ import { Badge } from "../components/Badge.tsx";
 import { Pagination } from "../components/Pagination.tsx";
 import { MarketLink } from "../components/MarketLink.tsx";
 import { SortTh } from "../components/SortTh.tsx";
-import { formatTimeLeft, formatTimestamp } from "../utils/format.ts";
+import { formatTimeLeft, formatTimestamp, formatUsd } from "../utils/format.ts";
 import { useSort, sortItems } from "../utils/useSort.ts";
 import type { OrderDTO, FillDTO } from "../api/types.ts";
 
@@ -15,6 +15,7 @@ const orderAccessors: Record<string, (o: OrderDTO) => string | number | null> = 
   side: (o) => o.side,
   price: (o) => o.price,
   size: (o) => o.size,
+  notional: (o) => orderNotionalUsdc(o),
   status: (o) => o.status,
   ends: (o) => o.endDate,
   updated: (o) => o.updatedAt,
@@ -29,6 +30,10 @@ const fillAccessors: Record<string, (f: FillDTO) => string | number | null> = {
   usdc: (f) => f.sizeUsdc,
   filledAt: (f) => f.filledAt,
 };
+
+function orderNotionalUsdc(order: Pick<OrderDTO, "price" | "size">): number {
+  return order.price * order.size;
+}
 
 export function OrdersFills() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -172,6 +177,12 @@ export function OrdersFills() {
                   onToggle={orderSort.toggle}
                 />
                 <SortTh
+                  label="Notional"
+                  sortKey="notional"
+                  sort={orderSort.sort}
+                  onToggle={orderSort.toggle}
+                />
+                <SortTh
                   label="Status"
                   sortKey="status"
                   sort={orderSort.sort}
@@ -215,6 +226,7 @@ export function OrdersFills() {
                     </td>
                     <td>${o.price.toFixed(4)}</td>
                     <td>{o.size.toFixed(2)}</td>
+                    <td>{formatUsd(orderNotionalUsdc(o))}</td>
                     <td>
                       <div
                         style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
