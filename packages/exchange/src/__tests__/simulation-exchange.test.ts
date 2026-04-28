@@ -39,7 +39,9 @@ describe("SimulationExchangeGateway (immediate fill)", () => {
   });
 
   it("returns fills for one order without scanning unrelated order history", async () => {
-    const first = await gw.placeOrder(makeParams({ clientOrderId: "c1", tokenId: createTokenId("tok-A") }));
+    const first = await gw.placeOrder(
+      makeParams({ clientOrderId: "c1", tokenId: createTokenId("tok-A") }),
+    );
     const second = await gw.placeOrder(
       makeParams({ clientOrderId: "c2", tokenId: createTokenId("tok-B") }),
     );
