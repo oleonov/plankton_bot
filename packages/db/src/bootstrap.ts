@@ -349,6 +349,14 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   // Step 0 §1.2/§1.3 — capture Gamma `createdAt` to compute `age_at_entry`
   // (spec §1.7 R14). Distinct from `markets.created_at` (DB write moment).
   safeAddColumn(conn.db, "markets", "gamma_created_at", "TEXT");
+  // Step 3 §D3 — soft-ranking score columns. The schema source-of-truth
+  // (ledger.sql) declares these inside the markets CREATE TABLE plus a
+  // partial index on `score IS NOT NULL`; existing DBs need them added
+  // before the schema re-exec runs the index build.
+  safeAddColumn(conn.db, "markets", "score", "REAL");
+  safeAddColumn(conn.db, "markets", "score_model_version", "TEXT");
+  safeAddColumn(conn.db, "markets", "scored_at", "TEXT");
+  safeAddColumn(conn.db, "markets", "features_captured_at", "TEXT");
   conn.db.exec(readSchema("ledger.sql"));
   safeAddColumn(conn.db, "orders", "decision_rule_id", "TEXT");
   safeAddColumn(conn.db, "orders", "signal_timestamp", "TEXT");

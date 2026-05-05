@@ -1,5 +1,10 @@
 import type Database from "better-sqlite3";
-import type { MarketRepository, Market, TrackedForPricing } from "@plankton/domain";
+import type {
+  MarketRepository,
+  Market,
+  MarketScoreUpdate,
+  TrackedForPricing,
+} from "@plankton/domain";
 import type { TokenId } from "@plankton/domain";
 import { createTokenId } from "@plankton/domain";
 import type { Regime } from "@plankton/domain";
@@ -12,6 +17,20 @@ const SELECTION_STATUS_RANK: Record<string, number> = {
   unknown: 2,
 };
 
+// Step 3 (audit doc §D5/§F5): a non-null `score` only counts for ranking
+// when its source snapshot is fresh (≤ 4h old). Stale scores are kept on
+// the row but are *not* allowed to outrank a fresh lower score.
+const FEATURE_FRESHNESS_MS = 4 * 60 * 60 * 1000;
+
+// Step 3 (audit doc §D3/§P2) **score-column ownership invariant**.
+// `score`, `score_model_version`, `scored_at`, `features_captured_at` are
+// written exclusively by `updateScoresBatch`. The market-upsert path below
+// must NOT mention these columns in either the INSERT column list or the
+// ON CONFLICT DO UPDATE SET clause. SQLite's UPSERT semantic preserves
+// columns omitted from SET, so saveBatch will not clobber a previously
+// written score. The market-repository-score test suite enforces this by
+// scanning UPSERT_MARKET_SQL for any of the four column names.
+//
 // `gamma_created_at` is null-preserving via COALESCE: once captured from a
 // Gamma response it must not be wiped if a later upsert (e.g. CLOB-side path
 // or a Gamma response missing the field) carries null. Repair flows that
@@ -255,16 +274,27 @@ export class SqliteMarketRepository implements MarketRepository {
     // Deduplicate: execution-critical markets may also be tradable.
     const criticalIds = new Set(executionCritical.map((m) => String(m.tokenId)));
 
-    // Sort tradable-only by selection_status rank ASC, then created_at DESC,
-    // then token_id ASC. Scanner rewrites updated_at on every full scan pass,
-    // so using updated_at here would churn the WS tier even when the universe
-    // itself is stable, forcing the pricing loop to repoll a new unknown set
-    // every few seconds.
+    // Sort tradable-only by selection_status rank ASC, then effective-score
+    // DESC NULLS LAST (Step 3 §D5), then created_at DESC, then token_id ASC.
+    // Scanner rewrites updated_at on every full scan pass, so using updated_at
+    // here would churn the WS tier even when the universe itself is stable,
+    // forcing the pricing loop to repoll a new unknown set every few seconds.
+    //
+    // `effectiveScore` treats stale scores (features_captured_at < now − 4h)
+    // as null so a stale non-null score never outranks a fresh lower score.
     const candidates = tradableOnly.filter((m) => !criticalIds.has(String(m.tokenId)));
+    const nowMs = Date.now();
     candidates.sort((a, b) => {
       const rankA = SELECTION_STATUS_RANK[a.selectionStatus ?? "unknown"] ?? 99;
       const rankB = SELECTION_STATUS_RANK[b.selectionStatus ?? "unknown"] ?? 99;
       if (rankA !== rankB) return rankA - rankB;
+      const sa = effectiveScore(a, nowMs);
+      const sb = effectiveScore(b, nowMs);
+      if (sa !== sb) {
+        if (sa === null) return 1;
+        if (sb === null) return -1;
+        return sb - sa;
+      }
       if (a.createdAt !== b.createdAt) {
         return a.createdAt < b.createdAt ? 1 : -1;
       }
@@ -306,8 +336,54 @@ export class SqliteMarketRepository implements MarketRepository {
         (row.selection_status as import("@plankton/domain").SelectionStatus) ?? "unknown",
       selectionWinningRuleId: (row.selection_winning_rule_id as string) ?? null,
       gammaCreatedAt: (row.gamma_created_at as string | null) ?? null,
+      score: (row.score as number | null) ?? null,
+      scoreModelVersion: (row.score_model_version as string | null) ?? null,
+      scoredAt: (row.scored_at as string | null) ?? null,
+      featuresCapturedAt: (row.features_captured_at as string | null) ?? null,
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
     };
   }
+
+  // Step 3 (audit doc §P2). Single transaction, prepared statement, owns
+  // the four score columns exclusively. Rows whose token_id is unknown are
+  // silently skipped via UPDATE ... WHERE token_id = ?.
+  private updateScoreStmt: Database.Statement | null = null;
+  private updateScoresTx:
+    | ((batch: readonly MarketScoreUpdate[], stmt: Database.Statement) => void)
+    | null = null;
+
+  updateScoresBatch(updates: Iterable<MarketScoreUpdate>): void {
+    const batch = Array.isArray(updates) ? updates : Array.from(updates);
+    if (batch.length === 0) return;
+    if (!this.updateScoreStmt) {
+      this.updateScoreStmt = this.db.prepare(
+        `UPDATE markets
+            SET score = ?,
+                score_model_version = ?,
+                scored_at = ?,
+                features_captured_at = ?
+          WHERE token_id = ?`,
+      );
+    }
+    if (!this.updateScoresTx) {
+      this.updateScoresTx = this.db.transaction(
+        (rows: readonly MarketScoreUpdate[], stmt: Database.Statement) => {
+          for (const u of rows) {
+            stmt.run(u.score, u.modelVersion, u.scoredAt, u.featuresCapturedAt, u.tokenId);
+          }
+        },
+      );
+    }
+    this.updateScoresTx(batch, this.updateScoreStmt);
+  }
+}
+
+function effectiveScore(market: Market, nowMs: number): number | null {
+  if (market.score == null) return null;
+  if (!market.featuresCapturedAt) return null;
+  const capturedMs = Date.parse(market.featuresCapturedAt);
+  if (!Number.isFinite(capturedMs)) return null;
+  if (nowMs - capturedMs > FEATURE_FRESHNESS_MS) return null;
+  return market.score;
 }

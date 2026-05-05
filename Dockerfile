@@ -81,6 +81,14 @@ COPY --from=builder /app/apps/api/dist ./apps/api/dist
 COPY --from=builder /app/apps/api/package.json ./apps/api/package.json
 COPY --from=builder /app/apps/runtime/dist ./apps/runtime/dist
 COPY --from=builder /app/apps/runtime/package.json ./apps/runtime/package.json
+# Step 3 (audit doc §G10) — soft-ranking model artifact lives under
+# `dist/data/` after `pnpm run build` (post-tsc copy in scripts/copy-data.mjs).
+# It is included in the dist copy above. We intentionally do NOT add a
+# separate COPY of `src/data`: when the artifact is rolled back by removing
+# `apps/runtime/src/data/soft-ranking-model.v1.json`, that directory may
+# vanish entirely. A redundant `COPY src/data` would then break the build
+# (or, if the dir still exists, resurrect a stale copy and defeat the
+# disabled-no-op contract from §F1 / §F14).
 COPY --from=builder /app/apps/runtime-manager/dist ./apps/runtime-manager/dist
 COPY --from=builder /app/apps/runtime-manager/package.json ./apps/runtime-manager/package.json
 COPY --from=builder /app/apps/web/dist ./apps/web/dist

@@ -1289,6 +1289,7 @@ function getCurrentPricing(
       lastTradePrice: null,
       lastTradeAt: null,
       volume24h: null,
+      volume24hr: null,
       liquidity: null,
       minOrderSize: null,
       bookSource: "clob" as const,

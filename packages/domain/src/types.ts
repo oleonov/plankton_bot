@@ -81,6 +81,16 @@ export interface Market {
    * fixture must explicitly set it (Step 0 §P1 guard).
    */
   gammaCreatedAt: string | null;
+  /**
+   * Step 3 (audit doc §D3) soft-ranking score columns. NULL = "not yet
+   * scored" — never store 0 (a valid model output). Owned exclusively by
+   * `MarketRepository.updateScoresBatch`; the saveBatch upsert path must
+   * preserve these on conflict by NOT mentioning them in its SET clause.
+   */
+  score?: number | null;
+  scoreModelVersion?: string | null;
+  scoredAt?: string | null; // ISO timestamp — when the model ran
+  featuresCapturedAt?: string | null; // ISO timestamp — when the input snapshot was observed
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
 }
@@ -313,6 +323,13 @@ export interface NormalizedMarket {
   lastTradePrice?: number | null;
   lastTradeAt?: string | null;
   volume24h?: number | null;
+  /**
+   * Rolling 24-hour traded volume from Gamma (`volume24hr`/`volume24hrClob`).
+   * Used by the soft-ranking score's `volume_24h` feature, which the LR model
+   * was trained on. Distinct from `volume24h` above, which carries Gamma's
+   * lifetime-cumulative `volumeNum` and is kept for backward compatibility.
+   */
+  volume24hr?: number | null;
   liquidity?: number | null;
   minOrderSize?: number | null;
   bookSource?: MarketBookSource | null;
@@ -322,7 +339,24 @@ export interface NormalizedMarket {
    * set it (Step 0 §P1 guard).
    */
   gammaCreatedAt: string | null;
+  /**
+   * Step 3 (audit doc §D4 / §P3 step 0) — propagated verbatim from
+   * `Market.selectionStatus` so the soft-ranking-score module can filter
+   * on Step2 inclusion without round-tripping to the DB. Null only on
+   * paths that build a NormalizedMarket without a backing Market row.
+   */
+  selectionStatus?: SelectionStatus | null;
   snapshotTs: number; // unix ms when pricing was captured
+  /**
+   * Step 3 (audit doc §D4) — wall-clock (unix ms) of the most recent
+   * REST/Gamma refresh of the score-feature inputs (`liquidity`, `volume24hr`).
+   * Distinct from `snapshotTs`, which is bumped on every CLOB stream update
+   * even though stream events do **not** carry fresh `liquidity`/`volume24hr`.
+   * Soft-ranking uses this for the 4h freshness window so a chatty book stream
+   * cannot mask hours-stale Gamma feature inputs. Null when the market has
+   * never seen a REST refresh yet (skipped by scoring).
+   */
+  featuresCapturedTs?: number | null;
 }
 
 // ─── MarketResolution ────────────────────────────────────────────────────────

@@ -31,3 +31,16 @@ export type {
   MinMarketAgeResult,
   MinMarketAgeReasonCode,
 } from "./min-market-age.js";
+export { deriveCategory, HEURISTIC_CATEGORIES } from "./category.js";
+export type { HeuristicCategory } from "./category.js";
+export {
+  loadLogisticModel,
+  predictScore,
+  ModelArtifactSchemaError,
+} from "./scoring/logistic-scorer.js";
+export type {
+  LogisticModel,
+  LogisticModelDecile,
+} from "./scoring/logistic-scorer.js";
+export { buildFeatureRow } from "./scoring/feature-builder.js";
+export type { FeatureRowInput } from "./scoring/feature-builder.js";

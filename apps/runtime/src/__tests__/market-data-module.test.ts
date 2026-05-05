@@ -181,6 +181,7 @@ function createMockMarketRepo(): MarketRepository {
       discoveryOnly: [],
     }),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
+    updateScoresBatch: vi.fn(),
   };
 }
 
@@ -680,8 +681,24 @@ describe("MarketDataModule", () => {
         makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" }),
       ];
       (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+      // Step 3: seed volume24hr + liquidity so featuresCapturedTs gets set on
+      // the first REST poll. Without this, the soft-ranking feature-freshness
+      // safeguard would force a re-poll on every cycle to prime null features
+      // for healthy WS-tier known-source tokens.
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
-        new Map([["tok-a", { bestBid: 0.4, bestAsk: 0.6, lastTradePrice: 0.5, minOrderSize: 1 }]]),
+        new Map([
+          [
+            "tok-a",
+            {
+              bestBid: 0.4,
+              bestAsk: 0.6,
+              lastTradePrice: 0.5,
+              minOrderSize: 1,
+              volume24hr: 1000,
+              liquidity: 5000,
+            },
+          ],
+        ]),
       );
       gateway.createMarketPricingStream = (handlers) => {
         stream = new FakePricingStream(handlers);
@@ -737,6 +754,9 @@ describe("MarketDataModule", () => {
         makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" }),
       ];
       (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
+      // Step 3: seed volume24hr + liquidity so featuresCapturedTs gets set on
+      // the initial REST poll. Without it, the new soft-ranking
+      // feature-freshness safeguard would force a re-poll on every cycle.
       (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
         new Map([
           [
@@ -749,6 +769,8 @@ describe("MarketDataModule", () => {
               lastTradePrice: 0.5,
               minOrderSize: 1,
               bookSource: "gamma",
+              volume24hr: 1000,
+              liquidity: 5000,
             },
           ],
         ]),
@@ -921,6 +943,7 @@ describe("MarketDataModule", () => {
         knownSourceRefresh: 0,
         forceFullPoll: 0,
         streamUnavailable: 0,
+        featureFreshness: 0,
       });
       expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
         executionCritical: 1,
@@ -1007,6 +1030,7 @@ describe("MarketDataModule", () => {
         knownSourceRefresh: 0,
         forceFullPoll: 0,
         streamUnavailable: 0,
+        featureFreshness: 0,
       });
       expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
         executionCritical: 1,
@@ -1088,6 +1112,7 @@ describe("MarketDataModule", () => {
       knownSourceRefresh: 0,
       forceFullPoll: 2,
       streamUnavailable: 0,
+      featureFreshness: 0,
     });
     expect(mod.getMetricsSnapshot().fallbackRoleCounts).toEqual({
       executionCritical: 0,

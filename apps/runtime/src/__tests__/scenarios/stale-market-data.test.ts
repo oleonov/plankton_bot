@@ -78,6 +78,7 @@ const mockMarketRepo = {
   findByConditionId: vi.fn().mockReturnValue([]),
   findAll: vi.fn().mockReturnValue([]),
   findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
+  updateScoresBatch: vi.fn(),
 };
 
 // ─── Scenario ─────────────────────────────────────────────────────────────

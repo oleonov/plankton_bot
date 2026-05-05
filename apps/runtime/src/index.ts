@@ -86,6 +86,12 @@ import { CommandPoller } from "./supervisor/command-poller.js";
 import { MarketDataModule } from "./modules/market-data/market-data-module.js";
 import { MarketScannerModule } from "./modules/market-scanner/index.js";
 import { NormalizationModule } from "./modules/normalization/normalization-module.js";
+import { SoftRankingScoreModule } from "./modules/soft-ranking/soft-ranking-score-module.js";
+import { loadSoftRankingModel } from "./modules/soft-ranking/load-soft-ranking-model.js";
+import {
+  computeScoreDistributionSnapshot,
+  SCORE_DISTRIBUTION_METRIC_NAME,
+} from "./modules/soft-ranking/score-distribution-snapshot.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
@@ -550,6 +556,75 @@ async function main(): Promise<void> {
     log,
   });
 
+  // 7e1. Soft-ranking score module (Step 3 / ADR-020). The model artifact is
+  // optional — a missing/invalid file produces `null` and the module enters
+  // a disabled no-op state (audit doc §F1 / §F14: rollback story).
+  //
+  // The recompute hook (audit doc §D7 / §P4) runs the DB-aggregated snapshot
+  // and persists it under `runtime_metrics.score_distribution`. The API reads
+  // the latest persisted row from there — `apps/api` has no in-memory module
+  // reference, so the DB is the cross-process surface.
+  const softRankingModel = loadSoftRankingModel(log);
+  // Disabled-state contract (audit doc §F1 / §F14 / runbook §4): when the
+  // artifact is missing or invalid the module no-ops. Two cleanups are
+  // mandatory at startup:
+  //   1. Clear `runtime_metrics.score_distribution` so the API does not serve
+  //      a stale snapshot as if it were current.
+  //   2. NULL out `markets.score` / `markets.score_model_version` /
+  //      `markets.scored_at` so `effectiveScore` in the repository ranking
+  //      cannot keep returning leftover values from before the disable.
+  // Without (2), Step 3's WS-tier ranking would still be score-driven for any
+  // row whose score has not yet aged past `FEATURE_FRESHNESS_MS`.
+  if (softRankingModel === null) {
+    try {
+      ledgerConn.db
+        .prepare("DELETE FROM runtime_metrics WHERE metric_name = ?")
+        .run(SCORE_DISTRIBUTION_METRIC_NAME);
+    } catch (err) {
+      log.warn({ err }, "score_distribution disabled-state cleanup failed");
+    }
+    try {
+      const result = ledgerConn.db
+        .prepare(
+          "UPDATE markets SET score = NULL, score_model_version = NULL, scored_at = NULL WHERE score IS NOT NULL OR score_model_version IS NOT NULL OR scored_at IS NOT NULL",
+        )
+        .run();
+      if (result.changes > 0) {
+        log.info({ rows: result.changes }, "soft_ranking_disabled_score_columns_cleared");
+      }
+    } catch (err) {
+      log.warn({ err }, "soft_ranking_disabled_score_columns_clear_failed");
+    }
+  }
+  const recomputeScoreDistribution = () => {
+    try {
+      const snapshot = computeScoreDistributionSnapshot(ledgerConn.db);
+      runtimeMetrics.writeLatest(
+        SCORE_DISTRIBUTION_METRIC_NAME,
+        1,
+        JSON.stringify(snapshot),
+        snapshot.capturedAt,
+      );
+      return {
+        modelVersion: snapshot.modelVersion,
+        scoredMarkets: snapshot.scoredMarkets,
+        staleMarkets: snapshot.staleMarkets,
+        mean: snapshot.mean,
+        capturedAt: snapshot.capturedAt,
+      };
+    } catch (err) {
+      log.warn({ err }, "score_distribution snapshot write failed");
+      return undefined;
+    }
+  };
+  const softRankingScoreModule = new SoftRankingScoreModule({
+    bus,
+    marketRepo: repos.market,
+    log,
+    model: softRankingModel,
+    recomputeScoreDistribution,
+  });
+
   // 7e2. Command poller (created here so normalizationModule is available)
   const commandPoller = new CommandPoller({
     commandRepo: repos.operatorCommand,
@@ -861,6 +936,7 @@ async function main(): Promise<void> {
     ["market-scanner", marketScannerModule],
     ["market-data", marketDataModule],
     ["normalization", normalizationModule],
+    ["soft-ranking-score", softRankingScoreModule],
     // leg-state-tracker MUST start before risk-inventory: risk-inventory's
     // start() runs replayUnreconciledFills, which publishes PositionUpdated
     // for each replayed fill. If leg-state-tracker hasn't subscribed yet,

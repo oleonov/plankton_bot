@@ -139,6 +139,11 @@ export interface MarketPricingSnapshot {
   lastTradePrice: number | null;
   lastTradeAt?: string | null;
   volume24h?: number | null;
+  /**
+   * Rolling 24-hour traded volume from Gamma (`volume24hr`/`volume24hrClob`).
+   * Distinct from `volume24h` (lifetime). Feeds the soft-ranking score.
+   */
+  volume24hr?: number | null;
   liquidity?: number | null;
   minOrderSize?: number | null;
   bookSource?: MarketBookSource | null;

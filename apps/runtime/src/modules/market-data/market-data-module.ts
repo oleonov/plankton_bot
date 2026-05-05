@@ -40,6 +40,14 @@ const STREAM_UNKNOWN_EXECUTION_CRITICAL_REFRESH_MIN_STALE_MS = 15_000;
 const STREAM_UNKNOWN_ENTRY_CANDIDATE_REFRESH_MIN_STALE_MS = 120_000;
 const STREAM_UNKNOWN_LEGACY_REFRESH_MIN_STALE_MS = 30_000;
 const STREAM_UPDATE_COALESCE_MS = 100;
+// Step 3 (audit doc §F2): soft-ranking feature inputs (`liquidity`,
+// `volume24hr`) only refresh via REST/Gamma — CLOB stream updates do NOT
+// carry them. The book-refresh budget can return Infinity for healthy
+// WS-tier tokens, so we need a separate, smaller budget keyed off
+// `featuresCapturedTs` to make sure feature timestamps stay inside the
+// 4h freshness window enforced by `effectiveScore` in the repository.
+// 3h gives ~1h of slack before scores get nulled by staleness.
+const SOFT_RANKING_FEATURE_REFRESH_MAX_AGE_MS = 3 * 60 * 60 * 1000;
 // Shard fan-out: one WS disconnect can fire 20× onGapDetected in quick succession,
 // one per shard. Coalesce the warn log into a single line per burst. State
 // updates (pendingGapTokenIds, forceFullPoll) stay synchronous so the next
@@ -68,6 +76,13 @@ export interface MarketDataFallbackReasonCounts {
   knownSourceRefresh: number;
   forceFullPoll: number;
   streamUnavailable: number;
+  /**
+   * Step 3 (audit doc §F2): tokens repolled because the soft-ranking
+   * feature timestamp (`featuresCapturedTs`) exceeded the REST/Gamma
+   * feature-refresh budget (`SOFT_RANKING_FEATURE_REFRESH_MAX_AGE_MS`),
+   * even when the book itself is still considered fresh by the stream.
+   */
+  featureFreshness: number;
 }
 
 export interface MarketDataTrackedDiffCounts {
@@ -492,6 +507,41 @@ export class MarketDataModule implements RuntimeModule {
             } else {
               fallbackReasonCounts.knownSourceRefresh += 1;
             }
+            incrementTrackedRoleCounts(fallbackRoleCounts, role);
+            return true;
+          }
+          // Step 3 (audit doc §F2): even when the book is still considered
+          // fresh by the stream, soft-ranking feature inputs (liquidity /
+          // volume24hr) only refresh via REST/Gamma. The book-refresh budget
+          // returns `Number.POSITIVE_INFINITY` for healthy WS-tier tokens
+          // with a known `bookSource`, so without a feature-keyed poll those
+          // tokens never get features refreshed.
+          //
+          // Trigger a REST poll for two cases:
+          //   (a) `featuresCapturedTs != null` AND the timestamp exceeds the
+          //       dedicated 3h budget — covers tokens that were previously
+          //       primed but are about to age past the 4h
+          //       `FEATURE_FRESHNESS_MS` window enforced by `effectiveScore`.
+          //   (b) `featuresCapturedTs == null` AND the token is on a healthy
+          //       WS tier with a known `bookSource` — these tokens have an
+          //       infinite book budget, so without this they could remain
+          //       permanently unscored. Other null cases (unknown source /
+          //       pendingGap / missingCache / inactive WS) already get
+          //       polled by the branches above, so we don't double-count
+          //       them here.
+          const featuresCapturedTs = cached.featuresCapturedTs ?? null;
+          if (featuresCapturedTs != null) {
+            if (now - featuresCapturedTs > SOFT_RANKING_FEATURE_REFRESH_MAX_AGE_MS) {
+              fallbackReasonCounts.featureFreshness += 1;
+              incrementTrackedRoleCounts(fallbackRoleCounts, role);
+              return true;
+            }
+          } else if (
+            tokenSubscribedOnHealthyWsTier &&
+            cached.bookSource != null &&
+            cached.bookSource !== "unknown"
+          ) {
+            fallbackReasonCounts.featureFreshness += 1;
             incrementTrackedRoleCounts(fallbackRoleCounts, role);
             return true;
           }
@@ -1051,6 +1101,7 @@ function zeroFallbackReasonCounts(): MarketDataFallbackReasonCounts {
     knownSourceRefresh: 0,
     forceFullPoll: 0,
     streamUnavailable: 0,
+    featureFreshness: 0,
   };
 }
 
@@ -1111,14 +1162,19 @@ function syncTrackedMarket(
     lastTradePrice: current?.lastTradePrice ?? null,
     lastTradeAt: current?.lastTradeAt ?? null,
     volume24h: current?.volume24h ?? null,
+    volume24hr: current?.volume24hr ?? null,
     liquidity: current?.liquidity ?? null,
     minOrderSize: current?.minOrderSize ?? null,
     bookSource: current?.bookSource ?? "unknown",
     snapshotTs: current?.snapshotTs ?? nowMs,
+    featuresCapturedTs: current?.featuresCapturedTs ?? null,
     // Persisted eventMarketCount from the DB row (always set by scanner).
     // Required field on Market — no silent `?? 1` fallback (ADR-019 §D2).
     eventMarketCount: tracked.eventMarketCount,
     // Persisted Gamma createdAt — null-preserving in DB, propagated as-is here.
     gammaCreatedAt: tracked.gammaCreatedAt ?? current?.gammaCreatedAt ?? null,
+    // Step 3 (audit doc §P3 step 0) — propagate Step2 verdict so the
+    // soft-ranking-score subscriber can filter without DB round-trip.
+    selectionStatus: tracked.selectionStatus ?? null,
   };
 }

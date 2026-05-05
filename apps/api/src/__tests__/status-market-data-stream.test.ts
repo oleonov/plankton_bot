@@ -127,6 +127,7 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
             knownSourceRefresh: 4,
             forceFullPoll: 0,
             streamUnavailable: 0,
+            featureFreshness: 0,
           },
           fallbackRoleCounts: {
             executionCritical: 1,
@@ -198,6 +199,7 @@ describe("buildStatusSnapshot market-data stream telemetry", () => {
         knownSourceRefresh: 4,
         forceFullPoll: 0,
         streamUnavailable: 0,
+        featureFreshness: 0,
       },
       fallbackRoleCounts: {
         executionCritical: 1,

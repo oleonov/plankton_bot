@@ -263,6 +263,7 @@ describe("PositionSettler", () => {
         deactivateMissing: vi.fn().mockReturnValue(0),
         findTrackedForPricing: vi.fn().mockReturnValue([]),
         findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
+        updateScoresBatch: vi.fn(),
         save: vi.fn(),
       } as unknown as MarketRepository;
     }

@@ -156,6 +156,28 @@ export interface MarketRepository {
    * Returns null if no row exists for that slug.
    */
   findEventMarketCountBySlug(slug: string): number | null;
+
+  /**
+   * Step 3 (audit doc §D3/§P2): write soft-ranking scores for one or more
+   * markets in a single transaction. Owns the four score columns
+   * exclusively — the saveBatch upsert path must NOT touch them. Rows
+   * whose `tokenId` does not exist in `markets` are silently skipped
+   * (UPDATE ... WHERE token_id = ?).
+   */
+  updateScoresBatch(updates: Iterable<MarketScoreUpdate>): void;
+}
+
+/**
+ * Single soft-ranking score update. NULL is intentionally not allowed:
+ * the module emits a row only when it has a fresh score; skipped markets
+ * simply receive no entry.
+ */
+export interface MarketScoreUpdate {
+  tokenId: TokenId;
+  score: number;
+  modelVersion: string;
+  scoredAt: string; // ISO timestamp — when the model ran
+  featuresCapturedAt: string; // ISO timestamp — input snapshot time
 }
 
 // ─── OrderRepository ─────────────────────────────────────────────────────

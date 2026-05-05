@@ -60,6 +60,14 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
     for (const tokenId of tokenIds) {
       const book = this.orderBooks.get(tokenId);
       const override = this.livenessOverrides.get(tokenId);
+      // Step 3 (audit doc §P0 step 1.4 / §F4): simulation/paper paths must
+      // produce populated soft-ranking feature inputs so the scorer is
+      // exercised end-to-end, not silently skipped as missing-features.
+      // Derive deterministic plausible values from the tokenId hash so the
+      // same simulated token always yields the same liquidity/volume —
+      // tests that depend on bestBid/bestAsk are unaffected because we only
+      // populate the previously-null feature fields.
+      const seed = simulationFeatureSeed(tokenId);
       result.set(tokenId, {
         bestBid: book?.bestBid ?? null,
         bestAsk: book?.bestAsk ?? null,
@@ -67,8 +75,9 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
         enableOrderBook: override?.enableOrderBook ?? true,
         lastTradePrice: null,
         lastTradeAt: null,
-        volume24h: null,
-        liquidity: null,
+        volume24h: seed.volume24h,
+        volume24hr: seed.volume24hr,
+        liquidity: seed.liquidity,
         minOrderSize: book?.minOrderSize ?? null,
         bookSource: "simulation",
       });
@@ -126,4 +135,29 @@ export class SimulationMarketDataGateway implements MarketDataGateway {
     this.orderBooks.clear();
     this.livenessOverrides.clear();
   }
+}
+
+function simulationFeatureSeed(tokenId: string): {
+  volume24h: number;
+  volume24hr: number;
+  liquidity: number;
+} {
+  // FNV-1a 32-bit — tiny deterministic hash, no crypto needed.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < tokenId.length; i += 1) {
+    hash ^= tokenId.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  // Spread the same hash across two ranges so volume and liquidity are not
+  // perfectly correlated (the LR scorer would otherwise see one redundant
+  // axis). Bounded to 100..50_000 so all feature transforms stay finite.
+  const volumeBucket = (hash >>> 0) % 49_900;
+  const liquidityBucket = ((hash >>> 8) >>> 0) % 49_900;
+  const volume24hr = 100 + volumeBucket;
+  const liquidity = 100 + liquidityBucket;
+  return {
+    volume24h: volume24hr * 2,
+    volume24hr,
+    liquidity,
+  };
 }

@@ -143,6 +143,7 @@ function createMockRepo(tiered: TrackedForPricing): MarketRepository {
       .mockReturnValue([...tiered.executionCritical, ...tiered.entryCandidates]),
     findTrackedForPricingTiered: vi.fn().mockReturnValue(tiered),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
+    updateScoresBatch: vi.fn(),
   };
 }
 

@@ -2,6 +2,7 @@ import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
 import { resolveTradingState } from "@plankton/domain";
 import type { LedgerPool } from "../ledger-pool.js";
+import { resolveActiveLedger } from "../active-ledger.js";
 import { computeExecutionTelemetry } from "../execution-telemetry.js";
 import { ok } from "../errors.js";
 import { resolveInitialBalanceUsdc } from "../initial-balance.js";
@@ -46,30 +47,6 @@ type StatusSnapshot = Record<string, unknown> & {
 };
 
 const INFRA_ALERT_LOOKBACK_MS = 60 * 60 * 1000;
-
-/**
- * Resolve the ledger DB for the currently active profile.
- * Falls back to the startup-fixed ledger if control.db or pool unavailable.
- */
-function resolveActiveLedger(
-  fallback: Database.Database,
-  controlDb?: Database.Database,
-  ledgerPool?: LedgerPool,
-): { db: Database.Database; profile: string | null } {
-  if (!controlDb || !ledgerPool) return { db: fallback, profile: null };
-  try {
-    const row = controlDb
-      .prepare("SELECT current_profile FROM runtime_control_state WHERE id = 1")
-      .get() as { current_profile: string | null } | undefined;
-    if (row?.current_profile) {
-      const ledger = ledgerPool.get(row.current_profile);
-      if (ledger) return { db: ledger, profile: row.current_profile };
-    }
-  } catch {
-    // Table may not exist in legacy/test DBs
-  }
-  return { db: fallback, profile: null };
-}
 
 function computeTradingState(
   db: Database.Database,

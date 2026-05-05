@@ -169,6 +169,7 @@ function createMockMarketRepo(orderTokenId: TokenId): MarketRepository {
       discoveryOnly: [],
     }),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
+    updateScoresBatch: vi.fn(),
   };
 }
 

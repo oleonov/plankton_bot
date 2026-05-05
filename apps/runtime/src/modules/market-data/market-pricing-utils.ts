@@ -28,10 +28,21 @@ export function applyPricingSnapshot(
     lastTradePrice: pricing.lastTradePrice ?? null,
     lastTradeAt: pricing.lastTradeAt ?? null,
     volume24h: pricing.volume24h ?? market.volume24h ?? null,
+    volume24hr: pricing.volume24hr ?? market.volume24hr ?? null,
     liquidity: pricing.liquidity ?? market.liquidity ?? null,
     minOrderSize: pricing.minOrderSize ?? market.minOrderSize ?? null,
     bookSource: pricing.bookSource ?? market.bookSource ?? "unknown",
     snapshotTs: nowMs,
+    // Only bump the feature-freshness clock when the current REST payload
+    // *actually* supplied both score-feature fields (`volume24hr` and
+    // `liquidity`). When Gamma omits either, the values above fall back to
+    // the previous `market.*` cache — bumping the clock would mark stale
+    // cached features as fresh and let soft-ranking score on hours-old data
+    // (audit doc §D7).
+    featuresCapturedTs:
+      pricing.volume24hr != null && pricing.liquidity != null
+        ? nowMs
+        : (market.featuresCapturedTs ?? null),
   };
 }
 
@@ -47,8 +58,14 @@ export function applyStreamUpdate(
           tickSize: update.tickSize,
         }
       : market;
+  // Stream updates never carry fresh Gamma features (volume24hr / liquidity);
+  // preserve the prior `featuresCapturedTs` so a chatty book stream cannot
+  // mark hours-stale feature inputs as fresh for soft-ranking (audit §D7).
+  const preservedFeaturesTs = marketWithTickSize.featuresCapturedTs ?? null;
   const nextMarket = applyPricingSnapshot(marketWithTickSize, update.pricing, nowMs);
-  if (!update.book) return nextMarket;
+  if (!update.book) {
+    return { ...nextMarket, featuresCapturedTs: preservedFeaturesTs };
+  }
   const topOfBook = deriveExecutableTopOfBook(
     {
       bestBid: update.book.bestBid,
@@ -67,6 +84,7 @@ export function applyStreamUpdate(
     minOrderSize: update.book.minOrderSize ?? nextMarket.minOrderSize ?? null,
     bookSource: "clob",
     snapshotTs: update.book.timestamp,
+    featuresCapturedTs: preservedFeaturesTs,
   };
 }
 
@@ -85,6 +103,7 @@ export function didMarketPricingChange(
     previous.lastTradePrice !== next.lastTradePrice ||
     previous.lastTradeAt !== next.lastTradeAt ||
     previous.volume24h !== next.volume24h ||
+    previous.volume24hr !== next.volume24hr ||
     previous.liquidity !== next.liquidity ||
     previous.minOrderSize !== next.minOrderSize ||
     previous.bookSource !== next.bookSource

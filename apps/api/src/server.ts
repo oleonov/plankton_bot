@@ -34,6 +34,7 @@ import { runtimePolicyRoutes } from "./routes/runtime-policy.js";
 import { auditRoutes } from "./routes/audit.js";
 import { selectionRulesRoutes } from "./routes/selection-rules.js";
 import { marketsRoutes } from "./routes/markets.js";
+import { scannerRoutes } from "./routes/scanner.js";
 
 export interface ServerDeps {
   config: AppConfig;
@@ -174,6 +175,12 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(marketsRoutes, {
     prefix: "/api/v1",
     ledgerDb: deps.ledgerDb,
+    ledgerPool: deps.ledgerPool,
+  });
+  await app.register(scannerRoutes, {
+    prefix: "/api/v1",
+    ledgerDb: deps.ledgerDb,
+    controlDb: deps.controlDb,
     ledgerPool: deps.ledgerPool,
   });
 

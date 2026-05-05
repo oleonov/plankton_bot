@@ -98,6 +98,7 @@ function createMockMarketRepo() {
     deactivateMissing: vi.fn().mockReturnValue(0),
     findTrackedForPricing: vi.fn().mockReturnValue([]),
     findEventMarketCountBySlug: vi.fn().mockReturnValue(null),
+    updateScoresBatch: vi.fn(),
   };
 }
 

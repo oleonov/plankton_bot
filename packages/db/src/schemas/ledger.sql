@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS markets (
       ('unknown','matched_include','matched_exclude','step2_fallback_include','fallback_exclude')),
   selection_winning_rule_id TEXT,
   gamma_created_at          TEXT,
+  -- Step 3 (audit doc §D3): soft-ranking score columns. NULL = "not yet
+  -- scored" (never store 0 — it is a valid model output). Owned exclusively
+  -- by SoftRankingScoreModule via MarketRepository.updateScoresBatch; the
+  -- market upsert path must NOT mention these columns.
+  score                     REAL,
+  score_model_version       TEXT,
+  scored_at                 TEXT,
+  features_captured_at      TEXT,
   created_at                TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -37,6 +45,7 @@ CREATE INDEX IF NOT EXISTS idx_markets_slug ON markets(slug);
 CREATE INDEX IF NOT EXISTS idx_markets_condition_id ON markets(condition_id);
 CREATE INDEX IF NOT EXISTS idx_markets_selection_status ON markets(selection_status);
 CREATE INDEX IF NOT EXISTS idx_markets_tracked ON markets(active, tradable) WHERE active = 1;
+CREATE INDEX IF NOT EXISTS idx_markets_score ON markets(score) WHERE score IS NOT NULL;
 
 -- ═══════════ MARKET SNAPSHOTS ═══════════
 -- From 001_initial.sql

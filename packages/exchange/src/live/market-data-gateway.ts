@@ -366,6 +366,12 @@ export class LiveMarketDataGateway implements MarketDataGateway {
       //   • `volume24hr` — rolling 24h (would false-exclude dormant markets)
       // Domain field name kept as `volume24h` for backward-compat; see ADR-007.
       const volume24h = parseOptionalNumber(raw.volumeNum);
+      // Step 3 (soft-ranking) needs rolling-24h volume, distinct from the
+      // lifetime field above. Prefer `volume24hr`; fall back to
+      // `volume24hrClob` (mirrors the training-side aliases — see
+      // `research_plankton/soft_ranking_score_analysis.py:545`).
+      const volume24hr =
+        parseOptionalNumber(raw.volume24hr) ?? parseOptionalNumber(raw.volume24hrClob);
       const liquidity = parseOptionalNumber(raw.liquidity);
 
       // Gamma provides market-level bestBid/bestAsk (for the first outcome token).
@@ -402,6 +408,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
           lastTradePrice,
           lastTradeAt,
           volume24h,
+          volume24hr,
           liquidity,
           minOrderSize: result.get(tokenId)?.minOrderSize ?? null,
           bookSource:
