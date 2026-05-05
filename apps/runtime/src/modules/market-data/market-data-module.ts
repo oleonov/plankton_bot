@@ -1118,5 +1118,7 @@ function syncTrackedMarket(
     // Use the persisted eventMarketCount from the DB row (set by scanner since Phase 4).
     // Fall back to current cached value, then to the DB default of 1.
     eventMarketCount: tracked.eventMarketCount ?? current?.eventMarketCount ?? 1,
+    // Persisted Gamma createdAt — null-preserving in DB, propagated as-is here.
+    gammaCreatedAt: tracked.gammaCreatedAt ?? current?.gammaCreatedAt ?? null,
   };
 }

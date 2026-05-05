@@ -18,6 +18,12 @@ export interface ControlProfileSeed {
    * dev/CI flow.
    */
   readonly defaultDeadSideGuardMode: DeadSideGuardMode;
+  /**
+   * Step 0 §P3: seed `ExecutionPolicy.entryMinMarketAgeSeconds`. Simulation
+   * gets 0 (full bypass — sim fixtures are freshly created and the spec floor
+   * doesn't apply). Paper / live-lite get the canonical 2,504 s spec floor.
+   */
+  readonly defaultEntryMinMarketAgeSeconds: number;
 }
 
 export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
@@ -26,25 +32,32 @@ export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
     displayName: "Simulation",
     description: "In-memory simulated execution",
     defaultDeadSideGuardMode: "observe",
+    defaultEntryMinMarketAgeSeconds: 0,
   },
   {
     profileId: ProfileId.Paper,
     displayName: "Paper",
     description: "Live market data, simulated orders",
     defaultDeadSideGuardMode: "observe",
+    defaultEntryMinMarketAgeSeconds: DEFAULT_EXECUTION_POLICY.entryMinMarketAgeSeconds,
   },
   {
     profileId: ProfileId.LiveLite,
     displayName: "Live-Lite",
     description: "Real orders with envelope caps",
     defaultDeadSideGuardMode: "enforce",
+    defaultEntryMinMarketAgeSeconds: DEFAULT_EXECUTION_POLICY.entryMinMarketAgeSeconds,
   },
 ];
 
-function defaultExecutionPolicyJson(mode: DeadSideGuardMode): string {
+function defaultExecutionPolicyJson(profile: ControlProfileSeed): string {
   return serializeExecutionPolicy({
     ...DEFAULT_EXECUTION_POLICY,
-    deadSideGuard: { ...DEFAULT_EXECUTION_POLICY.deadSideGuard, mode },
+    deadSideGuard: {
+      ...DEFAULT_EXECUTION_POLICY.deadSideGuard,
+      mode: profile.defaultDeadSideGuardMode,
+    },
+    entryMinMarketAgeSeconds: profile.defaultEntryMinMarketAgeSeconds,
   });
 }
 
@@ -82,8 +95,63 @@ export function ensureDefaultExecutionPolicy(db: Database.Database): void {
       WHERE profile_id = ? AND execution_policy_json IS NULL`,
   );
   for (const profile of CONTROL_PROFILES) {
-    const json = defaultExecutionPolicyJson(profile.defaultDeadSideGuardMode);
+    const json = defaultExecutionPolicyJson(profile);
     insertSettings.run(profile.profileId, json);
     fillMissing.run(json, profile.profileId);
+  }
+  backfillEntryMinMarketAgeSeconds(db);
+}
+
+/**
+ * Step 0 §P3 — idempotent JSON backfill.
+ *
+ * For every existing `profile_settings` row whose `execution_policy_json`
+ * lacks `entryMinMarketAgeSeconds`, insert the per-profile default via
+ * SQLite's `json_set`. Runs after `ensureDefaultExecutionPolicy` so newly
+ * inserted rows already carry the field.
+ *
+ * Idempotency guard: `json_extract(... '$.entryMinMarketAgeSeconds') IS NULL`
+ * — second run is a no-op (does not overwrite operator-edited values).
+ *
+ * Bumps `runtime_control_state.execution_policy_version` once when at least
+ * one row was actually patched, so the running ExecutionPolicyProvider
+ * picks up the new value via the existing hot-reload channel.
+ */
+function backfillEntryMinMarketAgeSeconds(db: Database.Database): void {
+  const stateColumns = db.prepare(`PRAGMA table_info(runtime_control_state)`).all() as Array<{
+    name: string;
+  }>;
+  const hasVersionColumn = stateColumns.some((c) => c.name === "execution_policy_version");
+
+  // Guard `json_extract`/`json_set` from throwing on malformed JSON: SQLite
+  // raises "malformed JSON" on the entire UPDATE if any matching row holds
+  // a non-parseable string, which would crash bootstrap. The provider/parser
+  // tolerates bad JSON at runtime (falls back to defaults + surfaces issues),
+  // so the migration must mirror that posture and skip such rows. Operators
+  // see the bad row via the existing parser warning path on next read.
+  const update = db.prepare(
+    `UPDATE profile_settings
+        SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.entryMinMarketAgeSeconds',
+              ?
+            ),
+            updated_at = datetime('now')
+      WHERE profile_id = ?
+        AND execution_policy_json IS NOT NULL
+        AND json_valid(execution_policy_json) = 1
+        AND json_extract(execution_policy_json, '$.entryMinMarketAgeSeconds') IS NULL`,
+  );
+  let totalChanges = 0;
+  for (const profile of CONTROL_PROFILES) {
+    const result = update.run(profile.defaultEntryMinMarketAgeSeconds, profile.profileId);
+    totalChanges += result.changes;
+  }
+
+  if (totalChanges > 0 && hasVersionColumn) {
+    db.prepare(
+      `UPDATE runtime_control_state
+          SET execution_policy_version = COALESCE(execution_policy_version, 0) + 1`,
+    ).run();
   }
 }

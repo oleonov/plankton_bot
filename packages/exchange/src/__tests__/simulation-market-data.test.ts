@@ -18,6 +18,7 @@ function makeMarket(overrides?: Partial<ClobMarket>): ClobMarket {
     tickSize: 0.01,
     volume24h: null,
     eventMarketCount: 1,
+    gammaCreatedAt: null,
     ...overrides,
   };
 }

@@ -20,7 +20,14 @@ export {
   DEFAULT_DEAD_SIDE_GUARD,
   DEFAULT_PRICING_POLICY,
   DEFAULT_TELEMETRY,
+  DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
 } from "./execution-policy.js";
 export type { ParseResult } from "./execution-policy.js";
+export { evaluateMinMarketAge } from "./min-market-age.js";
+export type {
+  MinMarketAgeArgs,
+  MinMarketAgeResult,
+  MinMarketAgeReasonCode,
+} from "./min-market-age.js";

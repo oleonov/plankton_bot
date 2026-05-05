@@ -57,6 +57,7 @@ const trackedMarket: Market = {
   tradable: true,
   tickSize: 0.01,
   negRisk: false,
+  gammaCreatedAt: null,
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
 };
@@ -67,6 +68,7 @@ const mockMarketRepo = {
   findTrackedForPricing: vi.fn().mockReturnValue([trackedMarket]),
   deactivate: vi.fn(),
   iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
+  iterateAllTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
   deactivateMissing: vi.fn().mockReturnValue(0),
   save: vi.fn(),
   saveBatch: vi.fn(),

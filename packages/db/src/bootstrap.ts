@@ -16,6 +16,10 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
   runMigrations(conn.db);
   ensureBootstrapBackfillsTable(conn.db);
   safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
+  // Step 0 §1.2 — capture Gamma createdAt; legacy merged-DB path mirrors the
+  // ledger column added in bootstrapLedgerDb so tests and old installs stay
+  // in sync. Distinct from `markets.created_at` (DB write moment).
+  safeAddColumn(conn.db, "markets", "gamma_created_at", "TEXT");
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
   setRuntimeBusyTimeout(conn);
@@ -342,6 +346,9 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
       "('unknown','matched_include','matched_exclude','step2_fallback_include','fallback_exclude'))",
   );
   safeAddColumn(conn.db, "markets", "selection_winning_rule_id", "TEXT");
+  // Step 0 §1.2/§1.3 — capture Gamma `createdAt` to compute `age_at_entry`
+  // (spec §1.7 R14). Distinct from `markets.created_at` (DB write moment).
+  safeAddColumn(conn.db, "markets", "gamma_created_at", "TEXT");
   conn.db.exec(readSchema("ledger.sql"));
   safeAddColumn(conn.db, "orders", "decision_rule_id", "TEXT");
   safeAddColumn(conn.db, "orders", "signal_timestamp", "TEXT");

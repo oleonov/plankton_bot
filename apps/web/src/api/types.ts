@@ -78,6 +78,12 @@ export interface ExecutionPolicyDTO {
   version: 1;
   entryPriceCeiling: number;
   exitOrderTtlMs: number;
+  /**
+   * Step 0 §P3 — minimum market age (gamma createdAt → first BUY) in seconds.
+   * `0` disables the gate (used by simulation). Canonical floor is 2,504 s
+   * per spec §1.7 R1 (`06:423`).
+   */
+  entryMinMarketAgeSeconds: number;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   telemetry: ExecutionTelemetryPolicy;

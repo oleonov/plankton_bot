@@ -286,6 +286,14 @@ describe("mapMarket", () => {
     const market = mapMarket({ condition_id: "c1" });
     expect(market.tokens).toEqual([]);
   });
+
+  it("CLOB-path leaves gammaCreatedAt null (Gamma is the only source)", () => {
+    const market = mapMarket({
+      condition_id: "c1",
+      created_at: "2026-01-01T00:00:00Z",
+    });
+    expect(market.gammaCreatedAt).toBeNull();
+  });
 });
 
 describe("mapOrderBook", () => {
@@ -502,6 +510,53 @@ describe("mapGammaMarket", () => {
     const market = mapGammaMarket({ slug: "some-market" }, { slug: null, marketCount: 5 });
     expect(market.eventSlug).toBeUndefined();
     expect(market.eventMarketCount).toBe(5);
+  });
+
+  // Step 0 §P1.9 — `gammaCreatedAt` is the source for spec §1.7 R14 `age_at_entry`.
+  // Validate ISO round-trip, null for missing, null for invalid.
+  it("normalizes Gamma createdAt ISO string through Date round-trip", () => {
+    const market = mapGammaMarket({ createdAt: "2026-04-15T08:30:00Z" });
+    expect(market.gammaCreatedAt).toBe("2026-04-15T08:30:00.000Z");
+  });
+
+  it("preserves sub-second precision in createdAt round-trip", () => {
+    const market = mapGammaMarket({ createdAt: "2026-04-15T08:30:00.123Z" });
+    expect(market.gammaCreatedAt).toBe("2026-04-15T08:30:00.123Z");
+  });
+
+  it("normalizes timezone-offset createdAt to UTC", () => {
+    const market = mapGammaMarket({ createdAt: "2026-04-15T10:30:00+02:00" });
+    expect(market.gammaCreatedAt).toBe("2026-04-15T08:30:00.000Z");
+  });
+
+  it("returns null when createdAt is missing", () => {
+    const market = mapGammaMarket({});
+    expect(market.gammaCreatedAt).toBeNull();
+  });
+
+  it("returns null when createdAt is empty string", () => {
+    const market = mapGammaMarket({ createdAt: "" });
+    expect(market.gammaCreatedAt).toBeNull();
+  });
+
+  it("returns null when createdAt is whitespace only", () => {
+    const market = mapGammaMarket({ createdAt: "   " });
+    expect(market.gammaCreatedAt).toBeNull();
+  });
+
+  it("returns null when createdAt is unparseable", () => {
+    const market = mapGammaMarket({ createdAt: "not-a-date" });
+    expect(market.gammaCreatedAt).toBeNull();
+  });
+
+  it("returns null when createdAt is non-string (number)", () => {
+    const market = mapGammaMarket({ createdAt: 1700000000 });
+    expect(market.gammaCreatedAt).toBeNull();
+  });
+
+  it("returns null when createdAt is null", () => {
+    const market = mapGammaMarket({ createdAt: null });
+    expect(market.gammaCreatedAt).toBeNull();
   });
 });
 

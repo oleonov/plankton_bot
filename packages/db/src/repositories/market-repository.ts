@@ -12,12 +12,16 @@ const SELECTION_STATUS_RANK: Record<string, number> = {
   unknown: 2,
 };
 
+// `gamma_created_at` is null-preserving via COALESCE: once captured from a
+// Gamma response it must not be wiped if a later upsert (e.g. CLOB-side path
+// or a Gamma response missing the field) carries null. Repair flows that
+// need to overwrite go through an explicit admin path, not saveBatch.
 const UPSERT_MARKET_SQL = `INSERT INTO markets
          (token_id, condition_id, slug, event_slug, question, outcome, outcome_index,
           regime, horizon, end_date, active, tradable, tick_size, neg_risk,
           event_market_count, selection_status, selection_winning_rule_id,
-          created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          gamma_created_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(token_id) DO UPDATE SET
            condition_id = excluded.condition_id,
            slug = excluded.slug,
@@ -35,6 +39,7 @@ const UPSERT_MARKET_SQL = `INSERT INTO markets
            event_market_count = excluded.event_market_count,
            selection_status = excluded.selection_status,
            selection_winning_rule_id = excluded.selection_winning_rule_id,
+           gamma_created_at = COALESCE(markets.gamma_created_at, excluded.gamma_created_at),
            updated_at = excluded.updated_at`;
 
 export class SqliteMarketRepository implements MarketRepository {
@@ -72,6 +77,7 @@ export class SqliteMarketRepository implements MarketRepository {
       market.eventMarketCount ?? 1,
       market.selectionStatus ?? "unknown",
       market.selectionWinningRuleId ?? null,
+      market.gammaCreatedAt ?? null,
       market.createdAt,
       market.updatedAt,
     );
@@ -127,6 +133,13 @@ export class SqliteMarketRepository implements MarketRepository {
 
   *iterateActiveTokenIds(): IterableIterator<TokenId> {
     const stmt = this.db.prepare("SELECT token_id FROM markets WHERE active = 1");
+    for (const row of stmt.iterate() as Iterable<{ token_id: string }>) {
+      yield createTokenId(row.token_id);
+    }
+  }
+
+  *iterateAllTokenIds(): IterableIterator<TokenId> {
+    const stmt = this.db.prepare("SELECT token_id FROM markets");
     for (const row of stmt.iterate() as Iterable<{ token_id: string }>) {
       yield createTokenId(row.token_id);
     }
@@ -292,6 +305,7 @@ export class SqliteMarketRepository implements MarketRepository {
       selectionStatus:
         (row.selection_status as import("@plankton/domain").SelectionStatus) ?? "unknown",
       selectionWinningRuleId: (row.selection_winning_rule_id as string) ?? null,
+      gammaCreatedAt: (row.gamma_created_at as string | null) ?? null,
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,
     };

@@ -215,6 +215,7 @@ function makeMarket(midPrice: number): NormalizedMarket {
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    gammaCreatedAt: null,
     acceptingOrders: true,
     enableOrderBook: true,
     bestBid: midPrice - 0.01,

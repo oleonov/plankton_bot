@@ -35,9 +35,22 @@ export const DEFAULT_TELEMETRY: ExecutionPolicyTelemetry = {
   pricingShadow: true,
 };
 
+/**
+ * Step 0 §P3: spec §1.7 R1 (`06:423`) — empirical lower bound 2,504 sec
+ * (~42 min) between Gamma `createdAt` and the first BUY across historical
+ * Plankton trades. Stricter rounding (e.g. 2,520) is NOT specified in the
+ * canonical spec; future tightening lives in a separate ADR.
+ *
+ * Default value applies to paper / live-lite. The simulation profile gets
+ * a per-profile seed of 0 (full bypass) — see `defaultExecutionPolicyJson`
+ * in `@plankton/db` (control-profiles.ts).
+ */
+export const DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS = 2_504;
+
 export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   version: 1,
   entryPriceCeiling: 0.75,
+  entryMinMarketAgeSeconds: DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
   exitOrderTtlMs: 300_000,
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
@@ -61,6 +74,10 @@ const BOUND_ENTRY_CEILING_MIN = 0.05;
 const BOUND_ENTRY_CEILING_MAX = 0.99;
 const BOUND_EXIT_TTL_MIN_MS = 10_000;
 const BOUND_EXIT_TTL_MAX_MS = 60 * 60_000;
+const BOUND_ENTRY_MIN_AGE_MIN_S = 0;
+// Two days — wide enough to cover any realistic conservative tightening
+// without enabling pathological values that would silently disable BUYs forever.
+const BOUND_ENTRY_MIN_AGE_MAX_S = 2 * 24 * 60 * 60;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -103,6 +120,14 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     issues,
     "exitOrderTtlMs",
   );
+  const entryMinMarketAgeSeconds = clampedInt(
+    obj.entryMinMarketAgeSeconds,
+    DEFAULT_EXECUTION_POLICY.entryMinMarketAgeSeconds,
+    BOUND_ENTRY_MIN_AGE_MIN_S,
+    BOUND_ENTRY_MIN_AGE_MAX_S,
+    issues,
+    "entryMinMarketAgeSeconds",
+  );
 
   const deadSideGuard = parseDeadSideGuard(obj.deadSideGuard, issues);
   const pricing = parsePricing(obj.pricing, issues);
@@ -112,6 +137,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     policy: {
       version,
       entryPriceCeiling,
+      entryMinMarketAgeSeconds,
       exitOrderTtlMs,
       deadSideGuard,
       pricing,

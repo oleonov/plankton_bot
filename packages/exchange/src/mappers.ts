@@ -241,6 +241,9 @@ export function mapMarket(raw: Record<string, unknown>): ClobMarket {
     volume24h: raw.volume_num != null ? Number(raw.volume_num) : null,
     // CLOB endpoint returns individual markets (not event-grouped); treat as single-market event.
     eventMarketCount: 1,
+    // CLOB market endpoint does not expose Gamma `createdAt` — discovery path
+    // populates this via Gamma scanner; CLOB-side paths leave it null.
+    gammaCreatedAt: null,
   };
 }
 
@@ -362,7 +365,19 @@ export function mapGammaMarket(
     // for backward-compat; ADR-007 documents the semantic.
     volume24h: raw.volumeNum != null ? Number(raw.volumeNum) : null,
     eventMarketCount: eventContext.marketCount,
+    // Gamma exposes ISO-8601 `createdAt` directly. We round-trip it through
+    // Date.parse to validate; invalid/missing values become null.
+    gammaCreatedAt: parseGammaCreatedAt(raw.createdAt),
   };
+}
+
+function parseGammaCreatedAt(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  const parsed = Date.parse(trimmed);
+  if (!Number.isFinite(parsed)) return null;
+  return new Date(parsed).toISOString();
 }
 
 /**

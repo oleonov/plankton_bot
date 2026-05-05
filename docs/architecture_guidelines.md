@@ -261,15 +261,15 @@ If command_id new → execute, cache result
 
 ### Periodic tasks
 
-| Task                 | Interval | Critical | Notes                                          |
-| -------------------- | -------- | -------- | ---------------------------------------------- |
-| market_scanner       | 3 min    | Yes      | Discovers new markets via Gamma API            |
-| orderbook_feed       | 30s      | Yes      | Fetches prices for tracked markets             |
-| exit_evaluator       | 30s      | Yes      | Checks exit conditions for open positions      |
-| reconciliation       | 60s      | Yes      | Syncs local state with exchange                |
-| risk_state_update    | 15s      | No       | Updates daily P&L, exposure counters           |
-| metrics_flush        | 60s      | No       | Writes metrics snapshot to DB                  |
-| stale_market_cleanup | 5 min    | No       | Removes resolved/expired markets from tracking |
+| Task                 | Interval | Critical | Notes                                                                                                                                                                                                                                                                                                              |
+| -------------------- | -------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| market_scanner       | 5 min    | Yes      | Discovers new markets via Gamma API. Cadence is empirical; ADR-017 §D2 ships discovery-latency telemetry (`MarketScannerModule.getDiscoveryLatencySnapshot`) so the value can be re-tuned against measured first-sighting delay. WSS hint via `NewMarketDiscoveredHint` accelerates the next cycle when available. |
+| orderbook_feed       | 30s      | Yes      | Fetches prices for tracked markets                                                                                                                                                                                                                                                                                 |
+| exit_evaluator       | 30s      | Yes      | Checks exit conditions for open positions                                                                                                                                                                                                                                                                          |
+| reconciliation       | 60s      | Yes      | Syncs local state with exchange                                                                                                                                                                                                                                                                                    |
+| risk_state_update    | 15s      | No       | Updates daily P&L, exposure counters                                                                                                                                                                                                                                                                               |
+| metrics_flush        | 60s      | No       | Writes metrics snapshot to DB                                                                                                                                                                                                                                                                                      |
+| stale_market_cleanup | 5 min    | No       | Removes resolved/expired markets from tracking                                                                                                                                                                                                                                                                     |
 
 ### Rules
 

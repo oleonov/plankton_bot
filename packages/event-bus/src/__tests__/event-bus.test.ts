@@ -44,6 +44,7 @@ function makeMarket(): NormalizedMarket {
     spread: 0.02,
     snapshotTs: Date.now(),
     eventMarketCount: 1,
+    gammaCreatedAt: null,
   } as NormalizedMarket;
 }
 

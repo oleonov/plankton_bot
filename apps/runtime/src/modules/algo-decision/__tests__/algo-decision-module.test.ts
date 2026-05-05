@@ -307,6 +307,7 @@ function makeMarket(
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    gammaCreatedAt: null,
     acceptingOrders: true,
     enableOrderBook: true,
     bestBid: midPrice !== null ? midPrice - 0.01 : null,
@@ -1879,6 +1880,7 @@ describe("AlgoDecisionModule", () => {
           orderType: "GTC",
           tickSize: 0.01,
           negRisk: false,
+          gammaCreatedAt: null,
           sequenceInTick: 0,
           signalReason: firstSignal.reason,
         },
@@ -1965,5 +1967,197 @@ describe("AlgoDecisionModule", () => {
     expect((await mod.healthCheck()).detail).toContain("markets=1");
 
     await mod.stop();
+  });
+
+  // Step 0 §P3 — min-age gate (spec §1.7 R1, `06:423`).
+  // Gate fires only on the legState==null branch; SELL / REDEEM / continuation
+  // must be unaffected.
+  describe("min-age gate", () => {
+    function makePolicy(entryMinMarketAgeSeconds: number) {
+      return () => ({
+        version: 1 as const,
+        entryPriceCeiling: 0.99,
+        exitOrderTtlMs: 60_000,
+        entryMinMarketAgeSeconds,
+        deadSideGuard: { mode: "off" as const, askCeiling: 0.2, maxTimeToEndMs: 0 },
+        pricing: {
+          mode: "edge" as const,
+          maxEntrySpreadTicks: 100,
+          maxExitSpreadTicks: 100,
+          maxImprovementTicks: 0,
+          wideSpreadPolicy: "edge" as const,
+          oneSidedPolicy: "edge" as const,
+        },
+        telemetry: { deadSideCanary: false, pricingShadow: false },
+      });
+    }
+
+    it("suppresses BUY with reason market_too_young when gammaCreatedAt is 10 min ago and threshold=2504", async () => {
+      const tokenId = "token-too-young";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({
+        riskEventRepo,
+        executionPolicy: makePolicy(2_504),
+      });
+      await mod.start();
+
+      const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+      const market: NormalizedMarket = {
+        ...makeMarket(tokenId, null, 0.45),
+        gammaCreatedAt: tenMinutesAgo,
+      };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(0);
+
+      const suppressedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) =>
+            event.eventType === "signal_suppressed" &&
+            event.payload.reasonCode === "market_too_young",
+        );
+      expect(suppressedCalls).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    it("suppresses with market_age_unknown when gammaCreatedAt is null and threshold>0", async () => {
+      const tokenId = "token-age-unknown";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({
+        riskEventRepo,
+        executionPolicy: makePolicy(2_504),
+      });
+      await mod.start();
+
+      const market: NormalizedMarket = {
+        ...makeMarket(tokenId, null, 0.45),
+        gammaCreatedAt: null,
+      };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(0);
+
+      const suppressedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) =>
+            event.eventType === "signal_suppressed" &&
+            event.payload.reasonCode === "market_age_unknown",
+        );
+      expect(suppressedCalls).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    it("threshold=0 fully bypasses the gate even with null gammaCreatedAt", async () => {
+      const tokenId = "token-bypass";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+      const mod = buildModule({ executionPolicy: makePolicy(0) });
+      await mod.start();
+
+      const market: NormalizedMarket = {
+        ...makeMarket(tokenId, null, 0.45),
+        gammaCreatedAt: null,
+      };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(signalCalls.length).toBe(1);
+
+      await mod.stop();
+    });
+
+    it("does NOT gate SELL on an existing leg even when gammaCreatedAt is too young", async () => {
+      const tokenId = "token-sell-not-gated";
+      const conditionId = "cond-sell-not-gated";
+      const twentyFiveMinAgo = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+      const legState: LegState = {
+        tokenId: createTokenId(tokenId),
+        buyCount: 2,
+        sellCount: 0, // S2 + price<0.05 → REDEEM-S2
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: twentyFiveMinAgo,
+        lastTradeAt: twentyFiveMinAgo,
+        updatedAt: twentyFiveMinAgo,
+      };
+      legStateRepo = createMockLegStateRepo([legState]);
+
+      const mod = buildModule({ executionPolicy: makePolicy(2_504) });
+      await mod.start();
+
+      const market: NormalizedMarket = {
+        ...makeMarket(tokenId, null, 0.03, conditionId),
+        // Recent createdAt (would gate a fresh BUY) — must NOT block REDEEM.
+        gammaCreatedAt: new Date(Date.now() - 60_000).toISOString(),
+      };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [market],
+        timestamp: Date.now(),
+      });
+
+      const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+      const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
+      expect(redeemCalls.length).toBe(1);
+
+      await mod.stop();
+    });
+
+    it("dedupes market_too_young suppressions within one window", async () => {
+      const tokenId = "token-too-young-dedupe";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({
+        riskEventRepo,
+        executionPolicy: makePolicy(2_504),
+      });
+      await mod.start();
+
+      const tooYoung: NormalizedMarket = {
+        ...makeMarket(tokenId, null, 0.45),
+        gammaCreatedAt: new Date(Date.now() - 60_000).toISOString(),
+      };
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [tooYoung],
+        timestamp: Date.now(),
+      });
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [tooYoung],
+        timestamp: Date.now(),
+      });
+
+      const suppressedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) =>
+            event.eventType === "signal_suppressed" &&
+            event.payload.reasonCode === "market_too_young",
+        );
+      expect(suppressedCalls).toHaveLength(1);
+
+      await mod.stop();
+    });
   });
 });

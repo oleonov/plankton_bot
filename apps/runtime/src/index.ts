@@ -647,6 +647,20 @@ async function main(): Promise<void> {
     observer: buildTradeCountObserver({ log: tradeCountLog, metrics: runtimeMetrics }),
   });
 
+  // ADR-015: DB-backed execution policy. The provider polls
+  // `runtime_control_state.execution_policy_version` and hot-swaps the
+  // snapshot when operators edit `profile_settings.execution_policy_json`.
+  // Constructed BEFORE AlgoDecisionModule so the min-age gate (Step 0 §P3)
+  // can read `entryMinMarketAgeSeconds` via the same provider — ADR-015 §57
+  // ("new consumers should thread the provider, not reimplement lookup").
+  const profileSettingsRepo = new SqliteProfileSettingsRepository(controlConn.db);
+  const executionPolicyProvider = new ExecutionPolicyProvider({
+    controlDb: controlConn.db,
+    profileSettingsRepo,
+    log,
+    profileId: activeProfile as import("@plankton/domain").ProfileId,
+  });
+
   const algoDecisionModule = new AlgoDecisionModule({
     bus,
     legStateRepo: repos.legState,
@@ -661,19 +675,12 @@ async function main(): Promise<void> {
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     tradeCountProvider,
+    executionPolicy: () => {
+      executionPolicyProvider.refreshIfStale();
+      return executionPolicyProvider.snapshot();
+    },
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
-  });
-
-  // ADR-015: DB-backed execution policy. The provider polls
-  // `runtime_control_state.execution_policy_version` and hot-swaps the
-  // snapshot when operators edit `profile_settings.execution_policy_json`.
-  const profileSettingsRepo = new SqliteProfileSettingsRepository(controlConn.db);
-  const executionPolicyProvider = new ExecutionPolicyProvider({
-    controlDb: controlConn.db,
-    profileSettingsRepo,
-    log,
-    profileId: activeProfile as import("@plankton/domain").ProfileId,
   });
 
   // Standalone SignalToOrderBridge — wired here so it is active when AlgoDecisionModule

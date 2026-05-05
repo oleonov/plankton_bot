@@ -88,6 +88,7 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       tradable: true,
       tickSize: 0.01,
       negRisk: false,
+      gammaCreatedAt: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
@@ -223,6 +224,7 @@ describe("Scenario: restart — no double-entry on existing open position", () =
       tradable: true,
       tickSize: 0.01,
       negRisk: false,
+      gammaCreatedAt: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });

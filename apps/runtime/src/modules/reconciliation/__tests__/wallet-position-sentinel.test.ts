@@ -72,6 +72,7 @@ function makeMarket(overrides: Partial<Market> = {}): Market {
     tradable: true,
     tickSize: 0.001,
     negRisk: false,
+    gammaCreatedAt: null,
     createdAt: "2026-04-24T00:00:00.000Z",
     updatedAt: "2026-04-24T00:00:00.000Z",
     ...overrides,

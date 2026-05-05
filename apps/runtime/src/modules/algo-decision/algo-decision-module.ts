@@ -34,6 +34,7 @@ import type {
   RiskEventRepository,
   MarketTradeCountProvider,
   ContinuationMode,
+  ExecutionPolicy,
 } from "@plankton/domain";
 import {
   deriveState,
@@ -42,6 +43,7 @@ import {
   evaluateSize,
   resolveSignalReason,
   evaluateContinuation,
+  evaluateMinMarketAge,
   matchRule,
   isAlive,
 } from "@plankton/domain";
@@ -120,6 +122,28 @@ type ContinuationFacts = {
 type SuppressionFacts = {
   tokenId: TokenId;
   conditionId: string | null;
+  /**
+   * Free-string code identifying the suppression reason. Currently emitted
+   * by the AlgoDecisionModule sweep:
+   *
+   * - `market-cache-miss` — token in selection but no NormalizedMarket yet.
+   * - `mid-price-unavailable` — market lacks a usable mid for the gate.
+   * - `pending-buy-order` — open BUY order already exists for token.
+   * - `redeem-before-end-date` — REDEEM blocked by endDate guard.
+   * - `market-not-live` — hard-liveness gate (acceptingOrders / book / spread).
+   * - `continuation-stop` — leg failed R1/R2 continuation gate.
+   * - `preserved-only-no-sell-rule` — preserved leg with no SELL rule match.
+   * - `market_too_young` — Step 0 §P3, age < `entryMinMarketAgeSeconds`
+   *   (spec §1.7 R1, `06:423`). Sticky → deduped via
+   *   `DEDUPED_SUPPRESSION_REASONS`.
+   * - `market_age_unknown` — Step 0 §P3, gammaCreatedAt is null/unparseable
+   *   while the gate is enabled. Sticky → deduped.
+   *
+   * Adding a new reason: pick a kebab/snake-case identifier, document it
+   * here, and decide whether it should join `DEDUPED_SUPPRESSION_REASONS`
+   * (sticky reasons that fire on every sweep tick must, or they flood
+   * `risk_events` ~1/sec).
+   */
   reasonCode: string;
   reasons?: readonly string[];
   side?: "BUY" | "SELL" | "REDEEM" | null;
@@ -156,6 +180,13 @@ export interface AlgoDecisionModuleDeps {
    * provider degrade transparently to leg-local (logged in suppression facts).
    */
   tradeCountProvider?: MarketTradeCountProvider | undefined;
+  /**
+   * Step 0 §P3 — DB-backed execution policy snapshot used by the min-age gate.
+   * Reads `entryMinMarketAgeSeconds` to suppress first-BUY signals on markets
+   * younger than the spec floor (2,504 s). When omitted, the gate is skipped
+   * entirely (e.g. tests that don't supply a provider).
+   */
+  executionPolicy?: (() => ExecutionPolicy) | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -190,6 +221,13 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // legs floods decision_signal_log with thousands of identical rows per hour
   // and drowns the genuine signal stream operators look at.
   "continuation-stop",
+  // Step 0 §P3 min-age gate: both reasons are sticky on the legState==null
+  // path — `market_too_young` repeats every sweep tick (≈1/sec) for up to
+  // 2 504 s after first sighting; `market_age_unknown` repeats indefinitely
+  // for legacy/null gammaCreatedAt rows. Both must dedupe like other sticky
+  // suppressions to keep decision_signal_log readable.
+  "market_too_young",
+  "market_age_unknown",
 ]);
 
 export class AlgoDecisionModule implements RuntimeModule {
@@ -723,6 +761,35 @@ export class AlgoDecisionModule implements RuntimeModule {
         timestamp: new Date(now).toISOString(),
       });
       return null;
+    }
+
+    // Step 0 §P3 — min-age gate. Fires only on the first-BUY branch
+    // (`legState == null`). SELL / REDEEM / scale-in continuation must NOT be
+    // suppressed for "too young" — by the time those decisions are reachable
+    // the market has already been entered and the spec floor is moot.
+    // Threshold = 0 ⇒ full bypass (simulation profile + fixture tests).
+    if (!legState && this.deps.executionPolicy) {
+      const policy = this.deps.executionPolicy();
+      const ageResult = evaluateMinMarketAge({
+        gammaCreatedAt: market.gammaCreatedAt ?? null,
+        thresholdSeconds: policy.entryMinMarketAgeSeconds,
+        nowMs: now,
+      });
+      if (!ageResult.ok) {
+        this.recordDecisionSuppressed({
+          tokenId,
+          conditionId: market.conditionId,
+          reasonCode: ageResult.reasonCode,
+          side: "BUY",
+          state,
+          price,
+          buyCount,
+          timeSinceLastSeconds,
+          emissionFacts,
+          timestamp: new Date(now).toISOString(),
+        });
+        return null;
+      }
     }
 
     // Preserved-for-lifecycle gate: market has an open leg but the CLOB no

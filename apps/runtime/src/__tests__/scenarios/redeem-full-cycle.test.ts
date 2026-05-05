@@ -145,6 +145,7 @@ async function buildFixture(opts: {
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    gammaCreatedAt: null,
     createdAt: now,
     updatedAt: now,
   });
@@ -255,6 +256,7 @@ async function buildFixture(opts: {
         enableOrderBook: true,
         tickSize: 0.01,
         negRisk: false,
+        gammaCreatedAt: null,
         endDate,
         volume24h: null,
         eventMarketCount: 1,

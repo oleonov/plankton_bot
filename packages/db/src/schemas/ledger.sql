@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS markets (
     CHECK (selection_status IN
       ('unknown','matched_include','matched_exclude','step2_fallback_include','fallback_exclude')),
   selection_winning_rule_id TEXT,
+  gamma_created_at          TEXT,
   created_at                TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at                TEXT NOT NULL DEFAULT (datetime('now'))
 );

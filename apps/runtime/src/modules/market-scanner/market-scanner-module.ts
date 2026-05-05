@@ -29,6 +29,30 @@ import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine
 const HINT_SCAN_DEBOUNCE_MS = 250;
 const HINT_SCAN_MIN_INTERVAL_MS = 60_000;
 
+/**
+ * Nearest-rank percentile (no interpolation). Stable for tiny samples and
+ * trivially auditable in logs. `samples` is mutated (sorted in place).
+ */
+function percentile(samples: number[], p: number): number {
+  if (samples.length === 0) return 0;
+  const idx = Math.min(samples.length - 1, Math.max(0, Math.ceil(p * samples.length) - 1));
+  return samples[idx]!;
+}
+
+function computeLatencyAggregates(samples: readonly number[]): {
+  p50: number | null;
+  p90: number | null;
+  max: number | null;
+} {
+  if (samples.length === 0) return { p50: null, p90: null, max: null };
+  const sorted = [...samples].sort((a, b) => a - b);
+  return {
+    p50: percentile(sorted, 0.5),
+    p90: percentile(sorted, 0.9),
+    max: sorted[sorted.length - 1]!,
+  };
+}
+
 export interface MarketScannerModuleDeps {
   discoveryGateway: MarketDiscoveryGateway;
   marketRepo: MarketRepository;
@@ -53,6 +77,17 @@ export interface MarketScanResult {
   preservedTokens: number;
   /** Token rows deactivated (token-level). */
   deactivatedTokens: number;
+  /** Tokens persisted for the first time during this scan (token-level). */
+  firstSeenTokens: number;
+  /**
+   * Discovery latency = `Date.now() - Date.parse(gammaCreatedAt)` evaluated for
+   * every first-sighted token whose ClobMarket carried a non-null `gammaCreatedAt`.
+   * Reported as p50/p90/max in milliseconds; null when no eligible samples in
+   * this cycle. Step 0 §P2: validates scanner overhead, NOT spec §1.7 R14.
+   */
+  discoveryLatencyP50Ms: number | null;
+  discoveryLatencyP90Ms: number | null;
+  discoveryLatencyMaxMs: number | null;
   durationMs: number;
 }
 
@@ -63,6 +98,16 @@ export class MarketScannerModule implements RuntimeModule {
   private scanning = false;
   private lastSuccessfulScanMs = 0;
   private wsHintConsumed = 0;
+  /**
+   * Step 0 §P2 — most-recent discovery-latency aggregates (ms) from the last
+   * scan that produced at least one first-sighted token with a non-null
+   * `gammaCreatedAt`. Surfaced via `healthCheck()` so operators see the live
+   * scanner overhead without grepping logs. Null while no eligible sample
+   * exists.
+   */
+  private lastLatencyP50Ms: number | null = null;
+  private lastLatencyP90Ms: number | null = null;
+  private lastLatencyMaxMs: number | null = null;
   private readonly log: Logger;
 
   constructor(private readonly deps: MarketScannerModuleDeps) {
@@ -116,11 +161,35 @@ export class MarketScannerModule implements RuntimeModule {
     const ageMs = Date.now() - this.lastSuccessfulScanMs;
     // Consider unhealthy if last scan was more than 3x the interval ago
     const stale = ageMs > this.deps.scanIntervalMs * 3;
+    const freshness = stale
+      ? `stale: last scan ${Math.round(ageMs / 1000)}s ago`
+      : `fresh: last scan ${Math.round(ageMs / 1000)}s ago`;
+    const latency =
+      this.lastLatencyP50Ms === null
+        ? "discoveryLatency=n/a"
+        : `discoveryLatencyMs p50=${this.lastLatencyP50Ms} p90=${this.lastLatencyP90Ms} max=${this.lastLatencyMaxMs}`;
     return {
       ok: !stale,
-      detail: stale
-        ? `stale: last scan ${Math.round(ageMs / 1000)}s ago`
-        : `fresh: last scan ${Math.round(ageMs / 1000)}s ago`,
+      detail: `${freshness} ${latency}`,
+    };
+  }
+
+  /**
+   * Step 0 §P2 — read-only accessor for the latest discovery-latency aggregates,
+   * intended for ops dashboards / API surfaces. Each value is the millisecond
+   * delta between `Date.now()` at scan time and the token's `gammaCreatedAt`,
+   * computed across all first-sighted tokens in the most recent qualifying
+   * scan. Null until at least one such sample is observed.
+   */
+  getDiscoveryLatencySnapshot(): {
+    readonly p50Ms: number | null;
+    readonly p90Ms: number | null;
+    readonly maxMs: number | null;
+  } {
+    return {
+      p50Ms: this.lastLatencyP50Ms,
+      p90Ms: this.lastLatencyP90Ms,
+      maxMs: this.lastLatencyMaxMs,
     };
   }
 
@@ -154,7 +223,18 @@ export class MarketScannerModule implements RuntimeModule {
       let includedMarkets = 0;
       let savedTokens = 0;
       const now = new Date().toISOString();
+      const nowMs = Date.now();
       const discoveredTokenIds = new Set<string>();
+
+      // Snapshot of token IDs already persisted to detect first-sighting
+      // for the discovery-latency telemetry (Step 0 §P2). Includes inactive
+      // rows so re-discovery of a deactivated token is NOT counted as new.
+      const knownTokenIds = new Set<string>();
+      for (const tokenId of this.deps.marketRepo.iterateAllTokenIds()) {
+        knownTokenIds.add(String(tokenId));
+      }
+      const discoveryLatencySamplesMs: number[] = [];
+      let firstSeenTokens = 0;
 
       // Build set of tokens with open positions/orders for preservation
       const activeTokenIds = new Set<string>();
@@ -187,7 +267,17 @@ export class MarketScannerModule implements RuntimeModule {
 
           for (const token of clobMarket.tokens) {
             const tokenId = createTokenId(token.tokenId);
-            discoveredTokenIds.add(String(tokenId));
+            const tokenIdStr = String(tokenId);
+            discoveredTokenIds.add(tokenIdStr);
+            if (!knownTokenIds.has(tokenIdStr)) {
+              firstSeenTokens++;
+              if (clobMarket.gammaCreatedAt !== null) {
+                const createdMs = Date.parse(clobMarket.gammaCreatedAt);
+                if (Number.isFinite(createdMs)) {
+                  discoveryLatencySamplesMs.push(nowMs - createdMs);
+                }
+              }
+            }
             pageBatch.push({
               tokenId,
               conditionId: clobMarket.conditionId,
@@ -208,6 +298,7 @@ export class MarketScannerModule implements RuntimeModule {
               eventMarketCount: clobMarket.eventMarketCount,
               selectionStatus: evalResult.selectionStatus,
               selectionWinningRuleId: evalResult.winningRuleId,
+              gammaCreatedAt: clobMarket.gammaCreatedAt,
               createdAt: now,
               updatedAt: now,
             });
@@ -230,12 +321,26 @@ export class MarketScannerModule implements RuntimeModule {
 
       this.lastSuccessfulScanMs = Date.now();
       const durationMs = this.lastSuccessfulScanMs - startMs;
+      const latencyAggregates = computeLatencyAggregates(discoveryLatencySamplesMs);
+      // Cache for healthCheck telemetry. We only refresh when at least one
+      // first-sighted token contributed a sample (p50!=null), otherwise we
+      // keep the previous reading so the dashboard doesn't oscillate to null
+      // every cycle that produces zero new tokens.
+      if (latencyAggregates.p50 !== null) {
+        this.lastLatencyP50Ms = latencyAggregates.p50;
+        this.lastLatencyP90Ms = latencyAggregates.p90;
+        this.lastLatencyMaxMs = latencyAggregates.max;
+      }
       const result: MarketScanResult = {
         discoveredMarkets,
         includedMarkets,
         savedTokens,
         preservedTokens: activeTokenIds.size,
         deactivatedTokens: deactivatedCount,
+        firstSeenTokens,
+        discoveryLatencyP50Ms: latencyAggregates.p50,
+        discoveryLatencyP90Ms: latencyAggregates.p90,
+        discoveryLatencyMaxMs: latencyAggregates.max,
         durationMs,
       };
 
@@ -246,6 +351,10 @@ export class MarketScannerModule implements RuntimeModule {
           savedTokens,
           preservedTokens: activeTokenIds.size,
           deactivatedTokens: deactivatedCount,
+          firstSeenTokens,
+          discoveryLatencyP50Ms: latencyAggregates.p50,
+          discoveryLatencyP90Ms: latencyAggregates.p90,
+          discoveryLatencyMaxMs: latencyAggregates.max,
           durationMs,
         },
         "scan cycle complete",

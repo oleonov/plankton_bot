@@ -31,6 +31,7 @@ function makeMarket(overrides?: Partial<Market>): Market {
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    gammaCreatedAt: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,
@@ -158,6 +159,36 @@ describe("SqliteMarketRepository", () => {
   it("saveBatch is a no-op for empty input", () => {
     repo.saveBatch([]);
     expect(repo.findAll()).toHaveLength(0);
+  });
+
+  // Step 0 §P1.7: when a later scan returns gammaCreatedAt=null (e.g. CLOB-only path
+  // or transient Gamma omission), we MUST NOT overwrite the previously captured
+  // ISO timestamp. The upsert uses COALESCE(markets.col, excluded.col).
+  it("saveBatch is null-preserving for gammaCreatedAt on subsequent upsert", () => {
+    repo.saveBatch([
+      makeMarket({ tokenId: createTokenId("g-1"), gammaCreatedAt: "2026-04-01T12:00:00.000Z" }),
+    ]);
+    expect(repo.findByTokenId(createTokenId("g-1"))!.gammaCreatedAt).toBe(
+      "2026-04-01T12:00:00.000Z",
+    );
+
+    // Upsert with null — must not clobber the existing ISO timestamp.
+    repo.saveBatch([makeMarket({ tokenId: createTokenId("g-1"), gammaCreatedAt: null })]);
+    expect(repo.findByTokenId(createTokenId("g-1"))!.gammaCreatedAt).toBe(
+      "2026-04-01T12:00:00.000Z",
+    );
+  });
+
+  it("saveBatch backfills gammaCreatedAt when previously null", () => {
+    repo.saveBatch([makeMarket({ tokenId: createTokenId("g-2"), gammaCreatedAt: null })]);
+    expect(repo.findByTokenId(createTokenId("g-2"))!.gammaCreatedAt).toBeNull();
+
+    repo.saveBatch([
+      makeMarket({ tokenId: createTokenId("g-2"), gammaCreatedAt: "2026-04-15T08:30:00.000Z" }),
+    ]);
+    expect(repo.findByTokenId(createTokenId("g-2"))!.gammaCreatedAt).toBe(
+      "2026-04-15T08:30:00.000Z",
+    );
   });
 
   it("findEventMarketCountBySlug reads event_market_count for the slug", () => {

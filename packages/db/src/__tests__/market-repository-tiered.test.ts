@@ -43,6 +43,7 @@ function makeMarket(
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    gammaCreatedAt: null,
     createdAt,
     updatedAt,
     ...overrides,

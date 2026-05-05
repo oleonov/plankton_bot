@@ -44,6 +44,9 @@ function ExecutionPolicyFormInner({
 }) {
   const [entryPriceCeiling, setEntryPriceCeiling] = useState(policy.entryPriceCeiling.toString());
   const [exitOrderTtlMs, setExitOrderTtlMs] = useState(policy.exitOrderTtlMs.toString());
+  const [entryMinMarketAge, setEntryMinMarketAge] = useState(
+    policy.entryMinMarketAgeSeconds.toString(),
+  );
 
   const [dsgMode, setDsgMode] = useState<DeadSideGuardMode>(policy.deadSideGuard.mode);
   const [dsgAskCeiling, setDsgAskCeiling] = useState(policy.deadSideGuard.askCeiling.toString());
@@ -70,6 +73,7 @@ function ExecutionPolicyFormInner({
       version: 1,
       entryPriceCeiling: numOr(entryPriceCeiling, policy.entryPriceCeiling),
       exitOrderTtlMs: numOr(exitOrderTtlMs, policy.exitOrderTtlMs),
+      entryMinMarketAgeSeconds: numOr(entryMinMarketAge, policy.entryMinMarketAgeSeconds),
       deadSideGuard: {
         mode: dsgMode,
         askCeiling: numOr(dsgAskCeiling, policy.deadSideGuard.askCeiling),
@@ -145,6 +149,17 @@ function ExecutionPolicyFormInner({
             value={exitOrderTtlMs}
             onChange={(e) => setExitOrderTtlMs(e.target.value)}
           />
+        </div>
+        <div className="form-field">
+          <label>Min Market Age before first BUY (s, 0 – 172 800)</label>
+          <input
+            type="number"
+            value={entryMinMarketAge}
+            onChange={(e) => setEntryMinMarketAge(e.target.value)}
+          />
+          <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
+            Spec §1.7 R1 floor: 2 504 s. <code>0</code> disables the gate (sim only).
+          </div>
         </div>
 
         <div

@@ -40,6 +40,7 @@ function makeMarket(tokenId: string, overrides: Partial<Market> = {}): Market {
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    gammaCreatedAt: null,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -134,6 +135,7 @@ function createMockRepo(tiered: TrackedForPricing): MarketRepository {
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
     iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
+    iterateAllTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
     deactivateMissing: vi.fn().mockReturnValue(0),
     findTrackedForPricing: vi
       .fn()

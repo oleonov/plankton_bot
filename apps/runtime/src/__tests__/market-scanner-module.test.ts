@@ -71,6 +71,7 @@ function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
     tickSize: 0.01,
     volume24h: null,
     eventMarketCount: 1,
+    gammaCreatedAt: null,
     ...overrides,
   };
 }
@@ -103,6 +104,7 @@ function createMockMarketRepo(): MarketRepository {
     findByConditionId: vi.fn().mockReturnValue([]),
     findActive: vi.fn().mockReturnValue([]),
     iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
+    iterateAllTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
     findAll: vi.fn().mockReturnValue([]),
     deactivate: vi.fn(),
     deactivateMissing: vi.fn().mockReturnValue(0),
@@ -554,6 +556,190 @@ describe("MarketScannerModule", () => {
     expect(marketRepo.save).not.toHaveBeenCalled();
   });
 
+  // Step 0 §P1.9: scanner must forward ClobMarket.gammaCreatedAt into every
+  // token-level Market row written to the repo. Spec §1.7 R14 (`age_at_entry`)
+  // depends on this field being captured at discovery time.
+  it("scan() propagates gammaCreatedAt from ClobMarket to every token batch row", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const { mod, marketRepo } = buildModule({ discoveryGateway });
+
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: (markets: ClobMarket[]) => void) => {
+        cb([
+          makeClobMarket({
+            slug: "bitcoin-above-100k",
+            conditionId: "cond-gamma",
+            tokens: [
+              { tokenId: "tok-gam-yes", outcome: "Yes" },
+              { tokenId: "tok-gam-no", outcome: "No" },
+            ],
+            eventMarketCount: 1,
+            gammaCreatedAt: "2026-04-15T08:30:00.000Z",
+          }),
+        ]);
+        return { totalMarkets: 1 };
+      },
+    );
+
+    await mod.scan();
+
+    const batch = (marketRepo.saveBatch as ReturnType<typeof vi.fn>).mock
+      .calls[0]![0] as readonly Market[];
+    expect(batch).toHaveLength(2);
+    expect(batch.every((m) => m.gammaCreatedAt === "2026-04-15T08:30:00.000Z")).toBe(true);
+  });
+
+  it("scan() forwards gammaCreatedAt=null verbatim when the gateway has no value", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const { mod, marketRepo } = buildModule({ discoveryGateway });
+
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: (markets: ClobMarket[]) => void) => {
+        cb([
+          makeClobMarket({
+            slug: "bitcoin-above-200k",
+            conditionId: "cond-no-gamma",
+            tokens: [{ tokenId: "tok-no-gamma", outcome: "Yes" }],
+            eventMarketCount: 1,
+            gammaCreatedAt: null,
+          }),
+        ]);
+        return { totalMarkets: 1 };
+      },
+    );
+
+    await mod.scan();
+
+    const batch = (marketRepo.saveBatch as ReturnType<typeof vi.fn>).mock
+      .calls[0]![0] as readonly Market[];
+    expect(batch).toHaveLength(1);
+    expect(batch[0]!.gammaCreatedAt).toBeNull();
+  });
+
+  // ── Discovery latency telemetry (Step 0 §P2) ─────────────────────────────
+
+  it("scanOrThrow() reports discoveryLatencyMs ≈ 600_000 for a 10-minute-old first-sighted market", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const { mod } = buildModule({ discoveryGateway });
+
+    const tenMinutesAgo = new Date(Date.now() - 600_000).toISOString();
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: (markets: ClobMarket[]) => void) => {
+        cb([
+          makeClobMarket({
+            slug: "bitcoin-above-100k",
+            conditionId: "cond-fresh",
+            tokens: [{ tokenId: "tok-fresh", outcome: "Yes" }],
+            eventMarketCount: 1,
+            gammaCreatedAt: tenMinutesAgo,
+          }),
+        ]);
+        return { totalMarkets: 1 };
+      },
+    );
+
+    const result = await mod.scanOrThrow();
+
+    expect(result.firstSeenTokens).toBe(1);
+    // Allow a small window for the actual scan duration to slip past 600s.
+    expect(result.discoveryLatencyP50Ms).not.toBeNull();
+    expect(result.discoveryLatencyP50Ms!).toBeGreaterThanOrEqual(600_000);
+    expect(result.discoveryLatencyP50Ms!).toBeLessThan(605_000);
+    expect(result.discoveryLatencyMaxMs).toBe(result.discoveryLatencyP50Ms);
+  });
+
+  it("scanOrThrow() reports null aggregates when no first-sighted token has gammaCreatedAt", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const { mod } = buildModule({ discoveryGateway });
+
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: (markets: ClobMarket[]) => void) => {
+        cb([
+          makeClobMarket({
+            slug: "bitcoin-above-100k",
+            conditionId: "cond-null-gamma",
+            tokens: [{ tokenId: "tok-null-gamma", outcome: "Yes" }],
+            eventMarketCount: 1,
+            gammaCreatedAt: null,
+          }),
+        ]);
+        return { totalMarkets: 1 };
+      },
+    );
+
+    const result = await mod.scanOrThrow();
+
+    expect(result.firstSeenTokens).toBe(1);
+    expect(result.discoveryLatencyP50Ms).toBeNull();
+    expect(result.discoveryLatencyP90Ms).toBeNull();
+    expect(result.discoveryLatencyMaxMs).toBeNull();
+  });
+
+  it("scanOrThrow() does NOT count re-discovery of an already-known token as first-seen", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const knownToken = createTokenId("tok-known");
+    const marketRepo = createMockMarketRepo();
+    (marketRepo.iterateAllTokenIds as ReturnType<typeof vi.fn>).mockReturnValue(
+      [knownToken][Symbol.iterator](),
+    );
+    const { mod } = buildModule({ discoveryGateway, marketRepo });
+
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: (markets: ClobMarket[]) => void) => {
+        cb([
+          makeClobMarket({
+            slug: "bitcoin-above-100k",
+            conditionId: "cond-known",
+            tokens: [{ tokenId: "tok-known", outcome: "Yes" }],
+            eventMarketCount: 1,
+            gammaCreatedAt: new Date(Date.now() - 600_000).toISOString(),
+          }),
+        ]);
+        return { totalMarkets: 1 };
+      },
+    );
+
+    const result = await mod.scanOrThrow();
+
+    expect(result.firstSeenTokens).toBe(0);
+    expect(result.discoveryLatencyP50Ms).toBeNull();
+  });
+
+  it("scanOrThrow() computes p50/p90/max correctly for multiple first-sighted samples", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const { mod } = buildModule({ discoveryGateway });
+
+    const now = Date.now();
+    const ages = [60_000, 120_000, 180_000, 240_000, 600_000];
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: (markets: ClobMarket[]) => void) => {
+        cb(
+          ages.map((ageMs, i) =>
+            makeClobMarket({
+              slug: `bitcoin-above-${i}`,
+              conditionId: `cond-${i}`,
+              tokens: [{ tokenId: `tok-${i}`, outcome: "Yes" }],
+              eventMarketCount: 1,
+              gammaCreatedAt: new Date(now - ageMs).toISOString(),
+            }),
+          ),
+        );
+        return { totalMarkets: ages.length };
+      },
+    );
+
+    const result = await mod.scanOrThrow();
+
+    expect(result.firstSeenTokens).toBe(5);
+    // p50 with nearest-rank on 5 sorted samples [60k,120k,180k,240k,600k]: idx ceil(0.5*5)-1 = 2 → 180k
+    expect(result.discoveryLatencyP50Ms!).toBeGreaterThanOrEqual(180_000);
+    expect(result.discoveryLatencyP50Ms!).toBeLessThan(185_000);
+    // p90: idx ceil(0.9*5)-1 = 4 → 600k
+    expect(result.discoveryLatencyP90Ms!).toBeGreaterThanOrEqual(600_000);
+    expect(result.discoveryLatencyP90Ms!).toBeLessThan(605_000);
+    expect(result.discoveryLatencyMaxMs).toBe(result.discoveryLatencyP90Ms);
+  });
+
   it("scan() uses saveBatch, not per-token save(), for the write path", async () => {
     // Bypass the trampoline mock used elsewhere so we can prove the module
     // never calls repo.save() directly — if a future refactor reverts the
@@ -567,6 +753,7 @@ describe("MarketScannerModule", () => {
       findByConditionId: vi.fn().mockReturnValue([]),
       findActive: vi.fn().mockReturnValue([]),
       iterateActiveTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
+      iterateAllTokenIds: vi.fn().mockReturnValue([][Symbol.iterator]()),
       findAll: vi.fn().mockReturnValue([]),
       deactivate: vi.fn(),
       deactivateMissing: vi.fn().mockReturnValue(0),

@@ -84,6 +84,13 @@ export interface MarketRepository {
    */
   iterateActiveTokenIds(): IterableIterator<TokenId>;
 
+  /**
+   * Iterate token IDs of every market (active OR inactive). Used by the scanner
+   * to detect "first sighting" of a token — newly discovered tokens not present
+   * in the result set drive the `discoveryLatencyMs` telemetry.
+   */
+  iterateAllTokenIds(): IterableIterator<TokenId>;
+
   /** Return every market row, active or inactive. */
   findAll(): Market[];
 

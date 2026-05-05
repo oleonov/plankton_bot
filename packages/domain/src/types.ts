@@ -68,6 +68,13 @@ export interface Market {
   selectionStatus?: SelectionStatus;
   /** The winning rule ID from evaluatePreEntry, or null. */
   selectionWinningRuleId?: string | null;
+  /**
+   * Gamma `createdAt` (ISO-8601). Distinct from `createdAt` — that is the moment
+   * the row was first written to our DB. Null for legacy rows / CLOB-only paths.
+   * Source: spec §1.7 R14 (`age_at_entry`). Required at the type level so every
+   * fixture must explicitly set it (Step 0 §P1 guard).
+   */
+  gammaCreatedAt: string | null;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp
 }
@@ -303,6 +310,12 @@ export interface NormalizedMarket {
   liquidity?: number | null;
   minOrderSize?: number | null;
   bookSource?: MarketBookSource | null;
+  /**
+   * Gamma createdAt (ISO-8601) propagated from `Market.gammaCreatedAt`. Null
+   * when unknown. Required at the type level so every fixture must explicitly
+   * set it (Step 0 §P1 guard).
+   */
+  gammaCreatedAt: string | null;
   snapshotTs: number; // unix ms when pricing was captured
 }
 
@@ -391,6 +404,14 @@ export interface ExecutionPolicyTelemetry {
 export interface ExecutionPolicy {
   version: number;
   entryPriceCeiling: number;
+  /**
+   * Step 0 §P3: minimum age between Gamma `createdAt` and the bot's first BUY,
+   * in seconds. Default 2,504 (spec §1.7 R1, `06:423` — empirical lower bound
+   * across historical Plankton trades). Set to 0 to bypass entirely
+   * (simulation profile). Applied only on the first-BUY branch
+   * (`legState == null`); SELL/REDEEM/continuation are NOT gated.
+   */
+  entryMinMarketAgeSeconds: number;
   exitOrderTtlMs: number;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
