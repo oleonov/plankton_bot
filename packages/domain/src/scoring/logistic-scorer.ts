@@ -106,9 +106,7 @@ const VALID_CATEGORIES: ReadonlySet<string> = new Set([
 // Whitelist of supported model artifacts. Bumping this list is a deliberate
 // runtime change — the feature builder + sigmoid path only support the
 // 12-numeric + 7-category logistic regression shape (audit doc §D2).
-const SUPPORTED_MODEL_KINDS: ReadonlySet<string> = new Set([
-  "logistic-numeric-plus-category",
-]);
+const SUPPORTED_MODEL_KINDS: ReadonlySet<string> = new Set(["logistic-numeric-plus-category"]);
 
 // Canonical feature-name set (audit doc §P1.3). Must match exactly — both
 // the set of names AND the order — so coefficient indices line up with the
@@ -159,7 +157,13 @@ export function loadLogisticModel(json: unknown): LogisticModel {
   const mean = asNumericVector(obj, "mean");
   const std = asNumericVector(obj, "std");
 
-  if (!(featureNames.length === coefficients.length && coefficients.length === mean.length && mean.length === std.length)) {
+  if (
+    !(
+      featureNames.length === coefficients.length &&
+      coefficients.length === mean.length &&
+      mean.length === std.length
+    )
+  ) {
     fail(
       `vector length mismatch: featureNames=${featureNames.length} coefficients=${coefficients.length} mean=${mean.length} std=${std.length}`,
     );
@@ -193,9 +197,7 @@ export function loadLogisticModel(json: unknown): LogisticModel {
   }
   for (let i = 0; i < expectedFeatureNames.length; i++) {
     if (featureNames[i] !== expectedFeatureNames[i]) {
-      fail(
-        `'featureNames[${i}]' is '${featureNames[i]}', expected '${expectedFeatureNames[i]}'`,
-      );
+      fail(`'featureNames[${i}]' is '${featureNames[i]}', expected '${expectedFeatureNames[i]}'`);
     }
   }
 
@@ -242,7 +244,10 @@ function sigmoid(z: number): number {
   return 1.0 / (1.0 + Math.exp(-clipped));
 }
 
-export function predictScore(model: LogisticModel, featureRow: ReadonlyMap<string, number>): number {
+export function predictScore(
+  model: LogisticModel,
+  featureRow: ReadonlyMap<string, number>,
+): number {
   let z = model.intercept;
   for (let i = 0; i < model.featureNames.length; i++) {
     const name = model.featureNames[i]!;

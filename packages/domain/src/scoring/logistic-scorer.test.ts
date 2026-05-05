@@ -2,11 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { buildFeatureRow } from "./feature-builder.js";
-import {
-  ModelArtifactSchemaError,
-  loadLogisticModel,
-  predictScore,
-} from "./logistic-scorer.js";
+import { ModelArtifactSchemaError, loadLogisticModel, predictScore } from "./logistic-scorer.js";
 
 const ARTIFACT_PATH = fileURLToPath(
   new URL("../../../../apps/runtime/src/data/soft-ranking-model.v1.json", import.meta.url),

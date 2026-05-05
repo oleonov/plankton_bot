@@ -227,8 +227,9 @@ operators can confirm freshness without touching the API.
    NULL, and `/api/v1/scanner/score-distribution` returns
    `503 NO_SNAPSHOT`.
 
-   *(Optional, manual safety net — only if you must clear scores
-   **before** the next runtime restart.)*
+   _(Optional, manual safety net — only if you must clear scores
+   **before** the next runtime restart.)_
+
    ```sql
    UPDATE markets
    SET score = NULL,

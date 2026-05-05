@@ -95,10 +95,7 @@ export class SoftRankingScoreModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly model: LogisticModel | null;
   private readonly recomputeScoreDistribution:
-    | (() =>
-        | void
-        | SoftRankingHealthSnapshot
-        | Promise<void | SoftRankingHealthSnapshot>)
+    | (() => void | SoftRankingHealthSnapshot | Promise<void | SoftRankingHealthSnapshot>)
     | null;
   private readonly flushIntervalMs: number;
   private readonly now: () => number;

@@ -65,8 +65,8 @@ describe("buildFeatureRow", () => {
     expect(buildFeatureRow(baseInput({ midPrice: 0.04 }))!.get("mid_below_010")).toBe(1);
     expect(buildFeatureRow(baseInput({ midPrice: 0.05 }))!.get("mid_below_005")).toBe(0);
     expect(buildFeatureRow(baseInput({ midPrice: 0.05 }))!.get("mid_below_010")).toBe(1);
-    expect(buildFeatureRow(baseInput({ midPrice: 0.10 }))!.get("mid_below_010")).toBe(0);
-    expect(buildFeatureRow(baseInput({ midPrice: 0.50 }))!.get("mid_below_010")).toBe(0);
+    expect(buildFeatureRow(baseInput({ midPrice: 0.1 }))!.get("mid_below_010")).toBe(0);
+    expect(buildFeatureRow(baseInput({ midPrice: 0.5 }))!.get("mid_below_010")).toBe(0);
   });
 
   it("horizon_above_30d fires above 720 hours", () => {

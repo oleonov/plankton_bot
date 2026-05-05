@@ -53,9 +53,9 @@ let ledgerConn: DbConnection;
 let app: Awaited<ReturnType<typeof buildServer>>;
 
 function clearMetrics(): void {
-  ledgerConn.db.prepare("DELETE FROM runtime_metrics WHERE metric_name = ?").run(
-    "score_distribution",
-  );
+  ledgerConn.db
+    .prepare("DELETE FROM runtime_metrics WHERE metric_name = ?")
+    .run("score_distribution");
 }
 
 function insertSnapshot(payload: unknown, capturedAt: string): void {

@@ -16,11 +16,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import {
-  loadLogisticModel,
-  ModelArtifactSchemaError,
-  type LogisticModel,
-} from "@plankton/domain";
+import { loadLogisticModel, ModelArtifactSchemaError, type LogisticModel } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 
 export interface LoadSoftRankingModelOptions {

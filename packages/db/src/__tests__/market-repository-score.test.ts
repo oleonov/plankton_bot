@@ -136,11 +136,13 @@ describe("ledger schema — score columns (audit §F3)", () => {
         updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `);
-    seed.prepare(
-      `INSERT INTO markets
+    seed
+      .prepare(
+        `INSERT INTO markets
          (token_id, condition_id, slug, question, outcome, active, tradable, tick_size, neg_risk)
        VALUES ('tok-pre', 'cond', 'slug', 'Q?', 'YES', 1, 1, 0.01, 0)`,
-    ).run();
+      )
+      .run();
     seed.close();
 
     const conn = bootstrapLedgerDb(dbPath);
@@ -188,10 +190,7 @@ describe("ledger schema — score columns (audit §F3)", () => {
       ).c;
 
       // Second pass — should not re-apply the migration nor error.
-      runMigrations(
-        conn.db,
-        path.join(import.meta.dirname, "..", "migrations"),
-      );
+      runMigrations(conn.db, path.join(import.meta.dirname, "..", "migrations"));
 
       const afterCount = (
         conn.db.prepare("SELECT COUNT(*) AS c FROM schema_migrations").get() as { c: number }
@@ -229,12 +228,7 @@ describe("score-column ownership invariant", () => {
     const endIdx = repoSrc.indexOf("`;", startIdx);
     expect(endIdx).toBeGreaterThan(startIdx);
     const upsertBlock = repoSrc.slice(startIdx, endIdx);
-    for (const forbidden of [
-      "score",
-      "score_model_version",
-      "scored_at",
-      "features_captured_at",
-    ]) {
+    for (const forbidden of ["score", "score_model_version", "scored_at", "features_captured_at"]) {
       // `score_model_version` etc. must not appear at all in the upsert SQL
       // block; for the bare token `score` we test against the column-list /
       // SET-clause grammar by requiring the substring to be absent entirely.

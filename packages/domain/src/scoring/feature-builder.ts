@@ -60,7 +60,8 @@ function log1pNonNegative(value: number): number {
 }
 
 export function buildFeatureRow(input: FeatureRowInput): Map<string, number> | null {
-  const { liquidity, midPrice, volume24hr, endDate, tickSize, eventMarketCount, snapshotTs } = input;
+  const { liquidity, midPrice, volume24hr, endDate, tickSize, eventMarketCount, snapshotTs } =
+    input;
 
   if (
     liquidity === null ||

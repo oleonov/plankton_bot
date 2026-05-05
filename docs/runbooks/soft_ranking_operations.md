@@ -139,7 +139,7 @@ disabled-no-op contract.
    deleted in the same startup hook so the API immediately returns
    `503 NO_SNAPSHOT`.
 
-   *(Optional, manual safety net)* If you must clear scores **before**
+   _(Optional, manual safety net)_ If you must clear scores **before**
    the next runtime restart (e.g. while the bot is still up), run:
 
    ```sql
@@ -177,13 +177,13 @@ positive-class mean recorded in the artifact's `deciles` field
 **Alert thresholds** (rule of thumb — refine once steady-state data is
 observable):
 
-| Symptom                                        | Likely cause                                                              | Action                                       |
-| ---------------------------------------------- | ------------------------------------------------------------------------- | -------------------------------------------- |
-| `mean` swings > 10 pp inside an hour           | Feature pipeline regression (volume, liquidity, midPrice all-null spike)  | Inspect `MarketDataModule` healthcheck.      |
-| `mean` drifts > 10 pp over multiple days       | Market regime change OR training distribution stale                       | Plan a retrain (§3).                         |
-| `staleMarkets > 50 %` of `scoredMarkets`       | `MarketDataModule` polling stalled / event lull                           | Inspect upstream module healthchecks.        |
-| `step2IncludedNoScore` climbs > 30 % of Step2  | Required feature input missing (liquidity / midPrice / volume24hr)        | Inspect `LiveMarketDataGateway.extractPricing()` for nulls. |
-| `scoredMarkets == 0` across multiple snapshots | Module disabled (artifact missing) OR Step2 universe empty                | Healthcheck `detail` will say `disabled (artifact missing or invalid)`; otherwise verify selection rules. |
+| Symptom                                        | Likely cause                                                             | Action                                                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `mean` swings > 10 pp inside an hour           | Feature pipeline regression (volume, liquidity, midPrice all-null spike) | Inspect `MarketDataModule` healthcheck.                                                                   |
+| `mean` drifts > 10 pp over multiple days       | Market regime change OR training distribution stale                      | Plan a retrain (§3).                                                                                      |
+| `staleMarkets > 50 %` of `scoredMarkets`       | `MarketDataModule` polling stalled / event lull                          | Inspect upstream module healthchecks.                                                                     |
+| `step2IncludedNoScore` climbs > 30 % of Step2  | Required feature input missing (liquidity / midPrice / volume24hr)       | Inspect `LiveMarketDataGateway.extractPricing()` for nulls.                                               |
+| `scoredMarkets == 0` across multiple snapshots | Module disabled (artifact missing) OR Step2 universe empty               | Healthcheck `detail` will say `disabled (artifact missing or invalid)`; otherwise verify selection rules. |
 
 ---
 
@@ -192,9 +192,11 @@ observable):
 For a specific `tokenId`, walk this checklist:
 
 1. **Is it in the active universe?**
+
    ```sql
    SELECT active, tradable, selection_status FROM markets WHERE token_id = '…';
    ```
+
    If `active = 0`, scoring is intentional — inactive rows are excluded
    from the snapshot scope.
 
@@ -205,9 +207,11 @@ For a specific `tokenId`, walk this checklist:
    `skippedNonStep2Included`.
 
 3. **Has it ever entered the data path?**
+
    ```sql
    SELECT scored_at, features_captured_at, score FROM markets WHERE token_id = '…';
    ```
+
    If all three are NULL, the row has not yet been emitted in a
    `NormalizedMarketUpdated` event. Verify via the
    `MarketDataModule` poller — un-tracked rows appear in the
@@ -242,22 +246,22 @@ For a specific `tokenId`, walk this checklist:
 
 ## 7. Where things live
 
-| Concern                          | Path                                                                              |
-| -------------------------------- | --------------------------------------------------------------------------------- |
-| Artifact (committed)             | `apps/runtime/src/data/soft-ranking-model.v1.json`                                |
-| Artifact (built)                 | `apps/runtime/dist/data/soft-ranking-model.v1.json`                               |
-| Loader                           | `apps/runtime/src/modules/soft-ranking/load-soft-ranking-model.ts`                |
-| Module                           | `apps/runtime/src/modules/soft-ranking/soft-ranking-score-module.ts`              |
-| Snapshot SQL                     | `apps/runtime/src/modules/soft-ranking/score-distribution-snapshot.ts`            |
-| Domain scorer                    | `packages/domain/src/scoring/logistic-scorer.ts`                                  |
-| Domain feature builder           | `packages/domain/src/scoring/feature-builder.ts`                                  |
-| Domain category derivation       | `packages/domain/src/category.ts`                                                 |
-| DB schema (SoT)                  | `packages/db/src/schemas/ledger.sql` (markets.score* columns)                     |
-| DB bootstrap upgrade             | `packages/db/src/bootstrap.ts:bootstrapLedgerDb` (`safeAddColumn` calls)          |
-| DB migration (history record)    | `packages/db/src/migrations/043_markets_score_columns.sql`                        |
-| Repository writer                | `packages/db/src/repositories/market-repository.ts:updateScoresBatch`             |
-| API endpoint                     | `apps/api/src/routes/scanner.ts` (`GET /api/v1/scanner/score-distribution`)       |
-| Python training                  | `research_plankton/soft_ranking_score_analysis.py`                                |
+| Concern                       | Path                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------- |
+| Artifact (committed)          | `apps/runtime/src/data/soft-ranking-model.v1.json`                          |
+| Artifact (built)              | `apps/runtime/dist/data/soft-ranking-model.v1.json`                         |
+| Loader                        | `apps/runtime/src/modules/soft-ranking/load-soft-ranking-model.ts`          |
+| Module                        | `apps/runtime/src/modules/soft-ranking/soft-ranking-score-module.ts`        |
+| Snapshot SQL                  | `apps/runtime/src/modules/soft-ranking/score-distribution-snapshot.ts`      |
+| Domain scorer                 | `packages/domain/src/scoring/logistic-scorer.ts`                            |
+| Domain feature builder        | `packages/domain/src/scoring/feature-builder.ts`                            |
+| Domain category derivation    | `packages/domain/src/category.ts`                                           |
+| DB schema (SoT)               | `packages/db/src/schemas/ledger.sql` (markets.score\* columns)              |
+| DB bootstrap upgrade          | `packages/db/src/bootstrap.ts:bootstrapLedgerDb` (`safeAddColumn` calls)    |
+| DB migration (history record) | `packages/db/src/migrations/043_markets_score_columns.sql`                  |
+| Repository writer             | `packages/db/src/repositories/market-repository.ts:updateScoresBatch`       |
+| API endpoint                  | `apps/api/src/routes/scanner.ts` (`GET /api/v1/scanner/score-distribution`) |
+| Python training               | `research_plankton/soft_ranking_score_analysis.py`                          |
 
 ---
 
