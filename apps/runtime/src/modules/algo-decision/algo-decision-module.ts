@@ -66,6 +66,18 @@ import {
 export interface SelectedMarketCache {
   isEligible(tokenId: TokenId): boolean;
   getEligibleTokenIds(): TokenId[];
+  /**
+   * ADR-018 §D2 — optional Step 1 universe-filter funnel snapshot. Implemented
+   * by `MarketSelectionCache`; absent on test stubs that don't need telemetry.
+   */
+  getUniverseFilterSnapshot?(): {
+    readonly seen: number;
+    readonly volumeZeroDropped: number;
+    readonly volumeNullEvaluated: number;
+    readonly volumePositiveEvaluated: number;
+    readonly selectionRuleAdmitted: number;
+    readonly selectionRuleRejected: number;
+  };
 }
 
 // ─── Internal types ──────────────────────────────────────────────────────────
@@ -328,10 +340,13 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
     if (!this.started) return { ok: false, detail: "not started" };
-    return {
-      ok: true,
-      detail: `ticks=${this.tickCounter} markets=${this.marketCache.size} pending=${this.pendingEntries.size}`,
-    };
+    const base = `ticks=${this.tickCounter} markets=${this.marketCache.size} pending=${this.pendingEntries.size}`;
+    // ADR-018 §D2 — append Step 1 universe funnel when the cache supports it.
+    const snap = this.deps.selectedMarketCache.getUniverseFilterSnapshot?.();
+    const funnel = snap
+      ? ` universeFunnel seen=${snap.seen} volumeZeroDropped=${snap.volumeZeroDropped} volumeNullEvaluated=${snap.volumeNullEvaluated} volumePositiveEvaluated=${snap.volumePositiveEvaluated} selectionRuleAdmitted=${snap.selectionRuleAdmitted} selectionRuleRejected=${snap.selectionRuleRejected}`
+      : "";
+    return { ok: true, detail: `${base}${funnel}` };
   }
 
   // ─── Event handlers ─────────────────────────────────────────────────────────

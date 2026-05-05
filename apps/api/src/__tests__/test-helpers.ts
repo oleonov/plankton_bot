@@ -29,4 +29,5 @@ export const MARKET_DATA_TEST_DEFAULTS = {
   marketDataCircuitOpenMs: 120_000,
   marketDataStreamStableMs: 30_000,
   marketDataFallbackBatchSize: 500,
+  universeFunnelLogIntervalMs: 60_000,
 };

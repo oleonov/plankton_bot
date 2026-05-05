@@ -117,6 +117,13 @@ const envSchema = z
     // Dead-side guard + pricing policy now live in `profile_settings.execution_policy_json`
     // and hot-reload via `runtime_control_state.execution_policy_version`. See
     // docs/adr/015-db-backed-execution-policy.md.
+    // ADR-018 (Step 1) — Universe-filter funnel log cadence (post-normalization).
+    UNIVERSE_FUNNEL_LOG_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .min(5_000)
+      .max(3_600_000)
+      .default(60_000),
   })
   .superRefine((data, ctx) => {
     // When RUNTIME_MODE is undefined, mode comes from control.db — skip env validation
@@ -213,6 +220,8 @@ export interface AppConfig {
   marketDataStreamStableMs: number;
   // Task 5
   marketDataFallbackBatchSize: number;
+  // ADR-018 (Step 1)
+  universeFunnelLogIntervalMs: number;
 }
 
 function findMonorepoRoot(): string {
@@ -299,5 +308,6 @@ export function loadEnv(envPath?: string): AppConfig {
     marketDataCircuitOpenMs: env.MARKET_DATA_CIRCUIT_OPEN_MS,
     marketDataStreamStableMs: env.MARKET_DATA_STREAM_STABLE_MS,
     marketDataFallbackBatchSize: env.MARKET_DATA_FALLBACK_BATCH_SIZE,
+    universeFunnelLogIntervalMs: env.UNIVERSE_FUNNEL_LOG_INTERVAL_MS,
   };
 }

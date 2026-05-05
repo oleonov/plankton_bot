@@ -13,10 +13,42 @@ import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine
 // no `trade_count` field; we use lifetime volume (`volumeNum`) as a proxy per
 // ADR-007. `volume24h === 0` (lifetime never traded) → excluded. `null`
 // (unknown, e.g. CLOB path) → not blocked.
+
+/**
+ * ADR-018 §D2 — Step 1 universe-filter funnel telemetry.
+ *
+ * Two-partition counters of `NormalizedMarketUpdated` events that reach the
+ * gate while `tradable === true`. Counters are cumulative since process start
+ * (monotonic), updated **per processed event** (not per unique token — a token
+ * may migrate between buckets across updates).
+ *
+ * Invariants:
+ *  - volume-partition (disjoint within layer):
+ *    `seen == volumeZeroDropped + volumeNullEvaluated + volumePositiveEvaluated`
+ *  - selection-partition (disjoint within layer; only counts evaluated events):
+ *    `volumeNullEvaluated + volumePositiveEvaluated == selectionRuleAdmitted + selectionRuleRejected`
+ */
+export interface UniverseFilterSnapshot {
+  readonly seen: number;
+  readonly volumeZeroDropped: number;
+  readonly volumeNullEvaluated: number;
+  readonly volumePositiveEvaluated: number;
+  readonly selectionRuleAdmitted: number;
+  readonly selectionRuleRejected: number;
+}
+
 export class MarketSelectionCache implements SelectedMarketCache {
   private readonly eligible = new Set<string>();
   private unsub: (() => void) | null = null;
   private trackedUnsub: (() => void) | null = null;
+
+  // ADR-018 §D2 — funnel counters. Process-cumulative, never reset.
+  private seen = 0;
+  private volumeZeroDropped = 0;
+  private volumeNullEvaluated = 0;
+  private volumePositiveEvaluated = 0;
+  private selectionRuleAdmitted = 0;
+  private selectionRuleRejected = 0;
 
   constructor(
     private readonly bus: EventBus,
@@ -62,6 +94,21 @@ export class MarketSelectionCache implements SelectedMarketCache {
     return [...this.eligible] as TokenId[];
   }
 
+  /**
+   * ADR-018 §D2 — Step 1 universe-filter funnel snapshot. Counters are
+   * process-cumulative; callers compute deltas if rate metrics are needed.
+   */
+  getUniverseFilterSnapshot(): UniverseFilterSnapshot {
+    return {
+      seen: this.seen,
+      volumeZeroDropped: this.volumeZeroDropped,
+      volumeNullEvaluated: this.volumeNullEvaluated,
+      volumePositiveEvaluated: this.volumePositiveEvaluated,
+      selectionRuleAdmitted: this.selectionRuleAdmitted,
+      selectionRuleRejected: this.selectionRuleRejected,
+    };
+  }
+
   private processMarket(
     tokenId: string,
     eventSlug: string | null,
@@ -71,15 +118,24 @@ export class MarketSelectionCache implements SelectedMarketCache {
     volumeLifetime: number | null,
   ): void {
     if (!tradable) {
+      // Untracked/preserved-for-lifecycle tokens are out of scope for the
+      // Step 1 funnel — they cannot be NEW-BUY admitted regardless of volume.
       this.eligible.delete(tokenId);
       return;
     }
+    this.seen++;
     // ADR-007: Historical Universe Filter (spec §0 R1). `volumeLifetime === 0`
     // means the market has never traded — proxy for `trade_count > 0`. `null`
     // is treated as unknown (not blocking) — typical for CLOB-path markets.
     if (volumeLifetime != null && volumeLifetime === 0) {
+      this.volumeZeroDropped++;
       this.eligible.delete(tokenId);
       return;
+    }
+    if (volumeLifetime == null) {
+      this.volumeNullEvaluated++;
+    } else {
+      this.volumePositiveEvaluated++;
     }
     const evalResult = evaluatePreEntry(this.selectionRuleEngine.current, {
       eventSlug,
@@ -87,8 +143,10 @@ export class MarketSelectionCache implements SelectedMarketCache {
       eventMarketCount,
     });
     if (evalResult.finalStatus === "INCLUDE") {
+      this.selectionRuleAdmitted++;
       this.eligible.add(tokenId);
     } else {
+      this.selectionRuleRejected++;
       this.eligible.delete(tokenId);
     }
   }

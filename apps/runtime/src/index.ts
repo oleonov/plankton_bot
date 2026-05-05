@@ -639,6 +639,28 @@ async function main(): Promise<void> {
   const selectedMarketCache = new MarketSelectionCache(bus, selectionRuleEngine);
   selectedMarketCache.subscribe();
 
+  // ADR-018 §D2 — Step 1 universe-filter funnel telemetry. Emits one log
+  // line per `universeFunnelLogIntervalMs` (default 60 s) with cumulative
+  // post-normalization counters. Independent of scan-cycle / pricing-tick:
+  // `NormalizedMarketUpdated` arrives continuously and the cumulative funnel
+  // is the spec-enforcer's view, not the scanner's.
+  const universeFunnelLogTimer = setInterval(() => {
+    const snap = selectedMarketCache.getUniverseFilterSnapshot();
+    if (snap.seen === 0) return;
+    log.info(
+      {
+        seen: snap.seen,
+        volumeZeroDropped: snap.volumeZeroDropped,
+        volumeNullEvaluated: snap.volumeNullEvaluated,
+        volumePositiveEvaluated: snap.volumePositiveEvaluated,
+        selectionRuleAdmitted: snap.selectionRuleAdmitted,
+        selectionRuleRejected: snap.selectionRuleRejected,
+      },
+      "universeFunnel",
+    );
+  }, config.universeFunnelLogIntervalMs);
+  universeFunnelLogTimer.unref();
+
   // ADR-016 — market-wide trade-count provider for the post-entry continuation
   // gate. Always constructed (cheap, no I/O until consulted); the gate only
   // calls it when `runtime_control_state.continuation_mode = 'market_wide'`.
@@ -1441,6 +1463,7 @@ async function main(): Promise<void> {
     }
 
     signalToOrderBridge.unsubscribe();
+    clearInterval(universeFunnelLogTimer);
     selectedMarketCache.dispose();
     candidateBookCache?.dispose();
 

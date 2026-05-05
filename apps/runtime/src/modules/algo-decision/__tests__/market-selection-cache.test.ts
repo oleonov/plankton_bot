@@ -520,6 +520,261 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
+  // ── ADR-018 §D2 — Universe-filter funnel telemetry ───────────────────────
+  //
+  // Counters are cumulative since process start (monotonic), updated per
+  // processed `NormalizedMarketUpdated` event (not per unique token). Two
+  // partitions:
+  //   volume:    seen == volumeZeroDropped + volumeNullEvaluated + volumePositiveEvaluated
+  //   selection: volumeNullEvaluated + volumePositiveEvaluated
+  //              == selectionRuleAdmitted + selectionRuleRejected
+
+  it("getUniverseFilterSnapshot — initial snapshot is all zeros", () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
+    cache.subscribe();
+
+    expect(cache.getUniverseFilterSnapshot()).toEqual({
+      seen: 0,
+      volumeZeroDropped: 0,
+      volumeNullEvaluated: 0,
+      volumePositiveEvaluated: 0,
+      selectionRuleAdmitted: 0,
+      selectionRuleRejected: 0,
+    });
+
+    cache.dispose();
+  });
+
+  it("getUniverseFilterSnapshot — non-tradable events do not increment seen", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          tradable: false,
+          eventSlug: "bitcoin-x",
+          slug: "bitcoin-up",
+          eventMarketCount: 1,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(cache.getUniverseFilterSnapshot().seen).toBe(0);
+    cache.dispose();
+  });
+
+  it("getUniverseFilterSnapshot — volume=0 increments volumeZeroDropped, not selection counters", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          eventSlug: "bitcoin-fresh",
+          slug: "bitcoin-fresh-yes",
+          volume24h: 0,
+          eventMarketCount: 1,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    const snap = cache.getUniverseFilterSnapshot();
+    expect(snap.seen).toBe(1);
+    expect(snap.volumeZeroDropped).toBe(1);
+    expect(snap.volumeNullEvaluated).toBe(0);
+    expect(snap.volumePositiveEvaluated).toBe(0);
+    expect(snap.selectionRuleAdmitted).toBe(0);
+    expect(snap.selectionRuleRejected).toBe(0);
+
+    cache.dispose();
+  });
+
+  it("getUniverseFilterSnapshot — volume=null + INCLUDE rule → volumeNullEvaluated + selectionRuleAdmitted", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, EMPTY_ENGINE);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          eventSlug: "us-election",
+          slug: "trump-wins",
+          volume24h: null,
+          eventMarketCount: 1,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    const snap = cache.getUniverseFilterSnapshot();
+    expect(snap.seen).toBe(1);
+    expect(snap.volumeNullEvaluated).toBe(1);
+    expect(snap.volumePositiveEvaluated).toBe(0);
+    expect(snap.selectionRuleAdmitted).toBe(1);
+    expect(snap.selectionRuleRejected).toBe(0);
+
+    cache.dispose();
+  });
+
+  it("getUniverseFilterSnapshot — volume>0 + INCLUDE rule → volumePositiveEvaluated + selectionRuleAdmitted", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          eventSlug: "bitcoin-rally",
+          slug: "bitcoin-up",
+          volume24h: 100,
+          eventMarketCount: 1,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    const snap = cache.getUniverseFilterSnapshot();
+    expect(snap.seen).toBe(1);
+    expect(snap.volumePositiveEvaluated).toBe(1);
+    expect(snap.volumeNullEvaluated).toBe(0);
+    expect(snap.selectionRuleAdmitted).toBe(1);
+    expect(snap.selectionRuleRejected).toBe(0);
+
+    cache.dispose();
+  });
+
+  it("getUniverseFilterSnapshot — volume>0 + EXCLUDE rule → volumePositiveEvaluated + selectionRuleRejected", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
+    cache.subscribe();
+
+    // No matching prefix rule → fallback EXCLUDE for multi-market events
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({
+          tokenId: TOK_A,
+          eventSlug: "random-event",
+          slug: "no-match-yes",
+          volume24h: 100,
+          eventMarketCount: 5,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    const snap = cache.getUniverseFilterSnapshot();
+    expect(snap.seen).toBe(1);
+    expect(snap.volumePositiveEvaluated).toBe(1);
+    expect(snap.selectionRuleRejected).toBe(1);
+    expect(snap.selectionRuleAdmitted).toBe(0);
+
+    cache.dispose();
+  });
+
+  it("getUniverseFilterSnapshot — invariants hold across mixed sequence", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
+    cache.subscribe();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        // volume=0 → dropped
+        makeMarket({
+          tokenId: createTokenId("t-zero"),
+          eventSlug: "bitcoin-fresh",
+          slug: "bitcoin-fresh",
+          volume24h: 0,
+          eventMarketCount: 1,
+        }),
+        // volume=null + INCLUDE
+        makeMarket({
+          tokenId: createTokenId("t-null"),
+          eventSlug: "bitcoin-x",
+          slug: "bitcoin-up",
+          volume24h: null,
+          eventMarketCount: 1,
+        }),
+        // volume=100 + INCLUDE
+        makeMarket({
+          tokenId: createTokenId("t-pos-in"),
+          eventSlug: "ethereum-x",
+          slug: "ethereum-up",
+          volume24h: 100,
+          eventMarketCount: 1,
+        }),
+        // volume=100 + EXCLUDE (no matching rule, multi-market event)
+        makeMarket({
+          tokenId: createTokenId("t-pos-out"),
+          eventSlug: "random-x",
+          slug: "random-y",
+          volume24h: 100,
+          eventMarketCount: 5,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    const s = cache.getUniverseFilterSnapshot();
+    // Volume-partition invariant: seen == sum of three volume buckets
+    expect(s.seen).toBe(s.volumeZeroDropped + s.volumeNullEvaluated + s.volumePositiveEvaluated);
+    // Selection-partition invariant: evaluated == admit + reject
+    expect(s.volumeNullEvaluated + s.volumePositiveEvaluated).toBe(
+      s.selectionRuleAdmitted + s.selectionRuleRejected,
+    );
+    // Concrete values
+    expect(s).toEqual({
+      seen: 4,
+      volumeZeroDropped: 1,
+      volumeNullEvaluated: 1,
+      volumePositiveEvaluated: 2,
+      selectionRuleAdmitted: 2,
+      selectionRuleRejected: 1,
+    });
+
+    cache.dispose();
+  });
+
+  it("getUniverseFilterSnapshot — counters are cumulative across events (per-event, not per-token)", async () => {
+    const bus = new InProcessEventBus();
+    const cache = new MarketSelectionCache(bus, SEEDED_ENGINE);
+    cache.subscribe();
+
+    // Same token, three updates: null → 0 → 100. Counter must reflect three
+    // increments to seen, not deduplicate to one unique token.
+    for (const v of [null, 0, 100] as const) {
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          makeMarket({
+            tokenId: TOK_A,
+            eventSlug: "bitcoin-x",
+            slug: "bitcoin-up",
+            volume24h: v,
+            eventMarketCount: 1,
+          }),
+        ],
+        timestamp: Date.now(),
+      });
+    }
+
+    const s = cache.getUniverseFilterSnapshot();
+    expect(s.seen).toBe(3);
+    expect(s.volumeZeroDropped).toBe(1);
+    expect(s.volumeNullEvaluated).toBe(1);
+    expect(s.volumePositiveEvaluated).toBe(1);
+
+    cache.dispose();
+  });
+
   // ── Dispose ───────────────────────────────────────────────────────────────
 
   it("dispose unsubscribes — further events are ignored", async () => {
