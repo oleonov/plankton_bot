@@ -74,7 +74,7 @@ export class SqliteMarketRepository implements MarketRepository {
       market.tradable ? 1 : 0,
       market.tickSize,
       market.negRisk ? 1 : 0,
-      market.eventMarketCount ?? 1,
+      market.eventMarketCount,
       market.selectionStatus ?? "unknown",
       market.selectionWinningRuleId ?? null,
       market.gammaCreatedAt ?? null,
@@ -301,7 +301,7 @@ export class SqliteMarketRepository implements MarketRepository {
       tradable: row.tradable == null ? row.active === 1 : row.tradable === 1,
       tickSize: row.tick_size as number,
       negRisk: row.neg_risk === 1,
-      eventMarketCount: (row.event_market_count as number | null) ?? 1,
+      eventMarketCount: row.event_market_count as number,
       selectionStatus:
         (row.selection_status as import("@plankton/domain").SelectionStatus) ?? "unknown",
       selectionWinningRuleId: (row.selection_winning_rule_id as string) ?? null,

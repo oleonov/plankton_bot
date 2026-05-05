@@ -382,8 +382,31 @@ export interface MarketDiscoveryGateway {
   /** Discover active markets matching configured filters. */
   discoverMarkets(): Promise<ClobMarket[]>;
 
-  /** Stream markets page-by-page so the full array is never held in memory. */
-  forEachMarketPage(callback: (markets: ClobMarket[]) => void): Promise<{ totalMarkets: number }>;
+  /**
+   * Stream markets page-by-page so the full array is never held in memory.
+   *
+   * The required `eventStats` arg carries per-page event-level counts (events
+   * are flattened into markets at the gateway boundary, so the scanner cannot
+   * reconstruct them from `markets` alone — see ADR-019 §D4 / Step 2 audit P2).
+   *
+   * Counter contract (must hold for every implementation):
+   * - `singleMarket` = events whose nested `markets.length === 1`
+   * - `multiMarket`  = events whose nested `markets.length >  1`
+   * - `events`       = `singleMarket + multiMarket` (partition invariant)
+   *
+   * Zero-market events (`markets: []` or no `markets` field — settled or
+   * malformed envelopes) MUST be excluded from all three counters so the
+   * partition holds and the per-event ratio stays apples-to-apples with
+   * ADR-003's 39.17 % single-market baseline. The callback MUST NOT be invoked
+   * for pages whose only events are zero-market — pass through to the next
+   * page instead.
+   */
+  forEachMarketPage(
+    callback: (
+      markets: ClobMarket[],
+      eventStats: { events: number; singleMarket: number; multiMarket: number },
+    ) => void,
+  ): Promise<{ totalMarkets: number }>;
 
   /** Validate connectivity. */
   healthCheck(): Promise<{ readonly ok: boolean; readonly latencyMs: number }>;

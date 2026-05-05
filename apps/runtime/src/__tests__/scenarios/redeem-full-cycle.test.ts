@@ -145,6 +145,7 @@ async function buildFixture(opts: {
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    eventMarketCount: 1,
     gammaCreatedAt: null,
     createdAt: now,
     updatedAt: now,

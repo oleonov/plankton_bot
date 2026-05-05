@@ -63,6 +63,7 @@ function seedMarket(repo: SqliteMarketRepository): void {
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    eventMarketCount: 1,
     gammaCreatedAt: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),

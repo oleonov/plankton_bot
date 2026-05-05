@@ -62,8 +62,14 @@ export interface Market {
   tradable: boolean;
   tickSize: number;
   negRisk: boolean;
-  /** Number of markets in the parent Gamma event — persisted by scanner. Defaults to 1. */
-  eventMarketCount?: number;
+  /**
+   * Number of markets in the parent Gamma event — persisted by scanner.
+   * Required: callers must always carry the authoritative value from
+   * Gamma `eventContext.marketCount`. Silent `?? 1` fallbacks are
+   * forbidden (see ADR-019 §D2 — they auto-INCLUDE multi-outcome markets
+   * via STEP 2 fallback).
+   */
+  eventMarketCount: number;
   /** Result of evaluatePreEntry for this market — persisted by scanner. */
   selectionStatus?: SelectionStatus;
   /** The winning rule ID from evaluatePreEntry, or null. */

@@ -220,6 +220,19 @@ export function mapTradeToPersonalFills(
 
 // ─── Market mapping ──────────────────────────────────────────────────────
 
+/**
+ * **Discovery-incompatible by design** — see ADR-019 §D1.
+ *
+ * `mapMarket` reads from the CLOB `/markets` endpoint, which returns
+ * individual markets (not event-grouped) and does not expose `event.slug`
+ * or `event.markets.length`. Hardcoding `eventMarketCount: 1` and omitting
+ * `eventSlug` makes any market that flows through here a self-INCLUDE for
+ * STEP 2 fallback in `evaluatePreEntry` — wrong for any discovery-time use.
+ *
+ * Production discovery goes exclusively through `GammaMarketDiscoveryGateway`
+ * + `mapGammaMarket`. Do **not** reattach `mapMarket` to a discovery code
+ * path without first solving the event-context gap.
+ */
 export function mapMarket(raw: Record<string, unknown>): ClobMarket {
   const tokens = Array.isArray(raw.tokens)
     ? (raw.tokens as Array<Record<string, unknown>>).map((t, i) => ({
@@ -331,11 +344,13 @@ export function parseStringOrArray(value: unknown): string[] {
  * @param eventContext.slug - Parent event slug (null when unknown).
  * @param eventContext.marketCount - Total number of markets in the parent Gamma event.
  *   Used for STEP 2 fallback: no_match && eventMarketCount === 1 ⇒ INCLUDE.
- *   Pass `event.markets.length` at the call site.
+ *   Pass `event.markets.length` at the call site. **Required** — silent
+ *   default `1` would auto-INCLUDE multi-outcome markets via STEP 2
+ *   fallback (ADR-019 §D2).
  */
 export function mapGammaMarket(
   raw: Record<string, unknown>,
-  eventContext: { slug: string | null; marketCount: number } = { slug: null, marketCount: 1 },
+  eventContext: { slug: string | null; marketCount: number },
 ): ClobMarket {
   const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
   const outcomes = parseStringOrArray(raw.outcomes);

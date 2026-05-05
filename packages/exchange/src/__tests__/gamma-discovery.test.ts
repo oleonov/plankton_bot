@@ -70,7 +70,11 @@ describe("GammaMarketDiscoveryGateway", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("discoverMarkets() uses /events endpoint with closed=false", async () => {
+  it("discoverMarkets() uses /events endpoint with active=true&closed=false", async () => {
+    // ADR-019 §D4 / Step 2 audit P2: scanner-query MUST match the ADR-003
+    // baseline filter `active=true&closed=false` so per-event funnel counters
+    // (eventsSingleMarketTotal / scannedEventsTotal) are apples-to-apples
+    // with the published 39.17 % single-market ratio.
     const gateway = new GammaMarketDiscoveryGateway({
       baseUrl: "https://test.gamma.api",
       tagId: 42,
@@ -84,10 +88,123 @@ describe("GammaMarketDiscoveryGateway", () => {
 
     const calledUrl = new URL(fetchMock.mock.calls[0]![0] as string);
     expect(calledUrl.pathname).toBe("/events");
+    expect(calledUrl.searchParams.get("active")).toBe("true");
     expect(calledUrl.searchParams.get("closed")).toBe("false");
     expect(calledUrl.searchParams.get("tag_id")).toBe("42");
     expect(calledUrl.searchParams.get("limit")).toBe("100");
     expect(calledUrl.searchParams.get("offset")).toBe("0");
+  });
+
+  it("forEachMarketPage() emits per-page eventStats with single/multi-market split", async () => {
+    // ADR-019 §D4 / Step 2 audit P2: gateway counts events at the page
+    // boundary (where event identity is still intact) so the scanner can
+    // accumulate `events`, `singleMarket` and `multiMarket` totals without
+    // re-grouping flattened markets by eventSlug downstream.
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(
+      mockFetchResponse([
+        makeEvent("solo-1", [makeGammaMarket("s1")]),
+        makeEvent("solo-2", [makeGammaMarket("s2")]),
+        makeEvent("multi-a", [makeGammaMarket("ma-1"), makeGammaMarket("ma-2")]),
+        makeEvent("multi-b", [
+          makeGammaMarket("mb-1"),
+          makeGammaMarket("mb-2"),
+          makeGammaMarket("mb-3"),
+        ]),
+      ]),
+    );
+
+    const captured: Array<{ events: number; singleMarket: number; multiMarket: number }> = [];
+    let totalMarkets = 0;
+    await gateway.forEachMarketPage((pageMarkets, eventStats) => {
+      captured.push({ ...eventStats });
+      totalMarkets += pageMarkets.length;
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toEqual({ events: 4, singleMarket: 2, multiMarket: 2 });
+    expect(totalMarkets).toBe(7);
+  });
+
+  it("forEachMarketPage() omits the callback for empty pages but still terminates", async () => {
+    // Empty-page guard: scanner must not be invoked when the gateway returns
+    // no events, otherwise per-event counters would be incremented with
+    // zero markets and skew the funnel.
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(mockFetchResponse([]));
+
+    const cb = vi.fn();
+    const result = await gateway.forEachMarketPage(cb);
+
+    expect(cb).not.toHaveBeenCalled();
+    expect(result).toEqual({ totalMarkets: 0 });
+  });
+
+  it("forEachMarketPage() excludes zero-market events from eventStats", async () => {
+    // ADR-019 §D4: events with `markets: []` or no `markets` field are
+    // malformed/settled envelopes that don't belong in the trading universe.
+    // They must NOT count as multiMarket (which would skew ADR-003's 39.17 %
+    // single-market ratio) and must preserve the partition invariant
+    // `events == singleMarket + multiMarket`.
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(
+      mockFetchResponse([
+        makeEvent("solo", [makeGammaMarket("s1")]),
+        makeEvent("empty", []),
+        { id: "no-markets-field", slug: "bare-event" },
+        makeEvent("multi", [makeGammaMarket("m1"), makeGammaMarket("m2")]),
+      ]),
+    );
+
+    const captured: Array<{ events: number; singleMarket: number; multiMarket: number }> = [];
+    let totalMarkets = 0;
+    await gateway.forEachMarketPage((pageMarkets, eventStats) => {
+      captured.push({ ...eventStats });
+      totalMarkets += pageMarkets.length;
+    });
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toEqual({ events: 2, singleMarket: 1, multiMarket: 1 });
+    expect(totalMarkets).toBe(3);
+  });
+
+  it("forEachMarketPage() omits the callback when every event is zero-market", async () => {
+    // Zero-market events alone must not trigger a scanner callback — per the
+    // empty-page guard, downstream counters would otherwise advance with no
+    // observable work to report.
+    const gateway = new GammaMarketDiscoveryGateway({
+      baseUrl: "https://test.gamma.api",
+      pageSize: 10,
+    });
+
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValueOnce(
+      mockFetchResponse([
+        makeEvent("empty-1", []),
+        { id: "no-markets-field", slug: "bare-event" },
+      ]),
+    );
+
+    const cb = vi.fn();
+    const result = await gateway.forEachMarketPage(cb);
+
+    expect(cb).not.toHaveBeenCalled();
+    expect(result).toEqual({ totalMarkets: 0 });
   });
 
   it("discoverMarkets() maps nested markets via mapGammaMarket", async () => {

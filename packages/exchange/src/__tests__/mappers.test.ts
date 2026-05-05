@@ -379,18 +379,25 @@ describe("mapBalance", () => {
 // ─── Gamma mapper tests ───────────────────────────────────────────────────
 
 describe("mapGammaMarket", () => {
+  // Default eventContext for tests not exercising STEP 2 fallback semantics.
+  // ADR-019 §D2 made the second arg required to close the silent-1 foot-gun.
+  const SINGLE_MARKET_EVENT = { slug: null, marketCount: 1 } as const;
+
   it("maps a typical Gamma response to ClobMarket", () => {
-    const market = mapGammaMarket({
-      conditionId: "cond-gamma-1",
-      clobTokenIds: ["tok-yes-1", "tok-no-1"],
-      outcomes: ["Yes", "No"],
-      question: "Will BTC hit 100k?",
-      slug: "bitcoin-above-100k",
-      endDate: "2026-06-30T00:00:00Z",
-      active: true,
-      negRisk: true,
-      orderPriceMinTickSize: 0.001,
-    });
+    const market = mapGammaMarket(
+      {
+        conditionId: "cond-gamma-1",
+        clobTokenIds: ["tok-yes-1", "tok-no-1"],
+        outcomes: ["Yes", "No"],
+        question: "Will BTC hit 100k?",
+        slug: "bitcoin-above-100k",
+        endDate: "2026-06-30T00:00:00Z",
+        active: true,
+        negRisk: true,
+        orderPriceMinTickSize: 0.001,
+      },
+      SINGLE_MARKET_EVENT,
+    );
 
     expect(market.conditionId).toBe("cond-gamma-1");
     expect(market.tokens).toHaveLength(2);
@@ -407,10 +414,13 @@ describe("mapGammaMarket", () => {
   });
 
   it("zips clobTokenIds and outcomes into tokens array", () => {
-    const market = mapGammaMarket({
-      clobTokenIds: ["a", "b", "c"],
-      outcomes: ["Yes", "No", "Maybe"],
-    });
+    const market = mapGammaMarket(
+      {
+        clobTokenIds: ["a", "b", "c"],
+        outcomes: ["Yes", "No", "Maybe"],
+      },
+      SINGLE_MARKET_EVENT,
+    );
 
     expect(market.tokens).toEqual([
       { tokenId: "a", outcome: "Yes", outcomeIndex: 0 },
@@ -420,32 +430,35 @@ describe("mapGammaMarket", () => {
   });
 
   it("uses orderPriceMinTickSize for tickSize", () => {
-    const market = mapGammaMarket({ orderPriceMinTickSize: 0.0001 });
+    const market = mapGammaMarket({ orderPriceMinTickSize: 0.0001 }, SINGLE_MARKET_EVENT);
     expect(market.tickSize).toBe(0.0001);
   });
 
   // ADR-007: lifetime `volumeNum` is the source for the `volume24h` field
   // (historical-universe-filter proxy for spec §0 R1 `trade_count > 0`).
   it("ADR-007: maps Gamma `volumeNum` (lifetime) into `volume24h`", () => {
-    const market = mapGammaMarket({
-      volumeNum: 1_568_499.88,
-      volume24hr: 5_733.78, // rolling 24h — MUST be ignored for this field
-    });
+    const market = mapGammaMarket(
+      {
+        volumeNum: 1_568_499.88,
+        volume24hr: 5_733.78, // rolling 24h — MUST be ignored for this field
+      },
+      SINGLE_MARKET_EVENT,
+    );
     expect(market.volume24h).toBe(1_568_499.88);
   });
 
   it("ADR-007: `volume24h` is null when `volumeNum` is absent (CLOB-path emulation)", () => {
-    const market = mapGammaMarket({});
+    const market = mapGammaMarket({}, SINGLE_MARKET_EVENT);
     expect(market.volume24h).toBeNull();
   });
 
   it("ADR-007: `volume24h` is 0 when `volumeNum` is 0 (never-traded market)", () => {
-    const market = mapGammaMarket({ volumeNum: 0 });
+    const market = mapGammaMarket({ volumeNum: 0 }, SINGLE_MARKET_EVENT);
     expect(market.volume24h).toBe(0);
   });
 
   it("handles missing fields with defaults", () => {
-    const market = mapGammaMarket({});
+    const market = mapGammaMarket({}, SINGLE_MARKET_EVENT);
 
     expect(market.conditionId).toBe("");
     expect(market.tokens).toEqual([]);
@@ -458,23 +471,29 @@ describe("mapGammaMarket", () => {
   });
 
   it("defaults outcome to empty string when outcomes array is shorter than clobTokenIds", () => {
-    const market = mapGammaMarket({
-      clobTokenIds: ["tok-1", "tok-2"],
-      outcomes: ["Yes"],
-    });
+    const market = mapGammaMarket(
+      {
+        clobTokenIds: ["tok-1", "tok-2"],
+        outcomes: ["Yes"],
+      },
+      SINGLE_MARKET_EVENT,
+    );
 
     expect(market.tokens[0]!.outcome).toBe("Yes");
     expect(market.tokens[1]!.outcome).toBe("");
   });
 
   it("parses JSON-stringified clobTokenIds and outcomes (Gamma event nesting)", () => {
-    const market = mapGammaMarket({
-      conditionId: "cond-nested",
-      clobTokenIds: '["tok-yes","tok-no"]',
-      outcomes: '["Yes","No"]',
-      slug: "will-bitcoin-reach-200k",
-      active: true,
-    });
+    const market = mapGammaMarket(
+      {
+        conditionId: "cond-nested",
+        clobTokenIds: '["tok-yes","tok-no"]',
+        outcomes: '["Yes","No"]',
+        slug: "will-bitcoin-reach-200k",
+        active: true,
+      },
+      SINGLE_MARKET_EVENT,
+    );
 
     expect(market.tokens).toHaveLength(2);
     expect(market.tokens[0]!.tokenId).toBe("tok-yes");
@@ -483,8 +502,11 @@ describe("mapGammaMarket", () => {
     expect(market.tokens[1]!.outcome).toBe("No");
   });
 
-  it("eventMarketCount defaults to 1 when no eventContext is supplied (binary binary event)", () => {
-    const market = mapGammaMarket({ slug: "bitcoin-above-100k" });
+  it("eventContext is required — caller must pass marketCount explicitly (ADR-019 §D2)", () => {
+    // No-eventContext call is a compile error post-ADR-019 — silent
+    // default 1 was a STEP 2 fallback foot-gun. Pinning the explicit
+    // single-market shape here for binary events.
+    const market = mapGammaMarket({ slug: "bitcoin-above-100k" }, { slug: null, marketCount: 1 });
     expect(market.eventMarketCount).toBe(1);
   });
 
@@ -515,47 +537,47 @@ describe("mapGammaMarket", () => {
   // Step 0 §P1.9 — `gammaCreatedAt` is the source for spec §1.7 R14 `age_at_entry`.
   // Validate ISO round-trip, null for missing, null for invalid.
   it("normalizes Gamma createdAt ISO string through Date round-trip", () => {
-    const market = mapGammaMarket({ createdAt: "2026-04-15T08:30:00Z" });
+    const market = mapGammaMarket({ createdAt: "2026-04-15T08:30:00Z" }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBe("2026-04-15T08:30:00.000Z");
   });
 
   it("preserves sub-second precision in createdAt round-trip", () => {
-    const market = mapGammaMarket({ createdAt: "2026-04-15T08:30:00.123Z" });
+    const market = mapGammaMarket({ createdAt: "2026-04-15T08:30:00.123Z" }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBe("2026-04-15T08:30:00.123Z");
   });
 
   it("normalizes timezone-offset createdAt to UTC", () => {
-    const market = mapGammaMarket({ createdAt: "2026-04-15T10:30:00+02:00" });
+    const market = mapGammaMarket({ createdAt: "2026-04-15T10:30:00+02:00" }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBe("2026-04-15T08:30:00.000Z");
   });
 
   it("returns null when createdAt is missing", () => {
-    const market = mapGammaMarket({});
+    const market = mapGammaMarket({}, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBeNull();
   });
 
   it("returns null when createdAt is empty string", () => {
-    const market = mapGammaMarket({ createdAt: "" });
+    const market = mapGammaMarket({ createdAt: "" }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBeNull();
   });
 
   it("returns null when createdAt is whitespace only", () => {
-    const market = mapGammaMarket({ createdAt: "   " });
+    const market = mapGammaMarket({ createdAt: "   " }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBeNull();
   });
 
   it("returns null when createdAt is unparseable", () => {
-    const market = mapGammaMarket({ createdAt: "not-a-date" });
+    const market = mapGammaMarket({ createdAt: "not-a-date" }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBeNull();
   });
 
   it("returns null when createdAt is non-string (number)", () => {
-    const market = mapGammaMarket({ createdAt: 1700000000 });
+    const market = mapGammaMarket({ createdAt: 1700000000 }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBeNull();
   });
 
   it("returns null when createdAt is null", () => {
-    const market = mapGammaMarket({ createdAt: null });
+    const market = mapGammaMarket({ createdAt: null }, SINGLE_MARKET_EVENT);
     expect(market.gammaCreatedAt).toBeNull();
   });
 });

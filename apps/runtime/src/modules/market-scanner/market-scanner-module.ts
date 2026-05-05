@@ -91,6 +91,29 @@ export interface MarketScanResult {
   durationMs: number;
 }
 
+/**
+ * Step 2 funnel breakdown — cumulative counters surfaced for healthcheck and
+ * dashboards. Spec mapping (ADR-019 §D4):
+ *   STEP 1 INCLUDE  = marketsStep1MatchedInclude  (slug-rule include hit)
+ *   STEP 1 EXCLUDE  = marketsStep1MatchedExclude  (slug-rule exclude hit)
+ *   STEP 2 INCLUDE  = marketsStep2FallbackInclude (no rule, eventMarketCount === 1)
+ *   FINAL EXCLUDE   = marketsFinalExclude         (no rule, eventMarketCount > 1)
+ *
+ * Per-event counters drive ADR-003 baseline drift detection
+ * (`eventsSingleMarketTotal / scannedEventsTotal` ≈ 39.17 % when baseline holds).
+ * Per-market counters are operational telemetry only.
+ */
+export interface Step2BreakdownSnapshot {
+  scannedMarketsTotal: number;
+  marketsStep1MatchedInclude: number;
+  marketsStep1MatchedExclude: number;
+  marketsStep2FallbackInclude: number;
+  marketsFinalExclude: number;
+  scannedEventsTotal: number;
+  eventsSingleMarketTotal: number;
+  eventsMultiMarketTotal: number;
+}
+
 export class MarketScannerModule implements RuntimeModule {
   private timer: ReturnType<typeof setInterval> | null = null;
   private hintTimer: ReturnType<typeof setTimeout> | null = null;
@@ -108,6 +131,20 @@ export class MarketScannerModule implements RuntimeModule {
   private lastLatencyP50Ms: number | null = null;
   private lastLatencyP90Ms: number | null = null;
   private lastLatencyMaxMs: number | null = null;
+  /**
+   * Step 2 funnel breakdown — cumulative counters across all scan cycles
+   * (mutated incrementally to keep memory flat). See Step2BreakdownSnapshot.
+   */
+  private readonly step2Breakdown: Step2BreakdownSnapshot = {
+    scannedMarketsTotal: 0,
+    marketsStep1MatchedInclude: 0,
+    marketsStep1MatchedExclude: 0,
+    marketsStep2FallbackInclude: 0,
+    marketsFinalExclude: 0,
+    scannedEventsTotal: 0,
+    eventsSingleMarketTotal: 0,
+    eventsMultiMarketTotal: 0,
+  };
   private readonly log: Logger;
 
   constructor(private readonly deps: MarketScannerModuleDeps) {
@@ -168,9 +205,14 @@ export class MarketScannerModule implements RuntimeModule {
       this.lastLatencyP50Ms === null
         ? "discoveryLatency=n/a"
         : `discoveryLatencyMs p50=${this.lastLatencyP50Ms} p90=${this.lastLatencyP90Ms} max=${this.lastLatencyMaxMs}`;
+    const b = this.step2Breakdown;
+    const breakdown =
+      b.scannedMarketsTotal === 0
+        ? ""
+        : ` step2Breakdown markets=${b.scannedMarketsTotal} step1Include=${b.marketsStep1MatchedInclude} step1Exclude=${b.marketsStep1MatchedExclude} step2Fallback=${b.marketsStep2FallbackInclude} finalExclude=${b.marketsFinalExclude} events=${b.scannedEventsTotal} singleMarket=${b.eventsSingleMarketTotal} multiMarket=${b.eventsMultiMarketTotal}`;
     return {
       ok: !stale,
-      detail: `${freshness} ${latency}`,
+      detail: `${freshness} ${latency}${breakdown}`,
     };
   }
 
@@ -191,6 +233,14 @@ export class MarketScannerModule implements RuntimeModule {
       p90Ms: this.lastLatencyP90Ms,
       maxMs: this.lastLatencyMaxMs,
     };
+  }
+
+  /**
+   * Step 2 funnel breakdown — read-only snapshot of cumulative counters.
+   * Returns a defensive copy so callers cannot mutate internal state.
+   */
+  getStep2BreakdownSnapshot(): Step2BreakdownSnapshot {
+    return { ...this.step2Breakdown };
   }
 
   /** Exposed for testing -- in production driven by the interval timer. */
@@ -249,8 +299,27 @@ export class MarketScannerModule implements RuntimeModule {
         }
       }
 
-      await this.deps.discoveryGateway.forEachMarketPage((pageMarkets) => {
+      // Accumulate Step 2 funnel counters into a local delta so a partial /
+      // failed scan does not leak skewed counts into `this.step2Breakdown`
+      // (Gamma pagination is order-biased — early pages alone are not
+      // representative). Merged into the cumulative snapshot only after the
+      // full scan completes successfully.
+      const pendingStep2Delta: Step2BreakdownSnapshot = {
+        scannedMarketsTotal: 0,
+        marketsStep1MatchedInclude: 0,
+        marketsStep1MatchedExclude: 0,
+        marketsStep2FallbackInclude: 0,
+        marketsFinalExclude: 0,
+        scannedEventsTotal: 0,
+        eventsSingleMarketTotal: 0,
+        eventsMultiMarketTotal: 0,
+      };
+
+      await this.deps.discoveryGateway.forEachMarketPage((pageMarkets, eventStats) => {
         discoveredMarkets += pageMarkets.length;
+        pendingStep2Delta.scannedEventsTotal += eventStats.events;
+        pendingStep2Delta.eventsSingleMarketTotal += eventStats.singleMarket;
+        pendingStep2Delta.eventsMultiMarketTotal += eventStats.multiMarket;
         const pageBatch: Market[] = [];
         for (const clobMarket of pageMarkets) {
           const evalResult = evaluatePreEntry(engine, {
@@ -258,6 +327,24 @@ export class MarketScannerModule implements RuntimeModule {
             slug: clobMarket.slug,
             eventMarketCount: clobMarket.eventMarketCount,
           });
+
+          // Step 2 funnel breakdown — increment per-market counter by status.
+          // Spec mapping in Step2BreakdownSnapshot doc-comment.
+          pendingStep2Delta.scannedMarketsTotal++;
+          switch (evalResult.selectionStatus) {
+            case "matched_include":
+              pendingStep2Delta.marketsStep1MatchedInclude++;
+              break;
+            case "matched_exclude":
+              pendingStep2Delta.marketsStep1MatchedExclude++;
+              break;
+            case "step2_fallback_include":
+              pendingStep2Delta.marketsStep2FallbackInclude++;
+              break;
+            case "fallback_exclude":
+              pendingStep2Delta.marketsFinalExclude++;
+              break;
+          }
 
           // tradable = INCLUDE decision (CLOB entry eligibility)
           const tradable = evalResult.finalStatus === "INCLUDE";
@@ -318,6 +405,21 @@ export class MarketScannerModule implements RuntimeModule {
         activeTokenIds,
         now,
       );
+
+      // Scan succeeded end-to-end — merge pending Step 2 delta into the
+      // cumulative snapshot. Failed/degraded scans drop the delta by virtue
+      // of falling through to the catch / finally without reaching this line.
+      this.step2Breakdown.scannedMarketsTotal += pendingStep2Delta.scannedMarketsTotal;
+      this.step2Breakdown.marketsStep1MatchedInclude +=
+        pendingStep2Delta.marketsStep1MatchedInclude;
+      this.step2Breakdown.marketsStep1MatchedExclude +=
+        pendingStep2Delta.marketsStep1MatchedExclude;
+      this.step2Breakdown.marketsStep2FallbackInclude +=
+        pendingStep2Delta.marketsStep2FallbackInclude;
+      this.step2Breakdown.marketsFinalExclude += pendingStep2Delta.marketsFinalExclude;
+      this.step2Breakdown.scannedEventsTotal += pendingStep2Delta.scannedEventsTotal;
+      this.step2Breakdown.eventsSingleMarketTotal += pendingStep2Delta.eventsSingleMarketTotal;
+      this.step2Breakdown.eventsMultiMarketTotal += pendingStep2Delta.eventsMultiMarketTotal;
 
       this.lastSuccessfulScanMs = Date.now();
       const durationMs = this.lastSuccessfulScanMs - startMs;

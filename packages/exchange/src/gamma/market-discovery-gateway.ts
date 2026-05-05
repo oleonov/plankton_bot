@@ -61,7 +61,10 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
   }
 
   async forEachMarketPage(
-    callback: (markets: ClobMarket[]) => void,
+    callback: (
+      markets: ClobMarket[],
+      eventStats: { events: number; singleMarket: number; multiMarket: number },
+    ) => void,
   ): Promise<{ totalMarkets: number }> {
     let offset = 0;
     let totalMarkets = 0;
@@ -69,19 +72,37 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
     while (true) {
       const events = await this.fetchPage(offset);
       const pageMarkets: ClobMarket[] = [];
+      let eventsWithMarkets = 0;
+      let singleMarket = 0;
+      let multiMarket = 0;
       for (const event of events) {
         const nestedMarkets = Array.isArray(event.markets)
           ? (event.markets as Record<string, unknown>[])
           : [];
         const parentSlug = typeof event.slug === "string" ? event.slug : null;
         const marketCount = nestedMarkets.length;
+        // Zero-market events (malformed payload, settled/closed envelopes) are
+        // excluded from eventStats entirely so the partition invariant
+        // `events == singleMarket + multiMarket` always holds and ADR-003's
+        // 39.17 % single-market ratio remains apples-to-apples with what the
+        // scanner actually evaluates downstream.
+        if (marketCount === 0) continue;
+        eventsWithMarkets++;
+        if (marketCount === 1) singleMarket++;
+        else multiMarket++;
         for (const raw of nestedMarkets) {
           pageMarkets.push(mapGammaMarket(raw, { slug: parentSlug, marketCount }));
         }
       }
 
+      if (eventsWithMarkets > 0) {
+        callback(pageMarkets, {
+          events: eventsWithMarkets,
+          singleMarket,
+          multiMarket,
+        });
+      }
       if (pageMarkets.length > 0) {
-        callback(pageMarkets);
         totalMarkets += pageMarkets.length;
       }
 
@@ -134,6 +155,11 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
 
   private buildUrl(offset: number, limitOverride?: number): URL {
     const url = new URL("/events", this.baseUrl);
+    // ADR-019 §D4 / Step 2 audit P2: align with ADR-003 baseline universe
+    // (`active=true&closed=false`). `active=false` events are paused/scheduled
+    // and never tradable in the current cycle — excluding them keeps scanner
+    // counters apples-to-apples with the published 39.17 % single-event ratio.
+    url.searchParams.set("active", "true");
     url.searchParams.set("closed", "false");
     url.searchParams.set("limit", String(limitOverride ?? this.pageSize));
     url.searchParams.set("offset", String(offset));

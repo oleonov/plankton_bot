@@ -297,6 +297,7 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
         tradable: true,
         tickSize: clobMarket.tickSize,
         negRisk: clobMarket.negRisk,
+        eventMarketCount: clobMarket.eventMarketCount,
         gammaCreatedAt: clobMarket.gammaCreatedAt,
         createdAt: now,
         updatedAt: now,

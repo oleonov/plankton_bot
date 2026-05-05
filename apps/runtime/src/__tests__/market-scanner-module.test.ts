@@ -76,13 +76,45 @@ function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
   };
 }
 
+/**
+ * Derive the per-page event stats the scanner expects from a flattened list
+ * of markets. Groups by `eventSlug` (falls back to `slug` for tests that
+ * don't set it) and tallies single- vs multi-market events using each
+ * group's `eventMarketCount`. Mirrors the gateway's per-page accounting.
+ */
+function eventStatsFromMarkets(markets: readonly ClobMarket[]): {
+  events: number;
+  singleMarket: number;
+  multiMarket: number;
+} {
+  const groups = new Map<string, ClobMarket[]>();
+  for (const m of markets) {
+    const key = m.eventSlug ?? m.slug;
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(m);
+    else groups.set(key, [m]);
+  }
+  let singleMarket = 0;
+  let multiMarket = 0;
+  for (const bucket of groups.values()) {
+    if (bucket[0]!.eventMarketCount === 1) singleMarket++;
+    else multiMarket++;
+  }
+  return { events: groups.size, singleMarket, multiMarket };
+}
+
+type ForEachMarketPageCallback = (
+  markets: ClobMarket[],
+  eventStats: { events: number; singleMarket: number; multiMarket: number },
+) => void;
+
 function createMockDiscoveryGateway(): MarketDiscoveryGateway {
   const discoverMarkets = vi.fn<() => Promise<ClobMarket[]>>().mockResolvedValue([]);
   return {
     discoverMarkets,
-    forEachMarketPage: vi.fn(async (cb: (markets: ClobMarket[]) => void) => {
+    forEachMarketPage: vi.fn(async (cb: ForEachMarketPageCallback) => {
       const markets = await discoverMarkets();
-      if (markets.length > 0) cb(markets);
+      if (markets.length > 0) cb(markets, eventStatsFromMarkets(markets));
       return { totalMarkets: markets.length };
     }),
     healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
@@ -463,9 +495,9 @@ describe("MarketScannerModule", () => {
     });
 
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb([page1Market]);
-        cb([page2Market]);
+      async (cb: ForEachMarketPageCallback) => {
+        cb([page1Market], eventStatsFromMarkets([page1Market]));
+        cb([page2Market], eventStatsFromMarkets([page2Market]));
         return { totalMarkets: 2 };
       },
     );
@@ -516,9 +548,9 @@ describe("MarketScannerModule", () => {
     ];
 
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb(page1);
-        cb(page2);
+      async (cb: ForEachMarketPageCallback) => {
+        cb(page1, eventStatsFromMarkets(page1));
+        cb(page2, eventStatsFromMarkets(page2));
         return { totalMarkets: 3 };
       },
     );
@@ -544,8 +576,8 @@ describe("MarketScannerModule", () => {
     const { mod, marketRepo } = buildModule({ discoveryGateway });
 
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb([]);
+      async (cb: ForEachMarketPageCallback) => {
+        cb([], eventStatsFromMarkets([]));
         return { totalMarkets: 0 };
       },
     );
@@ -564,8 +596,8 @@ describe("MarketScannerModule", () => {
     const { mod, marketRepo } = buildModule({ discoveryGateway });
 
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb([
+      async (cb: ForEachMarketPageCallback) => {
+        const page = [
           makeClobMarket({
             slug: "bitcoin-above-100k",
             conditionId: "cond-gamma",
@@ -576,7 +608,8 @@ describe("MarketScannerModule", () => {
             eventMarketCount: 1,
             gammaCreatedAt: "2026-04-15T08:30:00.000Z",
           }),
-        ]);
+        ];
+        cb(page, eventStatsFromMarkets(page));
         return { totalMarkets: 1 };
       },
     );
@@ -594,8 +627,8 @@ describe("MarketScannerModule", () => {
     const { mod, marketRepo } = buildModule({ discoveryGateway });
 
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb([
+      async (cb: ForEachMarketPageCallback) => {
+        const page = [
           makeClobMarket({
             slug: "bitcoin-above-200k",
             conditionId: "cond-no-gamma",
@@ -603,7 +636,8 @@ describe("MarketScannerModule", () => {
             eventMarketCount: 1,
             gammaCreatedAt: null,
           }),
-        ]);
+        ];
+        cb(page, eventStatsFromMarkets(page));
         return { totalMarkets: 1 };
       },
     );
@@ -624,8 +658,8 @@ describe("MarketScannerModule", () => {
 
     const tenMinutesAgo = new Date(Date.now() - 600_000).toISOString();
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb([
+      async (cb: ForEachMarketPageCallback) => {
+        const page = [
           makeClobMarket({
             slug: "bitcoin-above-100k",
             conditionId: "cond-fresh",
@@ -633,7 +667,8 @@ describe("MarketScannerModule", () => {
             eventMarketCount: 1,
             gammaCreatedAt: tenMinutesAgo,
           }),
-        ]);
+        ];
+        cb(page, eventStatsFromMarkets(page));
         return { totalMarkets: 1 };
       },
     );
@@ -653,8 +688,8 @@ describe("MarketScannerModule", () => {
     const { mod } = buildModule({ discoveryGateway });
 
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb([
+      async (cb: ForEachMarketPageCallback) => {
+        const page = [
           makeClobMarket({
             slug: "bitcoin-above-100k",
             conditionId: "cond-null-gamma",
@@ -662,7 +697,8 @@ describe("MarketScannerModule", () => {
             eventMarketCount: 1,
             gammaCreatedAt: null,
           }),
-        ]);
+        ];
+        cb(page, eventStatsFromMarkets(page));
         return { totalMarkets: 1 };
       },
     );
@@ -685,8 +721,8 @@ describe("MarketScannerModule", () => {
     const { mod } = buildModule({ discoveryGateway, marketRepo });
 
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb([
+      async (cb: ForEachMarketPageCallback) => {
+        const page = [
           makeClobMarket({
             slug: "bitcoin-above-100k",
             conditionId: "cond-known",
@@ -694,7 +730,8 @@ describe("MarketScannerModule", () => {
             eventMarketCount: 1,
             gammaCreatedAt: new Date(Date.now() - 600_000).toISOString(),
           }),
-        ]);
+        ];
+        cb(page, eventStatsFromMarkets(page));
         return { totalMarkets: 1 };
       },
     );
@@ -712,18 +749,17 @@ describe("MarketScannerModule", () => {
     const now = Date.now();
     const ages = [60_000, 120_000, 180_000, 240_000, 600_000];
     (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
-      async (cb: (markets: ClobMarket[]) => void) => {
-        cb(
-          ages.map((ageMs, i) =>
-            makeClobMarket({
-              slug: `bitcoin-above-${i}`,
-              conditionId: `cond-${i}`,
-              tokens: [{ tokenId: `tok-${i}`, outcome: "Yes" }],
-              eventMarketCount: 1,
-              gammaCreatedAt: new Date(now - ageMs).toISOString(),
-            }),
-          ),
+      async (cb: ForEachMarketPageCallback) => {
+        const page = ages.map((ageMs, i) =>
+          makeClobMarket({
+            slug: `bitcoin-above-${i}`,
+            conditionId: `cond-${i}`,
+            tokens: [{ tokenId: `tok-${i}`, outcome: "Yes" }],
+            eventMarketCount: 1,
+            gammaCreatedAt: new Date(now - ageMs).toISOString(),
+          }),
         );
+        cb(page, eventStatsFromMarkets(page));
         return { totalMarkets: ages.length };
       },
     );
@@ -1016,5 +1052,300 @@ describe("MarketScannerModule", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // ── Step 2 funnel breakdown (P2 acceptance) ──────────────────────────────
+  // ADR-019 §D4: 8 cumulative counters surface the live STEP-1 / STEP-2 /
+  // FINAL split alongside per-event single/multi totals so ADR-003 baseline
+  // drift (eventsSingleMarketTotal / scannedEventsTotal ≈ 39.17 %) is
+  // observable without re-grouping flattened markets.
+
+  describe("Step 2 funnel breakdown", () => {
+    it("counts a STEP 1 INCLUDE (slug-rule prefix match)", async () => {
+      const { mod, discoveryGateway } = buildModule();
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-above-100k",
+          eventSlug: "bitcoin-above-100k",
+          tokens: [{ tokenId: "tok-1", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.scannedMarketsTotal).toBe(1);
+      expect(snap.marketsStep1MatchedInclude).toBe(1);
+      expect(snap.marketsStep1MatchedExclude).toBe(0);
+      expect(snap.marketsStep2FallbackInclude).toBe(0);
+      expect(snap.marketsFinalExclude).toBe(0);
+    });
+
+    it("counts a STEP 1 EXCLUDE (slug-rule explicit exclude)", async () => {
+      const excludeEngine = makeEngine([
+        makeRule({ ruleId: "r-btc", ruleType: "include_prefix", pattern: "bitcoin-" }),
+        makeRule({ ruleId: "r-spam", ruleType: "exclude_slug", pattern: "bitcoin-spam" }),
+      ]);
+      const { mod, discoveryGateway } = buildModule({ selectionRuleEngine: excludeEngine });
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-spam",
+          eventSlug: "bitcoin-spam",
+          tokens: [{ tokenId: "tok-spam", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.marketsStep1MatchedInclude).toBe(0);
+      expect(snap.marketsStep1MatchedExclude).toBe(1);
+    });
+
+    it("counts a STEP 2 INCLUDE (no rule, single-market event)", async () => {
+      const { mod, discoveryGateway } = buildModule({ selectionRuleEngine: EMPTY_ENGINE });
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "us-election-winner",
+          eventSlug: "us-election-winner",
+          tokens: [{ tokenId: "tok-elect", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.marketsStep2FallbackInclude).toBe(1);
+      expect(snap.marketsFinalExclude).toBe(0);
+    });
+
+    it("counts a FINAL EXCLUDE (no rule, multi-market event)", async () => {
+      const { mod, discoveryGateway } = buildModule({ selectionRuleEngine: EMPTY_ENGINE });
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "best-pic-2026-oppenheimer",
+          eventSlug: "best-picture-2026",
+          tokens: [{ tokenId: "tok-multi", outcome: "Yes" }],
+          eventMarketCount: 8,
+        }),
+      ]);
+
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.marketsStep2FallbackInclude).toBe(0);
+      expect(snap.marketsFinalExclude).toBe(1);
+    });
+
+    it("counts per-event single-market totals from gateway eventStats", async () => {
+      // Two single-market events on one page — singleMarket=2, multiMarket=0.
+      const discoveryGateway = createMockDiscoveryGateway();
+      const { mod } = buildModule({ discoveryGateway });
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-above-100k",
+          eventSlug: "bitcoin-above-100k",
+          conditionId: "cond-evt-a",
+          tokens: [{ tokenId: "tok-evt-a", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+        makeClobMarket({
+          slug: "ethereum-above-5k",
+          eventSlug: "ethereum-above-5k",
+          conditionId: "cond-evt-b",
+          tokens: [{ tokenId: "tok-evt-b", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.scannedEventsTotal).toBe(2);
+      expect(snap.eventsSingleMarketTotal).toBe(2);
+      expect(snap.eventsMultiMarketTotal).toBe(0);
+    });
+
+    it("counts per-event multi-market totals from gateway eventStats", async () => {
+      // One single-market event + one multi-market event of 5 markets.
+      const discoveryGateway = createMockDiscoveryGateway();
+      const { mod } = buildModule({ discoveryGateway });
+      const multiMarkets = Array.from({ length: 5 }, (_, i) =>
+        makeClobMarket({
+          slug: `best-picture-${i}`,
+          eventSlug: "best-picture-2026",
+          conditionId: `cond-bp-${i}`,
+          tokens: [{ tokenId: `tok-bp-${i}`, outcome: "Yes" }],
+          eventMarketCount: 5,
+        }),
+      );
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-above-100k",
+          eventSlug: "bitcoin-above-100k",
+          conditionId: "cond-solo",
+          tokens: [{ tokenId: "tok-solo", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+        ...multiMarkets,
+      ]);
+
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.scannedEventsTotal).toBe(2);
+      expect(snap.eventsSingleMarketTotal).toBe(1);
+      expect(snap.eventsMultiMarketTotal).toBe(1);
+      // Per-market invariant: 1 (solo) + 5 (multi) = 6 markets in the partition.
+      expect(snap.scannedMarketsTotal).toBe(6);
+      expect(
+        snap.marketsStep1MatchedInclude +
+          snap.marketsStep1MatchedExclude +
+          snap.marketsStep2FallbackInclude +
+          snap.marketsFinalExclude,
+      ).toBe(6);
+    });
+
+    it("counters are cumulative across consecutive scans", async () => {
+      const { mod, discoveryGateway } = buildModule();
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-above-100k",
+          eventSlug: "bitcoin-above-100k",
+          tokens: [{ tokenId: "tok-c", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      await mod.scan();
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.scannedMarketsTotal).toBe(2);
+      expect(snap.scannedEventsTotal).toBe(2);
+      expect(snap.eventsSingleMarketTotal).toBe(2);
+      expect(snap.marketsStep1MatchedInclude).toBe(2);
+    });
+
+    it("getStep2BreakdownSnapshot() returns a defensive copy", async () => {
+      const { mod } = buildModule();
+      const a = mod.getStep2BreakdownSnapshot();
+      a.scannedMarketsTotal = 999;
+      const b = mod.getStep2BreakdownSnapshot();
+      expect(b.scannedMarketsTotal).toBe(0);
+    });
+
+    it("does not leak partial counters when the scan fails mid-pagination", async () => {
+      // ADR-019 §D4: counters represent successful scans only — Gamma
+      // pagination is order-biased, so a half-finished scan would skew the
+      // ADR-003 single-market ratio. A failure after page 1 must drop the
+      // page-1 delta entirely.
+      const discoveryGateway = createMockDiscoveryGateway();
+      const { mod } = buildModule({ discoveryGateway });
+      (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+        async (cb: ForEachMarketPageCallback) => {
+          const page = [
+            makeClobMarket({
+              slug: "bitcoin-above-100k",
+              eventSlug: "bitcoin-above-100k",
+              tokens: [{ tokenId: "tok-leak-1", outcome: "Yes" }],
+              eventMarketCount: 1,
+            }),
+          ];
+          cb(page, eventStatsFromMarkets(page));
+          throw new Error("page-2 fetch failed");
+        },
+      );
+
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap).toEqual({
+        scannedMarketsTotal: 0,
+        marketsStep1MatchedInclude: 0,
+        marketsStep1MatchedExclude: 0,
+        marketsStep2FallbackInclude: 0,
+        marketsFinalExclude: 0,
+        scannedEventsTotal: 0,
+        eventsSingleMarketTotal: 0,
+        eventsMultiMarketTotal: 0,
+      });
+    });
+
+    it("merges the pending delta only after a successful end-to-end scan", async () => {
+      // Sequence: failed scan (drops page-1 delta) → successful scan (merges
+      // its own delta). Cumulative counters must reflect only the successful
+      // scan, not the failed one.
+      const discoveryGateway = createMockDiscoveryGateway();
+      const { mod } = buildModule({ discoveryGateway });
+
+      const failingPage = [
+        makeClobMarket({
+          slug: "bitcoin-fail-page",
+          eventSlug: "bitcoin-fail-page",
+          tokens: [{ tokenId: "tok-fail", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ];
+      const successPage = [
+        makeClobMarket({
+          slug: "bitcoin-success",
+          eventSlug: "bitcoin-success",
+          tokens: [{ tokenId: "tok-ok", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ];
+
+      const fep = discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>;
+      fep.mockImplementationOnce(async (cb: ForEachMarketPageCallback) => {
+        cb(failingPage, eventStatsFromMarkets(failingPage));
+        throw new Error("scan crashed");
+      });
+      fep.mockImplementationOnce(async (cb: ForEachMarketPageCallback) => {
+        cb(successPage, eventStatsFromMarkets(successPage));
+        return { totalMarkets: successPage.length };
+      });
+
+      await mod.scan();
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.scannedMarketsTotal).toBe(1);
+      expect(snap.scannedEventsTotal).toBe(1);
+      expect(snap.eventsSingleMarketTotal).toBe(1);
+      expect(snap.marketsStep1MatchedInclude).toBe(1);
+    });
+
+    it("healthCheck() exposes step2Breakdown substring once a market has been scanned", async () => {
+      const { mod, discoveryGateway } = buildModule();
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-above-100k",
+          eventSlug: "bitcoin-above-100k",
+          tokens: [{ tokenId: "tok-hc", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      await mod.scan();
+
+      const h = await mod.healthCheck();
+      expect(h.detail).toContain("step2Breakdown");
+      expect(h.detail).toContain("step1Include=1");
+      expect(h.detail).toContain("singleMarket=1");
+    });
+
+    it("healthCheck() omits step2Breakdown substring before any market has been scanned", async () => {
+      const { mod, discoveryGateway } = buildModule();
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      await mod.scan();
+
+      const h = await mod.healthCheck();
+      expect(h.detail).not.toContain("step2Breakdown");
+    });
   });
 });

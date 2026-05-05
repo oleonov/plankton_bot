@@ -32,6 +32,7 @@ function makeTrackedMarket(overrides?: Partial<Market>): Market {
     tradable: true,
     tickSize: 0.01,
     negRisk: false,
+    eventMarketCount: 1,
     gammaCreatedAt: null,
     createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z",

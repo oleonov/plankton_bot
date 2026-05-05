@@ -1115,9 +1115,9 @@ function syncTrackedMarket(
     minOrderSize: current?.minOrderSize ?? null,
     bookSource: current?.bookSource ?? "unknown",
     snapshotTs: current?.snapshotTs ?? nowMs,
-    // Use the persisted eventMarketCount from the DB row (set by scanner since Phase 4).
-    // Fall back to current cached value, then to the DB default of 1.
-    eventMarketCount: tracked.eventMarketCount ?? current?.eventMarketCount ?? 1,
+    // Persisted eventMarketCount from the DB row (always set by scanner).
+    // Required field on Market — no silent `?? 1` fallback (ADR-019 §D2).
+    eventMarketCount: tracked.eventMarketCount,
     // Persisted Gamma createdAt — null-preserving in DB, propagated as-is here.
     gammaCreatedAt: tracked.gammaCreatedAt ?? current?.gammaCreatedAt ?? null,
   };
