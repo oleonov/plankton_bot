@@ -21,6 +21,8 @@ research/data/*.db-wal
 research/data/*.db-shm
 research/data/docs/
 research_plankton/data/
+research_plankton/*.json
+research_plankton/*.tar.gz
 research_old/
 
 # Local trade DB pulled for ad-hoc analysis (never committed)
