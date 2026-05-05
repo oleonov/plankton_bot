@@ -194,10 +194,7 @@ describe("GammaMarketDiscoveryGateway", () => {
 
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValueOnce(
-      mockFetchResponse([
-        makeEvent("empty-1", []),
-        { id: "no-markets-field", slug: "bare-event" },
-      ]),
+      mockFetchResponse([makeEvent("empty-1", []), { id: "no-markets-field", slug: "bare-event" }]),
     );
 
     const cb = vi.fn();

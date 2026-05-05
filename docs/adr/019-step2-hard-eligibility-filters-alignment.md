@@ -204,9 +204,9 @@ Invariants (asserted in `market-scanner-module.test.ts`):
 
 - Market partition (disjoint per market):
   `scannedMarketsTotal == marketsStep1MatchedInclude
-                     + marketsStep1MatchedExclude
-                     + marketsStep2FallbackInclude
-                     + marketsFinalExclude`.
+                   + marketsStep1MatchedExclude
+                   + marketsStep2FallbackInclude
+                   + marketsFinalExclude`.
 - Event partition (disjoint per event):
   `scannedEventsTotal == eventsSingleMarketTotal + eventsMultiMarketTotal`.
 - Apples-to-apples vs ADR-003:
