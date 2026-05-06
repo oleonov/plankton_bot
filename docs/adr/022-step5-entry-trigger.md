@@ -79,7 +79,7 @@ same evaluation tick:
    dedupe; applies only when `legState === null`
    (`algo-decision-module.ts:683-698`).
 4. `isAlive(market) === true` — `acceptingOrders &&
-   enableOrderBook && bestBid != null`
+enableOrderBook && bestBid != null`
    (`packages/domain/src/market-selection.ts:68-74`). Spread is **not**
    part of the liveness gate.
 5. `legState === null` (no open scale-in leg).
@@ -95,24 +95,24 @@ same evaluation tick:
    `resolution_tracker_unavailable`, `market_resolved`,
    `canPlaceBuyOrderForMarket` reasons all clear
    (`apps/runtime/src/modules/risk-inventory/risk-inventory-module.ts:204-238`
-   + `packages/domain/src/market-selection.ts:110-141`).
+   - `packages/domain/src/market-selection.ts:110-141`).
 10. `AlgoRiskGate.evaluate` passes — no open BUY of `pending` /
     `open` / `partially-filled` status, no open `Position` (status
     ≠ `closed`) for `ProbeEntry`, `signal.suggestedSize >=
-    minOrderSize`, `hasWalletBuyBudget(walletBudget,
-    suggestedSizeUsdc) === true` where `walletBudget` is sourced
+minOrderSize`, `hasWalletBuyBudget(walletBudget,
+suggestedSizeUsdc) === true` where `walletBudget` is sourced
     from `orderRepo.sumOpenBuyNotional()`
     (`apps/runtime/src/modules/risk-inventory/algo-risk-gate.ts:40-99`).
 11. signal-to-order bridge passes — `executionTerms.price <=
-    entryPriceCeiling` (default `0.75`, ADR-013), dead-side guard
+entryPriceCeiling` (default `0.75`, ADR-013), dead-side guard
     `bestAsk > 0.02 OR timeToEnd > 120s`
     (`apps/runtime/src/modules/strategy/signal-to-order.ts:389-460`).
     Pricing mode = `edge` (`bestBid` for BUY) or `bounded-midpoint`
     (ADR-006/014).
 12. ExecutionModule live-lite caps pass — `notional <=
-    liveLiteOrderCap`, total post-BUY exposure `<=
-    liveLiteOpenValueCap`, active markets `<=
-    liveLiteActiveMarketsCap` (ADR-009; only enforced in
+liveLiteOrderCap`, total post-BUY exposure `<=
+liveLiteOpenValueCap`, active markets `<=
+liveLiteActiveMarketsCap` (ADR-009; only enforced in
     `live-lite` mode).
 
 Step (8) is the substantive trigger decision. All other gates are
@@ -144,12 +144,12 @@ three branches (`algo-decision-module.ts:810-883`):
 1. **Continuation gate fails** —
    `evaluateContinuation(legTradeCount, firstTradePrice) === false`
    (i.e. `legTradeCount < 6 AND (firstTradePrice < 0.05 OR
-   legTradeCount < 2)`,
+legTradeCount < 2)`,
    `packages/domain/src/market-selection.ts:51-55`). The token is
    matched against `SELL_ONLY` rules (continuation gate constrains
    only BUY-side scale-in; SELL leg-exits are not blocked).
 2. **Preserved-only branch** — `legState !== null AND
-   market.tradable === false`. The market is delisted for new
+market.tradable === false`. The market is delisted for new
    entries; only `SELL_ONLY` rules fire. **FALLBACK BUY does not
    fire** in this branch even if the continuation gate would
    otherwise pass.
@@ -168,7 +168,7 @@ Continuation cadence is throttled by:
 - The continuation gate itself (`legTradeCount >= 6` or 2
   successive trades on `firstTradePrice >= 0.05`).
 - `AlgoRiskGate` open-BUY check (`orderRepo.findByTokenId.some(side =
-  buy AND status ∈ {pending, open, partially-filled})`) — this is the
+buy AND status ∈ {pending, open, partially-filled})`) — this is the
   predominant continuation duplicate-protection;
   `pendingEntries[tokenId]` only applies on first-BUY (`!legState`).
 
@@ -198,7 +198,7 @@ FALLBACK fires in two situations:
    requires S2, D6 requires S2 with `buyCount>=4`, D7 requires
    S3). FALLBACK is the only path to BUY.
 2. **Legged scale-in** — `legState !== null AND market.tradable
-   === true AND continuation gate passed AND no D1-D7 match`. Same
+=== true AND continuation gate passed AND no D1-D7 match`. Same
    FALLBACK rule applies.
 
 FALLBACK does **not** fire in the preserved-only branch
@@ -290,7 +290,7 @@ Three read-only telemetry additions, surfaced in the
 healthcheck. **No behavioural change.**
 
 1. **`signal_emitted.payload.dropFromLastSeen`** — `(price -
-   prevMidPrice) / prevMidPrice` where `prevMidPrice` is the
+prevMidPrice) / prevMidPrice` where `prevMidPrice` is the
    `midPrice` of the immediately previous `NormalizedMarketUpdated`
    for this token. `null` on the first observation of a token
    (no prior sample) **and** after any null-mid gap (a
@@ -427,6 +427,6 @@ JSON column and added fields are forward-compatible.
   rule).
 - ADR-017 — Step 0 §P3 min-age gate (`entryMinMarketAgeSeconds=2_504`).
 - ADR-020 — Step 3 soft-ranking score (`MVP does not gate BUYs by
-  score`); D-D re-affirms.
+score`); D-D re-affirms.
 - ADR-021 — Step 4 watch-set formation; D-F here mirrors ADR-021
   §D-F telemetry style.
