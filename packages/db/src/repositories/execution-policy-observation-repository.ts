@@ -16,8 +16,8 @@ export class SqliteExecutionPolicyObservationRepository implements ExecutionPoli
             bounded_price, bounded_outcome, spread_ticks, improvement_ticks,
             dead_side_observed, dead_side_bucket, dead_side_enforce_hit,
             dead_side_x60, dead_side_x120, dead_side_x300, dead_side_x900,
-            time_to_end_ms, skipped_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            time_to_end_ms, skipped_reason, pricing_delta_ticks, round_level_hit)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         obs.profileId,
@@ -44,6 +44,8 @@ export class SqliteExecutionPolicyObservationRepository implements ExecutionPoli
         obs.deadSideX900 ? 1 : 0,
         obs.timeToEndMs,
         obs.skippedReason,
+        obs.pricingDeltaTicks,
+        obs.roundLevelHit,
       );
   }
 }

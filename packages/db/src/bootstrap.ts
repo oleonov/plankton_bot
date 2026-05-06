@@ -371,6 +371,8 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "fills", "liquidity_role", "TEXT NOT NULL DEFAULT 'unknown'");
   safeAddColumn(conn.db, "fills", "fee_rate_bps", "REAL NOT NULL DEFAULT 0");
   safeAddColumn(conn.db, "execution_policy_observations", "decision_rule_id", "TEXT");
+  safeAddColumn(conn.db, "execution_policy_observations", "pricing_delta_ticks", "REAL");
+  safeAddColumn(conn.db, "execution_policy_observations", "round_level_hit", "TEXT");
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
   ensureUniqueOpenPositionIndex(conn.db);
   setRuntimeBusyTimeout(conn);

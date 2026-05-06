@@ -1960,6 +1960,12 @@ describe("ADR-015 execution policy observations", () => {
     expect(row.skippedReason).toBeNull();
     expect(row.deadSideObserved).toBe(false);
     expect(row.deadSideEnforceHit).toBe(false);
+    // ADR-023 D-F telemetry. Bounded-midpoint with bb=0.4/ba=0.42
+    // (tickSize=0.01) snaps the raw candidate (midpoint - tick = 0.40)
+    // back to the edge — selectedPrice equals bestBid, delta = 0 ticks,
+    // and 0.40 is a multiple of 0.05 → "0.05x".
+    expect(row.pricingDeltaTicks).toBe(0);
+    expect(row.roundLevelHit).toBe("0.05x");
   });
 
   it("writes a skip observation with skippedReason when dead-side enforce blocks BUY", async () => {
@@ -2009,6 +2015,12 @@ describe("ADR-015 execution policy observations", () => {
     expect(row.deadSideX120).toBe(true);
     expect(row.deadSideBucket).toBe("<1m");
     expect(row.timeToEndMs).toBe(30_000);
+    // ADR-023 D-F: dead-side enforce blocks AFTER resolveExecutionTerms — the
+    // edge-mode selectedPrice is recorded as the would-have-been price, so the
+    // delta + round-level still land on the row. selectedPrice=bestBid=0.005,
+    // tickSize=0.001 → delta=0, 0.005 is a multiple of 0.005 not 0.05/0.01.
+    expect(row.pricingDeltaTicks).toBe(0);
+    expect(row.roundLevelHit).toBe("0.005x");
   });
 
   it("does not write when observations repo is absent", async () => {
@@ -2106,6 +2118,10 @@ describe("ADR-015 execution policy observations", () => {
     expect(rows[0]!.skippedReason).toBe("execution-price-unavailable");
     expect(rows[0]!.boundedOutcome).toBe("not-computed");
     expect(rows[0]!.selectedPrice).toBeNull();
+    // ADR-023 D-F: no selectedPrice → both telemetry fields are null
+    // (preserves the "we don't know" gap rather than emitting a fake 0).
+    expect(rows[0]!.pricingDeltaTicks).toBeNull();
+    expect(rows[0]!.roundLevelHit).toBeNull();
   });
 
   it("writes a skip observation when bounded-midpoint rejects wide spread", async () => {
@@ -2143,6 +2159,84 @@ describe("ADR-015 execution policy observations", () => {
     expect(rows[0]!.skippedReason).toBe("spread-above-cap");
     expect(rows[0]!.boundedOutcome).toBe("skip");
     expect(rows[0]!.selectedPrice).toBeNull();
+    // ADR-023 D-F: skip path → selectedPrice null → telemetry null.
+    expect(rows[0]!.pricingDeltaTicks).toBeNull();
+    expect(rows[0]!.roundLevelHit).toBeNull();
+  });
+
+  it("writes a skip observation when bounded-midpoint rejects one-sided book", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const policy: ExecutionPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      pricing: {
+        ...DEFAULT_EXECUTION_POLICY.pricing,
+        mode: "bounded-midpoint",
+        oneSidedPolicy: "skip",
+      },
+    };
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => policy,
+      observations: repo,
+      profileId: PROFILE_ID,
+    });
+    bridge.subscribe();
+
+    // bestAsk null → bounded-midpoint resolver returns skip-one-sided.
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.4, bestAsk: null }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.skippedReason).toBe("one-sided-book");
+    expect(rows[0]!.boundedOutcome).toBe("skip");
+    expect(rows[0]!.selectedPrice).toBeNull();
+    expect(rows[0]!.pricingDeltaTicks).toBeNull();
+    expect(rows[0]!.roundLevelHit).toBeNull();
+  });
+
+  it("writes a skip observation when edge-mode price fails tick-grid validation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      observations: repo,
+      profileId: PROFILE_ID,
+    });
+    bridge.subscribe();
+
+    // bestBid 0.4005 is off-grid for tickSize=0.01 → resolveExecutionTerms
+    // returns "invalid". writeObservation records the rejected price as
+    // selectedPrice so analytics can see the magnitude of the off-grid drift.
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.4005, bestAsk: 0.42, tickSize: 0.01 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.skippedReason).toBe("execution-price-invalid");
+    expect(rows[0]!.boundedOutcome).toBe("invalid");
+    expect(rows[0]!.selectedPrice).toBe(0.4005);
+    // 0.4005 vs bestBid 0.4005: delta=0. Off-grid price → roundLevelHit
+    // computed from the value itself: not min_tick, not 0.05x/0.01x, but
+    // 0.4005/0.005=80.1 not integer → off-round.
+    expect(rows[0]!.pricingDeltaTicks).toBe(0);
+    expect(rows[0]!.roundLevelHit).toBe("off-round");
   });
 
   it("writes a skip observation when BUY price exceeds entry ceiling", async () => {
@@ -2175,6 +2269,11 @@ describe("ADR-015 execution policy observations", () => {
     expect(rows[0]!.skippedReason).toBe("price-above-entry-ceiling");
     // In edge mode the chosen bestBid is recorded as the would-have-been price.
     expect(rows[0]!.selectedPrice).toBe(0.5);
+    // ADR-023 D-F: telemetry is computed from the would-have-been price even
+    // on a skip row, so dashboards see the same delta + bucket distribution
+    // as if the order had been placed.
+    expect(rows[0]!.pricingDeltaTicks).toBe(0);
+    expect(rows[0]!.roundLevelHit).toBe("0.05x");
   });
 });
 

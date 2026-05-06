@@ -40,6 +40,8 @@ import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import {
+  classifyRoundLevel,
+  computePricingDeltaTicks,
   resolveBoundedMidpointPrice,
   validateExecutablePrice,
   type BoundedMidpointDiagnostics,
@@ -551,6 +553,14 @@ export class SignalToOrderBridge {
         executionTerms,
         policy.pricing.mode,
       );
+      const pricingDeltaTicks = computePricingDeltaTicks(
+        signal.side,
+        selectedPrice,
+        market.bestBid,
+        market.bestAsk,
+        market.tickSize,
+      );
+      const roundLevelHit = classifyRoundLevel(selectedPrice, market.tickSize);
       const row: ExecutionPolicyObservation = {
         profileId: String(profileId),
         signalId: signal.signalId,
@@ -576,6 +586,8 @@ export class SignalToOrderBridge {
         deadSideX900: canary?.shadowHits.x900_000 ?? false,
         timeToEndMs: canary?.timeToEndMs ?? null,
         skippedReason,
+        pricingDeltaTicks,
+        roundLevelHit,
       };
       observations.insert(row);
     } catch (err) {

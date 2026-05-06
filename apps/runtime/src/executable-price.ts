@@ -1,4 +1,4 @@
-import type { PriceLevel } from "@plankton/domain";
+import type { PriceLevel, PricingRoundLevel } from "@plankton/domain";
 
 const DEFAULT_TICK_SIZE = 0.01;
 const PRICE_EPSILON = 1e-9;
@@ -395,6 +395,62 @@ export function resolveBoundedMidpointPrice(input: BoundedMidpointInput): Bounde
   return improved
     ? { kind: "improved", price: finalPrice, diagnostics: diag }
     : { kind: "edge", price: finalPrice, diagnostics: diag };
+}
+
+/**
+ * ADR-023 D-F telemetry. Distance from the order's natural edge in ticks:
+ *   BUY  → (selectedPrice - bestBid) / tickSize
+ *   SELL → (bestAsk - selectedPrice) / tickSize
+ * Positive = improvement toward midpoint, 0 = at edge, negative = below edge
+ * (e.g. R29-style sub-bid fill prices). Returns null when the relevant edge
+ * or tickSize is missing/invalid so the observation row preserves the gap.
+ *
+ * Rounded to 4 decimal places (ADR-023 §D-F) so on-grid prices read as exact
+ * tick counts and dashboards aren't polluted by `(0.41 - 0.4) / 0.01`-style
+ * fp residue.
+ */
+export function computePricingDeltaTicks(
+  side: ExecutableSide,
+  selectedPrice: number | null,
+  bestBid: number | null,
+  bestAsk: number | null,
+  tickSize: number,
+): number | null {
+  if (selectedPrice == null || !Number.isFinite(selectedPrice)) return null;
+  if (!Number.isFinite(tickSize) || tickSize <= 0) return null;
+  const edge = side === "buy" ? bestBid : bestAsk;
+  if (edge == null || !Number.isFinite(edge)) return null;
+  const delta = side === "buy" ? selectedPrice - edge : edge - selectedPrice;
+  return Math.round((delta / tickSize) * 1e4) / 1e4;
+}
+
+/**
+ * ADR-023 D-F telemetry. Round-level taxonomy from R29 evidence — buckets
+ * are mutually exclusive in precedence order so a price is classified as the
+ * most specific tier it qualifies for:
+ *   `min_tick`  → exactly tickSize
+ *   `0.05x`     → multiple of 0.05
+ *   `0.01x`     → multiple of 0.01 (excluding above)
+ *   `0.005x`    → multiple of 0.005 (excluding above)
+ *   `off-round` → none of the above
+ * Returns null when price/tickSize is missing/invalid.
+ */
+export function classifyRoundLevel(
+  price: number | null,
+  tickSize: number,
+): PricingRoundLevel | null {
+  if (price == null || !Number.isFinite(price)) return null;
+  if (!Number.isFinite(tickSize) || tickSize <= 0) return null;
+  if (Math.abs(price - tickSize) <= PRICE_EPSILON) return "min_tick";
+  if (isMultipleOf(price, 0.05)) return "0.05x";
+  if (isMultipleOf(price, 0.01)) return "0.01x";
+  if (isMultipleOf(price, 0.005)) return "0.005x";
+  return "off-round";
+}
+
+function isMultipleOf(price: number, base: number): boolean {
+  const ratio = price / base;
+  return Math.abs(ratio - Math.round(ratio)) <= 1e-6;
 }
 
 export function deriveExecutableTopOfBook(

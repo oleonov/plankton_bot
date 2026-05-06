@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ceilToTick,
+  classifyRoundLevel,
   clampExecutablePrice,
+  computePricingDeltaTicks,
   deriveExecutableTopOfBook,
   floorToTick,
   resolveBoundedMidpointPrice,
@@ -362,5 +364,96 @@ describe("resolveBoundedMidpointPrice (ADR-014)", () => {
         }
       }
     }
+  });
+});
+
+describe("computePricingDeltaTicks", () => {
+  it("returns zero when BUY is at bestBid", () => {
+    expect(computePricingDeltaTicks("buy", 0.4, 0.4, 0.42, 0.01)).toBe(0);
+  });
+
+  it("returns positive ticks when BUY price improves above bestBid", () => {
+    expect(computePricingDeltaTicks("buy", 0.41, 0.4, 0.42, 0.01)).toBeCloseTo(1, 9);
+  });
+
+  it("rounds to 4 decimal places to absorb fp residue on on-grid prices", () => {
+    // (0.41 - 0.4) / 0.01 === 0.9999999999999953 in IEEE-754; ADR-023 D-F
+    // says emit `1` not `0.9999999999999953` so dashboards see exact tick
+    // counts.
+    expect(computePricingDeltaTicks("buy", 0.41, 0.4, null, 0.01)).toBe(1);
+    expect(computePricingDeltaTicks("sell", 0.41, null, 0.42, 0.01)).toBe(1);
+  });
+
+  it("returns negative ticks when BUY fill is below bestBid (R29 fill evidence)", () => {
+    // entry_trigger_threshold_refinement_results.json checkpoint 0 — fills
+    // landed below the pseudo-market reconstruction by a median of ~9 ticks.
+    expect(computePricingDeltaTicks("buy", 0.4, 0.49, null, 0.01)).toBeCloseTo(-9, 9);
+  });
+
+  it("returns positive ticks when SELL price improves below bestAsk", () => {
+    expect(computePricingDeltaTicks("sell", 0.41, 0.4, 0.42, 0.01)).toBeCloseTo(1, 9);
+  });
+
+  it("returns zero when SELL is at bestAsk", () => {
+    expect(computePricingDeltaTicks("sell", 0.42, 0.4, 0.42, 0.01)).toBe(0);
+  });
+
+  it("returns null when the relevant edge is missing", () => {
+    expect(computePricingDeltaTicks("buy", 0.4, null, 0.42, 0.01)).toBeNull();
+    expect(computePricingDeltaTicks("sell", 0.4, 0.39, null, 0.01)).toBeNull();
+  });
+
+  it("returns null when selectedPrice or tickSize is invalid", () => {
+    expect(computePricingDeltaTicks("buy", null, 0.4, 0.42, 0.01)).toBeNull();
+    expect(computePricingDeltaTicks("buy", 0.4, 0.4, 0.42, 0)).toBeNull();
+    expect(computePricingDeltaTicks("buy", Number.NaN, 0.4, 0.42, 0.01)).toBeNull();
+  });
+});
+
+describe("classifyRoundLevel", () => {
+  it("classifies the minimum tick as min_tick", () => {
+    expect(classifyRoundLevel(0.01, 0.01)).toBe("min_tick");
+    expect(classifyRoundLevel(0.001, 0.001)).toBe("min_tick");
+  });
+
+  it("min_tick wins precedence over coarser buckets", () => {
+    // 0.01 is also a multiple of 0.05 only via the integer ladder, but
+    // crucially 0.01 is a multiple of 0.01 — yet at tickSize=0.01 it must
+    // classify as min_tick rather than 0.01x.
+    expect(classifyRoundLevel(0.01, 0.01)).toBe("min_tick");
+  });
+
+  it("classifies multiples of 0.05 as 0.05x", () => {
+    expect(classifyRoundLevel(0.05, 0.001)).toBe("0.05x");
+    expect(classifyRoundLevel(0.5, 0.001)).toBe("0.05x");
+    expect(classifyRoundLevel(0.95, 0.001)).toBe("0.05x");
+  });
+
+  it("classifies multiples of 0.01 (excluding 0.05x) as 0.01x", () => {
+    expect(classifyRoundLevel(0.01, 0.001)).toBe("0.01x");
+    expect(classifyRoundLevel(0.42, 0.001)).toBe("0.01x");
+    expect(classifyRoundLevel(0.99, 0.001)).toBe("0.01x");
+  });
+
+  it("classifies multiples of 0.005 (excluding above) as 0.005x", () => {
+    expect(classifyRoundLevel(0.005, 0.001)).toBe("0.005x");
+    expect(classifyRoundLevel(0.025, 0.001)).toBe("0.005x");
+    expect(classifyRoundLevel(0.495, 0.001)).toBe("0.005x");
+  });
+
+  it("classifies everything else as off-round", () => {
+    expect(classifyRoundLevel(0.003, 0.001)).toBe("off-round");
+    expect(classifyRoundLevel(0.123, 0.001)).toBe("off-round");
+    expect(classifyRoundLevel(0.987, 0.001)).toBe("off-round");
+  });
+
+  it("is robust to floating-point residue at the 1e-6 tolerance", () => {
+    expect(classifyRoundLevel(0.1 + 0.2, 0.001)).toBe("0.05x");
+  });
+
+  it("returns null for missing/invalid inputs", () => {
+    expect(classifyRoundLevel(null, 0.001)).toBeNull();
+    expect(classifyRoundLevel(0.5, 0)).toBeNull();
+    expect(classifyRoundLevel(Number.NaN, 0.01)).toBeNull();
   });
 });

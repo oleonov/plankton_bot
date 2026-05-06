@@ -605,8 +605,18 @@ export interface ExecutionPolicyObservation {
   deadSideX900: boolean;
   timeToEndMs: number | null;
   skippedReason: string | null;
+  pricingDeltaTicks: number | null;
+  roundLevelHit: PricingRoundLevel | null;
   createdAt?: string;
 }
+
+/**
+ * ADR-023 D-F pricing telemetry — round-level taxonomy from R29 evidence
+ * (entry_trigger_threshold_refinement_results.json checkpoint 0).
+ * Precedence is mutually exclusive top-down: a price classified as `min_tick`
+ * never also counts as `0.05x`, even when both predicates match.
+ */
+export type PricingRoundLevel = "min_tick" | "0.05x" | "0.01x" | "0.005x" | "off-round";
 
 // ─── Algo Decision Engine Types ─────────────────────────────────────────
 

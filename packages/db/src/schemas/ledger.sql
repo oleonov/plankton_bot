@@ -300,6 +300,8 @@ CREATE TABLE IF NOT EXISTS execution_policy_observations (
   dead_side_x900           INTEGER NOT NULL DEFAULT 0,
   time_to_end_ms           INTEGER,
   skipped_reason           TEXT,
+  pricing_delta_ticks      REAL,
+  round_level_hit          TEXT,
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
