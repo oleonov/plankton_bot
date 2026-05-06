@@ -162,7 +162,7 @@ guard. It enforces three invariants on `algo_size_rules` rows where
    and returns the first match, so a FALLBACK that drifted to a
    priority value ≤ another rule would silently hijack BUY/SELL
    evaluation before the operator-defined ladder ever ran. The
-   *exact* priority value (and `size_usdc`) is deliberately **not**
+   _exact_ priority value (and `size_usdc`) is deliberately **not**
    asserted: operators may tune fallback notional via the control-DB
    rules API and bump fallback priority arbitrarily without
    triggering this invariant. Order, not value, is the structural
@@ -213,7 +213,7 @@ Both columns persist on every `decision_signal_log` row reached by
 the emit path (success emit and price-skipped emit) so analytics see
 the full distribution at the point the bot decided a notional,
 before any downstream price-resolution / clamp / risk gate. Decisions
-the algo drops *before* allocating a `signal_id` — chiefly the
+the algo drops _before_ allocating a `signal_id` — chiefly the
 wallet-budget guard at the top of `runEvaluation` — are intentionally
 not logged today: there is no Signal yet to attach telemetry to. If a
 future change wants distribution coverage for those drops, a separate
@@ -297,20 +297,20 @@ documented and retained for v1.
 
 Runtime floor sites (all share-denominated):
 
-| Site | Floor / clamp |
-| ---- | ------------- |
-| `algo-risk-gate.ts:80-86` (`AlgoRiskGate.evaluate`) | exchange `minOrderSize` per token |
-| `risk-inventory-module.ts:320-326` | `tokenMinOrderSize` cache from market metadata |
-| `execution-module.ts:297-309` (`getMinOrderSizeRejection`) | pre-placement rejection |
-| `execution-module.ts:357` (clamp applied; decision at `:689-700`) | SELL reservation clamp (ADR-008) |
-| `execution-module.ts:358` (post-clamp min-check) | re-check after SELL clamp |
+| Site                                                              | Floor / clamp                                  |
+| ----------------------------------------------------------------- | ---------------------------------------------- |
+| `algo-risk-gate.ts:80-86` (`AlgoRiskGate.evaluate`)               | exchange `minOrderSize` per token              |
+| `risk-inventory-module.ts:320-326`                                | `tokenMinOrderSize` cache from market metadata |
+| `execution-module.ts:297-309` (`getMinOrderSizeRejection`)        | pre-placement rejection                        |
+| `execution-module.ts:357` (clamp applied; decision at `:689-700`) | SELL reservation clamp (ADR-008)               |
+| `execution-module.ts:358` (post-clamp min-check)                  | re-check after SELL clamp                      |
 
 USDC-denominated sites:
 
-| Site | Status |
-| ---- | ------ |
-| `profile-preflight.ts:88-99` | preflight only (`min_order_usdc ≥ $0.50` EOA / `≥ $0.05` relayer) |
-| `live-lite-guard.ts:43-50` (`isOrderAboveMin`) | defined but no production caller; `live-lite-guard.test.ts` is the only invocation |
+| Site                                                   | Status                                                                                              |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `profile-preflight.ts:88-99`                           | preflight only (`min_order_usdc ≥ $0.50` EOA / `≥ $0.05` relayer)                                   |
+| `live-lite-guard.ts:43-50` (`isOrderAboveMin`)         | defined but no production caller; `live-lite-guard.test.ts` is the only invocation                  |
 | `live-lite-guard.ts:55-59` (`getMinEntryNotionalUsdc`) | private constant `CLOB_MARKETABLE_BUY_MIN_USDC = 1` consumed here only; no production caller either |
 
 There is a known structural discrepancy between the legacy
