@@ -169,6 +169,16 @@ export interface DecisionSignalLog {
   addPriceChangePct: number | null;
   addPriceChangeBucket: AddPriceChangeBucket | null;
   nthBuyAtEmit: number | null;
+  // ADR-027 §D-B — exit telemetry; non-null on SELL rows only. BUY/REDEEM
+  // rows carry nulls so the decision_signal_log stays one-row-per-emission.
+  isExit: 0 | 1 | null;
+  isFirstSell: 0 | 1 | null;
+  holdingTimeMs: number | null;
+  holdingTimeBucket: HoldingTimeBucket | null;
+  exitPnlPct: number | null;
+  exitPnlBucket: ExitPnlBucket | null;
+  soldBoughtRatio: number | null;
+  soldBoughtRatioBucket: SoldBoughtRatioBucket | null;
 }
 
 /**
@@ -237,6 +247,44 @@ export type AddPriceChangeBucket =
   | "+10% to +25%"
   | "+25% to +50%"
   | "above +50%";
+
+/**
+ * ADR-027 §D-D — exit pnl bucket taxonomy.
+ * Mirrors canonical §11.2 exit profit distribution buckets at
+ * `06_algorithm_spec.md` v5.13. Boundaries are signed fractional
+ * (e.g. `-0.5` = `-50%`); left-inclusive / right-exclusive except
+ * for the unbounded tails (`<-50%` and `>+100%`). Used to classify
+ * `(sellPrice - rollingCostBasis) / rollingCostBasis`.
+ */
+export type ExitPnlBucket =
+  | "<-50%"
+  | "-50% to -10%"
+  | "-10% to 0%"
+  | "0% to +5%"
+  | "+5% to +10%"
+  | "+10% to +25%"
+  | "+25% to +50%"
+  | "+50% to +100%"
+  | ">+100%";
+
+/**
+ * ADR-027 §D-D — leg holding-time bucket taxonomy.
+ * Mirrors canonical §11.2 holding-time-first-BUY-to-first-SELL
+ * distribution buckets at `06_algorithm_spec.md` v5.13. Boundaries
+ * are left-inclusive / right-exclusive except the unbounded `>30d`
+ * tail. Used to classify `(sellTimestamp - firstBuyTimestamp)`.
+ */
+export type HoldingTimeBucket = "<1h" | "1-6h" | "6-24h" | "1-7d" | "7-30d" | ">30d";
+
+/**
+ * ADR-027 §D-D — sold/bought shares ratio bucket taxonomy.
+ * Mirrors canonical §11.2 sold/bought shares ratio distribution
+ * buckets at `06_algorithm_spec.md` v5.13. The `0%` bucket includes
+ * <1% rounding (matches the spec's coarse zero classification);
+ * the `>=100%` bucket includes ≥99% rounding. Used to classify
+ * `cumulative_sell_size / cumulative_buy_size` at SELL emit time.
+ */
+export type SoldBoughtRatioBucket = "0%" | "1-25%" | "25-50%" | "50-75%" | "75-99%" | ">=100%";
 
 // ─── Risk Decision ────────────────────────────────────────────────────────────
 
@@ -749,6 +797,32 @@ export interface LegState {
   firstTradeAt: string;
   lastTradeAt: string;
   updatedAt: string;
+  /**
+   * ADR-027 §D-C — cumulative shares bought across all BUY fills on this leg.
+   * Numerator of the sold/bought ratio; denominator of the rolling cost basis
+   * VWAP. Optional in the type so legacy test fixtures stay valid; the
+   * production read paths in `nextLegStateForFill` and the SQLite repo
+   * coalesce undefined to 0. Re-materialised on next bot restart via
+   * updateLegStateForFill replay.
+   */
+  cumulativeBuySize?: number;
+  /**
+   * ADR-027 §D-C — cumulative USDC paid across all BUY fills on this leg
+   * (Σ size_usdc, with fallback to price * size for legacy fills missing
+   * size_usdc). This is the lifetime buy-VWAP numerator; it equals
+   * positions.avg_entry_price on the first SELL but diverges afterwards
+   * because the inventory engine recomputes avg_entry_price via FIFO from
+   * remaining lots. exit_pnl_pct accordingly sources the rolling basis
+   * from positions.avg_entry_price; this column stays as audit telemetry
+   * / fallback for the (test-only) no-positionRepo path. Optional — see
+   * cumulativeBuySize.
+   */
+  cumulativeBuyNotional?: number;
+  /**
+   * ADR-027 §D-C — cumulative shares sold across all SELL fills on this leg.
+   * Numerator of the sold/bought ratio. Optional — see cumulativeBuySize.
+   */
+  cumulativeSellSize?: number;
 }
 
 export type LegPhase = "S0" | "S1" | "S2" | "S3" | "S4";

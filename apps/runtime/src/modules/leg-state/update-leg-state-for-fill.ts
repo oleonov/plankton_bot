@@ -89,6 +89,24 @@ export function nextLegStateForFill(
   fill: LegStateFillInput,
   now: string,
 ): LegState | null {
+  // ADR-027 §D-C — accumulate buy/sell sizes + buy notional at the same
+  // chokepoint that maintains buy_count / sell_count, so backfill on next
+  // bot restart happens automatically via the ledger-replay path. fill.size
+  // is null on legacy events that pre-date the size-on-fill plumbing; treat
+  // those as zero-contribution to keep the cumulative columns monotonic.
+  // BUY notional uses sizeUsdc (cash delivered) to mirror inventory-handler's
+  // `unitCost = sizeUsdc / size`, so the LIFETIME VWAP
+  // (cumulative_buy_notional / cumulative_buy_size) tracks the same arithmetic
+  // as the first-SELL avg_entry_price. After partial sells, the inventory
+  // engine recomputes positions.avg_entry_price via FIFO from remaining lots —
+  // the lifetime VWAP no longer matches, and exit_pnl_pct sources the rolling
+  // basis from positions.avg_entry_price directly (these columns stay as
+  // audit telemetry / fallback). Fall back to price * size only when sizeUsdc
+  // is missing (legacy fills).
+  const fillSize = Number.isFinite(fill.size) ? (fill.size as number) : 0;
+  const fillBuyNotional = Number.isFinite(fill.sizeUsdc)
+    ? (fill.sizeUsdc as number)
+    : fill.price * fillSize;
   if (fill.side === "buy") {
     if (!existing) {
       return {
@@ -100,6 +118,9 @@ export function nextLegStateForFill(
         firstTradeAt: fill.filledAt,
         lastTradeAt: fill.filledAt,
         updatedAt: now,
+        cumulativeBuySize: fillSize,
+        cumulativeBuyNotional: fillBuyNotional,
+        cumulativeSellSize: 0,
       };
     }
     return {
@@ -108,6 +129,8 @@ export function nextLegStateForFill(
       lastAction: "BUY",
       lastTradeAt: fill.filledAt,
       updatedAt: now,
+      cumulativeBuySize: (existing.cumulativeBuySize ?? 0) + fillSize,
+      cumulativeBuyNotional: (existing.cumulativeBuyNotional ?? 0) + fillBuyNotional,
     };
   }
 
@@ -119,6 +142,7 @@ export function nextLegStateForFill(
     lastAction: "SELL",
     lastTradeAt: fill.filledAt,
     updatedAt: now,
+    cumulativeSellSize: (existing.cumulativeSellSize ?? 0) + fillSize,
   };
 }
 

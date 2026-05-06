@@ -4,8 +4,11 @@ import {
   classifyAddAgeBucket,
   classifyAddPriceChangeBucket,
   classifyCancelAgeBucket,
+  classifyExitPnlBucket,
+  classifyHoldingTimeBucket,
   classifyNotionalBucket,
   classifyRoundLevel,
+  classifySoldBoughtRatioBucket,
   clampExecutablePrice,
   computePricingDeltaTicks,
   deriveExecutableTopOfBook,
@@ -577,5 +580,87 @@ describe("classifyAddPriceChangeBucket", () => {
     expect(classifyAddPriceChangeBucket(Number.NaN)).toBeNull();
     expect(classifyAddPriceChangeBucket(Number.POSITIVE_INFINITY)).toBeNull();
     expect(classifyAddPriceChangeBucket(Number.NEGATIVE_INFINITY)).toBeNull();
+  });
+});
+
+describe("classifyExitPnlBucket", () => {
+  it("classifies values strictly below each upper bound (boundary is exclusive)", () => {
+    expect(classifyExitPnlBucket(-0.9)).toBe("<-50%");
+    expect(classifyExitPnlBucket(-0.500001)).toBe("<-50%");
+    expect(classifyExitPnlBucket(-0.5)).toBe("-50% to -10%");
+    expect(classifyExitPnlBucket(-0.10001)).toBe("-50% to -10%");
+    expect(classifyExitPnlBucket(-0.1)).toBe("-10% to 0%");
+    expect(classifyExitPnlBucket(-0.00001)).toBe("-10% to 0%");
+    expect(classifyExitPnlBucket(0)).toBe("0% to +5%");
+    expect(classifyExitPnlBucket(0.04999)).toBe("0% to +5%");
+    expect(classifyExitPnlBucket(0.05)).toBe("+5% to +10%");
+    expect(classifyExitPnlBucket(0.09999)).toBe("+5% to +10%");
+    expect(classifyExitPnlBucket(0.1)).toBe("+10% to +25%");
+    expect(classifyExitPnlBucket(0.24999)).toBe("+10% to +25%");
+    expect(classifyExitPnlBucket(0.25)).toBe("+25% to +50%");
+    expect(classifyExitPnlBucket(0.49999)).toBe("+25% to +50%");
+    expect(classifyExitPnlBucket(0.5)).toBe("+50% to +100%");
+    expect(classifyExitPnlBucket(0.99999)).toBe("+50% to +100%");
+    expect(classifyExitPnlBucket(1)).toBe(">+100%");
+    expect(classifyExitPnlBucket(10)).toBe(">+100%");
+  });
+
+  it("returns null for missing or invalid inputs", () => {
+    expect(classifyExitPnlBucket(null)).toBeNull();
+    expect(classifyExitPnlBucket(Number.NaN)).toBeNull();
+    expect(classifyExitPnlBucket(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(classifyExitPnlBucket(Number.NEGATIVE_INFINITY)).toBeNull();
+  });
+});
+
+describe("classifyHoldingTimeBucket", () => {
+  it("classifies values strictly below each upper bound (boundary is exclusive)", () => {
+    expect(classifyHoldingTimeBucket(0)).toBe("<1h");
+    expect(classifyHoldingTimeBucket(3_599_999)).toBe("<1h");
+    expect(classifyHoldingTimeBucket(3_600_000)).toBe("1-6h");
+    expect(classifyHoldingTimeBucket(21_599_999)).toBe("1-6h");
+    expect(classifyHoldingTimeBucket(21_600_000)).toBe("6-24h");
+    expect(classifyHoldingTimeBucket(86_399_999)).toBe("6-24h");
+    expect(classifyHoldingTimeBucket(86_400_000)).toBe("1-7d");
+    expect(classifyHoldingTimeBucket(604_799_999)).toBe("1-7d");
+    expect(classifyHoldingTimeBucket(604_800_000)).toBe("7-30d");
+    expect(classifyHoldingTimeBucket(2_591_999_999)).toBe("7-30d");
+    expect(classifyHoldingTimeBucket(2_592_000_000)).toBe(">30d");
+    expect(classifyHoldingTimeBucket(10 * 2_592_000_000)).toBe(">30d");
+  });
+
+  it("returns null for missing or invalid inputs", () => {
+    expect(classifyHoldingTimeBucket(null)).toBeNull();
+    expect(classifyHoldingTimeBucket(Number.NaN)).toBeNull();
+    expect(classifyHoldingTimeBucket(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(classifyHoldingTimeBucket(Number.NEGATIVE_INFINITY)).toBeNull();
+    expect(classifyHoldingTimeBucket(-1)).toBeNull();
+  });
+});
+
+describe("classifySoldBoughtRatioBucket", () => {
+  it("classifies values strictly below each upper bound (boundary is exclusive)", () => {
+    expect(classifySoldBoughtRatioBucket(0)).toBe("0%");
+    expect(classifySoldBoughtRatioBucket(0.005)).toBe("0%");
+    expect(classifySoldBoughtRatioBucket(0.00999)).toBe("0%");
+    expect(classifySoldBoughtRatioBucket(0.01)).toBe("1-25%");
+    expect(classifySoldBoughtRatioBucket(0.24999)).toBe("1-25%");
+    expect(classifySoldBoughtRatioBucket(0.25)).toBe("25-50%");
+    expect(classifySoldBoughtRatioBucket(0.49999)).toBe("25-50%");
+    expect(classifySoldBoughtRatioBucket(0.5)).toBe("50-75%");
+    expect(classifySoldBoughtRatioBucket(0.74999)).toBe("50-75%");
+    expect(classifySoldBoughtRatioBucket(0.75)).toBe("75-99%");
+    expect(classifySoldBoughtRatioBucket(0.98999)).toBe("75-99%");
+    expect(classifySoldBoughtRatioBucket(0.99)).toBe(">=100%");
+    expect(classifySoldBoughtRatioBucket(1)).toBe(">=100%");
+    expect(classifySoldBoughtRatioBucket(2)).toBe(">=100%");
+  });
+
+  it("returns null for missing or invalid inputs", () => {
+    expect(classifySoldBoughtRatioBucket(null)).toBeNull();
+    expect(classifySoldBoughtRatioBucket(Number.NaN)).toBeNull();
+    expect(classifySoldBoughtRatioBucket(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(classifySoldBoughtRatioBucket(Number.NEGATIVE_INFINITY)).toBeNull();
+    expect(classifySoldBoughtRatioBucket(-0.01)).toBeNull();
   });
 });

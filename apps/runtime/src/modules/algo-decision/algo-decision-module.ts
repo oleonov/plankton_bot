@@ -28,6 +28,7 @@ import type {
   TokenId,
   ConditionId,
   OrderRepository,
+  PositionRepository,
   ProfileId,
   DecisionSignalLog,
   DecisionSignalLogRepository,
@@ -59,7 +60,10 @@ import {
 import {
   classifyAddAgeBucket,
   classifyAddPriceChangeBucket,
+  classifyExitPnlBucket,
+  classifyHoldingTimeBucket,
   classifyNotionalBucket,
+  classifySoldBoughtRatioBucket,
 } from "../../executable-price.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
@@ -126,6 +130,24 @@ type EmissionFacts = {
   firstTradePrice: number | null;
   firstTradeAt: string | null;
   legTradeCount: number;
+  // ADR-027 §D-B — leg-local cumulative aggregates required to compute
+  // exit-telemetry (rolling cost basis VWAP, sold/bought ratio, holding
+  // time, first-sell flag) at SELL signal-emit time. Null when no
+  // pre-existing leg state (i.e. first BUY emission).
+  sellCountAtEmit?: number | null;
+  cumulativeBuySize?: number | null;
+  cumulativeBuyNotional?: number | null;
+  cumulativeSellSize?: number | null;
+  /**
+   * ADR-027 §D-B — canonical rolling cost basis from `positions.avg_entry_price`,
+   * sampled at signal-emit time. The runtime recomputes this via FIFO from
+   * remaining lots after each SELL fill (`inventory-handler.ts`), so it stays
+   * accurate across partial sells. The lifetime VWAP
+   * (`cumulative_buy_notional / cumulative_buy_size`) only matches this on the
+   * first SELL — subsequent SELLs need the rolling value or `exit_pnl_pct`
+   * silently shifts. Null when no open position exists for the token.
+   */
+  currentAvgEntryPrice?: number | null;
   continuationStop?: boolean | null;
   continuationTradeCount?: number | null;
   continuationTradeCountSource?: TradeCountSource | null;
@@ -155,6 +177,84 @@ type TriggerTelemetry = {
   dropFromLastSeen: number | null;
   entryPriceBucket: EntryPriceBucket;
 };
+
+/**
+ * ADR-027 §D-B — exit telemetry derived facts captured at SELL signal-emit
+ * time. BUY/REDEEM rows return all-null. Rolling cost basis is sourced from
+ * `positions.avg_entry_price` (recomputed via FIFO after each SELL fill in
+ * `inventory-handler.ts`), with a fallback to lifetime VWAP
+ * (`cumulative_buy_notional / cumulative_buy_size`) when the position row is
+ * unavailable. The lifetime VWAP only matches `avg_entry_price` on the first
+ * SELL — afterwards FIFO deductions diverge it. Holding time is signal-precise
+ * (not fill-precise); §11.2 analysts filter `WHERE is_first_sell = 1` for the
+ * canonical first-SELL distribution. Negative holding-time deltas (clock skew
+ * / future firstTradeAt) collapse to null rather than `<1h`.
+ */
+type ExitTelemetry = Pick<
+  DecisionSignalLog,
+  | "isExit"
+  | "isFirstSell"
+  | "holdingTimeMs"
+  | "holdingTimeBucket"
+  | "exitPnlPct"
+  | "exitPnlBucket"
+  | "soldBoughtRatio"
+  | "soldBoughtRatioBucket"
+>;
+
+const NULL_EXIT_TELEMETRY: ExitTelemetry = {
+  isExit: null,
+  isFirstSell: null,
+  holdingTimeMs: null,
+  holdingTimeBucket: null,
+  exitPnlPct: null,
+  exitPnlBucket: null,
+  soldBoughtRatio: null,
+  soldBoughtRatioBucket: null,
+};
+
+function computeExitTelemetry(
+  side: "buy" | "sell",
+  price: number,
+  nowMs: number,
+  emissionFacts: EmissionFacts,
+): ExitTelemetry {
+  if (side !== "sell") return NULL_EXIT_TELEMETRY;
+
+  const cumulativeBuySize = emissionFacts.cumulativeBuySize ?? 0;
+  const cumulativeBuyNotional = emissionFacts.cumulativeBuyNotional ?? 0;
+  const cumulativeSellSize = emissionFacts.cumulativeSellSize ?? 0;
+  const sellCount = emissionFacts.sellCountAtEmit ?? 0;
+
+  const firstTradeAtMs = emissionFacts.firstTradeAt
+    ? new Date(emissionFacts.firstTradeAt).getTime()
+    : null;
+  const rawHoldingMs =
+    firstTradeAtMs != null && Number.isFinite(firstTradeAtMs) ? nowMs - firstTradeAtMs : null;
+  const holdingTimeMs = rawHoldingMs != null && rawHoldingMs >= 0 ? rawHoldingMs : null;
+
+  const fallbackBasis =
+    cumulativeBuySize > 0 ? cumulativeBuyNotional / cumulativeBuySize : null;
+  const rollingBasis = emissionFacts.currentAvgEntryPrice ?? null;
+  const costBasis =
+    rollingBasis != null && rollingBasis > 0 && Number.isFinite(rollingBasis)
+      ? rollingBasis
+      : fallbackBasis;
+  const exitPnlPct = costBasis != null && costBasis > 0 ? (price - costBasis) / costBasis : null;
+
+  const soldBoughtRatio = cumulativeBuySize > 0 ? cumulativeSellSize / cumulativeBuySize : null;
+
+  return {
+    isExit: 1,
+    isFirstSell: sellCount === 0 ? 1 : 0,
+    holdingTimeMs,
+    holdingTimeBucket: classifyHoldingTimeBucket(holdingTimeMs),
+    exitPnlPct,
+    exitPnlBucket: classifyExitPnlBucket(exitPnlPct),
+    soldBoughtRatio,
+    soldBoughtRatioBucket: classifySoldBoughtRatioBucket(soldBoughtRatio),
+  };
+}
 
 type ContinuationFacts = {
   tradeCount: number;
@@ -208,6 +308,13 @@ export interface AlgoDecisionModuleDeps {
   legStateRepo: LegStateRepository;
   algoRulesRepo: AlgoRulesRepository;
   orderRepo?: Pick<OrderRepository, "sumOpenBuyNotional"> | undefined;
+  /**
+   * ADR-027 §D-B — used to read `positions.avg_entry_price` (FIFO-recomputed
+   * after each SELL fill) at signal-emit time, so `exit_pnl_pct` reflects the
+   * rolling cost basis of remaining lots rather than the lifetime buy VWAP.
+   * Optional: omitted only by tests that don't exercise SELL telemetry.
+   */
+  positionRepo?: Pick<PositionRepository, "findByTokenId"> | undefined;
   decisionSignalLogRepo?: DecisionSignalLogRepository | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
   selectedMarketCache: SelectedMarketCache;
@@ -722,10 +829,16 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     const state = deriveState(legState);
     const buyCount = legState?.buyCount ?? 0;
+    const position = legState ? (this.deps.positionRepo?.findByTokenId(tokenId) ?? null) : null;
     const emissionFacts: EmissionFacts = {
       firstTradePrice: legState?.firstTradePrice ?? null,
       firstTradeAt: legState?.firstTradeAt ?? null,
       legTradeCount: (legState?.buyCount ?? 0) + (legState?.sellCount ?? 0),
+      sellCountAtEmit: legState?.sellCount ?? null,
+      cumulativeBuySize: legState?.cumulativeBuySize ?? null,
+      cumulativeBuyNotional: legState?.cumulativeBuyNotional ?? null,
+      cumulativeSellSize: legState?.cumulativeSellSize ?? null,
+      currentAvgEntryPrice: position?.avgEntryPrice ?? null,
     };
     const timeSinceLastSeconds = legState
       ? (now - new Date(legState.lastTradeAt).getTime()) / 1000
@@ -835,6 +948,15 @@ export class AlgoDecisionModule implements RuntimeModule {
             addPriceChangePct: null,
             addPriceChangeBucket: null,
             nthBuyAtEmit: null,
+            // ADR-027 §D-B — exit telemetry is SELL-only; REDEEM rows carry nulls.
+            isExit: null,
+            isFirstSell: null,
+            holdingTimeMs: null,
+            holdingTimeBucket: null,
+            exitPnlPct: null,
+            exitPnlBucket: null,
+            soldBoughtRatio: null,
+            soldBoughtRatioBucket: null,
           },
           {
             firstTradePrice: emissionFacts.firstTradePrice,
@@ -1086,6 +1208,11 @@ export class AlgoDecisionModule implements RuntimeModule {
         : null;
     const nthBuyAtEmit = side === "buy" ? nthBuy : null;
 
+    // ADR-027 §D-B — denormalize §11.2 exit telemetry at SELL signal-emit time.
+    // Mirrors the §D-B BUY-side adds-telemetry pattern: BUY/REDEEM rows carry
+    // nulls so decision_signal_log stays one-row-per-emission.
+    const exitTelemetry = computeExitTelemetry(side, ctx.price, now, emissionFacts);
+
     const commitLog = (): void => {
       this.recordDecisionSignal(
         {
@@ -1107,6 +1234,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           addPriceChangePct,
           addPriceChangeBucket: classifyAddPriceChangeBucket(addPriceChangePct),
           nthBuyAtEmit,
+          ...exitTelemetry,
         },
         emissionFacts,
         triggerTelemetry,

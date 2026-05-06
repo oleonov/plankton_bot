@@ -232,6 +232,7 @@ async function executeScenario(fixture: ScenarioFixture, dbPath: string): Promis
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
     orderRepo: repos.order,
+    positionRepo: repos.position,
     selectedMarketCache,
     runtimeControl,
     log,

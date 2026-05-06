@@ -43,6 +43,14 @@ describe("SqliteDecisionSignalLogRepository", () => {
       addPriceChangePct: null,
       addPriceChangeBucket: null,
       nthBuyAtEmit: null,
+      isExit: 1,
+      isFirstSell: 1,
+      holdingTimeMs: 5_400_000,
+      holdingTimeBucket: "1-6h",
+      exitPnlPct: 0.4,
+      exitPnlBucket: "+25% to +50%",
+      soldBoughtRatio: 0,
+      soldBoughtRatioBucket: "0%",
     });
 
     const row = conn.db.prepare("SELECT * FROM decision_signal_log").get() as
@@ -67,6 +75,14 @@ describe("SqliteDecisionSignalLogRepository", () => {
       add_price_change_pct: null,
       add_price_change_bucket: null,
       nth_buy_at_emit: null,
+      is_exit: 1,
+      is_first_sell: 1,
+      holding_time_ms: 5_400_000,
+      holding_time_bucket: "1-6h",
+      exit_pnl_pct: 0.4,
+      exit_pnl_bucket: "+25% to +50%",
+      sold_bought_ratio: 0,
+      sold_bought_ratio_bucket: "0%",
     });
   });
 
@@ -90,6 +106,15 @@ describe("SqliteDecisionSignalLogRepository", () => {
       addPriceChangePct: -0.18,
       addPriceChangeBucket: "-25% to -10%",
       nthBuyAtEmit: 3,
+      // BUY rows carry null exit-telemetry per ADR-027 §D-B.
+      isExit: null,
+      isFirstSell: null,
+      holdingTimeMs: null,
+      holdingTimeBucket: null,
+      exitPnlPct: null,
+      exitPnlBucket: null,
+      soldBoughtRatio: null,
+      soldBoughtRatioBucket: null,
     });
 
     const row = conn.db
@@ -102,6 +127,14 @@ describe("SqliteDecisionSignalLogRepository", () => {
       add_price_change_pct: -0.18,
       add_price_change_bucket: "-25% to -10%",
       nth_buy_at_emit: 3,
+      is_exit: null,
+      is_first_sell: null,
+      holding_time_ms: null,
+      holding_time_bucket: null,
+      exit_pnl_pct: null,
+      exit_pnl_bucket: null,
+      sold_bought_ratio: null,
+      sold_bought_ratio_bucket: null,
     });
   });
 });

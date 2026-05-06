@@ -2,9 +2,12 @@ import type {
   AddAgeBucket,
   AddPriceChangeBucket,
   CancelAgeBucket,
+  ExitPnlBucket,
+  HoldingTimeBucket,
   NotionalBucket,
   PriceLevel,
   PricingRoundLevel,
+  SoldBoughtRatioBucket,
 } from "@plankton/domain";
 
 const DEFAULT_TICK_SIZE = 0.01;
@@ -563,6 +566,98 @@ export function classifyAddPriceChangeBucket(pct: number | null): AddPriceChange
   if (pct < 0.25) return "+10% to +25%";
   if (pct < 0.5) return "+25% to +50%";
   return "above +50%";
+}
+
+/**
+ * ADR-027 §D-D telemetry. Maps a signed fractional pnl pct
+ * (`(sellPrice - rollingCostBasis) / rollingCostBasis`) onto the
+ * canonical §11.2 exit-profit-distribution bucket taxonomy.
+ * Boundaries are left-inclusive / right-exclusive (`[lower, upper)`)
+ * for the interior buckets; the tails (`<-50%`, `>+100%`) are
+ * unbounded.
+ *
+ * Returns null when the input is null or non-finite. Note: callers
+ * must skip when `rollingCostBasis` is zero or non-positive
+ * (mirrors `classifyAddPriceChangeBucket` divide-by-zero handling).
+ */
+export function classifyExitPnlBucket(pct: number | null): ExitPnlBucket | null {
+  if (pct == null || !Number.isFinite(pct)) return null;
+  // Snap to 1e-9 to keep the documented [lower, upper) boundary contract
+  // honest under float arithmetic. Without this, mathematically exact
+  // boundary values (e.g. (0.15-0.10)/0.10 == 0.4999999999999999) fall
+  // into the lower bucket because of the binary-rounding artifact.
+  const snapped = Math.round(pct * 1e9) / 1e9;
+  if (snapped < -0.5) return "<-50%";
+  if (snapped < -0.1) return "-50% to -10%";
+  if (snapped < 0) return "-10% to 0%";
+  if (snapped < 0.05) return "0% to +5%";
+  if (snapped < 0.1) return "+5% to +10%";
+  if (snapped < 0.25) return "+10% to +25%";
+  if (snapped < 0.5) return "+25% to +50%";
+  if (snapped < 1) return "+50% to +100%";
+  return ">+100%";
+}
+
+/**
+ * ADR-027 §D-D telemetry. Maps a leg holding duration (ms, signed
+ * but expected non-negative — clock-skew negatives are returned as
+ * null per `classifyAddAgeBucket` convention) onto the canonical
+ * §11.2 holding-time-first-BUY-to-first-SELL bucket taxonomy.
+ * Boundaries are left-inclusive / right-exclusive (`[lower, upper)`)
+ * except the unbounded `>30d` tail.
+ *
+ * Bucket boundaries (ms):
+ *   <1h    → ms < 3_600_000
+ *   1-6h   → 3_600_000   ≤ ms < 21_600_000
+ *   6-24h  → 21_600_000  ≤ ms < 86_400_000
+ *   1-7d   → 86_400_000  ≤ ms < 604_800_000
+ *   7-30d  → 604_800_000 ≤ ms < 2_592_000_000
+ *   >30d   → 2_592_000_000 ≤ ms
+ *
+ * Returns null when ms is null, non-finite, or negative.
+ */
+export function classifyHoldingTimeBucket(ms: number | null): HoldingTimeBucket | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  if (ms < 3_600_000) return "<1h";
+  if (ms < 21_600_000) return "1-6h";
+  if (ms < 86_400_000) return "6-24h";
+  if (ms < 604_800_000) return "1-7d";
+  if (ms < 2_592_000_000) return "7-30d";
+  return ">30d";
+}
+
+/**
+ * ADR-027 §D-D telemetry. Maps a sold/bought shares ratio
+ * (`cumulative_sell_size / cumulative_buy_size`) onto the canonical
+ * §11.2 sold/bought-ratio bucket taxonomy. The `0%` bucket includes
+ * `<1%` rounding (spec coarse-rounds zero); the `>=100%` bucket
+ * includes `≥99%` rounding (spec coarse-rounds full exit).
+ *
+ * Bucket boundaries (fraction, e.g. `0.5` = `50%`):
+ *   0%      → ratio < 0.01
+ *   1-25%   → 0.01 ≤ ratio < 0.25
+ *   25-50%  → 0.25 ≤ ratio < 0.50
+ *   50-75%  → 0.50 ≤ ratio < 0.75
+ *   75-99%  → 0.75 ≤ ratio < 0.99
+ *   >=100%  → 0.99 ≤ ratio
+ *
+ * Returns null when ratio is null, non-finite, or negative.
+ * Callers must skip when `cumulative_buy_size <= 0` (divide-by-zero).
+ */
+export function classifySoldBoughtRatioBucket(
+  ratio: number | null,
+): SoldBoughtRatioBucket | null {
+  if (ratio == null || !Number.isFinite(ratio) || ratio < 0) return null;
+  // See classifyExitPnlBucket — snap to 1e-9 so values that are
+  // mathematically on a boundary (e.g. 50/200 == 0.25) honor the
+  // documented [lower, upper) contract under float arithmetic.
+  const snapped = Math.round(ratio * 1e9) / 1e9;
+  if (snapped < 0.01) return "0%";
+  if (snapped < 0.25) return "1-25%";
+  if (snapped < 0.5) return "25-50%";
+  if (snapped < 0.75) return "50-75%";
+  if (snapped < 0.99) return "75-99%";
+  return ">=100%";
 }
 
 export function deriveExecutableTopOfBook(

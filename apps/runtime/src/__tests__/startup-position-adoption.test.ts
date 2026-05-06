@@ -603,6 +603,191 @@ describe("runStartupPositionAdoption", () => {
       expect(legStateRepo.get(TOKEN_ID)).toBeNull();
     });
 
+    it("scopes replay past prior closed-leg fills — prior fills don't leak into rebuilt leg_state", async () => {
+      // ADR-027 §D-B — a token can have a prior CLOSED leg and a later
+      // reopened active position with no leg_state row (e.g. control DB
+      // migrated independently). The rebuild must scope fills to
+      // `filled_at > MAX(prior closed_at)`. opened_at is wall-clock and can
+      // race ahead of an exchange-supplied filled_at; closed_at is always
+      // strictly after the prior leg's last fill, so it gives a clean strict
+      // lower bound that excludes the old leg without dropping the active
+      // leg's opening fill.
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+
+      // Prior closed leg with its own fills — must be ignored by the rebuild:
+      positionRepo.save({
+        positionId: createPositionId("pos-prior"),
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        size: 0,
+        avgEntryPrice: 0.1,
+        costBasisUsdc: 0,
+        currentValueUsdc: 0,
+        realizedPnl: 0,
+        status: "closed",
+        entryStyle: "probe",
+        openedAt: "2026-03-01T00:00:00Z",
+        closedAt: "2026-03-15T00:00:00Z",
+        updatedAt: "2026-03-15T00:00:00Z",
+      });
+      seedFill(fillRepo, { fillId: "f-old-1", price: 0.10, filledAt: "2026-03-01T00:00:00Z" });
+      seedFill(fillRepo, {
+        fillId: "f-old-2",
+        side: "sell",
+        price: 0.15,
+        filledAt: "2026-03-02T00:00:00Z",
+      });
+
+      // Active position with one BUY whose exchange filled_at is BEFORE its
+      // wall-clock opened_at — exercises the clock-skew gap that broke the
+      // earlier opened_at-based scope.
+      seedOpenPosition(positionRepo, { openedAt: "2026-04-01T00:00:01Z" });
+      seedFill(fillRepo, {
+        fillId: "f-new-1",
+        side: "buy",
+        price: 0.42,
+        filledAt: "2026-04-01T00:00:00Z",
+      });
+
+      const { result, legStateRepo } = await runRebuild(conn);
+
+      expect(result.seededLegStates).toBe(1);
+      const state = legStateRepo.get(TOKEN_ID);
+      // Without scoping: buyCount=2, sellCount=1, firstTradePrice=0.10.
+      // With prior-close scoping (`filled_at > "2026-03-15"`): only the
+      // active leg's BUY survives, even though its filled_at < opened_at.
+      expect(state?.buyCount).toBe(1);
+      expect(state?.sellCount).toBe(0);
+      expect(state?.firstTradePrice).toBe(0.42);
+      expect(state?.firstTradeAt).toBe("2026-04-01T00:00:00Z");
+    });
+
+    it("ignores synthetic late closed_at (post-active-leg) when scoping replay", async () => {
+      // Bootstrap's duplicate-open repair (`ensureUniqueOpenPositionIndex`)
+      // closes losing duplicates with `closed_at = datetime('now')`, which
+      // can be AFTER the active leg's actual fills. The replay scope must
+      // pick the largest `closed_at < active.opened_at`, not a global MAX,
+      // or that synthetic timestamp would mask out the active leg's own
+      // fills and leave the position without a leg_state row.
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+
+      // Active position opened 2026-04-01 — its first BUY fill is here:
+      seedOpenPosition(positionRepo, {
+        positionId: createPositionId("pos-active"),
+        openedAt: "2026-04-01T00:00:00Z",
+      });
+      seedFill(fillRepo, {
+        fillId: "f-active-1",
+        side: "buy",
+        price: 0.42,
+        filledAt: "2026-04-01T00:00:01Z",
+      });
+
+      // Synthetic late-closed duplicate row: opened earlier (2026-03-25) but
+      // closed_at synthesised at "2026-05-10" by the dup-open repair. With
+      // an unfiltered MAX(closed_at), this would set the lower bound past
+      // the active leg's fill and orphan the position.
+      positionRepo.save({
+        positionId: createPositionId("pos-dup"),
+        tokenId: TOKEN_ID,
+        conditionId: createConditionId("cond-1"),
+        side: "buy",
+        size: 0,
+        avgEntryPrice: 0.1,
+        costBasisUsdc: 0,
+        currentValueUsdc: 0,
+        realizedPnl: 0,
+        status: "closed",
+        entryStyle: "probe",
+        openedAt: "2026-03-25T00:00:00Z",
+        closedAt: "2026-05-10T00:00:00Z",
+        updatedAt: "2026-05-10T00:00:00Z",
+      });
+
+      const { result, legStateRepo } = await runRebuild(conn);
+
+      expect(result.seededLegStates).toBe(1);
+      expect(result.positionsWithoutFills).toEqual([]);
+      const state = legStateRepo.get(TOKEN_ID);
+      expect(state?.buyCount).toBe(1);
+      expect(state?.firstTradePrice).toBe(0.42);
+    });
+
+    it("uses time parsing (not lexical sort) when comparing mixed-format timestamps", async () => {
+      // bootstrap.ts:600 (`ensureUniqueOpenPositionIndex`) writes
+      // `closed_at = datetime('now')`, which yields SQLite's compact format
+      // `YYYY-MM-DD HH:MM:SS` (space separator), while runtime opens/fills
+      // are ISO strings `...T...Z`. Lexical ordering disagrees with
+      // chronological ordering across the two formats because space (0x20)
+      // sorts before T (0x54). With raw text comparison, an ISO timestamp
+      // at 08:00 sorts AFTER an SQLite-format timestamp at 10:00 on the
+      // same date — so a stale prior-leg fill at 08:00 ISO would slip past
+      // a `filled_at > "YYYY-MM-DD 10:00:00"` predicate and leak into the
+      // active leg's rebuilt counts. We use julianday() to compare both
+      // sides numerically.
+      const conn = bootstrapLedgerDb(":memory:");
+      connections.push(conn);
+      const { fillRepo, positionRepo } = primeLedger(conn);
+
+      // Active position opened the next day.
+      seedOpenPosition(positionRepo, {
+        positionId: createPositionId("pos-active"),
+        openedAt: "2026-04-02T00:00:00.000Z",
+      });
+      seedFill(fillRepo, {
+        fillId: "f-active",
+        side: "buy",
+        price: 0.42,
+        filledAt: "2026-04-02T00:00:01.000Z",
+      });
+
+      // Stale fill from the prior leg, BEFORE the synthetic close at 10:00
+      // SQLite-format. Should be excluded by the replay scope. With raw
+      // text comparison, "2026-04-01T08:00:00.000Z" > "2026-04-01 10:00:00"
+      // (T > space at char 10) — so the broken impl wrongly includes it.
+      seedFill(fillRepo, {
+        fillId: "f-stale",
+        side: "buy",
+        price: 0.99,
+        filledAt: "2026-04-01T08:00:00.000Z",
+      });
+
+      // Bypass repository writes to inject SQLite's space-format timestamp
+      // directly, mirroring what `ensureUniqueOpenPositionIndex` produces
+      // via `datetime('now')`.
+      conn.db
+        .prepare(
+          `INSERT INTO positions (
+             position_id, token_id, condition_id, side, size,
+             avg_entry_price, cost_basis_usdc, current_value_usdc,
+             realized_pnl, status, entry_style,
+             opened_at, closed_at, updated_at
+           ) VALUES (?, ?, ?, 'buy', 0, 0.1, 0, 0, 0, 'closed', 'probe', ?, ?, ?)`,
+        )
+        .run(
+          "pos-prior",
+          TOKEN_ID,
+          "cond-1",
+          "2026-04-01T07:00:00.000Z",
+          "2026-04-01 10:00:00",
+          "2026-04-01 10:00:00",
+        );
+
+      const { result, legStateRepo } = await runRebuild(conn);
+
+      expect(result.seededLegStates).toBe(1);
+      const state = legStateRepo.get(TOKEN_ID);
+      // Only the active fill should count — the stale 08:00 ISO fill must
+      // not bleed past the 10:00 SQLite-format prior close boundary.
+      expect(state?.buyCount).toBe(1);
+      expect(state?.firstTradePrice).toBe(0.42);
+    });
+
     it("dedups tokens with coexisting open + dust rows (counts fills once)", async () => {
       const conn = bootstrapLedgerDb(":memory:");
       connections.push(conn);

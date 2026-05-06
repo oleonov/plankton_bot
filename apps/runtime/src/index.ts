@@ -750,6 +750,7 @@ async function main(): Promise<void> {
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
     orderRepo: repos.order,
+    positionRepo: repos.position,
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,
     selectedMarketCache,

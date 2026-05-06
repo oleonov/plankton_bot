@@ -129,6 +129,14 @@ CREATE TABLE IF NOT EXISTS decision_signal_log (
   add_price_change_pct     REAL,
   add_price_change_bucket  TEXT,
   nth_buy_at_emit          INTEGER,
+  is_exit                  INTEGER,
+  is_first_sell            INTEGER,
+  holding_time_ms          INTEGER,
+  holding_time_bucket      TEXT,
+  exit_pnl_pct             REAL,
+  exit_pnl_bucket          TEXT,
+  sold_bought_ratio        REAL,
+  sold_bought_ratio_bucket TEXT,
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -422,7 +430,11 @@ CREATE TABLE IF NOT EXISTS leg_states (
   first_trade_price       REAL NOT NULL,
   first_trade_at          TEXT NOT NULL,
   last_trade_at           TEXT NOT NULL,
-  updated_at              TEXT NOT NULL
+  updated_at              TEXT NOT NULL,
+  -- ADR-027 §D-C: cumulative sizes for §11.2 cost basis + sold/bought ratio.
+  cumulative_buy_size     REAL NOT NULL DEFAULT 0,
+  cumulative_buy_notional REAL NOT NULL DEFAULT 0,
+  cumulative_sell_size    REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS leg_state_transitions (

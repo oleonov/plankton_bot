@@ -72,7 +72,141 @@ describe("updateLegStateForFill", () => {
       firstTradeAt: "2026-01-01T00:00:00Z",
       lastTradeAt: "2026-01-01T00:00:00Z",
       updatedAt: "2026-01-01T00:00:01Z",
+      cumulativeBuySize: 0,
+      cumulativeBuyNotional: 0,
+      cumulativeSellSize: 0,
     });
+  });
+
+  it("accumulates cumulative buy size and notional across BUY fills", () => {
+    const repo = createMockLegStateRepo();
+    const log = createMockLogger();
+
+    updateLegStateForFill(
+      repo,
+      { tokenId: TOKEN, side: "buy", price: 0.4, filledAt: "2026-01-01T00:00:00Z", size: 100 },
+      log,
+      "2026-01-01T00:00:01Z",
+    );
+    updateLegStateForFill(
+      repo,
+      { tokenId: TOKEN, side: "buy", price: 0.3, filledAt: "2026-01-02T00:00:00Z", size: 50 },
+      log,
+      "2026-01-02T00:00:01Z",
+    );
+
+    const state = repo.get(TOKEN);
+    expect(state?.cumulativeBuySize).toBe(150);
+    expect(state?.cumulativeBuyNotional).toBeCloseTo(0.4 * 100 + 0.3 * 50, 10);
+    expect(state?.cumulativeSellSize).toBe(0);
+  });
+
+  it("accumulates cumulative sell size on SELL fills, leaves buy aggregates intact", () => {
+    const repo = createMockLegStateRepo();
+    const log = createMockLogger();
+
+    updateLegStateForFill(
+      repo,
+      { tokenId: TOKEN, side: "buy", price: 0.4, filledAt: "2026-01-01T00:00:00Z", size: 100 },
+      log,
+      "2026-01-01T00:00:01Z",
+    );
+    updateLegStateForFill(
+      repo,
+      { tokenId: TOKEN, side: "sell", price: 0.5, filledAt: "2026-01-03T00:00:00Z", size: 30 },
+      log,
+      "2026-01-03T00:00:01Z",
+    );
+    updateLegStateForFill(
+      repo,
+      { tokenId: TOKEN, side: "sell", price: 0.6, filledAt: "2026-01-04T00:00:00Z", size: 20 },
+      log,
+      "2026-01-04T00:00:01Z",
+    );
+
+    const state = repo.get(TOKEN);
+    expect(state?.cumulativeBuySize).toBe(100);
+    expect(state?.cumulativeBuyNotional).toBeCloseTo(40, 10);
+    expect(state?.cumulativeSellSize).toBe(50);
+  });
+
+  it("uses fill.sizeUsdc (cash delivered) for cumulativeBuyNotional, not price*size", () => {
+    // Mirrors inventory-handler.ts `unitCost = sizeUsdc / size`. Fees mean
+    // price * size != sizeUsdc on real taker BUYs; the spec says cost basis
+    // VWAP must equal positions.avg_entry_price. Test passes a size_usdc
+    // that doesn't equal price * size to prove which one is canonical.
+    const repo = createMockLegStateRepo();
+    const log = createMockLogger();
+
+    updateLegStateForFill(
+      repo,
+      {
+        tokenId: TOKEN,
+        side: "buy",
+        price: 0.4,
+        filledAt: "2026-01-01T00:00:00Z",
+        size: 100,
+        sizeUsdc: 41, // intentionally != price * size
+      },
+      log,
+      "2026-01-01T00:00:01Z",
+    );
+    updateLegStateForFill(
+      repo,
+      {
+        tokenId: TOKEN,
+        side: "buy",
+        price: 0.3,
+        filledAt: "2026-01-02T00:00:00Z",
+        size: 50,
+        sizeUsdc: 16,
+      },
+      log,
+      "2026-01-02T00:00:01Z",
+    );
+
+    const state = repo.get(TOKEN);
+    expect(state?.cumulativeBuySize).toBe(150);
+    expect(state?.cumulativeBuyNotional).toBeCloseTo(41 + 16, 10);
+  });
+
+  it("falls back to price*size for cumulativeBuyNotional when sizeUsdc is missing (legacy fills)", () => {
+    const repo = createMockLegStateRepo();
+    const log = createMockLogger();
+
+    updateLegStateForFill(
+      repo,
+      // No sizeUsdc — must fall back so legacy events still contribute.
+      { tokenId: TOKEN, side: "buy", price: 0.4, filledAt: "2026-01-01T00:00:00Z", size: 100 },
+      log,
+      "2026-01-01T00:00:01Z",
+    );
+
+    const state = repo.get(TOKEN);
+    expect(state?.cumulativeBuyNotional).toBeCloseTo(40, 10);
+  });
+
+  it("treats null fill.size as zero contribution to keep cumulative columns monotonic", () => {
+    const repo = createMockLegStateRepo();
+    const log = createMockLogger();
+
+    updateLegStateForFill(
+      repo,
+      { tokenId: TOKEN, side: "buy", price: 0.4, filledAt: "2026-01-01T00:00:00Z", size: 100 },
+      log,
+      "2026-01-01T00:00:01Z",
+    );
+    updateLegStateForFill(
+      repo,
+      // Legacy event missing size — must not corrupt prior aggregates with NaN.
+      { tokenId: TOKEN, side: "buy", price: 0.3, filledAt: "2026-01-02T00:00:00Z", size: null },
+      log,
+      "2026-01-02T00:00:01Z",
+    );
+
+    const state = repo.get(TOKEN);
+    expect(state?.cumulativeBuySize).toBe(100);
+    expect(state?.cumulativeBuyNotional).toBeCloseTo(40, 10);
   });
 
   it("increments buyCount on subsequent buy fills and preserves firstTrade", () => {

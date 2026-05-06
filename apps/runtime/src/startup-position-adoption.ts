@@ -327,9 +327,42 @@ function rebuildLegStatesFromLedger(
 
   if (activeTokens.length === 0) return;
 
-  const selectFills = deps.db.prepare(
-    `SELECT fill_id, token_id, side, price, filled_at FROM fills
+  // ADR-027 §D-B — scope replay so that fills from prior closed legs on the
+  // same token don't bleed into the active leg's cumulative_*, buy/sell
+  // counts, or first_trade_at. We pick the largest `closed_at` strictly less
+  // than the active leg's `opened_at`: that's the chronologically-prior
+  // close. Filtering on `closed_at < active.opened_at` is essential because
+  // bootstrap's duplicate-open repair (`ensureUniqueOpenPositionIndex` in
+  // packages/db/src/bootstrap.ts) writes `closed_at = datetime('now')`,
+  // which would otherwise outrank any real prior close and mask out the
+  // active leg's own fills. Using `closed_at` (rather than `opened_at`) for
+  // the prior leg avoids the clock-skew gap between exchange `filled_at`
+  // (event-time) and the active position's `opened_at` (wall-clock at handler
+  // time): the active opening fill can have `filled_at < active.opened_at`,
+  // but it always has `filled_at > prior.closed_at` since the prior leg's
+  // closure happened chronologically earlier on the wire.
+  //
+  // Comparisons go through `julianday()` because the duplicate-open repair
+  // writes SQLite's `datetime('now')` format (`YYYY-MM-DD HH:MM:SS`) while
+  // runtime opens/fills/closes are ISO strings (`YYYY-MM-DDTHH:mm:ss.sssZ`).
+  // Lexical ordering disagrees with chronological ordering on the same calendar
+  // day (space sorts before `T`), so a same-day synthetic close would falsely
+  // qualify as "prior" without numeric time parsing.
+  //
+  // When no prior closed leg exists, fall back to no lower bound — there is
+  // nothing to leak from.
+  const priorCloseStmt = deps.db.prepare(
+    `SELECT MAX(closed_at) AS max_closed_at FROM positions
+       WHERE token_id = ?
+         AND status = 'closed'
+         AND closed_at IS NOT NULL
+         AND julianday(closed_at) < julianday(?)`,
+  );
+  const selectFillsScoped = deps.db.prepare(
+    `SELECT fill_id, token_id, condition_id, side, price, size, size_usdc, filled_at
+       FROM fills
       WHERE token_id = ?
+        AND julianday(filled_at) > julianday(?)
       ORDER BY filled_at ASC, fill_id ASC`,
   );
 
@@ -337,18 +370,31 @@ function rebuildLegStatesFromLedger(
 
   for (const { token_id } of activeTokens) {
     const tokenId = createTokenId(token_id);
-    const fills = selectFills.all(token_id) as Array<{
+    const activePosition = deps.positionRepo.findByTokenId(tokenId);
+    const activeOpenedAt = activePosition?.openedAt ?? "9999-12-31T23:59:59.999Z";
+    const priorClose = priorCloseStmt.get(token_id, activeOpenedAt) as
+      | { max_closed_at: string | null }
+      | undefined;
+    const replayLowerBound = priorClose?.max_closed_at ?? "1970-01-01T00:00:00.000Z";
+    const fills = selectFillsScoped.all(token_id, replayLowerBound) as Array<{
       fill_id: string;
       token_id: string;
+      condition_id: string | null;
       side: "buy" | "sell";
       price: number;
+      size: number | null;
+      size_usdc: number | null;
       filled_at: string;
     }>;
 
     if (fills.length === 0) {
       result.positionsWithoutFills.push(tokenId);
       log.warn(
-        { tokenId: token_id },
+        {
+          tokenId: token_id,
+          priorCloseAt: priorClose?.max_closed_at ?? null,
+          activeOpenedAt: activePosition?.openedAt ?? null,
+        },
         "startup leg-state rebuild — active position has no matching fills",
       );
       continue;
@@ -362,6 +408,8 @@ function rebuildLegStatesFromLedger(
           side: f.side,
           price: f.price,
           filledAt: f.filled_at,
+          size: f.size,
+          sizeUsdc: f.size_usdc,
         },
         log,
         now,

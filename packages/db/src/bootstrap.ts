@@ -503,10 +503,82 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "decision_signal_log", "add_price_change_pct", "REAL");
   safeAddColumn(conn.db, "decision_signal_log", "add_price_change_bucket", "TEXT");
   safeAddColumn(conn.db, "decision_signal_log", "nth_buy_at_emit", "INTEGER");
+  // ADR-027 §D-B: §11.2 / §11.3 exit telemetry on decision_signal_log.
+  safeAddColumn(conn.db, "decision_signal_log", "is_exit", "INTEGER");
+  safeAddColumn(conn.db, "decision_signal_log", "is_first_sell", "INTEGER");
+  safeAddColumn(conn.db, "decision_signal_log", "holding_time_ms", "INTEGER");
+  safeAddColumn(conn.db, "decision_signal_log", "holding_time_bucket", "TEXT");
+  safeAddColumn(conn.db, "decision_signal_log", "exit_pnl_pct", "REAL");
+  safeAddColumn(conn.db, "decision_signal_log", "exit_pnl_bucket", "TEXT");
+  safeAddColumn(conn.db, "decision_signal_log", "sold_bought_ratio", "REAL");
+  safeAddColumn(conn.db, "decision_signal_log", "sold_bought_ratio_bucket", "TEXT");
+  // ADR-027 §D-C: cumulative sizes on leg_states.
+  safeAddColumn(conn.db, "leg_states", "cumulative_buy_size", "REAL NOT NULL DEFAULT 0");
+  safeAddColumn(conn.db, "leg_states", "cumulative_buy_notional", "REAL NOT NULL DEFAULT 0");
+  safeAddColumn(conn.db, "leg_states", "cumulative_sell_size", "REAL NOT NULL DEFAULT 0");
+  backfillLegStateCumulativeFromFills(conn.db);
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
   ensureUniqueOpenPositionIndex(conn.db);
   setRuntimeBusyTimeout(conn);
   return conn;
+}
+
+/**
+ * ADR-027 §D-C — one-time backfill of cumulative_* on existing leg_states
+ * after the columns are added. The split-ledger path uses `safeAddColumn`
+ * (not `runMigrations`), so the SQL UPDATE in migration 050 never fires
+ * here; without this, deployed bots keep the DEFAULT 0 forever and §11.2
+ * exit PnL / sold-bought telemetry stays broken until each leg is fully
+ * recreated by a fresh BUY fill.
+ *
+ * Idempotency guard: only legs with `cumulative_buy_size = 0` are touched.
+ * A leg row only exists once a BUY fill has occurred (live path always
+ * sets cumulative_buy_size to fillSize on the first BUY), so post-migration
+ * legs are non-zero and skipped. The rare leg whose only fill had
+ * `size IS NULL` (legacy pre-size-on-fill data) stays at 0 across
+ * subsequent boots — re-running the SUM is harmless (still 0).
+ *
+ * `filled_at >= leg_states.first_trade_at` keeps prior closed-out legs on
+ * the same token from leaking into the active leg's aggregates.
+ */
+function backfillLegStateCumulativeFromFills(
+  db: import("better-sqlite3").Database,
+): void {
+  // bootstrapLedgerDb is shared across plankton/control DBs; the `fills`
+  // table only exists in the ledger DB. Skip silently otherwise.
+  const fillsExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='fills'`)
+    .get();
+  if (!fillsExists) return;
+
+  db.exec(`UPDATE leg_states
+              SET cumulative_buy_size = COALESCE((
+                    SELECT SUM(COALESCE(f.size, 0))
+                      FROM fills f
+                     WHERE f.token_id = leg_states.token_id
+                       AND f.side = 'buy'
+                       AND f.filled_at >= leg_states.first_trade_at
+                  ), 0),
+                  cumulative_buy_notional = COALESCE((
+                    SELECT SUM(
+                             CASE
+                               WHEN f.size_usdc IS NOT NULL THEN f.size_usdc
+                               ELSE COALESCE(f.price, 0) * COALESCE(f.size, 0)
+                             END
+                           )
+                      FROM fills f
+                     WHERE f.token_id = leg_states.token_id
+                       AND f.side = 'buy'
+                       AND f.filled_at >= leg_states.first_trade_at
+                  ), 0),
+                  cumulative_sell_size = COALESCE((
+                    SELECT SUM(COALESCE(f.size, 0))
+                      FROM fills f
+                     WHERE f.token_id = leg_states.token_id
+                       AND f.side = 'sell'
+                       AND f.filled_at >= leg_states.first_trade_at
+                  ), 0)
+            WHERE cumulative_buy_size = 0`);
 }
 
 /**

@@ -525,6 +525,225 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("denormalizes §11.2 exit telemetry on SELL signals (first-sell, vwap pnl, ratio)", async () => {
+    const tokenId = "token-exit";
+    // 90 minutes ago → should land in "1-6h" holding-time bucket.
+    const ninetyMinAgoMs = Date.now() - 90 * 60 * 1000;
+    const ninetyMinAgo = new Date(ninetyMinAgoMs).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 0, // first-sell condition
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: ninetyMinAgo,
+      lastTradeAt: ninetyMinAgo,
+      updatedAt: ninetyMinAgo,
+      // Cost basis VWAP = 0.10 → exit @ 0.15 = +50%. Boundary is left-inclusive
+      // (`pct < 0.5` puts <0.5 in "+25% to +50%", so an exact 0.5 lands in
+      // "+50% to +100%"). Float-snap in classifyExitPnlBucket pulls the
+      // (0.15-0.10)/0.10 = 0.4999...9 binary artifact up to exact 0.5.
+      cumulativeBuySize: 100,
+      cumulativeBuyNotional: 10,
+      cumulativeSellSize: 0,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+    const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
+    await mod.start();
+
+    // Non-tradable market + SELL price > D7-SELL-S1 threshold (0.10) → SELL fires.
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-exit"), tradable: false }],
+      timestamp: Date.now(),
+    });
+
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    const inserted = vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0];
+    expect(inserted).toMatchObject({
+      side: "SELL",
+      isExit: 1,
+      isFirstSell: 1,
+      holdingTimeBucket: "1-6h",
+      exitPnlBucket: "+50% to +100%",
+      soldBoughtRatioBucket: "0%",
+    });
+    expect(inserted.exitPnlPct).toBeCloseTo(0.5, 5);
+    expect(inserted.soldBoughtRatio).toBe(0);
+    expect(inserted.holdingTimeMs).toBeGreaterThanOrEqual(90 * 60 * 1000);
+    expect(inserted.holdingTimeMs).toBeLessThan(91 * 60 * 1000);
+
+    await mod.stop();
+  });
+
+  it("leaves §11.2 exit telemetry null on BUY signals (BUY-side rows are exit=null)", async () => {
+    const tokenId = "token-exit-buy-null";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+    const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.45, "cond-exit-buy-null")],
+      timestamp: Date.now(),
+    });
+
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0]).toMatchObject({
+      side: "BUY",
+      isExit: null,
+      isFirstSell: null,
+      holdingTimeMs: null,
+      holdingTimeBucket: null,
+      exitPnlPct: null,
+      exitPnlBucket: null,
+      soldBoughtRatio: null,
+      soldBoughtRatioBucket: null,
+    });
+
+    await mod.stop();
+  });
+
+  it("uses positions.avg_entry_price as cost basis after partial sells (FIFO-rebased)", async () => {
+    // ADR-027 §D-B — after partial sells, inventory engine recomputes
+    // positions.avg_entry_price via FIFO from remaining lots. The lifetime
+    // VWAP (cumulative_buy_notional / cumulative_buy_size) does not get
+    // adjusted — so exit_pnl_pct must source the rolling cost basis from
+    // positions.avg_entry_price, not the lifetime VWAP. Without this fix, a
+    // SELL @ 0.15 with FIFO basis 0.20 would log 0% (vs lifetime 0.15)
+    // instead of the correct -25%.
+    const tokenId = "token-exit-fifo";
+    const ninetyMinAgo = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    // S1 state (buyCount=1, sellCount=1, lastAction=BUY) so D7-SELL-S1 fires.
+    // Lifetime VWAP intentionally diverges from positions.avgEntryPrice
+    // (0.15 vs 0.20) to exercise the rolling-basis preference.
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 1,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: ninetyMinAgo,
+      lastTradeAt: ninetyMinAgo,
+      updatedAt: ninetyMinAgo,
+      cumulativeBuySize: 200,
+      cumulativeBuyNotional: 30, // lifetime VWAP = 0.15
+      cumulativeSellSize: 100,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const positionRepo = {
+      findByTokenId: vi.fn().mockReturnValue({ avgEntryPrice: 0.2 }),
+    };
+
+    const mod = buildModule({
+      decisionSignalLogRepo,
+      riskEventRepo,
+      positionRepo: positionRepo as unknown as import("@plankton/domain").PositionRepository,
+    });
+    await mod.start();
+
+    // SELL @ 0.15 with rolling basis 0.20 → exit_pnl_pct = (0.15-0.20)/0.20 = -0.25
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-fifo"), tradable: false }],
+      timestamp: Date.now(),
+    });
+
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    const inserted = vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0];
+    expect(inserted.side).toBe("SELL");
+    expect(inserted.exitPnlPct).toBeCloseTo(-0.25, 5);
+    expect(inserted.exitPnlBucket).toBe("-50% to -10%");
+    expect(positionRepo.findByTokenId).toHaveBeenCalledWith(createTokenId(tokenId));
+
+    await mod.stop();
+  });
+
+  it("falls back to lifetime cumulative VWAP for exit_pnl_pct when positionRepo is omitted", async () => {
+    // Defensive fallback: tests / control-only deployments that don't wire
+    // positionRepo still get exit_pnl_pct (lifetime VWAP), matching the
+    // pre-fix behavior. Production wires positionRepo so the FIFO-rebased
+    // basis is preferred; this guards regression of the optional-dep contract.
+    const tokenId = "token-exit-fallback";
+    const ninetyMinAgo = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: ninetyMinAgo,
+      lastTradeAt: ninetyMinAgo,
+      updatedAt: ninetyMinAgo,
+      cumulativeBuySize: 100,
+      cumulativeBuyNotional: 10, // VWAP = 0.10
+      cumulativeSellSize: 0,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+    const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.12, "cond-fallback"), tradable: false }],
+      timestamp: Date.now(),
+    });
+
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    const inserted = vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0];
+    expect(inserted.exitPnlPct).toBeCloseTo(0.2, 5);
+
+    await mod.stop();
+  });
+
+  it("flags isFirstSell=0 on subsequent SELL signals after the first", async () => {
+    const tokenId = "token-exit-second";
+    const ninetyMinAgo = new Date(Date.now() - 90 * 60 * 1000).toISOString();
+    // buyCount=1, lastAction=BUY → state S1 (post S3 re-entry); D7-SELL-S1
+    // fires on price>=0.10. sellCount=1 makes this NOT the first SELL.
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 1,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: ninetyMinAgo,
+      lastTradeAt: ninetyMinAgo,
+      updatedAt: ninetyMinAgo,
+      cumulativeBuySize: 200,
+      cumulativeBuyNotional: 20,
+      cumulativeSellSize: 50, // 50/200 = 0.25 → buckets are [_, 0.25) so lands in "25-50%"
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+    const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-exit-2"), tradable: false }],
+      timestamp: Date.now(),
+    });
+
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0]).toMatchObject({
+      side: "SELL",
+      isExit: 1,
+      isFirstSell: 0,
+      soldBoughtRatioBucket: "25-50%",
+    });
+
+    await mod.stop();
+  });
+
   it("leaves §11.1 adds telemetry null on first-entry BUY signals", async () => {
     const tokenId = "token-first-entry";
     selectedMarketCache = createMockSelectedMarketCache([tokenId]);
