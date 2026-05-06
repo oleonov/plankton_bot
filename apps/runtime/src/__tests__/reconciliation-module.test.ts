@@ -284,6 +284,12 @@ describe("ReconciliationModule", () => {
         "cancelled",
         undefined,
         "phantom_missing_on_exchange",
+        expect.objectContaining({
+          cancelAgeMs: expect.any(Number),
+          cancelAgeBucket: expect.any(String),
+          fillProgressShares: 0,
+          marketHorizon: null,
+        }),
       );
     });
 
@@ -340,6 +346,8 @@ describe("ReconciliationModule", () => {
       const result = await reconcileOrders({
         gateway,
         orderRepo,
+        fillRepo,
+        marketRepo,
         log: silentLog,
         phantomGraceMs: 90_000,
       });
@@ -362,6 +370,8 @@ describe("ReconciliationModule", () => {
       const result = await reconcileOrders({
         gateway,
         orderRepo,
+        fillRepo,
+        marketRepo,
         log: silentLog,
         phantomGraceMs: 90_000,
       });
@@ -373,6 +383,12 @@ describe("ReconciliationModule", () => {
         "cancelled",
         undefined,
         "phantom_missing_on_exchange",
+        expect.objectContaining({
+          cancelAgeMs: expect.any(Number),
+          cancelAgeBucket: expect.any(String),
+          fillProgressShares: 0,
+          marketHorizon: null,
+        }),
       );
     });
 
@@ -391,6 +407,8 @@ describe("ReconciliationModule", () => {
       const result = await reconcileOrders({
         gateway,
         orderRepo,
+        fillRepo,
+        marketRepo,
         log: silentLog,
         phantomGraceMs: 90_000,
       });
@@ -412,6 +430,8 @@ describe("ReconciliationModule", () => {
       const result1 = await reconcileOrders({
         gateway,
         orderRepo,
+        fillRepo,
+        marketRepo,
         log: silentLog,
         phantomGraceMs: 90_000,
       });
@@ -429,6 +449,8 @@ describe("ReconciliationModule", () => {
       const result2 = await reconcileOrders({
         gateway,
         orderRepo,
+        fillRepo,
+        marketRepo,
         log: silentLog,
         phantomGraceMs: 90_000,
       });
@@ -452,6 +474,8 @@ describe("ReconciliationModule", () => {
       const result = await reconcileOrders({
         gateway,
         orderRepo,
+        fillRepo,
+        marketRepo,
         log: silentLog,
         phantomGraceMs: 90_000,
       });
@@ -463,6 +487,12 @@ describe("ReconciliationModule", () => {
         "cancelled",
         undefined,
         "phantom_missing_on_exchange",
+        expect.objectContaining({
+          cancelAgeMs: expect.any(Number),
+          cancelAgeBucket: expect.any(String),
+          fillProgressShares: 0,
+          marketHorizon: null,
+        }),
       );
     });
   });
@@ -506,6 +536,12 @@ describe("ReconciliationModule", () => {
         "cancelled",
         undefined,
         "phantom_missing_on_exchange",
+        expect.objectContaining({
+          cancelAgeMs: expect.any(Number),
+          cancelAgeBucket: expect.any(String),
+          fillProgressShares: 0,
+          marketHorizon: null,
+        }),
       );
     });
   });

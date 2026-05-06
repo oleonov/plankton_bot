@@ -117,6 +117,10 @@ export const TimeInForce = {
 } as const;
 export type TimeInForce = (typeof TimeInForce)[keyof typeof TimeInForce];
 
+// ADR-025 §D-D — `Expired` removed: Polymarket GTC has no built-in
+// expiry. The runtime never places FOK; exchange-level expiry from
+// FOK rejection (if ever wired) would surface via the reconciler's
+// stale-exchange branch and map onto `cancelled`.
 export const OrderStatus = {
   Pending: "pending",
   Open: "open",
@@ -124,7 +128,6 @@ export const OrderStatus = {
   Filled: "filled",
   Cancelled: "cancelled",
   Rejected: "rejected",
-  Expired: "expired",
 } as const;
 export type OrderStatus = (typeof OrderStatus)[keyof typeof OrderStatus];
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ceilToTick,
+  classifyCancelAgeBucket,
   classifyNotionalBucket,
   classifyRoundLevel,
   clampExecutablePrice,
@@ -488,5 +489,32 @@ describe("classifyNotionalBucket", () => {
     expect(classifyNotionalBucket(Number.NaN)).toBeNull();
     expect(classifyNotionalBucket(Number.POSITIVE_INFINITY)).toBeNull();
     expect(classifyNotionalBucket(-1)).toBeNull();
+  });
+});
+
+describe("classifyCancelAgeBucket", () => {
+  it("classifies values strictly below each upper bound (boundary is exclusive)", () => {
+    expect(classifyCancelAgeBucket(0)).toBe("<1min");
+    expect(classifyCancelAgeBucket(59_999)).toBe("<1min");
+    expect(classifyCancelAgeBucket(60_000)).toBe("1-10min");
+    expect(classifyCancelAgeBucket(599_999)).toBe("1-10min");
+    expect(classifyCancelAgeBucket(600_000)).toBe("10min-1h");
+    expect(classifyCancelAgeBucket(3_599_999)).toBe("10min-1h");
+    expect(classifyCancelAgeBucket(3_600_000)).toBe("1-6h");
+    expect(classifyCancelAgeBucket(21_599_999)).toBe("1-6h");
+    expect(classifyCancelAgeBucket(21_600_000)).toBe("6-24h");
+    expect(classifyCancelAgeBucket(86_399_999)).toBe("6-24h");
+    expect(classifyCancelAgeBucket(86_400_000)).toBe("1-7d");
+    expect(classifyCancelAgeBucket(604_799_999)).toBe("1-7d");
+    expect(classifyCancelAgeBucket(604_800_000)).toBe(">7d");
+    expect(classifyCancelAgeBucket(10 * 604_800_000)).toBe(">7d");
+  });
+
+  it("returns null for missing or invalid inputs", () => {
+    expect(classifyCancelAgeBucket(null)).toBeNull();
+    expect(classifyCancelAgeBucket(Number.NaN)).toBeNull();
+    expect(classifyCancelAgeBucket(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(classifyCancelAgeBucket(Number.NEGATIVE_INFINITY)).toBeNull();
+    expect(classifyCancelAgeBucket(-1)).toBeNull();
   });
 });

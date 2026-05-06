@@ -1,4 +1,9 @@
-import type { NotionalBucket, PriceLevel, PricingRoundLevel } from "@plankton/domain";
+import type {
+  CancelAgeBucket,
+  NotionalBucket,
+  PriceLevel,
+  PricingRoundLevel,
+} from "@plankton/domain";
 
 const DEFAULT_TICK_SIZE = 0.01;
 const PRICE_EPSILON = 1e-9;
@@ -478,6 +483,37 @@ export function classifyNotionalBucket(usdc: number | null): NotionalBucket | nu
   if (usdc < 50) return "$25-$50";
   if (usdc < 100) return "$50-$100";
   return ">$100";
+}
+
+/**
+ * ADR-025 §D-B telemetry. Maps a cancel-age duration (ms) onto the
+ * canonical §12.1 same-price-gap bucket taxonomy. Buckets are
+ * left-inclusive / right-exclusive (`[lower, upper)`) except the
+ * unbounded `>7d` tail.
+ *
+ * Bucket boundaries (ms):
+ *   <1min     → ageMs < 60_000
+ *   1-10min   → 60_000      ≤ ageMs < 600_000
+ *   10min-1h  → 600_000     ≤ ageMs < 3_600_000
+ *   1-6h      → 3_600_000   ≤ ageMs < 21_600_000
+ *   6-24h     → 21_600_000  ≤ ageMs < 86_400_000
+ *   1-7d      → 86_400_000  ≤ ageMs < 604_800_000
+ *   >7d       → 604_800_000 ≤ ageMs
+ *
+ * Returns null when ageMs is null, non-finite, or negative — the
+ * runtime never cancels with a negative age, but the helper is
+ * robust to malformed inputs (e.g. a clock skew between createdAt
+ * and Date.now()).
+ */
+export function classifyCancelAgeBucket(ageMs: number | null): CancelAgeBucket | null {
+  if (ageMs == null || !Number.isFinite(ageMs) || ageMs < 0) return null;
+  if (ageMs < 60_000) return "<1min";
+  if (ageMs < 600_000) return "1-10min";
+  if (ageMs < 3_600_000) return "10min-1h";
+  if (ageMs < 21_600_000) return "1-6h";
+  if (ageMs < 86_400_000) return "6-24h";
+  if (ageMs < 604_800_000) return "1-7d";
+  return ">7d";
 }
 
 export function deriveExecutableTopOfBook(

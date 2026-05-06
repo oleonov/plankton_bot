@@ -60,7 +60,7 @@ function makeCancelCmd(overrides?: Partial<CancelOrderCommand>): CancelOrderComm
     type: "CancelOrderCommand",
     commandId: createCommandId("cancel-1"),
     orderId: createOrderId("sim-ord-1"),
-    reason: "strategy_exit",
+    reason: "operator",
     ...overrides,
   };
 }
@@ -789,10 +789,16 @@ describe("ExecutionModule", () => {
       createOrderId("sim-ord-1"),
       "cancelled",
       undefined,
-      "strategy_exit",
+      "operator",
+      expect.objectContaining({
+        cancelAgeMs: expect.any(Number),
+        cancelAgeBucket: expect.any(String),
+        fillProgressShares: 0,
+        marketHorizon: null,
+      }),
     );
     expect(cancelled).toHaveLength(1);
-    expect(cancelled[0].reason).toBe("strategy_exit");
+    expect(cancelled[0].reason).toBe("operator");
 
     await mod.stop();
   });

@@ -330,6 +330,12 @@ describe("UserOrderStreamModule", () => {
       "cancelled",
       "ord-exch-1",
       "exchange-user-ws-cancelled",
+      expect.objectContaining({
+        cancelAgeMs: expect.anything(),
+        cancelAgeBucket: expect.anything(),
+        fillProgressShares: expect.anything(),
+        marketHorizon: expect.anything(),
+      }),
     );
     expect(cancelled).toHaveLength(1);
     expect(mod.getMetricsSnapshot().dedupeHits).toBe(1);

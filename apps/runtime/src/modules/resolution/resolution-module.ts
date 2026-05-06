@@ -13,6 +13,7 @@ import type {
   EventBus,
   ExchangeGateway,
   RuntimeModule,
+  FillRepository,
   MarketRepository,
   MarketResolutionRepository,
   OrderRepository,
@@ -30,6 +31,7 @@ import type {
 import { inferResolution, parseTokenIds } from "./resolution-detector.js";
 import type { PositionSettler } from "./position-settler.js";
 import type { Logger } from "../../logger.js";
+import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 
 function normalizeOutcomeLabel(value: string): string {
   return value.trim().toLowerCase();
@@ -66,6 +68,7 @@ export interface ResolutionModuleDeps {
   marketRepo: MarketRepository;
   resolutionRepo: MarketResolutionRepository;
   orderRepo: OrderRepository;
+  fillRepo: FillRepository;
   gammaClient: GammaResolutionClient;
   lotRepo: InventoryLotRepository;
   positionRepo: PositionRepository;
@@ -707,7 +710,19 @@ export class ResolutionModule implements RuntimeModule {
       // Pending orders without an exchange-assigned ID cannot be cancelled
       // on the exchange — just deactivate them locally.
       if (order.status === "pending" && !order.exchangeOrderId) {
-        this.deps.orderRepo.updateStatus(order.orderId, "cancelled", undefined, "market_resolved");
+        const telemetry = buildCancelTelemetry({
+          order,
+          nowMs: Date.now(),
+          fillRepo: this.deps.fillRepo,
+          marketRepo: this.deps.marketRepo,
+        });
+        this.deps.orderRepo.updateStatus(
+          order.orderId,
+          "cancelled",
+          undefined,
+          "market_resolved",
+          telemetry,
+        );
         opts?.rememberCancelledOrderIds?.add(String(order.orderId));
         this.deps.log.info(
           { orderId: String(order.orderId), tokenId: String(tokenId) },

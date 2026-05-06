@@ -852,6 +852,7 @@ async function main(): Promise<void> {
     marketRepo: repos.market,
     resolutionRepo: marketResolutionRepo,
     orderRepo: repos.order,
+    fillRepo: repos.fill,
     gammaClient: gammaResolutionClient,
     lotRepo: repos.inventoryLot,
     positionRepo: repos.position,

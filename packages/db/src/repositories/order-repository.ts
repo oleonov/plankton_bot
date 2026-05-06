@@ -1,5 +1,10 @@
 import type Database from "better-sqlite3";
-import type { OrderRepository, Order } from "@plankton/domain";
+import type {
+  OrderRepository,
+  Order,
+  OrderCancelTelemetry,
+  CancelAgeBucket,
+} from "@plankton/domain";
 import type {
   OrderId,
   TokenId,
@@ -19,9 +24,11 @@ export class SqliteOrderRepository implements OrderRepository {
         `INSERT INTO orders
          (order_id, client_order_id, token_id, condition_id, side, order_type, post_only,
           price, size, size_usdc, status, exchange_order_id, signal_id,
-          signal_reason, cancel_reason, decision_rule_id, signal_timestamp, exchange_error_code,
+          signal_reason, cancel_reason, cancel_age_ms, cancel_age_bucket,
+          fill_progress_shares, market_horizon,
+          decision_rule_id, signal_timestamp, exchange_error_code,
           exchange_error_message, exchange_error_payload, bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
@@ -31,6 +38,10 @@ export class SqliteOrderRepository implements OrderRepository {
            signal_id = excluded.signal_id,
            signal_reason = excluded.signal_reason,
            cancel_reason = excluded.cancel_reason,
+           cancel_age_ms = excluded.cancel_age_ms,
+           cancel_age_bucket = excluded.cancel_age_bucket,
+           fill_progress_shares = excluded.fill_progress_shares,
+           market_horizon = excluded.market_horizon,
            decision_rule_id = excluded.decision_rule_id,
            signal_timestamp = excluded.signal_timestamp,
            exchange_error_code = excluded.exchange_error_code,
@@ -54,6 +65,10 @@ export class SqliteOrderRepository implements OrderRepository {
         order.signalId,
         order.signalReason,
         order.cancelReason ?? null,
+        order.cancelAgeMs ?? null,
+        order.cancelAgeBucket ?? null,
+        order.fillProgressShares ?? null,
+        order.marketHorizon ?? null,
         order.decisionRuleId ?? null,
         order.signalTimestamp ?? null,
         order.exchangeErrorCode ?? null,
@@ -106,6 +121,7 @@ export class SqliteOrderRepository implements OrderRepository {
     status: OrderStatus,
     exchangeOrderId?: string,
     cancelReason?: string,
+    telemetry?: OrderCancelTelemetry,
   ): void {
     const assignments = ["status = ?", "updated_at = datetime('now')"];
     const params: unknown[] = [status];
@@ -118,6 +134,17 @@ export class SqliteOrderRepository implements OrderRepository {
     if (cancelReason !== undefined) {
       assignments.push("cancel_reason = ?");
       params.push(cancelReason);
+    }
+
+    if (telemetry !== undefined) {
+      assignments.push("cancel_age_ms = ?");
+      params.push(telemetry.cancelAgeMs);
+      assignments.push("cancel_age_bucket = ?");
+      params.push(telemetry.cancelAgeBucket);
+      assignments.push("fill_progress_shares = ?");
+      params.push(telemetry.fillProgressShares);
+      assignments.push("market_horizon = ?");
+      params.push(telemetry.marketHorizon);
     }
 
     params.push(id);
@@ -153,6 +180,10 @@ export class SqliteOrderRepository implements OrderRepository {
       sizeUsdc: row.size_usdc as number,
       status: row.status as OrderStatus,
       cancelReason: (row.cancel_reason as string) ?? null,
+      cancelAgeMs: (row.cancel_age_ms as number | null) ?? null,
+      cancelAgeBucket: (row.cancel_age_bucket as CancelAgeBucket | null) ?? null,
+      fillProgressShares: (row.fill_progress_shares as number | null) ?? null,
+      marketHorizon: (row.market_horizon as string | null) ?? null,
       exchangeOrderId: (row.exchange_order_id as string) ?? null,
       signalId: (row.signal_id as string) ?? null,
       signalReason: (row.signal_reason as string) ?? null,

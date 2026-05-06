@@ -55,28 +55,33 @@ export interface PlaceOrderCommand {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * ADR-025 §D-C — cancel-reason taxonomy. Each literal corresponds to
+ * a production code path that publishes `CancelOrderCommand`, with one
+ * exception: `phantom_missing_on_exchange` is written by the
+ * reconciler's phantom-recovery branch
+ * (`order-reconciler.ts`) directly into `orders.cancel_reason`
+ * without publishing a command, because the order is already gone on
+ * the exchange and there is nothing to cancel via the bus. The
+ * literal lives in this union so all consumers of cancel reasons see
+ * it as a typed value rather than an opaque string.
+ */
+export type CancelOrderReason =
+  | "market_resolved"
+  | "stale_entry_ttl"
+  | "stale_entry_enddate"
+  | "stale_exit_ttl"
+  | "sell_replace_reprice"
+  | "sell_replace_retry"
+  | "operator"
+  | "phantom_missing_on_exchange";
+
 export interface CancelOrderCommand {
   readonly type: "CancelOrderCommand";
   readonly commandId: CommandId;
   /** Exchange-assigned order ID. */
   readonly orderId: OrderId;
-  readonly reason:
-    | "strategy_exit"
-    | "risk_breach"
-    | "operator"
-    | "shutdown"
-    | "reconciliation"
-    | "market_resolved"
-    | "stale_entry_ttl"
-    | "stale_entry_enddate"
-    | "stale_exit_ttl"
-    | "sell_replace_reprice"
-    | "sell_replace_retry"
-    | "entry-reprice-cancel"
-    | "entry-ttl-cancel"
-    | "entry-suppress-cancel"
-    | "exit-reprice-cancel"
-    | "exit-ttl-cancel";
+  readonly reason: CancelOrderReason;
 }
 
 // ─── Global Operator Commands ─────────────────────────────────────────────

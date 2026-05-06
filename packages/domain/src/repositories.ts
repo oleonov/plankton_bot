@@ -10,6 +10,7 @@ import type {
   ConditionId,
 } from "./ids.js";
 import type {
+  CancelAgeBucket,
   Fill,
   InventoryLot,
   Market,
@@ -36,6 +37,19 @@ import type {
   LegStateTransition,
   SettlementRecord,
 } from "./types.js";
+
+/**
+ * ADR-025 §D-B telemetry payload, persisted on transition into
+ * `cancelled`. Every field is independently nullable: a missing
+ * cancel-age (e.g. malformed `createdAt`) does not block the
+ * cancel write itself.
+ */
+export interface OrderCancelTelemetry {
+  cancelAgeMs: number | null;
+  cancelAgeBucket: CancelAgeBucket | null;
+  fillProgressShares: number | null;
+  marketHorizon: string | null;
+}
 
 // ─── MarketRepository ────────────────────────────────────────────────────
 
@@ -201,12 +215,20 @@ export interface OrderRepository {
   /** Return all orders for a specific outcome token. */
   findByTokenId(tokenId: TokenId): Order[];
 
-  /** Update the status, exchange_order_id, and cancellation reason of an existing order. */
+  /**
+   * Update the status, exchange_order_id, and cancellation reason of an
+   * existing order. ADR-025 §D-B: when transitioning to `cancelled`,
+   * callers may pass a `telemetry` payload to persist cancel-age
+   * lifecycle data on the same row. Telemetry fields are written
+   * verbatim — `null` is a meaningful "lookup failed" signal and is
+   * preserved as such.
+   */
   updateStatus(
     id: OrderId,
     status: OrderStatus,
     exchangeOrderId?: string,
     cancelReason?: string,
+    telemetry?: OrderCancelTelemetry,
   ): void;
 
   /** Sum the notional (size_usdc) of all open buy orders. */

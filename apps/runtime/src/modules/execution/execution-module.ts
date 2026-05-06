@@ -42,6 +42,7 @@ import {
   getReservedSellSize,
   type PendingReservation,
 } from "./reservation-utils.js";
+import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
@@ -571,12 +572,27 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
-    this.deps.orderRepo.updateStatus(cmd.orderId, "cancelled", undefined, cmd.reason);
+    const orderForTelemetry = this.deps.orderRepo.findById(cmd.orderId);
+    const telemetry = orderForTelemetry
+      ? buildCancelTelemetry({
+          order: orderForTelemetry,
+          nowMs: now,
+          fillRepo: this.deps.fillRepo,
+          marketRepo: this.deps.marketRepo,
+        })
+      : undefined;
+
+    this.deps.orderRepo.updateStatus(
+      cmd.orderId,
+      "cancelled",
+      undefined,
+      cmd.reason,
+      telemetry,
+    );
 
     this.log.info({ commandId: cmd.commandId, orderId: cmd.orderId }, "order cancelled");
 
-    const cancelledOrder = this.deps.orderRepo.findById(cmd.orderId);
-    if (!cancelledOrder) {
+    if (!orderForTelemetry) {
       this.log.warn(
         { commandId: cmd.commandId, orderId: cmd.orderId },
         "cancel succeeded but local order not found — skipping OrderCancelled event",
@@ -585,10 +601,10 @@ export class ExecutionModule implements RuntimeModule {
       await this.deps.bus.publish("OrderCancelled", {
         commandId: cmd.commandId,
         orderId: cmd.orderId,
-        tokenId: cancelledOrder.tokenId,
-        conditionId: cancelledOrder.conditionId,
+        tokenId: orderForTelemetry.tokenId,
+        conditionId: orderForTelemetry.conditionId,
         reason: cmd.reason,
-        signalReason: cancelledOrder.signalReason,
+        signalReason: orderForTelemetry.signalReason,
         timestamp: now,
       });
     }

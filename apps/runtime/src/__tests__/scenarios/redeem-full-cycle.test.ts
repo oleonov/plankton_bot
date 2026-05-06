@@ -26,6 +26,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   bootstrapDatabase,
   SqliteAlgoRulesRepository,
+  SqliteFillRepository,
   SqliteInventoryLotRepository,
   SqliteLegStateRepository,
   SqliteMarketRepository,
@@ -116,6 +117,7 @@ async function buildFixture(opts: {
 
   const marketRepo = new SqliteMarketRepository(db.db);
   const orderRepo = new SqliteOrderRepository(db.db);
+  const fillRepo = new SqliteFillRepository(db.db);
   const positionRepo = new SqlitePositionRepository(db.db);
   const lotRepo = new SqliteInventoryLotRepository(db.db);
   const legStateRepo = new SqliteLegStateRepository(db.db);
@@ -218,6 +220,7 @@ async function buildFixture(opts: {
     marketRepo,
     resolutionRepo,
     orderRepo,
+    fillRepo,
     gammaClient: opts.gammaClient ?? makeNullGammaClient(),
     lotRepo,
     positionRepo,

@@ -10,12 +10,20 @@
  * track orders we placed.
  */
 
-import type { ExchangeGateway, OrderRepository } from "@plankton/domain";
+import type {
+  ExchangeGateway,
+  FillRepository,
+  MarketRepository,
+  OrderRepository,
+} from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { buildCancelTelemetry } from "./cancel-telemetry.js";
 
 export interface OrderReconcilerDeps {
   gateway: ExchangeGateway;
   orderRepo: OrderRepository;
+  fillRepo: FillRepository;
+  marketRepo: MarketRepository;
   log: Logger;
   phantomGraceMs?: number; // default: 90_000 (1.5× reconcile interval)
 }
@@ -32,7 +40,7 @@ export interface OrderReconcileResult {
 }
 
 export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderReconcileResult> {
-  const { gateway, orderRepo, log } = deps;
+  const { gateway, orderRepo, fillRepo, marketRepo, log } = deps;
   const details: string[] = [];
 
   const exchangeOrders = await gateway.getOpenOrders();
@@ -60,7 +68,19 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
         continue;
       }
 
-      orderRepo.updateStatus(local.orderId, "cancelled", undefined, "phantom_missing_on_exchange");
+      const telemetry = buildCancelTelemetry({
+        order: local,
+        nowMs: Date.now(),
+        fillRepo,
+        marketRepo,
+      });
+      orderRepo.updateStatus(
+        local.orderId,
+        "cancelled",
+        undefined,
+        "phantom_missing_on_exchange",
+        telemetry,
+      );
       phantomsCancelled++;
       const msg = `phantom order cancelled: ${local.orderId} (exchange: ${local.exchangeOrderId})`;
       details.push(msg);

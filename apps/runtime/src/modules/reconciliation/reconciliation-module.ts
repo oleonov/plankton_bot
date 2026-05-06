@@ -161,6 +161,8 @@ export class ReconciliationModule implements RuntimeModule {
       const orderResult = await reconcileOrders({
         gateway: this.deps.gateway,
         orderRepo: this.deps.orderRepo,
+        fillRepo: this.deps.fillRepo,
+        marketRepo: this.deps.marketRepo,
         log: this.log,
         phantomGraceMs: graceMs,
       });

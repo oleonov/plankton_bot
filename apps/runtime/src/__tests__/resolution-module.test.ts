@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createTokenId, createPositionId } from "@plankton/domain";
 import type {
   ExchangeGateway,
+  FillRepository,
   MarketRepository,
   MarketResolutionRepository,
   OrderRepository,
@@ -113,6 +114,15 @@ function createMockOrderRepo(): OrderRepository {
   } as unknown as OrderRepository;
 }
 
+function createMockFillRepo(): FillRepository {
+  return {
+    save: vi.fn(),
+    findByOrderId: vi.fn().mockReturnValue([]),
+    findByPositionId: vi.fn().mockReturnValue([]),
+    getLatestTimestamp: vi.fn().mockReturnValue(null),
+  } as unknown as FillRepository;
+}
+
 function createMockResolutionRepo(): MarketResolutionRepository {
   return {
     save: vi.fn(),
@@ -206,6 +216,7 @@ describe("ResolutionModule", () => {
   let marketRepo: ReturnType<typeof createMockMarketRepo>;
   let resolutionRepo: ReturnType<typeof createMockResolutionRepo>;
   let orderRepo: ReturnType<typeof createMockOrderRepo>;
+  let fillRepo: ReturnType<typeof createMockFillRepo>;
   let gammaClient: ReturnType<typeof createMockGammaClient>;
   let lotRepo: ReturnType<typeof createMockLotRepo>;
   let positionRepo: ReturnType<typeof createMockPositionRepo>;
@@ -219,6 +230,7 @@ describe("ResolutionModule", () => {
       marketRepo: marketRepo as unknown as MarketRepository,
       resolutionRepo: resolutionRepo as unknown as MarketResolutionRepository,
       orderRepo: orderRepo as unknown as OrderRepository,
+      fillRepo: fillRepo as unknown as FillRepository,
       gammaClient: gammaClient as unknown as GammaResolutionClient,
       lotRepo: lotRepo as unknown as InventoryLotRepository,
       positionRepo: positionRepo as unknown as PositionRepository,
@@ -239,6 +251,7 @@ describe("ResolutionModule", () => {
     marketRepo = createMockMarketRepo();
     resolutionRepo = createMockResolutionRepo();
     orderRepo = createMockOrderRepo();
+    fillRepo = createMockFillRepo();
     gammaClient = createMockGammaClient();
     lotRepo = createMockLotRepo();
     positionRepo = createMockPositionRepo();
@@ -261,6 +274,7 @@ describe("ResolutionModule", () => {
       marketRepo: marketRepo as unknown as MarketRepository,
       resolutionRepo: resolutionRepo as unknown as MarketResolutionRepository,
       orderRepo: orderRepo as unknown as OrderRepository,
+      fillRepo: fillRepo as unknown as FillRepository,
       gammaClient: gammaClient as unknown as GammaResolutionClient,
       lotRepo: lotRepo as unknown as InventoryLotRepository,
       positionRepo: positionRepo as unknown as PositionRepository,
@@ -610,6 +624,12 @@ describe("ResolutionModule", () => {
       "cancelled",
       undefined,
       "market_resolved",
+      expect.objectContaining({
+        cancelAgeMs: null,
+        cancelAgeBucket: null,
+        fillProgressShares: 0,
+        marketHorizon: null,
+      }),
     );
   });
 
@@ -652,6 +672,12 @@ describe("ResolutionModule", () => {
       "cancelled",
       undefined,
       "market_resolved",
+      expect.objectContaining({
+        cancelAgeMs: null,
+        cancelAgeBucket: null,
+        fillProgressShares: 0,
+        marketHorizon: null,
+      }),
     );
   });
 

@@ -217,6 +217,40 @@ describe("SqliteOrderRepository", () => {
     expect(found!.cancelReason).toBe("stale_entry_ttl");
   });
 
+  it("updateStatus persists cancel telemetry payload", () => {
+    repo.save(makeOrder());
+
+    repo.updateStatus(createOrderId("ord-1"), "cancelled", undefined, "stale_entry_ttl", {
+      cancelAgeMs: 1234,
+      cancelAgeBucket: "<1min",
+      fillProgressShares: 5,
+      marketHorizon: "short",
+    });
+
+    const found = repo.findById(createOrderId("ord-1"));
+    expect(found!.cancelAgeMs).toBe(1234);
+    expect(found!.cancelAgeBucket).toBe("<1min");
+    expect(found!.fillProgressShares).toBe(5);
+    expect(found!.marketHorizon).toBe("short");
+  });
+
+  it("save round-trips telemetry fields", () => {
+    repo.save(
+      makeOrder({
+        cancelAgeMs: 9_000,
+        cancelAgeBucket: "1-10min",
+        fillProgressShares: 3.5,
+        marketHorizon: "medium",
+      }),
+    );
+
+    const found = repo.findById(createOrderId("ord-1"));
+    expect(found!.cancelAgeMs).toBe(9_000);
+    expect(found!.cancelAgeBucket).toBe("1-10min");
+    expect(found!.fillProgressShares).toBe(3.5);
+    expect(found!.marketHorizon).toBe("medium");
+  });
+
   it("persists and retrieves signalReason", () => {
     repo.save(makeOrder({ signalReason: "repricing-exit" }));
 

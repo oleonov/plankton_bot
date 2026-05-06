@@ -17,6 +17,7 @@ import {
   reconcileFills,
 } from "./fill-reconciler.js";
 import { reconcileOrders } from "./order-reconciler.js";
+import { buildCancelTelemetry } from "./cancel-telemetry.js";
 
 const METRICS_WINDOW_MS = 10 * 60 * 1000;
 const ORPHAN_TTL_MS = 60 * 1000;
@@ -289,12 +290,31 @@ export class UserOrderStreamModule implements RuntimeModule {
       nextStatus === "cancelled" && currentStatus !== "cancelled" && currentStatus !== "filled";
 
     if (nextStatus != null || localOrder.exchangeOrderId !== event.orderId) {
-      this.deps.orderRepo.updateStatus(
-        localOrder.orderId,
-        nextStatus ?? currentStatus,
-        event.orderId,
-        nextStatus === "cancelled" ? "exchange-user-ws-cancelled" : undefined,
-      );
+      // Only stamp cancel reason + telemetry on the FIRST transition into
+      // `cancelled`. WS echoes for already-cancelled orders must not
+      // overwrite a prior cancel reason (e.g. `stale_entry_ttl`) or
+      // telemetry payload written by ExecutionModule / Reconciler.
+      if (shouldPublishCancel) {
+        const telemetry = buildCancelTelemetry({
+          order: localOrder,
+          nowMs: Date.now(),
+          fillRepo: this.deps.fillRepo,
+          marketRepo: this.deps.marketRepo,
+        });
+        this.deps.orderRepo.updateStatus(
+          localOrder.orderId,
+          nextStatus ?? currentStatus,
+          event.orderId,
+          "exchange-user-ws-cancelled",
+          telemetry,
+        );
+      } else {
+        this.deps.orderRepo.updateStatus(
+          localOrder.orderId,
+          nextStatus ?? currentStatus,
+          event.orderId,
+        );
+      }
     }
 
     if (shouldPublishCancel) {
@@ -346,6 +366,8 @@ export class UserOrderStreamModule implements RuntimeModule {
       await reconcileOrders({
         gateway: this.deps.gateway,
         orderRepo: this.deps.orderRepo,
+        fillRepo: this.deps.fillRepo,
+        marketRepo: this.deps.marketRepo,
         log: this.log,
         phantomGraceMs: PHANTOM_GRACE_MS,
       });

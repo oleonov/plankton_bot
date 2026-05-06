@@ -185,6 +185,23 @@ export type NotionalBucket =
   | "$50-$100"
   | ">$100";
 
+/**
+ * ADR-025 §D-B — cancel-age bucket taxonomy.
+ * Mirrors canonical §12.1 same-price gap distribution buckets at
+ * `06_algorithm_spec.md` v5.13. Buckets are left-inclusive /
+ * right-exclusive (`[lower, upper)`) except the unbounded `>7d`
+ * tail. Used to classify the time elapsed between an order's
+ * `createdAt` and its cancellation.
+ */
+export type CancelAgeBucket =
+  | "<1min"
+  | "1-10min"
+  | "10min-1h"
+  | "1-6h"
+  | "6-24h"
+  | "1-7d"
+  | ">7d";
+
 // ─── Risk Decision ────────────────────────────────────────────────────────────
 
 export interface RiskDecision {
@@ -216,6 +233,14 @@ export interface Order {
   sizeUsdc: number; // notional
   status: OrderStatus;
   cancelReason?: string | null;
+  /** ADR-025 §D-B — cancel-age telemetry (ms between createdAt and cancel time). */
+  cancelAgeMs?: number | null;
+  /** ADR-025 §D-B — §12.1 cancel-age bucket. */
+  cancelAgeBucket?: CancelAgeBucket | null;
+  /** ADR-025 §D-B — sum of fills.shares for this order at cancel time. */
+  fillProgressShares?: number | null;
+  /** ADR-025 §D-B — denormalized host-market horizon at cancel time. */
+  marketHorizon?: string | null;
   exchangeOrderId: string | null;
   signalId: string | null;
   signalReason: string | null;
