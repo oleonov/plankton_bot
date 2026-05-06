@@ -125,6 +125,31 @@ type EmissionFacts = {
   continuationTradeCountSource?: TradeCountSource | null;
 };
 
+/**
+ * ADR-022 §D-F — entry-price bucket categories aligned with R24 §9.6 buckets.
+ * Buckets are right-closed: `<=0.005`, `(0.005-0.05]`, `(0.05-0.20]`, `>0.20`.
+ */
+type EntryPriceBucket = "<=0.005" | "0.005-0.05" | "0.05-0.20" | ">0.20";
+
+function classifyEntryPriceBucket(price: number): EntryPriceBucket {
+  if (price <= 0.005) return "<=0.005";
+  if (price <= 0.05) return "0.005-0.05";
+  if (price <= 0.2) return "0.05-0.20";
+  return ">0.20";
+}
+
+/**
+ * ADR-022 §D-F — F-telemetry derived facts captured at signal-emission time.
+ * `dropFromLastSeen` is `(price - prevMidPrice) / prevMidPrice` against the
+ * immediately prior `NormalizedMarketUpdated` for this token; `null` on the
+ * first observation. Sign convention: negative = price went down, positive =
+ * price went up. `entryPriceBucket` mirrors R24 §9.6 buckets.
+ */
+type TriggerTelemetry = {
+  dropFromLastSeen: number | null;
+  entryPriceBucket: EntryPriceBucket;
+};
+
 type ContinuationFacts = {
   tradeCount: number;
   tradeCountSource: TradeCountSource;
@@ -248,6 +273,21 @@ export class AlgoDecisionModule implements RuntimeModule {
   // Market cache — updated on every NormalizedMarketUpdated
   private readonly marketCache = new Map<string, NormalizedMarket>();
 
+  // ADR-022 §D-F — F-telemetry: previous midPrice per token, captured on each
+  // NormalizedMarketUpdated BEFORE the cache is updated. Drives
+  // `signal_emitted.payload.dropFromLastSeen`. Cleared on token eviction
+  // (TrackedMarketsChanged.removedTokenIds) and on inactive markets so the
+  // map stays bounded by the watch-set capacity.
+  private readonly prevMidPrices = new Map<string, number>();
+
+  // ADR-022 §D-F — F-telemetry: per-tick decisionRuleId histogram for the
+  // healthcheck `triggerMix` segment. `lastTickRuleMix` is the snapshot from
+  // the most recently completed evaluation pass, exposed read-only via
+  // healthCheck; `currentTickRuleMix` is being filled by the in-flight pass
+  // and swapped in at its end. Both reset on module restart.
+  private lastTickRuleMix = new Map<string, number>();
+  private currentTickRuleMix = new Map<string, number>();
+
   // Rules — loaded once on start()
   private decisionRules: readonly AlgoDecisionRule[] = [];
   private buySizeRules: readonly AlgoSizeRule[] = [];
@@ -346,7 +386,18 @@ export class AlgoDecisionModule implements RuntimeModule {
     const funnel = snap
       ? ` universeFunnel seen=${snap.seen} volumeZeroDropped=${snap.volumeZeroDropped} volumeNullEvaluated=${snap.volumeNullEvaluated} volumePositiveEvaluated=${snap.volumePositiveEvaluated} selectionRuleAdmitted=${snap.selectionRuleAdmitted} selectionRuleRejected=${snap.selectionRuleRejected}`
       : "";
-    return { ok: true, detail: `${base}${funnel}` };
+    // ADR-022 §D-F — last-tick decisionRuleId histogram. Empty when no signals
+    // emitted on the most recent completed pass; the segment is omitted in
+    // that case to keep the line tidy. Sorted by ruleId for stable output.
+    const ruleMix = this.formatTriggerMix(this.lastTickRuleMix);
+    return { ok: true, detail: `${base}${funnel}${ruleMix}` };
+  }
+
+  private formatTriggerMix(mix: ReadonlyMap<string, number>): string {
+    if (mix.size === 0) return "";
+    const entries = [...mix.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const parts = entries.map(([ruleId, count]) => `${ruleId}=${count}`);
+    return ` triggerMix ${parts.join(" ")}`;
   }
 
   // ─── Event handlers ─────────────────────────────────────────────────────────
@@ -355,10 +406,24 @@ export class AlgoDecisionModule implements RuntimeModule {
     payload: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
     for (const market of payload.markets) {
+      const tokenIdStr = String(market.tokenId);
       if (!market.active) {
-        this.marketCache.delete(String(market.tokenId));
+        this.marketCache.delete(tokenIdStr);
+        this.prevMidPrices.delete(tokenIdStr);
       } else {
-        this.marketCache.set(String(market.tokenId), market);
+        // ADR-022 §D-F — capture the immediately previous midPrice into
+        // prevMidPrices BEFORE replacing the cache entry, so the next signal
+        // emission can compute `dropFromLastSeen` against the second-latest
+        // observation. If the prior update had no midPrice, clear the slot —
+        // ADR-022 defines the reference as the IMMEDIATELY previous update,
+        // not the last non-null sample, so a null gap resets the delta.
+        const prior = this.marketCache.get(tokenIdStr);
+        if (prior?.midPrice != null) {
+          this.prevMidPrices.set(tokenIdStr, prior.midPrice);
+        } else {
+          this.prevMidPrices.delete(tokenIdStr);
+        }
+        this.marketCache.set(tokenIdStr, market);
       }
     }
     const tokenIds = payload.markets.filter((m) => m.active).map((m) => m.tokenId);
@@ -371,7 +436,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     // Tokens leaving the tracked universe never get a final NormalizedMarketUpdated
     // delivery, so marketCache would retain them forever. Evict on scanner churn.
     for (const tokenId of payload.removedTokenIds) {
-      this.marketCache.delete(String(tokenId));
+      const tokenIdStr = String(tokenId);
+      this.marketCache.delete(tokenIdStr);
+      this.prevMidPrices.delete(tokenIdStr);
     }
   }
 
@@ -487,6 +554,11 @@ export class AlgoDecisionModule implements RuntimeModule {
   private async evaluateTokensInner(tokenIds: readonly TokenId[]): Promise<void> {
     this.refreshContinuationMode();
     this.tickCounter++;
+    // ADR-022 §D-F — start a fresh in-flight histogram for this sweep.
+    // The completed histogram is promoted into `lastTickRuleMix` at the END
+    // of the sweep (see below), so healthcheck always reflects the most
+    // recently completed pass rather than the one before it.
+    this.currentTickRuleMix = new Map<string, number>();
     const now = Date.now();
     let reservedBuyUsdc =
       (this.deps.orderRepo?.sumOpenBuyNotional() ?? 0) + this.getPendingReservedBuyUsdc();
@@ -564,6 +636,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     for (const { signal, market } of signals) {
       await this.deps.bus.publish("SignalProduced", { signal, market });
     }
+
+    // ADR-022 §D-F — promote the just-completed histogram so healthcheck
+    // immediately reflects this sweep, not the previous one.
+    this.lastTickRuleMix = this.currentTickRuleMix;
   }
 
   /**
@@ -680,6 +756,18 @@ export class AlgoDecisionModule implements RuntimeModule {
       return null;
     }
 
+    // ADR-022 §D-F — F-telemetry derived facts. `prevMidPrices` is populated
+    // in `handleMarketUpdate` BEFORE the cache is replaced, so at this point
+    // it holds the second-latest midPrice for this token (or is empty on the
+    // first observation, yielding `dropFromLastSeen=null`). Sign convention:
+    // negative = price went down, positive = price went up.
+    const prevMid = this.prevMidPrices.get(String(tokenId));
+    const dropFromLastSeen = prevMid != null && prevMid > 0 ? (price - prevMid) / prevMid : null;
+    const triggerTelemetry: TriggerTelemetry = {
+      dropFromLastSeen,
+      entryPriceBucket: classifyEntryPriceBucket(price),
+    };
+
     // Skip tokens that already have a pending buy order in-flight
     if (!legState && this.pendingEntries.has(String(tokenId))) {
       this.recordDecisionSuppressed({
@@ -736,6 +824,7 @@ export class AlgoDecisionModule implements RuntimeModule {
             firstTradePrice: emissionFacts.firstTradePrice,
             legTradeCount: emissionFacts.legTradeCount,
           },
+          triggerTelemetry,
         );
         return { type: "redeem", conditionId: market.conditionId };
       }
@@ -831,12 +920,21 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (continuationFacts.stop) {
         const sellMatch = matchRule(ctx, this.decisionRules, SELL_ONLY);
         if (sellMatch) {
-          return this.buildSignal(market, sellMatch, ctx, buyCount, now, nextSeq, {
-            ...emissionFacts,
-            continuationStop: true,
-            continuationTradeCount: continuationFacts.tradeCount,
-            continuationTradeCountSource: continuationFacts.tradeCountSource,
-          });
+          return this.buildSignal(
+            market,
+            sellMatch,
+            ctx,
+            buyCount,
+            now,
+            nextSeq,
+            {
+              ...emissionFacts,
+              continuationStop: true,
+              continuationTradeCount: continuationFacts.tradeCount,
+              continuationTradeCountSource: continuationFacts.tradeCountSource,
+            },
+            triggerTelemetry,
+          );
         }
         this.recordDecisionSuppressed({
           tokenId,
@@ -873,13 +971,31 @@ export class AlgoDecisionModule implements RuntimeModule {
           });
           return null;
         }
-        return this.buildSignal(market, sellMatch, ctx, buyCount, now, nextSeq, emissionFacts);
+        return this.buildSignal(
+          market,
+          sellMatch,
+          ctx,
+          buyCount,
+          now,
+          nextSeq,
+          emissionFacts,
+          triggerTelemetry,
+        );
       }
     }
 
     // Decide action + size
     const decision = evaluateDecision(ctx, this.decisionRules);
-    return this.buildSignal(market, decision, ctx, buyCount, now, nextSeq, emissionFacts);
+    return this.buildSignal(
+      market,
+      decision,
+      ctx,
+      buyCount,
+      now,
+      nextSeq,
+      emissionFacts,
+      triggerTelemetry,
+    );
   }
 
   private buildSignal(
@@ -890,6 +1006,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     now: number,
     nextSeq: (key: string) => number,
     emissionFacts: EmissionFacts,
+    triggerTelemetry: TriggerTelemetry,
   ): TokenEvalResult {
     const sizeRules = decision.action === "BUY" ? this.buySizeRules : this.sellSizeRules;
     const nthBuy = buyCount + 1;
@@ -943,13 +1060,27 @@ export class AlgoDecisionModule implements RuntimeModule {
           signalTimestamp: signal.generatedAt,
         },
         emissionFacts,
+        triggerTelemetry,
       );
     };
 
     return { type: "signal", signal, market, commitLog };
   }
 
-  private recordDecisionSignal(signal: DecisionSignalLog, emissionFacts: EmissionFacts): void {
+  private recordDecisionSignal(
+    signal: DecisionSignalLog,
+    emissionFacts: EmissionFacts,
+    triggerTelemetry: TriggerTelemetry,
+  ): void {
+    // ADR-022 §D-F — record this decisionRuleId in the per-tick histogram
+    // BEFORE the repo writes so the healthcheck reflects the signal even if
+    // persistence fails. Aggregation is in-memory only; failures here are
+    // not user-visible. `decisionRuleId === null` is technically possible
+    // per the DecisionSignalLog type — bucket those under the literal
+    // "(null)" so they remain countable rather than silently dropped.
+    const ruleKey = signal.decisionRuleId ?? "(null)";
+    this.currentTickRuleMix.set(ruleKey, (this.currentTickRuleMix.get(ruleKey) ?? 0) + 1);
+
     try {
       this.deps.decisionSignalLogRepo?.insert(signal);
     } catch (err) {
@@ -977,6 +1108,10 @@ export class AlgoDecisionModule implements RuntimeModule {
           tradeCount: emissionFacts.continuationTradeCount ?? null,
           tradeCountSource: emissionFacts.continuationTradeCountSource ?? null,
           continuationMode: this.continuationMode,
+          // ADR-022 §D-F — F-telemetry fields surfaced for post-hoc R23/R24
+          // distribution comparison.
+          dropFromLastSeen: triggerTelemetry.dropFromLastSeen,
+          entryPriceBucket: triggerTelemetry.entryPriceBucket,
           signalTimestamp: signal.signalTimestamp,
         },
       });

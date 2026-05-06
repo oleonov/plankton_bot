@@ -2160,4 +2160,248 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
   });
+
+  // ADR-022 §D-F — F-telemetry on signal_emitted + healthCheck triggerMix
+  describe("ADR-022 F-telemetry", () => {
+    it("emits dropFromLastSeen=null and entryPriceBucket on first observation", async () => {
+      const tokenId = "token-fresh";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      // Single observation → no prior midPrice → dropFromLastSeen must be null.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const emitted = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.find(([event]) => event.eventType === "signal_emitted");
+      expect(emitted).toBeDefined();
+      expect(emitted![0].payload.dropFromLastSeen).toBeNull();
+      // 0.45 > 0.20 → ">0.20" bucket per R24 §9.6.
+      expect(emitted![0].payload.entryPriceBucket).toBe(">0.20");
+
+      await mod.stop();
+    });
+
+    it("computes dropFromLastSeen against the previous NormalizedMarketUpdated", async () => {
+      const tokenId = "token-drop";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      // First update at 0.40 — emits a signal_emitted with dropFromLastSeen=null
+      // (no prior). The first BUY parks `pendingEntries[tokenId]` so the
+      // second update would be suppressed with `pending-buy-order` unless we
+      // simulate the in-flight signal failing — emit `SignalRejected` with the
+      // captured signal to mirror what the bridge does on rejection.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.4)],
+        timestamp: Date.now(),
+      });
+      const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([ev]) => ev === "SignalProduced",
+      )?.[1] as { signal: import("@plankton/domain").Signal; market: NormalizedMarket };
+      expect(firstSignal).toBeDefined();
+      await (bus as any).emit("SignalRejected", {
+        signal: firstSignal.signal,
+        market: firstSignal.market,
+        reason: "test-clear-pending",
+        rejectedAt: Date.now(),
+      });
+
+      // Second update at 0.30 should yield (0.30-0.40)/0.40 = -0.25.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.3)],
+        timestamp: Date.now(),
+      });
+
+      const emittedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([event]) => event.eventType === "signal_emitted");
+      expect(emittedCalls.length).toBeGreaterThanOrEqual(2);
+      const latest = emittedCalls.at(-1)!;
+      expect(latest[0].payload.price).toBeCloseTo(0.3, 6);
+      expect(latest[0].payload.dropFromLastSeen as number).toBeCloseTo(-0.25, 6);
+      expect(latest[0].payload.entryPriceBucket).toBe(">0.20");
+
+      await mod.stop();
+    });
+
+    it("resets dropFromLastSeen across a null-midPrice gap", async () => {
+      // ADR-022 §D-F: prevMidPrice references the IMMEDIATELY previous update.
+      // A null-mid update clears the slot, so the next non-null observation
+      // must report dropFromLastSeen=null (not delta-from-pre-gap).
+      const tokenId = "token-null-gap";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.4)],
+        timestamp: Date.now(),
+      });
+      const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([ev]) => ev === "SignalProduced",
+      )?.[1] as { signal: import("@plankton/domain").Signal; market: NormalizedMarket };
+      expect(firstSignal).toBeDefined();
+      await (bus as any).emit("SignalRejected", {
+        signal: firstSignal.signal,
+        market: firstSignal.market,
+        reason: "test-clear-pending",
+        rejectedAt: Date.now(),
+      });
+
+      // Null-mid update wipes prevMidPrices for this token.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, null)],
+        timestamp: Date.now(),
+      });
+
+      vi.mocked(riskEventRepo.insert).mockClear();
+
+      // Next non-null observation must see dropFromLastSeen=null.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.3)],
+        timestamp: Date.now(),
+      });
+
+      const emitted = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.find(([event]) => event.eventType === "signal_emitted");
+      expect(emitted).toBeDefined();
+      expect(emitted![0].payload.dropFromLastSeen).toBeNull();
+
+      await mod.stop();
+    });
+
+    it.each<[number, "<=0.005" | "0.005-0.05" | "0.05-0.20" | ">0.20"]>([
+      [0.003, "<=0.005"],
+      [0.005, "<=0.005"],
+      [0.04, "0.005-0.05"],
+      [0.05, "0.005-0.05"],
+      [0.15, "0.05-0.20"],
+      [0.2, "0.05-0.20"],
+      [0.3, ">0.20"],
+    ])("classifies entryPriceBucket for price=%f → %s", async (price, expected) => {
+      const tokenId = `token-bucket-${price}`;
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, price)],
+        timestamp: Date.now(),
+      });
+
+      const emitted = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.find(([event]) => event.eventType === "signal_emitted");
+      expect(emitted).toBeDefined();
+      expect(emitted![0].payload.entryPriceBucket).toBe(expected);
+
+      await mod.stop();
+    });
+
+    it("includes triggerMix segment in healthCheck after signals are emitted", async () => {
+      const tokenId = "token-mix";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+      const mod = buildModule();
+      await mod.start();
+
+      // Pre-emission: triggerMix segment is suppressed (empty histogram).
+      const before = await mod.healthCheck();
+      expect(before.detail).not.toContain("triggerMix");
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      // ADR-022 §D-F — the histogram is promoted into `lastTickRuleMix` at
+      // the END of the sweep, so healthcheck immediately after one emission
+      // already reports the triggerMix segment.
+      const after = await mod.healthCheck();
+      expect(after.detail).toContain("triggerMix");
+      expect(after.detail).toContain("FALLBACK=1");
+
+      await mod.stop();
+    });
+
+    it("clears prevMidPrices when token leaves the tracked universe", async () => {
+      const tokenId = "token-evict";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      // Seed first observation to populate prevMidPrices.
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.4)],
+        timestamp: Date.now(),
+      });
+
+      // First BUY parks pendingEntries — clear it so the next update isn't suppressed.
+      const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
+        ([ev]) => ev === "SignalProduced",
+      )?.[1] as { signal: import("@plankton/domain").Signal; market: NormalizedMarket };
+      expect(firstSignal).toBeDefined();
+      await (bus as any).emit("SignalRejected", {
+        signal: firstSignal.signal,
+        market: firstSignal.market,
+        reason: "test-clear-pending",
+        rejectedAt: Date.now(),
+      });
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.3)],
+        timestamp: Date.now(),
+      });
+
+      // Clear pendingEntries again before eviction.
+      const secondSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls
+        .filter(([ev]) => ev === "SignalProduced")
+        .at(-1)?.[1] as { signal: import("@plankton/domain").Signal; market: NormalizedMarket };
+      expect(secondSignal).toBeDefined();
+      await (bus as any).emit("SignalRejected", {
+        signal: secondSignal.signal,
+        market: secondSignal.market,
+        reason: "test-clear-pending",
+        rejectedAt: Date.now(),
+      });
+
+      // Evict via TrackedMarketsChanged; subsequent re-add should observe
+      // dropFromLastSeen=null again (history wiped, not (0.45-0.30)/0.30).
+      await (bus as any).emit("TrackedMarketsChanged", {
+        addedTokenIds: [],
+        removedTokenIds: [createTokenId(tokenId)],
+        timestamp: Date.now(),
+      });
+      vi.mocked(riskEventRepo.insert).mockClear();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const emitted = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.find(([event]) => event.eventType === "signal_emitted");
+      expect(emitted).toBeDefined();
+      expect(emitted![0].payload.dropFromLastSeen).toBeNull();
+
+      await mod.stop();
+    });
+  });
 });
