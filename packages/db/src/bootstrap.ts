@@ -497,6 +497,12 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "execution_policy_observations", "notional_bucket", "TEXT");
   safeAddColumn(conn.db, "decision_signal_log", "sizing_rule_id", "TEXT");
   safeAddColumn(conn.db, "decision_signal_log", "notional_bucket", "TEXT");
+  safeAddColumn(conn.db, "decision_signal_log", "is_add", "INTEGER");
+  safeAddColumn(conn.db, "decision_signal_log", "add_age_ms", "INTEGER");
+  safeAddColumn(conn.db, "decision_signal_log", "add_age_bucket", "TEXT");
+  safeAddColumn(conn.db, "decision_signal_log", "add_price_change_pct", "REAL");
+  safeAddColumn(conn.db, "decision_signal_log", "add_price_change_bucket", "TEXT");
+  safeAddColumn(conn.db, "decision_signal_log", "nth_buy_at_emit", "INTEGER");
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
   ensureUniqueOpenPositionIndex(conn.db);
   setRuntimeBusyTimeout(conn);

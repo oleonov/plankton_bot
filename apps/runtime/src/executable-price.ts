@@ -1,4 +1,6 @@
 import type {
+  AddAgeBucket,
+  AddPriceChangeBucket,
   CancelAgeBucket,
   NotionalBucket,
   PriceLevel,
@@ -514,6 +516,55 @@ export function classifyCancelAgeBucket(ageMs: number | null): CancelAgeBucket |
   if (ageMs < 86_400_000) return "6-24h";
   if (ageMs < 604_800_000) return "1-7d";
   return ">7d";
+}
+
+/**
+ * ADR-026 §D-C telemetry. Maps the duration between a leg's first
+ * BUY fill and a subsequent add-BUY signal (ms) onto the canonical
+ * §11.1.2 bucket taxonomy. Boundaries are left-inclusive /
+ * right-exclusive (`[lower, upper)`) except the unbounded `>7d`
+ * tail. Note these boundaries differ from `classifyCancelAgeBucket`
+ * (§12.1) — §11.1.2 uses 5/30min steps and a 1-3h / 3-12h split.
+ *
+ * Returns null when ageMs is null, non-finite, or negative.
+ */
+export function classifyAddAgeBucket(ageMs: number | null): AddAgeBucket | null {
+  if (ageMs == null || !Number.isFinite(ageMs) || ageMs < 0) return null;
+  if (ageMs < 60_000) return "<60s";
+  if (ageMs < 300_000) return "1-5min";
+  if (ageMs < 1_800_000) return "5-30min";
+  if (ageMs < 3_600_000) return "30min-1h";
+  if (ageMs < 10_800_000) return "1-3h";
+  if (ageMs < 43_200_000) return "3-12h";
+  if (ageMs < 86_400_000) return "12-24h";
+  if (ageMs < 604_800_000) return "1-7d";
+  return ">7d";
+}
+
+/**
+ * ADR-026 §D-C telemetry. Maps a signed fractional price-change
+ * (e.g. `-0.5` = `-50%`) onto the canonical §11.1.3 bucket
+ * taxonomy. Boundaries are left-inclusive / right-exclusive
+ * (`[lower, upper)`) for the interior buckets; the tails (`below
+ * -50%`, `above +50%`) are unbounded.
+ *
+ * Returns null when the input is null or non-finite. Note: §11.1
+ * computes price change as `(addPrice - firstTradePrice) /
+ * firstTradePrice`, so callers must skip when `firstTradePrice`
+ * is zero or non-positive.
+ */
+export function classifyAddPriceChangeBucket(
+  pct: number | null,
+): AddPriceChangeBucket | null {
+  if (pct == null || !Number.isFinite(pct)) return null;
+  if (pct < -0.5) return "below -50%";
+  if (pct < -0.25) return "-50% to -25%";
+  if (pct < -0.1) return "-25% to -10%";
+  if (pct < 0) return "-10% to 0%";
+  if (pct < 0.1) return "0% to +10%";
+  if (pct < 0.25) return "+10% to +25%";
+  if (pct < 0.5) return "+25% to +50%";
+  return "above +50%";
 }
 
 export function deriveExecutableTopOfBook(

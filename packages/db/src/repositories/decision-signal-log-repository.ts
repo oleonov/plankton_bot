@@ -8,8 +8,10 @@ export class SqliteDecisionSignalLogRepository implements DecisionSignalLogRepos
     this.insertStmt = db.prepare(
       `INSERT INTO decision_signal_log
        (signal_id, token_id, condition_id, side, decision_rule_id, sizing_rule_id,
-        notional_bucket, state, price, buy_count, time_since_last_seconds, signal_timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        notional_bucket, state, price, buy_count, time_since_last_seconds, signal_timestamp,
+        is_add, add_age_ms, add_age_bucket, add_price_change_pct, add_price_change_bucket,
+        nth_buy_at_emit)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -27,6 +29,12 @@ export class SqliteDecisionSignalLogRepository implements DecisionSignalLogRepos
       signal.buyCount,
       signal.timeSinceLastSeconds,
       signal.signalTimestamp,
+      signal.isAdd,
+      signal.addAgeMs,
+      signal.addAgeBucket,
+      signal.addPriceChangePct,
+      signal.addPriceChangeBucket,
+      signal.nthBuyAtEmit,
     );
   }
 }

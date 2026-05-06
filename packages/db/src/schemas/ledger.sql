@@ -123,6 +123,12 @@ CREATE TABLE IF NOT EXISTS decision_signal_log (
   buy_count                INTEGER NOT NULL,
   time_since_last_seconds  REAL,
   signal_timestamp         TEXT NOT NULL,
+  is_add                   INTEGER,
+  add_age_ms               INTEGER,
+  add_age_bucket           TEXT,
+  add_price_change_pct     REAL,
+  add_price_change_bucket  TEXT,
+  nth_buy_at_emit          INTEGER,
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

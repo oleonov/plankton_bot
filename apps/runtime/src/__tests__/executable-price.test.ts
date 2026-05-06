@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   ceilToTick,
+  classifyAddAgeBucket,
+  classifyAddPriceChangeBucket,
   classifyCancelAgeBucket,
   classifyNotionalBucket,
   classifyRoundLevel,
@@ -516,5 +518,64 @@ describe("classifyCancelAgeBucket", () => {
     expect(classifyCancelAgeBucket(Number.POSITIVE_INFINITY)).toBeNull();
     expect(classifyCancelAgeBucket(Number.NEGATIVE_INFINITY)).toBeNull();
     expect(classifyCancelAgeBucket(-1)).toBeNull();
+  });
+});
+
+describe("classifyAddAgeBucket", () => {
+  it("classifies values strictly below each upper bound (boundary is exclusive)", () => {
+    expect(classifyAddAgeBucket(0)).toBe("<60s");
+    expect(classifyAddAgeBucket(59_999)).toBe("<60s");
+    expect(classifyAddAgeBucket(60_000)).toBe("1-5min");
+    expect(classifyAddAgeBucket(299_999)).toBe("1-5min");
+    expect(classifyAddAgeBucket(300_000)).toBe("5-30min");
+    expect(classifyAddAgeBucket(1_799_999)).toBe("5-30min");
+    expect(classifyAddAgeBucket(1_800_000)).toBe("30min-1h");
+    expect(classifyAddAgeBucket(3_599_999)).toBe("30min-1h");
+    expect(classifyAddAgeBucket(3_600_000)).toBe("1-3h");
+    expect(classifyAddAgeBucket(10_799_999)).toBe("1-3h");
+    expect(classifyAddAgeBucket(10_800_000)).toBe("3-12h");
+    expect(classifyAddAgeBucket(43_199_999)).toBe("3-12h");
+    expect(classifyAddAgeBucket(43_200_000)).toBe("12-24h");
+    expect(classifyAddAgeBucket(86_399_999)).toBe("12-24h");
+    expect(classifyAddAgeBucket(86_400_000)).toBe("1-7d");
+    expect(classifyAddAgeBucket(604_799_999)).toBe("1-7d");
+    expect(classifyAddAgeBucket(604_800_000)).toBe(">7d");
+    expect(classifyAddAgeBucket(10 * 604_800_000)).toBe(">7d");
+  });
+
+  it("returns null for missing or invalid inputs", () => {
+    expect(classifyAddAgeBucket(null)).toBeNull();
+    expect(classifyAddAgeBucket(Number.NaN)).toBeNull();
+    expect(classifyAddAgeBucket(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(classifyAddAgeBucket(Number.NEGATIVE_INFINITY)).toBeNull();
+    expect(classifyAddAgeBucket(-1)).toBeNull();
+  });
+});
+
+describe("classifyAddPriceChangeBucket", () => {
+  it("classifies values strictly below each upper bound (boundary is exclusive)", () => {
+    expect(classifyAddPriceChangeBucket(-0.9)).toBe("below -50%");
+    expect(classifyAddPriceChangeBucket(-0.500001)).toBe("below -50%");
+    expect(classifyAddPriceChangeBucket(-0.5)).toBe("-50% to -25%");
+    expect(classifyAddPriceChangeBucket(-0.25001)).toBe("-50% to -25%");
+    expect(classifyAddPriceChangeBucket(-0.25)).toBe("-25% to -10%");
+    expect(classifyAddPriceChangeBucket(-0.10001)).toBe("-25% to -10%");
+    expect(classifyAddPriceChangeBucket(-0.1)).toBe("-10% to 0%");
+    expect(classifyAddPriceChangeBucket(-0.00001)).toBe("-10% to 0%");
+    expect(classifyAddPriceChangeBucket(0)).toBe("0% to +10%");
+    expect(classifyAddPriceChangeBucket(0.09999)).toBe("0% to +10%");
+    expect(classifyAddPriceChangeBucket(0.1)).toBe("+10% to +25%");
+    expect(classifyAddPriceChangeBucket(0.24999)).toBe("+10% to +25%");
+    expect(classifyAddPriceChangeBucket(0.25)).toBe("+25% to +50%");
+    expect(classifyAddPriceChangeBucket(0.49999)).toBe("+25% to +50%");
+    expect(classifyAddPriceChangeBucket(0.5)).toBe("above +50%");
+    expect(classifyAddPriceChangeBucket(2)).toBe("above +50%");
+  });
+
+  it("returns null for missing or invalid inputs", () => {
+    expect(classifyAddPriceChangeBucket(null)).toBeNull();
+    expect(classifyAddPriceChangeBucket(Number.NaN)).toBeNull();
+    expect(classifyAddPriceChangeBucket(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(classifyAddPriceChangeBucket(Number.NEGATIVE_INFINITY)).toBeNull();
   });
 });

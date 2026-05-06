@@ -467,6 +467,93 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("denormalizes §11.1 adds telemetry on add-BUY signals", async () => {
+    const tokenId = "token-add";
+    // buyCount=2 + firstTradePrice=0.1 satisfies R2 continuation
+    // (legTradeCount>=2 ∧ firstTradePrice>=0.05); add-BUY can fire.
+    const ninetyMinAgoMs = Date.now() - 90 * 60 * 1000;
+    const ninetyMinAgo = new Date(ninetyMinAgoMs).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 2,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: ninetyMinAgo,
+      lastTradeAt: ninetyMinAgo,
+      updatedAt: ninetyMinAgo,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+    const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
+    await mod.start();
+
+    // Price 0.07 is below D7-SELL-S1 (0.1) and above REDEEM-S2 (<0.05);
+    // FALLBACK BUY fires on the existing S2 leg → add-BUY.
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.07, "cond-add")],
+      timestamp: Date.now(),
+    });
+
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    const inserted = vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0];
+    expect(inserted).toMatchObject({
+      side: "BUY",
+      buyCount: 2,
+      isAdd: 1,
+      addAgeBucket: "1-3h",
+      addPriceChangeBucket: "-50% to -25%",
+      nthBuyAtEmit: 3,
+    });
+    expect(inserted.addPriceChangePct).toBeCloseTo(-0.3, 5);
+    expect(inserted.addAgeMs).toBeGreaterThanOrEqual(90 * 60 * 1000);
+    expect(inserted.addAgeMs).toBeLessThan(91 * 60 * 1000);
+
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "signal_emitted",
+      payload: expect.objectContaining({
+        side: "BUY",
+        isAdd: 1,
+        addAgeBucket: "1-3h",
+        addPriceChangeBucket: "-50% to -25%",
+        nthBuyAtEmit: 3,
+      }),
+    });
+
+    await mod.stop();
+  });
+
+  it("leaves §11.1 adds telemetry null on first-entry BUY signals", async () => {
+    const tokenId = "token-first-entry";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+    const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.45, "cond-first")],
+      timestamp: Date.now(),
+    });
+
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0]).toMatchObject({
+      side: "BUY",
+      buyCount: 0,
+      isAdd: 0,
+      addAgeMs: null,
+      addAgeBucket: null,
+      addPriceChangePct: null,
+      addPriceChangeBucket: null,
+      nthBuyAtEmit: 1,
+    });
+
+    await mod.stop();
+  });
+
   it("emits RedeemRequested when REDEEM conditions are met", async () => {
     const tokenId = "token-redeem";
     const familyId = "fam-2";

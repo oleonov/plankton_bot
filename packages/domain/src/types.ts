@@ -163,6 +163,12 @@ export interface DecisionSignalLog {
   buyCount: number;
   timeSinceLastSeconds: number | null;
   signalTimestamp: string;
+  isAdd: 0 | 1 | null;
+  addAgeMs: number | null;
+  addAgeBucket: AddAgeBucket | null;
+  addPriceChangePct: number | null;
+  addPriceChangeBucket: AddPriceChangeBucket | null;
+  nthBuyAtEmit: number | null;
 }
 
 /**
@@ -194,6 +200,43 @@ export type NotionalBucket =
  * `createdAt` and its cancellation.
  */
 export type CancelAgeBucket = "<1min" | "1-10min" | "10min-1h" | "1-6h" | "6-24h" | "1-7d" | ">7d";
+
+/**
+ * ADR-026 §D-C — add-age bucket taxonomy.
+ * Mirrors canonical §11.1.2 add-timing distribution buckets at
+ * `06_algorithm_spec.md` v5.13. Buckets are left-inclusive /
+ * right-exclusive (`[lower, upper)`) except the unbounded `>7d`
+ * tail. Used to classify the time between a leg's first BUY fill
+ * and a subsequent add-BUY signal emission.
+ */
+export type AddAgeBucket =
+  | "<60s"
+  | "1-5min"
+  | "5-30min"
+  | "30min-1h"
+  | "1-3h"
+  | "3-12h"
+  | "12-24h"
+  | "1-7d"
+  | ">7d";
+
+/**
+ * ADR-026 §D-C — add price-change-vs-first-BUY bucket taxonomy.
+ * Mirrors canonical §11.1.3 add price-change distribution buckets
+ * at `06_algorithm_spec.md` v5.13. Boundaries are signed fractional
+ * (e.g. `-0.5` = `-50%`); left-inclusive / right-exclusive except
+ * for the unbounded tails (`below -50%` and `above +50%`). Used to
+ * classify `(addPrice - firstTradePrice) / firstTradePrice`.
+ */
+export type AddPriceChangeBucket =
+  | "below -50%"
+  | "-50% to -25%"
+  | "-25% to -10%"
+  | "-10% to 0%"
+  | "0% to +10%"
+  | "+10% to +25%"
+  | "+25% to +50%"
+  | "above +50%";
 
 // ─── Risk Decision ────────────────────────────────────────────────────────────
 

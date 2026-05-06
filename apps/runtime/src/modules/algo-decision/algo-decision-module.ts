@@ -56,7 +56,11 @@ import {
   resolveWalletBuyBudget,
   type WalletBudgetControlDb,
 } from "../../wallet-buy-budget.js";
-import { classifyNotionalBucket } from "../../executable-price.js";
+import {
+  classifyAddAgeBucket,
+  classifyAddPriceChangeBucket,
+  classifyNotionalBucket,
+} from "../../executable-price.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -120,6 +124,7 @@ type TradeCountSource = "market_wide" | "leg_local_fallback" | "leg_local";
 
 type EmissionFacts = {
   firstTradePrice: number | null;
+  firstTradeAt: string | null;
   legTradeCount: number;
   continuationStop?: boolean | null;
   continuationTradeCount?: number | null;
@@ -719,6 +724,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const buyCount = legState?.buyCount ?? 0;
     const emissionFacts: EmissionFacts = {
       firstTradePrice: legState?.firstTradePrice ?? null,
+      firstTradeAt: legState?.firstTradeAt ?? null,
       legTradeCount: (legState?.buyCount ?? 0) + (legState?.sellCount ?? 0),
     };
     const timeSinceLastSeconds = legState
@@ -822,9 +828,17 @@ export class AlgoDecisionModule implements RuntimeModule {
             buyCount,
             timeSinceLastSeconds,
             signalTimestamp: new Date(now).toISOString(),
+            // ADR-026 §D-B — adds telemetry is BUY-only; REDEEM rows carry nulls.
+            isAdd: null,
+            addAgeMs: null,
+            addAgeBucket: null,
+            addPriceChangePct: null,
+            addPriceChangeBucket: null,
+            nthBuyAtEmit: null,
           },
           {
             firstTradePrice: emissionFacts.firstTradePrice,
+            firstTradeAt: emissionFacts.firstTradeAt,
             legTradeCount: emissionFacts.legTradeCount,
           },
           triggerTelemetry,
@@ -1049,6 +1063,29 @@ export class AlgoDecisionModule implements RuntimeModule {
     // overcounts decision_signal_log/signal_emitted by every tail-end signal
     // that gets silently dropped for lack of BUY headroom, breaking the
     // emitted-vs-suppressed accounting operators rely on.
+    // ADR-026 §D-B — denormalize §11.1 adds telemetry at signal-emit time so
+    // is_add / age / price-change / nth_buy distributions become first-class
+    // queryable columns without retroactive joins against a mutating
+    // leg_states.first_trade_at.
+    const isAdd: 0 | 1 = side === "buy" && buyCount >= 1 ? 1 : 0;
+    const isAddBuy = isAdd === 1;
+    const firstTradeAtMs = emissionFacts.firstTradeAt
+      ? new Date(emissionFacts.firstTradeAt).getTime()
+      : null;
+    // Negative deltas (clock skew / future firstTradeAt) stay null rather than
+    // collapsing into "<60s" — bucket lower bound is 0ms inclusive.
+    const rawAddAgeMs =
+      isAddBuy && firstTradeAtMs != null && Number.isFinite(firstTradeAtMs)
+        ? now - firstTradeAtMs
+        : null;
+    const addAgeMs = rawAddAgeMs != null && rawAddAgeMs >= 0 ? rawAddAgeMs : null;
+    const firstPrice = emissionFacts.firstTradePrice;
+    const addPriceChangePct =
+      isAddBuy && firstPrice != null && firstPrice > 0
+        ? (ctx.price - firstPrice) / firstPrice
+        : null;
+    const nthBuyAtEmit = side === "buy" ? nthBuy : null;
+
     const commitLog = (): void => {
       this.recordDecisionSignal(
         {
@@ -1064,6 +1101,12 @@ export class AlgoDecisionModule implements RuntimeModule {
           buyCount,
           timeSinceLastSeconds: ctx.timeSinceLastSeconds,
           signalTimestamp: signal.generatedAt,
+          isAdd: side === "buy" ? isAdd : null,
+          addAgeMs,
+          addAgeBucket: classifyAddAgeBucket(addAgeMs),
+          addPriceChangePct,
+          addPriceChangeBucket: classifyAddPriceChangeBucket(addPriceChangePct),
+          nthBuyAtEmit,
         },
         emissionFacts,
         triggerTelemetry,
@@ -1118,6 +1161,14 @@ export class AlgoDecisionModule implements RuntimeModule {
           // distribution comparison.
           dropFromLastSeen: triggerTelemetry.dropFromLastSeen,
           entryPriceBucket: triggerTelemetry.entryPriceBucket,
+          // ADR-026 §D-B — §11.1 adds telemetry mirrored alongside the
+          // decision_signal_log row.
+          isAdd: signal.isAdd,
+          addAgeMs: signal.addAgeMs,
+          addAgeBucket: signal.addAgeBucket,
+          addPriceChangePct: signal.addPriceChangePct,
+          addPriceChangeBucket: signal.addPriceChangeBucket,
+          nthBuyAtEmit: signal.nthBuyAtEmit,
           signalTimestamp: signal.signalTimestamp,
         },
       });
