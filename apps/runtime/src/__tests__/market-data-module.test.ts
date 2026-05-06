@@ -1409,4 +1409,68 @@ describe("MarketDataModule", () => {
     expect(received[0]!.acceptingOrders).toBe(false);
     expect(received[0]!.enableOrderBook).toBe(false);
   });
+
+  // ── ADR-021 §D-F #1 wsCapUtilizationPct ────────────────────────────────
+  describe("watch-set capacity telemetry (ADR-021 §D-F)", () => {
+    it("getMetricsSnapshot reports wsCapUtilizationPct=null when maxTrackedTokens is unset", async () => {
+      const snap = mod.getMetricsSnapshot();
+      expect(snap.wsCapUtilizationPct).toBeNull();
+    });
+
+    it("getMetricsSnapshot reports rounded utilization when maxTrackedTokens is set", async () => {
+      const tracked = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" }),
+        makeTrackedMarket({ tokenId: createTokenId("tok-b"), conditionId: "cond-b" }),
+        makeTrackedMarket({ tokenId: createTokenId("tok-c"), conditionId: "cond-c" }),
+      ];
+      (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+        executionCritical: tracked,
+        entryCandidates: [],
+        discoveryOnly: [],
+      });
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+      mod = new MarketDataModule({
+        gateway,
+        marketRepo,
+        bus,
+        log: silentLog,
+        pollIntervalMs: 60_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-123",
+        maxTrackedTokens: 4,
+      });
+
+      await mod.poll();
+
+      // 3 tracked / 4 cap = 75%
+      expect(mod.getMetricsSnapshot().wsCapUtilizationPct).toBe(75);
+    });
+
+    it("getMetricsSnapshot wsCapUtilizationPct rounds to nearest integer", async () => {
+      const tracked = [
+        makeTrackedMarket({ tokenId: createTokenId("tok-a"), conditionId: "cond-a" }),
+      ];
+      (marketRepo.findTrackedForPricingTiered as ReturnType<typeof vi.fn>).mockReturnValue({
+        executionCritical: tracked,
+        entryCandidates: [],
+        discoveryOnly: [],
+      });
+      (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(new Map());
+      mod = new MarketDataModule({
+        gateway,
+        marketRepo,
+        bus,
+        log: silentLog,
+        pollIntervalMs: 60_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-123",
+        maxTrackedTokens: 3,
+      });
+
+      await mod.poll();
+
+      // 1 / 3 = 33.33% → 33
+      expect(mod.getMetricsSnapshot().wsCapUtilizationPct).toBe(33);
+    });
+  });
 });

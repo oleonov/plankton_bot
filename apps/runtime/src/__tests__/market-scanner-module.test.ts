@@ -1350,4 +1350,104 @@ describe("MarketScannerModule", () => {
       expect(h.detail).not.toContain("step2Breakdown");
     });
   });
+
+  // ── ADR-021 §D-F watch-set telemetry ──────────────────────────────────────
+  describe("watch-set telemetry (ADR-021 §D-F)", () => {
+    it("scan() reports preservedDisappearedTokens=0 when every preserved token is rediscovered", async () => {
+      const positionRepo = createMockPositionRepo();
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-leg"), status: "open" },
+      ]);
+
+      const { mod, discoveryGateway } = buildModule({ positionRepo });
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-above-100k",
+          eventSlug: "bitcoin-above-100k",
+          tokens: [{ tokenId: "tok-leg", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      const result = await mod.scanOrThrow();
+      expect(result.preservedTokens).toBe(1);
+      expect(result.preservedDisappearedTokens).toBe(0);
+    });
+
+    it("scan() reports preservedDisappearedTokens=N when preserved tokens are absent from Gamma", async () => {
+      const positionRepo = createMockPositionRepo();
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-leg-a"), status: "open" },
+        { tokenId: createTokenId("tok-leg-b"), status: "open" },
+      ]);
+      const orderRepo = createMockOrderRepo();
+      (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-leg-c"), status: "open" },
+      ]);
+
+      const { mod, discoveryGateway } = buildModule({ positionRepo, orderRepo });
+      // Gamma scan returns nothing — all three preserved tokens are missing.
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      const result = await mod.scanOrThrow();
+      expect(result.preservedTokens).toBe(3);
+      expect(result.preservedDisappearedTokens).toBe(3);
+    });
+
+    it("scan() counts only the missing subset when some preserved tokens are rediscovered", async () => {
+      const positionRepo = createMockPositionRepo();
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-found"), status: "open" },
+        { tokenId: createTokenId("tok-missing"), status: "open" },
+      ]);
+
+      const { mod, discoveryGateway } = buildModule({ positionRepo });
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-above-100k",
+          eventSlug: "bitcoin-above-100k",
+          tokens: [{ tokenId: "tok-found", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      const result = await mod.scanOrThrow();
+      expect(result.preservedTokens).toBe(2);
+      expect(result.preservedDisappearedTokens).toBe(1);
+    });
+
+    it("healthCheck() includes a watchSet segment after a successful scan", async () => {
+      const positionRepo = createMockPositionRepo();
+      (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        { tokenId: createTokenId("tok-leg"), status: "open" },
+      ]);
+
+      const { mod, discoveryGateway, marketRepo } = buildModule({ positionRepo });
+      (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mockReturnValue(2);
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "bitcoin-above-100k",
+          eventSlug: "bitcoin-above-100k",
+          tokens: [{ tokenId: "tok-fresh", outcome: "Yes" }],
+          eventMarketCount: 1,
+        }),
+      ]);
+
+      await mod.scan();
+
+      const h = await mod.healthCheck();
+      expect(h.detail).toContain("watchSet");
+      expect(h.detail).toContain("preserved=1");
+      expect(h.detail).toContain("deactivated=2");
+      expect(h.detail).toContain("firstSeen=1");
+      expect(h.detail).toContain("preservedDisappeared=1");
+    });
+
+    it("healthCheck() omits watchSet segment before any successful scan", async () => {
+      const { mod } = buildModule();
+      const h = await mod.healthCheck();
+      expect(h.ok).toBe(false);
+      expect(h.detail).not.toContain("watchSet");
+    });
+  });
 });

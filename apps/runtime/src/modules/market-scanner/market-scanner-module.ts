@@ -77,6 +77,15 @@ export interface MarketScanResult {
   preservedTokens: number;
   /** Token rows deactivated (token-level). */
   deactivatedTokens: number;
+  /**
+   * Tokens preserved from deactivation that were ALSO fully missing from the
+   * Gamma scan this cycle (D-B1 edge — ADR-021 §D-F). Subset of
+   * `preservedTokens`; sustained non-zero readings indicate the bot is
+   * holding open legs on tokens whose `tradable` flag survives via the
+   * scanner UPSERT skipping them, which can leak BUY-eligibility until
+   * tracked-set diffing or resolution sweeps it away.
+   */
+  preservedDisappearedTokens: number;
   /** Tokens persisted for the first time during this scan (token-level). */
   firstSeenTokens: number;
   /**
@@ -131,6 +140,12 @@ export class MarketScannerModule implements RuntimeModule {
   private lastLatencyP50Ms: number | null = null;
   private lastLatencyP90Ms: number | null = null;
   private lastLatencyMaxMs: number | null = null;
+  /**
+   * ADR-021 §D-F — last successful scan's watch-set gauges (preserved /
+   * deactivated / firstSeen / preservedDisappeared) cached for `healthCheck`.
+   * Null until the first successful scan.
+   */
+  private lastScanResult: MarketScanResult | null = null;
   /**
    * Step 2 funnel breakdown — cumulative counters across all scan cycles
    * (mutated incrementally to keep memory flat). See Step2BreakdownSnapshot.
@@ -210,9 +225,14 @@ export class MarketScannerModule implements RuntimeModule {
       b.scannedMarketsTotal === 0
         ? ""
         : ` step2Breakdown markets=${b.scannedMarketsTotal} step1Include=${b.marketsStep1MatchedInclude} step1Exclude=${b.marketsStep1MatchedExclude} step2Fallback=${b.marketsStep2FallbackInclude} finalExclude=${b.marketsFinalExclude} events=${b.scannedEventsTotal} singleMarket=${b.eventsSingleMarketTotal} multiMarket=${b.eventsMultiMarketTotal}`;
+    const r = this.lastScanResult;
+    const watchSet =
+      r === null
+        ? ""
+        : ` watchSet preserved=${r.preservedTokens} deactivated=${r.deactivatedTokens} firstSeen=${r.firstSeenTokens} preservedDisappeared=${r.preservedDisappearedTokens}`;
     return {
       ok: !stale,
-      detail: `${freshness} ${latency}${breakdown}`,
+      detail: `${freshness} ${latency}${breakdown}${watchSet}`,
     };
   }
 
@@ -406,6 +426,15 @@ export class MarketScannerModule implements RuntimeModule {
         now,
       );
 
+      // ADR-021 §D-F #3 — D-B1 observability. Count preserved tokens (open
+      // position/order legs) that were fully absent from this Gamma scan.
+      // |activeTokenIds| is bounded by open positions + open orders (small),
+      // so a Set lookup loop is cheap.
+      let preservedDisappearedTokens = 0;
+      for (const tokenId of activeTokenIds) {
+        if (!discoveredTokenIds.has(tokenId)) preservedDisappearedTokens++;
+      }
+
       // Scan succeeded end-to-end — merge pending Step 2 delta into the
       // cumulative snapshot. Failed/degraded scans drop the delta by virtue
       // of falling through to the catch / finally without reaching this line.
@@ -439,12 +468,14 @@ export class MarketScannerModule implements RuntimeModule {
         savedTokens,
         preservedTokens: activeTokenIds.size,
         deactivatedTokens: deactivatedCount,
+        preservedDisappearedTokens,
         firstSeenTokens,
         discoveryLatencyP50Ms: latencyAggregates.p50,
         discoveryLatencyP90Ms: latencyAggregates.p90,
         discoveryLatencyMaxMs: latencyAggregates.max,
         durationMs,
       };
+      this.lastScanResult = result;
 
       this.log.info(
         {
@@ -453,6 +484,7 @@ export class MarketScannerModule implements RuntimeModule {
           savedTokens,
           preservedTokens: activeTokenIds.size,
           deactivatedTokens: deactivatedCount,
+          preservedDisappearedTokens,
           firstSeenTokens,
           discoveryLatencyP50Ms: latencyAggregates.p50,
           discoveryLatencyP90Ms: latencyAggregates.p90,

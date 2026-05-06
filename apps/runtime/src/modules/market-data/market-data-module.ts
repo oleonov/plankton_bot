@@ -98,6 +98,13 @@ export interface MarketDataStreamActivitySnapshot {
   readonly wsEventsReceivedPerSec: number;
   readonly wsUpdatesApplied: number;
   readonly trackedTokenCount: number;
+  /**
+   * ADR-021 §D-F #1 — WS-tier capacity utilisation as a 0–100 integer.
+   * `round(trackedTokenCount * 100 / maxTrackedTokens)`. Null when the
+   * module runs without a configured cap (legacy / simulation paths).
+   * Sustained ≥80 % is the operational signal for a D-C cap resize.
+   */
+  readonly wsCapUtilizationPct: number | null;
   readonly shardCount: number;
   readonly reconnectCount: number;
   readonly wsEventGapDetected: number;
@@ -323,13 +330,18 @@ export class MarketDataModule implements RuntimeModule {
       this.trackedMarketsByToken.keys(),
       this.marketCache,
     );
+    const trackedTokenCount = streamMetrics?.trackedTokenCount ?? this.lastTrackedTokenCount;
+    const cap = this.deps.maxTrackedTokens ?? null;
+    const wsCapUtilizationPct =
+      cap != null && cap > 0 ? Math.round((trackedTokenCount * 100) / cap) : null;
     return {
       wsEnabled: this.stream != null,
       windowStartMs: streamMetrics?.windowStartMs ?? null,
       wsEventsReceived: streamMetrics?.wsEventsReceived ?? 0,
       wsEventsReceivedPerSec: streamMetrics?.wsEventsReceivedPerSec ?? 0,
       wsUpdatesApplied: streamMetrics?.wsUpdatesApplied ?? 0,
-      trackedTokenCount: streamMetrics?.trackedTokenCount ?? this.lastTrackedTokenCount,
+      trackedTokenCount,
+      wsCapUtilizationPct,
       shardCount: streamMetrics?.shardCount ?? 0,
       reconnectCount: streamMetrics?.reconnectCount ?? 0,
       wsEventGapDetected: streamMetrics?.wsEventGapDetected ?? 0,
