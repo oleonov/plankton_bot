@@ -633,7 +633,7 @@ describe("runStartupPositionAdoption", () => {
         closedAt: "2026-03-15T00:00:00Z",
         updatedAt: "2026-03-15T00:00:00Z",
       });
-      seedFill(fillRepo, { fillId: "f-old-1", price: 0.10, filledAt: "2026-03-01T00:00:00Z" });
+      seedFill(fillRepo, { fillId: "f-old-1", price: 0.1, filledAt: "2026-03-01T00:00:00Z" });
       seedFill(fillRepo, {
         fillId: "f-old-2",
         side: "sell",

@@ -644,9 +644,7 @@ export function classifyHoldingTimeBucket(ms: number | null): HoldingTimeBucket 
  * Returns null when ratio is null, non-finite, or negative.
  * Callers must skip when `cumulative_buy_size <= 0` (divide-by-zero).
  */
-export function classifySoldBoughtRatioBucket(
-  ratio: number | null,
-): SoldBoughtRatioBucket | null {
+export function classifySoldBoughtRatioBucket(ratio: number | null): SoldBoughtRatioBucket | null {
   if (ratio == null || !Number.isFinite(ratio) || ratio < 0) return null;
   // See classifyExitPnlBucket — snap to 1e-9 so values that are
   // mathematically on a boundary (e.g. 50/200 == 0.25) honor the

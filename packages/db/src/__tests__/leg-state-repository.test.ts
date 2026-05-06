@@ -147,7 +147,16 @@ describe("SqliteLegStateRepository", () => {
         `INSERT INTO leg_states (token_id, buy_count, sell_count, last_action, first_trade_price, first_trade_at, last_trade_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run("tok-bf", 2, 0, "BUY", 0.1, "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "2026-01-02T00:00:00Z");
+      .run(
+        "tok-bf",
+        2,
+        0,
+        "BUY",
+        0.1,
+        "2026-01-01T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+        "2026-01-02T00:00:00Z",
+      );
 
     // Two BUYs and one SELL, all after first_trade_at — must all count.
     const insertFill = fresh.prepare(

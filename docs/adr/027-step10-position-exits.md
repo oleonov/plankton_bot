@@ -386,7 +386,7 @@ GROUP BY 1;
 - **Cumulative-size columns depend on `leg_states` staying intact
   across restarts.** A leg row cleared by close-and-reopen resets
   the cumulative counters; subsequent telemetry references the new
-  cumulative_*. This matches the production semantics of `legState`
+  cumulative\_\*. This matches the production semantics of `legState`
   already used by the reason ladder, so it is alignment with §11.1
   Step-9 caveats, not regression — but operators querying long-
   horizon §11.2 distributions must restrict to legs that haven't
@@ -422,7 +422,8 @@ GROUP BY 1;
 ## Migration
 
 Migration 049 — purely additive ALTER TABLE on `decision_signal_log`
-+ `leg_states`:
+
+- `leg_states`:
 
 ```sql
 -- decision_signal_log: §11.2 / §11.3 exit telemetry.

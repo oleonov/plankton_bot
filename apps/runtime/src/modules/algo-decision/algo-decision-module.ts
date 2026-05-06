@@ -233,8 +233,7 @@ function computeExitTelemetry(
     firstTradeAtMs != null && Number.isFinite(firstTradeAtMs) ? nowMs - firstTradeAtMs : null;
   const holdingTimeMs = rawHoldingMs != null && rawHoldingMs >= 0 ? rawHoldingMs : null;
 
-  const fallbackBasis =
-    cumulativeBuySize > 0 ? cumulativeBuyNotional / cumulativeBuySize : null;
+  const fallbackBasis = cumulativeBuySize > 0 ? cumulativeBuyNotional / cumulativeBuySize : null;
   const rollingBasis = emissionFacts.currentAvgEntryPrice ?? null;
   const costBasis =
     rollingBasis != null && rollingBasis > 0 && Number.isFinite(rollingBasis)

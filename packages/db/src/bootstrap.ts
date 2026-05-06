@@ -541,9 +541,7 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
  * `filled_at >= leg_states.first_trade_at` keeps prior closed-out legs on
  * the same token from leaking into the active leg's aggregates.
  */
-function backfillLegStateCumulativeFromFills(
-  db: import("better-sqlite3").Database,
-): void {
+function backfillLegStateCumulativeFromFills(db: import("better-sqlite3").Database): void {
   // bootstrapLedgerDb is shared across plankton/control DBs; the `fills`
   // table only exists in the ledger DB. Skip silently otherwise.
   const fillsExists = db
