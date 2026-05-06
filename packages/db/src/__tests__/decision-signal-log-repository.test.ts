@@ -92,9 +92,9 @@ describe("SqliteDecisionSignalLogRepository", () => {
       nthBuyAtEmit: 3,
     });
 
-    const row = conn.db.prepare("SELECT * FROM decision_signal_log WHERE signal_id = ?").get(
-      "sig-2",
-    ) as Record<string, unknown> | undefined;
+    const row = conn.db
+      .prepare("SELECT * FROM decision_signal_log WHERE signal_id = ?")
+      .get("sig-2") as Record<string, unknown> | undefined;
     expect(row).toMatchObject({
       is_add: 1,
       add_age_ms: 7_200_000,

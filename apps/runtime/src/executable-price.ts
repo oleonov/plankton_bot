@@ -553,9 +553,7 @@ export function classifyAddAgeBucket(ageMs: number | null): AddAgeBucket | null 
  * firstTradePrice`, so callers must skip when `firstTradePrice`
  * is zero or non-positive.
  */
-export function classifyAddPriceChangeBucket(
-  pct: number | null,
-): AddPriceChangeBucket | null {
+export function classifyAddPriceChangeBucket(pct: number | null): AddPriceChangeBucket | null {
   if (pct == null || !Number.isFinite(pct)) return null;
   if (pct < -0.5) return "below -50%";
   if (pct < -0.25) return "-50% to -25%";

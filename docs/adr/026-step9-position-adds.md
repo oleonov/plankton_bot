@@ -69,7 +69,7 @@ The current add-emission contract is hereby canonical:
   - `buyCount === 1 → confirm-scale` (1st add)
   - `buyCount in [2, 3] → scale-in` (2nd–3rd adds)
   - `buyCount >= 4 → heavy-scale` (4th+ adds)
-  Sells return `repricing-exit` and bypass this ladder.
+    Sells return `repricing-exit` and bypass this ladder.
 - **Two-layer risk gate**
   (`apps/runtime/src/modules/risk-inventory/algo-risk-gate.ts:31-77`):
   - **Layer 1 — open-buy-order dedupe**: rejects any BUY signal
@@ -102,8 +102,8 @@ Justification:
   ADR-011 reserves operational decisions to the runtime.
 - **The 4-tier reason ladder mirrors the §11.1.4 `n_adds`
   bucketing.** The spec reports `n_adds` buckets `0 / 1 / 2-3
-  / 4-10 / 11-30 / >30`. Our `confirm-scale | scale-in |
-  heavy-scale` split aligns with the `1 / 2-3 / >=4` boundary,
+/ 4-10 / 11-30 / >30`. Our `confirm-scale | scale-in |
+heavy-scale` split aligns with the `1 / 2-3 / >=4` boundary,
   collapsing the 4-10 / 11-30 / >30 spec buckets into a single
   `heavy-scale` operational class. Operators can subdivide
   later by inspecting the new `nth_buy_at_emit` column.
@@ -117,11 +117,11 @@ Justification:
   divergence.
 - **No `n_adds` cap because §11.1.4 does not publish one.**
   The empirical distribution shows 2.50% of legs accumulate
-  >30 adds. Capping at any constant would falsify the
-  long-tail behaviour the spec characterizes. If operational
-  experience surfaces a runaway-add problem in production, a
-  DB-tunable cap can be added later (analogous to ADR-015's
-  `exitOrderTtlMs` lift).
+  > 30 adds. Capping at any constant would falsify the
+  > long-tail behaviour the spec characterizes. If operational
+  > experience surfaces a runaway-add problem in production, a
+  > DB-tunable cap can be added later (analogous to ADR-015's
+  > `exitOrderTtlMs` lift).
 
 ### D-B — Denormalize adds telemetry onto `decision_signal_log` (audit D1 / D2 / D3 / D4)
 
@@ -138,7 +138,7 @@ Migration 048 adds six nullable columns to `decision_signal_log`:
   `1-5min`, `5-30min`, `30min-1h`, `1-3h`, `3-12h`, `12-24h`,
   `1-7d`, `>7d`) or `NULL`.
 - `add_price_change_pct REAL` — `(price - firstTradePrice) /
-  firstTradePrice`. Populated only when `is_add = 1` AND
+firstTradePrice`. Populated only when `is_add = 1` AND
   `firstTradePrice > 0`. **Recorded for all adds, including
   those <60s** — the §11.1 "exclude <60s" filter is applied at
   query time, not at write time, so the raw distribution is
@@ -190,7 +190,7 @@ Two new helpers join the existing
   `null` for negative, non-finite, or null inputs. Mirrors §11.1
   table headers exactly.
 - `classifyAddPriceChangeBucket(pct: number | null):
-  AddPriceChangeBucket | null` in the same module.
+AddPriceChangeBucket | null` in the same module.
   Boundaries (in fraction units, e.g. `-0.5` for `-50%`):
   ```
   (-∞, -0.50)         → "below -50%"
@@ -232,7 +232,7 @@ the dashboard widgets land. Rationale:
   panels.
 - The columns are immediately useful via SQL: a
   `SELECT add_age_bucket, COUNT(*) FROM decision_signal_log
-  WHERE is_add = 1 GROUP BY 1` query reproduces §11.1.2 from
+WHERE is_add = 1 GROUP BY 1` query reproduces §11.1.2 from
   production data with no application-layer changes.
 
 ## Consequences
@@ -262,7 +262,7 @@ the dashboard widgets land. Rationale:
   staying intact.** If a leg row is cleared (e.g. position
   closed, market resolved) and a new entry creates a fresh row,
   the `add_age_ms` and `add_price_change_pct` for any subsequent
-  BUY will reference the *new* `firstTradeAt`/`firstTradePrice`,
+  BUY will reference the _new_ `firstTradeAt`/`firstTradePrice`,
   not the historical chain. This matches the production
   semantics of `legState` already used by the reason ladder, so
   it is alignment, not regression — but operators querying
