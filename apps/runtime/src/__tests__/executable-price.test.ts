@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   ceilToTick,
+  classifyNotionalBucket,
   classifyRoundLevel,
   clampExecutablePrice,
   computePricingDeltaTicks,
@@ -455,5 +456,37 @@ describe("classifyRoundLevel", () => {
     expect(classifyRoundLevel(null, 0.001)).toBeNull();
     expect(classifyRoundLevel(0.5, 0)).toBeNull();
     expect(classifyRoundLevel(Number.NaN, 0.01)).toBeNull();
+  });
+});
+
+describe("classifyNotionalBucket", () => {
+  it("classifies values strictly below each upper bound (boundary is exclusive)", () => {
+    expect(classifyNotionalBucket(0)).toBe("<$0.10");
+    expect(classifyNotionalBucket(0.099)).toBe("<$0.10");
+    expect(classifyNotionalBucket(0.1)).toBe("$0.10-$0.50");
+    expect(classifyNotionalBucket(0.49)).toBe("$0.10-$0.50");
+    expect(classifyNotionalBucket(0.5)).toBe("$0.50-$1");
+    expect(classifyNotionalBucket(0.99)).toBe("$0.50-$1");
+    expect(classifyNotionalBucket(1)).toBe("$1-$2");
+    expect(classifyNotionalBucket(1.99)).toBe("$1-$2");
+    expect(classifyNotionalBucket(2)).toBe("$2-$5");
+    expect(classifyNotionalBucket(4.99)).toBe("$2-$5");
+    expect(classifyNotionalBucket(5)).toBe("$5-$10");
+    expect(classifyNotionalBucket(9.99)).toBe("$5-$10");
+    expect(classifyNotionalBucket(10)).toBe("$10-$25");
+    expect(classifyNotionalBucket(24.99)).toBe("$10-$25");
+    expect(classifyNotionalBucket(25)).toBe("$25-$50");
+    expect(classifyNotionalBucket(49.99)).toBe("$25-$50");
+    expect(classifyNotionalBucket(50)).toBe("$50-$100");
+    expect(classifyNotionalBucket(99.99)).toBe("$50-$100");
+    expect(classifyNotionalBucket(100)).toBe(">$100");
+    expect(classifyNotionalBucket(10_000)).toBe(">$100");
+  });
+
+  it("returns null for missing or invalid inputs", () => {
+    expect(classifyNotionalBucket(null)).toBeNull();
+    expect(classifyNotionalBucket(Number.NaN)).toBeNull();
+    expect(classifyNotionalBucket(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(classifyNotionalBucket(-1)).toBeNull();
   });
 });

@@ -7,9 +7,9 @@ export class SqliteDecisionSignalLogRepository implements DecisionSignalLogRepos
   constructor(db: Database.Database) {
     this.insertStmt = db.prepare(
       `INSERT INTO decision_signal_log
-       (signal_id, token_id, condition_id, side, decision_rule_id, state, price, buy_count,
-        time_since_last_seconds, signal_timestamp)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (signal_id, token_id, condition_id, side, decision_rule_id, sizing_rule_id,
+        notional_bucket, state, price, buy_count, time_since_last_seconds, signal_timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
   }
 
@@ -20,6 +20,8 @@ export class SqliteDecisionSignalLogRepository implements DecisionSignalLogRepos
       signal.conditionId,
       signal.side,
       signal.decisionRuleId,
+      signal.sizingRuleId,
+      signal.notionalBucket,
       signal.state,
       signal.price,
       signal.buyCount,

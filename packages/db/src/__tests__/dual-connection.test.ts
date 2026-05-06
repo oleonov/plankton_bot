@@ -131,6 +131,10 @@ describe("dual-connection infrastructure", () => {
     insert.run("BUY", 50, "B2", "S1", ">=", 0.2, null, null, null, 4.17);
     insert.run("BUY", 60, "B3", "S3", "<", 0.05, null, null, null, 0.76);
     insert.run("BUY", 70, "B4", "S2", "<", 0.05, null, null, null, 0.12);
+    // ADR-024 §D-B — legacy DBs always carry a BUY FALLBACK row; reinsert
+    // so the new bootstrap invariant assertion does not crash before the
+    // re-priority backfill runs.
+    insert.run("BUY", 80, "FALLBACK", "ANY", null, null, null, null, null, 0.44);
     conn1.close();
 
     // Re-bootstrap should detect the legacy ordering and re-priority in place.

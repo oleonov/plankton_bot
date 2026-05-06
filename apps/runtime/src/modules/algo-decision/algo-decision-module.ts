@@ -56,6 +56,7 @@ import {
   resolveWalletBuyBudget,
   type WalletBudgetControlDb,
 } from "../../wallet-buy-budget.js";
+import { classifyNotionalBucket } from "../../executable-price.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -814,6 +815,8 @@ export class AlgoDecisionModule implements RuntimeModule {
             conditionId: market.conditionId as ConditionId,
             side: "REDEEM",
             decisionRuleId: redeemResult.ruleId,
+            sizingRuleId: null,
+            notionalBucket: null,
             state,
             price,
             buyCount,
@@ -1037,6 +1040,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       strategyTick: now,
       sequenceInTick,
       decisionRuleId: decision.ruleId,
+      sizingRuleId: sizeResult.ruleId,
       generatedAt: new Date(now).toISOString(),
     };
 
@@ -1053,6 +1057,8 @@ export class AlgoDecisionModule implements RuntimeModule {
           conditionId: signal.conditionId,
           side: side === "buy" ? "BUY" : "SELL",
           decisionRuleId: signal.decisionRuleId,
+          sizingRuleId: signal.sizingRuleId,
+          notionalBucket: classifyNotionalBucket(signal.suggestedSizeUsdc),
           state: ctx.state,
           price: ctx.price,
           buyCount,

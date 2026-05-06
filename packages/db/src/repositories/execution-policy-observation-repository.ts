@@ -12,12 +12,13 @@ export class SqliteExecutionPolicyObservationRepository implements ExecutionPoli
       .prepare(
         `INSERT INTO execution_policy_observations
            (profile_id, signal_id, client_order_id, token_id, market_slug, side,
-            signal_reason, decision_rule_id, selected_pricing_mode, selected_price, edge_price,
+            signal_reason, decision_rule_id, sizing_rule_id, notional_bucket,
+            selected_pricing_mode, selected_price, edge_price,
             bounded_price, bounded_outcome, spread_ticks, improvement_ticks,
             dead_side_observed, dead_side_bucket, dead_side_enforce_hit,
             dead_side_x60, dead_side_x120, dead_side_x300, dead_side_x900,
             time_to_end_ms, skipped_reason, pricing_delta_ticks, round_level_hit)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         obs.profileId,
@@ -28,6 +29,8 @@ export class SqliteExecutionPolicyObservationRepository implements ExecutionPoli
         obs.side,
         obs.signalReason,
         obs.decisionRuleId,
+        obs.sizingRuleId,
+        obs.notionalBucket,
         obs.selectedPricingMode,
         obs.selectedPrice,
         obs.edgePrice,

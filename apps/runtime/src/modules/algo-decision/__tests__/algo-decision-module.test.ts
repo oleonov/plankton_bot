@@ -378,6 +378,9 @@ describe("AlgoDecisionModule", () => {
     expect(signal.reason).toBe("probe-entry");
     expect(signal.suggestedSizeUsdc).toBeCloseTo(2.1, 5);
     expect(signal.conditionId).toBe("cond-1");
+    // ADR-024 §D-C — sizingRuleId is propagated from evaluateSize onto the
+    // emitted Signal. Seed B5 fires here (nthBuy=1, sizeUsdc=2.1).
+    expect(signal.sizingRuleId).toBe("B5");
 
     // Phase 2.A: payload embeds the NormalizedMarket snapshot observed by the
     // pre-entry hard-liveness gate so the bridge downstream can re-use it.
@@ -441,6 +444,9 @@ describe("AlgoDecisionModule", () => {
       conditionId: "cond-sell",
       side: "SELL",
       decisionRuleId: "D7-SELL-S1",
+      sizingRuleId: "FALLBACK-SELL",
+      // sizeUsdc=1.62 falls in the §4.6 "$1-$2" bucket.
+      notionalBucket: "$1-$2",
       state: "S1",
       price: 0.15,
       buyCount: 1,
@@ -508,6 +514,9 @@ describe("AlgoDecisionModule", () => {
       conditionId,
       side: "REDEEM",
       decisionRuleId: "REDEEM-S2",
+      // ADR-024 §D-C — REDEEM signals have no sizing leg; both fields stay null.
+      sizingRuleId: null,
+      notionalBucket: null,
       state: "S2",
       price: 0.03,
       buyCount: 2,

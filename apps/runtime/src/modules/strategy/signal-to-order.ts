@@ -40,6 +40,7 @@ import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import {
+  classifyNotionalBucket,
   classifyRoundLevel,
   computePricingDeltaTicks,
   resolveBoundedMidpointPrice,
@@ -566,6 +567,8 @@ export class SignalToOrderBridge {
         signalId: signal.signalId,
         clientOrderId,
         decisionRuleId: signal.decisionRuleId,
+        sizingRuleId: signal.sizingRuleId,
+        notionalBucket: classifyNotionalBucket(signal.suggestedSizeUsdc),
         tokenId: String(signal.tokenId),
         marketSlug: market.slug ?? null,
         side: signal.side === "buy" ? "BUY" : "SELL",

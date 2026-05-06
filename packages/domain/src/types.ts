@@ -146,6 +146,7 @@ export interface Signal {
   strategyTick: number; // epoch ms of the scanner tick
   sequenceInTick: number; // 0-based within tick for same token+side
   decisionRuleId: string | null;
+  sizingRuleId: string | null;
   generatedAt: string; // ISO timestamp
 }
 
@@ -155,12 +156,34 @@ export interface DecisionSignalLog {
   conditionId: ConditionId;
   side: "BUY" | "SELL" | "REDEEM";
   decisionRuleId: string | null;
+  sizingRuleId: string | null;
+  notionalBucket: NotionalBucket | null;
   state: "OTHER" | "S1" | "S2" | "S3";
   price: number;
   buyCount: number;
   timeSinceLastSeconds: number | null;
   signalTimestamp: string;
 }
+
+/**
+ * ADR-024 §D-C / §D-D — sizing notional bucket taxonomy.
+ * Mirrors canonical §4.6 USDC bucket boundaries at
+ * `06_algorithm_spec.md:454-467`. Buckets are mutually exclusive and
+ * ordered. The empty-tail buckets ($25-$50, $50-$100, >$100) are
+ * preserved so production drift into them is visible rather than
+ * collapsed into a single ≥$25 catch-all.
+ */
+export type NotionalBucket =
+  | "<$0.10"
+  | "$0.10-$0.50"
+  | "$0.50-$1"
+  | "$1-$2"
+  | "$2-$5"
+  | "$5-$10"
+  | "$10-$25"
+  | "$25-$50"
+  | "$50-$100"
+  | ">$100";
 
 // ─── Risk Decision ────────────────────────────────────────────────────────────
 
@@ -607,6 +630,8 @@ export interface ExecutionPolicyObservation {
   skippedReason: string | null;
   pricingDeltaTicks: number | null;
   roundLevelHit: PricingRoundLevel | null;
+  sizingRuleId: string | null;
+  notionalBucket: NotionalBucket | null;
   createdAt?: string;
 }
 

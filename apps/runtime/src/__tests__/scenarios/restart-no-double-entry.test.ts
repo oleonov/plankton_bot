@@ -47,6 +47,7 @@ function makeProbeSignal(): Signal {
     strategyTick: Date.now(),
     sequenceInTick: 0,
     decisionRuleId: "FALLBACK",
+    sizingRuleId: "FALLBACK",
     generatedAt: new Date().toISOString(),
   };
 }

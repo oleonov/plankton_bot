@@ -22,6 +22,7 @@ export function bootstrapDatabase(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "markets", "gamma_created_at", "TEXT");
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
+  assertSizeRuleInvariants(conn.db);
   setRuntimeBusyTimeout(conn);
   return conn;
 }
@@ -57,6 +58,7 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   ensureDefaultExecutionPolicy(conn.db);
   ensureAlgoRulesDefaults(conn.db);
   backfillBuySizePrecedence(conn.db);
+  assertSizeRuleInvariants(conn.db);
 
   setRuntimeBusyTimeout(conn);
   return conn;
@@ -282,6 +284,120 @@ export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): 
 }
 
 /**
+ * ADR-024 §D-B — startup invariant for size-rule FALLBACK presence and shape.
+ *
+ * `evaluateSize` throws when no size rule matches; the seeded FALLBACK row is
+ * the implicit safety net. `ensureAlgoRulesDefaults` early-exits when
+ * `algo_decision_rules` already has rows, so a partially-drifted DB where the
+ * BUY or SELL FALLBACK row was lost or mutated would NOT be repaired by
+ * bootstrap and would crash (or silently mis-size) the next BUY/SELL
+ * evaluation at runtime.
+ *
+ * This helper runs unconditionally — outside that early-exit — and asserts:
+ *   1. Exactly one BUY FALLBACK row and exactly one SELL FALLBACK row exist.
+ *      Per-action grouping is required: a flat `COUNT(*) = 2` would pass with
+ *      two BUY fallbacks and zero SELL fallbacks.
+ *   2. The FALLBACK rows are true catch-alls — `state_condition = 'ANY'` and
+ *      every filter column (price_operator, price_value, nth_buy,
+ *      buy_count_min, buy_count_max) is NULL. A row tagged FALLBACK but with
+ *      filters set is not a fallback at all: `evaluateSize` would skip it for
+ *      the very inputs a fallback is supposed to catch, leaving the runtime
+ *      to throw `no size rule matched`.
+ *
+ * Throws on violation with an actionable message. Failure fail-fasts the
+ * runtime supervisor before the strategy module can crash mid-evaluation.
+ */
+export function assertSizeRuleInvariants(db: import("better-sqlite3").Database): void {
+  // The split-layout control DB holds algo rules; the legacy merged path holds
+  // them in the same DB. Both bootstrap entry points call this helper. If the
+  // table doesn't exist in this DB (e.g. a non-rules DB threading through the
+  // same code path), there is no invariant to assert — return quietly.
+  if (!hasTable(db, "algo_size_rules")) return;
+  const rows = db
+    .prepare(
+      `SELECT action_type, COUNT(*) AS count
+       FROM algo_size_rules
+       WHERE rule_id = 'FALLBACK'
+       GROUP BY action_type`,
+    )
+    .all() as Array<{ action_type: string; count: number }>;
+  const counts = new Map(rows.map((r) => [r.action_type, r.count]));
+  const buy = counts.get("BUY") ?? 0;
+  const sell = counts.get("SELL") ?? 0;
+  if (buy !== 1 || sell !== 1) {
+    throw new Error(
+      `algo_size_rules FALLBACK invariant violated — expected exactly 1 BUY and 1 SELL FALLBACK row, got BUY=${buy} SELL=${sell}. ` +
+        `Re-seed via ensureAlgoRulesDefaults or repair the rows manually before restarting.`,
+    );
+  }
+  const malformed = db
+    .prepare(
+      `SELECT action_type, state_condition, price_operator, price_value,
+              nth_buy, buy_count_min, buy_count_max
+         FROM algo_size_rules
+        WHERE rule_id = 'FALLBACK'
+          AND (state_condition != 'ANY'
+               OR price_operator IS NOT NULL
+               OR price_value    IS NOT NULL
+               OR nth_buy        IS NOT NULL
+               OR buy_count_min  IS NOT NULL
+               OR buy_count_max  IS NOT NULL)`,
+    )
+    .all() as Array<{
+    action_type: string;
+    state_condition: string;
+    price_operator: string | null;
+    price_value: number | null;
+    nth_buy: number | null;
+    buy_count_min: number | null;
+    buy_count_max: number | null;
+  }>;
+  if (malformed.length > 0) {
+    const summary = malformed
+      .map(
+        (r) =>
+          `${r.action_type}{state=${r.state_condition},price=${r.price_operator ?? "NULL"} ${r.price_value ?? "NULL"},nth=${r.nth_buy ?? "NULL"},buyCount=[${r.buy_count_min ?? "NULL"},${r.buy_count_max ?? "NULL"}]}`,
+      )
+      .join("; ");
+    throw new Error(
+      `algo_size_rules FALLBACK invariant violated — FALLBACK rows must be unconditional catch-alls (state_condition='ANY', all filter columns NULL). Offending rows: ${summary}. ` +
+        `Re-seed via ensureAlgoRulesDefaults or repair the rows manually before restarting.`,
+    );
+  }
+  // `evaluateSize` reads rules `ORDER BY priority ASC` and returns the first
+  // match — so the FALLBACK row must sit at strictly the highest priority
+  // value for its action_type. A drifted FALLBACK at priority < B1's would
+  // silently hijack every BUY/SELL evaluation. Operators may still tune the
+  // exact value (FALLBACK priorities aren't frozen), so we assert *order*,
+  // not *equality* with the seed value.
+  const orderViolations = db
+    .prepare(
+      `SELECT f.action_type AS action_type,
+              f.priority    AS fallback_priority,
+              MAX(r.priority) AS max_other_priority
+         FROM algo_size_rules f
+         JOIN algo_size_rules r ON r.action_type = f.action_type
+                                AND r.rule_id    != 'FALLBACK'
+        WHERE f.rule_id = 'FALLBACK'
+        GROUP BY f.action_type, f.priority
+       HAVING f.priority <= MAX(r.priority)`,
+    )
+    .all() as Array<{ action_type: string; fallback_priority: number; max_other_priority: number }>;
+  if (orderViolations.length > 0) {
+    const summary = orderViolations
+      .map(
+        (r) =>
+          `${r.action_type} FALLBACK priority=${r.fallback_priority} but another rule has priority=${r.max_other_priority}`,
+      )
+      .join("; ");
+    throw new Error(
+      `algo_size_rules FALLBACK invariant violated — FALLBACK rows must sit at the highest priority value for their action_type so they are evaluated last. ${summary}. ` +
+        `Re-seed via ensureAlgoRulesDefaults or repair the priorities manually before restarting.`,
+    );
+  }
+}
+
+/**
  * Spec v2.2 §2 BUY Size Precedence: state+price rules (B1–B4) override
  * nth_buy rules (B5–B7). Pre-v2.2 seed used the inverted order; this backfill
  * re-priorities existing rows in place. Idempotent via bootstrap_backfills.
@@ -373,6 +489,10 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "execution_policy_observations", "decision_rule_id", "TEXT");
   safeAddColumn(conn.db, "execution_policy_observations", "pricing_delta_ticks", "REAL");
   safeAddColumn(conn.db, "execution_policy_observations", "round_level_hit", "TEXT");
+  safeAddColumn(conn.db, "execution_policy_observations", "sizing_rule_id", "TEXT");
+  safeAddColumn(conn.db, "execution_policy_observations", "notional_bucket", "TEXT");
+  safeAddColumn(conn.db, "decision_signal_log", "sizing_rule_id", "TEXT");
+  safeAddColumn(conn.db, "decision_signal_log", "notional_bucket", "TEXT");
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
   ensureUniqueOpenPositionIndex(conn.db);
   setRuntimeBusyTimeout(conn);

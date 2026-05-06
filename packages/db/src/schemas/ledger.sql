@@ -112,6 +112,8 @@ CREATE TABLE IF NOT EXISTS decision_signal_log (
   condition_id             TEXT NOT NULL DEFAULT '',
   side                     TEXT NOT NULL,
   decision_rule_id         TEXT,
+  sizing_rule_id           TEXT,
+  notional_bucket          TEXT,
   state                    TEXT NOT NULL,
   price                    REAL NOT NULL,
   buy_count                INTEGER NOT NULL,
@@ -302,6 +304,8 @@ CREATE TABLE IF NOT EXISTS execution_policy_observations (
   skipped_reason           TEXT,
   pricing_delta_ticks      REAL,
   round_level_hit          TEXT,
+  sizing_rule_id           TEXT,
+  notional_bucket          TEXT,
   created_at               TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

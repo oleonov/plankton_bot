@@ -16,6 +16,7 @@ function makeSignal(overrides?: Partial<Signal>): Signal {
     strategyTick: Date.now(),
     sequenceInTick: 0,
     decisionRuleId: null,
+    sizingRuleId: null,
     generatedAt: new Date().toISOString(),
     ...overrides,
   };

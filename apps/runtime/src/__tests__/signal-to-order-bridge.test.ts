@@ -75,6 +75,7 @@ function makeSignal(): Signal {
     strategyTick: NOW,
     sequenceInTick: 0,
     decisionRuleId: null,
+    sizingRuleId: null,
     generatedAt: new Date(NOW).toISOString(),
   };
 }
@@ -1966,6 +1967,69 @@ describe("ADR-015 execution policy observations", () => {
     // and 0.40 is a multiple of 0.05 → "0.05x".
     expect(row.pricingDeltaTicks).toBe(0);
     expect(row.roundLevelHit).toBe("0.05x");
+  });
+
+  it("ADR-024 §D-D: carries sizingRuleId + notionalBucket onto the placed-order observation row", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      observations: repo,
+      profileId: PROFILE_ID,
+    });
+    bridge.subscribe();
+
+    const signal = makeSignal();
+    // Probe-entry ladder slot at ~$8.38 → bucket "$5-$10" (per §4.6).
+    signal.sizingRuleId = "B1";
+    signal.suggestedSizeUsdc = 8.38;
+    await bus.publish("SignalApproved", {
+      signal,
+      market: makeMarket({ bestBid: 0.4, bestAsk: 0.42 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.sizingRuleId).toBe("B1");
+    expect(rows[0]!.notionalBucket).toBe("$5-$10");
+  });
+
+  it("ADR-024 §D-D: carries sizing telemetry onto execution-price-unavailable skip rows", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      observations: repo,
+      profileId: PROFILE_ID,
+    });
+    bridge.subscribe();
+
+    const signal = makeSignal();
+    signal.sizingRuleId = "FALLBACK";
+    signal.suggestedSizeUsdc = 0.44;
+    // bestBid=0 trips the unavailable branch → skip row written.
+    await bus.publish("SignalApproved", {
+      signal,
+      market: makeMarket({ bestBid: 0, bestAsk: 0.2 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.skippedReason).toBe("execution-price-unavailable");
+    expect(rows[0]!.sizingRuleId).toBe("FALLBACK");
+    expect(rows[0]!.notionalBucket).toBe("$0.10-$0.50");
   });
 
   it("writes a skip observation with skippedReason when dead-side enforce blocks BUY", async () => {

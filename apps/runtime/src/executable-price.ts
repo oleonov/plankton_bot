@@ -1,4 +1,4 @@
-import type { PriceLevel, PricingRoundLevel } from "@plankton/domain";
+import type { NotionalBucket, PriceLevel, PricingRoundLevel } from "@plankton/domain";
 
 const DEFAULT_TICK_SIZE = 0.01;
 const PRICE_EPSILON = 1e-9;
@@ -451,6 +451,33 @@ export function classifyRoundLevel(
 function isMultipleOf(price: number, base: number): boolean {
   const ratio = price / base;
   return Math.abs(ratio - Math.round(ratio)) <= 1e-6;
+}
+
+/**
+ * ADR-024 §D-C / §D-D telemetry. Maps a USDC notional onto the canonical
+ * §4.6 bucket taxonomy at `06_algorithm_spec.md:454-467`. Buckets are
+ * left-inclusive / right-exclusive (`[lower, upper)`) except the
+ * unbounded `>$100` tail, which is right-open.
+ *
+ * Returns null when the notional is null or non-finite. Negative values
+ * are also returned as null — the bot never emits negative notionals,
+ * but the helper is robust to malformed inputs.
+ *
+ * Sub-cent values land in `<$0.10` along with any zero-rounded notional
+ * (matches §4.1's 1,582 BUY rows that round to $0.00 / sub-cent).
+ */
+export function classifyNotionalBucket(usdc: number | null): NotionalBucket | null {
+  if (usdc == null || !Number.isFinite(usdc) || usdc < 0) return null;
+  if (usdc < 0.1) return "<$0.10";
+  if (usdc < 0.5) return "$0.10-$0.50";
+  if (usdc < 1) return "$0.50-$1";
+  if (usdc < 2) return "$1-$2";
+  if (usdc < 5) return "$2-$5";
+  if (usdc < 10) return "$5-$10";
+  if (usdc < 25) return "$10-$25";
+  if (usdc < 50) return "$25-$50";
+  if (usdc < 100) return "$50-$100";
+  return ">$100";
 }
 
 export function deriveExecutableTopOfBook(

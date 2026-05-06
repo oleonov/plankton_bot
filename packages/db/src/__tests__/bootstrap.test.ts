@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bootstrapControlDb, bootstrapDatabase, bootstrapLedgerDb } from "../bootstrap.js";
+import {
+  assertSizeRuleInvariants,
+  bootstrapControlDb,
+  bootstrapDatabase,
+  bootstrapLedgerDb,
+} from "../bootstrap.js";
 import { RUNTIME_BUSY_TIMEOUT_MS, type DbConnection } from "../connection.js";
 
 function readBusyTimeout(db: import("better-sqlite3").Database): number {
@@ -115,5 +120,124 @@ describe("bootstrapLedgerDb busy_timeout scoping", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("assertSizeRuleInvariants (ADR-024 §D-B)", () => {
+  it("passes after bootstrap default seed (1 BUY + 1 SELL FALLBACK row)", () => {
+    expect(() => assertSizeRuleInvariants(conn.db)).not.toThrow();
+  });
+
+  it("returns quietly when algo_size_rules table is absent", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "plankton-no-sizerules-"));
+    try {
+      const empty = bootstrapLedgerDb(path.join(dir, "ledger.db"));
+      try {
+        expect(() => assertSizeRuleInvariants(empty.db)).not.toThrow();
+      } finally {
+        empty.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws when the BUY FALLBACK row is missing", () => {
+    conn.db
+      .prepare("DELETE FROM algo_size_rules WHERE action_type = 'BUY' AND rule_id = 'FALLBACK'")
+      .run();
+    expect(() => assertSizeRuleInvariants(conn.db)).toThrow(/BUY=0 SELL=1/);
+  });
+
+  it("throws when a duplicate BUY FALLBACK row exists", () => {
+    conn.db
+      .prepare(
+        `INSERT INTO algo_size_rules
+         (action_type, priority, rule_id, state_condition, price_operator, price_value,
+          nth_buy, buy_count_min, buy_count_max, size_usdc)
+         VALUES ('BUY', 999, 'FALLBACK', 'ANY', NULL, NULL, NULL, NULL, NULL, 1.0)`,
+      )
+      .run();
+    expect(() => assertSizeRuleInvariants(conn.db)).toThrow(/BUY=2 SELL=1/);
+  });
+
+  it("throws when the BUY FALLBACK row carries a state_condition other than ANY", () => {
+    conn.db
+      .prepare(
+        `UPDATE algo_size_rules SET state_condition = 'S1'
+         WHERE action_type = 'BUY' AND rule_id = 'FALLBACK'`,
+      )
+      .run();
+    expect(() => assertSizeRuleInvariants(conn.db)).toThrow(
+      /FALLBACK rows must be unconditional catch-alls/,
+    );
+  });
+
+  it("throws when the SELL FALLBACK row has a price filter set", () => {
+    conn.db
+      .prepare(
+        `UPDATE algo_size_rules SET price_operator = '>=', price_value = 0.5
+         WHERE action_type = 'SELL' AND rule_id = 'FALLBACK'`,
+      )
+      .run();
+    expect(() => assertSizeRuleInvariants(conn.db)).toThrow(
+      /FALLBACK rows must be unconditional catch-alls/,
+    );
+  });
+
+  it("throws when the BUY FALLBACK row has nth_buy or buy_count filters set", () => {
+    conn.db
+      .prepare(
+        `UPDATE algo_size_rules SET nth_buy = 1
+         WHERE action_type = 'BUY' AND rule_id = 'FALLBACK'`,
+      )
+      .run();
+    expect(() => assertSizeRuleInvariants(conn.db)).toThrow(
+      /FALLBACK rows must be unconditional catch-alls/,
+    );
+  });
+
+  it("throws when the BUY FALLBACK row sits ahead of a non-FALLBACK BUY rule", () => {
+    // Re-priority the FALLBACK row before B1 (priority 10) — evaluateSize
+    // reads ORDER BY priority ASC, so this would hijack every BUY evaluation.
+    conn.db
+      .prepare(
+        `UPDATE algo_size_rules SET priority = 5
+         WHERE action_type = 'BUY' AND rule_id = 'FALLBACK'`,
+      )
+      .run();
+    expect(() => assertSizeRuleInvariants(conn.db)).toThrow(
+      /FALLBACK rows must sit at the highest priority value/,
+    );
+  });
+
+  it("throws when the BUY FALLBACK ties with another BUY rule's priority", () => {
+    // A tie still leaves rule-resolution order undefined (ORDER BY priority
+    // ASC doesn't guarantee FALLBACK lands after the other row), so the
+    // invariant requires *strictly* greater priority on the FALLBACK row.
+    conn.db
+      .prepare(
+        `UPDATE algo_size_rules SET priority = (
+           SELECT MAX(priority) FROM algo_size_rules
+            WHERE action_type = 'BUY' AND rule_id != 'FALLBACK'
+         )
+         WHERE action_type = 'BUY' AND rule_id = 'FALLBACK'`,
+      )
+      .run();
+    expect(() => assertSizeRuleInvariants(conn.db)).toThrow(
+      /FALLBACK rows must sit at the highest priority value/,
+    );
+  });
+
+  it("does NOT throw when an operator tunes the FALLBACK priority above the seed default", () => {
+    // The invariant asserts *order*, not the seed value 999 — operators can
+    // bump the FALLBACK priority arbitrarily high without re-bootstrapping.
+    conn.db
+      .prepare(
+        `UPDATE algo_size_rules SET priority = 1500
+         WHERE action_type = 'BUY' AND rule_id = 'FALLBACK'`,
+      )
+      .run();
+    expect(() => assertSizeRuleInvariants(conn.db)).not.toThrow();
   });
 });
