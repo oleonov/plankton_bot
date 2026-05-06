@@ -92,6 +92,7 @@ import {
   computeScoreDistributionSnapshot,
   SCORE_DISTRIBUTION_METRIC_NAME,
 } from "./modules/soft-ranking/score-distribution-snapshot.js";
+import { softRankingDisabledCleanup } from "./soft-ranking-disabled-cleanup.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
@@ -565,36 +566,20 @@ async function main(): Promise<void> {
   // the latest persisted row from there — `apps/api` has no in-memory module
   // reference, so the DB is the cross-process surface.
   const softRankingModel = loadSoftRankingModel(log);
-  // Disabled-state contract (audit doc §F1 / §F14 / runbook §4): when the
-  // artifact is missing or invalid the module no-ops. Two cleanups are
-  // mandatory at startup:
+  // Disabled-state contract (ADR-020 §D4 score-column ownership invariant /
+  // audit doc §F1 / §F14 / runbook §4): when the artifact is missing or
+  // invalid the module no-ops. Two cleanups are mandatory at startup:
   //   1. Clear `runtime_metrics.score_distribution` so the API does not serve
   //      a stale snapshot as if it were current.
-  //   2. NULL out `markets.score` / `markets.score_model_version` /
-  //      `markets.scored_at` so `effectiveScore` in the repository ranking
-  //      cannot keep returning leftover values from before the disable.
+  //   2. NULL out all four score-ownership columns
+  //      (`markets.score` / `markets.score_model_version` /
+  //      `markets.scored_at` / `markets.features_captured_at`) so
+  //      `effectiveScore` in the repository ranking cannot keep returning
+  //      leftover values from before the disable.
   // Without (2), Step 3's WS-tier ranking would still be score-driven for any
   // row whose score has not yet aged past `FEATURE_FRESHNESS_MS`.
   if (softRankingModel === null) {
-    try {
-      ledgerConn.db
-        .prepare("DELETE FROM runtime_metrics WHERE metric_name = ?")
-        .run(SCORE_DISTRIBUTION_METRIC_NAME);
-    } catch (err) {
-      log.warn({ err }, "score_distribution disabled-state cleanup failed");
-    }
-    try {
-      const result = ledgerConn.db
-        .prepare(
-          "UPDATE markets SET score = NULL, score_model_version = NULL, scored_at = NULL WHERE score IS NOT NULL OR score_model_version IS NOT NULL OR scored_at IS NOT NULL",
-        )
-        .run();
-      if (result.changes > 0) {
-        log.info({ rows: result.changes }, "soft_ranking_disabled_score_columns_cleared");
-      }
-    } catch (err) {
-      log.warn({ err }, "soft_ranking_disabled_score_columns_clear_failed");
-    }
+    softRankingDisabledCleanup(ledgerConn.db, log);
   }
   const recomputeScoreDistribution = () => {
     try {
@@ -608,6 +593,8 @@ async function main(): Promise<void> {
       return {
         modelVersion: snapshot.modelVersion,
         scoredMarkets: snapshot.scoredMarkets,
+        step2IncludedNoScore: snapshot.step2IncludedNoScore,
+        skippedNonStep2Included: snapshot.skippedNonStep2Included,
         staleMarkets: snapshot.staleMarkets,
         mean: snapshot.mean,
         capturedAt: snapshot.capturedAt,

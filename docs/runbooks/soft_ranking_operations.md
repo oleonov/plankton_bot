@@ -17,17 +17,21 @@ The module surfaces under the runtime supervisor as
 `soft-ranking-score`. The healthcheck `detail` is one line containing:
 
 ```
-subscribed modelVersion=<version>
+subscribed scoreModelVersion=<version>
   events=<n> scoredRows=<n>
-  skippedNonStep2Included=<n> missingFeatures=<n> scoringErrors=<n>
-  scored=<n> stale=<n> mean=<x.xxxx>
+  missingFeatures=<n> scoringErrors=<n>
+  scored=<n> step2IncludedNoScore=<n> skippedNonStep2Included=<n>
+  stale=<n> mean=<x.xxxx>
 ```
 
-The first six counters are event-batch counters (cumulative since
-process start). The final three (`scored`, `stale`, `mean`) come from
-the last DB-aggregated snapshot — they appear once the snapshot has
-been computed at least once and at least one row carries a fresh
-score.
+`scoreModelVersion` is sourced from the latest snapshot when present
+(falling back to the loaded model before the first flush). The four
+event-batch counters (`events`, `scoredRows`, `missingFeatures`,
+`scoringErrors`) are cumulative since process start. The remaining
+fields (`scored`, `step2IncludedNoScore`, `skippedNonStep2Included`,
+`stale`, `mean`) come from the last DB-aggregated snapshot — they
+appear once the snapshot has been computed at least once and at least
+one row carries a fresh score.
 
 API endpoint:
 
@@ -132,8 +136,9 @@ disabled-no-op contract.
    The runtime startup automatically nulls out the score columns when
    the model is disabled (see `apps/runtime/src/index.ts` —
    `soft_ranking_disabled_score_columns_cleared` log line). After this
-   pass `markets.score`, `markets.score_model_version`, and
-   `markets.scored_at` are all `NULL`, and the JS comparator in
+   pass all four score-ownership columns
+   (`markets.score`, `markets.score_model_version`, `markets.scored_at`,
+   `markets.features_captured_at`) are `NULL`, and the JS comparator in
    `findTrackedForPricingTiered` degenerates back to the prior tier +
    `created_at` ordering. `runtime_metrics.score_distribution` is
    deleted in the same startup hook so the API immediately returns

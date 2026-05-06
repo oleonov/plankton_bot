@@ -1,0 +1,292 @@
+{
+  "_generated_by": "research_plankton/scripts/build_category_parity_fixture.py",
+  "_source_function": "research_plankton/soft_ranking_score_analysis.py:category_from_text",
+  "_call_shape": "category_from_text(slug, event_slug, raw_text='')",
+  "rows": [
+    {
+      "slug": "bitcoin-above-100k-2026",
+      "eventSlug": null,
+      "expected": "crypto"
+    },
+    {
+      "slug": "ethereum-eod-price-2026",
+      "eventSlug": null,
+      "expected": "crypto"
+    },
+    {
+      "slug": "xrp-flip-doge-2026",
+      "eventSlug": null,
+      "expected": "crypto"
+    },
+    {
+      "slug": "solana-deflate-2026",
+      "eventSlug": null,
+      "expected": "crypto"
+    },
+    {
+      "slug": "market-yes",
+      "eventSlug": "btc-flow-2026",
+      "expected": "crypto"
+    },
+    {
+      "slug": "market-yes",
+      "eventSlug": "eth-merge-eod-2026",
+      "expected": "crypto"
+    },
+    {
+      "slug": "nba-finals-warriors-win",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "nfl-superbowl-chiefs",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "mlb-yankees-win",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "nhl-stanley-cup",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "soccer-uefa-champion",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "fifa-world-cup-2026",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "ufc-300-main-event",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "tennis-wimbledon-winner",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "champion-league-final",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "election-winner-2026",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "election-2026-results",
+      "eventSlug": null,
+      "expected": "politics"
+    },
+    {
+      "slug": "president-trump-pardon",
+      "eventSlug": null,
+      "expected": "politics"
+    },
+    {
+      "slug": "senate-runoff-georgia",
+      "eventSlug": null,
+      "expected": "politics"
+    },
+    {
+      "slug": "governor-race-california",
+      "eventSlug": null,
+      "expected": "politics"
+    },
+    {
+      "slug": "mayor-nyc-2026",
+      "eventSlug": null,
+      "expected": "politics"
+    },
+    {
+      "slug": "nominee-supreme-court",
+      "eventSlug": null,
+      "expected": "politics"
+    },
+    {
+      "slug": "biden-pardons-2026",
+      "eventSlug": null,
+      "expected": "politics"
+    },
+    {
+      "slug": "weather-nyc-rain-may",
+      "eventSlug": null,
+      "expected": "weather"
+    },
+    {
+      "slug": "temperature-record-2026",
+      "eventSlug": null,
+      "expected": "weather"
+    },
+    {
+      "slug": "hurricane-season-2026",
+      "eventSlug": null,
+      "expected": "weather"
+    },
+    {
+      "slug": "snow-on-christmas",
+      "eventSlug": null,
+      "expected": "weather"
+    },
+    {
+      "slug": "stock-market-close-eod",
+      "eventSlug": null,
+      "expected": "stocks"
+    },
+    {
+      "slug": "nasdaq-100-eod",
+      "eventSlug": null,
+      "expected": "stocks"
+    },
+    {
+      "slug": "company-earnings-q1",
+      "eventSlug": null,
+      "expected": "stocks"
+    },
+    {
+      "slug": "market-cap-trillion-club",
+      "eventSlug": null,
+      "expected": "stocks"
+    },
+    {
+      "slug": "earnings-call-2026",
+      "eventSlug": null,
+      "expected": "stocks"
+    },
+    {
+      "slug": "esports-tournament-result",
+      "eventSlug": null,
+      "expected": "esports"
+    },
+    {
+      "slug": "lol-worlds-2026",
+      "eventSlug": null,
+      "expected": "esports"
+    },
+    {
+      "slug": "cs2-major-2026",
+      "eventSlug": null,
+      "expected": "esports"
+    },
+    {
+      "slug": "iem-katowice-2026",
+      "eventSlug": null,
+      "expected": "esports"
+    },
+    {
+      "slug": "valorant-champions-2026",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "bitcoin-nba-cross-bet-yes",
+      "eventSlug": null,
+      "expected": "crypto"
+    },
+    {
+      "slug": "election-nominee-nfl-charity",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "president-weather-policy",
+      "eventSlug": null,
+      "expected": "politics"
+    },
+    {
+      "slug": "hurricane-nasdaq-impact",
+      "eventSlug": null,
+      "expected": "weather"
+    },
+    {
+      "slug": "nasdaq-cs2-sponsorship",
+      "eventSlug": null,
+      "expected": "stocks"
+    },
+    {
+      "slug": "kanye-album-release-2026",
+      "eventSlug": null,
+      "expected": "other"
+    },
+    {
+      "slug": "oscars-best-picture-2026",
+      "eventSlug": null,
+      "expected": "other"
+    },
+    {
+      "slug": "nobel-prize-2026",
+      "eventSlug": null,
+      "expected": "other"
+    },
+    {
+      "slug": "market-yes",
+      "eventSlug": "kanye-album-2026",
+      "expected": "other"
+    },
+    {
+      "slug": "market-yes",
+      "eventSlug": "oscars-best-picture",
+      "expected": "other"
+    },
+    {
+      "slug": "BITCOIN-ABOVE-100K-2026",
+      "eventSlug": null,
+      "expected": "crypto"
+    },
+    {
+      "slug": "Election-Winner-2026",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "",
+      "eventSlug": null,
+      "expected": "other"
+    },
+    {
+      "slug": "",
+      "eventSlug": "bitcoin-2026",
+      "expected": "crypto"
+    },
+    {
+      "slug": "nba-finals",
+      "eventSlug": null,
+      "expected": "sports"
+    },
+    {
+      "slug": "btc-volatility-2026",
+      "eventSlug": null,
+      "expected": "crypto"
+    },
+    {
+      "slug": "eth-merge-2026",
+      "eventSlug": null,
+      "expected": "crypto"
+    },
+    {
+      "slug": "lol-worlds-final",
+      "eventSlug": null,
+      "expected": "esports"
+    },
+    {
+      "slug": "metabolic-results-2026",
+      "eventSlug": null,
+      "expected": "other"
+    },
+    {
+      "slug": "welcome-back-day-2026",
+      "eventSlug": null,
+      "expected": "other"
+    }
+  ]
+}

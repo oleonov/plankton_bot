@@ -208,7 +208,8 @@ describe("SoftRankingScoreModule", () => {
     expect(repo.__batches.length).toBe(1);
     expect(repo.__batches[0]!.length).toBe(1);
     const h = await mod.healthCheck();
-    expect(h.detail).toMatch(/skippedNonStep2Included=3/);
+    expect(h.detail).toMatch(/scoreModelVersion=/);
+    expect(h.detail).not.toMatch(/skippedNonStep2Included=/);
     await mod.stop();
   });
 
@@ -303,6 +304,8 @@ describe("SoftRankingScoreModule", () => {
     const recompute = vi.fn().mockReturnValue({
       modelVersion: "v1.0.0",
       scoredMarkets: 12,
+      step2IncludedNoScore: 4,
+      skippedNonStep2Included: 7,
       staleMarkets: 3,
       mean: 0.4321,
       capturedAt: new Date(NOW_MS).toISOString(),
@@ -324,7 +327,10 @@ describe("SoftRankingScoreModule", () => {
     expect(recompute).toHaveBeenCalledTimes(1);
 
     const h = await mod.healthCheck();
+    expect(h.detail).toMatch(/scoreModelVersion=v1\.0\.0/);
     expect(h.detail).toMatch(/scored=12/);
+    expect(h.detail).toMatch(/step2IncludedNoScore=4/);
+    expect(h.detail).toMatch(/skippedNonStep2Included=7/);
     expect(h.detail).toMatch(/stale=3/);
     expect(h.detail).toMatch(/mean=0\.4321/);
     await mod.stop();

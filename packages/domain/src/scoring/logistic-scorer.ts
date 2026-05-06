@@ -180,6 +180,27 @@ export function loadLogisticModel(json: unknown): LogisticModel {
   for (let i = 0; i < rawCategories.length; i++) {
     categories.push(asCategory(rawCategories[i], `categories[${i}]`));
   }
+  // Strict 7-category invariant (ADR-020 §D2). Loader must reject any
+  // artifact whose category set drifts from the canonical 7 — otherwise a
+  // future retraining script could silently emit a 5- or 8-category model
+  // and runtime would accept it.
+  if (categories.length !== VALID_CATEGORIES.size) {
+    fail(
+      `'categories' has ${categories.length} entries, expected ${VALID_CATEGORIES.size} (canonical 7-set)`,
+    );
+  }
+  const seen = new Set<string>();
+  for (const c of categories) {
+    if (seen.has(c)) {
+      fail(`'categories' contains duplicate '${c}'`);
+    }
+    seen.add(c);
+  }
+  for (const expected of VALID_CATEGORIES) {
+    if (!seen.has(expected)) {
+      fail(`'categories' is missing canonical category '${expected}'`);
+    }
+  }
 
   // Strict feature-name validation (audit doc §P1.3). Verifies BOTH the
   // exact set AND the order: the runtime indexes coefficients by position,

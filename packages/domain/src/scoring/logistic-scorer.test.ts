@@ -95,6 +95,47 @@ describe("loadLogisticModel", () => {
       loadLogisticModel({ ...ARTIFACT_RAW, categories: [...ARTIFACT_RAW.categories, "xyz"] }),
     ).toThrow(/categories/);
   });
+
+  it("rejects categories array with fewer than 7 entries", () => {
+    const truncated = ARTIFACT_RAW.categories.slice(0, 5);
+    const expectedFeatureNames: string[] = [
+      ...ARTIFACT_RAW.featureNames.slice(0, 12),
+      ...truncated.map((c: string) => `category=${c}`),
+    ];
+    const trimmed = expectedFeatureNames.length;
+    expect(() =>
+      loadLogisticModel({
+        ...ARTIFACT_RAW,
+        categories: truncated,
+        featureNames: expectedFeatureNames,
+        coefficients: ARTIFACT_RAW.coefficients.slice(0, trimmed),
+        mean: ARTIFACT_RAW.mean.slice(0, trimmed),
+        std: ARTIFACT_RAW.std.slice(0, trimmed),
+      }),
+    ).toThrow(/canonical 7-set/);
+  });
+
+  it("rejects duplicate category in categories array", () => {
+    const dup = [...ARTIFACT_RAW.categories];
+    dup[1] = dup[0]; // "other","other","politics",...
+    expect(() =>
+      loadLogisticModel({
+        ...ARTIFACT_RAW,
+        categories: dup,
+      }),
+    ).toThrow(/duplicate/);
+  });
+
+  it("rejects categories array missing a canonical category", () => {
+    const replaced = [...ARTIFACT_RAW.categories];
+    replaced[1] = replaced[0]; // remove "sports", duplicate "other"
+    expect(() =>
+      loadLogisticModel({
+        ...ARTIFACT_RAW,
+        categories: replaced,
+      }),
+    ).toThrow(/duplicate|missing/);
+  });
 });
 
 describe("predictScore (parity with Python oracle)", () => {

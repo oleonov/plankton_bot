@@ -219,7 +219,9 @@ operators can confirm freshness without touching the API.
    startup. The startup hook in `apps/runtime/src/index.ts` then
    automatically performs both cleanups required by the disabled-no-op
    contract: it deletes `runtime_metrics.score_distribution` and NULLs
-   `markets.score` / `markets.score_model_version` / `markets.scored_at`
+   all four score-ownership columns
+   (`markets.score` / `markets.score_model_version` /
+   `markets.scored_at` / `markets.features_captured_at`)
    for every row that still carries a value (logged as
    `soft_ranking_disabled_score_columns_cleared`). After the cleanup the
    JS comparator in `findTrackedForPricingTiered` silently degenerates

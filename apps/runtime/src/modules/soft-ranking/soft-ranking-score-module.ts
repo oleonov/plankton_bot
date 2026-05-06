@@ -40,6 +40,8 @@ import type { Logger } from "../../logger.js";
 export interface SoftRankingHealthSnapshot {
   readonly modelVersion: string | null;
   readonly scoredMarkets: number;
+  readonly step2IncludedNoScore: number;
+  readonly skippedNonStep2Included: number;
   readonly staleMarkets: number;
   readonly mean: number | null;
   readonly capturedAt: string;
@@ -152,19 +154,21 @@ export class SoftRankingScoreModule implements RuntimeModule {
       return { ok: false, detail: "not started" };
     }
     const snap = this.lastSnapshot;
+    const scoreModelVersion = snap?.modelVersion ?? this.model.modelVersion;
     const snapshotPart =
       snap && snap.scoredMarkets > 0
-        ? ` scored=${snap.scoredMarkets} stale=${snap.staleMarkets} mean=${
-            snap.mean == null ? "null" : snap.mean.toFixed(4)
-          }`
+        ? ` scored=${snap.scoredMarkets}` +
+          ` step2IncludedNoScore=${snap.step2IncludedNoScore}` +
+          ` skippedNonStep2Included=${snap.skippedNonStep2Included}` +
+          ` stale=${snap.staleMarkets}` +
+          ` mean=${snap.mean == null ? "null" : snap.mean.toFixed(4)}`
         : "";
     return {
       ok: true,
       detail:
-        `subscribed modelVersion=${this.model.modelVersion}` +
+        `subscribed scoreModelVersion=${scoreModelVersion}` +
         ` events=${this.summary.events}` +
         ` scoredRows=${this.summary.scoredRows}` +
-        ` skippedNonStep2Included=${this.summary.skippedNonStep2Included}` +
         ` missingFeatures=${this.summary.missingFeatures}` +
         ` scoringErrors=${this.summary.scoringErrors}` +
         snapshotPart,
