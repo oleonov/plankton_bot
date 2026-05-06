@@ -582,13 +582,7 @@ export class ExecutionModule implements RuntimeModule {
         })
       : undefined;
 
-    this.deps.orderRepo.updateStatus(
-      cmd.orderId,
-      "cancelled",
-      undefined,
-      cmd.reason,
-      telemetry,
-    );
+    this.deps.orderRepo.updateStatus(cmd.orderId, "cancelled", undefined, cmd.reason, telemetry);
 
     this.log.info({ commandId: cmd.commandId, orderId: cmd.orderId }, "order cancelled");
 

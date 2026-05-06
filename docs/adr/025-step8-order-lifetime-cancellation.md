@@ -176,7 +176,7 @@ Four columns are added to the `orders` table, populated on every
 transition into the `cancelled` terminal state:
 
 - **`cancel_age_ms INTEGER`** — `Date.now() − new
-  Date(order.createdAt).getTime()`, computed at the cancel-write
+Date(order.createdAt).getTime()`, computed at the cancel-write
   call site. Nullable when the row pre-dates the migration; populated
   for every cancel issued after migration 047.
 - **`cancel_age_bucket TEXT`** — categorical string in the §12.1
@@ -334,8 +334,8 @@ Justification for retention:
     should not abandon profitable resting bids.
   - **`cancel`**: an extended pause leaves stale prices in the book
     that may execute against stale state when the bot resumes.
-  §12 provides no empirical support for either default. The
-  operator has not requested the alternative.
+    §12 provides no empirical support for either default. The
+    operator has not requested the alternative.
 - **Shutdown-time cancel is contingent on Q2.** If pause-time
   semantics flip to `cancel`, shutdown should follow suit. Wiring
   shutdown in isolation pre-commits the `cancel` choice.

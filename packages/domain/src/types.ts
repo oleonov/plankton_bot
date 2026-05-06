@@ -193,14 +193,7 @@ export type NotionalBucket =
  * tail. Used to classify the time elapsed between an order's
  * `createdAt` and its cancellation.
  */
-export type CancelAgeBucket =
-  | "<1min"
-  | "1-10min"
-  | "10min-1h"
-  | "1-6h"
-  | "6-24h"
-  | "1-7d"
-  | ">7d";
+export type CancelAgeBucket = "<1min" | "1-10min" | "10min-1h" | "1-6h" | "6-24h" | "1-7d" | ">7d";
 
 // ─── Risk Decision ────────────────────────────────────────────────────────────
 
