@@ -319,7 +319,7 @@ expand ADR scope.
   by ADR-014 as a defensive seed; X selection deferred to ADR-024.
   Acceptable while live-lite is the only profile that enforces.
 - **`pricingDeltaTicks` is signed-by-side** — BUY is `(price -
-  bestBid) / tickSize` so a positive value means "above bid toward
+bestBid) / tickSize` so a positive value means "above bid toward
   ask" (improvement); SELL is `(bestAsk - price) / tickSize` so a
   positive value means "below ask toward bid" (improvement). The
   semantic is "ticks of improvement from the touch toward
