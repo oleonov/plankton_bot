@@ -23,6 +23,14 @@ research/data/docs/
 research_plankton/data/
 research_plankton/*.json
 research_plankton/*.tar.gz
+research_plankton/plankton_observer/*.db
+research_plankton/plankton_observer/*.db-wal
+research_plankton/plankton_observer/*.db-shm
+research_plankton/plankton_observer/*.log
+research_plankton/plankton_observer/status.json
+research_plankton/plankton_observer/snapshots/
+research_plankton/plankton_observer/debug_runs/
+research_plankton/plankton_observer/.venv/
 research_old/
 
 # Local trade DB pulled for ad-hoc analysis (never committed)

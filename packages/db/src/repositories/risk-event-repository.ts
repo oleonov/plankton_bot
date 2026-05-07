@@ -13,7 +13,13 @@ export class SqliteRiskEventRepository implements RiskEventRepository {
   countSince(createdAtIso: string): number {
     const row = this.db
       .prepare("SELECT COUNT(*) as c FROM risk_events WHERE created_at >= ?")
-      .get(createdAtIso) as { c: number };
+      .get(toSqliteDateTime(createdAtIso)) as { c: number };
     return row.c;
   }
+}
+
+function toSqliteDateTime(value: string): string {
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return value;
+  return new Date(ms).toISOString().slice(0, 19).replace("T", " ");
 }

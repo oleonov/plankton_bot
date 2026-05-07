@@ -293,6 +293,10 @@ interface ControlDbReader {
   prepare(sql: string): { get(...args: unknown[]): unknown };
 }
 
+export interface BuySignalBudgetCircuitBreaker {
+  canAttemptBuy(requiredNotionalUsdc: number): boolean;
+}
+
 // ─── Deps ────────────────────────────────────────────────────────────────────
 
 export interface AlgoDecisionModuleDeps {
@@ -311,6 +315,13 @@ export interface AlgoDecisionModuleDeps {
   selectedMarketCache: SelectedMarketCache;
   runtimeControl?: RuntimeControl;
   controlDb?: ControlDbReader | undefined;
+  /**
+   * Operational circuit breaker for globally exhausted BUY budget. RiskInventory
+   * still owns final budget rejection; this only prevents emitting thousands of
+   * known-impossible BUY candidates while the wallet has no spendable balance.
+   */
+  buySignalBudgetCircuitBreaker?: BuySignalBudgetCircuitBreaker | undefined;
+  buySignalBudgetCooldownMs?: number | undefined;
   /**
    * ADR-016 dependency. When provided AND the runtime_control_state policy is
    * `market_wide`, the post-entry continuation gate consults this provider
@@ -348,6 +359,8 @@ const CONTINUATION_TRADE_COUNT_CAP = 6;
 const EVALUATE_YIELD_BATCH = 50;
 const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
 const MAX_SUPPRESSION_DEDUPE_KEYS = 50_000;
+const DEFAULT_BUY_BUDGET_COOLDOWN_MS = 60 * 60 * 1000;
+const WALLET_BUY_BUDGET_EXHAUSTED_REASON = "wallet_buy_budget_exhausted";
 const DEDUPED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
   "mid-price-unavailable",
@@ -399,6 +412,8 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly clientOrderToToken = new Map<string, string>(); // clientOrderId → tokenId
   private readonly orderIdToToken = new Map<string, string>(); // orderId → tokenId
   private readonly suppressionDedupe = new Map<string, number>();
+  private buyBudgetCooldownUntilMs = 0;
+  private buyBudgetSuppressedSignals = 0;
 
   private tickCounter = 0;
   private unsubs: Array<() => void> = [];
@@ -572,6 +587,12 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleSignalRejected(payload: RuntimeEventMap["SignalRejected"]): Promise<void> {
+    if (
+      payload.signal.side === "buy" &&
+      payload.reason.includes(WALLET_BUY_BUDGET_EXHAUSTED_REASON)
+    ) {
+      this.activateBuyBudgetCooldown(payload.signal, payload.rejectedAt, "risk_rejection");
+    }
     this.clearPendingByTokenId(String(payload.signal.tokenId));
   }
 
@@ -623,7 +644,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   /** Prune stale pending entries and evaluate all eligible tokens. */
   async sweep(): Promise<void> {
-    if (this.deps.runtimeControl?.isPaused()) return;
+    if (this.isPaused()) return;
     this.pruneExpiredPending();
 
     const allLegStates = this.deps.legStateRepo.getAll();
@@ -640,7 +661,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   /** Evaluate a list of token IDs in one pass, emit signals and redeem events. */
   async evaluateTokens(tokenIds: readonly TokenId[]): Promise<void> {
-    if (this.deps.runtimeControl?.isPaused()) return;
+    if (this.isPaused()) return;
     if (this.evaluating) return;
     this.evaluating = true;
     try {
@@ -673,6 +694,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // consumer). Serial cache-misses inside the per-token loop would stack
     // ~75ms × N latency on the sweep; one parallel prefetch collapses it.
     await this.prefetchContinuationTradeCounts(tokenIds);
+    if (this.isPaused()) return;
 
     const redeemConditionIds = new Set<string>();
     const signals: Array<{ signal: import("@plankton/domain").Signal; market: NormalizedMarket }> =
@@ -684,8 +706,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     // and other I/O callbacks. setImmediate yields after macro-tasks drain.
     let processed = 0;
     for (const tokenId of tokenIds) {
+      if (this.isPaused()) return;
       if (processed > 0 && processed % EVALUATE_YIELD_BATCH === 0) {
         await new Promise<void>((resolve) => setImmediate(resolve));
+        if (this.isPaused()) return;
       }
       processed++;
       const result = await this.evaluateToken(String(tokenId) as TokenId, now, nextSeq);
@@ -694,16 +718,21 @@ export class AlgoDecisionModule implements RuntimeModule {
         redeemConditionIds.add(result.conditionId);
       } else {
         if (result.signal.side === "buy") {
+          if (this.shouldSuppressBuyForBudget(result.signal, now)) continue;
+          if (this.isPaused()) return;
           this.reservePendingSignal(result.signal, now);
         }
-        // Persist decision_signal_log / signal_emitted now, BEFORE pushing onto
-        // the emit queue. RiskInventory owns wallet-budget rejection; Step 5
-        // telemetry records decision-side triggers regardless of downstream
-        // approval or rejection (ADR-022 §D-F).
+        // Persist decision_signal_log / signal_emitted only after the
+        // operational BUY-budget circuit breaker keeps the signal. RiskInventory
+        // still owns final order-risk rejection; this prevents known-impossible
+        // empty-wallet BUY candidates from flooding telemetry before Risk sees
+        // the first rejection.
         result.commitLog();
         signals.push({ signal: result.signal, market: result.market });
       }
     }
+
+    if (this.isPaused()) return;
 
     // Emit grouped RedeemRequested — one event per sweep with deduplicated conditionIds
     if (redeemConditionIds.size > 0) {
@@ -714,6 +743,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     for (const { signal, market } of signals) {
+      if (this.isPaused()) return;
       await this.deps.bus.publish("SignalProduced", { signal, market });
     }
 
@@ -1342,6 +1372,127 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (oldestKey === undefined) break;
       this.suppressionDedupe.delete(oldestKey);
     }
+  }
+
+  private shouldSuppressBuyForBudget(
+    signal: import("@plankton/domain").Signal,
+    now: number,
+  ): boolean {
+    if (signal.side !== "buy") return false;
+
+    if (this.buyBudgetCooldownUntilMs > 0 && now >= this.buyBudgetCooldownUntilMs) {
+      this.clearBuyBudgetCooldown(now, "expired");
+    }
+
+    const canAttempt = this.canAttemptBuy(signal);
+    if (canAttempt === true) {
+      if (this.buyBudgetCooldownUntilMs > now) {
+        this.clearBuyBudgetCooldown(now, "budget_recovered");
+      }
+      return false;
+    }
+
+    if (canAttempt === false) {
+      this.activateBuyBudgetCooldown(signal, now, "decision_preflight");
+      this.buyBudgetSuppressedSignals++;
+      return true;
+    }
+
+    if (this.buyBudgetCooldownUntilMs > now) {
+      this.buyBudgetSuppressedSignals++;
+      return true;
+    }
+
+    return false;
+  }
+
+  private canAttemptBuy(signal: import("@plankton/domain").Signal): boolean | null {
+    const circuitBreaker = this.deps.buySignalBudgetCircuitBreaker;
+    if (!circuitBreaker) return null;
+
+    try {
+      return circuitBreaker.canAttemptBuy(signal.suggestedSizeUsdc);
+    } catch (err) {
+      this.log.warn(
+        {
+          err,
+          signalId: signal.signalId,
+          tokenId: String(signal.tokenId),
+          requiredNotionalUsdc: signal.suggestedSizeUsdc,
+        },
+        "buy budget circuit breaker failed open",
+      );
+      return true;
+    }
+  }
+
+  private activateBuyBudgetCooldown(
+    signal: import("@plankton/domain").Signal,
+    now: number,
+    source: "decision_preflight" | "risk_rejection",
+  ): void {
+    if (this.buyBudgetCooldownUntilMs > now) return;
+
+    const cooldownMs = this.deps.buySignalBudgetCooldownMs ?? DEFAULT_BUY_BUDGET_COOLDOWN_MS;
+    const cooldownUntilMs = now + cooldownMs;
+    this.buyBudgetCooldownUntilMs = cooldownUntilMs;
+    this.buyBudgetSuppressedSignals = 0;
+
+    this.recordBuyBudgetCooldownActivated(signal, now, cooldownUntilMs, source);
+    this.log.info(
+      {
+        signalId: signal.signalId,
+        tokenId: String(signal.tokenId),
+        requiredNotionalUsdc: signal.suggestedSizeUsdc,
+        cooldownUntil: new Date(cooldownUntilMs).toISOString(),
+        source,
+      },
+      "buy budget circuit breaker activated",
+    );
+  }
+
+  private clearBuyBudgetCooldown(now: number, reason: "budget_recovered" | "expired"): void {
+    const suppressedSignals = this.buyBudgetSuppressedSignals;
+    this.buyBudgetCooldownUntilMs = 0;
+    this.buyBudgetSuppressedSignals = 0;
+
+    this.log.info(
+      { reason, suppressedSignals, clearedAt: new Date(now).toISOString() },
+      "buy budget circuit breaker cleared",
+    );
+  }
+
+  private recordBuyBudgetCooldownActivated(
+    signal: import("@plankton/domain").Signal,
+    now: number,
+    cooldownUntilMs: number,
+    source: "decision_preflight" | "risk_rejection",
+  ): void {
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType: "signal_suppressed",
+        payload: {
+          signalId: signal.signalId,
+          tokenId: String(signal.tokenId),
+          conditionId: String(signal.conditionId),
+          reasonCode: WALLET_BUY_BUDGET_EXHAUSTED_REASON,
+          side: "BUY",
+          requiredNotionalUsdc: signal.suggestedSizeUsdc,
+          cooldownUntil: new Date(cooldownUntilMs).toISOString(),
+          source,
+          signalTimestamp: new Date(now).toISOString(),
+        },
+      });
+    } catch (err) {
+      this.log.warn(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "failed to persist buy budget suppression event",
+      );
+    }
+  }
+
+  private isPaused(): boolean {
+    return this.deps.runtimeControl?.isPaused() ?? false;
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────────

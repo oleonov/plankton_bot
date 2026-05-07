@@ -1,3 +1,9 @@
+x-json-logging: &json-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
   plankton-runtime:
     image: plankton:latest
@@ -8,6 +14,7 @@ services:
     restart: unless-stopped
     env_file: .env.production
     mem_limit: 640m
+    logging: *json-logging
     environment:
       # --heapsnapshot-signal=SIGUSR2 lets ops dump a heap snapshot on demand
       # (docker kill -s SIGUSR2 plankton-plankton-runtime-1) for leak triage.
@@ -26,6 +33,7 @@ services:
       - plankton-runtime
     env_file: .env.production
     mem_limit: 256m
+    logging: *json-logging
     environment:
       # Always behind nginx in production
       - TRUST_PROXY=true
@@ -63,6 +71,7 @@ services:
       # IMAGES, INFO, NETWORKS, NODES, PLUGINS, SECRETS, SERVICES,
       # SESSION, SWARM, SYSTEM, TASKS, VOLUMES = 0
     restart: unless-stopped
+    logging: *json-logging
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:2375/_ping || exit 1"]
       interval: 10s
@@ -87,6 +96,7 @@ services:
         condition: service_healthy
     env_file: .env.production
     mem_limit: 192m
+    logging: *json-logging
     environment:
       - CONTROL_DB_PATH=/app/apps/runtime/data/control.db
       - MANAGED_CONTAINER=plankton-plankton-runtime-1

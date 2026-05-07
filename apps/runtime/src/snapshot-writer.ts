@@ -9,6 +9,7 @@ export interface SnapshotWriterConfig {
   intervalMs: number;
   pruneIntervalMs: number;
   pruneTtlMs: number;
+  enabled?: () => boolean;
 }
 
 export class SnapshotWriter {
@@ -21,6 +22,8 @@ export class SnapshotWriter {
   ) {}
 
   onSnapshot(markets: readonly NormalizedMarket[], timestamp: number): void {
+    if (this.config.enabled && !this.config.enabled()) return;
+
     const batch: MarketSnapshot[] = [];
 
     for (const m of markets) {

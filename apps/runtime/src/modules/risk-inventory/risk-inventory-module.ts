@@ -25,12 +25,14 @@ import type {
   RuntimeEventMap,
   ProfileId,
   ClientOrderId,
+  RuntimeControl,
 } from "@plankton/domain";
 import { canPlaceBuyOrderForMarket } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { findActivePositions } from "../../active-positions.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
+import { normalizeReasonCode } from "../../risk-event-codes.js";
 import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
@@ -49,6 +51,8 @@ export interface RiskInventoryModuleDeps {
   activeProfile?: ProfileId | undefined;
   walletBufferPct?: number | undefined;
   walletBufferMinUsdc?: number | undefined;
+  runtimeControl?: RuntimeControl | undefined;
+  rejectionLogCooldownMs?: number | undefined;
   /**
    * Optional fail-closed BUY-side guard. When supplied, BUYs are pre-screened
    * against `canPlaceBuyOrder(market)` and `resolutionTracker.isResolved(...)`
@@ -69,6 +73,8 @@ export interface RiskDiagnostics {
   markToMarketUpdates: number;
 }
 
+const DEFAULT_REJECTION_LOG_COOLDOWN_MS = 60 * 60 * 1000;
+
 export class RiskInventoryModule implements RuntimeModule {
   private readonly log: Logger;
   private readonly riskGate: AlgoRiskGateImpl;
@@ -80,6 +86,11 @@ export class RiskInventoryModule implements RuntimeModule {
   private signalsRejectedCount = 0;
   private fillsProcessed = 0;
   private mtmUpdates = 0;
+  private readonly rejectionLogState = new Map<
+    string,
+    { lastLoggedAt: number; suppressed: number }
+  >();
+  private pausedSignalLogState: { lastLoggedAt: number; suppressed: number } | null = null;
 
   /** Latest known exchange minimum share size per token from live market updates. */
   private readonly tokenMinOrderSize = new Map<string, number>();
@@ -192,6 +203,53 @@ export class RiskInventoryModule implements RuntimeModule {
     return this.deps.now ? this.deps.now() : Date.now();
   }
 
+  private rejectionLogCooldownMs(): number {
+    return this.deps.rejectionLogCooldownMs ?? DEFAULT_REJECTION_LOG_COOLDOWN_MS;
+  }
+
+  private logRejectedSignal(
+    details: { signalId: string; tokenId: string; reasons: readonly string[] },
+    message: string,
+  ): void {
+    const now = this.now();
+    const reasonKey = normalizeReasonCode(details.reasons.join("; "));
+    const state = this.rejectionLogState.get(reasonKey);
+    if (state && now - state.lastLoggedAt < this.rejectionLogCooldownMs()) {
+      state.suppressed++;
+      return;
+    }
+
+    this.rejectionLogState.set(reasonKey, { lastLoggedAt: now, suppressed: 0 });
+    this.log.info(
+      {
+        ...details,
+        reasonCode: reasonKey,
+        suppressedSinceLast: state?.suppressed ?? 0,
+      },
+      message,
+    );
+  }
+
+  private logPausedSignalIgnored(signal: RuntimeEventMap["SignalProduced"]["signal"]): void {
+    const now = this.now();
+    const state = this.pausedSignalLogState;
+    if (state && now - state.lastLoggedAt < this.rejectionLogCooldownMs()) {
+      state.suppressed++;
+      return;
+    }
+
+    this.pausedSignalLogState = { lastLoggedAt: now, suppressed: 0 };
+    this.log.info(
+      {
+        signalId: signal.signalId,
+        tokenId: String(signal.tokenId),
+        side: signal.side,
+        suppressedSinceLast: state?.suppressed ?? 0,
+      },
+      "signal ignored while runtime is paused",
+    );
+  }
+
   /**
    * Returns a single block-reason code for a BUY, or null when admission is
    * cleared. Reason precedence: tracker availability → resolution → market
@@ -218,6 +276,11 @@ export class RiskInventoryModule implements RuntimeModule {
     const { signal, market } = payload;
     this.signalsProcessed++;
 
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.logPausedSignalIgnored(signal);
+      return;
+    }
+
     // BUY-side admission guard (defense-in-depth before riskGate). Blocks new
     // BUYs on markets that have already ended, gone inactive, lost tradability,
     // resolved, or aren't physically capable of accepting an order. SELL and
@@ -225,8 +288,12 @@ export class RiskInventoryModule implements RuntimeModule {
     const buyBlock = signal.side === "buy" ? this.evaluateBuyAdmission(market) : null;
     if (buyBlock) {
       this.signalsRejectedCount++;
-      this.log.info(
-        { signalId: signal.signalId, tokenId: String(signal.tokenId), reason: buyBlock },
+      this.logRejectedSignal(
+        {
+          signalId: signal.signalId,
+          tokenId: String(signal.tokenId),
+          reasons: [buyBlock],
+        },
         "BUY signal rejected — market not eligible for placement",
       );
       await this.deps.bus.publish("SignalRejected", {
@@ -254,8 +321,12 @@ export class RiskInventoryModule implements RuntimeModule {
         });
       } else {
         this.signalsRejectedCount++;
-        this.log.info(
-          { signalId: signal.signalId, reasons: decision.rejectionReasons },
+        this.logRejectedSignal(
+          {
+            signalId: signal.signalId,
+            tokenId: String(signal.tokenId),
+            reasons: decision.rejectionReasons,
+          },
           "signal rejected",
         );
         await this.deps.bus.publish("SignalRejected", {

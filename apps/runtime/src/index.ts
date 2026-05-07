@@ -78,6 +78,7 @@ import {
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
 import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
+import { hasWalletBuyBudget, resolveWalletBuyBudget } from "./wallet-buy-budget.js";
 
 import { createLogger } from "./logger.js";
 import { buildTradeCountObserver } from "./trade-count-observer.js";
@@ -671,6 +672,7 @@ async function main(): Promise<void> {
     log,
     db: ledgerConn.db,
     liveLiteGuard,
+    runtimeControl,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
     walletBufferPct: config.executionWalletBufferPct,
@@ -755,6 +757,21 @@ async function main(): Promise<void> {
     selectedMarketCache,
     runtimeControl,
     controlDb: controlConn.db,
+    buySignalBudgetCircuitBreaker: {
+      canAttemptBuy: (requiredNotionalUsdc) =>
+        hasWalletBuyBudget(
+          resolveWalletBuyBudget(
+            {
+              controlDb: controlConn.db,
+              activeProfile: activeProfile as import("@plankton/domain").ProfileId,
+              walletBufferPct: config.executionWalletBufferPct,
+              walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
+            },
+            repos.order.sumOpenBuyNotional(),
+          ),
+          requiredNotionalUsdc,
+        ),
+    },
     tradeCountProvider,
     executionPolicy: () => {
       executionPolicyProvider.refreshIfStale();
@@ -992,6 +1009,7 @@ async function main(): Promise<void> {
     intervalMs: 5 * 60 * 1000,
     pruneIntervalMs: 60 * 60 * 1000,
     pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+    enabled: () => !runtimeControl.isPaused(),
   });
 
   bus.subscribe("MarketSnapshotReceived", async ({ markets, timestamp }) => {

@@ -285,6 +285,7 @@ describe("RiskInventoryModule", () => {
   }
 
   beforeEach(() => {
+    vi.clearAllMocks();
     bus = new InProcessEventBus();
     positionRepo = createMockPositionRepo();
     lotRepo = createMockLotRepo();
@@ -399,6 +400,78 @@ describe("RiskInventoryModule", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toContain("wallet_buy_budget_exhausted");
 
+    await mod.stop();
+  });
+
+  it("rate-limits repeated rejection logs by reason", async () => {
+    let now = 1_000;
+    orderRepo = createMockOrderRepo();
+    (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(8);
+    mod = createModule(undefined, {
+      controlDb: createMockControlDb(10),
+      activeProfile: "paper" as any,
+      now: () => now,
+      rejectionLogCooldownMs: 60 * 60 * 1000,
+    });
+    await mod.start();
+    silentLog.info.mockClear();
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ signalId: "sig-wallet-1", suggestedSizeUsdc: 2, suggestedSize: 4 }),
+      market: makeMarket(),
+    });
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ signalId: "sig-wallet-2", suggestedSizeUsdc: 2, suggestedSize: 4 }),
+      market: makeMarket(),
+    });
+
+    const isSignalRejectedLog = (call: readonly unknown[]): boolean =>
+      call[1] === "signal rejected";
+    let rejectionLogs = silentLog.info.mock.calls.filter(isSignalRejectedLog);
+    expect(rejectionLogs).toHaveLength(1);
+
+    now += 60 * 60 * 1000 + 1;
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ signalId: "sig-wallet-3", suggestedSizeUsdc: 2, suggestedSize: 4 }),
+      market: makeMarket(),
+    });
+
+    rejectionLogs = silentLog.info.mock.calls.filter(isSignalRejectedLog);
+    expect(rejectionLogs).toHaveLength(2);
+    expect(rejectionLogs[1]![0]).toMatchObject({ suppressedSinceLast: 1 });
+
+    await mod.stop();
+  });
+
+  it("ignores in-flight signals while paused without publishing risk outcomes", async () => {
+    let paused = true;
+    mod = createModule(undefined, {
+      runtimeControl: { isPaused: () => paused },
+      now: () => 1_000,
+    });
+    await mod.start();
+    silentLog.info.mockClear();
+
+    const approved: any[] = [];
+    const rejected: any[] = [];
+    bus.subscribe("SignalApproved", async (p) => {
+      approved.push(p);
+    });
+    bus.subscribe("SignalRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
+
+    expect(approved).toHaveLength(0);
+    expect(rejected).toHaveLength(0);
+    expect(mod.getDiagnostics()).toMatchObject({ signalsProcessed: 1, signalsRejected: 0 });
+    expect(silentLog.info).toHaveBeenCalledWith(
+      expect.objectContaining({ signalId: "sig-1" }),
+      "signal ignored while runtime is paused",
+    );
+
+    paused = false;
     await mod.stop();
   });
 

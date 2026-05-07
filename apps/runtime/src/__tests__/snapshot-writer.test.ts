@@ -85,6 +85,25 @@ describe("SnapshotWriter", () => {
     expect(repo.saveBatch).toHaveBeenCalledTimes(2);
   });
 
+  it("does not write or update dedupe state while disabled", () => {
+    let enabled = false;
+    writer = new SnapshotWriter(repo, {
+      intervalMs: 5 * 60 * 1000,
+      pruneIntervalMs: 60 * 60 * 1000,
+      pruneTtlMs: 7 * 24 * 60 * 60 * 1000,
+      enabled: () => enabled,
+    });
+    const now = Date.now();
+    const markets = [makeMarket("tok-paused")];
+
+    writer.onSnapshot(markets, now);
+    enabled = true;
+    writer.onSnapshot(markets, now + 1);
+
+    expect(repo.saveBatch).toHaveBeenCalledTimes(1);
+    expect(repo.saveBatch.mock.calls[0]![0]).toHaveLength(1);
+  });
+
   it("prunes after pruneIntervalMs", () => {
     const now = Date.now();
     writer.onSnapshot([makeMarket("tok-1")], now);
