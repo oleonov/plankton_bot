@@ -2267,6 +2267,96 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("keeps cooldown active until the exhausted recovery notional fits", async () => {
+      const expensiveTokenId = "token-budget-expensive";
+      const cheapTokenId = "token-budget-cheap";
+      selectedMarketCache = createMockSelectedMarketCache([expensiveTokenId, cheapTokenId]);
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      let freeBudgetUsdc = 1.5;
+      const canAttemptBuy = vi.fn((requiredNotionalUsdc: number) => {
+        return freeBudgetUsdc >= requiredNotionalUsdc;
+      });
+      const buySizeRules: AlgoSizeRule[] = [
+        {
+          id: 101,
+          actionType: "BUY",
+          priority: 1,
+          ruleId: "B1",
+          stateCondition: "OTHER",
+          priceOperator: ">=",
+          priceValue: 0.2,
+          nthBuy: null,
+          buyCountMin: null,
+          buyCountMax: null,
+          sizeUsdc: 8.41,
+        },
+        ...SEED_SIZE_RULES_BUY,
+      ];
+      algoRulesRepo = {
+        getDecisionRules: vi.fn(() => SEED_DECISION_RULES),
+        getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+          actionType === "BUY" ? buySizeRules : SEED_SIZE_RULES_SELL,
+        ),
+      };
+
+      const mod = buildModule({
+        decisionSignalLogRepo,
+        riskEventRepo,
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+        buySignalBudgetCooldownMs: 60 * 60 * 1000,
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(expensiveTokenId, null, 0.45), makeMarket(cheapTokenId, null, 0.12)],
+        timestamp: Date.now(),
+      });
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([ev]) => ev === "SignalProduced",
+        ),
+      ).toHaveLength(0);
+      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+      expect(canAttemptBuy.mock.calls.map(([required]) => required)).toEqual([8.41, 8.41]);
+
+      canAttemptBuy.mockClear();
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+      freeBudgetUsdc = 2;
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(cheapTokenId, null, 0.12)],
+        timestamp: Date.now(),
+      });
+      expect(
+        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+          ([ev]) => ev === "SignalProduced",
+        ),
+      ).toHaveLength(0);
+      expect(canAttemptBuy.mock.calls.map(([required]) => required)).toEqual([8.41]);
+
+      canAttemptBuy.mockClear();
+      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+      freeBudgetUsdc = 9;
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(cheapTokenId, null, 0.12)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(1);
+      expect(signalCalls[0]![1].signal.suggestedSizeUsdc).toBeCloseTo(0.99, 5);
+      expect(canAttemptBuy.mock.calls.map(([required]) => required)).toEqual([8.41, 0.99]);
+      expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+      const suppressionCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([event]) => event.payload.reasonCode === "wallet_buy_budget_exhausted");
+      expect(suppressionCalls).toHaveLength(1);
+
+      await mod.stop();
+    });
+
     it("does not commit or publish a BUY if pause lands during in-flight evaluation", async () => {
       const tokenId = "token-budget-pause-mid-flight";
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);

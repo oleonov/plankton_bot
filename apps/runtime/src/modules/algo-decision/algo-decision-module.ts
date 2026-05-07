@@ -417,6 +417,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly suppressionDedupe = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
+  private buyBudgetRecoveryNotionalUsdc = 0;
 
   private tickCounter = 0;
   private unsubs: Array<() => void> = [];
@@ -1327,11 +1328,18 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.clearBuyBudgetCooldown(now, "expired");
     }
 
-    const canAttempt = this.canAttemptBuy(signal);
-    if (canAttempt === true) {
-      if (this.buyBudgetCooldownUntilMs > now) {
-        this.clearBuyBudgetCooldown(now, "budget_recovered");
+    if (this.buyBudgetCooldownUntilMs > now) {
+      const recoveryNotionalUsdc = this.buyBudgetRecoveryNotionalUsdc || signal.suggestedSizeUsdc;
+      const recovered = this.canAttemptBuyNotional(recoveryNotionalUsdc, signal);
+      if (recovered !== true) {
+        this.buyBudgetSuppressedSignals++;
+        return true;
       }
+      this.clearBuyBudgetCooldown(now, "budget_recovered");
+    }
+
+    const canAttempt = this.canAttemptBuyNotional(signal.suggestedSizeUsdc, signal);
+    if (canAttempt === true) {
       return false;
     }
 
@@ -1340,28 +1348,25 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.buyBudgetSuppressedSignals++;
       return true;
     }
-
-    if (this.buyBudgetCooldownUntilMs > now) {
-      this.buyBudgetSuppressedSignals++;
-      return true;
-    }
-
     return false;
   }
 
-  private canAttemptBuy(signal: import("@plankton/domain").Signal): boolean | null {
+  private canAttemptBuyNotional(
+    requiredNotionalUsdc: number,
+    signal: import("@plankton/domain").Signal,
+  ): boolean | null {
     const circuitBreaker = this.deps.buySignalBudgetCircuitBreaker;
     if (!circuitBreaker) return null;
 
     try {
-      return circuitBreaker.canAttemptBuy(signal.suggestedSizeUsdc);
+      return circuitBreaker.canAttemptBuy(requiredNotionalUsdc);
     } catch (err) {
       this.log.warn(
         {
           err,
           signalId: signal.signalId,
           tokenId: String(signal.tokenId),
-          requiredNotionalUsdc: signal.suggestedSizeUsdc,
+          requiredNotionalUsdc,
         },
         "buy budget circuit breaker failed open",
       );
@@ -1374,6 +1379,10 @@ export class AlgoDecisionModule implements RuntimeModule {
     now: number,
     source: "decision_preflight" | "risk_rejection",
   ): void {
+    this.buyBudgetRecoveryNotionalUsdc = Math.max(
+      this.buyBudgetRecoveryNotionalUsdc,
+      signal.suggestedSizeUsdc,
+    );
     if (this.buyBudgetCooldownUntilMs > now) return;
 
     const cooldownMs = this.deps.buySignalBudgetCooldownMs ?? DEFAULT_BUY_BUDGET_COOLDOWN_MS;
@@ -1387,6 +1396,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         signalId: signal.signalId,
         tokenId: String(signal.tokenId),
         requiredNotionalUsdc: signal.suggestedSizeUsdc,
+        recoveryNotionalUsdc: this.buyBudgetRecoveryNotionalUsdc,
         cooldownUntil: new Date(cooldownUntilMs).toISOString(),
         source,
       },
@@ -1398,6 +1408,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const suppressedSignals = this.buyBudgetSuppressedSignals;
     this.buyBudgetCooldownUntilMs = 0;
     this.buyBudgetSuppressedSignals = 0;
+    this.buyBudgetRecoveryNotionalUsdc = 0;
 
     this.log.info(
       { reason, suppressedSignals, clearedAt: new Date(now).toISOString() },
@@ -1421,6 +1432,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           reasonCode: WALLET_BUY_BUDGET_EXHAUSTED_REASON,
           side: "BUY",
           requiredNotionalUsdc: signal.suggestedSizeUsdc,
+          recoveryNotionalUsdc: this.buyBudgetRecoveryNotionalUsdc,
           cooldownUntil: new Date(cooldownUntilMs).toISOString(),
           source,
           signalTimestamp: new Date(now).toISOString(),

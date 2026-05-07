@@ -26,13 +26,16 @@ function setup() {
 
 describe("SelectionRules page", () => {
   describe("rules table", () => {
-    it("renders all seeded rules in the table", async () => {
+    it("renders active slug rules and hides deprecated prefix rows", async () => {
       setup();
 
       await screen.findByTestId("rules-table");
-      expect(screen.getByText("bitcoin-")).toBeInTheDocument();
       expect(screen.getByText("bitcoin-to-150k-by-2025")).toBeInTheDocument();
-      expect(screen.getByText("elon-musk-")).toBeInTheDocument();
+      expect(screen.queryByText("bitcoin-")).not.toBeInTheDocument();
+      expect(screen.queryByText("elon-musk-")).not.toBeInTheDocument();
+      expect(screen.getByTestId("deprecated-prefix-notice")).toHaveTextContent(
+        "2 deprecated prefix rules ignored by v5.11",
+      );
     });
 
     it("shows empty state when no rules exist", async () => {
@@ -40,7 +43,7 @@ describe("SelectionRules page", () => {
       setup();
 
       await screen.findByTestId("rules-empty");
-      expect(screen.getByText(/No selection rules yet/)).toBeInTheDocument();
+      expect(screen.getByText(/No active slug overrides yet/)).toBeInTheDocument();
     });
 
     it("shows error state when API fails", async () => {
@@ -179,11 +182,10 @@ describe("SelectionRules page", () => {
 
       await screen.findByTestId("rules-table");
 
-      // rule-1 is "bitcoin-" with enabled=true
-      await user.click(screen.getByTestId("toggle-rule-1"));
+      await user.click(screen.getByTestId("toggle-rule-2"));
 
       await waitFor(() => {
-        expect(patchedRuleIds).toContain("rule-1");
+        expect(patchedRuleIds).toContain("rule-2");
       });
 
       expect(patchedPayloads[0]).toMatchObject({ enabled: false });
@@ -240,10 +242,10 @@ describe("SelectionRules page", () => {
       setup();
 
       await screen.findByTestId("rules-table");
-      await user.click(screen.getByTestId("delete-rule-1"));
+      await user.click(screen.getByTestId("delete-rule-2"));
 
       await waitFor(() => {
-        expect(deletedRuleIds).toContain("rule-1");
+        expect(deletedRuleIds).toContain("rule-2");
       });
 
       window.confirm = originalConfirm;
@@ -266,7 +268,7 @@ describe("SelectionRules page", () => {
       setup();
 
       await screen.findByTestId("rules-table");
-      await user.click(screen.getByTestId("delete-rule-1"));
+      await user.click(screen.getByTestId("delete-rule-2"));
 
       // Give time for any async effects
       await waitFor(() => {}, { timeout: 200 });

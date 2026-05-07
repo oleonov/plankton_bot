@@ -27,6 +27,10 @@ function isDeprecatedPrefixRuleType(type: SelectionRuleType): boolean {
   return type === "include_prefix" || type === "exclude_prefix";
 }
 
+function isActiveSlugRule(rule: SelectionRule): boolean {
+  return !isDeprecatedPrefixRuleType(rule.ruleType);
+}
+
 // ─── RulesTable ──────────────────────────────────────────────────────────────
 
 interface RulesTableProps {
@@ -53,7 +57,7 @@ function RulesTable({ rules, profileId }: RulesTableProps) {
         data-testid="rules-empty"
         style={{ color: "var(--text-dim)", fontSize: 13, padding: "16px 0" }}
       >
-        No selection rules yet. Add one below.
+        No active slug overrides yet. Add one below.
       </div>
     );
   }
@@ -79,20 +83,13 @@ function RulesTable({ rules, profileId }: RulesTableProps) {
               >
                 {rule.ruleType}
               </span>
-              {isDeprecatedPrefixRuleType(rule.ruleType) && (
-                <span style={{ color: "var(--text-dim)", fontSize: 10, marginLeft: 6 }}>
-                  deprecated
-                </span>
-              )}
             </td>
             <td style={{ fontFamily: "monospace", fontSize: 12 }}>{rule.pattern}</td>
             <td>
               <button
                 data-testid={`toggle-${rule.ruleId}`}
                 onClick={() => handleToggle(rule)}
-                disabled={
-                  update.isPending || (!rule.enabled && isDeprecatedPrefixRuleType(rule.ruleType))
-                }
+                disabled={update.isPending}
                 style={{
                   background: rule.enabled ? "var(--green)" : "var(--bg-elevated)",
                   color: rule.enabled ? "#fff" : "var(--text-dim)",
@@ -100,16 +97,8 @@ function RulesTable({ rules, profileId }: RulesTableProps) {
                   borderRadius: 4,
                   padding: "2px 10px",
                   fontSize: 11,
-                  cursor:
-                    !rule.enabled && isDeprecatedPrefixRuleType(rule.ruleType)
-                      ? "not-allowed"
-                      : "pointer",
+                  cursor: "pointer",
                 }}
-                title={
-                  !rule.enabled && isDeprecatedPrefixRuleType(rule.ruleType)
-                    ? "Prefix rules are deprecated since v5.11"
-                    : undefined
-                }
               >
                 {rule.enabled ? "Enabled" : "Disabled"}
               </button>
@@ -479,6 +468,8 @@ export function SelectionRules() {
   const profileId = selectedId ?? profiles[0]?.profile_id ?? null;
 
   const { data: rules = [], isLoading, isError, error } = useSelectionRules(profileId ?? "");
+  const activeRules = rules.filter(isActiveSlugRule);
+  const deprecatedPrefixRuleCount = rules.length - activeRules.length;
 
   if (!profileId) {
     return (
@@ -540,11 +531,20 @@ export function SelectionRules() {
         }}
       >
         Hard filters: mid price below the policy ceiling, liquidity at or above the policy floor,
-        and not in the v5.11/R9 zero-coverage category blacklist. Prefix rows from legacy DBs are
-        shown for cleanup only and cannot be re-enabled.
+        and not in the v5.11/R9 zero-coverage category blacklist. Legacy prefix rows are ignored by
+        the engine and hidden from active rule management.
       </p>
 
-      <RulesTable rules={rules} profileId={profileId} />
+      <RulesTable rules={activeRules} profileId={profileId} />
+      {deprecatedPrefixRuleCount > 0 && (
+        <div
+          data-testid="deprecated-prefix-notice"
+          style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 8 }}
+        >
+          {deprecatedPrefixRuleCount} deprecated prefix rule
+          {deprecatedPrefixRuleCount === 1 ? "" : "s"} ignored by v5.11.
+        </div>
+      )}
       <CreateForm profileId={profileId} />
       <PreviewPanel profileId={profileId} />
       <MatchDebugger profileId={profileId} />
