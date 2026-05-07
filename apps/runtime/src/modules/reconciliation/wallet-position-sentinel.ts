@@ -5,6 +5,7 @@ import type { Logger } from "../../logger.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 
 const MIN_REMOTE_SIZE = 1e-9;
+const MISSING_REMOTE_GRACE_MS = 2 * 60 * 1000;
 // Polymarket data-api returns size with 4 decimals; local DB stores 6.
 // 1e-3 is the smallest absolute tolerance that absorbs every legitimate
 // rounding gap without masking real shortfalls (a real share-count drift
@@ -153,6 +154,7 @@ export async function runWalletPositionSentinel(
     // a real drift. Skipping here keeps the inverse-direction branch from
     // re-introducing the v138 false-positive class for tiny dust rows.
     if (active.size <= SIZE_DRIFT_EPSILON) continue;
+    if (isWithinMissingRemoteGrace(active, nowMs)) continue;
 
     const market = deps.marketRepo.findByTokenId(createTokenId(tokenIdStr));
     // Skip markets that have already ended — redemption is the legitimate
@@ -244,6 +246,16 @@ function latestActivePosition(positions: readonly Position[]): Position | null {
 function isFutureEndDate(endDate: string, nowMs: number): boolean {
   const endMs = Date.parse(endDate);
   return Number.isFinite(endMs) && endMs > nowMs;
+}
+
+function isWithinMissingRemoteGrace(position: Position, nowMs: number): boolean {
+  const latestLocalChangeMs = Math.max(
+    Date.parse(position.openedAt),
+    Date.parse(position.updatedAt),
+  );
+  return (
+    Number.isFinite(latestLocalChangeMs) && nowMs - latestLocalChangeMs < MISSING_REMOTE_GRACE_MS
+  );
 }
 
 function formatClosedDriftDetail(drift: ClosedLivePositionDrift): string {

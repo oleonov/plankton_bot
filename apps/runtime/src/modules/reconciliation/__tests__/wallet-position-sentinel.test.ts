@@ -286,6 +286,32 @@ describe("runWalletPositionSentinel", () => {
     expect(result.details[0]).toContain("wallet-local-position-missing-remote");
   });
 
+  it("does not flag a freshly opened local position before data-api catches up", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 42.05,
+            costBasisUsdc: 8.41,
+            currentValueUsdc: 8.41,
+            realizedPnl: 0,
+            closedAt: null,
+            openedAt: "2026-04-24T23:59:30.000Z",
+            updatedAt: "2026-04-24T23:59:30.000Z",
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.missingRemotePositions).toHaveLength(0);
+  });
+
   it("flags a dust local position absent from Polymarket while market is live", async () => {
     const result = await runWalletPositionSentinel(
       {
