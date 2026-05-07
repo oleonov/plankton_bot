@@ -67,6 +67,12 @@ function toUnixMs(value: unknown, fallbackMs = Date.now()): number {
   return fallbackMs;
 }
 
+function parseOptionalNumber(value: unknown): number | null {
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function sameAddress(left: unknown, right: string): boolean {
   return typeof left === "string" && left.trim().toLowerCase() === right.trim().toLowerCase();
 }
@@ -226,8 +232,8 @@ export function mapTradeToPersonalFills(
  * `mapMarket` reads from the CLOB `/markets` endpoint, which returns
  * individual markets (not event-grouped) and does not expose `event.slug`
  * or `event.markets.length`. Hardcoding `eventMarketCount: 1` and omitting
- * `eventSlug` makes any market that flows through here a self-INCLUDE for
- * STEP 2 fallback in `evaluatePreEntry` — wrong for any discovery-time use.
+ * `eventSlug` drops event-context telemetry and ranking inputs, so this mapper
+ * is not suitable for discovery-time admission.
  *
  * Production discovery goes exclusively through `GammaMarketDiscoveryGateway`
  * + `mapGammaMarket`. Do **not** reattach `mapMarket` to a discovery code
@@ -343,10 +349,8 @@ export function parseStringOrArray(value: unknown): string[] {
  *
  * @param eventContext.slug - Parent event slug (null when unknown).
  * @param eventContext.marketCount - Total number of markets in the parent Gamma event.
- *   Used for STEP 2 fallback: no_match && eventMarketCount === 1 ⇒ INCLUDE.
- *   Pass `event.markets.length` at the call site. **Required** — silent
- *   default `1` would auto-INCLUDE multi-outcome markets via STEP 2
- *   fallback (ADR-019 §D2).
+ *   Pass `event.markets.length` at the call site. **Required** for telemetry
+ *   and future ranking features; callers must not silently default it.
  */
 export function mapGammaMarket(
   raw: Record<string, unknown>,
@@ -354,12 +358,25 @@ export function mapGammaMarket(
 ): ClobMarket {
   const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
   const outcomes = parseStringOrArray(raw.outcomes);
+  const outcomePrices = parseStringOrArray(raw.outcomePrices);
+  const marketBestBid = parseOptionalNumber(raw.bestBid);
+  const marketBestAsk = parseOptionalNumber(raw.bestAsk);
 
-  const tokens = clobTokenIds.map((tokenId, i) => ({
-    tokenId,
-    outcome: outcomes[i] ?? "",
-    outcomeIndex: i,
-  }));
+  const tokens = clobTokenIds.map((tokenId, i) => {
+    const outcomePrice = i < outcomePrices.length ? parseOptionalNumber(outcomePrices[i]) : null;
+    const bestBid = i === 0 ? marketBestBid : null;
+    const bestAsk = i === 0 ? marketBestAsk : null;
+    const midPrice = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : outcomePrice;
+
+    return {
+      tokenId,
+      outcome: outcomes[i] ?? "",
+      outcomeIndex: i,
+      ...(bestBid !== null || bestAsk !== null || midPrice !== null
+        ? { bestBid, bestAsk, midPrice }
+        : {}),
+    };
+  });
 
   return {
     conditionId: String(raw.conditionId ?? ""),
@@ -379,6 +396,7 @@ export function mapGammaMarket(
     // with no recent activity. The domain field name is kept as `volume24h`
     // for backward-compat; ADR-007 documents the semantic.
     volume24h: raw.volumeNum != null ? Number(raw.volumeNum) : null,
+    liquidity: parseOptionalNumber(raw.liquidity),
     eventMarketCount: eventContext.marketCount,
     // Gamma exposes ISO-8601 `createdAt` directly. We round-trip it through
     // Date.parse to validate; invalid/missing values become null.

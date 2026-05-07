@@ -74,7 +74,7 @@ const BUY_SIZE_RULES: AlgoSizeRule[] = [
     nthBuy: null,
     buyCountMin: null,
     buyCountMax: null,
-    sizeUsdc: 2.1,
+    sizeUsdc: 0.99,
   },
 ];
 
@@ -90,7 +90,7 @@ const SELL_SIZE_RULES: AlgoSizeRule[] = [
     nthBuy: null,
     buyCountMin: null,
     buyCountMax: null,
-    sizeUsdc: 1.62,
+    sizeUsdc: 2.63,
   },
 ];
 
@@ -329,13 +329,13 @@ describe("Continuation STOP after post-entry filter fail", () => {
     await mod.stop();
   });
 
-  it("case 4: buyCount=6+, low price → tradeCount >= 6 branch passes, evaluation proceeds", async () => {
-    // evaluateContinuation(7, 0.01):
-    //   R1: legTradeCount=7 >= 6 → true immediately
+  it("case 4: tradeCount=6, low price → tradeCount >= 6 branch passes, evaluation proceeds", async () => {
+    // evaluateContinuation(6, 0.01):
+    //   R1: legTradeCount=6 >= 6 → true immediately
     // Result: continuation PASSES despite price well below 0.05
     const tokenId = "token-stop-highcount";
-    // buyCount=6, sellCount=1 → tradeCount=7
-    const legState = makeLegState(tokenId, 6, 1, 0.01);
+    // buyCount=3, sellCount=3 → tradeCount=6, while buyCount<4 avoids the R37 D6 guard.
+    const legState = makeLegState(tokenId, 3, 3, 0.01);
     const legStateRepo = createMockLegStateRepo([legState]);
     const selectedMarketCache = createMockSelectedMarketCache([tokenId]);
 

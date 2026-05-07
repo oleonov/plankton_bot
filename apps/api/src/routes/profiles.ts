@@ -423,6 +423,11 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       ...DEFAULT_EXECUTION_POLICY,
       ...current,
       ...(patch as Partial<ExecutionPolicy>),
+      marketSelection: {
+        ...current.marketSelection,
+        ...((patch.marketSelection as Partial<ExecutionPolicy["marketSelection"]> | undefined) ??
+          {}),
+      },
       deadSideGuard: {
         ...current.deadSideGuard,
         ...((patch.deadSideGuard as Partial<ExecutionPolicy["deadSideGuard"]> | undefined) ?? {}),

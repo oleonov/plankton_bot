@@ -3,6 +3,7 @@ import type {
   HealthFailReason,
   HealthInput,
   HealthResult,
+  MarketSelectionPolicy,
   NormalizedMarket,
   PreEntryEvaluation,
 } from "./types.js";
@@ -10,22 +11,51 @@ import type {
 export interface PreEntryInput {
   readonly eventSlug: string | null;
   readonly slug: string;
+  /** Retained for telemetry/ranking; v5.11 hard admission no longer uses fallback by count. */
   readonly eventMarketCount: number;
+  readonly question?: string | null;
+  readonly midPrice?: number | null;
+  readonly liquidity?: number | null;
+}
+
+export const DEFAULT_MARKET_SELECTION_POLICY: MarketSelectionPolicy = {
+  maxMidPrice: 0.5,
+  minLiquidity: 100,
+};
+
+export const PRE_ENTRY_MAX_MID_PRICE = DEFAULT_MARKET_SELECTION_POLICY.maxMidPrice;
+export const PRE_ENTRY_MIN_LIQUIDITY = DEFAULT_MARKET_SELECTION_POLICY.minLiquidity;
+
+const ZERO_COVERAGE_CATEGORY_PATTERN =
+  /\bo\/u\b|over-under|exact[- ]score|both[- ]teams|match[- ]winner|quadra|penta|inhibitor|baron|dragon|\b(?:eth|btc|sol|bnb|xrp|hype|doge)-up-or-down-5m\b|\bmap[- ]?[0-9]+\b|\bgame[- ]?[0-9]+\b|total kills/i;
+const SOCCER_DRAW_PATTERN =
+  /\b(?:soccer|football|match|game|teams?|score|winner)\b.{0,80}\bdraw\b|\bdraw\b.{0,80}\b(?:soccer|football|match|game|teams?|score|winner)\b/i;
+
+function finiteNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+export function isZeroCoverageCategoryMarket(
+  market: Pick<PreEntryInput, "eventSlug" | "slug" | "question">,
+): boolean {
+  const haystack = `${market.eventSlug ?? ""} ${market.slug} ${market.question ?? ""}`;
+  return ZERO_COVERAGE_CATEGORY_PATTERN.test(haystack) || SOCCER_DRAW_PATTERN.test(haystack);
+}
+
+function passesV511HardFilters(market: PreEntryInput, policy: MarketSelectionPolicy): boolean {
+  if (!finiteNumber(market.midPrice) || market.midPrice >= policy.maxMidPrice) return false;
+  if (!finiteNumber(market.liquidity) || market.liquidity < policy.minLiquidity) return false;
+  if (isZeroCoverageCategoryMarket(market)) return false;
+  return true;
 }
 
 export function evaluatePreEntry(
   engine: SelectionRuleEngine,
   market: PreEntryInput,
+  policy: MarketSelectionPolicy = DEFAULT_MARKET_SELECTION_POLICY,
 ): PreEntryEvaluation {
   const decision = engine.resolve(market.eventSlug, market.slug);
 
-  if (decision.status === "include") {
-    return {
-      finalStatus: "INCLUDE",
-      selectionStatus: "matched_include",
-      winningRuleId: decision.winningRuleId,
-    };
-  }
   if (decision.status === "exclude") {
     return {
       finalStatus: "EXCLUDE",
@@ -34,17 +64,18 @@ export function evaluatePreEntry(
     };
   }
 
-  if (market.eventMarketCount === 1) {
+  if (!passesV511HardFilters(market, policy)) {
     return {
-      finalStatus: "INCLUDE",
-      selectionStatus: "step2_fallback_include",
-      winningRuleId: null,
+      finalStatus: "EXCLUDE",
+      selectionStatus: "fallback_exclude",
+      winningRuleId: decision.status === "include" ? decision.winningRuleId : null,
     };
   }
+
   return {
-    finalStatus: "EXCLUDE",
-    selectionStatus: "fallback_exclude",
-    winningRuleId: null,
+    finalStatus: "INCLUDE",
+    selectionStatus: "matched_include",
+    winningRuleId: decision.status === "include" ? decision.winningRuleId : null,
   };
 }
 

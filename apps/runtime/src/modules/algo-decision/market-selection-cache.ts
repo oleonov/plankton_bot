@@ -1,26 +1,19 @@
-import type { EventBus, TokenId } from "@plankton/domain";
+import type { EventBus, MarketSelectionPolicy, NormalizedMarket, TokenId } from "@plankton/domain";
 import { evaluatePreEntry } from "@plankton/domain";
 import type { SelectedMarketCache } from "./algo-decision-module.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 
-// Spec §0 — Live Pre-Entry Filter, driven by SelectionRuleEngine (Phase 4+).
+// v5.11 §1 — Live Pre-Entry Filter, driven by hard price/liquidity/category gates.
 //
 // Eligibility gates NEW BUYs only. We key on `tradable` (CLOB-entry-eligible),
 // not `active`: preserved-for-lifecycle markets (active=true, tradable=false)
 // keep flowing pricing for SELL/REDEEM but are excluded from new-entry gating.
-//
-// Historical Universe Filter (spec §0 R1, `trade_count > 0`) — Gamma exposes
-// no `trade_count` field; we use lifetime volume (`volumeNum`) as a proxy per
-// ADR-007. `volume24h === 0` (lifetime never traded) → excluded. `null`
-// (unknown, e.g. CLOB path) → not blocked.
 
 /**
  * ADR-018 §D2 — Step 1 universe-filter funnel telemetry.
  *
- * Two-partition counters of `NormalizedMarketUpdated` events that reach the
- * gate while `tradable === true`. Counters are cumulative since process start
- * (monotonic), updated **per processed event** (not per unique token — a token
- * may migrate between buckets across updates).
+ * Legacy funnel counters retained for dashboards that still read them. Volume
+ * no longer blocks admission; v5.11 hard filters are applied by evaluatePreEntry.
  *
  * Invariants:
  *  - volume-partition (disjoint within layer):
@@ -53,25 +46,19 @@ export class MarketSelectionCache implements SelectedMarketCache {
   constructor(
     private readonly bus: EventBus,
     private readonly selectionRuleEngine: RefreshableSelectionRuleEngine,
+    private readonly marketSelectionPolicy?: () => MarketSelectionPolicy,
   ) {}
 
   subscribe(): void {
     this.unsub = this.bus.subscribe("NormalizedMarketUpdated", async (payload) => {
       for (const market of payload.markets) {
-        this.processMarket(
-          String(market.tokenId),
-          market.eventSlug,
-          market.slug,
-          market.eventMarketCount,
-          market.tradable,
-          market.volume24h ?? null,
-        );
+        this.processMarket(market);
       }
     });
     // Drop eligibility for tokens that exit the tracked universe so `eligible`
     // doesn't accumulate ghost entries from vanished tokens. The existing
-    // NormalizedMarketUpdated handler self-cleans on non-tradable/volume=0/!INCLUDE
-    // but never sees tokens that simply stopped being tracked.
+    // NormalizedMarketUpdated handler self-cleans on non-tradable/!INCLUDE
+    // updates, but never sees tokens that simply stopped being tracked.
     this.trackedUnsub = this.bus.subscribe("TrackedMarketsChanged", async (payload) => {
       for (const tokenId of payload.removedTokenIds) {
         this.eligible.delete(String(tokenId));
@@ -109,39 +96,32 @@ export class MarketSelectionCache implements SelectedMarketCache {
     };
   }
 
-  private processMarket(
-    tokenId: string,
-    eventSlug: string | null,
-    slug: string,
-    eventMarketCount: number,
-    tradable: boolean,
-    volumeLifetime: number | null,
-  ): void {
-    if (!tradable) {
+  private processMarket(market: NormalizedMarket): void {
+    const tokenId = String(market.tokenId);
+    if (!market.tradable) {
       // Untracked/preserved-for-lifecycle tokens are out of scope for the
-      // Step 1 funnel — they cannot be NEW-BUY admitted regardless of volume.
+      // admission funnel — they cannot be NEW-BUY admitted.
       this.eligible.delete(tokenId);
       return;
     }
     this.seen++;
-    // ADR-007: Historical Universe Filter (spec §0 R1). `volumeLifetime === 0`
-    // means the market has never traded — proxy for `trade_count > 0`. `null`
-    // is treated as unknown (not blocking) — typical for CLOB-path markets.
-    if (volumeLifetime != null && volumeLifetime === 0) {
-      this.volumeZeroDropped++;
-      this.eligible.delete(tokenId);
-      return;
-    }
-    if (volumeLifetime == null) {
+    if (market.volume24h == null) {
       this.volumeNullEvaluated++;
     } else {
       this.volumePositiveEvaluated++;
     }
-    const evalResult = evaluatePreEntry(this.selectionRuleEngine.current, {
-      eventSlug,
-      slug,
-      eventMarketCount,
-    });
+    const evalResult = evaluatePreEntry(
+      this.selectionRuleEngine.current,
+      {
+        eventSlug: market.eventSlug,
+        slug: market.slug,
+        eventMarketCount: market.eventMarketCount,
+        question: market.question,
+        midPrice: market.midPrice,
+        liquidity: market.liquidity ?? null,
+      },
+      this.marketSelectionPolicy?.(),
+    );
     if (evalResult.finalStatus === "INCLUDE") {
       this.selectionRuleAdmitted++;
       this.eligible.add(tokenId);

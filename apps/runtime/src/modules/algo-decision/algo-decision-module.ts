@@ -1,6 +1,6 @@
 /**
  * AlgoDecisionModule — subscribes to market updates and evaluates tokens against
- * the algo decision engine, emitting SignalProduced / RedeemRequested events.
+ * the algo decision engine, emitting SignalProduced events.
  *
  * Subscribes to:
  *  - NormalizedMarketUpdated → update market cache, evaluate affected tokens
@@ -34,11 +34,11 @@ import type {
   MarketTradeCountProvider,
   ContinuationMode,
   ExecutionPolicy,
+  TradeDecisionAction,
 } from "@plankton/domain";
 import {
   deriveState,
   evaluateDecision,
-  evaluateRedeem,
   evaluateSize,
   resolveSignalReason,
   evaluateContinuation,
@@ -92,19 +92,16 @@ interface PendingEntry {
   orderId: string | null;
 }
 
-type TokenEvalResult =
-  | { type: "redeem"; conditionId: string }
-  | {
-      type: "signal";
-      signal: import("@plankton/domain").Signal;
-      market: NormalizedMarket;
-      // Deferred persistence of decision_signal_log + signal_emitted risk_event.
-      // Keep construction pure until `evaluateTokensInner` commits the signal
-      // to the emit queue. Budget and exposure rejections happen downstream and
-      // must not erase Step 5 trigger telemetry.
-      commitLog: () => void;
-    }
-  | null;
+type TokenEvalResult = {
+  type: "signal";
+  signal: import("@plankton/domain").Signal;
+  market: NormalizedMarket;
+  // Deferred persistence of decision_signal_log + signal_emitted risk_event.
+  // Keep construction pure until `evaluateTokensInner` commits the signal
+  // to the emit queue. Budget and exposure rejections happen downstream and
+  // must not erase Step 5 trigger telemetry.
+  commitLog: () => void;
+} | null;
 
 /**
  * ADR-016: which source the continuation gate consulted for `trade_count`.
@@ -260,7 +257,6 @@ type SuppressionFacts = {
    * - `market-cache-miss` — token in selection but no NormalizedMarket yet.
    * - `mid-price-unavailable` — market lacks a usable mid for the gate.
    * - `pending-buy-order` — open BUY order already exists for token.
-   * - `redeem-before-end-date` — REDEEM blocked by endDate guard.
    * - `market-not-live` — hard-liveness gate (acceptingOrders / book / spread).
    * - `continuation-stop` — leg failed R1/R2 continuation gate.
    * - `preserved-only-no-sell-rule` — preserved leg with no SELL rule match.
@@ -269,6 +265,8 @@ type SuppressionFacts = {
    *   `DEDUPED_SUPPRESSION_REASONS`.
    * - `market_age_unknown` — Step 0 §P3, gammaCreatedAt is null/unparseable
    *   while the gate is enabled. Sticky → deduped.
+   * - `d6-suppressed` — R37 $50-test guard: S2 + buyCount>=4 BUY is blocked
+   *   unless the canonical D1 rule fired. Sticky → deduped.
    *
    * Adding a new reason: pick a kebab/snake-case identifier, document it
    * here, and decide whether it should join `DEDUPED_SUPPRESSION_REASONS`
@@ -343,7 +341,7 @@ export interface AlgoDecisionModuleDeps {
 // ─── Module ──────────────────────────────────────────────────────────────────
 
 const PENDING_ENTRY_TIMEOUT_MS = 120_000;
-const SELL_ONLY = new Set(["SELL"]);
+const SELL_ONLY: ReadonlySet<TradeDecisionAction> = new Set(["SELL"]);
 /**
  * ADR-016: trade-count cap passed to the provider; matches R1 (`>= 6`) so the
  * provider can early-exit and never has to page beyond a single response.
@@ -361,11 +359,12 @@ const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
 const MAX_SUPPRESSION_DEDUPE_KEYS = 50_000;
 const DEFAULT_BUY_BUDGET_COOLDOWN_MS = 60 * 60 * 1000;
 const WALLET_BUY_BUDGET_EXHAUSTED_REASON = "wallet_buy_budget_exhausted";
+const D6_SUPPRESSED_REASON = "d6-suppressed";
+const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
 const DEDUPED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
   "mid-price-unavailable",
   "pending-buy-order",
-  "redeem-before-end-date",
   "market-not-live",
   // continuation-stop is sticky: once a leg fails R1 it fails on every sweep
   // tick (≈1/sec) until the leg clears. Without dedupe, a handful of stuck
@@ -379,6 +378,10 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // suppressions to keep decision_signal_log readable.
   "market_too_young",
   "market_age_unknown",
+  // R37: S2/buyCount>=4 BUY has moderate evidence but is disabled for the
+  // $50 live test. This state is sticky across sweep ticks, so dedupe it.
+  D6_SUPPRESSED_REASON,
+  DECISION_RULE_HOLD_REASON,
 ]);
 
 export class AlgoDecisionModule implements RuntimeModule {
@@ -659,7 +662,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   // ─── Core evaluation ────────────────────────────────────────────────────────
 
-  /** Evaluate a list of token IDs in one pass, emit signals and redeem events. */
+  /** Evaluate a list of token IDs in one pass and emit CLOB trading signals. */
   async evaluateTokens(tokenIds: readonly TokenId[]): Promise<void> {
     if (this.isPaused()) return;
     if (this.evaluating) return;
@@ -696,7 +699,6 @@ export class AlgoDecisionModule implements RuntimeModule {
     await this.prefetchContinuationTradeCounts(tokenIds);
     if (this.isPaused()) return;
 
-    const redeemConditionIds = new Set<string>();
     const signals: Array<{ signal: import("@plankton/domain").Signal; market: NormalizedMarket }> =
       [];
 
@@ -714,33 +716,21 @@ export class AlgoDecisionModule implements RuntimeModule {
       processed++;
       const result = await this.evaluateToken(String(tokenId) as TokenId, now, nextSeq);
       if (!result) continue;
-      if (result.type === "redeem") {
-        redeemConditionIds.add(result.conditionId);
-      } else {
-        if (result.signal.side === "buy") {
-          if (this.shouldSuppressBuyForBudget(result.signal, now)) continue;
-          if (this.isPaused()) return;
-          this.reservePendingSignal(result.signal, now);
-        }
-        // Persist decision_signal_log / signal_emitted only after the
-        // operational BUY-budget circuit breaker keeps the signal. RiskInventory
-        // still owns final order-risk rejection; this prevents known-impossible
-        // empty-wallet BUY candidates from flooding telemetry before Risk sees
-        // the first rejection.
-        result.commitLog();
-        signals.push({ signal: result.signal, market: result.market });
+      if (result.signal.side === "buy") {
+        if (this.shouldSuppressBuyForBudget(result.signal, now)) continue;
+        if (this.isPaused()) return;
+        this.reservePendingSignal(result.signal, now);
       }
+      // Persist decision_signal_log / signal_emitted only after the
+      // operational BUY-budget circuit breaker keeps the signal. RiskInventory
+      // still owns final order-risk rejection; this prevents known-impossible
+      // empty-wallet BUY candidates from flooding telemetry before Risk sees
+      // the first rejection.
+      result.commitLog();
+      signals.push({ signal: result.signal, market: result.market });
     }
 
     if (this.isPaused()) return;
-
-    // Emit grouped RedeemRequested — one event per sweep with deduplicated conditionIds
-    if (redeemConditionIds.size > 0) {
-      await this.deps.bus.publish("RedeemRequested", {
-        conditionIds: [...redeemConditionIds],
-        timestamp: now,
-      });
-    }
 
     for (const { signal, market } of signals) {
       if (this.isPaused()) return;
@@ -914,79 +904,12 @@ export class AlgoDecisionModule implements RuntimeModule {
       holdDurationSeconds,
     };
 
-    // Redeem check first — if conditions met, skip signal generation.
-    // Pre-gate on endDate: on-chain redeemPositions() reverts before market
-    // resolution, and ResolutionModule's downstream filterConfirmedRedeemable
-    // defers such cases — but emitting RedeemRequested anyway spams the bus
-    // and writes defer-log noise every eval tick. Suppress at the source.
-    // Missing endDate → allow through (downstream still gates on Gamma).
-    const redeemResult = evaluateRedeem(ctx, this.decisionRules);
-    if (redeemResult) {
-      const endMs = market.endDate ? new Date(market.endDate).getTime() : NaN;
-      if (!Number.isFinite(endMs) || endMs <= now) {
-        this.recordDecisionSignal(
-          {
-            signalId: randomUUID(),
-            tokenId,
-            conditionId: market.conditionId as ConditionId,
-            side: "REDEEM",
-            decisionRuleId: redeemResult.ruleId,
-            sizingRuleId: null,
-            notionalBucket: null,
-            state,
-            price,
-            buyCount,
-            timeSinceLastSeconds,
-            signalTimestamp: new Date(now).toISOString(),
-            // ADR-026 §D-B — adds telemetry is BUY-only; REDEEM rows carry nulls.
-            isAdd: null,
-            addAgeMs: null,
-            addAgeBucket: null,
-            addPriceChangePct: null,
-            addPriceChangeBucket: null,
-            nthBuyAtEmit: null,
-            // ADR-027 §D-B — REDEEM is explicitly non-SELL (`is_exit=0`);
-            // SELL-only derived telemetry fields carry nulls.
-            isExit: 0,
-            isFirstSell: null,
-            holdingTimeMs: null,
-            holdingTimeBucket: null,
-            exitPnlPct: null,
-            exitPnlBucket: null,
-            soldBoughtRatio: null,
-            soldBoughtRatioBucket: null,
-          },
-          {
-            firstTradePrice: emissionFacts.firstTradePrice,
-            firstTradeAt: emissionFacts.firstTradeAt,
-            legTradeCount: emissionFacts.legTradeCount,
-          },
-          triggerTelemetry,
-        );
-        return { type: "redeem", conditionId: market.conditionId };
-      }
-      this.recordDecisionSuppressed({
-        tokenId,
-        conditionId: market.conditionId,
-        reasonCode: "redeem-before-end-date",
-        side: "REDEEM",
-        decisionRuleId: redeemResult.ruleId,
-        state,
-        price,
-        buyCount,
-        timeSinceLastSeconds,
-        emissionFacts,
-        timestamp: new Date(now).toISOString(),
-      });
-    }
-
-    // Hard-liveness gate for CLOB signals. REDEEM (above) uses a separate
-    // NegRisk contract path and is allowed on unhealthy markets. Any other
-    // signal — new-entry BUY, scale-in BUY, exit SELL — must traverse the
-    // signal-to-order bridge, which calls this same `isAlive` and rejects
-    // regardless of side. Suppress here to eliminate allocation churn from
-    // producing signals the bridge will reject anyway. Shared `isAlive` keeps
-    // the two gates in lockstep so they can't drift.
+    // Hard-liveness gate for CLOB signals. Real-resolution REDEEM is handled
+    // by Resolution/Reconciliation outside this module. BUY/SELL signals
+    // traverse the signal-to-order bridge, which calls this same `isAlive` and
+    // rejects regardless of side. Suppress here to eliminate allocation churn
+    // from producing signals the bridge will reject anyway. Shared `isAlive`
+    // keeps the two gates in lockstep so they can't drift.
     const liveness = isAlive(market);
     if (!liveness.healthy) {
       this.recordDecisionSuppressed({
@@ -1043,13 +966,14 @@ export class AlgoDecisionModule implements RuntimeModule {
     // Post-entry continuation gate — only applies when we have a leg. It blocks
     // further entry/scale-in decisions, but SELL exits use the same D2/D4/D5/D7
     // rules and must remain reachable for existing inventory.
+    let continuationFacts: ContinuationFacts | null = null;
     if (legState) {
       const { count: tradeCount, source: tradeCountSource } =
         await this.resolveContinuationTradeCount(
           market.conditionId as ConditionId,
           emissionFacts.legTradeCount,
         );
-      const continuationFacts: ContinuationFacts = {
+      continuationFacts = {
         tradeCount,
         tradeCountSource,
         stop: !evaluateContinuation(tradeCount, legState.firstTradePrice),
@@ -1123,9 +1047,28 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     // Decide action + size
     const decision = evaluateDecision(ctx, this.decisionRules);
+    if (decision.action === "HOLD") {
+      this.recordDecisionSuppressed({
+        tokenId,
+        conditionId: market.conditionId,
+        reasonCode: decision.ruleId === "D6" ? D6_SUPPRESSED_REASON : DECISION_RULE_HOLD_REASON,
+        side: decision.ruleId === "D6" ? "BUY" : null,
+        decisionRuleId: decision.ruleId,
+        state,
+        price,
+        buyCount,
+        timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+        tradeCount: continuationFacts?.tradeCount ?? null,
+        tradeCountSource: continuationFacts?.tradeCountSource ?? null,
+      });
+      return null;
+    }
+    const tradeDecision = decision as { action: TradeDecisionAction; ruleId: string };
     return this.buildSignal(
       market,
-      decision,
+      tradeDecision,
       ctx,
       buyCount,
       now,
@@ -1137,7 +1080,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   private buildSignal(
     market: NormalizedMarket,
-    decision: { action: string; ruleId: string },
+    decision: { action: TradeDecisionAction; ruleId: string },
     ctx: EvalContext,
     buyCount: number,
     now: number,
@@ -1148,7 +1091,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const sizeRules = decision.action === "BUY" ? this.buySizeRules : this.sellSizeRules;
     const nthBuy = buyCount + 1;
     const sizeResult = evaluateSize(
-      decision.action as "BUY" | "SELL",
+      decision.action,
       { state: ctx.state, price: ctx.price, nthBuy, buyCount },
       sizeRules,
     );

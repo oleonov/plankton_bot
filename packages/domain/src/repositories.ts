@@ -145,7 +145,7 @@ export interface MarketRepository {
    * 2. `entryCandidates` — `active=1 AND tradable=1` markets NOT in
    *    executionCritical, ordered by:
    *    - `selection_status` priority: `matched_include` (0) >
-   *      `step2_fallback_include` (1) > `unknown` (2)
+   *      legacy `step2_fallback_include` (1) > `unknown` (2)
    *    - `created_at DESC` within the same tier
    *    - `token_id ASC` as a deterministic tie-break
    *    Filled greedily up to `maxTokens - executionCritical.length`.
@@ -165,8 +165,7 @@ export interface MarketRepository {
   /**
    * Look up the event_market_count stored for a given market slug.
    * Used by the /selection-rules/match API endpoint so the debugger can
-   * evaluate STEP 2 fallback with the real event context instead of a
-   * biased constant.
+   * report the real event context instead of a biased constant.
    * Returns null if no row exists for that slug.
    */
   findEventMarketCountBySlug(slug: string): number | null;

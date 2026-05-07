@@ -23,6 +23,9 @@ export interface EvalContext {
   holdDurationSeconds: number | null;
 }
 
+export type TradeDecisionAction = "BUY" | "SELL";
+export type AlgoDecisionAction = TradeDecisionAction | "HOLD";
+
 function compareOp(op: string, actual: number, threshold: number): boolean {
   switch (op) {
     case "<":
@@ -38,13 +41,13 @@ function compareOp(op: string, actual: number, threshold: number): boolean {
   }
 }
 
-export function matchRule(
+export function matchRule<TAction extends string>(
   ctx: EvalContext,
   rules: readonly AlgoDecisionRule[],
-  allowedActions: ReadonlySet<string>,
-): { action: string; ruleId: string } | null {
+  allowedActions: ReadonlySet<TAction>,
+): { action: TAction; ruleId: string } | null {
   for (const rule of rules) {
-    if (!allowedActions.has(rule.action)) continue;
+    if (!allowedActions.has(rule.action as TAction)) continue;
     if (rule.stateCondition !== "ANY" && rule.stateCondition !== ctx.state) continue;
     if (rule.priceOperator != null && rule.priceValue != null) {
       if (!compareOp(rule.priceOperator, ctx.price, rule.priceValue)) continue;
@@ -63,21 +66,21 @@ export function matchRule(
     }
     if (rule.buyCountMin != null && ctx.buyCount < rule.buyCountMin) continue;
     if (rule.buyCountMax != null && ctx.buyCount > rule.buyCountMax) continue;
-    return { action: rule.action, ruleId: rule.ruleId };
+    return { action: rule.action as TAction, ruleId: rule.ruleId };
   }
   return null;
 }
 
-const BUY_SELL = new Set(["BUY", "SELL"]);
-const REDEEM_SET = new Set(["REDEEM"]);
+const TRADE_DECISION_ACTIONS: ReadonlySet<AlgoDecisionAction> = new Set(["BUY", "SELL", "HOLD"]);
+const REDEEM_SET: ReadonlySet<"REDEEM"> = new Set(["REDEEM"]);
 
 export function evaluateDecision(
   ctx: EvalContext,
   rules: readonly AlgoDecisionRule[],
-): { action: "BUY" | "SELL"; ruleId: string } {
-  const result = matchRule(ctx, rules, BUY_SELL);
-  if (!result) throw new Error("FALLBACK rule missing — no BUY/SELL match");
-  return result as { action: "BUY" | "SELL"; ruleId: string };
+): { action: AlgoDecisionAction; ruleId: string } {
+  const result = matchRule(ctx, rules, TRADE_DECISION_ACTIONS);
+  if (!result) throw new Error("FALLBACK rule missing — no BUY/SELL/HOLD match");
+  return result as { action: AlgoDecisionAction; ruleId: string };
 }
 
 export function evaluateRedeem(

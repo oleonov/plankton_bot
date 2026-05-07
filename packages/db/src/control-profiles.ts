@@ -100,6 +100,7 @@ export function ensureDefaultExecutionPolicy(db: Database.Database): void {
     fillMissing.run(json, profile.profileId);
   }
   backfillEntryMinMarketAgeSeconds(db);
+  backfillMarketSelectionPolicy(db);
 }
 
 /**
@@ -149,6 +150,35 @@ function backfillEntryMinMarketAgeSeconds(db: Database.Database): void {
   }
 
   if (totalChanges > 0 && hasVersionColumn) {
+    db.prepare(
+      `UPDATE runtime_control_state
+          SET execution_policy_version = COALESCE(execution_policy_version, 0) + 1`,
+    ).run();
+  }
+}
+
+function backfillMarketSelectionPolicy(db: Database.Database): void {
+  const stateColumns = db.prepare(`PRAGMA table_info(runtime_control_state)`).all() as Array<{
+    name: string;
+  }>;
+  const hasVersionColumn = stateColumns.some((c) => c.name === "execution_policy_version");
+  const defaultMarketSelectionJson = JSON.stringify(DEFAULT_EXECUTION_POLICY.marketSelection);
+  const result = db
+    .prepare(
+      `UPDATE profile_settings
+          SET execution_policy_json = json_set(
+                execution_policy_json,
+                '$.marketSelection',
+                json(?)
+              ),
+              updated_at = datetime('now')
+        WHERE execution_policy_json IS NOT NULL
+          AND json_valid(execution_policy_json) = 1
+          AND json_extract(execution_policy_json, '$.marketSelection') IS NULL`,
+    )
+    .run(defaultMarketSelectionJson);
+
+  if (result.changes > 0 && hasVersionColumn) {
     db.prepare(
       `UPDATE runtime_control_state
           SET execution_policy_version = COALESCE(execution_policy_version, 0) + 1`,

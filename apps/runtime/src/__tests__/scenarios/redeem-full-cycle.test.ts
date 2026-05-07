@@ -1,19 +1,14 @@
 /**
- * E2E scenario: REDEEM full lifecycle (spec §8)
+ * E2E scenario: external RedeemRequested full lifecycle.
  *
  * Flow under test:
- *   AlgoDecisionModule.evaluateTokens → RedeemRequested
+ *   Resolution/Reconciliation emits RedeemRequested
  *   → ResolutionModule.handleAlgoRedeem → PositionSettler.settleAlgoRedeem
  *   → PositionSettled event + position closed in DB + settlement_ledger row
  *
  * Simulation-mode: no gateway → on-chain call not issued.
  * The live-lite test provides a mocked gateway and checks that
  * gateway.redeemPositions is called before local settlement.
- *
- * REDEEM conditions (spec §8, seeded by bootstrapDatabase):
- *   Rule: stateCondition ∈ {S1, S2}, price < 0.05, holdDuration ≤ 3600s
- *   S1: buyCount=1  && lastAction="BUY"
- *   S2: buyCount≥2  && lastAction="BUY"
  *
  * FK note: settlement_ledger.condition_id references market_resolutions.
  * ResolutionModule.handleAlgoRedeem upserts a `source="algo"` resolution row
@@ -235,10 +230,9 @@ async function buildFixture(opts: {
   // Drain the startup runCheck (it resolves immediately since detector returns [])
   await bus.drain();
 
-  // Feed market price via NormalizedMarketUpdated so the algo module's
-  // internal marketCache knows the sub-0.05 mid-price required by the REDEEM rule.
-  // AlgoDecisionModule.handleMarketUpdate also calls evaluateTokens internally,
-  // which is the primary trigger for RedeemRequested in the E2E path.
+  // Feed market price so runtime caches have a current market snapshot, then
+  // publish the external redeem request that real resolution/reconciliation
+  // paths use. AlgoDecision no longer emits RedeemRequested.
   await bus.publish("NormalizedMarketUpdated", {
     markets: [
       {
@@ -270,6 +264,11 @@ async function buildFixture(opts: {
     timestamp: Date.now(),
   });
   await bus.drain();
+  await bus.publish("RedeemRequested", {
+    conditionIds: [String(conditionId)],
+    timestamp: Date.now(),
+  });
+  await bus.drain();
   // Allow async handlers (ResolutionModule.handleAlgoRedeem) to complete
   await new Promise((r) => setTimeout(r, 30));
   await bus.drain();
@@ -290,7 +289,7 @@ async function buildFixture(opts: {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe("Scenario: REDEEM full cycle (spec §8)", () => {
+describe("Scenario: external RedeemRequested full cycle", () => {
   const connections: Array<ReturnType<typeof bootstrapDatabase>> = [];
 
   afterEach(async () => {
@@ -300,115 +299,71 @@ describe("Scenario: REDEEM full cycle (spec §8)", () => {
     }
   });
 
-  it("S1 state: evaluateTokens → RedeemRequested → PositionSettled, position closed in DB", async () => {
-    const TOKEN_ID = createTokenId("tok-redeem-s1");
-    const CONDITION_ID = createConditionId("cond-redeem-s1");
-    const POSITION_ID = createPositionId("pos-redeem-s1");
-    const SIZE = 50;
-    const AVG_ENTRY = 0.02; // < 0.05 threshold
+  const externalRedeemCases = [
+    { stateLabel: "S1", tokenSuffix: "s1", buyCount: 1, size: 50, avgEntryPrice: 0.02 },
+    { stateLabel: "S2", tokenSuffix: "s2", buyCount: 2, size: 30, avgEntryPrice: 0.03 },
+  ];
 
-    const conn = bootstrapDatabase(":memory:");
-    connections.push(conn);
+  for (const testCase of externalRedeemCases) {
+    it(`external request settles a ${testCase.stateLabel}-positioned market`, async () => {
+      const tokenId = createTokenId(`tok-redeem-${testCase.tokenSuffix}`);
+      const conditionId = createConditionId(`cond-redeem-${testCase.tokenSuffix}`);
+      const positionId = createPositionId(`pos-redeem-${testCase.tokenSuffix}`);
 
-    const { redeemEvents, settledEvents, teardown } = await buildFixture({
-      db: conn,
-      tokenId: TOKEN_ID,
-      conditionId: CONDITION_ID,
-      positionId: POSITION_ID,
-      buyCount: 1, // S1
-      size: SIZE,
-      avgEntryPrice: AVG_ENTRY,
-      holdAgoSeconds: 1800, // 30 min — within 3600s limit
+      const conn = bootstrapDatabase(":memory:");
+      connections.push(conn);
+
+      const { redeemEvents, settledEvents, teardown } = await buildFixture({
+        db: conn,
+        tokenId,
+        conditionId,
+        positionId,
+        buyCount: testCase.buyCount,
+        size: testCase.size,
+        avgEntryPrice: testCase.avgEntryPrice,
+        holdAgoSeconds: 1800,
+      });
+
+      expect(redeemEvents.length).toBeGreaterThanOrEqual(1);
+      expect(redeemEvents[0]!.conditionIds).toContain(String(conditionId));
+
+      expect(settledEvents.length).toBeGreaterThanOrEqual(1);
+      const settled = settledEvents[0]!;
+      expect(settled.resolution).toBe("algo-redeem");
+      expect(settled.settlementPrice).toBe(0);
+      expect(settled.positionId).toBe(positionId);
+
+      const positionRepo = new SqlitePositionRepository(conn.db);
+      expect(positionRepo.findOpen()).toHaveLength(0);
+
+      const allPositions = positionRepo.findAll();
+      const position = allPositions.find((p) => String(p.positionId) === String(positionId));
+      const expectedPnl = -testCase.avgEntryPrice * testCase.size;
+      expect(position).toBeDefined();
+      expect(position!.status).toBe("closed");
+      expect(position!.size).toBe(0);
+      expect(position!.realizedPnl).toBeCloseTo(expectedPnl, 5);
+
+      const ledgerRow = conn.db
+        .prepare("SELECT * FROM settlement_ledger WHERE condition_id = ?")
+        .get(String(conditionId)) as
+        | { resolution: string; settlement_price: number; delta: number }
+        | undefined;
+      expect(ledgerRow).toBeDefined();
+      expect(ledgerRow!.resolution).toBe("algo-redeem");
+      expect(ledgerRow!.settlement_price).toBe(0);
+      expect(ledgerRow!.delta).toBeCloseTo(expectedPnl, 5);
+
+      const mrRow = conn.db
+        .prepare("SELECT source, resolution FROM market_resolutions WHERE condition_id = ?")
+        .get(String(conditionId)) as { source: string; resolution: string } | undefined;
+      expect(mrRow).toBeDefined();
+      expect(mrRow!.source).toBe("algo");
+      expect(mrRow!.resolution).toBe("algo-redeem");
+
+      await teardown();
     });
-
-    // ── Assert RedeemRequested was published ──────────────────────────────────
-    expect(redeemEvents.length).toBeGreaterThanOrEqual(1);
-    expect(redeemEvents[0]!.conditionIds).toContain(String(CONDITION_ID));
-
-    // ── Assert PositionSettled was published ──────────────────────────────────
-    expect(settledEvents.length).toBeGreaterThanOrEqual(1);
-    const settled = settledEvents[0]!;
-    expect(settled.resolution).toBe("algo-redeem");
-    expect(settled.settlementPrice).toBe(0);
-    expect(settled.positionId).toBe(POSITION_ID);
-
-    // ── Assert DB: position is closed ─────────────────────────────────────────
-    const positionRepo = new SqlitePositionRepository(conn.db);
-    expect(positionRepo.findOpen()).toHaveLength(0);
-
-    const allPositions = positionRepo.findAll();
-    const thePos = allPositions.find((p) => String(p.positionId) === String(POSITION_ID));
-    expect(thePos).toBeDefined();
-    expect(thePos!.status).toBe("closed");
-    expect(thePos!.size).toBe(0);
-    // PnL = (0 - 0.02) * 50 = -1
-    expect(thePos!.realizedPnl).toBeCloseTo(-1.0, 5);
-
-    // ── Assert settlement_ledger row exists ────────────────────────────────────
-    const ledgerRow = conn.db
-      .prepare("SELECT * FROM settlement_ledger WHERE condition_id = ?")
-      .get(String(CONDITION_ID)) as
-      | { resolution: string; settlement_price: number; delta: number }
-      | undefined;
-    expect(ledgerRow).toBeDefined();
-    expect(ledgerRow!.resolution).toBe("algo-redeem");
-    expect(ledgerRow!.settlement_price).toBe(0);
-    expect(ledgerRow!.delta).toBeCloseTo(-1.0, 5);
-
-    // ── Assert market_resolutions row was upserted by handleAlgoRedeem ───────
-    // FK regression: settlement_ledger.condition_id references this row. The
-    // test does not seed it manually — the module must write it.
-    const mrRow = conn.db
-      .prepare("SELECT source, resolution FROM market_resolutions WHERE condition_id = ?")
-      .get(String(CONDITION_ID)) as { source: string; resolution: string } | undefined;
-    expect(mrRow).toBeDefined();
-    expect(mrRow!.source).toBe("algo");
-    expect(mrRow!.resolution).toBe("algo-redeem");
-
-    await teardown();
-  });
-
-  it("S2 state: evaluateTokens → RedeemRequested → PositionSettled", async () => {
-    const TOKEN_ID = createTokenId("tok-redeem-s2");
-    const CONDITION_ID = createConditionId("cond-redeem-s2");
-    const POSITION_ID = createPositionId("pos-redeem-s2");
-    const SIZE = 30;
-    const AVG_ENTRY = 0.03;
-
-    const conn = bootstrapDatabase(":memory:");
-    connections.push(conn);
-
-    const { redeemEvents, settledEvents, teardown } = await buildFixture({
-      db: conn,
-      tokenId: TOKEN_ID,
-      conditionId: CONDITION_ID,
-      positionId: POSITION_ID,
-      buyCount: 2, // S2
-      size: SIZE,
-      avgEntryPrice: AVG_ENTRY,
-      holdAgoSeconds: 600, // 10 min
-    });
-
-    expect(redeemEvents.length).toBeGreaterThanOrEqual(1);
-    expect(redeemEvents[0]!.conditionIds).toContain(String(CONDITION_ID));
-
-    expect(settledEvents.length).toBeGreaterThanOrEqual(1);
-    expect(settledEvents[0]!.resolution).toBe("algo-redeem");
-    expect(settledEvents[0]!.settlementPrice).toBe(0);
-    expect(settledEvents[0]!.positionId).toBe(POSITION_ID);
-
-    const positionRepo = new SqlitePositionRepository(conn.db);
-    expect(positionRepo.findOpen()).toHaveLength(0);
-
-    const allPositions = positionRepo.findAll();
-    const pos = allPositions.find((p) => String(p.positionId) === String(POSITION_ID));
-    expect(pos!.status).toBe("closed");
-    expect(pos!.size).toBe(0);
-    // PnL = (0 - 0.03) * 30 = -0.9
-    expect(pos!.realizedPnl).toBeCloseTo(-0.9, 5);
-
-    await teardown();
-  });
+  }
 
   it("live-lite path: mocked gateway.redeemPositions is called before local settlement", async () => {
     const TOKEN_ID = createTokenId("tok-redeem-live");

@@ -39,8 +39,8 @@ describe("RefreshableSelectionRuleEngine", () => {
   it("resolves correctly when seeded with rules at construction", () => {
     repo.insert({
       profileId: "simulation",
-      ruleType: "include_prefix",
-      pattern: "bitcoin-",
+      ruleType: "include_slug",
+      pattern: "bitcoin-up",
       enabled: true,
       note: null,
     });
@@ -63,8 +63,8 @@ describe("RefreshableSelectionRuleEngine", () => {
     // Simulate an external mutation (e.g. operator API adds a rule)
     repo.insert({
       profileId: "simulation",
-      ruleType: "include_prefix",
-      pattern: "elon-musk-",
+      ruleType: "include_slug",
+      pattern: "elon-musk-up",
       enabled: true,
       note: null,
     });
@@ -81,8 +81,8 @@ describe("RefreshableSelectionRuleEngine", () => {
   it("does not reload on a second refreshIfStale call after already syncing", () => {
     repo.insert({
       profileId: "simulation",
-      ruleType: "include_prefix",
-      pattern: "bitcoin-",
+      ruleType: "include_slug",
+      pattern: "bitcoin-up",
       enabled: true,
       note: null,
     });

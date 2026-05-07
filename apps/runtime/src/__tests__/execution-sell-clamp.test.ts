@@ -216,9 +216,9 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     await mod.start();
     const rejected = collectRejections(bus);
 
-    // intent=6.31 (D5), available=2.0 → clamp to 2.0
+    // intent=5.73 (R37 D5), available=2.0 → clamp to 2.0
     await bus.publish("PlaceOrderRequested", {
-      command: makeSellCmd(6.31),
+      command: makeSellCmd(5.73),
       timestamp: Date.now(),
     });
     await bus.drain();
@@ -255,7 +255,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     const rejected = collectRejections(bus);
 
     await bus.publish("PlaceOrderRequested", {
-      command: makeSellCmd(6.31),
+      command: makeSellCmd(5.73),
       timestamp: Date.now(),
     });
     await bus.drain();
@@ -289,7 +289,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     const rejected = collectRejections(bus);
 
     await bus.publish("PlaceOrderRequested", {
-      command: makeSellCmd(6.31, {
+      command: makeSellCmd(5.73, {
         metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
       } as Partial<PlaceOrderCommand>),
       timestamp: Date.now(),
@@ -359,14 +359,14 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     const rejected = collectRejections(bus);
 
     await bus.publish("PlaceOrderRequested", {
-      command: makeSellCmd(6.31),
+      command: makeSellCmd(5.73),
       timestamp: Date.now(),
     });
     await bus.drain();
 
     expect(rejected).toHaveLength(0);
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(6.31);
+    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(5.73);
     expect(mod.getDiagnostics().sellSizeClamps).toBe(0);
 
     await mod.stop();

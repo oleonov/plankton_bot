@@ -1143,11 +1143,11 @@ describe("entry-price ceiling guard (ADR-013)", () => {
     return { bus, skipped, placed };
   }
 
-  it("rejects BUY when bestBid > 0.75 with price-above-entry-ceiling reason", async () => {
+  it("rejects BUY when bestBid > 0.45 with price-above-entry-ceiling reason", async () => {
     const { bus, skipped, placed } = makeBridge();
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
-      market: makeMarket({ bestBid: 0.76, bestAsk: 0.77, midPrice: 0.765 }),
+      market: makeMarket({ bestBid: 0.46, bestAsk: 0.47, midPrice: 0.465 }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -1158,11 +1158,11 @@ describe("entry-price ceiling guard (ADR-013)", () => {
     expect(skipped[0]!.reasons).toContain("price-above-entry-ceiling");
   });
 
-  it("allows BUY at exactly 0.75 (inclusive)", async () => {
+  it("allows BUY at exactly 0.45 (inclusive)", async () => {
     const { bus, skipped, placed } = makeBridge();
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
-      market: makeMarket({ bestBid: 0.75, bestAsk: 0.76, midPrice: 0.755 }),
+      market: makeMarket({ bestBid: 0.45, bestAsk: 0.46, midPrice: 0.455 }),
       approvedAt: Date.now(),
     });
     await bus.drain();
@@ -1171,7 +1171,7 @@ describe("entry-price ceiling guard (ADR-013)", () => {
     expect(placed).toHaveLength(1);
   });
 
-  it("does not guard SELL signals (sell price can legitimately be > 0.75)", async () => {
+  it("does not guard SELL signals (sell price can legitimately be > 0.45)", async () => {
     const { bus, skipped, placed } = makeBridge();
     const sellSignal: Signal = { ...makeSignal(), side: "sell", reason: "repricing-exit" };
     await bus.publish("SignalApproved", {
@@ -1442,7 +1442,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
   it("edge mode (default) posts BUY at bestBid — ADR-006 D1 preserved", async () => {
     const { bus, placed } = makeBridgeWithPricing(); // no options → default edge
-    const market = makeMarket({ bestBid: 0.5, bestAsk: 0.51, tickSize: 0.001 });
+    const market = makeMarket({ bestBid: 0.4, bestAsk: 0.41, tickSize: 0.001 });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
       market,
@@ -1451,13 +1451,13 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.5);
+    expect(placed[0]!.command.price).toBe(0.4);
   });
 
   it("bounded-midpoint on tight spread improves price inside the book", async () => {
     const { bus, placed } = makeBridgeWithPricing({ mode: "bounded-midpoint" });
-    // bb=0.5, ba=0.51, tickSize=0.001, spread=10 ticks — within default 20-cap
-    const market = makeMarket({ bestBid: 0.5, bestAsk: 0.51, tickSize: 0.001 });
+    // bb=0.4, ba=0.41, tickSize=0.001, spread=10 ticks — within default 20-cap
+    const market = makeMarket({ bestBid: 0.4, bestAsk: 0.41, tickSize: 0.001 });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
       market,
@@ -1466,8 +1466,8 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBeGreaterThan(0.5);
-    expect(placed[0]!.command.price).toBeLessThan(0.51);
+    expect(placed[0]!.command.price).toBeGreaterThan(0.4);
+    expect(placed[0]!.command.price).toBeLessThan(0.41);
   });
 
   it("bounded-midpoint on wide spread falls back to edge when policy=edge", async () => {
@@ -1516,7 +1516,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   it("final price still passes ENTRY_PRICE_CEILING (ADR-013) after bounded-midpoint", async () => {
     const { bus, skipped, placed } = makeBridgeWithPricing({ mode: "bounded-midpoint" });
     // BUY on bb=0.80, ba=0.82 → mid=0.81, raw=0.80, floor=0.80, improved=0.80
-    // 0.80 > ENTRY_PRICE_CEILING (0.75) → bridge rejects with price-above-entry-ceiling.
+    // 0.80 > ENTRY_PRICE_CEILING (0.45) → bridge rejects with price-above-entry-ceiling.
     const market = makeMarket({ bestBid: 0.8, bestAsk: 0.82, tickSize: 0.01 });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
@@ -1557,7 +1557,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       policy: () => policy,
     });
     bridge.subscribe();
-    const market = makeMarket({ bestBid: 0.5, bestAsk: 0.51, tickSize: 0.001 });
+    const market = makeMarket({ bestBid: 0.4, bestAsk: 0.41, tickSize: 0.001 });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
       market,
@@ -1572,8 +1572,8 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(converted![0]).toMatchObject({
       pricingMode: "bounded-midpoint",
       pricingDiagnostics: expect.objectContaining({
-        edgePrice: 0.5,
-        midpoint: 0.505,
+        edgePrice: 0.4,
+        midpoint: 0.405,
         finalPrice: expect.any(Number),
         side: "buy",
       }),
@@ -1602,7 +1602,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       mode: "bounded-midpoint",
       oneSidedPolicy: "edge",
     });
-    const market = makeMarket({ bestBid: 0.5, bestAsk: null, tickSize: 0.001 });
+    const market = makeMarket({ bestBid: 0.4, bestAsk: null, tickSize: 0.001 });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
       market,
@@ -1611,7 +1611,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.5);
+    expect(placed[0]!.command.price).toBe(0.4);
   });
 
   it("one-sided book with policy=skip publishes one-sided-book reason", async () => {
@@ -1635,7 +1635,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   it("edge mode vs bounded-midpoint mode resolve different prices on the same book (parity verification)", async () => {
     const edgeRun = makeBridgeWithPricing(); // default = edge
     const boundedRun = makeBridgeWithPricing({ mode: "bounded-midpoint" });
-    const market = makeMarket({ bestBid: 0.5, bestAsk: 0.52, tickSize: 0.001 });
+    const market = makeMarket({ bestBid: 0.4, bestAsk: 0.42, tickSize: 0.001 });
 
     await edgeRun.bus.publish("SignalApproved", {
       signal: makeSignal(),
@@ -1653,8 +1653,8 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(edgeRun.placed).toHaveLength(1);
     expect(boundedRun.placed).toHaveLength(1);
-    expect(edgeRun.placed[0]!.command.price).toBe(0.5); // bestBid
-    expect(boundedRun.placed[0]!.command.price).toBeGreaterThan(0.5);
+    expect(edgeRun.placed[0]!.command.price).toBe(0.4); // bestBid
+    expect(boundedRun.placed[0]!.command.price).toBeGreaterThan(0.4);
   });
 
   it("edge mode attaches pricingShadow to placement log (ADR-014 canary)", async () => {
@@ -1679,7 +1679,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       // default pricing mode = edge
     });
     bridge.subscribe();
-    const market = makeMarket({ bestBid: 0.5, bestAsk: 0.51, tickSize: 0.001 });
+    const market = makeMarket({ bestBid: 0.4, bestAsk: 0.41, tickSize: 0.001 });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
       market,
@@ -1694,16 +1694,16 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     // edge mode → command price = bestBid, and pricingShadow carries the bounded candidate
     expect(converted![0]).toMatchObject({
       pricingMode: "edge",
-      price: 0.5,
+      price: 0.4,
       pricingShadow: expect.objectContaining({
-        edgePrice: 0.5,
-        midpoint: 0.505,
+        edgePrice: 0.4,
+        midpoint: 0.405,
         finalPrice: expect.any(Number),
         side: "buy",
       }),
     });
     // Shadow bounded price improves strictly above bestBid for a 1-tick spread.
-    expect(converted![0].pricingShadow.finalPrice).toBeGreaterThan(0.5);
+    expect(converted![0].pricingShadow.finalPrice).toBeGreaterThan(0.4);
   });
 });
 
@@ -1985,9 +1985,9 @@ describe("ADR-015 execution policy observations", () => {
     bridge.subscribe();
 
     const signal = makeSignal();
-    // Probe-entry ladder slot at ~$8.38 → bucket "$5-$10" (per §4.6).
+    // R37 B1 ladder slot at ~$8.41 → bucket "$5-$10" (per §4.6).
     signal.sizingRuleId = "B1";
-    signal.suggestedSizeUsdc = 8.38;
+    signal.suggestedSizeUsdc = 8.41;
     await bus.publish("SignalApproved", {
       signal,
       market: makeMarket({ bestBid: 0.4, bestAsk: 0.42 }),
@@ -2017,7 +2017,7 @@ describe("ADR-015 execution policy observations", () => {
 
     const signal = makeSignal();
     signal.sizingRuleId = "FALLBACK";
-    signal.suggestedSizeUsdc = 0.44;
+    signal.suggestedSizeUsdc = 2.73;
     // bestBid=0 trips the unavailable branch → skip row written.
     await bus.publish("SignalApproved", {
       signal,
@@ -2029,7 +2029,7 @@ describe("ADR-015 execution policy observations", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]!.skippedReason).toBe("execution-price-unavailable");
     expect(rows[0]!.sizingRuleId).toBe("FALLBACK");
-    expect(rows[0]!.notionalBucket).toBe("$0.10-$0.50");
+    expect(rows[0]!.notionalBucket).toBe("$2-$5");
   });
 
   it("writes a skip observation with skippedReason when dead-side enforce blocks BUY", async () => {

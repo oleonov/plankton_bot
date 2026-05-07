@@ -1127,8 +1127,8 @@ describe("LiveMarketDataGateway", () => {
       expect(result.get("tok-a")!.bestBid).toBe(0.44);
       expect(result.get("tok-a")!.bestAsk).toBe(0.46);
       expect(result.get("tok-a")!.bookSource).toBe("gamma");
-      expect(result.get("tok-b")!.bestBid).toBe(0.55);
-      expect(result.get("tok-b")!.bestAsk).toBe(0.55);
+      expect(result.get("tok-b")!.bestBid).toBeNull();
+      expect(result.get("tok-b")!.bestAsk).toBeNull();
       expect(result.get("tok-b")!.bookSource).toBe("gamma-fallback");
       expect(result.get("tok-a")!.minOrderSize).toBeNull();
       expect(result.get("tok-b")!.minOrderSize).toBeNull();

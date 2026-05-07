@@ -61,7 +61,7 @@ const UNFILLED_CANCEL_COOLDOWN_MS = 10 * 60_000;
 // ADR-013 defaults exposed for callers that don't thread the policy provider
 // (tests, scenario runner). Runtime always reads the live policy via
 // `deps.policy()` and never the constant.
-export const ENTRY_PRICE_CEILING = 0.75;
+export const ENTRY_PRICE_CEILING = 0.45;
 export const DEAD_SIDE_NEAR_END_ASK_CEILING = 0.02;
 export const DEAD_SIDE_NEAR_END_MS = 120_000;
 

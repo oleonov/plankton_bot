@@ -19,6 +19,7 @@ import type {
   Market,
   PositionRepository,
   OrderRepository,
+  MarketSelectionPolicy,
 } from "@plankton/domain";
 import { evaluatePreEntry, createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -60,6 +61,7 @@ export interface MarketScannerModuleDeps {
   log: Logger;
   scanIntervalMs: number;
   selectionRuleEngine: RefreshableSelectionRuleEngine;
+  marketSelectionPolicy?: () => MarketSelectionPolicy;
   /** When provided, tokens with open positions are preserved from deactivation. */
   positionRepo?: PositionRepository;
   /** When provided, tokens with open orders are preserved from deactivation. */
@@ -101,16 +103,9 @@ export interface MarketScanResult {
 }
 
 /**
- * Step 2 funnel breakdown — cumulative counters surfaced for healthcheck and
- * dashboards. Spec mapping (ADR-019 §D4):
- *   STEP 1 INCLUDE  = marketsStep1MatchedInclude  (slug-rule include hit)
- *   STEP 1 EXCLUDE  = marketsStep1MatchedExclude  (slug-rule exclude hit)
- *   STEP 2 INCLUDE  = marketsStep2FallbackInclude (no rule, eventMarketCount === 1)
- *   FINAL EXCLUDE   = marketsFinalExclude         (no rule, eventMarketCount > 1)
- *
- * Per-event counters drive ADR-003 baseline drift detection
- * (`eventsSingleMarketTotal / scannedEventsTotal` ≈ 39.17 % when baseline holds).
- * Per-market counters are operational telemetry only.
+ * v5.11 admission breakdown — cumulative counters surfaced for healthcheck and
+ * dashboards. The legacy `marketsStep2FallbackInclude` field is retained for
+ * API compatibility and should stay zero under hard-filter admission.
  */
 export interface Step2BreakdownSnapshot {
   scannedMarketsTotal: number;
@@ -147,7 +142,7 @@ export class MarketScannerModule implements RuntimeModule {
    */
   private lastScanResult: MarketScanResult | null = null;
   /**
-   * Step 2 funnel breakdown — cumulative counters across all scan cycles
+   * v5.11 admission breakdown — cumulative counters across all scan cycles
    * (mutated incrementally to keep memory flat). See Step2BreakdownSnapshot.
    */
   private readonly step2Breakdown: Step2BreakdownSnapshot = {
@@ -256,7 +251,7 @@ export class MarketScannerModule implements RuntimeModule {
   }
 
   /**
-   * Step 2 funnel breakdown — read-only snapshot of cumulative counters.
+   * v5.11 admission breakdown — read-only snapshot of cumulative counters.
    * Returns a defensive copy so callers cannot mutate internal state.
    */
   getStep2BreakdownSnapshot(): Step2BreakdownSnapshot {
@@ -319,7 +314,7 @@ export class MarketScannerModule implements RuntimeModule {
         }
       }
 
-      // Accumulate Step 2 funnel counters into a local delta so a partial /
+      // Accumulate admission counters into a local delta so a partial /
       // failed scan does not leak skewed counts into `this.step2Breakdown`
       // (Gamma pagination is order-biased — early pages alone are not
       // representative). Merged into the cumulative snapshot only after the
@@ -342,16 +337,29 @@ export class MarketScannerModule implements RuntimeModule {
         pendingStep2Delta.eventsMultiMarketTotal += eventStats.multiMarket;
         const pageBatch: Market[] = [];
         for (const clobMarket of pageMarkets) {
-          const evalResult = evaluatePreEntry(engine, {
-            eventSlug: clobMarket.eventSlug ?? null,
-            slug: clobMarket.slug,
-            eventMarketCount: clobMarket.eventMarketCount,
-          });
+          const marketSelectionPolicy = this.deps.marketSelectionPolicy?.();
+          const tokenEvalResults = clobMarket.tokens.map((token) =>
+            evaluatePreEntry(
+              engine,
+              {
+                eventSlug: clobMarket.eventSlug ?? null,
+                slug: clobMarket.slug,
+                eventMarketCount: clobMarket.eventMarketCount,
+                question: clobMarket.question,
+                midPrice: token.midPrice ?? null,
+                liquidity: clobMarket.liquidity ?? null,
+              },
+              marketSelectionPolicy,
+            ),
+          );
+          const marketEvalResult =
+            tokenEvalResults.find((r) => r.finalStatus === "INCLUDE") ?? tokenEvalResults[0];
 
-          // Step 2 funnel breakdown — increment per-market counter by status.
-          // Spec mapping in Step2BreakdownSnapshot doc-comment.
+          if (marketEvalResult == null) continue;
+
+          // v5.11 admission breakdown — increment per-market counter by status.
           pendingStep2Delta.scannedMarketsTotal++;
-          switch (evalResult.selectionStatus) {
+          switch (marketEvalResult.selectionStatus) {
             case "matched_include":
               pendingStep2Delta.marketsStep1MatchedInclude++;
               break;
@@ -366,13 +374,13 @@ export class MarketScannerModule implements RuntimeModule {
               break;
           }
 
-          // tradable = INCLUDE decision (CLOB entry eligibility)
-          const tradable = evalResult.finalStatus === "INCLUDE";
-          if (tradable) includedMarkets++;
+          const marketHasAnyIncludedLeg = marketEvalResult.finalStatus === "INCLUDE";
+          if (marketHasAnyIncludedLeg) includedMarkets++;
 
           const hasActiveLeg = clobMarket.tokens.some((t) => activeTokenIds.has(t.tokenId));
 
-          for (const token of clobMarket.tokens) {
+          for (const [index, token] of clobMarket.tokens.entries()) {
+            const tokenEval = tokenEvalResults[index]!;
             const tokenId = createTokenId(token.tokenId);
             const tokenIdStr = String(tokenId);
             discoveredTokenIds.add(tokenIdStr);
@@ -397,14 +405,15 @@ export class MarketScannerModule implements RuntimeModule {
               horizon: null,
               endDate: clobMarket.endDate || null,
               active: clobMarket.active || hasActiveLeg,
-              // preserved-for-lifecycle markets become tradable=false so MarketSelectionCache
-              // stops signalling new BUYs; selection engine determines tradability otherwise.
-              tradable: clobMarket.active && tradable,
+              // Preserved or v5.11-filtered markets persist with tradable=false
+              // so MarketSelectionCache stops signalling new BUYs while exits
+              // for existing inventory can still observe lifecycle/pricing.
+              tradable: clobMarket.active && tokenEval.finalStatus === "INCLUDE",
               tickSize: clobMarket.tickSize,
               negRisk: clobMarket.negRisk,
               eventMarketCount: clobMarket.eventMarketCount,
-              selectionStatus: evalResult.selectionStatus,
-              selectionWinningRuleId: evalResult.winningRuleId,
+              selectionStatus: tokenEval.selectionStatus,
+              selectionWinningRuleId: tokenEval.winningRuleId,
               gammaCreatedAt: clobMarket.gammaCreatedAt,
               createdAt: now,
               updatedAt: now,
@@ -435,7 +444,7 @@ export class MarketScannerModule implements RuntimeModule {
         if (!discoveredTokenIds.has(tokenId)) preservedDisappearedTokens++;
       }
 
-      // Scan succeeded end-to-end — merge pending Step 2 delta into the
+      // Scan succeeded end-to-end — merge pending admission delta into the
       // cumulative snapshot. Failed/degraded scans drop the delta by virtue
       // of falling through to the catch / finally without reaching this line.
       this.step2Breakdown.scannedMarketsTotal += pendingStep2Delta.scannedMarketsTotal;

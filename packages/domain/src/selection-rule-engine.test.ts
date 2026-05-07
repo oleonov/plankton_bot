@@ -23,7 +23,7 @@ describe("SelectionRuleEngine", () => {
     expect(d.winningRuleId).toBeNull();
   });
 
-  it("exact include_slug wins over prefix include", () => {
+  it("exact include_slug still matches when prefix rules are present", () => {
     const engine = new SelectionRuleEngine([
       rule({ ruleId: "r1", ruleType: "include_prefix", pattern: "bitcoin-" }),
       rule({ ruleId: "r2", ruleType: "include_slug", pattern: "bitcoin-up" }),
@@ -43,24 +43,24 @@ describe("SelectionRuleEngine", () => {
     expect(d.winningRuleId).toBe("r2");
   });
 
-  it("longest prefix wins within include_prefix", () => {
+  it("ignores include_prefix rules", () => {
     const engine = new SelectionRuleEngine([
       rule({ ruleId: "r1", ruleType: "include_prefix", pattern: "bitcoin-" }),
       rule({ ruleId: "r2", ruleType: "include_prefix", pattern: "bitcoin-price-" }),
     ]);
     const d = engine.resolve("bitcoin-price-on-2025", "bitcoin-up");
-    expect(d.status).toBe("include");
-    expect(d.winningRuleId).toBe("r2");
+    expect(d.status).toBe("no_match");
+    expect(d.winningRuleId).toBeNull();
   });
 
-  it("exclude_prefix beats include_prefix at longest-match tier", () => {
+  it("ignores exclude_prefix rules", () => {
     const engine = new SelectionRuleEngine([
       rule({ ruleId: "r1", ruleType: "include_prefix", pattern: "bitcoin-price-" }),
       rule({ ruleId: "r2", ruleType: "exclude_prefix", pattern: "bitcoin-price-" }),
     ]);
     const d = engine.resolve("bitcoin-price-on-2025", "bitcoin-up");
-    expect(d.status).toBe("exclude");
-    expect(d.winningRuleId).toBe("r2");
+    expect(d.status).toBe("no_match");
+    expect(d.winningRuleId).toBeNull();
   });
 
   it("ignores disabled rules", () => {

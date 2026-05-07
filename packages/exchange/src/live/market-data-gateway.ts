@@ -353,7 +353,6 @@ export class LiveMarketDataGateway implements MarketDataGateway {
   ): void {
     for (const raw of data) {
       const clobTokenIds = parseStringOrArray(raw.clobTokenIds);
-      const outcomePrices = parseStringOrArray(raw.outcomePrices);
       const lastTradePrice = parseOptionalNumber(raw.lastTradePrice);
       const lastTradeAt =
         parseOptionalIsoTimestamp(raw.lastTradeAt) ??
@@ -384,23 +383,12 @@ export class LiveMarketDataGateway implements MarketDataGateway {
 
       for (let i = 0; i < clobTokenIds.length; i++) {
         const tokenId = clobTokenIds[i]!;
-        const outcomePrice =
-          i < outcomePrices.length ? parseOptionalNumber(outcomePrices[i]) : null;
 
-        // First token gets Gamma's real bestBid/bestAsk. Subsequent tokens
-        // fall back to outcomePrices (Gamma only exposes top-of-book for the primary outcome).
-        const bestBid =
-          i === 0 && marketBestBid !== null
-            ? marketBestBid
-            : outcomePrice !== null
-              ? outcomePrice
-              : null;
-        const bestAsk =
-          i === 0 && marketBestAsk !== null
-            ? marketBestAsk
-            : outcomePrice !== null
-              ? outcomePrice
-              : null;
+        // Gamma's market-level bestBid/bestAsk represent the primary outcome.
+        // Secondary outcomePrices are mid/probability hints, not executable
+        // book edges, so leave bid/ask null until CLOB book data supplies them.
+        const bestBid = i === 0 ? marketBestBid : null;
+        const bestAsk = i === 0 ? marketBestAsk : null;
 
         result.set(tokenId, {
           bestBid,

@@ -124,17 +124,17 @@ describe("dual-connection infrastructure", () => {
       `INSERT INTO algo_size_rules (action_type, priority, rule_id, state_condition, price_operator, price_value, nth_buy, buy_count_min, buy_count_max, size_usdc)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-    insert.run("BUY", 10, "B5", "ANY", null, null, 1, null, null, 2.1);
-    insert.run("BUY", 20, "B6", "ANY", null, null, 2, null, null, 1.17);
-    insert.run("BUY", 30, "B7", "ANY", null, null, 3, null, null, 0.92);
-    insert.run("BUY", 40, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38);
-    insert.run("BUY", 50, "B2", "S1", ">=", 0.2, null, null, null, 4.17);
-    insert.run("BUY", 60, "B3", "S3", "<", 0.05, null, null, null, 0.76);
-    insert.run("BUY", 70, "B4", "S2", "<", 0.05, null, null, null, 0.12);
+    insert.run("BUY", 10, "B5", "ANY", null, null, 1, null, null, 0.99);
+    insert.run("BUY", 20, "B6", "ANY", null, null, 2, null, null, 1.04);
+    insert.run("BUY", 30, "B7", "ANY", null, null, 3, null, null, 3.85);
+    insert.run("BUY", 40, "B1", "OTHER", ">=", 0.2, null, null, null, 8.41);
+    insert.run("BUY", 50, "B2", "S1", ">=", 0.2, null, null, null, 4.29);
+    insert.run("BUY", 60, "B3", "S3", "<", 0.05, null, null, null, 0.88);
+    insert.run("BUY", 70, "B4", "S2", "<", 0.05, null, null, null, 0.14);
     // ADR-024 §D-B — legacy DBs always carry a BUY FALLBACK row; reinsert
     // so the new bootstrap invariant assertion does not crash before the
     // re-priority backfill runs.
-    insert.run("BUY", 80, "FALLBACK", "ANY", null, null, null, null, null, 0.44);
+    insert.run("BUY", 80, "FALLBACK", "ANY", null, null, null, null, null, 2.73);
     conn1.close();
 
     // Re-bootstrap should detect the legacy ordering and re-priority in place.

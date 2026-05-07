@@ -47,6 +47,8 @@ function ExecutionPolicyFormInner({
   const [entryMinMarketAge, setEntryMinMarketAge] = useState(
     policy.entryMinMarketAgeSeconds.toString(),
   );
+  const [maxMidPrice, setMaxMidPrice] = useState(policy.marketSelection.maxMidPrice.toString());
+  const [minLiquidity, setMinLiquidity] = useState(policy.marketSelection.minLiquidity.toString());
 
   const [dsgMode, setDsgMode] = useState<DeadSideGuardMode>(policy.deadSideGuard.mode);
   const [dsgAskCeiling, setDsgAskCeiling] = useState(policy.deadSideGuard.askCeiling.toString());
@@ -74,6 +76,10 @@ function ExecutionPolicyFormInner({
       entryPriceCeiling: numOr(entryPriceCeiling, policy.entryPriceCeiling),
       exitOrderTtlMs: numOr(exitOrderTtlMs, policy.exitOrderTtlMs),
       entryMinMarketAgeSeconds: numOr(entryMinMarketAge, policy.entryMinMarketAgeSeconds),
+      marketSelection: {
+        maxMidPrice: numOr(maxMidPrice, policy.marketSelection.maxMidPrice),
+        minLiquidity: numOr(minLiquidity, policy.marketSelection.minLiquidity),
+      },
       deadSideGuard: {
         mode: dsgMode,
         askCeiling: numOr(dsgAskCeiling, policy.deadSideGuard.askCeiling),
@@ -160,6 +166,24 @@ function ExecutionPolicyFormInner({
           <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 2 }}>
             Spec §1.7 R1 floor: 2 504 s. <code>0</code> disables the gate (sim only).
           </div>
+        </div>
+        <div className="form-field">
+          <label>Admission Max Mid Price (0.001 – 0.99)</label>
+          <input
+            type="number"
+            step="0.001"
+            value={maxMidPrice}
+            onChange={(e) => setMaxMidPrice(e.target.value)}
+          />
+        </div>
+        <div className="form-field">
+          <label>Admission Min Liquidity (0 – 1 000 000)</label>
+          <input
+            type="number"
+            step="1"
+            value={minLiquidity}
+            onChange={(e) => setMinLiquidity(e.target.value)}
+          />
         </div>
 
         <div

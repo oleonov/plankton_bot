@@ -24,6 +24,9 @@ export interface ClobMarket {
     /** "Yes" | "No" as returned by the Polymarket API. */
     readonly outcome: string;
     readonly outcomeIndex?: number;
+    readonly bestBid?: number | null;
+    readonly bestAsk?: number | null;
+    readonly midPrice?: number | null;
   }>;
   readonly question: string;
   readonly slug: string;
@@ -36,7 +39,8 @@ export interface ClobMarket {
   readonly tickSize: number;
   /** 24-hour trading volume in USD. Null when unavailable. */
   readonly volume24h: number | null;
-  /** Number of markets in the parent Gamma event. Used for STEP 2 fallback: no_match && eventMarketCount === 1 ⇒ INCLUDE. */
+  readonly liquidity?: number | null;
+  /** Number of markets in the parent Gamma event; retained for telemetry/ranking. */
   readonly eventMarketCount: number;
   /**
    * Gamma `createdAt` (ISO-8601) — moment the market was created in Polymarket Gamma.

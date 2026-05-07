@@ -56,8 +56,8 @@ export interface Market {
    * CLOB is actively quoting and accepting orders for new entries.
    * Distinct from `active`: a market preserved-for-lifecycle (closed on CLOB
    * but with an open leg) keeps `active: true` so pricing continues flowing
-   * for SELL/REDEEM, while `tradable: false` suppresses new BUY eligibility
-   * in MarketSelectionCache.
+   * for SELL/real-resolution settlement, while `tradable: false` suppresses
+   * new BUY eligibility in MarketSelectionCache.
    */
   tradable: boolean;
   tickSize: number;
@@ -65,9 +65,9 @@ export interface Market {
   /**
    * Number of markets in the parent Gamma event — persisted by scanner.
    * Required: callers must always carry the authoritative value from
-   * Gamma `eventContext.marketCount`. Silent `?? 1` fallbacks are
-   * forbidden (see ADR-019 §D2 — they auto-INCLUDE multi-outcome markets
-   * via STEP 2 fallback).
+   * Gamma `eventContext.marketCount`. Retained for telemetry and future
+   * ranking features; v5.11 hard admission no longer uses single-market
+   * fallback.
    */
   eventMarketCount: number;
   /** Result of evaluatePreEntry for this market — persisted by scanner. */
@@ -434,7 +434,7 @@ export interface NormalizedMarket {
   conditionId: string;
   slug: string;
   eventSlug: string | null;
-  /** Number of markets in the parent Gamma event. Used for STEP 2 fallback: no_match && eventMarketCount === 1 ⇒ INCLUDE. */
+  /** Number of markets in the parent Gamma event; retained for telemetry/ranking. */
   eventMarketCount: number;
   question: string;
   outcome: string;
@@ -474,9 +474,9 @@ export interface NormalizedMarket {
   gammaCreatedAt: string | null;
   /**
    * Step 3 (audit doc §D4 / §P3 step 0) — propagated verbatim from
-   * `Market.selectionStatus` so the soft-ranking-score module can filter
-   * on Step2 inclusion without round-tripping to the DB. Null only on
-   * paths that build a NormalizedMarket without a backing Market row.
+   * `Market.selectionStatus` so downstream modules can filter on v5.11
+   * admission without round-tripping to the DB. Null only on paths that
+   * build a NormalizedMarket without a backing Market row.
    */
   selectionStatus?: SelectionStatus | null;
   snapshotTs: number; // unix ms when pricing was captured
@@ -574,6 +574,13 @@ export interface ExecutionPolicyTelemetry {
   pricingShadow: boolean;
 }
 
+export interface MarketSelectionPolicy {
+  /** v5.11 hard admission: BUY candidates must have mid price below this ceiling. */
+  maxMidPrice: number;
+  /** v5.11 hard admission: BUY candidates must have normalized liquidity at/above this floor. */
+  minLiquidity: number;
+}
+
 export interface ExecutionPolicy {
   version: number;
   entryPriceCeiling: number;
@@ -586,6 +593,7 @@ export interface ExecutionPolicy {
    */
   entryMinMarketAgeSeconds: number;
   exitOrderTtlMs: number;
+  marketSelection: MarketSelectionPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   telemetry: ExecutionPolicyTelemetry;
@@ -882,6 +890,7 @@ export type SelectionStatus =
   | "unknown"
   | "matched_include"
   | "matched_exclude"
+  /** Legacy status kept for dashboards/migrations; v5.11 admission no longer emits it. */
   | "step2_fallback_include"
   | "fallback_exclude";
 

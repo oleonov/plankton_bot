@@ -48,7 +48,7 @@ const SEEDED_ENGINE = makeEngine([
   makeRule({ ruleId: "r-eth", ruleType: "include_prefix", pattern: "ethereum-" }),
 ]);
 
-/** Engine with no rules — STEP 2: single-market events INCLUDE, multi-market EXCLUDE. */
+/** Engine with no rules; v5.11 hard filters now own admission. */
 const EMPTY_ENGINE = makeEngine([]);
 
 function nearEndDate(): string {
@@ -56,12 +56,20 @@ function nearEndDate(): string {
 }
 
 function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
-  return {
-    conditionId: "cond-1",
-    tokens: [
+  const tokens = (
+    overrides?.tokens ?? [
       { tokenId: "tok-yes", outcome: "Yes", outcomeIndex: 0 },
       { tokenId: "tok-no", outcome: "No", outcomeIndex: 1 },
-    ],
+    ]
+  ).map((token) => ({
+    bestBid: 0.31,
+    bestAsk: 0.33,
+    midPrice: 0.32,
+    ...token,
+  }));
+
+  return {
+    conditionId: "cond-1",
     question: "Will BTC hit 100k?",
     slug: "bitcoin-above-100k",
     eventSlug: "bitcoin-above-100k",
@@ -70,9 +78,11 @@ function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
     negRisk: false,
     tickSize: 0.01,
     volume24h: null,
+    liquidity: 250,
     eventMarketCount: 1,
     gammaCreatedAt: null,
     ...overrides,
+    tokens,
   };
 }
 
@@ -234,7 +244,7 @@ function buildModule(
 describe("MarketScannerModule", () => {
   // ── Engine integration ────────────────────────────────────────────────────
 
-  it("persists market with matched_include when prefix rule matches", async () => {
+  it("persists market with matched_include when v5.11 hard filters pass", async () => {
     const { mod, discoveryGateway, marketRepo } = buildModule();
     const btcMarket = makeClobMarket({
       slug: "bitcoin-above-100k",
@@ -250,16 +260,17 @@ describe("MarketScannerModule", () => {
     const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
     expect(saved.tokenId).toBe("tok-btc-yes");
     expect(saved.selectionStatus).toBe("matched_include");
-    expect(saved.selectionWinningRuleId).toBe("r-btc");
+    expect(saved.selectionWinningRuleId).toBeNull();
     expect(saved.tradable).toBe(true);
   });
 
-  it("persists market with fallback_exclude when no rule matches and multi-market event", async () => {
+  it("persists market with fallback_exclude when v5.11 hard filters fail", async () => {
     const { mod, discoveryGateway, marketRepo } = buildModule();
     const unrelated = makeClobMarket({
       slug: "will-it-rain-tomorrow",
       eventSlug: "will-it-rain-tomorrow",
       tokens: [{ tokenId: "tok-rain-yes", outcome: "Yes" }],
+      liquidity: 50,
       eventMarketCount: 5,
     });
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([unrelated]);
@@ -273,7 +284,7 @@ describe("MarketScannerModule", () => {
     expect(saved.tradable).toBe(false);
   });
 
-  it("persists market with step2_fallback_include for single-market event with no rule", async () => {
+  it("persists single-market event with matched_include when hard filters pass", async () => {
     const { mod, discoveryGateway, marketRepo } = buildModule({
       selectionRuleEngine: EMPTY_ENGINE,
     });
@@ -291,7 +302,8 @@ describe("MarketScannerModule", () => {
 
     expect(marketRepo.save).toHaveBeenCalledTimes(1);
     const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
-    expect(saved.selectionStatus).toBe("step2_fallback_include");
+    expect(saved.selectionStatus).toBe("matched_include");
+    expect(saved.selectionWinningRuleId).toBeNull();
     expect(saved.tradable).toBe(true);
   });
 
@@ -1063,7 +1075,7 @@ describe("MarketScannerModule", () => {
   // observable without re-grouping flattened markets.
 
   describe("Step 2 funnel breakdown", () => {
-    it("counts a STEP 1 INCLUDE (slug-rule prefix match)", async () => {
+    it("counts a hard-filter INCLUDE", async () => {
       const { mod, discoveryGateway } = buildModule();
       (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
         makeClobMarket({
@@ -1106,7 +1118,7 @@ describe("MarketScannerModule", () => {
       expect(snap.marketsStep1MatchedExclude).toBe(1);
     });
 
-    it("counts a STEP 2 INCLUDE (no rule, single-market event)", async () => {
+    it("does not count STEP 2 fallback for single-market hard-filter INCLUDE", async () => {
       const { mod, discoveryGateway } = buildModule({ selectionRuleEngine: EMPTY_ENGINE });
       (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
         makeClobMarket({
@@ -1120,17 +1132,19 @@ describe("MarketScannerModule", () => {
       await mod.scan();
 
       const snap = mod.getStep2BreakdownSnapshot();
-      expect(snap.marketsStep2FallbackInclude).toBe(1);
+      expect(snap.marketsStep1MatchedInclude).toBe(1);
+      expect(snap.marketsStep2FallbackInclude).toBe(0);
       expect(snap.marketsFinalExclude).toBe(0);
     });
 
-    it("counts a FINAL EXCLUDE (no rule, multi-market event)", async () => {
+    it("counts a FINAL EXCLUDE when hard filters fail", async () => {
       const { mod, discoveryGateway } = buildModule({ selectionRuleEngine: EMPTY_ENGINE });
       (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
         makeClobMarket({
           slug: "best-pic-2026-oppenheimer",
           eventSlug: "best-picture-2026",
           tokens: [{ tokenId: "tok-multi", outcome: "Yes" }],
+          liquidity: 50,
           eventMarketCount: 8,
         }),
       ]);

@@ -61,7 +61,7 @@ describe("SelectionRules page", () => {
   });
 
   describe("create form", () => {
-    it("submits a new include_prefix rule and clears the form", async () => {
+    it("submits a new include_slug rule and clears the form", async () => {
       const user = userEvent.setup();
       const createdRules: unknown[] = [];
 
@@ -73,8 +73,8 @@ describe("SelectionRules page", () => {
             rule: {
               ruleId: "rule-new",
               profileId: "simulation",
-              ruleType: "include_prefix",
-              pattern: "crypto-",
+              ruleType: "include_slug",
+              pattern: "crypto-market",
               enabled: true,
               note: "Test rule",
               createdAt: new Date().toISOString(),
@@ -87,8 +87,8 @@ describe("SelectionRules page", () => {
       setup();
       await screen.findByTestId("create-form");
 
-      await user.selectOptions(screen.getByTestId("rule-type-select"), "include_prefix");
-      await user.type(screen.getByTestId("pattern-input"), "crypto-");
+      await user.selectOptions(screen.getByTestId("rule-type-select"), "include_slug");
+      await user.type(screen.getByTestId("pattern-input"), "crypto-market");
       await user.type(screen.getByTestId("note-input"), "Test rule");
       await user.click(screen.getByTestId("submit-create"));
 
@@ -97,8 +97,8 @@ describe("SelectionRules page", () => {
       });
 
       expect(createdRules[0]).toMatchObject({
-        ruleType: "include_prefix",
-        pattern: "crypto-",
+        ruleType: "include_slug",
+        pattern: "crypto-market",
         note: "Test rule",
       });
     });
@@ -115,7 +115,7 @@ describe("SelectionRules page", () => {
             rule: {
               ruleId: "rule-new",
               profileId: "simulation",
-              ruleType: "include_prefix",
+              ruleType: "include_slug",
               pattern: body.pattern,
               enabled: true,
               note: null,
@@ -129,14 +129,14 @@ describe("SelectionRules page", () => {
       setup();
       await screen.findByTestId("create-form");
 
-      await user.type(screen.getByTestId("pattern-input"), "BITCOIN-");
+      await user.type(screen.getByTestId("pattern-input"), "BITCOIN-MARKET");
       await user.click(screen.getByTestId("submit-create"));
 
       await waitFor(() => {
         expect(createdPatterns).toHaveLength(1);
       });
 
-      expect(createdPatterns[0]).toBe("bitcoin-");
+      expect(createdPatterns[0]).toBe("bitcoin-market");
     });
 
     it("shows normalization preview when pattern has uppercase", async () => {
@@ -291,7 +291,7 @@ describe("SelectionRules page", () => {
       // Now open — should show bucket headers
       await screen.findByText("Matched Include (1)");
       expect(screen.getByText("Matched Exclude (1)")).toBeInTheDocument();
-      expect(screen.getByText("Step-2 Fallback Include (0)")).toBeInTheDocument();
+      expect(screen.getByText("Legacy Fallback Include (0)")).toBeInTheDocument();
       expect(screen.getByText("Fallback Exclude (0)")).toBeInTheDocument();
     });
 
@@ -367,7 +367,7 @@ describe("SelectionRules page", () => {
       expect(screen.getByTestId("match-result")).toHaveTextContent("EXCLUDE");
     });
 
-    it("shows step-2 fallback label when step2Fallback is true", async () => {
+    it("shows legacy fallback label when step2Fallback is true", async () => {
       server.use(
         http.get("/api/v1/selection-rules/match", () =>
           ok({
@@ -388,7 +388,7 @@ describe("SelectionRules page", () => {
       await user.click(screen.getByTestId("match-test-button"));
 
       await screen.findByTestId("match-result");
-      expect(screen.getByTestId("match-result")).toHaveTextContent("Step-2 fallback applied");
+      expect(screen.getByTestId("match-result")).toHaveTextContent("Legacy fallback applied");
     });
 
     it("disables Test button when market slug is empty", async () => {

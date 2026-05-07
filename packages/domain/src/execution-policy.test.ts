@@ -36,6 +36,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       version: 1,
       entryPriceCeiling: 0.6,
       exitOrderTtlMs: 600_000,
+      marketSelection: { maxMidPrice: 0.42, minLiquidity: 250 },
       deadSideGuard: { mode: "enforce", askCeiling: 0.05, maxTimeToEndMs: 60_000 },
       pricing: {
         mode: "bounded-midpoint",
@@ -50,6 +51,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     const { policy, issues } = parseExecutionPolicyJson(JSON.stringify(input));
     expect(issues).toHaveLength(0);
     expect(policy.entryPriceCeiling).toBe(0.6);
+    expect(policy.marketSelection).toEqual({ maxMidPrice: 0.42, minLiquidity: 250 });
     expect(policy.deadSideGuard.mode).toBe("enforce");
     expect(policy.pricing.mode).toBe("bounded-midpoint");
     expect(policy.pricing.wideSpreadPolicy).toBe("skip");
@@ -89,6 +91,26 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       DEFAULT_EXECUTION_POLICY.pricing.maxEntrySpreadTicks,
     );
     expect(policy.pricing.wideSpreadPolicy).toBe(DEFAULT_EXECUTION_POLICY.pricing.wideSpreadPolicy);
+  });
+
+  it("preserves partial market-selection override and defaults the rest", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ marketSelection: { minLiquidity: 500 } }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.marketSelection.maxMidPrice).toBe(
+      DEFAULT_EXECUTION_POLICY.marketSelection.maxMidPrice,
+    );
+    expect(policy.marketSelection.minLiquidity).toBe(500);
+  });
+
+  it("rejects invalid market-selection values with issues", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ marketSelection: { maxMidPrice: 2, minLiquidity: -1 } }),
+    );
+    expect(policy.marketSelection).toEqual(DEFAULT_EXECUTION_POLICY.marketSelection);
+    expect(issues.some((i) => i.includes("marketSelection.maxMidPrice"))).toBe(true);
+    expect(issues.some((i) => i.includes("marketSelection.minLiquidity"))).toBe(true);
   });
 
   it("rejects deadSideGuard as array or scalar with an issue", () => {

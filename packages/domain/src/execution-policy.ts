@@ -13,7 +13,9 @@ import type {
   ExecutionPolicy,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
+  MarketSelectionPolicy,
 } from "./types.js";
+import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
 
 export const DEFAULT_DEAD_SIDE_GUARD: DeadSideGuardPolicy = {
   mode: "observe",
@@ -49,9 +51,10 @@ export const DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS = 2_504;
 
 export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   version: 1,
-  entryPriceCeiling: 0.75,
+  entryPriceCeiling: 0.45,
   entryMinMarketAgeSeconds: DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
   exitOrderTtlMs: 300_000,
+  marketSelection: DEFAULT_MARKET_SELECTION_POLICY,
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
   telemetry: DEFAULT_TELEMETRY,
@@ -78,6 +81,10 @@ const BOUND_ENTRY_MIN_AGE_MIN_S = 0;
 // Two days — wide enough to cover any realistic conservative tightening
 // without enabling pathological values that would silently disable BUYs forever.
 const BOUND_ENTRY_MIN_AGE_MAX_S = 2 * 24 * 60 * 60;
+const BOUND_MARKET_SELECTION_MAX_MID_MIN = 0.001;
+const BOUND_MARKET_SELECTION_MAX_MID_MAX = 0.99;
+const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MIN = 0;
+const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MAX = 1_000_000;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -132,6 +139,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const deadSideGuard = parseDeadSideGuard(obj.deadSideGuard, issues);
   const pricing = parsePricing(obj.pricing, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
+  const marketSelection = parseMarketSelection(obj.marketSelection, issues);
 
   return {
     policy: {
@@ -139,11 +147,38 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       entryPriceCeiling,
       entryMinMarketAgeSeconds,
       exitOrderTtlMs,
+      marketSelection,
       deadSideGuard,
       pricing,
       telemetry,
     },
     issues,
+  };
+}
+
+function parseMarketSelection(raw: unknown, issues: string[]): MarketSelectionPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("marketSelection must be an object");
+    return DEFAULT_MARKET_SELECTION_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    maxMidPrice: clampedNumber(
+      obj.maxMidPrice,
+      DEFAULT_MARKET_SELECTION_POLICY.maxMidPrice,
+      BOUND_MARKET_SELECTION_MAX_MID_MIN,
+      BOUND_MARKET_SELECTION_MAX_MID_MAX,
+      issues,
+      "marketSelection.maxMidPrice",
+    ),
+    minLiquidity: clampedNumber(
+      obj.minLiquidity,
+      DEFAULT_MARKET_SELECTION_POLICY.minLiquidity,
+      BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MIN,
+      BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MAX,
+      issues,
+      "marketSelection.minLiquidity",
+    ),
   };
 }
 

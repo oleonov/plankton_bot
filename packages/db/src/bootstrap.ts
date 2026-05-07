@@ -237,14 +237,14 @@ export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): 
 
   db.transaction(() => {
     // Decision rules (priority order)
-    insertDecision.run(10, "REDEEM", "S1", "<", 0.05, null, null, null, null, "<=", 3600, "REDEEM");
-    insertDecision.run(11, "REDEEM", "S2", "<", 0.05, null, null, null, null, "<=", 3600, "REDEEM");
     insertDecision.run(20, "D1", "S2", "<", 0.05, "<=", 60, null, null, null, null, "BUY");
     insertDecision.run(30, "D2", "S3", "<", 0.05, "<=", 60, null, null, null, null, "SELL");
     insertDecision.run(40, "D3", "S1", "<", 0.05, null, null, null, null, null, null, "BUY");
     insertDecision.run(50, "D4", "S2", ">=", 0.2, ">", 60, null, null, null, null, "SELL");
     insertDecision.run(60, "D5", "S1", ">=", 0.2, null, null, null, null, null, null, "SELL");
-    insertDecision.run(70, "D6", "S2", null, null, null, null, 4, null, null, null, "BUY");
+    // R37 $50 live test: D6 has moderate evidence, so keep it explicit but
+    // non-trading until post-test validation turns it back into BUY.
+    insertDecision.run(70, "D6", "S2", null, null, null, null, 4, null, null, null, "HOLD");
     insertDecision.run(80, "D7", "S3", null, null, null, null, null, null, null, null, "SELL");
     insertDecision.run(
       999,
@@ -261,25 +261,25 @@ export function ensureAlgoRulesDefaults(db: import("better-sqlite3").Database): 
       "BUY",
     );
 
-    // Size rules — BUY (spec v2.2 §2: state+price rules B1–B4 override nth_buy rules B5–B7)
-    insertSize.run("BUY", 10, "B1", "OTHER", ">=", 0.2, null, null, null, 8.38);
-    insertSize.run("BUY", 20, "B2", "S1", ">=", 0.2, null, null, null, 4.17);
-    insertSize.run("BUY", 30, "B3", "S3", "<", 0.05, null, null, null, 0.76);
-    insertSize.run("BUY", 40, "B4", "S2", "<", 0.05, null, null, null, 0.12);
-    insertSize.run("BUY", 50, "B5", "ANY", null, null, 1, null, null, 2.1);
-    insertSize.run("BUY", 60, "B6", "ANY", null, null, 2, null, null, 1.17);
-    insertSize.run("BUY", 70, "B7", "ANY", null, null, 3, null, null, 0.92);
-    insertSize.run("BUY", 999, "FALLBACK", "ANY", null, null, null, null, null, 0.44);
+    // Size rules — BUY (R37 Task 3 observed median USDC ladder).
+    insertSize.run("BUY", 10, "B1", "OTHER", ">=", 0.2, null, null, null, 8.41);
+    insertSize.run("BUY", 20, "B2", "S1", ">=", 0.2, null, null, null, 4.29);
+    insertSize.run("BUY", 30, "B3", "S3", "<", 0.05, null, null, null, 0.88);
+    insertSize.run("BUY", 40, "B4", "S2", "<", 0.05, null, null, null, 0.14);
+    insertSize.run("BUY", 50, "B5", "ANY", null, null, 1, null, null, 0.99);
+    insertSize.run("BUY", 60, "B6", "ANY", null, null, 2, null, null, 1.04);
+    insertSize.run("BUY", 70, "B7", "ANY", null, null, 3, null, null, 3.85);
+    insertSize.run("BUY", 999, "FALLBACK", "ANY", null, null, null, null, null, 2.73);
 
     // Size rules — SELL
-    insertSize.run("SELL", 10, "S1", "S2", ">=", 0.2, null, null, null, 6.48);
-    insertSize.run("SELL", 20, "S2", "S1", ">=", 0.2, null, null, null, 6.31);
-    insertSize.run("SELL", 30, "S3", "OTHER", ">=", 0.2, null, null, null, 3.4);
-    insertSize.run("SELL", 40, "S4", "S2", "<", 0.05, null, null, null, 1.01);
-    insertSize.run("SELL", 50, "S5", "S3", "<", 0.05, null, null, null, 0.59);
-    insertSize.run("SELL", 60, "S6", "ANY", null, null, null, 1, 1, 2.85);
-    insertSize.run("SELL", 70, "S7", "ANY", null, null, null, 2, 3, 2.14);
-    insertSize.run("SELL", 999, "FALLBACK", "ANY", null, null, null, null, null, 1.62);
+    insertSize.run("SELL", 10, "S1", "S2", ">=", 0.2, null, null, null, 5.81);
+    insertSize.run("SELL", 20, "S2", "S1", ">=", 0.2, null, null, null, 5.73);
+    insertSize.run("SELL", 30, "S3", "OTHER", ">=", 0.2, null, null, null, 5.0);
+    insertSize.run("SELL", 40, "S4", "S2", "<", 0.05, null, null, null, 1.05);
+    insertSize.run("SELL", 50, "S5", "S3", "<", 0.05, null, null, null, 0.71);
+    insertSize.run("SELL", 60, "S6", "ANY", null, null, null, 1, 1, 1.54);
+    insertSize.run("SELL", 70, "S7", "ANY", null, null, null, 2, 3, 2.33);
+    insertSize.run("SELL", 999, "FALLBACK", "ANY", null, null, null, null, null, 2.63);
   })();
 }
 

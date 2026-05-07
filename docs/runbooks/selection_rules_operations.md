@@ -1,32 +1,48 @@
 # Selection Rules — Operator Runbook
 
-Selection rules control which Polymarket event slugs the scanner admits into the trading universe. They live in `control.db` and hot-reload into the runtime within ~5–6 minutes of a mutation (composite worst-case — see Hot-reload mechanics below) — no restart required.
+Market admission is primarily controlled by the v5.11 hard filters in
+`evaluatePreEntry`:
 
-> **Spec scope.** Canonical spec §0 STEP 1 describes only `include_prefix` seeded with `bitcoin-`, `ethereum-`, `elon-musk-` (migration 037 seeds exactly these). `exclude_prefix`, `include_slug`, `exclude_slug`, precedence, and the STEP 2 `eventMarketCount === 1` fallback are **operator extensions** frozen in [ADR-004](../adr/004-selection-engine-extended-matchers.md). Review any rule beyond the three seeded prefixes before enabling in live-lite — the engine has no "spec-safe mode" and a bad `exclude_prefix` can shrink the universe to zero.
+- per-token `midPrice < marketSelection.maxMidPrice` (default `0.5`)
+- market `liquidity >= marketSelection.minLiquidity` (default `100`)
+- not in the R9 zero-coverage category blacklist
 
-## Rule types
+These thresholds are stored per profile in
+`profile_settings.execution_policy_json.marketSelection` and hot-reload through
+the execution-policy version channel.
 
-| Type             | Matches                               | Example pattern                   |
-| ---------------- | ------------------------------------- | --------------------------------- |
-| `include_prefix` | event slugs starting with the pattern | `bitcoin-`                        |
-| `exclude_prefix` | event slugs starting with the pattern | `bitcoin-price-`                  |
-| `include_slug`   | exact event slug                      | `bitcoin-to-150k-by-2025`         |
-| `exclude_slug`   | exact event slug                      | `bitcoin-hash-rate-all-time-high` |
+## Rule Types
 
-## Resolver precedence (specificity wins)
+Exact slug rules are operator overrides for individual markets:
 
-1. Exact-slug rules beat prefix rules.
-2. Among prefix rules, the longest matching prefix wins.
-3. At equal tier, `exclude` beats `include`.
-4. If no rule hits: **STEP 2 fallback** admits events with exactly one tradable market (`eventMarketCount === 1`); multi-market events with no rule match are excluded.
+| Type           | Matches           | Example pattern           |
+| -------------- | ----------------- | ------------------------- |
+| `include_slug` | exact market slug | `bitcoin-to-150k-by-2025` |
+| `exclude_slug` | exact market slug | `spam-market-slug`        |
 
-`winningRuleId` is written to `markets.selection_winning_rule_id` for every admission/exclusion decision.
+Legacy prefix rows (`include_prefix`, `exclude_prefix`) may still appear in old
+databases for audit/cleanup, but they are deprecated since v5.11. The API/UI do
+not allow creating or re-enabling them, and migration 042 disables enabled prefix
+rows. Prefix rules are not part of live admission.
 
-## Daily operations
+## Resolver Behavior
 
-### Add a rule
+1. Exact `exclude_slug` wins and records `matched_exclude`.
+2. Exact `include_slug` can record its `winningRuleId`, but the market still has
+   to pass v5.11 hard filters.
+3. If no exact rule matches, hard-filter pass records `matched_include` with no
+   `winningRuleId`.
+4. There is no single-market fallback admission.
 
-UI: `/selection-rules` → **Add rule** → pick type, enter pattern, enable → Save.
+`winningRuleId` is written to `markets.selection_winning_rule_id` when an exact
+rule participates in the verdict.
+
+## Daily Operations
+
+### Add a Rule
+
+UI: `/selection-rules` → **Add rule** → pick `include_slug` or `exclude_slug`,
+enter the exact market slug, save.
 
 API:
 
@@ -34,51 +50,54 @@ API:
 curl -X POST https://bot.example.com/api/v1/selection-rules \
   -H "Authorization: Bearer $PLANKTON_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"profileId":"live-lite","ruleType":"include_prefix","pattern":"elon-musk-","enabled":true,"note":"Musk prediction cluster"}'
+  -d '{"profileId":"live-lite","ruleType":"exclude_slug","pattern":"spam-market-slug","enabled":true,"note":"manual block"}'
 ```
 
-### Disable / enable
+### Disable / Enable
 
-UI: toggle the switch in the rules table.
-
-API: `PATCH /selection-rules/:ruleId` with `{ "enabled": false }`.
+UI: toggle the switch in the rules table. Disabled legacy prefix rows cannot be
+re-enabled. API: `PATCH /selection-rules/:ruleId` with `{ "enabled": false }` or
+`{ "enabled": true }` for exact slug rules.
 
 ### Delete
 
 UI: trash icon. API: `DELETE /selection-rules/:ruleId`.
 
-### Preview before shipping
+### Preview
 
-`GET /selection-rules/preview?profileId=live-lite` returns buckets (`matchedInclude`, `matchedExclude`, `step2FallbackInclude`, `fallbackExclude`) for the current rule set against the live Gamma event catalog.
+`GET /selection-rules/preview?profileId=live-lite` returns buckets
+(`matchedInclude`, `matchedExclude`, `step2FallbackInclude`, `fallbackExclude`)
+from the persisted `markets.selection_status` values. The
+`step2FallbackInclude` bucket is legacy compatibility and should be empty under
+v5.11 hard-filter admission.
 
-Draft-rule what-if: `POST /selection-rules/preview` with a full rule set in the body runs the same resolver against a hypothetical ruleset without persisting.
+### Match Debugger
 
-### Match debugger
+`GET /selection-rules/match?marketSlug=<market-slug>&eventSlug=<event-slug>&profileId=live-lite`
+returns `{ finalStatus, selectionStatus, winningRuleId }`. A match endpoint
+without normalized `midPrice`/`liquidity` context fails closed for hard-filter
+admission; use scanner/market rows for authoritative live verdicts.
 
-`GET /selection-rules/match?marketSlug=<market-slug>&eventSlug=<event-slug>&profileId=live-lite` returns `{ finalStatus, selectionStatus, winningRuleId }` — the exact verdict the scanner will produce. Both `marketSlug` and `eventSlug` are required for prefix-rule matching (the engine evaluates against the parent event slug, not the leaf market slug). Example: `?marketSlug=bitcoin-to-150k-by-2025&eventSlug=bitcoin-to-150k-by-2025` for a single-market event where the two slugs are identical.
+## Hot-Reload Mechanics
 
-## Hot-reload mechanics
-
-Every mutation bumps `runtime_control_state.selection_rules_version`. The scanner's in-memory `RefreshableSelectionRuleEngine` polls this version before each scan tick; on mismatch it reloads rules from `control.db` in a single transaction. The composite worst-case latency before a rule change is fully observable in the runtime is `MARKET_SCAN_INTERVAL_MS` (default 5 min) + scan duration + per-page non-atomic `saveBatch` flush + `MARKET_DATA_POLL_INTERVAL_MS` poll cycle — typically ~5–6 min end-to-end, not "≤1 tick". Operators should plan rule rollouts with this floor in mind.
-
-## Audit trail
-
-Every create/update/delete writes a row to `state_transitions` with `entity_type='selection_rule'`, `entity_id=<ruleId>`. Query via `/audit?entityId=<ruleId>` or in-UI via the Audit page filtered on `entityId`.
+Selection-rule mutations bump
+`runtime_control_state.selection_rules_version`; the runtime reloads the rule
+engine before scan ticks. Market-selection thresholds are separate execution
+policy fields and hot-reload via
+`runtime_control_state.execution_policy_version`.
 
 ## Troubleshooting
 
-| Symptom                                       | Check                                                                                                                                                   |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| New rule doesn't admit markets within ~6 min  | `SELECT selection_rules_version, updated_at FROM runtime_control_state` — confirm version bumped; tail runtime logs for `selection-rule-engine refresh` |
-| Market excluded despite matching include rule | Look up `selection_winning_rule_id` in `markets`; another more-specific rule (e.g. `exclude_prefix`) outranks the include                               |
-| Excluded market still has open order          | Expected — `findTrackedForPricing` keeps excluded tokens in the pricing loop while orders/positions are open so exits can complete                      |
-| Preview counts mismatch live `markets` table  | Preview runs against the current Gamma response; `markets` reflects the last scan. Wait a tick and re-query                                             |
+| Symptom                                       | Check                                                                                                                                                    |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| New rule does not affect markets              | Confirm `selection_rules_version` bumped and wait one scan interval. Exact includes still fail if mid/liquidity/category hard filters reject the market. |
+| Prefix rule has no effect                     | Expected since v5.11. Delete it or keep it disabled for audit history.                                                                                   |
+| Market excluded despite exact include rule    | Inspect `mid_price`, `liquidity`, and R9 category blacklist match. Exact include is not a bypass for hard filters.                                       |
+| Excluded market still has open order/position | Expected: tracked pricing is preserved while orders/positions are open so exits and settlement can complete.                                             |
+| Fresh market missing liquidity is excluded    | Expected fail-closed behavior. It becomes eligible only after normalized liquidity is available and passes the floor.                                    |
 
 ## Rollback
 
-Selection rules have no destructive side effects. To revert:
-
-1. Disable the offending rule (`PATCH /selection-rules/:ruleId` with `enabled: false`) — effective within the composite hot-reload window (~5–6 min worst case, see Hot-reload mechanics).
-2. If a rule set misbehaves globally, restore `control.db` from the pre-change snapshot.
-
-**Do not** use "disable all rules" as a kill switch — STEP 2 fallback would still admit every single-market event. Pause the runtime (`/actions/pause`) for a hard stop.
+Selection-rule edits have no destructive side effects. Disable or delete the
+offending exact rule, or restore `control.db` from the pre-change snapshot if a
+larger rollback is needed. Pause the runtime (`/actions/pause`) for a hard stop.

@@ -21,6 +21,13 @@ const RULE_TYPES: readonly SelectionRuleType[] = [
   "include_slug",
   "exclude_slug",
 ];
+const CREATE_RULE_TYPES: readonly SelectionRuleType[] = ["include_slug", "exclude_slug"];
+const PREFIX_RULE_TYPES: readonly SelectionRuleType[] = ["include_prefix", "exclude_prefix"];
+const DEPRECATED_PREFIX_MESSAGE = "prefix rule types are deprecated since v5.11";
+
+function isPrefixRuleType(ruleType: SelectionRuleType): boolean {
+  return PREFIX_RULE_TYPES.includes(ruleType);
+}
 
 export const selectionRulesRoutes: FastifyPluginAsync<SelectionRulesOpts> = async (app, opts) => {
   const { controlDb, ledgerPool } = opts;
@@ -50,6 +57,9 @@ export const selectionRulesRoutes: FastifyPluginAsync<SelectionRulesOpts> = asyn
       !body.pattern
     ) {
       return reply.code(400).send(fail("BAD_REQUEST", "missing/invalid fields"));
+    }
+    if (!CREATE_RULE_TYPES.includes(body.ruleType)) {
+      return reply.code(400).send(fail("DEPRECATED_RULE_TYPE", DEPRECATED_PREFIX_MESSAGE));
     }
     try {
       const tx = controlDb.transaction(() => {
@@ -89,6 +99,9 @@ export const selectionRulesRoutes: FastifyPluginAsync<SelectionRulesOpts> = asyn
     const patch = req.body as { enabled?: boolean; note?: string | null };
     const before = selectionRuleRepo.findById(ruleId);
     if (!before) return reply.code(404).send(fail("NOT_FOUND", "rule not found"));
+    if (patch.enabled === true && isPrefixRuleType(before.ruleType)) {
+      return reply.code(400).send(fail("DEPRECATED_RULE_TYPE", DEPRECATED_PREFIX_MESSAGE));
+    }
     const patchArgs: import("@plankton/db").SelectionRulePatch = {};
     if (patch.enabled !== undefined) patchArgs.enabled = patch.enabled;
     if (patch.note !== undefined) patchArgs.note = patch.note;
@@ -192,7 +205,7 @@ export const selectionRulesRoutes: FastifyPluginAsync<SelectionRulesOpts> = asyn
   // eventMarketCount resolution order:
   //   1. explicit query param (caller knows the scenario)
   //   2. ledger lookup via SqliteMarketRepository
-  //   3. 400 — refuses to silently bias STEP-2 with a hardcoded default
+  //   3. 400 — refuses to hide missing market-context telemetry
   app.get("/selection-rules/match", async (req, reply) => {
     const { profileId, eventSlug, marketSlug, eventMarketCount } = req.query as {
       profileId?: string;
@@ -252,7 +265,7 @@ export const selectionRulesRoutes: FastifyPluginAsync<SelectionRulesOpts> = asyn
         selectionStatus: evaled.selectionStatus,
         eventMarketCount: resolvedCount,
         eventMarketCountSource: countSource,
-        step2Fallback: decision.status === "no_match" && evaled.finalStatus === "INCLUDE",
+        step2Fallback: evaled.selectionStatus === "step2_fallback_include",
       }),
     );
   });

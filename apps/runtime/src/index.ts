@@ -270,9 +270,8 @@ async function main(): Promise<void> {
     legStateTransition: new SqliteLegStateTransitionRepository(ledgerConn.db),
   };
 
-  // 3b. Selection rule engine — version-polled singleton for Phase 4 scanner wiring.
-  // Constructed here so it is available to the module DI graph; Phase 4 plugs it
-  // into the scanner and MarketSelectionCache. Not used by scanner yet (Phase 3).
+  // 3b. Selection rule engine — version-polled singleton shared by scanner,
+  // MarketSelectionCache, and operator/debug endpoints.
   const selectionRuleRepo = new SelectionRuleRepository(controlConn.db);
   const selectionRuleEngine = new RefreshableSelectionRuleEngine(selectionRuleRepo, activeProfile);
   log.info({ version: selectionRuleRepo.getVersion() }, "selection rule engine ready");
@@ -527,6 +526,22 @@ async function main(): Promise<void> {
   const discoveryGateway = new GammaMarketDiscoveryGateway(
     config.gammaTagId !== undefined ? { tagId: config.gammaTagId } : {},
   );
+
+  // ADR-015: DB-backed execution policy. The provider polls
+  // `runtime_control_state.execution_policy_version` and hot-swaps the
+  // snapshot when operators edit `profile_settings.execution_policy_json`.
+  const profileSettingsRepo = new SqliteProfileSettingsRepository(controlConn.db);
+  const executionPolicyProvider = new ExecutionPolicyProvider({
+    controlDb: controlConn.db,
+    profileSettingsRepo,
+    log,
+    profileId: activeProfile as import("@plankton/domain").ProfileId,
+  });
+  const currentExecutionPolicy = () => {
+    executionPolicyProvider.refreshIfStale();
+    return executionPolicyProvider.snapshot();
+  };
+
   const marketScannerModule = new MarketScannerModule({
     discoveryGateway,
     marketRepo: repos.market,
@@ -534,6 +549,7 @@ async function main(): Promise<void> {
     log,
     scanIntervalMs: config.marketScanIntervalMs,
     selectionRuleEngine,
+    marketSelectionPolicy: () => currentExecutionPolicy().marketSelection,
     positionRepo: repos.position,
     orderRepo: repos.order,
   });
@@ -700,7 +716,11 @@ async function main(): Promise<void> {
   });
 
   // 7h2. Algo decision module (replaces legacy StrategyModule in the pipeline)
-  const selectedMarketCache = new MarketSelectionCache(bus, selectionRuleEngine);
+  const selectedMarketCache = new MarketSelectionCache(
+    bus,
+    selectionRuleEngine,
+    () => currentExecutionPolicy().marketSelection,
+  );
   selectedMarketCache.subscribe();
 
   // ADR-018 §D2 — Step 1 universe-filter funnel telemetry. Emits one log
@@ -733,20 +753,6 @@ async function main(): Promise<void> {
     observer: buildTradeCountObserver({ log: tradeCountLog, metrics: runtimeMetrics }),
   });
 
-  // ADR-015: DB-backed execution policy. The provider polls
-  // `runtime_control_state.execution_policy_version` and hot-swaps the
-  // snapshot when operators edit `profile_settings.execution_policy_json`.
-  // Constructed BEFORE AlgoDecisionModule so the min-age gate (Step 0 §P3)
-  // can read `entryMinMarketAgeSeconds` via the same provider — ADR-015 §57
-  // ("new consumers should thread the provider, not reimplement lookup").
-  const profileSettingsRepo = new SqliteProfileSettingsRepository(controlConn.db);
-  const executionPolicyProvider = new ExecutionPolicyProvider({
-    controlDb: controlConn.db,
-    profileSettingsRepo,
-    log,
-    profileId: activeProfile as import("@plankton/domain").ProfileId,
-  });
-
   const algoDecisionModule = new AlgoDecisionModule({
     bus,
     legStateRepo: repos.legState,
@@ -773,10 +779,7 @@ async function main(): Promise<void> {
         ),
     },
     tradeCountProvider,
-    executionPolicy: () => {
-      executionPolicyProvider.refreshIfStale();
-      return executionPolicyProvider.snapshot();
-    },
+    executionPolicy: currentExecutionPolicy,
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
   });
@@ -792,10 +795,7 @@ async function main(): Promise<void> {
     orderRepo: repos.order,
     liveLiteGuard,
     candidateBookCache,
-    policy: () => {
-      executionPolicyProvider.refreshIfStale();
-      return executionPolicyProvider.snapshot();
-    },
+    policy: currentExecutionPolicy,
     observations: executionPolicyObservationRepo,
     profileId: activeProfile as import("@plankton/domain").ProfileId,
     resolutionTracker: marketResolutionTracker,
@@ -812,10 +812,7 @@ async function main(): Promise<void> {
     reconcileIntervalMs: 60_000,
     settlementLedgerRepo: repos.settlementLedger,
     driftRepo: repos.positionDrift,
-    exitOrderTtlMs: () => {
-      executionPolicyProvider.refreshIfStale();
-      return executionPolicyProvider.snapshot().exitOrderTtlMs;
-    },
+    exitOrderTtlMs: () => currentExecutionPolicy().exitOrderTtlMs,
     ...(runtimeMode === "live-lite" && traderAddress
       ? {
           walletPositionSentinel: {

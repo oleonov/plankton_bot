@@ -154,18 +154,34 @@ describe("POST /selection-rules", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {
         profileId: "simulation",
-        ruleType: "include_prefix",
-        pattern: " Solana- ",
+        ruleType: "include_slug",
+        pattern: " Solana-Market ",
         note: null,
       },
     });
     expect(res.statusCode).toBe(200);
     const body = res.json();
     expect(body.ok).toBe(true);
-    expect(body.data.rule.pattern).toBe("solana-"); // normalized: trim + lowercase
-    expect(body.data.rule.ruleType).toBe("include_prefix");
+    expect(body.data.rule.pattern).toBe("solana-market"); // normalized: trim + lowercase
+    expect(body.data.rule.ruleType).toBe("include_slug");
     expect(body.data.rule.enabled).toBe(true);
     expect(body.data.rule.ruleId).toBeTruthy();
+  });
+
+  it("rejects deprecated prefix rule creation", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/selection-rules",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {
+        profileId: "simulation",
+        ruleType: "include_prefix",
+        pattern: "bitcoin-",
+        note: null,
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("DEPRECATED_RULE_TYPE");
   });
 
   it("returns DUPLICATE_RULE on UNIQUE collision (same type + pattern)", async () => {
@@ -276,8 +292,8 @@ describe("PATCH /selection-rules/:ruleId", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {
         profileId: "simulation",
-        ruleType: "include_prefix",
-        pattern: "patch-test-",
+        ruleType: "include_slug",
+        pattern: "patch-test-market",
         note: "original note",
       },
     });
@@ -296,8 +312,8 @@ describe("PATCH /selection-rules/:ruleId", () => {
     expect(patched.enabled).toBe(false);
     expect(patched.note).toBe("updated note");
     // Pattern and ruleType must not change
-    expect(patched.pattern).toBe("patch-test-");
-    expect(patched.ruleType).toBe("include_prefix");
+    expect(patched.pattern).toBe("patch-test-market");
+    expect(patched.ruleType).toBe("include_slug");
   });
 
   it("writes state_transitions audit row on patch", async () => {
@@ -307,8 +323,8 @@ describe("PATCH /selection-rules/:ruleId", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {
         profileId: "simulation",
-        ruleType: "exclude_prefix",
-        pattern: "patch-audit-",
+        ruleType: "exclude_slug",
+        pattern: "patch-audit-market",
         note: null,
       },
     });
@@ -338,6 +354,26 @@ describe("PATCH /selection-rules/:ruleId", () => {
     ).c;
 
     expect(countAfter).toBe(countBefore + 1);
+  });
+
+  it("rejects re-enabling a legacy prefix rule", async () => {
+    const row = controlConn.db
+      .prepare(
+        `INSERT INTO selection_rules
+           (rule_id, profile_id, rule_type, pattern, enabled, note, created_at, updated_at)
+         VALUES ('legacy-prefix-test', 'simulation', 'include_prefix', 'legacy-prefix-', 0, NULL, datetime('now'), datetime('now'))
+         RETURNING rule_id`,
+      )
+      .get() as { rule_id: string };
+
+    const res = await app.inject({
+      method: "PATCH",
+      url: `/api/v1/selection-rules/${row.rule_id}`,
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: { enabled: true },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("DEPRECATED_RULE_TYPE");
   });
 
   it("returns 404 for unknown ruleId", async () => {

@@ -379,8 +379,7 @@ describe("mapBalance", () => {
 // ─── Gamma mapper tests ───────────────────────────────────────────────────
 
 describe("mapGammaMarket", () => {
-  // Default eventContext for tests not exercising STEP 2 fallback semantics.
-  // ADR-019 §D2 made the second arg required to close the silent-1 foot-gun.
+  // Default eventContext for tests not exercising event-size telemetry.
   const SINGLE_MARKET_EVENT = { slug: null, marketCount: 1 } as const;
 
   it("maps a typical Gamma response to ClobMarket", () => {
@@ -432,6 +431,34 @@ describe("mapGammaMarket", () => {
   it("uses orderPriceMinTickSize for tickSize", () => {
     const market = mapGammaMarket({ orderPriceMinTickSize: 0.0001 }, SINGLE_MARKET_EVENT);
     expect(market.tickSize).toBe(0.0001);
+  });
+
+  it("maps Gamma liquidity and per-token admission prices", () => {
+    const market = mapGammaMarket(
+      {
+        clobTokenIds: ["yes", "no"],
+        outcomes: ["Yes", "No"],
+        outcomePrices: ["0.32", "0.68"],
+        bestBid: "0.31",
+        bestAsk: "0.33",
+        liquidity: "250.5",
+      },
+      SINGLE_MARKET_EVENT,
+    );
+
+    expect(market.liquidity).toBe(250.5);
+    expect(market.tokens[0]).toMatchObject({
+      tokenId: "yes",
+      bestBid: 0.31,
+      bestAsk: 0.33,
+      midPrice: 0.32,
+    });
+    expect(market.tokens[1]).toMatchObject({
+      tokenId: "no",
+      bestBid: null,
+      bestAsk: null,
+      midPrice: 0.68,
+    });
   });
 
   // ADR-007: lifetime `volumeNum` is the source for the `volume24h` field
@@ -503,9 +530,8 @@ describe("mapGammaMarket", () => {
   });
 
   it("eventContext is required — caller must pass marketCount explicitly (ADR-019 §D2)", () => {
-    // No-eventContext call is a compile error post-ADR-019 — silent
-    // default 1 was a STEP 2 fallback foot-gun. Pinning the explicit
-    // single-market shape here for binary events.
+    // No-eventContext call is a compile error post-ADR-019. Pinning the
+    // explicit single-market shape here for binary events.
     const market = mapGammaMarket({ slug: "bitcoin-above-100k" }, { slug: null, marketCount: 1 });
     expect(market.eventMarketCount).toBe(1);
   });

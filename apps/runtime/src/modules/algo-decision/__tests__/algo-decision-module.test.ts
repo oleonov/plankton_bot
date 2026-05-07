@@ -19,7 +19,7 @@ import type { Logger } from "../../../logger.js";
 
 // ─── Seed rules ───────────────────────────────────────────────────────────────
 
-/** Minimal decision rules: REDEEM for S1 + S2 on low price + hold threshold, FALLBACK BUY. */
+/** Minimal decision rules. REDEEM rows are present to prove runtime ignores algo-REDEEM. */
 const SEED_DECISION_RULES: AlgoDecisionRule[] = [
   {
     id: 1,
@@ -96,7 +96,7 @@ const SEED_SIZE_RULES_BUY: AlgoSizeRule[] = [
     nthBuy: 1,
     buyCountMin: null,
     buyCountMax: null,
-    sizeUsdc: 2.1,
+    sizeUsdc: 0.99,
   },
   {
     id: 99,
@@ -109,7 +109,7 @@ const SEED_SIZE_RULES_BUY: AlgoSizeRule[] = [
     nthBuy: null,
     buyCountMin: null,
     buyCountMax: null,
-    sizeUsdc: 0.44,
+    sizeUsdc: 2.73,
   },
 ];
 
@@ -125,7 +125,7 @@ const SEED_SIZE_RULES_SELL: AlgoSizeRule[] = [
     nthBuy: null,
     buyCountMin: null,
     buyCountMax: null,
-    sizeUsdc: 1.62,
+    sizeUsdc: 2.63,
   },
 ];
 
@@ -346,10 +346,10 @@ describe("AlgoDecisionModule", () => {
     expect(signal.side).toBe("buy");
     expect(signal.decisionRuleId).toBe("FALLBACK");
     expect(signal.reason).toBe("probe-entry");
-    expect(signal.suggestedSizeUsdc).toBeCloseTo(2.1, 5);
+    expect(signal.suggestedSizeUsdc).toBeCloseTo(0.99, 5);
     expect(signal.conditionId).toBe("cond-1");
     // ADR-024 §D-C — sizingRuleId is propagated from evaluateSize onto the
-    // emitted Signal. Seed B5 fires here (nthBuy=1, sizeUsdc=2.1).
+    // emitted Signal. Seed B5 fires here (nthBuy=1, sizeUsdc=0.99).
     expect(signal.sizingRuleId).toBe("B5");
 
     // Phase 2.A: payload embeds the NormalizedMarket snapshot observed by the
@@ -415,8 +415,8 @@ describe("AlgoDecisionModule", () => {
       side: "SELL",
       decisionRuleId: "D7-SELL-S1",
       sizingRuleId: "FALLBACK-SELL",
-      // sizeUsdc=1.62 falls in the §4.6 "$1-$2" bucket.
-      notionalBucket: "$1-$2",
+      // sizeUsdc=2.63 falls in the §4.6 "$2-$5" bucket.
+      notionalBucket: "$2-$5",
       state: "S1",
       price: 0.15,
       buyCount: 1,
@@ -744,7 +744,7 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
-  it("emits RedeemRequested when REDEEM conditions are met", async () => {
+  it("does not emit algo RedeemRequested even when legacy REDEEM conditions are met", async () => {
     const tokenId = "token-redeem";
     const familyId = "fam-2";
     const conditionId = "cond-redeem";
@@ -768,7 +768,7 @@ describe("AlgoDecisionModule", () => {
     const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
     await mod.start();
 
-    // Price 0.03 < 0.05 + holdDuration ~1500s ≤ 3600s threshold → REDEEM-S2 fires
+    // Legacy REDEEM-S2 matches in the rules table, but runtime algo-REDEEM is disabled.
     const market = makeMarket(tokenId, familyId, 0.03, conditionId);
     await (bus as any).emit("NormalizedMarketUpdated", {
       markets: [market],
@@ -779,21 +779,15 @@ describe("AlgoDecisionModule", () => {
     const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
     const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
 
-    expect(redeemCalls.length).toBe(1);
-    expect(
-      (redeemCalls[0]![1] as import("@plankton/domain").RuntimeEventMap["RedeemRequested"])
-        .conditionIds,
-    ).toContain(conditionId);
-    expect(signalCalls.length).toBe(0);
+    expect(redeemCalls.length).toBe(0);
+    expect(signalCalls.length).toBe(1);
     expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
     expect(vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0]).toMatchObject({
       tokenId: createTokenId(tokenId),
       conditionId,
-      side: "REDEEM",
-      decisionRuleId: "REDEEM-S2",
-      // ADR-024 §D-C — REDEEM signals have no sizing leg; both fields stay null.
-      sizingRuleId: null,
-      notionalBucket: null,
+      side: "BUY",
+      decisionRuleId: "FALLBACK",
+      sizingRuleId: "FALLBACK-BUY",
       state: "S2",
       price: 0.03,
       buyCount: 2,
@@ -811,8 +805,8 @@ describe("AlgoDecisionModule", () => {
       payload: expect.objectContaining({
         tokenId,
         conditionId,
-        side: "REDEEM",
-        decisionRuleId: "REDEEM-S2",
+        side: "BUY",
+        decisionRuleId: "FALLBACK",
         state: "S2",
         firstTradePrice: 0.1,
         legTradeCount: 2,
@@ -857,19 +851,6 @@ describe("AlgoDecisionModule", () => {
     const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
     const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
     expect(redeemCalls.length).toBe(0);
-    expect(riskEventRepo.insert).toHaveBeenCalledWith({
-      eventType: "signal_suppressed",
-      payload: expect.objectContaining({
-        tokenId,
-        conditionId,
-        side: "REDEEM",
-        decisionRuleId: "REDEEM-S2",
-        reasonCode: "redeem-before-end-date",
-        state: "S2",
-        firstTradePrice: 0.1,
-        legTradeCount: 2,
-      }),
-    });
     const emittedRedeem = vi
       .mocked(riskEventRepo.insert)
       .mock.calls.some(
@@ -880,7 +861,7 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
-  it("emits RedeemRequested when market endDate is in the past", async () => {
+  it("does not emit algo RedeemRequested when market endDate is in the past", async () => {
     const tokenId = "token-redeem-past";
     const conditionId = "cond-redeem-past";
 
@@ -911,18 +892,14 @@ describe("AlgoDecisionModule", () => {
 
     const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
     const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
-    expect(redeemCalls.length).toBe(1);
-    expect(
-      (redeemCalls[0]![1] as import("@plankton/domain").RuntimeEventMap["RedeemRequested"])
-        .conditionIds,
-    ).toContain(conditionId);
+    const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+    expect(redeemCalls.length).toBe(0);
+    expect(signalCalls.length).toBe(1);
 
     await mod.stop();
   });
 
-  it("emits RedeemRequested when market endDate is null (downstream gamma-gate handles it)", async () => {
-    // Missing endDate → passthrough; ResolutionModule's filterConfirmedRedeemable
-    // still queries Gamma and defers if unresolved.
+  it("does not emit algo RedeemRequested when market endDate is null", async () => {
     const tokenId = "token-redeem-null";
     const conditionId = "cond-redeem-null";
 
@@ -950,7 +927,9 @@ describe("AlgoDecisionModule", () => {
 
     const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
     const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
-    expect(redeemCalls.length).toBe(1);
+    const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+    expect(redeemCalls.length).toBe(0);
+    expect(signalCalls.length).toBe(1);
 
     await mod.stop();
   });
@@ -1214,11 +1193,11 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
-    it("REDEEM still fires before continuation gate", async () => {
+    it("legacy REDEEM does not bypass the continuation gate", async () => {
       const tokenId = "token-cont-redeem";
       const familyId = "fam-cont";
       const conditionId = "cond-redeem-cont";
-      // S1 with low trade count → STOP, but REDEEM matches first
+      // S1 with low trade count → STOP. Legacy REDEEM rows must not bypass it.
       const thirtyMinAgo = new Date(Date.now() - 30 * 60 * 1000).toISOString();
       const legState: LegState = {
         tokenId: createTokenId(tokenId),
@@ -1235,7 +1214,7 @@ describe("AlgoDecisionModule", () => {
       const mod = buildModule();
       await mod.start();
 
-      // Price 0.03 < 0.05 + holdDuration ~1800s ≤ 3600s → REDEEM
+      // Price 0.03 < 0.05 + holdDuration ~1800s ≤ 3600s would match legacy REDEEM.
       await (bus as any).emit("NormalizedMarketUpdated", {
         markets: [makeMarket(tokenId, familyId, 0.03, conditionId)],
         timestamp: Date.now(),
@@ -1243,8 +1222,7 @@ describe("AlgoDecisionModule", () => {
 
       const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
       const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
-      expect(redeemCalls.length).toBe(1);
-      expect(redeemCalls[0]![1].conditionIds).toContain(conditionId);
+      expect(redeemCalls.length).toBe(0);
 
       // No SignalProduced
       const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
@@ -1728,6 +1706,223 @@ describe("AlgoDecisionModule", () => {
     });
   });
 
+  describe("R37 D6 HOLD suppression", () => {
+    const R37_RULES: AlgoDecisionRule[] = [
+      {
+        id: 10,
+        priority: 10,
+        ruleId: "D1",
+        stateCondition: "S2",
+        priceOperator: "<",
+        priceValue: 0.05,
+        timeSinceLastOperator: "<=",
+        timeSinceLastSeconds: 60,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "BUY",
+      },
+      {
+        id: 30,
+        priority: 30,
+        ruleId: "D3",
+        stateCondition: "S1",
+        priceOperator: "<",
+        priceValue: 0.05,
+        timeSinceLastOperator: null,
+        timeSinceLastSeconds: null,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "BUY",
+      },
+      {
+        id: 50,
+        priority: 50,
+        ruleId: "D4",
+        stateCondition: "S2",
+        priceOperator: ">=",
+        priceValue: 0.2,
+        timeSinceLastOperator: ">",
+        timeSinceLastSeconds: 60,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "SELL",
+      },
+      {
+        id: 70,
+        priority: 70,
+        ruleId: "D6",
+        stateCondition: "S2",
+        priceOperator: null,
+        priceValue: null,
+        timeSinceLastOperator: null,
+        timeSinceLastSeconds: null,
+        buyCountMin: 4,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "HOLD",
+      },
+      {
+        id: 80,
+        priority: 80,
+        ruleId: "D7",
+        stateCondition: "S3",
+        priceOperator: null,
+        priceValue: null,
+        timeSinceLastOperator: null,
+        timeSinceLastSeconds: null,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "SELL",
+      },
+      {
+        id: 999,
+        priority: 999,
+        ruleId: "FALLBACK",
+        stateCondition: "ANY",
+        priceOperator: null,
+        priceValue: null,
+        timeSinceLastOperator: null,
+        timeSinceLastSeconds: null,
+        buyCountMin: null,
+        buyCountMax: null,
+        holdDurationOperator: null,
+        holdDurationSeconds: null,
+        action: "BUY",
+      },
+    ];
+
+    function withR37Rules(rules: AlgoDecisionRule[] = R37_RULES): AlgoRulesRepository {
+      return {
+        getDecisionRules: vi.fn(() => rules),
+        getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+          actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+        ),
+      };
+    }
+
+    function makeR37LegState(
+      tokenId: string,
+      args: Partial<Pick<LegState, "buyCount" | "sellCount" | "lastAction">> & {
+        lastTradeAtMsAgo?: number;
+      } = {},
+    ): LegState {
+      const lastTradeAt = new Date(Date.now() - (args.lastTradeAtMsAgo ?? 120_000)).toISOString();
+      const firstTradeAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+      return {
+        tokenId: createTokenId(tokenId),
+        buyCount: args.buyCount ?? 4,
+        sellCount: args.sellCount ?? 0,
+        lastAction: args.lastAction ?? "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt,
+        lastTradeAt,
+        updatedAt: lastTradeAt,
+      };
+    }
+
+    async function emitOne(tokenId: string, price: number, riskEventRepo?: RiskEventRepository) {
+      algoRulesRepo = withR37Rules();
+      const mod = buildModule(riskEventRepo ? { riskEventRepo } : {});
+      await mod.start();
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, "r37", price, `cond-${tokenId}`)],
+        timestamp: Date.now(),
+      });
+      await mod.stop();
+      return (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+    }
+
+    it("suppresses canonical D6: S2 + buyCount>=4 HOLD", async () => {
+      const tokenId = "token-d6-suppressed";
+      legStateRepo = createMockLegStateRepo([makeR37LegState(tokenId)]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const signalCalls = await emitOne(tokenId, 0.1, riskEventRepo);
+
+      expect(signalCalls.length).toBe(0);
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          reasonCode: "d6-suppressed",
+          decisionRuleId: "D6",
+          side: "BUY",
+          state: "S2",
+          buyCount: 4,
+        }),
+      });
+    });
+
+    it("allows D1 despite S2 + buyCount>=4", async () => {
+      const tokenId = "token-d1-allowed";
+      legStateRepo = createMockLegStateRepo([
+        makeR37LegState(tokenId, { lastTradeAtMsAgo: 30_000 }),
+      ]);
+
+      const signalCalls = await emitOne(tokenId, 0.03);
+
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D1");
+    });
+
+    it("suppresses D6 boundary when D1 time window is missed", async () => {
+      const tokenId = "token-d1-window-missed";
+      legStateRepo = createMockLegStateRepo([
+        makeR37LegState(tokenId, { lastTradeAtMsAgo: 120_000 }),
+      ]);
+
+      const signalCalls = await emitOne(tokenId, 0.03);
+
+      expect(signalCalls.length).toBe(0);
+    });
+
+    it("does not suppress D3 because state is S1", async () => {
+      const tokenId = "token-d3-allowed";
+      legStateRepo = createMockLegStateRepo([
+        makeR37LegState(tokenId, { buyCount: 1, sellCount: 1, lastAction: "BUY" }),
+      ]);
+
+      const signalCalls = await emitOne(tokenId, 0.03);
+
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D3");
+    });
+
+    it("does not suppress D4 SELL", async () => {
+      const tokenId = "token-d4-allowed";
+      legStateRepo = createMockLegStateRepo([makeR37LegState(tokenId)]);
+
+      const signalCalls = await emitOne(tokenId, 0.25);
+
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D4");
+      expect(signalCalls[0]![1].signal.side).toBe("sell");
+    });
+
+    it("does not suppress D7 SELL", async () => {
+      const tokenId = "token-d7-allowed";
+      legStateRepo = createMockLegStateRepo([
+        makeR37LegState(tokenId, { sellCount: 1, lastAction: "SELL" }),
+      ]);
+
+      const signalCalls = await emitOne(tokenId, 0.1);
+
+      expect(signalCalls.length).toBe(1);
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D7");
+      expect(signalCalls[0]![1].signal.side).toBe("sell");
+    });
+  });
+
   describe("hard-liveness gate for new entries", () => {
     it("skips SignalProduced when a new-entry market has acceptingOrders=false", async () => {
       const tokenId = "token-not-accepting";
@@ -1868,17 +2063,14 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
-    // REDEEM uses a separate (NegRisk-contract) pipeline that does NOT go
-    // through the signal-to-order bridge, so it must still fire even when
-    // the CLOB has dropped liveness.
-    it("still emits RedeemRequested for an S2 legged token when market is unhealthy", async () => {
+    it("suppresses legacy-REDEEM fallback BUY when market is unhealthy", async () => {
       const tokenId = "token-redeem-unhealthy";
       const conditionId = "cond-redeem-unhealthy";
       const twentyFiveMinAgo = new Date(Date.now() - 25 * 60 * 1000).toISOString();
       const legState: LegState = {
         tokenId: createTokenId(tokenId),
         buyCount: 2,
-        sellCount: 0, // S2 + price<0.05 + holdDuration ≤ 3600s → REDEEM-S2
+        sellCount: 0,
         lastAction: "BUY",
         firstTradePrice: 0.1,
         firstTradeAt: twentyFiveMinAgo,
@@ -1890,7 +2082,7 @@ describe("AlgoDecisionModule", () => {
       const mod = buildModule();
       await mod.start();
 
-      // Unhealthy market (acceptingOrders=false) — gate must still let REDEEM through.
+      // Unhealthy market (acceptingOrders=false) suppresses the CLOB fallback BUY.
       const market = {
         ...makeMarket(tokenId, null, 0.03, conditionId),
         acceptingOrders: false,
@@ -1903,11 +2095,7 @@ describe("AlgoDecisionModule", () => {
       const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
       const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
       const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
-      expect(redeemCalls.length).toBe(1);
-      expect(
-        (redeemCalls[0]![1] as import("@plankton/domain").RuntimeEventMap["RedeemRequested"])
-          .conditionIds,
-      ).toContain(conditionId);
+      expect(redeemCalls.length).toBe(0);
       expect(signalCalls.length).toBe(0);
 
       await mod.stop();
@@ -2377,7 +2565,7 @@ describe("AlgoDecisionModule", () => {
     expect(signal.side).toBe("buy");
     expect(signal.decisionRuleId).toBe("FALLBACK");
     // B5 size rule: nth_buy=1 (first purchase) → 2.10 USDC
-    expect(signal.suggestedSizeUsdc).toBeCloseTo(2.1, 5);
+    expect(signal.suggestedSizeUsdc).toBeCloseTo(0.99, 5);
 
     await mod.stop();
   });
@@ -2419,6 +2607,7 @@ describe("AlgoDecisionModule", () => {
         entryPriceCeiling: 0.99,
         exitOrderTtlMs: 60_000,
         entryMinMarketAgeSeconds,
+        marketSelection: { maxMidPrice: 0.5, minLiquidity: 100 },
         deadSideGuard: { mode: "off" as const, askCeiling: 0.2, maxTimeToEndMs: 0 },
         pricing: {
           mode: "edge" as const,
@@ -2528,14 +2717,14 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
-    it("does NOT gate SELL on an existing leg even when gammaCreatedAt is too young", async () => {
+    it("does NOT gate existing-leg fallback BUY even when gammaCreatedAt is too young", async () => {
       const tokenId = "token-sell-not-gated";
       const conditionId = "cond-sell-not-gated";
       const twentyFiveMinAgo = new Date(Date.now() - 25 * 60 * 1000).toISOString();
       const legState: LegState = {
         tokenId: createTokenId(tokenId),
         buyCount: 2,
-        sellCount: 0, // S2 + price<0.05 → REDEEM-S2
+        sellCount: 0,
         lastAction: "BUY",
         firstTradePrice: 0.1,
         firstTradeAt: twentyFiveMinAgo,
@@ -2549,7 +2738,7 @@ describe("AlgoDecisionModule", () => {
 
       const market: NormalizedMarket = {
         ...makeMarket(tokenId, null, 0.03, conditionId),
-        // Recent createdAt (would gate a fresh BUY) — must NOT block REDEEM.
+        // Recent createdAt would gate a fresh BUY, but this token has an existing leg.
         gammaCreatedAt: new Date(Date.now() - 60_000).toISOString(),
       };
       await (bus as any).emit("NormalizedMarketUpdated", {
@@ -2559,7 +2748,9 @@ describe("AlgoDecisionModule", () => {
 
       const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
       const redeemCalls = publishCalls.filter(([ev]) => ev === "RedeemRequested");
-      expect(redeemCalls.length).toBe(1);
+      const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
+      expect(redeemCalls.length).toBe(0);
+      expect(signalCalls.length).toBe(1);
 
       await mod.stop();
     });

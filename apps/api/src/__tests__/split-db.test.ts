@@ -414,7 +414,7 @@ describe("API against real split schemas", () => {
         .run(
           JSON.stringify({
             version: 1,
-            entryPriceCeiling: 0.75,
+            entryPriceCeiling: 0.45,
             exitOrderTtlMs: 15000,
             deadSideGuard: { mode: "observe", askCeiling: 0.02, maxTimeToEndMs: 120000 },
             pricing: {

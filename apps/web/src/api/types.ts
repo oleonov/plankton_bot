@@ -74,6 +74,11 @@ export interface ExecutionTelemetryPolicy {
   pricingShadow: boolean;
 }
 
+export interface MarketSelectionPolicy {
+  maxMidPrice: number;
+  minLiquidity: number;
+}
+
 export interface ExecutionPolicyDTO {
   version: 1;
   entryPriceCeiling: number;
@@ -84,6 +89,7 @@ export interface ExecutionPolicyDTO {
    * per spec §1.7 R1 (`06:423`).
    */
   entryMinMarketAgeSeconds: number;
+  marketSelection: MarketSelectionPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   telemetry: ExecutionTelemetryPolicy;

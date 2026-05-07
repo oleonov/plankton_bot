@@ -10,6 +10,14 @@ import { SelectionRuleEngine } from "./selection-rule-engine.js";
 import type { SelectionRule, HealthInput, HealthFailReason } from "./types.js";
 
 const EMPTY_ENGINE = new SelectionRuleEngine([]);
+const VALID_PRE_ENTRY = {
+  eventSlug: "fed-rate-cut-in-2026",
+  slug: "fed-rate-cut-yes",
+  eventMarketCount: 4,
+  question: "Will the Fed cut rates in 2026?",
+  midPrice: 0.32,
+  liquidity: 250,
+};
 
 function engineWith(
   rules: Array<Partial<SelectionRule> & Pick<SelectionRule, "ruleId" | "ruleType" | "pattern">>,
@@ -27,9 +35,20 @@ function engineWith(
 }
 
 describe("evaluatePreEntry", () => {
-  it("matched_include when rule admits", () => {
-    const engine = engineWith([{ ruleId: "r1", ruleType: "include_prefix", pattern: "bitcoin-" }]);
-    const r = evaluatePreEntry(engine, { eventSlug: "bitcoin-x", slug: "a", eventMarketCount: 3 });
+  it("includes when v5.11 hard filters pass without any prefix rule", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, VALID_PRE_ENTRY);
+    expect(r).toEqual({
+      finalStatus: "INCLUDE",
+      selectionStatus: "matched_include",
+      winningRuleId: null,
+    });
+  });
+
+  it("keeps exact include_slug attribution only after hard filters pass", () => {
+    const engine = engineWith([
+      { ruleId: "r1", ruleType: "include_slug", pattern: "fed-rate-cut-yes" },
+    ]);
+    const r = evaluatePreEntry(engine, VALID_PRE_ENTRY);
     expect(r).toEqual({
       finalStatus: "INCLUDE",
       selectionStatus: "matched_include",
@@ -37,27 +56,25 @@ describe("evaluatePreEntry", () => {
     });
   });
 
-  it("matched_exclude when exclude rule hits", () => {
-    const engine = engineWith([{ ruleId: "r1", ruleType: "exclude_slug", pattern: "spam" }]);
-    const r = evaluatePreEntry(engine, { eventSlug: "any", slug: "spam", eventMarketCount: 1 });
+  it("keeps exact include_slug attribution when hard filters reject the market", () => {
+    const engine = engineWith([
+      { ruleId: "r1", ruleType: "include_slug", pattern: "fed-rate-cut-yes" },
+    ]);
+    const r = evaluatePreEntry(engine, { ...VALID_PRE_ENTRY, liquidity: 20 });
     expect(r).toEqual({
       finalStatus: "EXCLUDE",
-      selectionStatus: "matched_exclude",
+      selectionStatus: "fallback_exclude",
       winningRuleId: "r1",
     });
   });
 
-  it("step2_fallback_include when no_match and single-market event", () => {
-    const r = evaluatePreEntry(EMPTY_ENGINE, { eventSlug: "any", slug: "a", eventMarketCount: 1 });
-    expect(r).toEqual({
-      finalStatus: "INCLUDE",
-      selectionStatus: "step2_fallback_include",
-      winningRuleId: null,
+  it("ignores legacy include_prefix rules", () => {
+    const engine = engineWith([{ ruleId: "r1", ruleType: "include_prefix", pattern: "bitcoin-" }]);
+    const r = evaluatePreEntry(engine, {
+      ...VALID_PRE_ENTRY,
+      eventSlug: "bitcoin-price-above-100k",
+      midPrice: 0.51,
     });
-  });
-
-  it("fallback_exclude when no_match and multi-market event", () => {
-    const r = evaluatePreEntry(EMPTY_ENGINE, { eventSlug: "any", slug: "a", eventMarketCount: 3 });
     expect(r).toEqual({
       finalStatus: "EXCLUDE",
       selectionStatus: "fallback_exclude",
@@ -65,10 +82,86 @@ describe("evaluatePreEntry", () => {
     });
   });
 
-  it("null eventSlug + step2 fallback", () => {
-    const r = evaluatePreEntry(EMPTY_ENGINE, { eventSlug: null, slug: "a", eventMarketCount: 1 });
+  it("matched_exclude when exact exclude_slug hits", () => {
+    const engine = engineWith([{ ruleId: "r1", ruleType: "exclude_slug", pattern: "spam" }]);
+    const r = evaluatePreEntry(engine, { ...VALID_PRE_ENTRY, slug: "spam" });
+    expect(r).toEqual({
+      finalStatus: "EXCLUDE",
+      selectionStatus: "matched_exclude",
+      winningRuleId: "r1",
+    });
+  });
+
+  it("excludes at mid_price >= 0.50", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, { ...VALID_PRE_ENTRY, midPrice: 0.5 });
+    expect(r).toEqual({
+      finalStatus: "EXCLUDE",
+      selectionStatus: "fallback_exclude",
+      winningRuleId: null,
+    });
+  });
+
+  it("excludes below liquidity floor", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, { ...VALID_PRE_ENTRY, liquidity: 99.99 });
+    expect(r).toEqual({
+      finalStatus: "EXCLUDE",
+      selectionStatus: "fallback_exclude",
+      winningRuleId: null,
+    });
+  });
+
+  it("excludes zero-coverage R9 category markets", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, {
+      ...VALID_PRE_ENTRY,
+      eventSlug: "btc-up-or-down-5m",
+      slug: "btc-up-or-down-5m",
+      question: "Bitcoin up or down in the next 5m?",
+    });
+    expect(r).toEqual({
+      finalStatus: "EXCLUDE",
+      selectionStatus: "fallback_exclude",
+      winningRuleId: null,
+    });
+  });
+
+  it("does not exclude unrelated slugs that merely contain 5m", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, {
+      ...VALID_PRE_ENTRY,
+      eventSlug: "us-stock-market-5m-vix-above-20",
+      slug: "us-stock-market-5m-vix-above-20",
+      question: "Will the VIX be above 20 in a five minute window?",
+    });
     expect(r.finalStatus).toBe("INCLUDE");
-    expect(r.selectionStatus).toBe("step2_fallback_include");
+  });
+
+  it("does not exclude non-soccer lottery draw markets", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, {
+      ...VALID_PRE_ENTRY,
+      eventSlug: "lottery-draw-jackpot",
+      slug: "lottery-draw-jackpot",
+      question: "Will the lottery draw jackpot exceed $1 billion?",
+    });
+    expect(r.finalStatus).toBe("INCLUDE");
+  });
+
+  it("excludes soccer draw markets from the R9 zero-coverage category", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, {
+      ...VALID_PRE_ENTRY,
+      eventSlug: "arsenal-match-draw",
+      slug: "arsenal-match-draw",
+      question: "Will the Arsenal match end in a draw?",
+    });
+    expect(r.finalStatus).toBe("EXCLUDE");
+  });
+
+  it("does not use single-market fallback when hard filters fail", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, {
+      ...VALID_PRE_ENTRY,
+      eventMarketCount: 1,
+      liquidity: null,
+    });
+    expect(r.finalStatus).toBe("EXCLUDE");
+    expect(r.selectionStatus).toBe("fallback_exclude");
   });
 });
 

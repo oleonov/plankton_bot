@@ -23,6 +23,10 @@ function normalizePattern(raw: string): string {
   return raw.trim().toLowerCase();
 }
 
+function isDeprecatedPrefixRuleType(type: SelectionRuleType): boolean {
+  return type === "include_prefix" || type === "exclude_prefix";
+}
+
 // ─── RulesTable ──────────────────────────────────────────────────────────────
 
 interface RulesTableProps {
@@ -75,13 +79,20 @@ function RulesTable({ rules, profileId }: RulesTableProps) {
               >
                 {rule.ruleType}
               </span>
+              {isDeprecatedPrefixRuleType(rule.ruleType) && (
+                <span style={{ color: "var(--text-dim)", fontSize: 10, marginLeft: 6 }}>
+                  deprecated
+                </span>
+              )}
             </td>
             <td style={{ fontFamily: "monospace", fontSize: 12 }}>{rule.pattern}</td>
             <td>
               <button
                 data-testid={`toggle-${rule.ruleId}`}
                 onClick={() => handleToggle(rule)}
-                disabled={update.isPending}
+                disabled={
+                  update.isPending || (!rule.enabled && isDeprecatedPrefixRuleType(rule.ruleType))
+                }
                 style={{
                   background: rule.enabled ? "var(--green)" : "var(--bg-elevated)",
                   color: rule.enabled ? "#fff" : "var(--text-dim)",
@@ -89,8 +100,16 @@ function RulesTable({ rules, profileId }: RulesTableProps) {
                   borderRadius: 4,
                   padding: "2px 10px",
                   fontSize: 11,
-                  cursor: "pointer",
+                  cursor:
+                    !rule.enabled && isDeprecatedPrefixRuleType(rule.ruleType)
+                      ? "not-allowed"
+                      : "pointer",
                 }}
+                title={
+                  !rule.enabled && isDeprecatedPrefixRuleType(rule.ruleType)
+                    ? "Prefix rules are deprecated since v5.11"
+                    : undefined
+                }
               >
                 {rule.enabled ? "Enabled" : "Disabled"}
               </button>
@@ -129,7 +148,7 @@ interface CreateFormProps {
 
 function CreateForm({ profileId }: CreateFormProps) {
   const create = useCreateSelectionRule();
-  const [ruleType, setRuleType] = useState<SelectionRuleType>("include_prefix");
+  const [ruleType, setRuleType] = useState<SelectionRuleType>("include_slug");
   const [pattern, setPattern] = useState("");
   const [note, setNote] = useState("");
 
@@ -163,8 +182,6 @@ function CreateForm({ profileId }: CreateFormProps) {
           onChange={(e) => setRuleType(e.target.value as SelectionRuleType)}
           style={{ fontSize: 12, padding: "4px 8px" }}
         >
-          <option value="include_prefix">include_prefix</option>
-          <option value="exclude_prefix">exclude_prefix</option>
           <option value="include_slug">include_slug</option>
           <option value="exclude_slug">exclude_slug</option>
         </select>
@@ -175,7 +192,7 @@ function CreateForm({ profileId }: CreateFormProps) {
           data-testid="pattern-input"
           value={pattern}
           onChange={(e) => setPattern(e.target.value)}
-          placeholder="bitcoin-"
+          placeholder="bitcoin-to-150k-by-2026"
           style={{ fontSize: 12, padding: "4px 8px", minWidth: 160 }}
         />
         {normalized && pattern !== normalized && (
@@ -276,7 +293,7 @@ function PreviewPanel({ profileId }: PreviewPanelProps) {
                 color="var(--green)"
               />
               <PreviewBucket
-                label="Step-2 Fallback Include"
+                label="Legacy Fallback Include"
                 rows={preview.data.step2FallbackInclude}
                 color="var(--blue)"
               />
@@ -443,7 +460,7 @@ function MatchDebugger({ profileId }: MatchDebuggerProps) {
                 </span>
               )}
               {match.data.step2Fallback && (
-                <span style={{ color: "var(--blue)" }}>Step-2 fallback applied</span>
+                <span style={{ color: "var(--blue)" }}>Legacy fallback applied</span>
               )}
             </div>
           )}
@@ -509,8 +526,8 @@ export function SelectionRules() {
         </select>
       </div>
       <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "0 0 8px" }}>
-        Rules are evaluated with specificity-wins logic: exact slug beats prefix; longer prefix
-        wins; exclude beats include at the same tier.
+        v5.11 admission is driven by hard filters. Exact slug rules are operator overrides for
+        individual markets; prefix rules are deprecated and not applied.
       </p>
       <p
         style={{
@@ -522,10 +539,9 @@ export function SelectionRules() {
           borderRadius: 4,
         }}
       >
-        Heads up: canonical spec §0 STEP 1 only defines <code>include_prefix</code> seeded with
-        three prefixes (bitcoin, ethereum, elon-musk). <code>exclude_prefix</code>,{" "}
-        <code>include_slug</code>, <code>exclude_slug</code>, and precedence are operator extensions
-        frozen in ADR-004. Review any rule beyond the seeded prefixes before shipping to live-lite.
+        Hard filters: mid price below the policy ceiling, liquidity at or above the policy floor,
+        and not in the v5.11/R9 zero-coverage category blacklist. Prefix rows from legacy DBs are
+        shown for cleanup only and cannot be re-enabled.
       </p>
 
       <RulesTable rules={rules} profileId={profileId} />
