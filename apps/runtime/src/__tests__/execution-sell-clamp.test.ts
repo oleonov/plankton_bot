@@ -134,7 +134,10 @@ function createMockFillRepo(): FillRepository {
   };
 }
 
-function createMockPositionRepo(positionSize: number): PositionRepository {
+function createMockPositionRepo(
+  positionSize: number,
+  status: Position["status"] = "open",
+): PositionRepository {
   const pos: Position = {
     positionId: createPositionId("pos-clamp-1"),
     tokenId: SELL_TOKEN,
@@ -145,7 +148,7 @@ function createMockPositionRepo(positionSize: number): PositionRepository {
     costBasisUsdc: positionSize * 0.5,
     currentValueUsdc: positionSize * 0.5,
     realizedPnl: 0,
-    status: "open",
+    status,
     entryStyle: null,
     openedAt: new Date().toISOString(),
     closedAt: null,
@@ -368,6 +371,39 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
     expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(5.73);
     expect(mod.getDiagnostics().sellSizeClamps).toBe(0);
+
+    await mod.stop();
+  });
+
+  it("allows SELL against a dust-labelled position that still has enough shares", async () => {
+    const positionRepo = createMockPositionRepo(10, "dust");
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      allowSellSizeClamp: true,
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(5.73, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      } as Partial<PlaceOrderCommand>),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(5.73);
 
     await mod.stop();
   });

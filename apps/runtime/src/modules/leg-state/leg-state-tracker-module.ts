@@ -58,18 +58,7 @@ export class LegStateTrackerModule implements RuntimeModule {
     let cleared = 0;
     for (const leg of allLegs) {
       const position = positionRepo.findByTokenId(leg.tokenId);
-      // Treat `dust` like `closed`: a dust position carries shares too small to
-      // sell (rejected as below CLOB min). Keeping the leg state alive feeds
-      // AlgoDecisionModule a recurring D7 SELL that ExecutionModule then
-      // rejects on every sweep — same failure mode as orphan legs on closed
-      // positions, just dressed up as a non-zero size.
-      if (
-        position &&
-        position.status !== "closed" &&
-        position.status !== "dust" &&
-        position.size > 0
-      )
-        continue;
+      if (position && position.status !== "closed" && position.size > 0) continue;
 
       recordLegStateClearTransition({
         transitionRepo: this.deps.legStateTransitionRepo,

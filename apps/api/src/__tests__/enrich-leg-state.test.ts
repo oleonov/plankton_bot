@@ -14,10 +14,10 @@ describe("derivePhase", () => {
     ).toBe("S0");
   });
 
-  it("returns S0 when position is dust regardless of leg state", () => {
+  it("keeps phase from leg state when a dust-labelled position still has a leg", () => {
     expect(
       derivePhase("dust", { buyCount: 2, sellCount: 0, lastAction: "BUY", lastActionAt: null }),
-    ).toBe("S0");
+    ).toBe("S2");
   });
 
   it("returns S0 when leg state is empty (no fills yet)", () => {

@@ -430,12 +430,7 @@ describe("LegStateTrackerModule", () => {
       expect(repo.get(TOK)).not.toBeNull();
     });
 
-    it("clears orphan leg whose position has status 'dust' (below CLOB min, can't be sold)", async () => {
-      // Regression: dust positions still have size > 0 but can't be liquidated
-      // (below the exchange minimum). Without this case, AlgoDecisionModule
-      // keeps emitting D7 SELL on every sweep and ExecutionModule rejects
-      // them — same orphan-leg failure mode as closed positions, just with a
-      // non-zero size on the position row.
+    it("keeps leg state for dust positions that still carry shares", async () => {
       seedLeg(repo, TOK);
       const dust: Position = {
         ...makeOpenPosition(TOK, 0.0001),
@@ -451,7 +446,7 @@ describe("LegStateTrackerModule", () => {
       });
       await mod.start();
 
-      expect(repo.get(TOK)).toBeNull();
+      expect(repo.get(TOK)).not.toBeNull();
     });
   });
 

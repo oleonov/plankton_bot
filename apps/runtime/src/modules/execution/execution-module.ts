@@ -682,7 +682,7 @@ export class ExecutionModule implements RuntimeModule {
     if (!this.deps.positionRepo) return { kind: "accept" };
 
     const position = this.deps.positionRepo.findByTokenId(cmd.tokenId);
-    if (!position || position.status !== "open") {
+    if (!position || position.status === "closed") {
       return {
         kind: "reject",
         reason: "reserved-token-limit",

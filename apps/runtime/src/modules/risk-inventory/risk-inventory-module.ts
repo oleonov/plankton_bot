@@ -385,9 +385,7 @@ export class RiskInventoryModule implements RuntimeModule {
   private async handleMarketUpdate(
     payload: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
-    // Build lookup: tokenId → price that can be realized by selling long inventory now.
-    // No bid means no immediately sellable value; never keep a stale positive mark.
-    const priceMap = new Map<string, number>();
+    const markPriceByToken = new Map<string, number>();
     for (const m of payload.markets) {
       if (
         typeof m.minOrderSize === "number" &&
@@ -396,19 +394,27 @@ export class RiskInventoryModule implements RuntimeModule {
       ) {
         this.tokenMinOrderSize.set(String(m.tokenId), m.minOrderSize);
       }
-      priceMap.set(String(m.tokenId), m.bestBid ?? 0);
+      if (typeof m.midPrice === "number" && Number.isFinite(m.midPrice)) {
+        markPriceByToken.set(String(m.tokenId), m.midPrice);
+      }
     }
-    if (priceMap.size === 0) return;
+    if (markPriceByToken.size === 0) return;
 
     // Revalue all non-closed wallet inventory; dust can become open again.
     const openPositions = findActivePositions(this.deps.positionRepo);
     let updated = 0;
     for (const pos of openPositions) {
-      const livePrice = priceMap.get(String(pos.tokenId));
-      if (livePrice === undefined) continue;
+      const markPrice = markPriceByToken.get(String(pos.tokenId));
+      if (markPrice === undefined) continue;
 
-      const newValue = pos.size * livePrice;
-      const nextStatus = pos.status === "closed" ? "closed" : resolveOpenPositionStatus(newValue);
+      const newValue = pos.size * markPrice;
+      const nextStatus =
+        pos.status === "closed"
+          ? "closed"
+          : resolveOpenPositionStatus(newValue, {
+              size: pos.size,
+              minOrderSize: this.getLatestMinOrderSize(pos.tokenId),
+            });
       if (
         pos.currentValueUsdc !== null &&
         Math.abs(newValue - pos.currentValueUsdc) < 0.001 &&

@@ -71,7 +71,7 @@ export function getLegStateOrEmpty(map: Map<string, LegStateInfo>, tokenId: stri
 
 /**
  * Phase derivation per design handoff + 06_algorithm_spec:
- *   S0 — no open shares (dust/closed) OR no leg_state yet.
+ *   S0 — no open shares (closed) OR no leg_state yet.
  *   S1 — buy_count === 1 AND last_action === BUY   (first entry).
  *   S2 — buy_count >= 2 AND last_action === BUY    (accumulating).
  *   S3 — position still open AND last_action === SELL (distributing).
@@ -80,7 +80,7 @@ export function getLegStateOrEmpty(map: Map<string, LegStateInfo>, tokenId: stri
  * (README §"State machine").
  */
 export function derivePhase(positionStatus: string, leg: LegStateInfo): Phase {
-  if (positionStatus === "closed" || positionStatus === "dust") return "S0";
+  if (positionStatus === "closed") return "S0";
   if (leg.buyCount === 0 && leg.sellCount === 0) return "S0";
   if (leg.lastAction === "SELL") return "S3";
   if (leg.lastAction === "BUY" && leg.buyCount === 1) return "S1";

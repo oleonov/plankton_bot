@@ -97,8 +97,8 @@ beforeAll(async () => {
   seedPosition(db, { id: "pos-s0-closed", tok: "tok-s0-closed", status: "closed" });
   seedLegState(db, { tok: "tok-s0-closed", buyCount: 1, sellCount: 1, lastAction: "SELL" });
 
-  seedPosition(db, { id: "pos-s0-dust", tok: "tok-s0-dust", status: "dust" });
-  seedLegState(db, { tok: "tok-s0-dust", buyCount: 2, sellCount: 0, lastAction: "BUY" });
+  seedPosition(db, { id: "pos-s2-dust", tok: "tok-s2-dust", status: "dust" });
+  seedLegState(db, { tok: "tok-s2-dust", buyCount: 2, sellCount: 0, lastAction: "BUY" });
 
   seedPosition(db, { id: "pos-s0-no-leg", tok: "tok-s0-no-leg", status: "open" });
   // intentionally no leg_state row for tok-s0-no-leg
@@ -141,7 +141,7 @@ describe("GET /positions — phase + leg state enrichment", () => {
     const byId = Object.fromEntries(body.data.items.map((p) => [p.positionId, p]));
 
     expect(byId["pos-s0-closed"]).toMatchObject({ phase: "S0" });
-    expect(byId["pos-s0-dust"]).toMatchObject({ phase: "S0" });
+    expect(byId["pos-s2-dust"]).toMatchObject({ phase: "S2" });
     expect(byId["pos-s0-no-leg"]).toMatchObject({
       phase: "S0",
       buyCount: 0,

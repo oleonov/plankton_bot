@@ -1324,13 +1324,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     if (this.buyBudgetCooldownUntilMs > now) {
-      const recoveryNotionalUsdc = this.buyBudgetRecoveryNotionalUsdc || signal.suggestedSizeUsdc;
-      const recovered = this.canAttemptBuyNotional(recoveryNotionalUsdc, signal);
-      if (recovered !== true) {
-        this.buyBudgetSuppressedSignals++;
-        return true;
-      }
-      this.clearBuyBudgetCooldown(now, "budget_recovered");
+      this.buyBudgetSuppressedSignals++;
+      return true;
     }
 
     const canAttempt = this.canAttemptBuyNotional(signal.suggestedSizeUsdc, signal);
@@ -1399,7 +1394,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
-  private clearBuyBudgetCooldown(now: number, reason: "budget_recovered" | "expired"): void {
+  private clearBuyBudgetCooldown(now: number, reason: "expired"): void {
     const suppressedSignals = this.buyBudgetSuppressedSignals;
     this.buyBudgetCooldownUntilMs = 0;
     this.buyBudgetSuppressedSignals = 0;

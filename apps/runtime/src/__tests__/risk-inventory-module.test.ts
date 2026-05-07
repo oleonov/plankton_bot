@@ -1398,7 +1398,7 @@ describe("RiskInventoryModule", () => {
       mod = createModule();
       await mod.start();
 
-      // Market moves from 0.05 to 0.07 sellable bid → new value = 100 * 0.07 = 7.0
+      // Market moves from 0.05 to 0.08 mark price → new value = 100 * 0.08 = 8.0
       await bus.publish("NormalizedMarketUpdated", {
         markets: [
           {
@@ -1435,13 +1435,13 @@ describe("RiskInventoryModule", () => {
       const saveCalls = (positionRepo.save as any).mock.calls;
       expect(saveCalls.length).toBeGreaterThanOrEqual(1);
       const savedPos = saveCalls[saveCalls.length - 1][0];
-      expect(savedPos.currentValueUsdc).toBeCloseTo(7.0, 2);
+      expect(savedPos.currentValueUsdc).toBeCloseTo(8.0, 2);
       expect(savedPos.status).toBe("open");
 
       await mod.stop();
     });
 
-    it("values long inventory at the sellable side instead of midpoint", async () => {
+    it("values long inventory at midpoint/current price instead of thin best bid", async () => {
       const pos: Position = {
         positionId: createPositionId("pos-wide-spread"),
         tokenId: TOK_ID,
@@ -1463,7 +1463,7 @@ describe("RiskInventoryModule", () => {
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
-        markets: [makeMarket({ bestBid: 0.07, bestAsk: 0.09, midPrice: 0.08 })],
+        markets: [makeMarket({ bestBid: 0.003, bestAsk: 0.125, midPrice: 0.064 })],
         timestamp: Date.now(),
       });
       await bus.drain();
@@ -1471,12 +1471,13 @@ describe("RiskInventoryModule", () => {
       const saveCalls = (positionRepo.save as any).mock.calls;
       expect(saveCalls.length).toBeGreaterThanOrEqual(1);
       const savedPos = saveCalls[saveCalls.length - 1][0];
-      expect(savedPos.currentValueUsdc).toBeCloseTo(7.0, 2);
+      expect(savedPos.currentValueUsdc).toBeCloseTo(6.4, 2);
+      expect(savedPos.status).toBe("open");
 
       await mod.stop();
     });
 
-    it("marks long inventory as zero value when no best bid exists", async () => {
+    it("skips mark-to-market when midpoint/current price is unavailable", async () => {
       const pos: Position = {
         positionId: createPositionId("pos-no-bid"),
         tokenId: TOK_ID,
@@ -1504,10 +1505,7 @@ describe("RiskInventoryModule", () => {
       await bus.drain();
 
       const saveCalls = (positionRepo.save as any).mock.calls;
-      expect(saveCalls.length).toBeGreaterThanOrEqual(1);
-      const savedPos = saveCalls[saveCalls.length - 1][0];
-      expect(savedPos.currentValueUsdc).toBe(0);
-      expect(savedPos.status).toBe("dust");
+      expect(saveCalls).toHaveLength(0);
 
       await mod.stop();
     });
@@ -1569,8 +1567,52 @@ describe("RiskInventoryModule", () => {
       const saveCalls = (positionRepo.save as any).mock.calls;
       expect(saveCalls.length).toBeGreaterThanOrEqual(1);
       const savedPos = saveCalls[saveCalls.length - 1][0];
-      expect(savedPos.currentValueUsdc).toBeCloseTo(0.19, 2);
+      expect(savedPos.currentValueUsdc).toBeCloseTo(0.2, 2);
       expect(savedPos.status).toBe("dust");
+
+      await mod.stop();
+    });
+
+    it("keeps sellable low-bid positions open when share size exceeds min order", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-sellable-low-bid"),
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+
+        side: "buy",
+        size: 105,
+        avgEntryPrice: 0.02,
+        costBasisUsdc: 2.1,
+        currentValueUsdc: 0.315,
+        realizedPnl: 0,
+        status: "dust",
+        entryStyle: null,
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule();
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [
+          makeMarket({
+            bestBid: 0.003,
+            bestAsk: 0.05,
+            midPrice: 0.0265,
+            minOrderSize: 5,
+          }),
+        ],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls.length).toBeGreaterThanOrEqual(1);
+      const savedPos = saveCalls[saveCalls.length - 1][0];
+      expect(savedPos.currentValueUsdc).toBeCloseTo(2.7825, 4);
+      expect(savedPos.status).toBe("open");
 
       await mod.stop();
     });
@@ -1632,7 +1674,7 @@ describe("RiskInventoryModule", () => {
       const saveCalls = (positionRepo.save as any).mock.calls;
       expect(saveCalls.length).toBeGreaterThanOrEqual(1);
       const savedPos = saveCalls[saveCalls.length - 1][0];
-      expect(savedPos.currentValueUsdc).toBeCloseTo(5.046, 5);
+      expect(savedPos.currentValueUsdc).toBeCloseTo(5.11328, 5);
       expect(savedPos.status).toBe("open");
 
       await mod.stop();
