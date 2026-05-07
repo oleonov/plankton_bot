@@ -2,6 +2,7 @@ import type { MarketRepository, Position, PositionRepository, TokenId } from "@p
 import { createTokenId } from "@plankton/domain";
 import type { PolymarketDataPosition, PolymarketPositionReader } from "@plankton/exchange";
 import type { Logger } from "../../logger.js";
+import { resolveOpenPositionStatus } from "../../position-status.js";
 
 const MIN_REMOTE_SIZE = 1e-9;
 // Polymarket data-api returns size with 4 decimals; local DB stores 6.
@@ -13,6 +14,7 @@ const SIZE_DRIFT_EPSILON = 1e-3;
 export interface WalletPositionSentinelResult {
   driftCount: number;
   details: string[];
+  markUpdateCount: number;
   closedLivePositions: ClosedLivePositionDrift[];
   activePositionDrifts: ActivePositionSizeDrift[];
   /**
@@ -68,6 +70,7 @@ export async function runWalletPositionSentinel(
   const empty: WalletPositionSentinelResult = {
     driftCount: 0,
     details: [],
+    markUpdateCount: 0,
     closedLivePositions: [],
     activePositionDrifts: [],
     missingRemotePositions: [],
@@ -86,6 +89,7 @@ export async function runWalletPositionSentinel(
   const closedDrifts: ClosedLivePositionDrift[] = [];
   const activeDrifts: ActivePositionSizeDrift[] = [];
   const missingRemoteDrifts: MissingRemotePositionDrift[] = [];
+  let markUpdateCount = 0;
 
   // Tokens for which Polymarket reports a meaningful position. Used below to
   // detect the inverse case (local active/dust but no remote row) without
@@ -101,6 +105,9 @@ export async function runWalletPositionSentinel(
 
     const active = latestActivePosition(localPositions);
     if (active) {
+      if (applyRemoteMark(deps.positionRepo, active, remote, nowMs)) {
+        markUpdateCount++;
+      }
       if (Math.abs(active.size - remote.size) > SIZE_DRIFT_EPSILON) {
         const market = deps.marketRepo.findByTokenId(createTokenId(remote.tokenId));
         activeDrifts.push({
@@ -166,6 +173,7 @@ export async function runWalletPositionSentinel(
 
   return {
     driftCount: closedDrifts.length + activeDrifts.length + missingRemoteDrifts.length,
+    markUpdateCount,
     details: [
       ...closedDrifts.map(formatClosedDriftDetail),
       ...activeDrifts.map(formatActiveDriftDetail),
@@ -175,6 +183,32 @@ export async function runWalletPositionSentinel(
     activePositionDrifts: activeDrifts,
     missingRemotePositions: missingRemoteDrifts,
   };
+}
+
+function applyRemoteMark(
+  positionRepo: PositionRepository,
+  position: Position,
+  remote: PolymarketDataPosition,
+  nowMs: number,
+): boolean {
+  if (!Number.isFinite(remote.currentValueUsdc)) return false;
+
+  const nextStatus = resolveOpenPositionStatus(remote.currentValueUsdc);
+  if (
+    position.currentValueUsdc !== null &&
+    Math.abs(position.currentValueUsdc - remote.currentValueUsdc) < 0.001 &&
+    position.status === nextStatus
+  ) {
+    return false;
+  }
+
+  positionRepo.save({
+    ...position,
+    currentValueUsdc: remote.currentValueUsdc,
+    status: nextStatus,
+    updatedAt: new Date(nowMs).toISOString(),
+  });
+  return true;
 }
 
 function groupPositionsByToken(positions: readonly Position[]): Map<string, Position[]> {

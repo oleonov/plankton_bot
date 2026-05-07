@@ -87,6 +87,7 @@ function reader(positions: PolymarketDataPosition[] | null): PolymarketPositionR
 function positionRepo(positions: Position[]): PositionRepository {
   return {
     findAll: vi.fn().mockReturnValue(positions),
+    save: vi.fn(),
   } as unknown as PositionRepository;
 }
 
@@ -126,6 +127,67 @@ describe("runWalletPositionSentinel", () => {
     );
 
     expect(result.driftCount).toBe(0);
+  });
+
+  it("updates active local mark and status from Polymarket data-api", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "dust",
+        size: 205,
+        costBasisUsdc: 2.05,
+        currentValueUsdc: 0.615,
+        realizedPnl: 0,
+        closedAt: null,
+      }),
+    ]);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 205, currentValueUsdc: 12.5049 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.markUpdateCount).toBe(1);
+    expect(repo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentValueUsdc: 12.5049,
+        status: "open",
+        size: 205,
+        updatedAt: "2026-04-25T00:00:00.000Z",
+      }),
+    );
+  });
+
+  it("does not rewrite active marks that already match Polymarket", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "open",
+        size: 12,
+        costBasisUsdc: 0.8,
+        currentValueUsdc: 1.23,
+        realizedPnl: 0,
+        closedAt: null,
+      }),
+    ]);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote()]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.markUpdateCount).toBe(0);
+    expect(repo.save).not.toHaveBeenCalled();
   });
 
   it("detects active local inventory whose size diverges from Polymarket", async () => {

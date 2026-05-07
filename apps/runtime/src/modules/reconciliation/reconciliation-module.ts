@@ -209,6 +209,7 @@ export class ReconciliationModule implements RuntimeModule {
         : {
             driftCount: 0,
             details: [],
+            markUpdateCount: 0,
             closedLivePositions: [],
             activePositionDrifts: [],
             missingRemotePositions: [],
@@ -281,6 +282,7 @@ export class ReconciliationModule implements RuntimeModule {
           staleEntryEndDate: staleResult.staleEndDateCancelled,
           staleExitTtl: staleResult.staleExitTtlCancelled,
           walletPositionDrifts: walletResult.driftCount,
+          walletPositionMarkUpdates: walletResult.markUpdateCount,
         },
         "reconciliation pass complete",
       );
