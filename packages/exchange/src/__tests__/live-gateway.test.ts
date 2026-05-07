@@ -496,7 +496,7 @@ describe("LiveExchangeGateway", () => {
     expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
   });
 
-  it("redeemPositions keeps pending state when wait result is empty and balances remain non-zero", async () => {
+  it("redeemPositions clears pending state when wait result is empty and balances remain non-zero", async () => {
     const wait = vi.fn().mockResolvedValue(null);
     const settlementClient = {
       execute: vi.fn().mockResolvedValue({ wait }),
@@ -513,8 +513,30 @@ describe("LiveExchangeGateway", () => {
 
     const conditionId = "0x9999999999999999999999999999999999999999999999999999999999999999";
     await expect(gw.redeemPositions([conditionId])).rejects.toThrow(
-      "Settlement transaction failed or returned empty result",
+      "Settlement transaction reached failed state before balances cleared",
     );
+
+    expect(wait).toHaveBeenCalledTimes(1);
+    expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
+  });
+
+  it("redeemPositions keeps pending state when confirmation check errors after submit", async () => {
+    const wait = vi.fn().mockRejectedValue(new Error("relayer poll timeout"));
+    const settlementClient = {
+      execute: vi.fn().mockResolvedValue({ wait }),
+    };
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "1000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await expect(gw.redeemPositions([conditionId])).resolves.toBeUndefined();
 
     expect(wait).toHaveBeenCalledTimes(1);
     expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(true);

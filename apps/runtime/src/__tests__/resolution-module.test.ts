@@ -782,6 +782,44 @@ describe("ResolutionModule", () => {
     );
   });
 
+  it("backs off resolution redeem failures without failing the whole check", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50 });
+    (gateway.redeemPositions as any).mockRejectedValue(new Error("relayer failed onchain"));
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution();
+    (detector.detect as any).mockResolvedValue([resolution]);
+    let saved = false;
+    (resolutionRepo.findByConditionId as any).mockImplementation(() =>
+      saved ? { conditionId: CONDITION } : null,
+    );
+    (resolutionRepo.save as any).mockImplementation(() => {
+      saved = true;
+    });
+
+    const events: unknown[] = [];
+    bus.subscribe("MarketResolved", async (e) => {
+      events.push(e);
+    });
+
+    const firstCount = await mod.runCheck();
+    const secondCount = await mod.runCheck();
+
+    expect(firstCount).toBe(0);
+    expect(secondCount).toBe(0);
+    expect(gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(gateway.getPositionBalance).not.toHaveBeenCalled();
+    expect(settler.settle as any).not.toHaveBeenCalled();
+    expect(events).toHaveLength(1);
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+      "resolution on-chain redeem failed — settlement deferred",
+    );
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+      "resolution on-chain redeem retry suppressed by back-off",
+    );
+  });
+
   it("settles without balance check when no gateway is provided", async () => {
     // No gateway = simulation/paper mode, settle immediately
     mod = createModule();

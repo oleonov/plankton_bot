@@ -192,18 +192,16 @@ export class ResolutionModule implements RuntimeModule {
       // per-conditionId circuit for innocent markets. Submitting per condition
       // keeps success/failure strictly scoped to its own id.
       for (const conditionId of gammaConfirmedNeedsRedeem) {
-        try {
-          await this.deps.gateway.redeemPositions([conditionId]);
+        const result = await this.submitRedeemAttempt(conditionId);
+        if (result.ok) {
           this.deps.log.info(
             { conditionIds: [conditionId] },
             "algo-triggered on-chain redeem submitted",
           );
-          this.redeemFailures.delete(conditionId);
           successfullyRedeemed.push(conditionId);
-        } catch (err) {
-          this.recordRedeemFailure([conditionId], Date.now());
+        } else {
           this.deps.log.error(
-            { err, conditionIds: [conditionId] },
+            { err: result.err, conditionIds: [conditionId] },
             "algo-triggered on-chain redeem failed",
           );
         }
@@ -595,13 +593,8 @@ export class ResolutionModule implements RuntimeModule {
 
       const preFilterCount = eligibleCandidates.length;
       if (this.deps.gateway && eligibleCandidates.length > 0) {
-        await this.deps.gateway.redeemPositions([resolution.conditionId]);
-
-        if (this.deps.gateway.hasPendingRedeemSubmission?.(resolution.conditionId) ?? false) {
-          this.deps.log.info(
-            { conditionId: resolution.conditionId },
-            "redeem submitted — deferring settlement verification until relayer confirms",
-          );
+        const redeemStatus = await this.submitResolutionRedeem(resolution.conditionId);
+        if (redeemStatus === "deferred") {
           if (!isRetry) {
             await this.publishMarketResolved(resolution);
           }
@@ -642,6 +635,48 @@ export class ResolutionModule implements RuntimeModule {
     }
 
     return totalSettled;
+  }
+
+  private async submitResolutionRedeem(conditionId: string): Promise<"ready" | "deferred"> {
+    if (this.isRedeemCircuitOpen(conditionId, Date.now())) {
+      this.deps.log.warn(
+        { conditionId },
+        "resolution on-chain redeem retry suppressed by back-off",
+      );
+      return "deferred";
+    }
+
+    const result = await this.submitRedeemAttempt(conditionId);
+    if (!result.ok) {
+      this.deps.log.warn(
+        { err: result.err, conditionId },
+        "resolution on-chain redeem failed — settlement deferred",
+      );
+      return "deferred";
+    }
+
+    if (this.deps.gateway?.hasPendingRedeemSubmission?.(conditionId) ?? false) {
+      this.deps.log.info(
+        { conditionId },
+        "redeem submitted — deferring settlement verification until relayer confirms",
+      );
+      return "deferred";
+    }
+
+    return "ready";
+  }
+
+  private async submitRedeemAttempt(
+    conditionId: string,
+  ): Promise<{ readonly ok: true } | { readonly ok: false; readonly err: unknown }> {
+    try {
+      await this.deps.gateway!.redeemPositions([conditionId]);
+      this.redeemFailures.delete(conditionId);
+      return { ok: true };
+    } catch (err) {
+      this.recordRedeemFailure([conditionId], Date.now());
+      return { ok: false, err };
+    }
   }
 
   /**

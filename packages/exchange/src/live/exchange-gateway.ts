@@ -87,6 +87,13 @@ type SettlementRequest = {
   precheckBalances?: readonly string[];
 };
 
+class SettlementTransactionFailedError extends Error {
+  constructor() {
+    super("Settlement transaction reached failed state before balances cleared");
+    this.name = "SettlementTransactionFailedError";
+  }
+}
+
 /** Lifecycle diagnostics for REDEEM/MERGE paths. Stdout JSON — picked up by docker log capture. */
 function logSettlementLifecycle(event: Record<string, unknown>): void {
   // eslint-disable-next-line no-console
@@ -102,7 +109,16 @@ function describeShape(value: unknown): Record<string, unknown> {
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj);
   const summary: Record<string, unknown> = { type: "object", keys };
-  for (const probe of ["txHash", "hash", "transactionHash", "blockNumber", "gasUsed", "status"]) {
+  for (const probe of [
+    "transactionID",
+    "txHash",
+    "hash",
+    "transactionHash",
+    "blockNumber",
+    "gasUsed",
+    "status",
+    "state",
+  ]) {
     if (probe in obj) {
       const v = obj[probe];
       summary[probe] = typeof v === "object" ? describeShape(v) : v;
@@ -365,8 +381,11 @@ export class LiveExchangeGateway implements ExchangeGateway {
         });
         await this.observeSettlementExecution(response, requests);
       } catch (e) {
+        const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
         logSettlementLifecycle({
-          lifecycle: "redeem_submit_error",
+          lifecycle: confirmedSettlementFailure
+            ? "redeem_settlement_failed"
+            : "redeem_submit_error",
           conditionIds: requests.map((r) => r.conditionId),
           elapsedMs: Date.now() - submitStartedAt,
           errorMessage: e instanceof Error ? e.message : String(e),
@@ -376,11 +395,13 @@ export class LiveExchangeGateway implements ExchangeGateway {
               ? (e as { reason?: unknown }).reason
               : undefined,
         });
-        this.reportInfraAlert(e);
-        console.error(
-          `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
-          sanitizeLogArg(e),
-        );
+        if (!confirmedSettlementFailure) {
+          this.reportInfraAlert(e);
+          console.error(
+            `Failed to submit relayer redeem for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
+            sanitizeLogArg(e),
+          );
+        }
         throw e;
       }
       return;
@@ -710,7 +731,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
           this.clearPendingRedeemSubmissions(requests);
           return;
         }
-        throw new Error("Settlement transaction failed or returned empty result");
+        this.clearPendingRedeemSubmissions(requests);
+        throw new SettlementTransactionFailedError();
       }
 
       logSettlementLifecycle({
@@ -721,28 +743,32 @@ export class LiveExchangeGateway implements ExchangeGateway {
       });
       this.clearPendingRedeemSubmissions(requests);
     } catch (err) {
+      if (err instanceof SettlementTransactionFailedError) {
+        throw err;
+      }
+
       const elapsedMs = Date.now() - waitStartedAt;
       const message = err instanceof Error ? err.message : String(err);
+      logSettlementLifecycle({
+        lifecycle: "redeem_wait_error",
+        conditionIds,
+        elapsedMs,
+        errorMessage: message,
+        errorName: err instanceof Error ? err.name : undefined,
+        responseShape,
+      });
+      this.reportInfraAlert(err);
       if (
-        message !== "Settlement transaction failed or returned empty result" // already logged above
-      ) {
-        logSettlementLifecycle({
-          lifecycle: "redeem_wait_error",
-          conditionIds,
-          elapsedMs,
-          errorMessage: message,
-          errorName: err instanceof Error ? err.name : undefined,
-          responseShape,
-        });
-      }
-      if (
-        message !== "Settlement transaction failed or returned empty result" &&
-        (await this.verifySettlementBalancesCleared(requests, "redeem_postcheck_after_wait_error"))
+        await this.verifySettlementBalancesCleared(requests, "redeem_postcheck_after_wait_error")
       ) {
         this.clearPendingRedeemSubmissions(requests);
         return;
       }
-      throw err;
+      logSettlementLifecycle({
+        lifecycle: "redeem_pending_after_wait_error",
+        conditionIds,
+        elapsedMs,
+      });
     }
   }
 
