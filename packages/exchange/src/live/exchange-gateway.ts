@@ -16,6 +16,7 @@ import type {
   ExchangeFill,
   ExchangeBalance,
   MarketFeeInfo,
+  RedeemPositionsOptions,
   TokenId,
   ExchangeUserEventStream,
   ExchangeUserOrderEvent,
@@ -85,6 +86,11 @@ type SettlementRequest = {
   precheckTokenIds?: readonly string[];
   /** Phase 1.A REDEEM instrumentation — decimal strings to preserve bigint precision in logs. */
   precheckBalances?: readonly string[];
+};
+
+type MarketTokenEntry = {
+  readonly tokenId: string;
+  readonly index: number;
 };
 
 class SettlementTransactionFailedError extends Error {
@@ -357,10 +363,13 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return this.getRawPositionBalance(String(tokenId));
   }
 
-  async redeemPositions(conditionIds: string[]): Promise<void> {
+  async redeemPositions(conditionIds: string[], options?: RedeemPositionsOptions): Promise<void> {
     const settlementExecute = this.getSettlementExecuteMethod();
     if (settlementExecute) {
-      const requests = await this.buildRedeemRequests(conditionIds);
+      const requests = await this.buildRedeemRequests(
+        conditionIds,
+        options?.redeemTokenIdsByCondition,
+      );
       if (requests.length === 0) return;
 
       const submitStartedAt = Date.now();
@@ -566,11 +575,17 @@ export class LiveExchangeGateway implements ExchangeGateway {
     };
   }
 
-  private async buildRedeemRequests(conditionIds: string[]): Promise<SettlementRequest[]> {
+  private async buildRedeemRequests(
+    conditionIds: string[],
+    redeemTokenIdsByCondition?: Readonly<Record<string, readonly TokenId[]>>,
+  ): Promise<SettlementRequest[]> {
     const requests: SettlementRequest[] = [];
     for (const conditionId of conditionIds) {
       if (this.wasRedeemRecentlySubmitted(conditionId)) continue;
-      const request = await this.buildRedeemRequest(conditionId);
+      const request = await this.buildRedeemRequest(
+        conditionId,
+        redeemTokenIdsByCondition?.[conditionId],
+      );
       if (request) requests.push(request);
     }
     return requests;
@@ -584,20 +599,38 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return false;
   }
 
-  private async buildRedeemRequest(conditionId: string): Promise<SettlementRequest | null> {
+  private async buildRedeemRequest(
+    conditionId: string,
+    redeemTokenIds?: readonly TokenId[],
+  ): Promise<SettlementRequest | null> {
     const market = await this.client.getMarket(conditionId);
-    const tokenIds = this.extractMarketTokenIds(market);
-    if (tokenIds.length === 0) {
+    const tokenEntries = this.extractMarketTokenEntries(market);
+    if (tokenEntries.length === 0) {
       logSettlementLifecycle({ lifecycle: "redeem_skip_no_tokens", conditionId });
+      return null;
+    }
+
+    const allowedTokenIds = redeemTokenIds ? new Set(redeemTokenIds.map(String)) : null;
+    const redeemEntries = allowedTokenIds
+      ? tokenEntries.filter((entry) => allowedTokenIds.has(entry.tokenId))
+      : tokenEntries;
+    if (redeemEntries.length === 0) {
+      logSettlementLifecycle({
+        lifecycle: "redeem_skip_no_redeem_tokens",
+        conditionId,
+        requestedTokenIds: redeemTokenIds?.map(String) ?? [],
+        marketTokenIds: tokenEntries.map((entry) => entry.tokenId),
+      });
       return null;
     }
 
     const chainId = this.getChainId();
     const contracts = getContractConfig(chainId);
     const balances = await Promise.all(
-      tokenIds.map((tokenId) => this.getRawPositionBalance(tokenId)),
+      redeemEntries.map((entry) => this.getRawPositionBalance(entry.tokenId)),
     );
     const balanceStrings = balances.map((b) => b.toString());
+    const tokenIds = redeemEntries.map((entry) => entry.tokenId);
 
     if (balances.every((balance) => balance === 0n)) {
       logSettlementLifecycle({
@@ -618,10 +651,17 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
     const isNegRisk = this.extractNegRisk(market);
     if (isNegRisk) {
+      const balanceByTokenId = new Map<string, bigint>();
+      redeemEntries.forEach((entry, index) => {
+        balanceByTokenId.set(entry.tokenId, balances[index] ?? 0n);
+      });
+      const allOutcomeAmounts = tokenEntries.map(
+        (entry) => balanceByTokenId.get(entry.tokenId) ?? 0n,
+      );
       const data = encodeFunctionData({
         abi: NEG_RISK_REDEEM_ABI,
         functionName: "redeemPositions",
-        args: [conditionId as `0x${string}`, balances],
+        args: [conditionId as `0x${string}`, allOutcomeAmounts],
       });
       return {
         conditionId,
@@ -635,7 +675,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       };
     }
 
-    const indexSets = tokenIds.map((_, index) => 1n << BigInt(index));
+    const indexSets = redeemEntries.map((entry) => 1n << BigInt(entry.index));
     const data = encodeFunctionData({
       abi: CTF_REDEEM_ABI,
       functionName: "redeemPositions",
@@ -657,6 +697,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
       precheckTokenIds: tokenIds,
       precheckBalances: balanceStrings,
     };
+  }
+
+  private extractMarketTokenEntries(raw: unknown): MarketTokenEntry[] {
+    return this.extractMarketTokenIds(raw).map((tokenId, index) => ({ tokenId, index }));
   }
 
   private extractMarketTokenIds(raw: unknown): string[] {

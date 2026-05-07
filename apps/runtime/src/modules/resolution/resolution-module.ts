@@ -37,6 +37,13 @@ function normalizeOutcomeLabel(value: string): string {
   return value.trim().toLowerCase();
 }
 
+function summarizeError(err: unknown): { errorName?: string; errorMessage: string } {
+  if (err instanceof Error) {
+    return { errorName: err.name, errorMessage: err.message };
+  }
+  return { errorMessage: String(err) };
+}
+
 const SETTLEMENT_BALANCE_DUST_THRESHOLD = 1 / 1_000_000;
 
 // Per-conditionId circuit-breaker for the algo-triggered on-chain redeem path.
@@ -54,6 +61,7 @@ const REDEEM_BACKOFF_MS_BY_COUNT: readonly number[] = [
 ];
 const REDEEM_CIRCUIT_OPEN_COOLDOWN_MS = 60 * 60_000;
 const REDEEM_CIRCUIT_OPEN_THRESHOLD = 3;
+const RESOLUTION_REDEEM_RETRY_COOLDOWN_MS = 60 * 60_000;
 
 interface RedeemFailureEntry {
   readonly failedAt: number;
@@ -592,27 +600,36 @@ export class ResolutionModule implements RuntimeModule {
       let eligibleCandidates: ResolutionCandidate[] = [...resolution.candidates];
 
       const preFilterCount = eligibleCandidates.length;
+      let allVerified = !this.deps.gateway;
       if (this.deps.gateway && eligibleCandidates.length > 0) {
-        const redeemStatus = await this.submitResolutionRedeem(resolution.conditionId);
-        if (redeemStatus === "deferred") {
-          if (!isRetry) {
-            await this.publishMarketResolved(resolution);
-          }
-          continue;
-        }
-
-        eligibleCandidates = await this.filterByZeroBalance(
+        const { winningCandidates, losingCandidates } = this.partitionCandidatesByResolution(
+          resolution,
           eligibleCandidates,
-          resolution.conditionId,
         );
+        eligibleCandidates = [...losingCandidates];
+        allVerified = winningCandidates.length === 0;
+
+        if (winningCandidates.length > 0) {
+          const redeemStatus = await this.submitResolutionRedeem(
+            resolution.conditionId,
+            winningCandidates.map((candidate) => candidate.tokenId),
+          );
+          if (redeemStatus === "ready") {
+            const verifiedWinningCandidates = await this.filterByZeroBalance(
+              winningCandidates,
+              resolution.conditionId,
+            );
+            eligibleCandidates = [...eligibleCandidates, ...verifiedWinningCandidates];
+            allVerified = verifiedWinningCandidates.length === winningCandidates.length;
+          }
+        }
       }
-      const allVerified = !this.deps.gateway || eligibleCandidates.length === preFilterCount;
 
       const settleable = { ...resolution, candidates: eligibleCandidates };
       const settled = settleable.candidates.length > 0 ? this.deps.settler.settle(settleable) : [];
       totalSettled += settled.length;
 
-      if (allVerified && settled.length === eligibleCandidates.length) {
+      if (allVerified && settled.length === preFilterCount) {
         this.deps.resolutionRepo.markSettled(resolution.conditionId);
       }
 
@@ -637,19 +654,62 @@ export class ResolutionModule implements RuntimeModule {
     return totalSettled;
   }
 
-  private async submitResolutionRedeem(conditionId: string): Promise<"ready" | "deferred"> {
-    if (this.isRedeemCircuitOpen(conditionId, Date.now())) {
-      this.deps.log.warn(
-        { conditionId },
+  private partitionCandidatesByResolution(
+    resolution: DetectedResolution,
+    candidates: readonly ResolutionCandidate[],
+  ): {
+    readonly winningCandidates: ResolutionCandidate[];
+    readonly losingCandidates: ResolutionCandidate[];
+  } {
+    const winningCandidates: ResolutionCandidate[] = [];
+    const losingCandidates: ResolutionCandidate[] = [];
+
+    for (const candidate of candidates) {
+      if (this.isWinningCandidate(resolution, candidate)) {
+        winningCandidates.push(candidate);
+      } else {
+        losingCandidates.push(candidate);
+      }
+    }
+
+    return { winningCandidates, losingCandidates };
+  }
+
+  private isWinningCandidate(
+    resolution: DetectedResolution,
+    candidate: ResolutionCandidate,
+  ): boolean {
+    if (resolution.winnerTokenId) {
+      return String(candidate.tokenId) === String(resolution.winnerTokenId);
+    }
+    return (
+      normalizeOutcomeLabel(candidate.outcome) === normalizeOutcomeLabel(resolution.resolution)
+    );
+  }
+
+  private async submitResolutionRedeem(
+    conditionId: string,
+    redeemTokenIds: readonly TokenId[],
+  ): Promise<"ready" | "deferred"> {
+    const now = Date.now();
+    const failure = this.redeemFailures.get(conditionId);
+    if (failure && now - failure.failedAt < RESOLUTION_REDEEM_RETRY_COOLDOWN_MS) {
+      this.deps.log.debug(
+        {
+          conditionId,
+          failureCount: failure.failureCount,
+          cooldownMs: RESOLUTION_REDEEM_RETRY_COOLDOWN_MS,
+        },
         "resolution on-chain redeem retry suppressed by back-off",
       );
       return "deferred";
     }
 
-    const result = await this.submitRedeemAttempt(conditionId);
+    const result = await this.submitRedeemAttempt(conditionId, redeemTokenIds);
     if (!result.ok) {
+      const err = summarizeError(result.err);
       this.deps.log.warn(
-        { err: result.err, conditionId },
+        { conditionId, ...err },
         "resolution on-chain redeem failed — settlement deferred",
       );
       return "deferred";
@@ -668,9 +728,17 @@ export class ResolutionModule implements RuntimeModule {
 
   private async submitRedeemAttempt(
     conditionId: string,
+    redeemTokenIds?: readonly TokenId[],
   ): Promise<{ readonly ok: true } | { readonly ok: false; readonly err: unknown }> {
     try {
-      await this.deps.gateway!.redeemPositions([conditionId]);
+      const options = redeemTokenIds
+        ? { redeemTokenIdsByCondition: { [conditionId]: redeemTokenIds } }
+        : undefined;
+      if (options) {
+        await this.deps.gateway!.redeemPositions([conditionId], options);
+      } else {
+        await this.deps.gateway!.redeemPositions([conditionId]);
+      }
       this.redeemFailures.delete(conditionId);
       return { ok: true };
     } catch (err) {

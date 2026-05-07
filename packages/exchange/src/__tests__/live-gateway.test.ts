@@ -1,8 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId } from "@plankton/domain";
+import { decodeFunctionData, parseAbi } from "viem";
 import { LiveExchangeGateway } from "../live/exchange-gateway.js";
 import { LiveMarketDataGateway, buildTokenIdBatches } from "../live/market-data-gateway.js";
 import { SharedMarketPricingStreamHub } from "../live/market-pricing-stream-hub.js";
+
+const CTF_REDEEM_ABI = parseAbi([
+  "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
+]);
+const NEG_RISK_REDEEM_ABI = parseAbi([
+  "function redeemPositions(bytes32 _conditionId, uint256[] _amounts)",
+]);
 
 // ─── Mock ClobClient ─────────────────────────────────────────────────────
 
@@ -391,6 +399,36 @@ describe("LiveExchangeGateway", () => {
     expect(txs[0]!.data).toContain("0x");
   });
 
+  it("redeemPositions targets only requested CTF outcome tokens", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance.mockResolvedValueOnce({ balance: "25000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0x1212121212121212121212121212121212121212121212121212121212121212";
+    await gw.redeemPositions([conditionId], {
+      redeemTokenIdsByCondition: { [conditionId]: [createTokenId("tok-no")] },
+    });
+
+    expect(client.getBalanceAllowance).toHaveBeenCalledTimes(1);
+    expect(client.getBalanceAllowance).toHaveBeenCalledWith({
+      asset_type: "CONDITIONAL",
+      token_id: "tok-no",
+    });
+
+    const [txs] = settlementClient.execute.mock.calls[0]!;
+    const decoded = decodeFunctionData({
+      abi: CTF_REDEEM_ABI,
+      data: txs[0]!.data,
+    });
+    expect(decoded.functionName).toBe("redeemPositions");
+    expect(decoded.args[3]).toEqual([2n]);
+  });
+
   it("redeemPositions submits neg-risk adapter redeem with raw token balances", async () => {
     const settlementClient = createMockSettlementClient();
     client.getMarket.mockResolvedValue({
@@ -413,6 +451,36 @@ describe("LiveExchangeGateway", () => {
     expect(txs[0]!.to).toBe("0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296");
     expect(txs[0]!.value).toBe("0");
     expect(txs[0]!.data).toContain("0x");
+  });
+
+  it("redeemPositions zeroes unrequested neg-risk outcome amounts", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: true,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance.mockResolvedValueOnce({ balance: "31000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0x3434343434343434343434343434343434343434343434343434343434343434";
+    await gw.redeemPositions([conditionId], {
+      redeemTokenIdsByCondition: { [conditionId]: [createTokenId("tok-no")] },
+    });
+
+    expect(client.getBalanceAllowance).toHaveBeenCalledTimes(1);
+    expect(client.getBalanceAllowance).toHaveBeenCalledWith({
+      asset_type: "CONDITIONAL",
+      token_id: "tok-no",
+    });
+
+    const [txs] = settlementClient.execute.mock.calls[0]!;
+    const decoded = decodeFunctionData({
+      abi: NEG_RISK_REDEEM_ABI,
+      data: txs[0]!.data,
+    });
+    expect(decoded.functionName).toBe("redeemPositions");
+    expect(decoded.args[1]).toEqual([0n, 31_000_000n]);
   });
 
   it("redeemPositions skips relayer submission when no token balances remain", async () => {

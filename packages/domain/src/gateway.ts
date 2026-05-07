@@ -313,6 +313,15 @@ export interface ExchangeUserEventStream {
   close(): void;
 }
 
+export interface RedeemPositionsOptions {
+  /**
+   * Optional token-level allowlist for settlement-backed redeem calls.
+   * Normal resolution uses this to redeem only winning outcome tokens; losing
+   * outcome positions settle locally at 0 and must not be sent on-chain.
+   */
+  readonly redeemTokenIdsByCondition?: Readonly<Record<string, readonly TokenId[]>>;
+}
+
 // ─── Gateway interfaces ───────────────────────────────────────────────────
 
 /**
@@ -488,7 +497,7 @@ export interface ExchangeGateway {
    * Polymarket-specific: typically calls FixedProductMarketMaker.redeem()
    * or ClobClient.redeem().
    */
-  redeemPositions(conditionIds: string[]): Promise<void>;
+  redeemPositions(conditionIds: string[], options?: RedeemPositionsOptions): Promise<void>;
 
   /**
    * Optional hint for asynchronous settlement paths (for example relayer-backed

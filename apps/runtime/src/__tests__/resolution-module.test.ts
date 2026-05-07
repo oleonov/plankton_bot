@@ -16,6 +16,7 @@ import { ResolutionModule } from "../modules/resolution/resolution-module.js";
 import type {
   ResolutionDetector,
   DetectedResolution,
+  ResolutionCandidate,
 } from "../modules/resolution/resolution-detector.js";
 import type { PositionSettler, SettledPosition } from "../modules/resolution/position-settler.js";
 
@@ -710,6 +711,38 @@ describe("ResolutionModule", () => {
     expect(settler.settle as any).toHaveBeenCalled();
   });
 
+  it("settles losing candidates without on-chain redeem or balance gate", async () => {
+    const gateway = createMockGateway({ "tok-no": 50 });
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution({
+      candidates: [
+        {
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+        },
+      ],
+    });
+    const settled = [
+      makeSettledPosition({ positionId: POS2, tokenId: TOK_NO, settlementPrice: 0 }),
+    ];
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue(settled);
+
+    const count = await mod.runCheck();
+
+    expect(count).toBe(1);
+    expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+    expect(gateway.getPositionBalance as any).not.toHaveBeenCalled();
+    expect(settler.settle as any).toHaveBeenCalledWith(
+      expect.objectContaining({ candidates: resolution.candidates }),
+    );
+    expect(resolutionRepo.markSettled as any).toHaveBeenCalledWith(CONDITION);
+  });
+
   it("treats atomic dust balance as settled", async () => {
     const gateway = createMockGateway({ "tok-yes": 0.000001 });
     mod = createModule({ gateway });
@@ -773,13 +806,56 @@ describe("ResolutionModule", () => {
     const count = await mod.runCheck();
 
     expect(count).toBe(0);
-    expect(gateway.redeemPositions).toHaveBeenCalledWith([CONDITION]);
+    expect(gateway.redeemPositions).toHaveBeenCalledWith([CONDITION], {
+      redeemTokenIdsByCondition: { [CONDITION]: [TOK_YES] },
+    });
     expect(gateway.getPositionBalance).not.toHaveBeenCalled();
     expect(settler.settle as any).not.toHaveBeenCalled();
     expect(log.warn).not.toHaveBeenCalledWith(
       expect.anything(),
       "skipping settlement — on-chain token balance is non-zero",
     );
+  });
+
+  it("settles losers while winner redeem confirmation is still pending", async () => {
+    const gateway = createMockGateway({ "tok-yes": 50, "tok-no": 25 });
+    (gateway.hasPendingRedeemSubmission as any).mockReturnValue(true);
+    mod = createModule({ gateway });
+    const resolution = makeDetectedResolution({
+      candidates: [
+        {
+          tokenId: TOK_YES,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "YES",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS,
+        },
+        {
+          tokenId: TOK_NO,
+          conditionId: CONDITION,
+          slug: "will-x",
+          outcome: "NO",
+          endDate: "2026-01-14T00:00:00Z",
+          positionId: POS2,
+        },
+      ],
+    });
+    (detector.detect as any).mockResolvedValue([resolution]);
+    (settler.settle as any).mockReturnValue([
+      makeSettledPosition({ positionId: POS2, tokenId: TOK_NO, settlementPrice: 0 }),
+    ]);
+
+    const count = await mod.runCheck();
+
+    expect(count).toBe(1);
+    expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION], {
+      redeemTokenIdsByCondition: { [CONDITION]: [TOK_YES] },
+    });
+    expect(gateway.getPositionBalance as any).not.toHaveBeenCalled();
+    const settleArg = (settler.settle as any).mock.calls[0][0];
+    expect(settleArg.candidates).toEqual([resolution.candidates[1]]);
+    expect(resolutionRepo.markSettled as any).not.toHaveBeenCalled();
   });
 
   it("backs off resolution redeem failures without failing the whole check", async () => {
@@ -801,12 +877,26 @@ describe("ResolutionModule", () => {
       events.push(e);
     });
 
-    const firstCount = await mod.runCheck();
-    const secondCount = await mod.runCheck();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-07T00:00:00Z"));
+
+    let firstCount = -1;
+    let secondCount = -1;
+    let thirdCount = -1;
+    try {
+      firstCount = await mod.runCheck();
+      vi.setSystemTime(new Date("2026-05-07T00:05:00Z"));
+      secondCount = await mod.runCheck();
+      vi.setSystemTime(new Date("2026-05-07T01:01:00Z"));
+      thirdCount = await mod.runCheck();
+    } finally {
+      vi.useRealTimers();
+    }
 
     expect(firstCount).toBe(0);
     expect(secondCount).toBe(0);
-    expect(gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(thirdCount).toBe(0);
+    expect(gateway.redeemPositions).toHaveBeenCalledTimes(2);
     expect(gateway.getPositionBalance).not.toHaveBeenCalled();
     expect(settler.settle as any).not.toHaveBeenCalled();
     expect(events).toHaveLength(1);
@@ -814,8 +904,8 @@ describe("ResolutionModule", () => {
       expect.objectContaining({ conditionId: CONDITION }),
       "resolution on-chain redeem failed — settlement deferred",
     );
-    expect(log.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ conditionId: CONDITION }),
+    expect(log.debug).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION, cooldownMs: 60 * 60_000 }),
       "resolution on-chain redeem retry suppressed by back-off",
     );
   });
@@ -854,12 +944,11 @@ describe("ResolutionModule", () => {
     );
   });
 
-  it("settles zero-balance candidates and skips errored ones in mixed batch", async () => {
-    const gateway = createMockGateway({ "tok-yes": 0 });
-    // TOK_NO balance check will throw
+  it("settles losing candidates while skipping winners with balance-check errors", async () => {
+    const gateway = createMockGateway({ "tok-no": 50 });
     (gateway.getPositionBalance as any).mockImplementation(async (tokenId: TokenId) => {
-      if (String(tokenId) === "tok-yes") return 0;
-      throw new Error("SDK timeout");
+      if (String(tokenId) === "tok-yes") throw new Error("SDK timeout");
+      return 50;
     });
     mod = createModule({ gateway });
 
@@ -884,17 +973,21 @@ describe("ResolutionModule", () => {
       ],
     });
     (detector.detect as any).mockResolvedValue([resolution]);
-    (settler.settle as any).mockReturnValue([makeSettledPosition()]);
+    (settler.settle as any).mockReturnValue([
+      makeSettledPosition({ positionId: POS2, tokenId: TOK_NO, settlementPrice: 0 }),
+    ]);
 
     await mod.runCheck();
 
-    // settler should only receive the zero-balance candidate (TOK_YES)
+    expect(gateway.getPositionBalance as any).toHaveBeenCalledWith(TOK_YES);
+    expect(gateway.getPositionBalance as any).not.toHaveBeenCalledWith(TOK_NO);
     const settleArg = (settler.settle as any).mock.calls[0][0];
     expect(settleArg.candidates).toHaveLength(1);
-    expect(settleArg.candidates[0].tokenId).toBe(TOK_YES);
+    expect(settleArg.candidates[0].tokenId).toBe(TOK_NO);
+    expect(resolutionRepo.markSettled as any).not.toHaveBeenCalled();
   });
 
-  it("filters mixed-balance candidates — settles only zero-balance tokens", async () => {
+  it("settles losers locally and balance-checks only winning candidates", async () => {
     const gateway = createMockGateway({ "tok-yes": 0, "tok-no": 25 });
     mod = createModule({ gateway });
 
@@ -919,14 +1012,23 @@ describe("ResolutionModule", () => {
       ],
     });
     (detector.detect as any).mockResolvedValue([resolution]);
-    (settler.settle as any).mockReturnValue([makeSettledPosition()]);
+    (settler.settle as any).mockReturnValue([
+      makeSettledPosition({ positionId: POS, tokenId: TOK_YES, settlementPrice: 1 }),
+      makeSettledPosition({ positionId: POS2, tokenId: TOK_NO, settlementPrice: 0 }),
+    ]);
 
     await mod.runCheck();
 
-    // settler should only receive the zero-balance candidate (TOK_YES)
+    expect(gateway.redeemPositions as any).toHaveBeenCalledWith([CONDITION], {
+      redeemTokenIdsByCondition: { [CONDITION]: [TOK_YES] },
+    });
+    expect(gateway.getPositionBalance as any).toHaveBeenCalledWith(TOK_YES);
+    expect(gateway.getPositionBalance as any).not.toHaveBeenCalledWith(TOK_NO);
     const settleArg = (settler.settle as any).mock.calls[0][0];
-    expect(settleArg.candidates).toHaveLength(1);
-    expect(settleArg.candidates[0].tokenId).toBe(TOK_YES);
+    expect(settleArg.candidates.map((candidate: ResolutionCandidate) => candidate.tokenId)).toEqual(
+      [TOK_NO, TOK_YES],
+    );
+    expect(resolutionRepo.markSettled as any).toHaveBeenCalledWith(CONDITION);
   });
 
   // ─── Status tracking and settlement retry ──────────────────────────────
@@ -955,7 +1057,7 @@ describe("ResolutionModule", () => {
     expect(resolutionRepo.markSettled as any).toHaveBeenCalledWith(CONDITION);
   });
 
-  it("does NOT call markSettled when some candidates have non-zero balance", async () => {
+  it("does NOT call markSettled when a winning candidate has non-zero balance", async () => {
     const gateway = createMockGateway({ "tok-yes": 0, "tok-no": 25 });
     mod = createModule({ gateway });
 
@@ -980,7 +1082,12 @@ describe("ResolutionModule", () => {
       ],
     });
     (detector.detect as any).mockResolvedValue([resolution]);
-    (settler.settle as any).mockReturnValue([makeSettledPosition()]);
+    (gateway.getPositionBalance as any).mockImplementation(async (tokenId: TokenId) => {
+      return String(tokenId) === "tok-yes" ? 25 : 0;
+    });
+    (settler.settle as any).mockReturnValue([
+      makeSettledPosition({ positionId: POS2, tokenId: TOK_NO, settlementPrice: 0 }),
+    ]);
 
     await mod.runCheck();
 

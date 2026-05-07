@@ -7,6 +7,7 @@ import type {
   ExchangeOrder,
   ExchangeFill,
   ExchangeBalance,
+  RedeemPositionsOptions,
   TokenId,
 } from "@plankton/domain";
 
@@ -198,7 +199,7 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     return 0n;
   }
 
-  async redeemPositions(_conditionIds: string[]): Promise<void> {
+  async redeemPositions(_conditionIds: string[], _options?: RedeemPositionsOptions): Promise<void> {
     // No-op in simulation
   }
 
