@@ -2357,6 +2357,51 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("stops same-sweep BUY publishing after wallet-budget risk rejection", async () => {
+      const tokenIds = [
+        "token-budget-publish-1",
+        "token-budget-publish-2",
+        "token-budget-publish-3",
+      ];
+      selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      let walletExhausted = false;
+
+      const mod = buildModule({
+        decisionSignalLogRepo,
+        buySignalBudgetCircuitBreaker: {
+          canAttemptBuy: vi.fn(() => !walletExhausted),
+        },
+        buySignalBudgetCooldownMs: 60 * 60 * 1000,
+      });
+      await mod.start();
+
+      let emittedRejection = false;
+      bus.subscribe("SignalProduced", async (payload) => {
+        if (emittedRejection) return;
+        emittedRejection = true;
+        walletExhausted = true;
+        await (bus as any).emit("SignalRejected", {
+          signal: payload.signal,
+          reason: "wallet_buy_budget_exhausted",
+          rejectedAt: Date.now(),
+        });
+      });
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: tokenIds.map((tokenId) => makeMarket(tokenId, null, 0.45)),
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(1);
+      expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+
+      await mod.stop();
+    });
+
     it("does not commit or publish a BUY if pause lands during in-flight evaluation", async () => {
       const tokenId = "token-budget-pause-mid-flight";
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);

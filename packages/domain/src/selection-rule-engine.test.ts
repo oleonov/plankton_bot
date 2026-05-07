@@ -23,17 +23,17 @@ describe("SelectionRuleEngine", () => {
     expect(d.winningRuleId).toBeNull();
   });
 
-  it("exact include_slug still matches when prefix rules are present", () => {
+  it("ignores include_slug rules", () => {
     const engine = new SelectionRuleEngine([
       rule({ ruleId: "r1", ruleType: "include_prefix", pattern: "bitcoin-" }),
       rule({ ruleId: "r2", ruleType: "include_slug", pattern: "bitcoin-up" }),
     ]);
     const d = engine.resolve("bitcoin-price-on-2025", "bitcoin-up");
-    expect(d.status).toBe("include");
-    expect(d.winningRuleId).toBe("r2");
+    expect(d.status).toBe("no_match");
+    expect(d.winningRuleId).toBeNull();
   });
 
-  it("exclude_slug beats include_slug at same tier", () => {
+  it("exclude_slug still applies when include_slug is also present", () => {
     const engine = new SelectionRuleEngine([
       rule({ ruleId: "r1", ruleType: "include_slug", pattern: "bitcoin-up" }),
       rule({ ruleId: "r2", ruleType: "exclude_slug", pattern: "bitcoin-up" }),
@@ -73,10 +73,10 @@ describe("SelectionRuleEngine", () => {
 
   it("normalizes incoming slugs (case + whitespace)", () => {
     const engine = new SelectionRuleEngine([
-      rule({ ruleId: "r1", ruleType: "include_slug", pattern: "bitcoin-up" }),
+      rule({ ruleId: "r1", ruleType: "exclude_slug", pattern: "bitcoin-up" }),
     ]);
     const d = engine.resolve("  BITCOIN-price-on-2025  ", " Bitcoin-Up ");
-    expect(d.status).toBe("include");
+    expect(d.status).toBe("exclude");
     expect(d.winningRuleId).toBe("r1");
   });
 

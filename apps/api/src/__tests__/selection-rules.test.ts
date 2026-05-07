@@ -154,7 +154,7 @@ describe("POST /selection-rules", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {
         profileId: "simulation",
-        ruleType: "include_slug",
+        ruleType: "exclude_slug",
         pattern: " Solana-Market ",
         note: null,
       },
@@ -163,9 +163,25 @@ describe("POST /selection-rules", () => {
     const body = res.json();
     expect(body.ok).toBe(true);
     expect(body.data.rule.pattern).toBe("solana-market"); // normalized: trim + lowercase
-    expect(body.data.rule.ruleType).toBe("include_slug");
+    expect(body.data.rule.ruleType).toBe("exclude_slug");
     expect(body.data.rule.enabled).toBe(true);
     expect(body.data.rule.ruleId).toBeTruthy();
+  });
+
+  it("rejects include_slug creation because v5.11 admission is hard-filter driven", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/v1/selection-rules",
+      headers: { ...authHeaders(), "content-type": "application/json" },
+      payload: {
+        profileId: "simulation",
+        ruleType: "include_slug",
+        pattern: "manual-include",
+        note: null,
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error.code).toBe("UNSUPPORTED_RULE_TYPE");
   });
 
   it("rejects deprecated prefix rule creation", async () => {
@@ -187,7 +203,7 @@ describe("POST /selection-rules", () => {
   it("returns DUPLICATE_RULE on UNIQUE collision (same type + pattern)", async () => {
     const payload = {
       profileId: "simulation",
-      ruleType: "include_slug",
+      ruleType: "exclude_slug",
       pattern: "dup-slug-test",
       note: null,
     };
@@ -265,7 +281,7 @@ describe("POST /selection-rules", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {
         profileId: "simulation",
-        ruleType: "include_slug",
+        ruleType: "exclude_slug",
         pattern: "audit-test-create",
         note: null,
       },
@@ -292,7 +308,7 @@ describe("PATCH /selection-rules/:ruleId", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {
         profileId: "simulation",
-        ruleType: "include_slug",
+        ruleType: "exclude_slug",
         pattern: "patch-test-market",
         note: "original note",
       },
@@ -313,7 +329,7 @@ describe("PATCH /selection-rules/:ruleId", () => {
     expect(patched.note).toBe("updated note");
     // Pattern and ruleType must not change
     expect(patched.pattern).toBe("patch-test-market");
-    expect(patched.ruleType).toBe("include_slug");
+    expect(patched.ruleType).toBe("exclude_slug");
   });
 
   it("writes state_transitions audit row on patch", async () => {
@@ -398,7 +414,7 @@ describe("DELETE /selection-rules/:ruleId", () => {
       headers: { ...authHeaders(), "content-type": "application/json" },
       payload: {
         profileId: "simulation",
-        ruleType: "include_slug",
+        ruleType: "exclude_slug",
         pattern: "to-be-deleted",
         note: null,
       },

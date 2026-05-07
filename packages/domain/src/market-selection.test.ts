@@ -44,7 +44,7 @@ describe("evaluatePreEntry", () => {
     });
   });
 
-  it("keeps exact include_slug attribution only after hard filters pass", () => {
+  it("ignores include_slug attribution when hard filters pass", () => {
     const engine = engineWith([
       { ruleId: "r1", ruleType: "include_slug", pattern: "fed-rate-cut-yes" },
     ]);
@@ -52,11 +52,11 @@ describe("evaluatePreEntry", () => {
     expect(r).toEqual({
       finalStatus: "INCLUDE",
       selectionStatus: "matched_include",
-      winningRuleId: "r1",
+      winningRuleId: null,
     });
   });
 
-  it("keeps exact include_slug attribution when hard filters reject the market", () => {
+  it("ignores include_slug attribution when hard filters reject the market", () => {
     const engine = engineWith([
       { ruleId: "r1", ruleType: "include_slug", pattern: "fed-rate-cut-yes" },
     ]);
@@ -64,7 +64,7 @@ describe("evaluatePreEntry", () => {
     expect(r).toEqual({
       finalStatus: "EXCLUDE",
       selectionStatus: "fallback_exclude",
-      winningRuleId: "r1",
+      winningRuleId: null,
     });
   });
 

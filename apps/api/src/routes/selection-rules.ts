@@ -21,9 +21,11 @@ const RULE_TYPES: readonly SelectionRuleType[] = [
   "include_slug",
   "exclude_slug",
 ];
-const CREATE_RULE_TYPES: readonly SelectionRuleType[] = ["include_slug", "exclude_slug"];
+const CREATE_RULE_TYPES: readonly SelectionRuleType[] = ["exclude_slug"];
 const PREFIX_RULE_TYPES: readonly SelectionRuleType[] = ["include_prefix", "exclude_prefix"];
 const DEPRECATED_PREFIX_MESSAGE = "prefix rule types are deprecated since v5.11";
+const UNSUPPORTED_INCLUDE_MESSAGE =
+  "include_slug is disabled since v5.11; admission is hard-filter driven";
 
 function isPrefixRuleType(ruleType: SelectionRuleType): boolean {
   return PREFIX_RULE_TYPES.includes(ruleType);
@@ -59,6 +61,9 @@ export const selectionRulesRoutes: FastifyPluginAsync<SelectionRulesOpts> = asyn
       return reply.code(400).send(fail("BAD_REQUEST", "missing/invalid fields"));
     }
     if (!CREATE_RULE_TYPES.includes(body.ruleType)) {
+      if (body.ruleType === "include_slug") {
+        return reply.code(400).send(fail("UNSUPPORTED_RULE_TYPE", UNSUPPORTED_INCLUDE_MESSAGE));
+      }
       return reply.code(400).send(fail("DEPRECATED_RULE_TYPE", DEPRECATED_PREFIX_MESSAGE));
     }
     try {

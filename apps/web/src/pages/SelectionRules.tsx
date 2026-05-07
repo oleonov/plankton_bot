@@ -23,12 +23,8 @@ function normalizePattern(raw: string): string {
   return raw.trim().toLowerCase();
 }
 
-function isDeprecatedPrefixRuleType(type: SelectionRuleType): boolean {
-  return type === "include_prefix" || type === "exclude_prefix";
-}
-
-function isActiveSlugRule(rule: SelectionRule): boolean {
-  return !isDeprecatedPrefixRuleType(rule.ruleType);
+function isManualExclusionRule(rule: SelectionRule): boolean {
+  return rule.ruleType === "exclude_slug";
 }
 
 // ─── RulesTable ──────────────────────────────────────────────────────────────
@@ -57,7 +53,7 @@ function RulesTable({ rules, profileId }: RulesTableProps) {
         data-testid="rules-empty"
         style={{ color: "var(--text-dim)", fontSize: 13, padding: "16px 0" }}
       >
-        No active slug overrides yet. Add one below.
+        No manual market exclusions yet. Add one below.
       </div>
     );
   }
@@ -137,7 +133,6 @@ interface CreateFormProps {
 
 function CreateForm({ profileId }: CreateFormProps) {
   const create = useCreateSelectionRule();
-  const [ruleType, setRuleType] = useState<SelectionRuleType>("include_slug");
   const [pattern, setPattern] = useState("");
   const [note, setNote] = useState("");
 
@@ -147,7 +142,7 @@ function CreateForm({ profileId }: CreateFormProps) {
     e.preventDefault();
     if (!normalized) return;
     create.mutate(
-      { profileId, ruleType, pattern: normalized, note: note.trim() || null },
+      { profileId, ruleType: "exclude_slug", pattern: normalized, note: note.trim() || null },
       {
         onSuccess: () => {
           setPattern("");
@@ -164,19 +159,7 @@ function CreateForm({ profileId }: CreateFormProps) {
       style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginTop: 16 }}
     >
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Type</label>
-        <select
-          data-testid="rule-type-select"
-          value={ruleType}
-          onChange={(e) => setRuleType(e.target.value as SelectionRuleType)}
-          style={{ fontSize: 12, padding: "4px 8px" }}
-        >
-          <option value="include_slug">include_slug</option>
-          <option value="exclude_slug">exclude_slug</option>
-        </select>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Pattern</label>
+        <label style={{ fontSize: 11, color: "var(--text-muted)" }}>Market Slug</label>
         <input
           data-testid="pattern-input"
           value={pattern}
@@ -468,13 +451,13 @@ export function SelectionRules() {
   const profileId = selectedId ?? profiles[0]?.profile_id ?? null;
 
   const { data: rules = [], isLoading, isError, error } = useSelectionRules(profileId ?? "");
-  const activeRules = rules.filter(isActiveSlugRule);
-  const deprecatedPrefixRuleCount = rules.length - activeRules.length;
+  const exclusionRules = rules.filter(isManualExclusionRule);
+  const ignoredRuleCount = rules.length - exclusionRules.length;
 
   if (!profileId) {
     return (
       <div className="page">
-        <div className="page-title">Selection Rules</div>
+        <div className="page-title">Market Exclusions</div>
         <div style={{ color: "var(--text-dim)", fontSize: 13 }}>No profiles available.</div>
       </div>
     );
@@ -485,7 +468,7 @@ export function SelectionRules() {
   if (isError) {
     return (
       <div className="page">
-        <div className="page-title">Selection Rules</div>
+        <div className="page-title">Market Exclusions</div>
         <div data-testid="error-state" style={{ color: "var(--red)", fontSize: 13 }}>
           Failed to load: {error.message}
         </div>
@@ -495,7 +478,7 @@ export function SelectionRules() {
 
   return (
     <div className="page">
-      <div className="page-title">Selection Rules</div>
+      <div className="page-title">Market Exclusions</div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "0 0 8px" }}>
         <label
           htmlFor="selection-rules-profile"
@@ -517,8 +500,8 @@ export function SelectionRules() {
         </select>
       </div>
       <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "0 0 8px" }}>
-        v5.11 admission is driven by hard filters. Exact slug rules are operator overrides for
-        individual markets; prefix rules are deprecated and not applied.
+        v5.11 admission is driven by hard filters and watch-set tracking. This page is only a manual
+        deny-list for individual market slugs.
       </p>
       <p
         style={{
@@ -531,18 +514,18 @@ export function SelectionRules() {
         }}
       >
         Hard filters: mid price below the policy ceiling, liquidity at or above the policy floor,
-        and not in the v5.11/R9 zero-coverage category blacklist. Legacy prefix rows are ignored by
-        the engine and hidden from active rule management.
+        and not in the v5.11/R9 zero-coverage category blacklist. Include and prefix rows from
+        legacy DBs are ignored by the engine and hidden from active management.
       </p>
 
-      <RulesTable rules={activeRules} profileId={profileId} />
-      {deprecatedPrefixRuleCount > 0 && (
+      <RulesTable rules={exclusionRules} profileId={profileId} />
+      {ignoredRuleCount > 0 && (
         <div
-          data-testid="deprecated-prefix-notice"
+          data-testid="ignored-rules-notice"
           style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 8 }}
         >
-          {deprecatedPrefixRuleCount} deprecated prefix rule
-          {deprecatedPrefixRuleCount === 1 ? "" : "s"} ignored by v5.11.
+          {ignoredRuleCount} legacy include/prefix rule{ignoredRuleCount === 1 ? "" : "s"} ignored
+          by v5.11.
         </div>
       )}
       <CreateForm profileId={profileId} />

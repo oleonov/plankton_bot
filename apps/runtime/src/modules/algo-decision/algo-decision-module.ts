@@ -700,9 +700,6 @@ export class AlgoDecisionModule implements RuntimeModule {
     await this.prefetchContinuationTradeCounts(tokenIds);
     if (this.isPaused()) return;
 
-    const signals: Array<{ signal: import("@plankton/domain").Signal; market: NormalizedMarket }> =
-      [];
-
     // Yield to the event loop every EVALUATE_YIELD_BATCH tokens. evaluateToken
     // is mostly synchronous (DB reads + pure rules) and the sweep can hold the
     // loop for hundreds of ms across 1000+ tokens, blocking AbortSignal timers
@@ -728,14 +725,11 @@ export class AlgoDecisionModule implements RuntimeModule {
       // empty-wallet BUY candidates from flooding telemetry before Risk sees
       // the first rejection.
       result.commitLog();
-      signals.push({ signal: result.signal, market: result.market });
-    }
-
-    if (this.isPaused()) return;
-
-    for (const { signal, market } of signals) {
       if (this.isPaused()) return;
-      await this.deps.bus.publish("SignalProduced", { signal, market });
+      await this.deps.bus.publish("SignalProduced", {
+        signal: result.signal,
+        market: result.market,
+      });
     }
 
     // ADR-022 §D-F — promote the just-completed histogram so healthcheck

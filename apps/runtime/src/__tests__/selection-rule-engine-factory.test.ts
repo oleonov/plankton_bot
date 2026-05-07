@@ -39,7 +39,7 @@ describe("RefreshableSelectionRuleEngine", () => {
   it("resolves correctly when seeded with rules at construction", () => {
     repo.insert({
       profileId: "simulation",
-      ruleType: "include_slug",
+      ruleType: "exclude_slug",
       pattern: "bitcoin-up",
       enabled: true,
       note: null,
@@ -47,7 +47,7 @@ describe("RefreshableSelectionRuleEngine", () => {
     // Must create engine AFTER seeding so construction sees the rules
     const seededEngine = new RefreshableSelectionRuleEngine(repo, "simulation");
     const decision = seededEngine.resolve("bitcoin-price-2026", "bitcoin-up");
-    expect(decision.status).toBe("include");
+    expect(decision.status).toBe("exclude");
   });
 
   it("refreshIfStale is idempotent when version has not changed", () => {
@@ -63,7 +63,7 @@ describe("RefreshableSelectionRuleEngine", () => {
     // Simulate an external mutation (e.g. operator API adds a rule)
     repo.insert({
       profileId: "simulation",
-      ruleType: "include_slug",
+      ruleType: "exclude_slug",
       pattern: "elon-musk-up",
       enabled: true,
       note: null,
@@ -75,13 +75,13 @@ describe("RefreshableSelectionRuleEngine", () => {
 
     // The new engine must know about the inserted rule
     const decision = engine.resolve("elon-musk-wins-2026", "elon-musk-up");
-    expect(decision.status).toBe("include");
+    expect(decision.status).toBe("exclude");
   });
 
   it("does not reload on a second refreshIfStale call after already syncing", () => {
     repo.insert({
       profileId: "simulation",
-      ruleType: "include_slug",
+      ruleType: "exclude_slug",
       pattern: "bitcoin-up",
       enabled: true,
       note: null,

@@ -80,7 +80,7 @@ export function Layout() {
           Orders/Fills
         </NavLink>
         <NavLink className="nav-link" to="/selection-rules">
-          Selection Rules
+          Exclusions
         </NavLink>
         <NavLink className="nav-link" to="/risk">
           Risk

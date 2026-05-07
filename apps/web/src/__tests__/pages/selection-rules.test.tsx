@@ -33,8 +33,8 @@ describe("SelectionRules page", () => {
       expect(screen.getByText("bitcoin-to-150k-by-2025")).toBeInTheDocument();
       expect(screen.queryByText("bitcoin-")).not.toBeInTheDocument();
       expect(screen.queryByText("elon-musk-")).not.toBeInTheDocument();
-      expect(screen.getByTestId("deprecated-prefix-notice")).toHaveTextContent(
-        "2 deprecated prefix rules ignored by v5.11",
+      expect(screen.getByTestId("ignored-rules-notice")).toHaveTextContent(
+        "2 legacy include/prefix rules ignored by v5.11",
       );
     });
 
@@ -43,7 +43,7 @@ describe("SelectionRules page", () => {
       setup();
 
       await screen.findByTestId("rules-empty");
-      expect(screen.getByText(/No active slug overrides yet/)).toBeInTheDocument();
+      expect(screen.getByText(/No manual market exclusions yet/)).toBeInTheDocument();
     });
 
     it("shows error state when API fails", async () => {
@@ -64,7 +64,7 @@ describe("SelectionRules page", () => {
   });
 
   describe("create form", () => {
-    it("submits a new include_slug rule and clears the form", async () => {
+    it("submits a new exclude_slug rule and clears the form", async () => {
       const user = userEvent.setup();
       const createdRules: unknown[] = [];
 
@@ -76,7 +76,7 @@ describe("SelectionRules page", () => {
             rule: {
               ruleId: "rule-new",
               profileId: "simulation",
-              ruleType: "include_slug",
+              ruleType: "exclude_slug",
               pattern: "crypto-market",
               enabled: true,
               note: "Test rule",
@@ -90,7 +90,7 @@ describe("SelectionRules page", () => {
       setup();
       await screen.findByTestId("create-form");
 
-      await user.selectOptions(screen.getByTestId("rule-type-select"), "include_slug");
+      expect(screen.queryByTestId("rule-type-select")).not.toBeInTheDocument();
       await user.type(screen.getByTestId("pattern-input"), "crypto-market");
       await user.type(screen.getByTestId("note-input"), "Test rule");
       await user.click(screen.getByTestId("submit-create"));
@@ -100,7 +100,7 @@ describe("SelectionRules page", () => {
       });
 
       expect(createdRules[0]).toMatchObject({
-        ruleType: "include_slug",
+        ruleType: "exclude_slug",
         pattern: "crypto-market",
         note: "Test rule",
       });
@@ -118,7 +118,7 @@ describe("SelectionRules page", () => {
             rule: {
               ruleId: "rule-new",
               profileId: "simulation",
-              ruleType: "include_slug",
+              ruleType: "exclude_slug",
               pattern: body.pattern,
               enabled: true,
               note: null,

@@ -15,14 +15,11 @@ export class SelectionRuleEngine {
     const normSlug = normalizeSelectionPattern(marketSlug);
 
     const exactHits = this.rules.filter(
-      (r) =>
-        (r.ruleType === "include_slug" || r.ruleType === "exclude_slug") && r.pattern === normSlug,
+      (r) => r.ruleType === "exclude_slug" && r.pattern === normSlug,
     );
 
     if (exactHits.length > 0) {
-      const exclude = exactHits.find((r) => r.ruleType === "exclude_slug");
-      if (exclude) return { status: "exclude", winningRuleId: exclude.ruleId };
-      return { status: "include", winningRuleId: exactHits[0]!.ruleId };
+      return { status: "exclude", winningRuleId: exactHits[0]!.ruleId };
     }
 
     void eventSlug;
