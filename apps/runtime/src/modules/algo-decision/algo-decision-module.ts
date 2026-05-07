@@ -384,6 +384,14 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   D6_SUPPRESSED_REASON,
   DECISION_RULE_HOLD_REASON,
 ]);
+const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
+  "market-cache-miss",
+  "mid-price-unavailable",
+  "market-not-live",
+  "market_too_young",
+  "market_age_unknown",
+  DECISION_RULE_HOLD_REASON,
+]);
 
 export class AlgoDecisionModule implements RuntimeModule {
   private readonly log: Logger;
@@ -1283,13 +1291,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     const eventAt = Date.parse(facts.timestamp);
     const now = Number.isFinite(eventAt) ? eventAt : Date.now();
-    const key = [
-      facts.reasonCode,
-      String(facts.tokenId),
-      facts.conditionId ?? "",
-      facts.side ?? "",
-      this.continuationMode,
-    ].join("|");
+    const key = this.suppressionDedupeKey(facts);
     const lastAt = this.suppressionDedupe.get(key);
     if (lastAt != null && now - lastAt < NOISY_SUPPRESSION_DEDUPE_MS) return false;
 
@@ -1298,6 +1300,36 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.pruneSuppressionDedupe(now);
     }
     return true;
+  }
+
+  private suppressionDedupeKey(facts: SuppressionFacts): string {
+    if (this.shouldAggregateEntrySuppression(facts)) {
+      return [
+        "entry-sweep",
+        facts.reasonCode,
+        facts.side ?? "",
+        facts.decisionRuleId ?? "",
+        facts.state,
+        [...(facts.reasons ?? [])].sort().join(","),
+        this.continuationMode,
+      ].join("|");
+    }
+
+    return [
+      facts.reasonCode,
+      String(facts.tokenId),
+      facts.conditionId ?? "",
+      facts.side ?? "",
+      this.continuationMode,
+    ].join("|");
+  }
+
+  private shouldAggregateEntrySuppression(facts: SuppressionFacts): boolean {
+    return (
+      ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS.has(facts.reasonCode) &&
+      facts.buyCount === 0 &&
+      facts.emissionFacts.legTradeCount === 0
+    );
   }
 
   private pruneSuppressionDedupe(now: number): void {

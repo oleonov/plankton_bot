@@ -1974,6 +1974,76 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("aggregates entry-sweep market-not-live suppressions across tokens", async () => {
+      const tokenIds = ["token-not-live-1", "token-not-live-2", "token-not-live-3"];
+      selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: tokenIds.map((tokenId, idx) => ({
+          ...makeMarket(tokenId, null, 0.1 + idx * 0.01, `cond-not-live-${idx}`),
+          acceptingOrders: false,
+          enableOrderBook: false,
+        })),
+        timestamp: Date.now(),
+      });
+
+      const suppressedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) =>
+            event.eventType === "signal_suppressed" &&
+            event.payload.reasonCode === "market-not-live",
+        );
+      expect(suppressedCalls).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    it("keeps market-not-live suppressions per token for existing legs", async () => {
+      const tokenIds = ["token-open-not-live-1", "token-open-not-live-2"];
+      const nowIso = new Date(Date.now() - 60_000).toISOString();
+      legStateRepo = createMockLegStateRepo(
+        tokenIds.map((tokenId) => ({
+          tokenId: createTokenId(tokenId),
+          buyCount: 1,
+          sellCount: 0,
+          lastAction: "BUY",
+          firstTradePrice: 0.1,
+          firstTradeAt: nowIso,
+          lastTradeAt: nowIso,
+          updatedAt: nowIso,
+        })),
+      );
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+
+      const mod = buildModule({ riskEventRepo });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: tokenIds.map((tokenId, idx) => ({
+          ...makeMarket(tokenId, null, 0.1 + idx * 0.01, `cond-open-not-live-${idx}`),
+          acceptingOrders: false,
+          enableOrderBook: false,
+        })),
+        timestamp: Date.now(),
+      });
+
+      const suppressedCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) =>
+            event.eventType === "signal_suppressed" &&
+            event.payload.reasonCode === "market-not-live",
+        );
+      expect(suppressedCalls).toHaveLength(2);
+
+      await mod.stop();
+    });
+
     // Regression: continuation-stop is sticky — a leg that fails R1/R2 fails
     // identically on every sweep tick, so without dedupe a handful of stuck
     // legs floods decision_signal_log/risk_events ~1/sec. The dedupe set must
