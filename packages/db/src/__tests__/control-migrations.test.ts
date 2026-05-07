@@ -287,4 +287,36 @@ describe("control-db migration infrastructure", () => {
       minLiquidity: 100,
     });
   });
+
+  it("migration 043 removes non-exclusion selection rules from existing control DBs", () => {
+    const dbPath = path.join(tmpDir, "control-exclusions-only.db");
+    conn = bootstrapControlDb(dbPath);
+
+    conn.db
+      .prepare(
+        `INSERT INTO selection_rules
+          (rule_id, profile_id, rule_type, pattern, enabled, note, created_at, updated_at)
+         VALUES
+          ('legacy-prefix', 'live-lite', 'include_prefix', 'bitcoin-', 0, NULL, datetime('now'), datetime('now')),
+          ('legacy-include', 'live-lite', 'include_slug', 'bitcoin-above-100k', 1, NULL, datetime('now'), datetime('now')),
+          ('manual-exclude', 'live-lite', 'exclude_slug', 'bad-market', 1, NULL, datetime('now'), datetime('now'))`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("043_selection_exclusions_only.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare("SELECT rule_id, rule_type FROM selection_rules ORDER BY rule_id")
+      .all() as Array<{ rule_id: string; rule_type: string }>;
+    const applied = conn.db
+      .prepare("SELECT name FROM schema_migrations WHERE name = ?")
+      .get("043_selection_exclusions_only.sql");
+
+    expect(rows).toEqual([{ rule_id: "manual-exclude", rule_type: "exclude_slug" }]);
+    expect(applied).toBeDefined();
+  });
 });

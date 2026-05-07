@@ -87,6 +87,7 @@ export interface SelectedMarketCache {
 interface PendingEntry {
   tokenId: string;
   signalId: string;
+  suggestedSizeUsdc: number;
   reservedAt: number;
   clientOrderId: string | null;
   orderId: string | null;
@@ -1353,7 +1354,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (!circuitBreaker) return null;
 
     try {
-      return circuitBreaker.canAttemptBuy(requiredNotionalUsdc);
+      return circuitBreaker.canAttemptBuy(requiredNotionalUsdc + this.pendingPreOpenBuyNotional());
     } catch (err) {
       this.log.warn(
         {
@@ -1463,10 +1464,19 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (entry.orderId) this.orderIdToToken.delete(entry.orderId);
   }
 
+  private pendingPreOpenBuyNotional(): number {
+    let total = 0;
+    for (const entry of this.pendingEntries.values()) {
+      if (entry.orderId === null) total += entry.suggestedSizeUsdc;
+    }
+    return total;
+  }
+
   private reservePendingSignal(signal: import("@plankton/domain").Signal, now: number): void {
     this.pendingEntries.set(String(signal.tokenId), {
       tokenId: String(signal.tokenId),
       signalId: signal.signalId,
+      suggestedSizeUsdc: signal.suggestedSizeUsdc,
       reservedAt: now,
       clientOrderId: null,
       orderId: null,

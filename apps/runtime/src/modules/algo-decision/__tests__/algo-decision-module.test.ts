@@ -2169,11 +2169,18 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
-    it("does not cap decision-side BUY emissions within one sweep by wallet budget", async () => {
+    it("counts emitted-but-not-placed BUYs against same-sweep wallet budget", async () => {
       const tokenIds = ["token-budget-1", "token-budget-2", "token-budget-3"];
       selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const canAttemptBuy = vi.fn((requiredNotionalUsdc: number) => requiredNotionalUsdc <= 2);
 
-      const mod = buildModule();
+      const mod = buildModule({
+        decisionSignalLogRepo,
+        riskEventRepo,
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+      });
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
@@ -2184,8 +2191,15 @@ describe("AlgoDecisionModule", () => {
       const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
         ([ev]) => ev === "SignalProduced",
       );
-      expect(signalCalls.length).toBe(3);
+      expect(signalCalls.length).toBe(2);
       expect(signalCalls.every(([, payload]) => payload.signal.side === "buy")).toBe(true);
+      expect(canAttemptBuy.mock.calls.map(([required]) => Number(required.toFixed(2)))).toEqual([
+        0.99, 1.98, 2.97,
+      ]);
+      const suppressionCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([event]) => event.payload.reasonCode === "wallet_buy_budget_exhausted");
+      expect(suppressionCalls).toHaveLength(1);
 
       await mod.stop();
     });

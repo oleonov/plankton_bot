@@ -1,10 +1,9 @@
 /**
  * SelectionRules page — MSW-backed integration tests.
- * Covers: create, toggle enable/disable, delete, preview panel, match debugger,
- * empty state, and error state.
+ * Covers: create, toggle enable/disable, delete, empty state, and error state.
  */
 import { describe, it, expect } from "vitest";
-import { screen, fireEvent, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { http, HttpResponse } from "msw";
 import { server } from "../../test/server.ts";
@@ -33,9 +32,15 @@ describe("SelectionRules page", () => {
       expect(screen.getByText("bitcoin-to-150k-by-2025")).toBeInTheDocument();
       expect(screen.queryByText("bitcoin-")).not.toBeInTheDocument();
       expect(screen.queryByText("elon-musk-")).not.toBeInTheDocument();
-      expect(screen.getByTestId("ignored-rules-notice")).toHaveTextContent(
-        "2 legacy include/prefix rules ignored by v5.11",
-      );
+      expect(screen.queryByTestId("ignored-rules-notice")).not.toBeInTheDocument();
+    });
+
+    it("does not render legacy preview or match-debugger controls", async () => {
+      setup();
+
+      await screen.findByTestId("rules-table");
+      expect(screen.queryByTestId("preview-toggle")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("match-debugger-form")).not.toBeInTheDocument();
     });
 
     it("shows empty state when no rules exist", async () => {
@@ -275,178 +280,6 @@ describe("SelectionRules page", () => {
       expect(deletedRuleIds).toHaveLength(0);
 
       window.confirm = originalConfirm;
-    });
-  });
-
-  describe("preview panel", () => {
-    it("toggles the preview panel open and shows bucket counts", async () => {
-      const user = userEvent.setup();
-      setup();
-
-      await screen.findByTestId("preview-toggle");
-
-      // Panel is collapsed by default
-      expect(screen.queryByText("Matched Include")).not.toBeInTheDocument();
-
-      await user.click(screen.getByTestId("preview-toggle"));
-
-      // Now open — should show bucket headers
-      await screen.findByText("Matched Include (1)");
-      expect(screen.getByText("Matched Exclude (1)")).toBeInTheDocument();
-      expect(screen.getByText("Legacy Fallback Include (0)")).toBeInTheDocument();
-      expect(screen.getByText("Fallback Exclude (0)")).toBeInTheDocument();
-    });
-
-    it("shows INCLUDE count in toggle button label", async () => {
-      setup();
-      await screen.findByTestId("preview-toggle");
-      // Preview data from handler: 1 matchedInclude + 0 step2 = 1 INCLUDE
-      // 1 matchedExclude + 0 fallback = 1 EXCLUDE
-      await waitFor(() => {
-        expect(screen.getByTestId("preview-toggle")).toHaveTextContent("1 INCLUDE · 1 EXCLUDE");
-      });
-    });
-
-    it("shows market slug in the correct bucket", async () => {
-      const user = userEvent.setup();
-      setup();
-      await screen.findByTestId("preview-toggle");
-      await user.click(screen.getByTestId("preview-toggle"));
-
-      await screen.findByText("bitcoin-above-100k");
-    });
-  });
-
-  describe("match debugger", () => {
-    it("tests a market slug and shows match result", async () => {
-      server.use(
-        http.get("/api/v1/selection-rules/match", () =>
-          ok({
-            decision: "include",
-            winningRuleId: "rule-1",
-            finalStatus: "INCLUDE",
-            step2Fallback: false,
-          }),
-        ),
-      );
-
-      const user = userEvent.setup();
-      setup();
-
-      await screen.findByTestId("match-debugger-form");
-
-      await user.type(screen.getByTestId("event-slug-input"), "bitcoin-price-2026");
-      await user.type(screen.getByTestId("market-slug-input"), "bitcoin-above-100k");
-      await user.click(screen.getByTestId("match-test-button"));
-
-      await screen.findByTestId("match-result");
-      expect(screen.getByTestId("match-result")).toHaveTextContent("INCLUDE");
-      expect(screen.getByTestId("match-result")).toHaveTextContent("rule-1");
-    });
-
-    it("shows EXCLUDE result for excluded slug", async () => {
-      server.use(
-        http.get("/api/v1/selection-rules/match", () =>
-          ok({
-            decision: "exclude",
-            winningRuleId: "rule-2",
-            finalStatus: "EXCLUDE",
-            step2Fallback: false,
-          }),
-        ),
-      );
-
-      const user = userEvent.setup();
-      setup();
-
-      await screen.findByTestId("match-debugger-form");
-
-      await user.type(screen.getByTestId("event-slug-input"), "bitcoin-price-2026");
-      await user.type(screen.getByTestId("market-slug-input"), "bitcoin-to-150k-by-2025");
-      await user.click(screen.getByTestId("match-test-button"));
-
-      await screen.findByTestId("match-result");
-      expect(screen.getByTestId("match-result")).toHaveTextContent("EXCLUDE");
-    });
-
-    it("shows legacy fallback label when step2Fallback is true", async () => {
-      server.use(
-        http.get("/api/v1/selection-rules/match", () =>
-          ok({
-            decision: "no_match",
-            winningRuleId: null,
-            finalStatus: "INCLUDE",
-            step2Fallback: true,
-          }),
-        ),
-      );
-
-      const user = userEvent.setup();
-      setup();
-
-      await screen.findByTestId("match-debugger-form");
-
-      await user.type(screen.getByTestId("market-slug-input"), "some-unique-market");
-      await user.click(screen.getByTestId("match-test-button"));
-
-      await screen.findByTestId("match-result");
-      expect(screen.getByTestId("match-result")).toHaveTextContent("Legacy fallback applied");
-    });
-
-    it("disables Test button when market slug is empty", async () => {
-      setup();
-      await screen.findByTestId("match-debugger-form");
-
-      const testBtn = screen.getByTestId("match-test-button");
-      expect(testBtn).toBeDisabled();
-    });
-
-    it("populates event slug autocomplete options from API", async () => {
-      setup();
-      await screen.findByTestId("match-debugger-form");
-
-      // Event slugs are loaded in the background; wait for them
-      await waitFor(() => {
-        const datalist = document.getElementById("event-slugs-list");
-        expect(datalist).not.toBeNull();
-        const options = datalist?.querySelectorAll("option");
-        expect(options?.length).toBeGreaterThan(0);
-      });
-
-      const datalist = document.getElementById("event-slugs-list");
-      const optionValues = Array.from(datalist?.querySelectorAll("option") ?? []).map(
-        (o) => o.value,
-      );
-      expect(optionValues).toContain("bitcoin-price-2026");
-    });
-
-    it("fires match query only after Test button is clicked, not on every keystroke", async () => {
-      const matchRequests: string[] = [];
-      server.use(
-        http.get("/api/v1/selection-rules/match", ({ request }) => {
-          matchRequests.push(request.url);
-          return ok({
-            decision: "include",
-            winningRuleId: "rule-1",
-            finalStatus: "INCLUDE",
-            step2Fallback: false,
-          });
-        }),
-      );
-
-      const user = userEvent.setup();
-      setup();
-      await screen.findByTestId("match-debugger-form");
-
-      await user.type(screen.getByTestId("market-slug-input"), "bitcoin-above");
-
-      // No requests yet (query is disabled until Test is clicked)
-      expect(matchRequests).toHaveLength(0);
-
-      // Now click Test
-      fireEvent.click(screen.getByTestId("match-test-button"));
-      await screen.findByTestId("match-result");
-      expect(matchRequests).toHaveLength(1);
     });
   });
 });
