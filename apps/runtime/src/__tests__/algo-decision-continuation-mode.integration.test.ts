@@ -25,7 +25,6 @@ import {
   type LegState,
   type LegStateRepository,
   type NormalizedMarket,
-  type OrderRepository,
   type RiskEventRepository,
   type RuntimeEventMap,
 } from "@plankton/domain";
@@ -162,10 +161,6 @@ function createMockLogger(): Logger {
   } as unknown as Logger;
 }
 
-function createMockOrderRepo(): Pick<OrderRepository, "sumOpenBuyNotional"> {
-  return { sumOpenBuyNotional: vi.fn().mockReturnValue(0) };
-}
-
 function createTradeCountProvider(initial: number | null) {
   let nextValue: number | null = initial;
   const calls: Array<{ conditionId: string; cap: number }> = [];
@@ -235,7 +230,6 @@ describe("AlgoDecisionModule × continuation_mode (real control DB)", () => {
   let legStateRepo: LegStateRepository;
   let algoRulesRepo: AlgoRulesRepository;
   let selectedMarketCache: SelectedMarketCache;
-  let orderRepo: Pick<OrderRepository, "sumOpenBuyNotional">;
   let log: Logger;
 
   beforeEach(() => {
@@ -248,7 +242,6 @@ describe("AlgoDecisionModule × continuation_mode (real control DB)", () => {
     legStateRepo = createMockLegStateRepo([legAtBuy1()]);
     algoRulesRepo = createMockAlgoRulesRepo();
     selectedMarketCache = createMockSelectedMarketCache();
-    orderRepo = createMockOrderRepo();
     log = createMockLogger();
   });
 
@@ -264,7 +257,6 @@ describe("AlgoDecisionModule × continuation_mode (real control DB)", () => {
       bus,
       legStateRepo,
       algoRulesRepo,
-      orderRepo,
       selectedMarketCache,
       controlDb: db,
       tradeCountProvider: provider,
@@ -300,7 +292,6 @@ describe("AlgoDecisionModule × continuation_mode (real control DB)", () => {
       bus,
       legStateRepo,
       algoRulesRepo,
-      orderRepo,
       selectedMarketCache,
       controlDb: db,
       tradeCountProvider: provider,
@@ -338,7 +329,6 @@ describe("AlgoDecisionModule × continuation_mode (real control DB)", () => {
       bus,
       legStateRepo,
       algoRulesRepo,
-      orderRepo,
       selectedMarketCache,
       controlDb: db,
       tradeCountProvider: provider,
@@ -368,7 +358,6 @@ describe("AlgoDecisionModule × continuation_mode (real control DB)", () => {
       bus,
       legStateRepo,
       algoRulesRepo,
-      orderRepo,
       selectedMarketCache,
       controlDb: db,
       tradeCountProvider: provider,
@@ -407,7 +396,6 @@ describe("AlgoDecisionModule × continuation_mode (real control DB)", () => {
       bus,
       legStateRepo,
       algoRulesRepo,
-      orderRepo,
       selectedMarketCache,
       controlDb: db,
       tradeCountProvider: provider,
@@ -442,7 +430,6 @@ describe("AlgoDecisionModule × continuation_mode (real control DB)", () => {
       bus,
       legStateRepo,
       algoRulesRepo,
-      orderRepo,
       selectedMarketCache,
       controlDb: db,
       tradeCountProvider: provider,

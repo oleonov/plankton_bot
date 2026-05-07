@@ -27,9 +27,7 @@ import type {
   RuntimeEventMap,
   TokenId,
   ConditionId,
-  OrderRepository,
   PositionRepository,
-  ProfileId,
   DecisionSignalLog,
   DecisionSignalLogRepository,
   RiskEventRepository,
@@ -52,11 +50,6 @@ import { readContinuationMode, readContinuationModeVersion } from "@plankton/db"
 import type { EvalContext } from "@plankton/domain";
 import type { RuntimeControl } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
-import {
-  hasWalletBuyBudget,
-  resolveWalletBuyBudget,
-  type WalletBudgetControlDb,
-} from "../../wallet-buy-budget.js";
 import {
   classifyAddAgeBucket,
   classifyAddPriceChangeBucket,
@@ -94,9 +87,7 @@ export interface SelectedMarketCache {
 interface PendingEntry {
   tokenId: string;
   signalId: string;
-  sizeUsdc: number;
   reservedAt: number;
-  persisted: boolean;
   clientOrderId: string | null;
   orderId: string | null;
 }
@@ -108,11 +99,9 @@ type TokenEvalResult =
       signal: import("@plankton/domain").Signal;
       market: NormalizedMarket;
       // Deferred persistence of decision_signal_log + signal_emitted risk_event.
-      // The wallet-budget filter in `evaluateTokensInner` may drop the signal
-      // after `evaluateToken` returns; only call this once the signal is
-      // committed to the emit queue, otherwise telemetry overcounts emissions
-      // by the silently-dropped tail and operators cannot trust
-      // signal_emitted/signal_suppressed parity.
+      // Keep construction pure until `evaluateTokensInner` commits the signal
+      // to the emit queue. Budget and exposure rejections happen downstream and
+      // must not erase Step 5 trigger telemetry.
       commitLog: () => void;
     }
   | null;
@@ -202,8 +191,8 @@ type ExitTelemetry = Pick<
   | "soldBoughtRatioBucket"
 >;
 
-const NULL_EXIT_TELEMETRY: ExitTelemetry = {
-  isExit: null,
+const NON_SELL_EXIT_TELEMETRY: ExitTelemetry = {
+  isExit: 0,
   isFirstSell: null,
   holdingTimeMs: null,
   holdingTimeBucket: null,
@@ -219,7 +208,7 @@ function computeExitTelemetry(
   nowMs: number,
   emissionFacts: EmissionFacts,
 ): ExitTelemetry {
-  if (side !== "sell") return NULL_EXIT_TELEMETRY;
+  if (side !== "sell") return NON_SELL_EXIT_TELEMETRY;
 
   const cumulativeBuySize = emissionFacts.cumulativeBuySize ?? 0;
   const cumulativeBuyNotional = emissionFacts.cumulativeBuyNotional ?? 0;
@@ -300,13 +289,16 @@ type SuppressionFacts = {
   tradeCountSource?: TradeCountSource | null;
 };
 
+interface ControlDbReader {
+  prepare(sql: string): { get(...args: unknown[]): unknown };
+}
+
 // ─── Deps ────────────────────────────────────────────────────────────────────
 
 export interface AlgoDecisionModuleDeps {
   bus: EventBus;
   legStateRepo: LegStateRepository;
   algoRulesRepo: AlgoRulesRepository;
-  orderRepo?: Pick<OrderRepository, "sumOpenBuyNotional"> | undefined;
   /**
    * ADR-027 §D-B — used to read `positions.avg_entry_price` (FIFO-recomputed
    * after each SELL fill) at signal-emit time, so `exit_pnl_pct` reflects the
@@ -318,10 +310,7 @@ export interface AlgoDecisionModuleDeps {
   riskEventRepo?: RiskEventRepository | undefined;
   selectedMarketCache: SelectedMarketCache;
   runtimeControl?: RuntimeControl;
-  controlDb?: WalletBudgetControlDb | undefined;
-  activeProfile?: ProfileId | undefined;
-  walletBufferPct?: number | undefined;
-  walletBufferMinUsdc?: number | undefined;
+  controlDb?: ControlDbReader | undefined;
   /**
    * ADR-016 dependency. When provided AND the runtime_control_state policy is
    * `market_wide`, the post-entry continuation gate consults this provider
@@ -559,7 +548,6 @@ export class AlgoDecisionModule implements RuntimeModule {
     const tokenId = String(payload.tokenId);
     const existing = this.pendingEntries.get(tokenId);
     if (!existing) return;
-    existing.persisted = true;
     existing.clientOrderId = String(payload.clientOrderId);
     existing.orderId = String(payload.orderId);
     this.clientOrderToToken.set(existing.clientOrderId, tokenId);
@@ -613,9 +601,8 @@ export class AlgoDecisionModule implements RuntimeModule {
    * has bumped. Errors and missing columns degrade silently to `leg_local`
    * via `readContinuationMode/Version`'s try/catch.
    *
-   * Tests that pass a structural `WalletBudgetControlDb` mock satisfy
-   * `readContinuationMode/Version`'s `db.prepare(...).get(...)` shape; the
-   * cast is honest since production always wires the real `Database`.
+   * Tests pass a structural `prepare(...).get(...)` mock; production wires the
+   * real `Database`, so the cast only bridges the narrow dependency type.
    */
   private refreshContinuationMode(): void {
     if (!this.deps.controlDb) return;
@@ -672,14 +659,6 @@ export class AlgoDecisionModule implements RuntimeModule {
     // recently completed pass rather than the one before it.
     this.currentTickRuleMix = new Map<string, number>();
     const now = Date.now();
-    let reservedBuyUsdc =
-      (this.deps.orderRepo?.sumOpenBuyNotional() ?? 0) + this.getPendingReservedBuyUsdc();
-    const walletBudgetConfig = {
-      controlDb: this.deps.controlDb,
-      activeProfile: this.deps.activeProfile,
-      walletBufferPct: this.deps.walletBufferPct,
-      walletBufferMinUsdc: this.deps.walletBufferMinUsdc,
-    };
 
     // seqMap tracks sequence numbers: `${tokenId}|${side}` → next seq
     const seqMap = new Map<string, number>();
@@ -714,24 +693,13 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (result.type === "redeem") {
         redeemConditionIds.add(result.conditionId);
       } else {
-        if (
-          result.signal.side === "buy" &&
-          !hasWalletBuyBudget(
-            resolveWalletBuyBudget(walletBudgetConfig, reservedBuyUsdc),
-            result.signal.suggestedSizeUsdc,
-          )
-        ) {
-          continue;
-        }
         if (result.signal.side === "buy") {
           this.reservePendingSignal(result.signal, now);
-          reservedBuyUsdc += result.signal.suggestedSizeUsdc;
         }
-        // Budget passed (or non-buy): persist decision_signal_log /
-        // signal_emitted now, BEFORE pushing onto the emit queue. The actual
-        // SignalProduced publish happens after the loop; recording here
-        // guarantees every queued signal has matching telemetry without
-        // booking emissions for signals dropped above.
+        // Persist decision_signal_log / signal_emitted now, BEFORE pushing onto
+        // the emit queue. RiskInventory owns wallet-budget rejection; Step 5
+        // telemetry records decision-side triggers regardless of downstream
+        // approval or rejection (ADR-022 §D-F).
         result.commitLog();
         signals.push({ signal: result.signal, market: result.market });
       }
@@ -947,8 +915,9 @@ export class AlgoDecisionModule implements RuntimeModule {
             addPriceChangePct: null,
             addPriceChangeBucket: null,
             nthBuyAtEmit: null,
-            // ADR-027 §D-B — exit telemetry is SELL-only; REDEEM rows carry nulls.
-            isExit: null,
+            // ADR-027 §D-B — REDEEM is explicitly non-SELL (`is_exit=0`);
+            // SELL-only derived telemetry fields carry nulls.
+            isExit: 0,
             isFirstSell: null,
             holdingTimeMs: null,
             holdingTimeBucket: null,
@@ -1398,19 +1367,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.pendingEntries.set(String(signal.tokenId), {
       tokenId: String(signal.tokenId),
       signalId: signal.signalId,
-      sizeUsdc: signal.suggestedSizeUsdc,
       reservedAt: now,
-      persisted: false,
       clientOrderId: null,
       orderId: null,
     });
-  }
-
-  private getPendingReservedBuyUsdc(): number {
-    let reservedBuyUsdc = 0;
-    for (const entry of this.pendingEntries.values()) {
-      if (!entry.persisted) reservedBuyUsdc += entry.sizeUsdc;
-    }
-    return reservedBuyUsdc;
   }
 }

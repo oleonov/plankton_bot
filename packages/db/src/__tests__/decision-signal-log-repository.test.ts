@@ -106,8 +106,8 @@ describe("SqliteDecisionSignalLogRepository", () => {
       addPriceChangePct: -0.18,
       addPriceChangeBucket: "-25% to -10%",
       nthBuyAtEmit: 3,
-      // BUY rows carry null exit-telemetry per ADR-027 §D-B.
-      isExit: null,
+      // BUY rows are explicitly non-exits; SELL-only derived telemetry stays null.
+      isExit: 0,
       isFirstSell: null,
       holdingTimeMs: null,
       holdingTimeBucket: null,
@@ -127,7 +127,7 @@ describe("SqliteDecisionSignalLogRepository", () => {
       add_price_change_pct: -0.18,
       add_price_change_bucket: "-25% to -10%",
       nth_buy_at_emit: 3,
-      is_exit: null,
+      is_exit: 0,
       is_first_sell: null,
       holding_time_ms: null,
       holding_time_bucket: null,

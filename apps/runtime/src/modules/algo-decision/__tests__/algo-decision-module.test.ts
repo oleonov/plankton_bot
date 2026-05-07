@@ -10,7 +10,6 @@ import type {
   NormalizedMarket,
   LegState,
   RuntimeEventMap,
-  OrderRepository,
   DecisionSignalLogRepository,
   RiskEventRepository,
 } from "@plankton/domain";
@@ -201,40 +200,19 @@ function createMockLogger(): Logger {
   } as unknown as Logger;
 }
 
-function createMockOrderRepo(openBuyNotional = 0): Pick<OrderRepository, "sumOpenBuyNotional"> {
-  return {
-    sumOpenBuyNotional: vi.fn().mockReturnValue(openBuyNotional),
-  };
-}
-
-function createMockControlDb(walletBalance: number | null) {
-  return {
-    prepare: vi.fn().mockReturnValue({
-      get: vi
-        .fn()
-        .mockReturnValue(
-          walletBalance != null ? { wallet_balance_usdc: walletBalance } : undefined,
-        ),
-    }),
-  };
-}
-
 /**
  * ADR-016 — richer control-db mock that pattern-matches on the SQL string so
- * a single instance answers wallet-balance, continuation-mode, and
- * continuation-mode-version queries from `WalletBudgetControlDb`,
- * `readContinuationMode`, and `readContinuationModeVersion` respectively.
+ * a single instance answers continuation-mode and continuation-mode-version
+ * queries from `readContinuationMode` and `readContinuationModeVersion`.
  *
  * Mutate via `setMode` to simulate an operator flip; the helper bumps the
  * version automatically so the runtime's hot-reload poller observes a change.
  */
 function createContinuationControlDb(opts: {
-  walletBalanceUsdc?: number | null;
   continuationMode?: "leg_local" | "market_wide";
   continuationModeVersion?: number;
 }) {
   const state = {
-    walletBalanceUsdc: opts.walletBalanceUsdc ?? null,
     continuationMode: opts.continuationMode ?? "leg_local",
     continuationModeVersion: opts.continuationModeVersion ?? 0,
   };
@@ -246,11 +224,6 @@ function createContinuationControlDb(opts: {
         }
         if (sql.includes("continuation_mode AS m")) {
           return { m: state.continuationMode };
-        }
-        if (sql.includes("wallet_balance_usdc")) {
-          return state.walletBalanceUsdc != null
-            ? { wallet_balance_usdc: state.walletBalanceUsdc }
-            : undefined;
         }
         return undefined;
       }),
@@ -326,7 +299,6 @@ describe("AlgoDecisionModule", () => {
   let legStateRepo: LegStateRepository;
   let algoRulesRepo: AlgoRulesRepository;
   let selectedMarketCache: SelectedMarketCache;
-  let orderRepo: Pick<OrderRepository, "sumOpenBuyNotional">;
   let log: Logger;
 
   function buildModule(
@@ -336,7 +308,6 @@ describe("AlgoDecisionModule", () => {
       bus: bus as unknown as EventBus,
       legStateRepo,
       algoRulesRepo,
-      orderRepo,
       selectedMarketCache,
       log,
       sweepIntervalMs: 60_000,
@@ -349,7 +320,6 @@ describe("AlgoDecisionModule", () => {
     legStateRepo = createMockLegStateRepo();
     algoRulesRepo = createMockAlgoRulesRepo();
     selectedMarketCache = createMockSelectedMarketCache();
-    orderRepo = createMockOrderRepo();
     log = createMockLogger();
   });
 
@@ -578,7 +548,7 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
-  it("leaves §11.2 exit telemetry null on BUY signals (BUY-side rows are exit=null)", async () => {
+  it("sets isExit=0 and leaves SELL-only exit telemetry null on BUY signals", async () => {
     const tokenId = "token-exit-buy-null";
     selectedMarketCache = createMockSelectedMarketCache([tokenId]);
     const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
@@ -595,7 +565,7 @@ describe("AlgoDecisionModule", () => {
     expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
     expect(vi.mocked(decisionSignalLogRepo.insert).mock.calls[0]![0]).toMatchObject({
       side: "BUY",
-      isExit: null,
+      isExit: 0,
       isFirstSell: null,
       holdingTimeMs: null,
       holdingTimeBucket: null,
@@ -768,6 +738,7 @@ describe("AlgoDecisionModule", () => {
       addPriceChangePct: null,
       addPriceChangeBucket: null,
       nthBuyAtEmit: 1,
+      isExit: 0,
     });
 
     await mod.stop();
@@ -826,6 +797,14 @@ describe("AlgoDecisionModule", () => {
       state: "S2",
       price: 0.03,
       buyCount: 2,
+      isExit: 0,
+      isFirstSell: null,
+      holdingTimeMs: null,
+      holdingTimeBucket: null,
+      exitPnlPct: null,
+      exitPnlBucket: null,
+      soldBoughtRatio: null,
+      soldBoughtRatioBucket: null,
     });
     expect(riskEventRepo.insert).toHaveBeenCalledWith({
       eventType: "signal_emitted",
@@ -1974,51 +1953,14 @@ describe("AlgoDecisionModule", () => {
     });
   });
 
-  describe("wallet buy budget gate", () => {
-    it("skips SignalProduced for new entry when wallet buy budget is exhausted", async () => {
-      const tokenId = "token-wallet-blocked";
+  describe("wallet buy budget ownership", () => {
+    it("does not apply wallet-budget gating before SignalProduced", async () => {
+      const tokenId = "token-budget-owned-by-risk";
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);
-      orderRepo = createMockOrderRepo(8);
-
-      const mod = buildModule({
-        controlDb: createMockControlDb(10),
-        activeProfile: "paper" as any,
-      });
-      await mod.start();
-
-      await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenId, null, 0.45)],
-        timestamp: Date.now(),
-      });
-
-      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([ev]) => ev === "SignalProduced",
-      );
-      expect(signalCalls.length).toBe(0);
-
-      await mod.stop();
-    });
-
-    // Regression: decision_signal_log + signal_emitted used to be written
-    // inside `buildSignal` (before the wallet-budget filter). When budget was
-    // exhausted, we silently dropped the SignalProduced publish but still
-    // booked the emission row, so signal_emitted overcounted by every dropped
-    // tail-end signal. Operators reading
-    //   COUNT(signal_emitted) vs COUNT(SignalProduced)
-    // saw fictitious "missing" emissions and stopped trusting the ledger.
-    it("does not record decision_signal_log or signal_emitted when wallet budget drops the signal", async () => {
-      const tokenId = "token-wallet-no-telemetry";
-      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
-      orderRepo = createMockOrderRepo(8);
       const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
       const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
 
-      const mod = buildModule({
-        controlDb: createMockControlDb(10),
-        activeProfile: "paper" as any,
-        decisionSignalLogRepo,
-        riskEventRepo,
-      });
+      const mod = buildModule({ decisionSignalLogRepo, riskEventRepo });
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
@@ -2029,25 +1971,21 @@ describe("AlgoDecisionModule", () => {
       const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
         ([ev]) => ev === "SignalProduced",
       );
-      expect(signalCalls.length).toBe(0);
-      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+      expect(signalCalls.length).toBe(1);
+      expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
       const signalEmittedCalls = vi
         .mocked(riskEventRepo.insert)
         .mock.calls.filter(([event]) => event.eventType === "signal_emitted");
-      expect(signalEmittedCalls).toHaveLength(0);
+      expect(signalEmittedCalls).toHaveLength(1);
 
       await mod.stop();
     });
 
-    it("caps BUY emissions within one sweep to available wallet budget", async () => {
-      const tokenIds = ["token-wallet-1", "token-wallet-2", "token-wallet-3"];
+    it("does not cap decision-side BUY emissions within one sweep by wallet budget", async () => {
+      const tokenIds = ["token-budget-1", "token-budget-2", "token-budget-3"];
       selectedMarketCache = createMockSelectedMarketCache(tokenIds);
-      orderRepo = createMockOrderRepo(0);
 
-      const mod = buildModule({
-        controlDb: createMockControlDb(5),
-        activeProfile: "paper" as any,
-      });
+      const mod = buildModule();
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
@@ -2058,21 +1996,17 @@ describe("AlgoDecisionModule", () => {
       const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
         ([ev]) => ev === "SignalProduced",
       );
-      expect(signalCalls.length).toBe(2);
+      expect(signalCalls.length).toBe(3);
       expect(signalCalls.every(([, payload]) => payload.signal.side === "buy")).toBe(true);
 
       await mod.stop();
     });
 
-    it("carries pending BUY reservations across successive market-update batches", async () => {
-      const tokenIds = ["token-wallet-a", "token-wallet-b", "token-wallet-c"];
+    it("keeps first-BUY pending dedupe after emitted budget-layer rejections", async () => {
+      const tokenIds = ["token-budget-a", "token-budget-b", "token-budget-c"];
       selectedMarketCache = createMockSelectedMarketCache(tokenIds);
-      orderRepo = createMockOrderRepo(0);
 
-      const mod = buildModule({
-        controlDb: createMockControlDb(5),
-        activeProfile: "paper" as any,
-      });
+      const mod = buildModule();
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
@@ -2080,21 +2014,25 @@ describe("AlgoDecisionModule", () => {
         timestamp: Date.now(),
       });
       await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenIds[2]!, null, 0.45)],
+        markets: [makeMarket(tokenIds[0]!, null, 0.45), makeMarket(tokenIds[2]!, null, 0.45)],
         timestamp: Date.now(),
       });
 
       const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
         ([ev]) => ev === "SignalProduced",
       );
-      expect(signalCalls.length).toBe(2);
+      expect(signalCalls.length).toBe(3);
+      expect(signalCalls.map(([, payload]) => String(payload.signal.tokenId))).toEqual([
+        tokenIds[0],
+        tokenIds[1],
+        tokenIds[2],
+      ]);
 
       await mod.stop();
     });
 
-    it("does not block SELL when wallet buy budget is exhausted", async () => {
-      const tokenId = "token-wallet-sell";
-      orderRepo = createMockOrderRepo(8);
+    it("does not block SELL signals in the decision layer", async () => {
+      const tokenId = "token-budget-sell";
       const legState: LegState = {
         tokenId: createTokenId(tokenId),
         buyCount: 1,
@@ -2107,10 +2045,7 @@ describe("AlgoDecisionModule", () => {
       };
       legStateRepo = createMockLegStateRepo([legState]);
 
-      const mod = buildModule({
-        controlDb: createMockControlDb(10),
-        activeProfile: "paper" as any,
-      });
+      const mod = buildModule();
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {

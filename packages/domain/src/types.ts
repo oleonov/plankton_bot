@@ -169,8 +169,9 @@ export interface DecisionSignalLog {
   addPriceChangePct: number | null;
   addPriceChangeBucket: AddPriceChangeBucket | null;
   nthBuyAtEmit: number | null;
-  // ADR-027 §D-B — exit telemetry; non-null on SELL rows only. BUY/REDEEM
-  // rows carry nulls so the decision_signal_log stays one-row-per-emission.
+  // ADR-027 §D-B — exit telemetry. `isExit` is denormalized as 1 for SELL
+  // exits and 0 for non-SELL rows; SELL-only derived fields remain null on
+  // BUY/REDEEM rows.
   isExit: 0 | 1 | null;
   isFirstSell: 0 | 1 | null;
   holdingTimeMs: number | null;

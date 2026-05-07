@@ -749,16 +749,12 @@ async function main(): Promise<void> {
     bus,
     legStateRepo: repos.legState,
     algoRulesRepo: repos.algoRules,
-    orderRepo: repos.order,
     positionRepo: repos.position,
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,
     selectedMarketCache,
     runtimeControl,
     controlDb: controlConn.db,
-    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
-    walletBufferPct: config.executionWalletBufferPct,
-    walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     tradeCountProvider,
     executionPolicy: () => {
       executionPolicyProvider.refreshIfStale();
