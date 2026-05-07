@@ -62,6 +62,8 @@ export interface RiskInventoryModuleDeps {
   resolutionTracker?: MarketResolutionTracker | undefined;
   /** Override for tests; defaults to Date.now. */
   now?: () => number;
+  /** Live-lite marks active wallet positions from Polymarket data-api reconciliation. */
+  markToMarketEnabled?: boolean | undefined;
 }
 
 /** Full diagnostics snapshot returned by getDiagnostics(). */
@@ -398,6 +400,7 @@ export class RiskInventoryModule implements RuntimeModule {
         markPriceByToken.set(String(m.tokenId), m.midPrice);
       }
     }
+    if (this.deps.markToMarketEnabled === false) return;
     if (markPriceByToken.size === 0) return;
 
     // Revalue all non-closed wallet inventory; dust can become open again.

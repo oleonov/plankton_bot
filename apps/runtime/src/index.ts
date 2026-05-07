@@ -694,6 +694,7 @@ async function main(): Promise<void> {
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     resolutionTracker: marketResolutionTracker,
+    markToMarketEnabled: runtimeMode !== "live-lite",
   });
 
   // 7h. Strategy module

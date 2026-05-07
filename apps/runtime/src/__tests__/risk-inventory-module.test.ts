@@ -1441,6 +1441,38 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
+    it("can disable market-data mark-to-market for live wallet marks", async () => {
+      const pos: Position = {
+        positionId: createPositionId("pos-live-wallet-mark"),
+        tokenId: TOK_ID,
+        conditionId: COND_ID,
+        side: "buy",
+        size: 28.37,
+        avgEntryPrice: 0.074,
+        costBasisUsdc: 2.0993,
+        currentValueUsdc: 2.1135,
+        realizedPnl: 0,
+        status: "open",
+        entryStyle: null,
+        openedAt: new Date().toISOString(),
+        closedAt: null,
+        updatedAt: new Date().toISOString(),
+      };
+      positionRepo = createMockPositionRepo(pos);
+      mod = createModule(undefined, { markToMarketEnabled: false });
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ bestBid: 0.057, bestAsk: 0.058, midPrice: 0.0575 })],
+        timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      expect(positionRepo.save).not.toHaveBeenCalled();
+
+      await mod.stop();
+    });
+
     it("values long inventory at midpoint/current price instead of thin best bid", async () => {
       const pos: Position = {
         positionId: createPositionId("pos-wide-spread"),
