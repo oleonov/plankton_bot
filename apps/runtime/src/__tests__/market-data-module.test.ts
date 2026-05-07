@@ -933,7 +933,7 @@ describe("MarketDataModule", () => {
 
       expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
       expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-exec"], {
-        timeoutMs: 5_010,
+        timeoutMs: 10_025,
       });
       expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(1);
       expect(mod.getMetricsSnapshot().fallbackReasonCounts).toEqual({
@@ -957,7 +957,7 @@ describe("MarketDataModule", () => {
 
       expect(gateway.getMarketPricing).toHaveBeenCalledTimes(2);
       expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-exec", "tok-entry"], {
-        timeoutMs: 5_020,
+        timeoutMs: 10_050,
       });
       expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(2);
 
@@ -1020,7 +1020,7 @@ describe("MarketDataModule", () => {
 
       expect(gateway.getMarketPricing).toHaveBeenCalledTimes(1);
       expect(gateway.getMarketPricing).toHaveBeenLastCalledWith(["tok-exec"], {
-        timeoutMs: 5_010,
+        timeoutMs: 10_025,
       });
       expect(mod.getMetricsSnapshot().fallbackPollCount).toBe(1);
       expect(mod.getMetricsSnapshot().fallbackReasonCounts).toEqual({

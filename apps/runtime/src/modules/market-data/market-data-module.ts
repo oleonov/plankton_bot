@@ -53,6 +53,9 @@ const SOFT_RANKING_FEATURE_REFRESH_MAX_AGE_MS = 3 * 60 * 60 * 1000;
 // updates (pendingGapTokenIds, forceFullPoll) stay synchronous so the next
 // poll still picks up every gap.
 const GAP_LOG_DEBOUNCE_MS = 250;
+const FALLBACK_POLL_TIMEOUT_BASE_MS = 10_000;
+const FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS = 25;
+const FALLBACK_POLL_TIMEOUT_MAX_MS = 30_000;
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
@@ -585,8 +588,10 @@ export class MarketDataModule implements RuntimeModule {
         "fetching pricing for tracked markets",
       );
 
-      // Scale timeout proportionally to batch size: base 5 s + 10 ms/token, cap 30 s.
-      const timeoutMs = Math.min(30_000, 5_000 + tokenIdsToPoll.length * 10);
+      const timeoutMs = Math.min(
+        FALLBACK_POLL_TIMEOUT_MAX_MS,
+        FALLBACK_POLL_TIMEOUT_BASE_MS + tokenIdsToPoll.length * FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS,
+      );
       const pricingMap =
         tokenIdsToPoll.length > 0
           ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll, { timeoutMs })
@@ -996,7 +1001,6 @@ export class MarketDataModule implements RuntimeModule {
       this.stream != null &&
       tracked.length > 0 &&
       tokenIdsToPoll.length > 0 &&
-      tokenIdsToPoll.every((tokenId) => this.marketCache.has(tokenId)) &&
       isTransientNetworkError(err)
     );
   }

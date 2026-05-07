@@ -5,7 +5,7 @@
  * 1. Under forceFullPoll=true, only priority tokens (executionCritical + entryCandidates)
  *    are polled — discovery tokens are excluded.
  * 2. The timeoutMs passed to getMarketPricing scales as
- *    min(30_000, 5_000 + batchLength * 10).
+ *    min(30_000, 10_000 + batchLength * 25).
  * 3. When priority tier exceeds fallbackBatchSize, the batch is trimmed to the
  *    cap and a warn log fires.
  */
@@ -251,11 +251,11 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
 
   // ── Test 2: Dynamic timeout scaling ────────────────────────────────────
 
-  it("timeoutMs scales proportionally: 5_000 + length*10, capped at 30_000", async () => {
+  it("timeoutMs scales proportionally: 10_000 + length*25, capped at 30_000", async () => {
     // We use the legacy flat path (no maxTrackedTokens) so we can precisely
     // control the size of the poll batch by returning exactly the right tokens.
 
-    // ── Case A: batch length 100 → expected timeout = 6_000 ──────────────
+    // ── Case A: batch length 100 → expected timeout = 12_500 ─────────────
     const ids100 = Array.from({ length: 100 }, (_, i) => `tok-${i}`);
 
     const getMarketPricingA = vi.fn().mockResolvedValue(new Map());
@@ -299,7 +299,7 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
 
     expect(getMarketPricingA).toHaveBeenCalledTimes(1);
     const [, optsA] = getMarketPricingA.mock.calls[0] as [string[], { timeoutMs?: number }];
-    expect(optsA?.timeoutMs).toBe(6_000); // 5_000 + 100 * 10
+    expect(optsA?.timeoutMs).toBe(12_500);
 
     await modA.stop();
 
@@ -345,10 +345,64 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
 
     expect(getMarketPricingB).toHaveBeenCalledTimes(1);
     const [, optsB] = getMarketPricingB.mock.calls[0] as [string[], { timeoutMs?: number }];
-    // 5_000 + 2_500 * 10 = 30_000 — exactly at the cap.
     expect(optsB?.timeoutMs).toBe(30_000);
 
     await modB.stop();
+  });
+
+  it("degrades transient poll failures to cached/base stream state without error logs", async () => {
+    const tiered = makeTiered(["prio-a"], ["prio-b"], []);
+    const repo = createMockRepo(tiered);
+
+    const getMarketPricing = vi
+      .fn()
+      .mockRejectedValue(new Error("TimeoutError: operation was aborted due to timeout"));
+
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      createMarketPricingStream: (handlers) => {
+        const s = new FakePricingStream(handlers);
+        streamRef = s;
+        return s;
+      },
+    };
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "poll cycle failed");
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ trackedCount: 2, fallbackPollCount: 2 }),
+      "poll cycle degraded — keeping cached websocket state",
+    );
+
+    await mod.stop();
   });
 
   // ── Test 3: Defensive cap trims batch and fires warn ───────────────────
