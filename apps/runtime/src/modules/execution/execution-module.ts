@@ -36,6 +36,7 @@ import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
 import { validateExecutablePrice } from "../../executable-price.js";
 import { hasWalletBuyBudget, resolveWalletBuyBudget } from "../../wallet-buy-budget.js";
+import { DEFAULT_FALLBACK_MIN_ORDER_SIZE } from "../../min-order-size.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
@@ -754,13 +755,17 @@ export class ExecutionModule implements RuntimeModule {
 
   private resolveCommandMinOrderSize(cmd: PlaceOrderCommand): number | null {
     const metadata = cmd.metadata;
-    if (!metadata || typeof metadata !== "object") return null;
+    const fallback = this.deps.runtimeMode === "live-lite" ? DEFAULT_FALLBACK_MIN_ORDER_SIZE : null;
+    if (!metadata || typeof metadata !== "object") return fallback;
     const marketData = (metadata as Record<string, unknown>).marketData;
-    if (!marketData || typeof marketData !== "object") return null;
-    const rawMinOrderSize = (marketData as Record<string, unknown>).minOrderSize;
-    return typeof rawMinOrderSize === "number" && Number.isFinite(rawMinOrderSize)
-      ? rawMinOrderSize
-      : null;
+    if (!marketData || typeof marketData !== "object") return fallback;
+    const rawMarketData = marketData as Record<string, unknown>;
+    for (const value of [rawMarketData.minOrderSize, rawMarketData.effectiveMinOrderSize]) {
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+        return value;
+      }
+    }
+    return fallback;
   }
 
   private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {

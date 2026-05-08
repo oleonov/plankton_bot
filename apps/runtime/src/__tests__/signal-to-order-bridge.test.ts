@@ -1513,6 +1513,40 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.price).toBe(0.1);
   });
 
+  it("skips SELL below the effective exchange minimum size when market min is missing", async () => {
+    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.2,
+      suggestedSize: 3.22,
+      reason: "repricing-exit",
+    };
+    const market = makeMarket({
+      bestBid: 0.18,
+      bestAsk: 0.2,
+      midPrice: 0.19,
+      tickSize: 0.001,
+      minOrderSize: null,
+    });
+    await bus.publish("SignalApproved", {
+      signal: sellSignal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.stage).toBe("execution-terms");
+    expect(skipped[0]!.reasons).toContain("order-size-below-minimum");
+    expect(skipped[0]!.diagnostics).toMatchObject({
+      orderSize: 3.22,
+      minOrderSize: null,
+      effectiveMinOrderSize: 5,
+    });
+  });
+
   it("does not apply the SELL signal-distance floor to BUY", async () => {
     const { bus, skipped, placed } = makeBridgeWithPricing();
     const buySignal: Signal = { ...makeSignal(), suggestedPrice: 0.2 };

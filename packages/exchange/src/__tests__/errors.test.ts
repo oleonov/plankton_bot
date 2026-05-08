@@ -41,6 +41,9 @@ describe("classifyError", () => {
   it("maps invalid size", () => {
     expect(classifyError(new Error("invalid size")).code).toBe("INVALID_SIZE");
     expect(classifyError(new Error("min order size")).code).toBe("INVALID_SIZE");
+    expect(classifyError(new Error("Size (3.22) lower than the minimum: 5")).code).toBe(
+      "INVALID_SIZE",
+    );
   });
 
   it("maps duplicate order", () => {

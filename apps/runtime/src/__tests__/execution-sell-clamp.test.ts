@@ -307,6 +307,41 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     await mod.stop();
   });
 
+  it("rejects live-lite SELL below fallback exchange minimum when metadata is missing", async () => {
+    const positionRepo = createMockPositionRepo(10);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+      allowSellSizeClamp: true,
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(3.22),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!).toEqual({
+      reason: "exchange-min-order-size-rejected",
+      errorCode: "INVALID_SIZE",
+    });
+
+    await mod.stop();
+  });
+
   // ── Case 4: availableSize == 0 → plain reject (no clamp to zero) ──
 
   it("rejects SELL when position has zero available size (no clamp to zero)", async () => {

@@ -23,7 +23,8 @@ export function classifyError(err: unknown): {
   if (
     lower.includes("invalid size") ||
     lower.includes("size must") ||
-    lower.includes("min order size")
+    lower.includes("min order size") ||
+    lower.includes("lower than the minimum")
   ) {
     return { code: "INVALID_SIZE", message, details };
   }

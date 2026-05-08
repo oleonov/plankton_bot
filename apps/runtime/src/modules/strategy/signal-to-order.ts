@@ -53,6 +53,7 @@ import {
   type CandidateBookCache,
   type CandidateBookResolution,
 } from "./candidate-book-cache.js";
+import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 100;
 const MAX_UNFILLED_CANCELS_BEFORE_COOLDOWN = 3;
@@ -508,6 +509,39 @@ export class SignalToOrderBridge {
       }
     }
 
+    const orderSize = resolveOrderSize(signal, executionTerms.price);
+    const effectiveMinOrderSize = resolveEffectiveMinOrderSize(market.minOrderSize);
+    if (!isExecutableOrderSize(orderSize, market.minOrderSize)) {
+      this.log.info(
+        {
+          signalId: signal.signalId,
+          tokenId: signal.tokenId,
+          side: signal.side,
+          orderSize,
+          minOrderSize: market.minOrderSize ?? null,
+          effectiveMinOrderSize,
+          cacheStatus: pricing.cacheStatus,
+        },
+        "approved signal skipped — order size below exchange minimum",
+      );
+      await this.publishConversionSkipped(signal, "execution-terms", ["order-size-below-minimum"], {
+        cacheStatus: pricing.cacheStatus,
+        orderSize,
+        minOrderSize: market.minOrderSize ?? null,
+        effectiveMinOrderSize,
+      });
+      this.writeObservation({
+        signal,
+        clientOrderId: null,
+        market,
+        policy,
+        executionTerms,
+        canary,
+        skippedReason: "order-size-below-minimum",
+      });
+      return;
+    }
+
     const clientOrderId = buildClientOrderId({
       signalId: signal.signalId,
       tokenId: signal.tokenId,
@@ -522,7 +556,7 @@ export class SignalToOrderBridge {
       tokenId: signal.tokenId,
       conditionId: signal.conditionId,
       side: signal.side,
-      size: resolveOrderSize(signal, executionTerms.price),
+      size: orderSize,
       price: executionTerms.price,
       ...(executionTerms.postOnly ? { postOnly: true } : {}),
       orderType: "GTC",
@@ -538,6 +572,7 @@ export class SignalToOrderBridge {
         marketData: {
           bookSource: market.bookSource ?? "unknown",
           minOrderSize: market.minOrderSize ?? null,
+          effectiveMinOrderSize,
         },
       },
     };
