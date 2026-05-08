@@ -28,6 +28,7 @@ export const DEFAULT_PRICING_POLICY: ExecutionPricingPolicy = {
   maxEntrySpreadTicks: 20,
   maxExitSpreadTicks: 40,
   maxImprovementTicks: 10,
+  minExitPriceSignalRatio: 0.5,
   wideSpreadPolicy: "edge",
   oneSidedPolicy: "edge",
 };
@@ -73,6 +74,8 @@ const BOUND_SPREAD_TICKS_MIN = 1;
 const BOUND_SPREAD_TICKS_MAX = 2000;
 const BOUND_IMPROVEMENT_TICKS_MIN = 0;
 const BOUND_IMPROVEMENT_TICKS_MAX = 500;
+const BOUND_MIN_EXIT_SIGNAL_RATIO_MIN = 0;
+const BOUND_MIN_EXIT_SIGNAL_RATIO_MAX = 1;
 const BOUND_ENTRY_CEILING_MIN = 0.05;
 const BOUND_ENTRY_CEILING_MAX = 0.99;
 const BOUND_EXIT_TTL_MIN_MS = 10_000;
@@ -245,6 +248,14 @@ function parsePricing(raw: unknown, issues: string[]): ExecutionPricingPolicy {
       BOUND_IMPROVEMENT_TICKS_MAX,
       issues,
       "pricing.maxImprovementTicks",
+    ),
+    minExitPriceSignalRatio: clampedNumber(
+      obj.minExitPriceSignalRatio,
+      DEFAULT_PRICING_POLICY.minExitPriceSignalRatio,
+      BOUND_MIN_EXIT_SIGNAL_RATIO_MIN,
+      BOUND_MIN_EXIT_SIGNAL_RATIO_MAX,
+      issues,
+      "pricing.minExitPriceSignalRatio",
     ),
     wideSpreadPolicy: enumOr(
       obj.wideSpreadPolicy,

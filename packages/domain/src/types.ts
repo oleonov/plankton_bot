@@ -565,6 +565,7 @@ export interface ExecutionPricingPolicy {
   maxEntrySpreadTicks: number;
   maxExitSpreadTicks: number;
   maxImprovementTicks: number;
+  minExitPriceSignalRatio: number;
   wideSpreadPolicy: ExecutionWideSpreadPolicy;
   oneSidedPolicy: ExecutionOneSidedPolicy;
 }

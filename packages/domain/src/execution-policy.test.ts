@@ -43,6 +43,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         maxEntrySpreadTicks: 15,
         maxExitSpreadTicks: 30,
         maxImprovementTicks: 5,
+        minExitPriceSignalRatio: 0.6,
         wideSpreadPolicy: "skip",
         oneSidedPolicy: "skip",
       },
@@ -54,6 +55,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.marketSelection).toEqual({ maxMidPrice: 0.42, minLiquidity: 250 });
     expect(policy.deadSideGuard.mode).toBe("enforce");
     expect(policy.pricing.mode).toBe("bounded-midpoint");
+    expect(policy.pricing.minExitPriceSignalRatio).toBe(0.6);
     expect(policy.pricing.wideSpreadPolicy).toBe("skip");
     expect(policy.telemetry.deadSideCanary).toBe(false);
   });
@@ -90,7 +92,20 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.pricing.maxEntrySpreadTicks).toBe(
       DEFAULT_EXECUTION_POLICY.pricing.maxEntrySpreadTicks,
     );
+    expect(policy.pricing.minExitPriceSignalRatio).toBe(
+      DEFAULT_EXECUTION_POLICY.pricing.minExitPriceSignalRatio,
+    );
     expect(policy.pricing.wideSpreadPolicy).toBe(DEFAULT_EXECUTION_POLICY.pricing.wideSpreadPolicy);
+  });
+
+  it("rejects invalid SELL signal-distance guard ratios with an issue", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ pricing: { minExitPriceSignalRatio: 1.5 } }),
+    );
+    expect(policy.pricing.minExitPriceSignalRatio).toBe(
+      DEFAULT_EXECUTION_POLICY.pricing.minExitPriceSignalRatio,
+    );
+    expect(issues.some((i) => i.includes("pricing.minExitPriceSignalRatio"))).toBe(true);
   });
 
   it("preserves partial market-selection override and defaults the rest", () => {

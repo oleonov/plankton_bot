@@ -104,6 +104,16 @@ type TokenEvalResult = {
   commitLog: () => void;
 } | null;
 
+type DecisionEvalMetrics = {
+  evalTotal: number;
+  emitted: number;
+  suppressedMarketNotLive: number;
+  livenessNotAcceptingOrders: number;
+  livenessOrderBookDisabled: number;
+  livenessBothFlags: number;
+  wouldMatchRule: Map<string, number>;
+};
+
 /**
  * ADR-016: which source the continuation gate consulted for `trade_count`.
  *  - `market_wide` — fresh value from `MarketTradeCountProvider`.
@@ -151,6 +161,18 @@ function classifyEntryPriceBucket(price: number): EntryPriceBucket {
   if (price <= 0.05) return "0.005-0.05";
   if (price <= 0.2) return "0.05-0.20";
   return ">0.20";
+}
+
+function createDecisionEvalMetrics(): DecisionEvalMetrics {
+  return {
+    evalTotal: 0,
+    emitted: 0,
+    suppressedMarketNotLive: 0,
+    livenessNotAcceptingOrders: 0,
+    livenessOrderBookDisabled: 0,
+    livenessBothFlags: 0,
+    wouldMatchRule: new Map<string, number>(),
+  };
 }
 
 /**
@@ -413,6 +435,8 @@ export class AlgoDecisionModule implements RuntimeModule {
   // and swapped in at its end. Both reset on module restart.
   private lastTickRuleMix = new Map<string, number>();
   private currentTickRuleMix = new Map<string, number>();
+  private lastEvalMetrics = createDecisionEvalMetrics();
+  private currentEvalMetrics = createDecisionEvalMetrics();
 
   // Rules — loaded once on start()
   private decisionRules: readonly AlgoDecisionRule[] = [];
@@ -519,7 +543,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     // emitted on the most recent completed pass; the segment is omitted in
     // that case to keep the line tidy. Sorted by ruleId for stable output.
     const ruleMix = this.formatTriggerMix(this.lastTickRuleMix);
-    return { ok: true, detail: `${base}${funnel}${ruleMix}` };
+    const evalMetrics = this.formatEvalMetrics(this.lastEvalMetrics);
+    return { ok: true, detail: `${base}${funnel}${ruleMix}${evalMetrics}` };
   }
 
   private formatTriggerMix(mix: ReadonlyMap<string, number>): string {
@@ -527,6 +552,27 @@ export class AlgoDecisionModule implements RuntimeModule {
     const entries = [...mix.entries()].sort(([a], [b]) => a.localeCompare(b));
     const parts = entries.map(([ruleId, count]) => `${ruleId}=${count}`);
     return ` triggerMix ${parts.join(" ")}`;
+  }
+
+  private formatEvalMetrics(metrics: DecisionEvalMetrics): string {
+    if (metrics.evalTotal === 0) return "";
+    const wouldMatch = this.formatWouldMatchRuleMix(metrics.wouldMatchRule);
+    return (
+      ` eval_total=${metrics.evalTotal}` +
+      ` emitted=${metrics.emitted}` +
+      ` suppressed_market_not_live=${metrics.suppressedMarketNotLive}` +
+      ` liveness_not_accepting_orders=${metrics.livenessNotAcceptingOrders}` +
+      ` liveness_order_book_disabled=${metrics.livenessOrderBookDisabled}` +
+      ` liveness_both_flags=${metrics.livenessBothFlags}` +
+      wouldMatch
+    );
+  }
+
+  private formatWouldMatchRuleMix(mix: ReadonlyMap<string, number>): string {
+    if (mix.size === 0) return "";
+    const entries = [...mix.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const parts = entries.map(([ruleId, count]) => `${ruleId}=${count}`);
+    return ` wouldMatchRule ${parts.join(" ")}`;
   }
 
   // ─── Event handlers ─────────────────────────────────────────────────────────
@@ -692,6 +738,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // of the sweep (see below), so healthcheck always reflects the most
     // recently completed pass rather than the one before it.
     this.currentTickRuleMix = new Map<string, number>();
+    this.currentEvalMetrics = createDecisionEvalMetrics();
     const now = Date.now();
 
     // seqMap tracks sequence numbers: `${tokenId}|${side}` → next seq
@@ -733,6 +780,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       // still owns final order-risk rejection; this prevents known-impossible
       // empty-wallet BUY candidates from flooding telemetry before Risk sees
       // the first rejection.
+      this.currentEvalMetrics.emitted++;
       result.commitLog();
       if (this.isPaused()) return;
       await this.deps.bus.publish("SignalProduced", {
@@ -744,6 +792,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // ADR-022 §D-F — promote the just-completed histogram so healthcheck
     // immediately reflects this sweep, not the previous one.
     this.lastTickRuleMix = this.currentTickRuleMix;
+    this.lastEvalMetrics = this.currentEvalMetrics;
   }
 
   /**
@@ -817,6 +866,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // Avoid emitting suppression telemetry for the full unselected market
     // universe delivered by NormalizedMarketUpdated; it is selection-layer noise.
     if (!legState && !selectedForEntry) return null;
+    this.currentEvalMetrics.evalTotal++;
 
     const state = deriveState(legState);
     const buyCount = legState?.buyCount ?? 0;
@@ -916,6 +966,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     // keeps the two gates in lockstep so they can't drift.
     const liveness = isAlive(market);
     if (!liveness.healthy) {
+      this.recordLivenessSuppressedMetric(liveness.reasons, ctx);
       this.recordDecisionSuppressed({
         tokenId,
         conditionId: market.conditionId,
@@ -1251,6 +1302,22 @@ export class AlgoDecisionModule implements RuntimeModule {
         "failed to persist signal_emitted risk event",
       );
     }
+  }
+
+  private recordLivenessSuppressedMetric(reasons: readonly string[], ctx: EvalContext): void {
+    const metrics = this.currentEvalMetrics;
+    metrics.suppressedMarketNotLive++;
+    const notAcceptingOrders = reasons.includes("not_accepting_orders");
+    const orderBookDisabled = reasons.includes("order_book_disabled");
+    if (notAcceptingOrders) metrics.livenessNotAcceptingOrders++;
+    if (orderBookDisabled) metrics.livenessOrderBookDisabled++;
+    if (notAcceptingOrders && orderBookDisabled) metrics.livenessBothFlags++;
+
+    const wouldMatch = evaluateDecision(ctx, this.decisionRules);
+    metrics.wouldMatchRule.set(
+      wouldMatch.ruleId,
+      (metrics.wouldMatchRule.get(wouldMatch.ruleId) ?? 0) + 1,
+    );
   }
 
   private recordDecisionSuppressed(facts: SuppressionFacts): void {

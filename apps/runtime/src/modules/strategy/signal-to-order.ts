@@ -422,6 +422,52 @@ export class SignalToOrderBridge {
       return;
     }
 
+    if (
+      signal.side === "sell" &&
+      executionTerms.kind === "ok" &&
+      shouldSkipSellBelowSignalFloor(
+        signal.suggestedPrice,
+        executionTerms.price,
+        policy.pricing.minExitPriceSignalRatio,
+      )
+    ) {
+      const floor = signal.suggestedPrice * policy.pricing.minExitPriceSignalRatio;
+      this.log.info(
+        {
+          signalId: signal.signalId,
+          tokenId: signal.tokenId,
+          signalPrice: signal.suggestedPrice,
+          executionPrice: executionTerms.price,
+          minRatio: policy.pricing.minExitPriceSignalRatio,
+          floor,
+          cacheStatus: pricing.cacheStatus,
+        },
+        "approved SELL skipped — execution price below signal-distance floor",
+      );
+      await this.publishConversionSkipped(
+        signal,
+        "execution-terms",
+        ["sell-price-below-signal-floor"],
+        {
+          cacheStatus: pricing.cacheStatus,
+          signalPrice: signal.suggestedPrice,
+          executionPrice: executionTerms.price,
+          minRatio: policy.pricing.minExitPriceSignalRatio,
+          floor,
+        },
+      );
+      this.writeObservation({
+        signal,
+        clientOrderId: null,
+        market,
+        policy,
+        executionTerms,
+        canary,
+        skippedReason: "sell-price-below-signal-floor",
+      });
+      return;
+    }
+
     if (canary) {
       const diagnostics = {
         ...canary,
@@ -1100,6 +1146,17 @@ function deriveOkBoundedOutcome(
     return "ok";
   }
   return "edge-fallback";
+}
+
+function shouldSkipSellBelowSignalFloor(
+  signalPrice: number,
+  executionPrice: number,
+  minRatio: number,
+): boolean {
+  if (!Number.isFinite(minRatio) || minRatio <= 0) return false;
+  if (!Number.isFinite(signalPrice) || signalPrice <= 0) return false;
+  if (!Number.isFinite(executionPrice) || executionPrice <= 0) return false;
+  return executionPrice < signalPrice * minRatio;
 }
 
 function bucketForTimeToEndMs(timeToEndMs: number): DeadSideBucket {

@@ -422,6 +422,7 @@ describe("API against real split schemas", () => {
               maxEntrySpreadTicks: 10,
               maxExitSpreadTicks: 10,
               maxImprovementTicks: 1,
+              minExitPriceSignalRatio: 0.5,
               wideSpreadPolicy: "edge",
               oneSidedPolicy: "edge",
             },

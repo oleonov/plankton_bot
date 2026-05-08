@@ -2044,6 +2044,84 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("reports liveness suppression counters and would-match rule mix in healthCheck", async () => {
+      const tokenId = "token-liveness-metrics-d3";
+      const nowIso = new Date(Date.now() - 60_000).toISOString();
+      legStateRepo = createMockLegStateRepo([
+        {
+          tokenId: createTokenId(tokenId),
+          buyCount: 1,
+          sellCount: 0,
+          lastAction: "BUY",
+          firstTradePrice: 0.1,
+          firstTradeAt: nowIso,
+          lastTradeAt: nowIso,
+          updatedAt: nowIso,
+        },
+      ]);
+      algoRulesRepo = {
+        getDecisionRules: vi.fn(() => [
+          {
+            id: 1,
+            priority: 10,
+            ruleId: "D3",
+            stateCondition: "S1",
+            priceOperator: "<",
+            priceValue: 0.05,
+            timeSinceLastOperator: null,
+            timeSinceLastSeconds: null,
+            buyCountMin: null,
+            buyCountMax: null,
+            holdDurationOperator: null,
+            holdDurationSeconds: null,
+            action: "BUY",
+          },
+          {
+            id: 99,
+            priority: 999,
+            ruleId: "FALLBACK",
+            stateCondition: "ANY",
+            priceOperator: null,
+            priceValue: null,
+            timeSinceLastOperator: null,
+            timeSinceLastSeconds: null,
+            buyCountMin: null,
+            buyCountMax: null,
+            holdDurationOperator: null,
+            holdDurationSeconds: null,
+            action: "BUY",
+          },
+        ]),
+        getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+          actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+        ),
+      };
+
+      const mod = buildModule();
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, null, 0.03, "cond-liveness-metrics"),
+            acceptingOrders: false,
+            enableOrderBook: false,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+
+      const detail = (await mod.healthCheck()).detail ?? "";
+      expect(detail).toContain("eval_total=1");
+      expect(detail).toContain("suppressed_market_not_live=1");
+      expect(detail).toContain("liveness_not_accepting_orders=1");
+      expect(detail).toContain("liveness_order_book_disabled=1");
+      expect(detail).toContain("liveness_both_flags=1");
+      expect(detail).toContain("wouldMatchRule D3=1");
+
+      await mod.stop();
+    });
+
     // Regression: continuation-stop is sticky — a leg that fails R1/R2 fails
     // identically on every sweep tick, so without dedupe a handful of stuck
     // legs floods decision_signal_log/risk_events ~1/sec. The dedupe set must
@@ -2861,6 +2939,7 @@ describe("AlgoDecisionModule", () => {
           maxEntrySpreadTicks: 100,
           maxExitSpreadTicks: 100,
           maxImprovementTicks: 0,
+          minExitPriceSignalRatio: 0.5,
           wideSpreadPolicy: "edge" as const,
           oneSidedPolicy: "edge" as const,
         },

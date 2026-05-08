@@ -62,6 +62,9 @@ function ExecutionPolicyFormInner({
   const [maxImprovement, setMaxImprovement] = useState(
     policy.pricing.maxImprovementTicks.toString(),
   );
+  const [minExitSignalRatio, setMinExitSignalRatio] = useState(
+    policy.pricing.minExitPriceSignalRatio.toString(),
+  );
   const [wideSpread, setWideSpread] = useState<PricingSpreadPolicy>(
     policy.pricing.wideSpreadPolicy,
   );
@@ -90,6 +93,7 @@ function ExecutionPolicyFormInner({
         maxEntrySpreadTicks: numOr(maxEntrySpread, policy.pricing.maxEntrySpreadTicks),
         maxExitSpreadTicks: numOr(maxExitSpread, policy.pricing.maxExitSpreadTicks),
         maxImprovementTicks: numOr(maxImprovement, policy.pricing.maxImprovementTicks),
+        minExitPriceSignalRatio: numOr(minExitSignalRatio, policy.pricing.minExitPriceSignalRatio),
         wideSpreadPolicy: wideSpread,
         oneSidedPolicy: oneSided,
       },
@@ -260,6 +264,15 @@ function ExecutionPolicyFormInner({
             type="number"
             value={maxImprovement}
             onChange={(e) => setMaxImprovement(e.target.value)}
+          />
+        </div>
+        <div className="form-field">
+          <label>Min SELL / Signal Price Ratio (0 – 1)</label>
+          <input
+            type="number"
+            step="0.01"
+            value={minExitSignalRatio}
+            onChange={(e) => setMinExitSignalRatio(e.target.value)}
           />
         </div>
         <div className="form-field">

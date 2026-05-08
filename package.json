@@ -16,6 +16,7 @@
     "dev": "turbo run dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "changelog:check": "node scripts/check-changelog.mjs",
     "knip": "knip",
     "audit": "pnpm audit",
     "secrets:scan": "command -v gitleaks >/dev/null 2>&1 || { echo 'gitleaks not found. Install: brew install gitleaks (macOS) or see https://github.com/gitleaks/gitleaks#installing'; exit 1; } && gitleaks detect --source . --verbose"

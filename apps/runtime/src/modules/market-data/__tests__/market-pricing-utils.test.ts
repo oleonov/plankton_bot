@@ -99,6 +99,50 @@ describe("applyPricingSnapshot — executable top-of-book", () => {
 });
 
 describe("applyStreamUpdate — executable top-of-book", () => {
+  it("preserves Gamma liveness across alternating REST and WS updates", () => {
+    const gammaOpen = applyPricingSnapshot(
+      baseMarket({ acceptingOrders: false, enableOrderBook: false }),
+      baseSnapshot({ acceptingOrders: true, enableOrderBook: true }),
+      0,
+    );
+
+    const wsAfterOpen: MarketPricingStreamUpdate = {
+      tokenId: "t1",
+      pricing: baseSnapshot({
+        bestBid: 0.41,
+        bestAsk: 0.51,
+        acceptingOrders: false,
+        enableOrderBook: false,
+        bookSource: "clob",
+      }),
+    };
+    const afterWsOpen = applyStreamUpdate(gammaOpen, wsAfterOpen, 100);
+    expect(afterWsOpen.acceptingOrders).toBe(true);
+    expect(afterWsOpen.enableOrderBook).toBe(true);
+
+    const gammaClosed = applyPricingSnapshot(
+      afterWsOpen,
+      baseSnapshot({ acceptingOrders: false, enableOrderBook: false }),
+      5_000,
+    );
+    expect(gammaClosed.acceptingOrders).toBe(false);
+    expect(gammaClosed.enableOrderBook).toBe(false);
+
+    const wsAfterClosed: MarketPricingStreamUpdate = {
+      tokenId: "t1",
+      pricing: baseSnapshot({
+        bestBid: 0.42,
+        bestAsk: 0.52,
+        acceptingOrders: true,
+        enableOrderBook: true,
+        bookSource: "clob",
+      }),
+    };
+    const afterWsClosed = applyStreamUpdate(gammaClosed, wsAfterClosed, 5_100);
+    expect(afterWsClosed.acceptingOrders).toBe(false);
+    expect(afterWsClosed.enableOrderBook).toBe(false);
+  });
+
   it("uses the first deeper executable book levels when the raw top-of-book is invalid", () => {
     const update: MarketPricingStreamUpdate = {
       tokenId: "t1",

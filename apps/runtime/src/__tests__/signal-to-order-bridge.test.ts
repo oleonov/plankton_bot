@@ -1173,7 +1173,12 @@ describe("entry-price ceiling guard (ADR-013)", () => {
 
   it("does not guard SELL signals (sell price can legitimately be > 0.45)", async () => {
     const { bus, skipped, placed } = makeBridge();
-    const sellSignal: Signal = { ...makeSignal(), side: "sell", reason: "repricing-exit" };
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.01,
+      reason: "repricing-exit",
+    };
     await bus.publish("SignalApproved", {
       signal: sellSignal,
       market: makeMarket({ bestBid: 0.85, bestAsk: 0.9, midPrice: 0.875 }),
@@ -1343,7 +1348,12 @@ describe("dead-side-near-end guard", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
     const { bus, skipped, placed } = makeBridge({ mode: "enforce" });
-    const sellSignal: Signal = { ...makeSignal(), side: "sell", reason: "repricing-exit" };
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.01,
+      reason: "repricing-exit",
+    };
     await bus.publish("SignalApproved", {
       signal: sellSignal,
       market: deadSideMarket(30_000, 0.01),
@@ -1452,6 +1462,72 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.4);
+  });
+
+  it("skips SELL when edge price is below the signal-distance floor", async () => {
+    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.2,
+      reason: "repricing-exit",
+    };
+    const market = makeMarket({ bestBid: 0.02, bestAsk: 0.08, midPrice: 0.05, tickSize: 0.001 });
+    await bus.publish("SignalApproved", {
+      signal: sellSignal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.stage).toBe("execution-terms");
+    expect(skipped[0]!.reasons).toContain("sell-price-below-signal-floor");
+    expect(skipped[0]!.diagnostics).toMatchObject({
+      signalPrice: 0.2,
+      executionPrice: 0.08,
+      minRatio: 0.5,
+      floor: 0.1,
+    });
+  });
+
+  it("allows SELL exactly at the signal-distance floor", async () => {
+    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.2,
+      reason: "repricing-exit",
+    };
+    const market = makeMarket({ bestBid: 0.02, bestAsk: 0.1, midPrice: 0.06, tickSize: 0.001 });
+    await bus.publish("SignalApproved", {
+      signal: sellSignal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.1);
+  });
+
+  it("does not apply the SELL signal-distance floor to BUY", async () => {
+    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const buySignal: Signal = { ...makeSignal(), suggestedPrice: 0.2 };
+    const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, midPrice: 0.09, tickSize: 0.001 });
+    await bus.publish("SignalApproved", {
+      signal: buySignal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.side).toBe("buy");
+    expect(placed[0]!.command.price).toBe(0.08);
   });
 
   it("bounded-midpoint on tight spread improves price inside the book", async () => {
@@ -2338,6 +2414,39 @@ describe("ADR-015 execution policy observations", () => {
     // as if the order had been placed.
     expect(rows[0]!.pricingDeltaTicks).toBe(0);
     expect(rows[0]!.roundLevelHit).toBe("0.05x");
+  });
+
+  it("writes a skip observation when SELL price is below signal-distance floor", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const bus = new InProcessEventBus();
+    const { repo, rows } = makeCapturingRepo();
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => DEFAULT_EXECUTION_POLICY,
+      observations: repo,
+      profileId: PROFILE_ID,
+    });
+    bridge.subscribe();
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.2,
+        reason: "repricing-exit",
+      },
+      market: makeMarket({ bestBid: 0.02, bestAsk: 0.08, midPrice: 0.05, tickSize: 0.001 }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.skippedReason).toBe("sell-price-below-signal-floor");
+    expect(rows[0]!.selectedPrice).toBe(0.08);
+    expect(rows[0]!.side).toBe("SELL");
   });
 });
 

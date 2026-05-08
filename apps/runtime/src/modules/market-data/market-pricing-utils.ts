@@ -62,7 +62,12 @@ export function applyStreamUpdate(
   // preserve the prior `featuresCapturedTs` so a chatty book stream cannot
   // mark hours-stale feature inputs as fresh for soft-ranking (audit §D7).
   const preservedFeaturesTs = marketWithTickSize.featuresCapturedTs ?? null;
-  const nextMarket = applyPricingSnapshot(marketWithTickSize, update.pricing, nowMs);
+  const pricedMarket = applyPricingSnapshot(marketWithTickSize, update.pricing, nowMs);
+  const nextMarket = {
+    ...pricedMarket,
+    acceptingOrders: marketWithTickSize.acceptingOrders,
+    enableOrderBook: marketWithTickSize.enableOrderBook,
+  };
   if (!update.book) {
     return { ...nextMarket, featuresCapturedTs: preservedFeaturesTs };
   }
