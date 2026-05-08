@@ -350,7 +350,11 @@ export class ExecutionModule implements RuntimeModule {
     if (decision.kind === "reject") {
       this.recordInternalReservationReject();
       this.log.debug(decision.details, decision.message);
-      await this.rejectOrder(cmd, decision.reason, ExchangeErrorCode.InsufficientBalance);
+      await this.rejectOrder(
+        cmd,
+        decision.reason,
+        decision.errorCode ?? ExchangeErrorCode.InsufficientBalance,
+      );
       return;
     }
 
@@ -644,6 +648,7 @@ export class ExecutionModule implements RuntimeModule {
     | {
         kind: "reject";
         reason: string;
+        errorCode?: ExchangeErrorCode;
         message: string;
         details: Record<string, unknown>;
       }
@@ -698,6 +703,28 @@ export class ExecutionModule implements RuntimeModule {
 
     const clampEnabled = this.deps.allowSellSizeClamp !== false;
     if (clampEnabled && availableSize > ExecutionModule.SIZE_EPSILON_SHARES) {
+      const minOrderSize = this.resolveCommandMinOrderSize(cmd);
+      if (
+        minOrderSize != null &&
+        Number.isFinite(minOrderSize) &&
+        minOrderSize > 0 &&
+        availableSize + ExecutionModule.SIZE_EPSILON_SHARES < minOrderSize
+      ) {
+        return {
+          kind: "reject",
+          reason: "sell-residual-below-min-order-size",
+          errorCode: ExchangeErrorCode.InvalidSize,
+          message: "sell order skipped — available residual below exchange minimum",
+          details: {
+            tokenId: cmd.tokenId,
+            positionSize: position.size,
+            reservedSell,
+            availableSize,
+            orderSize: cmd.size,
+            minOrderSize,
+          },
+        };
+      }
       return {
         kind: "clamp",
         newSize: availableSize,

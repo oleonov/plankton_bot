@@ -56,6 +56,12 @@ const GAP_LOG_DEBOUNCE_MS = 250;
 const FALLBACK_POLL_TIMEOUT_BASE_MS = 10_000;
 const FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS = 25;
 const FALLBACK_POLL_TIMEOUT_MAX_MS = 30_000;
+const TRANSIENT_POLL_WARN_THROTTLE_MS = 5 * 60_000;
+
+interface WarnThrottleState {
+  lastLoggedAtMs: number | null;
+  suppressedCount: number;
+}
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
@@ -201,6 +207,8 @@ export class MarketDataModule implements RuntimeModule {
    * downstream cache footprint bounded to (WS tier + current discovery batch).
    */
   private lastDiscoveryBatchTokenIds: Set<string> = new Set();
+  private readonly cachedPollDegradeWarn: WarnThrottleState = createWarnThrottleState();
+  private readonly discoveryPollFailureWarn: WarnThrottleState = createWarnThrottleState();
   /**
    * True when the stream-level circuit breaker is open — the module degrades to
    * poll-only mode, polling the full WS-tier each cycle. Readable by Task 5.
@@ -588,10 +596,7 @@ export class MarketDataModule implements RuntimeModule {
         "fetching pricing for tracked markets",
       );
 
-      const timeoutMs = Math.min(
-        FALLBACK_POLL_TIMEOUT_MAX_MS,
-        FALLBACK_POLL_TIMEOUT_BASE_MS + tokenIdsToPoll.length * FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS,
-      );
+      const timeoutMs = resolveMarketPricingTimeoutMs(tokenIdsToPoll.length);
       const pricingMap =
         tokenIdsToPoll.length > 0
           ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll, { timeoutMs })
@@ -618,6 +623,7 @@ export class MarketDataModule implements RuntimeModule {
 
       this.lastSuccessfulDataMs = now;
       this.forceFullPoll = false;
+      resetWarnThrottle(this.cachedPollDegradeWarn);
       // A successful poll means every tracked token is either freshly priced
       // (just fetched) or still considered fresh by the stream. Drop the full
       // gap set instead of only the polled subset — otherwise entries for
@@ -643,14 +649,7 @@ export class MarketDataModule implements RuntimeModule {
       if (this.shouldDegradeToCachedStreamState(err, tracked, tokenIdsToPoll)) {
         const nowMs = Date.now();
         await this.publishCachedMarkets(tracked, nowMs);
-        this.log.warn(
-          {
-            err,
-            trackedCount: tracked.length,
-            fallbackPollCount: tokenIdsToPoll.length,
-          },
-          "poll cycle degraded — keeping cached websocket state",
-        );
+        this.logCachedPollDegraded(err, tracked.length, tokenIdsToPoll.length, nowMs);
       } else {
         this.log.error({ err }, "poll cycle failed");
       }
@@ -696,7 +695,8 @@ export class MarketDataModule implements RuntimeModule {
     this.discoveryCursor = (cursor + batch.length) % this.discoveryTier.length;
 
     try {
-      const pricingMap = await this.deps.gateway.getMarketPricing(tokenIds);
+      const timeoutMs = resolveMarketPricingTimeoutMs(tokenIds.length);
+      const pricingMap = await this.deps.gateway.getMarketPricing(tokenIds, { timeoutMs });
       const nowMs = Date.now();
       const snapshots: NormalizedMarket[] = [];
       for (const [tokenId, pricing] of pricingMap) {
@@ -722,8 +722,13 @@ export class MarketDataModule implements RuntimeModule {
       }
 
       await this.flushDiscoveryBatchEviction(new Set(tokenIds), nowMs);
+      resetWarnThrottle(this.discoveryPollFailureWarn);
     } catch (err) {
-      this.log.warn({ err }, "discovery poll batch failed");
+      this.logDiscoveryPollFailure(err, {
+        batchSize: batch.length,
+        cursor,
+        discoveryTotal: this.discoveryTier.length,
+      });
     }
   }
 
@@ -1022,6 +1027,71 @@ export class MarketDataModule implements RuntimeModule {
       timestamp: nowMs,
     });
   }
+
+  private logCachedPollDegraded(
+    err: unknown,
+    trackedCount: number,
+    fallbackPollCount: number,
+    nowMs: number,
+  ): void {
+    const suppressedCount = consumeWarnThrottle(this.cachedPollDegradeWarn, nowMs);
+    if (suppressedCount == null) return;
+    this.log.warn(
+      {
+        err,
+        trackedCount,
+        fallbackPollCount,
+        suppressedCount,
+      },
+      "poll cycle degraded — keeping cached websocket state",
+    );
+  }
+
+  private logDiscoveryPollFailure(
+    err: unknown,
+    context: Readonly<{ batchSize: number; cursor: number; discoveryTotal: number }>,
+  ): void {
+    const suppressedCount = consumeWarnThrottle(this.discoveryPollFailureWarn, Date.now());
+    if (suppressedCount == null) return;
+    this.log.warn(
+      {
+        err,
+        ...context,
+        suppressedCount,
+      },
+      "discovery poll batch failed",
+    );
+  }
+}
+
+function resolveMarketPricingTimeoutMs(tokenCount: number): number {
+  return Math.min(
+    FALLBACK_POLL_TIMEOUT_MAX_MS,
+    FALLBACK_POLL_TIMEOUT_BASE_MS + tokenCount * FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS,
+  );
+}
+
+function createWarnThrottleState(): WarnThrottleState {
+  return { lastLoggedAtMs: null, suppressedCount: 0 };
+}
+
+function consumeWarnThrottle(state: WarnThrottleState, nowMs: number): number | null {
+  if (
+    state.lastLoggedAtMs == null ||
+    nowMs - state.lastLoggedAtMs >= TRANSIENT_POLL_WARN_THROTTLE_MS
+  ) {
+    const suppressedCount = state.suppressedCount;
+    state.lastLoggedAtMs = nowMs;
+    state.suppressedCount = 0;
+    return suppressedCount;
+  }
+  state.suppressedCount++;
+  return null;
+}
+
+function resetWarnThrottle(state: WarnThrottleState): void {
+  state.lastLoggedAtMs = null;
+  state.suppressedCount = 0;
 }
 
 function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[] {

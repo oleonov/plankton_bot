@@ -405,6 +405,75 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     await mod.stop();
   });
 
+  it("throttles repeated cached-state degradation warnings", async () => {
+    const tiered = makeTiered(["prio-a"], ["prio-b"], []);
+    const repo = createMockRepo(tiered);
+    const getMarketPricing = vi
+      .fn()
+      .mockRejectedValue(new Error("TimeoutError: operation was aborted due to timeout"));
+
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      createMarketPricingStream: (handlers) => {
+        const s = new FakePricingStream(handlers);
+        streamRef = s;
+        return s;
+      },
+    };
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 3_600_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+    });
+
+    await mod.start();
+    await vi.waitFor(() => {
+      expect(silentLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trackedCount: 2,
+          fallbackPollCount: 2,
+          suppressedCount: 0,
+        }),
+        "poll cycle degraded — keeping cached websocket state",
+      );
+    });
+
+    await mod.poll();
+
+    expect(silentLog.warn).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await mod.poll();
+
+    expect(silentLog.warn).toHaveBeenCalledTimes(2);
+    const [lastContext] = silentLog.warn.mock.calls.at(-1)!;
+    expect(lastContext.suppressedCount).toBeGreaterThan(0);
+    expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "poll cycle failed");
+
+    await mod.stop();
+  });
+
   // ── Test 3: Defensive cap trims batch and fires warn ───────────────────
 
   it("defensive cap: priority tier exceeding fallbackBatchSize is trimmed + warn logged", async () => {

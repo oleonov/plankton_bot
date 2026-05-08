@@ -301,7 +301,9 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     });
     expect(discoveryCalls.length).toBeGreaterThanOrEqual(1);
     const firstBatch: string[] = discoveryCalls[0]![0] as string[];
+    const [, opts] = discoveryCalls[0] as [string[], { timeoutMs?: number }];
     expect(firstBatch).toHaveLength(4);
+    expect(opts?.timeoutMs).toBe(10_100);
     // All in batch are discovery tokens
     for (const id of firstBatch) {
       expect(id).toMatch(/^disc-/);
@@ -309,6 +311,61 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     // WS tokens NOT in discovery batch
     expect(firstBatch).not.toContain("crit-1");
     expect(firstBatch).not.toContain("cand-1");
+
+    await mod.stop();
+  });
+
+  it("throttles repeated discovery poll failures while preserving batch context", async () => {
+    vi.useFakeTimers();
+
+    const tiered = makeTiered([], [], ["d0", "d1"]);
+    const repo = createMockRepo(tiered);
+    gateway.getMarketPricing = vi
+      .fn()
+      .mockRejectedValue(new Error("TimeoutError: operation was aborted due to timeout"));
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      discoveryPollIntervalMs: 10_000,
+      discoveryBatchSize: 2,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    silentLog.warn.mockClear();
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    expect(silentLog.warn).toHaveBeenCalledTimes(1);
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        batchSize: 2,
+        cursor: 0,
+        discoveryTotal: 2,
+        suppressedCount: 0,
+      }),
+      "discovery poll batch failed",
+    );
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+    expect(silentLog.warn).toHaveBeenCalledTimes(2);
+    expect(silentLog.warn).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        batchSize: 2,
+        suppressedCount: expect.any(Number),
+      }),
+      "discovery poll batch failed",
+    );
+    const [lastContext] = silentLog.warn.mock.calls.at(-1)!;
+    expect(lastContext.suppressedCount).toBeGreaterThan(0);
 
     await mod.stop();
   });

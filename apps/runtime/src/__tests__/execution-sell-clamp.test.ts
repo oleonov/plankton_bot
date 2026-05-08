@@ -4,8 +4,8 @@
  * Verifies that SELL orders with intent > availableSize:
  *   1. are clamped to availableSize when ALLOW_SELL_SIZE_CLAMP is true (default)
  *   2. are rejected when ALLOW_SELL_SIZE_CLAMP is false
- *   3. are rejected with `clamped-below-min-order-size` when the clamp would
- *      push size below the exchange minOrderSize.
+ *   3. are rejected before clamp when the available residual would be below
+ *      the exchange minOrderSize.
  *
  * Ref: docs/adr/008-sell-size-clamp-policy.md
  *      docs/audits/2026-04-19-algo-spec-remediation-plan.md §7.3
@@ -17,6 +17,7 @@ import {
   createCommandId,
   createBotRunId,
   createConditionId,
+  createOrderId,
   createPositionId,
 } from "@plankton/domain";
 import type {
@@ -35,6 +36,7 @@ import type {
   PositionRepository,
   TokenId,
   ClientOrderId,
+  Order,
 } from "@plankton/domain";
 import { InProcessEventBus } from "@plankton/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
@@ -165,6 +167,28 @@ function createMockPositionRepo(
   } as unknown as PositionRepository;
 }
 
+function makeOpenSellOrder(overrides: Partial<Order> = {}): Order {
+  return {
+    orderId: createOrderId("ord-open-sell"),
+    clientOrderId: "plk_open_sell" as ClientOrderId,
+    tokenId: SELL_TOKEN,
+    conditionId: SELL_COND,
+    side: "sell",
+    orderType: "GTC",
+    price: 0.83,
+    size: 6.987804878048781,
+    sizeUsdc: 5.79987804878049,
+    status: "open",
+    exchangeOrderId: "ord-open-sell",
+    signalId: null,
+    signalReason: "repricing-exit",
+    botRunId: BOT_RUN_ID,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -197,6 +221,10 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     marketRepo = createMockMarketRepo();
     orderRepo = createMockOrderRepo();
     fillRepo = createMockFillRepo();
+    silentLog.info.mockClear();
+    silentLog.warn.mockClear();
+    silentLog.error.mockClear();
+    silentLog.debug.mockClear();
   });
 
   // ── Case 1: intent > available, clamp enabled → clamped to available ──
@@ -271,9 +299,9 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     await mod.stop();
   });
 
-  // ── Case 3: clamp would drop below minOrderSize → reject ──
+  // ── Case 3: available residual below minOrderSize → reject ──
 
-  it("rejects SELL with clamped-below-min-order-size when clamp would be below exchange minimum", async () => {
+  it("rejects SELL with sell-residual-below-min-order-size before clamp", async () => {
     const positionRepo = createMockPositionRepo(0.5);
     const mod = new ExecutionModule({
       gateway,
@@ -301,8 +329,58 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
 
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
-    expect(rejected[0]!.reason).toBe("clamped-below-min-order-size");
+    expect(rejected[0]!).toEqual({
+      reason: "sell-residual-below-min-order-size",
+      errorCode: "INVALID_SIZE",
+    });
     expect(mod.getDiagnostics().sellSizeClamps).toBe(0);
+    expect(silentLog.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "sell order rejected — clamped size below exchange minimum",
+    );
+
+    await mod.stop();
+  });
+
+  it("rejects SELL when open sell reservations leave a residual below minOrderSize", async () => {
+    const positionRepo = createMockPositionRepo(10.21);
+    orderRepo.findOpen = vi.fn().mockReturnValue([makeOpenSellOrder()]);
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      allowSellSizeClamp: true,
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(5.73, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      } as Partial<PlaceOrderCommand>),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!).toEqual({
+      reason: "sell-residual-below-min-order-size",
+      errorCode: "INVALID_SIZE",
+    });
+    expect(mod.getDiagnostics().sellSizeClamps).toBe(0);
+    expect(silentLog.warn).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "sell order rejected — clamped size below exchange minimum",
+    );
 
     await mod.stop();
   });
