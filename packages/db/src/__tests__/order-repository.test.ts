@@ -188,6 +188,76 @@ describe("SqliteOrderRepository", () => {
     expect(tokB).toHaveLength(1);
   });
 
+  it("findRecentByTokenId and findFirstByTokenId return bounded token order windows", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-old"),
+        clientOrderId: "c-old" as ClientOrderId,
+        tokenId: createTokenId("tok-A"),
+        createdAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-new"),
+        clientOrderId: "c-new" as ClientOrderId,
+        tokenId: createTokenId("tok-A"),
+        createdAt: "2026-01-03T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-mid"),
+        clientOrderId: "c-mid" as ClientOrderId,
+        tokenId: createTokenId("tok-A"),
+        createdAt: "2026-01-02T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-other"),
+        clientOrderId: "c-other" as ClientOrderId,
+        tokenId: createTokenId("tok-B"),
+        createdAt: "2026-01-04T00:00:00Z",
+      }),
+    );
+
+    expect(
+      repo.findRecentByTokenId(createTokenId("tok-A"), 2).map((order) => order.orderId),
+    ).toEqual(["o-new", "o-mid"]);
+    expect(repo.findFirstByTokenId(createTokenId("tok-A"))?.orderId).toBe("o-old");
+  });
+
+  it("findRecentBySignalReasons returns bounded exit orders since a timestamp", () => {
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-old"),
+        clientOrderId: "c-old" as ClientOrderId,
+        signalReason: "repricing-exit",
+        createdAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-entry"),
+        clientOrderId: "c-entry" as ClientOrderId,
+        signalReason: "probe-entry",
+        createdAt: "2026-01-03T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeOrder({
+        orderId: createOrderId("o-exit"),
+        clientOrderId: "c-exit" as ClientOrderId,
+        signalReason: "repricing-exit",
+        createdAt: "2026-01-04T00:00:00Z",
+      }),
+    );
+
+    const recent = repo.findRecentBySignalReasons(["repricing-exit"], "2026-01-02T00:00:00Z", 10);
+    expect(recent.map((order) => order.orderId)).toEqual(["o-exit"]);
+  });
+
   it("updateStatus changes status", () => {
     repo.save(makeOrder());
 

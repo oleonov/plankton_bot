@@ -114,6 +114,17 @@ type DecisionEvalMetrics = {
   wouldMatchRule: Map<string, number>;
 };
 
+export interface DecisionEvalMetricsSnapshot {
+  evalTotal: number;
+  emitted: number;
+  suppressedMarketNotLive: number;
+  livenessNotAcceptingOrders: number;
+  livenessOrderBookDisabled: number;
+  livenessBothFlags: number;
+  wouldMatchRule: Record<string, number>;
+  capturedAt: string;
+}
+
 /**
  * ADR-016: which source the continuation gate consulted for `trade_count`.
  *  - `market_wide` — fresh value from `MarketTradeCountProvider`.
@@ -357,6 +368,8 @@ export interface AlgoDecisionModuleDeps {
    * entirely (e.g. tests that don't supply a provider).
    */
   executionPolicy?: (() => ExecutionPolicy) | undefined;
+  evalMetricsSink?: ((snapshot: DecisionEvalMetricsSnapshot) => void) | undefined;
+  evalMetricsEmitIntervalMs?: number | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -437,6 +450,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private currentTickRuleMix = new Map<string, number>();
   private lastEvalMetrics = createDecisionEvalMetrics();
   private currentEvalMetrics = createDecisionEvalMetrics();
+  private lastEvalMetricsEmitAt = 0;
 
   // Rules — loaded once on start()
   private decisionRules: readonly AlgoDecisionRule[] = [];
@@ -793,6 +807,25 @@ export class AlgoDecisionModule implements RuntimeModule {
     // immediately reflects this sweep, not the previous one.
     this.lastTickRuleMix = this.currentTickRuleMix;
     this.lastEvalMetrics = this.currentEvalMetrics;
+    this.emitEvalMetricsSnapshot(now);
+  }
+
+  private emitEvalMetricsSnapshot(now: number): void {
+    const sink = this.deps.evalMetricsSink;
+    if (!sink) return;
+    const intervalMs = this.deps.evalMetricsEmitIntervalMs ?? 60_000;
+    if (now - this.lastEvalMetricsEmitAt < intervalMs) return;
+    this.lastEvalMetricsEmitAt = now;
+    sink({
+      evalTotal: this.lastEvalMetrics.evalTotal,
+      emitted: this.lastEvalMetrics.emitted,
+      suppressedMarketNotLive: this.lastEvalMetrics.suppressedMarketNotLive,
+      livenessNotAcceptingOrders: this.lastEvalMetrics.livenessNotAcceptingOrders,
+      livenessOrderBookDisabled: this.lastEvalMetrics.livenessOrderBookDisabled,
+      livenessBothFlags: this.lastEvalMetrics.livenessBothFlags,
+      wouldMatchRule: Object.fromEntries(this.lastEvalMetrics.wouldMatchRule),
+      capturedAt: new Date(now).toISOString(),
+    });
   }
 
   /**

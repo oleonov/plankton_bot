@@ -575,6 +575,81 @@ export interface ExecutionPolicyTelemetry {
   pricingShadow: boolean;
 }
 
+export type OrderLifetimeEnforcementMode = "observe" | "enforce";
+export type TokenOrderLifetimeMode = "PASSIVE" | "MIDDLE" | "BURST";
+export type TokenOrderLifetimeConfidence = "low" | "medium" | "high";
+
+export interface BurstOrderLifetimePolicy {
+  candidateFirstFillLatencyMs: number;
+  confirmSpanMs: number;
+  confirmMedianGapMs: number;
+  confirmFirstFillLatencyMs: number;
+  confirmP75GapMs: number;
+  confirmMaxSpanMs: number;
+  lowTtlMs: number;
+  mediumTtlMs: number;
+  highTtlMs: number;
+}
+
+export interface MiddleOrderLifetimePolicy {
+  minMedianGapMs: number;
+  maxMedianGapMs: number;
+  maxSpanMs: number;
+  lowTtlMs: number;
+  mediumTtlMs: number;
+  highTtlMs: number;
+}
+
+export interface PassiveOrderLifetimePolicy {
+  lowTtlMs: number;
+  mediumTtlMs: number;
+  highTtlMs: number;
+  highConfidenceMinFills: number;
+  highConfidenceMinSpanMs: number;
+}
+
+export interface OrderLifetimePolicy {
+  enabled: boolean;
+  enforcement: OrderLifetimeEnforcementMode;
+  staleResetMs: number;
+  safetyBufferMs: number;
+  resolutionAggressiveWindowMs: number;
+  resolutionStopWindowMs: number;
+  resolutionExitTtlCapMs: number;
+  relayerSubmitBudgetPerMinute: number;
+  maxTransitionEventsPerTokenPerDay: number;
+  oscillationTransitionLimitPerDay: number;
+  burst: BurstOrderLifetimePolicy;
+  middle: MiddleOrderLifetimePolicy;
+  passive: PassiveOrderLifetimePolicy;
+}
+
+export interface AlgoTokenModeState {
+  tokenId: TokenId;
+  conditionId: ConditionId;
+  outcomeIndex: number | null;
+  mode: TokenOrderLifetimeMode;
+  modeConfidence: TokenOrderLifetimeConfidence;
+  modeStatus: "candidate" | "confirmed";
+  modeSince: string;
+  modeAssessedAt: string;
+  ttlStage: number;
+  lastFillAt: string | null;
+  lastOrderAt: string | null;
+  lastStaleCancelAt: string | null;
+  fillCountWindow: number;
+  orderCountWindow: number;
+  firstFillLatencyMs: number | null;
+  medianGapMs: number | null;
+  p75GapMs: number | null;
+  spanMs: number | null;
+  lastFillTimestampsJson: string | null;
+  transitionCountDay: number;
+  transitionDay: string | null;
+  resetReason: string | null;
+  updatedAt: string;
+}
+
 export interface MarketSelectionPolicy {
   /** v5.11 hard admission: BUY candidates must have mid price below this ceiling. */
   maxMidPrice: number;
@@ -597,6 +672,7 @@ export interface ExecutionPolicy {
   marketSelection: MarketSelectionPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
+  orderLifetime: OrderLifetimePolicy;
   telemetry: ExecutionPolicyTelemetry;
 }
 

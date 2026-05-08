@@ -166,6 +166,49 @@ describe("SqliteFillRepository", () => {
     expect(recent[1]!.fillId).toBe("f2");
   });
 
+  it("findRecentByTokenId returns newest token fills first with limit", () => {
+    insertOrder(conn.db, { order_id: "ord-A", client_order_id: "c-A", token_id: "tok-A" });
+    insertOrder(conn.db, { order_id: "ord-B", client_order_id: "c-B", token_id: "tok-A" });
+    insertOrder(conn.db, { order_id: "ord-C", client_order_id: "c-C", token_id: "tok-A" });
+    insertOrder(conn.db, { order_id: "ord-D", client_order_id: "c-D", token_id: "tok-B" });
+
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-old"),
+        orderId: createOrderId("ord-A"),
+        tokenId: createTokenId("tok-A"),
+        filledAt: "2026-01-01T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-new"),
+        orderId: createOrderId("ord-B"),
+        tokenId: createTokenId("tok-A"),
+        filledAt: "2026-01-03T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-mid"),
+        orderId: createOrderId("ord-C"),
+        tokenId: createTokenId("tok-A"),
+        filledAt: "2026-01-02T00:00:00Z",
+      }),
+    );
+    repo.save(
+      makeFill({
+        fillId: createFillId("f-other"),
+        orderId: createOrderId("ord-D"),
+        tokenId: createTokenId("tok-B"),
+        filledAt: "2026-01-04T00:00:00Z",
+      }),
+    );
+
+    const recent = repo.findRecentByTokenId(createTokenId("tok-A"), 2);
+    expect(recent.map((fill) => fill.fillId)).toEqual(["f-new", "f-mid"]);
+  });
+
   it("findUnreconciled returns only unreconciled fills", () => {
     insertOrder(conn.db);
 

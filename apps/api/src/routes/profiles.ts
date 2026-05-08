@@ -436,6 +436,25 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         ...current.pricing,
         ...((patch.pricing as Partial<ExecutionPolicy["pricing"]> | undefined) ?? {}),
       },
+      orderLifetime: {
+        ...current.orderLifetime,
+        ...((patch.orderLifetime as Partial<ExecutionPolicy["orderLifetime"]> | undefined) ?? {}),
+        burst: {
+          ...current.orderLifetime.burst,
+          ...((patch.orderLifetime as Partial<ExecutionPolicy["orderLifetime"]> | undefined)
+            ?.burst ?? {}),
+        },
+        middle: {
+          ...current.orderLifetime.middle,
+          ...((patch.orderLifetime as Partial<ExecutionPolicy["orderLifetime"]> | undefined)
+            ?.middle ?? {}),
+        },
+        passive: {
+          ...current.orderLifetime.passive,
+          ...((patch.orderLifetime as Partial<ExecutionPolicy["orderLifetime"]> | undefined)
+            ?.passive ?? {}),
+        },
+      },
       telemetry: {
         ...current.telemetry,
         ...((patch.telemetry as Partial<ExecutionPolicy["telemetry"]> | undefined) ?? {}),

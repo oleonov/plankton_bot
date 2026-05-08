@@ -152,6 +152,12 @@ function summarizePolicy(policy: ExecutionPolicy): Record<string, unknown> {
     marketSelection: policy.marketSelection,
     deadSideGuard: policy.deadSideGuard,
     pricing: policy.pricing,
+    orderLifetime: {
+      enabled: policy.orderLifetime.enabled,
+      enforcement: policy.orderLifetime.enforcement,
+      passiveLowTtlMs: policy.orderLifetime.passive.lowTtlMs,
+      passiveHighTtlMs: policy.orderLifetime.passive.highTtlMs,
+    },
     telemetry: policy.telemetry,
   };
 }

@@ -116,6 +116,38 @@ export class SqliteOrderRepository implements OrderRepository {
     return rows.map((r) => this.rowToOrder(r));
   }
 
+  findRecentByTokenId(tokenId: TokenId, limit: number): Order[] {
+    const rows = this.db
+      .prepare("SELECT * FROM orders WHERE token_id = ? ORDER BY created_at DESC LIMIT ?")
+      .all(tokenId, Math.max(0, Math.trunc(limit))) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToOrder(r));
+  }
+
+  findFirstByTokenId(tokenId: TokenId): Order | null {
+    const row = this.db
+      .prepare("SELECT * FROM orders WHERE token_id = ? ORDER BY created_at ASC LIMIT 1")
+      .get(tokenId) as Record<string, unknown> | undefined;
+    return row ? this.rowToOrder(row) : null;
+  }
+
+  findRecentBySignalReasons(
+    signalReasons: readonly string[],
+    sinceIso: string,
+    limit: number,
+  ): Order[] {
+    if (signalReasons.length === 0 || limit <= 0) return [];
+    const placeholders = signalReasons.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM orders
+         WHERE signal_reason IN (${placeholders}) AND created_at >= ?
+         ORDER BY created_at DESC
+         LIMIT ?`,
+      )
+      .all(...signalReasons, sinceIso, Math.trunc(limit)) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToOrder(r));
+  }
+
   updateStatus(
     id: OrderId,
     status: OrderStatus,

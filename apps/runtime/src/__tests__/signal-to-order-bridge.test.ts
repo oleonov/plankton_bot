@@ -1371,13 +1371,35 @@ describe("dead-side-near-end guard", () => {
     };
     await bus.publish("SignalApproved", {
       signal: sellSignal,
-      market: deadSideMarket(30_000, 0.01),
+      market: deadSideMarket(2 * 60 * 60_000, 0.01),
       approvedAt: Date.now(),
     });
     await bus.drain();
 
     expect(skipped).toHaveLength(0);
     expect(placed).toHaveLength(1);
+  });
+
+  it("skips SELL orders inside the order-lifetime final resolution hour", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const { bus, skipped, placed } = makeBridge({ mode: "enforce" });
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.01,
+      reason: "repricing-exit",
+    };
+    await bus.publish("SignalApproved", {
+      signal: sellSignal,
+      market: deadSideMarket(30_000, 0.01),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("order-lifetime-resolution-stop-window");
   });
 
   it("does not hit when endDate is null (no resolution deadline known)", async () => {
@@ -1438,7 +1460,10 @@ describe("dead-side-near-end guard", () => {
 describe("bounded-midpoint pricing (ADR-014)", () => {
   function makeBridgeWithPricing(
     pricingOverrides?: Partial<ExecutionPricingPolicy>,
-    opts: { orderRepo?: OrderRepository } = {},
+    opts: {
+      orderRepo?: OrderRepository;
+      orderLifetime?: ConstructorParameters<typeof SignalToOrderBridge>[0]["orderLifetime"];
+    } = {},
   ) {
     const bus = new InProcessEventBus();
     const logger = makeLogger();
@@ -1452,6 +1477,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       liveLiteGuard: { getWalletMode: () => "eoa" } as never,
       policy: () => policy,
       ...(opts.orderRepo ? { orderRepo: opts.orderRepo } : {}),
+      ...(opts.orderLifetime ? { orderLifetime: opts.orderLifetime } : {}),
     });
     bridge.subscribe();
     const skipped: Array<{
@@ -1559,6 +1585,47 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(skipped[0]!.diagnostics).toMatchObject({
       existingPrice: 0.1,
       executionPrice: 0.1,
+    });
+  });
+
+  it("skips SELL when order-lifetime BURST placement budget is exhausted", async () => {
+    const orderLifetime = {
+      canPlaceExitOrder: vi.fn(() => ({
+        allowed: false,
+        reason: "order-lifetime-burst-rate-limit",
+        mode: "BURST",
+        budgetPerMinute: 20,
+        remainingBudget: 0,
+      })),
+    };
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, { orderLifetime });
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.2,
+      suggestedSize: 5.73,
+      reason: "repricing-exit",
+    };
+    const market = makeMarket({ bestBid: 0.02, bestAsk: 0.1, midPrice: 0.06, tickSize: 0.001 });
+    await bus.publish("SignalApproved", {
+      signal: sellSignal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(orderLifetime.canPlaceExitOrder).toHaveBeenCalledWith(
+      sellSignal.tokenId,
+      expect.any(Number),
+    );
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.stage).toBe("execution-terms");
+    expect(skipped[0]!.reasons).toContain("order-lifetime-burst-rate-limit");
+    expect(skipped[0]!.diagnostics).toMatchObject({
+      mode: "BURST",
+      budgetPerMinute: 20,
+      remainingBudget: 0,
     });
   });
 

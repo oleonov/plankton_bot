@@ -119,6 +119,7 @@ import {
   SqliteAlgoRulesRepository,
   SqliteLegStateRepository,
   SqliteLegStateTransitionRepository,
+  SqliteAlgoTokenModeStateRepository,
   SqliteSettlementLedgerRepository,
   SqlitePositionDriftRepository,
   SqliteExecutionPolicyObservationRepository,
@@ -137,6 +138,7 @@ import { createPolymarketClient, type SettlementClientLike } from "./polymarket-
 import { installConsoleRedaction } from "./console-redaction.js";
 import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
 import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-state-transition-backfill.js";
+import { OrderLifetimeModule } from "./modules/order-lifetime/order-lifetime-module.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -268,6 +270,7 @@ async function main(): Promise<void> {
     algoRules: new SqliteAlgoRulesRepository(controlConn.db),
     legState: new SqliteLegStateRepository(ledgerConn.db),
     legStateTransition: new SqliteLegStateTransitionRepository(ledgerConn.db),
+    tokenModeState: new SqliteAlgoTokenModeStateRepository(ledgerConn.db),
   };
 
   // 3b. Selection rule engine — version-polled singleton shared by scanner,
@@ -781,8 +784,29 @@ async function main(): Promise<void> {
     },
     tradeCountProvider,
     executionPolicy: currentExecutionPolicy,
+    evalMetricsSink: (snapshot) => {
+      runtimeMetrics.writeLatest(
+        "algo_decision_eval_counters",
+        snapshot.evalTotal,
+        JSON.stringify(snapshot),
+        snapshot.capturedAt,
+      );
+    },
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,
+  });
+
+  const orderLifetimeModule = new OrderLifetimeModule({
+    bus,
+    fillRepo: repos.fill,
+    orderRepo: repos.order,
+    marketRepo: repos.market,
+    positionRepo: repos.position,
+    modeStateRepo: repos.tokenModeState,
+    riskEventRepo: repos.riskEvent,
+    runtimeMetrics,
+    policy: () => currentExecutionPolicy().orderLifetime,
+    log,
   });
 
   // Standalone SignalToOrderBridge — wired here so it is active when AlgoDecisionModule
@@ -800,6 +824,7 @@ async function main(): Promise<void> {
     observations: executionPolicyObservationRepo,
     profileId: activeProfile as import("@plankton/domain").ProfileId,
     resolutionTracker: marketResolutionTracker,
+    orderLifetime: orderLifetimeModule,
   });
 
   // 7i. Reconciliation module
@@ -814,6 +839,7 @@ async function main(): Promise<void> {
     settlementLedgerRepo: repos.settlementLedger,
     driftRepo: repos.positionDrift,
     exitOrderTtlMs: () => currentExecutionPolicy().exitOrderTtlMs,
+    exitOrderLifetime: orderLifetimeModule,
     ...(runtimeMode === "live-lite" && traderAddress
       ? {
           walletPositionSentinel: {
@@ -947,6 +973,7 @@ async function main(): Promise<void> {
     ["risk-inventory", riskInventoryModule],
     ["profile-publisher", profilePublisher],
     ["ledger-retention", ledgerRetentionModule],
+    ["order-lifetime", orderLifetimeModule],
     ["reconciliation", reconciliationModule],
     ...(userOrderStreamModule
       ? [

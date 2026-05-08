@@ -14,6 +14,7 @@ import type {
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
   MarketSelectionPolicy,
+  OrderLifetimePolicy,
 } from "./types.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
 
@@ -38,6 +39,45 @@ export const DEFAULT_TELEMETRY: ExecutionPolicyTelemetry = {
   pricingShadow: true,
 };
 
+export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
+  enabled: true,
+  enforcement: "enforce",
+  staleResetMs: 24 * 60 * 60_000,
+  safetyBufferMs: 60 * 60_000,
+  resolutionAggressiveWindowMs: 6 * 60 * 60_000,
+  resolutionStopWindowMs: 60 * 60_000,
+  resolutionExitTtlCapMs: 10 * 60_000,
+  relayerSubmitBudgetPerMinute: 20,
+  maxTransitionEventsPerTokenPerDay: 10,
+  oscillationTransitionLimitPerDay: 3,
+  burst: {
+    candidateFirstFillLatencyMs: 30_000,
+    confirmSpanMs: 180_000,
+    confirmMedianGapMs: 30_000,
+    confirmFirstFillLatencyMs: 120_000,
+    confirmP75GapMs: 60_000,
+    confirmMaxSpanMs: 300_000,
+    lowTtlMs: 60_000,
+    mediumTtlMs: 30_000,
+    highTtlMs: 15_000,
+  },
+  middle: {
+    minMedianGapMs: 60_000,
+    maxMedianGapMs: 10 * 60_000,
+    maxSpanMs: 60 * 60_000,
+    lowTtlMs: 30 * 60_000,
+    mediumTtlMs: 60 * 60_000,
+    highTtlMs: 2 * 60 * 60_000,
+  },
+  passive: {
+    lowTtlMs: 6 * 60 * 60_000,
+    mediumTtlMs: 24 * 60 * 60_000,
+    highTtlMs: 72 * 60 * 60_000,
+    highConfidenceMinFills: 3,
+    highConfidenceMinSpanMs: 6 * 60 * 60_000,
+  },
+};
+
 /**
  * Step 0 §P3: spec §1.7 R1 (`06:423`) — empirical lower bound 2,504 sec
  * (~42 min) between Gamma `createdAt` and the first BUY across historical
@@ -58,10 +98,12 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   marketSelection: DEFAULT_MARKET_SELECTION_POLICY,
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
+  orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   telemetry: DEFAULT_TELEMETRY,
 };
 
 const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
+const ORDER_LIFETIME_ENFORCEMENT_MODES = ["observe", "enforce"] as const;
 const PRICING_MODES = ["edge", "bounded-midpoint"] as const;
 const BINARY_PRICING_POLICIES = ["edge", "skip"] as const;
 
@@ -88,6 +130,9 @@ const BOUND_MARKET_SELECTION_MAX_MID_MIN = 0.001;
 const BOUND_MARKET_SELECTION_MAX_MID_MAX = 0.99;
 const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MIN = 0;
 const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MAX = 1_000_000;
+const BOUND_ORDER_LIFETIME_MIN_MS = 1_000;
+const BOUND_ORDER_LIFETIME_MAX_MS = 14 * 24 * 60 * 60_000;
+const BOUND_ORDER_LIFETIME_COUNT_MAX = 10_000;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -143,6 +188,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const pricing = parsePricing(obj.pricing, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
+  const orderLifetime = parseOrderLifetime(obj.orderLifetime, issues);
 
   return {
     policy: {
@@ -153,6 +199,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       marketSelection,
       deadSideGuard,
       pricing,
+      orderLifetime,
       telemetry,
     },
     issues,
@@ -272,6 +319,237 @@ function parsePricing(raw: unknown, issues: string[]): ExecutionPricingPolicy {
       "pricing.oneSidedPolicy",
     ),
   };
+}
+
+function parseOrderLifetime(raw: unknown, issues: string[]): OrderLifetimePolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("orderLifetime must be an object");
+    return DEFAULT_ORDER_LIFETIME_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_ORDER_LIFETIME_POLICY.enabled,
+      issues,
+      "orderLifetime.enabled",
+    ),
+    enforcement: enumOr(
+      obj.enforcement,
+      ORDER_LIFETIME_ENFORCEMENT_MODES,
+      DEFAULT_ORDER_LIFETIME_POLICY.enforcement,
+      issues,
+      "orderLifetime.enforcement",
+    ),
+    staleResetMs: lifetimeMs(
+      obj.staleResetMs,
+      DEFAULT_ORDER_LIFETIME_POLICY.staleResetMs,
+      "orderLifetime.staleResetMs",
+      issues,
+    ),
+    safetyBufferMs: lifetimeMs(
+      obj.safetyBufferMs,
+      DEFAULT_ORDER_LIFETIME_POLICY.safetyBufferMs,
+      "orderLifetime.safetyBufferMs",
+      issues,
+    ),
+    resolutionAggressiveWindowMs: lifetimeMs(
+      obj.resolutionAggressiveWindowMs,
+      DEFAULT_ORDER_LIFETIME_POLICY.resolutionAggressiveWindowMs,
+      "orderLifetime.resolutionAggressiveWindowMs",
+      issues,
+    ),
+    resolutionStopWindowMs: lifetimeMs(
+      obj.resolutionStopWindowMs,
+      DEFAULT_ORDER_LIFETIME_POLICY.resolutionStopWindowMs,
+      "orderLifetime.resolutionStopWindowMs",
+      issues,
+    ),
+    resolutionExitTtlCapMs: lifetimeMs(
+      obj.resolutionExitTtlCapMs,
+      DEFAULT_ORDER_LIFETIME_POLICY.resolutionExitTtlCapMs,
+      "orderLifetime.resolutionExitTtlCapMs",
+      issues,
+    ),
+    relayerSubmitBudgetPerMinute: clampedInt(
+      obj.relayerSubmitBudgetPerMinute,
+      DEFAULT_ORDER_LIFETIME_POLICY.relayerSubmitBudgetPerMinute,
+      1,
+      1_000,
+      issues,
+      "orderLifetime.relayerSubmitBudgetPerMinute",
+    ),
+    maxTransitionEventsPerTokenPerDay: clampedInt(
+      obj.maxTransitionEventsPerTokenPerDay,
+      DEFAULT_ORDER_LIFETIME_POLICY.maxTransitionEventsPerTokenPerDay,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "orderLifetime.maxTransitionEventsPerTokenPerDay",
+    ),
+    oscillationTransitionLimitPerDay: clampedInt(
+      obj.oscillationTransitionLimitPerDay,
+      DEFAULT_ORDER_LIFETIME_POLICY.oscillationTransitionLimitPerDay,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "orderLifetime.oscillationTransitionLimitPerDay",
+    ),
+    burst: parseBurstOrderLifetime(obj.burst, issues),
+    middle: parseMiddleOrderLifetime(obj.middle, issues),
+    passive: parsePassiveOrderLifetime(obj.passive, issues),
+  };
+}
+
+function parseBurstOrderLifetime(raw: unknown, issues: string[]): OrderLifetimePolicy["burst"] {
+  const fallback = DEFAULT_ORDER_LIFETIME_POLICY.burst;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("orderLifetime.burst must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    candidateFirstFillLatencyMs: lifetimeMs(
+      obj.candidateFirstFillLatencyMs,
+      fallback.candidateFirstFillLatencyMs,
+      "orderLifetime.burst.candidateFirstFillLatencyMs",
+      issues,
+    ),
+    confirmSpanMs: lifetimeMs(
+      obj.confirmSpanMs,
+      fallback.confirmSpanMs,
+      "orderLifetime.burst.confirmSpanMs",
+      issues,
+    ),
+    confirmMedianGapMs: lifetimeMs(
+      obj.confirmMedianGapMs,
+      fallback.confirmMedianGapMs,
+      "orderLifetime.burst.confirmMedianGapMs",
+      issues,
+    ),
+    confirmFirstFillLatencyMs: lifetimeMs(
+      obj.confirmFirstFillLatencyMs,
+      fallback.confirmFirstFillLatencyMs,
+      "orderLifetime.burst.confirmFirstFillLatencyMs",
+      issues,
+    ),
+    confirmP75GapMs: lifetimeMs(
+      obj.confirmP75GapMs,
+      fallback.confirmP75GapMs,
+      "orderLifetime.burst.confirmP75GapMs",
+      issues,
+    ),
+    confirmMaxSpanMs: lifetimeMs(
+      obj.confirmMaxSpanMs,
+      fallback.confirmMaxSpanMs,
+      "orderLifetime.burst.confirmMaxSpanMs",
+      issues,
+    ),
+    lowTtlMs: lifetimeMs(obj.lowTtlMs, fallback.lowTtlMs, "orderLifetime.burst.lowTtlMs", issues),
+    mediumTtlMs: lifetimeMs(
+      obj.mediumTtlMs,
+      fallback.mediumTtlMs,
+      "orderLifetime.burst.mediumTtlMs",
+      issues,
+    ),
+    highTtlMs: lifetimeMs(
+      obj.highTtlMs,
+      fallback.highTtlMs,
+      "orderLifetime.burst.highTtlMs",
+      issues,
+    ),
+  };
+}
+
+function parseMiddleOrderLifetime(raw: unknown, issues: string[]): OrderLifetimePolicy["middle"] {
+  const fallback = DEFAULT_ORDER_LIFETIME_POLICY.middle;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("orderLifetime.middle must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    minMedianGapMs: lifetimeMs(
+      obj.minMedianGapMs,
+      fallback.minMedianGapMs,
+      "orderLifetime.middle.minMedianGapMs",
+      issues,
+    ),
+    maxMedianGapMs: lifetimeMs(
+      obj.maxMedianGapMs,
+      fallback.maxMedianGapMs,
+      "orderLifetime.middle.maxMedianGapMs",
+      issues,
+    ),
+    maxSpanMs: lifetimeMs(
+      obj.maxSpanMs,
+      fallback.maxSpanMs,
+      "orderLifetime.middle.maxSpanMs",
+      issues,
+    ),
+    lowTtlMs: lifetimeMs(obj.lowTtlMs, fallback.lowTtlMs, "orderLifetime.middle.lowTtlMs", issues),
+    mediumTtlMs: lifetimeMs(
+      obj.mediumTtlMs,
+      fallback.mediumTtlMs,
+      "orderLifetime.middle.mediumTtlMs",
+      issues,
+    ),
+    highTtlMs: lifetimeMs(
+      obj.highTtlMs,
+      fallback.highTtlMs,
+      "orderLifetime.middle.highTtlMs",
+      issues,
+    ),
+  };
+}
+
+function parsePassiveOrderLifetime(raw: unknown, issues: string[]): OrderLifetimePolicy["passive"] {
+  const fallback = DEFAULT_ORDER_LIFETIME_POLICY.passive;
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("orderLifetime.passive must be an object");
+    return fallback;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    lowTtlMs: lifetimeMs(obj.lowTtlMs, fallback.lowTtlMs, "orderLifetime.passive.lowTtlMs", issues),
+    mediumTtlMs: lifetimeMs(
+      obj.mediumTtlMs,
+      fallback.mediumTtlMs,
+      "orderLifetime.passive.mediumTtlMs",
+      issues,
+    ),
+    highTtlMs: lifetimeMs(
+      obj.highTtlMs,
+      fallback.highTtlMs,
+      "orderLifetime.passive.highTtlMs",
+      issues,
+    ),
+    highConfidenceMinFills: clampedInt(
+      obj.highConfidenceMinFills,
+      fallback.highConfidenceMinFills,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "orderLifetime.passive.highConfidenceMinFills",
+    ),
+    highConfidenceMinSpanMs: lifetimeMs(
+      obj.highConfidenceMinSpanMs,
+      fallback.highConfidenceMinSpanMs,
+      "orderLifetime.passive.highConfidenceMinSpanMs",
+      issues,
+    ),
+  };
+}
+
+function lifetimeMs(raw: unknown, fallback: number, name: string, issues: string[]): number {
+  return clampedInt(
+    raw,
+    fallback,
+    BOUND_ORDER_LIFETIME_MIN_MS,
+    BOUND_ORDER_LIFETIME_MAX_MS,
+    issues,
+    name,
+  );
 }
 
 function parseTelemetry(raw: unknown, issues: string[]): ExecutionPolicyTelemetry {

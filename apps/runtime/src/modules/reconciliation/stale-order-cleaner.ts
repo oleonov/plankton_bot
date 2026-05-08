@@ -11,8 +11,9 @@
  */
 
 import type { OrderRepository, MarketRepository, EventBus, Market, Order } from "@plankton/domain";
-import { createCommandId, ENTRY_REASONS } from "@plankton/domain";
+import { createCommandId, ENTRY_REASONS, EXIT_REASONS } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 
 // Horizon-aware TTLs for conviction-style entry orders.
 export const HORIZON_TTL_MS: Record<string, number> = {
@@ -34,8 +35,6 @@ export const EXIT_ORDER_TTL_MS = 300_000; // 5m
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff
 
-const EXIT_REASONS = new Set(["repricing-exit", "medium-hold-exit", "tail-prune", "reduce-only"]);
-
 export interface StaleOrderCleanerDeps {
   orderRepo: OrderRepository;
   marketRepo: MarketRepository;
@@ -48,6 +47,14 @@ export interface StaleOrderCleanerDeps {
    * when the caller doesn't thread a policy source in (scripts, tests).
    */
   exitOrderTtlMs?: number;
+  exitOrderLifetime?: {
+    resolveExitOrder: (
+      order: Pick<Order, "createdAt" | "orderId" | "tokenId">,
+      market: Pick<Market, "endDate"> | null,
+      flatTtlMs: number,
+      nowMs: number,
+    ) => ExitOrderLifetimeDecision;
+  };
 }
 
 export interface StaleCleanResult {
@@ -132,13 +139,25 @@ export async function cleanStaleEntryOrders(
     const lastAttempt = backoffMap.get(ordKey);
     if (lastAttempt != null && now - lastAttempt < CANCEL_BACKOFF_MS) continue;
 
+    const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();
-    if (ageMs > exitTtlMs) {
+    const lifetime = deps.exitOrderLifetime?.resolveExitOrder(order, market, exitTtlMs, now);
+    const enforceLifetime = lifetime?.enabled === true && lifetime.enforcement === "enforce";
+    const shouldCancel = enforceLifetime ? lifetime.wouldCancelUnderMode : ageMs > exitTtlMs;
+    const ttlMs = enforceLifetime ? (lifetime?.effectiveTtlMs ?? exitTtlMs) : exitTtlMs;
+    if (shouldCancel) {
       await publishCancel(bus, order, "stale_exit_ttl");
       backoffMap.set(ordKey, now);
       staleExitTtlCancelled++;
       log.info(
-        { orderId: ordKey, ageMs, ttlMs: exitTtlMs, signalReason: order.signalReason },
+        {
+          orderId: ordKey,
+          ageMs,
+          ttlMs,
+          signalReason: order.signalReason,
+          orderLifetimeMode: lifetime?.mode,
+          orderLifetimeReason: lifetime?.cancelReason,
+        },
         "stale exit order — TTL exceeded",
       );
     }

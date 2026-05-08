@@ -34,6 +34,7 @@ export { SqliteDecisionSignalLogRepository } from "./repositories/decision-signa
 export { SqliteAlgoRulesRepository } from "./repositories/algo-rules-repository.js";
 export { SqliteLegStateRepository } from "./repositories/leg-state-repository.js";
 export { SqliteLegStateTransitionRepository } from "./repositories/leg-state-transition-repository.js";
+export { SqliteAlgoTokenModeStateRepository } from "./repositories/algo-token-mode-state-repository.js";
 export { SelectionRuleRepository } from "./repositories/selection-rule-repository.js";
 export type {
   SelectionRuleInsert,

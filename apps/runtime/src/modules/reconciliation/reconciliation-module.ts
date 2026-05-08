@@ -31,6 +31,7 @@ import type { Logger } from "../../logger.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
 import { cleanStaleEntryOrders } from "./stale-order-cleaner.js";
+import type { OrderLifetimeModule } from "../order-lifetime/order-lifetime-module.js";
 import {
   runWalletPositionSentinel,
   type WalletPositionSentinelDeps,
@@ -63,6 +64,7 @@ export interface ReconciliationModuleDeps {
    * cleaner falls back to the ADR-013 constant.
    */
   exitOrderTtlMs?: () => number;
+  exitOrderLifetime?: Pick<OrderLifetimeModule, "resolveExitOrder">;
   /**
    * Live-lite wallet↔ledger sentinel. Detects impossible local state where
    * Polymarket still reports shares for a token, but the local position is
@@ -190,6 +192,9 @@ export class ReconciliationModule implements RuntimeModule {
           bus: this.deps.bus,
           log: this.log,
           ...(this.deps.exitOrderTtlMs ? { exitOrderTtlMs: this.deps.exitOrderTtlMs() } : {}),
+          ...(this.deps.exitOrderLifetime
+            ? { exitOrderLifetime: this.deps.exitOrderLifetime }
+            : {}),
         },
         this.staleBackoffMap,
       );

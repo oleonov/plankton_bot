@@ -15,6 +15,7 @@ import type {
 } from "@plankton/domain";
 import { createTokenId, createCommandId } from "@plankton/domain";
 import type { ConditionId } from "@plankton/domain";
+import { DEFAULT_EXECUTION_POLICY } from "@plankton/domain";
 import type { Logger } from "../../../logger.js";
 
 // ─── Seed rules ───────────────────────────────────────────────────────────────
@@ -2122,6 +2123,56 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("publishes liveness evaluation counters to the metrics sink", async () => {
+      const tokenId = "token-liveness-metrics-sink";
+      const sink = vi.fn();
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const mod = buildModule({ evalMetricsSink: sink, evalMetricsEmitIntervalMs: 0 });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, null, 0.03, "cond-liveness-metrics-sink"),
+            acceptingOrders: false,
+            enableOrderBook: false,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+
+      expect(sink).toHaveBeenCalledTimes(1);
+      expect(sink.mock.calls[0]?.[0]).toMatchObject({
+        evalTotal: 1,
+        suppressedMarketNotLive: 1,
+        livenessBothFlags: 1,
+      });
+
+      await mod.stop();
+    });
+
+    it("publishes zero evaluation heartbeat to the metrics sink", async () => {
+      const sink = vi.fn();
+      selectedMarketCache = createMockSelectedMarketCache([]);
+      const mod = buildModule({ evalMetricsSink: sink, evalMetricsEmitIntervalMs: 0 });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [],
+        timestamp: Date.now(),
+      });
+
+      expect(sink).toHaveBeenCalledTimes(1);
+      expect(sink.mock.calls[0]?.[0]).toMatchObject({
+        evalTotal: 0,
+        emitted: 0,
+        suppressedMarketNotLive: 0,
+        wouldMatchRule: {},
+      });
+
+      await mod.stop();
+    });
+
     // Regression: continuation-stop is sticky — a leg that fails R1/R2 fails
     // identically on every sweep tick, so without dedupe a handful of stuck
     // legs floods decision_signal_log/risk_events ~1/sec. The dedupe set must
@@ -2942,6 +2993,7 @@ describe("AlgoDecisionModule", () => {
   describe("min-age gate", () => {
     function makePolicy(entryMinMarketAgeSeconds: number) {
       return () => ({
+        ...DEFAULT_EXECUTION_POLICY,
         version: 1 as const,
         entryPriceCeiling: 0.99,
         exitOrderTtlMs: 60_000,

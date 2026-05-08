@@ -170,6 +170,14 @@ export const ENTRY_REASONS: ReadonlySet<string> = new Set([
   SignalReason.HeavyScale,
 ]);
 
+/** Signal reasons that represent exits (reducing exposure). */
+export const EXIT_REASONS: ReadonlySet<string> = new Set([
+  SignalReason.RepricingExit,
+  SignalReason.MediumHoldExit,
+  SignalReason.TailPrune,
+  SignalReason.ReduceOnly,
+]);
+
 // ─── Operator ─────────────────────────────────────────────────────────────────
 
 export const OperatorActionType = {

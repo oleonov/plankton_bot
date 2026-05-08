@@ -129,6 +129,46 @@ describe("cleanStaleEntryOrders", () => {
     return cleanStaleEntryOrders({ orderRepo, marketRepo, bus, log: silentLog }, backoffMap);
   }
 
+  function runWithLifetime(
+    decision: Partial<
+      ReturnType<
+        NonNullable<
+          Parameters<typeof cleanStaleEntryOrders>[0]["exitOrderLifetime"]
+        >["resolveExitOrder"]
+      >
+    >,
+  ) {
+    return cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        exitOrderLifetime: {
+          resolveExitOrder: () => ({
+            enabled: true,
+            enforcement: "enforce",
+            mode: "PASSIVE",
+            confidence: "low",
+            modeStatus: "confirmed",
+            flatTtlMs: 300_000,
+            modeTtlMs: 21_600_000,
+            effectiveTtlMs: 21_600_000,
+            ageMs: 360_000,
+            timeToEndMs: null,
+            resolutionCapApplied: false,
+            rateLimited: false,
+            wouldCancelUnderFlat: true,
+            wouldCancelUnderMode: false,
+            cancelReason: null,
+            ...decision,
+          }),
+        },
+      },
+      backoffMap,
+    );
+  }
+
   // ─── TTL cancellation ──────────────────────────────────────────────
 
   it("cancels old open buy entry order exceeding TTL", async () => {
@@ -293,6 +333,52 @@ describe("cleanStaleEntryOrders", () => {
 
     expect(result.staleExitTtlCancelled).toBe(1);
     expect(result.staleTtlCancelled).toBe(0);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
+  });
+
+  it("uses mode-aware exit TTL when enforcement is enabled", async () => {
+    const sixMinutesAgo = new Date(Date.now() - 6 * 60_000).toISOString();
+    const order = makeOrder({
+      side: "sell",
+      createdAt: sixMinutesAgo,
+      signalReason: "repricing-exit",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithLifetime({ wouldCancelUnderMode: false });
+    await bus.drain();
+
+    expect(result.staleExitTtlCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("restores flat exit TTL when orderLifetime.enabled=false", async () => {
+    const sixMinutesAgo = new Date(Date.now() - 6 * 60_000).toISOString();
+    const order = makeOrder({
+      side: "sell",
+      createdAt: sixMinutesAgo,
+      signalReason: "repricing-exit",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithLifetime({
+      enabled: false,
+      wouldCancelUnderMode: false,
+    });
+    await bus.drain();
+
+    expect(result.staleExitTtlCancelled).toBe(1);
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
   });

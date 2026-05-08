@@ -34,7 +34,7 @@ import {
   ENTRY_REASONS,
   isAlive,
 } from "@plankton/domain";
-import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
+import { DEFAULT_EXECUTION_POLICY, DEFAULT_ORDER_LIFETIME_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId } from "@plankton/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
@@ -98,6 +98,18 @@ export interface SignalToOrderBridgeDeps {
    * a placement onto a no-longer-eligible market. Optional for tests.
    */
   resolutionTracker?: MarketResolutionTracker;
+  orderLifetime?: {
+    canPlaceExitOrder: (
+      tokenId: TokenId,
+      nowMs: number,
+    ) => {
+      allowed: boolean;
+      reason: string | null;
+      mode: string | null;
+      budgetPerMinute: number | null;
+      remainingBudget: number | null;
+    };
+  };
   /** Override for tests; defaults to Date.now. */
   now?: () => number;
 }
@@ -424,6 +436,47 @@ export class SignalToOrderBridge {
       return;
     }
 
+    const nowMs = this.now();
+    if (
+      signal.side === "sell" &&
+      executionTerms.kind === "ok" &&
+      shouldSkipSellInsideOrderLifetimeStopWindow(market, policy, nowMs)
+    ) {
+      const lifetime = policy.orderLifetime ?? DEFAULT_ORDER_LIFETIME_POLICY;
+      const endMs = market.endDate ? Date.parse(market.endDate) : null;
+      const timeToEndMs = endMs != null && Number.isFinite(endMs) ? endMs - nowMs : null;
+      this.log.info(
+        {
+          signalId: signal.signalId,
+          tokenId: signal.tokenId,
+          endDate: market.endDate,
+          timeToEndMs,
+          stopWindowMs: lifetime.resolutionStopWindowMs,
+        },
+        "approved SELL skipped — order lifetime resolution stop window",
+      );
+      await this.publishConversionSkipped(
+        signal,
+        "execution-terms",
+        ["order-lifetime-resolution-stop-window"],
+        {
+          endDate: market.endDate,
+          timeToEndMs,
+          stopWindowMs: lifetime.resolutionStopWindowMs,
+        },
+      );
+      this.writeObservation({
+        signal,
+        clientOrderId: null,
+        market,
+        policy,
+        executionTerms,
+        canary,
+        skippedReason: "order-lifetime-resolution-stop-window",
+      });
+      return;
+    }
+
     if (
       signal.side === "sell" &&
       executionTerms.kind === "ok" &&
@@ -577,6 +630,39 @@ export class SignalToOrderBridge {
         skippedReason: "sell-order-already-open",
       });
       return;
+    }
+
+    if (signal.side === "sell" && this.deps.orderLifetime) {
+      const placementDecision = this.deps.orderLifetime.canPlaceExitOrder(signal.tokenId, nowMs);
+      if (!placementDecision.allowed) {
+        const reason = placementDecision.reason ?? "order-lifetime-placement-blocked";
+        this.log.info(
+          {
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            mode: placementDecision.mode,
+            budgetPerMinute: placementDecision.budgetPerMinute,
+            remainingBudget: placementDecision.remainingBudget,
+          },
+          "approved SELL skipped — order lifetime placement gate",
+        );
+        await this.publishConversionSkipped(signal, "execution-terms", [reason], {
+          cacheStatus: pricing.cacheStatus,
+          mode: placementDecision.mode,
+          budgetPerMinute: placementDecision.budgetPerMinute,
+          remainingBudget: placementDecision.remainingBudget,
+        });
+        this.writeObservation({
+          signal,
+          clientOrderId: null,
+          market,
+          policy,
+          executionTerms,
+          canary,
+          skippedReason: reason,
+        });
+        return;
+      }
     }
 
     const clientOrderId = buildClientOrderId({
@@ -1251,6 +1337,19 @@ function shouldSkipSellBelowSignalFloor(
   if (!Number.isFinite(signalPrice) || signalPrice <= 0) return false;
   if (!Number.isFinite(executionPrice) || executionPrice <= 0) return false;
   return executionPrice < signalPrice * minRatio;
+}
+
+function shouldSkipSellInsideOrderLifetimeStopWindow(
+  market: Pick<NormalizedMarket, "endDate">,
+  policy: ExecutionPolicy,
+  nowMs: number,
+): boolean {
+  const lifetime = policy.orderLifetime ?? DEFAULT_ORDER_LIFETIME_POLICY;
+  if (!lifetime.enabled || lifetime.enforcement !== "enforce") return false;
+  if (!market.endDate) return false;
+  const endMs = Date.parse(market.endDate);
+  if (!Number.isFinite(endMs)) return false;
+  return endMs - nowMs <= lifetime.resolutionStopWindowMs;
 }
 
 function bucketForTimeToEndMs(timeToEndMs: number): DeadSideBucket {

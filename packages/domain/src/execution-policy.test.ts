@@ -47,6 +47,44 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         wideSpreadPolicy: "skip",
         oneSidedPolicy: "skip",
       },
+      orderLifetime: {
+        enabled: true,
+        enforcement: "enforce",
+        staleResetMs: 86_400_000,
+        safetyBufferMs: 3_600_000,
+        resolutionAggressiveWindowMs: 21_600_000,
+        resolutionStopWindowMs: 3_600_000,
+        resolutionExitTtlCapMs: 600_000,
+        relayerSubmitBudgetPerMinute: 20,
+        maxTransitionEventsPerTokenPerDay: 10,
+        oscillationTransitionLimitPerDay: 3,
+        burst: {
+          candidateFirstFillLatencyMs: 30_000,
+          confirmSpanMs: 180_000,
+          confirmMedianGapMs: 30_000,
+          confirmFirstFillLatencyMs: 120_000,
+          confirmP75GapMs: 60_000,
+          confirmMaxSpanMs: 300_000,
+          lowTtlMs: 60_000,
+          mediumTtlMs: 30_000,
+          highTtlMs: 15_000,
+        },
+        middle: {
+          minMedianGapMs: 60_000,
+          maxMedianGapMs: 600_000,
+          maxSpanMs: 3_600_000,
+          lowTtlMs: 1_800_000,
+          mediumTtlMs: 3_600_000,
+          highTtlMs: 7_200_000,
+        },
+        passive: {
+          lowTtlMs: 21_600_000,
+          mediumTtlMs: 86_400_000,
+          highTtlMs: 259_200_000,
+          highConfidenceMinFills: 3,
+          highConfidenceMinSpanMs: 21_600_000,
+        },
+      },
       telemetry: { deadSideCanary: false, pricingShadow: false },
     };
     const { policy, issues } = parseExecutionPolicyJson(JSON.stringify(input));
@@ -57,6 +95,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.pricing.mode).toBe("bounded-midpoint");
     expect(policy.pricing.minExitPriceSignalRatio).toBe(0.6);
     expect(policy.pricing.wideSpreadPolicy).toBe("skip");
+    expect(policy.orderLifetime.passive.highTtlMs).toBe(259_200_000);
     expect(policy.telemetry.deadSideCanary).toBe(false);
   });
 
@@ -117,6 +156,40 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       DEFAULT_EXECUTION_POLICY.marketSelection.maxMidPrice,
     );
     expect(policy.marketSelection.minLiquidity).toBe(500);
+  });
+
+  it("preserves partial order-lifetime override and defaults nested mode policies", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        orderLifetime: {
+          enforcement: "enforce",
+          passive: { lowTtlMs: 12 * 60 * 60_000 },
+        },
+      }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.orderLifetime.enforcement).toBe("enforce");
+    expect(policy.orderLifetime.passive.lowTtlMs).toBe(12 * 60 * 60_000);
+    expect(policy.orderLifetime.passive.highTtlMs).toBe(
+      DEFAULT_EXECUTION_POLICY.orderLifetime.passive.highTtlMs,
+    );
+    expect(policy.orderLifetime.burst.highTtlMs).toBe(
+      DEFAULT_EXECUTION_POLICY.orderLifetime.burst.highTtlMs,
+    );
+  });
+
+  it("rejects invalid order-lifetime values with issues", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ orderLifetime: { enforcement: "live", passive: { highTtlMs: 1 } } }),
+    );
+    expect(policy.orderLifetime.enforcement).toBe(
+      DEFAULT_EXECUTION_POLICY.orderLifetime.enforcement,
+    );
+    expect(policy.orderLifetime.passive.highTtlMs).toBe(
+      DEFAULT_EXECUTION_POLICY.orderLifetime.passive.highTtlMs,
+    );
+    expect(issues.some((i) => i.includes("orderLifetime.enforcement"))).toBe(true);
+    expect(issues.some((i) => i.includes("orderLifetime.passive.highTtlMs"))).toBe(true);
   });
 
   it("rejects invalid market-selection values with issues", () => {

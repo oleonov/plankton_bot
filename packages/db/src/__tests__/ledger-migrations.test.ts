@@ -239,3 +239,38 @@ describe("migration 039 — retention indexes", () => {
     );
   });
 });
+
+describe("migration 051 — algo token mode state", () => {
+  it("creates additive mode-state storage and indexes", () => {
+    db.exec(readMigration("051_algo_token_mode_state.sql"));
+
+    const columns = db.prepare("PRAGMA table_info(algo_token_mode_state)").all() as Array<{
+      name: string;
+    }>;
+    expect(columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining([
+        "token_id",
+        "condition_id",
+        "mode",
+        "mode_confidence",
+        "mode_status",
+        "ttl_stage",
+        "median_gap_ms",
+        "last_fill_timestamps_json",
+      ]),
+    );
+
+    const indexes = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'algo_token_mode_state'",
+      )
+      .all() as Array<{ name: string }>;
+    expect(indexes.map((idx) => idx.name)).toEqual(
+      expect.arrayContaining([
+        "idx_algo_token_mode_state_condition",
+        "idx_algo_token_mode_state_mode",
+        "idx_algo_token_mode_state_updated",
+      ]),
+    );
+  });
+});

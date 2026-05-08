@@ -35,6 +35,7 @@ import type {
   DecisionSignalLog,
   LegState,
   LegStateTransition,
+  AlgoTokenModeState,
   SettlementRecord,
 } from "./types.js";
 
@@ -214,6 +215,19 @@ export interface OrderRepository {
   /** Return all orders for a specific outcome token. */
   findByTokenId(tokenId: TokenId): Order[];
 
+  /** Return the most recent orders for a specific outcome token, newest first. */
+  findRecentByTokenId?(tokenId: TokenId, limit: number): Order[];
+
+  /** Return the earliest recorded order for a specific outcome token. */
+  findFirstByTokenId?(tokenId: TokenId): Order | null;
+
+  /** Return recent orders whose signal_reason is in the supplied set, newest first. */
+  findRecentBySignalReasons?(
+    signalReasons: readonly string[],
+    sinceIso: string,
+    limit: number,
+  ): Order[];
+
   /**
    * Update the status, exchange_order_id, and cancellation reason of an
    * existing order. ADR-025 §D-B: when transitioning to `cancelled`,
@@ -255,6 +269,9 @@ export interface FillRepository {
 
   /** Return all fills for a specific outcome token. */
   findByTokenId(tokenId: TokenId): Fill[];
+
+  /** Return the most recent fills for a specific outcome token, newest first. */
+  findRecentByTokenId?(tokenId: TokenId, limit: number): Fill[];
 
   /** Return the most recent fills across all tokens. */
   findRecent(limit: number): Fill[];
@@ -540,6 +557,15 @@ export interface LegStateTransitionRepository {
   insert(transition: Omit<LegStateTransition, "id" | "createdAt">): boolean;
   findByTokenId(tokenId: TokenId, limit?: number): LegStateTransition[];
   findByPositionId(positionId: PositionId, limit?: number): LegStateTransition[];
+}
+
+// ─── AlgoTokenModeStateRepository ───────────────────────────────────────
+
+export interface AlgoTokenModeStateRepository {
+  get(tokenId: TokenId): AlgoTokenModeState | null;
+  upsert(state: AlgoTokenModeState): void;
+  delete(tokenId: TokenId): void;
+  findAll(): AlgoTokenModeState[];
 }
 
 // ─── MarketTradeCountProvider ───────────────────────────────────────────

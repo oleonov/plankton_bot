@@ -15,6 +15,7 @@ export {
   DEFAULT_DEAD_SIDE_GUARD,
   DEFAULT_PRICING_POLICY,
   DEFAULT_TELEMETRY,
+  DEFAULT_ORDER_LIFETIME_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
 } from "@plankton/domain";

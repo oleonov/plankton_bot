@@ -80,6 +80,13 @@ export class SqliteFillRepository implements FillRepository {
     return rows.map((r) => this.rowToFill(r));
   }
 
+  findRecentByTokenId(tokenId: TokenId, limit: number): Fill[] {
+    const rows = this.db
+      .prepare("SELECT * FROM fills WHERE token_id = ? ORDER BY filled_at DESC LIMIT ?")
+      .all(tokenId, Math.max(0, Math.trunc(limit))) as Record<string, unknown>[];
+    return rows.map((r) => this.rowToFill(r));
+  }
+
   findRecent(limit: number): Fill[] {
     const rows = this.db
       .prepare("SELECT * FROM fills ORDER BY filled_at DESC LIMIT ?")
