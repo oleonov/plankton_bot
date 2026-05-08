@@ -436,13 +436,45 @@ describe("MarketScannerModule", () => {
     expect(marketRepo.save).not.toHaveBeenCalled();
   });
 
-  it("scanOrThrow() propagates discovery failures for blocking startup use", async () => {
+  it("scanOrThrow() propagates non-transient discovery failures for blocking startup use", async () => {
     const { mod, discoveryGateway } = buildModule();
     (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockRejectedValue(
       new Error("Gamma API unreachable"),
     );
 
     await expect(mod.scanOrThrow()).rejects.toThrow("Gamma API unreachable");
+  });
+
+  it("scanOrThrow() starts from cached catalog on transient startup timeout", async () => {
+    silentLog.warn.mockClear();
+    silentLog.error.mockClear();
+    const marketRepo = createMockMarketRepo();
+    (marketRepo.iterateAllTokenIds as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      [createTokenId("tok-cached")][Symbol.iterator](),
+    );
+    const positionRepo = createMockPositionRepo();
+    (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+      { tokenId: createTokenId("tok-cached"), status: "open" },
+    ]);
+    const { mod, discoveryGateway } = buildModule({ marketRepo, positionRepo });
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("TimeoutError: operation was aborted due to timeout"),
+    );
+
+    const result = await mod.scanOrThrow();
+    const health = await mod.healthCheck();
+
+    expect(result).toMatchObject({
+      discoveredMarkets: 0,
+      savedTokens: 0,
+      preservedTokens: 1,
+    });
+    expect(health.ok).toBe(true);
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ cachedTokens: 1 }),
+      "startup scan degraded — using existing catalog until next scanner cycle",
+    );
+    expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "scan cycle failed");
   });
 
   // ── Health check ──────────────────────────────────────────────────────────

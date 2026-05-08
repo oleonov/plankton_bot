@@ -272,7 +272,16 @@ export class MarketScannerModule implements RuntimeModule {
 
   /** Blocking startup helper — throws on discovery failures. */
   async scanOrThrow(): Promise<MarketScanResult> {
-    const result = await this.runScan(true);
+    let result: MarketScanResult | null;
+    try {
+      result = await this.runScan(true);
+    } catch (err) {
+      const cachedTokens = this.countCachedTokens();
+      if (cachedTokens > 0 && isTransientNetworkError(err)) {
+        return this.useCachedCatalogAfterStartupScanFailure(err, cachedTokens);
+      }
+      throw err;
+    }
     if (!result) {
       throw new Error("market scan skipped unexpectedly");
     }
@@ -515,7 +524,9 @@ export class MarketScannerModule implements RuntimeModule {
         this.logScanDegraded(err);
         return null;
       }
-      this.log.error({ err }, "scan cycle failed");
+      if (!(throwOnError && isTransientNetworkError(err) && this.countCachedTokens() > 0)) {
+        this.log.error({ err }, "scan cycle failed");
+      }
       if (throwOnError) {
         throw err;
       }
@@ -549,5 +560,53 @@ export class MarketScannerModule implements RuntimeModule {
     return (
       this.lastSuccessfulScanMs > 0 && nowMs - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
     );
+  }
+
+  private countCachedTokens(): number {
+    let count = 0;
+    for (const _tokenId of this.deps.marketRepo.iterateAllTokenIds()) count++;
+    return count;
+  }
+
+  private useCachedCatalogAfterStartupScanFailure(
+    err: unknown,
+    cachedTokens: number,
+  ): MarketScanResult {
+    const nowMs = Date.now();
+    const result: MarketScanResult = {
+      discoveredMarkets: 0,
+      includedMarkets: 0,
+      savedTokens: 0,
+      preservedTokens: this.countActiveTokens(),
+      deactivatedTokens: 0,
+      preservedDisappearedTokens: 0,
+      firstSeenTokens: 0,
+      discoveryLatencyP50Ms: null,
+      discoveryLatencyP90Ms: null,
+      discoveryLatencyMaxMs: null,
+      durationMs: 0,
+    };
+    this.lastSuccessfulScanMs = nowMs;
+    this.lastScanResult = result;
+    this.log.warn(
+      { err, cachedTokens },
+      "startup scan degraded — using existing catalog until next scanner cycle",
+    );
+    return result;
+  }
+
+  private countActiveTokens(): number {
+    const activeTokenIds = new Set<string>();
+    if (this.deps.positionRepo) {
+      for (const pos of findActivePositions(this.deps.positionRepo)) {
+        activeTokenIds.add(String(pos.tokenId));
+      }
+    }
+    if (this.deps.orderRepo) {
+      for (const ord of this.deps.orderRepo.findOpen()) {
+        activeTokenIds.add(String(ord.tokenId));
+      }
+    }
+    return activeTokenIds.size;
   }
 }
