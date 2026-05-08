@@ -144,6 +144,7 @@ import { installConsoleRedaction } from "./console-redaction.js";
 import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
 import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-state-transition-backfill.js";
 import { OrderLifetimeModule } from "./modules/order-lifetime/order-lifetime-module.js";
+import { isGatewayOrderReject } from "./order-rejection-classification.js";
 import {
   buildRiskEventVolumeSnapshot,
   SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
@@ -1309,9 +1310,10 @@ async function main(): Promise<void> {
     entryOrderPlacedAtMsByOrderId.set(String(orderId), timestamp);
   });
 
-  bus.subscribe("OrderRejected", async ({ errorCode, signalReason }) => {
-    if (!ENTRY_REASONS.has(signalReason ?? "")) return;
-    const code = String(errorCode ?? "UNKNOWN");
+  bus.subscribe("OrderRejected", async (event) => {
+    if (!ENTRY_REASONS.has(event.signalReason ?? "")) return;
+    if (!isGatewayOrderReject(event)) return;
+    const code = String(event.errorCode ?? "UNKNOWN");
     conversionWindow.exchangeRejectedByCode.set(
       code,
       (conversionWindow.exchangeRejectedByCode.get(code) ?? 0) + 1,
