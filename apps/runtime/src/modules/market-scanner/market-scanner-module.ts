@@ -399,6 +399,14 @@ export class MarketScannerModule implements RuntimeModule {
             const tokenEval = tokenEvalResults[index]!;
             const tokenId = createTokenId(token.tokenId);
             const tokenIdStr = String(tokenId);
+            const isExecutionCriticalLeg = activeTokenIds.has(tokenIdStr);
+            const shouldPersistToken =
+              tokenEval.finalStatus === "INCLUDE" || isExecutionCriticalLeg;
+            // Persist only admitted legs plus existing inventory/order legs. A
+            // full-v5.11 scan sees many excluded legs; keeping them active in
+            // SQLite bloats the pricing universe without adding tradeability.
+            if (!shouldPersistToken) continue;
+
             discoveredTokenIds.add(tokenIdStr);
             if (!knownTokenIds.has(tokenIdStr)) {
               firstSeenTokens++;

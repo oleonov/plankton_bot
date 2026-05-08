@@ -264,7 +264,7 @@ describe("MarketScannerModule", () => {
     expect(saved.tradable).toBe(true);
   });
 
-  it("persists market with fallback_exclude when v5.11 hard filters fail", async () => {
+  it("does not persist non-critical fallback_exclude rows when v5.11 hard filters fail", async () => {
     const { mod, discoveryGateway, marketRepo } = buildModule();
     const unrelated = makeClobMarket({
       slug: "will-it-rain-tomorrow",
@@ -277,11 +277,36 @@ describe("MarketScannerModule", () => {
 
     await mod.scan();
 
-    // Scanner now persists FULL universe — no skip
+    expect(marketRepo.save).not.toHaveBeenCalled();
+    const [discovered] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect((discovered as Set<string>).has("tok-rain-yes")).toBe(false);
+  });
+
+  it("persists fallback_exclude rows when the token has an open position", async () => {
+    const positionRepo = createMockPositionRepo();
+    (positionRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+      { tokenId: createTokenId("tok-rain-yes"), status: "open" },
+    ]);
+    const { mod, discoveryGateway, marketRepo } = buildModule({ positionRepo });
+    const unrelated = makeClobMarket({
+      slug: "will-it-rain-tomorrow",
+      eventSlug: "will-it-rain-tomorrow",
+      tokens: [{ tokenId: "tok-rain-yes", outcome: "Yes" }],
+      liquidity: 50,
+      eventMarketCount: 5,
+    });
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([unrelated]);
+
+    await mod.scan();
+
     expect(marketRepo.save).toHaveBeenCalledTimes(1);
     const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
     expect(saved.selectionStatus).toBe("fallback_exclude");
     expect(saved.tradable).toBe(false);
+    const [discovered, preserved] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock
+      .calls[0]!;
+    expect((discovered as Set<string>).has("tok-rain-yes")).toBe(true);
+    expect((preserved as Set<string>).has("tok-rain-yes")).toBe(true);
   });
 
   it("persists single-market event with matched_include when hard filters pass", async () => {
@@ -307,7 +332,7 @@ describe("MarketScannerModule", () => {
     expect(saved.tradable).toBe(true);
   });
 
-  it("persists market with matched_exclude when exclude_slug rule matches", async () => {
+  it("does not persist non-critical matched_exclude rows when exclude_slug rule matches", async () => {
     const excludeEngine = makeEngine([
       makeRule({ ruleId: "r-btc", ruleType: "include_prefix", pattern: "bitcoin-" }),
       makeRule({ ruleId: "r-spam", ruleType: "exclude_slug", pattern: "bitcoin-spam" }),
@@ -325,10 +350,9 @@ describe("MarketScannerModule", () => {
 
     await mod.scan();
 
-    expect(marketRepo.save).toHaveBeenCalledTimes(1);
-    const saved = (marketRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Market;
-    expect(saved.selectionStatus).toBe("matched_exclude");
-    expect(saved.tradable).toBe(false);
+    expect(marketRepo.save).not.toHaveBeenCalled();
+    const [discovered] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect((discovered as Set<string>).has("tok-spam")).toBe(false);
   });
 
   it("populates eventMarketCount on saved market", async () => {
