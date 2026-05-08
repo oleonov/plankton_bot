@@ -26,6 +26,7 @@ import type {
   ProfileId,
   ClientOrderId,
   RuntimeControl,
+  ExecutionPolicy,
 } from "@plankton/domain";
 import { canPlaceBuyOrderForMarket } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -51,6 +52,7 @@ export interface RiskInventoryModuleDeps {
   activeProfile?: ProfileId | undefined;
   walletBufferPct?: number | undefined;
   walletBufferMinUsdc?: number | undefined;
+  executionPolicy?: (() => ExecutionPolicy) | undefined;
   runtimeControl?: RuntimeControl | undefined;
   rejectionLogCooldownMs?: number | undefined;
   /**
@@ -110,6 +112,7 @@ export class RiskInventoryModule implements RuntimeModule {
         walletBufferPct: deps.walletBufferPct,
         walletBufferMinUsdc: deps.walletBufferMinUsdc,
       },
+      () => deps.executionPolicy?.().buyCapacity ?? undefined,
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,

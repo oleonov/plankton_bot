@@ -14,6 +14,8 @@ import {
   createCommandId,
   createBotRunId,
   createConditionId,
+  DEFAULT_BUY_CAPACITY_POLICY,
+  DEFAULT_EXECUTION_POLICY,
 } from "@plankton/domain";
 import type {
   ExchangeGateway,
@@ -115,6 +117,16 @@ function createMockOrderRepo(): OrderRepository {
   };
 }
 
+function buyCapacityPolicy(overrides?: Partial<typeof DEFAULT_EXECUTION_POLICY.buyCapacity>) {
+  return {
+    ...DEFAULT_EXECUTION_POLICY,
+    buyCapacity: {
+      ...DEFAULT_BUY_CAPACITY_POLICY,
+      ...overrides,
+    },
+  };
+}
+
 function createMockFillRepo(): FillRepository {
   return {
     save: vi.fn(),
@@ -192,6 +204,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       runtimeControl: { isPaused: () => false },
       controlDb,
       activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ enabled: false }),
       // defaults: walletBufferPct=0.03, walletBufferMinUsdc=0.25
     });
 
@@ -234,6 +247,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       runtimeControl: { isPaused: () => false },
       controlDb,
       activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ enabled: false }),
     });
 
     await mod.start();
@@ -272,6 +286,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       runtimeControl: { isPaused: () => false },
       controlDb,
       activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ enabled: false }),
       // defaults: walletBufferPct=0.03, walletBufferMinUsdc=0.25
     });
 
@@ -313,6 +328,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       runtimeControl: { isPaused: () => false },
       controlDb,
       activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ enabled: false }),
       walletBufferPct: 0.1,
     });
 
@@ -334,6 +350,186 @@ describe("ExecutionModule — wallet reservation rejection", () => {
     expect(rejected).toHaveLength(1);
     expect(rejected[0]!.reason).toBe("reserved-usdc-limit");
     expect(rejected[0]!.errorCode).toBe("INSUFFICIENT_BALANCE");
+
+    await mod.stop();
+  });
+
+  it("rejects new-entry BUY when buy-capacity reserve would be exactly exhausted", async () => {
+    // balance - 3% wallet buffer - $2 order = $7.00 required new-entry headroom.
+    const controlDb = createMockControlDb(9 / 0.97);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy(),
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-capacity-new-entry"),
+        clientOrderId: "plk_capacity_new_entry" as ClientOrderId,
+        signalReason: "probe-entry",
+        price: 0.2,
+        size: 10,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
+
+    await mod.stop();
+  });
+
+  it("rejects add-buy when buy-capacity add reserve would be below threshold", async () => {
+    const controlDb = createMockControlDb(6.5);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy(),
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-capacity-add"),
+        clientOrderId: "plk_capacity_add" as ClientOrderId,
+        signalReason: "scale-in",
+        price: 0.2,
+        size: 10,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
+
+    await mod.stop();
+  });
+
+  it("enforces maxOpenBuyOrders before placing another BUY", async () => {
+    const controlDb = createMockControlDb(100);
+    const openBuy = makeBuyCmd({ commandId: createCommandId("existing-1") });
+    orderRepo.findOpen = vi.fn().mockReturnValue([
+      {
+        ...openBuy,
+        orderId: "ord-existing-1",
+        orderType: "GTC",
+        postOnly: true,
+        status: "open",
+        sizeUsdc: 1,
+        exchangeOrderId: null,
+        signalId: null,
+        signalReason: "probe-entry",
+        botRunId: BOT_RUN_ID,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        ...openBuy,
+        orderId: "ord-existing-2",
+        clientOrderId: "plk_existing_2",
+        orderType: "GTC",
+        postOnly: true,
+        status: "open",
+        sizeUsdc: 1,
+        exchangeOrderId: null,
+        signalId: null,
+        signalReason: "probe-entry",
+        botRunId: BOT_RUN_ID,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy(),
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-capacity-count"),
+        clientOrderId: "plk_capacity_count" as ClientOrderId,
+        signalReason: "probe-entry",
+        price: 0.2,
+        size: 10,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
+
+    await mod.stop();
+  });
+
+  it("restores flat wallet-buffer behavior when buy capacity is disabled", async () => {
+    const controlDb = createMockControlDb(9);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb,
+      activeProfile: "paper" as any,
+      executionPolicy: () => buyCapacityPolicy({ enabled: false }),
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-capacity-disabled"),
+        clientOrderId: "plk_capacity_disabled" as ClientOrderId,
+        signalReason: "probe-entry",
+        price: 0.2,
+        size: 10,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(rejected).toHaveLength(0);
 
     await mod.stop();
   });

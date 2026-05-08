@@ -154,10 +154,22 @@ describe("control-db migration infrastructure", () => {
       const parsed = JSON.parse(row.execution_policy_json!) as {
         entryPriceCeiling: number;
         marketSelection: { maxMidPrice: number; minLiquidity: number };
+        buyCapacity: {
+          enabled: boolean;
+          minNewEntryWalletHeadroomUsdc: number;
+          minAddWalletHeadroomUsdc: number;
+          maxOpenBuyOrders: number;
+        };
         deadSideGuard: { mode: string };
       };
       expect(parsed.entryPriceCeiling).toBe(0.45);
       expect(parsed.marketSelection).toEqual({ maxMidPrice: 0.5, minLiquidity: 100 });
+      expect(parsed.buyCapacity).toEqual({
+        enabled: true,
+        minNewEntryWalletHeadroomUsdc: 7,
+        minAddWalletHeadroomUsdc: 5,
+        maxOpenBuyOrders: 2,
+      });
       expect(parsed.deadSideGuard.mode).toBe(
         row.profile_id === "live-lite" ? "enforce" : "observe",
       );
@@ -285,6 +297,53 @@ describe("control-db migration infrastructure", () => {
     expect(JSON.parse(policy.json).marketSelection).toEqual({
       maxMidPrice: 0.5,
       minLiquidity: 100,
+    });
+  });
+
+  it("migration 044 backfills buy-capacity policy without overwriting existing values", () => {
+    const dbPath = path.join(tmpDir, "control-buy-capacity.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(execution_policy_json, '$.buyCapacity')
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.buyCapacity',
+              json('{"enabled":false,"minNewEntryWalletHeadroomUsdc":3,"minAddWalletHeadroomUsdc":2,"maxOpenBuyOrders":9}')
+            )
+          WHERE profile_id = 'paper'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("044_buy_capacity_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare("SELECT profile_id, execution_policy_json AS json FROM profile_settings")
+      .all() as Array<{ profile_id: string; json: string }>;
+    const byProfile = new Map(rows.map((row) => [row.profile_id, JSON.parse(row.json)]));
+
+    expect(byProfile.get("live-lite").buyCapacity).toEqual({
+      enabled: true,
+      minNewEntryWalletHeadroomUsdc: 7,
+      minAddWalletHeadroomUsdc: 5,
+      maxOpenBuyOrders: 2,
+    });
+    expect(byProfile.get("paper").buyCapacity).toEqual({
+      enabled: false,
+      minNewEntryWalletHeadroomUsdc: 3,
+      minAddWalletHeadroomUsdc: 2,
+      maxOpenBuyOrders: 9,
     });
   });
 

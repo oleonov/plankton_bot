@@ -17,6 +17,7 @@ export { SelectionRuleEngine, normalizeSelectionPattern } from "./selection-rule
 export type { PreEntryInput } from "./market-selection.js";
 export {
   DEFAULT_EXECUTION_POLICY,
+  DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_DEAD_SIDE_GUARD,
   DEFAULT_PRICING_POLICY,
   DEFAULT_TELEMETRY,

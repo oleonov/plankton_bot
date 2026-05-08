@@ -354,7 +354,7 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
       "discovery poll batch failed",
     );
 
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
 
     expect(silentLog.warn).toHaveBeenCalledTimes(2);
     expect(silentLog.warn).toHaveBeenLastCalledWith(

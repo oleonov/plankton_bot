@@ -948,6 +948,40 @@ describe("MarketScannerModule", () => {
     await mod.stop();
   });
 
+  it("throttles repeated transient scan-degraded warnings", async () => {
+    vi.useFakeTimers({ now: new Date("2026-05-08T00:00:00.000Z") });
+    silentLog.warn.mockClear();
+    silentLog.error.mockClear();
+    try {
+      const { mod, discoveryGateway } = buildModule();
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce([])
+        .mockRejectedValue(new Error("TimeoutError: operation was aborted due to timeout"));
+
+      await mod.scan();
+      await mod.scan();
+      await mod.scan();
+
+      expect(silentLog.warn).toHaveBeenCalledTimes(1);
+      expect(silentLog.warn).toHaveBeenLastCalledWith(
+        expect.objectContaining({ suppressedCount: 0 }),
+        "scan cycle degraded — keeping existing catalog",
+      );
+
+      await vi.advanceTimersByTimeAsync(15 * 60_000);
+      await mod.scan();
+
+      expect(silentLog.warn).toHaveBeenCalledTimes(2);
+      expect(silentLog.warn).toHaveBeenLastCalledWith(
+        expect.objectContaining({ suppressedCount: 1 }),
+        "scan cycle degraded — keeping existing catalog",
+      );
+      expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "scan cycle failed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("skips duplicate initial scan on start when a fresh startup scan already ran", async () => {
     const realBus = new InProcessEventBus();
     const discoveryGateway = createMockDiscoveryGateway();

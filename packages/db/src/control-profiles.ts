@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import {
+  DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_EXECUTION_POLICY,
   ProfileId,
   serializeExecutionPolicy,
@@ -49,6 +50,8 @@ export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
     defaultEntryMinMarketAgeSeconds: DEFAULT_EXECUTION_POLICY.entryMinMarketAgeSeconds,
   },
 ];
+
+const DEFAULT_BUY_CAPACITY_POLICY_JSON = JSON.stringify(DEFAULT_BUY_CAPACITY_POLICY);
 
 function defaultExecutionPolicyJson(profile: ControlProfileSeed): string {
   return serializeExecutionPolicy({
@@ -101,6 +104,7 @@ export function ensureDefaultExecutionPolicy(db: Database.Database): void {
   }
   backfillEntryMinMarketAgeSeconds(db);
   backfillMarketSelectionPolicy(db);
+  backfillBuyCapacityPolicy(db);
 }
 
 /**
@@ -177,6 +181,37 @@ function backfillMarketSelectionPolicy(db: Database.Database): void {
           AND json_extract(execution_policy_json, '$.marketSelection') IS NULL`,
     )
     .run(defaultMarketSelectionJson);
+
+  if (result.changes > 0 && hasVersionColumn) {
+    db.prepare(
+      `UPDATE runtime_control_state
+          SET execution_policy_version = COALESCE(execution_policy_version, 0) + 1`,
+    ).run();
+  }
+}
+
+function backfillBuyCapacityPolicy(db: Database.Database): void {
+  // Migration 044 patches already-running control DBs during deploy. This
+  // bootstrap backfill covers fresh installs and legacy/test DBs that reach
+  // profile seeding with a valid policy JSON but without the new key.
+  const stateColumns = db.prepare(`PRAGMA table_info(runtime_control_state)`).all() as Array<{
+    name: string;
+  }>;
+  const hasVersionColumn = stateColumns.some((c) => c.name === "execution_policy_version");
+  const result = db
+    .prepare(
+      `UPDATE profile_settings
+          SET execution_policy_json = json_set(
+                execution_policy_json,
+                '$.buyCapacity',
+                json(?)
+              ),
+              updated_at = datetime('now')
+        WHERE execution_policy_json IS NOT NULL
+          AND json_valid(execution_policy_json) = 1
+          AND json_extract(execution_policy_json, '$.buyCapacity') IS NULL`,
+    )
+    .run(DEFAULT_BUY_CAPACITY_POLICY_JSON);
 
   if (result.changes > 0 && hasVersionColumn) {
     db.prepare(

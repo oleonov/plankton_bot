@@ -108,6 +108,36 @@ describe("buildTradeCountObserver", () => {
       conditionId: COND,
       error: "TimeoutError",
       latencyMs: 5_004,
+      suppressedCount: 0,
+    });
+  });
+
+  it("throttles repeated trade-count error warnings while keeping per-error metrics", () => {
+    let now = 1_000_000;
+    const observer = buildTradeCountObserver({
+      log: stubs.log as unknown as Parameters<typeof buildTradeCountObserver>[0]["log"],
+      metrics: stubs.metrics as unknown as Parameters<typeof buildTradeCountObserver>[0]["metrics"],
+      now: () => now,
+      warnThrottleMs: 60_000,
+    });
+
+    observer({ type: "fetch_error", conditionId: COND, latencyMs: 5000, error: "TimeoutError" });
+    now += 1_000;
+    observer({ type: "fetch_error", conditionId: COND, latencyMs: 5001, error: "TimeoutError" });
+    now += 1_000;
+    observer({ type: "fetch_error", conditionId: COND, latencyMs: 5002, error: "TimeoutError" });
+
+    expect(stubs.metrics.calls).toHaveLength(3);
+    expect(stubs.log.logs).toHaveLength(1);
+
+    now += 60_000;
+    observer({ type: "fetch_error", conditionId: COND, latencyMs: 5003, error: "TimeoutError" });
+
+    expect(stubs.metrics.calls).toHaveLength(4);
+    expect(stubs.log.logs).toHaveLength(2);
+    expect(stubs.log.logs.at(-1)?.fields).toMatchObject({
+      error: "TimeoutError",
+      suppressedCount: 2,
     });
   });
 

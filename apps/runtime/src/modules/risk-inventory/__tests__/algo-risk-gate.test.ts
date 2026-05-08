@@ -3,6 +3,7 @@ import {
   createPositionId,
   createTokenId,
   createConditionId,
+  DEFAULT_BUY_CAPACITY_POLICY,
   type Signal,
   type Order,
   type Position,
@@ -55,10 +56,28 @@ function makeOrderRepo(orders: Order[] = []): OrderRepository {
     findById: vi.fn().mockReturnValue(null),
     findByClientOrderId: vi.fn().mockReturnValue(null),
     findByExchangeOrderId: vi.fn().mockReturnValue(null),
-    findOpen: vi.fn().mockReturnValue([]),
-    findByTokenId: vi.fn().mockReturnValue(orders),
+    findOpen: vi
+      .fn()
+      .mockReturnValue(
+        orders.filter((order) => ["pending", "open", "partially-filled"].includes(order.status)),
+      ),
+    findByTokenId: vi
+      .fn()
+      .mockImplementation((tokenId) => orders.filter((order) => order.tokenId === tokenId)),
     updateStatus: vi.fn(),
     sumOpenBuyNotional: vi.fn().mockReturnValue(0),
+  };
+}
+
+function makeBuyCapacityPolicy(overrides?: {
+  enabled?: boolean;
+  minNewEntryWalletHeadroomUsdc?: number;
+  minAddWalletHeadroomUsdc?: number;
+  maxOpenBuyOrders?: number;
+}) {
+  return {
+    ...DEFAULT_BUY_CAPACITY_POLICY,
+    ...overrides,
   };
 }
 
@@ -205,10 +224,17 @@ describe("AlgoRiskGateImpl", () => {
   it("rejects buy when wallet buy budget is exhausted", async () => {
     const orderRepo = makeOrderRepo();
     (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(8);
-    const gate = new AlgoRiskGateImpl(orderRepo, makePositionRepo(), makeLogger(), undefined, {
-      controlDb: createMockControlDb(10),
-      activeProfile: "paper" as any,
-    });
+    const gate = new AlgoRiskGateImpl(
+      orderRepo,
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(10),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy({ enabled: false }),
+    );
 
     const decision = await gate.evaluate(makeSignal({ suggestedSizeUsdc: 2 }));
 
@@ -219,12 +245,123 @@ describe("AlgoRiskGateImpl", () => {
   it("approves buy when wallet buy budget can cover the signal", async () => {
     const orderRepo = makeOrderRepo();
     (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(2);
-    const gate = new AlgoRiskGateImpl(orderRepo, makePositionRepo(), makeLogger(), undefined, {
-      controlDb: createMockControlDb(10),
-      activeProfile: "paper" as any,
-    });
+    const gate = new AlgoRiskGateImpl(
+      orderRepo,
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(10),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy({ enabled: false }),
+    );
 
     const decision = await gate.evaluate(makeSignal({ suggestedSizeUsdc: 2 }));
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("wallet_buy_budget_ok");
+  });
+
+  it("rejects new-entry BUY when capacity headroom would be at the threshold", async () => {
+    const orderRepo = makeOrderRepo();
+    const gate = new AlgoRiskGateImpl(
+      orderRepo,
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        // balance - 3% wallet buffer - $2 order = $7.00 required new-entry headroom.
+        controlDb: createMockControlDb(9 / 0.97),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy(),
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({ suggestedSizeUsdc: 2, reason: "probe-entry" }),
+    );
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("wallet_buy_capacity_exhausted");
+  });
+
+  it("rejects add-buy when capacity headroom would be below the add reserve", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(makeOpenPosition()),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(6.5),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy(),
+    );
+
+    const decision = await gate.evaluate(makeSignal({ suggestedSizeUsdc: 2, reason: "scale-in" }));
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("wallet_buy_capacity_exhausted");
+  });
+
+  it("rejects BUY when max open BUY order count is reached", async () => {
+    const orderRepo = makeOrderRepo([
+      makeOpenBuyOrder(),
+      { ...makeOpenBuyOrder(), orderId: "ord-2" as any, clientOrderId: "clord-2" as any },
+    ]);
+    const gate = new AlgoRiskGateImpl(
+      orderRepo,
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(100),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy(),
+    );
+
+    const decision = await gate.evaluate(makeSignal({ tokenId: createTokenId("other-token") }));
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("wallet_buy_capacity_exhausted");
+  });
+
+  it("allows SELL when BUY capacity is exhausted", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo([makeOpenBuyOrder(), { ...makeOpenBuyOrder(), orderId: "ord-2" as any }]),
+      makePositionRepo(makeOpenPosition()),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(1),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy(),
+    );
+
+    const decision = await gate.evaluate(makeSignal({ side: "sell", reason: "repricing-exit" }));
+
+    expect(decision.approved).toBe(true);
+  });
+
+  it("falls back to flat wallet budget when buy-capacity policy is disabled", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(9),
+        activeProfile: "paper" as any,
+      },
+      () => makeBuyCapacityPolicy({ enabled: false }),
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({ suggestedSizeUsdc: 2, reason: "probe-entry" }),
+    );
 
     expect(decision.approved).toBe(true);
     expect(decision.checksPassed).toContain("wallet_buy_budget_ok");

@@ -58,6 +58,7 @@ import {
   classifyNotionalBucket,
   classifySoldBoughtRatioBucket,
 } from "../../executable-price.js";
+import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -325,8 +326,16 @@ interface ControlDbReader {
   prepare(sql: string): { get(...args: unknown[]): unknown };
 }
 
+export type BuySignalBudgetCircuitBreakerResult = {
+  canAttempt: boolean;
+  reasonCode?: string | undefined;
+};
+
 export interface BuySignalBudgetCircuitBreaker {
-  canAttemptBuy(requiredNotionalUsdc: number): boolean;
+  canAttemptBuy(
+    requiredNotionalUsdc: number,
+    signal: import("@plankton/domain").Signal,
+  ): BuySignalBudgetCircuitBreakerResult;
 }
 
 // ─── Deps ────────────────────────────────────────────────────────────────────
@@ -395,6 +404,10 @@ const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
 const MAX_SUPPRESSION_DEDUPE_KEYS = 50_000;
 const DEFAULT_BUY_BUDGET_COOLDOWN_MS = 60 * 60 * 1000;
 const WALLET_BUY_BUDGET_EXHAUSTED_REASON = "wallet_buy_budget_exhausted";
+const BUY_BUDGET_COOLDOWN_REASONS = new Set([
+  WALLET_BUY_BUDGET_EXHAUSTED_REASON,
+  WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+]);
 const D6_SUPPRESSED_REASON = "d6-suppressed";
 const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
 const DEDUPED_SUPPRESSION_REASONS = new Set([
@@ -427,6 +440,17 @@ const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
   "market_age_unknown",
   DECISION_RULE_HOLD_REASON,
 ]);
+
+function findBuyBudgetCooldownReason(reason: string): string | null {
+  const reasons = reason
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  for (const exactReason of reasons.length > 0 ? reasons : [reason]) {
+    if (BUY_BUDGET_COOLDOWN_REASONS.has(exactReason)) return exactReason;
+  }
+  return null;
+}
 
 export class AlgoDecisionModule implements RuntimeModule {
   private readonly log: Logger;
@@ -660,11 +684,14 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleSignalRejected(payload: RuntimeEventMap["SignalRejected"]): Promise<void> {
-    if (
-      payload.signal.side === "buy" &&
-      payload.reason.includes(WALLET_BUY_BUDGET_EXHAUSTED_REASON)
-    ) {
-      this.activateBuyBudgetCooldown(payload.signal, payload.rejectedAt, "risk_rejection");
+    const reasonCode = findBuyBudgetCooldownReason(payload.reason);
+    if (payload.signal.side === "buy" && reasonCode) {
+      this.activateBuyBudgetCooldown(
+        payload.signal,
+        payload.rejectedAt,
+        "risk_rejection",
+        reasonCode,
+      );
     }
     this.clearPendingByTokenId(String(payload.signal.tokenId));
   }
@@ -1461,12 +1488,12 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     const canAttempt = this.canAttemptBuyNotional(signal.suggestedSizeUsdc, signal);
-    if (canAttempt === true) {
+    if (canAttempt?.allowed === true) {
       return false;
     }
 
-    if (canAttempt === false) {
-      this.activateBuyBudgetCooldown(signal, now, "decision_preflight");
+    if (canAttempt?.allowed === false) {
+      this.activateBuyBudgetCooldown(signal, now, "decision_preflight", canAttempt.reasonCode);
       this.buyBudgetSuppressedSignals++;
       return true;
     }
@@ -1476,12 +1503,19 @@ export class AlgoDecisionModule implements RuntimeModule {
   private canAttemptBuyNotional(
     requiredNotionalUsdc: number,
     signal: import("@plankton/domain").Signal,
-  ): boolean | null {
+  ): { allowed: boolean; reasonCode: string } | null {
     const circuitBreaker = this.deps.buySignalBudgetCircuitBreaker;
     if (!circuitBreaker) return null;
 
     try {
-      return circuitBreaker.canAttemptBuy(requiredNotionalUsdc + this.pendingPreOpenBuyNotional());
+      const result = circuitBreaker.canAttemptBuy(
+        requiredNotionalUsdc + this.pendingPreOpenBuyNotional(),
+        signal,
+      );
+      return {
+        allowed: result.canAttempt,
+        reasonCode: result.reasonCode ?? WALLET_BUY_BUDGET_EXHAUSTED_REASON,
+      };
     } catch (err) {
       this.log.warn(
         {
@@ -1492,7 +1526,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         },
         "buy budget circuit breaker failed open",
       );
-      return true;
+      return { allowed: true, reasonCode: "" };
     }
   }
 
@@ -1500,6 +1534,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     signal: import("@plankton/domain").Signal,
     now: number,
     source: "decision_preflight" | "risk_rejection",
+    reasonCode = WALLET_BUY_BUDGET_EXHAUSTED_REASON,
   ): void {
     this.buyBudgetRecoveryNotionalUsdc = Math.max(
       this.buyBudgetRecoveryNotionalUsdc,
@@ -1512,7 +1547,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.buyBudgetCooldownUntilMs = cooldownUntilMs;
     this.buyBudgetSuppressedSignals = 0;
 
-    this.recordBuyBudgetCooldownActivated(signal, now, cooldownUntilMs, source);
+    this.recordBuyBudgetCooldownActivated(signal, now, cooldownUntilMs, source, reasonCode);
     this.log.info(
       {
         signalId: signal.signalId,
@@ -1543,6 +1578,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     now: number,
     cooldownUntilMs: number,
     source: "decision_preflight" | "risk_rejection",
+    reasonCode: string,
   ): void {
     try {
       this.deps.riskEventRepo?.insert({
@@ -1551,7 +1587,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           signalId: signal.signalId,
           tokenId: String(signal.tokenId),
           conditionId: String(signal.conditionId),
-          reasonCode: WALLET_BUY_BUDGET_EXHAUSTED_REASON,
+          reasonCode,
           side: "BUY",
           requiredNotionalUsdc: signal.suggestedSizeUsdc,
           recoveryNotionalUsdc: this.buyBudgetRecoveryNotionalUsdc,

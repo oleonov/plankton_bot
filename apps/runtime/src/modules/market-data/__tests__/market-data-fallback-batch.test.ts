@@ -463,7 +463,7 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
 
     expect(silentLog.warn).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await vi.advanceTimersByTimeAsync(15 * 60_000);
     await mod.poll();
 
     expect(silentLog.warn).toHaveBeenCalledTimes(2);

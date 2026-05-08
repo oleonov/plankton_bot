@@ -657,6 +657,17 @@ export interface MarketSelectionPolicy {
   minLiquidity: number;
 }
 
+export interface BuyCapacityPolicy {
+  /** BUY-only wallet reserve guard. SELL exits always bypass this policy. */
+  enabled: boolean;
+  /** Reserve kept after first-entry BUY placement. */
+  minNewEntryWalletHeadroomUsdc: number;
+  /** Reserve kept after scale-in/add BUY placement. */
+  minAddWalletHeadroomUsdc: number;
+  /** Maximum pending/open BUY orders across the profile wallet. */
+  maxOpenBuyOrders: number;
+}
+
 export interface ExecutionPolicy {
   version: number;
   entryPriceCeiling: number;
@@ -670,6 +681,7 @@ export interface ExecutionPolicy {
   entryMinMarketAgeSeconds: number;
   exitOrderTtlMs: number;
   marketSelection: MarketSelectionPolicy;
+  buyCapacity: BuyCapacityPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   orderLifetime: OrderLifetimePolicy;

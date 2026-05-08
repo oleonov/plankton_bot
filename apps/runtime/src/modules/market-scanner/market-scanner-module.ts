@@ -25,10 +25,16 @@ import { evaluatePreEntry, createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { findActivePositions } from "../../active-positions.js";
 import { isTransientNetworkError } from "../../network-errors.js";
+import {
+  consumeWarnThrottle,
+  createWarnThrottleState,
+  type WarnThrottleState,
+} from "../../warn-throttle.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 
 const HINT_SCAN_DEBOUNCE_MS = 250;
 const HINT_SCAN_MIN_INTERVAL_MS = 60_000;
+const TRANSIENT_SCAN_WARN_THROTTLE_MS = 15 * 60_000;
 
 /**
  * Nearest-rank percentile (no interpolation). Stable for tiny samples and
@@ -156,6 +162,7 @@ export class MarketScannerModule implements RuntimeModule {
     eventsMultiMarketTotal: 0,
   };
   private readonly log: Logger;
+  private readonly scanDegradeWarn: WarnThrottleState = createWarnThrottleState();
 
   constructor(private readonly deps: MarketScannerModuleDeps) {
     this.log = deps.log.child({ module: "market-scanner" });
@@ -505,7 +512,7 @@ export class MarketScannerModule implements RuntimeModule {
       return result;
     } catch (err) {
       if (!throwOnError && this.lastSuccessfulScanMs > 0 && isTransientNetworkError(err)) {
-        this.log.warn({ err }, "scan cycle degraded — keeping existing catalog");
+        this.logScanDegraded(err);
         return null;
       }
       this.log.error({ err }, "scan cycle failed");
@@ -526,6 +533,16 @@ export class MarketScannerModule implements RuntimeModule {
       if (this.hasFreshSuccessfulScan()) return;
       void this.scan().catch((err) => this.log.error({ err }, "hint-triggered scan failed"));
     }, HINT_SCAN_DEBOUNCE_MS);
+  }
+
+  private logScanDegraded(err: unknown): void {
+    const suppressedCount = consumeWarnThrottle(
+      this.scanDegradeWarn,
+      Date.now(),
+      TRANSIENT_SCAN_WARN_THROTTLE_MS,
+    );
+    if (suppressedCount == null) return;
+    this.log.warn({ err, suppressedCount }, "scan cycle degraded — keeping existing catalog");
   }
 
   private hasFreshSuccessfulScan(nowMs = Date.now()): boolean {

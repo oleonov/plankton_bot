@@ -78,7 +78,12 @@ import {
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
 import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
-import { hasWalletBuyBudget, resolveWalletBuyBudget } from "./wallet-buy-budget.js";
+import {
+  evaluateWalletBuyCapacity,
+  hasWalletBuyBudget,
+  resolveWalletBuyBudget,
+  WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+} from "./wallet-buy-budget.js";
 
 import { createLogger } from "./logger.js";
 import { buildTradeCountObserver } from "./trade-count-observer.js";
@@ -139,6 +144,10 @@ import { installConsoleRedaction } from "./console-redaction.js";
 import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
 import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-state-transition-backfill.js";
 import { OrderLifetimeModule } from "./modules/order-lifetime/order-lifetime-module.js";
+import {
+  buildRiskEventVolumeSnapshot,
+  SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
+} from "./risk-event-volume.js";
 
 // ─── Bootstrap ────────────────────────────────────────────────────────────────
 
@@ -676,6 +685,7 @@ async function main(): Promise<void> {
     maxConcurrency: config.executionMaxConcurrency,
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
+    executionPolicy: currentExecutionPolicy,
     allowSellSizeClamp: config.allowSellSizeClamp,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
@@ -696,6 +706,7 @@ async function main(): Promise<void> {
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
+    executionPolicy: currentExecutionPolicy,
     resolutionTracker: marketResolutionTracker,
     markToMarketEnabled: runtimeMode !== "live-lite",
   });
@@ -768,19 +779,30 @@ async function main(): Promise<void> {
     runtimeControl,
     controlDb: controlConn.db,
     buySignalBudgetCircuitBreaker: {
-      canAttemptBuy: (requiredNotionalUsdc) =>
-        hasWalletBuyBudget(
-          resolveWalletBuyBudget(
-            {
-              controlDb: controlConn.db,
-              activeProfile: activeProfile as import("@plankton/domain").ProfileId,
-              walletBufferPct: config.executionWalletBufferPct,
-              walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
-            },
-            repos.order.sumOpenBuyNotional(),
-          ),
+      canAttemptBuy: (requiredNotionalUsdc, signal) => {
+        const walletBudget = resolveWalletBuyBudget(
+          {
+            controlDb: controlConn.db,
+            activeProfile: activeProfile as import("@plankton/domain").ProfileId,
+            walletBufferPct: config.executionWalletBufferPct,
+            walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
+          },
+          repos.order.sumOpenBuyNotional(),
+        );
+        const buyCapacity = evaluateWalletBuyCapacity({
+          policy: currentExecutionPolicy().buyCapacity,
+          snapshot: walletBudget,
           requiredNotionalUsdc,
-        ),
+          signalReason: signal.reason,
+          openBuyOrderCount: repos.order.findOpen().filter((order) => order.side === "buy").length,
+        });
+        if (!buyCapacity.allowed) {
+          return { canAttempt: false, reasonCode: WALLET_BUY_CAPACITY_EXHAUSTED_REASON };
+        }
+        return {
+          canAttempt: hasWalletBuyBudget(walletBudget, requiredNotionalUsdc),
+        };
+      },
     },
     tradeCountProvider,
     executionPolicy: currentExecutionPolicy,
@@ -1130,6 +1152,18 @@ async function main(): Promise<void> {
   const insertRiskEventVolume = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('risk_event_volume', 1, ?, ?)",
   );
+  const countRiskEventsSince = ledgerConn.db.prepare(
+    "SELECT COUNT(*) as c FROM risk_events WHERE created_at >= datetime(?)",
+  );
+  const signalTelemetryRiskEventPlaceholders = SIGNAL_TELEMETRY_RISK_EVENT_TYPES.map(
+    () => "?",
+  ).join(", ");
+  const countSignalTelemetryRiskEventsSince = ledgerConn.db.prepare(
+    `SELECT COUNT(*) as c
+     FROM risk_events
+     WHERE created_at >= datetime(?)
+       AND event_type IN (${signalTelemetryRiskEventPlaceholders})`,
+  );
   const deleteUserOrderStreamActivity = ledgerConn.db.prepare(
     "DELETE FROM runtime_metrics WHERE metric_name = 'user_order_stream_activity'",
   );
@@ -1168,6 +1202,14 @@ async function main(): Promise<void> {
       insertMarketDataStreamActivity.run(labels, capturedAt);
     },
   );
+  const readRiskEventCount = (
+    stmt: { get(...args: unknown[]): unknown },
+    sinceIso: string,
+    eventTypes: readonly string[] = [],
+  ): number => {
+    const row = stmt.get(sinceIso, ...eventTypes) as { c?: number } | undefined;
+    return row?.c ?? 0;
+  };
 
   // Track signal counts in a sliding window (resets every 10 minutes — approximate, not rolling)
   const signalWindow = {
@@ -1412,32 +1454,42 @@ async function main(): Promise<void> {
       }),
       new Date().toISOString(),
     );
-    const riskEventsLast1h = repos.riskEvent.countSince(
-      new Date(now - 60 * 60 * 1000).toISOString(),
+    const riskEventSince1h = new Date(now - 60 * 60 * 1000).toISOString();
+    const riskEventSince24h = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+    const riskEventsLast1h = readRiskEventCount(countRiskEventsSince, riskEventSince1h);
+    const riskEventsLast24h = readRiskEventCount(countRiskEventsSince, riskEventSince24h);
+    const signalTelemetryRiskEventsLast1h = readRiskEventCount(
+      countSignalTelemetryRiskEventsSince,
+      riskEventSince1h,
+      SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
     );
-    const riskEventsLast24h = repos.riskEvent.countSince(
-      new Date(now - 24 * 60 * 60 * 1000).toISOString(),
+    const signalTelemetryRiskEventsLast24h = readRiskEventCount(
+      countSignalTelemetryRiskEventsSince,
+      riskEventSince24h,
+      SIGNAL_TELEMETRY_RISK_EVENT_TYPES,
     );
-    const riskEventWarning = riskEventsLast1h >= RISK_EVENT_WARNING_THRESHOLD_PER_HOUR;
-    upsertRiskEventVolume(
-      JSON.stringify({
-        last1h: riskEventsLast1h,
-        last24h: riskEventsLast24h,
-        warning: riskEventWarning,
-        thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
-        windowStartMs: now - 24 * 60 * 60 * 1000,
-      }),
-      new Date().toISOString(),
-    );
+    const riskEventVolume = buildRiskEventVolumeSnapshot({
+      last1h: riskEventsLast1h,
+      last24h: riskEventsLast24h,
+      signalTelemetryLast1h: signalTelemetryRiskEventsLast1h,
+      signalTelemetryLast24h: signalTelemetryRiskEventsLast24h,
+      thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
+      windowStartMs: now - 24 * 60 * 60 * 1000,
+    });
+    upsertRiskEventVolume(JSON.stringify(riskEventVolume), new Date().toISOString());
     if (
-      riskEventWarning &&
+      riskEventVolume.warning &&
       now - lastRiskEventVolumeWarningAtMs >= RISK_EVENT_WARNING_COOLDOWN_MS
     ) {
       lastRiskEventVolumeWarningAtMs = now;
       log.warn(
         {
-          riskEventsLast1h,
-          riskEventsLast24h,
+          riskEventsLast1h: riskEventVolume.last1h,
+          riskEventsLast24h: riskEventVolume.last24h,
+          signalTelemetryRiskEventsLast1h: riskEventVolume.signalTelemetryLast1h,
+          signalTelemetryRiskEventsLast24h: riskEventVolume.signalTelemetryLast24h,
+          operationalRiskEventsLast1h: riskEventVolume.operationalLast1h,
+          operationalRiskEventsLast24h: riskEventVolume.operationalLast24h,
           thresholdPerHour: RISK_EVENT_WARNING_THRESHOLD_PER_HOUR,
         },
         "risk_events growth threshold exceeded",

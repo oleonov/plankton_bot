@@ -9,6 +9,7 @@
  * Keep this module pure — no runtime deps, no I/O.
  */
 import type {
+  BuyCapacityPolicy,
   DeadSideGuardPolicy,
   ExecutionPolicy,
   ExecutionPricingPolicy,
@@ -37,6 +38,13 @@ export const DEFAULT_PRICING_POLICY: ExecutionPricingPolicy = {
 export const DEFAULT_TELEMETRY: ExecutionPolicyTelemetry = {
   deadSideCanary: true,
   pricingShadow: true,
+};
+
+export const DEFAULT_BUY_CAPACITY_POLICY: BuyCapacityPolicy = {
+  enabled: true,
+  minNewEntryWalletHeadroomUsdc: 7,
+  minAddWalletHeadroomUsdc: 5,
+  maxOpenBuyOrders: 2,
 };
 
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
@@ -96,6 +104,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   entryMinMarketAgeSeconds: DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
   exitOrderTtlMs: 300_000,
   marketSelection: DEFAULT_MARKET_SELECTION_POLICY,
+  buyCapacity: DEFAULT_BUY_CAPACITY_POLICY,
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
@@ -130,6 +139,10 @@ const BOUND_MARKET_SELECTION_MAX_MID_MIN = 0.001;
 const BOUND_MARKET_SELECTION_MAX_MID_MAX = 0.99;
 const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MIN = 0;
 const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MAX = 1_000_000;
+const BOUND_BUY_CAPACITY_HEADROOM_MIN_USDC = 0;
+const BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC = 10_000;
+const BOUND_BUY_CAPACITY_OPEN_ORDERS_MIN = 0;
+const BOUND_BUY_CAPACITY_OPEN_ORDERS_MAX = 1_000;
 const BOUND_ORDER_LIFETIME_MIN_MS = 1_000;
 const BOUND_ORDER_LIFETIME_MAX_MS = 14 * 24 * 60 * 60_000;
 const BOUND_ORDER_LIFETIME_COUNT_MAX = 10_000;
@@ -188,6 +201,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const pricing = parsePricing(obj.pricing, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
+  const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
   const orderLifetime = parseOrderLifetime(obj.orderLifetime, issues);
 
   return {
@@ -197,12 +211,53 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       entryMinMarketAgeSeconds,
       exitOrderTtlMs,
       marketSelection,
+      buyCapacity,
       deadSideGuard,
       pricing,
       orderLifetime,
       telemetry,
     },
     issues,
+  };
+}
+
+function parseBuyCapacity(raw: unknown, issues: string[]): BuyCapacityPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("buyCapacity must be an object");
+    return DEFAULT_BUY_CAPACITY_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_BUY_CAPACITY_POLICY.enabled,
+      issues,
+      "buyCapacity.enabled",
+    ),
+    minNewEntryWalletHeadroomUsdc: clampedNumber(
+      obj.minNewEntryWalletHeadroomUsdc,
+      DEFAULT_BUY_CAPACITY_POLICY.minNewEntryWalletHeadroomUsdc,
+      BOUND_BUY_CAPACITY_HEADROOM_MIN_USDC,
+      BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC,
+      issues,
+      "buyCapacity.minNewEntryWalletHeadroomUsdc",
+    ),
+    minAddWalletHeadroomUsdc: clampedNumber(
+      obj.minAddWalletHeadroomUsdc,
+      DEFAULT_BUY_CAPACITY_POLICY.minAddWalletHeadroomUsdc,
+      BOUND_BUY_CAPACITY_HEADROOM_MIN_USDC,
+      BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC,
+      issues,
+      "buyCapacity.minAddWalletHeadroomUsdc",
+    ),
+    maxOpenBuyOrders: clampedInt(
+      obj.maxOpenBuyOrders,
+      DEFAULT_BUY_CAPACITY_POLICY.maxOpenBuyOrders,
+      BOUND_BUY_CAPACITY_OPEN_ORDERS_MIN,
+      BOUND_BUY_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "buyCapacity.maxOpenBuyOrders",
+    ),
   };
 }
 

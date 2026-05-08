@@ -2373,7 +2373,9 @@ describe("AlgoDecisionModule", () => {
       selectedMarketCache = createMockSelectedMarketCache(tokenIds);
       const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
       const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
-      const canAttemptBuy = vi.fn((requiredNotionalUsdc: number) => requiredNotionalUsdc <= 2);
+      const canAttemptBuy = vi.fn((requiredNotionalUsdc: number) => ({
+        canAttempt: requiredNotionalUsdc <= 2,
+      }));
 
       const mod = buildModule({
         decisionSignalLogRepo,
@@ -2408,7 +2410,7 @@ describe("AlgoDecisionModule", () => {
       selectedMarketCache = createMockSelectedMarketCache(tokenIds);
       const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
       const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
-      const canAttemptBuy = vi.fn(() => false);
+      const canAttemptBuy = vi.fn(() => ({ canAttempt: false }));
 
       const mod = buildModule({
         decisionSignalLogRepo,
@@ -2441,6 +2443,45 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("records capacity-specific reason when decision preflight blocks BUY capacity", async () => {
+      const tokenId = "token-capacity-preflight";
+      selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const canAttemptBuy = vi.fn(() => ({
+        canAttempt: false,
+        reasonCode: "wallet_buy_capacity_exhausted",
+      }));
+
+      const mod = buildModule({
+        decisionSignalLogRepo,
+        riskEventRepo,
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [makeMarket(tokenId, null, 0.45)],
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      const suppressionCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(
+          ([event]) => event.payload.reasonCode === "wallet_buy_capacity_exhausted",
+        );
+
+      expect(signalCalls).toHaveLength(0);
+      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+      expect(suppressionCalls).toHaveLength(1);
+      expect(canAttemptBuy).toHaveBeenCalledTimes(1);
+
+      await mod.stop();
+    });
+
     it("keeps BUY emission suppressed until the budget cooldown expires", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-05-08T00:00:00.000Z"));
@@ -2449,7 +2490,7 @@ describe("AlgoDecisionModule", () => {
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);
       const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
       let budgetAvailable = false;
-      const canAttemptBuy = vi.fn(() => budgetAvailable);
+      const canAttemptBuy = vi.fn(() => ({ canAttempt: budgetAvailable }));
 
       const mod = buildModule({
         decisionSignalLogRepo,
@@ -2511,9 +2552,9 @@ describe("AlgoDecisionModule", () => {
       const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
       const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
       let freeBudgetUsdc = 1.5;
-      const canAttemptBuy = vi.fn((requiredNotionalUsdc: number) => {
-        return freeBudgetUsdc >= requiredNotionalUsdc;
-      });
+      const canAttemptBuy = vi.fn((requiredNotionalUsdc: number) => ({
+        canAttempt: freeBudgetUsdc >= requiredNotionalUsdc,
+      }));
       const buySizeRules: AlgoSizeRule[] = [
         {
           id: 101,
@@ -2625,7 +2666,7 @@ describe("AlgoDecisionModule", () => {
       const mod = buildModule({
         decisionSignalLogRepo,
         buySignalBudgetCircuitBreaker: {
-          canAttemptBuy: vi.fn(() => !walletExhausted),
+          canAttemptBuy: vi.fn(() => ({ canAttempt: !walletExhausted })),
         },
         buySignalBudgetCooldownMs: 60 * 60 * 1000,
       });
@@ -2669,7 +2710,7 @@ describe("AlgoDecisionModule", () => {
         buySignalBudgetCircuitBreaker: {
           canAttemptBuy: () => {
             paused = true;
-            return true;
+            return { canAttempt: true };
           },
         },
       });
@@ -2766,7 +2807,7 @@ describe("AlgoDecisionModule", () => {
       selectedMarketCache = createMockSelectedMarketCache([buyTokenId]);
 
       const mod = buildModule({
-        buySignalBudgetCircuitBreaker: { canAttemptBuy: () => false },
+        buySignalBudgetCircuitBreaker: { canAttemptBuy: () => ({ canAttempt: false }) },
       });
       await mod.start();
 
@@ -2806,7 +2847,7 @@ describe("AlgoDecisionModule", () => {
 
       await (bus as any).emit("SignalRejected", {
         signal: firstSignal,
-        reason: "position_cap_exceeded",
+        reason: "non_budget_wallet_buy_budget_exhausted_substring",
         rejectedAt: Date.now(),
       });
       (bus.publish as ReturnType<typeof vi.fn>).mockClear();

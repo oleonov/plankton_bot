@@ -28,6 +28,12 @@ import { createTokenId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { isTransientNetworkError } from "../../network-errors.js";
 import {
+  consumeWarnThrottle,
+  createWarnThrottleState,
+  resetWarnThrottle,
+  type WarnThrottleState,
+} from "../../warn-throttle.js";
+import {
   applyPricingSnapshot,
   applyStreamUpdate,
   didMarketPricingChange,
@@ -56,12 +62,7 @@ const GAP_LOG_DEBOUNCE_MS = 250;
 const FALLBACK_POLL_TIMEOUT_BASE_MS = 10_000;
 const FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS = 25;
 const FALLBACK_POLL_TIMEOUT_MAX_MS = 30_000;
-const TRANSIENT_POLL_WARN_THROTTLE_MS = 5 * 60_000;
-
-interface WarnThrottleState {
-  lastLoggedAtMs: number | null;
-  suppressedCount: number;
-}
+const TRANSIENT_POLL_WARN_THROTTLE_MS = 15 * 60_000;
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
@@ -1034,7 +1035,11 @@ export class MarketDataModule implements RuntimeModule {
     fallbackPollCount: number,
     nowMs: number,
   ): void {
-    const suppressedCount = consumeWarnThrottle(this.cachedPollDegradeWarn, nowMs);
+    const suppressedCount = consumeWarnThrottle(
+      this.cachedPollDegradeWarn,
+      nowMs,
+      TRANSIENT_POLL_WARN_THROTTLE_MS,
+    );
     if (suppressedCount == null) return;
     this.log.warn(
       {
@@ -1051,7 +1056,11 @@ export class MarketDataModule implements RuntimeModule {
     err: unknown,
     context: Readonly<{ batchSize: number; cursor: number; discoveryTotal: number }>,
   ): void {
-    const suppressedCount = consumeWarnThrottle(this.discoveryPollFailureWarn, Date.now());
+    const suppressedCount = consumeWarnThrottle(
+      this.discoveryPollFailureWarn,
+      Date.now(),
+      TRANSIENT_POLL_WARN_THROTTLE_MS,
+    );
     if (suppressedCount == null) return;
     this.log.warn(
       {
@@ -1069,29 +1078,6 @@ function resolveMarketPricingTimeoutMs(tokenCount: number): number {
     FALLBACK_POLL_TIMEOUT_MAX_MS,
     FALLBACK_POLL_TIMEOUT_BASE_MS + tokenCount * FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS,
   );
-}
-
-function createWarnThrottleState(): WarnThrottleState {
-  return { lastLoggedAtMs: null, suppressedCount: 0 };
-}
-
-function consumeWarnThrottle(state: WarnThrottleState, nowMs: number): number | null {
-  if (
-    state.lastLoggedAtMs == null ||
-    nowMs - state.lastLoggedAtMs >= TRANSIENT_POLL_WARN_THROTTLE_MS
-  ) {
-    const suppressedCount = state.suppressedCount;
-    state.lastLoggedAtMs = nowMs;
-    state.suppressedCount = 0;
-    return suppressedCount;
-  }
-  state.suppressedCount++;
-  return null;
-}
-
-function resetWarnThrottle(state: WarnThrottleState): void {
-  state.lastLoggedAtMs = null;
-  state.suppressedCount = 0;
 }
 
 function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[] {

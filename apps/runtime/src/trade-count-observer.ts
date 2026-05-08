@@ -20,14 +20,22 @@
 import type { TradeCountFetchEvent, TradeCountObserver } from "@plankton/exchange";
 import type { Logger } from "./logger.js";
 import type { RuntimeMetricWriter } from "./runtime-metric-writer.js";
+import { consumeWarnThrottle, createWarnThrottleState } from "./warn-throttle.js";
+
+const TRADE_COUNT_FETCH_ERROR_WARN_THROTTLE_MS = 10 * 60_000;
 
 export interface TradeCountObserverDeps {
   log: Logger;
   metrics: RuntimeMetricWriter;
+  now?: () => number;
+  warnThrottleMs?: number;
 }
 
 export function buildTradeCountObserver(deps: TradeCountObserverDeps): TradeCountObserver {
   const { log, metrics } = deps;
+  const now = deps.now ?? Date.now;
+  const warnThrottleMs = deps.warnThrottleMs ?? TRADE_COUNT_FETCH_ERROR_WARN_THROTTLE_MS;
+  const fetchErrorWarn = createWarnThrottleState();
   const writeMetric = (name: string, labels: string): void => {
     try {
       metrics.writeEvent(name, 1, labels);
@@ -42,20 +50,30 @@ export function buildTradeCountObserver(deps: TradeCountObserverDeps): TradeCoun
       }
     }
   };
+  const warnFetchError = (event: TradeCountFetchEvent): void => {
+    const suppressedCount = consumeWarnThrottle(fetchErrorWarn, now(), warnThrottleMs);
+    if (suppressedCount == null) return;
+    try {
+      log.warn(
+        {
+          conditionId: event.conditionId,
+          error: event.error,
+          latencyMs: event.latencyMs,
+          suppressedCount,
+        },
+        "trade_count_fetch_error",
+      );
+    } catch {
+      // Logger throw must not mask metric emission by the caller.
+    }
+  };
   return (event: TradeCountFetchEvent): void => {
     if (event.type === "fetch_ok") {
       writeMetric("trade_count_fetch_ok", JSON.stringify({ latencyMs: event.latencyMs ?? null }));
       return;
     }
     if (event.type === "fetch_error") {
-      try {
-        log.warn(
-          { conditionId: event.conditionId, error: event.error, latencyMs: event.latencyMs },
-          "trade_count_fetch_error",
-        );
-      } catch {
-        // Logger throw must not mask metric emission below.
-      }
+      warnFetchError(event);
       writeMetric(
         "trade_count_fetch_err",
         JSON.stringify({ latencyMs: event.latencyMs ?? null, error: event.error ?? "unknown" }),

@@ -53,6 +53,45 @@ function formatExecutionRejects(rejects?: Record<string, number>): string | null
     .join(", ");
 }
 
+function formatBuyCapacity(
+  capacity?: NonNullable<import("../api/types.ts").StatusData["executionQueue"]>["buyCapacity"],
+): string | null {
+  if (!capacity?.enabled) return null;
+  const parts = [
+    `entry reserve ${formatUsd(capacity.minNewEntryWalletHeadroomUsdc)}`,
+    `add reserve ${formatUsd(capacity.minAddWalletHeadroomUsdc)}`,
+    `open buys ${capacity.openBuyOrderCount}/${capacity.maxOpenBuyOrders}`,
+  ];
+  if (capacity.newEntryCapacityUsdc != null) {
+    parts.push(`entry cap ${formatUsd(capacity.newEntryCapacityUsdc)}`);
+  }
+  if (capacity.addCapacityUsdc != null) {
+    parts.push(`add cap ${formatUsd(capacity.addCapacityUsdc)}`);
+  }
+  return parts.join(" · ");
+}
+
+function exitsOnlyMessage(status: import("../api/types.ts").StatusData): string {
+  const capacity = status.executionQueue?.buyCapacity;
+  if (capacity?.entriesBlocked) {
+    return `Entry capacity exhausted — new entries need ${formatUsd(
+      capacity.minNewEntryWalletHeadroomUsdc,
+    )} usable wallet headroom after order placement`;
+  }
+  if (capacity?.addsBlocked) {
+    return `Add-buy capacity exhausted — adds need ${formatUsd(
+      capacity.minAddWalletHeadroomUsdc,
+    )} usable wallet headroom after order placement`;
+  }
+  if (
+    status.executionQueue?.freeUsdcForNewOrders != null &&
+    status.executionQueue.freeUsdcForNewOrders <= 0
+  ) {
+    return "Wallet buy budget exhausted — only exit signals are active";
+  }
+  return "Only exit signals active — no new entries being opened";
+}
+
 function BalanceCard({ status }: { status: import("../api/types.ts").StatusData }) {
   const isLive = status.runtimeMode === "live-lite";
   const dim = { color: "var(--text-dim)" };
@@ -337,6 +376,12 @@ export function Overview() {
                     {status.executionQueue.freeUsdcForNewOrders != null && (
                       <> / free {formatUsd(status.executionQueue.freeUsdcForNewOrders)}</>
                     )}
+                    {formatBuyCapacity(status.executionQueue.buyCapacity) && (
+                      <>
+                        {" · "}
+                        capacity {formatBuyCapacity(status.executionQueue.buyCapacity)}
+                      </>
+                    )}
                     {(status.executionQueue.cancelReplacePendingCount ?? 0) > 0 && (
                       <> · replace locks {status.executionQueue.cancelReplacePendingCount}</>
                     )}
@@ -375,7 +420,7 @@ export function Overview() {
           )}
           {status.tradingState === "EXITS_ONLY" && (
             <div style={{ marginTop: 8, fontSize: 12, color: "var(--orange)" }}>
-              Only exit signals active — no new entries being opened
+              {exitsOnlyMessage(status)}
             </div>
           )}
         </div>

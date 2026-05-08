@@ -12,6 +12,7 @@ export interface PendingReservation {
 
 export interface ReservationSnapshot {
   reservedBuyUsdc: number;
+  openBuyOrderCount: number;
   reservedSellByToken: Map<string, number>;
 }
 
@@ -22,6 +23,7 @@ export function buildReservationSnapshot(
 ): ReservationSnapshot {
   const snapshot: ReservationSnapshot = {
     reservedBuyUsdc: 0,
+    openBuyOrderCount: 0,
     reservedSellByToken: new Map(),
   };
   const activeOpenOrders = openOrders.filter((order) => OPEN_ORDER_STATUSES.has(order.status));
@@ -73,6 +75,7 @@ function addReservation(snapshot: ReservationSnapshot, reservation: PendingReser
   if (reservation.size <= 0 || reservation.price <= 0) return;
   if (reservation.side === "buy") {
     snapshot.reservedBuyUsdc += reservation.size * reservation.price;
+    snapshot.openBuyOrderCount += 1;
     return;
   }
   const key = String(reservation.tokenId);

@@ -6,12 +6,15 @@ import {
   type PositionRepository,
   type TokenId,
   SignalReason,
+  type BuyCapacityPolicy,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import {
   hasWalletBuyBudget,
+  evaluateWalletBuyCapacity,
   resolveWalletBuyBudget,
+  WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
   type WalletBuyBudgetConfig,
 } from "../../wallet-buy-budget.js";
 
@@ -28,6 +31,10 @@ function hasOpenBuyOrderForToken(orderRepo: OrderRepository, tokenId: TokenId): 
     .some((order) => order.side === "buy" && OPEN_ORDER_STATUSES.has(order.status));
 }
 
+function countOpenBuyOrders(orderRepo: OrderRepository): number {
+  return orderRepo.findOpen().filter((order) => order.side === "buy").length;
+}
+
 export class AlgoRiskGateImpl implements RiskGate {
   constructor(
     private readonly orderRepo: OrderRepository,
@@ -35,6 +42,7 @@ export class AlgoRiskGateImpl implements RiskGate {
     private readonly log: Logger,
     private readonly resolveMinOrderSize?: (tokenId: TokenId) => number | null,
     private readonly walletBudget?: WalletBuyBudgetConfig,
+    private readonly buyCapacityPolicy?: () => BuyCapacityPolicy | undefined,
   ) {}
 
   async evaluate(signal: Signal): Promise<RiskDecision> {
@@ -89,6 +97,19 @@ export class AlgoRiskGateImpl implements RiskGate {
       this.walletBudget ?? {},
       this.orderRepo.sumOpenBuyNotional(),
     );
+    const buyCapacity = evaluateWalletBuyCapacity({
+      policy: this.buyCapacityPolicy?.(),
+      snapshot: walletBudget,
+      requiredNotionalUsdc: signal.suggestedSizeUsdc,
+      signalReason: signal.reason,
+      openBuyOrderCount: countOpenBuyOrders(this.orderRepo),
+    });
+    if (!buyCapacity.allowed) {
+      rejected.push(WALLET_BUY_CAPACITY_EXHAUSTED_REASON);
+      return this.decision(signal, false, rejected, passed);
+    }
+    passed.push("wallet_buy_capacity_ok");
+
     if (!hasWalletBuyBudget(walletBudget, signal.suggestedSizeUsdc)) {
       rejected.push("wallet_buy_budget_exhausted");
       return this.decision(signal, false, rejected, passed);

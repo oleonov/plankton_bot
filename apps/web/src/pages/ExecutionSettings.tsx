@@ -83,6 +83,7 @@ function ExecutionPolicyFormInner({
         maxMidPrice: numOr(maxMidPrice, policy.marketSelection.maxMidPrice),
         minLiquidity: numOr(minLiquidity, policy.marketSelection.minLiquidity),
       },
+      buyCapacity: policy.buyCapacity,
       deadSideGuard: {
         mode: dsgMode,
         askCeiling: numOr(dsgAskCeiling, policy.deadSideGuard.askCeiling),

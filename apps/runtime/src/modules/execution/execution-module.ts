@@ -28,6 +28,7 @@ import type {
   TokenId,
   PositionRepository,
   ExchangeFill,
+  ExecutionPolicy,
 } from "@plankton/domain";
 import { createCommandId, createOrderId, ExchangeErrorCode } from "@plankton/domain";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
@@ -35,7 +36,13 @@ import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-calculator.js";
 import { validateExecutablePrice } from "../../executable-price.js";
-import { hasWalletBuyBudget, resolveWalletBuyBudget } from "../../wallet-buy-budget.js";
+import {
+  evaluateWalletBuyCapacity,
+  hasWalletBuyBudget,
+  normalizeBuyCapacityPolicy,
+  resolveWalletBuyBudget,
+  WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+} from "../../wallet-buy-budget.js";
 import { DEFAULT_FALLBACK_MIN_ORDER_SIZE } from "../../min-order-size.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
@@ -68,6 +75,7 @@ export interface ExecutionModuleDeps {
   activeProfile?: ProfileId | undefined;
   walletBufferPct?: number | undefined;
   walletBufferMinUsdc?: number | undefined;
+  executionPolicy?: (() => ExecutionPolicy) | undefined;
   allowSellSizeClamp?: boolean | undefined;
 }
 
@@ -145,6 +153,17 @@ export class ExecutionModule implements RuntimeModule {
     avgCancelLatencyMs: number | null;
     reservedBuyUsdc: number;
     freeUsdcForNewOrders: number | null;
+    buyCapacity?: {
+      enabled: boolean;
+      minNewEntryWalletHeadroomUsdc: number;
+      minAddWalletHeadroomUsdc: number;
+      maxOpenBuyOrders: number;
+      openBuyOrderCount: number;
+      newEntryCapacityUsdc: number | null;
+      addCapacityUsdc: number | null;
+      entriesBlocked: boolean;
+      addsBlocked: boolean;
+    };
     reservedSellTokenCount: number;
     cancelReplacePendingCount: number;
     gatewayRejectsLast10mByCode: Record<string, number>;
@@ -162,6 +181,21 @@ export class ExecutionModule implements RuntimeModule {
       },
       reservations.reservedBuyUsdc,
     );
+    const buyCapacity = normalizeBuyCapacityPolicy(this.currentBuyCapacityPolicy());
+    const newEntryDecision = evaluateWalletBuyCapacity({
+      policy: buyCapacity,
+      snapshot: walletBudget,
+      requiredNotionalUsdc: 0,
+      signalReason: "probe-entry",
+      openBuyOrderCount: reservations.openBuyOrderCount,
+    });
+    const addDecision = evaluateWalletBuyCapacity({
+      policy: buyCapacity,
+      snapshot: walletBudget,
+      requiredNotionalUsdc: 0,
+      signalReason: "scale-in",
+      openBuyOrderCount: reservations.openBuyOrderCount,
+    });
     return {
       pendingCount: this.pendingCount,
       queueDepth: queue?.queueDepth ?? 0,
@@ -179,6 +213,34 @@ export class ExecutionModule implements RuntimeModule {
       freeUsdcForNewOrders: walletBudget
         ? Number(Math.max(0, walletBudget.freeUsdcForNewOrders).toFixed(6))
         : null,
+      buyCapacity: {
+        enabled: buyCapacity.enabled,
+        minNewEntryWalletHeadroomUsdc: buyCapacity.minNewEntryWalletHeadroomUsdc,
+        minAddWalletHeadroomUsdc: buyCapacity.minAddWalletHeadroomUsdc,
+        maxOpenBuyOrders: buyCapacity.maxOpenBuyOrders,
+        openBuyOrderCount: reservations.openBuyOrderCount,
+        newEntryCapacityUsdc:
+          newEntryDecision.availableAfterOrderUsdc == null
+            ? null
+            : Number(
+                Math.max(
+                  0,
+                  newEntryDecision.availableAfterOrderUsdc -
+                    buyCapacity.minNewEntryWalletHeadroomUsdc,
+                ).toFixed(6),
+              ),
+        addCapacityUsdc:
+          addDecision.availableAfterOrderUsdc == null
+            ? null
+            : Number(
+                Math.max(
+                  0,
+                  addDecision.availableAfterOrderUsdc - buyCapacity.minAddWalletHeadroomUsdc,
+                ).toFixed(6),
+              ),
+        entriesBlocked: !newEntryDecision.allowed,
+        addsBlocked: !addDecision.allowed,
+      },
       reservedSellTokenCount: reservations.reservedSellByToken.size,
       cancelReplacePendingCount: this.sellReplaceLocks.size,
       gatewayRejectsLast10mByCode: this.getGatewayRejectsLast10mByCode(),
@@ -640,6 +702,10 @@ export class ExecutionModule implements RuntimeModule {
     );
   }
 
+  private currentBuyCapacityPolicy(): ExecutionPolicy["buyCapacity"] | undefined {
+    return this.deps.executionPolicy?.().buyCapacity;
+  }
+
   private getReservationDecision(
     cmd: PlaceOrderCommand,
     notional: number,
@@ -669,6 +735,30 @@ export class ExecutionModule implements RuntimeModule {
         },
         reservations.reservedBuyUsdc,
       );
+      const buyCapacity = evaluateWalletBuyCapacity({
+        policy: this.currentBuyCapacityPolicy(),
+        snapshot: walletBudget,
+        requiredNotionalUsdc: notional,
+        signalReason: cmd.signalReason,
+        openBuyOrderCount: reservations.openBuyOrderCount,
+      });
+      if (!buyCapacity.allowed) {
+        return {
+          kind: "reject",
+          reason: WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+          message: "order skipped — wallet buy capacity exhausted",
+          details: {
+            wallet: walletBudget?.walletBalanceUsdc ?? null,
+            reservedBuy: reservations.reservedBuyUsdc,
+            openBuyOrders: reservations.openBuyOrderCount,
+            order: notional,
+            capacityKind: buyCapacity.kind,
+            requiredHeadroomUsdc: buyCapacity.requiredHeadroomUsdc,
+            availableAfterOrderUsdc: buyCapacity.availableAfterOrderUsdc,
+            maxOpenBuyOrders: buyCapacity.maxOpenBuyOrders,
+          },
+        };
+      }
       if (hasWalletBuyBudget(walletBudget, notional)) return { kind: "accept" };
 
       return {

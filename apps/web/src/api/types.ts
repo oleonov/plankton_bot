@@ -80,6 +80,13 @@ export interface MarketSelectionPolicy {
   minLiquidity: number;
 }
 
+export interface BuyCapacityPolicy {
+  enabled: boolean;
+  minNewEntryWalletHeadroomUsdc: number;
+  minAddWalletHeadroomUsdc: number;
+  maxOpenBuyOrders: number;
+}
+
 export interface ExecutionPolicyDTO {
   version: 1;
   entryPriceCeiling: number;
@@ -91,6 +98,7 @@ export interface ExecutionPolicyDTO {
    */
   entryMinMarketAgeSeconds: number;
   marketSelection: MarketSelectionPolicy;
+  buyCapacity: BuyCapacityPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   telemetry: ExecutionTelemetryPolicy;
@@ -206,6 +214,17 @@ export interface StatusData {
     avgCancelLatencyMs?: number | null;
     reservedBuyUsdc?: number;
     freeUsdcForNewOrders?: number | null;
+    buyCapacity?: {
+      enabled: boolean;
+      minNewEntryWalletHeadroomUsdc: number;
+      minAddWalletHeadroomUsdc: number;
+      maxOpenBuyOrders: number;
+      openBuyOrderCount: number;
+      newEntryCapacityUsdc: number | null;
+      addCapacityUsdc: number | null;
+      entriesBlocked: boolean;
+      addsBlocked: boolean;
+    };
     reservedSellTokenCount?: number;
     cancelReplacePendingCount?: number;
     gatewayRejectsLast10mByCode?: Record<string, number>;

@@ -37,6 +37,12 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       entryPriceCeiling: 0.6,
       exitOrderTtlMs: 600_000,
       marketSelection: { maxMidPrice: 0.42, minLiquidity: 250 },
+      buyCapacity: {
+        enabled: true,
+        minNewEntryWalletHeadroomUsdc: 7,
+        minAddWalletHeadroomUsdc: 5,
+        maxOpenBuyOrders: 2,
+      },
       deadSideGuard: { mode: "enforce", askCeiling: 0.05, maxTimeToEndMs: 60_000 },
       pricing: {
         mode: "bounded-midpoint",
@@ -91,6 +97,12 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues).toHaveLength(0);
     expect(policy.entryPriceCeiling).toBe(0.6);
     expect(policy.marketSelection).toEqual({ maxMidPrice: 0.42, minLiquidity: 250 });
+    expect(policy.buyCapacity).toEqual({
+      enabled: true,
+      minNewEntryWalletHeadroomUsdc: 7,
+      minAddWalletHeadroomUsdc: 5,
+      maxOpenBuyOrders: 2,
+    });
     expect(policy.deadSideGuard.mode).toBe("enforce");
     expect(policy.pricing.mode).toBe("bounded-midpoint");
     expect(policy.pricing.minExitPriceSignalRatio).toBe(0.6);
@@ -190,6 +202,35 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     );
     expect(issues.some((i) => i.includes("orderLifetime.enforcement"))).toBe(true);
     expect(issues.some((i) => i.includes("orderLifetime.passive.highTtlMs"))).toBe(true);
+  });
+
+  it("preserves partial buy-capacity override and defaults the rest", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ buyCapacity: { minNewEntryWalletHeadroomUsdc: 10 } }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.buyCapacity).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.buyCapacity,
+      minNewEntryWalletHeadroomUsdc: 10,
+    });
+  });
+
+  it("rejects invalid buy-capacity values with issues", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        buyCapacity: {
+          enabled: "yes",
+          minNewEntryWalletHeadroomUsdc: -1,
+          minAddWalletHeadroomUsdc: 20_000,
+          maxOpenBuyOrders: 1.5,
+        },
+      }),
+    );
+    expect(policy.buyCapacity).toEqual(DEFAULT_EXECUTION_POLICY.buyCapacity);
+    expect(issues.some((i) => i.includes("buyCapacity.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("buyCapacity.minNewEntryWalletHeadroomUsdc"))).toBe(true);
+    expect(issues.some((i) => i.includes("buyCapacity.minAddWalletHeadroomUsdc"))).toBe(true);
+    expect(issues.some((i) => i.includes("buyCapacity.maxOpenBuyOrders"))).toBe(true);
   });
 
   it("rejects invalid market-selection values with issues", () => {
