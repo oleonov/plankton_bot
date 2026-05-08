@@ -61,6 +61,7 @@ function formatBuyCapacity(
     `entry reserve ${formatUsd(capacity.minNewEntryWalletHeadroomUsdc)}`,
     `add reserve ${formatUsd(capacity.minAddWalletHeadroomUsdc)}`,
     `open buys ${capacity.openBuyOrderCount}/${capacity.maxOpenBuyOrders}`,
+    `per token ${capacity.maxOpenBuyOrdersPerToken}`,
   ];
   if (capacity.newEntryCapacityUsdc != null) {
     parts.push(`entry cap ${formatUsd(capacity.newEntryCapacityUsdc)}`);
@@ -69,6 +70,25 @@ function formatBuyCapacity(
     parts.push(`add cap ${formatUsd(capacity.addCapacityUsdc)}`);
   }
   return parts.join(" · ");
+}
+
+function formatOrderCapacity(
+  queue?: NonNullable<import("../api/types.ts").StatusData["executionQueue"]>,
+): string | null {
+  if (!queue) return null;
+  const parts: string[] = [];
+  if (queue.sellCapacity?.enabled) {
+    parts.push(
+      `sells ${queue.sellCapacity.openSellOrderCount}/${queue.sellCapacity.maxOpenSellOrders}`,
+      `sell/token ${queue.sellCapacity.maxOpenSellOrdersPerToken}`,
+    );
+  }
+  if (queue.orderCapacity?.enabled) {
+    parts.push(
+      `total ${queue.orderCapacity.openOrdersTotal}/${queue.orderCapacity.maxOpenOrdersTotal}`,
+    );
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 function exitsOnlyMessage(status: import("../api/types.ts").StatusData): string {
@@ -380,6 +400,12 @@ export function Overview() {
                       <>
                         {" · "}
                         capacity {formatBuyCapacity(status.executionQueue.buyCapacity)}
+                      </>
+                    )}
+                    {formatOrderCapacity(status.executionQueue) && (
+                      <>
+                        {" · "}
+                        {formatOrderCapacity(status.executionQueue)}
                       </>
                     )}
                     {(status.executionQueue.cancelReplacePendingCount ?? 0) > 0 && (

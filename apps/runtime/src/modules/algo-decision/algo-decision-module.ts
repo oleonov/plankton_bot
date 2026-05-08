@@ -329,6 +329,7 @@ interface ControlDbReader {
 export type BuySignalBudgetCircuitBreakerResult = {
   canAttempt: boolean;
   reasonCode?: string | undefined;
+  activateCooldown?: boolean | undefined;
 };
 
 export interface BuySignalBudgetCircuitBreaker {
@@ -1493,7 +1494,9 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     if (canAttempt?.allowed === false) {
-      this.activateBuyBudgetCooldown(signal, now, "decision_preflight", canAttempt.reasonCode);
+      if (canAttempt.activateCooldown) {
+        this.activateBuyBudgetCooldown(signal, now, "decision_preflight", canAttempt.reasonCode);
+      }
       this.buyBudgetSuppressedSignals++;
       return true;
     }
@@ -1503,7 +1506,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private canAttemptBuyNotional(
     requiredNotionalUsdc: number,
     signal: import("@plankton/domain").Signal,
-  ): { allowed: boolean; reasonCode: string } | null {
+  ): { allowed: boolean; reasonCode: string; activateCooldown: boolean } | null {
     const circuitBreaker = this.deps.buySignalBudgetCircuitBreaker;
     if (!circuitBreaker) return null;
 
@@ -1515,6 +1518,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       return {
         allowed: result.canAttempt,
         reasonCode: result.reasonCode ?? WALLET_BUY_BUDGET_EXHAUSTED_REASON,
+        activateCooldown: result.activateCooldown ?? true,
       };
     } catch (err) {
       this.log.warn(
@@ -1526,7 +1530,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         },
         "buy budget circuit breaker failed open",
       );
-      return { allowed: true, reasonCode: "" };
+      return { allowed: true, reasonCode: "", activateCooldown: false };
     }
   }
 

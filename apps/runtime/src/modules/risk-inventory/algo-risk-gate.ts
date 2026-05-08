@@ -7,32 +7,92 @@ import {
   type TokenId,
   SignalReason,
   type BuyCapacityPolicy,
+  type ExecutionPolicy,
+  type Order,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import {
   hasWalletBuyBudget,
   evaluateWalletBuyCapacity,
+  evaluatePerTokenOrderCapacity,
+  evaluateTotalOrdersCapacity,
+  evaluateWalletSellCapacity,
+  normalizeBuyCapacityPolicy,
+  normalizeOrderCapacityPolicy,
+  normalizeSellCapacityPolicy,
   resolveWalletBuyBudget,
+  PER_TOKEN_BUY_LIMIT_REASON,
+  PER_TOKEN_SELL_LIMIT_REASON,
+  TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+  WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
+  type OrderCapacityMetricsSample,
   type WalletBuyBudgetConfig,
 } from "../../wallet-buy-budget.js";
 
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
 const NEW_ENTRY_REASONS = new Set<string>([SignalReason.ProbeEntry]);
 
+interface OpenOrderCounts {
+  openBuyOrderCount: number;
+  openSellOrderCount: number;
+  openOrdersTotal: number;
+  perTokenOpenBuyOrderCount: number;
+  perTokenOpenSellOrderCount: number;
+}
+
+interface SellCapacityCounts {
+  openSellOrderCount: number;
+  openOrdersTotal: number;
+  perTokenOpenSellOrderCount: number;
+}
+
 function isBuySignal(signal: Signal): boolean {
   return signal.side === "buy";
 }
 
-function hasOpenBuyOrderForToken(orderRepo: OrderRepository, tokenId: TokenId): boolean {
-  return orderRepo
-    .findByTokenId(tokenId)
-    .some((order) => order.side === "buy" && OPEN_ORDER_STATUSES.has(order.status));
+function isOpenOrder(order: Order): boolean {
+  return OPEN_ORDER_STATUSES.has(order.status);
 }
 
-function countOpenBuyOrders(orderRepo: OrderRepository): number {
-  return orderRepo.findOpen().filter((order) => order.side === "buy").length;
+function getOpenOrderCounts(orderRepo: OrderRepository, tokenId: TokenId): OpenOrderCounts {
+  const openOrders = orderRepo.findOpen().filter(isOpenOrder);
+  let openBuyOrderCount = 0;
+  let openSellOrderCount = 0;
+  let perTokenOpenBuyOrderCount = 0;
+  let perTokenOpenSellOrderCount = 0;
+
+  for (const order of openOrders) {
+    if (order.side === "buy") {
+      openBuyOrderCount += 1;
+      if (order.tokenId === tokenId) perTokenOpenBuyOrderCount += 1;
+    } else {
+      openSellOrderCount += 1;
+      if (order.tokenId === tokenId) perTokenOpenSellOrderCount += 1;
+    }
+  }
+
+  return {
+    openBuyOrderCount,
+    openSellOrderCount,
+    openOrdersTotal: openOrders.length,
+    perTokenOpenBuyOrderCount,
+    perTokenOpenSellOrderCount,
+  };
+}
+
+// SELL repricing is net-neutral: execution cancels the existing token SELL
+// before submitting the replacement, but risk-gate runs before that flow.
+function getReplacementAwareSellCounts(counts: OpenOrderCounts): SellCapacityCounts {
+  if (counts.perTokenOpenSellOrderCount <= 0) {
+    return counts;
+  }
+  return {
+    openSellOrderCount: Math.max(0, counts.openSellOrderCount - 1),
+    openOrdersTotal: Math.max(0, counts.openOrdersTotal - 1),
+    perTokenOpenSellOrderCount: Math.max(0, counts.perTokenOpenSellOrderCount - 1),
+  };
 }
 
 export class AlgoRiskGateImpl implements RiskGate {
@@ -43,25 +103,81 @@ export class AlgoRiskGateImpl implements RiskGate {
     private readonly resolveMinOrderSize?: (tokenId: TokenId) => number | null,
     private readonly walletBudget?: WalletBuyBudgetConfig,
     private readonly buyCapacityPolicy?: () => BuyCapacityPolicy | undefined,
+    private readonly executionPolicy?: () => ExecutionPolicy | undefined,
+    private readonly capacityMetricsSink?: (sample: OrderCapacityMetricsSample) => void,
   ) {}
 
   async evaluate(signal: Signal): Promise<RiskDecision> {
     const passed: string[] = [];
     const rejected: string[] = [];
     const isBuy = isBuySignal(signal);
+    const counts = getOpenOrderCounts(this.orderRepo, signal.tokenId);
+    const policy = this.executionPolicy?.();
+    const buyPolicy = normalizeBuyCapacityPolicy(this.buyCapacityPolicy?.() ?? policy?.buyCapacity);
+    const sellPolicy = normalizeSellCapacityPolicy(policy?.sellCapacity);
+    const orderPolicy = normalizeOrderCapacityPolicy(policy?.orderCapacity);
 
-    // Sell signals bypass entry checks entirely
+    const finish = (approved: boolean, reason: string | null = null): RiskDecision => {
+      this.capacityMetricsSink?.({
+        source: "risk_gate",
+        side: signal.side,
+        approved,
+        rejectionReason: reason,
+        ...counts,
+      });
+      return this.decision(signal, approved, rejected, passed);
+    };
+
+    // Sell signals bypass BUY entry checks, but still respect SELL/total caps.
     if (!isBuy) {
+      const sellCounts = getReplacementAwareSellCounts(counts);
+      const sellCapacity = evaluateWalletSellCapacity({
+        policy: sellPolicy,
+        openSellOrderCount: sellCounts.openSellOrderCount,
+      });
+      if (!sellCapacity.allowed) {
+        rejected.push(WALLET_SELL_CAPACITY_EXHAUSTED_REASON);
+        return finish(false, WALLET_SELL_CAPACITY_EXHAUSTED_REASON);
+      }
+      passed.push("wallet_sell_capacity_ok");
+
+      const perTokenSell = evaluatePerTokenOrderCapacity({
+        side: "sell",
+        maxOpenOrdersPerToken: sellPolicy.maxOpenSellOrdersPerToken,
+        openOrdersForToken: sellCounts.perTokenOpenSellOrderCount,
+        enabled: sellPolicy.enabled,
+      });
+      if (!perTokenSell.allowed) {
+        rejected.push(PER_TOKEN_SELL_LIMIT_REASON);
+        return finish(false, PER_TOKEN_SELL_LIMIT_REASON);
+      }
+      passed.push("per_token_sell_capacity_ok");
+
+      const totalCapacity = evaluateTotalOrdersCapacity({
+        policy: orderPolicy,
+        openOrdersTotal: sellCounts.openOrdersTotal,
+      });
+      if (!totalCapacity.allowed) {
+        rejected.push(TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON);
+        return finish(false, TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON);
+      }
+      passed.push("total_order_capacity_ok");
       passed.push("sell_signal_bypass");
-      return this.decision(signal, true, rejected, passed);
+      return finish(true);
     }
 
-    // 1. Token-level open-order dedupe for BUY
-    if (hasOpenBuyOrderForToken(this.orderRepo, signal.tokenId)) {
-      rejected.push("token already has open buy order");
-      return this.decision(signal, false, rejected, passed);
+    // 1. Token-level open-order cap for BUY.
+    const perTokenBuy = evaluatePerTokenOrderCapacity({
+      side: "buy",
+      maxOpenOrdersPerToken: buyPolicy.maxOpenBuyOrdersPerToken,
+      openOrdersForToken: counts.perTokenOpenBuyOrderCount,
+      enabled: buyPolicy.enabled,
+    });
+    if (!perTokenBuy.allowed) {
+      rejected.push(PER_TOKEN_BUY_LIMIT_REASON);
+      return finish(false, PER_TOKEN_BUY_LIMIT_REASON);
     }
-    passed.push("no_open_buy_order");
+    passed.push("per_token_buy_capacity_ok");
 
     // 1a. Defensive: block probe/spray entries when an open position already
     // exists for this token. If leg_states ever drifts from positions (e.g.
@@ -80,7 +196,7 @@ export class AlgoRiskGateImpl implements RiskGate {
           "entry rejected — open position already exists for token",
         );
         rejected.push("open_position_exists");
-        return this.decision(signal, false, rejected, passed);
+        return finish(false, "open_position_exists");
       }
     }
     passed.push("no_open_position_or_scale_in");
@@ -89,7 +205,7 @@ export class AlgoRiskGateImpl implements RiskGate {
     const minOrderSize = this.resolveMinOrderSize?.(signal.tokenId) ?? null;
     if (minOrderSize != null && !isExecutableOrderSize(signal.suggestedSize, minOrderSize)) {
       rejected.push(`order size ${signal.suggestedSize} below min ${minOrderSize}`);
-      return this.decision(signal, false, rejected, passed);
+      return finish(false, "min_order_size");
     }
     passed.push("min_order_size_ok");
 
@@ -98,25 +214,35 @@ export class AlgoRiskGateImpl implements RiskGate {
       this.orderRepo.sumOpenBuyNotional(),
     );
     const buyCapacity = evaluateWalletBuyCapacity({
-      policy: this.buyCapacityPolicy?.(),
+      policy: buyPolicy,
       snapshot: walletBudget,
       requiredNotionalUsdc: signal.suggestedSizeUsdc,
       signalReason: signal.reason,
-      openBuyOrderCount: countOpenBuyOrders(this.orderRepo),
+      openBuyOrderCount: counts.openBuyOrderCount,
     });
     if (!buyCapacity.allowed) {
       rejected.push(WALLET_BUY_CAPACITY_EXHAUSTED_REASON);
-      return this.decision(signal, false, rejected, passed);
+      return finish(false, WALLET_BUY_CAPACITY_EXHAUSTED_REASON);
     }
     passed.push("wallet_buy_capacity_ok");
 
+    const totalCapacity = evaluateTotalOrdersCapacity({
+      policy: orderPolicy,
+      openOrdersTotal: counts.openOrdersTotal,
+    });
+    if (!totalCapacity.allowed) {
+      rejected.push(TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON);
+      return finish(false, TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON);
+    }
+    passed.push("total_order_capacity_ok");
+
     if (!hasWalletBuyBudget(walletBudget, signal.suggestedSizeUsdc)) {
       rejected.push("wallet_buy_budget_exhausted");
-      return this.decision(signal, false, rejected, passed);
+      return finish(false, "wallet_buy_budget_exhausted");
     }
     passed.push("wallet_buy_budget_ok");
 
-    return this.decision(signal, true, rejected, passed);
+    return finish(true);
   }
 
   private decision(

@@ -159,6 +159,16 @@ describe("control-db migration infrastructure", () => {
           minNewEntryWalletHeadroomUsdc: number;
           minAddWalletHeadroomUsdc: number;
           maxOpenBuyOrders: number;
+          maxOpenBuyOrdersPerToken: number;
+        };
+        sellCapacity: {
+          enabled: boolean;
+          maxOpenSellOrders: number;
+          maxOpenSellOrdersPerToken: number;
+        };
+        orderCapacity: {
+          enabled: boolean;
+          maxOpenOrdersTotal: number;
         };
         deadSideGuard: { mode: string };
       };
@@ -168,7 +178,17 @@ describe("control-db migration infrastructure", () => {
         enabled: true,
         minNewEntryWalletHeadroomUsdc: 7,
         minAddWalletHeadroomUsdc: 5,
-        maxOpenBuyOrders: 2,
+        maxOpenBuyOrders: 15,
+        maxOpenBuyOrdersPerToken: 2,
+      });
+      expect(parsed.sellCapacity).toEqual({
+        enabled: true,
+        maxOpenSellOrders: 10,
+        maxOpenSellOrdersPerToken: 2,
+      });
+      expect(parsed.orderCapacity).toEqual({
+        enabled: true,
+        maxOpenOrdersTotal: 22,
       });
       expect(parsed.deadSideGuard.mode).toBe(
         row.profile_id === "live-lite" ? "enforce" : "observe",
@@ -344,6 +364,88 @@ describe("control-db migration infrastructure", () => {
       minNewEntryWalletHeadroomUsdc: 3,
       minAddWalletHeadroomUsdc: 2,
       maxOpenBuyOrders: 9,
+    });
+  });
+
+  it("migration 045 widens live-lite order caps without overwriting custom profile caps", () => {
+    const dbPath = path.join(tmpDir, "control-order-capacity.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              json_remove(execution_policy_json, '$.sellCapacity', '$.orderCapacity'),
+              '$.buyCapacity',
+              json(?)
+            )
+          WHERE profile_id = ?`,
+      )
+      .run(
+        JSON.stringify({
+          enabled: true,
+          minNewEntryWalletHeadroomUsdc: 7,
+          minAddWalletHeadroomUsdc: 5,
+          maxOpenBuyOrders: 2,
+        }),
+        "live-lite",
+      );
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              json_remove(execution_policy_json, '$.sellCapacity', '$.orderCapacity'),
+              '$.buyCapacity',
+              json(?)
+            )
+          WHERE profile_id = ?`,
+      )
+      .run(
+        JSON.stringify({
+          enabled: true,
+          minNewEntryWalletHeadroomUsdc: 3,
+          minAddWalletHeadroomUsdc: 2,
+          maxOpenBuyOrders: 9,
+        }),
+        "paper",
+      );
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("045_order_capacity_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare(
+        `SELECT profile_id, execution_policy_json AS json
+           FROM profile_settings
+          WHERE profile_id IN ('live-lite', 'paper')`,
+      )
+      .all() as Array<{ profile_id: string; json: string }>;
+    const byProfile = new Map(rows.map((row) => [row.profile_id, JSON.parse(row.json)]));
+
+    expect(byProfile.get("live-lite").buyCapacity).toEqual({
+      enabled: true,
+      minNewEntryWalletHeadroomUsdc: 7,
+      minAddWalletHeadroomUsdc: 5,
+      maxOpenBuyOrders: 15,
+      maxOpenBuyOrdersPerToken: 2,
+    });
+    expect(byProfile.get("paper").buyCapacity).toEqual({
+      enabled: true,
+      minNewEntryWalletHeadroomUsdc: 3,
+      minAddWalletHeadroomUsdc: 2,
+      maxOpenBuyOrders: 9,
+      maxOpenBuyOrdersPerToken: 2,
+    });
+    expect(byProfile.get("live-lite").sellCapacity).toEqual({
+      enabled: true,
+      maxOpenSellOrders: 10,
+      maxOpenSellOrdersPerToken: 2,
+    });
+    expect(byProfile.get("live-lite").orderCapacity).toEqual({
+      enabled: true,
+      maxOpenOrdersTotal: 22,
     });
   });
 

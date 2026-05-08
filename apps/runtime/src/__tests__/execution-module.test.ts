@@ -6,6 +6,7 @@ import {
   createBotRunId,
   createPositionId,
   createConditionId,
+  DEFAULT_EXECUTION_POLICY,
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -970,6 +971,125 @@ describe("ExecutionModule", () => {
     });
     expect(rejected.some((event) => event.reason === "sell-replace-pending")).toBe(true);
     expect(replaceMod.getDiagnostics().cancelReplacePendingCount).toBe(0);
+
+    await replaceMod.stop();
+  });
+
+  it("does not cascade-cancel a second same-token SELL after replacement cancel completes", async () => {
+    const tokenId = createTokenId("tok-yes");
+    const now = new Date().toISOString();
+    const makeOpenOrder = (overrides: Partial<Order>): Order => ({
+      orderId: createOrderId("ord-default"),
+      clientOrderId: "plk_default" as ClientOrderId,
+      tokenId,
+      conditionId: createConditionId("cond-1"),
+      side: "sell",
+      orderType: "GTC",
+      price: 0.55,
+      size: 5,
+      sizeUsdc: 2.75,
+      status: "open",
+      exchangeOrderId: null,
+      signalId: null,
+      signalReason: "repricing-exit",
+      botRunId: BOT_RUN_ID,
+      createdAt: now,
+      updatedAt: now,
+      ...overrides,
+    });
+    const orders: Order[] = [
+      makeOpenOrder({
+        orderId: createOrderId("existing-sell-1"),
+        clientOrderId: "plk_existing_sell_1" as ClientOrderId,
+        exchangeOrderId: "existing-sell-1",
+        price: 0.55,
+      }),
+      makeOpenOrder({
+        orderId: createOrderId("existing-sell-2"),
+        clientOrderId: "plk_existing_sell_2" as ClientOrderId,
+        exchangeOrderId: "existing-sell-2",
+        price: 0.6,
+      }),
+      ...Array.from({ length: 8 }, (_, index) =>
+        makeOpenOrder({
+          orderId: createOrderId(`other-sell-${index}`),
+          clientOrderId: `plk_other_sell_${index}` as ClientOrderId,
+          tokenId: createTokenId(`other-sell-token-${index}`),
+        }),
+      ),
+      ...Array.from({ length: 12 }, (_, index) =>
+        makeOpenOrder({
+          orderId: createOrderId(`other-buy-${index}`),
+          clientOrderId: `plk_other_buy_${index}` as ClientOrderId,
+          tokenId: createTokenId(`other-buy-token-${index}`),
+          side: "buy",
+        }),
+      ),
+    ];
+    orderRepo.findOpen = vi
+      .fn()
+      .mockImplementation(() => orders.filter((order) => order.status === "open"));
+    orderRepo.findById = vi
+      .fn()
+      .mockImplementation((orderId) => orders.find((order) => order.orderId === orderId) ?? null);
+    orderRepo.findByTokenId = vi
+      .fn()
+      .mockImplementation((id) => orders.filter((order) => order.tokenId === id));
+    orderRepo.findByClientOrderId = vi
+      .fn()
+      .mockImplementation(
+        (clientOrderId) =>
+          orders.find(
+            (order) =>
+              order.clientOrderId === clientOrderId &&
+              (order.status === "pending" || order.status === "open"),
+          ) ?? null,
+      );
+    orderRepo.updateStatus = vi.fn().mockImplementation((orderId, status) => {
+      const order = orders.find((entry) => entry.orderId === orderId);
+      if (order) order.status = status;
+    });
+    orderRepo.save = vi.fn().mockImplementation((order: Order) => {
+      orders.push(order);
+    });
+
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 100 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+
+    await replaceMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-replace-two-open-request"),
+        clientOrderId: "plk_sell_replace_two_open" as ClientOrderId,
+        side: "sell",
+        price: 0.5,
+        size: 5,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell-1" });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      clientOrderId: "plk_sell_replace_two_open",
+      side: "sell",
+      price: 0.5,
+    });
+    expect(orders.find((order) => order.orderId === createOrderId("existing-sell-2"))?.status).toBe(
+      "open",
+    );
 
     await replaceMod.stop();
   });

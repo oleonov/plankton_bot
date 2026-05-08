@@ -4,9 +4,11 @@ import {
   createTokenId,
   createConditionId,
   DEFAULT_BUY_CAPACITY_POLICY,
+  DEFAULT_EXECUTION_POLICY,
   type Signal,
   type Order,
   type Position,
+  type ExecutionPolicy,
 } from "@plankton/domain";
 import type { OrderRepository, PositionRepository } from "@plankton/domain";
 import { AlgoRiskGateImpl } from "../algo-risk-gate.js";
@@ -74,10 +76,30 @@ function makeBuyCapacityPolicy(overrides?: {
   minNewEntryWalletHeadroomUsdc?: number;
   minAddWalletHeadroomUsdc?: number;
   maxOpenBuyOrders?: number;
+  maxOpenBuyOrdersPerToken?: number;
 }) {
   return {
     ...DEFAULT_BUY_CAPACITY_POLICY,
     ...overrides,
+  };
+}
+
+function makeExecutionPolicy(overrides?: Partial<ExecutionPolicy>): ExecutionPolicy {
+  return {
+    ...DEFAULT_EXECUTION_POLICY,
+    ...overrides,
+    buyCapacity: {
+      ...DEFAULT_EXECUTION_POLICY.buyCapacity,
+      ...overrides?.buyCapacity,
+    },
+    sellCapacity: {
+      ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+      ...overrides?.sellCapacity,
+    },
+    orderCapacity: {
+      ...DEFAULT_EXECUTION_POLICY.orderCapacity,
+      ...overrides?.orderCapacity,
+    },
   };
 }
 
@@ -124,7 +146,7 @@ function makeOpenPosition(overrides?: Partial<Position>): Position {
   };
 }
 
-function makeOpenBuyOrder(): Order {
+function makeOpenBuyOrder(overrides?: Partial<Order>): Order {
   return {
     orderId: "ord-1" as any,
     clientOrderId: "clord-1" as any,
@@ -142,7 +164,17 @@ function makeOpenBuyOrder(): Order {
     botRunId: "run-1" as any,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    ...overrides,
   };
+}
+
+function makeOpenSellOrder(overrides?: Partial<Order>): Order {
+  return makeOpenBuyOrder({
+    orderId: "sell-ord-1" as any,
+    clientOrderId: "sell-clord-1" as any,
+    side: "sell",
+    ...overrides,
+  });
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -158,7 +190,7 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.rejectionReasons).toHaveLength(0);
   });
 
-  it("rejects buy when token has open buy order", async () => {
+  it("allows second buy when token has one open buy order and per-token cap is two", async () => {
     const gate = new AlgoRiskGateImpl(
       makeOrderRepo([makeOpenBuyOrder()]),
       makePositionRepo(),
@@ -167,14 +199,32 @@ describe("AlgoRiskGateImpl", () => {
     const signal = makeSignal({ side: "buy", reason: "probe-entry" });
     const decision = await gate.evaluate(signal);
 
+    expect(decision.approved).toBe(true);
+  });
+
+  it("rejects buy when token has two open buy orders and per-token cap is two", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo([
+        makeOpenBuyOrder(),
+        makeOpenBuyOrder({ orderId: "ord-2" as any, clientOrderId: "clord-2" as any }),
+      ]),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+    );
+    const decision = await gate.evaluate(makeSignal({ side: "buy", reason: "probe-entry" }));
+
     expect(decision.approved).toBe(false);
-    expect(decision.rejectionReasons.some((r) => r.includes("open buy order"))).toBe(true);
+    expect(decision.rejectionReasons).toContain("per_token_buy_limit");
   });
 
   it("allows sell signals even with open buy order", async () => {
     const gate = new AlgoRiskGateImpl(
       makeOrderRepo([makeOpenBuyOrder()]),
-      makePositionRepo(makeOpenPosition()),
+      makePositionRepo(null),
       makeLogger(),
     );
     const signal = makeSignal({ side: "sell", reason: "repricing-exit" });
@@ -275,7 +325,7 @@ describe("AlgoRiskGateImpl", () => {
         controlDb: createMockControlDb(9 / 0.97),
         activeProfile: "paper" as any,
       },
-      () => makeBuyCapacityPolicy(),
+      () => makeBuyCapacityPolicy({ maxOpenBuyOrders: 2 }),
     );
 
     const decision = await gate.evaluate(
@@ -296,7 +346,7 @@ describe("AlgoRiskGateImpl", () => {
         controlDb: createMockControlDb(6.5),
         activeProfile: "paper" as any,
       },
-      () => makeBuyCapacityPolicy(),
+      () => makeBuyCapacityPolicy({ maxOpenBuyOrders: 2 }),
     );
 
     const decision = await gate.evaluate(makeSignal({ suggestedSizeUsdc: 2, reason: "scale-in" }));
@@ -319,13 +369,156 @@ describe("AlgoRiskGateImpl", () => {
         controlDb: createMockControlDb(100),
         activeProfile: "paper" as any,
       },
-      () => makeBuyCapacityPolicy(),
+      () => makeBuyCapacityPolicy({ maxOpenBuyOrders: 2 }),
     );
 
     const decision = await gate.evaluate(makeSignal({ tokenId: createTokenId("other-token") }));
 
     expect(decision.approved).toBe(false);
     expect(decision.rejectionReasons).toContain("wallet_buy_capacity_exhausted");
+  });
+
+  it.each([
+    [1, true],
+    [2, false],
+    [3, false],
+  ])("evaluates per-token BUY cap at count %i", async (count, approved) => {
+    const orders = Array.from({ length: count }, (_, index) =>
+      makeOpenBuyOrder({
+        orderId: `buy-${index}` as any,
+        clientOrderId: `buy-cl-${index}` as any,
+      }),
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(100),
+        activeProfile: "paper" as any,
+      },
+      undefined,
+      () => makeExecutionPolicy(),
+    );
+
+    const decision = await gate.evaluate(makeSignal({ reason: "scale-in" }));
+
+    expect(decision.approved).toBe(approved);
+    if (!approved) expect(decision.rejectionReasons).toContain("per_token_buy_limit");
+  });
+
+  it.each([
+    [1, true],
+    [2, true],
+    [3, false],
+  ])("evaluates replacement-aware per-token SELL cap at count %i", async (count, approved) => {
+    const orders = Array.from({ length: count }, (_, index) =>
+      makeOpenSellOrder({
+        orderId: `sell-${index}` as any,
+        clientOrderId: `sell-cl-${index}` as any,
+      }),
+    );
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(null),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+    );
+
+    const decision = await gate.evaluate(makeSignal({ side: "sell", reason: "repricing-exit" }));
+
+    expect(decision.approved).toBe(approved);
+    if (!approved) expect(decision.rejectionReasons).toContain("per_token_sell_limit");
+  });
+
+  it("rejects new BUY and SELL when total open-order cap is reached", async () => {
+    const orders = [
+      ...Array.from({ length: 12 }, (_, index) =>
+        makeOpenBuyOrder({
+          orderId: `buy-total-${index}` as any,
+          clientOrderId: `buy-total-cl-${index}` as any,
+          tokenId: createTokenId(`buy-total-token-${index}`),
+        }),
+      ),
+      ...Array.from({ length: 10 }, (_, index) =>
+        makeOpenSellOrder({
+          orderId: `sell-total-${index}` as any,
+          clientOrderId: `sell-total-cl-${index}` as any,
+          tokenId: createTokenId(`sell-total-token-${index}`),
+        }),
+      ),
+    ];
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(null),
+      makeLogger(),
+      undefined,
+      {
+        controlDb: createMockControlDb(100),
+        activeProfile: "paper" as any,
+      },
+      undefined,
+      () =>
+        makeExecutionPolicy({
+          sellCapacity: { ...DEFAULT_EXECUTION_POLICY.sellCapacity, maxOpenSellOrders: 11 },
+        }),
+    );
+
+    const buyDecision = await gate.evaluate(makeSignal({ tokenId: createTokenId("new-buy") }));
+    const sellDecision = await gate.evaluate(
+      makeSignal({ tokenId: createTokenId("new-sell"), side: "sell", reason: "repricing-exit" }),
+    );
+
+    expect(buyDecision.approved).toBe(false);
+    expect(buyDecision.rejectionReasons).toContain("total_orders_capacity_exhausted");
+    expect(sellDecision.approved).toBe(false);
+    expect(sellDecision.rejectionReasons).toContain("total_orders_capacity_exhausted");
+  });
+
+  it("allows same-token SELL replacement when global and per-token caps are full", async () => {
+    const orders = [
+      ...Array.from({ length: 12 }, (_, index) =>
+        makeOpenBuyOrder({
+          orderId: `buy-replace-cap-${index}` as any,
+          clientOrderId: `buy-replace-cap-cl-${index}` as any,
+          tokenId: createTokenId(`buy-replace-cap-token-${index}`),
+        }),
+      ),
+      makeOpenSellOrder({
+        orderId: "sell-replace-cap-1" as any,
+        clientOrderId: "sell-replace-cap-cl-1" as any,
+        tokenId: TOK_ID,
+      }),
+      makeOpenSellOrder({
+        orderId: "sell-replace-cap-2" as any,
+        clientOrderId: "sell-replace-cap-cl-2" as any,
+        tokenId: TOK_ID,
+      }),
+      ...Array.from({ length: 8 }, (_, index) =>
+        makeOpenSellOrder({
+          orderId: `sell-replace-cap-other-${index}` as any,
+          clientOrderId: `sell-replace-cap-other-cl-${index}` as any,
+          tokenId: createTokenId(`sell-replace-cap-token-${index}`),
+        }),
+      ),
+    ];
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(orders),
+      makePositionRepo(null),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+    );
+
+    const decision = await gate.evaluate(makeSignal({ side: "sell", reason: "repricing-exit" }));
+
+    expect(decision.approved).toBe(true);
   });
 
   it("allows SELL when BUY capacity is exhausted", async () => {

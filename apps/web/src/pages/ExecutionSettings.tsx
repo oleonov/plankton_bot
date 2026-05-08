@@ -49,6 +49,21 @@ function ExecutionPolicyFormInner({
   );
   const [maxMidPrice, setMaxMidPrice] = useState(policy.marketSelection.maxMidPrice.toString());
   const [minLiquidity, setMinLiquidity] = useState(policy.marketSelection.minLiquidity.toString());
+  const [maxOpenBuyOrders, setMaxOpenBuyOrders] = useState(
+    policy.buyCapacity.maxOpenBuyOrders.toString(),
+  );
+  const [maxOpenBuyOrdersPerToken, setMaxOpenBuyOrdersPerToken] = useState(
+    policy.buyCapacity.maxOpenBuyOrdersPerToken.toString(),
+  );
+  const [maxOpenSellOrders, setMaxOpenSellOrders] = useState(
+    policy.sellCapacity.maxOpenSellOrders.toString(),
+  );
+  const [maxOpenSellOrdersPerToken, setMaxOpenSellOrdersPerToken] = useState(
+    policy.sellCapacity.maxOpenSellOrdersPerToken.toString(),
+  );
+  const [maxOpenOrdersTotal, setMaxOpenOrdersTotal] = useState(
+    policy.orderCapacity.maxOpenOrdersTotal.toString(),
+  );
 
   const [dsgMode, setDsgMode] = useState<DeadSideGuardMode>(policy.deadSideGuard.mode);
   const [dsgAskCeiling, setDsgAskCeiling] = useState(policy.deadSideGuard.askCeiling.toString());
@@ -83,7 +98,26 @@ function ExecutionPolicyFormInner({
         maxMidPrice: numOr(maxMidPrice, policy.marketSelection.maxMidPrice),
         minLiquidity: numOr(minLiquidity, policy.marketSelection.minLiquidity),
       },
-      buyCapacity: policy.buyCapacity,
+      buyCapacity: {
+        ...policy.buyCapacity,
+        maxOpenBuyOrders: numOr(maxOpenBuyOrders, policy.buyCapacity.maxOpenBuyOrders),
+        maxOpenBuyOrdersPerToken: numOr(
+          maxOpenBuyOrdersPerToken,
+          policy.buyCapacity.maxOpenBuyOrdersPerToken,
+        ),
+      },
+      sellCapacity: {
+        ...policy.sellCapacity,
+        maxOpenSellOrders: numOr(maxOpenSellOrders, policy.sellCapacity.maxOpenSellOrders),
+        maxOpenSellOrdersPerToken: numOr(
+          maxOpenSellOrdersPerToken,
+          policy.sellCapacity.maxOpenSellOrdersPerToken,
+        ),
+      },
+      orderCapacity: {
+        ...policy.orderCapacity,
+        maxOpenOrdersTotal: numOr(maxOpenOrdersTotal, policy.orderCapacity.maxOpenOrdersTotal),
+      },
       deadSideGuard: {
         mode: dsgMode,
         askCeiling: numOr(dsgAskCeiling, policy.deadSideGuard.askCeiling),
@@ -188,6 +222,57 @@ function ExecutionPolicyFormInner({
             step="1"
             value={minLiquidity}
             onChange={(e) => setMinLiquidity(e.target.value)}
+          />
+        </div>
+
+        <div
+          style={{
+            fontSize: 11,
+            fontWeight: 600,
+            color: "var(--text-muted)",
+            marginTop: 12,
+          }}
+        >
+          Order Capacity
+        </div>
+        <div className="form-field">
+          <label>Max Open BUY Orders</label>
+          <input
+            type="number"
+            value={maxOpenBuyOrders}
+            onChange={(e) => setMaxOpenBuyOrders(e.target.value)}
+          />
+        </div>
+        <div className="form-field">
+          <label>Max Open BUY Orders Per Token</label>
+          <input
+            type="number"
+            value={maxOpenBuyOrdersPerToken}
+            onChange={(e) => setMaxOpenBuyOrdersPerToken(e.target.value)}
+          />
+        </div>
+        <div className="form-field">
+          <label>Max Open SELL Orders</label>
+          <input
+            type="number"
+            value={maxOpenSellOrders}
+            onChange={(e) => setMaxOpenSellOrders(e.target.value)}
+          />
+        </div>
+        <div className="form-field">
+          <label>Max Open SELL Orders Per Token</label>
+          <input
+            type="number"
+            value={maxOpenSellOrdersPerToken}
+            onChange={(e) => setMaxOpenSellOrdersPerToken(e.target.value)}
+          />
+        </div>
+        <div className="form-field">
+          <label>Max Open Orders Total</label>
+          <input
+            type="number"
+            value={maxOpenOrdersTotal}
+            onChange={(e) => setMaxOpenOrdersTotal(e.target.value)}
           />
         </div>
 

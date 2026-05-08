@@ -15,7 +15,9 @@ import type {
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
   MarketSelectionPolicy,
+  OrderCapacityPolicy,
   OrderLifetimePolicy,
+  SellCapacityPolicy,
 } from "./types.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
 
@@ -44,7 +46,19 @@ export const DEFAULT_BUY_CAPACITY_POLICY: BuyCapacityPolicy = {
   enabled: true,
   minNewEntryWalletHeadroomUsdc: 7,
   minAddWalletHeadroomUsdc: 5,
-  maxOpenBuyOrders: 2,
+  maxOpenBuyOrders: 15,
+  maxOpenBuyOrdersPerToken: 2,
+};
+
+export const DEFAULT_SELL_CAPACITY_POLICY: SellCapacityPolicy = {
+  enabled: true,
+  maxOpenSellOrders: 10,
+  maxOpenSellOrdersPerToken: 2,
+};
+
+export const DEFAULT_ORDER_CAPACITY_POLICY: OrderCapacityPolicy = {
+  enabled: true,
+  maxOpenOrdersTotal: 22,
 };
 
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
@@ -105,6 +119,8 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   exitOrderTtlMs: 300_000,
   marketSelection: DEFAULT_MARKET_SELECTION_POLICY,
   buyCapacity: DEFAULT_BUY_CAPACITY_POLICY,
+  sellCapacity: DEFAULT_SELL_CAPACITY_POLICY,
+  orderCapacity: DEFAULT_ORDER_CAPACITY_POLICY,
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
@@ -141,8 +157,8 @@ const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MIN = 0;
 const BOUND_MARKET_SELECTION_MIN_LIQUIDITY_MAX = 1_000_000;
 const BOUND_BUY_CAPACITY_HEADROOM_MIN_USDC = 0;
 const BOUND_BUY_CAPACITY_HEADROOM_MAX_USDC = 10_000;
-const BOUND_BUY_CAPACITY_OPEN_ORDERS_MIN = 0;
-const BOUND_BUY_CAPACITY_OPEN_ORDERS_MAX = 1_000;
+const BOUND_CAPACITY_OPEN_ORDERS_MIN = 0;
+const BOUND_CAPACITY_OPEN_ORDERS_MAX = 1_000;
 const BOUND_ORDER_LIFETIME_MIN_MS = 1_000;
 const BOUND_ORDER_LIFETIME_MAX_MS = 14 * 24 * 60 * 60_000;
 const BOUND_ORDER_LIFETIME_COUNT_MAX = 10_000;
@@ -202,6 +218,8 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
+  const sellCapacity = parseSellCapacity(obj.sellCapacity, issues);
+  const orderCapacity = parseOrderCapacity(obj.orderCapacity, issues);
   const orderLifetime = parseOrderLifetime(obj.orderLifetime, issues);
 
   return {
@@ -212,6 +230,8 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       exitOrderTtlMs,
       marketSelection,
       buyCapacity,
+      sellCapacity,
+      orderCapacity,
       deadSideGuard,
       pricing,
       orderLifetime,
@@ -253,10 +273,74 @@ function parseBuyCapacity(raw: unknown, issues: string[]): BuyCapacityPolicy {
     maxOpenBuyOrders: clampedInt(
       obj.maxOpenBuyOrders,
       DEFAULT_BUY_CAPACITY_POLICY.maxOpenBuyOrders,
-      BOUND_BUY_CAPACITY_OPEN_ORDERS_MIN,
-      BOUND_BUY_CAPACITY_OPEN_ORDERS_MAX,
+      BOUND_CAPACITY_OPEN_ORDERS_MIN,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
       issues,
       "buyCapacity.maxOpenBuyOrders",
+    ),
+    maxOpenBuyOrdersPerToken: clampedInt(
+      obj.maxOpenBuyOrdersPerToken,
+      DEFAULT_BUY_CAPACITY_POLICY.maxOpenBuyOrdersPerToken,
+      BOUND_CAPACITY_OPEN_ORDERS_MIN,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "buyCapacity.maxOpenBuyOrdersPerToken",
+    ),
+  };
+}
+
+function parseSellCapacity(raw: unknown, issues: string[]): SellCapacityPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("sellCapacity must be an object");
+    return DEFAULT_SELL_CAPACITY_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_SELL_CAPACITY_POLICY.enabled,
+      issues,
+      "sellCapacity.enabled",
+    ),
+    maxOpenSellOrders: clampedInt(
+      obj.maxOpenSellOrders,
+      DEFAULT_SELL_CAPACITY_POLICY.maxOpenSellOrders,
+      BOUND_CAPACITY_OPEN_ORDERS_MIN,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "sellCapacity.maxOpenSellOrders",
+    ),
+    maxOpenSellOrdersPerToken: clampedInt(
+      obj.maxOpenSellOrdersPerToken,
+      DEFAULT_SELL_CAPACITY_POLICY.maxOpenSellOrdersPerToken,
+      BOUND_CAPACITY_OPEN_ORDERS_MIN,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "sellCapacity.maxOpenSellOrdersPerToken",
+    ),
+  };
+}
+
+function parseOrderCapacity(raw: unknown, issues: string[]): OrderCapacityPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("orderCapacity must be an object");
+    return DEFAULT_ORDER_CAPACITY_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_ORDER_CAPACITY_POLICY.enabled,
+      issues,
+      "orderCapacity.enabled",
+    ),
+    maxOpenOrdersTotal: clampedInt(
+      obj.maxOpenOrdersTotal,
+      DEFAULT_ORDER_CAPACITY_POLICY.maxOpenOrdersTotal,
+      BOUND_CAPACITY_OPEN_ORDERS_MIN,
+      BOUND_CAPACITY_OPEN_ORDERS_MAX,
+      issues,
+      "orderCapacity.maxOpenOrdersTotal",
     ),
   };
 }

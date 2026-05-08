@@ -2,6 +2,8 @@ import type Database from "better-sqlite3";
 import {
   DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_EXECUTION_POLICY,
+  DEFAULT_ORDER_CAPACITY_POLICY,
+  DEFAULT_SELL_CAPACITY_POLICY,
   ProfileId,
   serializeExecutionPolicy,
   type DeadSideGuardMode,
@@ -52,6 +54,8 @@ export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
 ];
 
 const DEFAULT_BUY_CAPACITY_POLICY_JSON = JSON.stringify(DEFAULT_BUY_CAPACITY_POLICY);
+const DEFAULT_SELL_CAPACITY_POLICY_JSON = JSON.stringify(DEFAULT_SELL_CAPACITY_POLICY);
+const DEFAULT_ORDER_CAPACITY_POLICY_JSON = JSON.stringify(DEFAULT_ORDER_CAPACITY_POLICY);
 
 function defaultExecutionPolicyJson(profile: ControlProfileSeed): string {
   return serializeExecutionPolicy({
@@ -105,6 +109,8 @@ export function ensureDefaultExecutionPolicy(db: Database.Database): void {
   backfillEntryMinMarketAgeSeconds(db);
   backfillMarketSelectionPolicy(db);
   backfillBuyCapacityPolicy(db);
+  backfillSellCapacityPolicy(db);
+  backfillOrderCapacityPolicy(db);
 }
 
 /**
@@ -212,6 +218,62 @@ function backfillBuyCapacityPolicy(db: Database.Database): void {
           AND json_extract(execution_policy_json, '$.buyCapacity') IS NULL`,
     )
     .run(DEFAULT_BUY_CAPACITY_POLICY_JSON);
+
+  if (result.changes > 0 && hasVersionColumn) {
+    db.prepare(
+      `UPDATE runtime_control_state
+          SET execution_policy_version = COALESCE(execution_policy_version, 0) + 1`,
+    ).run();
+  }
+}
+
+function backfillSellCapacityPolicy(db: Database.Database): void {
+  const stateColumns = db.prepare(`PRAGMA table_info(runtime_control_state)`).all() as Array<{
+    name: string;
+  }>;
+  const hasVersionColumn = stateColumns.some((c) => c.name === "execution_policy_version");
+  const result = db
+    .prepare(
+      `UPDATE profile_settings
+          SET execution_policy_json = json_set(
+                execution_policy_json,
+                '$.sellCapacity',
+                json(?)
+              ),
+              updated_at = datetime('now')
+        WHERE execution_policy_json IS NOT NULL
+          AND json_valid(execution_policy_json) = 1
+          AND json_extract(execution_policy_json, '$.sellCapacity') IS NULL`,
+    )
+    .run(DEFAULT_SELL_CAPACITY_POLICY_JSON);
+
+  if (result.changes > 0 && hasVersionColumn) {
+    db.prepare(
+      `UPDATE runtime_control_state
+          SET execution_policy_version = COALESCE(execution_policy_version, 0) + 1`,
+    ).run();
+  }
+}
+
+function backfillOrderCapacityPolicy(db: Database.Database): void {
+  const stateColumns = db.prepare(`PRAGMA table_info(runtime_control_state)`).all() as Array<{
+    name: string;
+  }>;
+  const hasVersionColumn = stateColumns.some((c) => c.name === "execution_policy_version");
+  const result = db
+    .prepare(
+      `UPDATE profile_settings
+          SET execution_policy_json = json_set(
+                execution_policy_json,
+                '$.orderCapacity',
+                json(?)
+              ),
+              updated_at = datetime('now')
+        WHERE execution_policy_json IS NOT NULL
+          AND json_valid(execution_policy_json) = 1
+          AND json_extract(execution_policy_json, '$.orderCapacity') IS NULL`,
+    )
+    .run(DEFAULT_ORDER_CAPACITY_POLICY_JSON);
 
   if (result.changes > 0 && hasVersionColumn) {
     db.prepare(

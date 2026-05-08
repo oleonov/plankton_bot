@@ -79,9 +79,16 @@ import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
 import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
 import {
+  evaluatePerTokenOrderCapacity,
+  evaluateTotalOrdersCapacity,
   evaluateWalletBuyCapacity,
   hasWalletBuyBudget,
+  normalizeBuyCapacityPolicy,
+  normalizeOrderCapacityPolicy,
+  type OrderCapacityMetricsSample,
+  PER_TOKEN_BUY_LIMIT_REASON,
   resolveWalletBuyBudget,
+  TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
 } from "./wallet-buy-budget.js";
 
@@ -158,6 +165,18 @@ const ENTRY_FILL_LATENCY_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RISK_EVENT_WARNING_THRESHOLD_PER_HOUR = 1_000;
 const RISK_EVENT_WARNING_COOLDOWN_MS = 10 * 60 * 1000;
 
+interface OrderCapacityWindow {
+  placeCalls: number;
+  sourceBuckets: Map<string, number>;
+  rejectedByReason: Map<string, number>;
+  openBuyOrderCountBuckets: Map<string, number>;
+  openSellOrderCountBuckets: Map<string, number>;
+  openOrdersTotalBuckets: Map<string, number>;
+  perTokenOpenBuyOrderCountBuckets: Map<string, number>;
+  perTokenOpenSellOrderCountBuckets: Map<string, number>;
+  lastReset: number;
+}
+
 function summarizeFillLatency(samplesMs: readonly number[]): Record<string, number> | null {
   if (samplesMs.length === 0) return null;
   const sorted = [...samplesMs].sort((a, b) => a - b);
@@ -169,6 +188,54 @@ function summarizeFillLatency(samplesMs: readonly number[]): Record<string, numb
     p50Ms: percentile(sorted, 0.5),
     p95Ms: percentile(sorted, 0.95),
     maxMs: sorted[sorted.length - 1]!,
+  };
+}
+
+function createOrderCapacityWindow(now = Date.now()): OrderCapacityWindow {
+  return {
+    placeCalls: 0,
+    sourceBuckets: new Map(),
+    rejectedByReason: new Map(),
+    openBuyOrderCountBuckets: new Map(),
+    openSellOrderCountBuckets: new Map(),
+    openOrdersTotalBuckets: new Map(),
+    perTokenOpenBuyOrderCountBuckets: new Map(),
+    perTokenOpenSellOrderCountBuckets: new Map(),
+    lastReset: now,
+  };
+}
+
+function bucketCount(value: number, maxBucket: number): string {
+  return String(Math.min(Math.max(0, Math.trunc(value)), maxBucket));
+}
+
+function incrementBucket(map: Map<string, number>, bucket: string): void {
+  map.set(bucket, (map.get(bucket) ?? 0) + 1);
+}
+
+function resetOrderCapacityWindow(window: OrderCapacityWindow, now = Date.now()): void {
+  window.placeCalls = 0;
+  window.sourceBuckets.clear();
+  window.rejectedByReason.clear();
+  window.openBuyOrderCountBuckets.clear();
+  window.openSellOrderCountBuckets.clear();
+  window.openOrdersTotalBuckets.clear();
+  window.perTokenOpenBuyOrderCountBuckets.clear();
+  window.perTokenOpenSellOrderCountBuckets.clear();
+  window.lastReset = now;
+}
+
+function serializeOrderCapacityWindow(window: OrderCapacityWindow): Record<string, unknown> {
+  return {
+    placeCalls: window.placeCalls,
+    sourceBuckets: Object.fromEntries(window.sourceBuckets),
+    rejectedByReason: Object.fromEntries(window.rejectedByReason),
+    openBuyOrderCountBuckets: Object.fromEntries(window.openBuyOrderCountBuckets),
+    openSellOrderCountBuckets: Object.fromEntries(window.openSellOrderCountBuckets),
+    openOrdersTotalBuckets: Object.fromEntries(window.openOrdersTotalBuckets),
+    perTokenOpenBuyOrderCountBuckets: Object.fromEntries(window.perTokenOpenBuyOrderCountBuckets),
+    perTokenOpenSellOrderCountBuckets: Object.fromEntries(window.perTokenOpenSellOrderCountBuckets),
+    windowStartMs: window.lastReset,
   };
 }
 
@@ -674,6 +741,38 @@ async function main(): Promise<void> {
     modeNow,
   );
 
+  const orderCapacityWindow = createOrderCapacityWindow();
+  const recordOrderCapacitySample = (sample: OrderCapacityMetricsSample): void => {
+    orderCapacityWindow.placeCalls += 1;
+    incrementBucket(orderCapacityWindow.sourceBuckets, sample.source);
+    if (!sample.approved && sample.rejectionReason) {
+      orderCapacityWindow.rejectedByReason.set(
+        sample.rejectionReason,
+        (orderCapacityWindow.rejectedByReason.get(sample.rejectionReason) ?? 0) + 1,
+      );
+    }
+    incrementBucket(
+      orderCapacityWindow.openBuyOrderCountBuckets,
+      bucketCount(sample.openBuyOrderCount, 15),
+    );
+    incrementBucket(
+      orderCapacityWindow.openSellOrderCountBuckets,
+      bucketCount(sample.openSellOrderCount, 10),
+    );
+    incrementBucket(
+      orderCapacityWindow.openOrdersTotalBuckets,
+      bucketCount(sample.openOrdersTotal, 22),
+    );
+    incrementBucket(
+      orderCapacityWindow.perTokenOpenBuyOrderCountBuckets,
+      bucketCount(sample.perTokenOpenBuyOrderCount, 2),
+    );
+    incrementBucket(
+      orderCapacityWindow.perTokenOpenSellOrderCountBuckets,
+      bucketCount(sample.perTokenOpenSellOrderCount, 2),
+    );
+  };
+
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
@@ -691,6 +790,7 @@ async function main(): Promise<void> {
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     executionPolicy: currentExecutionPolicy,
     allowSellSizeClamp: config.allowSellSizeClamp,
+    capacityMetricsSink: recordOrderCapacitySample,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@plankton/domain").ProfileId,
   });
@@ -711,6 +811,7 @@ async function main(): Promise<void> {
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     executionPolicy: currentExecutionPolicy,
+    capacityMetricsSink: recordOrderCapacitySample,
     resolutionTracker: marketResolutionTracker,
     markToMarketEnabled: runtimeMode !== "live-lite",
   });
@@ -784,6 +885,27 @@ async function main(): Promise<void> {
     controlDb: controlConn.db,
     buySignalBudgetCircuitBreaker: {
       canAttemptBuy: (requiredNotionalUsdc, signal) => {
+        const openOrders = repos.order.findOpen();
+        const openBuyOrderCount = openOrders.filter((order) => order.side === "buy").length;
+        const openOrdersTotal = openOrders.length;
+        const perTokenOpenBuyOrderCount = openOrders.filter(
+          (order) => order.side === "buy" && order.tokenId === signal.tokenId,
+        ).length;
+        const policy = currentExecutionPolicy();
+        const buyPolicy = normalizeBuyCapacityPolicy(policy.buyCapacity);
+        const perTokenCapacity = evaluatePerTokenOrderCapacity({
+          side: "buy",
+          maxOpenOrdersPerToken: buyPolicy.maxOpenBuyOrdersPerToken,
+          openOrdersForToken: perTokenOpenBuyOrderCount,
+          enabled: buyPolicy.enabled,
+        });
+        if (!perTokenCapacity.allowed) {
+          return {
+            canAttempt: false,
+            reasonCode: PER_TOKEN_BUY_LIMIT_REASON,
+            activateCooldown: false,
+          };
+        }
         const walletBudget = resolveWalletBuyBudget(
           {
             controlDb: controlConn.db,
@@ -794,14 +916,29 @@ async function main(): Promise<void> {
           repos.order.sumOpenBuyNotional(),
         );
         const buyCapacity = evaluateWalletBuyCapacity({
-          policy: currentExecutionPolicy().buyCapacity,
+          policy: buyPolicy,
           snapshot: walletBudget,
           requiredNotionalUsdc,
           signalReason: signal.reason,
-          openBuyOrderCount: repos.order.findOpen().filter((order) => order.side === "buy").length,
+          openBuyOrderCount,
         });
         if (!buyCapacity.allowed) {
-          return { canAttempt: false, reasonCode: WALLET_BUY_CAPACITY_EXHAUSTED_REASON };
+          return {
+            canAttempt: false,
+            reasonCode: WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+            activateCooldown: buyCapacity.availableAfterOrderUsdc != null,
+          };
+        }
+        const totalCapacity = evaluateTotalOrdersCapacity({
+          policy: normalizeOrderCapacityPolicy(policy.orderCapacity),
+          openOrdersTotal,
+        });
+        if (!totalCapacity.allowed) {
+          return {
+            canAttempt: false,
+            reasonCode: TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
+            activateCooldown: false,
+          };
         }
         return {
           canAttempt: hasWalletBuyBudget(walletBudget, requiredNotionalUsdc),
@@ -1399,6 +1536,12 @@ async function main(): Promise<void> {
   const insertExecutionQueue = ledgerConn.db.prepare(
     "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('execution_queue', 1, ?, ?)",
   );
+  const deleteOrderCapacityActivity = ledgerConn.db.prepare(
+    "DELETE FROM runtime_metrics WHERE metric_name = 'order_capacity_activity'",
+  );
+  const insertOrderCapacityActivity = ledgerConn.db.prepare(
+    "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES ('order_capacity_activity', 1, ?, ?)",
+  );
   const insertSnapshot = ledgerConn.db.prepare(
     `INSERT INTO trading_state_snapshots (trading_state, signals_produced, signals_approved, signals_rejected, captured_at)
    VALUES (?, ?, ?, ?, ?)`,
@@ -1531,6 +1674,9 @@ async function main(): Promise<void> {
       scannerWindow.scanPrimeSkippedByPolicy = 0;
       scannerWindow.lastReset = now;
     }
+    if (now - orderCapacityWindow.lastReset > SIGNAL_WINDOW_MS) {
+      resetOrderCapacityWindow(orderCapacityWindow, now);
+    }
     deleteScanner.run();
     insertScanner.run(
       JSON.stringify({
@@ -1544,6 +1690,11 @@ async function main(): Promise<void> {
     deleteExecutionQueue.run();
     insertExecutionQueue.run(
       JSON.stringify(executionModule.getDiagnostics()),
+      new Date().toISOString(),
+    );
+    deleteOrderCapacityActivity.run();
+    insertOrderCapacityActivity.run(
+      JSON.stringify(serializeOrderCapacityWindow(orderCapacityWindow)),
       new Date().toISOString(),
     );
 

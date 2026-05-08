@@ -85,6 +85,18 @@ export interface BuyCapacityPolicy {
   minNewEntryWalletHeadroomUsdc: number;
   minAddWalletHeadroomUsdc: number;
   maxOpenBuyOrders: number;
+  maxOpenBuyOrdersPerToken: number;
+}
+
+export interface SellCapacityPolicy {
+  enabled: boolean;
+  maxOpenSellOrders: number;
+  maxOpenSellOrdersPerToken: number;
+}
+
+export interface OrderCapacityPolicy {
+  enabled: boolean;
+  maxOpenOrdersTotal: number;
 }
 
 export interface ExecutionPolicyDTO {
@@ -99,6 +111,8 @@ export interface ExecutionPolicyDTO {
   entryMinMarketAgeSeconds: number;
   marketSelection: MarketSelectionPolicy;
   buyCapacity: BuyCapacityPolicy;
+  sellCapacity: SellCapacityPolicy;
+  orderCapacity: OrderCapacityPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   telemetry: ExecutionTelemetryPolicy;
@@ -219,16 +233,40 @@ export interface StatusData {
       minNewEntryWalletHeadroomUsdc: number;
       minAddWalletHeadroomUsdc: number;
       maxOpenBuyOrders: number;
+      maxOpenBuyOrdersPerToken: number;
       openBuyOrderCount: number;
       newEntryCapacityUsdc: number | null;
       addCapacityUsdc: number | null;
       entriesBlocked: boolean;
       addsBlocked: boolean;
     };
+    sellCapacity?: {
+      enabled: boolean;
+      maxOpenSellOrders: number;
+      maxOpenSellOrdersPerToken: number;
+      openSellOrderCount: number;
+      blocked: boolean;
+    };
+    orderCapacity?: {
+      enabled: boolean;
+      maxOpenOrdersTotal: number;
+      openOrdersTotal: number;
+      blocked: boolean;
+    };
     reservedSellTokenCount?: number;
     cancelReplacePendingCount?: number;
     gatewayRejectsLast10mByCode?: Record<string, number>;
     internalReservationRejectsLast10m?: number;
+  } | null;
+  orderCapacityActivity?: {
+    placeCalls?: number;
+    rejectedByReason?: Record<string, number>;
+    openBuyOrderCountBuckets?: Record<string, number>;
+    openSellOrderCountBuckets?: Record<string, number>;
+    openOrdersTotalBuckets?: Record<string, number>;
+    perTokenOpenBuyOrderCountBuckets?: Record<string, number>;
+    perTokenOpenSellOrderCountBuckets?: Record<string, number>;
+    windowStartMs?: number;
   } | null;
   executionTelemetry24h?: ExecutionTelemetryWindow;
   infraAlerts?: Array<{

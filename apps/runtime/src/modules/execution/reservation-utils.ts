@@ -13,6 +13,10 @@ export interface PendingReservation {
 export interface ReservationSnapshot {
   reservedBuyUsdc: number;
   openBuyOrderCount: number;
+  openSellOrderCount: number;
+  openOrdersTotal: number;
+  openBuyOrdersByToken: Map<string, number>;
+  openSellOrdersByToken: Map<string, number>;
   reservedSellByToken: Map<string, number>;
 }
 
@@ -24,6 +28,10 @@ export function buildReservationSnapshot(
   const snapshot: ReservationSnapshot = {
     reservedBuyUsdc: 0,
     openBuyOrderCount: 0,
+    openSellOrderCount: 0,
+    openOrdersTotal: 0,
+    openBuyOrdersByToken: new Map(),
+    openSellOrdersByToken: new Map(),
     reservedSellByToken: new Map(),
   };
   const activeOpenOrders = openOrders.filter((order) => OPEN_ORDER_STATUSES.has(order.status));
@@ -47,6 +55,15 @@ export function buildReservationSnapshot(
 
 export function getReservedSellSize(snapshot: ReservationSnapshot, tokenId: TokenId): number {
   return snapshot.reservedSellByToken.get(String(tokenId)) ?? 0;
+}
+
+export function getOpenOrderCountForToken(
+  snapshot: ReservationSnapshot,
+  tokenId: TokenId,
+  side: "buy" | "sell",
+): number {
+  const map = side === "buy" ? snapshot.openBuyOrdersByToken : snapshot.openSellOrdersByToken;
+  return map.get(String(tokenId)) ?? 0;
 }
 
 function getFilledSizeByOrderId(
@@ -73,14 +90,23 @@ function getRemainingOrderSize(order: Order, filledSizeByOrderId: Map<string, nu
 
 function addReservation(snapshot: ReservationSnapshot, reservation: PendingReservation): void {
   if (reservation.size <= 0 || reservation.price <= 0) return;
+  snapshot.openOrdersTotal += 1;
   if (reservation.side === "buy") {
     snapshot.reservedBuyUsdc += reservation.size * reservation.price;
     snapshot.openBuyOrderCount += 1;
+    increment(snapshot.openBuyOrdersByToken, reservation.tokenId);
     return;
   }
+  snapshot.openSellOrderCount += 1;
+  increment(snapshot.openSellOrdersByToken, reservation.tokenId);
   const key = String(reservation.tokenId);
   snapshot.reservedSellByToken.set(
     key,
     (snapshot.reservedSellByToken.get(key) ?? 0) + reservation.size,
   );
+}
+
+function increment(map: Map<string, number>, tokenId: TokenId): void {
+  const key = String(tokenId);
+  map.set(key, (map.get(key) ?? 0) + 1);
 }

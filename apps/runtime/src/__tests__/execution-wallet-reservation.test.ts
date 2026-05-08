@@ -29,6 +29,7 @@ import type {
   OrderRepository,
   FillRepository,
   PlaceOrderCommand,
+  ExecutionPolicy,
   TokenId,
   ClientOrderId,
 } from "@plankton/domain";
@@ -57,6 +58,16 @@ function makeBuyCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand {
     signalReason: null,
     ...overrides,
   };
+}
+
+function makeSellCmd(overrides?: Partial<PlaceOrderCommand>): PlaceOrderCommand {
+  return makeBuyCmd({
+    commandId: createCommandId("cmd-sell-1"),
+    clientOrderId: "plk_sell_test" as ClientOrderId,
+    side: "sell",
+    signalReason: "repricing-exit",
+    ...overrides,
+  });
 }
 
 function createMockGateway(): ExchangeGateway {
@@ -124,6 +135,42 @@ function buyCapacityPolicy(overrides?: Partial<typeof DEFAULT_EXECUTION_POLICY.b
       ...DEFAULT_BUY_CAPACITY_POLICY,
       ...overrides,
     },
+  };
+}
+
+function executionPolicy(overrides?: Partial<ExecutionPolicy>): ExecutionPolicy {
+  return {
+    ...DEFAULT_EXECUTION_POLICY,
+    ...overrides,
+    buyCapacity: {
+      ...DEFAULT_EXECUTION_POLICY.buyCapacity,
+      ...overrides?.buyCapacity,
+    },
+    sellCapacity: {
+      ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+      ...overrides?.sellCapacity,
+    },
+    orderCapacity: {
+      ...DEFAULT_EXECUTION_POLICY.orderCapacity,
+      ...overrides?.orderCapacity,
+    },
+  };
+}
+
+function openOrderFromCommand(command: PlaceOrderCommand, orderId: string) {
+  return {
+    ...command,
+    orderId,
+    orderType: "GTC",
+    postOnly: true,
+    status: "open",
+    sizeUsdc: command.size * command.price,
+    exchangeOrderId: null,
+    signalId: null,
+    signalReason: command.signalReason,
+    botRunId: BOT_RUN_ID,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
   };
 }
 
@@ -368,7 +415,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       runtimeControl: { isPaused: () => false },
       controlDb,
       activeProfile: "paper" as any,
-      executionPolicy: () => buyCapacityPolicy(),
+      executionPolicy: () => buyCapacityPolicy({ maxOpenBuyOrders: 2 }),
     });
 
     await mod.start();
@@ -431,7 +478,10 @@ describe("ExecutionModule — wallet reservation rejection", () => {
 
   it("enforces maxOpenBuyOrders before placing another BUY", async () => {
     const controlDb = createMockControlDb(100);
-    const openBuy = makeBuyCmd({ commandId: createCommandId("existing-1") });
+    const openBuy = makeBuyCmd({
+      commandId: createCommandId("existing-1"),
+      tokenId: createTokenId("existing-buy-token-1"),
+    });
     orderRepo.findOpen = vi.fn().mockReturnValue([
       {
         ...openBuy,
@@ -451,6 +501,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
         ...openBuy,
         orderId: "ord-existing-2",
         clientOrderId: "plk_existing_2",
+        tokenId: createTokenId("existing-buy-token-2"),
         orderType: "GTC",
         postOnly: true,
         status: "open",
@@ -474,7 +525,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
       runtimeControl: { isPaused: () => false },
       controlDb,
       activeProfile: "paper" as any,
-      executionPolicy: () => buyCapacityPolicy(),
+      executionPolicy: () => buyCapacityPolicy({ maxOpenBuyOrders: 2 }),
     });
 
     await mod.start();
@@ -485,6 +536,7 @@ describe("ExecutionModule — wallet reservation rejection", () => {
         commandId: createCommandId("cmd-capacity-count"),
         clientOrderId: "plk_capacity_count" as ClientOrderId,
         signalReason: "probe-entry",
+        tokenId: createTokenId("new-buy-token"),
         price: 0.2,
         size: 10,
       }),
@@ -494,6 +546,185 @@ describe("ExecutionModule — wallet reservation rejection", () => {
     expect(gateway.placeOrder).not.toHaveBeenCalled();
     expect(rejected).toHaveLength(1);
     expect(rejected[0]!.reason).toBe("wallet_buy_capacity_exhausted");
+
+    await mod.stop();
+  });
+
+  it("enforces maxOpenSellOrders before placing another SELL", async () => {
+    orderRepo.findOpen = vi.fn().mockReturnValue(
+      Array.from({ length: 10 }, (_, index) =>
+        openOrderFromCommand(
+          makeSellCmd({
+            commandId: createCommandId(`existing-sell-${index}`),
+            clientOrderId: `plk_existing_sell_${index}` as ClientOrderId,
+            tokenId: createTokenId(`sell-token-${index}`),
+          }),
+          `ord-existing-sell-${index}`,
+        ),
+      ),
+    );
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => executionPolicy(),
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd({
+        commandId: createCommandId("cmd-sell-capacity-count"),
+        clientOrderId: "plk_sell_capacity_count" as ClientOrderId,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!.reason).toBe("wallet_sell_capacity_exhausted");
+
+    await mod.stop();
+  });
+
+  it("enforces maxOpenOrdersTotal before placing BUY or SELL", async () => {
+    orderRepo.findOpen = vi.fn().mockReturnValue([
+      ...Array.from({ length: 12 }, (_, index) =>
+        openOrderFromCommand(
+          makeBuyCmd({
+            commandId: createCommandId(`existing-buy-total-${index}`),
+            clientOrderId: `plk_existing_buy_total_${index}` as ClientOrderId,
+            tokenId: createTokenId(`buy-total-token-${index}`),
+          }),
+          `ord-existing-buy-total-${index}`,
+        ),
+      ),
+      ...Array.from({ length: 10 }, (_, index) =>
+        openOrderFromCommand(
+          makeSellCmd({
+            commandId: createCommandId(`existing-sell-total-${index}`),
+            clientOrderId: `plk_existing_sell_total_${index}` as ClientOrderId,
+            tokenId: createTokenId(`sell-total-token-${index}`),
+          }),
+          `ord-existing-sell-total-${index}`,
+        ),
+      ),
+    ]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb: createMockControlDb(100),
+      activeProfile: "paper" as any,
+      executionPolicy: () =>
+        executionPolicy({
+          sellCapacity: { ...DEFAULT_EXECUTION_POLICY.sellCapacity, maxOpenSellOrders: 11 },
+        }),
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-total-buy"),
+        clientOrderId: "plk_total_buy" as ClientOrderId,
+        tokenId: createTokenId("new-total-buy"),
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd({
+        commandId: createCommandId("cmd-total-sell"),
+        clientOrderId: "plk_total_sell" as ClientOrderId,
+        tokenId: createTokenId("new-total-sell"),
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(2);
+    expect(rejected.map((item) => item.reason)).toEqual([
+      "total_orders_capacity_exhausted",
+      "total_orders_capacity_exhausted",
+    ]);
+
+    await mod.stop();
+  });
+
+  it("enforces per-token BUY and SELL caps from current open orders after restart", async () => {
+    const tokenId = createTokenId("restart-token");
+    orderRepo.findOpen = vi.fn().mockReturnValue([
+      openOrderFromCommand(makeBuyCmd({ tokenId }), "ord-restart-buy-1"),
+      openOrderFromCommand(
+        makeBuyCmd({
+          commandId: createCommandId("restart-buy-2"),
+          clientOrderId: "plk_restart_buy_2" as ClientOrderId,
+          tokenId,
+        }),
+        "ord-restart-buy-2",
+      ),
+      openOrderFromCommand(makeSellCmd({ tokenId }), "ord-restart-sell-1"),
+      openOrderFromCommand(
+        makeSellCmd({
+          commandId: createCommandId("restart-sell-2"),
+          clientOrderId: "plk_restart_sell_2" as ClientOrderId,
+          tokenId,
+        }),
+        "ord-restart-sell-2",
+      ),
+    ]);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      controlDb: createMockControlDb(100),
+      activeProfile: "paper" as any,
+      executionPolicy: () => executionPolicy(),
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeBuyCmd({
+        commandId: createCommandId("cmd-restart-buy"),
+        clientOrderId: "plk_restart_buy" as ClientOrderId,
+        tokenId,
+        signalReason: "scale-in",
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd({
+        commandId: createCommandId("cmd-restart-sell"),
+        clientOrderId: "plk_restart_sell" as ClientOrderId,
+        tokenId,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected.map((item) => item.reason)).toEqual([
+      "per_token_buy_limit",
+      "per_token_sell_limit",
+    ]);
 
     await mod.stop();
   });

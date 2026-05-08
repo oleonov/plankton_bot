@@ -432,6 +432,14 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
         ...current.buyCapacity,
         ...((patch.buyCapacity as Partial<ExecutionPolicy["buyCapacity"]> | undefined) ?? {}),
       },
+      sellCapacity: {
+        ...current.sellCapacity,
+        ...((patch.sellCapacity as Partial<ExecutionPolicy["sellCapacity"]> | undefined) ?? {}),
+      },
+      orderCapacity: {
+        ...current.orderCapacity,
+        ...((patch.orderCapacity as Partial<ExecutionPolicy["orderCapacity"]> | undefined) ?? {}),
+      },
       deadSideGuard: {
         ...current.deadSideGuard,
         ...((patch.deadSideGuard as Partial<ExecutionPolicy["deadSideGuard"]> | undefined) ?? {}),

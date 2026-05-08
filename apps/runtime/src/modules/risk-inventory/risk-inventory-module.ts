@@ -37,7 +37,7 @@ import { normalizeReasonCode } from "../../risk-event-codes.js";
 import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
-import type { WalletBudgetControlDb } from "../../wallet-buy-budget.js";
+import type { OrderCapacityMetricsSample, WalletBudgetControlDb } from "../../wallet-buy-budget.js";
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
@@ -53,6 +53,7 @@ export interface RiskInventoryModuleDeps {
   walletBufferPct?: number | undefined;
   walletBufferMinUsdc?: number | undefined;
   executionPolicy?: (() => ExecutionPolicy) | undefined;
+  capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
   runtimeControl?: RuntimeControl | undefined;
   rejectionLogCooldownMs?: number | undefined;
   /**
@@ -113,6 +114,8 @@ export class RiskInventoryModule implements RuntimeModule {
         walletBufferMinUsdc: deps.walletBufferMinUsdc,
       },
       () => deps.executionPolicy?.().buyCapacity ?? undefined,
+      deps.executionPolicy,
+      deps.capacityMetricsSink,
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,

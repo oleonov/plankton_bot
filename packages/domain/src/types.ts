@@ -675,6 +675,24 @@ export interface BuyCapacityPolicy {
   minAddWalletHeadroomUsdc: number;
   /** Maximum pending/open BUY orders across the profile wallet. */
   maxOpenBuyOrders: number;
+  /** Maximum pending/open BUY orders for one token. */
+  maxOpenBuyOrdersPerToken: number;
+}
+
+export interface SellCapacityPolicy {
+  /** SELL-only open-order guard. BUY wallet reserves are configured separately. */
+  enabled: boolean;
+  /** Maximum pending/open SELL orders across the profile wallet. */
+  maxOpenSellOrders: number;
+  /** Maximum pending/open SELL orders for one token. */
+  maxOpenSellOrdersPerToken: number;
+}
+
+export interface OrderCapacityPolicy {
+  /** Shared BUY+SELL open-order guard. */
+  enabled: boolean;
+  /** Maximum pending/open orders across BUY and SELL sides. */
+  maxOpenOrdersTotal: number;
 }
 
 export interface ExecutionPolicy {
@@ -691,6 +709,8 @@ export interface ExecutionPolicy {
   exitOrderTtlMs: number;
   marketSelection: MarketSelectionPolicy;
   buyCapacity: BuyCapacityPolicy;
+  sellCapacity: SellCapacityPolicy;
+  orderCapacity: OrderCapacityPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   orderLifetime: OrderLifetimePolicy;

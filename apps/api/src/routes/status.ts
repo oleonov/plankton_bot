@@ -477,6 +477,14 @@ export function buildStatusSnapshot(
   const executionQueue = executionQueueRow
     ? (JSON.parse(executionQueueRow.labels) as Record<string, unknown>)
     : null;
+  const orderCapacityActivityRow = db
+    .prepare(
+      "SELECT labels FROM runtime_metrics WHERE metric_name = 'order_capacity_activity' ORDER BY captured_at DESC LIMIT 1",
+    )
+    .get() as { labels: string } | undefined;
+  const orderCapacityActivity = orderCapacityActivityRow
+    ? (JSON.parse(orderCapacityActivityRow.labels) as Record<string, unknown>)
+    : null;
   const riskEventVolumeRow = db
     .prepare(
       "SELECT labels FROM runtime_metrics WHERE metric_name = 'risk_event_volume' ORDER BY captured_at DESC LIMIT 1",
@@ -570,6 +578,7 @@ export function buildStatusSnapshot(
     marketDataStreamActivity,
     executionTelemetry24h,
     executionQueue,
+    orderCapacityActivity,
     startupAdoption,
     ...(infraAlerts.length > 0 ? { infraAlerts } : {}),
     ...(marketDataPoll ? { marketDataPoll } : {}),

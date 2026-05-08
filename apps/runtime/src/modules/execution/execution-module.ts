@@ -38,15 +38,26 @@ import { calculateTotalExposure, countActiveOpenMarkets } from "../../exposure-c
 import { validateExecutablePrice } from "../../executable-price.js";
 import {
   evaluateWalletBuyCapacity,
+  evaluatePerTokenOrderCapacity,
+  evaluateTotalOrdersCapacity,
+  evaluateWalletSellCapacity,
   hasWalletBuyBudget,
   normalizeBuyCapacityPolicy,
+  normalizeOrderCapacityPolicy,
+  normalizeSellCapacityPolicy,
+  PER_TOKEN_BUY_LIMIT_REASON,
+  PER_TOKEN_SELL_LIMIT_REASON,
+  TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
+  type OrderCapacityMetricsSample,
   resolveWalletBuyBudget,
   WALLET_BUY_CAPACITY_EXHAUSTED_REASON,
+  WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
 import { DEFAULT_FALLBACK_MIN_ORDER_SIZE } from "../../min-order-size.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
+  getOpenOrderCountForToken,
   getReservedSellSize,
   type PendingReservation,
 } from "./reservation-utils.js";
@@ -77,11 +88,13 @@ export interface ExecutionModuleDeps {
   walletBufferMinUsdc?: number | undefined;
   executionPolicy?: (() => ExecutionPolicy) | undefined;
   allowSellSizeClamp?: boolean | undefined;
+  capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
   private static readonly SELL_REPLACE_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
   private static readonly SIZE_EPSILON_SHARES = 1e-9;
+  private static readonly SELL_REPLACEMENT_CANCELLED_ORDER_ID = "sellReplacementCancelledOrderId";
 
   private readonly log: Logger;
   private readonly processedCommandIds = new Set<string>();
@@ -158,11 +171,25 @@ export class ExecutionModule implements RuntimeModule {
       minNewEntryWalletHeadroomUsdc: number;
       minAddWalletHeadroomUsdc: number;
       maxOpenBuyOrders: number;
+      maxOpenBuyOrdersPerToken: number;
       openBuyOrderCount: number;
       newEntryCapacityUsdc: number | null;
       addCapacityUsdc: number | null;
       entriesBlocked: boolean;
       addsBlocked: boolean;
+    };
+    sellCapacity?: {
+      enabled: boolean;
+      maxOpenSellOrders: number;
+      maxOpenSellOrdersPerToken: number;
+      openSellOrderCount: number;
+      blocked: boolean;
+    };
+    orderCapacity?: {
+      enabled: boolean;
+      maxOpenOrdersTotal: number;
+      openOrdersTotal: number;
+      blocked: boolean;
     };
     reservedSellTokenCount: number;
     cancelReplacePendingCount: number;
@@ -182,6 +209,8 @@ export class ExecutionModule implements RuntimeModule {
       reservations.reservedBuyUsdc,
     );
     const buyCapacity = normalizeBuyCapacityPolicy(this.currentBuyCapacityPolicy());
+    const sellCapacity = normalizeSellCapacityPolicy(this.currentSellCapacityPolicy());
+    const orderCapacity = normalizeOrderCapacityPolicy(this.currentOrderCapacityPolicy());
     const newEntryDecision = evaluateWalletBuyCapacity({
       policy: buyCapacity,
       snapshot: walletBudget,
@@ -218,6 +247,7 @@ export class ExecutionModule implements RuntimeModule {
         minNewEntryWalletHeadroomUsdc: buyCapacity.minNewEntryWalletHeadroomUsdc,
         minAddWalletHeadroomUsdc: buyCapacity.minAddWalletHeadroomUsdc,
         maxOpenBuyOrders: buyCapacity.maxOpenBuyOrders,
+        maxOpenBuyOrdersPerToken: buyCapacity.maxOpenBuyOrdersPerToken,
         openBuyOrderCount: reservations.openBuyOrderCount,
         newEntryCapacityUsdc:
           newEntryDecision.availableAfterOrderUsdc == null
@@ -240,6 +270,25 @@ export class ExecutionModule implements RuntimeModule {
               ),
         entriesBlocked: !newEntryDecision.allowed,
         addsBlocked: !addDecision.allowed,
+      },
+      sellCapacity: {
+        enabled: sellCapacity.enabled,
+        maxOpenSellOrders: sellCapacity.maxOpenSellOrders,
+        maxOpenSellOrdersPerToken: sellCapacity.maxOpenSellOrdersPerToken,
+        openSellOrderCount: reservations.openSellOrderCount,
+        blocked:
+          sellCapacity.enabled &&
+          sellCapacity.maxOpenSellOrders > 0 &&
+          reservations.openSellOrderCount >= sellCapacity.maxOpenSellOrders,
+      },
+      orderCapacity: {
+        enabled: orderCapacity.enabled,
+        maxOpenOrdersTotal: orderCapacity.maxOpenOrdersTotal,
+        openOrdersTotal: reservations.openOrdersTotal,
+        blocked:
+          orderCapacity.enabled &&
+          orderCapacity.maxOpenOrdersTotal > 0 &&
+          reservations.openOrdersTotal >= orderCapacity.maxOpenOrdersTotal,
       },
       reservedSellTokenCount: reservations.reservedSellByToken.size,
       cancelReplacePendingCount: this.sellReplaceLocks.size,
@@ -411,6 +460,7 @@ export class ExecutionModule implements RuntimeModule {
     const decision = this.getReservationDecision(cmd, notional);
     if (decision.kind === "reject") {
       this.recordInternalReservationReject();
+      this.recordExecutionCapacityReject(cmd, decision.reason);
       this.log.debug(decision.details, decision.message);
       await this.rejectOrder(
         cmd,
@@ -702,8 +752,31 @@ export class ExecutionModule implements RuntimeModule {
     );
   }
 
+  private recordExecutionCapacityReject(cmd: PlaceOrderCommand, reason: string): void {
+    const reservations = this.getReservationSnapshot();
+    this.deps.capacityMetricsSink?.({
+      source: "execution",
+      side: cmd.side,
+      approved: false,
+      rejectionReason: reason,
+      openBuyOrderCount: reservations.openBuyOrderCount,
+      openSellOrderCount: reservations.openSellOrderCount,
+      openOrdersTotal: reservations.openOrdersTotal,
+      perTokenOpenBuyOrderCount: getOpenOrderCountForToken(reservations, cmd.tokenId, "buy"),
+      perTokenOpenSellOrderCount: getOpenOrderCountForToken(reservations, cmd.tokenId, "sell"),
+    });
+  }
+
   private currentBuyCapacityPolicy(): ExecutionPolicy["buyCapacity"] | undefined {
     return this.deps.executionPolicy?.().buyCapacity;
+  }
+
+  private currentSellCapacityPolicy(): ExecutionPolicy["sellCapacity"] | undefined {
+    return this.deps.executionPolicy?.().sellCapacity;
+  }
+
+  private currentOrderCapacityPolicy(): ExecutionPolicy["orderCapacity"] | undefined {
+    return this.deps.executionPolicy?.().orderCapacity;
   }
 
   private getReservationDecision(
@@ -724,8 +797,32 @@ export class ExecutionModule implements RuntimeModule {
         details: Record<string, unknown>;
       } {
     const reservations = this.getReservationSnapshot();
+    const orderCapacity = evaluateTotalOrdersCapacity({
+      policy: this.currentOrderCapacityPolicy(),
+      openOrdersTotal: reservations.openOrdersTotal,
+    });
 
     if (cmd.side === "buy") {
+      const buyPolicy = normalizeBuyCapacityPolicy(this.currentBuyCapacityPolicy());
+      const perTokenBuy = evaluatePerTokenOrderCapacity({
+        side: "buy",
+        maxOpenOrdersPerToken: buyPolicy.maxOpenBuyOrdersPerToken,
+        openOrdersForToken: getOpenOrderCountForToken(reservations, cmd.tokenId, "buy"),
+        enabled: buyPolicy.enabled,
+      });
+      if (!perTokenBuy.allowed) {
+        return {
+          kind: "reject",
+          reason: PER_TOKEN_BUY_LIMIT_REASON,
+          message: "order skipped — per-token BUY order capacity exhausted",
+          details: {
+            tokenId: String(cmd.tokenId),
+            openBuyOrdersForToken: perTokenBuy.openOrdersForToken,
+            maxOpenBuyOrdersPerToken: perTokenBuy.maxOpenOrdersPerToken,
+          },
+        };
+      }
+
       const walletBudget = resolveWalletBuyBudget(
         {
           controlDb: this.deps.controlDb,
@@ -736,7 +833,7 @@ export class ExecutionModule implements RuntimeModule {
         reservations.reservedBuyUsdc,
       );
       const buyCapacity = evaluateWalletBuyCapacity({
-        policy: this.currentBuyCapacityPolicy(),
+        policy: buyPolicy,
         snapshot: walletBudget,
         requiredNotionalUsdc: notional,
         signalReason: cmd.signalReason,
@@ -759,6 +856,17 @@ export class ExecutionModule implements RuntimeModule {
           },
         };
       }
+      if (!orderCapacity.allowed) {
+        return {
+          kind: "reject",
+          reason: TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
+          message: "order skipped — total open order capacity exhausted",
+          details: {
+            openOrdersTotal: orderCapacity.openOrdersTotal,
+            maxOpenOrdersTotal: orderCapacity.maxOpenOrdersTotal,
+          },
+        };
+      }
       if (hasWalletBuyBudget(walletBudget, notional)) return { kind: "accept" };
 
       return {
@@ -771,6 +879,54 @@ export class ExecutionModule implements RuntimeModule {
           walletBuffer: walletBudget?.walletBufferUsdc ?? null,
           available: walletBudget?.freeUsdcForNewOrders ?? null,
           order: notional,
+        },
+      };
+    }
+
+    const sellPolicy = normalizeSellCapacityPolicy(this.currentSellCapacityPolicy());
+    const sellCapacity = evaluateWalletSellCapacity({
+      policy: sellPolicy,
+      openSellOrderCount: reservations.openSellOrderCount,
+    });
+    if (!sellCapacity.allowed) {
+      return {
+        kind: "reject",
+        reason: WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
+        message: "order skipped — wallet sell capacity exhausted",
+        details: {
+          openSellOrders: sellCapacity.openSellOrderCount,
+          maxOpenSellOrders: sellCapacity.maxOpenSellOrders,
+        },
+      };
+    }
+
+    const perTokenSell = evaluatePerTokenOrderCapacity({
+      side: "sell",
+      maxOpenOrdersPerToken: sellPolicy.maxOpenSellOrdersPerToken,
+      openOrdersForToken: getOpenOrderCountForToken(reservations, cmd.tokenId, "sell"),
+      enabled: sellPolicy.enabled,
+    });
+    if (!perTokenSell.allowed) {
+      return {
+        kind: "reject",
+        reason: PER_TOKEN_SELL_LIMIT_REASON,
+        message: "order skipped — per-token SELL order capacity exhausted",
+        details: {
+          tokenId: String(cmd.tokenId),
+          openSellOrdersForToken: perTokenSell.openOrdersForToken,
+          maxOpenSellOrdersPerToken: perTokenSell.maxOpenOrdersPerToken,
+        },
+      };
+    }
+
+    if (!orderCapacity.allowed) {
+      return {
+        kind: "reject",
+        reason: TOTAL_ORDERS_CAPACITY_EXHAUSTED_REASON,
+        message: "order skipped — total open order capacity exhausted",
+        details: {
+          openOrdersTotal: orderCapacity.openOrdersTotal,
+          maxOpenOrdersTotal: orderCapacity.maxOpenOrdersTotal,
         },
       };
     }
@@ -888,18 +1044,27 @@ export class ExecutionModule implements RuntimeModule {
   private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {
     if (cmd.side !== "sell") return false;
 
-    const existingSell = this.findOpenSellOrderForToken(cmd.tokenId);
+    // Normal exit management keeps one live price per token and replaces it
+    // when strategy moves. The per-token SELL cap is a race/legacy-state
+    // ceiling, not permission to stack multiple independent exit prices.
+    const existingSells = this.findOpenSellOrdersForToken(cmd.tokenId);
     const key = String(cmd.tokenId);
-    if (!existingSell) {
+    if (existingSells.length === 0) {
       this.sellReplaceLocks.delete(key);
       return false;
     }
 
-    if (Math.abs(existingSell.price - cmd.price) < cmd.tickSize - 1e-9) {
+    const matchingPriceSell = existingSells.find(
+      (order) => Math.abs(order.price - cmd.price) < cmd.tickSize - 1e-9,
+    );
+    if (matchingPriceSell) {
       await this.rejectOrder(cmd, "sell-order-already-open", ExchangeErrorCode.LivePolicyBlocked);
       return true;
     }
 
+    if (this.isSellReplacementSubmit(cmd)) return false;
+
+    const existingSell = existingSells[0]!;
     const now = Date.now();
     const existingLock = this.sellReplaceLocks.get(key);
     if (
@@ -928,8 +1093,8 @@ export class ExecutionModule implements RuntimeModule {
     return true;
   }
 
-  private findOpenSellOrderForToken(tokenId: TokenId): Order | null {
-    const openOrders = this.deps.orderRepo
+  private findOpenSellOrdersForToken(tokenId: TokenId): Order[] {
+    return this.deps.orderRepo
       .findByTokenId(tokenId)
       .filter(
         (order) =>
@@ -938,7 +1103,13 @@ export class ExecutionModule implements RuntimeModule {
             order.status === "open" ||
             order.status === "partially-filled"),
       );
-    return openOrders[0] ?? null;
+  }
+
+  private isSellReplacementSubmit(cmd: PlaceOrderCommand): boolean {
+    return (
+      cmd.side === "sell" &&
+      typeof cmd.metadata?.[ExecutionModule.SELL_REPLACEMENT_CANCELLED_ORDER_ID] === "string"
+    );
   }
 
   private async releasePendingSellReplacement(cancelledOrderId: OrderId): Promise<void> {
@@ -948,6 +1119,10 @@ export class ExecutionModule implements RuntimeModule {
       const replacement: PlaceOrderCommand = {
         ...lock.command,
         commandId: createCommandId(`sell-replace-submit-${String(cancelledOrderId)}-${Date.now()}`),
+        metadata: {
+          ...(lock.command.metadata ?? {}),
+          [ExecutionModule.SELL_REPLACEMENT_CANCELLED_ORDER_ID]: String(cancelledOrderId),
+        },
       };
       await this.deps.bus.publish("PlaceOrderRequested", {
         command: replacement,

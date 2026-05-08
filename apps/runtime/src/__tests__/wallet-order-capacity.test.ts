@@ -1,0 +1,70 @@
+import { describe, expect, it } from "vitest";
+import {
+  evaluateTotalOrdersCapacity,
+  evaluateWalletBuyCapacity,
+  evaluateWalletSellCapacity,
+} from "../wallet-buy-budget.js";
+import type { BuyCapacityPolicy, OrderCapacityPolicy, SellCapacityPolicy } from "@plankton/domain";
+
+const buyPolicy: BuyCapacityPolicy = {
+  enabled: true,
+  minNewEntryWalletHeadroomUsdc: 7,
+  minAddWalletHeadroomUsdc: 5,
+  maxOpenBuyOrders: 15,
+  maxOpenBuyOrdersPerToken: 2,
+};
+
+const sellPolicy: SellCapacityPolicy = {
+  enabled: true,
+  maxOpenSellOrders: 10,
+  maxOpenSellOrdersPerToken: 2,
+};
+
+const orderPolicy: OrderCapacityPolicy = {
+  enabled: true,
+  maxOpenOrdersTotal: 22,
+};
+
+describe("order capacity policy evaluators", () => {
+  it.each([
+    [14, true],
+    [15, false],
+    [16, false],
+  ])("evaluates BUY global cap at open count %i", (openBuyOrderCount, allowed) => {
+    const decision = evaluateWalletBuyCapacity({
+      policy: buyPolicy,
+      snapshot: null,
+      requiredNotionalUsdc: 1,
+      signalReason: "probe-entry",
+      openBuyOrderCount,
+    });
+
+    expect(decision.allowed).toBe(allowed);
+  });
+
+  it.each([
+    [9, true],
+    [10, false],
+    [11, false],
+  ])("evaluates SELL global cap at open count %i", (openSellOrderCount, allowed) => {
+    const decision = evaluateWalletSellCapacity({
+      policy: sellPolicy,
+      openSellOrderCount,
+    });
+
+    expect(decision.allowed).toBe(allowed);
+  });
+
+  it.each([
+    [21, true],
+    [22, false],
+    [23, false],
+  ])("evaluates total open-order cap at open count %i", (openOrdersTotal, allowed) => {
+    const decision = evaluateTotalOrdersCapacity({
+      policy: orderPolicy,
+      openOrdersTotal,
+    });
+
+    expect(decision.allowed).toBe(allowed);
+  });
+});

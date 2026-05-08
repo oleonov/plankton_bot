@@ -2482,6 +2482,50 @@ describe("AlgoDecisionModule", () => {
       await mod.stop();
     });
 
+    it("does not globally cooldown BUYs for token-local capacity preflight blocks", async () => {
+      const tokenIds = [
+        "token-local-capacity-blocked",
+        "token-local-capacity-allowed-1",
+        "token-local-capacity-allowed-2",
+      ];
+      selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+      const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const canAttemptBuy = vi
+        .fn()
+        .mockReturnValueOnce({
+          canAttempt: false,
+          reasonCode: "per_token_buy_limit",
+          activateCooldown: false,
+        })
+        .mockReturnValue({ canAttempt: true });
+
+      const mod = buildModule({
+        decisionSignalLogRepo,
+        riskEventRepo,
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: tokenIds.map((tokenId) => makeMarket(tokenId, null, 0.45)),
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      const suppressionCalls = vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.filter(([event]) => event.payload.reasonCode === "per_token_buy_limit");
+
+      expect(canAttemptBuy).toHaveBeenCalledTimes(3);
+      expect(signalCalls).toHaveLength(2);
+      expect(suppressionCalls).toHaveLength(0);
+
+      await mod.stop();
+    });
+
     it("keeps BUY emission suppressed until the budget cooldown expires", async () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date("2026-05-08T00:00:00.000Z"));

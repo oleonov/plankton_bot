@@ -41,7 +41,17 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         enabled: true,
         minNewEntryWalletHeadroomUsdc: 7,
         minAddWalletHeadroomUsdc: 5,
-        maxOpenBuyOrders: 2,
+        maxOpenBuyOrders: 15,
+        maxOpenBuyOrdersPerToken: 2,
+      },
+      sellCapacity: {
+        enabled: true,
+        maxOpenSellOrders: 10,
+        maxOpenSellOrdersPerToken: 2,
+      },
+      orderCapacity: {
+        enabled: true,
+        maxOpenOrdersTotal: 22,
       },
       deadSideGuard: { mode: "enforce", askCeiling: 0.05, maxTimeToEndMs: 60_000 },
       pricing: {
@@ -101,7 +111,17 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       enabled: true,
       minNewEntryWalletHeadroomUsdc: 7,
       minAddWalletHeadroomUsdc: 5,
-      maxOpenBuyOrders: 2,
+      maxOpenBuyOrders: 15,
+      maxOpenBuyOrdersPerToken: 2,
+    });
+    expect(policy.sellCapacity).toEqual({
+      enabled: true,
+      maxOpenSellOrders: 10,
+      maxOpenSellOrdersPerToken: 2,
+    });
+    expect(policy.orderCapacity).toEqual({
+      enabled: true,
+      maxOpenOrdersTotal: 22,
     });
     expect(policy.deadSideGuard.mode).toBe("enforce");
     expect(policy.pricing.mode).toBe("bounded-midpoint");
@@ -223,6 +243,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           minNewEntryWalletHeadroomUsdc: -1,
           minAddWalletHeadroomUsdc: 20_000,
           maxOpenBuyOrders: 1.5,
+          maxOpenBuyOrdersPerToken: -1,
         },
       }),
     );
@@ -231,6 +252,48 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("buyCapacity.minNewEntryWalletHeadroomUsdc"))).toBe(true);
     expect(issues.some((i) => i.includes("buyCapacity.minAddWalletHeadroomUsdc"))).toBe(true);
     expect(issues.some((i) => i.includes("buyCapacity.maxOpenBuyOrders"))).toBe(true);
+    expect(issues.some((i) => i.includes("buyCapacity.maxOpenBuyOrdersPerToken"))).toBe(true);
+  });
+
+  it("preserves partial sell/order-capacity overrides and defaults the rest", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        sellCapacity: { maxOpenSellOrders: 7 },
+        orderCapacity: { maxOpenOrdersTotal: 19 },
+      }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.sellCapacity).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.sellCapacity,
+      maxOpenSellOrders: 7,
+    });
+    expect(policy.orderCapacity).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.orderCapacity,
+      maxOpenOrdersTotal: 19,
+    });
+  });
+
+  it("rejects invalid sell/order-capacity values with issues", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        sellCapacity: {
+          enabled: "yes",
+          maxOpenSellOrders: 1.5,
+          maxOpenSellOrdersPerToken: -1,
+        },
+        orderCapacity: {
+          enabled: "yes",
+          maxOpenOrdersTotal: 1.5,
+        },
+      }),
+    );
+    expect(policy.sellCapacity).toEqual(DEFAULT_EXECUTION_POLICY.sellCapacity);
+    expect(policy.orderCapacity).toEqual(DEFAULT_EXECUTION_POLICY.orderCapacity);
+    expect(issues.some((i) => i.includes("sellCapacity.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("sellCapacity.maxOpenSellOrders"))).toBe(true);
+    expect(issues.some((i) => i.includes("sellCapacity.maxOpenSellOrdersPerToken"))).toBe(true);
+    expect(issues.some((i) => i.includes("orderCapacity.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("orderCapacity.maxOpenOrdersTotal"))).toBe(true);
   });
 
   it("rejects invalid market-selection values with issues", () => {

@@ -7,6 +7,7 @@ import {
   createLotId,
   createConditionId,
   createBotRunId,
+  DEFAULT_EXECUTION_POLICY,
 } from "@plankton/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -1181,8 +1182,8 @@ describe("RiskInventoryModule", () => {
   // ─── Error resilience ─────────────────────────────────────────────
 
   it("rejects signal on internal error without crashing", async () => {
-    // Make orderRepo.findByTokenId throw to trigger internal error path in AlgoRiskGate
-    (orderRepo.findByTokenId as ReturnType<typeof vi.fn>).mockImplementation(() => {
+    // Make orderRepo.findOpen throw to trigger internal error path in AlgoRiskGate.
+    (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockImplementation(() => {
       throw new Error("db explosion");
     });
     mod = createModule();
@@ -1210,7 +1211,7 @@ describe("RiskInventoryModule", () => {
 
   describe("null-family signals", () => {
     it("approves a null-family buy signal when token-level checks pass", async () => {
-      mod = createModule();
+      mod = createModule(undefined, { executionPolicy: () => DEFAULT_EXECUTION_POLICY });
       await mod.start();
 
       const approved: any[] = [];
@@ -1232,8 +1233,8 @@ describe("RiskInventoryModule", () => {
     });
 
     it("still rejects null-family signals that fail token-level checks", async () => {
-      // Simulate an existing open buy order on the same token — AlgoRiskGate
-      // must reject with "token already has open buy order" regardless of family.
+      // Simulate the per-token BUY cap on the same token — AlgoRiskGate
+      // must reject with the token-level reason regardless of family.
       const existingOrder: Order = {
         orderId: createOrderId("ord-nullfam-open"),
         clientOrderId: "plk_nullfam_open" as ClientOrderId,
@@ -1253,8 +1254,15 @@ describe("RiskInventoryModule", () => {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
-      (orderRepo.findByTokenId as ReturnType<typeof vi.fn>).mockReturnValue([existingOrder]);
-      mod = createModule();
+      (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockReturnValue([
+        existingOrder,
+        {
+          ...existingOrder,
+          orderId: createOrderId("ord-nullfam-open-2"),
+          clientOrderId: "plk_nullfam_open_2" as ClientOrderId,
+        },
+      ]);
+      mod = createModule(undefined, { executionPolicy: () => DEFAULT_EXECUTION_POLICY });
       await mod.start();
 
       const approved: any[] = [];
@@ -1270,7 +1278,7 @@ describe("RiskInventoryModule", () => {
 
       expect(approved).toHaveLength(0);
       expect(rejected).toHaveLength(1);
-      expect(rejected[0].reason).toContain("token already has open buy order");
+      expect(rejected[0].reason).toContain("per_token_buy_limit");
 
       await mod.stop();
     });
@@ -1784,8 +1792,8 @@ describe("RiskInventoryModule", () => {
       await bus.publish("SignalProduced", { signal: makeSignal(), market: makeMarket() });
       await bus.drain();
 
-      // Reject by making orderRepo.findByTokenId throw (triggers internal error path)
-      (orderRepo.findByTokenId as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      // Reject by making orderRepo.findOpen throw (triggers internal error path)
+      (orderRepo.findOpen as ReturnType<typeof vi.fn>).mockImplementation(() => {
         throw new Error("db explosion");
       });
       await bus.publish("SignalProduced", {
