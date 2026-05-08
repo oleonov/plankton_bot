@@ -27,7 +27,7 @@ export const PRE_ENTRY_MAX_MID_PRICE = DEFAULT_MARKET_SELECTION_POLICY.maxMidPri
 export const PRE_ENTRY_MIN_LIQUIDITY = DEFAULT_MARKET_SELECTION_POLICY.minLiquidity;
 
 const ZERO_COVERAGE_CATEGORY_PATTERN =
-  /\bo\/u\b|over-under|exact[- ]score|both[- ]teams|match[- ]winner|quadra|penta|inhibitor|baron|dragon|\b(?:eth|btc|sol|bnb|xrp|hype|doge)-up-or-down-5m\b|\bmap[- ]?[0-9]+\b|\bgame[- ]?[0-9]+\b|total kills/i;
+  /\bo\/u\b|over-under|exact[- ]score|both[- ]teams|match[- ]winner|quadra|penta|inhibitor|baron|dragon|\b(?:eth|btc|sol|bnb|xrp|hype|doge)-up-or-down-5m\b|\b(?:bitcoin|btc|ethereum|eth|solana|sol|bnb|xrp|hype|doge)-up-or-down-[a-z0-9-]+-(?:1[0-2]|[1-9])(?:am|pm)-et\b|\bmap[- ]?[0-9]+\b|\bgame[- ]?[0-9]+\b|total kills/i;
 const SOCCER_DRAW_PATTERN =
   /\b(?:soccer|football|match|game|teams?|score|winner)\b.{0,80}\bdraw\b|\bdraw\b.{0,80}\b(?:soccer|football|match|game|teams?|score|winner)\b/i;
 

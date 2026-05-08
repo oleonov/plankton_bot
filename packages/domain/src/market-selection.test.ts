@@ -124,12 +124,32 @@ describe("evaluatePreEntry", () => {
     });
   });
 
+  it("excludes hourly crypto up-or-down direction markets", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, {
+      ...VALID_PRE_ENTRY,
+      eventSlug: "bitcoin-up-or-down-may-8-2026-8am-et",
+      slug: "bitcoin-up-or-down-may-8-2026-8am-et",
+      question: "Bitcoin up or down on May 8, 2026 at 8am ET?",
+    });
+    expect(r.finalStatus).toBe("EXCLUDE");
+  });
+
   it("does not exclude unrelated slugs that merely contain 5m", () => {
     const r = evaluatePreEntry(EMPTY_ENGINE, {
       ...VALID_PRE_ENTRY,
       eventSlug: "us-stock-market-5m-vix-above-20",
       slug: "us-stock-market-5m-vix-above-20",
       question: "Will the VIX be above 20 in a five minute window?",
+    });
+    expect(r.finalStatus).toBe("INCLUDE");
+  });
+
+  it("does not exclude unrelated hourly ET markets", () => {
+    const r = evaluatePreEntry(EMPTY_ENGINE, {
+      ...VALID_PRE_ENTRY,
+      eventSlug: "bitcoin-price-above-100k-may-8-2026-8am-et",
+      slug: "bitcoin-price-above-100k-may-8-2026-8am-et",
+      question: "Will Bitcoin be above 100k at 8am ET?",
     });
     expect(r.finalStatus).toBe("INCLUDE");
   });

@@ -1,4 +1,4 @@
-import type { OrderStatus, ProfileId, SwitchState } from "./enums.js";
+import type { OrderSide, OrderStatus, ProfileId, SwitchState } from "./enums.js";
 import type {
   FillId,
   OrderId,
@@ -36,6 +36,7 @@ import type {
   LegState,
   LegStateTransition,
   AlgoTokenModeState,
+  OrderPriceCooldown,
   SettlementRecord,
 } from "./types.js";
 
@@ -566,6 +567,16 @@ export interface AlgoTokenModeStateRepository {
   upsert(state: AlgoTokenModeState): void;
   delete(tokenId: TokenId): void;
   findAll(): AlgoTokenModeState[];
+}
+
+// ─── OrderPriceCooldownRepository ────────────────────────────────────────
+
+export interface OrderPriceCooldownRepository {
+  get(tokenId: TokenId, side: OrderSide, priceX10000: number): OrderPriceCooldown | null;
+  upsert(cooldown: OrderPriceCooldown): void;
+  delete(tokenId: TokenId, side: OrderSide, priceX10000: number): void;
+  deleteByTokenId(tokenId: TokenId): number;
+  findAll(): OrderPriceCooldown[];
 }
 
 // ─── MarketTradeCountProvider ───────────────────────────────────────────

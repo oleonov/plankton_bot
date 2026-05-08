@@ -650,6 +650,15 @@ export interface AlgoTokenModeState {
   updatedAt: string;
 }
 
+export interface OrderPriceCooldown {
+  tokenId: TokenId;
+  side: OrderSide;
+  priceX10000: number;
+  staleCancelCount: number;
+  cooldownUntilTsUtc: number;
+  lastEventTsUtc: number;
+}
+
 export interface MarketSelectionPolicy {
   /** v5.11 hard admission: BUY candidates must have mid price below this ceiling. */
   maxMidPrice: number;

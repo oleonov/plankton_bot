@@ -125,6 +125,7 @@ import {
   SqliteLegStateRepository,
   SqliteLegStateTransitionRepository,
   SqliteAlgoTokenModeStateRepository,
+  SqliteOrderPriceCooldownRepository,
   SqliteSettlementLedgerRepository,
   SqlitePositionDriftRepository,
   SqliteExecutionPolicyObservationRepository,
@@ -144,6 +145,7 @@ import { installConsoleRedaction } from "./console-redaction.js";
 import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
 import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-state-transition-backfill.js";
 import { OrderLifetimeModule } from "./modules/order-lifetime/order-lifetime-module.js";
+import { SamePriceCooldownModule } from "./modules/same-price-cooldown/same-price-cooldown-module.js";
 import { isGatewayOrderReject } from "./order-rejection-classification.js";
 import {
   buildRiskEventVolumeSnapshot,
@@ -281,6 +283,7 @@ async function main(): Promise<void> {
     legState: new SqliteLegStateRepository(ledgerConn.db),
     legStateTransition: new SqliteLegStateTransitionRepository(ledgerConn.db),
     tokenModeState: new SqliteAlgoTokenModeStateRepository(ledgerConn.db),
+    orderPriceCooldown: new SqliteOrderPriceCooldownRepository(ledgerConn.db),
   };
 
   // 3b. Selection rule engine — version-polled singleton shared by scanner,
@@ -832,6 +835,13 @@ async function main(): Promise<void> {
     log,
   });
 
+  const samePriceCooldownModule = new SamePriceCooldownModule({
+    bus,
+    orderRepo: repos.order,
+    cooldownRepo: repos.orderPriceCooldown,
+    log,
+  });
+
   // Standalone SignalToOrderBridge — wired here so it is active when AlgoDecisionModule
   // is used. bridge.subscribe() is called after all modules are wired (below).
   const executionPolicyObservationRepo = new SqliteExecutionPolicyObservationRepository(
@@ -848,6 +858,7 @@ async function main(): Promise<void> {
     profileId: activeProfile as import("@plankton/domain").ProfileId,
     resolutionTracker: marketResolutionTracker,
     orderLifetime: orderLifetimeModule,
+    samePriceCooldown: samePriceCooldownModule,
   });
 
   // 7i. Reconciliation module
@@ -997,6 +1008,7 @@ async function main(): Promise<void> {
     ["profile-publisher", profilePublisher],
     ["ledger-retention", ledgerRetentionModule],
     ["order-lifetime", orderLifetimeModule],
+    ["same-price-cooldown", samePriceCooldownModule],
     ["reconciliation", reconciliationModule],
     ...(userOrderStreamModule
       ? [

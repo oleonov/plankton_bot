@@ -176,6 +176,22 @@ CREATE INDEX IF NOT EXISTS idx_fills_token ON fills(token_id);
 CREATE INDEX IF NOT EXISTS idx_fills_filled_at ON fills(filled_at DESC);
 CREATE INDEX IF NOT EXISTS idx_fills_unreconciled ON fills(reconciled) WHERE reconciled = 0;
 
+-- ═══════════ ORDER PRICE COOLDOWNS ═══════════
+-- From 052_order_price_cooldowns.sql
+
+CREATE TABLE IF NOT EXISTS order_price_cooldowns (
+  token_id                  TEXT NOT NULL,
+  side                      TEXT NOT NULL CHECK (side IN ('buy', 'sell')),
+  price_x10000              INTEGER NOT NULL,
+  stale_cancel_count        INTEGER NOT NULL DEFAULT 0,
+  cooldown_until_ts_utc     INTEGER NOT NULL DEFAULT 0,
+  last_event_ts_utc         INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (token_id, side, price_x10000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_order_price_cooldowns_until
+  ON order_price_cooldowns(cooldown_until_ts_utc);
+
 -- ═══════════ POSITIONS ═══════════
 -- From 001_initial.sql
 

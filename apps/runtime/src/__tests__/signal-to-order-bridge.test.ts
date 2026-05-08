@@ -138,6 +138,92 @@ afterEach(() => {
 });
 
 describe("SignalToOrderBridge", () => {
+  it("skips placement when persistent same-price cooldown is active", async () => {
+    const bus = new InProcessEventBus();
+    const canPlaceOrder = vi.fn(() => ({
+      allowed: false,
+      reason: "same-price-cooldown",
+      staleCancelCount: 3,
+      cooldownUntilTsUtc: NOW + 24 * 60 * 60_000,
+    }));
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+      samePriceCooldown: {
+        canPlaceOrder,
+      },
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: unknown[] = [];
+    const skipped: Array<{ reasons: readonly string[]; diagnostics: Record<string, unknown> }> = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.09, bestAsk: 0.09, midPrice: 0.09 }),
+      approvedAt: NOW,
+    });
+
+    expect(placed).toHaveLength(0);
+    expect(canPlaceOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: TOKEN_ID, side: "buy", price: 0.09, nowMs: NOW }),
+    );
+    expect(skipped[0]?.reasons).toEqual(["same-price-cooldown"]);
+    expect(skipped[0]?.diagnostics["staleCancelCount"]).toBe(3);
+  });
+
+  it("places when persistent same-price cooldown allows the execution price", async () => {
+    const bus = new InProcessEventBus();
+    const canPlaceOrder = vi.fn(() => ({
+      allowed: true,
+      reason: null,
+      staleCancelCount: 2,
+      cooldownUntilTsUtc: NOW - 1,
+    }));
+    const bridge = new SignalToOrderBridge({
+      bus,
+      log: makeLogger(),
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+      } as never,
+      samePriceCooldown: { canPlaceOrder },
+      now: () => NOW,
+    });
+    bridge.subscribe();
+
+    const placed: Array<{ command: { price: number } }> = [];
+    const skipped: unknown[] = [];
+    bus.subscribe("PlaceOrderRequested", async (payload) => {
+      placed.push(payload);
+    });
+    bus.subscribe("SignalConversionSkipped", async (payload) => {
+      skipped.push(payload);
+    });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market: makeMarket({ bestBid: 0.09, bestAsk: 0.09, midPrice: 0.09 }),
+      approvedAt: NOW,
+    });
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.09);
+    expect(canPlaceOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ tokenId: TOKEN_ID, side: "buy", price: 0.09, nowMs: NOW }),
+    );
+  });
+
   it("uses the shared candidate-book cache so approved signals convert against the same book as scanner", async () => {
     const bus = new InProcessEventBus();
     const clobBook = {
@@ -592,173 +678,6 @@ describe("SignalToOrderBridge", () => {
   // Per-family feature tests (gamma-fallback-dust, queue-jump canary, dust-lane config)
   // removed — the algo decision engine uses universal policies, not per-family rules.
   // See docs/superpowers/specs/2026-04-15-algo-decision-engine-design.md §5.4.
-
-  it("keeps token in cooldown when the book did not materially move", async () => {
-    const bus = new InProcessEventBus();
-    const order = makeEntryOrder();
-    const orderRepo = {
-      findOpen: vi.fn(() => []),
-      findById: vi.fn(() => order),
-    } as never;
-    const bridge = new SignalToOrderBridge({
-      bus,
-      log: makeLogger(),
-      liveLiteGuard: {
-        getWalletMode: () => "relayer",
-      } as never,
-      orderRepo,
-    });
-    bridge.subscribe();
-
-    const skipped: Array<{ reasons: readonly string[] }> = [];
-    bus.subscribe("SignalConversionSkipped", async (payload) => {
-      skipped.push(payload);
-    });
-
-    const market = makeMarket({
-      bestBid: 0.03,
-      bestAsk: 0.04,
-      midPrice: 0.035,
-      spread: 0.01,
-      bookSource: "clob",
-    });
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [market],
-      timestamp: Date.now(),
-    });
-    await bus.publish("OrderCancelled", {
-      commandId: "cmd-1" as never,
-      orderId: order.orderId,
-      tokenId: TOKEN_ID,
-      conditionId: createConditionId("cond-1"),
-      reason: "ttl-expired",
-      signalReason: "probe-entry",
-      timestamp: Date.now(),
-    });
-    await bus.publish("OrderCancelled", {
-      commandId: "cmd-2" as never,
-      orderId: order.orderId,
-      tokenId: TOKEN_ID,
-      conditionId: createConditionId("cond-1"),
-      reason: "ttl-expired",
-      signalReason: "probe-entry",
-      timestamp: Date.now(),
-    });
-    await bus.publish("OrderCancelled", {
-      commandId: "cmd-3" as never,
-      orderId: order.orderId,
-      tokenId: TOKEN_ID,
-      conditionId: createConditionId("cond-1"),
-      reason: "ttl-expired",
-      signalReason: "probe-entry",
-      timestamp: Date.now(),
-    });
-    await bus.publish("SignalApproved", {
-      signal: makeSignal(),
-      market,
-      approvedAt: Date.now(),
-    });
-    await bus.drain();
-
-    // Fallback policy maxUnfilledCancelsBeforeCooldown=3 → cooldown kicks in
-    expect(skipped).toHaveLength(1);
-    expect(skipped[0]!.reasons).toContain("token-cooling-down");
-  });
-
-  it("bypasses cooldown when top-of-book materially moved and emits the bypass reason", async () => {
-    const bus = new InProcessEventBus();
-    const order = makeEntryOrder();
-    const orderRepo = {
-      findOpen: vi.fn(() => []),
-      findById: vi.fn(() => order),
-    } as never;
-    const bridge = new SignalToOrderBridge({
-      bus,
-      log: makeLogger(),
-      liveLiteGuard: {
-        getWalletMode: () => "relayer",
-      } as never,
-      orderRepo,
-    });
-    bridge.subscribe();
-
-    const bypasses: Array<{ reason: string }> = [];
-    const placed: Array<{ command: { price: number } }> = [];
-    bus.subscribe("CooldownBypassApplied", async (payload) => {
-      bypasses.push(payload);
-    });
-    bus.subscribe("PlaceOrderRequested", async (payload) => {
-      placed.push(payload);
-    });
-
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({
-          bestBid: 0.03,
-          bestAsk: 0.04,
-          midPrice: 0.035,
-          spread: 0.01,
-          bookSource: "clob",
-        }),
-      ],
-      timestamp: Date.now(),
-    });
-    await bus.publish("OrderCancelled", {
-      commandId: "cmd-1" as never,
-      orderId: order.orderId,
-      tokenId: TOKEN_ID,
-      conditionId: createConditionId("cond-1"),
-      reason: "ttl-expired",
-      signalReason: "probe-entry",
-      timestamp: Date.now(),
-    });
-    await bus.publish("OrderCancelled", {
-      commandId: "cmd-2" as never,
-      orderId: order.orderId,
-      tokenId: TOKEN_ID,
-      conditionId: createConditionId("cond-1"),
-      reason: "ttl-expired",
-      signalReason: "probe-entry",
-      timestamp: Date.now(),
-    });
-    await bus.publish("OrderCancelled", {
-      commandId: "cmd-3" as never,
-      orderId: order.orderId,
-      tokenId: TOKEN_ID,
-      conditionId: createConditionId("cond-1"),
-      reason: "ttl-expired",
-      signalReason: "probe-entry",
-      timestamp: Date.now(),
-    });
-    await bus.publish("NormalizedMarketUpdated", {
-      markets: [
-        makeMarket({
-          bestBid: 0.04,
-          bestAsk: 0.05,
-          midPrice: 0.045,
-          spread: 0.01,
-          bookSource: "clob",
-        }),
-      ],
-      timestamp: Date.now(),
-    });
-    await bus.publish("SignalApproved", {
-      signal: makeSignal(),
-      market: makeMarket({
-        bestBid: 0.04,
-        bestAsk: 0.05,
-        midPrice: 0.045,
-        spread: 0.01,
-        bookSource: "clob",
-      }),
-      approvedAt: Date.now(),
-    });
-    await bus.drain();
-
-    // Fallback policy maxUnfilledCancelsBeforeCooldown=3 → cooldown set, then bypass on book move
-    expect(bypasses).toHaveLength(1);
-    expect(placed).toHaveLength(1);
-  });
 
   it.each([
     {
