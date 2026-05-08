@@ -2391,6 +2391,9 @@ describe("AlgoDecisionModule", () => {
     });
 
     it("keeps BUY emission suppressed until the budget cooldown expires", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-08T00:00:00.000Z"));
+
       const tokenId = "token-budget-recovered";
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);
       const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
@@ -2404,47 +2407,53 @@ describe("AlgoDecisionModule", () => {
       });
       await mod.start();
 
-      await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenId, null, 0.45)],
-        timestamp: Date.now(),
-      });
-      expect(
-        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      try {
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.45)],
+          timestamp: Date.now(),
+        });
+        expect(
+          (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+            ([ev]) => ev === "SignalProduced",
+          ),
+        ).toHaveLength(0);
+
+        budgetAvailable = true;
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.45)],
+          timestamp: Date.now(),
+        });
+
+        expect(
+          (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+            ([ev]) => ev === "SignalProduced",
+          ),
+        ).toHaveLength(0);
+        expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+
+        vi.setSystemTime(Date.now() + 10);
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(tokenId, null, 0.45)],
+          timestamp: Date.now(),
+        });
+
+        const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
           ([ev]) => ev === "SignalProduced",
-        ),
-      ).toHaveLength(0);
-
-      budgetAvailable = true;
-      await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenId, null, 0.45)],
-        timestamp: Date.now(),
-      });
-
-      expect(
-        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
-          ([ev]) => ev === "SignalProduced",
-        ),
-      ).toHaveLength(0);
-      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(tokenId, null, 0.45)],
-        timestamp: Date.now(),
-      });
-
-      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([ev]) => ev === "SignalProduced",
-      );
-      expect(signalCalls).toHaveLength(1);
-      expect(signalCalls[0]![1].signal.side).toBe("buy");
-      expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
-      expect(canAttemptBuy).toHaveBeenCalledTimes(2);
-
-      await mod.stop();
+        );
+        expect(signalCalls).toHaveLength(1);
+        expect(signalCalls[0]![1].signal.side).toBe("buy");
+        expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+        expect(canAttemptBuy).toHaveBeenCalledTimes(2);
+      } finally {
+        await mod.stop();
+        vi.useRealTimers();
+      }
     });
 
     it("does not clear cooldown early just because stale cancels free some budget", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-08T00:00:00.000Z"));
+
       const expensiveTokenId = "token-budget-expensive";
       const cheapTokenId = "token-budget-cheap";
       selectedMarketCache = createMockSelectedMarketCache([expensiveTokenId, cheapTokenId]);
@@ -2485,66 +2494,71 @@ describe("AlgoDecisionModule", () => {
       });
       await mod.start();
 
-      await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(expensiveTokenId, null, 0.45), makeMarket(cheapTokenId, null, 0.12)],
-        timestamp: Date.now(),
-      });
-      expect(
-        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      try {
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(expensiveTokenId, null, 0.45), makeMarket(cheapTokenId, null, 0.12)],
+          timestamp: Date.now(),
+        });
+        expect(
+          (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+            ([ev]) => ev === "SignalProduced",
+          ),
+        ).toHaveLength(0);
+        expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+        expect(canAttemptBuy.mock.calls.map(([required]) => required)).toEqual([8.41]);
+
+        canAttemptBuy.mockClear();
+        (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+        freeBudgetUsdc = 2;
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(cheapTokenId, null, 0.12)],
+          timestamp: Date.now(),
+        });
+        expect(
+          (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+            ([ev]) => ev === "SignalProduced",
+          ),
+        ).toHaveLength(0);
+        expect(canAttemptBuy).not.toHaveBeenCalled();
+
+        canAttemptBuy.mockClear();
+        (bus.publish as ReturnType<typeof vi.fn>).mockClear();
+        freeBudgetUsdc = 9;
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(cheapTokenId, null, 0.12)],
+          timestamp: Date.now(),
+        });
+
+        const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
           ([ev]) => ev === "SignalProduced",
-        ),
-      ).toHaveLength(0);
-      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
-      expect(canAttemptBuy.mock.calls.map(([required]) => required)).toEqual([8.41]);
+        );
+        expect(signalCalls).toHaveLength(0);
+        expect(canAttemptBuy).not.toHaveBeenCalled();
+        expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
 
-      canAttemptBuy.mockClear();
-      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
-      freeBudgetUsdc = 2;
-      await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(cheapTokenId, null, 0.12)],
-        timestamp: Date.now(),
-      });
-      expect(
-        (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        vi.setSystemTime(Date.now() + 10);
+        await (bus as any).emit("NormalizedMarketUpdated", {
+          markets: [makeMarket(cheapTokenId, null, 0.12)],
+          timestamp: Date.now(),
+        });
+
+        const postExpirySignalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
           ([ev]) => ev === "SignalProduced",
-        ),
-      ).toHaveLength(0);
-      expect(canAttemptBuy).not.toHaveBeenCalled();
-
-      canAttemptBuy.mockClear();
-      (bus.publish as ReturnType<typeof vi.fn>).mockClear();
-      freeBudgetUsdc = 9;
-      await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(cheapTokenId, null, 0.12)],
-        timestamp: Date.now(),
-      });
-
-      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([ev]) => ev === "SignalProduced",
-      );
-      expect(signalCalls).toHaveLength(0);
-      expect(canAttemptBuy).not.toHaveBeenCalled();
-      expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
-
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      await (bus as any).emit("NormalizedMarketUpdated", {
-        markets: [makeMarket(cheapTokenId, null, 0.12)],
-        timestamp: Date.now(),
-      });
-
-      const postExpirySignalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
-        ([ev]) => ev === "SignalProduced",
-      );
-      expect(postExpirySignalCalls).toHaveLength(1);
-      expect(postExpirySignalCalls[0]![1].signal.suggestedSizeUsdc).toBeCloseTo(0.99, 5);
-      expect(canAttemptBuy.mock.calls.map(([required]) => required)).toEqual([0.99]);
-      expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
-      const suppressionCalls = vi
-        .mocked(riskEventRepo.insert)
-        .mock.calls.filter(([event]) => event.payload.reasonCode === "wallet_buy_budget_exhausted");
-      expect(suppressionCalls).toHaveLength(1);
-
-      await mod.stop();
+        );
+        expect(postExpirySignalCalls).toHaveLength(1);
+        expect(postExpirySignalCalls[0]![1].signal.suggestedSizeUsdc).toBeCloseTo(0.99, 5);
+        expect(canAttemptBuy.mock.calls.map(([required]) => required)).toEqual([0.99]);
+        expect(decisionSignalLogRepo.insert).toHaveBeenCalledTimes(1);
+        const suppressionCalls = vi
+          .mocked(riskEventRepo.insert)
+          .mock.calls.filter(
+            ([event]) => event.payload.reasonCode === "wallet_buy_budget_exhausted",
+          );
+        expect(suppressionCalls).toHaveLength(1);
+      } finally {
+        await mod.stop();
+        vi.useRealTimers();
+      }
     });
 
     it("stops same-sweep BUY publishing after wallet-budget risk rejection", async () => {
