@@ -7,6 +7,7 @@ import {
   type ConditionId,
   type NormalizedMarket,
   type Order,
+  type OrderRepository,
   type ProfileId,
   type Signal,
 } from "@plankton/domain";
@@ -58,6 +59,20 @@ function makeEntryOrder(): Order {
     botRunId: "bot-run-1" as never,
     createdAt: new Date(NOW).toISOString(),
     updatedAt: new Date(NOW).toISOString(),
+  };
+}
+
+function makeOpenSellOrder(overrides?: Partial<Order>): Order {
+  return {
+    ...makeEntryOrder(),
+    orderId: createOrderId("ord-sell-1"),
+    clientOrderId: "cl-sell-1" as never,
+    side: "sell",
+    price: 0.1,
+    size: 5,
+    sizeUsdc: 0.5,
+    signalReason: "repricing-exit",
+    ...overrides,
   };
 }
 
@@ -1421,7 +1436,10 @@ describe("dead-side-near-end guard", () => {
 });
 
 describe("bounded-midpoint pricing (ADR-014)", () => {
-  function makeBridgeWithPricing(pricingOverrides?: Partial<ExecutionPricingPolicy>) {
+  function makeBridgeWithPricing(
+    pricingOverrides?: Partial<ExecutionPricingPolicy>,
+    opts: { orderRepo?: OrderRepository } = {},
+  ) {
     const bus = new InProcessEventBus();
     const logger = makeLogger();
     const pricing: ExecutionPricingPolicy = pricingOverrides
@@ -1433,6 +1451,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       log: logger,
       liveLiteGuard: { getWalletMode: () => "eoa" } as never,
       policy: () => policy,
+      ...(opts.orderRepo ? { orderRepo: opts.orderRepo } : {}),
     });
     bridge.subscribe();
     const skipped: Array<{
@@ -1511,6 +1530,36 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(skipped).toHaveLength(0);
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.1);
+  });
+
+  it("skips duplicate same-price SELL when an open sell order already exists", async () => {
+    const orderRepo = {
+      findByTokenId: vi.fn(() => [makeOpenSellOrder({ price: 0.1 })]),
+    } as unknown as OrderRepository;
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, { orderRepo });
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.2,
+      suggestedSize: 5.73,
+      reason: "repricing-exit",
+    };
+    const market = makeMarket({ bestBid: 0.02, bestAsk: 0.1, midPrice: 0.06, tickSize: 0.001 });
+    await bus.publish("SignalApproved", {
+      signal: sellSignal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.stage).toBe("execution-terms");
+    expect(skipped[0]!.reasons).toContain("sell-order-already-open");
+    expect(skipped[0]!.diagnostics).toMatchObject({
+      existingPrice: 0.1,
+      executionPrice: 0.1,
+    });
   });
 
   it("skips SELL below the effective exchange minimum size when market min is missing", async () => {

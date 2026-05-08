@@ -26,6 +26,7 @@ import type {
   RuntimeEventMap,
   PlaceOrderCommand,
   TokenId,
+  Order,
 } from "@plankton/domain";
 import {
   canPlaceBuyOrderForMarket,
@@ -542,6 +543,42 @@ export class SignalToOrderBridge {
       return;
     }
 
+    const duplicateSell = this.findSamePriceOpenSellOrder(
+      signal.tokenId,
+      signal.side,
+      executionTerms.price,
+      market.tickSize,
+    );
+    if (duplicateSell) {
+      this.log.debug(
+        {
+          signalId: signal.signalId,
+          tokenId: signal.tokenId,
+          existingOrderId: duplicateSell.orderId,
+          existingPrice: duplicateSell.price,
+          executionPrice: executionTerms.price,
+          cacheStatus: pricing.cacheStatus,
+        },
+        "approved SELL skipped — same-price sell order already open",
+      );
+      await this.publishConversionSkipped(signal, "execution-terms", ["sell-order-already-open"], {
+        cacheStatus: pricing.cacheStatus,
+        existingOrderId: String(duplicateSell.orderId),
+        existingPrice: duplicateSell.price,
+        executionPrice: executionTerms.price,
+      });
+      this.writeObservation({
+        signal,
+        clientOrderId: null,
+        market,
+        policy,
+        executionTerms,
+        canary,
+        skippedReason: "sell-order-already-open",
+      });
+      return;
+    }
+
     const clientOrderId = buildClientOrderId({
       signalId: signal.signalId,
       tokenId: signal.tokenId,
@@ -963,6 +1000,24 @@ export class SignalToOrderBridge {
     return String(tokenId);
   }
 
+  private findSamePriceOpenSellOrder(
+    tokenId: TokenId,
+    side: "buy" | "sell",
+    executionPrice: number,
+    tickSize: number,
+  ): Order | null {
+    if (side !== "sell" || !this.deps.orderRepo) return null;
+    const orders = this.deps.orderRepo.findByTokenId(tokenId);
+    return (
+      orders.find(
+        (order) =>
+          order.side === "sell" &&
+          isOpenOrderStatus(order.status) &&
+          Math.abs(order.price - executionPrice) < tickSize - 1e-9,
+      ) ?? null
+    );
+  }
+
   private resolveBaselineMarket(tokenId: unknown): NormalizedMarket | null {
     const tokenKey = String(tokenId);
     const market = this.marketCache.get(tokenKey);
@@ -1089,6 +1144,10 @@ function resolveOrderSize(
 
 function isEntryReason(reason: string): boolean {
   return ENTRY_REASONS.has(reason);
+}
+
+function isOpenOrderStatus(status: Order["status"]): boolean {
+  return status === "pending" || status === "open" || status === "partially-filled";
 }
 
 type ExecutionTermsResolution =
