@@ -19,22 +19,41 @@ coverage/
 .idea/
 .vscode/
 .claude/
+.co-review/
+.gemini/
+.playwright-mcp/
 .superpowers/
 .worktrees/
+.pnpm-store/
+__pycache__/
+*.pyc
 
 # Runtime data (created at runtime via volume mount)
 apps/runtime/data/
 logs/
 snapshots/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
 
 # Docs and research (not needed in image)
 docs/
 research/
+research_old/
+research_plankton/
+research_gabagool22/
 *.md
 !README.md
 
 # Config backups
 config/*.bak
+
+# Local generated reports / archives
+baseline-coverage.txt
+*.tar.gz
 
 # Test files (not needed in production image)
 **/__tests__/
