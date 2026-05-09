@@ -58,6 +58,7 @@ import {
   classifyNotionalBucket,
   classifySoldBoughtRatioBucket,
 } from "../../executable-price.js";
+import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
@@ -336,6 +337,11 @@ export interface BuySignalBudgetCircuitBreaker {
   canAttemptBuy(
     requiredNotionalUsdc: number,
     signal: import("@plankton/domain").Signal,
+    context?: {
+      pendingPreOpenBuyCount: number;
+      pendingPreOpenBuyCountForToken: number;
+      pendingPreOpenBuyNotionalUsdc: number;
+    },
   ): BuySignalBudgetCircuitBreakerResult;
 }
 
@@ -432,6 +438,7 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // $50 live test. This state is sticky across sweep ticks, so dedupe it.
   D6_SUPPRESSED_REASON,
   DECISION_RULE_HOLD_REASON,
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
 ]);
 const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
@@ -1097,20 +1104,22 @@ export class AlgoDecisionModule implements RuntimeModule {
       if (continuationFacts.stop) {
         const sellMatch = matchRule(ctx, this.decisionRules, SELL_ONLY);
         if (sellMatch) {
-          return this.buildSignal(
+          const emissionFactsWithContinuationStop = {
+            ...emissionFacts,
+            continuationStop: true,
+            continuationTradeCount: continuationFacts.tradeCount,
+            continuationTradeCountSource: continuationFacts.tradeCountSource,
+          };
+          return this.buildSignalOrSuppressSellResidual(
             market,
             sellMatch,
             ctx,
             buyCount,
             now,
             nextSeq,
-            {
-              ...emissionFacts,
-              continuationStop: true,
-              continuationTradeCount: continuationFacts.tradeCount,
-              continuationTradeCountSource: continuationFacts.tradeCountSource,
-            },
+            emissionFactsWithContinuationStop,
             triggerTelemetry,
+            position,
           );
         }
         this.recordDecisionSuppressed({
@@ -1148,7 +1157,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           });
           return null;
         }
-        return this.buildSignal(
+        return this.buildSignalOrSuppressSellResidual(
           market,
           sellMatch,
           ctx,
@@ -1157,6 +1166,7 @@ export class AlgoDecisionModule implements RuntimeModule {
           nextSeq,
           emissionFacts,
           triggerTelemetry,
+          position,
         );
       }
     }
@@ -1182,7 +1192,7 @@ export class AlgoDecisionModule implements RuntimeModule {
       return null;
     }
     const tradeDecision = decision as { action: TradeDecisionAction; ruleId: string };
-    return this.buildSignal(
+    return this.buildSignalOrSuppressSellResidual(
       market,
       tradeDecision,
       ctx,
@@ -1191,6 +1201,65 @@ export class AlgoDecisionModule implements RuntimeModule {
       nextSeq,
       emissionFacts,
       triggerTelemetry,
+      position,
+    );
+  }
+
+  private buildSignalOrSuppressSellResidual(
+    market: NormalizedMarket,
+    decision: { action: TradeDecisionAction; ruleId: string },
+    ctx: EvalContext,
+    buyCount: number,
+    now: number,
+    nextSeq: (key: string) => number,
+    emissionFacts: EmissionFacts,
+    triggerTelemetry: TriggerTelemetry,
+    position: ReturnType<NonNullable<AlgoDecisionModuleDeps["positionRepo"]>["findByTokenId"]>,
+  ): TokenEvalResult | null {
+    if (this.shouldSuppressSellResidualBelowMinSize(decision, market, position)) {
+      this.recordDecisionSuppressed({
+        tokenId: market.tokenId,
+        conditionId: market.conditionId,
+        reasonCode: SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+        side: "SELL",
+        decisionRuleId: decision.ruleId,
+        state: ctx.state,
+        price: ctx.price,
+        buyCount,
+        timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+      });
+      return null;
+    }
+
+    return this.buildSignal(
+      market,
+      decision,
+      ctx,
+      buyCount,
+      now,
+      nextSeq,
+      emissionFacts,
+      triggerTelemetry,
+    );
+  }
+
+  private shouldSuppressSellResidualBelowMinSize(
+    decision: { action: TradeDecisionAction; ruleId: string },
+    market: NormalizedMarket,
+    position: ReturnType<NonNullable<AlgoDecisionModuleDeps["positionRepo"]>["findByTokenId"]>,
+  ): boolean {
+    if (decision.action !== "SELL") return false;
+    const minOrderSize = market.minOrderSize;
+    const positionSize = position?.size;
+    return (
+      typeof minOrderSize === "number" &&
+      Number.isFinite(minOrderSize) &&
+      minOrderSize > 0 &&
+      typeof positionSize === "number" &&
+      Number.isFinite(positionSize) &&
+      positionSize + 1e-9 < minOrderSize
     );
   }
 
@@ -1511,10 +1580,12 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (!circuitBreaker) return null;
 
     try {
-      const result = circuitBreaker.canAttemptBuy(
-        requiredNotionalUsdc + this.pendingPreOpenBuyNotional(),
-        signal,
-      );
+      const pending = this.pendingPreOpenBuy(signal.tokenId);
+      const result = circuitBreaker.canAttemptBuy(requiredNotionalUsdc + pending.notional, signal, {
+        pendingPreOpenBuyCount: pending.count,
+        pendingPreOpenBuyCountForToken: pending.countForToken,
+        pendingPreOpenBuyNotionalUsdc: pending.notional,
+      });
       return {
         allowed: result.canAttempt,
         reasonCode: result.reasonCode ?? WALLET_BUY_BUDGET_EXHAUSTED_REASON,
@@ -1631,12 +1702,22 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (entry.orderId) this.orderIdToToken.delete(entry.orderId);
   }
 
-  private pendingPreOpenBuyNotional(): number {
-    let total = 0;
+  private pendingPreOpenBuy(tokenId: TokenId): {
+    count: number;
+    countForToken: number;
+    notional: number;
+  } {
+    let count = 0;
+    let countForToken = 0;
+    let notional = 0;
     for (const entry of this.pendingEntries.values()) {
-      if (entry.orderId === null) total += entry.suggestedSizeUsdc;
+      if (entry.orderId === null) {
+        count++;
+        if (entry.tokenId === String(tokenId)) countForToken++;
+        notional += entry.suggestedSizeUsdc;
+      }
     }
-    return total;
+    return { count, countForToken, notional };
   }
 
   private reservePendingSignal(signal: import("@plankton/domain").Signal, now: number): void {

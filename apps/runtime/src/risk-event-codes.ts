@@ -27,6 +27,7 @@ const STATIC_CODES: Record<string, string> = {
   "sell-replace-lock-active": "sell_replace_lock_active",
   "sell-replace-lock-retry": "sell_replace_lock_retry",
   "sell-replace-pending": "sell_replace_pending",
+  "sell-residual-below-min-order-size": "sell_residual_below_min_order_size",
   // BUY-side admission guard codes. Reason strings already arrive in canonical
   // snake_case form (see packages/domain/src/market-selection.ts +
   // signal-to-order.ts:evaluateBuyAdmission), so the mapping is identity —

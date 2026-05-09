@@ -54,6 +54,7 @@ import {
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
 import { DEFAULT_FALLBACK_MIN_ORDER_SIZE } from "../../min-order-size.js";
+import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
@@ -958,7 +959,7 @@ export class ExecutionModule implements RuntimeModule {
       ) {
         return {
           kind: "reject",
-          reason: "sell-residual-below-min-order-size",
+          reason: SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
           errorCode: ExchangeErrorCode.InvalidSize,
           message: "sell order skipped — available residual below exchange minimum",
           details: {

@@ -1,13 +1,16 @@
 import type { RiskEventRepository } from "@plankton/domain";
+import { DEDUPED_INTERNAL_ORDER_REJECTION_REASONS } from "./internal-order-reasons.js";
 import { normalizeReasonCode } from "./risk-event-codes.js";
 
 export interface RiskEventWriterConfig {
   rejectCooldownMs: number;
+  orderRejectCooldownMs?: number;
   exposureBreachCooldownMs: number;
 }
 
 export class RiskEventWriter {
   private readonly cooldown = new Map<string, number>();
+  private readonly orderRejectCooldown = new Map<string, number>();
   // Opportunistic prune cadence: walk the cooldown map on every ~1000 calls.
   // Entries are small but grow 1:1 with (tokenId × reasonCode) pairs seen.
   private callsSinceLastPrune = 0;
@@ -47,12 +50,7 @@ export class RiskEventWriter {
       },
     });
     this.cooldown.set(key, rejectedAt);
-
-    this.callsSinceLastPrune++;
-    if (this.callsSinceLastPrune >= 1000) {
-      this.pruneExpired(rejectedAt);
-      this.callsSinceLastPrune = 0;
-    }
+    this.pruneCooldownsPeriodically(rejectedAt);
   }
 
   onOrderRejected(event: {
@@ -71,6 +69,8 @@ export class RiskEventWriter {
     exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
     timestamp: number;
   }): void {
+    if (this.shouldDedupeOrderRejected(event)) return;
+
     this.repo.insert({
       eventType: "order_rejected",
       payload: {
@@ -90,12 +90,76 @@ export class RiskEventWriter {
         timestamp: event.timestamp,
       },
     });
+    this.rememberOrderRejected(event);
+    this.pruneCooldownsPeriodically(event.timestamp);
+  }
+
+  private pruneCooldownsPeriodically(nowMs: number): void {
+    this.callsSinceLastPrune++;
+    if (this.callsSinceLastPrune >= 1000) {
+      this.pruneExpired(nowMs);
+      this.callsSinceLastPrune = 0;
+    }
+  }
+
+  private shouldDedupeOrderRejected(event: {
+    tokenId: string;
+    side?: string | null;
+    reason: string;
+    decisionRuleId?: string | null;
+    signalReason: string | null;
+    exchangeErrorMessage?: string | null;
+    exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
+    timestamp: number;
+  }): boolean {
+    if (event.exchangeErrorMessage != null || event.exchangeErrorDetails != null) return false;
+    if (!DEDUPED_INTERNAL_ORDER_REJECTION_REASONS.has(event.reason)) return false;
+
+    const key = this.orderRejectedCooldownKey(event);
+    const lastAt = this.orderRejectCooldown.get(key);
+    const cooldownMs = this.config.orderRejectCooldownMs ?? this.config.rejectCooldownMs;
+    return lastAt !== undefined && event.timestamp - lastAt < cooldownMs;
+  }
+
+  private rememberOrderRejected(event: {
+    tokenId: string;
+    side?: string | null;
+    reason: string;
+    decisionRuleId?: string | null;
+    signalReason: string | null;
+    exchangeErrorMessage?: string | null;
+    exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
+    timestamp: number;
+  }): void {
+    if (event.exchangeErrorMessage != null || event.exchangeErrorDetails != null) return;
+    if (!DEDUPED_INTERNAL_ORDER_REJECTION_REASONS.has(event.reason)) return;
+    this.orderRejectCooldown.set(this.orderRejectedCooldownKey(event), event.timestamp);
+  }
+
+  private orderRejectedCooldownKey(event: {
+    tokenId: string;
+    side?: string | null;
+    reason: string;
+    decisionRuleId?: string | null;
+    signalReason: string | null;
+  }): string {
+    return [
+      event.tokenId,
+      event.side ?? "",
+      event.reason,
+      event.decisionRuleId ?? "",
+      event.signalReason ?? "",
+    ].join(":");
   }
 
   private pruneExpired(nowMs: number): void {
     const ttl = this.config.rejectCooldownMs;
     for (const [key, ts] of this.cooldown) {
       if (nowMs - ts > ttl) this.cooldown.delete(key);
+    }
+    const orderTtl = this.config.orderRejectCooldownMs ?? this.config.rejectCooldownMs;
+    for (const [key, ts] of this.orderRejectCooldown) {
+      if (nowMs - ts > orderTtl) this.orderRejectCooldown.delete(key);
     }
   }
 

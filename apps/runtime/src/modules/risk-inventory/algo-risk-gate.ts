@@ -11,6 +11,7 @@ import {
   type Order,
 } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
+import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import {
   hasWalletBuyBudget,
@@ -153,6 +154,12 @@ export class AlgoRiskGateImpl implements RiskGate {
       }
       passed.push("per_token_sell_capacity_ok");
 
+      if (this.isSellResidualBelowMinSize(signal)) {
+        rejected.push(SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON);
+        return finish(false, SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON);
+      }
+      passed.push("sell_residual_min_size_ok");
+
       const totalCapacity = evaluateTotalOrdersCapacity({
         policy: orderPolicy,
         openOrdersTotal: sellCounts.openOrdersTotal,
@@ -260,5 +267,16 @@ export class AlgoRiskGateImpl implements RiskGate {
       checksPassed,
       decidedAt: new Date().toISOString(),
     };
+  }
+
+  private isSellResidualBelowMinSize(signal: Signal): boolean {
+    if (signal.side !== "sell") return false;
+    const minOrderSize = this.resolveMinOrderSize?.(signal.tokenId) ?? null;
+    if (minOrderSize == null || !Number.isFinite(minOrderSize) || minOrderSize <= 0) {
+      return false;
+    }
+    const position = this.positionRepo.findByTokenId(signal.tokenId);
+    if (!position || position.status === "closed") return false;
+    return position.size + 1e-9 < minOrderSize;
   }
 }

@@ -884,13 +884,15 @@ async function main(): Promise<void> {
     runtimeControl,
     controlDb: controlConn.db,
     buySignalBudgetCircuitBreaker: {
-      canAttemptBuy: (requiredNotionalUsdc, signal) => {
+      canAttemptBuy: (requiredNotionalUsdc, signal, context) => {
         const openOrders = repos.order.findOpen();
-        const openBuyOrderCount = openOrders.filter((order) => order.side === "buy").length;
-        const openOrdersTotal = openOrders.length;
-        const perTokenOpenBuyOrderCount = openOrders.filter(
-          (order) => order.side === "buy" && order.tokenId === signal.tokenId,
-        ).length;
+        const pendingPreOpenBuyCount = context?.pendingPreOpenBuyCount ?? 0;
+        const openBuyOrderCount =
+          openOrders.filter((order) => order.side === "buy").length + pendingPreOpenBuyCount;
+        const openOrdersTotal = openOrders.length + pendingPreOpenBuyCount;
+        const perTokenOpenBuyOrderCount =
+          openOrders.filter((order) => order.side === "buy" && order.tokenId === signal.tokenId)
+            .length + (context?.pendingPreOpenBuyCountForToken ?? 0);
         const policy = currentExecutionPolicy();
         const buyPolicy = normalizeBuyCapacityPolicy(policy.buyCapacity);
         const perTokenCapacity = evaluatePerTokenOrderCapacity({
@@ -1218,6 +1220,7 @@ async function main(): Promise<void> {
   // tables elsewhere, not to risk_events.
   const riskEventWriter = new RiskEventWriter(repos.riskEvent, {
     rejectCooldownMs: 15 * 60 * 1000,
+    orderRejectCooldownMs: 15 * 60 * 1000,
     exposureBreachCooldownMs: 15 * 60 * 1000,
   });
 

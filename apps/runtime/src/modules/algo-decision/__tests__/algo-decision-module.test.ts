@@ -579,6 +579,120 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("suppresses repeated SELL residuals below exchange min size before signal telemetry", async () => {
+    const tokenId = "token-sell-residual";
+    const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: nowIso,
+      lastTradeAt: nowIso,
+      updatedAt: nowIso,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const positionRepo = {
+      findByTokenId: vi.fn().mockReturnValue({ size: 2, avgEntryPrice: 0.2 }),
+    };
+
+    const mod = buildModule({
+      decisionSignalLogRepo,
+      riskEventRepo,
+      positionRepo: positionRepo as unknown as import("@plankton/domain").PositionRepository,
+    });
+    await mod.start();
+
+    const market = {
+      ...makeMarket(tokenId, null, 0.15, "cond-residual"),
+      tradable: false,
+      minOrderSize: 5,
+    };
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    const signalEmittedCalls = vi
+      .mocked(riskEventRepo.insert)
+      .mock.calls.filter(([event]) => event.eventType === "signal_emitted");
+    const residualSuppressionCalls = vi
+      .mocked(riskEventRepo.insert)
+      .mock.calls.filter(
+        ([event]) => event.payload.reasonCode === "sell-residual-below-min-order-size",
+      );
+
+    expect(signalCalls).toHaveLength(0);
+    expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+    expect(signalEmittedCalls).toHaveLength(0);
+    expect(residualSuppressionCalls).toHaveLength(1);
+    expect(residualSuppressionCalls[0]![0]).toMatchObject({
+      eventType: "signal_suppressed",
+      payload: {
+        tokenId,
+        side: "SELL",
+        decisionRuleId: "D7-SELL-S1",
+      },
+    });
+
+    await mod.stop();
+  });
+
+  it("keeps SELL eligible when position size meets exchange min size", async () => {
+    const tokenId = "token-sell-min-ok";
+    const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: nowIso,
+      lastTradeAt: nowIso,
+      updatedAt: nowIso,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const positionRepo = {
+      findByTokenId: vi.fn().mockReturnValue({ size: 5, avgEntryPrice: 0.2 }),
+    };
+
+    const mod = buildModule({
+      riskEventRepo,
+      positionRepo: positionRepo as unknown as import("@plankton/domain").PositionRepository,
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [
+        {
+          ...makeMarket(tokenId, null, 0.15, "cond-min-ok"),
+          tradable: false,
+          minOrderSize: 5,
+        },
+      ],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal.side).toBe("sell");
+
+    await mod.stop();
+  });
+
   it("uses positions.avg_entry_price as cost basis after partial sells (FIFO-rebased)", async () => {
     // ADR-027 §D-B — after partial sells, inventory engine recomputes
     // positions.avg_entry_price via FIFO from remaining lots. The lifetime
@@ -2401,6 +2515,36 @@ describe("AlgoDecisionModule", () => {
         .mocked(riskEventRepo.insert)
         .mock.calls.filter(([event]) => event.payload.reasonCode === "wallet_buy_budget_exhausted");
       expect(suppressionCalls).toHaveLength(1);
+
+      await mod.stop();
+    });
+
+    it("passes same-sweep pending BUY count into the budget circuit breaker", async () => {
+      const tokenIds = ["token-count-1", "token-count-2", "token-count-3"];
+      selectedMarketCache = createMockSelectedMarketCache(tokenIds);
+      const canAttemptBuy = vi.fn((_requiredNotionalUsdc, _signal, context) => ({
+        canAttempt: (context?.pendingPreOpenBuyCount ?? 0) < 2,
+        reasonCode: "wallet_buy_capacity_exhausted",
+        activateCooldown: false,
+      }));
+
+      const mod = buildModule({
+        buySignalBudgetCircuitBreaker: { canAttemptBuy },
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: tokenIds.map((tokenId) => makeMarket(tokenId, null, 0.45)),
+        timestamp: Date.now(),
+      });
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(2);
+      expect(
+        canAttemptBuy.mock.calls.map(([, , context]) => context?.pendingPreOpenBuyCount),
+      ).toEqual([0, 1, 2]);
 
       await mod.stop();
     });

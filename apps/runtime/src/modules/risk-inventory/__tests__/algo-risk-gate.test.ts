@@ -539,6 +539,44 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.approved).toBe(true);
   });
 
+  it("rejects SELL when the position residual is below exchange min order size", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(makeOpenPosition({ size: 2, currentValueUsdc: 0.6 })),
+      makeLogger(),
+      () => 5,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({ side: "sell", reason: "repricing-exit", suggestedSize: 10 }),
+    );
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain("sell-residual-below-min-order-size");
+  });
+
+  it("allows SELL min-size guard when the position can satisfy exchange minimum", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(makeOpenPosition({ size: 5, currentValueUsdc: 1.5 })),
+      makeLogger(),
+      () => 5,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+    );
+
+    const decision = await gate.evaluate(
+      makeSignal({ side: "sell", reason: "repricing-exit", suggestedSize: 10 }),
+    );
+
+    expect(decision.approved).toBe(true);
+    expect(decision.checksPassed).toContain("sell_residual_min_size_ok");
+  });
+
   it("falls back to flat wallet budget when buy-capacity policy is disabled", async () => {
     const gate = new AlgoRiskGateImpl(
       makeOrderRepo(),
