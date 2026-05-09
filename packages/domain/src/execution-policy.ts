@@ -14,9 +14,12 @@ import type {
   ExecutionPolicy,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
+  DropTriggerPolicy,
   MarketSelectionPolicy,
   OrderCapacityPolicy,
   OrderLifetimePolicy,
+  MultiBuyLadderPolicy,
+  RepriceOnOutbidPolicy,
   SellCapacityPolicy,
 } from "./types.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
@@ -59,6 +62,28 @@ export const DEFAULT_SELL_CAPACITY_POLICY: SellCapacityPolicy = {
 export const DEFAULT_ORDER_CAPACITY_POLICY: OrderCapacityPolicy = {
   enabled: true,
   maxOpenOrdersTotal: 22,
+};
+
+export const DEFAULT_REPRICE_ON_OUTBID_POLICY: RepriceOnOutbidPolicy = {
+  enabled: false,
+  maxRepriceCount: 5,
+};
+
+export const DEFAULT_DROP_TRIGGER_POLICY: DropTriggerPolicy = {
+  enabled: false,
+  failOpenOnNoData: true,
+  thresholdPct: -0.02,
+  lookbackMs: 60 * 60_000,
+  historyMaxAgeMs: 10 * 60_000,
+};
+
+export const DEFAULT_MULTI_BUY_LADDER_POLICY: MultiBuyLadderPolicy = {
+  enabled: false,
+  maxLadderFillsPerToken: 5,
+  ladderGapMs: 60_000,
+  perTokenUsdcCap: 10,
+  maxPriceDriftTicks: 5,
+  minStepFillRate: 0.1,
 };
 
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
@@ -124,6 +149,9 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
+  repriceOnOutbid: DEFAULT_REPRICE_ON_OUTBID_POLICY,
+  dropTrigger: DEFAULT_DROP_TRIGGER_POLICY,
+  multiBuyLadder: DEFAULT_MULTI_BUY_LADDER_POLICY,
   telemetry: DEFAULT_TELEMETRY,
 };
 
@@ -162,6 +190,12 @@ const BOUND_CAPACITY_OPEN_ORDERS_MAX = 1_000;
 const BOUND_ORDER_LIFETIME_MIN_MS = 1_000;
 const BOUND_ORDER_LIFETIME_MAX_MS = 14 * 24 * 60 * 60_000;
 const BOUND_ORDER_LIFETIME_COUNT_MAX = 10_000;
+const BOUND_DROP_TRIGGER_THRESHOLD_MIN = -1;
+const BOUND_DROP_TRIGGER_THRESHOLD_MAX = 0;
+const BOUND_FILL_RATE_MIN = 0;
+const BOUND_FILL_RATE_MAX = 1;
+// Parser ceiling only; profile capital/order risk limits still constrain live exposure.
+const BOUND_LADDER_USDC_CAP_MAX = 10_000;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -221,6 +255,9 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const sellCapacity = parseSellCapacity(obj.sellCapacity, issues);
   const orderCapacity = parseOrderCapacity(obj.orderCapacity, issues);
   const orderLifetime = parseOrderLifetime(obj.orderLifetime, issues);
+  const repriceOnOutbid = parseRepriceOnOutbid(obj.repriceOnOutbid, issues);
+  const dropTrigger = parseDropTrigger(obj.dropTrigger, issues);
+  const multiBuyLadder = parseMultiBuyLadder(obj.multiBuyLadder, issues);
 
   return {
     policy: {
@@ -235,9 +272,132 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       deadSideGuard,
       pricing,
       orderLifetime,
+      repriceOnOutbid,
+      dropTrigger,
+      multiBuyLadder,
       telemetry,
     },
     issues,
+  };
+}
+
+function parseRepriceOnOutbid(raw: unknown, issues: string[]): RepriceOnOutbidPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("repriceOnOutbid must be an object");
+    return DEFAULT_REPRICE_ON_OUTBID_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_REPRICE_ON_OUTBID_POLICY.enabled,
+      issues,
+      "repriceOnOutbid.enabled",
+    ),
+    maxRepriceCount: clampedInt(
+      obj.maxRepriceCount,
+      DEFAULT_REPRICE_ON_OUTBID_POLICY.maxRepriceCount,
+      0,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "repriceOnOutbid.maxRepriceCount",
+    ),
+  };
+}
+
+function parseDropTrigger(raw: unknown, issues: string[]): DropTriggerPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("dropTrigger must be an object");
+    return DEFAULT_DROP_TRIGGER_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_DROP_TRIGGER_POLICY.enabled,
+      issues,
+      "dropTrigger.enabled",
+    ),
+    failOpenOnNoData: booleanOr(
+      obj.failOpenOnNoData,
+      DEFAULT_DROP_TRIGGER_POLICY.failOpenOnNoData,
+      issues,
+      "dropTrigger.failOpenOnNoData",
+    ),
+    thresholdPct: clampedNumber(
+      obj.thresholdPct,
+      DEFAULT_DROP_TRIGGER_POLICY.thresholdPct,
+      BOUND_DROP_TRIGGER_THRESHOLD_MIN,
+      BOUND_DROP_TRIGGER_THRESHOLD_MAX,
+      issues,
+      "dropTrigger.thresholdPct",
+    ),
+    lookbackMs: lifetimeMs(
+      obj.lookbackMs,
+      DEFAULT_DROP_TRIGGER_POLICY.lookbackMs,
+      "dropTrigger.lookbackMs",
+      issues,
+    ),
+    historyMaxAgeMs: lifetimeMs(
+      obj.historyMaxAgeMs,
+      DEFAULT_DROP_TRIGGER_POLICY.historyMaxAgeMs,
+      "dropTrigger.historyMaxAgeMs",
+      issues,
+    ),
+  };
+}
+
+function parseMultiBuyLadder(raw: unknown, issues: string[]): MultiBuyLadderPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("multiBuyLadder must be an object");
+    return DEFAULT_MULTI_BUY_LADDER_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_MULTI_BUY_LADDER_POLICY.enabled,
+      issues,
+      "multiBuyLadder.enabled",
+    ),
+    maxLadderFillsPerToken: clampedInt(
+      obj.maxLadderFillsPerToken,
+      DEFAULT_MULTI_BUY_LADDER_POLICY.maxLadderFillsPerToken,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "multiBuyLadder.maxLadderFillsPerToken",
+    ),
+    ladderGapMs: lifetimeMs(
+      obj.ladderGapMs,
+      DEFAULT_MULTI_BUY_LADDER_POLICY.ladderGapMs,
+      "multiBuyLadder.ladderGapMs",
+      issues,
+    ),
+    perTokenUsdcCap: clampedNumber(
+      obj.perTokenUsdcCap,
+      DEFAULT_MULTI_BUY_LADDER_POLICY.perTokenUsdcCap,
+      0,
+      BOUND_LADDER_USDC_CAP_MAX,
+      issues,
+      "multiBuyLadder.perTokenUsdcCap",
+    ),
+    maxPriceDriftTicks: clampedInt(
+      obj.maxPriceDriftTicks,
+      DEFAULT_MULTI_BUY_LADDER_POLICY.maxPriceDriftTicks,
+      0,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "multiBuyLadder.maxPriceDriftTicks",
+    ),
+    minStepFillRate: clampedNumber(
+      obj.minStepFillRate,
+      DEFAULT_MULTI_BUY_LADDER_POLICY.minStepFillRate,
+      BOUND_FILL_RATE_MIN,
+      BOUND_FILL_RATE_MAX,
+      issues,
+      "multiBuyLadder.minStepFillRate",
+    ),
   };
 }
 

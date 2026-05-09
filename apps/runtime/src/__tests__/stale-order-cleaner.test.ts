@@ -4,6 +4,7 @@ import type {
   OrderRepository,
   MarketRepository,
   Market,
+  NormalizedMarket,
   Order,
   ClientOrderId,
 } from "@plankton/domain";
@@ -106,6 +107,14 @@ function makeMarket(overrides?: Partial<Market>): Market {
     gammaCreatedAt: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function makePricing(overrides?: Partial<Pick<NormalizedMarket, "bestBid" | "tickSize">>) {
+  return {
+    bestBid: 0.32,
+    tickSize: 0.01,
     ...overrides,
   };
 }
@@ -213,6 +222,185 @@ describe("cleanStaleEntryOrders", () => {
     expect(result.staleTtlCancelled).toBe(0);
     expect(result.staleEndDateCancelled).toBe(0);
     expect(cancelled).toHaveLength(0);
+  });
+
+  it("cancels fresh buy entry order for outbid reprice when best bid moved up by one tick", async () => {
+    const order = makeOrder({
+      price: 0.3,
+      signalId: "sig-1",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        entryRepriceOnOutbid: {
+          policy: () => ({ enabled: true, maxRepriceCount: 5 }),
+          getRepriceCount: () => 0,
+          getMarket: () => makePricing({ bestBid: 0.31, tickSize: 0.01 }),
+        },
+      },
+      backoffMap,
+    );
+    await bus.drain();
+
+    expect(result.outbidRepriceCancelled).toBe(1);
+    expect(result.staleTtlCancelled).toBe(0);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("outbid_repriced");
+  });
+
+  it("keeps endDate safety ahead of outbid reprice near resolution", async () => {
+    const order = makeOrder({
+      price: 0.3,
+      signalId: "sig-1",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi
+      .fn()
+      .mockReturnValue(makeMarket({ endDate: new Date(Date.now() + 30 * 60_000).toISOString() }));
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        entryRepriceOnOutbid: {
+          policy: () => ({ enabled: true, maxRepriceCount: 5 }),
+          getRepriceCount: () => 0,
+          getMarket: () => makePricing({ bestBid: 0.31, tickSize: 0.01 }),
+        },
+      },
+      backoffMap,
+    );
+    await bus.drain();
+
+    expect(result.outbidRepriceCancelled).toBe(0);
+    expect(result.staleEndDateCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_entry_enddate");
+  });
+
+  it("does not outbid-reprice when best bid has not moved by a full tick", async () => {
+    const order = makeOrder({
+      price: 0.3,
+      signalId: "sig-1",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        entryRepriceOnOutbid: {
+          policy: () => ({ enabled: true, maxRepriceCount: 5 }),
+          getRepriceCount: () => 0,
+          getMarket: () => makePricing({ bestBid: 0.3, tickSize: 0.01 }),
+        },
+      },
+      backoffMap,
+    );
+    await bus.drain();
+
+    expect(result.outbidRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("does not outbid-reprice when the feature flag is disabled", async () => {
+    const order = makeOrder({
+      price: 0.3,
+      signalId: "sig-1",
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        entryRepriceOnOutbid: {
+          policy: () => ({ enabled: false, maxRepriceCount: 5 }),
+          getRepriceCount: () => 0,
+          getMarket: () => makePricing({ bestBid: 0.31, tickSize: 0.01 }),
+        },
+      },
+      backoffMap,
+    );
+    await bus.drain();
+
+    expect(result.outbidRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("falls back to stale TTL cancellation after max outbid reprice attempts", async () => {
+    const order = makeOrder({
+      price: 0.3,
+      signalId: "sig-1",
+      createdAt: new Date(Date.now() - 7 * 60 * 60_000).toISOString(),
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        entryRepriceOnOutbid: {
+          policy: () => ({ enabled: true, maxRepriceCount: 5 }),
+          getRepriceCount: () => 5,
+          getMarket: () => makePricing({ bestBid: 0.32, tickSize: 0.01 }),
+        },
+      },
+      backoffMap,
+    );
+    await bus.drain();
+
+    expect(result.outbidRepriceCancelled).toBe(0);
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
   });
 
   it("cancels stale intraday probe orders on a short leash", async () => {

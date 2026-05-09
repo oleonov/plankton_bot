@@ -60,6 +60,7 @@ import {
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
+import type { PriceHistoryProvider } from "./market-snapshot-price-history.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -110,6 +111,10 @@ type DecisionEvalMetrics = {
   evalTotal: number;
   emitted: number;
   suppressedMarketNotLive: number;
+  dropTriggerChecked: number;
+  dropTriggerPassed: number;
+  rejectNoDropSignal: number;
+  allowNoDropData: number;
   livenessNotAcceptingOrders: number;
   livenessOrderBookDisabled: number;
   livenessBothFlags: number;
@@ -120,6 +125,10 @@ export interface DecisionEvalMetricsSnapshot {
   evalTotal: number;
   emitted: number;
   suppressedMarketNotLive: number;
+  dropTriggerChecked: number;
+  dropTriggerPassed: number;
+  rejectNoDropSignal: number;
+  allowNoDropData: number;
   livenessNotAcceptingOrders: number;
   livenessOrderBookDisabled: number;
   livenessBothFlags: number;
@@ -181,6 +190,10 @@ function createDecisionEvalMetrics(): DecisionEvalMetrics {
     evalTotal: 0,
     emitted: 0,
     suppressedMarketNotLive: 0,
+    dropTriggerChecked: 0,
+    dropTriggerPassed: 0,
+    rejectNoDropSignal: 0,
+    allowNoDropData: 0,
     livenessNotAcceptingOrders: 0,
     livenessOrderBookDisabled: 0,
     livenessBothFlags: 0,
@@ -198,6 +211,8 @@ function createDecisionEvalMetrics(): DecisionEvalMetrics {
 type TriggerTelemetry = {
   dropFromLastSeen: number | null;
   entryPriceBucket: EntryPriceBucket;
+  dropTriggerStatus: "bypass_probe" | "passed" | "rejected" | "no_drop_data" | "disabled";
+  dropTriggerPct: number | null;
 };
 
 /**
@@ -303,6 +318,8 @@ type SuppressionFacts = {
    *   while the gate is enabled. Sticky → deduped.
    * - `d6-suppressed` — R37 $50-test guard: S2 + buyCount>=4 BUY is blocked
    *   unless the canonical D1 rule fired. Sticky → deduped.
+   * - `no_drop_signal` — R54 drop-trigger gate blocked a non-probe BUY because
+   *   the 1h reference price did not show a sufficient decline. Sticky → deduped.
    *
    * Adding a new reason: pick a kebab/snake-case identifier, document it
    * here, and decide whether it should join `DEDUPED_SUPPRESSION_REASONS`
@@ -377,6 +394,7 @@ export interface AlgoDecisionModuleDeps {
    * provider degrade transparently to leg-local (logged in suppression facts).
    */
   tradeCountProvider?: MarketTradeCountProvider | undefined;
+  priceHistoryProvider?: PriceHistoryProvider | undefined;
   /**
    * Step 0 §P3 — DB-backed execution policy snapshot used by the min-age gate.
    * Reads `entryMinMarketAgeSeconds` to suppress first-BUY signals on markets
@@ -438,6 +456,7 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // $50 live test. This state is sticky across sweep ticks, so dedupe it.
   D6_SUPPRESSED_REASON,
   DECISION_RULE_HOLD_REASON,
+  "no_drop_signal",
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
 ]);
 const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
@@ -543,6 +562,11 @@ export class AlgoDecisionModule implements RuntimeModule {
       },
       "algo-decision continuation_mode loaded",
     );
+    if (!this.deps.executionPolicy) {
+      this.log.warn(
+        "algo-decision execution policy provider missing; policy-gated entry checks disabled",
+      );
+    }
 
     this.unsubs.push(
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
@@ -607,6 +631,10 @@ export class AlgoDecisionModule implements RuntimeModule {
       ` eval_total=${metrics.evalTotal}` +
       ` emitted=${metrics.emitted}` +
       ` suppressed_market_not_live=${metrics.suppressedMarketNotLive}` +
+      ` drop_checked=${metrics.dropTriggerChecked}` +
+      ` drop_passed=${metrics.dropTriggerPassed}` +
+      ` reject_no_drop_signal=${metrics.rejectNoDropSignal}` +
+      ` allow_no_drop_data=${metrics.allowNoDropData}` +
       ` liveness_not_accepting_orders=${metrics.livenessNotAcceptingOrders}` +
       ` liveness_order_book_disabled=${metrics.livenessOrderBookDisabled}` +
       ` liveness_both_flags=${metrics.livenessBothFlags}` +
@@ -855,6 +883,10 @@ export class AlgoDecisionModule implements RuntimeModule {
       evalTotal: this.lastEvalMetrics.evalTotal,
       emitted: this.lastEvalMetrics.emitted,
       suppressedMarketNotLive: this.lastEvalMetrics.suppressedMarketNotLive,
+      dropTriggerChecked: this.lastEvalMetrics.dropTriggerChecked,
+      dropTriggerPassed: this.lastEvalMetrics.dropTriggerPassed,
+      rejectNoDropSignal: this.lastEvalMetrics.rejectNoDropSignal,
+      allowNoDropData: this.lastEvalMetrics.allowNoDropData,
       livenessNotAcceptingOrders: this.lastEvalMetrics.livenessNotAcceptingOrders,
       livenessOrderBookDisabled: this.lastEvalMetrics.livenessOrderBookDisabled,
       livenessBothFlags: this.lastEvalMetrics.livenessBothFlags,
@@ -995,6 +1027,8 @@ export class AlgoDecisionModule implements RuntimeModule {
     const triggerTelemetry: TriggerTelemetry = {
       dropFromLastSeen,
       entryPriceBucket: classifyEntryPriceBucket(price),
+      dropTriggerStatus: "disabled",
+      dropTriggerPct: null,
     };
 
     // Skip tokens that already have a pending buy order in-flight
@@ -1263,6 +1297,45 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
+  private evaluateDropTrigger(
+    tokenId: TokenId,
+    currentPrice: number,
+    signalReason: string,
+    nowMs: number,
+  ): {
+    allowed: boolean;
+    status: TriggerTelemetry["dropTriggerStatus"];
+    priceDropPct: number | null;
+  } {
+    const policy = this.deps.executionPolicy?.().dropTrigger;
+    if (!policy?.enabled) return { allowed: true, status: "disabled", priceDropPct: null };
+    if (signalReason === "probe-entry") {
+      return { allowed: true, status: "bypass_probe", priceDropPct: null };
+    }
+    this.currentEvalMetrics.dropTriggerChecked++;
+    const provider = this.deps.priceHistoryProvider;
+    const referencePrice = provider?.findReferencePrice(
+      tokenId,
+      nowMs - policy.lookbackMs,
+      policy.historyMaxAgeMs,
+    );
+    if (referencePrice == null || referencePrice <= 0 || !Number.isFinite(referencePrice)) {
+      this.currentEvalMetrics.allowNoDropData++;
+      return {
+        allowed: policy.failOpenOnNoData,
+        status: "no_drop_data",
+        priceDropPct: null,
+      };
+    }
+    const priceDropPct = (currentPrice - referencePrice) / referencePrice;
+    if (priceDropPct > policy.thresholdPct) {
+      this.currentEvalMetrics.rejectNoDropSignal++;
+      return { allowed: false, status: "rejected", priceDropPct };
+    }
+    this.currentEvalMetrics.dropTriggerPassed++;
+    return { allowed: true, status: "passed", priceDropPct };
+  }
+
   private buildSignal(
     market: NormalizedMarket,
     decision: { action: TradeDecisionAction; ruleId: string },
@@ -1273,6 +1346,30 @@ export class AlgoDecisionModule implements RuntimeModule {
     emissionFacts: EmissionFacts,
     triggerTelemetry: TriggerTelemetry,
   ): TokenEvalResult {
+    const side = decision.action === "BUY" ? "buy" : ("sell" as const);
+    const reason = resolveSignalReason(side, buyCount);
+    if (side === "buy") {
+      const dropGate = this.evaluateDropTrigger(market.tokenId, ctx.price, reason, now);
+      triggerTelemetry.dropTriggerStatus = dropGate.status;
+      triggerTelemetry.dropTriggerPct = dropGate.priceDropPct;
+      if (!dropGate.allowed) {
+        this.recordDecisionSuppressed({
+          tokenId: market.tokenId,
+          conditionId: market.conditionId,
+          reasonCode: dropGate.status === "no_drop_data" ? "no_drop_data" : "no_drop_signal",
+          side: "BUY",
+          decisionRuleId: decision.ruleId,
+          state: ctx.state,
+          price: ctx.price,
+          buyCount,
+          timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+          emissionFacts,
+          timestamp: new Date(now).toISOString(),
+        });
+        return null;
+      }
+    }
+
     const sizeRules = decision.action === "BUY" ? this.buySizeRules : this.sellSizeRules;
     const nthBuy = buyCount + 1;
     const sizeResult = evaluateSize(
@@ -1280,9 +1377,6 @@ export class AlgoDecisionModule implements RuntimeModule {
       { state: ctx.state, price: ctx.price, nthBuy, buyCount },
       sizeRules,
     );
-
-    const side = decision.action === "BUY" ? "buy" : ("sell" as const);
-    const reason = resolveSignalReason(side, buyCount);
 
     const seqKey = `${market.tokenId}|${side}`;
     const sequenceInTick = nextSeq(seqKey);
@@ -1415,6 +1509,8 @@ export class AlgoDecisionModule implements RuntimeModule {
           // distribution comparison.
           dropFromLastSeen: triggerTelemetry.dropFromLastSeen,
           entryPriceBucket: triggerTelemetry.entryPriceBucket,
+          dropTriggerStatus: triggerTelemetry.dropTriggerStatus,
+          dropTriggerPct: triggerTelemetry.dropTriggerPct,
           // ADR-026 §D-B — §11.1 adds telemetry mirrored alongside the
           // decision_signal_log row.
           isAdd: signal.isAdd,

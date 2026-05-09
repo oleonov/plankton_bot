@@ -467,6 +467,19 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
             ?.passive ?? {}),
         },
       },
+      repriceOnOutbid: {
+        ...current.repriceOnOutbid,
+        ...((patch.repriceOnOutbid as Partial<ExecutionPolicy["repriceOnOutbid"]> | undefined) ??
+          {}),
+      },
+      dropTrigger: {
+        ...current.dropTrigger,
+        ...((patch.dropTrigger as Partial<ExecutionPolicy["dropTrigger"]> | undefined) ?? {}),
+      },
+      multiBuyLadder: {
+        ...current.multiBuyLadder,
+        ...((patch.multiBuyLadder as Partial<ExecutionPolicy["multiBuyLadder"]> | undefined) ?? {}),
+      },
       telemetry: {
         ...current.telemetry,
         ...((patch.telemetry as Partial<ExecutionPolicy["telemetry"]> | undefined) ?? {}),

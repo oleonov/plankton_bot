@@ -30,9 +30,11 @@ research_plankton/plankton_observer/*.log
 research_plankton/plankton_observer/status.json
 research_plankton/plankton_observer/snapshots/
 research_plankton/plankton_observer/debug_runs/
+research_plankton/plankton_observer/rotated/
 research_plankton/plankton_observer/.venv/
 research_plankton/plankton-analysis/pipeline_analysis/.backup_pre_r37/
 research_old/
+/data/observer_shards/
 
 # Local trade DB pulled for ad-hoc analysis (never committed)
 /plankton_trades.db

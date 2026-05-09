@@ -25,6 +25,7 @@ import type {
   ReconciliationResult,
   SettlementLedgerRepository,
   PositionDriftRepository,
+  RepriceOnOutbidPolicy,
 } from "@plankton/domain";
 import { createTokenId, createConditionId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
@@ -65,6 +66,13 @@ export interface ReconciliationModuleDeps {
    */
   exitOrderTtlMs?: () => number;
   exitOrderLifetime?: Pick<OrderLifetimeModule, "resolveExitOrder">;
+  entryRepriceOnOutbid?: {
+    policy: () => RepriceOnOutbidPolicy;
+    getRepriceCount: (signalId: string | null) => number;
+    getMarket: (
+      tokenId: import("@plankton/domain").TokenId,
+    ) => Pick<import("@plankton/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
+  };
   /**
    * Live-lite wallet↔ledger sentinel. Detects impossible local state where
    * Polymarket still reports shares for a token, but the local position is
@@ -195,6 +203,9 @@ export class ReconciliationModule implements RuntimeModule {
           ...(this.deps.exitOrderLifetime
             ? { exitOrderLifetime: this.deps.exitOrderLifetime }
             : {}),
+          ...(this.deps.entryRepriceOnOutbid
+            ? { entryRepriceOnOutbid: this.deps.entryRepriceOnOutbid }
+            : {}),
         },
         this.staleBackoffMap,
       );
@@ -206,6 +217,9 @@ export class ReconciliationModule implements RuntimeModule {
       }
       if (staleResult.staleExitTtlCancelled > 0) {
         allDetails.push(`stale exit TTL cancels: ${staleResult.staleExitTtlCancelled}`);
+      }
+      if (staleResult.outbidRepriceCancelled > 0) {
+        allDetails.push(`outbid reprice cancels: ${staleResult.outbidRepriceCancelled}`);
       }
 
       // 4. Wallet↔ledger sentinel
@@ -241,6 +255,7 @@ export class ReconciliationModule implements RuntimeModule {
         staleResult.staleTtlCancelled === 0 &&
         staleResult.staleEndDateCancelled === 0 &&
         staleResult.staleExitTtlCancelled === 0 &&
+        staleResult.outbidRepriceCancelled === 0 &&
         walletResult.driftCount === 0;
 
       const result: ReconciliationResult = {
@@ -286,6 +301,7 @@ export class ReconciliationModule implements RuntimeModule {
           staleEntryTtl: staleResult.staleTtlCancelled,
           staleEntryEndDate: staleResult.staleEndDateCancelled,
           staleExitTtl: staleResult.staleExitTtlCancelled,
+          outbidRepriceCancelled: staleResult.outbidRepriceCancelled,
           walletPositionDrifts: walletResult.driftCount,
           walletPositionMarkUpdates: walletResult.markUpdateCount,
         },

@@ -10,7 +10,17 @@
  * leaves the open set.
  */
 
-import type { OrderRepository, MarketRepository, EventBus, Market, Order } from "@plankton/domain";
+import type {
+  OrderRepository,
+  MarketRepository,
+  EventBus,
+  Market,
+  NormalizedMarket,
+  Order,
+  RepriceOnOutbidPolicy,
+  CancelOrderReason,
+  TokenId,
+} from "@plankton/domain";
 import { createCommandId, ENTRY_REASONS, EXIT_REASONS } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
@@ -34,6 +44,7 @@ export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
 export const EXIT_ORDER_TTL_MS = 300_000; // 5m
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff
+const PRICE_EPSILON = 1e-9;
 
 export interface StaleOrderCleanerDeps {
   orderRepo: OrderRepository;
@@ -55,12 +66,18 @@ export interface StaleOrderCleanerDeps {
       nowMs: number,
     ) => ExitOrderLifetimeDecision;
   };
+  entryRepriceOnOutbid?: {
+    policy: () => RepriceOnOutbidPolicy;
+    getRepriceCount: (signalId: string | null) => number;
+    getMarket: (tokenId: TokenId) => Pick<NormalizedMarket, "bestBid" | "tickSize"> | null;
+  };
 }
 
 export interface StaleCleanResult {
   staleTtlCancelled: number;
   staleEndDateCancelled: number;
   staleExitTtlCancelled: number;
+  outbidRepriceCancelled: number;
 }
 
 /**
@@ -93,6 +110,7 @@ export async function cleanStaleEntryOrders(
   let staleTtlCancelled = 0;
   let staleEndDateCancelled = 0;
   let staleExitTtlCancelled = 0;
+  let outbidRepriceCancelled = 0;
 
   for (const order of entryBuys) {
     const ordKey = String(order.orderId);
@@ -132,6 +150,27 @@ export async function cleanStaleEntryOrders(
         continue;
       }
     }
+
+    const repriceMarket = deps.entryRepriceOnOutbid?.getMarket(order.tokenId) ?? null;
+    const repriceDecision = shouldRepriceOutbid(order, repriceMarket, deps.entryRepriceOnOutbid);
+
+    if (repriceDecision.shouldReprice) {
+      await publishCancel(bus, order, "outbid_repriced");
+      backoffMap.set(ordKey, now);
+      outbidRepriceCancelled++;
+      log.info(
+        {
+          orderId: ordKey,
+          orderPrice: order.price,
+          currentBestBid: repriceMarket?.bestBid ?? null,
+          tickSize: repriceMarket?.tickSize ?? null,
+          repriceCount: repriceDecision.repriceCount,
+          maxRepriceCount: repriceDecision.maxRepriceCount,
+        },
+        "stale entry order — outbid, requesting reprice",
+      );
+      continue;
+    }
   }
 
   for (const order of exitSells) {
@@ -163,7 +202,41 @@ export async function cleanStaleEntryOrders(
     }
   }
 
-  return { staleTtlCancelled, staleEndDateCancelled, staleExitTtlCancelled };
+  return {
+    staleTtlCancelled,
+    staleEndDateCancelled,
+    staleExitTtlCancelled,
+    outbidRepriceCancelled,
+  };
+}
+
+function shouldRepriceOutbid(
+  order: Pick<Order, "price" | "signalId">,
+  market: Pick<NormalizedMarket, "bestBid" | "tickSize"> | null,
+  reprice:
+    | {
+        policy: () => RepriceOnOutbidPolicy;
+        getRepriceCount: (signalId: string | null) => number;
+      }
+    | undefined,
+): { shouldReprice: boolean; repriceCount: number; maxRepriceCount: number } {
+  if (!reprice || !market) return { shouldReprice: false, repriceCount: 0, maxRepriceCount: 0 };
+  const policy = reprice.policy();
+  if (!policy.enabled || policy.maxRepriceCount <= 0) {
+    return { shouldReprice: false, repriceCount: 0, maxRepriceCount: policy.maxRepriceCount };
+  }
+  const bestBid = market.bestBid;
+  const tickSize = market.tickSize;
+  if (bestBid == null || !Number.isFinite(bestBid) || !Number.isFinite(tickSize) || tickSize <= 0) {
+    return { shouldReprice: false, repriceCount: 0, maxRepriceCount: policy.maxRepriceCount };
+  }
+  const repriceCount = reprice.getRepriceCount(order.signalId ?? null);
+  const outbid = bestBid > order.price + tickSize - PRICE_EPSILON;
+  return {
+    shouldReprice: outbid && repriceCount < policy.maxRepriceCount,
+    repriceCount,
+    maxRepriceCount: policy.maxRepriceCount,
+  };
 }
 
 function resolveOrderTtlMs(
@@ -187,7 +260,10 @@ function resolveOrderTtlMs(
 async function publishCancel(
   bus: EventBus,
   order: { orderId: import("@plankton/domain").OrderId },
-  reason: "stale_entry_ttl" | "stale_entry_enddate" | "stale_exit_ttl",
+  reason: Extract<
+    CancelOrderReason,
+    "stale_entry_ttl" | "stale_entry_enddate" | "stale_exit_ttl" | "outbid_repriced"
+  >,
 ): Promise<void> {
   await bus.publish("CancelOrderRequested", {
     command: {

@@ -53,6 +53,24 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         enabled: true,
         maxOpenOrdersTotal: 22,
       },
+      repriceOnOutbid: {
+        enabled: true,
+        maxRepriceCount: 5,
+      },
+      dropTrigger: {
+        enabled: true,
+        thresholdPct: -0.02,
+        lookbackMs: 3_600_000,
+        historyMaxAgeMs: 600_000,
+      },
+      multiBuyLadder: {
+        enabled: true,
+        maxLadderFillsPerToken: 5,
+        ladderGapMs: 60_000,
+        perTokenUsdcCap: 10,
+        maxPriceDriftTicks: 5,
+        minStepFillRate: 0.1,
+      },
       deadSideGuard: { mode: "enforce", askCeiling: 0.05, maxTimeToEndMs: 60_000 },
       pricing: {
         mode: "bounded-midpoint",
@@ -122,6 +140,22 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.orderCapacity).toEqual({
       enabled: true,
       maxOpenOrdersTotal: 22,
+    });
+    expect(policy.repriceOnOutbid).toEqual({ enabled: true, maxRepriceCount: 5 });
+    expect(policy.dropTrigger).toEqual({
+      enabled: true,
+      failOpenOnNoData: true,
+      thresholdPct: -0.02,
+      lookbackMs: 3_600_000,
+      historyMaxAgeMs: 600_000,
+    });
+    expect(policy.multiBuyLadder).toEqual({
+      enabled: true,
+      maxLadderFillsPerToken: 5,
+      ladderGapMs: 60_000,
+      perTokenUsdcCap: 10,
+      maxPriceDriftTicks: 5,
+      minStepFillRate: 0.1,
     });
     expect(policy.deadSideGuard.mode).toBe("enforce");
     expect(policy.pricing.mode).toBe("bounded-midpoint");
@@ -303,6 +337,68 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.marketSelection).toEqual(DEFAULT_EXECUTION_POLICY.marketSelection);
     expect(issues.some((i) => i.includes("marketSelection.maxMidPrice"))).toBe(true);
     expect(issues.some((i) => i.includes("marketSelection.minLiquidity"))).toBe(true);
+  });
+
+  it("preserves partial fill-rate feature overrides and defaults the rest", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        repriceOnOutbid: { enabled: false },
+        dropTrigger: { enabled: true, failOpenOnNoData: false, thresholdPct: -0.05 },
+        multiBuyLadder: { maxLadderFillsPerToken: 4 },
+      }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.repriceOnOutbid).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.repriceOnOutbid,
+      enabled: false,
+    });
+    expect(policy.dropTrigger).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.dropTrigger,
+      enabled: true,
+      failOpenOnNoData: false,
+      thresholdPct: -0.05,
+    });
+    expect(policy.multiBuyLadder).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.multiBuyLadder,
+      maxLadderFillsPerToken: 4,
+    });
+  });
+
+  it("rejects invalid fill-rate feature policy values with issues", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        repriceOnOutbid: { enabled: "yes", maxRepriceCount: 1.5 },
+        dropTrigger: {
+          enabled: "yes",
+          failOpenOnNoData: "yes",
+          thresholdPct: 0.1,
+          lookbackMs: 1,
+        },
+        multiBuyLadder: {
+          enabled: "yes",
+          maxLadderFillsPerToken: 0,
+          ladderGapMs: 1,
+          perTokenUsdcCap: -1,
+          maxPriceDriftTicks: -1,
+          minStepFillRate: 2,
+        },
+      }),
+    );
+    expect(policy.repriceOnOutbid).toEqual(DEFAULT_EXECUTION_POLICY.repriceOnOutbid);
+    expect(policy.dropTrigger).toEqual(DEFAULT_EXECUTION_POLICY.dropTrigger);
+    expect(policy.multiBuyLadder).toEqual(DEFAULT_EXECUTION_POLICY.multiBuyLadder);
+    expect(issues.some((i) => i.includes("repriceOnOutbid.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("repriceOnOutbid.maxRepriceCount"))).toBe(true);
+    expect(issues.some((i) => i.includes("dropTrigger.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("dropTrigger.failOpenOnNoData"))).toBe(true);
+    expect(issues.some((i) => i.includes("dropTrigger.thresholdPct"))).toBe(true);
+    expect(issues.some((i) => i.includes("dropTrigger.lookbackMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("multiBuyLadder.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("multiBuyLadder.maxLadderFillsPerToken"))).toBe(true);
+    expect(issues.some((i) => i.includes("multiBuyLadder.ladderGapMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("multiBuyLadder.perTokenUsdcCap"))).toBe(true);
+    expect(issues.some((i) => i.includes("multiBuyLadder.maxPriceDriftTicks"))).toBe(true);
+    expect(issues.some((i) => i.includes("multiBuyLadder.minStepFillRate"))).toBe(true);
   });
 
   it("rejects deadSideGuard as array or scalar with an issue", () => {

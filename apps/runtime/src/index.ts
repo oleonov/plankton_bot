@@ -112,7 +112,9 @@ import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
 import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
 import { ExecutionPolicyProvider } from "./execution-policy-provider.js";
 import { AlgoDecisionModule } from "./modules/algo-decision/algo-decision-module.js";
+import { MarketSnapshotPriceHistoryProvider } from "./modules/algo-decision/market-snapshot-price-history.js";
 import { MarketSelectionCache } from "./modules/algo-decision/market-selection-cache.js";
+import { EntryLifecycleModule } from "./modules/entry-lifecycle/entry-lifecycle-module.js";
 import { LegStateTrackerModule } from "./modules/leg-state/leg-state-tracker-module.js";
 import { ReconciliationModule } from "./modules/reconciliation/reconciliation-module.js";
 import { ResolutionModule } from "./modules/resolution/resolution-module.js";
@@ -872,6 +874,7 @@ async function main(): Promise<void> {
   const tradeCountProvider = new DataApiTradeCountProvider({
     observer: buildTradeCountObserver({ log: tradeCountLog, metrics: runtimeMetrics }),
   });
+  const priceHistoryProvider = new MarketSnapshotPriceHistoryProvider(ledgerConn.db);
 
   const algoDecisionModule = new AlgoDecisionModule({
     bus,
@@ -948,6 +951,7 @@ async function main(): Promise<void> {
       },
     },
     tradeCountProvider,
+    priceHistoryProvider,
     executionPolicy: currentExecutionPolicy,
     evalMetricsSink: (snapshot) => {
       runtimeMetrics.writeLatest(
@@ -978,6 +982,16 @@ async function main(): Promise<void> {
     bus,
     orderRepo: repos.order,
     cooldownRepo: repos.orderPriceCooldown,
+    log,
+  });
+  const entryLifecycleModule = new EntryLifecycleModule({
+    bus,
+    orderRepo: repos.order,
+    fillRepo: repos.fill,
+    legStateRepo: repos.legState,
+    algoRulesRepo: repos.algoRules,
+    policy: currentExecutionPolicy,
+    runtimeMetrics,
     log,
   });
 
@@ -1013,6 +1027,11 @@ async function main(): Promise<void> {
     driftRepo: repos.positionDrift,
     exitOrderTtlMs: () => currentExecutionPolicy().exitOrderTtlMs,
     exitOrderLifetime: orderLifetimeModule,
+    entryRepriceOnOutbid: {
+      policy: () => currentExecutionPolicy().repriceOnOutbid,
+      getRepriceCount: (signalId) => entryLifecycleModule.getRepriceCount(signalId),
+      getMarket: (tokenId) => entryLifecycleModule.getMarket(tokenId),
+    },
     ...(runtimeMode === "live-lite" && traderAddress
       ? {
           walletPositionSentinel: {
@@ -1171,6 +1190,7 @@ async function main(): Promise<void> {
       ? [["fill-poller", fillPollerModule] as [string, import("@plankton/domain").RuntimeModule]]
       : []),
     ["execution", executionModule],
+    ["entry-lifecycle", entryLifecycleModule],
   ];
 
   bus.subscribe("ReconciliationDriftDetected", async () => {

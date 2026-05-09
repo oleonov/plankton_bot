@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { bootstrapControlDb, bootstrapLedgerDb } from "@plankton/db";
+import { DEFAULT_EXECUTION_POLICY } from "@plankton/domain";
 import type { DbConnection } from "@plankton/db";
 import type { AppConfig } from "@plankton/config";
 import { buildServer } from "../server.js";
@@ -439,5 +440,30 @@ describe("API against real split schemas", () => {
       headers: auth(),
     });
     expect(res.statusCode).toBe(404);
+  });
+
+  it("PATCH /execution-policy deep-merges PR2 policy objects", async () => {
+    const res = await app.inject({
+      method: "PATCH",
+      url: "/api/v1/profiles/simulation/execution-policy",
+      headers: auth(),
+      payload: {
+        dropTrigger: { thresholdPct: -0.05 },
+        multiBuyLadder: { maxLadderFillsPerToken: 4 },
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.data.policy.dropTrigger).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.dropTrigger,
+      thresholdPct: -0.05,
+    });
+    expect(body.data.policy.multiBuyLadder).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.multiBuyLadder,
+      maxLadderFillsPerToken: 4,
+    });
+    expect(body.data.policy.repriceOnOutbid).toEqual(DEFAULT_EXECUTION_POLICY.repriceOnOutbid);
   });
 });

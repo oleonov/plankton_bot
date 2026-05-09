@@ -695,6 +695,33 @@ export interface OrderCapacityPolicy {
   maxOpenOrdersTotal: number;
 }
 
+export interface RepriceOnOutbidPolicy {
+  enabled: boolean;
+  /** Maximum number of outbid-driven cancel/reissue attempts in one signal chain. */
+  maxRepriceCount: number;
+}
+
+export interface DropTriggerPolicy {
+  enabled: boolean;
+  /** When true, missing 1h history allows the BUY and emits `no_drop_data` telemetry. */
+  failOpenOnNoData: boolean;
+  /** Required `(current - reference) / reference` delta for non-probe BUYs. */
+  thresholdPct: number;
+  /** Lookback window for the reference price. */
+  lookbackMs: number;
+  /** Maximum age around the reference timestamp before the history is treated as unavailable. */
+  historyMaxAgeMs: number;
+}
+
+export interface MultiBuyLadderPolicy {
+  enabled: boolean;
+  maxLadderFillsPerToken: number;
+  ladderGapMs: number;
+  perTokenUsdcCap: number;
+  maxPriceDriftTicks: number;
+  minStepFillRate: number;
+}
+
 export interface ExecutionPolicy {
   version: number;
   entryPriceCeiling: number;
@@ -714,6 +741,9 @@ export interface ExecutionPolicy {
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   orderLifetime: OrderLifetimePolicy;
+  repriceOnOutbid: RepriceOnOutbidPolicy;
+  dropTrigger: DropTriggerPolicy;
+  multiBuyLadder: MultiBuyLadderPolicy;
   telemetry: ExecutionPolicyTelemetry;
 }
 

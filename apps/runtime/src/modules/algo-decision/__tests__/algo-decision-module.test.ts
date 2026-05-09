@@ -384,6 +384,297 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("passes non-probe BUY when the 1h reference price dropped by at least threshold", async () => {
+    const tokenId = "token-drop-pass";
+    const nowIso = new Date(Date.now() - 25 * 60_000).toISOString();
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    legStateRepo = createMockLegStateRepo([
+      {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 1,
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: nowIso,
+        lastTradeAt: nowIso,
+        updatedAt: nowIso,
+      },
+    ]);
+    const priceHistoryProvider = { findReferencePrice: vi.fn(() => 0.06) };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      priceHistoryProvider,
+      riskEventRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        dropTrigger: {
+          ...DEFAULT_EXECUTION_POLICY.dropTrigger,
+          enabled: true,
+          thresholdPct: -0.02,
+        },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.0585)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(priceHistoryProvider.findReferencePrice).toHaveBeenCalledTimes(1);
+    expect(
+      vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.some(
+          ([event]) =>
+            event.eventType === "signal_emitted" && event.payload.dropTriggerStatus === "passed",
+        ),
+    ).toBe(true);
+
+    await mod.stop();
+  });
+
+  it("suppresses non-probe BUY when the 1h reference price did not drop enough", async () => {
+    const tokenId = "token-drop-reject";
+    const nowIso = new Date(Date.now() - 25 * 60_000).toISOString();
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    legStateRepo = createMockLegStateRepo([
+      {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 1,
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: nowIso,
+        lastTradeAt: nowIso,
+        updatedAt: nowIso,
+      },
+    ]);
+    const priceHistoryProvider = { findReferencePrice: vi.fn(() => 0.06) };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      priceHistoryProvider,
+      riskEventRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        dropTrigger: {
+          ...DEFAULT_EXECUTION_POLICY.dropTrigger,
+          enabled: true,
+          thresholdPct: -0.02,
+        },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.0591)],
+      timestamp: Date.now(),
+    });
+
+    const publishCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls;
+    expect(publishCalls.filter(([ev]) => ev === "SignalProduced")).toHaveLength(0);
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "signal_suppressed",
+      payload: expect.objectContaining({
+        tokenId,
+        reasonCode: "no_drop_signal",
+        side: "BUY",
+      }),
+    });
+
+    await mod.stop();
+  });
+
+  it("allows non-probe BUY when drop-trigger history is unavailable", async () => {
+    const tokenId = "token-drop-missing-history";
+    const nowIso = new Date(Date.now() - 25 * 60_000).toISOString();
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    legStateRepo = createMockLegStateRepo([
+      {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 1,
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: nowIso,
+        lastTradeAt: nowIso,
+        updatedAt: nowIso,
+      },
+    ]);
+    const priceHistoryProvider = { findReferencePrice: vi.fn(() => null) };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      priceHistoryProvider,
+      riskEventRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        dropTrigger: { ...DEFAULT_EXECUTION_POLICY.dropTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.0591)],
+      timestamp: Date.now(),
+    });
+
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      ),
+    ).toHaveLength(1);
+    expect(
+      vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.some(
+          ([event]) =>
+            event.eventType === "signal_emitted" &&
+            event.payload.dropTriggerStatus === "no_drop_data",
+        ),
+    ).toBe(true);
+
+    await mod.stop();
+  });
+
+  it("suppresses non-probe BUY with no history when drop-trigger failOpenOnNoData is false", async () => {
+    const tokenId = "token-drop-missing-history-strict";
+    const nowIso = new Date(Date.now() - 25 * 60_000).toISOString();
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    legStateRepo = createMockLegStateRepo([
+      {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 1,
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: nowIso,
+        lastTradeAt: nowIso,
+        updatedAt: nowIso,
+      },
+    ]);
+    const priceHistoryProvider = { findReferencePrice: vi.fn(() => null) };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      priceHistoryProvider,
+      riskEventRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        dropTrigger: {
+          ...DEFAULT_EXECUTION_POLICY.dropTrigger,
+          enabled: true,
+          failOpenOnNoData: false,
+        },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.0591)],
+      timestamp: Date.now(),
+    });
+
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      ),
+    ).toHaveLength(0);
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "signal_suppressed",
+      payload: expect.objectContaining({
+        tokenId,
+        reasonCode: "no_drop_data",
+        side: "BUY",
+      }),
+    });
+
+    await mod.stop();
+  });
+
+  it("does not call price history when drop-trigger is disabled", async () => {
+    const tokenId = "token-drop-disabled";
+    const nowIso = new Date(Date.now() - 25 * 60_000).toISOString();
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    legStateRepo = createMockLegStateRepo([
+      {
+        tokenId: createTokenId(tokenId),
+        buyCount: 1,
+        sellCount: 1,
+        lastAction: "BUY",
+        firstTradePrice: 0.1,
+        firstTradeAt: nowIso,
+        lastTradeAt: nowIso,
+        updatedAt: nowIso,
+      },
+    ]);
+    const priceHistoryProvider = { findReferencePrice: vi.fn(() => 0.9) };
+    const mod = buildModule({
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        dropTrigger: { ...DEFAULT_EXECUTION_POLICY.dropTrigger, enabled: false },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.0591)],
+      timestamp: Date.now(),
+    });
+
+    expect(priceHistoryProvider.findReferencePrice).not.toHaveBeenCalled();
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      ),
+    ).toHaveLength(1);
+
+    await mod.stop();
+  });
+
+  it("bypasses drop trigger for probe-entry BUY", async () => {
+    const tokenId = "token-drop-probe";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    const priceHistoryProvider = { findReferencePrice: vi.fn(() => 0.9) };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      priceHistoryProvider,
+      riskEventRepo,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        dropTrigger: { ...DEFAULT_EXECUTION_POLICY.dropTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.45)],
+      timestamp: Date.now(),
+    });
+
+    expect(
+      (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      ),
+    ).toHaveLength(1);
+    expect(priceHistoryProvider.findReferencePrice).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.some(
+          ([event]) =>
+            event.eventType === "signal_emitted" &&
+            event.payload.dropTriggerStatus === "bypass_probe",
+        ),
+    ).toBe(true);
+
+    await mod.stop();
+  });
+
   it("persists BUY/SELL decision signal telemetry", async () => {
     const tokenId = "token-sell";
     const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
