@@ -327,6 +327,137 @@ describe("runWalletPositionSentinel", () => {
     expect(result.missingRemotePositions[0]!.localStatus).toBe("dust");
   });
 
+  it("does not flag missing-remote micro-dust below one cent", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "dust",
+            size: 0.009999999999999787,
+            costBasisUsdc: 0.0037,
+            currentValueUsdc: 0.0033,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.missingRemotePositions).toHaveLength(0);
+  });
+
+  it("still flags same-size missing-remote open inventory even when value is tiny", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 0.01,
+            costBasisUsdc: 0.0037,
+            currentValueUsdc: 0.0033,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.missingRemotePositions[0]!.localStatus).toBe("open");
+  });
+
+  it("still flags missing-remote dust above the micro-dust share threshold", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "dust",
+            size: 0.010_001,
+            costBasisUsdc: 0.0037,
+            currentValueUsdc: 0.0033,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.missingRemotePositions[0]!.localStatus).toBe("dust");
+  });
+
+  it("does not let newer micro-dust hide an older meaningful open position", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            positionId: createPositionId("pos-older-open"),
+            status: "open",
+            size: 50,
+            costBasisUsdc: 5,
+            currentValueUsdc: 4.5,
+            realizedPnl: 0,
+            closedAt: null,
+            updatedAt: "2026-04-24T02:00:00.000Z",
+          }),
+          makePosition({
+            positionId: createPositionId("pos-newer-micro-dust"),
+            status: "dust",
+            size: 0.01,
+            costBasisUsdc: 0.0037,
+            currentValueUsdc: 0.0033,
+            closedAt: null,
+            updatedAt: "2026-04-24T03:00:00.000Z",
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.missingRemotePositions[0]).toMatchObject({
+      positionId: "pos-older-open",
+      localStatus: "open",
+      localSize: 50,
+    });
+  });
+
+  it("still flags same-size missing-remote dust when remaining value is meaningful", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "dust",
+            size: 0.01,
+            costBasisUsdc: 0.5,
+            currentValueUsdc: 0.49,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.missingRemotePositions[0]!.localStatus).toBe("dust");
+  });
+
   it("treats a remote dust row (size <= MIN_REMOTE_SIZE) as missing for inverse-direction drift", async () => {
     const result = await runWalletPositionSentinel(
       {

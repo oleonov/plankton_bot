@@ -11,6 +11,8 @@ const MISSING_REMOTE_GRACE_MS = 2 * 60 * 1000;
 // rounding gap without masking real shortfalls (a real share-count drift
 // at $0.50/token is worth ≥ $0.0005, which is below our minimum order size).
 const SIZE_DRIFT_EPSILON = 1e-3;
+const MISSING_REMOTE_MICRO_DUST_MAX_SIZE = 0.01 + 1e-9;
+const MISSING_REMOTE_MICRO_DUST_MAX_VALUE_USDC = 0.01 + 1e-9;
 
 export interface WalletPositionSentinelResult {
   driftCount: number;
@@ -146,7 +148,7 @@ export async function runWalletPositionSentinel(
   // path will collapse them; no useful drift signal there).
   for (const [tokenIdStr, localPositions] of localByToken) {
     if (remoteTokensWithSize.has(tokenIdStr)) continue;
-    const active = latestActivePosition(localPositions);
+    const active = latestMissingRemoteDriftPosition(localPositions);
     if (!active) continue;
     if (active.status !== "open" && active.status !== "dust") continue;
     // Same data-api 4-decimal rounding gap that gated the direct-mismatch path:
@@ -154,6 +156,7 @@ export async function runWalletPositionSentinel(
     // a real drift. Skipping here keeps the inverse-direction branch from
     // re-introducing the v138 false-positive class for tiny dust rows.
     if (active.size <= SIZE_DRIFT_EPSILON) continue;
+    if (isMissingRemoteMicroDust(active)) continue;
     if (isWithinMissingRemoteGrace(active, nowMs)) continue;
 
     const market = deps.marketRepo.findByTokenId(createTokenId(tokenIdStr));
@@ -243,6 +246,16 @@ function latestActivePosition(positions: readonly Position[]): Position | null {
   );
 }
 
+function latestMissingRemoteDriftPosition(positions: readonly Position[]): Position | null {
+  const activePositions = positions.filter(
+    (position) => position.status !== "closed" && position.size > 0,
+  );
+  const reportablePositions = activePositions.filter(
+    (position) => !isMissingRemoteMicroDust(position),
+  );
+  return latestPosition(reportablePositions) ?? latestPosition(activePositions);
+}
+
 function isFutureEndDate(endDate: string, nowMs: number): boolean {
   const endMs = Date.parse(endDate);
   return Number.isFinite(endMs) && endMs > nowMs;
@@ -256,6 +269,18 @@ function isWithinMissingRemoteGrace(position: Position, nowMs: number): boolean 
   return (
     Number.isFinite(latestLocalChangeMs) && nowMs - latestLocalChangeMs < MISSING_REMOTE_GRACE_MS
   );
+}
+
+function isMissingRemoteMicroDust(position: Position): boolean {
+  if (position.status !== "dust") return false;
+  if (position.size > MISSING_REMOTE_MICRO_DUST_MAX_SIZE) return false;
+
+  const currentValue =
+    position.currentValueUsdc === null || !Number.isFinite(position.currentValueUsdc)
+      ? 0
+      : position.currentValueUsdc;
+  const maxRemainingValue = Math.max(currentValue, position.costBasisUsdc);
+  return maxRemainingValue <= MISSING_REMOTE_MICRO_DUST_MAX_VALUE_USDC;
 }
 
 function formatClosedDriftDetail(drift: ClosedLivePositionDrift): string {
