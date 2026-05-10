@@ -1044,6 +1044,7 @@ async function main(): Promise<void> {
           walletPositionSentinel: {
             reader: new PolymarketDataPositionReader(traderAddress),
             positionRepo: repos.position,
+            fillRepo: repos.fill,
             marketRepo: repos.market,
             log,
           },

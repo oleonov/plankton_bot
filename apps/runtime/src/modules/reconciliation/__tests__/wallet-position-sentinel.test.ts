@@ -3,6 +3,8 @@ import {
   createConditionId,
   createPositionId,
   createTokenId,
+  type Fill,
+  type FillRepository,
   type Market,
   type MarketRepository,
   type Position,
@@ -89,6 +91,34 @@ function positionRepo(positions: Position[]): PositionRepository {
     findAll: vi.fn().mockReturnValue(positions),
     save: vi.fn(),
   } as unknown as PositionRepository;
+}
+
+function makeFill(overrides: Partial<Fill> = {}): Fill {
+  return {
+    fillId: "fill-live" as Fill["fillId"],
+    orderId: "order-live" as Fill["orderId"],
+    tokenId: TOKEN,
+    conditionId: CONDITION,
+    side: "buy",
+    price: 0.06,
+    size: 17.33,
+    sizeUsdc: 1.0398,
+    liquidityRole: "maker",
+    fee: 0,
+    feeRateBps: 0,
+    signalId: null,
+    decisionRuleId: null,
+    signalTimestamp: null,
+    filledAt: "2026-04-24T23:59:30.000Z",
+    ...overrides,
+  };
+}
+
+function fillRepo(fills: Fill[]): FillRepository {
+  return {
+    findByTokenId: vi.fn().mockReturnValue(fills),
+    findRecentByTokenId: vi.fn().mockReturnValue([...fills].reverse()),
+  } as unknown as FillRepository;
 }
 
 function marketRepo(market: Market | null): MarketRepository {
@@ -212,6 +242,62 @@ describe("runWalletPositionSentinel", () => {
 
     expect(result.driftCount).toBe(1);
     expect(result.details[0]).toContain("wallet-live-position-size-mismatch");
+  });
+
+  it("does not flag active size drift while Polymarket data-api lags a fresh fill", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "open",
+        size: 50.88,
+        costBasisUsdc: 3.069,
+        currentValueUsdc: 3.05,
+        realizedPnl: 0,
+        closedAt: null,
+      }),
+    ]);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 33.55, currentValueUsdc: 2.0297 })]),
+        positionRepo: repo,
+        fillRepo: fillRepo([makeFill({ filledAt: "2026-04-24T23:59:15.000Z" })]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.activePositionDrifts).toHaveLength(0);
+    expect(result.markUpdateCount).toBe(1);
+  });
+
+  it("flags active size drift after the fresh-fill data-api grace expires", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 33.55, currentValueUsdc: 2.0297 })]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 50.88,
+            costBasisUsdc: 3.069,
+            currentValueUsdc: 3.05,
+            realizedPnl: 0,
+            closedAt: null,
+          }),
+        ]),
+        fillRepo: fillRepo([makeFill({ filledAt: "2026-04-24T23:55:00.000Z" })]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(1);
+    expect(result.activePositionDrifts[0]).toMatchObject({
+      localSize: 50.88,
+      remoteSize: 33.55,
+    });
   });
 
   it("does not flag a 4-decimal data-api rounding gap as size mismatch", async () => {

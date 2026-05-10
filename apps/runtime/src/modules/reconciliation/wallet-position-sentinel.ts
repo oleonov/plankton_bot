@@ -1,4 +1,10 @@
-import type { MarketRepository, Position, PositionRepository, TokenId } from "@krabs/domain";
+import type {
+  FillRepository,
+  MarketRepository,
+  Position,
+  PositionRepository,
+  TokenId,
+} from "@krabs/domain";
 import { createTokenId } from "@krabs/domain";
 import type { PolymarketDataPosition, PolymarketPositionReader } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
@@ -6,6 +12,7 @@ import { resolveOpenPositionStatus } from "../../position-status.js";
 
 const MIN_REMOTE_SIZE = 1e-9;
 const MISSING_REMOTE_GRACE_MS = 2 * 60 * 1000;
+const ACTIVE_SIZE_DRIFT_GRACE_MS = 2 * 60 * 1000;
 // Polymarket data-api returns size with 4 decimals; local DB stores 6.
 // 1e-3 is the smallest absolute tolerance that absorbs every legitimate
 // rounding gap without masking real shortfalls (a real share-count drift
@@ -62,6 +69,7 @@ export interface MissingRemotePositionDrift {
 export interface WalletPositionSentinelDeps {
   reader: PolymarketPositionReader;
   positionRepo: PositionRepository;
+  fillRepo?: FillRepository;
   marketRepo: MarketRepository;
   log: Logger;
 }
@@ -112,6 +120,7 @@ export async function runWalletPositionSentinel(
         markUpdateCount++;
       }
       if (Math.abs(active.size - remote.size) > SIZE_DRIFT_EPSILON) {
+        if (isWithinRecentFillGrace(deps.fillRepo, active.tokenId, nowMs)) continue;
         const market = deps.marketRepo.findByTokenId(createTokenId(remote.tokenId));
         activeDrifts.push({
           tokenId: createTokenId(remote.tokenId),
@@ -269,6 +278,31 @@ function isWithinMissingRemoteGrace(position: Position, nowMs: number): boolean 
   return (
     Number.isFinite(latestLocalChangeMs) && nowMs - latestLocalChangeMs < MISSING_REMOTE_GRACE_MS
   );
+}
+
+function isWithinRecentFillGrace(
+  fillRepo: FillRepository | undefined,
+  tokenId: TokenId,
+  nowMs: number,
+): boolean {
+  if (!fillRepo) return false;
+  const latestFill = getLatestFillForToken(fillRepo, tokenId);
+  if (!latestFill) return false;
+  const latestFillMs = Date.parse(latestFill.filledAt);
+  return Number.isFinite(latestFillMs) && nowMs - latestFillMs < ACTIVE_SIZE_DRIFT_GRACE_MS;
+}
+
+function getLatestFillForToken(fillRepo: FillRepository, tokenId: TokenId) {
+  const recent = fillRepo.findRecentByTokenId?.(tokenId, 1);
+  if (recent && recent.length > 0) return recent[0] ?? null;
+
+  let latest = null as ReturnType<FillRepository["findByTokenId"]>[number] | null;
+  for (const fill of fillRepo.findByTokenId(tokenId)) {
+    if (!latest || Date.parse(fill.filledAt) > Date.parse(latest.filledAt)) {
+      latest = fill;
+    }
+  }
+  return latest;
 }
 
 function isMissingRemoteMicroDust(position: Position): boolean {
