@@ -28,6 +28,7 @@ services:
       - "3100:3100"
     volumes:
       - krabs-data:/app/apps/runtime/data
+      - ./config:/app/config:ro
     restart: unless-stopped
     depends_on:
       - krabs-runtime
