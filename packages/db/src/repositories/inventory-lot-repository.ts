@@ -4,6 +4,8 @@ import type { InventoryLot, PositionId, TokenId } from "@plankton/domain";
 import { createLotId, createPositionId, createTokenId, createFillId } from "@plankton/domain";
 import type { OrderSide } from "@plankton/domain";
 
+const INVENTORY_EPSILON = 1e-6;
+
 interface LotRow {
   lot_id: string;
   position_id: string;
@@ -87,21 +89,22 @@ export class SqliteInventoryLotRepository implements InventoryLotRepository {
           .all(positionId) as LotRow[];
 
         const totalAvailable = openLots.reduce((sum, r) => sum + r.remaining_size, 0);
-        if (totalAvailable < size) {
+        if (totalAvailable + INVENTORY_EPSILON < size) {
           throw new Error(`Insufficient inventory: requested ${size}, available ${totalAvailable}`);
         }
 
         const updateStmt = this.db.prepare(
-          `UPDATE inventory_lots SET remaining_size = remaining_size - ? WHERE lot_id = ?`,
+          `UPDATE inventory_lots SET remaining_size = ? WHERE lot_id = ?`,
         );
 
         const result: { lot: InventoryLot; consumed: number }[] = [];
         let remaining = size;
 
         for (const row of openLots) {
-          if (remaining <= 0) break;
+          if (remaining <= INVENTORY_EPSILON) break;
           const consumed = Math.min(row.remaining_size, remaining);
-          updateStmt.run(consumed, row.lot_id);
+          const nextRemaining = row.remaining_size - consumed;
+          updateStmt.run(nextRemaining <= INVENTORY_EPSILON ? 0 : nextRemaining, row.lot_id);
           remaining -= consumed;
 
           // Re-read to return the updated lot

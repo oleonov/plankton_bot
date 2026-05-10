@@ -176,6 +176,28 @@ describe("SqliteInventoryLotRepository", () => {
     );
   });
 
+  it("consumeFifo tolerates tiny floating point inventory drift", () => {
+    setupPrereqs(conn.db);
+    repo.save(makeLot({ size: 9.75, remainingSize: 4.119999999999999 }));
+
+    const result = repo.consumeFifo(createPositionId("pos-1"), 4.12);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]!.consumed).toBeCloseTo(4.12, 6);
+
+    const lots = repo.findByTokenId(createTokenId("tok-1"));
+    expect(lots[0]!.remainingSize).toBe(0);
+  });
+
+  it("consumeFifo still rejects inventory shortfalls beyond tolerance", () => {
+    setupPrereqs(conn.db);
+    repo.save(makeLot({ size: 9.75, remainingSize: 4.119 }));
+
+    expect(() => repo.consumeFifo(createPositionId("pos-1"), 4.12)).toThrow(
+      /Insufficient inventory/,
+    );
+  });
+
   it("consumeFifo updates remaining_size correctly in DB", () => {
     setupPrereqs(conn.db);
     repo.save(makeLot({ size: 100, remainingSize: 100 }));
