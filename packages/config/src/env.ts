@@ -80,8 +80,8 @@ const envSchema = z
       .int()
       .min(10_000)
       .max(600_000)
-      .default(60_000),
-    MARKET_DATA_DISCOVERY_BATCH_SIZE: z.coerce.number().int().min(50).max(500).default(200),
+      .default(5 * 60_000),
+    MARKET_DATA_DISCOVERY_BATCH_SIZE: z.coerce.number().int().min(50).max(500).default(50),
     // Task 2 — CLOB axios agent pool bounds
     CLOB_AXIOS_MAX_SOCKETS: z.coerce.number().int().min(1).max(32).default(8),
     CLOB_AXIOS_MAX_FREE_SOCKETS: z.coerce.number().int().min(0).max(16).default(2),

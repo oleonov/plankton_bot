@@ -26,7 +26,7 @@ import type {
 } from "@krabs/domain";
 import { createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
-import { isTransientNetworkError } from "../../network-errors.js";
+import { isRateLimitError, isTransientNetworkError } from "../../network-errors.js";
 import {
   consumeWarnThrottle,
   createWarnThrottleState,
@@ -63,6 +63,7 @@ const FALLBACK_POLL_TIMEOUT_BASE_MS = 10_000;
 const FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS = 25;
 const FALLBACK_POLL_TIMEOUT_MAX_MS = 30_000;
 const TRANSIENT_POLL_WARN_THROTTLE_MS = 15 * 60_000;
+const GAMMA_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
@@ -154,9 +155,9 @@ export interface MarketDataModuleDeps {
   botRunId?: string;
   /** Max tokens subscribed via WebSocket (executionCritical + entryCandidates). Default: unbounded (legacy). */
   maxTrackedTokens?: number;
-  /** Interval in ms between discovery-tier poll batches. Default: 60_000. */
+  /** Interval in ms between discovery-tier poll batches. Default: 300_000. */
   discoveryPollIntervalMs?: number;
-  /** Number of discovery-tier tokens to poll per batch cycle. Default: 200. */
+  /** Number of discovery-tier tokens to poll per batch cycle. Default: 50. */
   discoveryBatchSize?: number;
   /**
    * Safety cap for the main poll batch under forceFullPoll (Task 5).
@@ -210,6 +211,8 @@ export class MarketDataModule implements RuntimeModule {
   private lastDiscoveryBatchTokenIds: Set<string> = new Set();
   private readonly cachedPollDegradeWarn: WarnThrottleState = createWarnThrottleState();
   private readonly discoveryPollFailureWarn: WarnThrottleState = createWarnThrottleState();
+  private pricingPollBackoffUntilMs = 0;
+  private discoveryPollBackoffUntilMs = 0;
   /**
    * True when the stream-level circuit breaker is open — the module degrades to
    * poll-only mode, polling the full WS-tier each cycle. Readable by Task 5.
@@ -256,7 +259,7 @@ export class MarketDataModule implements RuntimeModule {
     }, this.deps.pollIntervalMs);
 
     // Discovery poll loop: separate channel for tokens beyond the WS cap.
-    const discoveryIntervalMs = this.deps.discoveryPollIntervalMs ?? 60_000;
+    const discoveryIntervalMs = this.deps.discoveryPollIntervalMs ?? 5 * 60_000;
     this.discoveryPollTimer = setInterval(() => {
       this.pollDiscoveryBatch().catch((err) =>
         this.log.error({ err }, "discovery poll cycle error"),
@@ -598,6 +601,17 @@ export class MarketDataModule implements RuntimeModule {
       );
 
       const timeoutMs = resolveMarketPricingTimeoutMs(tokenIdsToPoll.length);
+      if (tokenIdsToPoll.length > 0 && now < this.pricingPollBackoffUntilMs) {
+        this.lastPricingHitCount = 0;
+        await this.publishCachedMarkets(tracked, now);
+        this.logCachedPollDegraded(
+          new Error("Gamma pricing rate-limit backoff active"),
+          tracked.length,
+          tokenIdsToPoll.length,
+          now,
+        );
+        return;
+      }
       const pricingMap =
         tokenIdsToPoll.length > 0
           ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll, { timeoutMs })
@@ -647,6 +661,9 @@ export class MarketDataModule implements RuntimeModule {
         timestamp: now,
       });
     } catch (err) {
+      if (isRateLimitError(err)) {
+        this.pricingPollBackoffUntilMs = Date.now() + GAMMA_RATE_LIMIT_BACKOFF_MS;
+      }
       if (this.shouldDegradeToCachedStreamState(err, tracked, tokenIdsToPoll)) {
         const nowMs = Date.now();
         await this.publishCachedMarkets(tracked, nowMs);
@@ -677,15 +694,23 @@ export class MarketDataModule implements RuntimeModule {
    * modules (Normalization, AlgoDecision, SignalToOrder) see fresh pricing.
    */
   private async pollDiscoveryBatch(): Promise<void> {
+    const nowMs = Date.now();
+    if (nowMs < this.discoveryPollBackoffUntilMs) {
+      this.log.debug(
+        { backoffRemainingMs: this.discoveryPollBackoffUntilMs - nowMs },
+        "discovery poll skipped during Gamma rate-limit backoff",
+      );
+      return;
+    }
     if (this.discoveryTier.length === 0) {
       // Even when the discovery tier has emptied out (scanner withdrew it, or
       // selection rules narrowed the universe), we must still flush any
       // tokens from the previous batch so they don't linger in downstream
       // caches forever.
-      await this.flushDiscoveryBatchEviction(new Set(), Date.now());
+      await this.flushDiscoveryBatchEviction(new Set(), nowMs);
       return;
     }
-    const batchSize = this.deps.discoveryBatchSize ?? 200;
+    const batchSize = this.deps.discoveryBatchSize ?? 50;
     const cursor = this.discoveryCursor % this.discoveryTier.length;
     const batch = this.discoveryTier.slice(cursor, cursor + batchSize);
     const tokenIds = batch.map((m) => String(m.tokenId));
@@ -725,6 +750,9 @@ export class MarketDataModule implements RuntimeModule {
       await this.flushDiscoveryBatchEviction(new Set(tokenIds), nowMs);
       resetWarnThrottle(this.discoveryPollFailureWarn);
     } catch (err) {
+      if (isRateLimitError(err)) {
+        this.discoveryPollBackoffUntilMs = Date.now() + GAMMA_RATE_LIMIT_BACKOFF_MS;
+      }
       this.logDiscoveryPollFailure(err, {
         batchSize: batch.length,
         cursor,

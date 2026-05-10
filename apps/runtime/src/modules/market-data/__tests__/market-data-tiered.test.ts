@@ -370,6 +370,83 @@ describe("MarketDataModule — tiered pricing (Task 1)", () => {
     await mod.stop();
   });
 
+  it("backs off discovery pricing polls after Gamma 429 responses", async () => {
+    vi.useFakeTimers();
+
+    const tiered = makeTiered([], [], ["d0", "d1", "d2", "d3"]);
+    const repo = createMockRepo(tiered);
+    const getMarketPricing = vi
+      .fn()
+      .mockRejectedValue(new Error("Gamma pricing request failed: 429 Too Many Requests"));
+    gateway.getMarketPricing = getMarketPricing;
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      discoveryPollIntervalMs: 10_000,
+      discoveryBatchSize: 2,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(getMarketPricing).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(getMarketPricing).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(getMarketPricing).toHaveBeenCalledTimes(2);
+
+    await mod.stop();
+  });
+
+  it("degrades main polling to cached stream state on Gamma 429 responses", async () => {
+    vi.useFakeTimers();
+
+    const tiered = makeTiered(["crit-1"], [], []);
+    const repo = createMockRepo(tiered);
+    gateway.createMarketPricingStream = (handlers) => {
+      stream = new FakePricingStream(handlers);
+      return stream;
+    };
+    gateway.getMarketPricing = vi
+      .fn()
+      .mockRejectedValue(new Error("Gamma pricing request failed: 429 Too Many Requests"));
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 1000,
+      discoveryPollIntervalMs: 10_000,
+      discoveryBatchSize: 2,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(silentLog.error).not.toHaveBeenCalledWith(expect.anything(), "poll cycle failed");
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        trackedCount: 1,
+        fallbackPollCount: 1,
+      }),
+      "poll cycle degraded — keeping cached websocket state",
+    );
+
+    await mod.stop();
+  });
+
   it("discovery cursor advances across poll cycles, wrapping at end of discovery list", async () => {
     vi.useFakeTimers();
 

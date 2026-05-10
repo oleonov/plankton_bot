@@ -8,6 +8,8 @@ describe("speedup config vars", () => {
     delete process.env.MARKET_SCAN_INTERVAL_MS;
     delete process.env.MARKET_SCAN_HINT_MIN_INTERVAL_MS;
     delete process.env.RECONCILIATION_INTERVAL_MS;
+    delete process.env.MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS;
+    delete process.env.MARKET_DATA_DISCOVERY_BATCH_SIZE;
     delete process.env.FILL_POLL_INTERVAL_MS;
     delete process.env.EXECUTION_MAX_CONCURRENCY;
   });
@@ -40,6 +42,16 @@ describe("speedup config vars", () => {
   it("defaults MARKET_DATA_POLL_INTERVAL_MS to 5000", () => {
     const config = loadEnv();
     expect(config.marketDataPollIntervalMs).toBe(5000);
+  });
+
+  it("defaults MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS to 5 minutes", () => {
+    const config = loadEnv();
+    expect(config.marketDataDiscoveryPollIntervalMs).toBe(5 * 60 * 1000);
+  });
+
+  it("defaults MARKET_DATA_DISCOVERY_BATCH_SIZE to 50", () => {
+    const config = loadEnv();
+    expect(config.marketDataDiscoveryBatchSize).toBe(50);
   });
 
   it("defaults EXECUTION_MAX_CONCURRENCY to 16", () => {
