@@ -265,7 +265,7 @@ export class EntryLifecycleModule implements RuntimeModule {
       return;
     }
     const market = readiness.market;
-    const price = market.bestBid ?? market.midPrice;
+    const price = readiness.ladderTargetPrice;
     if (price == null || price <= 0 || !Number.isFinite(price)) {
       this.recordLadderStop("price_unavailable");
       this.writeMetrics(now);
@@ -291,6 +291,7 @@ export class EntryLifecycleModule implements RuntimeModule {
       conditionId: createConditionId(market.conditionId),
       side: "buy",
       suggestedPrice: price,
+      ladderTargetPrice: price,
       suggestedSize: suggestedSizeUsdc / price,
       suggestedSizeUsdc,
       reason,
@@ -318,22 +319,29 @@ export class EntryLifecycleModule implements RuntimeModule {
     tokenId: TokenId,
     fallbackFirstPrice: number | null,
     policy: MultiBuyLadderPolicy,
-  ): { allowed: true; market: NormalizedMarket } | { allowed: false; reason: string } {
+  ):
+    | { allowed: true; market: NormalizedMarket; ladderTargetPrice: number }
+    | { allowed: false; reason: string } {
     const market = this.getMarket(tokenId);
     if (!market) return { allowed: false, reason: "market_missing" };
     if (!canPlaceBuyOrderForMarket(market, this.now()).allowed) {
       return { allowed: false, reason: "market_not_buyable" };
     }
     const buyFills = this.buyFills(tokenId);
-    const firstFillPrice = buyFills[0]?.price ?? fallbackFirstPrice;
+    const existingState = this.ladderStateByToken.get(String(tokenId));
+    const firstFillPrice =
+      buyFills[0]?.price ?? fallbackFirstPrice ?? existingState?.firstFillPrice;
+    if (firstFillPrice == null || !Number.isFinite(firstFillPrice) || firstFillPrice <= 0) {
+      return { allowed: false, reason: "price_unavailable" };
+    }
     const totalUsdc = buyFills.reduce((sum, fill) => sum + fill.sizeUsdc, 0);
     if (buyFills.length >= policy.maxLadderFillsPerToken) {
       return { allowed: false, reason: "max_ladder_fills" };
     }
     if (totalUsdc >= policy.perTokenUsdcCap) return { allowed: false, reason: "per_token_cap" };
     const currentPrice = market.bestBid ?? market.midPrice;
+    // R55 treats >=5 ticks away from the first fill as a new regime in either direction.
     if (
-      firstFillPrice != null &&
       currentPrice != null &&
       Number.isFinite(currentPrice) &&
       Number.isFinite(market.tickSize) &&
@@ -352,7 +360,7 @@ export class EntryLifecycleModule implements RuntimeModule {
       const fillRate = state.filledSteps / state.attemptedSteps;
       if (fillRate < policy.minStepFillRate) return { allowed: false, reason: "low_fill_rate" };
     }
-    return { allowed: true, market };
+    return { allowed: true, market, ladderTargetPrice: firstFillPrice };
   }
 
   private buildRepriceSignal(

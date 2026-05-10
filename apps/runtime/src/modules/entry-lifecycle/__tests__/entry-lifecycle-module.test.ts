@@ -300,7 +300,44 @@ describe("EntryLifecycleModule", () => {
       tokenId: TOKEN,
       side: "buy",
       suggestedPrice: 0.1,
+      ladderTargetPrice: 0.1,
       reason: "confirm-scale",
+      decisionRuleId: "LADDER",
+    });
+
+    await module.stop();
+  });
+
+  it("keeps ladder BUYs on the first fill price when best bid moves 4 ticks below the 5-tick drift guard", async () => {
+    const bus = new InProcessEventBus();
+    const fill = makeFill({ price: 0.1, sizeUsdc: 1 });
+    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+    const module = buildModule({
+      bus,
+      fillRepo: makeFillRepo([fill]),
+      setTimer: (fn, delayMs) => {
+        scheduled.push({ fn, delayMs });
+        return scheduled.length as never;
+      },
+    });
+    const signals: Signal[] = [];
+    bus.subscribe("SignalProduced", async (payload) => {
+      signals.push(payload.signal);
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket({ bestBid: 0.14, midPrice: 0.15, tickSize: 0.01 }));
+    await bus.publish("FillReceived", fillToEvent(fill));
+    await bus.drain();
+
+    expect(scheduled).toHaveLength(1);
+    scheduled[0]!.fn();
+    await bus.drain();
+
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      suggestedPrice: 0.1,
+      ladderTargetPrice: 0.1,
       decisionRuleId: "LADDER",
     });
 
@@ -386,15 +423,23 @@ describe("EntryLifecycleModule", () => {
     await module.stop();
   });
 
-  it("stops ladder scheduling after max ladder fills", async () => {
+  it("continues ladder scheduling at 14 fills when max ladder fills is 15", async () => {
     const bus = new InProcessEventBus();
-    const fills = [0, 1, 2, 3, 4].map((idx) =>
+    const fills = Array.from({ length: 14 }, (_, idx) =>
       makeFill({ fillId: createFillId(`fill-${idx}`), price: 0.1, sizeUsdc: 1 }),
     );
     const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
     const module = buildModule({
       bus,
       fillRepo: makeFillRepo(fills),
+      policy: () => ({
+        ...ENABLED_ENTRY_LIFECYCLE_POLICY,
+        multiBuyLadder: {
+          ...ENABLED_ENTRY_LIFECYCLE_POLICY.multiBuyLadder,
+          maxLadderFillsPerToken: 15,
+          perTokenUsdcCap: 100,
+        },
+      }),
       setTimer: (fn, delayMs) => {
         scheduled.push({ fn, delayMs });
         return scheduled.length as never;
@@ -403,7 +448,40 @@ describe("EntryLifecycleModule", () => {
 
     await module.start();
     await publishMarket(bus, makeMarket({ bestBid: 0.1, midPrice: 0.11 }));
-    await bus.publish("FillReceived", fillToEvent(fills[4]!));
+    await bus.publish("FillReceived", fillToEvent(fills[13]!));
+    await bus.drain();
+
+    expect(scheduled).toHaveLength(1);
+
+    await module.stop();
+  });
+
+  it("stops ladder scheduling at 15 fills when max ladder fills is 15", async () => {
+    const bus = new InProcessEventBus();
+    const fills = Array.from({ length: 15 }, (_, idx) =>
+      makeFill({ fillId: createFillId(`fill-${idx}`), price: 0.1, sizeUsdc: 1 }),
+    );
+    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+    const module = buildModule({
+      bus,
+      fillRepo: makeFillRepo(fills),
+      policy: () => ({
+        ...ENABLED_ENTRY_LIFECYCLE_POLICY,
+        multiBuyLadder: {
+          ...ENABLED_ENTRY_LIFECYCLE_POLICY.multiBuyLadder,
+          maxLadderFillsPerToken: 15,
+          perTokenUsdcCap: 100,
+        },
+      }),
+      setTimer: (fn, delayMs) => {
+        scheduled.push({ fn, delayMs });
+        return scheduled.length as never;
+      },
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket({ bestBid: 0.1, midPrice: 0.11 }));
+    await bus.publish("FillReceived", fillToEvent(fills[14]!));
     await bus.drain();
 
     expect(scheduled).toHaveLength(0);
@@ -411,7 +489,7 @@ describe("EntryLifecycleModule", () => {
     await module.stop();
   });
 
-  it("stops ladder scheduling when price drift reaches five ticks", async () => {
+  it("stops ladder scheduling when upward price drift reaches five ticks", async () => {
     const bus = new InProcessEventBus();
     const fill = makeFill({ price: 0.1, sizeUsdc: 1 });
     const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
@@ -430,6 +508,56 @@ describe("EntryLifecycleModule", () => {
     await bus.drain();
 
     expect(scheduled).toHaveLength(0);
+
+    await module.stop();
+  });
+
+  it("stops later ladder steps when price drift reaches five ticks", async () => {
+    const bus = new InProcessEventBus();
+    const fill = makeFill({ price: 0.1, sizeUsdc: 1 });
+    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+    const module = buildModule({
+      bus,
+      fillRepo: makeFillRepo([fill]),
+      setTimer: (fn, delayMs) => {
+        scheduled.push({ fn, delayMs });
+        return scheduled.length as never;
+      },
+    });
+    let ladderSignal: Signal | null = null;
+    bus.subscribe("SignalProduced", async (payload) => {
+      ladderSignal = payload.signal;
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket({ bestBid: 0.1, midPrice: 0.11, tickSize: 0.01 }));
+    await bus.publish("FillReceived", fillToEvent(fill));
+    await bus.drain();
+    scheduled[0]!.fn();
+    await bus.drain();
+
+    expect(ladderSignal).not.toBeNull();
+    await bus.publish(
+      "FillReceived",
+      fillToEvent(
+        makeFill({
+          fillId: createFillId("ladder-fill-step-1"),
+          signalId: ladderSignal!.signalId,
+          price: 0.1,
+          sizeUsdc: 1,
+          filledAt: new Date(2_000).toISOString(),
+        }),
+      ),
+    );
+    await bus.drain();
+
+    expect(scheduled).toHaveLength(2);
+    await publishMarket(bus, makeMarket({ bestBid: 0.15, midPrice: 0.16, tickSize: 0.01 }));
+    scheduled[1]!.fn();
+    await bus.drain();
+
+    expect(ladderSignal).not.toBeNull();
+    expect(scheduled).toHaveLength(2);
 
     await module.stop();
   });

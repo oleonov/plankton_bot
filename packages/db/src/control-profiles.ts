@@ -56,6 +56,13 @@ export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
 const DEFAULT_BUY_CAPACITY_POLICY_JSON = JSON.stringify(DEFAULT_BUY_CAPACITY_POLICY);
 const DEFAULT_SELL_CAPACITY_POLICY_JSON = JSON.stringify(DEFAULT_SELL_CAPACITY_POLICY);
 const DEFAULT_ORDER_CAPACITY_POLICY_JSON = JSON.stringify(DEFAULT_ORDER_CAPACITY_POLICY);
+// R55 rollout default for seeded DB profile rows. The domain fallback remains
+// conservative; production behavior is controlled by execution_policy_json.
+const ACTIVE_MULTI_BUY_LADDER_POLICY = {
+  ...DEFAULT_EXECUTION_POLICY.multiBuyLadder,
+  enabled: true,
+  maxLadderFillsPerToken: 15,
+};
 
 function defaultExecutionPolicyJson(profile: ControlProfileSeed): string {
   return serializeExecutionPolicy({
@@ -65,6 +72,7 @@ function defaultExecutionPolicyJson(profile: ControlProfileSeed): string {
       mode: profile.defaultDeadSideGuardMode,
     },
     entryMinMarketAgeSeconds: profile.defaultEntryMinMarketAgeSeconds,
+    multiBuyLadder: ACTIVE_MULTI_BUY_LADDER_POLICY,
   });
 }
 

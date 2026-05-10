@@ -203,6 +203,28 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled[0].command.orderId).toBe(order.orderId);
   });
 
+  it("keeps regular stale TTL cancellation for ladder entry orders", async () => {
+    const sevenHoursAgo = new Date(Date.now() - 7 * 60 * 60_000).toISOString();
+    const order = makeOrder({
+      createdAt: sevenHoursAgo,
+      signalId: "ladder-signal-1",
+      signalReason: "confirm-scale",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await run();
+    await bus.drain();
+
+    expect(result.staleTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_entry_ttl");
+  });
+
   it("does not cancel fresh open buy entry order within TTL", async () => {
     const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
     const order = makeOrder({

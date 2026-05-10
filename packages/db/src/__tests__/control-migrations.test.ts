@@ -170,6 +170,14 @@ describe("control-db migration infrastructure", () => {
           enabled: boolean;
           maxOpenOrdersTotal: number;
         };
+        multiBuyLadder: {
+          enabled: boolean;
+          maxLadderFillsPerToken: number;
+          ladderGapMs: number;
+          perTokenUsdcCap: number;
+          maxPriceDriftTicks: number;
+          minStepFillRate: number;
+        };
         deadSideGuard: { mode: string };
       };
       expect(parsed.entryPriceCeiling).toBe(0.45);
@@ -189,6 +197,14 @@ describe("control-db migration infrastructure", () => {
       expect(parsed.orderCapacity).toEqual({
         enabled: true,
         maxOpenOrdersTotal: 22,
+      });
+      expect(parsed.multiBuyLadder).toEqual({
+        enabled: true,
+        maxLadderFillsPerToken: 15,
+        ladderGapMs: 60_000,
+        perTokenUsdcCap: 10,
+        maxPriceDriftTicks: 5,
+        minStepFillRate: 0.1,
       });
       expect(parsed.deadSideGuard.mode).toBe(
         row.profile_id === "live-lite" ? "enforce" : "observe",
@@ -479,5 +495,70 @@ describe("control-db migration infrastructure", () => {
 
     expect(rows).toEqual([{ rule_id: "manual-exclude", rule_type: "exclude_slug" }]);
     expect(applied).toBeDefined();
+  });
+
+  it("migration 046 enables multi-buy ladder and preserves its other knobs", () => {
+    const dbPath = path.join(tmpDir, "control-r55-ladder.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              json_remove(execution_policy_json, '$.multiBuyLadder'),
+              '$.multiBuyLadder',
+              json(?)
+            )
+          WHERE profile_id = ?`,
+      )
+      .run(
+        JSON.stringify({
+          enabled: false,
+          maxLadderFillsPerToken: 5,
+          ladderGapMs: 90_000,
+          perTokenUsdcCap: 25,
+          maxPriceDriftTicks: 4,
+          minStepFillRate: 0.25,
+        }),
+        "live-lite",
+      );
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(execution_policy_json, '$.multiBuyLadder')
+          WHERE profile_id = ?`,
+      )
+      .run("paper");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("046_enable_multi_buy_ladder.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare(
+        `SELECT profile_id, execution_policy_json AS json
+           FROM profile_settings
+          WHERE profile_id IN ('live-lite', 'paper')`,
+      )
+      .all() as Array<{ profile_id: string; json: string }>;
+    const byProfile = new Map(rows.map((row) => [row.profile_id, JSON.parse(row.json)]));
+
+    expect(byProfile.get("live-lite").multiBuyLadder).toEqual({
+      enabled: true,
+      maxLadderFillsPerToken: 15,
+      ladderGapMs: 90_000,
+      perTokenUsdcCap: 25,
+      maxPriceDriftTicks: 4,
+      minStepFillRate: 0.25,
+    });
+    expect(byProfile.get("paper").multiBuyLadder).toEqual({
+      enabled: true,
+      maxLadderFillsPerToken: 15,
+      ladderGapMs: 60_000,
+      perTokenUsdcCap: 10,
+      maxPriceDriftTicks: 5,
+      minStepFillRate: 0.1,
+    });
   });
 });

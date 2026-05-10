@@ -140,6 +140,7 @@ export interface Signal {
   conditionId: ConditionId;
   side: OrderSide;
   suggestedPrice: number;
+  ladderTargetPrice?: number;
   suggestedSize: number; // share quantity
   suggestedSizeUsdc: number; // USDC notional (= suggestedSize × suggestedPrice)
   reason: SignalReason;

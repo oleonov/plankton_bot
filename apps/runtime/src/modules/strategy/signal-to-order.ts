@@ -957,6 +957,49 @@ export class SignalToOrderBridge {
   ): ExecutionTermsResolution {
     const isRelayer = this.deps.liveLiteGuard?.getWalletMode() === "relayer";
     const pricing = policy.pricing;
+    const ladderTargetPrice =
+      signal.side === "buy" && signal.ladderTargetPrice != null ? signal.ladderTargetPrice : null;
+
+    if (ladderTargetPrice != null) {
+      if (
+        market.bestAsk != null &&
+        Number.isFinite(market.bestAsk) &&
+        ladderTargetPrice >= market.bestAsk
+      ) {
+        return { kind: "unavailable" };
+      }
+      if (
+        !Number.isFinite(ladderTargetPrice) ||
+        ladderTargetPrice <= 0 ||
+        !Number.isFinite(market.tickSize)
+      ) {
+        return { kind: "unavailable" };
+      }
+      const validation = validateExecutablePrice(ladderTargetPrice, market.tickSize);
+      if (!validation.ok) {
+        this.log.warn(
+          {
+            signalId: signal.signalId,
+            tokenId: String(signal.tokenId),
+            ladderTargetPrice,
+            tickSize: market.tickSize,
+            validationReason: validation.reason,
+          },
+          "ladder target price failed executable-price validation",
+        );
+        return {
+          kind: "invalid",
+          price: ladderTargetPrice,
+          tickSize: validation.tickSize,
+          minPrice: validation.minPrice,
+          maxPrice: validation.maxPrice,
+          validationReason: validation.reason,
+        };
+      }
+      return isRelayer
+        ? { kind: "ok", price: ladderTargetPrice, postOnly: true }
+        : { kind: "ok", price: ladderTargetPrice };
+    }
 
     if (pricing.mode === "bounded-midpoint") {
       const maxSpreadTicks =

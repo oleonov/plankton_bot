@@ -64,7 +64,12 @@ beforeAll(async () => {
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('simulation', 'Simulation');
     INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('paper', 'Paper');
     INSERT INTO runtime_control_state (id, current_profile, desired_profile, runtime_status, paused)
-    VALUES (1, 'simulation', 'simulation', 'running', 0);
+    VALUES (1, 'simulation', 'simulation', 'running', 0)
+    ON CONFLICT(id) DO UPDATE SET
+      current_profile = excluded.current_profile,
+      desired_profile = excluded.desired_profile,
+      runtime_status = excluded.runtime_status,
+      paused = excluded.paused;
   `);
 
   // Ledger: runtime state, positions, orders, bot_runs, metrics, markets
@@ -462,6 +467,7 @@ describe("API against real split schemas", () => {
     });
     expect(body.data.policy.multiBuyLadder).toEqual({
       ...DEFAULT_EXECUTION_POLICY.multiBuyLadder,
+      enabled: true,
       maxLadderFillsPerToken: 4,
     });
     expect(body.data.policy.repriceOnOutbid).toEqual(DEFAULT_EXECUTION_POLICY.repriceOnOutbid);

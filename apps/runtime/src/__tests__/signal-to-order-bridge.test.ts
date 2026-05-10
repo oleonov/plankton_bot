@@ -1428,6 +1428,51 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.price).toBe(0.4);
   });
 
+  it("ladder BUY posts at ladderTargetPrice even when bestBid moved", async () => {
+    const { bus, placed } = makeBridgeWithPricing();
+    const market = makeMarket({ bestBid: 0.14, bestAsk: 0.16, midPrice: 0.15, tickSize: 0.01 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedPrice: 0.1, ladderTargetPrice: 0.1 },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.1);
+  });
+
+  it("skips ladder BUY when pinned target would cross bestAsk", async () => {
+    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, midPrice: 0.095, tickSize: 0.01 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedPrice: 0.1, ladderTargetPrice: 0.1 },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.stage).toBe("execution-terms");
+    expect(skipped[0]!.reasons).toContain("execution-price-unavailable");
+  });
+
+  it("allows ladder BUY at ladderTargetPrice when bestAsk is unavailable", async () => {
+    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const market = makeMarket({ bestBid: 0.09, bestAsk: null, midPrice: 0.09, tickSize: 0.01 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedPrice: 0.1, ladderTargetPrice: 0.1 },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.1);
+  });
+
   it("skips SELL when edge price is below the signal-distance floor", async () => {
     const { bus, skipped, placed } = makeBridgeWithPricing();
     const sellSignal: Signal = {
