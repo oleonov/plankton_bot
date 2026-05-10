@@ -140,6 +140,105 @@ describe("importExchangeFills", () => {
     expect(fillRepo.save).not.toHaveBeenCalled();
   });
 
+  it("skips a fill that appears locally while fee metadata is resolving", async () => {
+    (fillRepo.exists as any).mockReturnValueOnce(false).mockReturnValueOnce(true);
+    const localOrder = {
+      orderId: createOrderId("ord-1"),
+      conditionId: createConditionId("cond-1"),
+      signalId: null,
+      signalReason: null,
+      decisionRuleId: null,
+      signalTimestamp: null,
+      size: 10,
+    };
+    (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
+
+    const received: any[] = [];
+    bus.subscribe("FillReceived", async (p) => {
+      received.push(p);
+    });
+
+    const result = await importExchangeFills(
+      [
+        {
+          fillId: "fill-race",
+          orderId: "ord-1",
+          clientOrderId: "co-1",
+          tokenId: createTokenId("tok-1"),
+          side: "buy",
+          price: 0.5,
+          size: 10,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          timestamp: Date.now(),
+        },
+      ],
+      {
+        fillRepo,
+        orderRepo,
+        bus,
+        log: silentLog,
+        gateway: { getMarketFeeInfo: vi.fn().mockResolvedValue(null) } as any,
+      },
+    );
+
+    expect(result.imported).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(fillRepo.save).not.toHaveBeenCalled();
+    expect(received).toHaveLength(0);
+  });
+
+  it("treats duplicate fill_id save races as skipped without publishing FillReceived", async () => {
+    (fillRepo.exists as any).mockReturnValue(false);
+    (fillRepo.save as any).mockImplementation(() => {
+      const error = new Error("UNIQUE constraint failed: fills.fill_id") as Error & {
+        code: string;
+      };
+      error.code = "SQLITE_CONSTRAINT_PRIMARYKEY";
+      throw error;
+    });
+    const localOrder = {
+      orderId: createOrderId("ord-1"),
+      conditionId: createConditionId("cond-1"),
+      signalId: null,
+      signalReason: null,
+      decisionRuleId: null,
+      signalTimestamp: null,
+      size: 10,
+    };
+    (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
+
+    const received: any[] = [];
+    bus.subscribe("FillReceived", async (p) => {
+      received.push(p);
+    });
+
+    const result = await importExchangeFills(
+      [
+        {
+          fillId: "fill-race",
+          orderId: "ord-1",
+          clientOrderId: "co-1",
+          tokenId: createTokenId("tok-1"),
+          side: "buy",
+          price: 0.5,
+          size: 10,
+          liquidityRole: "unknown",
+          fee: 0,
+          feeRateBps: 0,
+          timestamp: Date.now(),
+        },
+      ],
+      { fillRepo, orderRepo, bus, log: silentLog },
+    );
+
+    expect(result.imported).toBe(0);
+    expect(result.skipped).toBe(1);
+    expect(received).toHaveLength(0);
+    expect(orderRepo.updateStatus).not.toHaveBeenCalled();
+  });
+
   it("skips fills with no matching local order", async () => {
     (orderRepo.findByClientOrderId as any).mockReturnValue(null);
 

@@ -47,6 +47,16 @@ function rememberOrphanFillId(fillId: string): boolean {
   return true;
 }
 
+function isDuplicateFillConstraintError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const maybe = error as { code?: unknown; message?: unknown };
+  return (
+    maybe.code === "SQLITE_CONSTRAINT_PRIMARYKEY" &&
+    typeof maybe.message === "string" &&
+    maybe.message.includes("fills.fill_id")
+  );
+}
+
 // ─── Shared fill import (DRY) ─────────────────────────────────────────────
 
 export interface ImportFillsDeps {
@@ -286,7 +296,21 @@ export async function importExchangeFills(
     const feeInfo = await resolveFeeInfo(localOrder.conditionId);
     const resolved = buildLocalFillFromExchangeFill(ef, localOrder, undefined, feeInfo);
 
-    fillRepo.save(resolved.fill);
+    if (fillRepo.exists(fillId)) {
+      skipped++;
+      continue;
+    }
+
+    try {
+      fillRepo.save(resolved.fill);
+    } catch (error) {
+      if (isDuplicateFillConstraintError(error)) {
+        skipped++;
+        log.debug({ fillId: ef.fillId }, "duplicate fill observed during import — skipped");
+        continue;
+      }
+      throw error;
+    }
     imported++;
     ordersWithNewFills.add(String(resolved.orderId));
     savedFills.push({
