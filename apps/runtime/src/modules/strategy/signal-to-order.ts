@@ -52,6 +52,9 @@ import {
 import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 100;
+// Policy epsilon: suppress only truly identical SELL prices. The tiny margin
+// absorbs JS decimal representation drift while staying far below CLOB tick size.
+const SELL_DEDUP_PRICE_EPSILON = 1.000001e-9;
 
 // ADR-013 defaults exposed for callers that don't thread the policy provider
 // (tests, scenario runner). Runtime always reads the live policy via
@@ -575,7 +578,6 @@ export class SignalToOrderBridge {
       signal.tokenId,
       signal.side,
       executionTerms.price,
-      market.tickSize,
     );
     if (duplicateSell) {
       this.log.debug(
@@ -1096,7 +1098,6 @@ export class SignalToOrderBridge {
     tokenId: TokenId,
     side: "buy" | "sell",
     executionPrice: number,
-    tickSize: number,
   ): Order | null {
     if (side !== "sell" || !this.deps.orderRepo) return null;
     const orders = this.deps.orderRepo.findByTokenId(tokenId);
@@ -1105,7 +1106,7 @@ export class SignalToOrderBridge {
         (order) =>
           order.side === "sell" &&
           isOpenOrderStatus(order.status) &&
-          Math.abs(order.price - executionPrice) < tickSize - 1e-9,
+          Math.abs(order.price - executionPrice) <= SELL_DEDUP_PRICE_EPSILON,
       ) ?? null
     );
   }

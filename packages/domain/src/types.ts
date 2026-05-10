@@ -702,6 +702,20 @@ export interface RepriceOnOutbidPolicy {
   maxRepriceCount: number;
 }
 
+export interface ExitRepriceOnDownpricePolicy {
+  enabled: boolean;
+  /** Minimum SELL price gap to current best bid, expressed in CLOB ticks. */
+  thresholdTicks: number;
+  /** Maximum confirmed downprice-driven cancel attempts tracked while a token has open SELLs. */
+  maxRepricesPerOrder: number;
+  /** Operational alert for SELL orders that remained far above the live bid. */
+  stuckWarningEnabled: boolean;
+  /** Minimum open SELL age before stuck warning checks run, in milliseconds. */
+  stuckWarningAgeMs: number;
+  /** Fractional gap `(orderPrice - bestBid) / orderPrice` required for stuck warning. */
+  stuckWarningGapPct: number;
+}
+
 export interface DropTriggerPolicy {
   enabled: boolean;
   /** When true, missing 1h history allows the BUY and emits `no_drop_data` telemetry. */
@@ -743,6 +757,7 @@ export interface ExecutionPolicy {
   pricing: ExecutionPricingPolicy;
   orderLifetime: OrderLifetimePolicy;
   repriceOnOutbid: RepriceOnOutbidPolicy;
+  exitRepriceOnDownprice: ExitRepriceOnDownpricePolicy;
   dropTrigger: DropTriggerPolicy;
   multiBuyLadder: MultiBuyLadderPolicy;
   telemetry: ExecutionPolicyTelemetry;

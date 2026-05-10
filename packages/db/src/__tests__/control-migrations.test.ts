@@ -561,4 +561,50 @@ describe("control-db migration infrastructure", () => {
       minStepFillRate: 0.1,
     });
   });
+
+  it("migration 047 applies R58 SELL downprice policy and passive TTLs", () => {
+    const dbPath = path.join(tmpDir, "control-r58-sell-downprice.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(
+              json_set(
+                execution_policy_json,
+                '$.orderLifetime.passive.lowTtlMs',
+                21600000,
+                '$.orderLifetime.passive.mediumTtlMs',
+                86400000,
+                '$.orderLifetime.passive.highTtlMs',
+                259200000
+              ),
+              '$.exitRepriceOnDownprice'
+            )
+          WHERE profile_id = ?`,
+      )
+      .run("live-lite");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("047_sell_downprice_reprice_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const policy = JSON.parse(raw.json);
+
+    expect(policy.orderLifetime.passive.lowTtlMs).toBe(2 * 60 * 60_000);
+    expect(policy.orderLifetime.passive.mediumTtlMs).toBe(4 * 60 * 60_000);
+    expect(policy.orderLifetime.passive.highTtlMs).toBe(6 * 60 * 60_000);
+    expect(policy.exitRepriceOnDownprice).toEqual({
+      enabled: true,
+      thresholdTicks: 5,
+      maxRepricesPerOrder: 10,
+      stuckWarningEnabled: true,
+      stuckWarningAgeMs: 4 * 60 * 60_000,
+      stuckWarningGapPct: 0.1,
+    });
+  });
 });

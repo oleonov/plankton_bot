@@ -50,6 +50,7 @@ function formatCancelReason(reason: string): string {
     "exit-ttl-cancel": "exit TTL",
     sell_replace_reprice: "sell reprice",
     sell_replace_retry: "sell retry",
+    downpriced_reprice: "downprice reprice",
   };
   return labels[reason] ?? reason.replace(/[-_]/g, " ");
 }

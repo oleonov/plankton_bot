@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId, createOrderId, createConditionId } from "@plankton/domain";
 import type {
   OrderRepository,
@@ -14,6 +14,8 @@ import {
   CANCEL_BACKOFF_MS,
   PROBE_LIKE_DAILY_TTL_MS,
   PROBE_LIKE_INTRADAY_TTL_MS,
+  recordSellDownpriceCancelSucceeded,
+  type SellDownpriceRepriceStateMap,
 } from "../modules/reconciliation/stale-order-cleaner.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -128,10 +130,15 @@ describe("cleanStaleEntryOrders", () => {
   let backoffMap: Map<string, number>;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     orderRepo = createMockOrderRepo();
     marketRepo = createMockMarketRepo();
     bus = new InProcessEventBus();
     backoffMap = new Map();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   function run() {
@@ -175,6 +182,36 @@ describe("cleanStaleEntryOrders", () => {
         },
       },
       backoffMap,
+    );
+  }
+
+  function runWithDownprice(
+    order: Order,
+    bestBid: number,
+    stateMap: SellDownpriceRepriceStateMap = new Map(),
+  ) {
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket());
+    return cleanStaleEntryOrders(
+      {
+        orderRepo,
+        marketRepo,
+        bus,
+        log: silentLog,
+        exitRepriceOnDownprice: {
+          policy: () => ({
+            enabled: true,
+            thresholdTicks: 5,
+            maxRepricesPerOrder: 10,
+            stuckWarningEnabled: true,
+            stuckWarningAgeMs: 4 * 60 * 60_000,
+            stuckWarningGapPct: 0.1,
+          }),
+          getMarket: () => makePricing({ bestBid, tickSize: 0.01 }),
+        },
+      },
+      backoffMap,
+      stateMap,
     );
   }
 
@@ -568,6 +605,66 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled).toHaveLength(0);
   });
 
+  it("keeps mode-aware PASSIVE high exit orders before the 6h TTL", async () => {
+    const fiveHoursFiftyNineMinutesAgo = new Date(
+      Date.now() - (6 * 60 * 60_000 - 60_000),
+    ).toISOString();
+    const order = makeOrder({
+      side: "sell",
+      createdAt: fiveHoursFiftyNineMinutesAgo,
+      signalReason: "repricing-exit",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithLifetime({
+      mode: "PASSIVE",
+      confidence: "high",
+      modeTtlMs: 6 * 60 * 60_000,
+      effectiveTtlMs: 6 * 60 * 60_000,
+      ageMs: 6 * 60 * 60_000 - 60_000,
+      wouldCancelUnderMode: false,
+    });
+    await bus.drain();
+
+    expect(result.staleExitTtlCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("cancels mode-aware PASSIVE high exit orders after the 6h TTL", async () => {
+    const sixHoursOneMinuteAgo = new Date(Date.now() - (6 * 60 * 60_000 + 60_000)).toISOString();
+    const order = makeOrder({
+      side: "sell",
+      createdAt: sixHoursOneMinuteAgo,
+      signalReason: "repricing-exit",
+    });
+    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithLifetime({
+      mode: "PASSIVE",
+      confidence: "high",
+      modeTtlMs: 6 * 60 * 60_000,
+      effectiveTtlMs: 6 * 60 * 60_000,
+      ageMs: 6 * 60 * 60_000 + 60_000,
+      wouldCancelUnderMode: true,
+      cancelReason: "ttl_exceeded",
+    });
+    await bus.drain();
+
+    expect(result.staleExitTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
+  });
+
   it("restores flat exit TTL when orderLifetime.enabled=false", async () => {
     const sixMinutesAgo = new Date(Date.now() - 6 * 60_000).toISOString();
     const order = makeOrder({
@@ -612,6 +709,240 @@ describe("cleanStaleEntryOrders", () => {
 
     expect(result.staleExitTtlCancelled).toBe(0);
     expect(cancelled).toHaveLength(0);
+  });
+
+  it("does not downprice-reprice a SELL when the best bid is only one tick lower", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.28);
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("downprice-reprices a SELL when the best bid is five ticks lower", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.24);
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("downpriced_reprice");
+  });
+
+  it("downprice-reprices a SELL when the best bid is six ticks lower", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23);
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("downpriced_reprice");
+  });
+
+  it("falls through to exit TTL after the tenth downprice reprice attempt", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const stateMap: SellDownpriceRepriceStateMap = new Map([
+      [
+        String(order.tokenId),
+        {
+          repriceCount: 10,
+          lastBestBid: 0.24,
+          pendingOrderId: null,
+          pendingSinceMs: null,
+          lastWarningAtMs: null,
+        },
+      ],
+    ]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, stateMap);
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(result.staleExitTtlCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
+  });
+
+  it("resets the downprice reprice counter after a three-tick best-bid recovery", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const stateMap: SellDownpriceRepriceStateMap = new Map([
+      [
+        String(order.tokenId),
+        {
+          repriceCount: 10,
+          lastBestBid: 0.2,
+          pendingOrderId: null,
+          pendingSinceMs: null,
+          lastWarningAtMs: null,
+        },
+      ],
+    ]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, stateMap);
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(stateMap.get(String(order.tokenId))).toMatchObject({
+      repriceCount: 0,
+      pendingOrderId: String(order.orderId),
+    });
+    expect(cancelled).toHaveLength(1);
+    expect(cancelled[0].command.reason).toBe("downpriced_reprice");
+  });
+
+  it("keeps the downprice counter pending until the cancel event confirms", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const stateMap: SellDownpriceRepriceStateMap = new Map();
+
+    const result = await runWithDownprice(order, 0.23, stateMap);
+
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(stateMap.get(String(order.tokenId))).toMatchObject({
+      repriceCount: 0,
+      pendingOrderId: String(order.orderId),
+    });
+
+    recordSellDownpriceCancelSucceeded(stateMap, order.tokenId, order.orderId);
+
+    expect(stateMap.get(String(order.tokenId))).toMatchObject({
+      repriceCount: 1,
+      pendingOrderId: null,
+      pendingSinceMs: null,
+    });
+  });
+
+  it("does not fire repeated downprice cancels while a token cancel is pending", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const stateMap: SellDownpriceRepriceStateMap = new Map([
+      [
+        String(order.tokenId),
+        {
+          repriceCount: 2,
+          lastBestBid: 0.23,
+          pendingOrderId: String(order.orderId),
+          pendingSinceMs: Date.now() - 30_000,
+          lastWarningAtMs: null,
+        },
+      ],
+    ]);
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.22, stateMap);
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("logs a stuck SELL warning for old wide-gap exit orders", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const result = await runWithDownprice(order, 0.25);
+
+    expect(result.stuckSellWarnings).toBe(1);
+    expect(silentLog.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderId: String(order.orderId),
+        tokenId: String(order.tokenId),
+        slug: "test-market",
+        orderPrice: order.price,
+      }),
+      "stuck_sell_detected",
+    );
+  });
+
+  it("rate-limits stuck SELL warnings to once per token per hour", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-10T00:00:00Z"));
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      createdAt: new Date(Date.now() - 5 * 60 * 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const stateMap: SellDownpriceRepriceStateMap = new Map();
+
+    const first = await runWithDownprice(order, 0.25, stateMap);
+    const second = await runWithDownprice(order, 0.25, stateMap);
+
+    expect(first.stuckSellWarnings).toBe(1);
+    expect(second.stuckSellWarnings).toBe(0);
+    expect(silentLog.warn).toHaveBeenCalledTimes(1);
   });
 
   // ─── Signal reason filtering ───────────────────────────────────────

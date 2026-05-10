@@ -343,6 +343,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({
         repriceOnOutbid: { enabled: false },
+        exitRepriceOnDownprice: { thresholdTicks: 7 },
         dropTrigger: { enabled: true, failOpenOnNoData: false, thresholdPct: -0.05 },
         multiBuyLadder: { maxLadderFillsPerToken: 4 },
       }),
@@ -351,6 +352,10 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.repriceOnOutbid).toEqual({
       ...DEFAULT_EXECUTION_POLICY.repriceOnOutbid,
       enabled: false,
+    });
+    expect(policy.exitRepriceOnDownprice).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice,
+      thresholdTicks: 7,
     });
     expect(policy.dropTrigger).toEqual({
       ...DEFAULT_EXECUTION_POLICY.dropTrigger,
@@ -368,6 +373,14 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({
         repriceOnOutbid: { enabled: "yes", maxRepriceCount: 1.5 },
+        exitRepriceOnDownprice: {
+          enabled: "yes",
+          thresholdTicks: -1,
+          maxRepricesPerOrder: 1.5,
+          stuckWarningEnabled: "yes",
+          stuckWarningAgeMs: 1,
+          stuckWarningGapPct: 2,
+        },
         dropTrigger: {
           enabled: "yes",
           failOpenOnNoData: "yes",
@@ -385,10 +398,17 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       }),
     );
     expect(policy.repriceOnOutbid).toEqual(DEFAULT_EXECUTION_POLICY.repriceOnOutbid);
+    expect(policy.exitRepriceOnDownprice).toEqual(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice);
     expect(policy.dropTrigger).toEqual(DEFAULT_EXECUTION_POLICY.dropTrigger);
     expect(policy.multiBuyLadder).toEqual(DEFAULT_EXECUTION_POLICY.multiBuyLadder);
     expect(issues.some((i) => i.includes("repriceOnOutbid.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("repriceOnOutbid.maxRepriceCount"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitRepriceOnDownprice.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitRepriceOnDownprice.thresholdTicks"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitRepriceOnDownprice.maxRepricesPerOrder"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitRepriceOnDownprice.stuckWarningEnabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitRepriceOnDownprice.stuckWarningAgeMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitRepriceOnDownprice.stuckWarningGapPct"))).toBe(true);
     expect(issues.some((i) => i.includes("dropTrigger.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("dropTrigger.failOpenOnNoData"))).toBe(true);
     expect(issues.some((i) => i.includes("dropTrigger.thresholdPct"))).toBe(true);

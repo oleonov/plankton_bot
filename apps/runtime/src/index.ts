@@ -1032,6 +1032,11 @@ async function main(): Promise<void> {
       getRepriceCount: (signalId) => entryLifecycleModule.getRepriceCount(signalId),
       getMarket: (tokenId) => entryLifecycleModule.getMarket(tokenId),
     },
+    exitRepriceOnDownprice: {
+      policy: () => currentExecutionPolicy().exitRepriceOnDownprice,
+      getMarket: (tokenId) => entryLifecycleModule.getMarket(tokenId),
+    },
+    runtimeMetrics,
     ...(runtimeMode === "live-lite" && traderAddress
       ? {
           walletPositionSentinel: {

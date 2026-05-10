@@ -72,6 +72,7 @@ export type CancelOrderReason =
   | "outbid_repriced"
   | "stale_entry_enddate"
   | "stale_exit_ttl"
+  | "downpriced_reprice"
   | "sell_replace_reprice"
   | "sell_replace_retry"
   | "operator"

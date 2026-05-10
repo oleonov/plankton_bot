@@ -20,6 +20,7 @@ import type {
   OrderLifetimePolicy,
   MultiBuyLadderPolicy,
   RepriceOnOutbidPolicy,
+  ExitRepriceOnDownpricePolicy,
   SellCapacityPolicy,
 } from "./types.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
@@ -67,6 +68,15 @@ export const DEFAULT_ORDER_CAPACITY_POLICY: OrderCapacityPolicy = {
 export const DEFAULT_REPRICE_ON_OUTBID_POLICY: RepriceOnOutbidPolicy = {
   enabled: false,
   maxRepriceCount: 5,
+};
+
+export const DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY: ExitRepriceOnDownpricePolicy = {
+  enabled: false,
+  thresholdTicks: 5,
+  maxRepricesPerOrder: 10,
+  stuckWarningEnabled: true,
+  stuckWarningAgeMs: 4 * 60 * 60_000,
+  stuckWarningGapPct: 0.1,
 };
 
 export const DEFAULT_DROP_TRIGGER_POLICY: DropTriggerPolicy = {
@@ -117,9 +127,9 @@ export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
     highTtlMs: 2 * 60 * 60_000,
   },
   passive: {
-    lowTtlMs: 6 * 60 * 60_000,
-    mediumTtlMs: 24 * 60 * 60_000,
-    highTtlMs: 72 * 60 * 60_000,
+    lowTtlMs: 2 * 60 * 60_000,
+    mediumTtlMs: 4 * 60 * 60_000,
+    highTtlMs: 6 * 60 * 60_000,
     highConfidenceMinFills: 3,
     highConfidenceMinSpanMs: 6 * 60 * 60_000,
   },
@@ -150,6 +160,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   pricing: DEFAULT_PRICING_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   repriceOnOutbid: DEFAULT_REPRICE_ON_OUTBID_POLICY,
+  exitRepriceOnDownprice: DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   dropTrigger: DEFAULT_DROP_TRIGGER_POLICY,
   multiBuyLadder: DEFAULT_MULTI_BUY_LADDER_POLICY,
   telemetry: DEFAULT_TELEMETRY,
@@ -190,6 +201,8 @@ const BOUND_CAPACITY_OPEN_ORDERS_MAX = 1_000;
 const BOUND_ORDER_LIFETIME_MIN_MS = 1_000;
 const BOUND_ORDER_LIFETIME_MAX_MS = 14 * 24 * 60 * 60_000;
 const BOUND_ORDER_LIFETIME_COUNT_MAX = 10_000;
+const BOUND_STUCK_WARNING_GAP_PCT_MIN = 0;
+const BOUND_STUCK_WARNING_GAP_PCT_MAX = 1;
 const BOUND_DROP_TRIGGER_THRESHOLD_MIN = -1;
 const BOUND_DROP_TRIGGER_THRESHOLD_MAX = 0;
 const BOUND_FILL_RATE_MIN = 0;
@@ -256,6 +269,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const orderCapacity = parseOrderCapacity(obj.orderCapacity, issues);
   const orderLifetime = parseOrderLifetime(obj.orderLifetime, issues);
   const repriceOnOutbid = parseRepriceOnOutbid(obj.repriceOnOutbid, issues);
+  const exitRepriceOnDownprice = parseExitRepriceOnDownprice(obj.exitRepriceOnDownprice, issues);
   const dropTrigger = parseDropTrigger(obj.dropTrigger, issues);
   const multiBuyLadder = parseMultiBuyLadder(obj.multiBuyLadder, issues);
 
@@ -273,6 +287,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       pricing,
       orderLifetime,
       repriceOnOutbid,
+      exitRepriceOnDownprice,
       dropTrigger,
       multiBuyLadder,
       telemetry,
@@ -301,6 +316,58 @@ function parseRepriceOnOutbid(raw: unknown, issues: string[]): RepriceOnOutbidPo
       BOUND_ORDER_LIFETIME_COUNT_MAX,
       issues,
       "repriceOnOutbid.maxRepriceCount",
+    ),
+  };
+}
+
+function parseExitRepriceOnDownprice(raw: unknown, issues: string[]): ExitRepriceOnDownpricePolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("exitRepriceOnDownprice must be an object");
+    return DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.enabled,
+      issues,
+      "exitRepriceOnDownprice.enabled",
+    ),
+    thresholdTicks: clampedInt(
+      obj.thresholdTicks,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.thresholdTicks,
+      0,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "exitRepriceOnDownprice.thresholdTicks",
+    ),
+    maxRepricesPerOrder: clampedInt(
+      obj.maxRepricesPerOrder,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.maxRepricesPerOrder,
+      0,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "exitRepriceOnDownprice.maxRepricesPerOrder",
+    ),
+    stuckWarningEnabled: booleanOr(
+      obj.stuckWarningEnabled,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.stuckWarningEnabled,
+      issues,
+      "exitRepriceOnDownprice.stuckWarningEnabled",
+    ),
+    stuckWarningAgeMs: lifetimeMs(
+      obj.stuckWarningAgeMs,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.stuckWarningAgeMs,
+      "exitRepriceOnDownprice.stuckWarningAgeMs",
+      issues,
+    ),
+    stuckWarningGapPct: clampedNumber(
+      obj.stuckWarningGapPct,
+      DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY.stuckWarningGapPct,
+      BOUND_STUCK_WARNING_GAP_PCT_MIN,
+      BOUND_STUCK_WARNING_GAP_PCT_MAX,
+      issues,
+      "exitRepriceOnDownprice.stuckWarningGapPct",
     ),
   };
 }

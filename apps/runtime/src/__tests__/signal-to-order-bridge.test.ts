@@ -1552,6 +1552,77 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     });
   });
 
+  it("allows a replacement SELL after the old same-price order is already cancelled", async () => {
+    const orderRepo = {
+      findByTokenId: vi.fn(() => [makeOpenSellOrder({ price: 0.1, status: "cancelled" })]),
+    } as unknown as OrderRepository;
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, { orderRepo });
+    const sellSignal: Signal = {
+      ...makeSignal(),
+      side: "sell",
+      suggestedPrice: 0.2,
+      suggestedSize: 5.73,
+      reason: "repricing-exit",
+    };
+    const market = makeMarket({ bestBid: 0.02, bestAsk: 0.1, midPrice: 0.06, tickSize: 0.001 });
+
+    await bus.publish("SignalApproved", {
+      signal: sellSignal,
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(skipped.some((event) => event.reasons.includes("sell-order-already-open"))).toBe(false);
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.1);
+  });
+
+  it.each([
+    { existingPrice: 0.29, executionPrice: 0.29, tickSize: 0.01, shouldSuppress: true },
+    { existingPrice: 0.29, executionPrice: 0.28, tickSize: 0.01, shouldSuppress: false },
+    { existingPrice: 0.29, executionPrice: 0.295, tickSize: 0.001, shouldSuppress: false },
+    {
+      existingPrice: 0.29,
+      executionPrice: 0.290000001,
+      tickSize: 0.000000001,
+      shouldSuppress: true,
+    },
+  ])(
+    "dedupes SELL only on price epsilon: $existingPrice vs $executionPrice",
+    async ({ existingPrice, executionPrice, tickSize, shouldSuppress }) => {
+      const orderRepo = {
+        findByTokenId: vi.fn(() => [makeOpenSellOrder({ price: existingPrice })]),
+      } as unknown as OrderRepository;
+      const { bus, skipped, placed } = makeBridgeWithPricing(undefined, { orderRepo });
+      const sellSignal: Signal = {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.2,
+        suggestedSize: 5.73,
+        reason: "repricing-exit",
+      };
+      const market = makeMarket({
+        bestBid: 0.02,
+        bestAsk: executionPrice,
+        midPrice: (0.02 + executionPrice) / 2,
+        tickSize,
+      });
+
+      await bus.publish("SignalApproved", {
+        signal: sellSignal,
+        market,
+        approvedAt: Date.now(),
+      });
+      await bus.drain();
+
+      expect(placed).toHaveLength(shouldSuppress ? 0 : 1);
+      expect(skipped.some((event) => event.reasons.includes("sell-order-already-open"))).toBe(
+        shouldSuppress,
+      );
+    },
+  );
+
   it("skips SELL when order-lifetime BURST placement budget is exhausted", async () => {
     const orderLifetime = {
       canPlaceExitOrder: vi.fn(() => ({

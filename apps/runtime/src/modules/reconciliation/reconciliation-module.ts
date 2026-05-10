@@ -26,12 +26,17 @@ import type {
   SettlementLedgerRepository,
   PositionDriftRepository,
   RepriceOnOutbidPolicy,
+  ExitRepriceOnDownpricePolicy,
 } from "@plankton/domain";
 import { createTokenId, createConditionId } from "@plankton/domain";
 import type { Logger } from "../../logger.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
-import { cleanStaleEntryOrders } from "./stale-order-cleaner.js";
+import {
+  cleanStaleEntryOrders,
+  recordSellDownpriceCancelSucceeded,
+  type SellDownpriceRepriceStateMap,
+} from "./stale-order-cleaner.js";
 import type { OrderLifetimeModule } from "../order-lifetime/order-lifetime-module.js";
 import {
   runWalletPositionSentinel,
@@ -73,6 +78,20 @@ export interface ReconciliationModuleDeps {
       tokenId: import("@plankton/domain").TokenId,
     ) => Pick<import("@plankton/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
   };
+  exitRepriceOnDownprice?: {
+    policy: () => ExitRepriceOnDownpricePolicy;
+    getMarket: (
+      tokenId: import("@plankton/domain").TokenId,
+    ) => Pick<import("@plankton/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
+  };
+  runtimeMetrics?: {
+    writeEvent: (
+      metricName: string,
+      value?: number,
+      labels?: string | null,
+      capturedAt?: string,
+    ) => void;
+  };
   /**
    * Live-lite wallet↔ledger sentinel. Detects impossible local state where
    * Polymarket still reports shares for a token, but the local position is
@@ -94,12 +113,24 @@ export class ReconciliationModule implements RuntimeModule {
   private lastRunAt: number | null = null;
   private lastResult: ReconciliationResult | null = null;
   private readonly staleBackoffMap = new Map<string, number>();
+  private readonly sellDownpriceRepriceMap: SellDownpriceRepriceStateMap = new Map();
 
   constructor(private readonly deps: ReconciliationModuleDeps) {
     this.log = deps.log.child({ module: "reconciliation" });
   }
 
   async start(): Promise<void> {
+    this.unsubs.push(
+      this.deps.bus.subscribe("OrderCancelled", async (event) => {
+        if (event.reason !== "downpriced_reprice") return;
+        recordSellDownpriceCancelSucceeded(
+          this.sellDownpriceRepriceMap,
+          event.tokenId,
+          event.orderId,
+        );
+      }),
+    );
+
     // Startup reconciliation — blocks until complete
     this.log.info("running startup reconciliation");
     await this.runReconciliation();
@@ -206,8 +237,12 @@ export class ReconciliationModule implements RuntimeModule {
           ...(this.deps.entryRepriceOnOutbid
             ? { entryRepriceOnOutbid: this.deps.entryRepriceOnOutbid }
             : {}),
+          ...(this.deps.exitRepriceOnDownprice
+            ? { exitRepriceOnDownprice: this.deps.exitRepriceOnDownprice }
+            : {}),
         },
         this.staleBackoffMap,
+        this.sellDownpriceRepriceMap,
       );
       if (staleResult.staleTtlCancelled > 0) {
         allDetails.push(`stale entry TTL cancels: ${staleResult.staleTtlCancelled}`);
@@ -220,6 +255,24 @@ export class ReconciliationModule implements RuntimeModule {
       }
       if (staleResult.outbidRepriceCancelled > 0) {
         allDetails.push(`outbid reprice cancels: ${staleResult.outbidRepriceCancelled}`);
+      }
+      if (staleResult.downpriceRepriceCancelled > 0) {
+        allDetails.push(`downprice reprice cancels: ${staleResult.downpriceRepriceCancelled}`);
+        this.deps.runtimeMetrics?.writeEvent(
+          "downprice_reprice_events_total",
+          staleResult.downpriceRepriceCancelled,
+          JSON.stringify({ source: "stale-order-cleaner" }),
+          new Date(ranAt).toISOString(),
+        );
+      }
+      if (staleResult.stuckSellWarnings > 0) {
+        allDetails.push(`stuck sell warnings: ${staleResult.stuckSellWarnings}`);
+        this.deps.runtimeMetrics?.writeEvent(
+          "stuck_sell_warnings_total",
+          staleResult.stuckSellWarnings,
+          JSON.stringify({ source: "stale-order-cleaner" }),
+          new Date(ranAt).toISOString(),
+        );
       }
 
       // 4. Wallet↔ledger sentinel
@@ -256,6 +309,7 @@ export class ReconciliationModule implements RuntimeModule {
         staleResult.staleEndDateCancelled === 0 &&
         staleResult.staleExitTtlCancelled === 0 &&
         staleResult.outbidRepriceCancelled === 0 &&
+        staleResult.downpriceRepriceCancelled === 0 &&
         walletResult.driftCount === 0;
 
       const result: ReconciliationResult = {
@@ -302,6 +356,8 @@ export class ReconciliationModule implements RuntimeModule {
           staleEntryEndDate: staleResult.staleEndDateCancelled,
           staleExitTtl: staleResult.staleExitTtlCancelled,
           outbidRepriceCancelled: staleResult.outbidRepriceCancelled,
+          downpriceRepriceCancelled: staleResult.downpriceRepriceCancelled,
+          stuckSellWarnings: staleResult.stuckSellWarnings,
           walletPositionDrifts: walletResult.driftCount,
           walletPositionMarkUpdates: walletResult.markUpdateCount,
         },

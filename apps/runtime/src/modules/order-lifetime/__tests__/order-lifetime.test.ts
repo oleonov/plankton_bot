@@ -176,6 +176,22 @@ describe("order lifetime TTL resolver", () => {
     expect(ttlFor("PASSIVE", "high")).toBe(policy.passive.highTtlMs);
   });
 
+  it("uses the PASSIVE stage-2 TTL as the six-hour upper retry band", () => {
+    const decision = resolveExitOrderLifetime({
+      order: orderAt(0),
+      market: null,
+      modeState: { ...state("PASSIVE", "low", "confirmed"), ttlStage: 2 },
+      policy,
+      flatTtlMs: 300_000,
+      nowMs: baseMs,
+    });
+
+    expect(policy.passive.lowTtlMs).toBe(2 * 60 * 60_000);
+    expect(policy.passive.mediumTtlMs).toBe(4 * 60 * 60_000);
+    expect(policy.passive.highTtlMs).toBe(6 * 60 * 60_000);
+    expect(decision.modeTtlMs).toBe(6 * 60 * 60_000);
+  });
+
   it("defaults missing mode state to PASSIVE low TTL while enforcement is enabled", () => {
     const decision = resolveExitOrderLifetime({
       order: orderAt(0),

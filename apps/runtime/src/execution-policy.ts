@@ -16,6 +16,7 @@ export {
   DEFAULT_PRICING_POLICY,
   DEFAULT_TELEMETRY,
   DEFAULT_ORDER_LIFETIME_POLICY,
+  DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
 } from "@plankton/domain";
