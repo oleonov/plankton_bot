@@ -1,5 +1,5 @@
 -- 001_initial.sql
--- Initial schema for poly_plankton trading bot.
+-- Initial schema for Krabs trading bot.
 -- All market_id columns renamed to token_id per domain model.
 
 -- ═══════════ MARKETS ═══════════

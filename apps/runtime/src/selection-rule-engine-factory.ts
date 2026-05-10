@@ -1,5 +1,5 @@
-import { SelectionRuleEngine } from "@plankton/domain";
-import type { SelectionRuleRepository } from "@plankton/db";
+import { SelectionRuleEngine } from "@krabs/domain";
+import type { SelectionRuleRepository } from "@krabs/db";
 
 /**
  * Wraps SelectionRuleEngine with version-polled hot reload.

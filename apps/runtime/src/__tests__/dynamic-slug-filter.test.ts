@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { slugPatternToRegex } from "@plankton/domain";
+import { slugPatternToRegex } from "@krabs/domain";
 
 /**
  * Tests the dynamic slug filter pattern used in index.ts where the slugFilter

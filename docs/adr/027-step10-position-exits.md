@@ -306,7 +306,7 @@ All three helpers are pure functions with no `Date.now()`
 dependency, so production-equivalent unit tests verify boundary
 behaviour deterministically. Branded types `ExitPnlBucket`,
 `HoldingTimeBucket`, `SoldBoughtRatioBucket` are exported from
-`@plankton/domain` so persistence and analytics share the same
+`@krabs/domain` so persistence and analytics share the same
 vocabulary.
 
 Computed once at row-write time; not re-derived at query time, so

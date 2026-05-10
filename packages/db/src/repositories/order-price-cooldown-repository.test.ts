@@ -3,12 +3,12 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createTokenId, type OrderPriceCooldown } from "@plankton/domain";
+import { createTokenId, type OrderPriceCooldown } from "@krabs/domain";
 import { SqliteOrderPriceCooldownRepository } from "./order-price-cooldown-repository.js";
 
 describe("SqliteOrderPriceCooldownRepository", () => {
   it("persists cooldown rows across repository restarts", () => {
-    const tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-price-cooldown-"));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-price-cooldown-"));
     const dbPath = path.join(tmpDir, "ledger.db");
     try {
       const db1 = new Database(dbPath);

@@ -15,10 +15,10 @@ The Phase 1 design spec is solid and covers the core scaffold well. Below are ga
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ----------------------------------------------------------------------- |
 | 1   | **No `.env` loading strategy** -- the v1 dev plan lists "env loading" as a must-have for Phase 1, but the spec only has `.env.example` with no library choice or loading pattern                                      | Medium   | Use `dotenv` (see Section 8)                                            |
 | 2   | **No logging library chosen** -- Phase 5 requires structured logging, but nothing is installed in Phase 1. The base should be available early for debugging                                                           | Medium   | Install `pino` at root (see Section 8)                                  |
-| 3   | **No YAML parsing library specified** -- `@plankton/config` lists `yaml` as a dep but does not specify which npm package                                                                                              | Low      | Use `yaml` (the `yaml` npm package, YAML 1.2 compliant)                 |
+| 3   | **No YAML parsing library specified** -- `@krabs/config` lists `yaml` as a dep but does not specify which npm package                                                                                                 | Low      | Use `yaml` (the `yaml` npm package, YAML 1.2 compliant)                 |
 | 4   | **`typecheck` task in turbo.json has no `dependsOn: ["^build"]`** -- type-checking a downstream package requires upstream `.d.ts` files to exist first                                                                | High     | Add `dependsOn: ["^build"]` to `typecheck` task                         |
 | 5   | **`test` task should also depend on `^build`** -- vitest resolving workspace imports works, but `tsc -b` outputs are needed for packages that import compiled siblings                                                | Medium   | Add `dependsOn: ["^build"]` to `test` task                              |
-| 6   | **Missing `@types/better-sqlite3`** -- `better-sqlite3` is a native addon with no built-in types                                                                                                                      | Low      | Add to `@plankton/db` devDependencies                                   |
+| 6   | **Missing `@types/better-sqlite3`** -- `better-sqlite3` is a native addon with no built-in types                                                                                                                      | Low      | Add to `@krabs/db` devDependencies                                      |
 | 7   | **`outDir` and `rootDir` in `tsconfig.base.json`** -- these should not be in the base config because each package overrides them anyway, and leaving them in the base causes confusing errors when tsc is run at root | Low      | Remove from base, set per-package only                                  |
 | 8   | **No `composite: true`** in base tsconfig -- required for `tsc -b` (project references) to work                                                                                                                       | High     | Add `composite: true` to `tsconfig.base.json`                           |
 | 9   | **`apps/web` framework not specified** -- spec says "placeholder" but does not state whether this will be a Next.js app, Vite+React, or plain TS. Matters for package.json shape                                      | Low      | Defer to Phase 13. For now, plain TS placeholder with no framework deps |
@@ -42,7 +42,7 @@ Every file below lives at the monorepo root (`poly_plankton/`).
 ```json
 {
   "private": true,
-  "name": "poly-plankton",
+  "name": "krabs",
   "type": "module",
   "packageManager": "pnpm@10.6.1",
   "engines": {
@@ -247,7 +247,7 @@ RUNTIME_MODE=simulation
 LOG_LEVEL=info
 
 # SQLite database path (relative to apps/runtime)
-DB_PATH=./data/plankton.db
+DB_PATH=./data/krabs.db
 
 # Family rules config path
 FAMILY_RULES_PATH=./config/family_rules.yaml
@@ -259,11 +259,11 @@ FAMILY_RULES_PATH=./config/family_rules.yaml
 
 ### 3.1 Library package (`packages/*`)
 
-**`package.json`** (example for `@plankton/domain`):
+**`package.json`** (example for `@krabs/domain`):
 
 ```json
 {
-  "name": "@plankton/domain",
+  "name": "@krabs/domain",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -283,7 +283,7 @@ FAMILY_RULES_PATH=./config/family_rules.yaml
 }
 ```
 
-**`tsconfig.json`** (example for `@plankton/domain`):
+**`tsconfig.json`** (example for `@krabs/domain`):
 
 ```json
 {
@@ -297,7 +297,7 @@ FAMILY_RULES_PATH=./config/family_rules.yaml
 }
 ```
 
-For packages with workspace dependencies (e.g., `@plankton/event-bus`):
+For packages with workspace dependencies (e.g., `@krabs/event-bus`):
 
 ```json
 {
@@ -317,7 +317,7 @@ For packages with workspace dependencies (e.g., `@plankton/event-bus`):
 
 ```json
 {
-  "name": "@plankton/runtime",
+  "name": "@krabs/runtime",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -330,12 +330,12 @@ For packages with workspace dependencies (e.g., `@plankton/event-bus`):
     "test": "vitest run"
   },
   "dependencies": {
-    "@plankton/domain": "workspace:*",
-    "@plankton/config": "workspace:*",
-    "@plankton/event-bus": "workspace:*",
-    "@plankton/db": "workspace:*",
-    "@plankton/exchange": "workspace:*",
-    "@plankton/family-rules": "workspace:*"
+    "@krabs/domain": "workspace:*",
+    "@krabs/config": "workspace:*",
+    "@krabs/event-bus": "workspace:*",
+    "@krabs/db": "workspace:*",
+    "@krabs/exchange": "workspace:*",
+    "@krabs/family-rules": "workspace:*"
   }
 }
 ```
@@ -365,17 +365,17 @@ Apps do NOT use `exports` -- they are entry points, not consumed by other packag
 
 ### 3.3 Package reference map
 
-| Package                  | `tsconfig.json` references                         |
-| ------------------------ | -------------------------------------------------- |
-| `@plankton/domain`       | (none)                                             |
-| `@plankton/config`       | (none -- uses `zod` and `yaml`, no workspace deps) |
-| `@plankton/event-bus`    | `../domain`                                        |
-| `@plankton/db`           | `../domain`                                        |
-| `@plankton/exchange`     | `../domain`                                        |
-| `@plankton/family-rules` | `../domain`, `../config`                           |
-| `apps/runtime`           | all six packages                                   |
-| `apps/api`               | `../../packages/domain`, `../../packages/db`       |
-| `apps/web`               | `../../packages/domain`                            |
+| Package               | `tsconfig.json` references                         |
+| --------------------- | -------------------------------------------------- |
+| `@krabs/domain`       | (none)                                             |
+| `@krabs/config`       | (none -- uses `zod` and `yaml`, no workspace deps) |
+| `@krabs/event-bus`    | `../domain`                                        |
+| `@krabs/db`           | `../domain`                                        |
+| `@krabs/exchange`     | `../domain`                                        |
+| `@krabs/family-rules` | `../domain`, `../config`                           |
+| `apps/runtime`        | all six packages                                   |
+| `apps/api`            | `../../packages/domain`, `../../packages/db`       |
+| `apps/web`            | `../../packages/domain`                            |
 
 ---
 
@@ -389,10 +389,10 @@ build
 
 Concrete order (turbo resolves automatically):
 
-Layer 0 (no deps):    @plankton/domain, @plankton/config
-Layer 1:              @plankton/event-bus, @plankton/db, @plankton/exchange
-Layer 2:              @plankton/family-rules
-Layer 3:              @plankton/runtime, @plankton/api, @plankton/web
+Layer 0 (no deps):    @krabs/domain, @krabs/config
+Layer 1:              @krabs/event-bus, @krabs/db, @krabs/exchange
+Layer 2:              @krabs/family-rules
+Layer 3:              @krabs/runtime, @krabs/api, @krabs/web
 ```
 
 Layers 0 and 1 items within the same layer build in parallel.
@@ -444,25 +444,25 @@ pnpm build
 
 ```bash
 # Build only one package
-pnpm --filter @plankton/domain build
+pnpm --filter @krabs/domain build
 
 # Test only one package
-pnpm --filter @plankton/db test
+pnpm --filter @krabs/db test
 
 # Run runtime in watch mode
-pnpm --filter @plankton/runtime dev
+pnpm --filter @krabs/runtime dev
 
 # Add a dependency to a specific package
-pnpm --filter @plankton/db add better-sqlite3
+pnpm --filter @krabs/db add better-sqlite3
 ```
 
 ### 5.4 Adding a workspace dependency
 
 ```bash
-pnpm --filter @plankton/event-bus add @plankton/domain --workspace
+pnpm --filter @krabs/event-bus add @krabs/domain --workspace
 ```
 
-This adds `"@plankton/domain": "workspace:*"` to the consumer's `package.json`.
+This adds `"@krabs/domain": "workspace:*"` to the consumer's `package.json`.
 
 ---
 
@@ -486,36 +486,36 @@ This adds `"@plankton/domain": "workspace:*"` to the consumer's `package.json`.
 
 ### 6.2 Per-package runtime dependencies
 
-| Package                  | Dependency                | Version Range | Purpose                     |
-| ------------------------ | ------------------------- | ------------- | --------------------------- |
-| `@plankton/domain`       | (none)                    | --            | Pure types, zero deps       |
-| `@plankton/config`       | `zod`                     | `^3.24.0`     | Schema validation           |
-| `@plankton/config`       | `yaml`                    | `^2.7.0`      | YAML parsing (family rules) |
-| `@plankton/config`       | `dotenv`                  | `^16.4.0`     | `.env` file loading         |
-| `@plankton/db`           | `better-sqlite3`          | `^11.8.0`     | SQLite driver               |
-| `@plankton/exchange`     | `@polymarket/clob-client` | `^4.x`        | Polymarket CLOB API client  |
-| `@plankton/family-rules` | (none)                    | --            | Uses workspace deps only    |
-| `apps/runtime`           | `pino`                    | `^9.6.0`      | Structured logging          |
+| Package               | Dependency                | Version Range | Purpose                     |
+| --------------------- | ------------------------- | ------------- | --------------------------- |
+| `@krabs/domain`       | (none)                    | --            | Pure types, zero deps       |
+| `@krabs/config`       | `zod`                     | `^3.24.0`     | Schema validation           |
+| `@krabs/config`       | `yaml`                    | `^2.7.0`      | YAML parsing (family rules) |
+| `@krabs/config`       | `dotenv`                  | `^16.4.0`     | `.env` file loading         |
+| `@krabs/db`           | `better-sqlite3`          | `^11.8.0`     | SQLite driver               |
+| `@krabs/exchange`     | `@polymarket/clob-client` | `^4.x`        | Polymarket CLOB API client  |
+| `@krabs/family-rules` | (none)                    | --            | Uses workspace deps only    |
+| `apps/runtime`        | `pino`                    | `^9.6.0`      | Structured logging          |
 
 ### 6.3 Per-package devDependencies
 
-| Package        | Dependency              | Version Range | Purpose          |
-| -------------- | ----------------------- | ------------- | ---------------- |
-| `@plankton/db` | `@types/better-sqlite3` | `^7.6.0`      | Type definitions |
+| Package     | Dependency              | Version Range | Purpose          |
+| ----------- | ----------------------- | ------------- | ---------------- |
+| `@krabs/db` | `@types/better-sqlite3` | `^7.6.0`      | Type definitions |
 
 ### 6.4 Workspace dependency map
 
-| Consumer                 | Workspace Dependencies                 |
-| ------------------------ | -------------------------------------- |
-| `@plankton/domain`       | (none)                                 |
-| `@plankton/config`       | (none)                                 |
-| `@plankton/event-bus`    | `@plankton/domain`                     |
-| `@plankton/db`           | `@plankton/domain`                     |
-| `@plankton/exchange`     | `@plankton/domain`                     |
-| `@plankton/family-rules` | `@plankton/domain`, `@plankton/config` |
-| `@plankton/runtime`      | all six `@plankton/*` packages         |
-| `@plankton/api`          | `@plankton/domain`, `@plankton/db`     |
-| `@plankton/web`          | `@plankton/domain`                     |
+| Consumer              | Workspace Dependencies           |
+| --------------------- | -------------------------------- |
+| `@krabs/domain`       | (none)                           |
+| `@krabs/config`       | (none)                           |
+| `@krabs/event-bus`    | `@krabs/domain`                  |
+| `@krabs/db`           | `@krabs/domain`                  |
+| `@krabs/exchange`     | `@krabs/domain`                  |
+| `@krabs/family-rules` | `@krabs/domain`, `@krabs/config` |
+| `@krabs/runtime`      | all six `@krabs/*` packages      |
+| `@krabs/api`          | `@krabs/domain`, `@krabs/db`     |
+| `@krabs/web`          | `@krabs/domain`                  |
 
 ### 6.5 Version pinning strategy
 
@@ -607,7 +607,7 @@ Recommendation: **Option A**. Add to `.gitignore`, document how to regenerate.
 
 ### 8.1 Environment variable loading
 
-**Decision:** Use `dotenv` (`^16.4.0`) in `@plankton/config`.
+**Decision:** Use `dotenv` (`^16.4.0`) in `@krabs/config`.
 
 **Rationale:**
 
@@ -687,7 +687,7 @@ familyLogger.info({ market: marketId }, "processing market");
   - `js-yaml`: YAML 1.1 only, no built-in TS types, less maintained.
   - `yamljs`: Unmaintained.
 
-**Installation location:** `@plankton/config` runtime dependency.
+**Installation location:** `@krabs/config` runtime dependency.
 
 **Usage pattern:**
 

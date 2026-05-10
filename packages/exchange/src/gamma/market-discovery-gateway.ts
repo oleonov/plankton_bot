@@ -9,7 +9,7 @@
  * Does NOT perform slug filtering -- that is the scanner module's job.
  */
 
-import type { MarketDiscoveryGateway, ClobMarket } from "@plankton/domain";
+import type { MarketDiscoveryGateway, ClobMarket } from "@krabs/domain";
 import { drainResponseBody } from "../live/market-data-gateway.js";
 import { mapGammaMarket } from "../mappers.js";
 import { isTransientNetworkError, sleep } from "../network-errors.js";

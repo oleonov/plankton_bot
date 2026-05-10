@@ -1,5 +1,5 @@
 /* eslint-disable no-console -- wraps console before third-party SDK logs can leak secrets. */
-import { sanitizeLogArg } from "@plankton/exchange";
+import { sanitizeLogArg } from "@krabs/exchange";
 
 let installed = false;
 

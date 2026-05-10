@@ -6,7 +6,7 @@ import {
   type MarketPricingStream,
   type MarketPricingStreamMetricsSnapshot,
   type MarketPricingStreamUpdate,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { mapOrderBook } from "../mappers.js";
 import {
   extractBookTokenId,

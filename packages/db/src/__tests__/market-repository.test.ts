@@ -5,8 +5,8 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteMarketRepository } from "../repositories/market-repository.js";
-import { createTokenId } from "@plankton/domain";
-import type { Market } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { Market } from "@krabs/domain";
 import type Database from "better-sqlite3";
 
 let conn: DbConnection;
@@ -40,7 +40,7 @@ function makeMarket(overrides?: Partial<Market>): Market {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   db = conn.db;
   repo = new SqliteMarketRepository(conn.db);

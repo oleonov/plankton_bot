@@ -1,4 +1,4 @@
-import type { RiskEventRepository } from "@plankton/domain";
+import type { RiskEventRepository } from "@krabs/domain";
 import { DEDUPED_INTERNAL_ORDER_REJECTION_REASONS } from "./internal-order-reasons.js";
 import { normalizeReasonCode } from "./risk-event-codes.js";
 

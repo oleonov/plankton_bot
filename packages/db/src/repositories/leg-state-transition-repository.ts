@@ -7,14 +7,14 @@ import type {
   LegStateTransitionRepository,
   PositionId,
   TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import {
   createConditionId,
   createFillId,
   createOrderId,
   createPositionId,
   createTokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 interface LegStateTransitionRow {
   id: number;

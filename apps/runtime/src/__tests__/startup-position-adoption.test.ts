@@ -7,7 +7,7 @@ import {
   SqliteMarketRepository,
   SqliteOrderRepository,
   SqlitePositionRepository,
-} from "@plankton/db";
+} from "@krabs/db";
 import {
   createBotRunId,
   createConditionId,
@@ -18,7 +18,7 @@ import {
   createTokenId,
   type ClientOrderId,
   type ExchangeFill,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { runStartupPositionAdoption } from "../startup-position-adoption.js";
 
 const TOKEN_ID = createTokenId("tok-btc-yes");

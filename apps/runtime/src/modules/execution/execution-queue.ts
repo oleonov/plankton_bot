@@ -8,7 +8,7 @@
  * FIFO ordering. Errors in individual commands do not break the queue.
  */
 
-import type { PlaceOrderCommand, CancelOrderCommand, TokenId } from "@plankton/domain";
+import type { PlaceOrderCommand, CancelOrderCommand, TokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 type Command = PlaceOrderCommand | CancelOrderCommand;

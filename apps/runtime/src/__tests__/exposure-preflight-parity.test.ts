@@ -34,8 +34,8 @@
  */
 
 import { describe, expect, it, afterEach } from "vitest";
-import { bootstrapDatabase, SqlitePositionRepository, SqliteOrderRepository } from "@plankton/db";
-import type { Order, Position, OrderStatus } from "@plankton/domain";
+import { bootstrapDatabase, SqlitePositionRepository, SqliteOrderRepository } from "@krabs/db";
+import type { Order, Position, OrderStatus } from "@krabs/domain";
 import {
   createBotRunId,
   createConditionId,
@@ -43,7 +43,7 @@ import {
   createPositionId,
   createTokenId,
   type ClientOrderId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { calculateTotalExposure } from "../exposure-calculator.js";
 
 // ─── Reference SQL — MUST stay in lock-step with profile-preflight.ts ────────

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createGateways } from "../gateway-factory.js";
-import { SimulationMarketDataGateway, SimulationExchangeGateway } from "@plankton/exchange";
+import { SimulationMarketDataGateway, SimulationExchangeGateway } from "@krabs/exchange";
 
 describe("createGateways", () => {
   it("simulation mode returns both simulation gateways", () => {

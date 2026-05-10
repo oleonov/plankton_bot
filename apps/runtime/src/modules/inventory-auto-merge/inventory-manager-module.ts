@@ -7,7 +7,7 @@ import type {
   InventoryLotRepository,
   MergeLedgerRepository,
   RuntimeModule,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type Database from "better-sqlite3";
 import type { Logger } from "../../logger.js";
 import { MergeCandidateService } from "./merge-candidate-service.js";
@@ -19,7 +19,7 @@ export interface InventoryManagerDeps {
   positionRepo: PositionRepository;
   orderRepo: OrderRepository;
   marketRepo: MarketRepository;
-  fillRepo: import("@plankton/domain").FillRepository;
+  fillRepo: import("@krabs/domain").FillRepository;
   lotRepo: InventoryLotRepository;
   mergeLedgerRepo: MergeLedgerRepository;
   db: Database.Database;

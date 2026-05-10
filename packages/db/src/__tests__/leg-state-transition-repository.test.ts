@@ -8,7 +8,7 @@ import {
   createOrderId,
   createPositionId,
   createTokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { SqliteLegStateTransitionRepository } from "../repositories/leg-state-transition-repository.js";
 
 function createTestDb(): Database.Database {

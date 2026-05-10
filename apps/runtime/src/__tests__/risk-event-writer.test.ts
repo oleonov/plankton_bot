@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
 import { RiskEventWriter } from "../risk-event-writer.js";
 
 describe("RiskEventWriter", () => {

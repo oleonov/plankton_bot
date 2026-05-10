@@ -9,7 +9,7 @@ import type {
   OrderRepository,
   RuntimeEventMap,
   Signal,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import {
   DEFAULT_EXECUTION_POLICY,
   createBotRunId,
@@ -18,8 +18,8 @@ import {
   createOrderId,
   createPositionId,
   createTokenId,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { EntryLifecycleModule } from "../entry-lifecycle-module.js";
 import type { Logger } from "../../../logger.js";
 

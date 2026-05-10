@@ -10,7 +10,7 @@ let conn: DbConnection;
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
 });
 

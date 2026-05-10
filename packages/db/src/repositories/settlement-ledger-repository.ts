@@ -1,5 +1,5 @@
 import type { Database } from "better-sqlite3";
-import type { SettlementLedgerRepository, SettlementRecord } from "@plankton/domain";
+import type { SettlementLedgerRepository, SettlementRecord } from "@krabs/domain";
 
 interface SettlementLedgerRow {
   settlement_id: string;

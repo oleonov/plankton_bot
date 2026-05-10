@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { RiskEventRepository } from "@plankton/domain";
+import type { RiskEventRepository } from "@krabs/domain";
 
 export class SqliteRiskEventRepository implements RiskEventRepository {
   constructor(private readonly db: Database.Database) {}

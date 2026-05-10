@@ -4,7 +4,7 @@
  * that stream_circuit_open/closed toggles streamDegradedMode.
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import type { MarketPricingLifecycleEvent } from "@plankton/domain";
+import type { MarketPricingLifecycleEvent } from "@krabs/domain";
 import { MarketDataModule } from "../modules/market-data/market-data-module.js";
 
 describe("MarketDataModule — circuit breaker lifecycle events", () => {

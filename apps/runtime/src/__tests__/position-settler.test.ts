@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createPositionId } from "@plankton/domain";
+import { createTokenId, createPositionId } from "@krabs/domain";
 import type {
   PositionRepository,
   InventoryLotRepository,
@@ -7,7 +7,7 @@ import type {
   Market,
   Position,
   TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type {
   DetectedResolution,
   ResolutionCandidate,

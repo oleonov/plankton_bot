@@ -23,8 +23,8 @@ import type {
   MarketPricingStreamUpdate,
   Market,
   NormalizedMarket,
-} from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
+} from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { isTransientNetworkError } from "../../network-errors.js";
 import {
@@ -601,7 +601,7 @@ export class MarketDataModule implements RuntimeModule {
       const pricingMap =
         tokenIdsToPoll.length > 0
           ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll, { timeoutMs })
-          : new Map<string, import("@plankton/domain").MarketPricingSnapshot>();
+          : new Map<string, import("@krabs/domain").MarketPricingSnapshot>();
       this.lastPricingHitCount = pricingMap.size;
       for (const tokenId of tokenIdsToPoll) {
         this.lastPricingAttemptAtByToken.set(tokenId, now);

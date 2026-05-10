@@ -3,7 +3,7 @@
  * and order book reads.
  *
  * The SDK ClobClient is accepted as `unknown` in the public config interface
- * to prevent SDK types from leaking into @plankton/domain consumers.
+ * to prevent SDK types from leaking into @krabs/domain consumers.
  */
 
 import {
@@ -15,7 +15,7 @@ import {
   type ClobMarket,
   type OrderBookSnapshot,
   type TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { mapMarket, mapOrderBook, parseStringOrArray } from "../mappers.js";
 import { isTransientNetworkError, sleep } from "../network-errors.js";
 import { SharedMarketPricingStreamHub } from "./market-pricing-stream-hub.js";
@@ -332,7 +332,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     handlers: Readonly<{
       onUpdates: (updates: readonly MarketPricingStreamUpdate[]) => Promise<void> | void;
       onLifecycleEvents?: (
-        events: readonly import("@plankton/domain").MarketPricingLifecycleEvent[],
+        events: readonly import("@krabs/domain").MarketPricingLifecycleEvent[],
       ) => Promise<void> | void;
       onError?: (error: unknown) => Promise<void> | void;
       onGapDetected?: (

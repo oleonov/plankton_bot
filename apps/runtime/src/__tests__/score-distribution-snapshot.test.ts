@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { bootstrapDatabase, type DbConnection } from "@plankton/db";
+import { bootstrapDatabase, type DbConnection } from "@krabs/db";
 import { computeScoreDistributionSnapshot } from "../modules/soft-ranking/score-distribution-snapshot.js";
 
 const NOW = new Date("2026-05-05T12:00:00Z");

@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
-import type { OrderPriceCooldown, OrderPriceCooldownRepository } from "@plankton/domain";
-import type { OrderSide, TokenId } from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
+import type { OrderPriceCooldown, OrderPriceCooldownRepository } from "@krabs/domain";
+import type { OrderSide, TokenId } from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
 
 interface OrderPriceCooldownRow {
   token_id: string;

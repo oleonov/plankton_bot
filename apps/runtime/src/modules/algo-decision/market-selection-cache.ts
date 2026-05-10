@@ -1,5 +1,5 @@
-import type { EventBus, MarketSelectionPolicy, NormalizedMarket, TokenId } from "@plankton/domain";
-import { evaluatePreEntry } from "@plankton/domain";
+import type { EventBus, MarketSelectionPolicy, NormalizedMarket, TokenId } from "@krabs/domain";
+import { evaluatePreEntry } from "@krabs/domain";
 import type { SelectedMarketCache } from "./algo-decision-module.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 

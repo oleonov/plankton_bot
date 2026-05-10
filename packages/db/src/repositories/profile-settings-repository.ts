@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
-import type { ProfileSettingsRepository, ProfileSettings } from "@plankton/domain";
-import type { ProfileId, WalletMode } from "@plankton/domain";
+import type { ProfileSettingsRepository, ProfileSettings } from "@krabs/domain";
+import type { ProfileId, WalletMode } from "@krabs/domain";
 
 export class SqliteProfileSettingsRepository implements ProfileSettingsRepository {
   constructor(private readonly db: Database.Database) {}

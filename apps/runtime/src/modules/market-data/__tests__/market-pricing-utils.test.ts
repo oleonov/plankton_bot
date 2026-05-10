@@ -9,7 +9,7 @@ import type {
   MarketPricingStreamUpdate,
   NormalizedMarket,
   TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 const baseMarket = (overrides: Partial<NormalizedMarket> = {}): NormalizedMarket => ({
   tokenId: "t1" as TokenId,

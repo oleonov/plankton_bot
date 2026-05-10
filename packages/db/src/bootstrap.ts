@@ -542,7 +542,7 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
  * the same token from leaking into the active leg's aggregates.
  */
 function backfillLegStateCumulativeFromFills(db: import("better-sqlite3").Database): void {
-  // bootstrapLedgerDb is shared across plankton/control DBs; the `fills`
+  // bootstrapLedgerDb is shared across krabs/control DBs; the `fills`
   // table only exists in the ledger DB. Skip silently otherwise.
   const fillsExists = db
     .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='fills'`)

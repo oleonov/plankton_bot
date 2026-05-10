@@ -8,7 +8,7 @@ import type {
   MarketRepository,
   InventoryLotRepository,
   MergeLedgerRepository,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 
 describe("InventoryManagerModule", () => {
@@ -17,7 +17,7 @@ describe("InventoryManagerModule", () => {
   let positionRepo: PositionRepository;
   let orderRepo: OrderRepository;
   let marketRepo: MarketRepository;
-  let fillRepo: import("@plankton/domain").FillRepository;
+  let fillRepo: import("@krabs/domain").FillRepository;
   let lotRepo: InventoryLotRepository;
   let mergeLedgerRepo: MergeLedgerRepository;
   let db: any;

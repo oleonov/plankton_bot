@@ -12,7 +12,7 @@ import {
   mapGammaMarket,
   mapGammaPricing,
 } from "../mappers.js";
-import { createTokenId } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
 
 describe("side mapping", () => {
   it("toDomainSide converts BUY/SELL to buy/sell", () => {

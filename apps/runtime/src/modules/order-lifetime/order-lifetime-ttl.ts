@@ -1,4 +1,4 @@
-import type { AlgoTokenModeState, Market, Order, OrderLifetimePolicy } from "@plankton/domain";
+import type { AlgoTokenModeState, Market, Order, OrderLifetimePolicy } from "@krabs/domain";
 
 export interface ExitOrderLifetimeInput {
   order: Pick<Order, "createdAt" | "orderId" | "tokenId">;

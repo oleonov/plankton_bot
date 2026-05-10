@@ -8,7 +8,7 @@ import {
   type OrderSide,
   type ProfileId,
   type SellCapacityPolicy,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 const BUDGET_EPSILON_USDC = 1e-9;
 const CAPACITY_EPSILON_USDC = 1e-9;

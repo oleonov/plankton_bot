@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { SqliteAlgoRulesRepository } from "../repositories/algo-rules-repository.js";
 import { ensureAlgoRulesDefaults } from "../bootstrap.js";
-import { evaluateDecision, evaluateSize } from "@plankton/domain";
-import type { EvalContext } from "@plankton/domain";
+import { evaluateDecision, evaluateSize } from "@krabs/domain";
+import type { EvalContext } from "@krabs/domain";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 

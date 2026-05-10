@@ -10,7 +10,7 @@ const envSchema = z
   .object({
     RUNTIME_MODE: runtimeModeSchema.optional(),
     LOG_LEVEL: logLevelSchema.default("info"),
-    DB_PATH: z.string().default("./apps/runtime/data/plankton.db"),
+    DB_PATH: z.string().default("./apps/runtime/data/krabs.db"),
     MARKET_DATA_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
     MARKET_DATA_STALE_THRESHOLD_MS: z.coerce.number().int().positive().default(120_000),
     MARKET_SCAN_INTERVAL_MS: z.coerce
@@ -55,13 +55,13 @@ const envSchema = z
     POLYMARKET_RELAYER_URL: z.string().url().default("https://relayer-v2.polymarket.com"),
     POLYGON_RPC_URL: z.string().url().default("https://polygon-rpc.com"),
     POLYGON_RPC_FALLBACK_URL: z.string().url().optional(),
-    PLANKTON_API_KEY: z.string().optional(),
-    PLANKTON_API_PORT: z.coerce.number().int().positive().default(3100),
+    KRABS_API_KEY: z.string().optional(),
+    KRABS_API_PORT: z.coerce.number().int().positive().default(3100),
     // LIVE_LITE_* env vars removed — envelope caps now come from profile_settings in control.db
     // Kept as optional for backward compat during migration; ignored by runtime.
-    PLANKTON_AUTH_USERNAME: z.string().optional(),
-    PLANKTON_AUTH_PASSWORD: z.string().optional(),
-    PLANKTON_SESSION_SECRET: z.string().optional(),
+    KRABS_AUTH_USERNAME: z.string().optional(),
+    KRABS_AUTH_PASSWORD: z.string().optional(),
+    KRABS_SESSION_SECRET: z.string().optional(),
     TRUST_PROXY: z
       .enum(["true", "false"])
       .default("false")
@@ -189,11 +189,11 @@ export interface AppConfig {
   polymarketRelayerUrl?: string | undefined;
   polygonRpcUrl?: string | undefined;
   polygonRpcFallbackUrl?: string | undefined;
-  planktonApiKey: string | undefined;
-  planktonApiPort: number;
-  planktonAuthUsername: string | undefined;
-  planktonAuthPassword: string | undefined;
-  planktonSessionSecret: string | undefined;
+  krabsApiKey: string | undefined;
+  krabsApiPort: number;
+  krabsAuthUsername: string | undefined;
+  krabsAuthPassword: string | undefined;
+  krabsSessionSecret: string | undefined;
   trustProxy: boolean;
   // Task 1
   marketDataMaxTrackedTokens: number;
@@ -282,11 +282,11 @@ export function loadEnv(envPath?: string): AppConfig {
     polymarketRelayerUrl: env.POLYMARKET_RELAYER_URL,
     polygonRpcUrl: env.POLYGON_RPC_URL,
     polygonRpcFallbackUrl: env.POLYGON_RPC_FALLBACK_URL,
-    planktonApiKey: env.PLANKTON_API_KEY,
-    planktonApiPort: env.PLANKTON_API_PORT,
-    planktonAuthUsername: env.PLANKTON_AUTH_USERNAME,
-    planktonAuthPassword: env.PLANKTON_AUTH_PASSWORD,
-    planktonSessionSecret: env.PLANKTON_SESSION_SECRET,
+    krabsApiKey: env.KRABS_API_KEY,
+    krabsApiPort: env.KRABS_API_PORT,
+    krabsAuthUsername: env.KRABS_AUTH_USERNAME,
+    krabsAuthPassword: env.KRABS_AUTH_PASSWORD,
+    krabsSessionSecret: env.KRABS_SESSION_SECRET,
     trustProxy: env.TRUST_PROXY,
     marketDataMaxTrackedTokens: env.MARKET_DATA_MAX_TRACKED_TOKENS,
     marketDataMaxWsShards: env.MARKET_DATA_MAX_WS_SHARDS,

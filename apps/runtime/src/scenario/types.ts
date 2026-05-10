@@ -2,7 +2,7 @@
  * Scenario fixture and result types for deterministic end-to-end validation.
  */
 
-import type { ClobMarket, MarketTradeCountProvider, PriceLevel } from "@plankton/domain";
+import type { ClobMarket, MarketTradeCountProvider, PriceLevel } from "@krabs/domain";
 import type Database from "better-sqlite3";
 
 /** A single market snapshot to feed into the simulation gateway. */

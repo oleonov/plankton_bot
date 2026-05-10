@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { openDatabase, type DbConnection } from "@plankton/db";
+import { openDatabase, type DbConnection } from "@krabs/db";
 
 /**
  * Integration test: verify that resume_intent_at is always consumed

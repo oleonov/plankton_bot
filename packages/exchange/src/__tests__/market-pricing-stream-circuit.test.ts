@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { computeReconnectDelayMs } from "../live/reconnect-backoff.js";
 import { LiveMarketPricingStream } from "../live/market-pricing-stream.js";
-import type { MarketPricingLifecycleEvent } from "@plankton/domain";
+import type { MarketPricingLifecycleEvent } from "@krabs/domain";
 import type { MarketDataWebSocketLike } from "../live/market-data-stream-shared.js";
 
 // ─── Fake WebSocket ───────────────────────────────────────────────────────

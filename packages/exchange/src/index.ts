@@ -1,4 +1,4 @@
-// @plankton/exchange — ExchangeGateway + MarketDataGateway implementations
+// @krabs/exchange — ExchangeGateway + MarketDataGateway implementations
 
 // Re-export domain interfaces for convenience
 export type {
@@ -13,7 +13,7 @@ export type {
   ExchangeFill,
   ExchangeBalance,
   ClobMarket,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 // Simulation
 export {

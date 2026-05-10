@@ -1,11 +1,7 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import {
-  readContinuationMode,
-  readContinuationModeVersion,
-  setContinuationMode,
-} from "@plankton/db";
-import type { ContinuationMode } from "@plankton/domain";
+import { readContinuationMode, readContinuationModeVersion, setContinuationMode } from "@krabs/db";
+import type { ContinuationMode } from "@krabs/domain";
 import { ok, ApiError } from "../errors.js";
 import { getActor } from "../auth.js";
 

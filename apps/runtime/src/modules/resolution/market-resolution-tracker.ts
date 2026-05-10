@@ -19,7 +19,7 @@
  * rather than fall through allow.
  */
 
-import type { EventBus, MarketResolutionRepository, RuntimeEventMap } from "@plankton/domain";
+import type { EventBus, MarketResolutionRepository, RuntimeEventMap } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 export class MarketResolutionTracker {

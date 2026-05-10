@@ -91,7 +91,7 @@ export async function fetchPolymarketPositions(
     const res = await fetchImpl(url, {
       headers: {
         Accept: "application/json",
-        "User-Agent": options.userAgent ?? "poly-plankton/1.0",
+        "User-Agent": options.userAgent ?? "krabs/1.0",
       },
       signal: AbortSignal.timeout(options.timeoutMs ?? 15_000),
     });

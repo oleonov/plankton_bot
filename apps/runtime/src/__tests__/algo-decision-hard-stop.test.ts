@@ -21,9 +21,9 @@ import type {
   NormalizedMarket,
   LegState,
   RuntimeEventMap,
-} from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
-import type { ConditionId } from "@plankton/domain";
+} from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
+import type { ConditionId } from "@krabs/domain";
 import type { Logger } from "../logger.js";
 
 // ─── Seed rules ───────────────────────────────────────────────────────────────

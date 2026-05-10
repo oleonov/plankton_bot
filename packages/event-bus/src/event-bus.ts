@@ -1,4 +1,4 @@
-import type { EventBus, RuntimeEventMap } from "@plankton/domain";
+import type { EventBus, RuntimeEventMap } from "@krabs/domain";
 
 type Handler = (payload: never) => Promise<void>;
 

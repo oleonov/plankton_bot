@@ -16,7 +16,7 @@ import {
   createConditionId,
   DEFAULT_BUY_CAPACITY_POLICY,
   DEFAULT_EXECUTION_POLICY,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type {
   ExchangeGateway,
   PlaceOrderParams,
@@ -32,8 +32,8 @@ import type {
   ExecutionPolicy,
   TokenId,
   ClientOrderId,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 
 // ─── Shared fixtures ──────────────────────────────────────────────────────

@@ -80,7 +80,7 @@ Per remediation plan §7.3 (lines 565–579), the merge gate for 7.3 is a
 PnL replay against the `08_pnl_validation.md §7` reference fixtures:
 
 ```bash
-pnpm --filter @plankton/runtime test -- replay-08-pnl-validation.test
+pnpm --filter @krabs/runtime test -- replay-08-pnl-validation.test
 ```
 
 Deliverable: `docs/audits/2026-04-19-pnl-replay-post-clamp.md`. The

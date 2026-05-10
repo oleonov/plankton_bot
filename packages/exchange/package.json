@@ -1,5 +1,5 @@
 {
-  "name": "@plankton/exchange",
+  "name": "@krabs/exchange",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -19,7 +19,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@plankton/domain": "workspace:*",
+    "@krabs/domain": "workspace:*",
     "@polymarket/clob-client-v2": "^1.0.2",
     "viem": "^2.47.10"
   }

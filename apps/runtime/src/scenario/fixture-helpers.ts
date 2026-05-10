@@ -2,7 +2,7 @@
  * Helpers to build typed scenario fixtures without boilerplate.
  */
 
-import type { ClobMarket, PriceLevel } from "@plankton/domain";
+import type { ClobMarket, PriceLevel } from "@krabs/domain";
 import type { MarketFixture } from "./types.js";
 
 let marketCounter = 0;

@@ -3,7 +3,7 @@ import {
   aggregatePolymarketPositions,
   fetchPolymarketPositions,
   type PolymarketPositionAggregate,
-} from "@plankton/exchange";
+} from "@krabs/exchange";
 
 const EVM_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/;
 

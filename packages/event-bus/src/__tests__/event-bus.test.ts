@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { InProcessEventBus } from "../event-bus.js";
-import type { Signal, Position, NormalizedMarket } from "@plankton/domain";
-import { createTokenId, createPositionId, createConditionId } from "@plankton/domain";
+import type { Signal, Position, NormalizedMarket } from "@krabs/domain";
+import { createTokenId, createPositionId, createConditionId } from "@krabs/domain";
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {

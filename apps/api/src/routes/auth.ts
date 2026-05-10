@@ -24,10 +24,7 @@ export const authRoutes: FastifyPluginAsync<AuthRoutesOpts> = async (app, opts) 
         return reply
           .status(501)
           .send(
-            fail(
-              "LOGIN_NOT_CONFIGURED",
-              "web login is not configured — set PLANKTON_AUTH_PASSWORD",
-            ),
+            fail("LOGIN_NOT_CONFIGURED", "web login is not configured — set KRABS_AUTH_PASSWORD"),
           );
       }
 

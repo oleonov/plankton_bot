@@ -48,7 +48,7 @@ API:
 
 ```bash
 curl -X POST https://bot.example.com/api/v1/selection-rules \
-  -H "Authorization: Bearer $PLANKTON_API_KEY" \
+  -H "Authorization: Bearer $KRABS_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"profileId":"live-lite","ruleType":"exclude_slug","pattern":"spam-market-slug","enabled":true,"note":"manual block"}'
 ```

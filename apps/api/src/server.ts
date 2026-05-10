@@ -11,7 +11,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import type Database from "better-sqlite3";
-import type { AppConfig } from "@plankton/config";
+import type { AppConfig } from "@krabs/config";
 import type { LedgerPool } from "./ledger-pool.js";
 import { createAuthHook } from "./auth.js";
 import { fail } from "./errors.js";
@@ -50,10 +50,10 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(cors, { origin: true });
 
   // Session auth — only registered if password is configured
-  if (deps.config.planktonSessionSecret) {
+  if (deps.config.krabsSessionSecret) {
     await app.register(secureSession, {
-      cookieName: "plankton_session",
-      key: Buffer.from(deps.config.planktonSessionSecret, "hex"),
+      cookieName: "krabs_session",
+      key: Buffer.from(deps.config.krabsSessionSecret, "hex"),
       expiry: 15 * 24 * 60 * 60,
       cookie: {
         httpOnly: true,
@@ -69,8 +69,8 @@ export async function buildServer(deps: ServerDeps) {
 
   // Auth hook — dual mechanism (session cookie OR Bearer API key)
   const authenticate = createAuthHook({
-    apiKey: deps.config.planktonApiKey,
-    authPasswordConfigured: !!deps.config.planktonAuthPassword,
+    apiKey: deps.config.krabsApiKey,
+    authPasswordConfigured: !!deps.config.krabsAuthPassword,
   });
   app.addHook("onRequest", authenticate);
 
@@ -84,8 +84,8 @@ export async function buildServer(deps: ServerDeps) {
   // Routes — each receives only the DB(s) it needs
   await app.register(authRoutes, {
     prefix: "/api/v1",
-    username: deps.config.planktonAuthUsername,
-    password: deps.config.planktonAuthPassword,
+    username: deps.config.krabsAuthUsername,
+    password: deps.config.krabsAuthPassword,
   });
   await app.register(healthRoutes, { prefix: "/api/v1" });
 

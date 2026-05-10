@@ -1,13 +1,7 @@
 import type Database from "better-sqlite3";
-import type { PreflightReportRepository, PreflightReport } from "@plankton/domain";
-import { createReportId, createSwitchId } from "@plankton/domain";
-import type {
-  ReportId,
-  SwitchId,
-  ProfileId,
-  PreflightKind,
-  PreflightStatus,
-} from "@plankton/domain";
+import type { PreflightReportRepository, PreflightReport } from "@krabs/domain";
+import { createReportId, createSwitchId } from "@krabs/domain";
+import type { ReportId, SwitchId, ProfileId, PreflightKind, PreflightStatus } from "@krabs/domain";
 
 export class SqlitePreflightReportRepository implements PreflightReportRepository {
   constructor(private readonly db: Database.Database) {}

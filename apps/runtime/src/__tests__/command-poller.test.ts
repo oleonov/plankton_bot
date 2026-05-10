@@ -3,14 +3,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import pino from "pino";
-import { InProcessEventBus } from "@plankton/event-bus";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   bootstrapDatabase,
   SqliteOperatorCommandRepository,
   SqliteOperatorActionRepository,
-} from "@plankton/db";
-import type { DbConnection } from "@plankton/db";
-import type { OperatorActionType } from "@plankton/domain";
+} from "@krabs/db";
+import type { DbConnection } from "@krabs/db";
+import type { OperatorActionType } from "@krabs/domain";
 import { CommandPoller } from "../supervisor/command-poller.js";
 import type { PatternRebuilder, ReloadableRules } from "../supervisor/command-poller.js";
 
@@ -46,7 +46,7 @@ function insertCommand(
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   cmdRepo = new SqliteOperatorCommandRepository(conn.db);
   actionRepo = new SqliteOperatorActionRepository(conn.db);

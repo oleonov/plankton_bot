@@ -5,8 +5,8 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteOrderRepository } from "../repositories/order-repository.js";
-import { createOrderId, createTokenId, createConditionId, createBotRunId } from "@plankton/domain";
-import type { Order, ClientOrderId } from "@plankton/domain";
+import { createOrderId, createTokenId, createConditionId, createBotRunId } from "@krabs/domain";
+import type { Order, ClientOrderId } from "@krabs/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -36,7 +36,7 @@ function makeOrder(overrides?: Partial<Order>): Order {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   repo = new SqliteOrderRepository(conn.db);
 });

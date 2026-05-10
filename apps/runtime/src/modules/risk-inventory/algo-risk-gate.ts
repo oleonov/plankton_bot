@@ -9,7 +9,7 @@ import {
   type BuyCapacityPolicy,
   type ExecutionPolicy,
   type Order,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";

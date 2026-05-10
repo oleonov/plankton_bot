@@ -7,6 +7,6 @@ export default defineConfig({
     setupFiles: ["./src/test/setup.ts"],
   },
   define: {
-    "import.meta.env.VITE_PLANKTON_API_KEY": JSON.stringify(""),
+    "import.meta.env.VITE_KRABS_API_KEY": JSON.stringify(""),
   },
 });

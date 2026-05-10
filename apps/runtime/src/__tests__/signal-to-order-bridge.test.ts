@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { InProcessEventBus } from "@plankton/event-bus";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   createConditionId,
   createOrderId,
@@ -10,7 +10,7 @@ import {
   type OrderRepository,
   type ProfileId,
   type Signal,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
 import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
 import { DEFAULT_EXECUTION_POLICY } from "../execution-policy.js";
@@ -20,7 +20,7 @@ import type {
   ExecutionPolicyObservation,
   ExecutionPolicyObservationRepository,
   ExecutionPricingPolicy,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 const TOKEN_ID = createTokenId("tok-yes");
 const NOW = Date.parse("2026-04-11T10:00:00.000Z");

@@ -5,9 +5,9 @@ import type {
   OrderBookSnapshot,
   TokenId,
   Market,
-} from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { MarketDataModule } from "../../modules/market-data/market-data-module.js";
 
 // ─── Minimal test helpers ─────────────────────────────────────────────────

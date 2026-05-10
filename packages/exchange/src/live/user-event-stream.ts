@@ -2,7 +2,7 @@ import type {
   ExchangeUserEventStream,
   ExchangeUserOrderEvent,
   ExchangeUserTradeEvent,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { mapUserOrderEvent, mapUserTradeEvent } from "./user-event-mappers.js";
 
 const USER_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user";

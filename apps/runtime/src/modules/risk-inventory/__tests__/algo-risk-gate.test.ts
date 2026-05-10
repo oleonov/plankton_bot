@@ -9,8 +9,8 @@ import {
   type Order,
   type Position,
   type ExecutionPolicy,
-} from "@plankton/domain";
-import type { OrderRepository, PositionRepository } from "@plankton/domain";
+} from "@krabs/domain";
+import type { OrderRepository, PositionRepository } from "@krabs/domain";
 import { AlgoRiskGateImpl } from "../algo-risk-gate.js";
 import type { Logger } from "../../../logger.js";
 

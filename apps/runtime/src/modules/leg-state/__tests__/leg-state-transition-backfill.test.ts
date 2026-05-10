@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type Database from "better-sqlite3";
-import { bootstrapDatabase, SqliteLegStateTransitionRepository } from "@plankton/db";
-import type { DbConnection } from "@plankton/db";
-import { createTokenId } from "@plankton/domain";
+import { bootstrapDatabase, SqliteLegStateTransitionRepository } from "@krabs/db";
+import type { DbConnection } from "@krabs/db";
+import { createTokenId } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 import { backfillLegStateTransitionsFromLedger } from "../leg-state-transition-backfill.js";
 

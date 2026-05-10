@@ -1,4 +1,4 @@
-import type { WalletMode } from "@plankton/domain";
+import type { WalletMode } from "@krabs/domain";
 
 const CLOB_MARKETABLE_BUY_MIN_USDC = 1;
 const NOTIONAL_EPSILON_USDC = 1e-6;

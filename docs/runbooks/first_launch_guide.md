@@ -22,7 +22,7 @@ Use this file as the "start here" guide. For the detailed procedures after paper
 
 You need one local API key for the operator API and web UI:
 
-- `PLANKTON_API_KEY`
+- `KRABS_API_KEY`
 
 This is not a Polymarket key. It is just a local bearer token for the API/UI.
 
@@ -42,9 +42,9 @@ You do not need them for the initial `simulation` smoke run.
 
 Do not reuse the same DB file across all modes. Keep them separate:
 
-- `./apps/runtime/data/plankton-sim.db`
-- `./apps/runtime/data/plankton-paper.db`
-- `./apps/runtime/data/plankton-live-lite.db`
+- `./apps/runtime/data/krabs-sim.db`
+- `./apps/runtime/data/krabs-paper.db`
+- `./apps/runtime/data/krabs-live-lite.db`
 
 ### One important note about `.env.example`
 
@@ -88,7 +88,7 @@ cp .env.simulation .env
 
 > First time? Create `.env.simulation` from the template: `cp .env.simulation.example .env.simulation`
 
-Both `@plankton/runtime` and `@plankton/api` read the same `.env`.
+Both `@krabs/runtime` and `@krabs/api` read the same `.env`.
 
 ## Env Template: Simulation
 
@@ -97,10 +97,10 @@ Use this for the first smoke run.
 ```env
 RUNTIME_MODE=simulation
 LOG_LEVEL=info
-DB_PATH=./apps/runtime/data/plankton-sim.db
+DB_PATH=./apps/runtime/data/krabs-sim.db
 INITIAL_BALANCE_USDC=10000
-PLANKTON_API_KEY=replace-with-a-long-random-string
-PLANKTON_API_PORT=3100
+KRABS_API_KEY=replace-with-a-long-random-string
+KRABS_API_PORT=3100
 ```
 
 ## Env Template: Paper
@@ -110,10 +110,10 @@ Use this only after the first smoke run is understood.
 ```env
 RUNTIME_MODE=paper
 LOG_LEVEL=info
-DB_PATH=./apps/runtime/data/plankton-paper.db
+DB_PATH=./apps/runtime/data/krabs-paper.db
 INITIAL_BALANCE_USDC=10000
-PLANKTON_API_KEY=replace-with-a-long-random-string
-PLANKTON_API_PORT=3100
+KRABS_API_KEY=replace-with-a-long-random-string
+KRABS_API_PORT=3100
 
 POLY_API_KEY=replace
 POLY_API_SECRET=replace
@@ -127,9 +127,9 @@ Use this only after paper sign-off is clean.
 ```env
 RUNTIME_MODE=live-lite
 LOG_LEVEL=info
-DB_PATH=./apps/runtime/data/plankton-live-lite.db
-PLANKTON_API_KEY=replace-with-a-long-random-string
-PLANKTON_API_PORT=3100
+DB_PATH=./apps/runtime/data/krabs-live-lite.db
+KRABS_API_KEY=replace-with-a-long-random-string
+KRABS_API_PORT=3100
 
 POLY_API_KEY=replace
 POLY_API_SECRET=replace
@@ -195,13 +195,13 @@ pnpm build
 Start runtime in terminal 1:
 
 ```bash
-pnpm --filter @plankton/runtime start 2>&1 | tee logs/runtime-sim-$(date +%Y%m%d-%H%M%S).log
+pnpm --filter @krabs/runtime start 2>&1 | tee logs/runtime-sim-$(date +%Y%m%d-%H%M%S).log
 ```
 
 Start API in terminal 2:
 
 ```bash
-pnpm --filter @plankton/api start 2>&1 | tee logs/api-sim-$(date +%Y%m%d-%H%M%S).log
+pnpm --filter @krabs/api start 2>&1 | tee logs/api-sim-$(date +%Y%m%d-%H%M%S).log
 ```
 
 Open the UI:
@@ -240,7 +240,7 @@ It is acceptable if you do not see meaningful signals, orders, or fills yet. Thi
 Set a local shell variable for snapshots:
 
 ```bash
-API_KEY='replace-with-the-same-PLANKTON_API_KEY'
+API_KEY='replace-with-the-same-KRABS_API_KEY'
 ```
 
 Save a status snapshot:
@@ -308,13 +308,13 @@ pnpm build
 Start runtime:
 
 ```bash
-pnpm --filter @plankton/runtime start 2>&1 | tee logs/runtime-paper-$(date +%Y%m%d-%H%M%S).log
+pnpm --filter @krabs/runtime start 2>&1 | tee logs/runtime-paper-$(date +%Y%m%d-%H%M%S).log
 ```
 
 Start API:
 
 ```bash
-pnpm --filter @plankton/api start 2>&1 | tee logs/api-paper-$(date +%Y%m%d-%H%M%S).log
+pnpm --filter @krabs/api start 2>&1 | tee logs/api-paper-$(date +%Y%m%d-%H%M%S).log
 ```
 
 Set the API key in browser `localStorage` if needed.
@@ -372,7 +372,7 @@ At each checkpoint:
 Use:
 
 ```bash
-API_KEY='replace-with-the-same-PLANKTON_API_KEY'
+API_KEY='replace-with-the-same-KRABS_API_KEY'
 SESSION='paper'
 TS=$(date +%Y%m%d-%H%M%S)
 

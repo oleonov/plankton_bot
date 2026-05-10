@@ -8,7 +8,7 @@ import type {
   TokenId,
   TokenOrderLifetimeConfidence,
   TokenOrderLifetimeMode,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 const MAX_FILL_TIMESTAMPS = 10;
 const MODE_TRANSITION_STATUSES = new Set(["candidate", "confirmed"]);

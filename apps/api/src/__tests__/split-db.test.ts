@@ -7,10 +7,10 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bootstrapControlDb, bootstrapLedgerDb } from "@plankton/db";
-import { DEFAULT_EXECUTION_POLICY } from "@plankton/domain";
-import type { DbConnection } from "@plankton/db";
-import type { AppConfig } from "@plankton/config";
+import { bootstrapControlDb, bootstrapLedgerDb } from "@krabs/db";
+import { DEFAULT_EXECUTION_POLICY } from "@krabs/domain";
+import type { DbConnection } from "@krabs/db";
+import type { AppConfig } from "@krabs/config";
 import { buildServer } from "../server.js";
 import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
@@ -34,11 +34,11 @@ function testConfig(): AppConfig {
     polyApiSecret: undefined,
     polyPassphrase: undefined,
     polyPrivateKey: undefined,
-    planktonApiKey: TEST_API_KEY,
-    planktonApiPort: 0,
-    planktonAuthUsername: undefined,
-    planktonAuthPassword: undefined,
-    planktonSessionSecret: undefined,
+    krabsApiKey: TEST_API_KEY,
+    krabsApiPort: 0,
+    krabsAuthUsername: undefined,
+    krabsAuthPassword: undefined,
+    krabsSessionSecret: undefined,
     allowSellSizeClamp: true,
     trustProxy: false,
     ...MARKET_DATA_TEST_DEFAULTS,
@@ -51,7 +51,7 @@ let ledgerConn: DbConnection;
 let app: Awaited<ReturnType<typeof buildServer>>;
 
 beforeAll(async () => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-split-api-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-split-api-"));
   controlConn = bootstrapControlDb(path.join(tmpDir, "control.db"));
   ledgerConn = bootstrapLedgerDb(path.join(tmpDir, "ledger-sim.db"));
 

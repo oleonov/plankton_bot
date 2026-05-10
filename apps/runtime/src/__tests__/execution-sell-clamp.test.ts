@@ -19,7 +19,7 @@ import {
   createConditionId,
   createOrderId,
   createPositionId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type {
   ExchangeGateway,
   PlaceOrderParams,
@@ -37,8 +37,8 @@ import type {
   TokenId,
   ClientOrderId,
   Order,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 
 const BOT_RUN_ID = createBotRunId("test-sell-clamp-run");

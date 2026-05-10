@@ -18,13 +18,13 @@ import {
   type MarketScoreUpdate,
   type NormalizedMarket,
   type SelectionStatus,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SoftRankingScoreModule } from "../modules/soft-ranking/soft-ranking-score-module.js";
-import { loadLogisticModel } from "@plankton/domain";
+import { loadLogisticModel } from "@krabs/domain";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 

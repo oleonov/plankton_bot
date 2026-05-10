@@ -4,7 +4,7 @@ import type {
   InventoryLotRepository,
   MergeLedgerRepository,
   Position,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { MergeCandidate } from "./merge-candidate-service.js";
 
 export class MergeSettler {

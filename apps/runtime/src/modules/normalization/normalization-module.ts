@@ -11,7 +11,7 @@
  * selection via algoRules + SelectedMarketCache.
  */
 
-import type { RuntimeModule, EventBus, NormalizedMarket } from "@plankton/domain";
+import type { RuntimeModule, EventBus, NormalizedMarket } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 export interface NormalizationModuleDeps {

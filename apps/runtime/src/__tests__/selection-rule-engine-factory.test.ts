@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import Database from "better-sqlite3";
-import { SelectionRuleRepository } from "@plankton/db";
+import { SelectionRuleRepository } from "@krabs/db";
 import { RefreshableSelectionRuleEngine } from "../selection-rule-engine-factory.js";
 
 const CONTROL_SQL = readFileSync(

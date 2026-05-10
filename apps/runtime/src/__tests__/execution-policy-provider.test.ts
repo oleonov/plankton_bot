@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { openDatabase, SqliteProfileSettingsRepository, type DbConnection } from "@plankton/db";
-import { DEFAULT_EXECUTION_POLICY } from "@plankton/domain";
-import type { ProfileId } from "@plankton/domain";
+import { openDatabase, SqliteProfileSettingsRepository, type DbConnection } from "@krabs/db";
+import { DEFAULT_EXECUTION_POLICY } from "@krabs/domain";
+import type { ProfileId } from "@krabs/domain";
 import type { Logger } from "../logger.js";
 import { ExecutionPolicyProvider } from "../execution-policy-provider.js";
 

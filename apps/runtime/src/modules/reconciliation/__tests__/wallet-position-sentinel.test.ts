@@ -7,8 +7,8 @@ import {
   type MarketRepository,
   type Position,
   type PositionRepository,
-} from "@plankton/domain";
-import type { PolymarketDataPosition, PolymarketPositionReader } from "@plankton/exchange";
+} from "@krabs/domain";
+import type { PolymarketDataPosition, PolymarketPositionReader } from "@krabs/exchange";
 import { runWalletPositionSentinel } from "../wallet-position-sentinel.js";
 
 const TOKEN = createTokenId("tok-live");

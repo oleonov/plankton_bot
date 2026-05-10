@@ -4,7 +4,7 @@ import {
   evaluateWalletBuyCapacity,
   evaluateWalletSellCapacity,
 } from "../wallet-buy-budget.js";
-import type { BuyCapacityPolicy, OrderCapacityPolicy, SellCapacityPolicy } from "@plankton/domain";
+import type { BuyCapacityPolicy, OrderCapacityPolicy, SellCapacityPolicy } from "@krabs/domain";
 
 const buyPolicy: BuyCapacityPolicy = {
   enabled: true,

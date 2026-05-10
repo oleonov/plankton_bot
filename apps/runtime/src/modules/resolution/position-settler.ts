@@ -13,8 +13,8 @@ import type {
   InventoryLotRepository,
   MarketRepository,
   Position,
-} from "@plankton/domain";
-import type { RuntimeEventMap } from "@plankton/domain";
+} from "@krabs/domain";
+import type { RuntimeEventMap } from "@krabs/domain";
 import type { DetectedResolution, ResolutionCandidate } from "./resolution-detector.js";
 
 export type SettledPosition = RuntimeEventMap["PositionSettled"];

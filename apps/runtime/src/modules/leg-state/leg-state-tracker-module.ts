@@ -4,7 +4,7 @@ import type {
   LegStateTransitionRepository,
   PositionRepository,
   RuntimeModule,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import {
   recordLegStateClearTransition,
@@ -92,7 +92,7 @@ export class LegStateTrackerModule implements RuntimeModule {
   }
 
   private async handleFill(
-    p: import("@plankton/domain").RuntimeEventMap["FillReceived"],
+    p: import("@krabs/domain").RuntimeEventMap["FillReceived"],
   ): Promise<void> {
     const position = this.deps.positionRepo?.findByTokenId(p.tokenId);
     updateLegStateForFill(
@@ -120,7 +120,7 @@ export class LegStateTrackerModule implements RuntimeModule {
   }
 
   private async handlePositionUpdated(
-    p: import("@plankton/domain").RuntimeEventMap["PositionUpdated"],
+    p: import("@krabs/domain").RuntimeEventMap["PositionUpdated"],
   ): Promise<void> {
     if (p.position.size === 0) {
       const existing = this.deps.legStateRepo.get(p.position.tokenId);
@@ -143,7 +143,7 @@ export class LegStateTrackerModule implements RuntimeModule {
   }
 
   private async handleSettled(
-    p: import("@plankton/domain").RuntimeEventMap["PositionSettled"],
+    p: import("@krabs/domain").RuntimeEventMap["PositionSettled"],
   ): Promise<void> {
     const existing = this.deps.legStateRepo.get(p.tokenId);
     recordLegStateClearTransition({

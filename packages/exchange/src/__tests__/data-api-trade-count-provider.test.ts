@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createConditionId } from "@plankton/domain";
+import { createConditionId } from "@krabs/domain";
 import {
   DataApiTradeCountProvider,
   type TradeCountFetchEvent,

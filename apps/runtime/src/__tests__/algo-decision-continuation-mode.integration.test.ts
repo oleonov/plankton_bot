@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import Database from "better-sqlite3";
 
-import { setContinuationMode } from "@plankton/db";
+import { setContinuationMode } from "@krabs/db";
 import {
   createTokenId,
   type AlgoDecisionRule,
@@ -27,7 +27,7 @@ import {
   type NormalizedMarket,
   type RiskEventRepository,
   type RuntimeEventMap,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 import { AlgoDecisionModule } from "../modules/algo-decision/algo-decision-module.js";
 import type { SelectedMarketCache } from "../modules/algo-decision/algo-decision-module.js";

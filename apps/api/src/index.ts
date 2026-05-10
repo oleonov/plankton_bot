@@ -1,5 +1,5 @@
 /**
- * Plankton API — operator-facing REST + SSE server.
+ * Krabs API — operator-facing REST + SSE server.
  *
  * Reads from two databases:
  *   control.db  — selection rules, algo rules, operator commands
@@ -9,8 +9,8 @@
  */
 
 import process from "node:process";
-import { loadEnv } from "@plankton/config";
-import { bootstrapControlDb, bootstrapLedgerDb } from "@plankton/db";
+import { loadEnv } from "@krabs/config";
+import { bootstrapControlDb, bootstrapLedgerDb } from "@krabs/db";
 import { buildServer } from "./server.js";
 import { LedgerPool } from "./ledger-pool.js";
 
@@ -18,23 +18,23 @@ async function main(): Promise<void> {
   const config = loadEnv();
 
   // Validate session auth configuration
-  if (config.planktonAuthPassword && !config.planktonSessionSecret) {
+  if (config.krabsAuthPassword && !config.krabsSessionSecret) {
     throw new Error(
-      "PLANKTON_SESSION_SECRET is required when PLANKTON_AUTH_PASSWORD is set. " +
+      "KRABS_SESSION_SECRET is required when KRABS_AUTH_PASSWORD is set. " +
         "Generate one: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
     );
   }
 
-  if (config.planktonSessionSecret && !/^[0-9a-f]{64}$/i.test(config.planktonSessionSecret)) {
-    throw new Error("PLANKTON_SESSION_SECRET must be exactly 64 hex characters (32 bytes).");
+  if (config.krabsSessionSecret && !/^[0-9a-f]{64}$/i.test(config.krabsSessionSecret)) {
+    throw new Error("KRABS_SESSION_SECRET must be exactly 64 hex characters (32 bytes).");
   }
 
-  if (!config.planktonAuthPassword) {
+  if (!config.krabsAuthPassword) {
     // eslint-disable-next-line no-console
-    console.log("PLANKTON_AUTH_PASSWORD not set — web login disabled, API key auth only");
-  } else if (!config.planktonAuthUsername) {
+    console.log("KRABS_AUTH_PASSWORD not set — web login disabled, API key auth only");
+  } else if (!config.krabsAuthUsername) {
     // eslint-disable-next-line no-console
-    console.log("PLANKTON_AUTH_USERNAME not set — password-only login (username recommended)");
+    console.log("KRABS_AUTH_USERNAME not set — password-only login (username recommended)");
   }
 
   // Derive control DB path from legacy dbPath
@@ -73,11 +73,11 @@ async function main(): Promise<void> {
     defaultInitialBalanceUsdc,
   });
 
-  const port = config.planktonApiPort;
+  const port = config.krabsApiPort;
 
   await app.listen({ port, host: "0.0.0.0" });
   // eslint-disable-next-line no-console
-  console.log(`plankton API listening on :${port}`);
+  console.log(`krabs API listening on :${port}`);
 
   const shutdown = async () => {
     await app.close();

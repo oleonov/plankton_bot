@@ -1,5 +1,5 @@
 {
-  "name": "@plankton/runtime-manager",
+  "name": "@krabs/runtime-manager",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,8 +10,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@plankton/db": "workspace:*",
-    "@plankton/domain": "workspace:*",
+    "@krabs/db": "workspace:*",
+    "@krabs/domain": "workspace:*",
     "better-sqlite3": "^12.8.0",
     "dockerode": "^4.0.4",
     "pino": "^9.6.0",

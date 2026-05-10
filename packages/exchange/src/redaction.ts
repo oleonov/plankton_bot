@@ -3,14 +3,14 @@ import { inspect } from "node:util";
 const REDACTION_MARKER = "********";
 
 const SENSITIVE_KEY_PATTERN =
-  /^(authorization|cookie|set-cookie|poly_api_key|poly_api_secret|poly_passphrase|poly_signature|poly_timestamp|poly_builder_api_key|poly_builder_secret|poly_builder_passphrase|poly_builder_signature|poly_builder_timestamp|poly_private_key|plankton_api_key)$/i;
+  /^(authorization|cookie|set-cookie|poly_api_key|poly_api_secret|poly_passphrase|poly_signature|poly_timestamp|poly_builder_api_key|poly_builder_secret|poly_builder_passphrase|poly_builder_signature|poly_builder_timestamp|poly_private_key|krabs_api_key)$/i;
 
 // Matches `KEY: value`, `KEY=value`, `"KEY":"value"`, `'KEY':'value'` — the
 // optional quote between the key and the colon lets JSON-stringified payloads
 // (e.g. Axios/clob-client headers serialized via JSON.stringify before being
 // passed to console.error) get redacted along with plain `k: v` text.
 const STRING_KEY_VALUE_PATTERN =
-  /\b(cookie|set-cookie|POLY_API_KEY|POLY_API_SECRET|POLY_PASSPHRASE|POLY_SIGNATURE|POLY_TIMESTAMP|POLY_BUILDER_API_KEY|POLY_BUILDER_SECRET|POLY_BUILDER_PASSPHRASE|POLY_BUILDER_SIGNATURE|POLY_BUILDER_TIMESTAMP|POLY_PRIVATE_KEY|PLANKTON_API_KEY)\b["']?\s*[:=]\s*(['"]?)[^'",\s}\]]+\2/gi;
+  /\b(cookie|set-cookie|POLY_API_KEY|POLY_API_SECRET|POLY_PASSPHRASE|POLY_SIGNATURE|POLY_TIMESTAMP|POLY_BUILDER_API_KEY|POLY_BUILDER_SECRET|POLY_BUILDER_PASSPHRASE|POLY_BUILDER_SIGNATURE|POLY_BUILDER_TIMESTAMP|POLY_PRIVATE_KEY|KRABS_API_KEY)\b["']?\s*[:=]\s*(['"]?)[^'",\s}\]]+\2/gi;
 
 const AUTHORIZATION_BEARER_PATTERN =
   /\b(authorization)\b["']?\s*[:=]\s*(['"]?)Bearer\s+[A-Za-z0-9._~+/=-]+\2/gi;

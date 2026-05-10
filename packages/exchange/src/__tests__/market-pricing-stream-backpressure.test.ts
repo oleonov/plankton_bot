@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { LiveMarketPricingStream } from "../live/market-pricing-stream.js";
-import type { MarketPricingLifecycleEvent, MarketPricingStreamUpdate } from "@plankton/domain";
+import type { MarketPricingLifecycleEvent, MarketPricingStreamUpdate } from "@krabs/domain";
 import type { MarketDataWebSocketLike } from "../live/market-data-stream-shared.js";
 
 // ─── Fake WebSocket ───────────────────────────────────────────────────────

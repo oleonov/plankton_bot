@@ -5,8 +5,8 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqlitePositionRepository } from "../repositories/position-repository.js";
-import { createPositionId, createTokenId, createConditionId } from "@plankton/domain";
-import type { Position } from "@plankton/domain";
+import { createPositionId, createTokenId, createConditionId } from "@krabs/domain";
+import type { Position } from "@krabs/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -34,7 +34,7 @@ function makePosition(overrides?: Partial<Position>): Position {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   repo = new SqlitePositionRepository(conn.db);
 });

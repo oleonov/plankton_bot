@@ -7,7 +7,7 @@ import {
   type ExchangeFill,
   type MarketFeeInfo,
   type Order,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 const baseLocalOrder: Pick<
   Order,

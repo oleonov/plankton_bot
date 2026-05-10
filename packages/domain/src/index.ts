@@ -1,4 +1,4 @@
-// @plankton/domain — pure types, enums, and branded IDs. Zero runtime deps.
+// @krabs/domain — pure types, enums, and branded IDs. Zero runtime deps.
 export * from "./enums.js";
 export * from "./ids.js";
 export * from "./types.js";

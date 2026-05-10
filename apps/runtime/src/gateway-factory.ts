@@ -2,14 +2,14 @@
  * Gateway factory — maps runtime mode to the correct MarketDataGateway + ExchangeGateway pair.
  */
 
-import type { MarketDataGateway, ExchangeGateway } from "@plankton/domain";
+import type { MarketDataGateway, ExchangeGateway } from "@krabs/domain";
 import {
   SimulationMarketDataGateway,
   SimulationExchangeGateway,
   LiveMarketDataGateway,
   LiveExchangeGateway,
   type UserEventStreamAuth,
-} from "@plankton/exchange";
+} from "@krabs/exchange";
 
 export interface CreateGatewaysInput {
   runtimeMode: "simulation" | "paper" | "live-lite";

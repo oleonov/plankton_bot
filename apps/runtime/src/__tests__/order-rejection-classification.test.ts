@@ -5,7 +5,7 @@ import {
   createTokenId,
   ExchangeErrorCode,
   type ClientOrderId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import {
   isGatewayOrderReject,
   type OrderRejectedEvent,

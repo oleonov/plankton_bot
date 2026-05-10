@@ -143,7 +143,7 @@ export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
  *
  * Default value applies to paper / live-lite. The simulation profile gets
  * a per-profile seed of 0 (full bypass) — see `defaultExecutionPolicyJson`
- * in `@plankton/db` (control-profiles.ts).
+ * in `@krabs/db` (control-profiles.ts).
  */
 export const DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS = 2_504;
 

@@ -1,4 +1,4 @@
-import { deriveState } from "@plankton/domain";
+import { deriveState } from "@krabs/domain";
 import type {
   ClientOrderId,
   ConditionId,
@@ -11,7 +11,7 @@ import type {
   OrderId,
   PositionId,
   TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 export interface LegStateFillInput {

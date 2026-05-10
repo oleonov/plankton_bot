@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId } from "@plankton/domain";
-import type { NormalizedMarket } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { NormalizedMarket } from "@krabs/domain";
 import { SnapshotWriter } from "../snapshot-writer.js";
 
 function makeMarket(tokenId: string, bestBid = 0.45, bestAsk = 0.55): NormalizedMarket {

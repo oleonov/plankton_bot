@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { bootstrapDatabase, type DbConnection } from "@plankton/db";
+import { bootstrapDatabase, type DbConnection } from "@krabs/db";
 import {
   buildLegStateMap,
   getLegStateOrEmpty,

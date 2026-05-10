@@ -574,7 +574,7 @@ rate_limit:
 
 data:
   orderbook_ttl_seconds: 60
-  db_path: plankton_bot.db
+  db_path: krabs_bot.db
 
 logging:
   level: INFO
@@ -582,7 +582,7 @@ logging:
   file: logs/bot.jsonl
 ```
 
-Environment variables override any config value with prefix `PLANKTON_BOT_`.
+Environment variables override any config value with prefix `KRABS_BOT_`.
 
 ---
 

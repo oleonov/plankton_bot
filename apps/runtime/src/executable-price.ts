@@ -8,7 +8,7 @@ import type {
   PriceLevel,
   PricingRoundLevel,
   SoldBoughtRatioBucket,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 const DEFAULT_TICK_SIZE = 0.01;
 const PRICE_EPSILON = 1e-9;

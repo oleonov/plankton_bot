@@ -1,5 +1,5 @@
 /**
- * Mappers — convert raw SDK responses to @plankton/domain types.
+ * Mappers — convert raw SDK responses to @krabs/domain types.
  *
  * All SDK → domain conversions live here. No SDK types are imported;
  * raw data arrives as Record<string, unknown> to prevent type leakage.
@@ -15,13 +15,13 @@ import type {
   TokenId,
   OrderSide,
   LiquidityRole,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import {
   computePolymarketBuyShareFee,
   computePolymarketTakerFeeUsdc,
   createTokenId,
   resolvePolymarketTakerFeeRate,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 // ─── Side mapping ────────────────────────────────────────────────────────
 

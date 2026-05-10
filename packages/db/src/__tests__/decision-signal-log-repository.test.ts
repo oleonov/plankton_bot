@@ -5,14 +5,14 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteDecisionSignalLogRepository } from "../repositories/decision-signal-log-repository.js";
-import { createConditionId, createTokenId } from "@plankton/domain";
+import { createConditionId, createTokenId } from "@krabs/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
 let repo: SqliteDecisionSignalLogRepository;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   repo = new SqliteDecisionSignalLogRepository(conn.db);
 });

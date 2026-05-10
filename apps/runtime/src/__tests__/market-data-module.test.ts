@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
 import type {
   MarketDataGateway,
   MarketPricingLifecycleEvent,
@@ -10,8 +10,8 @@ import type {
   RuntimeEventMap,
   MarketRepository,
   Market,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { MarketDataModule } from "../modules/market-data/market-data-module.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
@@ -1384,7 +1384,7 @@ describe("MarketDataModule", () => {
     (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue(tracked);
 
     // Snapshot with both liveness booleans false — market not live yet.
-    const pricingMap = new Map<string, import("@plankton/domain").MarketPricingSnapshot>([
+    const pricingMap = new Map<string, import("@krabs/domain").MarketPricingSnapshot>([
       [
         "tok-t1",
         {

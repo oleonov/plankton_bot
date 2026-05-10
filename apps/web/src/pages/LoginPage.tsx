@@ -35,7 +35,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
       const body = await res.json();
 
       if (res.status === 501) {
-        setError("Login not available -- configure PLANKTON_AUTH_PASSWORD on the server");
+        setError("Login not available -- configure KRABS_AUTH_PASSWORD on the server");
       } else if (!body.ok) {
         setError(body.error?.message ?? "Login failed");
       } else {
@@ -72,8 +72,15 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           width: 320,
         }}
       >
-        <span style={{ fontWeight: 700, color: "var(--blue)", fontSize: 18, textAlign: "center" }}>
-          PLANKTON
+        <span
+          style={{
+            fontWeight: 700,
+            color: "var(--brand-accent)",
+            fontSize: 18,
+            textAlign: "center",
+          }}
+        >
+          KRABS
         </span>
         {usernameRequired && (
           <input
@@ -114,7 +121,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             padding: "8px 16px",
             borderRadius: 4,
             border: "none",
-            background: "var(--blue)",
+            background: "var(--brand-accent)",
             color: "#fff",
             fontSize: 14,
             cursor: loading ? "wait" : "pointer",

@@ -2,7 +2,7 @@ import type {
   MarketPricingSnapshot,
   MarketPricingStreamUpdate,
   NormalizedMarket,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { deriveExecutableTopOfBook } from "../../executable-price.js";
 
 export function applyPricingSnapshot(

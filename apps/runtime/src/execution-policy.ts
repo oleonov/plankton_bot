@@ -1,13 +1,13 @@
 /**
- * ADR-015 — runtime shim over the shared `@plankton/domain` policy parser.
+ * ADR-015 — runtime shim over the shared `@krabs/domain` policy parser.
  *
  * Defaults, the parse function, and bounds now live in domain so the api
  * package can PATCH-validate against the same code path. Keep this file as
  * a re-export plus the Logger-aware convenience wrapper; callers that only
- * need the pure parser can depend on `@plankton/domain` directly.
+ * need the pure parser can depend on `@krabs/domain` directly.
  */
-import type { ExecutionPolicy } from "@plankton/domain";
-import { parseExecutionPolicyJson } from "@plankton/domain";
+import type { ExecutionPolicy } from "@krabs/domain";
+import { parseExecutionPolicyJson } from "@krabs/domain";
 import type { Logger } from "./logger.js";
 
 export {
@@ -19,8 +19,8 @@ export {
   DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
-} from "@plankton/domain";
-export type { ParseResult } from "@plankton/domain";
+} from "@krabs/domain";
+export type { ParseResult } from "@krabs/domain";
 
 /**
  * Convenience wrapper: parse + log one structured error if anything is

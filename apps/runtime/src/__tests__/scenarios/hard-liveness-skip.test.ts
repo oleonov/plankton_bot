@@ -5,8 +5,8 @@ import {
   makeMarketFixture,
   resetFixtureCounters,
 } from "../../scenario/fixture-helpers.js";
-import type { SimulationMarketDataGateway } from "@plankton/exchange";
-import { createTokenId } from "@plankton/domain";
+import type { SimulationMarketDataGateway } from "@krabs/exchange";
+import { createTokenId } from "@krabs/domain";
 
 afterEach(() => {
   resetFixtureCounters();

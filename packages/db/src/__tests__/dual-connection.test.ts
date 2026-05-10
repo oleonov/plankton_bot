@@ -16,7 +16,7 @@ afterEach(() => {
 
 describe("dual-connection infrastructure", () => {
   it("bootstrapControlDb creates control tables from schema", () => {
-    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ctrl-"));
+    tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-ctrl-"));
     const conn = bootstrapControlDb(path.join(tmpDir, "control.db"));
     conns.push(conn);
     const tables = conn.db
@@ -34,7 +34,7 @@ describe("dual-connection infrastructure", () => {
   });
 
   it("bootstrapLedgerDb creates ledger tables from schema", () => {
-    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-"));
+    tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-"));
     const conn = bootstrapLedgerDb(path.join(tmpDir, "ledger-sim.db"));
     conns.push(conn);
     const tables = conn.db
@@ -52,7 +52,7 @@ describe("dual-connection infrastructure", () => {
   });
 
   it("bootstrapLedgerDb repairs pre-existing duplicate open positions and installs unique index", () => {
-    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-repair-"));
+    tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-repair-"));
     const dbPath = path.join(tmpDir, "ledger.db");
 
     // Simulate an upgrade install: first bootstrap creates the schema, we then
@@ -99,7 +99,7 @@ describe("dual-connection infrastructure", () => {
   });
 
   it("bootstrapControlDb is idempotent", () => {
-    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ctrl-idem-"));
+    tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-ctrl-idem-"));
     const dbPath = path.join(tmpDir, "control.db");
     const conn1 = bootstrapControlDb(dbPath);
     conn1.close();
@@ -112,7 +112,7 @@ describe("dual-connection infrastructure", () => {
   });
 
   it("bootstrapControlDb fixes legacy-inverted BUY size priorities on existing rules (spec v2.2)", () => {
-    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ctrl-buy-prec-"));
+    tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-ctrl-buy-prec-"));
     const dbPath = path.join(tmpDir, "control.db");
 
     // Simulate a control.db seeded under the pre-v2.2 precedence contract:
@@ -158,7 +158,7 @@ describe("dual-connection infrastructure", () => {
   });
 
   it("bootstrapLedgerDb is idempotent", () => {
-    tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-idem-"));
+    tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-idem-"));
     const dbPath = path.join(tmpDir, "ledger.db");
     const conn1 = bootstrapLedgerDb(dbPath);
     conn1.close();

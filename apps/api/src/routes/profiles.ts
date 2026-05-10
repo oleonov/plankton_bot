@@ -12,8 +12,8 @@ import {
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
   type ExecutionPolicy,
-} from "@plankton/domain";
-import { readExecutionPolicyVersion } from "@plankton/db";
+} from "@krabs/domain";
+import { readExecutionPolicyVersion } from "@krabs/db";
 
 interface ProfilesOpts {
   controlDb: Database.Database;

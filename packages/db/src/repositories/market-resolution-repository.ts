@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
-import type { MarketResolutionRepository } from "@plankton/domain";
-import type { MarketResolution } from "@plankton/domain";
+import type { MarketResolutionRepository } from "@krabs/domain";
+import type { MarketResolution } from "@krabs/domain";
 
 export class SqliteMarketResolutionRepository implements MarketResolutionRepository {
   constructor(private readonly db: Database.Database) {}

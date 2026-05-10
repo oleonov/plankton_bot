@@ -14,8 +14,8 @@ import type {
   InventoryLotRepository,
   ClientOrderId,
   TokenId,
-} from "@plankton/domain";
-import { createFillId, createOrderId, createTokenId } from "@plankton/domain";
+} from "@krabs/domain";
+import { createFillId, createOrderId, createTokenId } from "@krabs/domain";
 import type { Logger } from "./logger.js";
 import { resolveOpenPositionStatus } from "./position-status.js";
 import { InventoryHandler } from "./modules/risk-inventory/inventory-handler.js";

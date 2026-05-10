@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { resolveTradingState } from "@plankton/domain";
+import { resolveTradingState } from "@krabs/domain";
 import type { LedgerPool } from "../ledger-pool.js";
 import { resolveActiveLedger } from "../active-ledger.js";
 import { computeExecutionTelemetry } from "../execution-telemetry.js";

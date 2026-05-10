@@ -35,7 +35,7 @@ import type {
   ContinuationMode,
   ExecutionPolicy,
   TradeDecisionAction,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import {
   deriveState,
   evaluateDecision,
@@ -45,10 +45,10 @@ import {
   evaluateMinMarketAge,
   matchRule,
   isAlive,
-} from "@plankton/domain";
-import { readContinuationMode, readContinuationModeVersion } from "@plankton/db";
-import type { EvalContext } from "@plankton/domain";
-import type { RuntimeControl } from "@plankton/domain";
+} from "@krabs/domain";
+import { readContinuationMode, readContinuationModeVersion } from "@krabs/db";
+import type { EvalContext } from "@krabs/domain";
+import type { RuntimeControl } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import {
   classifyAddAgeBucket,
@@ -98,7 +98,7 @@ interface PendingEntry {
 
 type TokenEvalResult = {
   type: "signal";
-  signal: import("@plankton/domain").Signal;
+  signal: import("@krabs/domain").Signal;
   market: NormalizedMarket;
   // Deferred persistence of decision_signal_log + signal_emitted risk_event.
   // Keep construction pure until `evaluateTokensInner` commits the signal
@@ -353,7 +353,7 @@ export type BuySignalBudgetCircuitBreakerResult = {
 export interface BuySignalBudgetCircuitBreaker {
   canAttemptBuy(
     requiredNotionalUsdc: number,
-    signal: import("@plankton/domain").Signal,
+    signal: import("@krabs/domain").Signal,
     context?: {
       pendingPreOpenBuyCount: number;
       pendingPreOpenBuyCountForToken: number;
@@ -1384,7 +1384,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const suggestedSizeUsdc = sizeResult.sizeUsdc;
     const suggestedSize = ctx.price > 0 ? suggestedSizeUsdc / ctx.price : 0;
 
-    const signal: import("@plankton/domain").Signal = {
+    const signal: import("@krabs/domain").Signal = {
       signalId: randomUUID(),
       tokenId: market.tokenId,
       conditionId: market.conditionId as ConditionId,
@@ -1638,10 +1638,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
   }
 
-  private shouldSuppressBuyForBudget(
-    signal: import("@plankton/domain").Signal,
-    now: number,
-  ): boolean {
+  private shouldSuppressBuyForBudget(signal: import("@krabs/domain").Signal, now: number): boolean {
     if (signal.side !== "buy") return false;
 
     if (this.buyBudgetCooldownUntilMs > 0 && now >= this.buyBudgetCooldownUntilMs) {
@@ -1670,7 +1667,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   private canAttemptBuyNotional(
     requiredNotionalUsdc: number,
-    signal: import("@plankton/domain").Signal,
+    signal: import("@krabs/domain").Signal,
   ): { allowed: boolean; reasonCode: string; activateCooldown: boolean } | null {
     const circuitBreaker = this.deps.buySignalBudgetCircuitBreaker;
     if (!circuitBreaker) return null;
@@ -1702,7 +1699,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private activateBuyBudgetCooldown(
-    signal: import("@plankton/domain").Signal,
+    signal: import("@krabs/domain").Signal,
     now: number,
     source: "decision_preflight" | "risk_rejection",
     reasonCode = WALLET_BUY_BUDGET_EXHAUSTED_REASON,
@@ -1745,7 +1742,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private recordBuyBudgetCooldownActivated(
-    signal: import("@plankton/domain").Signal,
+    signal: import("@krabs/domain").Signal,
     now: number,
     cooldownUntilMs: number,
     source: "decision_preflight" | "risk_rejection",
@@ -1816,7 +1813,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     return { count, countForToken, notional };
   }
 
-  private reservePendingSignal(signal: import("@plankton/domain").Signal, now: number): void {
+  private reservePendingSignal(signal: import("@krabs/domain").Signal, now: number): void {
     this.pendingEntries.set(String(signal.tokenId), {
       tokenId: String(signal.tokenId),
       signalId: signal.signalId,

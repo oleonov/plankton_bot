@@ -4,8 +4,8 @@ set -e
 # ── Configuration ─────────────────────────────────────────────────────────────
 SERVER_USER="root"
 SERVER_HOST="old.server.ip"
-SERVER_PATH="/opt/plankton"
-IMAGE_NAME="plankton"
+SERVER_PATH="/opt/krabs"
+IMAGE_NAME="krabs"
 IMAGE_TAG="latest"
 
 # Colors
@@ -14,7 +14,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${YELLOW}=== Plankton Deployment Script ===${NC}\n"
+echo -e "${YELLOW}=== Krabs Deployment Script ===${NC}\n"
 
 # Verify .env.production exists locally before starting
 if [ ! -f ".env.production" ]; then
@@ -53,9 +53,9 @@ scp .env.production ${SERVER_USER}@${SERVER_HOST}:${SERVER_PATH}/.env.production
 
 # Step 4: Capture current bot state and write resume intent if running
 echo -e "\n${GREEN}[4/6] Capturing current bot state...${NC}"
-API_KEY=$(grep '^PLANKTON_API_KEY=' .env.production | cut -d'=' -f2-)
+API_KEY=$(grep '^KRABS_API_KEY=' .env.production | cut -d'=' -f2-)
 API_BASE="https://bot.example.com"
-CONTROL_DB="/var/lib/docker/volumes/plankton-data/_data/control.db"
+CONTROL_DB="/var/lib/docker/volumes/krabs-data/_data/control.db"
 if [ -n "$API_KEY" ]; then
     STATUS_JSON=$(curl -sf -H "Authorization: Bearer ${API_KEY}" "${API_BASE}/api/v1/status" 2>/dev/null || echo "")
     if [ -n "$STATUS_JSON" ]; then
@@ -75,7 +75,7 @@ if [ -n "$API_KEY" ]; then
         echo -e "${YELLOW}Could not reach API — no resume intent${NC}"
     fi
 else
-    echo -e "${YELLOW}No PLANKTON_API_KEY — no resume intent${NC}"
+    echo -e "${YELLOW}No KRABS_API_KEY — no resume intent${NC}"
 fi
 
 # Step 5: Load image and replace containers (atomic swap — no separate down)
@@ -169,5 +169,5 @@ echo -e "Dashboard: https://bot.example.com"
 echo -e "\nTo check status:"
 echo -e "  ssh ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker-compose --env-file .env.production ps'"
 echo -e "\nTo view logs:"
-echo -e "  ssh ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker-compose --env-file .env.production logs -f plankton-runtime'"
-echo -e "  ssh ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker-compose --env-file .env.production logs -f plankton-api'"
+echo -e "  ssh ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker-compose --env-file .env.production logs -f krabs-runtime'"
+echo -e "  ssh ${SERVER_USER}@${SERVER_HOST} 'cd ${SERVER_PATH} && docker-compose --env-file .env.production logs -f krabs-api'"

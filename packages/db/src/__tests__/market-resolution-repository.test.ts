@@ -5,7 +5,7 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteMarketResolutionRepository } from "../repositories/market-resolution-repository.js";
-import type { MarketResolution } from "@plankton/domain";
+import type { MarketResolution } from "@krabs/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -25,7 +25,7 @@ function makeResolution(overrides?: Partial<MarketResolution>): MarketResolution
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   repo = new SqliteMarketResolutionRepository(conn.db);
 });

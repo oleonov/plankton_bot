@@ -8,7 +8,7 @@ import type {
   RuntimeEventMap,
   RuntimeModule,
   TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 const PRICE_SCALE = 10_000;

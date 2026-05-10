@@ -7,7 +7,7 @@ import {
   createPositionId,
   createConditionId,
   DEFAULT_EXECUTION_POLICY,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
   ExchangeGateway,
@@ -28,8 +28,8 @@ import type {
   Fill,
   Position,
   PositionRepository,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────

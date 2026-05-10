@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTokenId, type OrderBookSnapshot } from "@plankton/domain";
+import { createTokenId, type OrderBookSnapshot } from "@krabs/domain";
 import {
   applyOrderBookToMarket,
   CandidateBookCache,

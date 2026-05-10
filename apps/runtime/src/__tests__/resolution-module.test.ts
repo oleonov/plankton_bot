@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createPositionId } from "@plankton/domain";
+import { createTokenId, createPositionId } from "@krabs/domain";
 import type {
   ExchangeGateway,
   FillRepository,
@@ -9,9 +9,9 @@ import type {
   InventoryLotRepository,
   PositionRepository,
   TokenId,
-} from "@plankton/domain";
-import type { GammaResolutionClient } from "@plankton/exchange";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import type { GammaResolutionClient } from "@krabs/exchange";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { ResolutionModule } from "../modules/resolution/resolution-module.js";
 import type {
   ResolutionDetector,

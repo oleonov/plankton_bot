@@ -1,5 +1,5 @@
 import { BuilderConfig as RelayerBuilderConfig } from "@polymarket/builder-signing-sdk";
-import type { WalletMode } from "@plankton/domain";
+import type { WalletMode } from "@krabs/domain";
 import {
   parseRelayerConfigJson,
   resolveRelayerSignatureType,

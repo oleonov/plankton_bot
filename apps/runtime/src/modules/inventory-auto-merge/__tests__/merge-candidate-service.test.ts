@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { MergeCandidateService } from "../merge-candidate-service.js";
-import { createTokenId, createPositionId } from "@plankton/domain";
+import { createTokenId, createPositionId } from "@krabs/domain";
 import type {
   PositionRepository,
   OrderRepository,
@@ -9,7 +9,7 @@ import type {
   Position,
   Market,
   Order,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 describe("MergeCandidateService", () => {
   let positionRepo: PositionRepository;

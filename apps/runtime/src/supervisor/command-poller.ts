@@ -5,7 +5,7 @@ import type {
   OperatorActionRepository,
   StateTransitionRepository,
   OperatorCommand,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Logger } from "../logger.js";
 
 export interface ReloadableRules {

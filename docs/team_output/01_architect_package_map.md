@@ -10,14 +10,14 @@ References: arch_tmp.md, v1_development_plan.md, Phase 1 bootstrap spec
 
 ### Shared Packages (under `packages/`)
 
-| Package                  | Responsibility                                                                                                                                                                                             |
-| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@plankton/domain`       | Pure types, enums, event definitions, command definitions, and repository/gateway interfaces. Zero runtime dependencies. The single source of truth for every cross-boundary contract.                     |
-| `@plankton/config`       | YAML/env config loading and zod validation. Exposes typed, validated config objects. Knows nothing about what consumes the config.                                                                         |
-| `@plankton/event-bus`    | Typed in-process pub/sub bus. Accepts `@plankton/domain` event types. Replaceable later with Redis/NATS without changing consumers.                                                                        |
-| `@plankton/db`           | Repository interface implementations (SQLite in v1). Owns connection management, migrations, WAL setup. Exposes only repository interfaces defined in `@plankton/domain`.                                  |
-| `@plankton/exchange`     | Exchange gateway implementations (`LiveExchangeGateway`, `SimulationExchangeGateway`). Wraps Polymarket CLOB SDK. Exposes only the `ExchangeGateway` interface defined in `@plankton/domain`.              |
-| `@plankton/family-rules` | Family rule loading, validation, resolution (`family_key:regime:horizon` -> `FamilyRule`). Owns the family config file format. Depends on `@plankton/domain` for types and `@plankton/config` for loading. |
+| Package               | Responsibility                                                                                                                                                                                       |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@krabs/domain`       | Pure types, enums, event definitions, command definitions, and repository/gateway interfaces. Zero runtime dependencies. The single source of truth for every cross-boundary contract.               |
+| `@krabs/config`       | YAML/env config loading and zod validation. Exposes typed, validated config objects. Knows nothing about what consumes the config.                                                                   |
+| `@krabs/event-bus`    | Typed in-process pub/sub bus. Accepts `@krabs/domain` event types. Replaceable later with Redis/NATS without changing consumers.                                                                     |
+| `@krabs/db`           | Repository interface implementations (SQLite in v1). Owns connection management, migrations, WAL setup. Exposes only repository interfaces defined in `@krabs/domain`.                               |
+| `@krabs/exchange`     | Exchange gateway implementations (`LiveExchangeGateway`, `SimulationExchangeGateway`). Wraps Polymarket CLOB SDK. Exposes only the `ExchangeGateway` interface defined in `@krabs/domain`.           |
+| `@krabs/family-rules` | Family rule loading, validation, resolution (`family_key:regime:horizon` -> `FamilyRule`). Owns the family config file format. Depends on `@krabs/domain` for types and `@krabs/config` for loading. |
 
 ### Applications (under `apps/`)
 
@@ -38,18 +38,18 @@ References: arch_tmp.md, v1_development_plan.md, Phase 1 bootstrap spec
 ## 2. Dependency Graph
 
 ```
-@plankton/domain          (depends on: nothing)
+@krabs/domain          (depends on: nothing)
     ^
     |
-    +--- @plankton/config         (depends on: nothing from workspace)
+    +--- @krabs/config         (depends on: nothing from workspace)
     |
-    +--- @plankton/event-bus      (depends on: domain)
+    +--- @krabs/event-bus      (depends on: domain)
     |
-    +--- @plankton/db             (depends on: domain)
+    +--- @krabs/db             (depends on: domain)
     |
-    +--- @plankton/exchange       (depends on: domain)
+    +--- @krabs/exchange       (depends on: domain)
     |
-    +--- @plankton/family-rules   (depends on: domain, config)
+    +--- @krabs/family-rules   (depends on: domain, config)
          ^
          |
 apps/runtime  (depends on: domain, config, event-bus, db, exchange, family-rules)
@@ -77,20 +77,20 @@ apps/web       -> domain
 
 ### Allowed
 
-- Every package may depend on `@plankton/domain`.
-- `@plankton/family-rules` may depend on `@plankton/config` (it needs the loader).
+- Every package may depend on `@krabs/domain`.
+- `@krabs/family-rules` may depend on `@krabs/config` (it needs the loader).
 - Apps may depend on any package.
-- `apps/api` may depend on `@plankton/db` (it reads repositories directly in v1).
+- `apps/api` may depend on `@krabs/db` (it reads repositories directly in v1).
 
 ### Forbidden
 
-- No package may depend on another package except through `@plankton/domain` types (with the single exception of `family-rules -> config`).
+- No package may depend on another package except through `@krabs/domain` types (with the single exception of `family-rules -> config`).
 - No package may depend on any app.
-- `@plankton/db` must NOT depend on `@plankton/exchange` or vice versa.
-- `@plankton/event-bus` must NOT depend on `@plankton/db` or `@plankton/exchange`.
-- `@plankton/domain` must have ZERO workspace dependencies. It is the leaf.
-- `apps/web` must NOT depend on `@plankton/db` or `@plankton/exchange` (it talks to `apps/api` over HTTP).
-- `apps/api` must NOT depend on `@plankton/exchange` (it does not talk to the exchange).
+- `@krabs/db` must NOT depend on `@krabs/exchange` or vice versa.
+- `@krabs/event-bus` must NOT depend on `@krabs/db` or `@krabs/exchange`.
+- `@krabs/domain` must have ZERO workspace dependencies. It is the leaf.
+- `apps/web` must NOT depend on `@krabs/db` or `@krabs/exchange` (it talks to `apps/api` over HTTP).
+- `apps/api` must NOT depend on `@krabs/exchange` (it does not talk to the exchange).
 
 ### Enforcement
 
@@ -106,14 +106,14 @@ The architecture defines ~10 runtime "modules." Some are packages, some are inte
 
 These are packages because they are either (a) needed by multiple apps, or (b) have a clear independent responsibility worth isolating:
 
-| Module from arch_tmp.md | Package                  |
-| ----------------------- | ------------------------ |
-| Event bus               | `@plankton/event-bus`    |
-| Persistence             | `@plankton/db`           |
-| Exchange gateway        | `@plankton/exchange`     |
-| Family rules engine     | `@plankton/family-rules` |
-| Config loading          | `@plankton/config`       |
-| Shared domain model     | `@plankton/domain`       |
+| Module from arch_tmp.md | Package               |
+| ----------------------- | --------------------- |
+| Event bus               | `@krabs/event-bus`    |
+| Persistence             | `@krabs/db`           |
+| Exchange gateway        | `@krabs/exchange`     |
+| Family rules engine     | `@krabs/family-rules` |
+| Config loading          | `@krabs/config`       |
+| Shared domain model     | `@krabs/domain`       |
 
 ### Internal to `apps/runtime`
 
@@ -134,7 +134,7 @@ These live as modules inside `apps/runtime/src/modules/` (or similar). They are 
 
 - Internal modules communicate through the event bus and through injected repository/gateway interfaces.
 - They do NOT export anything consumed outside `apps/runtime`.
-- If a module is later needed by `apps/api` (e.g., risk state queries), the correct path is: api reads from the DB via `@plankton/db` repositories, not by importing runtime modules.
+- If a module is later needed by `apps/api` (e.g., risk state queries), the correct path is: api reads from the DB via `@krabs/db` repositories, not by importing runtime modules.
 
 ---
 
@@ -142,55 +142,55 @@ These live as modules inside `apps/runtime/src/modules/` (or similar). They are 
 
 ### What CAN cross package boundaries
 
-- **Types and interfaces** defined in `@plankton/domain` (the entire point of the package).
-- **Event and command type definitions** (from `@plankton/domain`).
-- **Repository interfaces** (defined in `@plankton/domain`, implemented in `@plankton/db`).
-- **Gateway interfaces** (defined in `@plankton/domain`, implemented in `@plankton/exchange`).
-- **Validated config objects** (from `@plankton/config`).
-- **Family rule data** (from `@plankton/family-rules`, as typed objects).
+- **Types and interfaces** defined in `@krabs/domain` (the entire point of the package).
+- **Event and command type definitions** (from `@krabs/domain`).
+- **Repository interfaces** (defined in `@krabs/domain`, implemented in `@krabs/db`).
+- **Gateway interfaces** (defined in `@krabs/domain`, implemented in `@krabs/exchange`).
+- **Validated config objects** (from `@krabs/config`).
+- **Family rule data** (from `@krabs/family-rules`, as typed objects).
 
 ### What CANNOT cross package boundaries
 
 - **Implementation classes.** Consumers depend on interfaces, not concrete implementations. `apps/runtime` wires implementations at startup.
-- **DB connections or SQLite handles.** Only `@plankton/db` touches the database driver. Repositories are the boundary.
-- **Exchange SDK types or clients.** Only `@plankton/exchange` imports `@polymarket/clob-client`. The rest of the system sees `ExchangeGateway`.
+- **DB connections or SQLite handles.** Only `@krabs/db` touches the database driver. Repositories are the boundary.
+- **Exchange SDK types or clients.** Only `@krabs/exchange` imports `@polymarket/clob-client`. The rest of the system sees `ExchangeGateway`.
 - **Internal module state.** Runtime modules (strategy, risk, execution) do not expose mutable state to other packages. They communicate through events and repositories.
 - **Node.js process-level concerns** (timers, intervals, signal handlers). These stay in `apps/runtime/src/modules/supervisor/`.
 
 ### Practical test
 
-If you are about to import from `@plankton/db` and the import is not a repository interface instantiation at the composition root, something is wrong. If you are about to import from `@plankton/exchange` and you are not in `apps/runtime`'s composition root, something is wrong.
+If you are about to import from `@krabs/db` and the import is not a repository interface instantiation at the composition root, something is wrong. If you are about to import from `@krabs/exchange` and you are not in `apps/runtime`'s composition root, something is wrong.
 
 ---
 
 ## 6. Key Interfaces That Must Be Designed First
 
-These are the contracts that gate all downstream implementation. They live in `@plankton/domain` (or in the package that owns the contract). Design these before writing any business logic.
+These are the contracts that gate all downstream implementation. They live in `@krabs/domain` (or in the package that owns the contract). Design these before writing any business logic.
 
 ### Tier 1: Gate everything
 
-| #   | Interface               | Package            | Why it gates                                                                                                                                                |
-| --- | ----------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `ExchangeGateway`       | `@plankton/domain` | Execution, reconciliation, market data, and simulation all depend on this. Defines `placeOrder`, `cancelOrder`, `getOpenOrders`, `getFills`, `getBalances`. |
-| 2   | `EventBus`              | `@plankton/domain` | Every module communicates through this. Defines `publish<T>`, `subscribe<T>`, event type registry.                                                          |
-| 3   | `OrderRepository`       | `@plankton/domain` | Execution and reconciliation persist through this. Defines `save`, `findById`, `findOpen`, `updateStatus`.                                                  |
-| 4   | `PositionRepository`    | `@plankton/domain` | Risk/inventory and reconciliation depend on this. Defines `save`, `findByFamily`, `findOpen`, `findDust`.                                                   |
-| 5   | `FamilyStateRepository` | `@plankton/domain` | Risk/inventory reads and writes runtime family state. Defines `get`, `save`, `findQuarantined`, `findByMode`.                                               |
+| #   | Interface               | Package         | Why it gates                                                                                                                                                |
+| --- | ----------------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `ExchangeGateway`       | `@krabs/domain` | Execution, reconciliation, market data, and simulation all depend on this. Defines `placeOrder`, `cancelOrder`, `getOpenOrders`, `getFills`, `getBalances`. |
+| 2   | `EventBus`              | `@krabs/domain` | Every module communicates through this. Defines `publish<T>`, `subscribe<T>`, event type registry.                                                          |
+| 3   | `OrderRepository`       | `@krabs/domain` | Execution and reconciliation persist through this. Defines `save`, `findById`, `findOpen`, `updateStatus`.                                                  |
+| 4   | `PositionRepository`    | `@krabs/domain` | Risk/inventory and reconciliation depend on this. Defines `save`, `findByFamily`, `findOpen`, `findDust`.                                                   |
+| 5   | `FamilyStateRepository` | `@krabs/domain` | Risk/inventory reads and writes runtime family state. Defines `get`, `save`, `findQuarantined`, `findByMode`.                                               |
 
 ### Tier 2: Gate domain modules
 
-| #   | Interface             | Package            | Why it gates                                                                                                                                                             |
-| --- | --------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 6   | `FamilyRulesProvider` | `@plankton/domain` | Strategy, risk, and execution all need family rules. Defines `getRule(familyId)`, `isEnabled(familyId)`, `getLimits(familyId)`. Implemented by `@plankton/family-rules`. |
-| 7   | `RiskGate`            | `@plankton/domain` | Strategy produces signals; risk approves or rejects. Defines `evaluate(signal): RiskDecision`.                                                                           |
-| 8   | `MarketRepository`    | `@plankton/domain` | Normalization writes, strategy reads. Defines `save`, `findActive`, `findByFamily`.                                                                                      |
+| #   | Interface             | Package         | Why it gates                                                                                                                                                          |
+| --- | --------------------- | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 6   | `FamilyRulesProvider` | `@krabs/domain` | Strategy, risk, and execution all need family rules. Defines `getRule(familyId)`, `isEnabled(familyId)`, `getLimits(familyId)`. Implemented by `@krabs/family-rules`. |
+| 7   | `RiskGate`            | `@krabs/domain` | Strategy produces signals; risk approves or rejects. Defines `evaluate(signal): RiskDecision`.                                                                        |
+| 8   | `MarketRepository`    | `@krabs/domain` | Normalization writes, strategy reads. Defines `save`, `findActive`, `findByFamily`.                                                                                   |
 
 ### Tier 3: Gate runtime lifecycle
 
-| #   | Interface        | Package            | Why it gates                                                                                                                        |
-| --- | ---------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
-| 9   | `RuntimeModule`  | `@plankton/domain` | Supervisor needs a uniform lifecycle contract. Defines `start()`, `stop()`, `healthCheck()`. Every internal module implements this. |
-| 10  | `FillRepository` | `@plankton/domain` | Reconciliation and P&L depend on this. Defines `save`, `findByOrder`, `findRecent`, `findUnreconciled`.                             |
+| #   | Interface        | Package         | Why it gates                                                                                                                        |
+| --- | ---------------- | --------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| 9   | `RuntimeModule`  | `@krabs/domain` | Supervisor needs a uniform lifecycle contract. Defines `start()`, `stop()`, `healthCheck()`. Every internal module implements this. |
+| 10  | `FillRepository` | `@krabs/domain` | Reconciliation and P&L depend on this. Defines `save`, `findByOrder`, `findRecent`, `findUnreconciled`.                             |
 
 ### Design order recommendation
 
@@ -204,8 +204,8 @@ All 10 interfaces should be designed and reviewed before any module writes its f
 
 ## Summary
 
-- **6 packages** under `packages/`, all flowing through `@plankton/domain` as the dependency root.
+- **6 packages** under `packages/`, all flowing through `@krabs/domain` as the dependency root.
 - **8 internal modules** inside `apps/runtime`, communicating through the event bus and repository interfaces.
 - **3 apps**: runtime (must-have), api (v1 optional), web (v1 optional).
-- **10 critical interfaces** in `@plankton/domain` that must be designed before implementation begins.
+- **10 critical interfaces** in `@krabs/domain` that must be designed before implementation begins.
 - **Strict dependency direction**: domain is the leaf, packages depend only on domain (+ config for family-rules), apps depend on packages, nothing points upward.

@@ -5,7 +5,7 @@ import type {
   InventoryLotRepository,
   MergeLedgerRepository,
   Position,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Database } from "better-sqlite3";
 
 describe("MergeSettler", () => {

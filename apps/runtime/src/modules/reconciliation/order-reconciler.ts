@@ -15,7 +15,7 @@ import type {
   FillRepository,
   MarketRepository,
   OrderRepository,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { buildCancelTelemetry } from "./cancel-telemetry.js";
 

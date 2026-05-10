@@ -19,7 +19,7 @@ let conn: DbConnection;
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
 });
 
@@ -93,7 +93,7 @@ describe("bootstrapDatabase", () => {
 
 describe("bootstrapControlDb busy_timeout scoping", () => {
   it("returns a connection at the runtime busy_timeout after bootstrap DDL", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "plankton-control-bootstrap-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-control-bootstrap-"));
     try {
       const c = bootstrapControlDb(path.join(dir, "control.db"));
       try {
@@ -109,7 +109,7 @@ describe("bootstrapControlDb busy_timeout scoping", () => {
 
 describe("bootstrapLedgerDb busy_timeout scoping", () => {
   it("returns a connection at the runtime busy_timeout after bootstrap DDL", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-bootstrap-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-bootstrap-"));
     try {
       const c = bootstrapLedgerDb(path.join(dir, "ledger.db"));
       try {
@@ -127,7 +127,7 @@ describe("bootstrapLedgerDb leg_state cumulative_* backfill (ADR-027 §D-C)", ()
   it("backfills existing leg_states from fills history on the split-ledger path", () => {
     // Simulate a deployed bot: pre-existing leg_state rows + fills, columns
     // not yet added. bootstrapLedgerDb must add the columns AND backfill.
-    const dir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-bf-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-bf-"));
     try {
       const dbPath = path.join(dir, "ledger.db");
       // First boot creates the schema + cumulative_* columns at DEFAULT 0.
@@ -227,7 +227,7 @@ describe("assertSizeRuleInvariants (ADR-024 §D-B)", () => {
   });
 
   it("returns quietly when algo_size_rules table is absent", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "plankton-no-sizerules-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-no-sizerules-"));
     try {
       const empty = bootstrapLedgerDb(path.join(dir, "ledger.db"));
       try {

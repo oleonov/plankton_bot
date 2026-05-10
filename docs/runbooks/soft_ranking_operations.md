@@ -158,7 +158,7 @@ disabled-no-op contract.
 4. **Verify** rollback completion:
 
    ```bash
-   curl -s -H "Authorization: Bearer $PLANKTON_API_KEY" \
+   curl -s -H "Authorization: Bearer $KRABS_API_KEY" \
      https://bot.example.com/api/v1/scanner/score-distribution
    ```
 

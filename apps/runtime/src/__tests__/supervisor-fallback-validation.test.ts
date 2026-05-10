@@ -5,7 +5,7 @@ import type {
   AlgoRulesRepository,
   EventBus,
   LegStateRepository,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { SelectedMarketCache } from "../modules/algo-decision/algo-decision-module.js";
 import type { Logger } from "../logger.js";
 

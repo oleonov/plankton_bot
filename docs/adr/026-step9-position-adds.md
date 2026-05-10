@@ -209,7 +209,7 @@ Both helpers are pure functions and have no runtime dependency
 on `Date.now()`, so production-equivalent unit tests can verify
 boundary behaviour deterministically. Branded types
 `AddAgeBucket` and `AddPriceChangeBucket` are exported from
-`@plankton/domain` so persistence (insert call sites) and
+`@krabs/domain` so persistence (insert call sites) and
 analytics (future dashboard) share the same vocabulary.
 
 Computed once at row-write time; not re-derived at query time so

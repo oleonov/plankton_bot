@@ -1,5 +1,5 @@
-import type { RuntimeModule, ExchangeGateway } from "@plankton/domain";
-import { withImmediate } from "@plankton/db";
+import type { RuntimeModule, ExchangeGateway } from "@krabs/domain";
+import { withImmediate } from "@krabs/db";
 import type Database from "better-sqlite3";
 import type { Logger } from "../../logger.js";
 import { ValidationMetricsReader } from "./validation-metrics-reader.js";

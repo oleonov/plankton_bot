@@ -1,4 +1,4 @@
-import type { ConditionId, MarketTradeCountProvider } from "@plankton/domain";
+import type { ConditionId, MarketTradeCountProvider } from "@krabs/domain";
 import type { FetchLike } from "./polymarket-data-api.js";
 
 export const DATA_API_DEFAULT_BASE_URL = "https://data-api.polymarket.com";
@@ -88,7 +88,7 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
       options.prefetchConcurrency ?? DATA_API_DEFAULT_PREFETCH_CONCURRENCY,
     );
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.userAgent = options.userAgent ?? "poly-plankton/1.0";
+    this.userAgent = options.userAgent ?? "krabs/1.0";
     this.observer = options.observer ?? null;
     this.now = options.now ?? Date.now;
   }

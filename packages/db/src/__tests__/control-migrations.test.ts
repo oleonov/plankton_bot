@@ -11,7 +11,7 @@ let conn: DbConnection;
 let tmpDir: string;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-control-migr-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-control-migr-"));
 });
 
 afterEach(() => {

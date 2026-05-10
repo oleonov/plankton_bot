@@ -11,8 +11,8 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteMarketRepository } from "../repositories/market-repository.js";
-import { createTokenId } from "@plankton/domain";
-import type { Market } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { Market } from "@krabs/domain";
 import type Database from "better-sqlite3";
 
 let conn: DbConnection;
@@ -73,7 +73,7 @@ function insertOrder(tokenId: string, status: "pending" | "open" | "filled"): vo
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-tiered-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-tiered-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   db = conn.db;
   repo = new SqliteMarketRepository(conn.db);

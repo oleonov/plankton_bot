@@ -2,7 +2,7 @@ import type { Database } from "better-sqlite3";
 import type {
   ExecutionPolicyObservation,
   ExecutionPolicyObservationRepository,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 export class SqliteExecutionPolicyObservationRepository implements ExecutionPolicyObservationRepository {
   constructor(private readonly db: Database) {}

@@ -4,8 +4,8 @@ import type {
   LegStateRepository,
   LegStateTransition,
   LegStateTransitionRepository,
-} from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
+} from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 import {
   recordLegStateClearTransition,

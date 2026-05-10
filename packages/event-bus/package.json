@@ -1,5 +1,5 @@
 {
-  "name": "@plankton/event-bus",
+  "name": "@krabs/event-bus",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -19,6 +19,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@plankton/domain": "workspace:*"
+    "@krabs/domain": "workspace:*"
   }
 }

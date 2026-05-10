@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
 import { decodeFunctionData, parseAbi } from "viem";
 import { LiveExchangeGateway } from "../live/exchange-gateway.js";
 import { LiveMarketDataGateway, buildTokenIdBatches } from "../live/market-data-gateway.js";
@@ -370,7 +370,7 @@ describe("LiveExchangeGateway", () => {
     expect(emitWarning).toHaveBeenCalledTimes(1);
     expect(emitWarning).toHaveBeenCalledWith(
       expect.stringContaining("redeemPositions skipped"),
-      expect.objectContaining({ code: "PLANKTON_REDEEM_UNSUPPORTED" }),
+      expect.objectContaining({ code: "KRABS_REDEEM_UNSUPPORTED" }),
     );
   });
 
@@ -725,7 +725,7 @@ describe("LiveExchangeGateway", () => {
     expect(emitWarning).toHaveBeenCalledTimes(1);
     expect(emitWarning).toHaveBeenCalledWith(
       expect.stringContaining("mergePositions skipped"),
-      expect.objectContaining({ code: "PLANKTON_MERGE_UNSUPPORTED" }),
+      expect.objectContaining({ code: "KRABS_MERGE_UNSUPPORTED" }),
     );
   });
 
@@ -746,7 +746,7 @@ describe("LiveExchangeGateway", () => {
     expect(mergeBatch).not.toHaveBeenCalled();
     expect(emitWarning).toHaveBeenCalledWith(
       expect.stringContaining("mergePositions skipped"),
-      expect.objectContaining({ code: "PLANKTON_MERGE_UNSUPPORTED" }),
+      expect.objectContaining({ code: "KRABS_MERGE_UNSUPPORTED" }),
     );
   });
 

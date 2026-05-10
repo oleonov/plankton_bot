@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import type { RuntimeModule } from "@plankton/domain";
+import type { RuntimeModule } from "@krabs/domain";
 import { collectHealth } from "../supervisor/health.js";
 
 function okModule(): RuntimeModule {

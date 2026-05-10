@@ -28,7 +28,7 @@ interface Signal { market_id: MarketId; size_usdc: number; ... }
 interface Order { market_id: MarketId; size: number; size_usdc: number; ... }
 ```
 
-The `markets` table has no `token_id` column at all. These cannot implement against a single `@plankton/domain`.
+The `markets` table has no `token_id` column at all. These cannot implement against a single `@krabs/domain`.
 
 ### Root cause
 
@@ -212,7 +212,7 @@ export interface PlaceOrderParams {
 
 - `03_runtime_flows.md`: Split ExchangeGateway, add MarketDataGateway, update PlaceOrderParams
 - `04_domain_persistence.md`: Add tickSize/negRisk to Market type and markets table
-- `01_architect_package_map.md`: Note that @plankton/exchange implements two interfaces
+- `01_architect_package_map.md`: Note that @krabs/exchange implements two interfaces
 
 ---
 
@@ -388,12 +388,12 @@ Three conflicting statements:
 
 1. `00_synthesis` says `plankton_trades.db` is gitignored in `research/data/`
 2. `02_tooling` `.gitignore` explicitly does NOT ignore `*.db` ("because the research SQLite DB is tracked")
-3. `.env.example` sets `DB_PATH=./data/plankton.db` (relative to apps/runtime)
+3. `.env.example` sets `DB_PATH=./data/krabs.db` (relative to apps/runtime)
 
 Risks:
 
-- If `*.db` is not gitignored, the live runtime DB (which will be at `apps/runtime/data/plankton.db`) gets committed
-- Relative path `./data/plankton.db` resolves differently depending on which process's cwd — runtime and API may use different DB files
+- If `*.db` is not gitignored, the live runtime DB (which will be at `apps/runtime/data/krabs.db`) gets committed
+- Relative path `./data/krabs.db` resolves differently depending on which process's cwd — runtime and API may use different DB files
 
 ### Resolution
 
@@ -430,7 +430,7 @@ The `.env` sets a path that gets resolved to absolute at config load time. The `
 
 ```env
 # SQLite database path (relative to monorepo root, resolved to absolute at startup)
-DB_PATH=./apps/runtime/data/plankton.db
+DB_PATH=./apps/runtime/data/krabs.db
 ```
 
 This way both runtime and API resolve to the same file regardless of their own package directory.

@@ -1,13 +1,8 @@
 import type Database from "better-sqlite3";
-import type {
-  MarketRepository,
-  Market,
-  MarketScoreUpdate,
-  TrackedForPricing,
-} from "@plankton/domain";
-import type { TokenId } from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
-import type { Regime } from "@plankton/domain";
+import type { MarketRepository, Market, MarketScoreUpdate, TrackedForPricing } from "@krabs/domain";
+import type { TokenId } from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
+import type { Regime } from "@krabs/domain";
 
 // Rank for entry-candidate ordering: lower rank = higher priority.
 // Only these three statuses are ever WS-subscribed as entry-candidates.
@@ -333,7 +328,7 @@ export class SqliteMarketRepository implements MarketRepository {
       negRisk: row.neg_risk === 1,
       eventMarketCount: row.event_market_count as number,
       selectionStatus:
-        (row.selection_status as import("@plankton/domain").SelectionStatus) ?? "unknown",
+        (row.selection_status as import("@krabs/domain").SelectionStatus) ?? "unknown",
       selectionWinningRuleId: (row.selection_winning_rule_id as string) ?? null,
       gammaCreatedAt: (row.gamma_created_at as string | null) ?? null,
       score: (row.score as number | null) ?? null,

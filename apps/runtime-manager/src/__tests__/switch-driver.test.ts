@@ -2,13 +2,13 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { createSwitchId, SwitchState } from "@plankton/domain";
-import type { ProfileId, SwitchId } from "@plankton/domain";
+import { createSwitchId, SwitchState } from "@krabs/domain";
+import type { ProfileId, SwitchId } from "@krabs/domain";
 import {
   SqliteSwitchRequestRepository,
   SqliteRuntimeControlStateRepository,
   SqliteStateTransitionRepository,
-} from "@plankton/db";
+} from "@krabs/db";
 import { SwitchDriver } from "../switch-driver.js";
 import { MockContainerControl } from "../container-control.js";
 

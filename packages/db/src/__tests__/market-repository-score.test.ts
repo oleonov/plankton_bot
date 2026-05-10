@@ -28,8 +28,8 @@ import { bootstrapDatabase, bootstrapLedgerDb } from "../bootstrap.js";
 import { runMigrations } from "../migrations/runner.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteMarketRepository } from "../repositories/market-repository.js";
-import { createTokenId } from "@plankton/domain";
-import type { Market } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { Market } from "@krabs/domain";
 
 let tmpDir: string;
 
@@ -65,7 +65,7 @@ function makeMarket(
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-score-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-score-test-"));
 });
 
 afterEach(() => {

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import type { RuntimeModule, RuntimePhase } from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+import type { RuntimeModule, RuntimePhase } from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import pino from "pino";
 import { Supervisor } from "../supervisor/supervisor.js";
 

@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createTokenId, createPositionId } from "@plankton/domain";
+import { createTokenId, createPositionId } from "@krabs/domain";
 import type {
   PositionRepository,
   MarketRepository,
   MarketResolutionRepository,
   Position,
-} from "@plankton/domain";
-import type { GammaResolutionClient, GammaMarketInfo } from "@plankton/exchange";
+} from "@krabs/domain";
+import type { GammaResolutionClient, GammaMarketInfo } from "@krabs/exchange";
 import { ResolutionDetector } from "../modules/resolution/resolution-detector.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────────

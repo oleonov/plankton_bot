@@ -1,4 +1,4 @@
-import type { ExchangeErrorCode } from "@plankton/domain";
+import type { ExchangeErrorCode } from "@krabs/domain";
 import { sanitizeErrorDetails, sanitizeErrorMessage } from "./redaction.js";
 
 /**

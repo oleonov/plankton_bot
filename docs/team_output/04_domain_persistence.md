@@ -1165,7 +1165,7 @@ import fs from "node:fs";
 import path from "node:path";
 import YAML from "yaml";
 import { familyRuleFileSchema, type FamilyRuleFile } from "./schema.js";
-import type { FamilyRule, FamilyState, FamilyId } from "@plankton/domain";
+import type { FamilyRule, FamilyState, FamilyId } from "@krabs/domain";
 
 export interface LoadResult {
   rules: FamilyRule[];
@@ -1237,8 +1237,8 @@ function toTyped(raw: FamilyRuleFile): { rule: FamilyRule; state: FamilyState } 
 ```typescript
 // Pseudocode for apps/runtime startup
 
-import { loadFamilyRulesFromDir } from "@plankton/family-rules";
-import { SqliteFamilyRulesRepository, SqliteFamilyStateRepository } from "@plankton/db";
+import { loadFamilyRulesFromDir } from "@krabs/family-rules";
+import { SqliteFamilyRulesRepository, SqliteFamilyStateRepository } from "@krabs/db";
 
 // 1. Load YAML files
 const { rules, states, errors } = loadFamilyRulesFromDir(config.familyRulesDir);
@@ -1408,14 +1408,7 @@ Repository implementations in `packages/db/src/sqlite/` follow a consistent patt
 // packages/db/src/sqlite/SqliteOrderRepository.ts
 
 import type Database from "better-sqlite3";
-import type {
-  Order,
-  OrderId,
-  OrderRepository,
-  MarketId,
-  FamilyId,
-  BotRunId,
-} from "@plankton/domain";
+import type { Order, OrderId, OrderRepository, MarketId, FamilyId, BotRunId } from "@krabs/domain";
 
 export class SqliteOrderRepository implements OrderRepository {
   private stmts: ReturnType<typeof this.prepare>;
@@ -1484,7 +1477,7 @@ export class SqliteOrderRepository implements OrderRepository {
 Key patterns:
 
 - **Prepared statements** are created once in the constructor and reused. This is the primary performance advantage of better-sqlite3's synchronous API.
-- **Each repository class** implements the corresponding interface from `@plankton/domain`.
+- **Each repository class** implements the corresponding interface from `@krabs/domain`.
 - **Boolean columns** are stored as `INTEGER` (0/1) in SQLite and converted at the repository boundary.
 - **JSON array columns** (like `active_windows_utc`) are stored as `TEXT` and parsed/serialized at the repository boundary.
 - **Timestamp columns** use ISO 8601 strings (`TEXT`). SQLite has no native datetime type, and string comparison works correctly for ISO format.

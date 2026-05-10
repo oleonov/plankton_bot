@@ -453,11 +453,11 @@ Rollback bounded-midpoint immediately if any of these happen after the flip:
 Local checks after implementation:
 
 ```bash
-pnpm --filter @plankton/config test
-pnpm --filter @plankton/db test
-pnpm --filter @plankton/runtime test
-pnpm --filter @plankton/api test
-pnpm --filter @plankton/web test
+pnpm --filter @krabs/config test
+pnpm --filter @krabs/db test
+pnpm --filter @krabs/runtime test
+pnpm --filter @krabs/api test
+pnpm --filter @krabs/web test
 pnpm run typecheck
 pnpm run lint
 ```
@@ -465,7 +465,7 @@ pnpm run lint
 Focused runtime checks:
 
 ```bash
-pnpm --filter @plankton/runtime exec vitest run \
+pnpm --filter @krabs/runtime exec vitest run \
   src/__tests__/signal-to-order-bridge.test.ts \
   src/__tests__/executable-price.test.ts \
   src/__tests__/stale-order-cleaner.test.ts

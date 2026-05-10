@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { TokenId } from "@plankton/domain";
+import type { TokenId } from "@krabs/domain";
 
 export interface PriceHistoryProvider {
   findReferencePrice(tokenId: TokenId, targetMs: number, maxAgeMs: number): number | null;

@@ -366,7 +366,7 @@ This is a single-operator system. There is one human watching one bot.
 
 Implementation:
 
-- API key is set via environment variable: `PLANKTON_API_KEY`.
+- API key is set via environment variable: `KRABS_API_KEY`.
 - All endpoints except `GET /health` require the header: `Authorization: Bearer <api_key>`.
 - The API key is a random 64-character hex string generated at deploy time.
 - SSE endpoint also requires the API key, passed as query parameter `?token=<api_key>` since EventSource does not support custom headers natively.
@@ -377,7 +377,7 @@ Middleware pseudocode:
 function authMiddleware(req: Request, res: Response, next: NextFunction) {
   if (req.path === "/health") return next();
   const token = req.headers.authorization?.replace("Bearer ", "") || req.query.token;
-  if (token !== process.env.PLANKTON_API_KEY) {
+  if (token !== process.env.KRABS_API_KEY) {
     return res
       .status(401)
       .json({ ok: false, error: { code: "UNAUTHORIZED", message: "Invalid API key" } });

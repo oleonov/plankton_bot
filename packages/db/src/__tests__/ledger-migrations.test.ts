@@ -59,7 +59,7 @@ function insertPosition(
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-ledger-migr-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-migr-"));
   dbPath = path.join(tmpDir, "ledger.db");
   db = new Database(dbPath);
   createMinimalPositionsTable(db);

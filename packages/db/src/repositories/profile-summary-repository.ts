@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
-import type { ProfileSummaryRepository, ProfileSummary } from "@plankton/domain";
-import type { ProfileId, PreflightStatus } from "@plankton/domain";
+import type { ProfileSummaryRepository, ProfileSummary } from "@krabs/domain";
+import type { ProfileId, PreflightStatus } from "@krabs/domain";
 
 export class SqliteProfileSummaryRepository implements ProfileSummaryRepository {
   constructor(private readonly db: Database.Database) {}

@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
-import { InProcessEventBus } from "@plankton/event-bus";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   createTokenId,
   type MarketResolution,
   type MarketResolutionRepository,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { MarketResolutionTracker } from "../modules/resolution/market-resolution-tracker.js";
 
 const mockLog = {

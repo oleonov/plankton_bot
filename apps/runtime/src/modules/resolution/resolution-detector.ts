@@ -10,8 +10,8 @@ import {
   type MarketResolutionRepository,
   type TokenId,
   type PositionId,
-} from "@plankton/domain";
-import type { GammaResolutionClient } from "@plankton/exchange";
+} from "@krabs/domain";
+import type { GammaResolutionClient } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
 
 export interface ResolutionCandidate {

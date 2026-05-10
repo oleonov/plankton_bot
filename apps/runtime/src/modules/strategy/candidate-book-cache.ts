@@ -1,5 +1,5 @@
 import type { Logger } from "../../logger.js";
-import type { NormalizedMarket, OrderBookSnapshot } from "@plankton/domain";
+import type { NormalizedMarket, OrderBookSnapshot } from "@krabs/domain";
 import { deriveExecutableTopOfBook } from "../../executable-price.js";
 
 export interface CandidateBookGateway {

@@ -5,32 +5,32 @@ x-json-logging: &json-logging
     max-file: "5"
 
 services:
-  plankton-runtime:
-    image: plankton:latest
+  krabs-runtime:
+    image: krabs:latest
     command: ["node", "apps/runtime/dist/index.js"]
     working_dir: /app
     volumes:
-      - plankton-data:/app/apps/runtime/data
+      - krabs-data:/app/apps/runtime/data
     restart: unless-stopped
     env_file: .env.production
     mem_limit: 640m
     logging: *json-logging
     environment:
       # --heapsnapshot-signal=SIGUSR2 lets ops dump a heap snapshot on demand
-      # (docker kill -s SIGUSR2 plankton-plankton-runtime-1) for leak triage.
+      # (docker kill -s SIGUSR2 krabs-krabs-runtime-1) for leak triage.
       - NODE_OPTIONS=--max-old-space-size=448 --heapsnapshot-signal=SIGUSR2
 
-  plankton-api:
-    image: plankton:latest
+  krabs-api:
+    image: krabs:latest
     command: ["node", "apps/api/dist/index.js"]
     working_dir: /app
     ports:
       - "3100:3100"
     volumes:
-      - plankton-data:/app/apps/runtime/data
+      - krabs-data:/app/apps/runtime/data
     restart: unless-stopped
     depends_on:
-      - plankton-runtime
+      - krabs-runtime
     env_file: .env.production
     mem_limit: 256m
     logging: *json-logging
@@ -81,16 +81,16 @@ services:
     networks:
       - manager-net
 
-  plankton-runtime-manager:
-    image: plankton:latest
+  krabs-runtime-manager:
+    image: krabs:latest
     command: ["node", "apps/runtime-manager/dist/index.js"]
     working_dir: /app
     volumes:
-      - plankton-data:/app/apps/runtime/data
+      - krabs-data:/app/apps/runtime/data
       # No docker.sock mount — connects via proxy
     restart: unless-stopped
     depends_on:
-      plankton-runtime:
+      krabs-runtime:
         condition: service_started
       docker-socket-proxy:
         condition: service_healthy
@@ -99,7 +99,7 @@ services:
     logging: *json-logging
     environment:
       - CONTROL_DB_PATH=/app/apps/runtime/data/control.db
-      - MANAGED_CONTAINER=plankton-plankton-runtime-1
+      - MANAGED_CONTAINER=krabs-krabs-runtime-1
       - POLL_INTERVAL_MS=3000
       - RESTART_TIMEOUT_S=30
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
@@ -109,8 +109,8 @@ services:
       - manager-net
 
 volumes:
-  plankton-data:
-    name: plankton-data
+  krabs-data:
+    name: krabs-data
 
 networks:
   manager-net:

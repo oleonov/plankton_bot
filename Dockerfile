@@ -59,8 +59,8 @@ ENV NODE_ENV=production
 LABEL org.opencontainers.image.revision="$GIT_SHA"
 
 # Non-root user
-RUN groupadd --system --gid 1001 plankton && \
-    useradd --system --uid 1001 --gid plankton plankton
+RUN groupadd --system --gid 1001 krabs && \
+    useradd --system --uid 1001 --gid krabs krabs
 
 # Copy monorepo structure marker
 COPY --from=builder /app/pnpm-workspace.yaml ./
@@ -110,8 +110,8 @@ COPY --from=builder /app/packages/exchange/package.json ./packages/exchange/pack
 RUN echo "$GIT_SHA" > /app/GIT_SHA
 
 # Create data directory for SQLite (will be volume-mounted)
-RUN mkdir -p /app/apps/runtime/data && chown plankton:plankton /app/apps/runtime/data
+RUN mkdir -p /app/apps/runtime/data && chown krabs:krabs /app/apps/runtime/data
 
-USER plankton
+USER krabs
 
 EXPOSE 3100

@@ -12,8 +12,8 @@
  * yields the denominator and numerator over any window.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { createConditionId } from "@plankton/domain";
-import type { TradeCountFetchEvent } from "@plankton/exchange";
+import { createConditionId } from "@krabs/domain";
+import type { TradeCountFetchEvent } from "@krabs/exchange";
 import { buildTradeCountObserver } from "../trade-count-observer.js";
 
 interface MetricCall {

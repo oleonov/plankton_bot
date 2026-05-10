@@ -1,6 +1,6 @@
-import type { MarketRepository, Position, PositionRepository, TokenId } from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
-import type { PolymarketDataPosition, PolymarketPositionReader } from "@plankton/exchange";
+import type { MarketRepository, Position, PositionRepository, TokenId } from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
+import type { PolymarketDataPosition, PolymarketPositionReader } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 

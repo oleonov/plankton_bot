@@ -6,8 +6,8 @@ import type Database from "better-sqlite3";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteInventoryLotRepository } from "../repositories/inventory-lot-repository.js";
-import { createLotId, createPositionId, createTokenId, createFillId } from "@plankton/domain";
-import type { InventoryLot } from "@plankton/domain";
+import { createLotId, createPositionId, createTokenId, createFillId } from "@krabs/domain";
+import type { InventoryLot } from "@krabs/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -70,7 +70,7 @@ function setupPrereqs(db: Database.Database): void {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   repo = new SqliteInventoryLotRepository(conn.db);
 });

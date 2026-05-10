@@ -6,9 +6,9 @@ import {
   createPositionId,
   createConditionId,
   OrderSide,
-} from "@plankton/domain";
-import type { LegStateRepository, TokenId, ClientOrderId, LegState } from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import type { LegStateRepository, TokenId, ClientOrderId, LegState } from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { LegStateTrackerModule } from "../modules/leg-state/leg-state-tracker-module.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────

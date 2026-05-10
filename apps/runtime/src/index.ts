@@ -1,5 +1,5 @@
 /**
- * Plankton Runtime — composition root and entrypoint.
+ * Krabs Runtime — composition root and entrypoint.
  *
  * Wires config, DB, selection rules, algo rules, event bus, supervisor, and modules.
  * Does NOT implement exchange, strategy, risk, or market-data logic.
@@ -37,7 +37,7 @@ import axiosDefault from "axios";
 // deliberately left unset — that field expects http.Agent, and CLOB/Gamma are
 // HTTPS-only. Mixing an https.Agent into httpAgent is a type error that would
 // break any future plain-HTTP consumer.
-import { buildClobAxiosAgent, installClobErrorSanitizer } from "@plankton/exchange";
+import { buildClobAxiosAgent, installClobErrorSanitizer } from "@krabs/exchange";
 // CLOB SDK serializes axios error.config (which holds the keep-alive
 // https.Agent) via JSON.stringify before re-throwing. Circular socket refs
 // crash that stringify, masking real exchange errors as a generic
@@ -50,8 +50,8 @@ installClobErrorSanitizer(
 import { randomUUID } from "node:crypto";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import process from "node:process";
-import { loadEnv } from "@plankton/config";
-import { InProcessEventBus } from "@plankton/event-bus";
+import { loadEnv } from "@krabs/config";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   bootstrapControlDb,
   bootstrapLedgerDb,
@@ -67,14 +67,14 @@ import {
   SelectionRuleRepository,
   SqliteRiskEventRepository,
   SqliteStateTransitionRepository,
-} from "@plankton/db";
-import type { DbConnection } from "@plankton/db";
-import { createBotRunId, ENTRY_REASONS, resolveTradingState } from "@plankton/domain";
+} from "@krabs/db";
+import type { DbConnection } from "@krabs/db";
+import { createBotRunId, ENTRY_REASONS, resolveTradingState } from "@krabs/domain";
 import {
   DataApiTradeCountProvider,
   GammaMarketDiscoveryGateway,
   PolymarketDataPositionReader,
-} from "@plankton/exchange";
+} from "@krabs/exchange";
 import { createGateways } from "./gateway-factory.js";
 import { LiveLiteGuard } from "./live-lite-guard.js";
 import { runProfilePreflight, writePreflightReport } from "./profile-preflight.js";
@@ -126,7 +126,7 @@ import { ResolutionDetector } from "./modules/resolution/resolution-detector.js"
 import { PositionSettler } from "./modules/resolution/position-settler.js";
 import { MarketResolutionTracker } from "./modules/resolution/market-resolution-tracker.js";
 import { startResolutionHealthWatcher } from "./modules/resolution/resolution-health-watcher.js";
-import { GammaResolutionClient } from "@plankton/exchange";
+import { GammaResolutionClient } from "@krabs/exchange";
 import {
   SqliteMarketResolutionRepository,
   SqliteMergeLedgerRepository,
@@ -139,7 +139,7 @@ import {
   SqlitePositionDriftRepository,
   SqliteExecutionPolicyObservationRepository,
   SqliteDecisionSignalLogRepository,
-} from "@plankton/db";
+} from "@krabs/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
 import { RiskEventWriter } from "./risk-event-writer.js";
@@ -268,7 +268,7 @@ async function main(): Promise<void> {
   // 1. Load config
   const config = loadEnv();
   const log = createLogger(config.logLevel, config.runtimeMode);
-  log.info({ mode: config.runtimeMode }, "plankton runtime starting (env mode)");
+  log.info({ mode: config.runtimeMode }, "krabs runtime starting (env mode)");
 
   // Install bounded https.Agent on the global axios singleton (covers all CLOB SDK calls).
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -620,7 +620,7 @@ async function main(): Promise<void> {
     controlDb: controlConn.db,
     profileSettingsRepo,
     log,
-    profileId: activeProfile as import("@plankton/domain").ProfileId,
+    profileId: activeProfile as import("@krabs/domain").ProfileId,
   });
   const currentExecutionPolicy = () => {
     executionPolicyProvider.refreshIfStale();
@@ -794,7 +794,7 @@ async function main(): Promise<void> {
     allowSellSizeClamp: config.allowSellSizeClamp,
     capacityMetricsSink: recordOrderCapacitySample,
     controlDb: controlConn.db,
-    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
+    activeProfile: activeProfile as import("@krabs/domain").ProfileId,
   });
 
   // 7g. Risk + Inventory module
@@ -809,7 +809,7 @@ async function main(): Promise<void> {
     liveLiteGuard,
     runtimeControl,
     controlDb: controlConn.db,
-    activeProfile: activeProfile as import("@plankton/domain").ProfileId,
+    activeProfile: activeProfile as import("@krabs/domain").ProfileId,
     walletBufferPct: config.executionWalletBufferPct,
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     executionPolicy: currentExecutionPolicy,
@@ -914,7 +914,7 @@ async function main(): Promise<void> {
         const walletBudget = resolveWalletBuyBudget(
           {
             controlDb: controlConn.db,
-            activeProfile: activeProfile as import("@plankton/domain").ProfileId,
+            activeProfile: activeProfile as import("@krabs/domain").ProfileId,
             walletBufferPct: config.executionWalletBufferPct,
             walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
           },
@@ -1008,7 +1008,7 @@ async function main(): Promise<void> {
     candidateBookCache,
     policy: currentExecutionPolicy,
     observations: executionPolicyObservationRepo,
-    profileId: activeProfile as import("@plankton/domain").ProfileId,
+    profileId: activeProfile as import("@krabs/domain").ProfileId,
     resolutionTracker: marketResolutionTracker,
     orderLifetime: orderLifetimeModule,
     samePriceCooldown: samePriceCooldownModule,
@@ -1154,7 +1154,7 @@ async function main(): Promise<void> {
     log,
   });
 
-  const modules: Array<[string, import("@plankton/domain").RuntimeModule]> = [
+  const modules: Array<[string, import("@krabs/domain").RuntimeModule]> = [
     ["command-poller", commandPoller],
     ["market-scanner", marketScannerModule],
     ["market-data", marketDataModule],
@@ -1177,7 +1177,7 @@ async function main(): Promise<void> {
       ? [
           ["user-order-stream", userOrderStreamModule] as [
             string,
-            import("@plankton/domain").RuntimeModule,
+            import("@krabs/domain").RuntimeModule,
           ],
         ]
       : []),
@@ -1187,12 +1187,12 @@ async function main(): Promise<void> {
       ? [
           ["inventory-manager", inventoryManagerModule] as [
             string,
-            import("@plankton/domain").RuntimeModule,
+            import("@krabs/domain").RuntimeModule,
           ],
         ]
       : []),
     ...(fillPollerModule
-      ? [["fill-poller", fillPollerModule] as [string, import("@plankton/domain").RuntimeModule]]
+      ? [["fill-poller", fillPollerModule] as [string, import("@krabs/domain").RuntimeModule]]
       : []),
     ["execution", executionModule],
     ["entry-lifecycle", entryLifecycleModule],

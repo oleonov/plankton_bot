@@ -1,4 +1,4 @@
-import type { RuntimeEventMap } from "@plankton/domain";
+import type { RuntimeEventMap } from "@krabs/domain";
 
 export type OrderRejectedEvent = RuntimeEventMap["OrderRejected"];
 

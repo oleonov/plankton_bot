@@ -6,7 +6,7 @@ import type {
   Position,
   TokenId,
   PositionId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { findActivePositions } from "../../active-positions.js";
 
 export interface MergeCandidate {

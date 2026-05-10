@@ -1,12 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { InProcessEventBus } from "@plankton/event-bus";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   SelectionRuleEngine,
   createTokenId,
   type NormalizedMarket,
   type SelectionRule,
   type TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { MarketSelectionCache } from "../market-selection-cache.js";
 import type { RefreshableSelectionRuleEngine } from "../../../selection-rule-engine-factory.js";
 

@@ -27,8 +27,8 @@ import type {
   PositionDriftRepository,
   RepriceOnOutbidPolicy,
   ExitRepriceOnDownpricePolicy,
-} from "@plankton/domain";
-import { createTokenId, createConditionId } from "@plankton/domain";
+} from "@krabs/domain";
+import { createTokenId, createConditionId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
@@ -75,14 +75,14 @@ export interface ReconciliationModuleDeps {
     policy: () => RepriceOnOutbidPolicy;
     getRepriceCount: (signalId: string | null) => number;
     getMarket: (
-      tokenId: import("@plankton/domain").TokenId,
-    ) => Pick<import("@plankton/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
+      tokenId: import("@krabs/domain").TokenId,
+    ) => Pick<import("@krabs/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
   };
   exitRepriceOnDownprice?: {
     policy: () => ExitRepriceOnDownpricePolicy;
     getMarket: (
-      tokenId: import("@plankton/domain").TokenId,
-    ) => Pick<import("@plankton/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
+      tokenId: import("@krabs/domain").TokenId,
+    ) => Pick<import("@krabs/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
   };
   runtimeMetrics?: {
     writeEvent: (

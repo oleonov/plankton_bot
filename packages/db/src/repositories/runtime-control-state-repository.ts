@@ -3,9 +3,9 @@ import type {
   ContinuationMode,
   RuntimeControlStateRepository,
   RuntimeControlState,
-} from "@plankton/domain";
-import { createSwitchId } from "@plankton/domain";
-import type { ProfileId, RuntimeStatus } from "@plankton/domain";
+} from "@krabs/domain";
+import { createSwitchId } from "@krabs/domain";
+import type { ProfileId, RuntimeStatus } from "@krabs/domain";
 
 export class SqliteRuntimeControlStateRepository implements RuntimeControlStateRepository {
   constructor(private readonly db: Database.Database) {}

@@ -9,8 +9,8 @@ import type {
   PositionRepository,
   RuntimeEventMap,
   TokenId,
-} from "@plankton/domain";
-import { createTokenId, createOrderId, deriveState } from "@plankton/domain";
+} from "@krabs/domain";
+import { createTokenId, createOrderId, deriveState } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 
 // ─── Mock helpers ─────────────────────────────────────────────────────────────

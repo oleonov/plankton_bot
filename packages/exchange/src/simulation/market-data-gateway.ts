@@ -5,7 +5,7 @@ import type {
   TokenId,
   PriceLevel,
   MarketPricingSnapshot,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 export class SimulationMarketDataGateway implements MarketDataGateway {
   private readonly markets = new Map<string, ClobMarket>();

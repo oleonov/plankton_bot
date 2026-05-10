@@ -13,7 +13,7 @@ let cmdRepo: SqliteOperatorCommandRepository;
 let actionRepo: SqliteOperatorActionRepository;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   cmdRepo = new SqliteOperatorCommandRepository(conn.db);
   actionRepo = new SqliteOperatorActionRepository(conn.db);

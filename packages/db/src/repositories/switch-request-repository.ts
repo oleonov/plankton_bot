@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
-import type { SwitchRequestRepository, SwitchRequest } from "@plankton/domain";
-import { createSwitchId } from "@plankton/domain";
-import type { SwitchId, ProfileId, SwitchState, LedgerResetPolicy } from "@plankton/domain";
+import type { SwitchRequestRepository, SwitchRequest } from "@krabs/domain";
+import { createSwitchId } from "@krabs/domain";
+import type { SwitchId, ProfileId, SwitchState, LedgerResetPolicy } from "@krabs/domain";
 
 export class SqliteSwitchRequestRepository implements SwitchRequestRepository {
   constructor(private readonly db: Database.Database) {}

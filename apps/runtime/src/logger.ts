@@ -48,7 +48,7 @@ const REDACT_PATHS = [
   "headers.POLY_BUILDER_SIGNATURE",
   "headers.POLY_BUILDER_TIMESTAMP",
   "headers.POLY_PRIVATE_KEY",
-  "headers.PLANKTON_API_KEY",
+  "headers.KRABS_API_KEY",
   "err.config.headers.authorization",
   "err.config.headers.Authorization",
   "err.config.headers.cookie",
@@ -64,7 +64,7 @@ const REDACT_PATHS = [
   "err.config.headers.POLY_BUILDER_SIGNATURE",
   "err.config.headers.POLY_BUILDER_TIMESTAMP",
   "err.config.headers.POLY_PRIVATE_KEY",
-  "err.config.headers.PLANKTON_API_KEY",
+  "err.config.headers.KRABS_API_KEY",
   "alert.details.headers.authorization",
   "alert.details.headers.Authorization",
   "alert.details.headers.POLY_API_KEY",
@@ -76,7 +76,7 @@ const REDACT_PATHS = [
   "alert.details.headers.POLY_BUILDER_PASSPHRASE",
   "alert.details.headers.POLY_BUILDER_SIGNATURE",
   "alert.details.headers.POLY_PRIVATE_KEY",
-  "alert.details.headers.PLANKTON_API_KEY",
+  "alert.details.headers.KRABS_API_KEY",
 ] as const;
 
 export function createLogger(level: string, mode?: string): Logger {

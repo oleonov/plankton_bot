@@ -1,5 +1,5 @@
-import type { ExchangeUserOrderEvent, ExchangeUserTradeEvent } from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
+import type { ExchangeUserOrderEvent, ExchangeUserTradeEvent } from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
 import {
   mapExchangeOrderStatus,
   mapTrade,

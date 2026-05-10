@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { InProcessEventBus } from "@plankton/event-bus";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   createTokenId,
   createConditionId,
@@ -27,8 +27,8 @@ import {
   createFillId,
   OrderSide,
   LiquidityRole,
-} from "@plankton/domain";
-import type { ClientOrderId, FillReceived } from "@plankton/domain";
+} from "@krabs/domain";
+import type { ClientOrderId, FillReceived } from "@krabs/domain";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -91,7 +91,7 @@ describe("throughput soak", () => {
     `sustains ≥2 orders/sec and p99 latency <500ms over ${SOAK_DURATION_MS}ms`,
     async () => {
       // ── Setup: in-memory-equivalent SQLite (temp file, WAL off for speed) ──
-      tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-soak-"));
+      tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-soak-"));
       const db = new Database(path.join(tmpDir, "soak.db"));
       db.pragma("journal_mode = MEMORY");
       db.pragma("synchronous = OFF");

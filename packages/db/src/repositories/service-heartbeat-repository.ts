@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
-import type { ServiceHeartbeatRepository, ServiceHeartbeat } from "@plankton/domain";
-import type { ProfileId } from "@plankton/domain";
+import type { ServiceHeartbeatRepository, ServiceHeartbeat } from "@krabs/domain";
+import type { ProfileId } from "@krabs/domain";
 
 export class SqliteServiceHeartbeatRepository implements ServiceHeartbeatRepository {
   constructor(private readonly db: Database.Database) {}

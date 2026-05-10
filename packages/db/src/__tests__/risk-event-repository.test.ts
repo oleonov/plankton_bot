@@ -11,7 +11,7 @@ let tmpDir: string;
 let repo: SqliteRiskEventRepository;
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   repo = new SqliteRiskEventRepository(conn.db);
 });

@@ -1,11 +1,11 @@
 import pino from "pino";
 import Docker from "dockerode";
-import { bootstrapControlDb } from "@plankton/db";
+import { bootstrapControlDb } from "@krabs/db";
 import {
   SqliteSwitchRequestRepository,
   SqliteRuntimeControlStateRepository,
   SqliteStateTransitionRepository,
-} from "@plankton/db";
+} from "@krabs/db";
 import { SwitchDriver } from "./switch-driver.js";
 import { DockerContainerControl } from "./container-control.js";
 
@@ -18,7 +18,7 @@ function main(): void {
   const controlDbPath = process.env["CONTROL_DB_PATH"];
   if (!controlDbPath) throw new Error("CONTROL_DB_PATH required");
 
-  const managedContainer = process.env["MANAGED_CONTAINER"] ?? "plankton-plankton-runtime-1";
+  const managedContainer = process.env["MANAGED_CONTAINER"] ?? "krabs-krabs-runtime-1";
   const pollIntervalMs = Number(process.env["POLL_INTERVAL_MS"]) || 3000;
   const restartTimeoutS = Number(process.env["RESTART_TIMEOUT_S"]) || 30;
 

@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { normalizeSelectionPattern } from "@plankton/domain";
-import type { SelectionRule, SelectionRuleType } from "@plankton/domain";
+import { normalizeSelectionPattern } from "@krabs/domain";
+import type { SelectionRule, SelectionRuleType } from "@krabs/domain";
 
 export interface SelectionRuleInsert {
   profileId: string;

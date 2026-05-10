@@ -2,8 +2,8 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bootstrapDatabase } from "@plankton/db";
-import type { DbConnection } from "@plankton/db";
+import { bootstrapDatabase } from "@krabs/db";
+import type { DbConnection } from "@krabs/db";
 import { liveLitePreflight } from "../live-lite-preflight.js";
 import type { LiveLiteConfig } from "../live-lite-guard.js";
 
@@ -14,7 +14,7 @@ const ENVELOPE: LiveLiteConfig = {
 };
 
 function withTempDb(fn: (conn: DbConnection) => void): void {
-  const tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-preflight-"));
+  const tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-preflight-"));
   const conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   try {
     fn(conn);

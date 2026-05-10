@@ -3,7 +3,7 @@ import type {
   MarketSnapshot,
   NormalizedMarket,
   TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 export interface SnapshotWriterConfig {
   intervalMs: number;

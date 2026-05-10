@@ -28,9 +28,9 @@ import {
   SqliteMarketResolutionRepository,
   SqliteOrderRepository,
   SqlitePositionRepository,
-} from "@plankton/db";
-import { createConditionId, createPositionId, createTokenId, type TokenId } from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/db";
+import { createConditionId, createPositionId, createTokenId, type TokenId } from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 
 import { AlgoDecisionModule } from "../../modules/algo-decision/algo-decision-module.js";
 import type { SelectedMarketCache } from "../../modules/algo-decision/algo-decision-module.js";

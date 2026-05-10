@@ -30,9 +30,9 @@ const ALL_KEYS = [
   "POLY_PRIVATE_KEY",
   "POLYGON_RPC_URL",
   "POLYGON_RPC_FALLBACK_URL",
-  "PLANKTON_AUTH_USERNAME",
-  "PLANKTON_AUTH_PASSWORD",
-  "PLANKTON_SESSION_SECRET",
+  "KRABS_AUTH_USERNAME",
+  "KRABS_AUTH_PASSWORD",
+  "KRABS_SESSION_SECRET",
   "TRUST_PROXY",
 ];
 
@@ -49,7 +49,7 @@ describe("loadEnv", () => {
   const saved: Record<string, string | undefined> = {};
 
   // Explicit empty .env file to prevent loadEnv() from loading the real root .env
-  const emptyEnvDir = mkdtempSync(path.join(os.tmpdir(), "plankton-env-test-"));
+  const emptyEnvDir = mkdtempSync(path.join(os.tmpdir(), "krabs-env-test-"));
   const emptyEnvPath = path.join(emptyEnvDir, "empty.env");
   writeFileSync(emptyEnvPath, "");
 
@@ -68,7 +68,7 @@ describe("loadEnv", () => {
   });
 
   it("returns defaults when no env vars are set", () => {
-    const tempDir = mkdtempSync(path.join(os.tmpdir(), "plankton-config-test-"));
+    const tempDir = mkdtempSync(path.join(os.tmpdir(), "krabs-config-test-"));
     const envPath = path.join(tempDir, "empty.env");
     writeFileSync(envPath, "");
 
@@ -76,7 +76,7 @@ describe("loadEnv", () => {
       const config = loadEnv(envPath);
       expect(config.runtimeMode).toBeUndefined();
       expect(config.logLevel).toBe("info");
-      expect(config.dbPath).toContain("plankton.db");
+      expect(config.dbPath).toContain("krabs.db");
       expect(config.polyApiKey).toBeUndefined();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

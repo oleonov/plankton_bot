@@ -17,7 +17,7 @@
  * sweep fails. The provider contract is that errors collapse to `null`, not
  * propagate — observers that mutate persistent state must honor that.
  */
-import type { TradeCountFetchEvent, TradeCountObserver } from "@plankton/exchange";
+import type { TradeCountFetchEvent, TradeCountObserver } from "@krabs/exchange";
 import type { Logger } from "./logger.js";
 import type { RuntimeMetricWriter } from "./runtime-metric-writer.js";
 import { consumeWarnThrottle, createWarnThrottleState } from "./warn-throttle.js";

@@ -74,28 +74,28 @@ poly_plankton/
 
 ## 2. Package Responsibility Table
 
-| Package                  | Responsibility                                                             | Workspace deps           | External deps                                    |
-| ------------------------ | -------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------ |
-| `@plankton/domain`       | Pure types, enums, event defs, command defs, repository/gateway interfaces | (none)                   | (none)                                           |
-| `@plankton/config`       | YAML + env loading, zod validation                                         | (none)                   | `zod`, `yaml`, `dotenv`                          |
-| `@plankton/event-bus`    | Typed in-process pub/sub with async handlers                               | `domain`                 | (none)                                           |
-| `@plankton/db`           | SQLite repos, migrations, connection management                            | `domain`                 | `better-sqlite3`                                 |
-| `@plankton/exchange`     | ExchangeGateway implementations (Live + Sim)                               | `domain`                 | `@polymarket/clob-client`                        |
-| `@plankton/family-rules` | Family YAML loading, validation, resolution                                | `domain`, `config`       | (none)                                           |
-| `apps/runtime`           | Trading bot: supervisor, all internal modules                              | all packages             | `pino`                                           |
-| `apps/api`               | REST + SSE server, operator actions                                        | `domain`, `db`, `config` | `fastify`                                        |
-| `apps/web`               | React SPA dashboard                                                        | `domain`                 | `react`, `react-router`, `@tanstack/react-query` |
+| Package               | Responsibility                                                             | Workspace deps           | External deps                                    |
+| --------------------- | -------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------ |
+| `@krabs/domain`       | Pure types, enums, event defs, command defs, repository/gateway interfaces | (none)                   | (none)                                           |
+| `@krabs/config`       | YAML + env loading, zod validation                                         | (none)                   | `zod`, `yaml`, `dotenv`                          |
+| `@krabs/event-bus`    | Typed in-process pub/sub with async handlers                               | `domain`                 | (none)                                           |
+| `@krabs/db`           | SQLite repos, migrations, connection management                            | `domain`                 | `better-sqlite3`                                 |
+| `@krabs/exchange`     | ExchangeGateway implementations (Live + Sim)                               | `domain`                 | `@polymarket/clob-client`                        |
+| `@krabs/family-rules` | Family YAML loading, validation, resolution                                | `domain`, `config`       | (none)                                           |
+| `apps/runtime`        | Trading bot: supervisor, all internal modules                              | all packages             | `pino`                                           |
+| `apps/api`            | REST + SSE server, operator actions                                        | `domain`, `db`, `config` | `fastify`                                        |
+| `apps/web`            | React SPA dashboard                                                        | `domain`                 | `react`, `react-router`, `@tanstack/react-query` |
 
 ### Dependency Direction (strictly enforced)
 
 ```
-@plankton/domain          ← leaf, zero deps
+@krabs/domain          ← leaf, zero deps
     ↑
-    ├── @plankton/config
-    ├── @plankton/event-bus
-    ├── @plankton/db
-    ├── @plankton/exchange
-    └── @plankton/family-rules ← also depends on config
+    ├── @krabs/config
+    ├── @krabs/event-bus
+    ├── @krabs/db
+    ├── @krabs/exchange
+    └── @krabs/family-rules ← also depends on config
          ↑
     apps/runtime  ← depends on all packages
     apps/api      ← depends on domain, db, config
@@ -108,7 +108,7 @@ poly_plankton/
 
 ## 3. Key Interfaces (must design first)
 
-These 12 interfaces in `@plankton/domain` gate all implementation. Design before writing business logic.
+These 12 interfaces in `@krabs/domain` gate all implementation. Design before writing business logic.
 
 | #   | Interface                   | Why critical                                                                                                                           |
 | --- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -139,7 +139,7 @@ These 12 interfaces in `@plankton/domain` gate all implementation. Design before
 | 1.2 | Create root configs: package.json, pnpm-workspace.yaml, turbo.json, tsconfig.base.json, vitest.config.ts, eslint.config.js, .prettierrc, .npmrc, .node-version, .gitignore, .env.example | Tooling | Files match 02_tooling_scaffold.md spec      |
 | 1.3 | Create all package directories + package.json + tsconfig.json                                                                                                                            | Tooling | Per spec in 02_tooling_scaffold.md Section 3 |
 | 1.4 | Create placeholder `src/index.ts` in every package/app                                                                                                                                   | Tooling | Minimal exports, no business logic           |
-| 1.5 | apps/runtime imports type from @plankton/domain                                                                                                                                          | Tooling | Proves cross-package resolution              |
+| 1.5 | apps/runtime imports type from @krabs/domain                                                                                                                                             | Tooling | Proves cross-package resolution              |
 | 1.6 | `pnpm install && pnpm build && pnpm typecheck && pnpm lint && pnpm test` all pass                                                                                                        | Tooling | Green across all packages                    |
 
 **Critical fixes vs existing Phase 1 spec:**
@@ -147,7 +147,7 @@ These 12 interfaces in `@plankton/domain` gate all implementation. Design before
 - Add `composite: true` to tsconfig.base.json
 - Remove `outDir`/`rootDir` from base tsconfig (per-package only)
 - Add `dependsOn: ["^build"]` to `typecheck` and `test` in turbo.json
-- Add `@types/better-sqlite3` to `@plankton/db` devDeps
+- Add `@types/better-sqlite3` to `@krabs/db` devDeps
 - Add `isolatedModules: true`, `verbatimModuleSyntax: true` to base tsconfig
 
 ### Phase 2: Domain Contracts (this week, 2-3 days)
@@ -162,7 +162,7 @@ These 12 interfaces in `@plankton/domain` gate all implementation. Design before
 | 2.6  | Define EventBus interface in `packages/domain/src/bus.ts`             | Runtime  | Typed publish/subscribe with RuntimeEventMap                                                                                                                 |
 | 2.7  | Define RuntimeModule interface                                        | Runtime  | start(), stop(), healthCheck()                                                                                                                               |
 | 2.8  | Define RiskGate interface                                             | Strategy | evaluate(signal): RiskDecision                                                                                                                               |
-| 2.9  | Barrel export from `packages/domain/src/index.ts`                     | Domain   | All types importable via `@plankton/domain`                                                                                                                  |
+| 2.9  | Barrel export from `packages/domain/src/index.ts`                     | Domain   | All types importable via `@krabs/domain`                                                                                                                     |
 | 2.10 | Unit tests for branded ID helpers, enum validation                    | Domain   | Tests pass                                                                                                                                                   |
 
 ### Phase 3: Config + Family Rules + Event Bus (next week, 3-4 days)
@@ -250,7 +250,7 @@ All 6 team roles converged on the following:
 | Decision                                                               | Status                                |
 | ---------------------------------------------------------------------- | ------------------------------------- |
 | 6 packages + 3 apps + research/                                        | **Agreed**                            |
-| @plankton/domain as zero-dep leaf                                      | **Agreed**                            |
+| @krabs/domain as zero-dep leaf                                         | **Agreed**                            |
 | Internal modules inside apps/runtime (not packages)                    | **Agreed**                            |
 | 12 critical interfaces in domain (updated from 10 after F2/F4)         | **Agreed**                            |
 | tokenId as primary market identifier (F1 resolution)                   | **Agreed**                            |

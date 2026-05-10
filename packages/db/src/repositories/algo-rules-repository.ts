@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
-import type { AlgoRulesRepository } from "@plankton/domain";
-import type { AlgoDecisionRule, AlgoSizeRule } from "@plankton/domain";
+import type { AlgoRulesRepository } from "@krabs/domain";
+import type { AlgoDecisionRule, AlgoSizeRule } from "@krabs/domain";
 
 interface DecisionRow {
   id: number;

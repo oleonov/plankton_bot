@@ -15,7 +15,7 @@ import type {
   SignalReason as SignalReasonType,
   TokenId,
   ExecutionPolicy,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import {
   ENTRY_REASONS,
   canPlaceBuyOrderForMarket,
@@ -23,7 +23,7 @@ import {
   deriveState,
   evaluateSize,
   resolveSignalReason,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { Logger } from "../../logger.js";
 

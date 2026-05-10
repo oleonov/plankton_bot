@@ -12,14 +12,14 @@
  * `snapshot()` to pick up the current policy.
  */
 import type Database from "better-sqlite3";
-import type { ExecutionPolicy, ProfileId, ProfileSettings } from "@plankton/domain";
+import type { ExecutionPolicy, ProfileId, ProfileSettings } from "@krabs/domain";
 import {
   DEFAULT_EXECUTION_POLICY,
   parseExecutionPolicyJson,
   type ParseResult,
-} from "@plankton/domain";
-import { readExecutionPolicyVersion } from "@plankton/db";
-import type { ProfileSettingsRepository } from "@plankton/domain";
+} from "@krabs/domain";
+import { readExecutionPolicyVersion } from "@krabs/db";
+import type { ProfileSettingsRepository } from "@krabs/domain";
 import type { Logger } from "./logger.js";
 
 export interface ExecutionPolicyProviderDeps {

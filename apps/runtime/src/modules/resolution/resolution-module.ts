@@ -20,9 +20,9 @@ import type {
   InventoryLotRepository,
   PositionRepository,
   TokenId,
-} from "@plankton/domain";
-import { createCommandId } from "@plankton/domain";
-import type { GammaResolutionClient } from "@plankton/exchange";
+} from "@krabs/domain";
+import { createCommandId } from "@krabs/domain";
+import type { GammaResolutionClient } from "@krabs/exchange";
 import type {
   ResolutionDetector,
   ResolutionCandidate,
@@ -519,7 +519,7 @@ export class ResolutionModule implements RuntimeModule {
   }
 
   private async handleMarketResolvedHint(
-    hint: import("@plankton/domain").RuntimeEventMap["MarketResolvedHint"],
+    hint: import("@krabs/domain").RuntimeEventMap["MarketResolvedHint"],
   ): Promise<void> {
     this.wsHintConsumed++;
     for (const tokenId of hint.tokenIds) {

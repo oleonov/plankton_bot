@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { createSwitchId, createReportId, createImportId } from "@plankton/domain";
+import { createSwitchId, createReportId, createImportId } from "@krabs/domain";
 import type {
   Profile,
   ProfileSettings,
@@ -12,8 +12,8 @@ import type {
   PreflightReport,
   ServiceHeartbeat,
   ConfigImport,
-} from "@plankton/domain";
-import type { ProfileId } from "@plankton/domain";
+} from "@krabs/domain";
+import type { ProfileId } from "@krabs/domain";
 import { SqliteProfileRepository } from "../repositories/profile-repository.js";
 import { SqliteProfileSettingsRepository } from "../repositories/profile-settings-repository.js";
 import {

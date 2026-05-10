@@ -1,4 +1,4 @@
-import type { Position, PositionRepository } from "@plankton/domain";
+import type { Position, PositionRepository } from "@krabs/domain";
 
 export function findActivePositions(positionRepo: PositionRepository): Position[] {
   const byToken = new Map<string, Position>();

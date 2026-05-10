@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
-import type { ConfigImportRepository, ConfigImport } from "@plankton/domain";
-import { createImportId } from "@plankton/domain";
-import type { ImportId } from "@plankton/domain";
+import type { ConfigImportRepository, ConfigImport } from "@krabs/domain";
+import { createImportId } from "@krabs/domain";
+import type { ImportId } from "@krabs/domain";
 
 export class SqliteConfigImportRepository implements ConfigImportRepository {
   constructor(private readonly db: Database.Database) {}

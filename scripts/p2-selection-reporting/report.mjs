@@ -19,7 +19,7 @@
  *   node scripts/p2-selection-reporting/report.mjs --db <path> [--since YYYY-MM-DD]
  *
  * Or against prod (script is copied into the container then executed):
- *   ssh root@<host> "docker exec -i plankton-plankton-runtime-1 node /tmp/report.mjs"
+ *   ssh root@<host> "docker exec -i krabs-krabs-runtime-1 node /tmp/report.mjs"
  */
 
 import Database from "better-sqlite3";

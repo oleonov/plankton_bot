@@ -104,7 +104,7 @@ export interface MarketTradeCountProvider {
 - `prefetch` is optional batch warming. The default implementation in
   `DataApiTradeCountProvider` is `Promise.all` over `countTrades`.
 
-Concrete implementation in `@plankton/exchange`
+Concrete implementation in `@krabs/exchange`
 (`packages/exchange/src/data-api-trade-count-provider.ts`):
 
 - HTTP client over `https://data-api.polymarket.com/trades?market=<conditionId>&limit=<cap>`.

@@ -1,5 +1,5 @@
 {
-  "name": "@plankton/runtime",
+  "name": "@krabs/runtime",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,11 +12,11 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@plankton/config": "workspace:*",
-    "@plankton/db": "workspace:*",
-    "@plankton/domain": "workspace:*",
-    "@plankton/event-bus": "workspace:*",
-    "@plankton/exchange": "workspace:*",
+    "@krabs/config": "workspace:*",
+    "@krabs/db": "workspace:*",
+    "@krabs/domain": "workspace:*",
+    "@krabs/event-bus": "workspace:*",
+    "@krabs/exchange": "workspace:*",
     "@polymarket/builder-relayer-client": "^0.0.8",
     "@polymarket/builder-signing-sdk": "^0.0.8",
     "@polymarket/clob-client-v2": "^1.0.2",

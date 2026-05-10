@@ -13,7 +13,7 @@
  * `additionalNotional` when simulating a would-be-placed order.
  */
 
-import type { OrderRepository, PositionRepository } from "@plankton/domain";
+import type { OrderRepository, PositionRepository } from "@krabs/domain";
 import { findActivePositions } from "./active-positions.js";
 
 export function calculateTotalExposure(

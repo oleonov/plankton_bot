@@ -1,4 +1,4 @@
-import type { RuntimeModule, EventBus, RuntimePhase } from "@plankton/domain";
+import type { RuntimeModule, EventBus, RuntimePhase } from "@krabs/domain";
 import type { Logger } from "../logger.js";
 
 export interface SupervisorConfig {

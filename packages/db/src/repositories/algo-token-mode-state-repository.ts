@@ -1,11 +1,11 @@
 import type Database from "better-sqlite3";
-import type { AlgoTokenModeState, AlgoTokenModeStateRepository } from "@plankton/domain";
-import { createConditionId, createTokenId } from "@plankton/domain";
+import type { AlgoTokenModeState, AlgoTokenModeStateRepository } from "@krabs/domain";
+import { createConditionId, createTokenId } from "@krabs/domain";
 
 export class SqliteAlgoTokenModeStateRepository implements AlgoTokenModeStateRepository {
   constructor(private readonly db: Database.Database) {}
 
-  get(tokenId: import("@plankton/domain").TokenId): AlgoTokenModeState | null {
+  get(tokenId: import("@krabs/domain").TokenId): AlgoTokenModeState | null {
     const row = this.db
       .prepare("SELECT * FROM algo_token_mode_state WHERE token_id = ?")
       .get(tokenId) as Record<string, unknown> | undefined;
@@ -74,7 +74,7 @@ export class SqliteAlgoTokenModeStateRepository implements AlgoTokenModeStateRep
       );
   }
 
-  delete(tokenId: import("@plankton/domain").TokenId): void {
+  delete(tokenId: import("@krabs/domain").TokenId): void {
     this.db.prepare("DELETE FROM algo_token_mode_state WHERE token_id = ?").run(tokenId);
   }
 

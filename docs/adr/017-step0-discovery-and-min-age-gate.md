@@ -70,7 +70,7 @@ without yet committing to the WSS migration.
 
 ### D3 — Min-age gate before first BUY (P3)
 
-`evaluateMinMarketAge` (in `@plankton/domain`) is a pure helper that gates the
+`evaluateMinMarketAge` (in `@krabs/domain`) is a pure helper that gates the
 **legState == null** branch only. SELL / REDEEM / continuation are explicitly
 unaffected — the spec floor applies to _first_ BUYs.
 

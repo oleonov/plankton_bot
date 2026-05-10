@@ -40,12 +40,12 @@ apps/runtime/src/
 
 Packages consumed by these modules:
 
-| Package               | Purpose                                              |
-| --------------------- | ---------------------------------------------------- |
-| `@plankton/domain`    | Shared value objects, enums, entity types            |
-| `@plankton/event-bus` | Typed in-process bus with async handlers             |
-| `@plankton/db`        | Repository interfaces + SQLite v1 implementations    |
-| `@plankton/exchange`  | ExchangeGateway interface + Live/Sim implementations |
+| Package            | Purpose                                              |
+| ------------------ | ---------------------------------------------------- |
+| `@krabs/domain`    | Shared value objects, enums, entity types            |
+| `@krabs/event-bus` | Typed in-process bus with async handlers             |
+| `@krabs/db`        | Repository interfaces + SQLite v1 implementations    |
+| `@krabs/exchange`  | ExchangeGateway interface + Live/Sim implementations |
 
 ---
 
@@ -80,7 +80,7 @@ Packages consumed by these modules:
         |
         | PositionUpdated / FamilyExposureChanged
         v
-  persistence (via @plankton/db repositories)
+  persistence (via @krabs/db repositories)
 
   reconciliation (periodic + startup)
         |
@@ -665,7 +665,7 @@ Single bucket is acceptable for v1 because there is one process and one exchange
 
 Every interface below must exist for the runtime to compile and function. Grouped by package.
 
-### @plankton/domain
+### @krabs/domain
 
 ```typescript
 /** Core identity types */
@@ -722,7 +722,7 @@ export interface Position {
 }
 ```
 
-### @plankton/event-bus
+### @krabs/event-bus
 
 ```typescript
 /** Typed event map -- every key is an event name, value is the payload type */
@@ -757,7 +757,7 @@ export interface EventBus {
 }
 ```
 
-### @plankton/exchange
+### @krabs/exchange
 
 ```typescript
 // ExchangeGateway -- see full definition in section 4 above
@@ -772,7 +772,7 @@ export {
 export { buildClientOrderId } from "./client-order-id";
 ```
 
-### @plankton/db
+### @krabs/db
 
 ```typescript
 export interface OrderRepository {

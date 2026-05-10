@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import pino from "pino";
 
-import { InProcessEventBus } from "@plankton/event-bus";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   bootstrapDatabase,
   SqliteMarketRepository,
@@ -23,10 +23,10 @@ import {
   SqliteOperatorActionRepository,
   SqliteAlgoRulesRepository,
   SqliteLegStateRepository,
-} from "@plankton/db";
-import { createBotRunId, createTokenId } from "@plankton/domain";
-import type { Market, ClobMarket, TokenId } from "@plankton/domain";
-import { SimulationMarketDataGateway, SimulationExchangeGateway } from "@plankton/exchange";
+} from "@krabs/db";
+import { createBotRunId, createTokenId } from "@krabs/domain";
+import type { Market, ClobMarket, TokenId } from "@krabs/domain";
+import { SimulationMarketDataGateway, SimulationExchangeGateway } from "@krabs/exchange";
 
 import { MarketDataModule } from "../modules/market-data/market-data-module.js";
 import { NormalizationModule } from "../modules/normalization/normalization-module.js";
@@ -71,7 +71,7 @@ export async function runScenario(fixture: ScenarioFixture): Promise<ScenarioRes
     return await executeScenario(fixture, fixture.dbPath);
   }
 
-  const tmpDir = mkdtempSync(join(tmpdir(), "plankton-scenario-"));
+  const tmpDir = mkdtempSync(join(tmpdir(), "krabs-scenario-"));
   const dbPath = join(tmpDir, "scenario.db");
 
   try {

@@ -7,7 +7,7 @@ import {
   SqliteMarketRepository,
   SqliteOrderRepository,
   SqlitePositionRepository,
-} from "@plankton/db";
+} from "@krabs/db";
 import {
   createBotRunId,
   createConditionId,
@@ -17,7 +17,7 @@ import {
   createTokenId,
   type ClientOrderId,
   type Signal,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { runStartupPositionAdoption } from "../../startup-position-adoption.js";
 import { AlgoRiskGateImpl } from "../../modules/risk-inventory/algo-risk-gate.js";
 

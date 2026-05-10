@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { InProcessEventBus } from "@plankton/event-bus";
-import { createOrderId, createTokenId, createConditionId } from "@plankton/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
+import { createOrderId, createTokenId, createConditionId } from "@krabs/domain";
 import type {
   ExchangeBalance,
   ExchangeFill,
@@ -17,7 +17,7 @@ import type {
   CancelOrderParams,
   CancelOrderResult,
   TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { UserOrderStreamModule } from "../modules/reconciliation/user-order-stream-module.js";
 
 class FakeUserEventStream implements ExchangeUserEventStream {

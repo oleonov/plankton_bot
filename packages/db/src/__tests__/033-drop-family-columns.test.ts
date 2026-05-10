@@ -179,7 +179,7 @@ function columnNames(db: Database.Database, table: string): string[] {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-migr-033-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-migr-033-"));
   db = new Database(path.join(tmpDir, "ledger.db"));
   db.pragma("foreign_keys = OFF"); // ease pre-migration seeding
   createPreMigrationSchema(db);

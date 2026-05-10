@@ -4,7 +4,7 @@
  * Both tests use a local https.createServer with an inline self-signed cert
  * generated via node:crypto.  rejectUnauthorized:false is set on each request.
  * Requests are fired via https.request (not axios) because axios is not a direct
- * dependency of @plankton/exchange; the agent itself is the unit under test.
+ * dependency of @krabs/exchange; the agent itself is the unit under test.
  */
 import { describe, it, expect, afterEach } from "vitest";
 import https from "node:https";

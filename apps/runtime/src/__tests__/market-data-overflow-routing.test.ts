@@ -3,8 +3,8 @@
  * (Finding #2) and the discovery poll cache seeding (Finding #3).
  */
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { createTokenId } from "@plankton/domain";
-import type { Market, MarketPricingLifecycleEvent, MarketPricingSnapshot } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { Market, MarketPricingLifecycleEvent, MarketPricingSnapshot } from "@krabs/domain";
 import { MarketDataModule } from "../modules/market-data/market-data-module.js";
 
 function makeMarket(tokenId: string): Market {

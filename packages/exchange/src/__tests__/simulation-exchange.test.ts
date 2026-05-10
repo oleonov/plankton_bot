@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createTokenId } from "@plankton/domain";
-import type { PlaceOrderParams } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { PlaceOrderParams } from "@krabs/domain";
 import { SimulationExchangeGateway } from "../simulation/exchange-gateway.js";
 
 function makeParams(overrides?: Partial<PlaceOrderParams>): PlaceOrderParams {

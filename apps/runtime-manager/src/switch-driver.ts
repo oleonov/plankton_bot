@@ -1,10 +1,10 @@
-import type { SwitchRequest } from "@plankton/domain";
+import type { SwitchRequest } from "@krabs/domain";
 import type {
   SwitchRequestRepository,
   RuntimeControlStateRepository,
   StateTransitionRepository,
-} from "@plankton/domain";
-import { SwitchState } from "@plankton/domain";
+} from "@krabs/domain";
+import { SwitchState } from "@krabs/domain";
 import type Database from "better-sqlite3";
 import type { ContainerControl } from "./container-control.js";
 

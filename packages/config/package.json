@@ -1,5 +1,5 @@
 {
-  "name": "@plankton/config",
+  "name": "@krabs/config",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -19,7 +19,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@plankton/domain": "workspace:*",
+    "@krabs/domain": "workspace:*",
     "dotenv": "^16.4.0",
     "yaml": "^2.7.0",
     "zod": "^3.24.0"

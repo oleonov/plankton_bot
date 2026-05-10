@@ -7,7 +7,7 @@ import {
   type FillRepository,
   type MarketRepository,
   type Order,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { buildCancelTelemetry } from "../modules/reconciliation/cancel-telemetry.js";
 
 const TOK = createTokenId("tok-yes");

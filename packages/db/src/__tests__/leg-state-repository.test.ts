@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import Database from "better-sqlite3";
 import { SqliteLegStateRepository } from "../repositories/leg-state-repository.js";
-import { createTokenId } from "@plankton/domain";
-import type { LegState } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { LegState } from "@krabs/domain";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 

@@ -27,10 +27,10 @@ import type {
   PlaceOrderCommand,
   TokenId,
   Order,
-} from "@plankton/domain";
-import { canPlaceBuyOrderForMarket, createCommandId, isAlive } from "@plankton/domain";
+} from "@krabs/domain";
+import { canPlaceBuyOrderForMarket, createCommandId, isAlive } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY, DEFAULT_ORDER_LIFETIME_POLICY } from "../../execution-policy.js";
-import { buildClientOrderId } from "@plankton/domain/node";
+import { buildClientOrderId } from "@krabs/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";

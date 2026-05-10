@@ -58,7 +58,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { createTokenId } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
 import { runScenario } from "../../scenario/runner.js";
 import {
   makeMarket,

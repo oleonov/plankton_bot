@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
-import type { LegStateRepository } from "@plankton/domain";
-import type { LegState, TokenId } from "@plankton/domain";
-import { createTokenId } from "@plankton/domain";
+import type { LegStateRepository } from "@krabs/domain";
+import type { LegState, TokenId } from "@krabs/domain";
+import { createTokenId } from "@krabs/domain";
 
 interface LegStateRow {
   token_id: string;

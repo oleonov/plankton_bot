@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { openDatabase, type DbConnection } from "@plankton/db";
+import { openDatabase, type DbConnection } from "@krabs/db";
 import type { Logger } from "../logger.js";
 import { ProfileRuntimePublisher } from "../modules/publisher/profile-runtime-publisher.js";
 

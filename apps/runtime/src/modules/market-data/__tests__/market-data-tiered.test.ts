@@ -8,7 +8,7 @@
  * 4. Module stop() clears the discovery timer.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
 import type {
   MarketDataGateway,
   MarketPricingLifecycleEvent,
@@ -18,8 +18,8 @@ import type {
   MarketRepository,
   Market,
   TrackedForPricing,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { MarketDataModule } from "../market-data-module.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────

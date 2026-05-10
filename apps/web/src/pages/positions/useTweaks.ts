@@ -7,7 +7,7 @@ export interface Tweaks {
   hideDust: boolean;
 }
 
-export const TWEAKS_STORAGE_KEY = "plankton.positions.tweaks.v1";
+export const TWEAKS_STORAGE_KEY = "krabs.positions.tweaks.v1";
 
 export const DEFAULT_TWEAKS: Tweaks = {
   groupBy: "lastAction",

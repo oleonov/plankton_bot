@@ -20,8 +20,8 @@ import type {
   PositionRepository,
   OrderRepository,
   MarketSelectionPolicy,
-} from "@plankton/domain";
-import { evaluatePreEntry, createTokenId } from "@plankton/domain";
+} from "@krabs/domain";
+import { evaluatePreEntry, createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { findActivePositions } from "../../active-positions.js";
 import { isTransientNetworkError } from "../../network-errors.js";

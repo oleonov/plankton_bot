@@ -1,5 +1,5 @@
 import type { Database } from "better-sqlite3";
-import type { PositionDrift, PositionDriftRepository } from "@plankton/domain";
+import type { PositionDrift, PositionDriftRepository } from "@krabs/domain";
 
 interface PositionDriftRow {
   settlement_id: string;

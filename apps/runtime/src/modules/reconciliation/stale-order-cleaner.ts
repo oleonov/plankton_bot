@@ -21,8 +21,8 @@ import type {
   ExitRepriceOnDownpricePolicy,
   CancelOrderReason,
   TokenId,
-} from "@plankton/domain";
-import { createCommandId, ENTRY_REASONS, EXIT_REASONS } from "@plankton/domain";
+} from "@krabs/domain";
+import { createCommandId, ENTRY_REASONS, EXIT_REASONS } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 
@@ -300,7 +300,7 @@ export async function cleanStaleEntryOrders(
 export function recordSellDownpriceCancelSucceeded(
   stateMap: SellDownpriceRepriceStateMap,
   tokenId: TokenId,
-  orderId: import("@plankton/domain").OrderId,
+  orderId: import("@krabs/domain").OrderId,
 ): void {
   const key = String(tokenId);
   const state = stateMap.get(key);
@@ -527,7 +527,7 @@ function resolveOrderTtlMs(
 
 async function publishCancel(
   bus: EventBus,
-  order: { orderId: import("@plankton/domain").OrderId },
+  order: { orderId: import("@krabs/domain").OrderId },
   reason: Extract<
     CancelOrderReason,
     | "stale_entry_ttl"

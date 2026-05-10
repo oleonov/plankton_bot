@@ -1,4 +1,4 @@
-title = "Poly Plankton gitleaks config"
+title = "Krabs gitleaks config"
 
 [allowlist]
   paths = [

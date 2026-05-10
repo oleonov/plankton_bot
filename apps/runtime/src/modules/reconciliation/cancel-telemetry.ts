@@ -1,9 +1,4 @@
-import type {
-  FillRepository,
-  MarketRepository,
-  Order,
-  OrderCancelTelemetry,
-} from "@plankton/domain";
+import type { FillRepository, MarketRepository, Order, OrderCancelTelemetry } from "@krabs/domain";
 import { classifyCancelAgeBucket } from "../../executable-price.js";
 
 /**

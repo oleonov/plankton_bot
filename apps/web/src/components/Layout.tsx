@@ -67,8 +67,10 @@ export function Layout() {
           height: 40,
         }}
       >
-        <span style={{ fontWeight: 700, color: "var(--blue)", fontSize: 15, marginRight: 12 }}>
-          PLANKTON
+        <span
+          style={{ fontWeight: 700, color: "var(--brand-accent)", fontSize: 15, marginRight: 12 }}
+        >
+          KRABS
         </span>
         <NavLink className="nav-link" to="/overview">
           Overview

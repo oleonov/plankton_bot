@@ -12,14 +12,14 @@ a source label, not the current runtime phase.
 
 ```bash
 curl -s \
-  -H "Authorization: Bearer $PLANKTON_API_KEY" \
+  -H "Authorization: Bearer $KRABS_API_KEY" \
   "https://bot.example.com/api/v1/positions/<position_id>/phase-transitions?limit=200"
 ```
 
 ## Server SQL
 
 ```bash
-sqlite3 /var/lib/docker/volumes/plankton-data/_data/ledger-live-lite.db "
+sqlite3 /var/lib/docker/volumes/krabs-data/_data/ledger-live-lite.db "
 SELECT occurred_at, from_phase, to_phase, action, price, size, size_usdc,
        from_buy_count, from_sell_count, to_buy_count, to_sell_count,
        fill_id, order_id, reason
@@ -33,7 +33,7 @@ SELECT occurred_at, from_phase, to_phase, action, price, size, size_usdc,
 Recent transitions:
 
 ```bash
-sqlite3 /var/lib/docker/volumes/plankton-data/_data/ledger-live-lite.db "
+sqlite3 /var/lib/docker/volumes/krabs-data/_data/ledger-live-lite.db "
 SELECT id, token_id, position_id, occurred_at, from_phase, to_phase, action, reason
   FROM leg_state_transitions
  ORDER BY id DESC

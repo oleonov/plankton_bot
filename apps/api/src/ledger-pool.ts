@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { bootstrapLedgerDb, type DbConnection } from "@plankton/db";
+import { bootstrapLedgerDb, type DbConnection } from "@krabs/db";
 import type Database from "better-sqlite3";
 
 /**

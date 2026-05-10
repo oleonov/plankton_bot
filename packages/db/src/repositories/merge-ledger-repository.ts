@@ -1,5 +1,5 @@
 import type { Database } from "better-sqlite3";
-import type { MergeLedgerRepository, MergeRecord } from "@plankton/domain";
+import type { MergeLedgerRepository, MergeRecord } from "@krabs/domain";
 
 export class SqliteMergeLedgerRepository implements MergeLedgerRepository {
   constructor(private readonly db: Database) {}

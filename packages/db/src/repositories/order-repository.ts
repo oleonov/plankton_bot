@@ -1,10 +1,5 @@
 import type Database from "better-sqlite3";
-import type {
-  OrderRepository,
-  Order,
-  OrderCancelTelemetry,
-  CancelAgeBucket,
-} from "@plankton/domain";
+import type { OrderRepository, Order, OrderCancelTelemetry, CancelAgeBucket } from "@krabs/domain";
 import type {
   OrderId,
   TokenId,
@@ -12,8 +7,8 @@ import type {
   OrderStatus,
   OrderSide,
   OrderType,
-} from "@plankton/domain";
-import { createOrderId, createTokenId, createConditionId, createBotRunId } from "@plankton/domain";
+} from "@krabs/domain";
+import { createOrderId, createTokenId, createConditionId, createBotRunId } from "@krabs/domain";
 
 export class SqliteOrderRepository implements OrderRepository {
   constructor(private readonly db: Database.Database) {}

@@ -6,8 +6,8 @@ import type Database from "better-sqlite3";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteFillRepository } from "../repositories/fill-repository.js";
-import { createFillId, createOrderId, createTokenId, createConditionId } from "@plankton/domain";
-import type { Fill } from "@plankton/domain";
+import { createFillId, createOrderId, createTokenId, createConditionId } from "@krabs/domain";
+import type { Fill } from "@krabs/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -53,7 +53,7 @@ function makeFill(overrides?: Partial<Fill>): Fill {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   repo = new SqliteFillRepository(conn.db);
 });

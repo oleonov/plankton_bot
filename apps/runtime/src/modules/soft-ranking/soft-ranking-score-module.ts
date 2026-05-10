@@ -28,8 +28,8 @@ import type {
   MarketScoreUpdate,
   NormalizedMarket,
   RuntimeModule,
-} from "@plankton/domain";
-import { buildFeatureRow, predictScore } from "@plankton/domain";
+} from "@krabs/domain";
+import { buildFeatureRow, predictScore } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 /**

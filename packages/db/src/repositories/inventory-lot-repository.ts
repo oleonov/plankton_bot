@@ -1,8 +1,8 @@
 import type Database from "better-sqlite3";
-import type { InventoryLotRepository } from "@plankton/domain";
-import type { InventoryLot, PositionId, TokenId } from "@plankton/domain";
-import { createLotId, createPositionId, createTokenId, createFillId } from "@plankton/domain";
-import type { OrderSide } from "@plankton/domain";
+import type { InventoryLotRepository } from "@krabs/domain";
+import type { InventoryLot, PositionId, TokenId } from "@krabs/domain";
+import { createLotId, createPositionId, createTokenId, createFillId } from "@krabs/domain";
+import type { OrderSide } from "@krabs/domain";
 
 const INVENTORY_EPSILON = 1e-6;
 

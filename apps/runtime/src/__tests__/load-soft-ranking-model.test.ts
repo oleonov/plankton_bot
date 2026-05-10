@@ -50,7 +50,7 @@ describe("loadSoftRankingModel", () => {
   });
 
   it("returns null with a warn log when the file is invalid JSON", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "plankton-soft-ranking-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-soft-ranking-"));
     const file = path.join(dir, "bad.json");
     writeFileSync(file, "{not-json", "utf-8");
 
@@ -60,7 +60,7 @@ describe("loadSoftRankingModel", () => {
   });
 
   it("returns null with a warn log when the schema is invalid", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "plankton-soft-ranking-"));
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-soft-ranking-"));
     const file = path.join(dir, "bad-schema.json");
     writeFileSync(file, JSON.stringify({ modelVersion: "v1" }), "utf-8");
 

@@ -9,7 +9,7 @@ import type {
   ExchangeBalance,
   RedeemPositionsOptions,
   TokenId,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 export type FillMode = "immediate" | "manual";
 

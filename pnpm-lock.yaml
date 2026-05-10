@@ -10,10 +10,10 @@ importers:
       "@eslint/js":
         specifier: ^9.22.0
         version: 9.39.4
-      "@plankton/config":
+      "@krabs/config":
         specifier: workspace:*
         version: link:packages/config
-      "@plankton/db":
+      "@krabs/db":
         specifier: workspace:*
         version: link:packages/db
       "@tanstack/eslint-plugin-query":
@@ -76,16 +76,16 @@ importers:
       "@fastify/static":
         specifier: ^9.0.0
         version: 9.0.0
-      "@plankton/config":
+      "@krabs/config":
         specifier: workspace:*
         version: link:../../packages/config
-      "@plankton/db":
+      "@krabs/db":
         specifier: workspace:*
         version: link:../../packages/db
-      "@plankton/domain":
+      "@krabs/domain":
         specifier: workspace:*
         version: link:../../packages/domain
-      "@plankton/exchange":
+      "@krabs/exchange":
         specifier: workspace:*
         version: link:../../packages/exchange
       better-sqlite3:
@@ -104,19 +104,19 @@ importers:
 
   apps/runtime:
     dependencies:
-      "@plankton/config":
+      "@krabs/config":
         specifier: workspace:*
         version: link:../../packages/config
-      "@plankton/db":
+      "@krabs/db":
         specifier: workspace:*
         version: link:../../packages/db
-      "@plankton/domain":
+      "@krabs/domain":
         specifier: workspace:*
         version: link:../../packages/domain
-      "@plankton/event-bus":
+      "@krabs/event-bus":
         specifier: workspace:*
         version: link:../../packages/event-bus
-      "@plankton/exchange":
+      "@krabs/exchange":
         specifier: workspace:*
         version: link:../../packages/exchange
       "@polymarket/builder-relayer-client":
@@ -147,10 +147,10 @@ importers:
 
   apps/runtime-manager:
     dependencies:
-      "@plankton/db":
+      "@krabs/db":
         specifier: workspace:*
         version: link:../../packages/db
-      "@plankton/domain":
+      "@krabs/domain":
         specifier: workspace:*
         version: link:../../packages/domain
       better-sqlite3:
@@ -181,7 +181,7 @@ importers:
 
   apps/web:
     dependencies:
-      "@plankton/domain":
+      "@krabs/domain":
         specifier: workspace:^
         version: link:../../packages/domain
       "@tanstack/react-query":
@@ -227,7 +227,7 @@ importers:
 
   packages/config:
     dependencies:
-      "@plankton/domain":
+      "@krabs/domain":
         specifier: workspace:*
         version: link:../domain
       dotenv:
@@ -242,10 +242,10 @@ importers:
 
   packages/db:
     dependencies:
-      "@plankton/config":
+      "@krabs/config":
         specifier: workspace:*
         version: link:../config
-      "@plankton/domain":
+      "@krabs/domain":
         specifier: workspace:*
         version: link:../domain
       better-sqlite3:
@@ -260,13 +260,13 @@ importers:
 
   packages/event-bus:
     dependencies:
-      "@plankton/domain":
+      "@krabs/domain":
         specifier: workspace:*
         version: link:../domain
 
   packages/exchange:
     dependencies:
-      "@plankton/domain":
+      "@krabs/domain":
         specifier: workspace:*
         version: link:../domain
       "@polymarket/clob-client-v2":

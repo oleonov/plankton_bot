@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { RuntimeModule } from "@plankton/domain";
+import type { RuntimeModule } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 export const LATEST_ONLY_RUNTIME_METRICS = [

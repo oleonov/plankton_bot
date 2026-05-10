@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId, createOrderId, createConditionId } from "@plankton/domain";
+import { createTokenId, createOrderId, createConditionId } from "@krabs/domain";
 import type {
   OrderRepository,
   MarketRepository,
@@ -7,8 +7,8 @@ import type {
   NormalizedMarket,
   Order,
   ClientOrderId,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   cleanStaleEntryOrders,
   CANCEL_BACKOFF_MS,

@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { StateTransitionRepository, StateTransition, ProfileId } from "@plankton/domain";
+import type { StateTransitionRepository, StateTransition, ProfileId } from "@krabs/domain";
 
 interface TransitionRow {
   id: number;

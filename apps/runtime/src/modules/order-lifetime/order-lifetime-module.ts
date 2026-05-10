@@ -13,8 +13,8 @@ import type {
   RuntimeEventMap,
   RuntimeModule,
   TokenId,
-} from "@plankton/domain";
-import { EXIT_REASONS, createConditionId, createTokenId } from "@plankton/domain";
+} from "@krabs/domain";
+import { EXIT_REASONS, createConditionId, createTokenId } from "@krabs/domain";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { Logger } from "../../logger.js";
 import {
@@ -278,7 +278,7 @@ export class OrderLifetimeModule implements RuntimeModule {
 
   private buildTokenSnapshot(tokenId: TokenId): {
     tokenId: TokenId;
-    conditionId: import("@plankton/domain").ConditionId;
+    conditionId: import("@krabs/domain").ConditionId;
     outcomeIndex: number | null;
     fills: ReturnType<FillRepository["findByTokenId"]>;
     orders: ReturnType<OrderRepository["findByTokenId"]>;

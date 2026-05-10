@@ -4,7 +4,7 @@ import type {
   MarketPricingStream,
   MarketPricingStreamMetricsSnapshot,
   MarketPricingStreamUpdate,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { LiveMarketPricingStream } from "./market-pricing-stream.js";
 import type { MarketDataWebSocketLike } from "./market-data-stream-shared.js";
 

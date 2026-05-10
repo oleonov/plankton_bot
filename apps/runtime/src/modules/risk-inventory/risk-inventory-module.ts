@@ -14,7 +14,7 @@
  */
 
 import type Database from "better-sqlite3";
-import { withImmediate } from "@plankton/db";
+import { withImmediate } from "@krabs/db";
 import type {
   RuntimeModule,
   EventBus,
@@ -27,8 +27,8 @@ import type {
   ClientOrderId,
   RuntimeControl,
   ExecutionPolicy,
-} from "@plankton/domain";
-import { canPlaceBuyOrderForMarket } from "@plankton/domain";
+} from "@krabs/domain";
+import { canPlaceBuyOrderForMarket } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
 import { findActivePositions } from "../../active-positions.js";

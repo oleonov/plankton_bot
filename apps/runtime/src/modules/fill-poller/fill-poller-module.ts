@@ -15,7 +15,7 @@ import type {
   FillRepository,
   OrderRepository,
   EventBus,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 

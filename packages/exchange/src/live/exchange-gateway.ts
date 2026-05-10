@@ -2,7 +2,7 @@
  * Live ExchangeGateway — wraps @polymarket/clob-client-v2 for order lifecycle.
  *
  * The SDK ClobClient is accepted as `unknown` in the public config interface
- * to prevent SDK types from leaking into @plankton/domain consumers.
+ * to prevent SDK types from leaking into @krabs/domain consumers.
  */
 
 import { getContractConfig } from "@polymarket/clob-client-v2";
@@ -21,7 +21,7 @@ import type {
   ExchangeUserEventStream,
   ExchangeUserOrderEvent,
   ExchangeUserTradeEvent,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
 import { redactSensitive, sanitizeLogArg } from "../redaction.js";
@@ -877,7 +877,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     process.emitWarning(
       `LiveExchangeGateway ${kind}Positions skipped: installed @polymarket/clob-client-v2 does not expose a ${kind} API`,
       {
-        code: kind === "redeem" ? "PLANKTON_REDEEM_UNSUPPORTED" : "PLANKTON_MERGE_UNSUPPORTED",
+        code: kind === "redeem" ? "KRABS_REDEEM_UNSUPPORTED" : "KRABS_MERGE_UNSUPPORTED",
       },
     );
   }

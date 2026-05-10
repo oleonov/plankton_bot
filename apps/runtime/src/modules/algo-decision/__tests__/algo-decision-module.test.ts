@@ -12,10 +12,10 @@ import type {
   RuntimeEventMap,
   DecisionSignalLogRepository,
   RiskEventRepository,
-} from "@plankton/domain";
-import { createTokenId, createCommandId } from "@plankton/domain";
-import type { ConditionId } from "@plankton/domain";
-import { DEFAULT_EXECUTION_POLICY } from "@plankton/domain";
+} from "@krabs/domain";
+import { createTokenId, createCommandId } from "@krabs/domain";
+import type { ConditionId } from "@krabs/domain";
+import { DEFAULT_EXECUTION_POLICY } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
 
 // ─── Seed rules ───────────────────────────────────────────────────────────────
@@ -343,7 +343,7 @@ describe("AlgoDecisionModule", () => {
     const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
 
     expect(signalCalls.length).toBe(1);
-    const signal = signalCalls[0]![1].signal as import("@plankton/domain").Signal;
+    const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
     expect(signal.side).toBe("buy");
     expect(signal.decisionRuleId).toBe("FALLBACK");
     expect(signal.reason).toBe("probe-entry");
@@ -378,7 +378,7 @@ describe("AlgoDecisionModule", () => {
     const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
 
     expect(signalCalls.length).toBe(1);
-    const signal = signalCalls[0]![1].signal as import("@plankton/domain").Signal;
+    const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
     expect(signal.conditionId).toBe("cond-1" as ConditionId);
 
     await mod.stop();
@@ -893,7 +893,7 @@ describe("AlgoDecisionModule", () => {
     const mod = buildModule({
       decisionSignalLogRepo,
       riskEventRepo,
-      positionRepo: positionRepo as unknown as import("@plankton/domain").PositionRepository,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
     });
     await mod.start();
 
@@ -960,7 +960,7 @@ describe("AlgoDecisionModule", () => {
 
     const mod = buildModule({
       riskEventRepo,
-      positionRepo: positionRepo as unknown as import("@plankton/domain").PositionRepository,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
     });
     await mod.start();
 
@@ -1020,7 +1020,7 @@ describe("AlgoDecisionModule", () => {
     const mod = buildModule({
       decisionSignalLogRepo,
       riskEventRepo,
-      positionRepo: positionRepo as unknown as import("@plankton/domain").PositionRepository,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
     });
     await mod.start();
 
@@ -3321,7 +3321,7 @@ describe("AlgoDecisionModule", () => {
 
       const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
         ([ev]) => ev === "SignalProduced",
-      )?.[1].signal as import("@plankton/domain").Signal;
+      )?.[1].signal as import("@krabs/domain").Signal;
       expect(firstSignal).toBeDefined();
 
       await (bus as any).emit("SignalRejected", {
@@ -3362,7 +3362,7 @@ describe("AlgoDecisionModule", () => {
 
       const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
         ([ev]) => ev === "SignalProduced",
-      )?.[1].signal as import("@plankton/domain").Signal;
+      )?.[1].signal as import("@krabs/domain").Signal;
       expect(firstSignal).toBeDefined();
 
       await (bus as any).emit("SignalRejected", {
@@ -3401,7 +3401,7 @@ describe("AlgoDecisionModule", () => {
 
       const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
         ([ev]) => ev === "SignalProduced",
-      )?.[1].signal as import("@plankton/domain").Signal;
+      )?.[1].signal as import("@krabs/domain").Signal;
       expect(firstSignal).toBeDefined();
 
       await (bus as any).emit("PlaceOrderRequested", {
@@ -3471,7 +3471,7 @@ describe("AlgoDecisionModule", () => {
     const signalCalls = publishCalls.filter(([ev]) => ev === "SignalProduced");
 
     expect(signalCalls.length).toBe(1);
-    const signal = signalCalls[0]![1].signal as import("@plankton/domain").Signal;
+    const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
     expect(signal.side).toBe("buy");
     expect(signal.decisionRuleId).toBe("FALLBACK");
     // B5 size rule: nth_buy=1 (first purchase) → 2.10 USDC
@@ -3750,7 +3750,7 @@ describe("AlgoDecisionModule", () => {
       });
       const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
         ([ev]) => ev === "SignalProduced",
-      )?.[1] as { signal: import("@plankton/domain").Signal; market: NormalizedMarket };
+      )?.[1] as { signal: import("@krabs/domain").Signal; market: NormalizedMarket };
       expect(firstSignal).toBeDefined();
       await (bus as any).emit("SignalRejected", {
         signal: firstSignal.signal,
@@ -3794,7 +3794,7 @@ describe("AlgoDecisionModule", () => {
       });
       const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
         ([ev]) => ev === "SignalProduced",
-      )?.[1] as { signal: import("@plankton/domain").Signal; market: NormalizedMarket };
+      )?.[1] as { signal: import("@krabs/domain").Signal; market: NormalizedMarket };
       expect(firstSignal).toBeDefined();
       await (bus as any).emit("SignalRejected", {
         signal: firstSignal.signal,
@@ -3898,7 +3898,7 @@ describe("AlgoDecisionModule", () => {
       // First BUY parks pendingEntries — clear it so the next update isn't suppressed.
       const firstSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.find(
         ([ev]) => ev === "SignalProduced",
-      )?.[1] as { signal: import("@plankton/domain").Signal; market: NormalizedMarket };
+      )?.[1] as { signal: import("@krabs/domain").Signal; market: NormalizedMarket };
       expect(firstSignal).toBeDefined();
       await (bus as any).emit("SignalRejected", {
         signal: firstSignal.signal,
@@ -3915,7 +3915,7 @@ describe("AlgoDecisionModule", () => {
       // Clear pendingEntries again before eviction.
       const secondSignal = (bus.publish as ReturnType<typeof vi.fn>).mock.calls
         .filter(([ev]) => ev === "SignalProduced")
-        .at(-1)?.[1] as { signal: import("@plankton/domain").Signal; market: NormalizedMarket };
+        .at(-1)?.[1] as { signal: import("@krabs/domain").Signal; market: NormalizedMarket };
       expect(secondSignal).toBeDefined();
       await (bus as any).emit("SignalRejected", {
         signal: secondSignal.signal,

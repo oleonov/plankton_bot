@@ -1,4 +1,4 @@
-import type { MarketPricingStreamLatencySummary } from "@plankton/domain";
+import type { MarketPricingStreamLatencySummary } from "@krabs/domain";
 
 export interface MarketDataWebSocketLike {
   send(data: string): void;

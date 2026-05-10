@@ -7,7 +7,7 @@ import {
   ProfileId,
   serializeExecutionPolicy,
   type DeadSideGuardMode,
-} from "@plankton/domain";
+} from "@krabs/domain";
 
 export interface ControlProfileSeed {
   readonly profileId: string;

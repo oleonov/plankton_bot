@@ -8,7 +8,7 @@ import {
   createConditionId,
   createBotRunId,
   DEFAULT_EXECUTION_POLICY,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
   PositionRepository,
@@ -21,14 +21,14 @@ import type {
   ClientOrderId,
   NormalizedMarket,
   Fill,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   bootstrapDatabase,
   SqliteInventoryLotRepository,
   SqlitePositionRepository,
   type DbConnection,
-} from "@plankton/db";
+} from "@krabs/db";
 import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────

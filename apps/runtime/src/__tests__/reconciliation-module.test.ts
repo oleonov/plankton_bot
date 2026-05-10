@@ -1,10 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import {
-  createTokenId,
-  createOrderId,
-  createConditionId,
-  createPositionId,
-} from "@plankton/domain";
+import { createTokenId, createOrderId, createConditionId, createPositionId } from "@krabs/domain";
 import type {
   ExchangeGateway,
   ExchangeOrder,
@@ -27,9 +22,9 @@ import type {
   SettlementRecord,
   RuntimeEventMap,
   Position,
-} from "@plankton/domain";
-import type { PolymarketPositionReader } from "@plankton/exchange";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import type { PolymarketPositionReader } from "@krabs/exchange";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { ReconciliationModule } from "../modules/reconciliation/reconciliation-module.js";
 import { reconcileOrders } from "../modules/reconciliation/order-reconciler.js";
 
@@ -894,7 +889,7 @@ describe("ReconciliationModule", () => {
           reader: walletReader,
           positionRepo: {
             findAll: vi.fn().mockReturnValue([closedPosition]),
-          } as unknown as import("@plankton/domain").PositionRepository,
+          } as unknown as import("@krabs/domain").PositionRepository,
           marketRepo,
           log: localLog,
         },

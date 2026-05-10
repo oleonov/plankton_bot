@@ -5,8 +5,8 @@ import path from "node:path";
 import { bootstrapDatabase } from "../bootstrap.js";
 import type { DbConnection } from "../connection.js";
 import { SqliteMarketSnapshotRepository } from "../repositories/market-snapshot-repository.js";
-import { createTokenId } from "@plankton/domain";
-import type { MarketSnapshot } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { MarketSnapshot } from "@krabs/domain";
 
 let conn: DbConnection;
 let tmpDir: string;
@@ -33,7 +33,7 @@ function makeSnapshot(overrides?: Partial<MarketSnapshot>): MarketSnapshot {
 }
 
 beforeEach(() => {
-  tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-test-"));
+  tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-test-"));
   conn = bootstrapDatabase(path.join(tmpDir, "test.db"));
   repo = new SqliteMarketSnapshotRepository(conn.db);
   insertMarket(conn.db, "tok-1");

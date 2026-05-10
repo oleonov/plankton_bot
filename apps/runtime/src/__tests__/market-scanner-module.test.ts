@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { SelectionRuleEngine, createTokenId } from "@plankton/domain";
+import { SelectionRuleEngine, createTokenId } from "@krabs/domain";
 import type {
   SelectionRule,
   MarketDiscoveryGateway,
@@ -9,8 +9,8 @@ import type {
   EventBus,
   PositionRepository,
   OrderRepository,
-} from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+} from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { MarketScannerModule } from "../modules/market-scanner/market-scanner-module.js";
 import type { RefreshableSelectionRuleEngine } from "../selection-rule-engine-factory.js";
 

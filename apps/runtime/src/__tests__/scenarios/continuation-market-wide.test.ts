@@ -27,8 +27,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import Database from "better-sqlite3";
 
-import { setContinuationMode } from "@plankton/db";
-import { createTokenId, type ConditionId, type MarketTradeCountProvider } from "@plankton/domain";
+import { setContinuationMode } from "@krabs/db";
+import { createTokenId, type ConditionId, type MarketTradeCountProvider } from "@krabs/domain";
 
 import { runScenario } from "../../scenario/runner.js";
 import {

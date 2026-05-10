@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { MarketSnapshotRepository, MarketSnapshot } from "@plankton/domain";
+import type { MarketSnapshotRepository, MarketSnapshot } from "@krabs/domain";
 
 export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository {
   constructor(private readonly db: Database.Database) {}

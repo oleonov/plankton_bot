@@ -9,9 +9,9 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { bootstrapControlDb, bootstrapLedgerDb } from "@plankton/db";
-import type { DbConnection } from "@plankton/db";
-import type { AppConfig } from "@plankton/config";
+import { bootstrapControlDb, bootstrapLedgerDb } from "@krabs/db";
+import type { DbConnection } from "@krabs/db";
+import type { AppConfig } from "@krabs/config";
 import { buildServer } from "../server.js";
 import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
@@ -35,11 +35,11 @@ function testConfig(): AppConfig {
     polyApiSecret: undefined,
     polyPassphrase: undefined,
     polyPrivateKey: undefined,
-    planktonApiKey: TEST_API_KEY,
-    planktonApiPort: 0,
-    planktonAuthUsername: undefined,
-    planktonAuthPassword: undefined,
-    planktonSessionSecret: undefined,
+    krabsApiKey: TEST_API_KEY,
+    krabsApiPort: 0,
+    krabsAuthUsername: undefined,
+    krabsAuthPassword: undefined,
+    krabsSessionSecret: undefined,
     allowSellSizeClamp: true,
     trustProxy: false,
     ...MARKET_DATA_TEST_DEFAULTS,

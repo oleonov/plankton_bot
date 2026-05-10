@@ -1,4 +1,4 @@
-import type { RuntimeModule, RuntimePhase } from "@plankton/domain";
+import type { RuntimeModule, RuntimePhase } from "@krabs/domain";
 
 export interface HealthSnapshot {
   phase: RuntimePhase;

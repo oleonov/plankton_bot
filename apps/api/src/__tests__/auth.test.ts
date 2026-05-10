@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { bootstrapDatabase } from "@plankton/db";
-import type { DbConnection } from "@plankton/db";
-import type { AppConfig } from "@plankton/config";
+import { bootstrapDatabase } from "@krabs/db";
+import type { DbConnection } from "@krabs/db";
+import type { AppConfig } from "@krabs/config";
 import { buildServer } from "../server.js";
 import { stubLedgerPool, MARKET_DATA_TEST_DEFAULTS } from "./test-helpers.js";
 
@@ -38,11 +38,11 @@ function testConfig(overrides?: Partial<AppConfig>): AppConfig {
     polyApiSecret: undefined,
     polyPassphrase: undefined,
     polyPrivateKey: undefined,
-    planktonApiKey: TEST_API_KEY,
-    planktonApiPort: 0,
-    planktonAuthUsername: TEST_USERNAME,
-    planktonAuthPassword: TEST_PASSWORD,
-    planktonSessionSecret: TEST_SESSION_SECRET,
+    krabsApiKey: TEST_API_KEY,
+    krabsApiPort: 0,
+    krabsAuthUsername: TEST_USERNAME,
+    krabsAuthPassword: TEST_PASSWORD,
+    krabsSessionSecret: TEST_SESSION_SECRET,
     allowSellSizeClamp: true,
     trustProxy: false,
     ...MARKET_DATA_TEST_DEFAULTS,
@@ -77,7 +77,7 @@ describe("Session Auth", () => {
     expect(json(res).ok).toBe(true);
     expect(res.headers["set-cookie"]).toBeDefined();
     const cookie = res.headers["set-cookie"];
-    expect(typeof cookie === "string" ? cookie : "").toContain("plankton_session");
+    expect(typeof cookie === "string" ? cookie : "").toContain("krabs_session");
     await app.close();
   });
 
@@ -134,7 +134,7 @@ describe("Session Auth", () => {
 
   it("login succeeds without username when not configured", async () => {
     const app = await buildServer({
-      config: testConfig({ planktonAuthUsername: undefined }),
+      config: testConfig({ krabsAuthUsername: undefined }),
       controlDb: conn.db,
       ledgerDb: conn.db,
       ledgerPool: stubLedgerPool(),
@@ -164,7 +164,7 @@ describe("Session Auth", () => {
 
   it("GET /auth/config returns usernameRequired=false when not configured", async () => {
     const app = await buildServer({
-      config: testConfig({ planktonAuthUsername: undefined }),
+      config: testConfig({ krabsAuthUsername: undefined }),
       controlDb: conn.db,
       ledgerDb: conn.db,
       ledgerPool: stubLedgerPool(),
@@ -177,7 +177,7 @@ describe("Session Auth", () => {
 
   it("GET /auth/config is accessible without authentication", async () => {
     const app = await buildServer({
-      config: testConfig({ planktonApiKey: undefined }),
+      config: testConfig({ krabsApiKey: undefined }),
       controlDb: conn.db,
       ledgerDb: conn.db,
       ledgerPool: stubLedgerPool(),
@@ -189,7 +189,7 @@ describe("Session Auth", () => {
 
   it("login returns 501 when password not configured", async () => {
     const app = await buildServer({
-      config: testConfig({ planktonAuthPassword: undefined, planktonSessionSecret: undefined }),
+      config: testConfig({ krabsAuthPassword: undefined, krabsSessionSecret: undefined }),
       controlDb: conn.db,
       ledgerDb: conn.db,
       ledgerPool: stubLedgerPool(),
@@ -430,9 +430,9 @@ describe("Session Auth", () => {
   it("fail-closed when no auth configured at all", async () => {
     const app = await buildServer({
       config: testConfig({
-        planktonApiKey: undefined,
-        planktonAuthPassword: undefined,
-        planktonSessionSecret: undefined,
+        krabsApiKey: undefined,
+        krabsAuthPassword: undefined,
+        krabsSessionSecret: undefined,
       }),
       controlDb: conn.db,
       ledgerDb: conn.db,

@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 import type Database from "better-sqlite3";
-import type { OperatorActionRepository } from "@plankton/domain";
-import type { OperatorAction } from "@plankton/domain";
-import type { OperatorActionType } from "@plankton/domain";
+import type { OperatorActionRepository } from "@krabs/domain";
+import type { OperatorAction } from "@krabs/domain";
+import type { OperatorActionType } from "@krabs/domain";
 
 interface ActionRow {
   action_id: string;

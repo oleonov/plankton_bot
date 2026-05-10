@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { openDatabase, type DbConnection } from "@plankton/db";
+import { openDatabase, type DbConnection } from "@krabs/db";
 import { resolveActiveProfile } from "../profile-boot.js";
 
 const CONTROL_SQL = readFileSync(

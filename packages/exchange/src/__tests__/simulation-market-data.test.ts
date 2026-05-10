@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { createTokenId } from "@plankton/domain";
-import type { ClobMarket, TokenId } from "@plankton/domain";
+import { createTokenId } from "@krabs/domain";
+import type { ClobMarket, TokenId } from "@krabs/domain";
 import { SimulationMarketDataGateway } from "../simulation/market-data-gateway.js";
 
 function makeMarket(overrides?: Partial<ClobMarket>): ClobMarket {

@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootstrapDatabase } from "@plankton/db";
+import { bootstrapDatabase } from "@krabs/db";
 import { runScenario } from "../../scenario/runner.js";
 import {
   makeMarket,

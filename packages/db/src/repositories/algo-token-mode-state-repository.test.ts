@@ -3,12 +3,12 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createConditionId, createTokenId, type AlgoTokenModeState } from "@plankton/domain";
+import { createConditionId, createTokenId, type AlgoTokenModeState } from "@krabs/domain";
 import { SqliteAlgoTokenModeStateRepository } from "./algo-token-mode-state-repository.js";
 
 describe("SqliteAlgoTokenModeStateRepository", () => {
   it("persists mode state across repository restarts", () => {
-    const tmpDir = mkdtempSync(path.join(tmpdir(), "plankton-token-mode-"));
+    const tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-token-mode-"));
     const dbPath = path.join(tmpDir, "ledger.db");
     try {
       const db1 = new Database(dbPath);

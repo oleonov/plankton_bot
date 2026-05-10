@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { InProcessEventBus } from "@plankton/event-bus";
+import { InProcessEventBus } from "@krabs/event-bus";
 import {
   createBotRunId,
   createCommandId,
@@ -12,7 +12,7 @@ import {
   type OrderId,
   type OrderRepository,
   type Position,
-} from "@plankton/domain";
+} from "@krabs/domain";
 import {
   priceToX10000,
   SAME_PRICE_COOLDOWN_REASON,

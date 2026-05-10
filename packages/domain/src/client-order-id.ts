@@ -1,7 +1,7 @@
 // ─── buildClientOrderId ───────────────────────────────────────────────────────
 //
-// Node-only utility — uses node:crypto. NOT exported from the main "@plankton/domain"
-// entry point. Import from "@plankton/domain/node" instead.
+// Node-only utility — uses node:crypto. NOT exported from the main "@krabs/domain"
+// entry point. Import from "@krabs/domain/node" instead.
 //
 // Signal-derived, retry-safe client order ID.
 //

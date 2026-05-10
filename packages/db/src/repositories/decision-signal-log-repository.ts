@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { DecisionSignalLogRepository, DecisionSignalLog } from "@plankton/domain";
+import type { DecisionSignalLogRepository, DecisionSignalLog } from "@krabs/domain";
 
 export class SqliteDecisionSignalLogRepository implements DecisionSignalLogRepository {
   private readonly insertStmt: Database.Statement;

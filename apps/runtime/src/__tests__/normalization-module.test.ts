@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId } from "@plankton/domain";
-import type { NormalizedMarket } from "@plankton/domain";
-import { InProcessEventBus } from "@plankton/event-bus";
+import { createTokenId } from "@krabs/domain";
+import type { NormalizedMarket } from "@krabs/domain";
+import { InProcessEventBus } from "@krabs/event-bus";
 import { NormalizationModule } from "../modules/normalization/normalization-module.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────

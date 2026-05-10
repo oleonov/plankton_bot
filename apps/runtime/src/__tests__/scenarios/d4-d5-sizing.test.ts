@@ -12,8 +12,8 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { evaluateSize } from "@plankton/domain";
-import type { AlgoSizeRule } from "@plankton/domain";
+import { evaluateSize } from "@krabs/domain";
+import type { AlgoSizeRule } from "@krabs/domain";
 
 // ─── Seed fixture ─────────────────────────────────────────────────────────────
 // Mirrors the exact rows inserted by ensureAlgoRulesDefaults in

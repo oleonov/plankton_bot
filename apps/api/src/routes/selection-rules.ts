@@ -1,12 +1,12 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
-import { SelectionRuleEngine, evaluatePreEntry, normalizeSelectionPattern } from "@plankton/domain";
-import type { ProfileId, SelectionRuleType } from "@plankton/domain";
+import { SelectionRuleEngine, evaluatePreEntry, normalizeSelectionPattern } from "@krabs/domain";
+import type { ProfileId, SelectionRuleType } from "@krabs/domain";
 import {
   SelectionRuleRepository,
   SqliteMarketRepository,
   SqliteStateTransitionRepository,
-} from "@plankton/db";
+} from "@krabs/db";
 import { ok, fail } from "../errors.js";
 import type { LedgerPool } from "../ledger-pool.js";
 
@@ -107,7 +107,7 @@ export const selectionRulesRoutes: FastifyPluginAsync<SelectionRulesOpts> = asyn
     if (patch.enabled === true && isPrefixRuleType(before.ruleType)) {
       return reply.code(400).send(fail("DEPRECATED_RULE_TYPE", DEPRECATED_PREFIX_MESSAGE));
     }
-    const patchArgs: import("@plankton/db").SelectionRulePatch = {};
+    const patchArgs: import("@krabs/db").SelectionRulePatch = {};
     if (patch.enabled !== undefined) patchArgs.enabled = patch.enabled;
     if (patch.note !== undefined) patchArgs.note = patch.note;
     const tx = controlDb.transaction(() => {

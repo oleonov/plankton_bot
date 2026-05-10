@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
-import type { OperatorCommandRepository } from "@plankton/domain";
-import type { OperatorCommand } from "@plankton/domain";
-import type { OperatorActionType, CommandStatus } from "@plankton/domain";
+import type { OperatorCommandRepository } from "@krabs/domain";
+import type { OperatorCommand } from "@krabs/domain";
+import type { OperatorActionType, CommandStatus } from "@krabs/domain";
 
 interface CommandRow {
   id: number;
