@@ -606,6 +606,92 @@ describe("EntryLifecycleModule", () => {
     await module.stop();
   });
 
+  it("prunes stale signal-keyed lifecycle state on later activity", async () => {
+    const bus = new InProcessEventBus();
+    const fill = makeFill({ price: 0.1, sizeUsdc: 1 });
+    const order = makeOrder({
+      orderId: createOrderId("ord-reprice-gc"),
+      signalId: "sig-original",
+      price: 0.3,
+      sizeUsdc: 0.99,
+    });
+    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+    const module = buildModule({
+      bus,
+      orderRepo: makeOrderRepo(order),
+      fillRepo: makeFillRepo([fill]),
+      setTimer: (fn, delayMs) => {
+        scheduled.push({ fn, delayMs });
+        return scheduled.length as never;
+      },
+    });
+    let ladderSignalId: string | null = null;
+    bus.subscribe("SignalProduced", async (payload) => {
+      if (payload.signal.decisionRuleId === "LADDER") ladderSignalId = payload.signal.signalId;
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket({ bestBid: 0.1, midPrice: 0.11 }));
+    await bus.publish("FillReceived", fillToEvent(fill));
+    await bus.drain();
+    scheduled[0]!.fn();
+    await bus.drain();
+
+    expect(ladderSignalId).not.toBeNull();
+    const internals = module as unknown as {
+      ladderSignalSteps: Map<string, number>;
+      signalStateTouchedAt: Map<string, number>;
+    };
+    expect(internals.ladderSignalSteps.has(ladderSignalId!)).toBe(true);
+
+    await publishMarket(bus, makeMarket({ bestBid: 0.31, midPrice: 0.32 }));
+    await bus.publish("OrderCancelled", {
+      commandId: "cmd-gc" as never,
+      orderId: order.orderId,
+      tokenId: order.tokenId,
+      conditionId: order.conditionId,
+      reason: "outbid_repriced",
+      signalReason: order.signalReason,
+      timestamp: 24 * 60 * 60_000 + 10 * 60_000,
+    });
+    await bus.drain();
+
+    expect(internals.ladderSignalSteps.has(ladderSignalId!)).toBe(false);
+    expect(internals.signalStateTouchedAt.has(ladderSignalId!)).toBe(false);
+
+    await module.stop();
+  });
+
+  it("clears ladder reset anchors when the market resolves", async () => {
+    const bus = new InProcessEventBus();
+    const module = buildModule({ bus });
+    const internals = module as unknown as {
+      ladderResetAnchorByToken: Map<string, number>;
+    };
+
+    await module.start();
+    await bus.publish("PositionUpdated", {
+      position: makePosition({ status: "closed", size: 0 }),
+    });
+    await bus.drain();
+
+    expect(internals.ladderResetAnchorByToken.has(String(TOKEN))).toBe(true);
+
+    await bus.publish("MarketResolvedHint", {
+      conditionId: CONDITION,
+      marketId: "market-entry-life",
+      slug: "entry-life-market",
+      tokenIds: [TOKEN],
+      winningTokenId: TOKEN,
+      timestamp: 2_000,
+    });
+    await bus.drain();
+
+    expect(internals.ladderResetAnchorByToken.has(String(TOKEN))).toBe(false);
+
+    await module.stop();
+  });
+
   it("ignores pre-reset fills when a token reopens after being closed", async () => {
     const bus = new InProcessEventBus();
     let now = 10_000;

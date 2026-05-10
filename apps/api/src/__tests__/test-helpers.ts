@@ -9,6 +9,8 @@ export function stubLedgerPool(): LedgerPool {
 // introduced by the 2026-04-22 socket-leak plan. Kept in one place so
 // individual testConfig() helpers don't have to duplicate ~20 numeric fields.
 export const MARKET_DATA_TEST_DEFAULTS = {
+  marketScanHintMinIntervalMs: 900_000,
+  reconciliationIntervalMs: 15_000,
   marketDataMaxTrackedTokens: 1_000,
   marketDataMaxWsShards: 2,
   marketDataDiscoveryPollIntervalMs: 60_000,

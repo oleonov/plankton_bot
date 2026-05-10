@@ -33,6 +33,9 @@ import type { Logger } from "../../logger.js";
 const OUTBID_REPRICED_REASON = "outbid_repriced";
 const OUTBID_REPRICE_SIGNAL_PREFIX = "outbid-reprice";
 const EPSILON = 1e-9;
+const SIGNAL_KEYED_STATE_TTL_MS = 24 * 60 * 60_000;
+const LADDER_RESET_ANCHOR_TTL_MS = 24 * 60 * 60_000;
+const STATE_GC_MIN_INTERVAL_MS = 5 * 60_000;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -74,12 +77,14 @@ export class EntryLifecycleModule implements RuntimeModule {
   private readonly repriceCountBySignalId = new Map<string, number>();
   private readonly repricedSignalIds = new Set<string>();
   private readonly ladderSignalSteps = new Map<string, number>();
+  private readonly signalStateTouchedAt = new Map<string, number>();
   private readonly ladderStateByToken = new Map<string, LadderState>();
   private readonly ladderResetAnchorByToken = new Map<string, number>();
   private readonly ladderTimers = new Map<string, TimerHandle>();
   private readonly marketCache = new Map<string, NormalizedMarket>();
   private readonly unsubs: Array<() => void> = [];
   private started = false;
+  private lastStateGcAt = 0;
   private metrics: EntryLifecycleMetrics = createMetrics();
 
   constructor(private readonly deps: EntryLifecycleModuleDeps) {
@@ -146,6 +151,7 @@ export class EntryLifecycleModule implements RuntimeModule {
     if (!signal) return;
     this.repriceCountBySignalId.set(signal.signalId, priorCount + 1);
     this.repricedSignalIds.add(signal.signalId);
+    this.touchSignalState(signal.signalId, event.timestamp);
     this.metrics.outbidRepriceSignals++;
     this.writeMetrics(event.timestamp);
     await this.publishSignal(signal, market);
@@ -309,6 +315,7 @@ export class EntryLifecycleModule implements RuntimeModule {
     stateForToken.attemptedSteps++;
     const step = stateForToken.attemptedSteps;
     this.ladderSignalSteps.set(signalId, step);
+    this.touchSignalState(signalId, now);
     this.metrics.ladderSignals++;
     increment(this.metrics.ladderSignalsByStep, String(step));
     this.writeMetrics(now);
@@ -459,9 +466,15 @@ export class EntryLifecycleModule implements RuntimeModule {
     if (timer) this.clearTimer(timer);
     this.ladderTimers.delete(key);
     this.ladderStateByToken.delete(key);
-    this.ladderResetAnchorByToken.set(key, this.now());
+    const now = this.now();
+    if (reason === "market_resolved") {
+      this.ladderResetAnchorByToken.delete(key);
+    } else {
+      this.ladderResetAnchorByToken.set(key, now);
+    }
     this.recordLadderStop(reason);
-    this.writeMetrics(this.now());
+    this.collectStaleState(now);
+    this.writeMetrics(now);
   }
 
   private recordLadderStop(reason: string): void {
@@ -475,6 +488,33 @@ export class EntryLifecycleModule implements RuntimeModule {
       JSON.stringify({ ...this.metrics, capturedAt: new Date(nowMs).toISOString() }),
       new Date(nowMs).toISOString(),
     );
+  }
+
+  private touchSignalState(signalId: string, nowMs: number): void {
+    this.signalStateTouchedAt.set(signalId, nowMs);
+    this.collectStaleState(nowMs);
+  }
+
+  // Activity-driven GC is enough here: these maps only grow when signal state
+  // is written, so a separate timer would wake the module during quiet periods
+  // without reclaiming anything new.
+  private collectStaleState(nowMs: number): void {
+    if (nowMs - this.lastStateGcAt < STATE_GC_MIN_INTERVAL_MS) return;
+    this.lastStateGcAt = nowMs;
+
+    for (const [signalId, touchedAt] of this.signalStateTouchedAt) {
+      if (nowMs - touchedAt <= SIGNAL_KEYED_STATE_TTL_MS) continue;
+      this.repriceCountBySignalId.delete(signalId);
+      this.repricedSignalIds.delete(signalId);
+      this.ladderSignalSteps.delete(signalId);
+      this.signalStateTouchedAt.delete(signalId);
+    }
+
+    for (const [tokenKey, anchorMs] of this.ladderResetAnchorByToken) {
+      if (nowMs - anchorMs <= LADDER_RESET_ANCHOR_TTL_MS) continue;
+      if (this.ladderStateByToken.has(tokenKey) || this.ladderTimers.has(tokenKey)) continue;
+      this.ladderResetAnchorByToken.delete(tokenKey);
+    }
   }
 
   private now(): number {

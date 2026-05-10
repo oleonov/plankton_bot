@@ -17,7 +17,13 @@ const envSchema = z
       .number()
       .int()
       .positive()
-      .default(5 * 60 * 1000),
+      .default(15 * 60 * 1000),
+    MARKET_SCAN_HINT_MIN_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(15 * 60 * 1000),
+    RECONCILIATION_INTERVAL_MS: z.coerce.number().int().positive().default(15_000),
     GAMMA_TAG_ID: z.coerce.number().int().positive().optional(),
     STRATEGY_SCAN_INTERVAL_MS: z.coerce.number().int().positive().default(12_000),
     FILL_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
@@ -169,6 +175,8 @@ export interface AppConfig {
   marketDataPollIntervalMs: number;
   marketDataStaleThresholdMs: number;
   marketScanIntervalMs: number;
+  marketScanHintMinIntervalMs: number;
+  reconciliationIntervalMs: number;
   gammaTagId?: number | undefined;
   strategyScanIntervalMs: number;
   fillPollIntervalMs: number;
@@ -262,6 +270,8 @@ export function loadEnv(envPath?: string): AppConfig {
     marketDataPollIntervalMs: env.MARKET_DATA_POLL_INTERVAL_MS,
     marketDataStaleThresholdMs: env.MARKET_DATA_STALE_THRESHOLD_MS,
     marketScanIntervalMs: env.MARKET_SCAN_INTERVAL_MS,
+    marketScanHintMinIntervalMs: env.MARKET_SCAN_HINT_MIN_INTERVAL_MS,
+    reconciliationIntervalMs: env.RECONCILIATION_INTERVAL_MS,
     gammaTagId: env.GAMMA_TAG_ID,
     strategyScanIntervalMs: env.STRATEGY_SCAN_INTERVAL_MS,
     fillPollIntervalMs: env.FILL_POLL_INTERVAL_MS,

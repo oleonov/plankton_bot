@@ -5,6 +5,9 @@ describe("speedup config vars", () => {
   beforeEach(() => {
     process.env.RUNTIME_MODE = "simulation";
     delete process.env.STRATEGY_SCAN_INTERVAL_MS;
+    delete process.env.MARKET_SCAN_INTERVAL_MS;
+    delete process.env.MARKET_SCAN_HINT_MIN_INTERVAL_MS;
+    delete process.env.RECONCILIATION_INTERVAL_MS;
     delete process.env.FILL_POLL_INTERVAL_MS;
     delete process.env.EXECUTION_MAX_CONCURRENCY;
   });
@@ -14,9 +17,19 @@ describe("speedup config vars", () => {
     expect(config.strategyScanIntervalMs).toBe(12000);
   });
 
-  it("defaults MARKET_SCAN_INTERVAL_MS to 5 minutes", () => {
+  it("defaults MARKET_SCAN_INTERVAL_MS to 15 minutes", () => {
     const config = loadEnv();
-    expect(config.marketScanIntervalMs).toBe(5 * 60 * 1000);
+    expect(config.marketScanIntervalMs).toBe(15 * 60 * 1000);
+  });
+
+  it("defaults MARKET_SCAN_HINT_MIN_INTERVAL_MS to 15 minutes", () => {
+    const config = loadEnv();
+    expect(config.marketScanHintMinIntervalMs).toBe(15 * 60 * 1000);
+  });
+
+  it("defaults RECONCILIATION_INTERVAL_MS to 15000", () => {
+    const config = loadEnv();
+    expect(config.reconciliationIntervalMs).toBe(15000);
   });
 
   it("defaults FILL_POLL_INTERVAL_MS to 5000", () => {

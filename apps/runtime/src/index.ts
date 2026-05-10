@@ -633,10 +633,12 @@ async function main(): Promise<void> {
     bus,
     log,
     scanIntervalMs: config.marketScanIntervalMs,
+    hintScanMinIntervalMs: config.marketScanHintMinIntervalMs,
     selectionRuleEngine,
     marketSelectionPolicy: () => currentExecutionPolicy().marketSelection,
     positionRepo: repos.position,
     orderRepo: repos.order,
+    runtimeControl,
   });
 
   // 7e. Real modules for market-data and normalization
@@ -1022,7 +1024,7 @@ async function main(): Promise<void> {
     fillRepo: repos.fill,
     marketRepo: repos.market,
     log,
-    reconcileIntervalMs: 60_000,
+    reconcileIntervalMs: config.reconciliationIntervalMs,
     settlementLedgerRepo: repos.settlementLedger,
     driftRepo: repos.positionDrift,
     exitOrderTtlMs: () => currentExecutionPolicy().exitOrderTtlMs,

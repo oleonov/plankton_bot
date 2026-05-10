@@ -221,6 +221,29 @@ describe("ReconciliationModule", () => {
       const hc = await mod.healthCheck();
       expect(hc.ok).toBe(false);
     });
+
+    it("skips overlapping reconciliation passes when the 15s timer fires during a slow pass", async () => {
+      let releaseOpenOrders!: () => void;
+      const openOrdersStarted = new Promise<void>((resolve) => {
+        gateway.getOpenOrders = vi.fn(
+          () =>
+            new Promise<ExchangeOrder[]>((resolveOpenOrders) => {
+              resolve();
+              releaseOpenOrders = () => resolveOpenOrders([]);
+            }),
+        );
+      });
+
+      const first = mod.runReconciliation();
+      await openOrdersStarted;
+      const second = await mod.runReconciliation();
+
+      expect(gateway.getOpenOrders).toHaveBeenCalledTimes(1);
+      expect(second.clean).toBe(true);
+
+      releaseOpenOrders();
+      await first;
+    });
   });
 
   // ─── Clean reconciliation ──────────────────────────────────────────

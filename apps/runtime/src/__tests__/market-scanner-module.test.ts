@@ -55,9 +55,14 @@ function nearEndDate(): string {
   return new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
 }
 
-function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
+type ClobMarketTestOverrides = Omit<Partial<ClobMarket>, "eventSlug"> & {
+  eventSlug?: string | null;
+};
+
+function makeClobMarket(overrides?: ClobMarketTestOverrides): ClobMarket {
+  const { eventSlug: overrideEventSlug, tokens: overrideTokens, ...rest } = overrides ?? {};
   const tokens = (
-    overrides?.tokens ?? [
+    overrideTokens ?? [
       { tokenId: "tok-yes", outcome: "Yes", outcomeIndex: 0 },
       { tokenId: "tok-no", outcome: "No", outcomeIndex: 1 },
     ]
@@ -67,12 +72,16 @@ function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
     midPrice: 0.32,
     ...token,
   }));
+  const eventSlug =
+    overrides != null && "eventSlug" in overrides
+      ? (overrideEventSlug ?? undefined)
+      : "bitcoin-above-100k";
 
   return {
     conditionId: "cond-1",
     question: "Will BTC hit 100k?",
     slug: "bitcoin-above-100k",
-    eventSlug: "bitcoin-above-100k",
+    ...(eventSlug !== undefined ? { eventSlug } : {}),
     endDate: nearEndDate(),
     active: true,
     negRisk: false,
@@ -81,7 +90,7 @@ function makeClobMarket(overrides?: Partial<ClobMarket>): ClobMarket {
     liquidity: 250,
     eventMarketCount: 1,
     gammaCreatedAt: null,
-    ...overrides,
+    ...rest,
     tokens,
   };
 }
@@ -210,6 +219,8 @@ function buildModule(
     positionRepo?: PositionRepository;
     orderRepo?: OrderRepository;
     selectionRuleEngine?: RefreshableSelectionRuleEngine;
+    runtimeControl?: { isPaused(): boolean };
+    hintScanMinIntervalMs?: number;
   } = {},
 ): {
   mod: MarketScannerModule;
@@ -235,6 +246,8 @@ function buildModule(
     selectionRuleEngine,
     positionRepo,
     orderRepo,
+    runtimeControl: opts.runtimeControl,
+    hintScanMinIntervalMs: opts.hintScanMinIntervalMs,
   });
   return { mod, discoveryGateway, marketRepo, bus, positionRepo, orderRepo };
 }
@@ -544,6 +557,28 @@ describe("MarketScannerModule", () => {
     expect(discoveryGateway.discoverMarkets).toHaveBeenCalledTimes(1);
   });
 
+  it("skips non-startup scans while runtime is paused", async () => {
+    const runtimeControl = { isPaused: vi.fn(() => true) };
+    const { mod, discoveryGateway, marketRepo } = buildModule({ runtimeControl });
+
+    await mod.scan();
+
+    expect(runtimeControl.isPaused).toHaveBeenCalledTimes(1);
+    expect(discoveryGateway.discoverMarkets).not.toHaveBeenCalled();
+    expect(marketRepo.saveBatch).not.toHaveBeenCalled();
+  });
+
+  it("still runs the blocking startup scan while runtime is paused", async () => {
+    const runtimeControl = { isPaused: vi.fn(() => true) };
+    const { mod, discoveryGateway } = buildModule({ runtimeControl });
+    (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+    const result = await mod.scanOrThrow();
+
+    expect(result.discoveredMarkets).toBe(0);
+    expect(discoveryGateway.discoverMarkets).toHaveBeenCalledTimes(1);
+  });
+
   // ── Multi-page discovery ──────────────────────────────────────────────────
 
   it("scan() handles multi-page discovery correctly", async () => {
@@ -655,6 +690,151 @@ describe("MarketScannerModule", () => {
 
     expect(marketRepo.saveBatch).not.toHaveBeenCalled();
     expect(marketRepo.save).not.toHaveBeenCalled();
+  });
+
+  it("scan() skips unchanged token rows without touching updated_at", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const { mod, marketRepo } = buildModule({ discoveryGateway });
+    const page = [
+      makeClobMarket({
+        slug: "bitcoin-above-100k",
+        eventSlug: "bitcoin-above-100k",
+        tokens: [{ tokenId: "tok-same", outcome: "Yes", outcomeIndex: 0 }],
+        eventMarketCount: 1,
+      }),
+    ];
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: ForEachMarketPageCallback) => {
+        cb(page, eventStatsFromMarkets(page));
+        return { totalMarkets: page.length };
+      },
+    );
+
+    await mod.scan();
+    const saveBatchMock = marketRepo.saveBatch as ReturnType<typeof vi.fn>;
+    const saved = saveBatchMock.mock.calls[0]![0] as readonly Market[];
+    const firstUpdatedAt = saved[0]!.updatedAt;
+    saveBatchMock.mockClear();
+    (marketRepo.findByTokenIds as ReturnType<typeof vi.fn>).mockReturnValue(saved);
+    (marketRepo.iterateAllTokenIds as ReturnType<typeof vi.fn>).mockReturnValue(
+      [createTokenId("tok-same")][Symbol.iterator](),
+    );
+
+    const result = await mod.scanOrThrow();
+
+    expect(saveBatchMock).not.toHaveBeenCalled();
+    expect(result.savedTokens).toBe(0);
+    expect(result.skippedUnchangedTokens).toBe(1);
+    expect(saved[0]!.updatedAt).toBe(firstUpdatedAt);
+    const [discovered] = (marketRepo.deactivateMissing as ReturnType<typeof vi.fn>).mock.calls.at(
+      -1,
+    )!;
+    expect((discovered as Set<string>).has("tok-same")).toBe(true);
+  });
+
+  it("scan() treats null eventSlug/gammaCreatedAt as a COALESCE no-op when DB already has values", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const { mod, marketRepo } = buildModule({ discoveryGateway });
+    const existing: Market = {
+      tokenId: createTokenId("tok-coalesce"),
+      conditionId: "cond-1",
+      slug: "bitcoin-above-100k",
+      eventSlug: "bitcoin-above-100k",
+      question: "Will BTC hit 100k?",
+      outcome: "Yes",
+      outcomeIndex: 0,
+      regime: null,
+      horizon: null,
+      endDate: nearEndDate(),
+      active: true,
+      tradable: true,
+      tickSize: 0.01,
+      negRisk: false,
+      eventMarketCount: 1,
+      selectionStatus: "matched_include",
+      selectionWinningRuleId: null,
+      gammaCreatedAt: "2026-04-15T08:30:00.000Z",
+      createdAt: "2026-05-01T00:00:00.000Z",
+      updatedAt: "2026-05-01T00:00:00.000Z",
+    };
+    const page = [
+      makeClobMarket({
+        slug: "bitcoin-above-100k",
+        eventSlug: null,
+        gammaCreatedAt: null,
+        endDate: existing.endDate!,
+        tokens: [{ tokenId: "tok-coalesce", outcome: "Yes", outcomeIndex: 0 }],
+        eventMarketCount: 1,
+      }),
+    ];
+    (marketRepo.findByTokenIds as ReturnType<typeof vi.fn>).mockReturnValue([existing]);
+    (marketRepo.iterateAllTokenIds as ReturnType<typeof vi.fn>).mockReturnValue(
+      [createTokenId("tok-coalesce")][Symbol.iterator](),
+    );
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: ForEachMarketPageCallback) => {
+        cb(page, eventStatsFromMarkets(page));
+        return { totalMarkets: page.length };
+      },
+    );
+
+    const result = await mod.scanOrThrow();
+
+    expect(marketRepo.saveBatch).not.toHaveBeenCalled();
+    expect(result.savedTokens).toBe(0);
+    expect(result.skippedCoalesceNoopTokens).toBe(1);
+  });
+
+  it("scan() still writes existing rows when a scanner-owned field changes", async () => {
+    const discoveryGateway = createMockDiscoveryGateway();
+    const { mod, marketRepo } = buildModule({ discoveryGateway });
+    const existing: Market = {
+      tokenId: createTokenId("tok-changed"),
+      conditionId: "cond-old",
+      slug: "bitcoin-above-100k",
+      eventSlug: "bitcoin-above-100k",
+      question: "Will BTC hit 100k?",
+      outcome: "Yes",
+      outcomeIndex: 0,
+      regime: null,
+      horizon: null,
+      endDate: nearEndDate(),
+      active: true,
+      tradable: true,
+      tickSize: 0.01,
+      negRisk: false,
+      eventMarketCount: 1,
+      selectionStatus: "matched_include",
+      selectionWinningRuleId: null,
+      gammaCreatedAt: null,
+      createdAt: "2026-05-01T00:00:00.000Z",
+      updatedAt: "2026-05-01T00:00:00.000Z",
+    };
+    const page = [
+      makeClobMarket({
+        conditionId: "cond-new",
+        slug: "bitcoin-above-100k",
+        eventSlug: "bitcoin-above-100k",
+        endDate: existing.endDate!,
+        tokens: [{ tokenId: "tok-changed", outcome: "Yes", outcomeIndex: 0 }],
+        eventMarketCount: 1,
+      }),
+    ];
+    (marketRepo.findByTokenIds as ReturnType<typeof vi.fn>).mockReturnValue([existing]);
+    (marketRepo.iterateAllTokenIds as ReturnType<typeof vi.fn>).mockReturnValue(
+      [createTokenId("tok-changed")][Symbol.iterator](),
+    );
+    (discoveryGateway.forEachMarketPage as ReturnType<typeof vi.fn>).mockImplementation(
+      async (cb: ForEachMarketPageCallback) => {
+        cb(page, eventStatsFromMarkets(page));
+        return { totalMarkets: page.length };
+      },
+    );
+
+    const result = await mod.scanOrThrow();
+
+    expect(marketRepo.saveBatch).toHaveBeenCalledTimes(1);
+    expect(result.savedTokens).toBe(1);
   });
 
   // Step 0 §P1.9: scanner must forward ClobMarket.gammaCreatedAt into every

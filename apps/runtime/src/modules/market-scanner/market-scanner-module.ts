@@ -20,6 +20,7 @@ import type {
   PositionRepository,
   OrderRepository,
   MarketSelectionPolicy,
+  RuntimeControl,
 } from "@krabs/domain";
 import { evaluatePreEntry, createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -33,8 +34,12 @@ import {
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 
 const HINT_SCAN_DEBOUNCE_MS = 250;
-const HINT_SCAN_MIN_INTERVAL_MS = 60_000;
+const DEFAULT_HINT_SCAN_MIN_INTERVAL_MS = 15 * 60 * 1000;
 const TRANSIENT_SCAN_WARN_THROTTLE_MS = 15 * 60_000;
+
+type MarketScanTrigger = "startup" | "periodic" | "hint" | "manual";
+
+type MarketWriteDecision = "changed" | "unchanged" | "coalesce_noop";
 
 /**
  * Nearest-rank percentile (no interpolation). Stable for tiny samples and
@@ -72,6 +77,9 @@ export interface MarketScannerModuleDeps {
   positionRepo?: PositionRepository;
   /** When provided, tokens with open orders are preserved from deactivation. */
   orderRepo?: OrderRepository;
+  runtimeControl?: RuntimeControl | undefined;
+  /** Minimum age of a successful scan before a WS new-market hint may trigger a full rescan. */
+  hintScanMinIntervalMs?: number | undefined;
 }
 
 export interface MarketScanResult {
@@ -81,6 +89,10 @@ export interface MarketScanResult {
   includedMarkets: number;
   /** Token rows written to DB (token-level). */
   savedTokens: number;
+  /** Token rows skipped because scanner-owned fields were unchanged. */
+  skippedUnchangedTokens: number;
+  /** Token rows skipped because incoming nulls would be no-ops under repository COALESCE semantics. */
+  skippedCoalesceNoopTokens: number;
   /** Tokens preserved from deactivation via open positions/orders (token-level). */
   preservedTokens: number;
   /** Token rows deactivated (token-level). */
@@ -179,10 +191,10 @@ export class MarketScannerModule implements RuntimeModule {
     // Fire the first background scan only when startup didn't already complete
     // a fresh blocking scan immediately beforehand.
     if (!this.hasFreshSuccessfulScan()) {
-      this.scan().catch((err) => this.log.error({ err }, "initial scan failed"));
+      this.scan("startup").catch((err) => this.log.error({ err }, "initial scan failed"));
     }
     this.timer = setInterval(() => {
-      this.scan().catch((err) => this.log.error({ err }, "scan cycle error"));
+      this.scan("periodic").catch((err) => this.log.error({ err }, "scan cycle error"));
     }, this.deps.scanIntervalMs);
   }
 
@@ -266,15 +278,15 @@ export class MarketScannerModule implements RuntimeModule {
   }
 
   /** Exposed for testing -- in production driven by the interval timer. */
-  async scan(): Promise<void> {
-    await this.runScan(false);
+  async scan(trigger: MarketScanTrigger = "manual"): Promise<void> {
+    await this.runScan(false, trigger);
   }
 
   /** Blocking startup helper — throws on discovery failures. */
   async scanOrThrow(): Promise<MarketScanResult> {
     let result: MarketScanResult | null;
     try {
-      result = await this.runScan(true);
+      result = await this.runScan(true, "startup");
     } catch (err) {
       const cachedTokens = this.countCachedTokens();
       if (cachedTokens > 0 && isTransientNetworkError(err)) {
@@ -288,8 +300,15 @@ export class MarketScannerModule implements RuntimeModule {
     return result;
   }
 
-  private async runScan(throwOnError: boolean): Promise<MarketScanResult | null> {
+  private async runScan(
+    throwOnError: boolean,
+    trigger: MarketScanTrigger,
+  ): Promise<MarketScanResult | null> {
     if (this.scanning) return null;
+    if (!throwOnError && trigger !== "startup" && this.deps.runtimeControl?.isPaused()) {
+      this.log.debug({ scanTrigger: trigger }, "market scan skipped while runtime is paused");
+      return null;
+    }
     this.scanning = true;
     const startMs = Date.now();
 
@@ -303,6 +322,8 @@ export class MarketScannerModule implements RuntimeModule {
       let discoveredMarkets = 0;
       let includedMarkets = 0;
       let savedTokens = 0;
+      let skippedUnchangedTokens = 0;
+      let skippedCoalesceNoopTokens = 0;
       const now = new Date().toISOString();
       const nowMs = Date.now();
       const discoveredTokenIds = new Set<string>();
@@ -445,8 +466,13 @@ export class MarketScannerModule implements RuntimeModule {
           }
         }
         if (pageBatch.length > 0) {
-          this.deps.marketRepo.saveBatch(pageBatch);
-          savedTokens += pageBatch.length;
+          const writePlan = this.planPageWrites(pageBatch);
+          skippedUnchangedTokens += writePlan.skippedUnchanged;
+          skippedCoalesceNoopTokens += writePlan.skippedCoalesceNoop;
+          if (writePlan.changedMarkets.length > 0) {
+            this.deps.marketRepo.saveBatch(writePlan.changedMarkets);
+            savedTokens += writePlan.changedMarkets.length;
+          }
         }
       });
 
@@ -499,6 +525,8 @@ export class MarketScannerModule implements RuntimeModule {
         discoveredMarkets,
         includedMarkets,
         savedTokens,
+        skippedUnchangedTokens,
+        skippedCoalesceNoopTokens,
         preservedTokens: activeTokenIds.size,
         deactivatedTokens: deactivatedCount,
         preservedDisappearedTokens,
@@ -515,6 +543,8 @@ export class MarketScannerModule implements RuntimeModule {
           discoveredMarkets,
           includedMarkets,
           savedTokens,
+          skippedUnchangedTokens,
+          skippedCoalesceNoopTokens,
           preservedTokens: activeTokenIds.size,
           deactivatedTokens: deactivatedCount,
           preservedDisappearedTokens,
@@ -522,6 +552,7 @@ export class MarketScannerModule implements RuntimeModule {
           discoveryLatencyP50Ms: latencyAggregates.p50,
           discoveryLatencyP90Ms: latencyAggregates.p90,
           discoveryLatencyMaxMs: latencyAggregates.max,
+          scanTrigger: trigger,
           durationMs,
         },
         "scan cycle complete",
@@ -550,7 +581,7 @@ export class MarketScannerModule implements RuntimeModule {
     this.hintTimer = setTimeout(() => {
       this.hintTimer = null;
       if (this.hasFreshSuccessfulScan()) return;
-      void this.scan().catch((err) => this.log.error({ err }, "hint-triggered scan failed"));
+      void this.scan("hint").catch((err) => this.log.error({ err }, "hint-triggered scan failed"));
     }, HINT_SCAN_DEBOUNCE_MS);
   }
 
@@ -564,10 +595,35 @@ export class MarketScannerModule implements RuntimeModule {
     this.log.warn({ err, suppressedCount }, "scan cycle degraded — keeping existing catalog");
   }
 
+  private planPageWrites(markets: readonly Market[]): {
+    changedMarkets: Market[];
+    skippedUnchanged: number;
+    skippedCoalesceNoop: number;
+  } {
+    const existingRows = this.deps.marketRepo.findByTokenIds(markets.map((m) => m.tokenId));
+    const existingByTokenId = new Map(existingRows.map((m) => [String(m.tokenId), m]));
+    const changedMarkets: Market[] = [];
+    let skippedUnchanged = 0;
+    let skippedCoalesceNoop = 0;
+
+    for (const market of markets) {
+      const existing = existingByTokenId.get(String(market.tokenId));
+      const decision = classifyMarketWrite(market, existing ?? null);
+      if (decision === "changed") {
+        changedMarkets.push(market);
+      } else if (decision === "coalesce_noop") {
+        skippedCoalesceNoop++;
+      } else {
+        skippedUnchanged++;
+      }
+    }
+
+    return { changedMarkets, skippedUnchanged, skippedCoalesceNoop };
+  }
+
   private hasFreshSuccessfulScan(nowMs = Date.now()): boolean {
-    return (
-      this.lastSuccessfulScanMs > 0 && nowMs - this.lastSuccessfulScanMs < HINT_SCAN_MIN_INTERVAL_MS
-    );
+    const minIntervalMs = this.deps.hintScanMinIntervalMs ?? DEFAULT_HINT_SCAN_MIN_INTERVAL_MS;
+    return this.lastSuccessfulScanMs > 0 && nowMs - this.lastSuccessfulScanMs < minIntervalMs;
   }
 
   private countCachedTokens(): number {
@@ -585,6 +641,8 @@ export class MarketScannerModule implements RuntimeModule {
       discoveredMarkets: 0,
       includedMarkets: 0,
       savedTokens: 0,
+      skippedUnchangedTokens: 0,
+      skippedCoalesceNoopTokens: 0,
       preservedTokens: this.countActiveTokens(),
       deactivatedTokens: 0,
       preservedDisappearedTokens: 0,
@@ -617,4 +675,40 @@ export class MarketScannerModule implements RuntimeModule {
     }
     return activeTokenIds.size;
   }
+}
+
+function classifyMarketWrite(next: Market, existing: Market | null): MarketWriteDecision {
+  if (existing === null) return "changed";
+
+  const coalesceNoop =
+    next.eventSlug == null && existing.eventSlug != null
+      ? "eventSlug"
+      : next.gammaCreatedAt == null && existing.gammaCreatedAt != null
+        ? "gammaCreatedAt"
+        : null;
+
+  const effectiveNextEventSlug = next.eventSlug == null ? existing.eventSlug : next.eventSlug;
+  const effectiveNextGammaCreatedAt = existing.gammaCreatedAt ?? next.gammaCreatedAt ?? null;
+
+  const unchanged =
+    String(next.conditionId) === String(existing.conditionId) &&
+    next.slug === existing.slug &&
+    effectiveNextEventSlug === existing.eventSlug &&
+    next.question === existing.question &&
+    next.outcome === existing.outcome &&
+    next.outcomeIndex === existing.outcomeIndex &&
+    next.regime === existing.regime &&
+    next.horizon === existing.horizon &&
+    next.endDate === existing.endDate &&
+    next.active === existing.active &&
+    next.tradable === existing.tradable &&
+    next.tickSize === existing.tickSize &&
+    next.negRisk === existing.negRisk &&
+    next.eventMarketCount === existing.eventMarketCount &&
+    next.selectionStatus === existing.selectionStatus &&
+    next.selectionWinningRuleId === existing.selectionWinningRuleId &&
+    effectiveNextGammaCreatedAt === existing.gammaCreatedAt;
+
+  if (!unchanged) return "changed";
+  return coalesceNoop === null ? "unchanged" : "coalesce_noop";
 }
