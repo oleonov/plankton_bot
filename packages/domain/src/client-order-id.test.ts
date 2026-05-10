@@ -15,9 +15,9 @@ describe("buildClientOrderId", () => {
     expect(a).toBe(b);
   });
 
-  it("produces the plk_ prefix followed by 16 hex chars", () => {
+  it("produces the krb_ prefix followed by 16 hex chars", () => {
     const id = buildClientOrderId(base());
-    expect(id).toMatch(/^plk_[0-9a-f]{16}$/);
+    expect(id).toMatch(/^krb_[0-9a-f]{16}$/);
   });
 
   it("differs when signalId changes", () => {
