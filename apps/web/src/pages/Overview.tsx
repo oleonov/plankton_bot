@@ -94,11 +94,27 @@ function formatOrderCapacity(
 function exitsOnlyMessage(status: import("../api/types.ts").StatusData): string {
   const capacity = status.executionQueue?.buyCapacity;
   if (capacity?.entriesBlocked) {
+    if (capacity.maxOpenBuyOrders > 0 && capacity.openBuyOrderCount >= capacity.maxOpenBuyOrders) {
+      return `Entry capacity exhausted — open BUY order limit reached (${capacity.openBuyOrderCount}/${capacity.maxOpenBuyOrders})`;
+    }
+    if (capacity.newEntryCapacityUsdc != null && capacity.newEntryCapacityUsdc <= 0) {
+      return `Entry capacity exhausted — new entries need ${formatUsd(
+        capacity.minNewEntryWalletHeadroomUsdc,
+      )} usable wallet headroom after order placement`;
+    }
     return `Entry capacity exhausted — new entries need ${formatUsd(
       capacity.minNewEntryWalletHeadroomUsdc,
     )} usable wallet headroom after order placement`;
   }
   if (capacity?.addsBlocked) {
+    if (capacity.maxOpenBuyOrders > 0 && capacity.openBuyOrderCount >= capacity.maxOpenBuyOrders) {
+      return `Add-buy capacity exhausted — open BUY order limit reached (${capacity.openBuyOrderCount}/${capacity.maxOpenBuyOrders})`;
+    }
+    if (capacity.addCapacityUsdc != null && capacity.addCapacityUsdc <= 0) {
+      return `Add-buy capacity exhausted — adds need ${formatUsd(
+        capacity.minAddWalletHeadroomUsdc,
+      )} usable wallet headroom after order placement`;
+    }
     return `Add-buy capacity exhausted — adds need ${formatUsd(
       capacity.minAddWalletHeadroomUsdc,
     )} usable wallet headroom after order placement`;
