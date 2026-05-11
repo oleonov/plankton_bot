@@ -1531,6 +1531,34 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     );
   });
 
+  it("keeps sub-dollar BUY orders as maker even when taker spread is tight", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      runtimeMetrics: metrics as never,
+      policyOverrides: {
+        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      },
+    });
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01 });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedSizeUsdc: 0.99 },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.09);
+    expect(placed[0]!.command.postOnly).toBeUndefined();
+    expect(metrics.writeEvent).not.toHaveBeenCalledWith(
+      "taker_decision_total",
+      expect.any(Number),
+      expect.any(String),
+      expect.any(String),
+    );
+  });
+
   it("uses opportunistic taker pricing for SELL when spread is two ticks", async () => {
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       policyOverrides: {

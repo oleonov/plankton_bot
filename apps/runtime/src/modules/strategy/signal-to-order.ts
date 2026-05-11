@@ -54,6 +54,8 @@ import {
 import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 100;
+const MARKETABLE_BUY_MIN_NOTIONAL_USDC = 1;
+const MIN_NOTIONAL_EPSILON = 1e-9;
 // Policy epsilon: suppress only truly identical SELL prices. The tiny margin
 // absorbs JS decimal representation drift while staying far below CLOB tick size.
 const SELL_DEDUP_PRICE_EPSILON = 1.000001e-9;
@@ -1148,6 +1150,12 @@ export class SignalToOrderBridge {
     if (!Number.isFinite(spread) || spread < 0) return null;
     const spreadTicks = Math.round(spread / market.tickSize);
     if (spreadTicks > taker.maxSpreadTicks) return null;
+    if (
+      signal.side === "buy" &&
+      signal.suggestedSizeUsdc + MIN_NOTIONAL_EPSILON < MARKETABLE_BUY_MIN_NOTIONAL_USDC
+    ) {
+      return null;
+    }
 
     const price = signal.side === "buy" ? market.bestAsk : market.bestBid;
     const validation = validateExecutablePrice(price, market.tickSize);
