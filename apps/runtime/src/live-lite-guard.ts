@@ -1,7 +1,9 @@
 import type { WalletMode } from "@krabs/domain";
 
-const CLOB_MARKETABLE_BUY_MIN_USDC = 1;
 const NOTIONAL_EPSILON_USDC = 1e-6;
+const DEFAULT_FALLBACK_MIN_ORDER_USDC_RELAYER = 1;
+const DEFAULT_FALLBACK_MIN_ORDER_USDC_EOA = 3;
+const DEFAULT_MARKETABLE_BUY_MIN_USDC = 1;
 
 export interface LiveLiteConfig {
   maxOpenValueUsdc: number;
@@ -9,6 +11,8 @@ export interface LiveLiteConfig {
   maxActiveMarkets: number;
   walletMode?: WalletMode;
   minOrderUsdc?: number | null;
+  fallbackMinOrderUsdcRelayer?: number | null;
+  fallbackMinOrderUsdcEoa?: number | null;
 }
 
 export class LiveLiteGuard {
@@ -41,7 +45,10 @@ export class LiveLiteGuard {
   getMinOrderUsdc(): number | null {
     if (!this.config) return null;
     if (this.config.minOrderUsdc != null) return this.config.minOrderUsdc;
-    return this.getWalletMode() === "relayer" ? 1 : 3;
+    if (this.getWalletMode() === "relayer") {
+      return this.config.fallbackMinOrderUsdcRelayer ?? DEFAULT_FALLBACK_MIN_ORDER_USDC_RELAYER;
+    }
+    return this.config.fallbackMinOrderUsdcEoa ?? DEFAULT_FALLBACK_MIN_ORDER_USDC_EOA;
   }
 
   isOrderAboveMin(notionalUsdc: number): boolean {
@@ -50,11 +57,11 @@ export class LiveLiteGuard {
     return notionalUsdc + NOTIONAL_EPSILON_USDC >= minOrderUsdc;
   }
 
-  // Current CLOB rejects marketable BUY orders below $1 even when relayer
-  // profile minimums are configured lower for dust experiments.
-  getMinEntryNotionalUsdc(): number | null {
+  getMinEntryNotionalUsdc(
+    marketableBuyMinNotionalUsdc = DEFAULT_MARKETABLE_BUY_MIN_USDC,
+  ): number | null {
     if (!this.config) return null;
     const minOrderUsdc = this.getMinOrderUsdc();
-    return Math.max(minOrderUsdc ?? 0, CLOB_MARKETABLE_BUY_MIN_USDC);
+    return Math.max(minOrderUsdc ?? 0, marketableBuyMinNotionalUsdc);
   }
 }

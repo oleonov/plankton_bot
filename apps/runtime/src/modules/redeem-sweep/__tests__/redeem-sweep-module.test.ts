@@ -1,0 +1,892 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { InProcessEventBus } from "@krabs/event-bus";
+import { createConditionId, createPositionId, createTokenId, type Position } from "@krabs/domain";
+import { RedeemSweepModule } from "../redeem-sweep-module.js";
+import { DEFAULT_EXECUTION_POLICY } from "../../../execution-policy.js";
+
+const NOW = Date.parse("2026-05-11T00:00:00.000Z");
+const TOKEN = "tok-1";
+const TOKEN_TWO = "tok-2";
+const CONDITION = "cond-1";
+
+function logger() {
+  return {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: () => logger(),
+  } as any;
+}
+
+function remotePosition(overrides: Partial<any> = {}) {
+  return {
+    tokenId: TOKEN,
+    conditionId: CONDITION,
+    size: 10,
+    currentValueUsdc: 1,
+    initialValueUsdc: 1,
+    redeemable: true,
+    slug: "market",
+    marketSlug: "market",
+    outcome: "Yes",
+    raw: {},
+    ...overrides,
+  };
+}
+
+function localPosition(tokenId = TOKEN): Position {
+  return {
+    positionId: createPositionId(`pos-${tokenId}`),
+    tokenId: createTokenId(tokenId),
+    conditionId: createConditionId(CONDITION),
+    side: "buy",
+    size: 10,
+    avgEntryPrice: 0.1,
+    costBasisUsdc: 1,
+    currentValueUsdc: 1,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: null,
+    openedAt: new Date(NOW).toISOString(),
+    closedAt: null,
+    updatedAt: new Date(NOW).toISOString(),
+  };
+}
+
+function makeHarness(
+  opts: {
+    positions?: any[];
+    readImpl?: () => Promise<any[] | null>;
+    redeemImpl?: () => Promise<any>;
+    policy?: Partial<typeof DEFAULT_EXECUTION_POLICY.redeemSweep>;
+    redeemLogRows?: any[];
+    uniqueViolationOnFirstAttemptingInsert?: boolean;
+  } = {},
+) {
+  const bus = new InProcessEventBus();
+  const log = logger();
+  const redeemLogRows: any[] = opts.redeemLogRows ?? [];
+  const position = localPosition();
+  const positionRepo = {
+    findByTokenId: vi.fn((tokenId) => (String(tokenId) === TOKEN ? position : null)),
+    save: vi.fn(),
+  };
+  const lotRepo = { settleAll: vi.fn() };
+  const gateway = {
+    redeemPositions: vi.fn(
+      opts.redeemImpl ??
+        (() =>
+          Promise.resolve({
+            status: "confirmed",
+            conditionIds: [CONDITION],
+            txHash: "0xredeem",
+            gasUsed: 12345,
+          })),
+    ),
+  };
+  const reader = {
+    read: vi.fn(opts.readImpl ?? (() => Promise.resolve(opts.positions ?? [remotePosition()]))),
+  };
+  const runtimeMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+  let uniqueViolationOnFirstAttemptingInsert = opts.uniqueViolationOnFirstAttemptingInsert ?? false;
+  const module = new RedeemSweepModule({
+    bus,
+    gateway: gateway as any,
+    positionReader: reader,
+    positionRepo: positionRepo as any,
+    lotRepo: lotRepo as any,
+    marketRepo: {
+      findByConditionId: vi.fn(() => [
+        { tokenId: createTokenId(TOKEN) },
+        { tokenId: createTokenId(TOKEN_TWO) },
+      ]),
+    } as any,
+    redeemLogRepo: {
+      insert: vi.fn((row) => {
+        if (row.status === "attempting" && uniqueViolationOnFirstAttemptingInsert) {
+          uniqueViolationOnFirstAttemptingInsert = false;
+          const err = new Error("UNIQUE constraint failed: redeem_log.condition_id") as Error & {
+            code: string;
+          };
+          err.code = "SQLITE_CONSTRAINT_UNIQUE";
+          throw err;
+        }
+        const nextId =
+          redeemLogRows.reduce((max, existing) => Math.max(max, existing.id ?? 0), 0) + 1;
+        redeemLogRows.push({ id: nextId, ...row });
+      }),
+      updateLatestActiveAttempt: vi.fn((entry) => {
+        const row = redeemLogRows
+          .filter(
+            (existing) =>
+              existing.conditionId === entry.conditionId &&
+              isActiveRedeemLogStatus(existing.status),
+          )
+          .sort((a, b) => b.attemptTs - a.attemptTs || b.id - a.id)[0];
+        if (!row) return false;
+        Object.assign(row, entry);
+        return true;
+      }),
+      findRecentActiveAttempts: vi.fn((sinceTs: number) =>
+        redeemLogRows
+          .filter((row) => isActiveRedeemLogStatus(row.status) && row.attemptTs > sinceTs)
+          .filter((row) => !hasLaterRedeemLogRow(redeemLogRows, row))
+          .map((row) => ({
+            id: row.id,
+            conditionId: row.conditionId,
+            tokenIds: row.tokenIds,
+            attemptTs: row.attemptTs,
+            status: row.status,
+            detailsJson: row.details ? JSON.stringify(row.details) : null,
+          })),
+      ),
+      hasRecentActiveAttempt: vi.fn((conditionId: string, sinceTs: number) =>
+        redeemLogRows.some(
+          (row) =>
+            row.conditionId === conditionId &&
+            isActiveRedeemLogStatus(row.status) &&
+            row.attemptTs > sinceTs &&
+            !hasLaterRedeemLogRow(redeemLogRows, row),
+        ),
+      ),
+      findLatestAttemptTs: vi.fn((conditionId: string) => {
+        const row = redeemLogRows
+          .filter((entry) => entry.conditionId === conditionId)
+          .sort((a, b) => b.attemptTs - a.attemptTs || b.id - a.id)[0];
+        return row?.attemptTs ?? null;
+      }),
+      markOrphanedActiveAttempts: vi.fn((cutoffTs: number, errorMsg: string) => {
+        const rows = redeemLogRows.filter(
+          (row) =>
+            isActiveRedeemLogStatus(row.status) &&
+            row.attemptTs <= cutoffTs &&
+            !hasLaterRedeemLogRow(redeemLogRows, row),
+        );
+        for (const row of rows) {
+          row.status = "failed_orphaned";
+          row.errorMsg = row.errorMsg ?? errorMsg;
+        }
+        return rows.map((row) => ({
+          id: row.id,
+          conditionId: row.conditionId,
+          attemptTs: row.attemptTs,
+          status: row.status,
+        }));
+      }),
+    } as any,
+    policy: () => ({
+      ...DEFAULT_EXECUTION_POLICY.redeemSweep,
+      intervalMs: 60_000,
+      inFlightTtlMs: 15 * 60_000,
+      retryBackoffMs: [60_000, 300_000, 1_800_000],
+      ...(opts.policy ?? {}),
+    }),
+    log,
+    runtimeMetrics: runtimeMetrics as any,
+    now: () => Date.now(),
+  });
+  return {
+    bus,
+    module,
+    gateway,
+    reader,
+    redeemLogRows,
+    positionRepo,
+    lotRepo,
+    log,
+    runtimeMetrics,
+  };
+}
+
+function isActiveRedeemLogStatus(status: string): boolean {
+  return status === "attempting" || status === "submitted" || status === "pending";
+}
+
+function hasLaterRedeemLogRow(rows: readonly any[], row: any): boolean {
+  return rows.some(
+    (candidate) =>
+      candidate.conditionId === row.conditionId &&
+      (candidate.attemptTs > row.attemptTs ||
+        (candidate.attemptTs === row.attemptTs && candidate.id > row.id)),
+  );
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+function coalescingPosition(index: number) {
+  return remotePosition({
+    tokenId: `tok-coalesce-${index}`,
+    conditionId: `cond-coalesce-${index}`,
+  });
+}
+
+function runSweepForTest(module: RedeemSweepModule, reason = "periodic"): Promise<void> {
+  return (
+    module as unknown as {
+      runSweep(reason: string): Promise<void>;
+    }
+  ).runSweep(reason);
+}
+
+function redeemConditionCallOrder(calls: readonly unknown[][]): string[] {
+  return calls.map((call) => (call[0] as readonly string[])[0]!);
+}
+
+async function flushMicrotasks(times = 3): Promise<void> {
+  for (let i = 0; i < times; i += 1) await Promise.resolve();
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+describe("RedeemSweepModule", () => {
+  it("redeems visible redeemable wallet positions and closes local state", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness();
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledWith([CONDITION], {
+      redeemTokenIdsByCondition: { [CONDITION]: [createTokenId(TOKEN)] },
+    });
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["success"]);
+    expect(h.redeemLogRows.at(-1)).toMatchObject({
+      txHash: "0xredeem",
+      gasUsed: 12345,
+      details: expect.objectContaining({ gatewayStatus: "confirmed" }),
+    });
+    expect(h.lotRepo.settleAll).toHaveBeenCalledWith(createPositionId(`pos-${TOKEN}`));
+    expect(h.positionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ size: 0, status: "closed" }),
+    );
+  });
+
+  it("skips a duplicate attempt inside the per-condition TTL", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness();
+    await h.module.start();
+    await h.bus.drain();
+    await h.bus.publish("PolymarketWalletUpdated", {
+      positions: [
+        {
+          tokenId: createTokenId(TOKEN),
+          conditionId: CONDITION,
+          size: 10,
+          redeemable: true,
+          slug: "market",
+          outcome: "Yes",
+        },
+      ],
+      timestamp: Date.now(),
+    });
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a failed redeem and records retry_count on success", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("relayer down"))
+        .mockResolvedValueOnce({
+          status: "confirmed",
+          conditionIds: [CONDITION],
+          txHash: "0xretry",
+          gasUsed: 111,
+        }),
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["failed", "success"]);
+    expect(h.redeemLogRows.at(-1)).toMatchObject({ retryCount: 1 });
+  });
+
+  it("does not close local state for pending settlement until verification clears remote shares", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockResolvedValue({
+        status: "pending",
+        conditionIds: [CONDITION],
+        txHash: "0xpending",
+        gasUsed: null,
+      }),
+      policy: { postRedeemVerifyDelayMs: 1_000 },
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["pending"]);
+    expect(h.positionRepo.save).not.toHaveBeenCalled();
+    expect(h.lotRepo.settleAll).not.toHaveBeenCalled();
+
+    h.reader.read.mockResolvedValueOnce([]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+
+    expect(h.positionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ size: 0, status: "closed" }),
+    );
+  });
+
+  it("does not close local state when redeem is skipped because settlement is unsupported", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockResolvedValue({
+        status: "skipped",
+        conditionIds: [CONDITION],
+        reason: "unsupported_settlement",
+        txHash: null,
+        gasUsed: null,
+      }),
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["rejected"]);
+    expect(h.positionRepo.save).not.toHaveBeenCalled();
+    expect(h.log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION, gatewayReason: "unsupported_settlement" }),
+      "redeem sweep skipped without settlement support",
+    );
+  });
+
+  it("emits failed_max_retries after configured retry exhaustion", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockRejectedValue(new Error("relayer down")),
+      policy: { maxRetries: 1, retryBackoffMs: [60_000] },
+    });
+    await h.module.start();
+    await h.bus.drain();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+
+    expect(h.redeemLogRows.at(-1)).toMatchObject({
+      status: "failed_max_retries",
+      retryCount: 1,
+    });
+    expect(h.log.error).toHaveBeenCalled();
+  });
+
+  it("redeems only the redeemable token in a partial condition", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [
+        remotePosition({ tokenId: TOKEN, redeemable: true }),
+        remotePosition({ tokenId: TOKEN_TWO, redeemable: false, size: 4 }),
+      ],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledWith([CONDITION], {
+      redeemTokenIdsByCondition: { [CONDITION]: [createTokenId(TOKEN)] },
+    });
+    expect(h.redeemLogRows[0]!.details).toMatchObject({ excludedTokenIds: [TOKEN_TWO] });
+  });
+
+  it("post-redeem verification retries when remote shares remain", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness();
+    await h.module.start();
+    await h.bus.drain();
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_EXECUTION_POLICY.redeemSweep.postRedeemVerifyDelayMs);
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(h.log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+      "redeem sweep verification found remaining wallet shares",
+    );
+  });
+
+  it("handles a redeem_log unique in-flight race without retrying or alerting", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ uniqueViolationOnFirstAttemptingInsert: true });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.log.info).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+      "redeem sweep race detected, condition already in-flight",
+    );
+    expect(h.log.error).not.toHaveBeenCalled();
+  });
+
+  it("serializes startup and wallet-event sweeps through one single-flight guard", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const firstRead = deferred<any[]>();
+    const h = makeHarness({
+      readImpl: vi
+        .fn()
+        .mockReturnValueOnce(firstRead.promise)
+        .mockResolvedValueOnce([
+          remotePosition({ tokenId: "tok-event", conditionId: "cond-event" }),
+        ]),
+    });
+
+    const startPromise = h.module.start();
+    await Promise.resolve();
+    const eventPromise = h.bus.publish("PolymarketWalletUpdated", {
+      positions: [
+        {
+          tokenId: createTokenId("tok-event"),
+          conditionId: "cond-event",
+          size: 8,
+          redeemable: true,
+          slug: "event-market",
+          outcome: "Yes",
+        },
+      ],
+      timestamp: Date.now(),
+    });
+    await Promise.resolve();
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    firstRead.resolve([remotePosition()]);
+    await startPromise;
+    await eventPromise;
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenNthCalledWith(1, [CONDITION], {
+      redeemTokenIdsByCondition: { [CONDITION]: [createTokenId(TOKEN)] },
+    });
+    expect(h.gateway.redeemPositions).toHaveBeenNthCalledWith(2, ["cond-event"], {
+      redeemTokenIdsByCondition: { "cond-event": [createTokenId("tok-event")] },
+    });
+  });
+
+  it("coalescing: drops duplicate trigger while sweep is running", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    h.gateway.redeemPositions.mockClear();
+    h.reader.read.mockReset();
+    const firstRedeem = deferred<any>();
+    h.reader.read
+      .mockResolvedValueOnce([coalescingPosition(1)])
+      .mockResolvedValueOnce([coalescingPosition(2)]);
+    h.gateway.redeemPositions.mockReturnValueOnce(firstRedeem.promise);
+
+    const firstSweep = runSweepForTest(h.module);
+    await flushMicrotasks();
+    let secondResolved = false;
+    const secondSweep = runSweepForTest(h.module, "reactive").then(() => {
+      secondResolved = true;
+    });
+    await flushMicrotasks();
+
+    expect(h.reader.read).toHaveBeenCalledTimes(1);
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(secondResolved).toBe(true);
+
+    firstRedeem.resolve({ status: "confirmed", conditionIds: ["cond-coalesce-1"] });
+    await firstSweep;
+    await secondSweep;
+  });
+
+  it("coalescing: pending trigger executes one follow-up after current completes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    h.gateway.redeemPositions.mockClear();
+    h.reader.read.mockReset();
+    const firstRedeem = deferred<any>();
+    h.reader.read
+      .mockResolvedValueOnce([coalescingPosition(1)])
+      .mockResolvedValueOnce([coalescingPosition(2)]);
+    h.gateway.redeemPositions
+      .mockReturnValueOnce(firstRedeem.promise)
+      .mockResolvedValue({ status: "confirmed", conditionIds: ["cond-coalesce-2"] });
+
+    const firstSweep = runSweepForTest(h.module);
+    await flushMicrotasks();
+    await runSweepForTest(h.module, "reactive");
+    await flushMicrotasks();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    firstRedeem.resolve({ status: "confirmed", conditionIds: ["cond-coalesce-1"] });
+    await firstSweep;
+    await flushMicrotasks();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect((h.module as unknown as { pendingSweepReason: string | null }).pendingSweepReason).toBe(
+      null,
+    );
+  });
+
+  it("coalescing: 5 rapid triggers result in exactly 1 follow-up, not 5", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    h.gateway.redeemPositions.mockClear();
+    h.reader.read.mockReset();
+    const firstRedeem = deferred<any>();
+    h.reader.read
+      .mockResolvedValueOnce([coalescingPosition(1)])
+      .mockResolvedValueOnce([coalescingPosition(2)]);
+    h.gateway.redeemPositions
+      .mockReturnValueOnce(firstRedeem.promise)
+      .mockResolvedValue({ status: "confirmed", conditionIds: ["cond-coalesce-2"] });
+
+    const firstSweep = runSweepForTest(h.module);
+    await flushMicrotasks();
+    for (let i = 1; i <= 5; i += 1) {
+      await runSweepForTest(h.module, `reactive-${i}`);
+    }
+
+    expect((h.module as unknown as { pendingSweepReason: string | null }).pendingSweepReason).toBe(
+      "reactive-5",
+    );
+    firstRedeem.resolve({ status: "confirmed", conditionIds: ["cond-coalesce-1"] });
+    await firstSweep;
+    await flushMicrotasks();
+
+    expect(h.reader.read).toHaveBeenCalledTimes(2);
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(redeemConditionCallOrder(h.gateway.redeemPositions.mock.calls as unknown[][])).toEqual([
+      "cond-coalesce-1",
+      "cond-coalesce-2",
+    ]);
+  });
+
+  it("coalescing: error in first sweep does not block subsequent calls", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    h.gateway.redeemPositions.mockClear();
+    h.reader.read.mockReset();
+    h.reader.read
+      .mockResolvedValueOnce([coalescingPosition(1)])
+      .mockResolvedValueOnce([coalescingPosition(2)]);
+    h.gateway.redeemPositions
+      .mockRejectedValueOnce(new Error("relayer down"))
+      .mockResolvedValueOnce({ status: "confirmed", conditionIds: ["cond-coalesce-2"] });
+
+    await runSweepForTest(h.module);
+    expect((h.module as unknown as { isSweepRunning: boolean }).isSweepRunning).toBe(false);
+    await runSweepForTest(h.module);
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(h.gateway.redeemPositions).toHaveBeenLastCalledWith(["cond-coalesce-2"], {
+      redeemTokenIdsByCondition: { "cond-coalesce-2": [createTokenId("tok-coalesce-2")] },
+    });
+  });
+
+  it("caps verification-triggered retries when remote shares never clear", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      policy: { maxRetries: 1, postRedeemVerifyDelayMs: 1_000 },
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(h.redeemLogRows.at(-1)).toMatchObject({
+      status: "failed_max_retries",
+      errorMsg: "verification_retry_budget_exhausted",
+      retryCount: 1,
+    });
+    expect(h.log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ conditionId: CONDITION }),
+      "redeem sweep verification exhausted retry budget",
+    );
+  });
+
+  it("reacts to wallet snapshot events without waiting for the timer", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({ positions: [] });
+    await h.module.start();
+    await h.bus.drain();
+    h.reader.read.mockResolvedValueOnce([remotePosition()]);
+    await h.bus.publish("PolymarketWalletUpdated", {
+      positions: [
+        {
+          tokenId: createTokenId(TOKEN),
+          conditionId: CONDITION,
+          size: 10,
+          redeemable: true,
+          slug: "market",
+          outcome: "Yes",
+        },
+      ],
+      timestamp: Date.now(),
+    });
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("rate-limits per condition, not globally", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [
+        remotePosition({ tokenId: TOKEN, conditionId: "cond-1" }),
+        remotePosition({ tokenId: TOKEN_TWO, conditionId: "cond-2" }),
+      ],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+  });
+
+  it("loads recent attempting rows after restart and blocks duplicate reservation", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemLogRows: [
+        {
+          id: 1,
+          conditionId: CONDITION,
+          tokenIds: [TOKEN],
+          attemptTs: NOW - 60_000,
+          status: "attempting",
+        },
+      ],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.module.isConditionInRedeemFlight(CONDITION)).toBe(true);
+  });
+
+  it("reloads submitted rows after restart and schedules verification", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemLogRows: [
+        {
+          id: 1,
+          conditionId: CONDITION,
+          tokenIds: [TOKEN],
+          attemptTs: NOW - 4 * 60_000,
+          status: "submitted",
+          details: { excludedTokenIds: [TOKEN_TWO] },
+        },
+      ],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.module.isConditionInRedeemFlight(CONDITION)).toBe(true);
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.gateway.redeemPositions).toHaveBeenCalledWith([CONDITION], {
+      redeemTokenIdsByCondition: { [CONDITION]: [createTokenId(TOKEN)] },
+    });
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["failed", "success"]);
+    expect(h.redeemLogRows.at(-1)).toMatchObject({
+      status: "success",
+      details: { source: "verify", excludedTokenIds: [TOKEN_TWO] },
+    });
+  });
+
+  it("marks old attempting rows as orphaned on restart and alerts", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemLogRows: [
+        {
+          id: 1,
+          conditionId: CONDITION,
+          tokenIds: [TOKEN],
+          attemptTs: NOW - 31 * 60_000,
+          status: "attempting",
+        },
+      ],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.redeemLogRows[0]).toMatchObject({
+      status: "failed_orphaned",
+      errorMsg: "runtime_restart_during_attempt",
+    });
+    expect(h.log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ orphaned: expect.any(Array) }),
+      "redeem sweep recovered orphaned attempts after runtime restart",
+    );
+  });
+
+  it("does not reload successful attempts as in-flight after restart", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemLogRows: [
+        {
+          id: 1,
+          conditionId: "cond-success",
+          tokenIds: [TOKEN],
+          attemptTs: NOW - 60_000,
+          status: "success",
+        },
+      ],
+      positions: [],
+    });
+    await h.module.start();
+
+    expect(h.module.isConditionInRedeemFlight("cond-success")).toBe(false);
+  });
+
+  it("does not reload failed attempts as in-flight after restart", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemLogRows: [
+        {
+          id: 1,
+          conditionId: "cond-failed",
+          tokenIds: [TOKEN],
+          attemptTs: NOW - 60_000,
+          status: "failed",
+        },
+      ],
+      positions: [],
+    });
+    await h.module.start();
+
+    expect(h.module.isConditionInRedeemFlight("cond-failed")).toBe(false);
+  });
+
+  it("waits for startup in-flight load before the first wallet-event sweep", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemLogRows: [
+        {
+          id: 1,
+          conditionId: CONDITION,
+          tokenIds: [TOKEN],
+          attemptTs: NOW - 60_000,
+          status: "attempting",
+        },
+      ],
+      positions: [],
+    });
+    const startPromise = h.module.start();
+    await h.bus.publish("PolymarketWalletUpdated", {
+      positions: [
+        {
+          tokenId: createTokenId(TOKEN),
+          conditionId: CONDITION,
+          size: 10,
+          redeemable: true,
+          slug: "market",
+          outcome: "Yes",
+        },
+      ],
+      timestamp: Date.now(),
+    });
+    await startPromise;
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+  });
+
+  it("records partial-ambiguous rows per condition and emits one batch warning", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [
+        remotePosition({ tokenId: "amb-1", conditionId: null }),
+        remotePosition({ tokenId: "amb-2", conditionId: null }),
+        remotePosition({ tokenId: "amb-3", conditionId: null }),
+      ],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.redeemLogRows.filter((row) => row.errorMsg === "partial_ambiguous")).toHaveLength(3);
+    expect(h.log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ count: 3, conditionIds: expect.any(Array) }),
+      "redeem_sweep_partial_ambiguous_batch",
+    );
+  });
+
+  it("records one partial-ambiguous redeem_log entry for one ambiguous position", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [remotePosition({ tokenId: "amb-one", conditionId: null })],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.redeemLogRows).toContainEqual(
+      expect.objectContaining({
+        conditionId: "unknown:amb-one",
+        tokenIds: ["amb-one"],
+        status: "rejected",
+        errorMsg: "partial_ambiguous",
+        details: expect.objectContaining({
+          includedTokenIds: ["amb-one"],
+          excludedTokenIds: [],
+        }),
+      }),
+    );
+  });
+
+  it("increments partial-ambiguous counters per condition", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [remotePosition({ tokenId: "amb-1", conditionId: null })],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "redeem_partial_ambiguous_total",
+      1,
+      JSON.stringify({ condition_id: "unknown:amb-1" }),
+      new Date(NOW).toISOString(),
+    );
+  });
+});

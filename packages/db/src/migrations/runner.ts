@@ -28,10 +28,26 @@ export function runMigrations(
 
     const sql = readFileSync(path.join(migrationsDir, file), "utf-8");
     db.transaction(() => {
-      db.exec(sql);
+      db.exec(applySafeAddColumnStatements(db, sql));
       db.prepare("INSERT INTO schema_migrations (name) VALUES (?)").run(file);
     })();
   }
+}
+
+export function applySafeAddColumnStatements(db: Database.Database, sql: string): string {
+  // `safe_add_column` is a migration-runner macro, not a SQLite UDF. Keeping it
+  // out of db.exec avoids re-entering the same better-sqlite3 connection from a
+  // custom function while still making split-ledger replay idempotent.
+  return sql.replace(
+    /^\s*SELECT\s+safe_add_column\('([A-Za-z_][A-Za-z0-9_]*)',\s*'([A-Za-z_][A-Za-z0-9_]*)',\s*'((?:[^']|'')*)'\);\s*$/gm,
+    (_match, table: string, column: string, definition: string) => {
+      const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!columns.some((c) => c.name === column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition.replace(/''/g, "'")}`);
+      }
+      return "";
+    },
+  );
 }
 
 export function listControlMigrationFiles(): string[] {

@@ -140,6 +140,7 @@ import {
   SqlitePositionDriftRepository,
   SqliteExecutionPolicyObservationRepository,
   SqliteDecisionSignalLogRepository,
+  SqliteRedeemLogRepository,
 } from "@krabs/db";
 import { SnapshotWriter } from "./snapshot-writer.js";
 import { calculateTotalExposure } from "./exposure-calculator.js";
@@ -156,6 +157,7 @@ import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.
 import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-state-transition-backfill.js";
 import { OrderLifetimeModule } from "./modules/order-lifetime/order-lifetime-module.js";
 import { SamePriceCooldownModule } from "./modules/same-price-cooldown/same-price-cooldown-module.js";
+import { RedeemSweepModule } from "./modules/redeem-sweep/redeem-sweep-module.js";
 import { isGatewayOrderReject } from "./order-rejection-classification.js";
 import {
   buildRiskEventVolumeSnapshot,
@@ -341,6 +343,7 @@ async function main(): Promise<void> {
     mergeLedger: new SqliteMergeLedgerRepository(ledgerConn.db),
     settlementLedger: new SqliteSettlementLedgerRepository(ledgerConn.db),
     positionDrift: new SqlitePositionDriftRepository(ledgerConn.db),
+    redeemLog: new SqliteRedeemLogRepository(ledgerConn.db),
     marketSnapshot: new SqliteMarketSnapshotRepository(ledgerConn.db),
     riskEvent: new SqliteRiskEventRepository(ledgerConn.db),
     decisionSignalLog: new SqliteDecisionSignalLogRepository(ledgerConn.db),
@@ -369,7 +372,8 @@ async function main(): Promise<void> {
   // Read initial balance from profile_settings (control.db) instead of YAML
   const settingsRow = controlConn.db
     .prepare(
-      `SELECT initial_balance_usdc, envelope_json, wallet_mode, min_order_usdc, relayer_json
+      `SELECT initial_balance_usdc, envelope_json, wallet_mode, min_order_usdc,
+              fallback_min_order_usdc_relayer, fallback_min_order_usdc_eoa, relayer_json
          FROM profile_settings
         WHERE profile_id = ?`,
     )
@@ -379,6 +383,8 @@ async function main(): Promise<void> {
         envelope_json: string | null;
         wallet_mode: "eoa" | "relayer" | null;
         min_order_usdc: number | null;
+        fallback_min_order_usdc_relayer: number | null;
+        fallback_min_order_usdc_eoa: number | null;
         relayer_json: string | null;
       }
     | undefined;
@@ -487,6 +493,8 @@ async function main(): Promise<void> {
       maxOrderUsdc: Number(envelope.maxOrderUsdc ?? 25),
       maxActiveMarkets: Number(envelope.maxActiveMarkets ?? 10),
       walletMode: settingsRow?.wallet_mode ?? "eoa",
+      fallbackMinOrderUsdcRelayer: settingsRow?.fallback_min_order_usdc_relayer ?? null,
+      fallbackMinOrderUsdcEoa: settingsRow?.fallback_min_order_usdc_eoa ?? null,
       ...(typeof minOrderUsdc === "number" && Number.isFinite(minOrderUsdc)
         ? { minOrderUsdc }
         : {}),
@@ -809,12 +817,15 @@ async function main(): Promise<void> {
     reconciliationTrigger: () => reconcileTrigger.fn?.(),
   });
 
+  let redeemSweepModule: RedeemSweepModule | null = null;
+
   // 7g. Risk + Inventory module
   const riskInventoryModule = new RiskInventoryModule({
     bus,
     positionRepo: repos.position,
     inventoryLotRepo: repos.inventoryLot,
     orderRepo: repos.order,
+    marketRepo: repos.market,
     fillRepo: repos.fill,
     log,
     db: ledgerConn.db,
@@ -826,6 +837,9 @@ async function main(): Promise<void> {
     walletBufferMinUsdc: config.executionWalletBufferMinUsdc,
     executionPolicy: currentExecutionPolicy,
     capacityMetricsSink: recordOrderCapacitySample,
+    redeemInFlightGuard: (conditionId) =>
+      redeemSweepModule?.isConditionInRedeemFlight(conditionId) ?? false,
+    runtimeMetrics,
     resolutionTracker: marketResolutionTracker,
     markToMarketEnabled: runtimeMode !== "live-lite",
   });
@@ -1122,6 +1136,22 @@ async function main(): Promise<void> {
     ...(runtimeMode === "live-lite" && exchangeGateway ? { gateway: exchangeGateway } : {}),
   });
 
+  redeemSweepModule =
+    runtimeMode === "live-lite" && traderAddress
+      ? new RedeemSweepModule({
+          bus,
+          gateway: exchangeGateway,
+          positionReader: new PolymarketDataPositionReader(traderAddress),
+          positionRepo: repos.position,
+          lotRepo: repos.inventoryLot,
+          marketRepo: repos.market,
+          redeemLogRepo: repos.redeemLog,
+          policy: () => currentExecutionPolicy().redeemSweep,
+          log,
+          runtimeMetrics,
+        })
+      : null;
+
   // 7k. Inventory Auto-Merge (P3-1) — Polymarket-specific USDC-release operational
   // extension. Not in spec §0; gated behind ENABLE_INVENTORY_AUTO_MERGE=true.
   // See docs/adr/002-inventory-auto-merge.md.
@@ -1200,6 +1230,9 @@ async function main(): Promise<void> {
             import("@krabs/domain").RuntimeModule,
           ],
         ]
+      : []),
+    ...(redeemSweepModule
+      ? [["redeem-sweep", redeemSweepModule] as [string, import("@krabs/domain").RuntimeModule]]
       : []),
     ["algo-decision", algoDecisionModule],
     ["resolution", resolutionModule],

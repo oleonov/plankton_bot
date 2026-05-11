@@ -209,6 +209,9 @@ describe("control-db migration infrastructure", () => {
         enabled: true,
         maxSpreadTicks: 2,
         sides: ["buy", "sell"],
+        safetyBuffer: 1.05,
+        fallbackMinNotionalUsdc: 1,
+        marketableBuyMinNotionalUsdc: 1,
       });
       expect(parsed.multiBuyLadder).toEqual({
         enabled: true,
@@ -685,6 +688,9 @@ describe("control-db migration infrastructure", () => {
       enabled: true,
       maxSpreadTicks: 2,
       sides: ["buy", "sell"],
+      safetyBuffer: 1.05,
+      fallbackMinNotionalUsdc: 1,
+      marketableBuyMinNotionalUsdc: 1,
     });
   });
 
@@ -721,6 +727,9 @@ describe("control-db migration infrastructure", () => {
       enabled: false,
       maxSpreadTicks: 1,
       sides: ["sell"],
+      safetyBuffer: 1.05,
+      fallbackMinNotionalUsdc: 1,
+      marketableBuyMinNotionalUsdc: 1,
     });
   });
 });

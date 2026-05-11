@@ -35,6 +35,7 @@ import { auditRoutes } from "./routes/audit.js";
 import { selectionRulesRoutes } from "./routes/selection-rules.js";
 import { marketsRoutes } from "./routes/markets.js";
 import { scannerRoutes } from "./routes/scanner.js";
+import { redeemLogRoutes } from "./routes/redeem-log.js";
 
 export interface ServerDeps {
   config: AppConfig;
@@ -149,6 +150,7 @@ export async function buildServer(deps: ServerDeps) {
     defaultInitialBalanceUsdc: deps.defaultInitialBalanceUsdc,
   });
   await app.register(tradingActivityRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(redeemLogRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
 
   // Mixed routes — pass both
   await app.register(metricsRoutes, {

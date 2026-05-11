@@ -78,8 +78,37 @@ else
     echo -e "${YELLOW}No KRABS_API_KEY — no resume intent${NC}"
 fi
 
+# Step 4b: Create remote DB backup before container replacement can run migrations
+echo -e "\n${GREEN}[4b/7] Creating remote SQLite backup...${NC}"
+ssh ${SERVER_USER}@${SERVER_HOST} << ENDSSH
+set -e
+DATA_DIR="/var/lib/docker/volumes/krabs-data/_data"
+BACKUP_ROOT="\${DATA_DIR}/backups"
+BACKUP_DIR="\${BACKUP_ROOT}/pre-deploy-${GIT_SHA}-\$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p "\${BACKUP_DIR}"
+COUNT=0
+for db in "\${DATA_DIR}/control.db" "\${DATA_DIR}"/ledger-*.db; do
+  [ -f "\${db}" ] || continue
+  base=\$(basename "\${db}")
+  if command -v sqlite3 >/dev/null 2>&1; then
+    sqlite3 "\${db}" ".timeout 5000" ".backup \${BACKUP_DIR}/\${base}"
+  else
+    cp "\${db}" "\${BACKUP_DIR}/\${base}"
+    [ -f "\${db}-wal" ] && cp "\${db}-wal" "\${BACKUP_DIR}/\${base}-wal"
+    [ -f "\${db}-shm" ] && cp "\${db}-shm" "\${BACKUP_DIR}/\${base}-shm"
+  fi
+  COUNT=\$((COUNT + 1))
+done
+if [ "\${COUNT}" -eq 0 ]; then
+  echo "WARNING: no SQLite DB files found under \${DATA_DIR}"
+else
+  echo "Backed up \${COUNT} DB file(s) to \${BACKUP_DIR}"
+fi
+find "\${BACKUP_ROOT}" -maxdepth 1 -type d -name 'pre-deploy-*' -mtime +14 -exec rm -rf {} +
+ENDSSH
+
 # Step 5: Load image and replace containers (atomic swap — no separate down)
-echo -e "\n${GREEN}[5/6] Loading image and replacing containers on server...${NC}"
+echo -e "\n${GREEN}[5/7] Loading image and replacing containers on server...${NC}"
 ssh ${SERVER_USER}@${SERVER_HOST} << ENDSSH
 set -e
 echo "Loading Docker image..."

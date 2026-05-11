@@ -54,8 +54,6 @@ import {
 import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 100;
-const TAKER_MIN_SIZE_SAFETY_BUFFER = 1.05;
-const TAKER_FALLBACK_MIN_NOTIONAL_USDC = 1;
 const MIN_SIZE_EPSILON = 1e-9;
 const MIN_NOTIONAL_EPSILON = 1e-9;
 // Policy epsilon: suppress only truly identical SELL prices. The tiny margin
@@ -1154,7 +1152,7 @@ export class SignalToOrderBridge {
     if (spreadTicks > taker.maxSpreadTicks) return null;
 
     const price = signal.side === "buy" ? market.bestAsk : market.bestBid;
-    const minSizeBlock = this.resolveTakerMinSizeBlock(signal, market, price);
+    const minSizeBlock = this.resolveTakerMinSizeBlock(signal, market, price, taker);
     if (minSizeBlock) {
       this.recordTakerMinSizeDisabledMetric(signal, minSizeBlock);
       return null;
@@ -1178,11 +1176,13 @@ export class SignalToOrderBridge {
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
     price: number,
+    taker: ExecutionPolicy["opportunisticTaker"],
   ): {
     reason: "share_min_size" | "notional_min_size";
     marketMinOrderSize: number | null;
     minNotionalUsdc: number | null;
     notionalUsdc: number;
+    safetyBuffer: number;
   } | null {
     const marketMinOrderSize =
       typeof market.minOrderSize === "number" &&
@@ -1193,13 +1193,14 @@ export class SignalToOrderBridge {
 
     if (
       marketMinOrderSize !== null &&
-      signal.suggestedSize + MIN_SIZE_EPSILON < marketMinOrderSize * TAKER_MIN_SIZE_SAFETY_BUFFER
+      signal.suggestedSize + MIN_SIZE_EPSILON < marketMinOrderSize * taker.safetyBuffer
     ) {
       return {
         reason: "share_min_size",
         marketMinOrderSize,
         minNotionalUsdc: null,
         notionalUsdc: signal.suggestedSizeUsdc,
+        safetyBuffer: taker.safetyBuffer,
       };
     }
 
@@ -1208,22 +1209,25 @@ export class SignalToOrderBridge {
         ? signal.suggestedSizeUsdc
         : signal.suggestedSize * price;
     const configuredBuyMinNotional =
-      signal.side === "buy" ? this.deps.liveLiteGuard?.getMinEntryNotionalUsdc?.() : null;
+      signal.side === "buy"
+        ? this.deps.liveLiteGuard?.getMinEntryNotionalUsdc?.(taker.marketableBuyMinNotionalUsdc)
+        : null;
     const minNotionalUsdc =
       configuredBuyMinNotional ??
-      (marketMinOrderSize === null ? TAKER_FALLBACK_MIN_NOTIONAL_USDC : null);
+      (marketMinOrderSize === null ? taker.fallbackMinNotionalUsdc : null);
 
     if (
       minNotionalUsdc !== null &&
       Number.isFinite(minNotionalUsdc) &&
       minNotionalUsdc > 0 &&
-      notionalUsdc + MIN_NOTIONAL_EPSILON < minNotionalUsdc * TAKER_MIN_SIZE_SAFETY_BUFFER
+      notionalUsdc + MIN_NOTIONAL_EPSILON < minNotionalUsdc * taker.safetyBuffer
     ) {
       return {
         reason: "notional_min_size",
         marketMinOrderSize,
         minNotionalUsdc,
         notionalUsdc,
+        safetyBuffer: taker.safetyBuffer,
       };
     }
 
@@ -1334,6 +1338,7 @@ export class SignalToOrderBridge {
       marketMinOrderSize: number | null;
       minNotionalUsdc: number | null;
       notionalUsdc: number;
+      safetyBuffer: number;
     },
   ): void {
     try {
@@ -1344,6 +1349,13 @@ export class SignalToOrderBridge {
         reason: block.reason,
         market_min_order_size: block.marketMinOrderSize,
         min_notional_usdc: block.minNotionalUsdc,
+        requested_size_shares: signal.suggestedSize,
+        requested_size_usdc: block.notionalUsdc,
+        required_size_shares:
+          block.marketMinOrderSize === null ? null : block.marketMinOrderSize * block.safetyBuffer,
+        required_notional_usdc:
+          block.minNotionalUsdc === null ? null : block.minNotionalUsdc * block.safetyBuffer,
+        safety_buffer: block.safetyBuffer,
       };
       this.deps.runtimeMetrics?.writeEvent(
         "taker_disabled_min_size_total",
@@ -1357,6 +1369,12 @@ export class SignalToOrderBridge {
         JSON.stringify({ side: signal.side, mode: "rejected", reason: "min_size" }),
         capturedAt,
       );
+      this.deps.runtimeMetrics?.writeEvent(
+        "taker_disabled_fraction_over_threshold",
+        1,
+        JSON.stringify({ side: signal.side, bucket: takerFractionBucket(signal, block) }),
+        capturedAt,
+      );
     } catch (err) {
       this.log.debug(
         { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
@@ -1368,6 +1386,32 @@ export class SignalToOrderBridge {
 
 function canUseBaseMarketForPricing(market: NormalizedMarket): boolean {
   return market.bookSource === "clob" || market.bookSource === "simulation";
+}
+
+function takerFractionBucket(
+  signal: RuntimeEventMap["SignalApproved"]["signal"],
+  block: {
+    reason: "share_min_size" | "notional_min_size";
+    marketMinOrderSize: number | null;
+    minNotionalUsdc: number | null;
+    notionalUsdc: number;
+    safetyBuffer: number;
+  },
+): "0-0.5" | "0.5-0.8" | "0.8-0.95" | "0.95-1.0" {
+  const requiredShares =
+    block.marketMinOrderSize === null ? null : block.marketMinOrderSize * block.safetyBuffer;
+  const requiredNotional =
+    block.minNotionalUsdc === null ? null : block.minNotionalUsdc * block.safetyBuffer;
+  const fraction =
+    block.reason === "share_min_size" && requiredShares !== null && requiredShares > 0
+      ? signal.suggestedSize / requiredShares
+      : block.reason === "notional_min_size" && requiredNotional !== null && requiredNotional > 0
+        ? block.notionalUsdc / requiredNotional
+        : 0;
+  if (fraction < 0.5) return "0-0.5";
+  if (fraction < 0.8) return "0.5-0.8";
+  if (fraction < 0.95) return "0.8-0.95";
+  return "0.95-1.0";
 }
 
 function resolveBidAnchoredSellPrice(

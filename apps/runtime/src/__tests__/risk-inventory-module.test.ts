@@ -374,6 +374,42 @@ describe("RiskInventoryModule", () => {
     await mod.stop();
   });
 
+  it("emits the configured redeem-in-flight rejection counter for BUY and SELL", async () => {
+    const fixedNow = Date.parse("2026-05-11T00:00:00.000Z");
+    const runtimeMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    mod = createModule(undefined, {
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      redeemInFlightGuard: () => true,
+      runtimeMetrics: runtimeMetrics as never,
+      now: () => fixedNow,
+    });
+    await mod.start();
+
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ side: "buy" }),
+      market: makeMarket(),
+    });
+    await bus.publish("SignalProduced", {
+      signal: makeSignal({ signalId: "sig-sell", side: "sell", reason: "repricing-exit" }),
+      market: makeMarket(),
+    });
+
+    expect(runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "buy_rejected_due_to_redeem_in_flight_total",
+      1,
+      JSON.stringify({ side: "buy", condition_id: String(COND_ID) }),
+      new Date(fixedNow).toISOString(),
+    );
+    expect(runtimeMetrics.writeEvent).toHaveBeenCalledWith(
+      "buy_rejected_due_to_redeem_in_flight_total",
+      1,
+      JSON.stringify({ side: "sell", condition_id: String(COND_ID) }),
+      new Date(fixedNow).toISOString(),
+    );
+
+    await mod.stop();
+  });
+
   it("rejects BUY before SignalApproved when wallet buy budget is exhausted", async () => {
     orderRepo = createMockOrderRepo();
     (orderRepo.sumOpenBuyNotional as ReturnType<typeof vi.fn>).mockReturnValue(8);

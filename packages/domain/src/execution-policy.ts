@@ -20,6 +20,8 @@ import type {
   OrderLifetimePolicy,
   MultiBuyLadderPolicy,
   OpportunisticTakerPolicy,
+  RaceProtectionPolicy,
+  RedeemSweepPolicy,
   RepriceOnOutbidPolicy,
   ExitRepriceOnDownpricePolicy,
   SellCapacityPolicy,
@@ -101,6 +103,24 @@ export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
   enabled: true,
   maxSpreadTicks: 2,
   sides: ["buy", "sell"],
+  safetyBuffer: 1.05,
+  fallbackMinNotionalUsdc: 1,
+  marketableBuyMinNotionalUsdc: 1,
+};
+
+export const DEFAULT_REDEEM_SWEEP_POLICY: RedeemSweepPolicy = {
+  enabled: true,
+  intervalMs: 10 * 60_000,
+  inFlightTtlMs: 15 * 60_000,
+  maxRetries: 3,
+  retryBackoffMs: [60_000, 300_000, 1_800_000],
+  postRedeemVerifyDelayMs: 5 * 60_000,
+};
+
+export const DEFAULT_RACE_PROTECTION_POLICY: RaceProtectionPolicy = {
+  redeemInFlight: {
+    enabled: true,
+  },
 };
 
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
@@ -173,6 +193,8 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   exitRepriceOnDownprice: DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   dropTrigger: DEFAULT_DROP_TRIGGER_POLICY,
   multiBuyLadder: DEFAULT_MULTI_BUY_LADDER_POLICY,
+  redeemSweep: DEFAULT_REDEEM_SWEEP_POLICY,
+  raceProtection: DEFAULT_RACE_PROTECTION_POLICY,
   telemetry: DEFAULT_TELEMETRY,
 };
 
@@ -221,6 +243,12 @@ const BOUND_FILL_RATE_MIN = 0;
 const BOUND_FILL_RATE_MAX = 1;
 // Parser ceiling only; profile capital/order risk limits still constrain live exposure.
 const BOUND_LADDER_USDC_CAP_MAX = 10_000;
+const BOUND_TAKER_SAFETY_BUFFER_MIN = 1;
+const BOUND_TAKER_SAFETY_BUFFER_MAX = 10;
+const BOUND_TAKER_MIN_NOTIONAL_MAX = 1_000;
+const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
+const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
+const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -300,6 +328,8 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const exitRepriceOnDownprice = parseExitRepriceOnDownprice(obj.exitRepriceOnDownprice, issues);
   const dropTrigger = parseDropTrigger(obj.dropTrigger, issues);
   const multiBuyLadder = parseMultiBuyLadder(obj.multiBuyLadder, issues);
+  const redeemSweep = parseRedeemSweep(obj.redeemSweep, issues);
+  const raceProtection = parseRaceProtection(obj.raceProtection, issues);
 
   return {
     policy: {
@@ -321,6 +351,8 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       exitRepriceOnDownprice,
       dropTrigger,
       multiBuyLadder,
+      redeemSweep,
+      raceProtection,
       telemetry,
     },
     issues,
@@ -349,6 +381,30 @@ function parseOpportunisticTaker(raw: unknown, issues: string[]): OpportunisticT
       "opportunisticTaker.maxSpreadTicks",
     ),
     sides: sideListOr(obj.sides, DEFAULT_OPPORTUNISTIC_TAKER_POLICY.sides, issues),
+    safetyBuffer: clampedNumber(
+      obj.safetyBuffer,
+      DEFAULT_OPPORTUNISTIC_TAKER_POLICY.safetyBuffer,
+      BOUND_TAKER_SAFETY_BUFFER_MIN,
+      BOUND_TAKER_SAFETY_BUFFER_MAX,
+      issues,
+      "opportunisticTaker.safetyBuffer",
+    ),
+    fallbackMinNotionalUsdc: clampedNumber(
+      obj.fallbackMinNotionalUsdc,
+      DEFAULT_OPPORTUNISTIC_TAKER_POLICY.fallbackMinNotionalUsdc,
+      0,
+      BOUND_TAKER_MIN_NOTIONAL_MAX,
+      issues,
+      "opportunisticTaker.fallbackMinNotionalUsdc",
+    ),
+    marketableBuyMinNotionalUsdc: clampedNumber(
+      obj.marketableBuyMinNotionalUsdc,
+      DEFAULT_OPPORTUNISTIC_TAKER_POLICY.marketableBuyMinNotionalUsdc,
+      0,
+      BOUND_TAKER_MIN_NOTIONAL_MAX,
+      issues,
+      "opportunisticTaker.marketableBuyMinNotionalUsdc",
+    ),
   };
 }
 
@@ -521,6 +577,86 @@ function parseMultiBuyLadder(raw: unknown, issues: string[]): MultiBuyLadderPoli
       issues,
       "multiBuyLadder.minStepFillRate",
     ),
+  };
+}
+
+function parseRedeemSweep(raw: unknown, issues: string[]): RedeemSweepPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("redeemSweep must be an object");
+    return DEFAULT_REDEEM_SWEEP_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_REDEEM_SWEEP_POLICY.enabled,
+      issues,
+      "redeemSweep.enabled",
+    ),
+    intervalMs: clampedInt(
+      obj.intervalMs,
+      DEFAULT_REDEEM_SWEEP_POLICY.intervalMs,
+      BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS,
+      BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS,
+      issues,
+      "redeemSweep.intervalMs",
+    ),
+    inFlightTtlMs: clampedInt(
+      obj.inFlightTtlMs,
+      DEFAULT_REDEEM_SWEEP_POLICY.inFlightTtlMs,
+      BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS,
+      BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS,
+      issues,
+      "redeemSweep.inFlightTtlMs",
+    ),
+    maxRetries: clampedInt(
+      obj.maxRetries,
+      DEFAULT_REDEEM_SWEEP_POLICY.maxRetries,
+      0,
+      BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX,
+      issues,
+      "redeemSweep.maxRetries",
+    ),
+    retryBackoffMs: intListOr(
+      obj.retryBackoffMs,
+      DEFAULT_REDEEM_SWEEP_POLICY.retryBackoffMs,
+      BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS,
+      BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS,
+      issues,
+      "redeemSweep.retryBackoffMs",
+    ),
+    postRedeemVerifyDelayMs: clampedInt(
+      obj.postRedeemVerifyDelayMs,
+      DEFAULT_REDEEM_SWEEP_POLICY.postRedeemVerifyDelayMs,
+      BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS,
+      BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS,
+      issues,
+      "redeemSweep.postRedeemVerifyDelayMs",
+    ),
+  };
+}
+
+function parseRaceProtection(raw: unknown, issues: string[]): RaceProtectionPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("raceProtection must be an object");
+    return DEFAULT_RACE_PROTECTION_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  const redeemRaw = obj.redeemInFlight;
+  if (redeemRaw == null || typeof redeemRaw !== "object" || Array.isArray(redeemRaw)) {
+    if (redeemRaw !== undefined) issues.push("raceProtection.redeemInFlight must be an object");
+    return DEFAULT_RACE_PROTECTION_POLICY;
+  }
+  const redeem = redeemRaw as Record<string, unknown>;
+  return {
+    redeemInFlight: {
+      enabled: booleanOr(
+        redeem.enabled,
+        DEFAULT_RACE_PROTECTION_POLICY.redeemInFlight.enabled,
+        issues,
+        "raceProtection.redeemInFlight.enabled",
+      ),
+    },
   };
 }
 
@@ -1092,6 +1228,34 @@ function sideListOr(
     return fallback;
   }
   return sides;
+}
+
+function intListOr(
+  raw: unknown,
+  fallback: number[],
+  min: number,
+  max: number,
+  issues: string[],
+  name: string,
+): number[] {
+  if (raw === undefined) return fallback;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    issues.push(`${name} must be a non-empty integer array`);
+    return fallback;
+  }
+  const parsed: number[] = [];
+  for (const value of raw) {
+    if (typeof value !== "number" || !Number.isFinite(value) || !Number.isInteger(value)) {
+      issues.push(`${name} must contain only finite integers`);
+      return fallback;
+    }
+    if (value < min || value > max) {
+      issues.push(`${name} contains ${value} outside [${min}, ${max}]`);
+      return fallback;
+    }
+    parsed.push(value);
+  }
+  return parsed;
 }
 
 /** Serialize an ExecutionPolicy back to the compact JSON used by the DB. */

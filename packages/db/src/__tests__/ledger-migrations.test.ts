@@ -323,6 +323,11 @@ describe("migration 053 — taker BUY gross fill sizes", () => {
       .prepare("SELECT remaining_size FROM inventory_lots WHERE lot_id = 'lot-closed'")
       .get() as { remaining_size: number };
     expect(closedLot.remaining_size).toBe(0);
+
+    const beforeReplay = db.prepare("SELECT total_changes() AS count").get() as { count: number };
+    db.exec(readMigration("053_taker_buy_gross_fill_sizes.sql"));
+    const afterReplay = db.prepare("SELECT total_changes() AS count").get() as { count: number };
+    expect(afterReplay.count - beforeReplay.count).toBe(0);
   });
 });
 
@@ -410,5 +415,34 @@ describe("migration 051 — algo token mode state", () => {
         "idx_algo_token_mode_state_updated",
       ]),
     );
+  });
+});
+
+describe("migration 055 — redeem_log unique in-flight", () => {
+  it("retires pre-index append-only active rows that already have a later outcome", () => {
+    db.exec(readMigration("054_redeem_log.sql"));
+    db.prepare(
+      `INSERT INTO redeem_log (condition_id, token_ids, attempt_ts, status)
+       VALUES (?, ?, ?, ?)`,
+    ).run("cond-1", JSON.stringify(["tok-1"]), 1_000, "attempting");
+    db.prepare(
+      `INSERT INTO redeem_log (condition_id, token_ids, attempt_ts, status)
+       VALUES (?, ?, ?, ?)`,
+    ).run("cond-1", JSON.stringify(["tok-1"]), 2_000, "success");
+
+    db.exec(readMigration("055_redeem_log_unique_in_flight.sql"));
+
+    const rows = db
+      .prepare("SELECT status FROM redeem_log WHERE condition_id = ? ORDER BY attempt_ts")
+      .all("cond-1") as Array<{ status: string }>;
+    expect(rows.map((row) => row.status)).toEqual(["failed_orphaned", "success"]);
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO redeem_log (condition_id, token_ids, attempt_ts, status)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run("cond-1", JSON.stringify(["tok-1"]), 3_000, "attempting"),
+    ).not.toThrow();
   });
 });

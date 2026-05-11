@@ -135,6 +135,81 @@ describe("ledger schema — score columns (audit §F3)", () => {
         created_at          TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
       );
+
+      CREATE TABLE market_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_id TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      );
+
+      CREATE TABLE runtime_metrics (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        metric_name TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      );
+
+      CREATE TABLE risk_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_type TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE portfolio_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        profile TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      );
+
+      CREATE TABLE orders (
+        order_id TEXT PRIMARY KEY,
+        client_order_id TEXT,
+        token_id TEXT,
+        status TEXT,
+        exchange_order_id TEXT,
+        bot_run_id TEXT
+      );
+
+      CREATE TABLE fills (
+        fill_id TEXT PRIMARY KEY,
+        order_id TEXT,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        price REAL NOT NULL,
+        size REAL,
+        size_usdc REAL,
+        filled_at TEXT NOT NULL,
+        liquidity_role TEXT,
+        reconciled INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE leg_states (
+        token_id TEXT PRIMARY KEY,
+        first_trade_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE positions (
+        position_id TEXT PRIMARY KEY,
+        token_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        size REAL NOT NULL DEFAULT 0,
+        cost_basis_usdc REAL NOT NULL DEFAULT 0,
+        avg_entry_price REAL,
+        opened_at TEXT NOT NULL DEFAULT (datetime('now')),
+        closed_at TEXT,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE inventory_lots (
+        lot_id TEXT PRIMARY KEY,
+        position_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        fill_id TEXT NOT NULL,
+        size REAL NOT NULL DEFAULT 0,
+        remaining_size REAL NOT NULL DEFAULT 0,
+        entry_price REAL NOT NULL DEFAULT 0,
+        cost_usdc REAL NOT NULL DEFAULT 0
+      );
     `);
     seed
       .prepare(

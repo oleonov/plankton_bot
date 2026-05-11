@@ -123,6 +123,113 @@ describe("bootstrapLedgerDb busy_timeout scoping", () => {
   });
 });
 
+describe("bootstrapLedgerDb split-ledger migration runner", () => {
+  it("creates a clean ledger and records replay-safe migrations through 055", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-runner-clean-"));
+    try {
+      const c = bootstrapLedgerDb(path.join(dir, "ledger.db"));
+      try {
+        const migrations = c.db
+          .prepare("SELECT name FROM schema_migrations ORDER BY name")
+          .all() as Array<{ name: string }>;
+        const names = migrations.map((row) => row.name);
+        expect(names).toContain("037_position_drifts.sql");
+        expect(names).toContain("050_leg_states_cumulative_sizes.sql");
+        expect(names).toContain("053_taker_buy_gross_fill_sizes.sql");
+        expect(names).toContain("054_redeem_log.sql");
+        expect(names).toContain("055_redeem_log_unique_in_flight.sql");
+        expect(
+          c.db
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='redeem_log'")
+            .get(),
+        ).toBeTruthy();
+      } finally {
+        c.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("continues a ledger whose schema_migrations stopped at 040", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-runner-partial-"));
+    try {
+      const dbPath = path.join(dir, "ledger.db");
+      const first = bootstrapLedgerDb(dbPath);
+      try {
+        first.db
+          .prepare("DELETE FROM schema_migrations WHERE name > ?")
+          .run("040_leg_state_transitions.sql");
+      } finally {
+        first.close();
+      }
+
+      const second = bootstrapLedgerDb(dbPath);
+      try {
+        const row = second.db
+          .prepare("SELECT name FROM schema_migrations WHERE name = ?")
+          .get("055_redeem_log_unique_in_flight.sql");
+        expect(row).toBeTruthy();
+      } finally {
+        second.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("is a no-op when ledger migrations are already at the latest version", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-runner-noop-"));
+    try {
+      const dbPath = path.join(dir, "ledger.db");
+      const first = bootstrapLedgerDb(dbPath);
+      const before = first.db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as {
+        count: number;
+      };
+      first.close();
+
+      const second = bootstrapLedgerDb(dbPath);
+      try {
+        const after = second.db
+          .prepare("SELECT COUNT(*) AS count FROM schema_migrations")
+          .get() as { count: number };
+        expect(after.count).toBe(before.count);
+      } finally {
+        second.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("repairs the current live-lite shape with ad-hoc columns but no late migration rows", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-runner-prod-shape-"));
+    try {
+      const dbPath = path.join(dir, "ledger.db");
+      const first = bootstrapLedgerDb(dbPath);
+      try {
+        first.db
+          .prepare("DELETE FROM schema_migrations WHERE name >= ?")
+          .run("037_position_drifts.sql");
+      } finally {
+        first.close();
+      }
+
+      const second = bootstrapLedgerDb(dbPath);
+      try {
+        const rows = second.db
+          .prepare("SELECT name FROM schema_migrations WHERE name >= ? ORDER BY name")
+          .all("037_position_drifts.sql") as Array<{ name: string }>;
+        expect(rows.map((row) => row.name)).toContain("055_redeem_log_unique_in_flight.sql");
+      } finally {
+        second.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("bootstrapLedgerDb leg_state cumulative_* backfill (ADR-027 §D-C)", () => {
   it("backfills existing leg_states from fills history on the split-ledger path", () => {
     // Simulate a deployed bot: pre-existing leg_state rows + fills, columns
@@ -172,9 +279,12 @@ describe("bootstrapLedgerDb leg_state cumulative_* backfill (ADR-027 §D-C)", ()
             WHERE token_id = ?`,
         )
         .run("tok-bf");
+      first.db
+        .prepare("DELETE FROM schema_migrations WHERE name = ?")
+        .run("050_leg_states_cumulative_sizes.sql");
       first.close();
 
-      // Second boot: bootstrapLedgerDb must run the backfill.
+      // Second boot: bootstrapLedgerDb must run migration 050 via the standard runner.
       const second = bootstrapLedgerDb(dbPath);
       try {
         const row = second.db
@@ -333,11 +443,11 @@ describe("bootstrapLedgerDb taker BUY gross-size repair (R60)", () => {
             "2026-05-11T00:00:00Z",
           );
         // First boot represents the old split-ledger bootstrap path, which
-        // did not run migration 053. Drop the marker set by the current
-        // bootstrap so the second boot exercises the repair.
+        // did not run migration 053. Drop the schema migration row so the
+        // second boot exercises the standard runner repair.
         first.db
-          .prepare("DELETE FROM bootstrap_backfills WHERE name = ?")
-          .run("2026-05-11-taker-buy-gross-fill-sizes-r60");
+          .prepare("DELETE FROM schema_migrations WHERE name = ?")
+          .run("053_taker_buy_gross_fill_sizes.sql");
       } finally {
         first.close();
       }
@@ -362,8 +472,8 @@ describe("bootstrapLedgerDb taker BUY gross-size repair (R60)", () => {
           )
           .get("tok-r60") as Record<string, number>;
         const marker = second.db
-          .prepare("SELECT name FROM bootstrap_backfills WHERE name = ?")
-          .get("2026-05-11-taker-buy-gross-fill-sizes-r60");
+          .prepare("SELECT name FROM schema_migrations WHERE name = ?")
+          .get("053_taker_buy_gross_fill_sizes.sql");
 
         expect(fill.size).toBeCloseTo(grossSize, 10);
         expect(lot.size).toBeCloseTo(grossSize, 10);

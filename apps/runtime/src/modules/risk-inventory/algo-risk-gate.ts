@@ -8,6 +8,7 @@ import {
   SignalReason,
   type BuyCapacityPolicy,
   type ExecutionPolicy,
+  type MarketRepository,
   type Order,
 } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -34,6 +35,7 @@ import {
 
 const OPEN_ORDER_STATUSES = new Set(["pending", "open", "partially-filled"]);
 const NEW_ENTRY_REASONS = new Set<string>([SignalReason.ProbeEntry]);
+export const CONDITION_REDEEM_IN_FLIGHT_REASON = "condition_redeem_in_flight";
 
 interface OpenOrderCounts {
   openBuyOrderCount: number;
@@ -106,6 +108,11 @@ export class AlgoRiskGateImpl implements RiskGate {
     private readonly buyCapacityPolicy?: () => BuyCapacityPolicy | undefined,
     private readonly executionPolicy?: () => ExecutionPolicy | undefined,
     private readonly capacityMetricsSink?: (sample: OrderCapacityMetricsSample) => void,
+    private readonly marketRepo?: Pick<MarketRepository, "findByTokenId"> | undefined,
+    private readonly redeemInFlightGuard?: ((conditionId: string) => boolean) | undefined,
+    private readonly redeemInFlightMetricsSink?:
+      | ((sample: { side: "buy" | "sell"; conditionId: string }) => void)
+      | undefined,
   ) {}
 
   async evaluate(signal: Signal): Promise<RiskDecision> {
@@ -128,6 +135,17 @@ export class AlgoRiskGateImpl implements RiskGate {
       });
       return this.decision(signal, approved, rejected, passed);
     };
+
+    if (this.isRedeemInFlightBlocked(signal, policy)) {
+      const conditionId = this.resolveConditionId(signal);
+      this.log.warn(
+        { tokenId: String(signal.tokenId), conditionId, side: signal.side },
+        "signal rejected — condition redeem in flight",
+      );
+      this.redeemInFlightMetricsSink?.({ side: signal.side, conditionId });
+      rejected.push(CONDITION_REDEEM_IN_FLIGHT_REASON);
+      return finish(false, CONDITION_REDEEM_IN_FLIGHT_REASON);
+    }
 
     // Sell signals bypass BUY entry checks, but still respect SELL/total caps.
     if (!isBuy) {
@@ -278,5 +296,17 @@ export class AlgoRiskGateImpl implements RiskGate {
     const position = this.positionRepo.findByTokenId(signal.tokenId);
     if (!position || position.status === "closed") return false;
     return position.size + 1e-9 < minOrderSize;
+  }
+
+  private isRedeemInFlightBlocked(signal: Signal, policy: ExecutionPolicy | undefined): boolean {
+    if (!this.redeemInFlightGuard) return false;
+    if (!policy || (policy.raceProtection?.redeemInFlight.enabled ?? true) !== true) return false;
+    return this.redeemInFlightGuard(this.resolveConditionId(signal));
+  }
+
+  private resolveConditionId(signal: Signal): string {
+    return String(
+      this.marketRepo?.findByTokenId(signal.tokenId)?.conditionId ?? signal.conditionId,
+    );
   }
 }

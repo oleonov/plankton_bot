@@ -543,6 +543,8 @@ export interface ProfileSettings {
   riskCapsJson: string | null;
   walletMode?: WalletMode | null;
   minOrderUsdc?: number | null;
+  fallbackMinOrderUsdcRelayer?: number | null;
+  fallbackMinOrderUsdcEoa?: number | null;
   relayerJson?: string | null;
   /**
    * ADR-015: DB-backed execution policy. JSON payload shaped by
@@ -730,6 +732,12 @@ export interface OpportunisticTakerPolicy {
   /** Maximum top-of-book spread, in CLOB ticks, where placement may cross as taker. */
   maxSpreadTicks: number;
   sides: Array<"buy" | "sell">;
+  /** Multiplier applied to market/order minimums before a taker placement is allowed. */
+  safetyBuffer: number;
+  /** Fallback USDC notional floor when CLOB market metadata lacks minOrderSize. */
+  fallbackMinNotionalUsdc: number;
+  /** Marketable BUY notional floor used by live-lite guards. */
+  marketableBuyMinNotionalUsdc: number;
 }
 
 export interface DropTriggerPolicy {
@@ -751,6 +759,21 @@ export interface MultiBuyLadderPolicy {
   perTokenUsdcCap: number;
   maxPriceDriftTicks: number;
   minStepFillRate: number;
+}
+
+export interface RedeemSweepPolicy {
+  enabled: boolean;
+  intervalMs: number;
+  inFlightTtlMs: number;
+  maxRetries: number;
+  retryBackoffMs: number[];
+  postRedeemVerifyDelayMs: number;
+}
+
+export interface RaceProtectionPolicy {
+  redeemInFlight: {
+    enabled: boolean;
+  };
 }
 
 export interface ExecutionPolicy {
@@ -781,6 +804,8 @@ export interface ExecutionPolicy {
   exitRepriceOnDownprice: ExitRepriceOnDownpricePolicy;
   dropTrigger: DropTriggerPolicy;
   multiBuyLadder: MultiBuyLadderPolicy;
+  redeemSweep: RedeemSweepPolicy;
+  raceProtection: RaceProtectionPolicy;
   telemetry: ExecutionPolicyTelemetry;
 }
 
