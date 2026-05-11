@@ -54,7 +54,9 @@ import {
 import { isExecutableOrderSize, resolveEffectiveMinOrderSize } from "../../min-order-size.js";
 
 const BRIDGE_WS_BOOK_WAIT_MS = 100;
-const MARKETABLE_BUY_MIN_NOTIONAL_USDC = 1;
+const TAKER_MIN_SIZE_SAFETY_BUFFER = 1.05;
+const TAKER_FALLBACK_MIN_NOTIONAL_USDC = 1;
+const MIN_SIZE_EPSILON = 1e-9;
 const MIN_NOTIONAL_EPSILON = 1e-9;
 // Policy epsilon: suppress only truly identical SELL prices. The tiny margin
 // absorbs JS decimal representation drift while staying far below CLOB tick size.
@@ -1150,14 +1152,14 @@ export class SignalToOrderBridge {
     if (!Number.isFinite(spread) || spread < 0) return null;
     const spreadTicks = Math.round(spread / market.tickSize);
     if (spreadTicks > taker.maxSpreadTicks) return null;
-    if (
-      signal.side === "buy" &&
-      signal.suggestedSizeUsdc + MIN_NOTIONAL_EPSILON < MARKETABLE_BUY_MIN_NOTIONAL_USDC
-    ) {
+
+    const price = signal.side === "buy" ? market.bestAsk : market.bestBid;
+    const minSizeBlock = this.resolveTakerMinSizeBlock(signal, market, price);
+    if (minSizeBlock) {
+      this.recordTakerMinSizeDisabledMetric(signal, minSizeBlock);
       return null;
     }
 
-    const price = signal.side === "buy" ? market.bestAsk : market.bestBid;
     const validation = validateExecutablePrice(price, market.tickSize);
     if (!validation.ok) {
       return {
@@ -1170,6 +1172,62 @@ export class SignalToOrderBridge {
       };
     }
     return { kind: "ok", price, postOnly: false, pricedMode: "taker", spreadTicks };
+  }
+
+  private resolveTakerMinSizeBlock(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    price: number,
+  ): {
+    reason: "share_min_size" | "notional_min_size";
+    marketMinOrderSize: number | null;
+    minNotionalUsdc: number | null;
+    notionalUsdc: number;
+  } | null {
+    const marketMinOrderSize =
+      typeof market.minOrderSize === "number" &&
+      Number.isFinite(market.minOrderSize) &&
+      market.minOrderSize > 0
+        ? market.minOrderSize
+        : null;
+
+    if (
+      marketMinOrderSize !== null &&
+      signal.suggestedSize + MIN_SIZE_EPSILON < marketMinOrderSize * TAKER_MIN_SIZE_SAFETY_BUFFER
+    ) {
+      return {
+        reason: "share_min_size",
+        marketMinOrderSize,
+        minNotionalUsdc: null,
+        notionalUsdc: signal.suggestedSizeUsdc,
+      };
+    }
+
+    const notionalUsdc =
+      Number.isFinite(signal.suggestedSizeUsdc) && signal.suggestedSizeUsdc > 0
+        ? signal.suggestedSizeUsdc
+        : signal.suggestedSize * price;
+    const configuredBuyMinNotional =
+      signal.side === "buy" ? this.deps.liveLiteGuard?.getMinEntryNotionalUsdc?.() : null;
+    const minNotionalUsdc =
+      configuredBuyMinNotional ??
+      (marketMinOrderSize === null ? TAKER_FALLBACK_MIN_NOTIONAL_USDC : null);
+
+    if (
+      minNotionalUsdc !== null &&
+      Number.isFinite(minNotionalUsdc) &&
+      minNotionalUsdc > 0 &&
+      notionalUsdc + MIN_NOTIONAL_EPSILON < minNotionalUsdc * TAKER_MIN_SIZE_SAFETY_BUFFER
+    ) {
+      return {
+        reason: "notional_min_size",
+        marketMinOrderSize,
+        minNotionalUsdc,
+        notionalUsdc,
+      };
+    }
+
+    return null;
   }
 
   private computePricingShadow(
@@ -1229,6 +1287,12 @@ export class SignalToOrderBridge {
           JSON.stringify({ side: signal.side, spread_ticks: executionTerms.spreadTicks ?? null }),
           capturedAt,
         );
+        this.deps.runtimeMetrics?.writeEvent(
+          "taker_attempt_total",
+          1,
+          JSON.stringify({ side: signal.side, mode: "success" }),
+          capturedAt,
+        );
         const day = capturedAt.slice(0, 10);
         if (this.lastTakerInfoLogDay !== day) {
           this.lastTakerInfoLogDay = day;
@@ -1259,6 +1323,44 @@ export class SignalToOrderBridge {
       this.log.debug(
         { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
         "failed to record pricing metrics",
+      );
+    }
+  }
+
+  private recordTakerMinSizeDisabledMetric(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    block: {
+      reason: "share_min_size" | "notional_min_size";
+      marketMinOrderSize: number | null;
+      minNotionalUsdc: number | null;
+      notionalUsdc: number;
+    },
+  ): void {
+    try {
+      const capturedAt = new Date(this.now()).toISOString();
+      const labels = {
+        side: signal.side,
+        token_id: String(signal.tokenId),
+        reason: block.reason,
+        market_min_order_size: block.marketMinOrderSize,
+        min_notional_usdc: block.minNotionalUsdc,
+      };
+      this.deps.runtimeMetrics?.writeEvent(
+        "taker_disabled_min_size_total",
+        1,
+        JSON.stringify(labels),
+        capturedAt,
+      );
+      this.deps.runtimeMetrics?.writeEvent(
+        "taker_attempt_total",
+        1,
+        JSON.stringify({ side: signal.side, mode: "rejected", reason: "min_size" }),
+        capturedAt,
+      );
+    } catch (err) {
+      this.log.debug(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "failed to record taker min-size metric",
       );
     }
   }

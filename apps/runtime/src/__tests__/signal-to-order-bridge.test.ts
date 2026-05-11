@@ -1400,6 +1400,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       orderRepo?: OrderRepository;
       orderLifetime?: ConstructorParameters<typeof SignalToOrderBridge>[0]["orderLifetime"];
       runtimeMetrics?: ConstructorParameters<typeof SignalToOrderBridge>[0]["runtimeMetrics"];
+      liveLiteGuard?: ConstructorParameters<typeof SignalToOrderBridge>[0]["liveLiteGuard"];
       policyOverrides?: Partial<ExecutionPolicy>;
     } = {},
   ) {
@@ -1417,7 +1418,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const bridge = new SignalToOrderBridge({
       bus,
       log: logger,
-      liveLiteGuard: { getWalletMode: () => "eoa" } as never,
+      liveLiteGuard: opts.liveLiteGuard ?? ({ getWalletMode: () => "eoa" } as never),
       policy: () => policy,
       ...(opts.orderRepo ? { orderRepo: opts.orderRepo } : {}),
       ...(opts.orderLifetime ? { orderLifetime: opts.orderLifetime } : {}),
@@ -1531,7 +1532,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     );
   });
 
-  it("keeps sub-dollar BUY orders as maker even when taker spread is tight", async () => {
+  it("allows sub-dollar BUY taker when market min size is below the signal size", async () => {
     const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
@@ -1539,10 +1540,74 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
         opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
       },
     });
-    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01 });
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 0.1 });
 
     await bus.publish("SignalApproved", {
-      signal: { ...makeSignal(), suggestedSizeUsdc: 0.99 },
+      signal: { ...makeSignal(), suggestedSize: 5, suggestedSizeUsdc: 0.5 },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.1);
+    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "taker_decision_total",
+      1,
+      JSON.stringify({ side: "buy", spread_ticks: 1 }),
+      expect.any(String),
+    );
+  });
+
+  it("keeps BUY maker when taker notional is below the live-lite entry floor", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      runtimeMetrics: metrics as never,
+      liveLiteGuard: {
+        getWalletMode: () => "relayer",
+        getMinEntryNotionalUsdc: () => 1,
+      } as never,
+      policyOverrides: {
+        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      },
+    });
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 5 });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedSize: 9.9, suggestedSizeUsdc: 0.99 },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.09);
+    expect(placed[0]!.command.postOnly).toBe(true);
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "taker_disabled_min_size_total",
+      1,
+      expect.stringContaining('"reason":"notional_min_size"'),
+      expect.any(String),
+    );
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "taker_attempt_total",
+      1,
+      JSON.stringify({ side: "buy", mode: "rejected", reason: "min_size" }),
+      expect.any(String),
+    );
+  });
+
+  it("keeps BUY maker when market min size metadata is missing and size is below fallback", async () => {
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      policyOverrides: {
+        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      },
+    });
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01, minOrderSize: null });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), suggestedSize: 9.9, suggestedSizeUsdc: 0.99 },
       market,
       approvedAt: Date.now(),
     });
@@ -1551,10 +1616,37 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.09);
     expect(placed[0]!.command.postOnly).toBeUndefined();
-    expect(metrics.writeEvent).not.toHaveBeenCalledWith(
-      "taker_decision_total",
-      expect.any(Number),
-      expect.any(String),
+  });
+
+  it("applies market min size guard to SELL taker decisions", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      runtimeMetrics: metrics as never,
+      policyOverrides: {
+        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      },
+    });
+    const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 5 });
+
+    await bus.publish("SignalApproved", {
+      signal: {
+        ...makeSignal(),
+        side: "sell",
+        suggestedPrice: 0.1,
+        suggestedSize: 4.9,
+        suggestedSizeUsdc: 0.49,
+        reason: "repricing-exit",
+      },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "taker_disabled_min_size_total",
+      1,
+      expect.stringContaining('"side":"sell"'),
       expect.any(String),
     );
   });
