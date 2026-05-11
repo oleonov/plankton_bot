@@ -184,6 +184,8 @@ function seedControlMigrationsBaseline(db: import("better-sqlite3").Database): v
 }
 
 const BOOTSTRAP_BACKFILL_BUY_SIZE_PRECEDENCE_V22 = "2026-04-17-buy-size-precedence-v2.2";
+const BOOTSTRAP_BACKFILL_TAKER_BUY_GROSS_FILL_SIZES_R60 =
+  "2026-05-11-taker-buy-gross-fill-sizes-r60";
 
 function ensureBootstrapBackfillsTable(db: import("better-sqlite3").Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS bootstrap_backfills (
@@ -205,6 +207,20 @@ function hasBootstrapBackfill(db: import("better-sqlite3").Database, name: strin
 
 function markBootstrapBackfill(db: import("better-sqlite3").Database, name: string): void {
   db.prepare("INSERT OR IGNORE INTO bootstrap_backfills (name) VALUES (?)").run(name);
+}
+
+function runSplitLedgerBackfillFromMigration(
+  db: import("better-sqlite3").Database,
+  filename: string,
+  marker: string,
+): void {
+  if (hasBootstrapBackfill(db, marker)) return;
+
+  const sql = readFileSync(join(import.meta.dirname, "migrations", filename), "utf-8");
+  db.transaction(() => {
+    db.exec(sql);
+    markBootstrapBackfill(db, marker);
+  })();
 }
 
 function backfillLiveProfileSettings(db: import("better-sqlite3").Database): void {
@@ -512,15 +528,25 @@ export function bootstrapLedgerDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "decision_signal_log", "exit_pnl_bucket", "TEXT");
   safeAddColumn(conn.db, "decision_signal_log", "sold_bought_ratio", "REAL");
   safeAddColumn(conn.db, "decision_signal_log", "sold_bought_ratio_bucket", "TEXT");
+  ensureBootstrapBackfillsTable(conn.db);
   // ADR-027 §D-C: cumulative sizes on leg_states.
   safeAddColumn(conn.db, "leg_states", "cumulative_buy_size", "REAL NOT NULL DEFAULT 0");
   safeAddColumn(conn.db, "leg_states", "cumulative_buy_notional", "REAL NOT NULL DEFAULT 0");
   safeAddColumn(conn.db, "leg_states", "cumulative_sell_size", "REAL NOT NULL DEFAULT 0");
   backfillLegStateCumulativeFromFills(conn.db);
+  backfillTakerBuyGrossFillSizes(conn.db);
   safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
   ensureUniqueOpenPositionIndex(conn.db);
   setRuntimeBusyTimeout(conn);
   return conn;
+}
+
+function backfillTakerBuyGrossFillSizes(db: import("better-sqlite3").Database): void {
+  runSplitLedgerBackfillFromMigration(
+    db,
+    "053_taker_buy_gross_fill_sizes.sql",
+    BOOTSTRAP_BACKFILL_TAKER_BUY_GROSS_FILL_SIZES_R60,
+  );
 }
 
 /**

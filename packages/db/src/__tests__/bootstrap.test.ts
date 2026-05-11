@@ -221,6 +221,170 @@ describe("bootstrapLedgerDb leg_state cumulative_* backfill (ADR-027 §D-C)", ()
   });
 });
 
+describe("bootstrapLedgerDb taker BUY gross-size repair (R60)", () => {
+  it("repairs old net-sized taker BUY fills on the split-ledger path", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "krabs-ledger-taker-buy-bf-"));
+    try {
+      const dbPath = path.join(dir, "ledger.db");
+      const first = bootstrapLedgerDb(dbPath);
+      const grossSize = 21;
+      const oldNetSize = 20.7261;
+      const costUsdc = 2.73;
+      try {
+        first.db
+          .prepare(
+            `INSERT INTO orders
+               (order_id, client_order_id, token_id, condition_id, side, order_type,
+                post_only, price, size, size_usdc, status, bot_run_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            "ord-r60",
+            "client-r60",
+            "tok-r60",
+            "cond-r60",
+            "buy",
+            "limit",
+            0,
+            0.13,
+            oldNetSize,
+            costUsdc,
+            "filled",
+            "run-r60",
+          );
+        first.db
+          .prepare(
+            `INSERT INTO fills
+               (fill_id, order_id, token_id, condition_id, side, price, size,
+                size_usdc, liquidity_role, fee, fee_rate_bps, filled_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            "fill-r60",
+            "ord-r60",
+            "tok-r60",
+            "cond-r60",
+            "buy",
+            0.13,
+            oldNetSize,
+            costUsdc,
+            "taker",
+            0.003561,
+            60,
+            "2026-05-11T00:00:00Z",
+          );
+        first.db
+          .prepare(
+            `INSERT INTO positions
+               (position_id, token_id, condition_id, side, size, avg_entry_price,
+                cost_basis_usdc, status, opened_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            "pos-r60",
+            "tok-r60",
+            "cond-r60",
+            "yes",
+            oldNetSize,
+            costUsdc / oldNetSize,
+            costUsdc,
+            "open",
+            "2026-05-11T00:00:00Z",
+            "2026-05-11T00:00:00Z",
+          );
+        first.db
+          .prepare(
+            `INSERT INTO inventory_lots
+               (lot_id, position_id, token_id, side, size, remaining_size,
+                entry_price, cost_usdc, fill_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            "lot-r60",
+            "pos-r60",
+            "tok-r60",
+            "yes",
+            oldNetSize,
+            oldNetSize,
+            costUsdc / oldNetSize,
+            costUsdc,
+            "fill-r60",
+            "2026-05-11T00:00:00Z",
+          );
+        first.db
+          .prepare(
+            `INSERT INTO leg_states
+               (token_id, buy_count, sell_count, last_action, first_trade_price,
+                first_trade_at, last_trade_at, cumulative_buy_size,
+                cumulative_buy_notional, cumulative_sell_size, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            "tok-r60",
+            1,
+            0,
+            "BUY",
+            0.13,
+            "2026-05-11T00:00:00Z",
+            "2026-05-11T00:00:00Z",
+            oldNetSize,
+            costUsdc,
+            0,
+            "2026-05-11T00:00:00Z",
+          );
+        // First boot represents the old split-ledger bootstrap path, which
+        // did not run migration 053. Drop the marker set by the current
+        // bootstrap so the second boot exercises the repair.
+        first.db
+          .prepare("DELETE FROM bootstrap_backfills WHERE name = ?")
+          .run("2026-05-11-taker-buy-gross-fill-sizes-r60");
+      } finally {
+        first.close();
+      }
+
+      const second = bootstrapLedgerDb(dbPath);
+      try {
+        const fill = second.db
+          .prepare("SELECT size FROM fills WHERE fill_id = ?")
+          .get("fill-r60") as { size: number };
+        const lot = second.db
+          .prepare("SELECT size, remaining_size, entry_price FROM inventory_lots WHERE lot_id = ?")
+          .get("lot-r60") as Record<string, number>;
+        const position = second.db
+          .prepare(
+            "SELECT size, avg_entry_price, cost_basis_usdc FROM positions WHERE position_id = ?",
+          )
+          .get("pos-r60") as Record<string, number>;
+        const leg = second.db
+          .prepare(
+            `SELECT cumulative_buy_size, cumulative_buy_notional, cumulative_sell_size
+               FROM leg_states WHERE token_id = ?`,
+          )
+          .get("tok-r60") as Record<string, number>;
+        const marker = second.db
+          .prepare("SELECT name FROM bootstrap_backfills WHERE name = ?")
+          .get("2026-05-11-taker-buy-gross-fill-sizes-r60");
+
+        expect(fill.size).toBeCloseTo(grossSize, 10);
+        expect(lot.size).toBeCloseTo(grossSize, 10);
+        expect(lot.remaining_size).toBeCloseTo(grossSize, 10);
+        expect(lot.entry_price).toBeCloseTo(0.13, 10);
+        expect(position.size).toBeCloseTo(grossSize, 10);
+        expect(position.cost_basis_usdc).toBeCloseTo(costUsdc, 10);
+        expect(position.avg_entry_price).toBeCloseTo(0.13, 10);
+        expect(leg.cumulative_buy_size).toBeCloseTo(grossSize, 10);
+        expect(leg.cumulative_buy_notional).toBeCloseTo(costUsdc, 10);
+        expect(leg.cumulative_sell_size).toBe(0);
+        expect(marker).toBeTruthy();
+      } finally {
+        second.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("assertSizeRuleInvariants (ADR-024 §D-B)", () => {
   it("passes after bootstrap default seed (1 BUY + 1 SELL FALLBACK row)", () => {
     expect(() => assertSizeRuleInvariants(conn.db)).not.toThrow();
