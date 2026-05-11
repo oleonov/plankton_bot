@@ -7,7 +7,7 @@
  * Responsibilities:
  *  - Subscribe to SignalApproved
  *  - Resolve a live CLOB book (cache/refresh) and build hard-liveness guard
- *  - Price orders at bestBid/bestAsk (spec §7 execution policy); postOnly in relayer mode
+ *  - Price orders from the configured edge/exit policy; postOnly in relayer mode
  *  - Enforce persistent same-price cooldowns after repeated stale cancels
  *  - Publish PlaceOrderRequested with a deterministic clientOrderId
  *
@@ -40,6 +40,7 @@ import {
   classifyRoundLevel,
   computePricingDeltaTicks,
   resolveBoundedMidpointPrice,
+  roundToTick,
   validateExecutablePrice,
   type BoundedMidpointDiagnostics,
   type ExecutablePriceValidationFailureReason,
@@ -948,6 +949,8 @@ export class SignalToOrderBridge {
 
   /**
    * ADR-006 D1 (edge mode): BUY = bestBid, SELL = bestAsk.
+   * R58 sell-exit guard: default SELL exits are bid-anchored to avoid
+   * self-referential loops when our own maker order is the only visible ask.
    * ADR-014 (bounded-midpoint mode): price improves toward midpoint, bounded by
    * spread cap + improvement cap + no-cross clamp. Single formula for all runtime
    * modes; mode selector is `policy.pricing.mode`. Postonly remains relayer-only (D2).
@@ -1042,8 +1045,7 @@ export class SignalToOrderBridge {
         : { kind: "ok", price: outcome.price, pricingDiagnostics: outcome.diagnostics };
     }
 
-    // Edge mode (ADR-006 D1).
-    const price = signal.side === "buy" ? market.bestBid : market.bestAsk;
+    const price = this.resolveEdgeExecutionPrice(signal, market, policy);
     if (price == null || !Number.isFinite(price) || price <= 0) return { kind: "unavailable" };
     const validation = validateExecutablePrice(price, market.tickSize);
     if (!validation.ok) {
@@ -1071,6 +1073,30 @@ export class SignalToOrderBridge {
       ok.pricingShadow = pricingShadow;
     }
     return ok;
+  }
+
+  private resolveEdgeExecutionPrice(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    policy: ExecutionPolicy,
+  ): number | null {
+    if (signal.side === "sell" && policy.exitPricingMode === "bid-anchored") {
+      if (
+        market.bestBid == null ||
+        !Number.isFinite(market.bestBid) ||
+        !Number.isFinite(market.tickSize) ||
+        market.tickSize <= 0
+      ) {
+        return null;
+      }
+      return resolveBidAnchoredSellPrice(
+        market.bestBid,
+        market.bestAsk,
+        market.tickSize,
+        policy.exitBidAnchorTicks,
+      );
+    }
+    return signal.side === "buy" ? market.bestBid : market.bestAsk;
   }
 
   private computePricingShadow(
@@ -1114,6 +1140,22 @@ export class SignalToOrderBridge {
 
 function canUseBaseMarketForPricing(market: NormalizedMarket): boolean {
   return market.bookSource === "clob" || market.bookSource === "simulation";
+}
+
+function resolveBidAnchoredSellPrice(
+  bestBid: number,
+  bestAsk: number | null,
+  tickSize: number,
+  anchorTicks: number,
+): number {
+  const rawPrice = roundToTick(bestBid + anchorTicks * tickSize, tickSize);
+  if (bestAsk == null || !Number.isFinite(bestAsk)) return rawPrice;
+
+  const insideAsk = roundToTick(bestAsk - tickSize, tickSize);
+  if (insideAsk > bestBid + SELL_DEDUP_PRICE_EPSILON) {
+    return Math.min(rawPrice, insideAsk);
+  }
+  return Math.min(rawPrice, roundToTick(bestAsk, tickSize));
 }
 
 function resolveOrderSize(

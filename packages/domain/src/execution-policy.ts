@@ -73,7 +73,7 @@ export const DEFAULT_REPRICE_ON_OUTBID_POLICY: RepriceOnOutbidPolicy = {
 export const DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY: ExitRepriceOnDownpricePolicy = {
   enabled: false,
   thresholdTicks: 5,
-  maxRepricesPerOrder: 10,
+  maxRepricesPerOrder: 3,
   stuckWarningEnabled: true,
   stuckWarningAgeMs: 4 * 60 * 60_000,
   stuckWarningGapPct: 0.1,
@@ -158,6 +158,8 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   orderCapacity: DEFAULT_ORDER_CAPACITY_POLICY,
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
+  exitPricingMode: "bid-anchored",
+  exitBidAnchorTicks: 3,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   repriceOnOutbid: DEFAULT_REPRICE_ON_OUTBID_POLICY,
   exitRepriceOnDownprice: DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
@@ -170,6 +172,7 @@ const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
 const ORDER_LIFETIME_ENFORCEMENT_MODES = ["observe", "enforce"] as const;
 const PRICING_MODES = ["edge", "bounded-midpoint"] as const;
 const BINARY_PRICING_POLICIES = ["edge", "skip"] as const;
+const EXIT_PRICING_MODES = ["bid-anchored", "edge"] as const;
 
 // Bounds chosen to match the Zod schema that previously lived in
 // packages/config/src/env.ts so operators can't wedge the runtime via SQL.
@@ -262,6 +265,21 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
 
   const deadSideGuard = parseDeadSideGuard(obj.deadSideGuard, issues);
   const pricing = parsePricing(obj.pricing, issues);
+  const exitPricingMode = enumOr(
+    obj.exitPricingMode,
+    EXIT_PRICING_MODES,
+    DEFAULT_EXECUTION_POLICY.exitPricingMode,
+    issues,
+    "exitPricingMode",
+  );
+  const exitBidAnchorTicks = clampedInt(
+    obj.exitBidAnchorTicks,
+    DEFAULT_EXECUTION_POLICY.exitBidAnchorTicks,
+    BOUND_SPREAD_TICKS_MIN,
+    BOUND_SPREAD_TICKS_MAX,
+    issues,
+    "exitBidAnchorTicks",
+  );
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
@@ -285,6 +303,8 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       orderCapacity,
       deadSideGuard,
       pricing,
+      exitPricingMode,
+      exitBidAnchorTicks,
       orderLifetime,
       repriceOnOutbid,
       exitRepriceOnDownprice,

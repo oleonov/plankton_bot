@@ -82,7 +82,10 @@ export interface ReconciliationModuleDeps {
     policy: () => ExitRepriceOnDownpricePolicy;
     getMarket: (
       tokenId: import("@krabs/domain").TokenId,
-    ) => Pick<import("@krabs/domain").NormalizedMarket, "bestBid" | "tickSize"> | null;
+    ) => Pick<
+      import("@krabs/domain").NormalizedMarket,
+      "bestBid" | "bestAsk" | "bestAskSize" | "askDepthExcludingOurs" | "tickSize"
+    > | null;
   };
   runtimeMetrics?: {
     writeEvent: (

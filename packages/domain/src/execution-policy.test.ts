@@ -342,6 +342,8 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
   it("preserves partial fill-rate feature overrides and defaults the rest", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({
+        exitPricingMode: "edge",
+        exitBidAnchorTicks: 7,
         repriceOnOutbid: { enabled: false },
         exitRepriceOnDownprice: { thresholdTicks: 7 },
         dropTrigger: { enabled: true, failOpenOnNoData: false, thresholdPct: -0.05 },
@@ -349,6 +351,8 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       }),
     );
     expect(issues).toHaveLength(0);
+    expect(policy.exitPricingMode).toBe("edge");
+    expect(policy.exitBidAnchorTicks).toBe(7);
     expect(policy.repriceOnOutbid).toEqual({
       ...DEFAULT_EXECUTION_POLICY.repriceOnOutbid,
       enabled: false,
@@ -372,6 +376,8 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
   it("rejects invalid fill-rate feature policy values with issues", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({
+        exitPricingMode: "ask",
+        exitBidAnchorTicks: -1,
         repriceOnOutbid: { enabled: "yes", maxRepriceCount: 1.5 },
         exitRepriceOnDownprice: {
           enabled: "yes",
@@ -397,11 +403,15 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         },
       }),
     );
+    expect(policy.exitPricingMode).toBe(DEFAULT_EXECUTION_POLICY.exitPricingMode);
+    expect(policy.exitBidAnchorTicks).toBe(DEFAULT_EXECUTION_POLICY.exitBidAnchorTicks);
     expect(policy.repriceOnOutbid).toEqual(DEFAULT_EXECUTION_POLICY.repriceOnOutbid);
     expect(policy.exitRepriceOnDownprice).toEqual(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice);
     expect(policy.dropTrigger).toEqual(DEFAULT_EXECUTION_POLICY.dropTrigger);
     expect(policy.multiBuyLadder).toEqual(DEFAULT_EXECUTION_POLICY.multiBuyLadder);
     expect(issues.some((i) => i.includes("repriceOnOutbid.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitPricingMode"))).toBe(true);
+    expect(issues.some((i) => i.includes("exitBidAnchorTicks"))).toBe(true);
     expect(issues.some((i) => i.includes("repriceOnOutbid.maxRepriceCount"))).toBe(true);
     expect(issues.some((i) => i.includes("exitRepriceOnDownprice.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("exitRepriceOnDownprice.thresholdTicks"))).toBe(true);

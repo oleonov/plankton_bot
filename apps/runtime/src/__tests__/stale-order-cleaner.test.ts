@@ -113,9 +113,19 @@ function makeMarket(overrides?: Partial<Market>): Market {
   };
 }
 
-function makePricing(overrides?: Partial<Pick<NormalizedMarket, "bestBid" | "tickSize">>) {
+function makePricing(
+  overrides?: Partial<
+    Pick<
+      NormalizedMarket,
+      "bestBid" | "bestAsk" | "bestAskSize" | "askDepthExcludingOurs" | "tickSize"
+    >
+  >,
+) {
   return {
     bestBid: 0.32,
+    bestAsk: null,
+    bestAskSize: null,
+    askDepthExcludingOurs: null,
     tickSize: 0.01,
     ...overrides,
   };
@@ -189,8 +199,15 @@ describe("cleanStaleEntryOrders", () => {
     order: Order,
     bestBid: number,
     stateMap: SellDownpriceRepriceStateMap = new Map(),
+    opts: {
+      bestAsk?: number | null;
+      bestAskSize?: number | null;
+      askDepthExcludingOurs?: number | null;
+      maxRepricesPerOrder?: number;
+      extraOpenOrders?: Order[];
+    } = {},
   ) {
-    orderRepo.findOpen = vi.fn().mockReturnValue([order]);
+    orderRepo.findOpen = vi.fn().mockReturnValue([order, ...(opts.extraOpenOrders ?? [])]);
     marketRepo.findByTokenId = vi.fn().mockReturnValue(makeMarket());
     return cleanStaleEntryOrders(
       {
@@ -202,12 +219,19 @@ describe("cleanStaleEntryOrders", () => {
           policy: () => ({
             enabled: true,
             thresholdTicks: 5,
-            maxRepricesPerOrder: 10,
+            maxRepricesPerOrder: opts.maxRepricesPerOrder ?? 3,
             stuckWarningEnabled: true,
             stuckWarningAgeMs: 4 * 60 * 60_000,
             stuckWarningGapPct: 0.1,
           }),
-          getMarket: () => makePricing({ bestBid, tickSize: 0.01 }),
+          getMarket: () =>
+            makePricing({
+              bestBid,
+              bestAsk: opts.bestAsk ?? null,
+              bestAskSize: opts.bestAskSize ?? null,
+              askDepthExcludingOurs: opts.askDepthExcludingOurs ?? null,
+              tickSize: 0.01,
+            }),
         },
       },
       backoffMap,
@@ -773,7 +797,7 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled[0].command.reason).toBe("downpriced_reprice");
   });
 
-  it("falls through to exit TTL after the tenth downprice reprice attempt", async () => {
+  it("falls through to exit TTL after the third downprice reprice attempt", async () => {
     const order = makeOrder({
       side: "sell",
       price: 0.29,
@@ -784,7 +808,7 @@ describe("cleanStaleEntryOrders", () => {
       [
         String(order.tokenId),
         {
-          repriceCount: 10,
+          repriceCount: 3,
           lastBestBid: 0.24,
           pendingOrderId: null,
           pendingSinceMs: null,
@@ -818,7 +842,7 @@ describe("cleanStaleEntryOrders", () => {
       [
         String(order.tokenId),
         {
-          repriceCount: 10,
+          repriceCount: 3,
           lastBestBid: 0.2,
           pendingOrderId: null,
           pendingSinceMs: null,
@@ -842,6 +866,136 @@ describe("cleanStaleEntryOrders", () => {
     });
     expect(cancelled).toHaveLength(1);
     expect(cancelled[0].command.reason).toBe("downpriced_reprice");
+  });
+
+  it("skips downprice reprice when our order is the only visible ask", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      size: 41,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      bestAsk: 0.29,
+      askDepthExcludingOurs: 0,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("skips downprice reprice through best-ask size inference when depth excluding ours is absent", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      size: 41,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      bestAsk: 0.29,
+      bestAskSize: 41,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("does not treat a partially filled order plus another ask as only ours", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      size: 22.47,
+      fillProgressShares: 5,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      bestAsk: 0.29,
+      bestAskSize: 20.47,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
+  });
+
+  it("sums multiple open bot SELL orders at the same best ask before skipping reprice", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      size: 11,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+    const sibling = makeOrder({
+      orderId: "ord-sibling" as Order["orderId"],
+      side: "sell",
+      price: 0.29,
+      size: 11,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      bestAsk: 0.29,
+      bestAskSize: 22,
+      extraOpenOrders: [sibling],
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(0);
+    expect(cancelled).toHaveLength(0);
+  });
+
+  it("does not skip downprice reprice when another ask remains at our price", async () => {
+    const order = makeOrder({
+      side: "sell",
+      price: 0.29,
+      size: 41,
+      createdAt: new Date(Date.now() - 60_000).toISOString(),
+      signalReason: "repricing-exit",
+    });
+
+    const cancelled: any[] = [];
+    bus.subscribe("CancelOrderRequested", async (p) => {
+      cancelled.push(p);
+    });
+
+    const result = await runWithDownprice(order, 0.23, new Map(), {
+      bestAsk: 0.29,
+      askDepthExcludingOurs: 5,
+    });
+    await bus.drain();
+
+    expect(result.downpriceRepriceCancelled).toBe(1);
+    expect(cancelled).toHaveLength(1);
   });
 
   it("keeps the downprice counter pending until the cancel event confirms", async () => {

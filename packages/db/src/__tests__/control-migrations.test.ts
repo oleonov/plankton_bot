@@ -607,4 +607,39 @@ describe("control-db migration infrastructure", () => {
       stuckWarningGapPct: 0.1,
     });
   });
+
+  it("migration 048 applies bid-anchored SELL pricing and lowers downprice cap", () => {
+    const dbPath = path.join(tmpDir, "control-r58-bid-anchored-sell.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.exitPricingMode',
+              'edge',
+              '$.exitBidAnchorTicks',
+              9,
+              '$.exitRepriceOnDownprice.maxRepricesPerOrder',
+              10
+            )
+          WHERE profile_id = ?`,
+      )
+      .run("live-lite");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("048_bid_anchored_sell_pricing.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const policy = JSON.parse(raw.json);
+
+    expect(policy.exitPricingMode).toBe("bid-anchored");
+    expect(policy.exitBidAnchorTicks).toBe(3);
+    expect(policy.exitRepriceOnDownprice.maxRepricesPerOrder).toBe(3);
+  });
 });

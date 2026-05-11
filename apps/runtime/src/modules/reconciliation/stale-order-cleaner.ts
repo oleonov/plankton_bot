@@ -87,7 +87,12 @@ export interface StaleOrderCleanerDeps {
   };
   exitRepriceOnDownprice?: {
     policy: () => ExitRepriceOnDownpricePolicy;
-    getMarket: (tokenId: TokenId) => Pick<NormalizedMarket, "bestBid" | "tickSize"> | null;
+    getMarket: (
+      tokenId: TokenId,
+    ) => Pick<
+      NormalizedMarket,
+      "bestBid" | "bestAsk" | "bestAskSize" | "askDepthExcludingOurs" | "tickSize"
+    > | null;
   };
 }
 
@@ -118,7 +123,8 @@ export async function cleanStaleEntryOrders(
   const entryBuys = openOrders.filter(
     (o) => o.side === "buy" && o.signalReason != null && ENTRY_REASONS.has(o.signalReason),
   );
-  const exitSells = openOrders.filter(
+  const openSells = openOrders.filter((o) => o.side === "sell");
+  const exitSells = openSells.filter(
     (o) => o.side === "sell" && o.signalReason != null && EXIT_REASONS.has(o.signalReason),
   );
 
@@ -207,7 +213,11 @@ export async function cleanStaleEntryOrders(
 
     const market = marketRepo.findByTokenId(order.tokenId);
     const ageMs = now - new Date(order.createdAt).getTime();
-    const repriceMarket = deps.exitRepriceOnDownprice?.getMarket(order.tokenId) ?? null;
+    const repriceMarket = withAskDepthExcludingOurOpenSells(
+      deps.exitRepriceOnDownprice?.getMarket(order.tokenId) ?? null,
+      order.tokenId,
+      openSells,
+    );
 
     const repriceKey = String(order.tokenId);
     const stuckSell = shouldWarnStuckSell(
@@ -343,8 +353,11 @@ function shouldRepriceOutbid(
 }
 
 function shouldRepriceDownprice(
-  order: Pick<Order, "orderId" | "tokenId" | "price">,
-  market: Pick<NormalizedMarket, "bestBid" | "tickSize"> | null,
+  order: Pick<Order, "orderId" | "tokenId" | "price" | "size" | "fillProgressShares">,
+  market: Pick<
+    NormalizedMarket,
+    "bestBid" | "bestAsk" | "bestAskSize" | "askDepthExcludingOurs" | "tickSize"
+  > | null,
   reprice:
     | {
         policy: () => ExitRepriceOnDownpricePolicy;
@@ -413,6 +426,15 @@ function shouldRepriceDownprice(
   }
 
   const gapTicks = (order.price - bestBid) / tickSize;
+  if (isOnlyVisibleAskFromThisOrder(order, market)) {
+    return {
+      shouldReprice: false,
+      gapTicks,
+      maxRepricesPerOrder: policy.maxRepricesPerOrder,
+      nextState,
+      stateChanged,
+    };
+  }
   if (gapTicks < policy.thresholdTicks - PRICE_EPSILON) {
     return {
       shouldReprice: false,
@@ -459,6 +481,54 @@ function shouldRepriceDownprice(
     },
     stateChanged: true,
   };
+}
+
+function withAskDepthExcludingOurOpenSells<
+  T extends Pick<NormalizedMarket, "bestAsk" | "bestAskSize" | "askDepthExcludingOurs">,
+>(market: T | null, tokenId: TokenId, openSells: readonly Order[]): T | null {
+  if (
+    !market ||
+    market.bestAsk == null ||
+    !Number.isFinite(market.bestAsk) ||
+    market.bestAskSize == null ||
+    !Number.isFinite(market.bestAskSize)
+  ) {
+    return market;
+  }
+  const ownSizeAtBestAsk = openSells.reduce((sum, order) => {
+    if (String(order.tokenId) !== String(tokenId)) return sum;
+    if (Math.abs(order.price - market.bestAsk!) > PRICE_EPSILON) return sum;
+    return sum + remainingOrderShares(order);
+  }, 0);
+  if (ownSizeAtBestAsk <= PRICE_EPSILON) return market;
+  return {
+    ...market,
+    askDepthExcludingOurs: Math.max(0, market.bestAskSize - ownSizeAtBestAsk),
+  };
+}
+
+function isOnlyVisibleAskFromThisOrder(
+  order: Pick<Order, "price" | "size" | "fillProgressShares">,
+  market: Pick<NormalizedMarket, "bestAsk" | "bestAskSize" | "askDepthExcludingOurs">,
+): boolean {
+  if (
+    market.bestAsk == null ||
+    !Number.isFinite(market.bestAsk) ||
+    Math.abs(order.price - market.bestAsk) > PRICE_EPSILON
+  ) {
+    return false;
+  }
+  if (market.askDepthExcludingOurs != null && Number.isFinite(market.askDepthExcludingOurs)) {
+    return market.askDepthExcludingOurs <= PRICE_EPSILON;
+  }
+  if (market.bestAskSize == null || !Number.isFinite(market.bestAskSize)) return false;
+  return market.bestAskSize <= remainingOrderShares(order) + PRICE_EPSILON;
+}
+
+function remainingOrderShares(order: Pick<Order, "size" | "fillProgressShares">): number {
+  const filled = order.fillProgressShares;
+  if (filled == null || !Number.isFinite(filled) || filled <= 0) return order.size;
+  return Math.max(0, order.size - filled);
 }
 
 function shouldWarnStuckSell(

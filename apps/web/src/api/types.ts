@@ -103,6 +103,8 @@ export interface ExecutionPolicyDTO {
   version: 1;
   entryPriceCeiling: number;
   exitOrderTtlMs: number;
+  exitPricingMode?: "bid-anchored" | "edge";
+  exitBidAnchorTicks?: number;
   /**
    * Step 0 §P3 — minimum market age (gamma createdAt → first BUY) in seconds.
    * `0` disables the gate (used by simulation). Canonical floor is 2,504 s

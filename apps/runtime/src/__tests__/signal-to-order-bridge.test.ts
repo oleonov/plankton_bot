@@ -476,6 +476,7 @@ describe("SignalToOrderBridge", () => {
         getWalletMode: () => "relayer",
       } as never,
       candidateBookCache,
+      policy: () => ({ ...DEFAULT_EXECUTION_POLICY, exitPricingMode: "edge" }),
     });
     bridge.subscribe();
 
@@ -1382,6 +1383,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     opts: {
       orderRepo?: OrderRepository;
       orderLifetime?: ConstructorParameters<typeof SignalToOrderBridge>[0]["orderLifetime"];
+      policyOverrides?: Partial<ExecutionPolicy>;
     } = {},
   ) {
     const bus = new InProcessEventBus();
@@ -1389,7 +1391,11 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const pricing: ExecutionPricingPolicy = pricingOverrides
       ? { ...DEFAULT_EXECUTION_POLICY.pricing, mode: "bounded-midpoint", ...pricingOverrides }
       : DEFAULT_EXECUTION_POLICY.pricing;
-    const policy: ExecutionPolicy = { ...DEFAULT_EXECUTION_POLICY, pricing };
+    const policy: ExecutionPolicy = {
+      ...DEFAULT_EXECUTION_POLICY,
+      pricing,
+      ...opts.policyOverrides,
+    };
     const bridge = new SignalToOrderBridge({
       bus,
       log: logger,
@@ -1414,8 +1420,8 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     return { bus, skipped, placed };
   }
 
-  it("edge mode (default) posts BUY at bestBid — ADR-006 D1 preserved", async () => {
-    const { bus, placed } = makeBridgeWithPricing(); // no options → default edge
+  it("default edge branch posts BUY at bestBid — ADR-006 D1 preserved", async () => {
+    const { bus, placed } = makeBridgeWithPricing();
     const market = makeMarket({ bestBid: 0.4, bestAsk: 0.41, tickSize: 0.001 });
     await bus.publish("SignalApproved", {
       signal: makeSignal(),
@@ -1426,6 +1432,79 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.4);
+  });
+
+  it("defaults SELL edge branch to bid-anchored pricing", async () => {
+    const { bus, placed } = makeBridgeWithPricing();
+    const market = makeMarket({ bestBid: 0.23, bestAsk: 0.29, tickSize: 0.01 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.2, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.26);
+  });
+
+  it("caps bid-anchored SELL inside the spread when the raw anchor is above bestAsk", async () => {
+    const { bus, placed } = makeBridgeWithPricing();
+    const market = makeMarket({ bestBid: 0.27, bestAsk: 0.29, tickSize: 0.01 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.2, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.28);
+  });
+
+  it("falls back to bestAsk when a one-tick spread has no inside SELL price", async () => {
+    const { bus, placed } = makeBridgeWithPricing();
+    const market = makeMarket({ bestBid: 0.27, bestAsk: 0.28, tickSize: 0.01 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.2, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.28);
+  });
+
+  it("can roll SELL edge branch back to bestAsk pricing", async () => {
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      policyOverrides: { exitPricingMode: "edge" },
+    });
+    const market = makeMarket({ bestBid: 0.23, bestAsk: 0.29, tickSize: 0.01 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.2, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.29);
+  });
+
+  it("skips bid-anchored SELL through hard-liveness when bestBid is unavailable", async () => {
+    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const market = makeMarket({ bestBid: null, bestAsk: 0.29, tickSize: 0.01 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.2, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(0);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.reasons).toContain("no_bid");
   });
 
   it("ladder BUY posts at ladderTargetPrice even when bestBid moved", async () => {
@@ -1474,7 +1553,9 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   });
 
   it("skips SELL when edge price is below the signal-distance floor", async () => {
-    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, {
+      policyOverrides: { exitPricingMode: "edge" },
+    });
     const sellSignal: Signal = {
       ...makeSignal(),
       side: "sell",
@@ -1502,7 +1583,9 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   });
 
   it("allows SELL exactly at the signal-distance floor", async () => {
-    const { bus, skipped, placed } = makeBridgeWithPricing();
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, {
+      policyOverrides: { exitPricingMode: "edge" },
+    });
     const sellSignal: Signal = {
       ...makeSignal(),
       side: "sell",
@@ -1526,7 +1609,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const orderRepo = {
       findByTokenId: vi.fn(() => [makeOpenSellOrder({ price: 0.1 })]),
     } as unknown as OrderRepository;
-    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, { orderRepo });
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, {
+      orderRepo,
+      policyOverrides: { exitPricingMode: "edge" },
+    });
     const sellSignal: Signal = {
       ...makeSignal(),
       side: "sell",
@@ -1556,7 +1642,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const orderRepo = {
       findByTokenId: vi.fn(() => [makeOpenSellOrder({ price: 0.1, status: "cancelled" })]),
     } as unknown as OrderRepository;
-    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, { orderRepo });
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, {
+      orderRepo,
+      policyOverrides: { exitPricingMode: "edge" },
+    });
     const sellSignal: Signal = {
       ...makeSignal(),
       side: "sell",
@@ -1594,7 +1683,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       const orderRepo = {
         findByTokenId: vi.fn(() => [makeOpenSellOrder({ price: existingPrice })]),
       } as unknown as OrderRepository;
-      const { bus, skipped, placed } = makeBridgeWithPricing(undefined, { orderRepo });
+      const { bus, skipped, placed } = makeBridgeWithPricing(undefined, {
+        orderRepo,
+        policyOverrides: { exitPricingMode: "edge" },
+      });
       const sellSignal: Signal = {
         ...makeSignal(),
         side: "sell",
@@ -1633,7 +1725,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
         remainingBudget: 0,
       })),
     };
-    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, { orderLifetime });
+    const { bus, skipped, placed } = makeBridgeWithPricing(undefined, {
+      orderLifetime,
+      policyOverrides: { exitPricingMode: "edge" },
+    });
     const sellSignal: Signal = {
       ...makeSignal(),
       side: "sell",
@@ -2630,7 +2725,7 @@ describe("ADR-015 execution policy observations", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]!.skippedReason).toBe("sell-price-below-signal-floor");
-    expect(rows[0]!.selectedPrice).toBe(0.08);
+    expect(rows[0]!.selectedPrice).toBe(0.023);
     expect(rows[0]!.side).toBe("SELL");
   });
 });

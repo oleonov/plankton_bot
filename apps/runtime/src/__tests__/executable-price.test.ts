@@ -66,6 +66,8 @@ describe("deriveExecutableTopOfBook", () => {
     ).toEqual({
       bestBid: 0.001,
       bestAsk: 0.999,
+      bestBidSize: 90,
+      bestAskSize: 90,
       midPrice: 0.5,
       spread: 0.998,
     });
@@ -83,6 +85,8 @@ describe("deriveExecutableTopOfBook", () => {
     ).toEqual({
       bestBid: null,
       bestAsk: null,
+      bestBidSize: null,
+      bestAskSize: null,
       midPrice: null,
       spread: null,
     });

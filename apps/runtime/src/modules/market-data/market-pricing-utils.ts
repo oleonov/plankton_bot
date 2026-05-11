@@ -21,6 +21,9 @@ export function applyPricingSnapshot(
     ...market,
     bestBid: topOfBook.bestBid,
     bestAsk: topOfBook.bestAsk,
+    bestBidSize: topOfBook.bestBidSize,
+    bestAskSize: topOfBook.bestAskSize,
+    askDepthExcludingOurs: null,
     midPrice: topOfBook.midPrice,
     spread: topOfBook.spread,
     acceptingOrders: pricing.acceptingOrders,
@@ -84,6 +87,9 @@ export function applyStreamUpdate(
     ...nextMarket,
     bestBid: topOfBook.bestBid,
     bestAsk: topOfBook.bestAsk,
+    bestBidSize: topOfBook.bestBidSize,
+    bestAskSize: topOfBook.bestAskSize,
+    askDepthExcludingOurs: null,
     midPrice: topOfBook.midPrice,
     spread: topOfBook.spread,
     minOrderSize: update.book.minOrderSize ?? nextMarket.minOrderSize ?? null,
@@ -103,6 +109,8 @@ export function didMarketPricingChange(
     previous.tickSize !== next.tickSize ||
     previous.bestBid !== next.bestBid ||
     previous.bestAsk !== next.bestAsk ||
+    previous.bestBidSize !== next.bestBidSize ||
+    previous.bestAskSize !== next.bestAskSize ||
     previous.midPrice !== next.midPrice ||
     previous.spread !== next.spread ||
     previous.lastTradePrice !== next.lastTradePrice ||

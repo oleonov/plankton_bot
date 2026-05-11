@@ -95,6 +95,8 @@ export interface ExecutableTopOfBookInput {
 export interface ExecutableTopOfBook {
   readonly bestBid: number | null;
   readonly bestAsk: number | null;
+  readonly bestBidSize: number | null;
+  readonly bestAskSize: number | null;
   readonly midPrice: number | null;
   readonly spread: number | null;
 }
@@ -102,11 +104,11 @@ export interface ExecutableTopOfBook {
 function firstExecutableLevel(
   levels: readonly PriceLevel[] | null | undefined,
   tickSize: number,
-): number | null {
+): PriceLevel | null {
   if (!levels || levels.length === 0) return null;
   for (const level of levels) {
     if (validateExecutablePrice(level.price, tickSize).ok) {
-      return level.price;
+      return level;
     }
   }
   return null;
@@ -662,10 +664,10 @@ export function deriveExecutableTopOfBook(
   input: ExecutableTopOfBookInput,
   tickSize: number,
 ): ExecutableTopOfBook {
-  const bestBid = input.bids ? firstExecutableLevel(input.bids, tickSize) : null;
-  const bestAsk = input.asks ? firstExecutableLevel(input.asks, tickSize) : null;
-  const normalizedBestBid = bestBid ?? sanitizeExecutableQuote(input.bestBid, tickSize);
-  const normalizedBestAsk = bestAsk ?? sanitizeExecutableQuote(input.bestAsk, tickSize);
+  const bestBidLevel = input.bids ? firstExecutableLevel(input.bids, tickSize) : null;
+  const bestAskLevel = input.asks ? firstExecutableLevel(input.asks, tickSize) : null;
+  const normalizedBestBid = bestBidLevel?.price ?? sanitizeExecutableQuote(input.bestBid, tickSize);
+  const normalizedBestAsk = bestAskLevel?.price ?? sanitizeExecutableQuote(input.bestAsk, tickSize);
   const midPrice =
     normalizedBestBid !== null && normalizedBestAsk !== null
       ? (normalizedBestBid + normalizedBestAsk) / 2
@@ -678,6 +680,8 @@ export function deriveExecutableTopOfBook(
   return {
     bestBid: normalizedBestBid,
     bestAsk: normalizedBestAsk,
+    bestBidSize: bestBidLevel?.size ?? null,
+    bestAskSize: bestAskLevel?.size ?? null,
     midPrice,
     spread,
   };

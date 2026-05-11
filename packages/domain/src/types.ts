@@ -452,6 +452,13 @@ export interface NormalizedMarket {
   enableOrderBook: boolean;
   bestBid: number | null;
   bestAsk: number | null;
+  bestBidSize?: number | null;
+  bestAskSize?: number | null;
+  /**
+   * Optional exchange-depth estimate after removing this bot's visible ask.
+   * Present only when a caller can calculate it from a live book + open order.
+   */
+  askDepthExcludingOurs?: number | null;
   midPrice: number | null;
   spread: number | null;
   lastTradePrice?: number | null;
@@ -716,6 +723,8 @@ export interface ExitRepriceOnDownpricePolicy {
   stuckWarningGapPct: number;
 }
 
+export type ExitPricingMode = "bid-anchored" | "edge";
+
 export interface DropTriggerPolicy {
   enabled: boolean;
   /** When true, missing 1h history allows the BUY and emits `no_drop_data` telemetry. */
@@ -755,6 +764,10 @@ export interface ExecutionPolicy {
   orderCapacity: OrderCapacityPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
+  /** SELL exit edge strategy. BUY pricing remains governed by `pricing.mode`. */
+  exitPricingMode: ExitPricingMode;
+  /** Number of CLOB ticks to place a bid-anchored SELL above current best bid. */
+  exitBidAnchorTicks: number;
   orderLifetime: OrderLifetimePolicy;
   repriceOnOutbid: RepriceOnOutbidPolicy;
   exitRepriceOnDownprice: ExitRepriceOnDownpricePolicy;

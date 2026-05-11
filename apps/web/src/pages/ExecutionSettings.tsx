@@ -90,6 +90,7 @@ function ExecutionPolicyFormInner({
 
   const handleSave = () => {
     const next: ExecutionPolicyDTO = {
+      ...policy,
       version: 1,
       entryPriceCeiling: numOr(entryPriceCeiling, policy.entryPriceCeiling),
       exitOrderTtlMs: numOr(exitOrderTtlMs, policy.exitOrderTtlMs),
