@@ -123,7 +123,11 @@ export class ExchangeStateStore {
   }
 
   /** Replace the wallet snapshot for a single token. */
-  updateWalletPosition(tokenId: TokenId | string, size: number, capturedAtMs: number = this.now()): void {
+  updateWalletPosition(
+    tokenId: TokenId | string,
+    size: number,
+    capturedAtMs: number = this.now(),
+  ): void {
     if (!Number.isFinite(size) || size < 0) return;
     this.walletByToken.set(String(tokenId), { size, capturedAtMs });
     this.lastWalletCaptureMs = capturedAtMs;

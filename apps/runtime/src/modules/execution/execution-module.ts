@@ -116,14 +116,16 @@ export interface ExecutionModuleDeps {
    * Optional metrics sink for per-event counters (balance-reject hits,
    * pending-wallet-sync rejects). Reuses the RuntimeMetricWriter shape.
    */
-  runtimeMetrics?: {
-    writeEvent: (
-      metricName: string,
-      value?: number,
-      labels?: string | null,
-      capturedAt?: string,
-    ) => void;
-  } | undefined;
+  runtimeMetrics?:
+    | {
+        writeEvent: (
+          metricName: string,
+          value?: number,
+          labels?: string | null,
+          capturedAt?: string,
+        ) => void;
+      }
+    | undefined;
   /**
    * Trigger a fresh reconciliation pass when an exchange balance reject is
    * observed. Wired from the reconciliation module; absent in unit tests.
