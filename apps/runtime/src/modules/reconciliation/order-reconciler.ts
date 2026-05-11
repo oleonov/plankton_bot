@@ -12,6 +12,7 @@
 
 import type {
   ExchangeGateway,
+  ExchangeOrder,
   FillRepository,
   MarketRepository,
   OrderRepository,
@@ -36,6 +37,10 @@ export interface OrderReconcileResult {
   staleCancelled: number;
   staleCancelFailed: number;
   phantomsSkippedGrace: number;
+  /** Snapshot of the exchange's open orders captured at the start of the pass. */
+  exchangeOpenOrders: readonly ExchangeOrder[];
+  /** Epoch ms when the exchange snapshot was captured. */
+  capturedAtMs: number;
   details: string[];
 }
 
@@ -44,6 +49,7 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   const details: string[] = [];
 
   const exchangeOrders = await gateway.getOpenOrders();
+  const capturedAtMs = Date.now();
   const localOrders = orderRepo.findOpen();
 
   const exchangeOrderIds = new Set(exchangeOrders.map((o) => o.orderId));
@@ -92,6 +98,11 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
   let unknownExchangeOrders = 0;
   let staleCancelled = 0;
   let staleCancelFailed = 0;
+  // Surviving exchange orders the snapshot is allowed to advertise downstream.
+  // Successfully cancelled stale orders are removed here so consumers like the
+  // ExchangeStateStore do not keep reserving shares for ghosts until the next
+  // pass.
+  const cancelledStaleOrderIds = new Set<string>();
 
   for (const ex of exchangeOrders) {
     if (localExchangeIds.has(ex.orderId)) continue; // locally open — normal
@@ -112,6 +123,7 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     const result = await gateway.cancelOrder({ orderId: ex.orderId });
     if (result.success) {
       staleCancelled++;
+      cancelledStaleOrderIds.add(ex.orderId);
       const msg = `stale exchange order cancelled: ${ex.orderId} (local: ${localOrder.status})`;
       details.push(msg);
       log.info({ exchangeOrderId: ex.orderId, localStatus: localOrder.status }, msg);
@@ -130,6 +142,11 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     }
   }
 
+  const survivingExchangeOrders =
+    cancelledStaleOrderIds.size === 0
+      ? exchangeOrders
+      : exchangeOrders.filter((o) => !cancelledStaleOrderIds.has(o.orderId));
+
   return {
     exchangeOpenCount: exchangeOrders.length,
     localOpenCount: localOrders.length,
@@ -138,6 +155,8 @@ export async function reconcileOrders(deps: OrderReconcilerDeps): Promise<OrderR
     staleCancelled,
     staleCancelFailed,
     phantomsSkippedGrace,
+    exchangeOpenOrders: survivingExchangeOrders,
+    capturedAtMs,
     details,
   };
 }

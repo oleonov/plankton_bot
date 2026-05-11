@@ -39,6 +39,15 @@ const envSchema = z
       .enum(["true", "false"])
       .default("true")
       .transform((v) => v === "true"),
+    EXECUTION_SELL_BALANCE_REJECT_BLOCK_ENABLED: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((v) => v === "true"),
+    EXECUTION_SELL_BALANCE_REJECT_BLOCK_MS: z.coerce.number().int().min(1_000).default(60_000),
+    EXECUTION_SELL_EXCHANGE_RESERVED_ENABLED: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((v) => v === "true"),
     POLY_API_KEY: z.string().optional(),
     POLY_API_SECRET: z.string().optional(),
     POLY_PASSPHRASE: z.string().optional(),
@@ -186,6 +195,9 @@ export interface AppConfig {
   executionWalletBufferPct: number;
   executionWalletBufferMinUsdc: number;
   allowSellSizeClamp: boolean;
+  executionSellBalanceRejectBlockEnabled: boolean;
+  executionSellBalanceRejectBlockMs: number;
+  executionSellExchangeReservedEnabled: boolean;
   polyApiKey: string | undefined;
   polyApiSecret: string | undefined;
   polyPassphrase: string | undefined;
@@ -281,6 +293,9 @@ export function loadEnv(envPath?: string): AppConfig {
     executionWalletBufferPct: env.EXECUTION_WALLET_BUFFER_PCT,
     executionWalletBufferMinUsdc: env.EXECUTION_WALLET_BUFFER_MIN_USDC,
     allowSellSizeClamp: env.ALLOW_SELL_SIZE_CLAMP,
+    executionSellBalanceRejectBlockEnabled: env.EXECUTION_SELL_BALANCE_REJECT_BLOCK_ENABLED,
+    executionSellBalanceRejectBlockMs: env.EXECUTION_SELL_BALANCE_REJECT_BLOCK_MS,
+    executionSellExchangeReservedEnabled: env.EXECUTION_SELL_EXCHANGE_RESERVED_ENABLED,
     polyApiKey: env.POLY_API_KEY,
     polyApiSecret: env.POLY_API_SECRET,
     polyPassphrase: env.POLY_PASSPHRASE,

@@ -35,6 +35,12 @@ function testConfig(overrides?: Partial<AppConfig>): AppConfig {
     krabsAuthPassword: undefined,
     krabsSessionSecret: undefined,
     allowSellSizeClamp: true,
+
+    executionSellBalanceRejectBlockEnabled: true,
+
+    executionSellBalanceRejectBlockMs: 60000,
+
+    executionSellExchangeReservedEnabled: true,
     trustProxy: false,
     ...MARKET_DATA_TEST_DEFAULTS,
     ...overrides,

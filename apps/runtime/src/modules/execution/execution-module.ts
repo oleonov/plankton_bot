@@ -62,6 +62,11 @@ import {
   getReservedSellSize,
   type PendingReservation,
 } from "./reservation-utils.js";
+import {
+  computeSellUpperBound,
+  ExchangeStateStore,
+  isExchangeBalanceRejection,
+} from "./exchange-state-store.js";
 import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 
 type OrderFillLookupGateway = ExchangeGateway & {
@@ -90,6 +95,40 @@ export interface ExecutionModuleDeps {
   executionPolicy?: (() => ExecutionPolicy) | undefined;
   allowSellSizeClamp?: boolean | undefined;
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
+  /**
+   * Shared store of exchange-side SELL state (open orders + wallet balance)
+   * updated by the reconciliation module. When provided, the SELL clamp
+   * branch additionally caps `availableSize` against the wallet snapshot and
+   * the reservedSell sum honours exchange-side orders that survived a restart.
+   */
+  exchangeStateStore?: ExchangeStateStore | undefined;
+  /**
+   * CHANGE A — block new SELLs for `balanceRejectBlockMs` after the exchange
+   * returns "balance is not enough / allowance" on placement. Default true.
+   */
+  sellBalanceRejectBlockEnabled?: boolean | undefined;
+  /**
+   * CHANGE C — when true, reservedSell = max(localOpenSellSum, exchangeOpenSellSum).
+   * Default true; reverts to local-only sum when false.
+   */
+  sellExchangeReservedEnabled?: boolean | undefined;
+  /**
+   * Optional metrics sink for per-event counters (balance-reject hits,
+   * pending-wallet-sync rejects). Reuses the RuntimeMetricWriter shape.
+   */
+  runtimeMetrics?: {
+    writeEvent: (
+      metricName: string,
+      value?: number,
+      labels?: string | null,
+      capturedAt?: string,
+    ) => void;
+  } | undefined;
+  /**
+   * Trigger a fresh reconciliation pass when an exchange balance reject is
+   * observed. Wired from the reconciliation module; absent in unit tests.
+   */
+  reconciliationTrigger?: (() => void) | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -454,6 +493,17 @@ export class ExecutionModule implements RuntimeModule {
     this.processedCommandOrder.push(String(cmd.commandId));
     this.pruneProcessedCommandIds();
 
+    // Balance-block check must run BEFORE sell replacement so a blocked token
+    // does not get its existing exit SELL cancelled into a void: replacement
+    // would cancel the live order then the new SELL would itself be rejected
+    // by the same block, leaving no exit order on the book.
+    if (cmd.side === "sell" && this.isBalanceBlocked(cmd)) {
+      this.recordInternalReservationReject();
+      this.recordExecutionCapacityReject(cmd, "pending-wallet-sync");
+      await this.rejectOrder(cmd, "pending-wallet-sync", ExchangeErrorCode.InsufficientBalance);
+      return;
+    }
+
     if (await this.deferSellReplacementIfNeeded(cmd)) {
       return;
     }
@@ -599,6 +649,12 @@ export class ExecutionModule implements RuntimeModule {
         { commandId: cmd.commandId, errorCode, exchangeErrorDetails: result.errorDetails ?? null },
         "order rejected by gateway",
       );
+
+      this.handleExchangeBalanceRejection(cmd, {
+        errorCode: result.errorCode ?? null,
+        errorMessage: result.errorMessage ?? null,
+        errorDetails: result.errorDetails ?? null,
+      });
 
       const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
         errorCode,
@@ -944,9 +1000,13 @@ export class ExecutionModule implements RuntimeModule {
       };
     }
 
-    const reservedSell = getReservedSellSize(reservations, cmd.tokenId);
-    const availableSize = position.size - reservedSell;
-    if (availableSize + 1e-9 >= cmd.size) return { kind: "accept" };
+    const localReservedSell = getReservedSellSize(reservations, cmd.tokenId);
+    const reservedSell = this.effectiveReservedSell(cmd.tokenId, localReservedSell);
+    const upperBound = this.computeSellUpperBound(cmd.tokenId, position.size);
+    const availableSize = upperBound - reservedSell;
+    if (availableSize + 1e-9 >= cmd.size) {
+      return { kind: "accept" };
+    }
 
     const clampEnabled = this.deps.allowSellSizeClamp !== false;
     if (clampEnabled && availableSize > ExecutionModule.SIZE_EPSILON_SHARES) {
@@ -965,7 +1025,9 @@ export class ExecutionModule implements RuntimeModule {
           details: {
             tokenId: cmd.tokenId,
             positionSize: position.size,
+            upperBound,
             reservedSell,
+            localReservedSell,
             availableSize,
             orderSize: cmd.size,
             minOrderSize,
@@ -978,7 +1040,9 @@ export class ExecutionModule implements RuntimeModule {
         details: {
           tokenId: cmd.tokenId,
           positionSize: position.size,
+          upperBound,
           reservedSell,
+          localReservedSell,
           availableSize,
           intentSize: cmd.size,
         },
@@ -992,12 +1056,78 @@ export class ExecutionModule implements RuntimeModule {
       details: {
         tokenId: cmd.tokenId,
         positionSize: position.size,
+        upperBound,
         reservedSell,
+        localReservedSell,
         availableSize,
         orderSize: cmd.size,
       },
     };
   }
+
+  /** CHANGE B — wallet/local upper-bound for SELL clamp. */
+  private computeSellUpperBound(tokenId: TokenId, localPositionSize: number): number {
+    if (!this.deps.exchangeStateStore) return localPositionSize;
+    const walletSize = this.deps.exchangeStateStore.getWalletPositionSize(tokenId);
+    const walletCapturedAt = this.deps.exchangeStateStore.getWalletPositionCapturedAt(tokenId);
+    const latestFillMs = this.getLatestFillMs(tokenId);
+    return computeSellUpperBound({
+      localPositionSize,
+      walletPositionSize: walletSize,
+      walletCapturedAtMs: walletCapturedAt,
+      latestFillMs,
+    });
+  }
+
+  /**
+   * CHANGE C — `localReservedSell + sum(exchange SELL orders unknown to local)`
+   * when the flag is on. The conservative union avoids the undercount when
+   * local and exchange order sets are not subsets (e.g. an in-flight local
+   * SELL not yet visible to the exchange + a phantom exchange order with no
+   * local record). Falls back to local-only when no fresh snapshot exists.
+   */
+  private effectiveReservedSell(tokenId: TokenId, localReservedSell: number): number {
+    if (this.deps.sellExchangeReservedEnabled === false) return localReservedSell;
+    const store = this.deps.exchangeStateStore;
+    if (!store) return localReservedSell;
+    const known = this.collectKnownLocalExchangeOrderIds(tokenId);
+    const exchangeOnly = store.getOpenSellSizeUnknownToLocal(tokenId, known);
+    if (exchangeOnly === null) return localReservedSell;
+    return localReservedSell + exchangeOnly;
+  }
+
+  private collectKnownLocalExchangeOrderIds(tokenId: TokenId): Set<string> {
+    const known = new Set<string>();
+    for (const order of this.deps.orderRepo.findOpen()) {
+      if (order.side !== "sell") continue;
+      if (String(order.tokenId) !== String(tokenId)) continue;
+      if (order.exchangeOrderId) known.add(order.exchangeOrderId);
+    }
+    return known;
+  }
+
+  /** CHANGE A — true when the token is in a balance-reject cooldown. */
+  private isBalanceBlocked(cmd: PlaceOrderCommand): boolean {
+    if (this.deps.sellBalanceRejectBlockEnabled === false) return false;
+    if (!this.deps.exchangeStateStore) return false;
+    return this.deps.exchangeStateStore.isBalanceBlocked(cmd.tokenId);
+  }
+
+  private getLatestFillMs(tokenId: TokenId): number | null {
+    const recent = this.deps.fillRepo.findRecentByTokenId?.(tokenId, 1);
+    if (recent && recent.length > 0) {
+      const ts = Date.parse(recent[0]!.filledAt);
+      return Number.isFinite(ts) ? ts : null;
+    }
+    let latest: number | null = null;
+    for (const fill of this.deps.fillRepo.findByTokenId(tokenId)) {
+      const ts = Date.parse(fill.filledAt);
+      if (!Number.isFinite(ts)) continue;
+      if (latest === null || ts > latest) latest = ts;
+    }
+    return latest;
+  }
+
   private getMinOrderSizeRejection(cmd: PlaceOrderCommand): { minOrderSize: number } | null {
     const minOrderSize = this.resolveCommandMinOrderSize(cmd);
     if (
@@ -1172,6 +1302,46 @@ export class ExecutionModule implements RuntimeModule {
   private recordGatewayReject(errorCode: string): void {
     this.gatewayRejects.push({ ts: Date.now(), code: errorCode });
     this.pruneDiagnosticsWindows();
+  }
+
+  private handleExchangeBalanceRejection(
+    cmd: PlaceOrderCommand,
+    payload: {
+      errorCode: ExchangeErrorCode | null;
+      errorMessage: string | null;
+      errorDetails: Readonly<Record<string, unknown>> | null;
+    },
+  ): void {
+    if (cmd.side !== "sell") return;
+    const isInsufficient =
+      payload.errorCode === ExchangeErrorCode.InsufficientBalance ||
+      isExchangeBalanceRejection(payload);
+    if (!isInsufficient) return;
+    const enabled = this.deps.sellBalanceRejectBlockEnabled !== false;
+    const store = this.deps.exchangeStateStore;
+    const block = enabled && store ? store.markBalanceReject(cmd.tokenId) : null;
+    this.deps.runtimeMetrics?.writeEvent(
+      "exchange_balance_reject_count",
+      1,
+      JSON.stringify({ tokenId: String(cmd.tokenId), side: cmd.side }),
+      new Date().toISOString(),
+    );
+    this.log.warn(
+      {
+        tokenId: String(cmd.tokenId),
+        commandId: cmd.commandId,
+        blockedUntilMs: block?.blockedUntilMs ?? null,
+        rejectCount: block?.count ?? null,
+      },
+      "exchange rejected SELL for balance/allowance — token put in cool-down",
+    );
+    // Trigger an immediate reconcile so the next SELL evaluates against the
+    // refreshed wallet/exchange snapshot rather than waiting for the next tick.
+    try {
+      this.deps.reconciliationTrigger?.();
+    } catch (err) {
+      this.log.debug({ err }, "reconciliation trigger threw — ignoring");
+    }
   }
 
   private gatewayRejectReason(

@@ -42,9 +42,19 @@ import {
   runWalletPositionSentinel,
   type WalletPositionSentinelDeps,
 } from "./wallet-position-sentinel.js";
+import type { ExchangeStateStore } from "../execution/exchange-state-store.js";
+import { buildReservationSnapshot } from "../execution/reservation-utils.js";
+import type { PolymarketDataPosition } from "@krabs/exchange";
 
 const DRIFT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DRIFT_INTERVAL_MS = 5 * 60 * 1000;
+
+function computePercentile(samples: readonly number[], percentile: number): number {
+  if (samples.length === 0) return 0;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentile * sorted.length) - 1));
+  return sorted[idx]!;
+}
 
 export interface ReconciliationModuleDeps {
   gateway: ExchangeGateway;
@@ -102,6 +112,22 @@ export interface ReconciliationModuleDeps {
    * it emits critical drift so the root cause remains visible.
    */
   walletPositionSentinel?: WalletPositionSentinelDeps;
+  /**
+   * Shared store published into Execution. The reconciliation pass pushes the
+   * freshest exchange-side open SELL summary + wallet position snapshot here
+   * so the SELL clamp uses the same source of truth the gateway will compare
+   * against. Optional — when omitted, Execution falls back to local state.
+   */
+  exchangeStateStore?: ExchangeStateStore;
+  /**
+   * Optional reader for wallet positions in non-live-lite modes (or when the
+   * sentinel is disabled). When provided, periodic reconciliation pulls
+   * positions through it solely for ExchangeStateStore — never for local
+   * repair. Currently wired only in live-lite (same source as the sentinel).
+   */
+  walletPositionReader?: {
+    read: () => Promise<readonly PolymarketDataPosition[] | null>;
+  };
 }
 
 export class ReconciliationModule implements RuntimeModule {
@@ -301,6 +327,10 @@ export class ReconciliationModule implements RuntimeModule {
         );
       }
 
+      // 4b. Push exchange snapshot + wallet snapshot into ExchangeStateStore.
+      // Best-effort: a sentinel failure must not abort the reconciliation pass.
+      await this.publishExchangeState(orderResult, ranAt);
+
       // 5. Build result
       const clean =
         orderResult.phantomsCancelled === 0 &&
@@ -343,6 +373,9 @@ export class ReconciliationModule implements RuntimeModule {
         });
       }
 
+      const lagMs = Date.now() - ranAt;
+      this.recordReconciliationLag(lagMs, ranAt);
+
       await this.deps.bus.publish("ReconciliationComplete", { result });
 
       this.log.info(
@@ -370,6 +403,144 @@ export class ReconciliationModule implements RuntimeModule {
       return result;
     } finally {
       this.reconciling = false;
+    }
+  }
+
+  /**
+   * Triggered by ExecutionModule after an exchange "balance is not enough"
+   * reject so the next SELL evaluates against a fresh snapshot rather than
+   * waiting for the next 15s tick. Uses the same re-entrancy guard as the
+   * periodic loop — concurrent runs return the last result.
+   */
+  triggerImmediateReconciliation(): void {
+    if (this.reconciling) return;
+    this.runReconciliation().catch((err) =>
+      this.log.error({ err }, "immediate reconciliation error"),
+    );
+  }
+
+  private async publishExchangeState(
+    orderResult: Pick<
+      Awaited<ReturnType<typeof reconcileOrders>>,
+      "exchangeOpenOrders" | "capturedAtMs"
+    >,
+    ranAt: number,
+  ): Promise<void> {
+    const store = this.deps.exchangeStateStore;
+    if (!store) return;
+
+    const sellRows = orderResult.exchangeOpenOrders
+      .filter((order) => order.side === "sell")
+      .map((order) => ({
+        orderId: order.orderId,
+        tokenId: order.tokenId,
+        sizeRemaining: order.sizeRemaining,
+      }));
+    store.updateExchangeSellOrders(sellRows, orderResult.capturedAtMs);
+
+    if (this.deps.walletPositionReader) {
+      try {
+        const positions = await this.deps.walletPositionReader.read();
+        if (positions) {
+          store.updateWalletPositionsBatch(
+            positions.map((p) => ({ tokenId: p.tokenId, size: p.size })),
+            ranAt,
+          );
+          // Local active tokens absent from the wallet response are the precise
+          // desync case: local DB believes we hold shares the wallet does not
+          // report. Publish an explicit zero so the SELL clamp sees the truth
+          // instead of falling back to local-only.
+          const remoteTokens = new Set(positions.map((p) => String(p.tokenId)));
+          const localRepo = this.deps.walletPositionSentinel?.positionRepo;
+          if (localRepo) {
+            for (const local of localRepo.findAll()) {
+              if (local.status === "closed") continue;
+              if (local.size <= 0) continue;
+              if (remoteTokens.has(String(local.tokenId))) continue;
+              store.updateWalletPosition(local.tokenId, 0, ranAt);
+            }
+          }
+        }
+      } catch (err) {
+        this.log.debug({ err }, "wallet position reader threw — exchange store not refreshed");
+      }
+    }
+
+    const metrics = this.computeStoreMetrics(store);
+    this.deps.runtimeMetrics?.writeEvent(
+      "wallet_position_drift_abs",
+      metrics.walletPositionDriftAbs,
+      JSON.stringify({ source: "reconciliation" }),
+      new Date(ranAt).toISOString(),
+    );
+    this.deps.runtimeMetrics?.writeEvent(
+      "reserved_sell_drift_abs",
+      metrics.reservedSellDriftAbs,
+      JSON.stringify({ source: "reconciliation" }),
+      new Date(ranAt).toISOString(),
+    );
+
+    if (metrics.reservedSellDriftAbs >= 1) {
+      this.log.warn(
+        { reservedSellDriftAbs: metrics.reservedSellDriftAbs },
+        "reservedSell drift threshold exceeded (>=1 share)",
+      );
+    }
+    if (metrics.walletPositionDriftAbs >= 5) {
+      this.log.warn(
+        { walletPositionDriftAbs: metrics.walletPositionDriftAbs },
+        "wallet position drift threshold exceeded (>=5 shares)",
+      );
+    }
+  }
+
+  private computeStoreMetrics(store: NonNullable<ReconciliationModuleDeps["exchangeStateStore"]>) {
+    const localOpenSellSizeByToken = new Map<string, number>();
+    // Use buildReservationSnapshot so the per-token sum subtracts realized
+    // fills — the exchange snapshot reports `sizeRemaining`, so comparing
+    // against original `order.size` would falsely flag partially-filled SELLs
+    // as drift.
+    const reservations = buildReservationSnapshot(
+      this.deps.orderRepo.findOpen(),
+      this.deps.fillRepo,
+    );
+    for (const [key, remaining] of reservations.reservedSellByToken) {
+      localOpenSellSizeByToken.set(key, remaining);
+    }
+    // Local position size by token comes from the wallet sentinel deps when
+    // available (same PositionRepository the sentinel reads).
+    const localPositionSizeByToken = new Map<string, number>();
+    const repo = this.deps.walletPositionSentinel?.positionRepo;
+    if (repo) {
+      for (const position of repo.findAll()) {
+        if (position.status === "closed") continue;
+        const key = String(position.tokenId);
+        localPositionSizeByToken.set(
+          key,
+          (localPositionSizeByToken.get(key) ?? 0) + Math.max(0, position.size),
+        );
+      }
+    }
+    return store.computeMetrics({ localOpenSellSizeByToken, localPositionSizeByToken });
+  }
+
+  private readonly reconciliationLagSamplesMs: number[] = [];
+
+  private recordReconciliationLag(lagMs: number, ranAt: number): void {
+    if (!Number.isFinite(lagMs) || lagMs < 0) return;
+    this.reconciliationLagSamplesMs.push(lagMs);
+    if (this.reconciliationLagSamplesMs.length > 240) {
+      this.reconciliationLagSamplesMs.shift();
+    }
+    const p99 = computePercentile(this.reconciliationLagSamplesMs, 0.99);
+    this.deps.runtimeMetrics?.writeEvent(
+      "reconciliation_lag_ms_p99",
+      p99,
+      JSON.stringify({ samples: this.reconciliationLagSamplesMs.length }),
+      new Date(ranAt).toISOString(),
+    );
+    if (p99 >= 5_000) {
+      this.log.warn({ p99 }, "reconciliation_lag_ms_p99 threshold exceeded (>=5s)");
     }
   }
 

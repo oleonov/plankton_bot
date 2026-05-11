@@ -107,6 +107,7 @@ import {
 } from "./modules/soft-ranking/score-distribution-snapshot.js";
 import { softRankingDisabledCleanup } from "./soft-ranking-disabled-cleanup.js";
 import { ExecutionModule } from "./modules/execution/execution-module.js";
+import { ExchangeStateStore } from "./modules/execution/exchange-state-store.js";
 import { RiskInventoryModule } from "./modules/risk-inventory/risk-inventory-module.js";
 import { CandidateBookCache } from "./modules/strategy/candidate-book-cache.js";
 import { SignalToOrderBridge } from "./modules/strategy/signal-to-order.js";
@@ -777,6 +778,10 @@ async function main(): Promise<void> {
     );
   };
 
+  const exchangeStateStore = new ExchangeStateStore({
+    balanceRejectBlockMs: config.executionSellBalanceRejectBlockMs,
+  });
+  const reconcileTrigger: { fn: (() => void) | undefined } = { fn: undefined };
   const executionModule = new ExecutionModule({
     gateway: exchangeGateway,
     bus,
@@ -797,6 +802,11 @@ async function main(): Promise<void> {
     capacityMetricsSink: recordOrderCapacitySample,
     controlDb: controlConn.db,
     activeProfile: activeProfile as import("@krabs/domain").ProfileId,
+    exchangeStateStore,
+    sellBalanceRejectBlockEnabled: config.executionSellBalanceRejectBlockEnabled,
+    sellExchangeReservedEnabled: config.executionSellExchangeReservedEnabled,
+    runtimeMetrics,
+    reconciliationTrigger: () => reconcileTrigger.fn?.(),
   });
 
   // 7g. Risk + Inventory module
@@ -1039,18 +1049,24 @@ async function main(): Promise<void> {
       getMarket: (tokenId) => entryLifecycleModule.getMarket(tokenId),
     },
     runtimeMetrics,
+    exchangeStateStore,
     ...(runtimeMode === "live-lite" && traderAddress
-      ? {
-          walletPositionSentinel: {
-            reader: new PolymarketDataPositionReader(traderAddress),
-            positionRepo: repos.position,
-            fillRepo: repos.fill,
-            marketRepo: repos.market,
-            log,
-          },
-        }
+      ? (() => {
+          const reader = new PolymarketDataPositionReader(traderAddress);
+          return {
+            walletPositionSentinel: {
+              reader,
+              positionRepo: repos.position,
+              fillRepo: repos.fill,
+              marketRepo: repos.market,
+              log,
+            },
+            walletPositionReader: reader,
+          };
+        })()
       : {}),
   });
+  reconcileTrigger.fn = () => reconciliationModule.triggerImmediateReconciliation();
 
   const userOrderStreamModule =
     runtimeMode === "live-lite"
