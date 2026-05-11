@@ -22,14 +22,14 @@ CREATE INDEX IF NOT EXISTS idx_decision_signal_log_token_ts
 CREATE INDEX IF NOT EXISTS idx_decision_signal_log_signal_id
   ON decision_signal_log(signal_id);
 
-ALTER TABLE orders ADD COLUMN decision_rule_id TEXT;
-ALTER TABLE orders ADD COLUMN signal_timestamp TEXT;
-ALTER TABLE orders ADD COLUMN exchange_error_code TEXT;
-ALTER TABLE orders ADD COLUMN exchange_error_message TEXT;
-ALTER TABLE orders ADD COLUMN exchange_error_payload TEXT;
+SELECT safe_add_column('orders', 'decision_rule_id', 'TEXT');
+SELECT safe_add_column('orders', 'signal_timestamp', 'TEXT');
+SELECT safe_add_column('orders', 'exchange_error_code', 'TEXT');
+SELECT safe_add_column('orders', 'exchange_error_message', 'TEXT');
+SELECT safe_add_column('orders', 'exchange_error_payload', 'TEXT');
 
-ALTER TABLE fills ADD COLUMN signal_id TEXT;
-ALTER TABLE fills ADD COLUMN decision_rule_id TEXT;
-ALTER TABLE fills ADD COLUMN signal_timestamp TEXT;
+SELECT safe_add_column('fills', 'signal_id', 'TEXT');
+SELECT safe_add_column('fills', 'decision_rule_id', 'TEXT');
+SELECT safe_add_column('fills', 'signal_timestamp', 'TEXT');
 
-ALTER TABLE execution_policy_observations ADD COLUMN decision_rule_id TEXT;
+SELECT safe_add_column('execution_policy_observations', 'decision_rule_id', 'TEXT');

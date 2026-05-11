@@ -15,9 +15,9 @@
 -- price * size for legacy fills missing size_usdc.
 -- Filter by filled_at >= leg_states.first_trade_at so prior, closed-out
 -- legs on the same token don't leak into the active leg's aggregates.
-ALTER TABLE leg_states ADD COLUMN cumulative_buy_size REAL NOT NULL DEFAULT 0;
-ALTER TABLE leg_states ADD COLUMN cumulative_buy_notional REAL NOT NULL DEFAULT 0;
-ALTER TABLE leg_states ADD COLUMN cumulative_sell_size REAL NOT NULL DEFAULT 0;
+SELECT safe_add_column('leg_states', 'cumulative_buy_size', 'REAL NOT NULL DEFAULT 0');
+SELECT safe_add_column('leg_states', 'cumulative_buy_notional', 'REAL NOT NULL DEFAULT 0');
+SELECT safe_add_column('leg_states', 'cumulative_sell_size', 'REAL NOT NULL DEFAULT 0');
 
 -- Idempotency guard mirrors backfillLegStateCumulativeFromFills in bootstrap.ts:
 -- a leg row only exists after a BUY fill, and the live path always sets

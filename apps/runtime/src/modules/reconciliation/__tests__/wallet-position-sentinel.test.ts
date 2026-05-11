@@ -28,9 +28,11 @@ const log = {
 function makeRemote(overrides: Partial<PolymarketDataPosition> = {}): PolymarketDataPosition {
   return {
     tokenId: String(TOKEN),
+    conditionId: String(CONDITION),
     size: 12,
     currentValueUsdc: 1.23,
     initialValueUsdc: 0.8,
+    redeemable: false,
     slug: null,
     marketSlug: null,
     outcome: "Yes",

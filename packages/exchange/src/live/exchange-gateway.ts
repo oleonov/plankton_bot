@@ -16,6 +16,7 @@ import type {
   ExchangeFill,
   ExchangeBalance,
   MarketFeeInfo,
+  RedeemPositionsResult,
   RedeemPositionsOptions,
   TokenId,
   ExchangeUserEventStream,
@@ -88,6 +89,11 @@ type SettlementRequest = {
   precheckBalances?: readonly string[];
 };
 
+type SettlementTxMetadata = {
+  txHash: string | null;
+  gasUsed: number | null;
+};
+
 type MarketTokenEntry = {
   readonly tokenId: string;
   readonly index: number;
@@ -141,6 +147,61 @@ function describeShape(value: unknown): Record<string, unknown> {
     };
   }
   return summary;
+}
+
+function emptySettlementTxMetadata(): SettlementTxMetadata {
+  return { txHash: null, gasUsed: null };
+}
+
+function extractSettlementTxMetadata(value: unknown): SettlementTxMetadata {
+  if (!value || typeof value !== "object") return emptySettlementTxMetadata();
+  const obj = value as Record<string, unknown>;
+  const receipt =
+    "receipt" in obj && obj.receipt && typeof obj.receipt === "object"
+      ? (obj.receipt as Record<string, unknown>)
+      : null;
+  return {
+    txHash:
+      stringField(obj, "txHash") ??
+      stringField(obj, "hash") ??
+      stringField(obj, "transactionHash") ??
+      stringField(obj, "transactionID") ??
+      stringField(receipt, "transactionHash"),
+    gasUsed: numberField(obj, "gasUsed") ?? numberField(receipt, "gasUsed"),
+  };
+}
+
+function mergeSettlementTxMetadata(
+  left: SettlementTxMetadata,
+  right: SettlementTxMetadata,
+): SettlementTxMetadata {
+  return {
+    txHash: left.txHash ?? right.txHash,
+    gasUsed: left.gasUsed ?? right.gasUsed,
+  };
+}
+
+function stringField(obj: Record<string, unknown> | null, key: string): string | null {
+  const value = obj?.[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function numberField(obj: Record<string, unknown> | null, key: string): number | null {
+  const value = obj?.[key];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") return Number(value);
+  if (typeof value === "string" && value.length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function skippedRedeemResult(
+  conditionIds: readonly string[],
+  reason: NonNullable<RedeemPositionsResult["reason"]>,
+): RedeemPositionsResult {
+  return { status: "skipped", conditionIds, reason, txHash: null, gasUsed: null };
 }
 
 export class LiveExchangeGateway implements ExchangeGateway {
@@ -363,14 +424,17 @@ export class LiveExchangeGateway implements ExchangeGateway {
     return this.getRawPositionBalance(String(tokenId));
   }
 
-  async redeemPositions(conditionIds: string[], options?: RedeemPositionsOptions): Promise<void> {
+  async redeemPositions(
+    conditionIds: string[],
+    options?: RedeemPositionsOptions,
+  ): Promise<RedeemPositionsResult> {
     const settlementExecute = this.getSettlementExecuteMethod();
     if (settlementExecute) {
       const requests = await this.buildRedeemRequests(
         conditionIds,
         options?.redeemTokenIdsByCondition,
       );
-      if (requests.length === 0) return;
+      if (requests.length === 0) return skippedRedeemResult(conditionIds, "no_redeem_requests");
 
       const submitStartedAt = Date.now();
       try {
@@ -388,7 +452,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
           elapsedMs: submittedAt - submitStartedAt,
           responseShape: describeShape(response),
         });
-        await this.observeSettlementExecution(response, requests);
+        const metadata = extractSettlementTxMetadata(response);
+        const observed = await this.observeSettlementExecution(response, requests);
+        return {
+          status: observed.status,
+          conditionIds: requests.map((request) => request.conditionId),
+          txHash: observed.metadata.txHash ?? metadata.txHash,
+          gasUsed: observed.metadata.gasUsed ?? metadata.gasUsed,
+        };
       } catch (e) {
         const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
         logSettlementLifecycle({
@@ -413,34 +484,40 @@ export class LiveExchangeGateway implements ExchangeGateway {
         }
         throw e;
       }
-      return;
     }
 
     const redeemOne = this.getClientMethod("postRedeem") ?? this.getClientMethod("redeem");
     const redeemBatch = this.getClientMethod("redeemPositions");
     if (!redeemOne && !redeemBatch) {
       this.warnUnsupportedSettlement("redeem");
-      return;
+      return skippedRedeemResult(conditionIds, "unsupported_settlement");
     }
 
     if (redeemBatch) {
       try {
-        await redeemBatch(conditionIds);
+        const response = await redeemBatch(conditionIds);
+        const metadata = extractSettlementTxMetadata(response);
+        return { status: "submitted", conditionIds, ...metadata };
       } catch (e) {
         console.error(`Failed to redeem conditions ${conditionIds.join(",")}:`, sanitizeLogArg(e));
         throw e;
       }
-      return;
     }
 
+    let mergedMetadata: SettlementTxMetadata = emptySettlementTxMetadata();
     for (const conditionId of conditionIds) {
       try {
-        await redeemOne!({ conditionId });
+        const response = await redeemOne!({ conditionId });
+        mergedMetadata = mergeSettlementTxMetadata(
+          mergedMetadata,
+          extractSettlementTxMetadata(response),
+        );
       } catch (e) {
         console.error(`Failed to redeem ${conditionId}:`, sanitizeLogArg(e));
         throw e;
       }
     }
+    return { status: "submitted", conditionIds, ...mergedMetadata };
   }
 
   hasPendingRedeemSubmission(conditionId: string): boolean {
@@ -700,7 +777,16 @@ export class LiveExchangeGateway implements ExchangeGateway {
   }
 
   private extractMarketTokenEntries(raw: unknown): MarketTokenEntry[] {
-    return this.extractMarketTokenIds(raw).map((tokenId, index) => ({ tokenId, index }));
+    if (!raw || typeof raw !== "object") return [];
+    const tokens = Reflect.get(raw, "tokens");
+    if (!Array.isArray(tokens)) return [];
+    return tokens
+      .map((token, index) => {
+        if (!token || typeof token !== "object") return null;
+        const tokenId = Reflect.get(token, "token_id");
+        return typeof tokenId === "string" && tokenId.length > 0 ? { tokenId, index } : null;
+      })
+      .filter((entry): entry is MarketTokenEntry => entry !== null);
   }
 
   private extractMarketTokenIds(raw: unknown): string[] {
@@ -741,13 +827,21 @@ export class LiveExchangeGateway implements ExchangeGateway {
   private async observeSettlementExecution(
     response: unknown,
     requests: SettlementRequest[],
-  ): Promise<void> {
-    if (!response || typeof response !== "object") return;
+  ): Promise<{
+    status: RedeemPositionsResult["status"];
+    metadata: SettlementTxMetadata;
+  }> {
+    if (!response || typeof response !== "object") {
+      return { status: "submitted", metadata: emptySettlementTxMetadata() };
+    }
     const waitForConfirmation = Reflect.get(response, "wait");
-    if (typeof waitForConfirmation !== "function") return;
+    if (typeof waitForConfirmation !== "function") {
+      return { status: "submitted", metadata: extractSettlementTxMetadata(response) };
+    }
 
     const conditionIds = requests.map((r) => r.conditionId);
     const responseShape = describeShape(response);
+    const responseMetadata = extractSettlementTxMetadata(response);
 
     const waitStartedAt = Date.now();
     try {
@@ -773,12 +867,13 @@ export class LiveExchangeGateway implements ExchangeGateway {
         });
         if (await this.verifySettlementBalancesCleared(requests, "redeem_postcheck_after_empty")) {
           this.clearPendingRedeemSubmissions(requests);
-          return;
+          return { status: "confirmed", metadata: responseMetadata };
         }
         this.clearPendingRedeemSubmissions(requests);
         throw new SettlementTransactionFailedError();
       }
 
+      const resultMetadata = extractSettlementTxMetadata(result);
       logSettlementLifecycle({
         lifecycle: "redeem_wait_result",
         conditionIds,
@@ -786,6 +881,10 @@ export class LiveExchangeGateway implements ExchangeGateway {
         resultShape: describeShape(result),
       });
       this.clearPendingRedeemSubmissions(requests);
+      return {
+        status: "confirmed",
+        metadata: mergeSettlementTxMetadata(resultMetadata, responseMetadata),
+      };
     } catch (err) {
       if (err instanceof SettlementTransactionFailedError) {
         throw err;
@@ -806,13 +905,14 @@ export class LiveExchangeGateway implements ExchangeGateway {
         await this.verifySettlementBalancesCleared(requests, "redeem_postcheck_after_wait_error")
       ) {
         this.clearPendingRedeemSubmissions(requests);
-        return;
+        return { status: "confirmed", metadata: responseMetadata };
       }
       logSettlementLifecycle({
         lifecycle: "redeem_pending_after_wait_error",
         conditionIds,
         elapsedMs,
       });
+      return { status: "pending", metadata: responseMetadata };
     }
   }
 

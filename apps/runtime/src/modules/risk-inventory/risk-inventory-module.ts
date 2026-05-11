@@ -27,6 +27,7 @@ import type {
   ClientOrderId,
   RuntimeControl,
   ExecutionPolicy,
+  MarketRepository,
 } from "@krabs/domain";
 import { canPlaceBuyOrderForMarket } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -38,12 +39,14 @@ import { AlgoRiskGateImpl } from "./algo-risk-gate.js";
 import { InventoryHandler } from "./inventory-handler.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import type { OrderCapacityMetricsSample, WalletBudgetControlDb } from "../../wallet-buy-budget.js";
+import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 
 export interface RiskInventoryModuleDeps {
   bus: EventBus;
   positionRepo: PositionRepository;
   inventoryLotRepo: InventoryLotRepository;
   orderRepo: OrderRepository;
+  marketRepo?: Pick<MarketRepository, "findByTokenId"> | undefined;
   fillRepo: Pick<FillRepository, "findUnreconciled" | "markReconciled">;
   log: Logger;
   db: Database.Database;
@@ -54,6 +57,8 @@ export interface RiskInventoryModuleDeps {
   walletBufferMinUsdc?: number | undefined;
   executionPolicy?: (() => ExecutionPolicy) | undefined;
   capacityMetricsSink?: ((sample: OrderCapacityMetricsSample) => void) | undefined;
+  redeemInFlightGuard?: ((conditionId: string) => boolean) | undefined;
+  runtimeMetrics?: RuntimeMetricWriter | undefined;
   runtimeControl?: RuntimeControl | undefined;
   rejectionLogCooldownMs?: number | undefined;
   /**
@@ -116,6 +121,15 @@ export class RiskInventoryModule implements RuntimeModule {
       () => deps.executionPolicy?.().buyCapacity ?? undefined,
       deps.executionPolicy,
       deps.capacityMetricsSink,
+      deps.marketRepo,
+      deps.redeemInFlightGuard,
+      (sample) =>
+        deps.runtimeMetrics?.writeEvent(
+          "buy_rejected_due_to_redeem_in_flight_total",
+          1,
+          JSON.stringify({ side: sample.side, condition_id: sample.conditionId }),
+          new Date(deps.now?.() ?? Date.now()).toISOString(),
+        ),
     );
     this.inventory = new InventoryHandler(
       deps.positionRepo,

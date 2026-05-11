@@ -364,8 +364,16 @@ describe("LiveExchangeGateway", () => {
   it("redeemPositions warns once and no-ops when the SDK has no redeem API", async () => {
     const emitWarning = vi.spyOn(process, "emitWarning").mockImplementation(() => {});
 
-    await expect(gw.redeemPositions(["cond-1", "cond-2"])).resolves.toBeUndefined();
-    await expect(gw.redeemPositions(["cond-3"])).resolves.toBeUndefined();
+    await expect(gw.redeemPositions(["cond-1", "cond-2"])).resolves.toMatchObject({
+      status: "skipped",
+      conditionIds: ["cond-1", "cond-2"],
+      txHash: null,
+      gasUsed: null,
+    });
+    await expect(gw.redeemPositions(["cond-3"])).resolves.toMatchObject({
+      status: "skipped",
+      conditionIds: ["cond-3"],
+    });
 
     expect(emitWarning).toHaveBeenCalledTimes(1);
     expect(emitWarning).toHaveBeenCalledWith(
@@ -426,6 +434,29 @@ describe("LiveExchangeGateway", () => {
       data: txs[0]!.data,
     });
     expect(decoded.functionName).toBe("redeemPositions");
+    expect(decoded.args[3]).toEqual([2n]);
+  });
+
+  it("redeemPositions preserves original token indexes when malformed market tokens are filtered", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{}, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance.mockResolvedValueOnce({ balance: "25000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0x1313131313131313131313131313131313131313131313131313131313131313";
+    await gw.redeemPositions([conditionId], {
+      redeemTokenIdsByCondition: { [conditionId]: [createTokenId("tok-no")] },
+    });
+
+    const [txs] = settlementClient.execute.mock.calls[0]!;
+    const decoded = decodeFunctionData({
+      abi: CTF_REDEEM_ABI,
+      data: txs[0]!.data,
+    });
     expect(decoded.args[3]).toEqual([2n]);
   });
 
@@ -495,9 +526,12 @@ describe("LiveExchangeGateway", () => {
       .mockResolvedValueOnce({ balance: "0" });
     gw = new LiveExchangeGateway({ client, settlementClient });
 
-    await gw.redeemPositions([
-      "0x3333333333333333333333333333333333333333333333333333333333333333",
-    ]);
+    await expect(
+      gw.redeemPositions(["0x3333333333333333333333333333333333333333333333333333333333333333"]),
+    ).resolves.toMatchObject({
+      status: "skipped",
+      reason: "no_redeem_requests",
+    });
 
     expect(settlementClient.execute).not.toHaveBeenCalled();
   });
@@ -534,12 +568,37 @@ describe("LiveExchangeGateway", () => {
     gw = new LiveExchangeGateway({ client, settlementClient });
 
     const conditionId = "0x7777777777777777777777777777777777777777777777777777777777777777";
-    await gw.redeemPositions([conditionId]);
+    const result = await gw.redeemPositions([conditionId]);
     await Promise.resolve();
     await Promise.resolve();
 
+    expect(result).toMatchObject({ status: "confirmed", conditionIds: [conditionId] });
     expect(wait).toHaveBeenCalledTimes(1);
     expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
+  });
+
+  it("redeemPositions returns tx metadata from submit and wait responses", async () => {
+    const wait = vi.fn().mockResolvedValue({
+      receipt: { transactionHash: "0xwait", gasUsed: "12345" },
+    });
+    const settlementClient = {
+      execute: vi.fn().mockResolvedValue({ txHash: "0xsubmit", wait }),
+    };
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }],
+    });
+    client.getBalanceAllowance.mockResolvedValueOnce({ balance: "1000000" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    const conditionId = "0x7878787878787878787878787878787878787878787878787878787878787878";
+    await expect(gw.redeemPositions([conditionId])).resolves.toMatchObject({
+      status: "confirmed",
+      conditionIds: [conditionId],
+      txHash: "0xwait",
+      gasUsed: 12345,
+    });
   });
 
   it("redeemPositions accepts an empty wait result when postcheck balances are already zero", async () => {
@@ -558,7 +617,10 @@ describe("LiveExchangeGateway", () => {
     gw = new LiveExchangeGateway({ client, settlementClient });
 
     const conditionId = "0x8888888888888888888888888888888888888888888888888888888888888888";
-    await expect(gw.redeemPositions([conditionId])).resolves.toBeUndefined();
+    await expect(gw.redeemPositions([conditionId])).resolves.toMatchObject({
+      status: "confirmed",
+      conditionIds: [conditionId],
+    });
 
     expect(wait).toHaveBeenCalledTimes(1);
     expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(false);
@@ -604,7 +666,10 @@ describe("LiveExchangeGateway", () => {
     gw = new LiveExchangeGateway({ client, settlementClient });
 
     const conditionId = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    await expect(gw.redeemPositions([conditionId])).resolves.toBeUndefined();
+    await expect(gw.redeemPositions([conditionId])).resolves.toMatchObject({
+      status: "pending",
+      conditionIds: [conditionId],
+    });
 
     expect(wait).toHaveBeenCalledTimes(1);
     expect(gw.hasPendingRedeemSubmission(conditionId)).toBe(true);

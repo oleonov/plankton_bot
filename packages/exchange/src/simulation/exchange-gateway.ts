@@ -199,8 +199,14 @@ export class SimulationExchangeGateway implements ExchangeGateway {
     return 0n;
   }
 
-  async redeemPositions(_conditionIds: string[], _options?: RedeemPositionsOptions): Promise<void> {
-    // No-op in simulation
+  async redeemPositions(conditionIds: string[], _options?: RedeemPositionsOptions) {
+    return {
+      status: "skipped" as const,
+      conditionIds,
+      reason: "unsupported_settlement" as const,
+      txHash: null,
+      gasUsed: null,
+    };
   }
 
   async mergePositions(_merges: { conditionId: string; amount: number }[]): Promise<void> {

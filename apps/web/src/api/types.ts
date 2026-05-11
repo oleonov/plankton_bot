@@ -103,6 +103,24 @@ export interface OpportunisticTakerPolicy {
   enabled: boolean;
   maxSpreadTicks: number;
   sides: Array<"buy" | "sell">;
+  safetyBuffer: number;
+  fallbackMinNotionalUsdc: number;
+  marketableBuyMinNotionalUsdc: number;
+}
+
+export interface RedeemSweepPolicy {
+  enabled: boolean;
+  intervalMs: number;
+  inFlightTtlMs: number;
+  maxRetries: number;
+  retryBackoffMs: number[];
+  postRedeemVerifyDelayMs: number;
+}
+
+export interface RaceProtectionPolicy {
+  redeemInFlight: {
+    enabled: boolean;
+  };
 }
 
 export interface ExecutionPolicyDTO {
@@ -124,6 +142,8 @@ export interface ExecutionPolicyDTO {
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
   opportunisticTaker?: OpportunisticTakerPolicy;
+  redeemSweep?: RedeemSweepPolicy;
+  raceProtection?: RaceProtectionPolicy;
   telemetry: ExecutionTelemetryPolicy;
 }
 

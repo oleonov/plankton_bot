@@ -455,6 +455,20 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
           | Partial<ExecutionPolicy["opportunisticTaker"]>
           | undefined) ?? {}),
       },
+      redeemSweep: {
+        ...current.redeemSweep,
+        ...((patch.redeemSweep as Partial<ExecutionPolicy["redeemSweep"]> | undefined) ?? {}),
+      },
+      raceProtection: {
+        ...(current.raceProtection ?? DEFAULT_EXECUTION_POLICY.raceProtection),
+        ...((patch.raceProtection as Partial<ExecutionPolicy["raceProtection"]> | undefined) ?? {}),
+        redeemInFlight: {
+          ...(current.raceProtection?.redeemInFlight ??
+            DEFAULT_EXECUTION_POLICY.raceProtection.redeemInFlight),
+          ...((patch.raceProtection as Partial<ExecutionPolicy["raceProtection"]> | undefined)
+            ?.redeemInFlight ?? {}),
+        },
+      },
       orderLifetime: {
         ...current.orderLifetime,
         ...((patch.orderLifetime as Partial<ExecutionPolicy["orderLifetime"]> | undefined) ?? {}),

@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS profile_settings (
   risk_caps_json         TEXT,
   wallet_mode            TEXT,
   min_order_usdc         REAL,
+  fallback_min_order_usdc_relayer REAL,
+  fallback_min_order_usdc_eoa     REAL,
   relayer_json           TEXT,
   execution_policy_json  TEXT,
   updated_at             TEXT NOT NULL DEFAULT (datetime('now'))

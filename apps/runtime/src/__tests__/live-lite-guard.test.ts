@@ -116,5 +116,18 @@ describe("LiveLiteGuard", () => {
       expect(lowConfiguredGuard.getMinOrderUsdc()).toBe(0.05);
       expect(lowConfiguredGuard.getMinEntryNotionalUsdc()).toBe(1);
     });
+
+    it("uses configured fallback relayer minimums", () => {
+      const guardWithFallback = new LiveLiteGuard({
+        maxOpenValueUsdc: 50,
+        maxOrderUsdc: 10,
+        maxActiveMarkets: 2,
+        walletMode: "relayer",
+        fallbackMinOrderUsdcRelayer: 0.5,
+      });
+
+      expect(guardWithFallback.getMinOrderUsdc()).toBe(0.5);
+      expect(guardWithFallback.getMinEntryNotionalUsdc(0.5)).toBe(0.5);
+    });
   });
 });

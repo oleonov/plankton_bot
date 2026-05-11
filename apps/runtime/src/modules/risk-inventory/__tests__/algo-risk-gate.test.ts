@@ -10,8 +10,8 @@ import {
   type Position,
   type ExecutionPolicy,
 } from "@krabs/domain";
-import type { OrderRepository, PositionRepository } from "@krabs/domain";
-import { AlgoRiskGateImpl } from "../algo-risk-gate.js";
+import type { MarketRepository, OrderRepository, PositionRepository } from "@krabs/domain";
+import { AlgoRiskGateImpl, CONDITION_REDEEM_IN_FLIGHT_REASON } from "../algo-risk-gate.js";
 import type { Logger } from "../../../logger.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────────
@@ -114,6 +114,15 @@ function makePositionRepo(position: Position | null = null): PositionRepository 
   };
 }
 
+function makeMarketRepo(conditionId = COND_ID): Pick<MarketRepository, "findByTokenId"> {
+  return {
+    findByTokenId: vi.fn(() => ({
+      tokenId: TOK_ID,
+      conditionId,
+    })) as unknown as MarketRepository["findByTokenId"],
+  };
+}
+
 function createMockControlDb(walletBalance: number | null) {
   return {
     prepare: vi.fn().mockReturnValue({
@@ -188,6 +197,106 @@ describe("AlgoRiskGateImpl", () => {
     expect(decision.approved).toBe(true);
     expect(decision.signalId).toBe(signal.signalId);
     expect(decision.rejectionReasons).toHaveLength(0);
+  });
+
+  it("rejects BUY when the signal condition has an in-flight redeem", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+      undefined,
+      makeMarketRepo(),
+      () => true,
+    );
+    const decision = await gate.evaluate(makeSignal({ side: "buy" }));
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain(CONDITION_REDEEM_IN_FLIGHT_REASON);
+  });
+
+  it("rejects SELL when the signal condition has an in-flight redeem", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+      undefined,
+      makeMarketRepo(),
+      () => true,
+    );
+    const decision = await gate.evaluate(makeSignal({ side: "sell" }));
+
+    expect(decision.approved).toBe(false);
+    expect(decision.rejectionReasons).toContain(CONDITION_REDEEM_IN_FLIGHT_REASON);
+  });
+
+  it("allows unrelated conditions when redeem guard returns false", async () => {
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+      undefined,
+      makeMarketRepo(createConditionId("cond-unrelated")),
+      (conditionId) => conditionId === "cond-other",
+    );
+    const decision = await gate.evaluate(makeSignal({ side: "buy" }));
+
+    expect(decision.approved).toBe(true);
+  });
+
+  it("allows signals after successful redeem clears the in-flight condition", async () => {
+    let inFlight = true;
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+      undefined,
+      makeMarketRepo(),
+      () => inFlight,
+    );
+
+    expect((await gate.evaluate(makeSignal({ side: "buy" }))).approved).toBe(false);
+    inFlight = false;
+    expect((await gate.evaluate(makeSignal({ side: "buy" }))).approved).toBe(true);
+  });
+
+  it("emits a redeem-in-flight rejection metric for every rejected signal", async () => {
+    const metrics = vi.fn();
+    const gate = new AlgoRiskGateImpl(
+      makeOrderRepo(),
+      makePositionRepo(),
+      makeLogger(),
+      undefined,
+      undefined,
+      undefined,
+      () => makeExecutionPolicy(),
+      undefined,
+      makeMarketRepo(),
+      () => true,
+      metrics,
+    );
+
+    await gate.evaluate(makeSignal({ side: "buy" }));
+    await gate.evaluate(makeSignal({ signalId: "sig-2", side: "sell" }));
+
+    expect(metrics).toHaveBeenCalledTimes(2);
+    expect(metrics).toHaveBeenCalledWith({ side: "buy", conditionId: String(COND_ID) });
+    expect(metrics).toHaveBeenCalledWith({ side: "sell", conditionId: String(COND_ID) });
   });
 
   it("allows second buy when token has one open buy order and per-token cap is two", async () => {

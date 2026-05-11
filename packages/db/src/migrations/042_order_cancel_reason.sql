@@ -1,1 +1,1 @@
-ALTER TABLE orders ADD COLUMN cancel_reason TEXT;
+SELECT safe_add_column('orders', 'cancel_reason', 'TEXT');

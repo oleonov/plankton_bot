@@ -2,9 +2,11 @@ const POLYMARKET_POSITIONS_URL = "https://data-api.polymarket.com/positions";
 
 export interface PolymarketDataPosition {
   tokenId: string;
+  conditionId: string | null;
   size: number;
   currentValueUsdc: number;
   initialValueUsdc: number;
+  redeemable: boolean;
   slug: string | null;
   marketSlug: string | null;
   outcome: string | null;
@@ -44,6 +46,14 @@ function stringField(raw: Record<string, unknown>, ...fields: string[]): string 
   return null;
 }
 
+function booleanField(raw: Record<string, unknown>, field: string): boolean {
+  const value = raw[field];
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  if (typeof value === "string") return value.toLowerCase() === "true" || value === "1";
+  return false;
+}
+
 export function normalizePolymarketPosition(
   raw: Record<string, unknown>,
 ): PolymarketDataPosition | null {
@@ -52,9 +62,11 @@ export function normalizePolymarketPosition(
 
   return {
     tokenId,
+    conditionId: stringField(raw, "conditionId", "condition_id"),
     size: numericField(raw, "size"),
     currentValueUsdc: numericField(raw, "currentValue"),
     initialValueUsdc: numericField(raw, "initialValue"),
+    redeemable: booleanField(raw, "redeemable"),
     slug: stringField(raw, "slug"),
     marketSlug: stringField(raw, "marketSlug", "market_slug"),
     outcome: stringField(raw, "outcome"),

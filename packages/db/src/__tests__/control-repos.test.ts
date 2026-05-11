@@ -89,6 +89,8 @@ describe("SqliteProfileSettingsRepository", () => {
       riskCapsJson: null,
       walletMode: null,
       minOrderUsdc: null,
+      fallbackMinOrderUsdcRelayer: null,
+      fallbackMinOrderUsdcEoa: null,
       relayerJson: null,
       executionPolicyJson: null,
       updatedAt: NOW,

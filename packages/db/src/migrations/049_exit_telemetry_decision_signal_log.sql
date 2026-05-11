@@ -22,13 +22,11 @@
 -- sold_bought_ratio: legState.cumulative_sell_size / legState.cumulative_buy_size
 --   at SELL emit time (pre-this-SELL state).
 -- sold_bought_ratio_bucket: §11.2 six-bucket label.
--- Runtime ledger DBs upgrade via bootstrapLedgerDb safeAddColumn calls; this
--- file exists for non-runtime DB consumers iterating the migrations directory.
-ALTER TABLE decision_signal_log ADD COLUMN is_exit INTEGER;
-ALTER TABLE decision_signal_log ADD COLUMN is_first_sell INTEGER;
-ALTER TABLE decision_signal_log ADD COLUMN holding_time_ms INTEGER;
-ALTER TABLE decision_signal_log ADD COLUMN holding_time_bucket TEXT;
-ALTER TABLE decision_signal_log ADD COLUMN exit_pnl_pct REAL;
-ALTER TABLE decision_signal_log ADD COLUMN exit_pnl_bucket TEXT;
-ALTER TABLE decision_signal_log ADD COLUMN sold_bought_ratio REAL;
-ALTER TABLE decision_signal_log ADD COLUMN sold_bought_ratio_bucket TEXT;
+SELECT safe_add_column('decision_signal_log', 'is_exit', 'INTEGER');
+SELECT safe_add_column('decision_signal_log', 'is_first_sell', 'INTEGER');
+SELECT safe_add_column('decision_signal_log', 'holding_time_ms', 'INTEGER');
+SELECT safe_add_column('decision_signal_log', 'holding_time_bucket', 'TEXT');
+SELECT safe_add_column('decision_signal_log', 'exit_pnl_pct', 'REAL');
+SELECT safe_add_column('decision_signal_log', 'exit_pnl_bucket', 'TEXT');
+SELECT safe_add_column('decision_signal_log', 'sold_bought_ratio', 'REAL');
+SELECT safe_add_column('decision_signal_log', 'sold_bought_ratio_bucket', 'TEXT');

@@ -77,6 +77,14 @@ export interface CancelOrderParams {
   readonly orderId: string;
 }
 
+export interface RedeemPositionsResult {
+  readonly status: "skipped" | "submitted" | "confirmed" | "pending";
+  readonly conditionIds: readonly string[];
+  readonly reason?: "no_redeem_requests" | "unsupported_settlement" | null;
+  readonly txHash?: string | null;
+  readonly gasUsed?: number | null;
+}
+
 export interface ExchangeOrder {
   readonly orderId: string;
   readonly clientOrderId: string;
@@ -498,7 +506,10 @@ export interface ExchangeGateway {
    * Polymarket-specific: typically calls FixedProductMarketMaker.redeem()
    * or ClobClient.redeem().
    */
-  redeemPositions(conditionIds: string[], options?: RedeemPositionsOptions): Promise<void>;
+  redeemPositions(
+    conditionIds: string[],
+    options?: RedeemPositionsOptions,
+  ): Promise<RedeemPositionsResult>;
 
   /**
    * Optional hint for asynchronous settlement paths (for example relayer-backed

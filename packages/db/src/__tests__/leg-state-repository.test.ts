@@ -5,6 +5,7 @@ import { createTokenId } from "@krabs/domain";
 import type { LegState } from "@krabs/domain";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { applySafeAddColumnStatements } from "../migrations/runner.js";
 
 const TOKEN = createTokenId("tok-test");
 
@@ -31,7 +32,7 @@ function createTestDb(): Database.Database {
     size_usdc REAL,
     filled_at TEXT NOT NULL
   )`);
-  db.exec(cumulativeSizes);
+  db.exec(applySafeAddColumnStatements(db, cumulativeSizes));
   return db;
 }
 
@@ -173,7 +174,7 @@ describe("SqliteLegStateRepository", () => {
       join(import.meta.dirname, "../migrations/050_leg_states_cumulative_sizes.sql"),
       "utf-8",
     );
-    fresh.exec(cumulativeSizes);
+    fresh.exec(applySafeAddColumnStatements(fresh, cumulativeSizes));
 
     const row = fresh
       .prepare(

@@ -446,6 +446,17 @@ export class ReconciliationModule implements RuntimeModule {
             positions.map((p) => ({ tokenId: p.tokenId, size: p.size })),
             ranAt,
           );
+          await this.deps.bus.publish("PolymarketWalletUpdated", {
+            positions: positions.map((p) => ({
+              tokenId: p.tokenId as import("@krabs/domain").TokenId,
+              conditionId: p.conditionId,
+              size: p.size,
+              redeemable: p.redeemable,
+              slug: p.slug ?? p.marketSlug,
+              outcome: p.outcome,
+            })),
+            timestamp: ranAt,
+          });
           // Local active tokens absent from the wallet response are the precise
           // desync case: local DB believes we hold shares the wallet does not
           // report. Publish an explicit zero so the SELL clamp sees the truth

@@ -235,6 +235,18 @@ export interface RuntimeEventMap {
     readonly detectedAt: number;
   };
 
+  PolymarketWalletUpdated: {
+    readonly positions: readonly {
+      readonly tokenId: TokenId;
+      readonly conditionId: string | null;
+      readonly size: number;
+      readonly redeemable: boolean;
+      readonly slug: string | null;
+      readonly outcome: string | null;
+    }[];
+    readonly timestamp: number;
+  };
+
   ReconciliationComplete: {
     readonly result: ReconciliationResult;
   };

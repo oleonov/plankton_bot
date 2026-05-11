@@ -45,6 +45,8 @@ export function bootstrapControlDb(dbPath: string): DbConnection {
   safeAddColumn(conn.db, "runtime_control_state", "resume_intent_at", "TEXT");
   safeAddColumn(conn.db, "profile_settings", "wallet_mode", "TEXT");
   safeAddColumn(conn.db, "profile_settings", "min_order_usdc", "REAL");
+  safeAddColumn(conn.db, "profile_settings", "fallback_min_order_usdc_relayer", "REAL");
+  safeAddColumn(conn.db, "profile_settings", "fallback_min_order_usdc_eoa", "REAL");
   safeAddColumn(conn.db, "profile_settings", "relayer_json", "TEXT");
   safeAddColumn(conn.db, "profile_settings", "execution_policy_json", "TEXT");
   safeAddColumn(
@@ -184,8 +186,42 @@ function seedControlMigrationsBaseline(db: import("better-sqlite3").Database): v
 }
 
 const BOOTSTRAP_BACKFILL_BUY_SIZE_PRECEDENCE_V22 = "2026-04-17-buy-size-precedence-v2.2";
-const BOOTSTRAP_BACKFILL_TAKER_BUY_GROSS_FILL_SIZES_R60 =
-  "2026-05-11-taker-buy-gross-fill-sizes-r60";
+const LEDGER_BASELINE_MIGRATIONS = [
+  "001_initial.sql",
+  "002_pnl_ledger.sql",
+  "003_market_resolutions.sql",
+  "004_resolution_status.sql",
+  "005_event_slug.sql",
+  "006_effective_mode.sql",
+  "007_schema_extensions.sql",
+  "008_state_transitions.sql",
+  "009_negative_tail_tracking.sql",
+  "011_probe_substate.sql",
+  "013_wallet_balance.sql",
+  "014_trading_state_snapshots.sql",
+  "015_order_post_only.sql",
+  "016_fill_liquidity_role.sql",
+  "017_position_entry_style.sql",
+  "018_portfolio_snapshots.sql",
+  "019_state_transitions_profile.sql",
+  "020_fill_fee_rate_bps.sql",
+  "021_merge_ledger.sql",
+  "022_market_outcome_index.sql",
+  "023_family_throughput_policy.sql",
+  "024_family_fast_lane.sql",
+  "025_family_dust_lane.sql",
+  "026_queue_jump_canary.sql",
+  "027_family_rule_defaults.sql",
+  "028_algo_engine.sql",
+  "029_condition_id_family_nullable.sql",
+  "030_settlement_ledger_family_nullable.sql",
+  "031_drop_family_mode_columns.sql",
+  "032_unique_open_position_per_token.sql",
+  "033_drop_family_columns.sql",
+  "034_markets_selection_columns.sql",
+  "035_drop_family_runtime_state.sql",
+  "036_entry_style_spray_to_probe.sql",
+] as const;
 
 function ensureBootstrapBackfillsTable(db: import("better-sqlite3").Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS bootstrap_backfills (
@@ -209,20 +245,6 @@ function markBootstrapBackfill(db: import("better-sqlite3").Database, name: stri
   db.prepare("INSERT OR IGNORE INTO bootstrap_backfills (name) VALUES (?)").run(name);
 }
 
-function runSplitLedgerBackfillFromMigration(
-  db: import("better-sqlite3").Database,
-  filename: string,
-  marker: string,
-): void {
-  if (hasBootstrapBackfill(db, marker)) return;
-
-  const sql = readFileSync(join(import.meta.dirname, "migrations", filename), "utf-8");
-  db.transaction(() => {
-    db.exec(sql);
-    markBootstrapBackfill(db, marker);
-  })();
-}
-
 function backfillLiveProfileSettings(db: import("better-sqlite3").Database): void {
   try {
     db.prepare(
@@ -233,6 +255,18 @@ function backfillLiveProfileSettings(db: import("better-sqlite3").Database): voi
     ).run();
   } catch {
     // Legacy test DBs may not have the profile_settings table.
+  }
+}
+
+function seedLedgerMigrationsBaseline(db: import("better-sqlite3").Database): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+  const seed = db.prepare("INSERT OR IGNORE INTO schema_migrations (name) VALUES (?)");
+  for (const name of LEDGER_BASELINE_MIGRATIONS) {
+    seed.run(name);
   }
 }
 
@@ -461,148 +495,21 @@ function safeAddColumn(
 }
 
 export function bootstrapLedgerDb(dbPath: string): DbConnection {
-  // Upgrade an existing ledger before exec'ing the full schema: the schema
-  // declares CREATE INDEX on columns (selection_status, tradable, …) that
-  // pre-selection-rules DBs don't have yet. ALTER TABLE ADD COLUMN first so
-  // `openDatabaseWithSchema` doesn't fail the index build on a missing column.
   const conn = openDatabase(dbPath, { busyTimeoutMs: BOOTSTRAP_BUSY_TIMEOUT_MS });
-  safeAddColumn(conn.db, "markets", "outcome_index", "INTEGER");
-  safeAddColumn(conn.db, "markets", "tradable", "INTEGER NOT NULL DEFAULT 1");
-  safeAddColumn(conn.db, "markets", "event_market_count", "INTEGER NOT NULL DEFAULT 1");
-  safeAddColumn(
-    conn.db,
-    "markets",
-    "selection_status",
-    "TEXT NOT NULL DEFAULT 'unknown' " +
-      "CHECK (selection_status IN " +
-      "('unknown','matched_include','matched_exclude','step2_fallback_include','fallback_exclude'))",
-  );
-  safeAddColumn(conn.db, "markets", "selection_winning_rule_id", "TEXT");
-  // Step 0 §1.2/§1.3 — capture Gamma `createdAt` to compute `age_at_entry`
-  // (spec §1.7 R14). Distinct from `markets.created_at` (DB write moment).
-  safeAddColumn(conn.db, "markets", "gamma_created_at", "TEXT");
-  // Step 3 §D3 — soft-ranking score columns. The schema source-of-truth
-  // (ledger.sql) declares these inside the markets CREATE TABLE plus a
-  // partial index on `score IS NOT NULL`; existing DBs need them added
-  // before the schema re-exec runs the index build.
-  safeAddColumn(conn.db, "markets", "score", "REAL");
-  safeAddColumn(conn.db, "markets", "score_model_version", "TEXT");
-  safeAddColumn(conn.db, "markets", "scored_at", "TEXT");
-  safeAddColumn(conn.db, "markets", "features_captured_at", "TEXT");
-  conn.db.exec(readSchema("ledger.sql"));
-  safeAddColumn(conn.db, "orders", "decision_rule_id", "TEXT");
-  safeAddColumn(conn.db, "orders", "signal_timestamp", "TEXT");
-  safeAddColumn(conn.db, "orders", "exchange_error_code", "TEXT");
-  safeAddColumn(conn.db, "orders", "exchange_error_message", "TEXT");
-  safeAddColumn(conn.db, "orders", "exchange_error_payload", "TEXT");
-  safeAddColumn(conn.db, "orders", "post_only", "INTEGER NOT NULL DEFAULT 0");
-  safeAddColumn(conn.db, "orders", "cancel_reason", "TEXT");
-  safeAddColumn(conn.db, "orders", "cancel_age_ms", "INTEGER");
-  safeAddColumn(conn.db, "orders", "cancel_age_bucket", "TEXT");
-  safeAddColumn(conn.db, "orders", "fill_progress_shares", "NUMERIC");
-  safeAddColumn(conn.db, "orders", "market_horizon", "TEXT");
-  safeAddColumn(conn.db, "fills", "signal_id", "TEXT");
-  safeAddColumn(conn.db, "fills", "decision_rule_id", "TEXT");
-  safeAddColumn(conn.db, "fills", "signal_timestamp", "TEXT");
-  safeAddColumn(conn.db, "fills", "liquidity_role", "TEXT NOT NULL DEFAULT 'unknown'");
-  safeAddColumn(conn.db, "fills", "fee_rate_bps", "REAL NOT NULL DEFAULT 0");
-  safeAddColumn(conn.db, "execution_policy_observations", "decision_rule_id", "TEXT");
-  safeAddColumn(conn.db, "execution_policy_observations", "pricing_delta_ticks", "REAL");
-  safeAddColumn(conn.db, "execution_policy_observations", "round_level_hit", "TEXT");
-  safeAddColumn(conn.db, "execution_policy_observations", "sizing_rule_id", "TEXT");
-  safeAddColumn(conn.db, "execution_policy_observations", "notional_bucket", "TEXT");
-  safeAddColumn(conn.db, "decision_signal_log", "sizing_rule_id", "TEXT");
-  safeAddColumn(conn.db, "decision_signal_log", "notional_bucket", "TEXT");
-  safeAddColumn(conn.db, "decision_signal_log", "is_add", "INTEGER");
-  safeAddColumn(conn.db, "decision_signal_log", "add_age_ms", "INTEGER");
-  safeAddColumn(conn.db, "decision_signal_log", "add_age_bucket", "TEXT");
-  safeAddColumn(conn.db, "decision_signal_log", "add_price_change_pct", "REAL");
-  safeAddColumn(conn.db, "decision_signal_log", "add_price_change_bucket", "TEXT");
-  safeAddColumn(conn.db, "decision_signal_log", "nth_buy_at_emit", "INTEGER");
-  // ADR-027 §D-B: §11.2 / §11.3 exit telemetry on decision_signal_log.
-  safeAddColumn(conn.db, "decision_signal_log", "is_exit", "INTEGER");
-  safeAddColumn(conn.db, "decision_signal_log", "is_first_sell", "INTEGER");
-  safeAddColumn(conn.db, "decision_signal_log", "holding_time_ms", "INTEGER");
-  safeAddColumn(conn.db, "decision_signal_log", "holding_time_bucket", "TEXT");
-  safeAddColumn(conn.db, "decision_signal_log", "exit_pnl_pct", "REAL");
-  safeAddColumn(conn.db, "decision_signal_log", "exit_pnl_bucket", "TEXT");
-  safeAddColumn(conn.db, "decision_signal_log", "sold_bought_ratio", "REAL");
-  safeAddColumn(conn.db, "decision_signal_log", "sold_bought_ratio_bucket", "TEXT");
   ensureBootstrapBackfillsTable(conn.db);
-  // ADR-027 §D-C: cumulative sizes on leg_states.
-  safeAddColumn(conn.db, "leg_states", "cumulative_buy_size", "REAL NOT NULL DEFAULT 0");
-  safeAddColumn(conn.db, "leg_states", "cumulative_buy_notional", "REAL NOT NULL DEFAULT 0");
-  safeAddColumn(conn.db, "leg_states", "cumulative_sell_size", "REAL NOT NULL DEFAULT 0");
-  backfillLegStateCumulativeFromFills(conn.db);
-  backfillTakerBuyGrossFillSizes(conn.db);
-  safeAddColumn(conn.db, "positions", "entry_style", "TEXT");
+  const hasBaseSchema = hasTable(conn.db, "markets");
+  if (hasBaseSchema) {
+    seedLedgerMigrationsBaseline(conn.db);
+    runMigrations(conn.db);
+    conn.db.exec(readSchema("ledger.sql"));
+  } else {
+    conn.db.exec(readSchema("ledger.sql"));
+    seedLedgerMigrationsBaseline(conn.db);
+    runMigrations(conn.db);
+  }
   ensureUniqueOpenPositionIndex(conn.db);
   setRuntimeBusyTimeout(conn);
   return conn;
-}
-
-function backfillTakerBuyGrossFillSizes(db: import("better-sqlite3").Database): void {
-  runSplitLedgerBackfillFromMigration(
-    db,
-    "053_taker_buy_gross_fill_sizes.sql",
-    BOOTSTRAP_BACKFILL_TAKER_BUY_GROSS_FILL_SIZES_R60,
-  );
-}
-
-/**
- * ADR-027 §D-C — one-time backfill of cumulative_* on existing leg_states
- * after the columns are added. The split-ledger path uses `safeAddColumn`
- * (not `runMigrations`), so the SQL UPDATE in migration 050 never fires
- * here; without this, deployed bots keep the DEFAULT 0 forever and §11.2
- * exit PnL / sold-bought telemetry stays broken until each leg is fully
- * recreated by a fresh BUY fill.
- *
- * Idempotency guard: only legs with `cumulative_buy_size = 0` are touched.
- * A leg row only exists once a BUY fill has occurred (live path always
- * sets cumulative_buy_size to fillSize on the first BUY), so post-migration
- * legs are non-zero and skipped. The rare leg whose only fill had
- * `size IS NULL` (legacy pre-size-on-fill data) stays at 0 across
- * subsequent boots — re-running the SUM is harmless (still 0).
- *
- * `filled_at >= leg_states.first_trade_at` keeps prior closed-out legs on
- * the same token from leaking into the active leg's aggregates.
- */
-function backfillLegStateCumulativeFromFills(db: import("better-sqlite3").Database): void {
-  // bootstrapLedgerDb is shared across krabs/control DBs; the `fills`
-  // table only exists in the ledger DB. Skip silently otherwise.
-  const fillsExists = db
-    .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='fills'`)
-    .get();
-  if (!fillsExists) return;
-
-  db.exec(`UPDATE leg_states
-              SET cumulative_buy_size = COALESCE((
-                    SELECT SUM(COALESCE(f.size, 0))
-                      FROM fills f
-                     WHERE f.token_id = leg_states.token_id
-                       AND f.side = 'buy'
-                       AND f.filled_at >= leg_states.first_trade_at
-                  ), 0),
-                  cumulative_buy_notional = COALESCE((
-                    SELECT SUM(
-                             CASE
-                               WHEN f.size_usdc IS NOT NULL THEN f.size_usdc
-                               ELSE COALESCE(f.price, 0) * COALESCE(f.size, 0)
-                             END
-                           )
-                      FROM fills f
-                     WHERE f.token_id = leg_states.token_id
-                       AND f.side = 'buy'
-                       AND f.filled_at >= leg_states.first_trade_at
-                  ), 0),
-                  cumulative_sell_size = COALESCE((
-                    SELECT SUM(COALESCE(f.size, 0))
-                      FROM fills f
-                     WHERE f.token_id = leg_states.token_id
-                       AND f.side = 'sell'
-                       AND f.filled_at >= leg_states.first_trade_at
-                  ), 0)
-            WHERE cumulative_buy_size = 0`);
 }
 
 /**

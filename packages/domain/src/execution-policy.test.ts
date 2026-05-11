@@ -166,6 +166,9 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       enabled: true,
       maxSpreadTicks: 2,
       sides: ["buy", "sell"],
+      safetyBuffer: 1.05,
+      fallbackMinNotionalUsdc: 1,
+      marketableBuyMinNotionalUsdc: 1,
     });
     expect(policy.deadSideGuard.mode).toBe("enforce");
     expect(policy.pricing.mode).toBe("bounded-midpoint");
@@ -225,13 +228,25 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
 
   it("parses opportunistic taker settings and rejects invalid sides", () => {
     const parsed = parseExecutionPolicyJson(
-      JSON.stringify({ opportunisticTaker: { enabled: false, maxSpreadTicks: 4, sides: ["buy"] } }),
+      JSON.stringify({
+        opportunisticTaker: {
+          enabled: false,
+          maxSpreadTicks: 4,
+          sides: ["buy"],
+          safetyBuffer: 2,
+          fallbackMinNotionalUsdc: 0.5,
+          marketableBuyMinNotionalUsdc: 0.75,
+        },
+      }),
     );
     expect(parsed.issues).toHaveLength(0);
     expect(parsed.policy.opportunisticTaker).toEqual({
       enabled: false,
       maxSpreadTicks: 4,
       sides: ["buy"],
+      safetyBuffer: 2,
+      fallbackMinNotionalUsdc: 0.5,
+      marketableBuyMinNotionalUsdc: 0.75,
     });
 
     const invalid = parseExecutionPolicyJson(
@@ -404,6 +419,18 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
       maxSpreadTicks: 4,
       sides: ["sell"],
+    });
+  });
+
+  it("parses redeem sweep policy and defaults missing fields", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ redeemSweep: { enabled: false, intervalMs: 120_000 } }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.redeemSweep).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.redeemSweep,
+      enabled: false,
+      intervalMs: 120_000,
     });
   });
 

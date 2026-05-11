@@ -45,6 +45,30 @@ UPDATE inventory_lots
          SELECT p.position_id
            FROM positions p
           WHERE p.status IN ('open', 'dust')
+       )
+   AND (
+         ABS(size - (
+           SELECT f.size
+             FROM fills f
+            WHERE f.fill_id = inventory_lots.fill_id
+         )) > 1e-9
+         OR ABS(remaining_size - MAX(0, (
+           SELECT f.size
+             FROM fills f
+            WHERE f.fill_id = inventory_lots.fill_id
+         ) - (size - remaining_size))) > 1e-9
+         OR ABS(entry_price - CASE
+           WHEN (
+             SELECT f.size
+               FROM fills f
+              WHERE f.fill_id = inventory_lots.fill_id
+           ) > 0 THEN cost_usdc / (
+             SELECT f.size
+               FROM fills f
+              WHERE f.fill_id = inventory_lots.fill_id
+           )
+           ELSE entry_price
+         END) > 1e-9
        );
 
 WITH position_totals AS (
@@ -80,7 +104,31 @@ UPDATE positions
          ELSE avg_entry_price
        END,
        updated_at = datetime('now')
- WHERE position_id IN (SELECT position_id FROM position_totals);
+ WHERE position_id IN (SELECT position_id FROM position_totals)
+   AND (
+         ABS(size - (
+           SELECT pt.size
+             FROM position_totals pt
+            WHERE pt.position_id = positions.position_id
+         )) > 1e-9
+         OR ABS(cost_basis_usdc - (
+           SELECT pt.cost_basis_usdc
+             FROM position_totals pt
+            WHERE pt.position_id = positions.position_id
+         )) > 1e-9
+         OR ABS(avg_entry_price - CASE
+           WHEN (
+             SELECT pt.size
+               FROM position_totals pt
+              WHERE pt.position_id = positions.position_id
+           ) > 0 THEN (
+             SELECT pt.cost_basis_usdc / pt.size
+               FROM position_totals pt
+              WHERE pt.position_id = positions.position_id
+           )
+           ELSE avg_entry_price
+         END) > 1e-9
+       );
 
 UPDATE leg_states
    SET cumulative_buy_size = COALESCE((
@@ -116,4 +164,32 @@ UPDATE leg_states
           WHERE f.token_id = leg_states.token_id
             AND f.side = 'buy'
             AND f.liquidity_role = 'taker'
+       )
+   AND (
+         ABS(COALESCE(cumulative_buy_size, 0) - COALESCE((
+           SELECT SUM(COALESCE(f.size, 0))
+             FROM fills f
+            WHERE f.token_id = leg_states.token_id
+              AND f.side = 'buy'
+              AND f.filled_at >= leg_states.first_trade_at
+         ), 0)) > 1e-9
+         OR ABS(COALESCE(cumulative_buy_notional, 0) - COALESCE((
+           SELECT SUM(
+                    CASE
+                      WHEN f.size_usdc IS NOT NULL THEN f.size_usdc
+                      ELSE COALESCE(f.price, 0) * COALESCE(f.size, 0)
+                    END
+                  )
+             FROM fills f
+            WHERE f.token_id = leg_states.token_id
+              AND f.side = 'buy'
+              AND f.filled_at >= leg_states.first_trade_at
+         ), 0)) > 1e-9
+         OR ABS(COALESCE(cumulative_sell_size, 0) - COALESCE((
+           SELECT SUM(COALESCE(f.size, 0))
+             FROM fills f
+            WHERE f.token_id = leg_states.token_id
+              AND f.side = 'sell'
+              AND f.filled_at >= leg_states.first_trade_at
+         ), 0)) > 1e-9
        );
