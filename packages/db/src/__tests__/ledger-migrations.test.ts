@@ -188,6 +188,144 @@ describe("migration 032 — unique open position per token", () => {
   });
 });
 
+describe("migration 053 — taker BUY gross fill sizes", () => {
+  beforeEach(() => {
+    db.exec(`
+      CREATE TABLE fills (
+        fill_id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        condition_id TEXT NOT NULL DEFAULT '',
+        side TEXT NOT NULL,
+        price REAL NOT NULL,
+        size REAL NOT NULL,
+        size_usdc REAL NOT NULL,
+        liquidity_role TEXT NOT NULL,
+        fee REAL NOT NULL DEFAULT 0,
+        fee_rate_bps REAL NOT NULL DEFAULT 0,
+        filled_at TEXT NOT NULL
+      );
+      CREATE TABLE inventory_lots (
+        lot_id TEXT PRIMARY KEY,
+        position_id TEXT NOT NULL,
+        token_id TEXT NOT NULL,
+        side TEXT NOT NULL,
+        size REAL NOT NULL,
+        remaining_size REAL NOT NULL,
+        entry_price REAL NOT NULL,
+        cost_usdc REAL NOT NULL,
+        fill_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE leg_states (
+        token_id TEXT PRIMARY KEY,
+        buy_count INTEGER NOT NULL DEFAULT 0,
+        sell_count INTEGER NOT NULL DEFAULT 0,
+        last_action TEXT NOT NULL,
+        first_trade_price REAL NOT NULL,
+        first_trade_at TEXT NOT NULL,
+        last_trade_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        cumulative_buy_size REAL NOT NULL DEFAULT 0,
+        cumulative_buy_notional REAL NOT NULL DEFAULT 0,
+        cumulative_sell_size REAL NOT NULL DEFAULT 0
+      );
+    `);
+  });
+
+  it("repairs open taker BUY fills, lots, positions, and leg state to gross shares", () => {
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, status, opened_at, updated_at)
+       VALUES ('pos-open', 'tok-open', 'cond-1', 'buy', 19.7211, ?, 2.73, 2.73,
+               'open', '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z')`,
+    ).run(2.73 / 19.7211);
+    db.prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size,
+          size_usdc, liquidity_role, fee, filled_at)
+       VALUES ('fill-open', 'ord-1', 'tok-open', 'cond-1', 'buy', 0.13, 19.7211,
+               2.73, 'taker', 0.166257, '2026-05-11T00:00:00Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, side, size, remaining_size,
+          entry_price, cost_usdc, fill_id, created_at)
+       VALUES ('lot-open', 'pos-open', 'tok-open', 'buy', 19.7211, 19.7211,
+               ?, 2.73, 'fill-open', '2026-05-11T00:00:00Z')`,
+    ).run(2.73 / 19.7211);
+    db.prepare(
+      `INSERT INTO leg_states
+         (token_id, buy_count, sell_count, last_action, first_trade_price,
+          first_trade_at, last_trade_at, updated_at, cumulative_buy_size,
+          cumulative_buy_notional, cumulative_sell_size)
+       VALUES ('tok-open', 1, 0, 'BUY', 0.13, '2026-05-11T00:00:00Z',
+               '2026-05-11T00:00:00Z', '2026-05-11T00:00:00Z', 19.7211, 2.73, 0)`,
+    ).run();
+
+    db.prepare(
+      `INSERT INTO positions
+         (position_id, token_id, condition_id, side, size, avg_entry_price,
+          cost_basis_usdc, current_value_usdc, status, opened_at, updated_at)
+       VALUES ('pos-closed', 'tok-closed', 'cond-2', 'buy', 0, 0, 0, 0,
+               'closed', '2026-05-10T00:00:00Z', '2026-05-10T00:00:00Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO fills
+         (fill_id, order_id, token_id, condition_id, side, price, size,
+          size_usdc, liquidity_role, fee, filled_at)
+       VALUES ('fill-closed', 'ord-2', 'tok-closed', 'cond-2', 'buy', 0.45,
+               17.882648, 8.379, 'taker', 0.3318084, '2026-05-10T00:00:00Z')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO inventory_lots
+         (lot_id, position_id, token_id, side, size, remaining_size,
+          entry_price, cost_usdc, fill_id, created_at)
+       VALUES ('lot-closed', 'pos-closed', 'tok-closed', 'buy', 17.882648, 0,
+               ?, 8.379, 'fill-closed', '2026-05-10T00:00:00Z')`,
+    ).run(8.379 / 17.882648);
+
+    db.exec(readMigration("053_taker_buy_gross_fill_sizes.sql"));
+
+    const openFill = db.prepare("SELECT size FROM fills WHERE fill_id = 'fill-open'").get() as {
+      size: number;
+    };
+    expect(openFill.size).toBeCloseTo(21, 9);
+
+    const openLot = db
+      .prepare(
+        "SELECT size, remaining_size, entry_price FROM inventory_lots WHERE lot_id = 'lot-open'",
+      )
+      .get() as { size: number; remaining_size: number; entry_price: number };
+    expect(openLot.size).toBeCloseTo(21, 9);
+    expect(openLot.remaining_size).toBeCloseTo(21, 9);
+    expect(openLot.entry_price).toBeCloseTo(2.73 / 21, 9);
+
+    const openPosition = db
+      .prepare(
+        "SELECT size, avg_entry_price, cost_basis_usdc FROM positions WHERE position_id = 'pos-open'",
+      )
+      .get() as { size: number; avg_entry_price: number; cost_basis_usdc: number };
+    expect(openPosition.size).toBeCloseTo(21, 9);
+    expect(openPosition.avg_entry_price).toBeCloseTo(2.73 / 21, 9);
+    expect(openPosition.cost_basis_usdc).toBeCloseTo(2.73, 9);
+
+    const legState = db
+      .prepare(
+        "SELECT cumulative_buy_size, cumulative_buy_notional FROM leg_states WHERE token_id = 'tok-open'",
+      )
+      .get() as { cumulative_buy_size: number; cumulative_buy_notional: number };
+    expect(legState.cumulative_buy_size).toBeCloseTo(21, 9);
+    expect(legState.cumulative_buy_notional).toBeCloseTo(2.73, 9);
+
+    const closedLot = db
+      .prepare("SELECT remaining_size FROM inventory_lots WHERE lot_id = 'lot-closed'")
+      .get() as { remaining_size: number };
+    expect(closedLot.remaining_size).toBe(0);
+  });
+});
+
 describe("migration 039 — retention indexes", () => {
   it("creates date indexes used by retention cleanup", () => {
     db.exec(`

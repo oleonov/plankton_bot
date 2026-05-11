@@ -98,14 +98,11 @@ export interface ExchangeFill {
   readonly tokenId: TokenId;
   readonly side: OrderSide;
   readonly price: number;
-  /** Net shares delivered to the wallet (after taker BUY share fee deduction). */
+  /** Shares reported by the exchange and reflected in wallet position size. */
   readonly size: number;
-  /** Pre-fee gross shares as reported by the exchange. Mappers should populate
-   *  this from the raw fill payload so downstream (fill-reconciler) can
-   *  re-derive net size with authoritative V2 fee metadata. Falls back to
-   *  `size` when omitted (legacy / simulation paths). */
+  /** Same share quantity before any local transforms. Kept for legacy reconciliation paths. */
   readonly grossSize?: number;
-  /** Cash notional paid/received when it differs from wallet share size × price. */
+  /** Cash notional paid/received, excluding taker fee. */
   readonly sizeUsdc?: number;
   readonly liquidityRole: LiquidityRole;
   readonly fee: number;

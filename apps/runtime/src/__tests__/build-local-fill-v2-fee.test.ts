@@ -40,26 +40,21 @@ function makeBuyTakerFill(overrides: Partial<ExchangeFill> = {}): ExchangeFill {
 }
 
 describe("buildLocalFillFromExchangeFill — V2 fee metadata", () => {
-  it("recomputes net shares from grossSize when V2 feeInfo is present (exponent=1)", () => {
+  it("keeps taker BUY shares gross and computes fee separately when V2 feeInfo is present", () => {
     // V2 SDK fee model: platformFeeRate = rate * (p*(1-p))^e.
-    // For taker BUY, share fee = grossSize * platformFeeRate / price.
     // rate=0.04, e=1, p=0.5 → platformFeeRate = 0.04 * 0.25 = 0.01.
-    // shareFee = 100 * 0.01 / 0.5 = 2 → net size = 98.
+    // fee USDC = 100 * 0.01 = 1; wallet position size remains 100 shares.
     const fill = makeBuyTakerFill({ grossSize: 100, size: 100, feeRateBps: 0 });
     const feeInfo: MarketFeeInfo = { rate: 0.04, exponent: 1, takerOnly: false };
 
     const result = buildLocalFillFromExchangeFill(fill, baseLocalOrder, undefined, feeInfo);
 
-    expect(result.fill.size).toBeCloseTo(98, 9);
-    // fee USDC = grossSize * platformFeeRate = 100 * 0.01 = 1
+    expect(result.fill.size).toBeCloseTo(100, 9);
     expect(result.fill.fee).toBeCloseTo(1, 9);
   });
 
   it("treats feeInfo.rate=0 as authoritative zero-fee market (no fee, full shares)", () => {
-    // mapper saw feeRateBps=10 (0.001) and baked a V1 share fee. With V2
-    // feeInfo.rate=0, the reconciler must override and emit zero fee + full
-    // gross shares.
-    const fill = makeBuyTakerFill({ grossSize: 100, size: 99.95, feeRateBps: 10 });
+    const fill = makeBuyTakerFill({ grossSize: 100, size: 100, feeRateBps: 10 });
     const feeInfo: MarketFeeInfo = { rate: 0, exponent: 1, takerOnly: false };
 
     const result = buildLocalFillFromExchangeFill(fill, baseLocalOrder, undefined, feeInfo);
@@ -70,31 +65,29 @@ describe("buildLocalFillFromExchangeFill — V2 fee metadata", () => {
 
   it("applies non-trivial exponent (e=2) to platform fee rate", () => {
     // rate=0.04, e=2, p=0.5 → platformFeeRate = 0.04 * (0.25)^2 = 0.0025.
-    // shareFee = 100 * 0.0025 / 0.5 = 0.5 → net size = 99.5
     // fee USDC = 100 * 0.0025 = 0.25
     const fill = makeBuyTakerFill({ grossSize: 100, size: 100, feeRateBps: 0 });
     const feeInfo: MarketFeeInfo = { rate: 0.04, exponent: 2, takerOnly: false };
 
     const result = buildLocalFillFromExchangeFill(fill, baseLocalOrder, undefined, feeInfo);
 
-    expect(result.fill.size).toBeCloseTo(99.5, 9);
+    expect(result.fill.size).toBeCloseTo(100, 9);
     expect(result.fill.fee).toBeCloseTo(0.25, 9);
   });
 
   it("treats exponent=0 as a flat-rate fee (does not coerce to 1)", () => {
     // rate=0.04, e=0, p=0.5 → platformFeeRate = 0.04 * 1 = 0.04.
-    // shareFee = 100 * 0.04 / 0.5 = 8 → net size = 92.
     // fee USDC = 100 * 0.04 = 4.
     const fill = makeBuyTakerFill({ grossSize: 100, size: 100, feeRateBps: 0 });
     const feeInfo: MarketFeeInfo = { rate: 0.04, exponent: 0, takerOnly: false };
 
     const result = buildLocalFillFromExchangeFill(fill, baseLocalOrder, undefined, feeInfo);
 
-    expect(result.fill.size).toBeCloseTo(92, 9);
+    expect(result.fill.size).toBeCloseTo(100, 9);
     expect(result.fill.fee).toBeCloseTo(4, 9);
   });
 
-  it("does NOT recompute net shares for SELL (taker SELL has no share fee)", () => {
+  it("keeps SELL share size gross while computing fee separately", () => {
     const fill = makeBuyTakerFill({
       side: "sell",
       grossSize: 100,
@@ -110,11 +103,11 @@ describe("buildLocalFillFromExchangeFill — V2 fee metadata", () => {
     expect(result.fill.fee).toBeCloseTo(1, 9);
   });
 
-  it("falls back to mapper-baked size when no feeInfo is supplied", () => {
+  it("falls back to grossSize when no feeInfo is supplied", () => {
     const fill = makeBuyTakerFill({ grossSize: 100, size: 97, feeRateBps: 600 });
 
     const result = buildLocalFillFromExchangeFill(fill, baseLocalOrder, undefined, null);
 
-    expect(result.fill.size).toBe(97);
+    expect(result.fill.size).toBe(100);
   });
 });

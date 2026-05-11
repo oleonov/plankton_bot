@@ -17,7 +17,6 @@ import type {
   LiquidityRole,
 } from "@krabs/domain";
 import {
-  computePolymarketBuyShareFee,
   computePolymarketTakerFeeUsdc,
   createTokenId,
   resolvePolymarketTakerFeeRate,
@@ -94,11 +93,7 @@ function buildExchangeFill(input: {
   const feeRateBps = Number(input.feeRateBps ?? 0);
   const side = toDomainSide(input.side);
   const { rate, exponent } = resolvePolymarketTakerFeeRate({ feeRateBps });
-  const shareFee =
-    input.liquidityRole === "taker" && side === "buy"
-      ? computePolymarketBuyShareFee({ grossSize, price, rate, exponent })
-      : 0;
-  const size = grossSize - shareFee;
+  const size = grossSize;
   const sizeUsdc = grossSize * price;
 
   const fee =

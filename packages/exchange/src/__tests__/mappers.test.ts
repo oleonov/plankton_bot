@@ -182,11 +182,11 @@ describe("mapTrade", () => {
       price: 0.11,
       liquidityRole: "taker",
     });
-    expect(fills[0]!.size).toBeCloseTo(40.71252, 5);
+    expect(fills[0]!.size).toBeCloseTo(43.5, 5);
     expect(fills[0]!.sizeUsdc).toBeCloseTo(4.785, 6);
   });
 
-  it("maps taker BUY fills to wallet net shares, not gross order shares", () => {
+  it("maps taker BUY fills to wallet gross shares and keeps fee separate", () => {
     const fills = mapTradeToPersonalFills(
       {
         id: "prod-btc-range-fill",
@@ -204,8 +204,9 @@ describe("mapTrade", () => {
     );
 
     expect(fills).toHaveLength(1);
-    expect(fills[0]!.size).toBeCloseTo(1085.84424, 5);
+    expect(fills[0]!.size).toBeCloseTo(1170, 5);
     expect(fills[0]!.sizeUsdc).toBeCloseTo(1.17, 6);
+    expect(fills[0]!.fee).toBeGreaterThan(0);
   });
 
   it("extracts our maker fills from nested maker_orders instead of the top-level row", () => {

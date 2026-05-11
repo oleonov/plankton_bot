@@ -270,14 +270,10 @@ describe("importExchangeFills", () => {
     expect(result.details).toHaveLength(1);
   });
 
-  // Regression for "taker BUY orders never reach `filled`": Polymarket deducts
-  // the share-side fee from gross at fill time, so `fill.size` is NET shares
-  // while `order.size` is GROSS shares. Without compensation, the cumulative
-  // sum of `fill.size` never catches up to `order.size`. The order is then
-  // stuck `partially-filled`, its full sizeUsdc continues to be reserved by
-  // `OrderRepository.sumOpenBuyNotional()`, and new BUY budget silently dries
-  // up over uptime.
-  it("marks taker BUY filled when cumulative NET fill.size is below GROSS order.size", async () => {
+  // Regression for legacy rows: older code persisted taker BUY fills net of a
+  // local share-fee calculation. Status accounting must still recover gross
+  // from size_usdc / price so those orders do not stay partially-filled.
+  it("marks legacy net-sized taker BUY filled using gross notional", async () => {
     const fills: ExchangeFill[] = [
       {
         fillId: "fill-taker-buy",
@@ -317,12 +313,9 @@ describe("importExchangeFills", () => {
     expect(orderRepo.updateStatus).toHaveBeenCalledWith(createOrderId("ord-1"), "filled");
   });
 
-  // Regression for "RiskInventory built positions from raw exchange size":
-  // FillReceived.size must equal the V2-recomputed net size (`resolved.fill.size`)
-  // so the persisted fill, the published event, and the inventory replay all
-  // agree on share count. Pre-fix, the publish path used `ef.size`, drifting
-  // the in-memory inventory away from the DB after V2 fee recompute.
-  it("publishes FillReceived.size as V2-recomputed net (not raw ef.size)", async () => {
+  // FillReceived.size must equal the persisted wallet share size so the DB,
+  // published event, and inventory replay agree on the position quantity.
+  it("publishes FillReceived.size as gross wallet shares with fee separate", async () => {
     const fills: ExchangeFill[] = [
       {
         fillId: "fill-v2",
@@ -331,8 +324,6 @@ describe("importExchangeFills", () => {
         tokenId: createTokenId("tok-1"),
         side: "buy",
         price: 0.5,
-        // mapper-baked size = gross to simulate an exchange that didn't
-        // pre-deduct share fees (V2 reconciler is responsible for net).
         size: 100,
         grossSize: 100,
         liquidityRole: "taker",
@@ -353,10 +344,10 @@ describe("importExchangeFills", () => {
     };
     (orderRepo.findByClientOrderId as any).mockReturnValue(localOrder);
     (orderRepo.findById as any).mockReturnValue(localOrder);
-    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 98, sizeUsdc: 50 }]);
+    (fillRepo.findByOrderId as any).mockReturnValue([{ size: 100, sizeUsdc: 50 }]);
 
     // V2 feeInfo: rate=0.04, e=1, p=0.5 → platformFeeRate = 0.01.
-    // shareFee = 100 * 0.01 / 0.5 = 2 → net size = 98.
+    // fee = 100 * 0.01 = 1; position shares remain gross.
     const gateway = {
       getMarketFeeInfo: vi.fn().mockResolvedValue({
         rate: 0.04,
@@ -379,7 +370,7 @@ describe("importExchangeFills", () => {
     });
 
     expect(received).toHaveLength(1);
-    expect(received[0].size).toBeCloseTo(98, 9);
+    expect(received[0].size).toBeCloseTo(100, 9);
     expect(received[0].fee).toBeCloseTo(1, 9); // 100 * 0.01
     // Sanity: persisted size matches published size.
     const savedFill = (fillRepo.save as any).mock.calls[0][0];

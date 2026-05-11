@@ -164,12 +164,8 @@ export async function runStartupPositionAdoption(
 
     const orphanGroupKey = buildOrphanGroupKey(fill);
     const existing = syntheticSeeds.get(orphanGroupKey);
-    // Prefer gross notional from the exchange fill: for taker BUY in V2,
-    // `fill.size` is post-fee net shares, so `size * price` would be net
-    // notional. The synthetic seed represents what was actually traded, so
-    // we want gross — `fill.sizeUsdc` (gross from the mapper) when present,
-    // otherwise reconstruct from `fill.grossSize * fill.price`, falling
-    // back to `fill.size * fill.price` only on legacy/simulation paths.
+    // Prefer exchange notional when present; fee remains separate from
+    // position size/cost basis and is applied through the fill fee field.
     const sizeUsdc = fill.sizeUsdc ?? (fill.grossSize ?? fill.size) * fill.price;
 
     if (existing) {

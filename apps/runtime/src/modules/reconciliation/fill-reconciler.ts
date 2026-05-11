@@ -25,7 +25,6 @@ import type {
 import {
   createFillId,
   createOrderId,
-  computePolymarketBuyShareFee,
   computePolymarketTakerFeeUsdc,
   resolvePolymarketTakerFeeRate,
 } from "@krabs/domain";
@@ -121,25 +120,16 @@ export function buildLocalFillFromExchangeFill(
     feeInfo,
   });
 
-  // Re-derive net shares from gross when V2 fee metadata is authoritative.
-  // The mapper baked in a V1-style share fee from `feeRateBps`; if V2 reports
-  // a different rate/exponent (or the fill payload omitted bps), the wallet
-  // share count is wrong unless we recompute from the gross size.
   const grossSize: number =
     Number.isFinite(fill.grossSize) && (fill.grossSize ?? 0) > 0
       ? (fill.grossSize as number)
       : fill.size;
-  const useV2 = !!feeInfo;
-  const recomputedShareFee =
-    useV2 && fill.liquidityRole === "taker" && fill.side === "buy"
-      ? computePolymarketBuyShareFee({ grossSize, price: fill.price, rate, exponent })
-      : null;
-  const size = recomputedShareFee !== null ? grossSize - recomputedShareFee : fill.size;
+  const size = grossSize;
 
   const sizeUsdc = fill.sizeUsdc ?? grossSize * fill.price;
 
   const recomputedFeeUsdc =
-    useV2 && fill.liquidityRole !== "maker"
+    feeInfo && fill.liquidityRole !== "maker"
       ? computePolymarketTakerFeeUsdc({ grossSize, price: fill.price, rate, exponent })
       : null;
   const fee =
@@ -182,12 +172,9 @@ export function buildLocalFillFromExchangeFill(
 const FILL_GROSS_EPSILON = 1e-9;
 
 /**
- * Recover GROSS shares from a fill row. Polymarket taker BUY deducts the
- * share-side fee from gross at fill time — `fill.size` is NET shares for that
- * case (see `packages/exchange/src/mappers.ts:91-95`), while `fill.sizeUsdc`
- * is always GROSS USDC (`= grossSize × price`). Recover gross shares from
- * `sizeUsdc / price` for taker BUY; every other shape (`maker`, `unknown`,
- * any SELL) already stores gross in `fill.size`.
+ * Recover gross shares from legacy taker-BUY fill rows that were persisted
+ * before 2026-05-11 with the fee deducted from `fill.size`. New rows store
+ * exchange/wallet shares directly, so this path becomes a harmless no-op.
  *
  * Without this, `cumulativeFilled >= localOrder.size` is never true for a
  * fully-executed taker BUY: the order stays `partially-filled` forever, and
