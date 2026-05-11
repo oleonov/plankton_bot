@@ -170,6 +170,12 @@ describe("control-db migration infrastructure", () => {
           enabled: boolean;
           maxOpenOrdersTotal: number;
         };
+        exitBidAnchorTicks: number;
+        opportunisticTaker: {
+          enabled: boolean;
+          maxSpreadTicks: number;
+          sides: Array<"buy" | "sell">;
+        };
         multiBuyLadder: {
           enabled: boolean;
           maxLadderFillsPerToken: number;
@@ -197,6 +203,12 @@ describe("control-db migration infrastructure", () => {
       expect(parsed.orderCapacity).toEqual({
         enabled: true,
         maxOpenOrdersTotal: 22,
+      });
+      expect(parsed.exitBidAnchorTicks).toBe(4);
+      expect(parsed.opportunisticTaker).toEqual({
+        enabled: true,
+        maxSpreadTicks: 2,
+        sides: ["buy", "sell"],
       });
       expect(parsed.multiBuyLadder).toEqual({
         enabled: true,
@@ -641,5 +653,74 @@ describe("control-db migration infrastructure", () => {
     expect(policy.exitPricingMode).toBe("bid-anchored");
     expect(policy.exitBidAnchorTicks).toBe(3);
     expect(policy.exitRepriceOnDownprice.maxRepricesPerOrder).toBe(3);
+  });
+
+  it("migration 049 applies R51 taker policy and bid-anchor calibration", () => {
+    const dbPath = path.join(tmpDir, "control-r51-opportunistic-taker.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(
+              json_set(execution_policy_json, '$.exitBidAnchorTicks', 3),
+              '$.opportunisticTaker'
+            )
+          WHERE profile_id = ?`,
+      )
+      .run("live-lite");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("049_opportunistic_taker_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const policy = JSON.parse(raw.json);
+
+    expect(policy.exitBidAnchorTicks).toBe(4);
+    expect(policy.opportunisticTaker).toEqual({
+      enabled: true,
+      maxSpreadTicks: 2,
+      sides: ["buy", "sell"],
+    });
+  });
+
+  it("migration 049 preserves explicit opportunistic taker custom fields", () => {
+    const dbPath = path.join(tmpDir, "control-r51-opportunistic-taker-custom.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.exitBidAnchorTicks',
+              3,
+              '$.opportunisticTaker',
+              json('{"enabled":false,"maxSpreadTicks":1,"sides":["sell"]}')
+            )
+          WHERE profile_id = ?`,
+      )
+      .run("live-lite");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("049_opportunistic_taker_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const policy = JSON.parse(raw.json);
+
+    expect(policy.exitBidAnchorTicks).toBe(4);
+    expect(policy.opportunisticTaker).toEqual({
+      enabled: false,
+      maxSpreadTicks: 1,
+      sides: ["sell"],
+    });
   });
 });

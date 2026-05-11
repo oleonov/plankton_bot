@@ -633,7 +633,7 @@ export class ExecutionModule implements RuntimeModule {
       side: cmd.side,
       size: cmd.size,
       price: cmd.price,
-      ...(cmd.postOnly ? { postOnly: true } : {}),
+      ...(cmd.postOnly !== undefined ? { postOnly: cmd.postOnly } : {}),
       orderType: cmd.orderType,
       tickSize: cmd.tickSize,
       negRisk: cmd.negRisk,

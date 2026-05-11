@@ -17,6 +17,7 @@ export {
   DEFAULT_TELEMETRY,
   DEFAULT_ORDER_LIFETIME_POLICY,
   DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
+  DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
 } from "@krabs/domain";

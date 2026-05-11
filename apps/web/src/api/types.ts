@@ -99,6 +99,12 @@ export interface OrderCapacityPolicy {
   maxOpenOrdersTotal: number;
 }
 
+export interface OpportunisticTakerPolicy {
+  enabled: boolean;
+  maxSpreadTicks: number;
+  sides: Array<"buy" | "sell">;
+}
+
 export interface ExecutionPolicyDTO {
   version: 1;
   entryPriceCeiling: number;
@@ -117,6 +123,7 @@ export interface ExecutionPolicyDTO {
   orderCapacity: OrderCapacityPolicy;
   deadSideGuard: DeadSideGuardPolicy;
   pricing: ExecutionPricingPolicy;
+  opportunisticTaker?: OpportunisticTakerPolicy;
   telemetry: ExecutionTelemetryPolicy;
 }
 

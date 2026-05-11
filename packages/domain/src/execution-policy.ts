@@ -19,6 +19,7 @@ import type {
   OrderCapacityPolicy,
   OrderLifetimePolicy,
   MultiBuyLadderPolicy,
+  OpportunisticTakerPolicy,
   RepriceOnOutbidPolicy,
   ExitRepriceOnDownpricePolicy,
   SellCapacityPolicy,
@@ -96,6 +97,12 @@ export const DEFAULT_MULTI_BUY_LADDER_POLICY: MultiBuyLadderPolicy = {
   minStepFillRate: 0.1,
 };
 
+export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
+  enabled: true,
+  maxSpreadTicks: 2,
+  sides: ["buy", "sell"],
+};
+
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
   enabled: true,
   enforcement: "enforce",
@@ -159,7 +166,8 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
   exitPricingMode: "bid-anchored",
-  exitBidAnchorTicks: 3,
+  exitBidAnchorTicks: 4,
+  opportunisticTaker: DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   repriceOnOutbid: DEFAULT_REPRICE_ON_OUTBID_POLICY,
   exitRepriceOnDownprice: DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
@@ -173,6 +181,7 @@ const ORDER_LIFETIME_ENFORCEMENT_MODES = ["observe", "enforce"] as const;
 const PRICING_MODES = ["edge", "bounded-midpoint"] as const;
 const BINARY_PRICING_POLICIES = ["edge", "skip"] as const;
 const EXIT_PRICING_MODES = ["bid-anchored", "edge"] as const;
+const ORDER_SIDES = ["buy", "sell"] as const;
 
 // Bounds chosen to match the Zod schema that previously lived in
 // packages/config/src/env.ts so operators can't wedge the runtime via SQL.
@@ -280,6 +289,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     issues,
     "exitBidAnchorTicks",
   );
+  const opportunisticTaker = parseOpportunisticTaker(obj.opportunisticTaker, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
   const buyCapacity = parseBuyCapacity(obj.buyCapacity, issues);
@@ -305,6 +315,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       pricing,
       exitPricingMode,
       exitBidAnchorTicks,
+      opportunisticTaker,
       orderLifetime,
       repriceOnOutbid,
       exitRepriceOnDownprice,
@@ -313,6 +324,31 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       telemetry,
     },
     issues,
+  };
+}
+
+function parseOpportunisticTaker(raw: unknown, issues: string[]): OpportunisticTakerPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("opportunisticTaker must be an object");
+    return DEFAULT_OPPORTUNISTIC_TAKER_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_OPPORTUNISTIC_TAKER_POLICY.enabled,
+      issues,
+      "opportunisticTaker.enabled",
+    ),
+    maxSpreadTicks: clampedInt(
+      obj.maxSpreadTicks,
+      DEFAULT_OPPORTUNISTIC_TAKER_POLICY.maxSpreadTicks,
+      0,
+      BOUND_SPREAD_TICKS_MAX,
+      issues,
+      "opportunisticTaker.maxSpreadTicks",
+    ),
+    sides: sideListOr(obj.sides, DEFAULT_OPPORTUNISTIC_TAKER_POLICY.sides, issues),
   };
 }
 
@@ -1031,6 +1067,31 @@ function booleanOr(raw: unknown, fallback: boolean, issues: string[], name: stri
     return fallback;
   }
   return raw;
+}
+
+function sideListOr(
+  raw: unknown,
+  fallback: OpportunisticTakerPolicy["sides"],
+  issues: string[],
+): OpportunisticTakerPolicy["sides"] {
+  if (raw === undefined) return fallback;
+  if (!Array.isArray(raw)) {
+    issues.push("opportunisticTaker.sides must be an array");
+    return fallback;
+  }
+  const sides: OpportunisticTakerPolicy["sides"] = [];
+  for (const side of raw) {
+    if (typeof side !== "string" || !(ORDER_SIDES as readonly string[]).includes(side)) {
+      issues.push(`opportunisticTaker.sides contains invalid side ${String(side)}`);
+      return fallback;
+    }
+    if (!sides.includes(side as "buy" | "sell")) sides.push(side as "buy" | "sell");
+  }
+  if (sides.length === 0) {
+    issues.push("opportunisticTaker.sides must include at least one side");
+    return fallback;
+  }
+  return sides;
 }
 
 /** Serialize an ExecutionPolicy back to the compact JSON used by the DB. */

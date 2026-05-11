@@ -725,6 +725,13 @@ export interface ExitRepriceOnDownpricePolicy {
 
 export type ExitPricingMode = "bid-anchored" | "edge";
 
+export interface OpportunisticTakerPolicy {
+  enabled: boolean;
+  /** Maximum top-of-book spread, in CLOB ticks, where placement may cross as taker. */
+  maxSpreadTicks: number;
+  sides: Array<"buy" | "sell">;
+}
+
 export interface DropTriggerPolicy {
   enabled: boolean;
   /** When true, missing 1h history allows the BUY and emits `no_drop_data` telemetry. */
@@ -768,6 +775,7 @@ export interface ExecutionPolicy {
   exitPricingMode: ExitPricingMode;
   /** Number of CLOB ticks to place a bid-anchored SELL above current best bid. */
   exitBidAnchorTicks: number;
+  opportunisticTaker: OpportunisticTakerPolicy;
   orderLifetime: OrderLifetimePolicy;
   repriceOnOutbid: RepriceOnOutbidPolicy;
   exitRepriceOnDownprice: ExitRepriceOnDownpricePolicy;

@@ -9,6 +9,7 @@ import { toDto as fillToDto } from "./fills.js";
 import type { LedgerPool } from "../ledger-pool.js";
 import {
   DEFAULT_EXECUTION_POLICY,
+  DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
   type ExecutionPolicy,
@@ -447,6 +448,12 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       pricing: {
         ...current.pricing,
         ...((patch.pricing as Partial<ExecutionPolicy["pricing"]> | undefined) ?? {}),
+      },
+      opportunisticTaker: {
+        ...(current.opportunisticTaker ?? DEFAULT_OPPORTUNISTIC_TAKER_POLICY),
+        ...((patch.opportunisticTaker as
+          | Partial<ExecutionPolicy["opportunisticTaker"]>
+          | undefined) ?? {}),
       },
       orderLifetime: {
         ...current.orderLifetime,

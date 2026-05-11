@@ -71,6 +71,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         maxPriceDriftTicks: 5,
         minStepFillRate: 0.1,
       },
+      opportunisticTaker: {
+        enabled: true,
+        maxSpreadTicks: 2,
+        sides: ["buy", "sell"],
+      },
       deadSideGuard: { mode: "enforce", askCeiling: 0.05, maxTimeToEndMs: 60_000 },
       pricing: {
         mode: "bounded-midpoint",
@@ -157,6 +162,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       maxPriceDriftTicks: 5,
       minStepFillRate: 0.1,
     });
+    expect(policy.opportunisticTaker).toEqual({
+      enabled: true,
+      maxSpreadTicks: 2,
+      sides: ["buy", "sell"],
+    });
     expect(policy.deadSideGuard.mode).toBe("enforce");
     expect(policy.pricing.mode).toBe("bounded-midpoint");
     expect(policy.pricing.minExitPriceSignalRatio).toBe(0.6);
@@ -211,6 +221,24 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       DEFAULT_EXECUTION_POLICY.pricing.minExitPriceSignalRatio,
     );
     expect(issues.some((i) => i.includes("pricing.minExitPriceSignalRatio"))).toBe(true);
+  });
+
+  it("parses opportunistic taker settings and rejects invalid sides", () => {
+    const parsed = parseExecutionPolicyJson(
+      JSON.stringify({ opportunisticTaker: { enabled: false, maxSpreadTicks: 4, sides: ["buy"] } }),
+    );
+    expect(parsed.issues).toHaveLength(0);
+    expect(parsed.policy.opportunisticTaker).toEqual({
+      enabled: false,
+      maxSpreadTicks: 4,
+      sides: ["buy"],
+    });
+
+    const invalid = parseExecutionPolicyJson(
+      JSON.stringify({ opportunisticTaker: { enabled: true, maxSpreadTicks: 2, sides: ["hold"] } }),
+    );
+    expect(invalid.policy.opportunisticTaker).toEqual(DEFAULT_EXECUTION_POLICY.opportunisticTaker);
+    expect(invalid.issues.some((i) => i.includes("opportunisticTaker.sides"))).toBe(true);
   });
 
   it("preserves partial market-selection override and defaults the rest", () => {
@@ -348,6 +376,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         exitRepriceOnDownprice: { thresholdTicks: 7 },
         dropTrigger: { enabled: true, failOpenOnNoData: false, thresholdPct: -0.05 },
         multiBuyLadder: { maxLadderFillsPerToken: 4 },
+        opportunisticTaker: { maxSpreadTicks: 4, sides: ["sell"] },
       }),
     );
     expect(issues).toHaveLength(0);
@@ -370,6 +399,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.multiBuyLadder).toEqual({
       ...DEFAULT_EXECUTION_POLICY.multiBuyLadder,
       maxLadderFillsPerToken: 4,
+    });
+    expect(policy.opportunisticTaker).toEqual({
+      ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      maxSpreadTicks: 4,
+      sides: ["sell"],
     });
   });
 
@@ -401,6 +435,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           maxPriceDriftTicks: -1,
           minStepFillRate: 2,
         },
+        opportunisticTaker: {
+          enabled: "yes",
+          maxSpreadTicks: -1,
+          sides: ["buy", "hold"],
+        },
       }),
     );
     expect(policy.exitPricingMode).toBe(DEFAULT_EXECUTION_POLICY.exitPricingMode);
@@ -409,6 +448,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.exitRepriceOnDownprice).toEqual(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice);
     expect(policy.dropTrigger).toEqual(DEFAULT_EXECUTION_POLICY.dropTrigger);
     expect(policy.multiBuyLadder).toEqual(DEFAULT_EXECUTION_POLICY.multiBuyLadder);
+    expect(policy.opportunisticTaker).toEqual(DEFAULT_EXECUTION_POLICY.opportunisticTaker);
     expect(issues.some((i) => i.includes("repriceOnOutbid.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("exitPricingMode"))).toBe(true);
     expect(issues.some((i) => i.includes("exitBidAnchorTicks"))).toBe(true);
@@ -429,6 +469,9 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("multiBuyLadder.perTokenUsdcCap"))).toBe(true);
     expect(issues.some((i) => i.includes("multiBuyLadder.maxPriceDriftTicks"))).toBe(true);
     expect(issues.some((i) => i.includes("multiBuyLadder.minStepFillRate"))).toBe(true);
+    expect(issues.some((i) => i.includes("opportunisticTaker.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("opportunisticTaker.maxSpreadTicks"))).toBe(true);
+    expect(issues.some((i) => i.includes("opportunisticTaker.sides"))).toBe(true);
   });
 
   it("rejects deadSideGuard as array or scalar with an issue", () => {

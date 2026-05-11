@@ -133,6 +133,14 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
   };
 }
 
+function makerOnlyPolicy(overrides?: Partial<ExecutionPolicy>): ExecutionPolicy {
+  return {
+    ...DEFAULT_EXECUTION_POLICY,
+    opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
+    ...overrides,
+  };
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -278,7 +286,7 @@ describe("SignalToOrderBridge", () => {
 
     expect(skipped).toHaveLength(0);
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.price).toBe(0.05);
     expect(placed[0]!.command.metadata).toMatchObject({
       marketData: {
         minOrderSize: 5,
@@ -322,7 +330,7 @@ describe("SignalToOrderBridge", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.price).toBe(0.05);
     expect(candidateBookCache.waitForFreshEntry as any).not.toHaveBeenCalled();
     expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
   });
@@ -379,7 +387,7 @@ describe("SignalToOrderBridge", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.price).toBe(0.05);
     expect(candidateBookCache.waitForFreshEntry as any).toHaveBeenCalledTimes(1);
     expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
   });
@@ -442,7 +450,7 @@ describe("SignalToOrderBridge", () => {
 
     expect(skipped).toHaveLength(0);
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.price).toBe(0.05);
   });
 
   it("preserves embedded SELL price when a fresher candidate book is bid-only", async () => {
@@ -515,6 +523,7 @@ describe("SignalToOrderBridge", () => {
       liveLiteGuard: {
         getWalletMode: () => "relayer",
       } as never,
+      policy: () => makerOnlyPolicy(),
     });
     bridge.subscribe();
 
@@ -559,6 +568,7 @@ describe("SignalToOrderBridge", () => {
       liveLiteGuard: {
         getWalletMode: () => "relayer",
       } as never,
+      policy: () => makerOnlyPolicy(),
     });
     bridge.subscribe();
 
@@ -673,7 +683,7 @@ describe("SignalToOrderBridge", () => {
     // so base-market is used directly without refresh
     expect(candidateBookCache.getFreshOrRefresh as any).not.toHaveBeenCalled();
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.04);
+    expect(placed[0]!.command.price).toBe(0.05);
   });
 
   // Per-family feature tests (gamma-fallback-dust, queue-jump canary, dust-lane config)
@@ -720,6 +730,10 @@ describe("SignalToOrderBridge", () => {
         getWalletMode: vi.fn(() => walletMode),
       } as never,
       candidateBookCache: cache,
+      policy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
+      }),
     });
     bridge.subscribe();
 
@@ -767,6 +781,7 @@ describe("SignalToOrderBridge", () => {
         getWalletMode: () => "relayer",
       } as never,
       orderRepo,
+      policy: () => makerOnlyPolicy(),
     });
     bridge.subscribe();
 
@@ -1065,6 +1080,7 @@ describe("entry-price ceiling guard (ADR-013)", () => {
       bus,
       log: makeLogger(),
       liveLiteGuard: { getWalletMode: () => "relayer" } as never,
+      policy: () => makerOnlyPolicy(),
     });
     bridge.subscribe();
     const skipped: Array<{ stage: string; reasons: readonly string[] }> = [];
@@ -1383,6 +1399,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     opts: {
       orderRepo?: OrderRepository;
       orderLifetime?: ConstructorParameters<typeof SignalToOrderBridge>[0]["orderLifetime"];
+      runtimeMetrics?: ConstructorParameters<typeof SignalToOrderBridge>[0]["runtimeMetrics"];
       policyOverrides?: Partial<ExecutionPolicy>;
     } = {},
   ) {
@@ -1393,6 +1410,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       : DEFAULT_EXECUTION_POLICY.pricing;
     const policy: ExecutionPolicy = {
       ...DEFAULT_EXECUTION_POLICY,
+      opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
       pricing,
       ...opts.policyOverrides,
     };
@@ -1403,6 +1421,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       policy: () => policy,
       ...(opts.orderRepo ? { orderRepo: opts.orderRepo } : {}),
       ...(opts.orderLifetime ? { orderLifetime: opts.orderLifetime } : {}),
+      ...(opts.runtimeMetrics ? { runtimeMetrics: opts.runtimeMetrics } : {}),
     });
     bridge.subscribe();
     const skipped: Array<{
@@ -1410,7 +1429,9 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       reasons: readonly string[];
       diagnostics: Record<string, unknown>;
     }> = [];
-    const placed: Array<{ command: { price: number; size: number; side: "buy" | "sell" } }> = [];
+    const placed: Array<{
+      command: { price: number; size: number; side: "buy" | "sell"; postOnly?: boolean };
+    }> = [];
     bus.subscribe("SignalConversionSkipped", async (p) => {
       skipped.push(p);
     });
@@ -1445,7 +1466,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.26);
+    expect(placed[0]!.command.price).toBe(0.27);
   });
 
   it("caps bid-anchored SELL inside the spread when the raw anchor is above bestAsk", async () => {
@@ -1474,6 +1495,130 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.28);
+  });
+
+  it("uses opportunistic taker pricing for BUY when spread is one tick", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      runtimeMetrics: metrics as never,
+      policyOverrides: {
+        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      },
+    });
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01 });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.1);
+    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "order_priced_mode_total",
+      1,
+      JSON.stringify({ mode: "taker", side: "buy" }),
+      expect.any(String),
+    );
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "taker_decision_total",
+      1,
+      JSON.stringify({ side: "buy", spread_ticks: 1 }),
+      expect.any(String),
+    );
+  });
+
+  it("uses opportunistic taker pricing for SELL when spread is two ticks", async () => {
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      policyOverrides: {
+        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      },
+    });
+    const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, tickSize: 0.01 });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.1, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.08);
+    expect(placed[0]!.command.postOnly).toBe(false);
+  });
+
+  it("keeps maker pricing when opportunistic taker spread is above threshold", async () => {
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      runtimeMetrics: metrics as never,
+      policyOverrides: {
+        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      },
+    });
+    const market = makeMarket({ bestBid: 0.08, bestAsk: 0.11, tickSize: 0.01 });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.1, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.1);
+    expect(placed[0]!.command.postOnly).toBeUndefined();
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "bid_anchored_decision_total",
+      1,
+      JSON.stringify({ side: "sell", anchor_ticks_used: 4 }),
+      expect.any(String),
+    );
+  });
+
+  it("keeps maker pricing when opportunistic taker is disabled", async () => {
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      policyOverrides: {
+        opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
+      },
+    });
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01 });
+
+    await bus.publish("SignalApproved", {
+      signal: makeSignal(),
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.09);
+  });
+
+  it("keeps SELL maker pricing when opportunistic taker is buy-only", async () => {
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      policyOverrides: {
+        opportunisticTaker: {
+          ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+          sides: ["buy"],
+        },
+      },
+    });
+    const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01 });
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.1, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.1);
+    expect(placed[0]!.command.postOnly).toBeUndefined();
   });
 
   it("can roll SELL edge branch back to bestAsk pricing", async () => {
@@ -1508,7 +1653,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   });
 
   it("ladder BUY posts at ladderTargetPrice even when bestBid moved", async () => {
-    const { bus, placed } = makeBridgeWithPricing();
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      runtimeMetrics: metrics as never,
+    });
     const market = makeMarket({ bestBid: 0.14, bestAsk: 0.16, midPrice: 0.15, tickSize: 0.01 });
     await bus.publish("SignalApproved", {
       signal: { ...makeSignal(), suggestedPrice: 0.1, ladderTargetPrice: 0.1 },
@@ -1519,6 +1667,12 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.1);
+    expect(metrics.writeEvent).toHaveBeenCalledWith(
+      "order_priced_mode_total",
+      1,
+      JSON.stringify({ mode: "ladder", side: "buy" }),
+      expect.any(String),
+    );
   });
 
   it("skips ladder BUY when pinned target would cross bestAsk", async () => {
@@ -1904,6 +2058,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const bus = new InProcessEventBus();
     const policy: ExecutionPolicy = {
       ...DEFAULT_EXECUTION_POLICY,
+      opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
       pricing: { ...DEFAULT_EXECUTION_POLICY.pricing, mode: "bounded-midpoint" },
     };
     const bridge = new SignalToOrderBridge({
@@ -2278,6 +2433,7 @@ describe("ADR-015 execution policy observations", () => {
     const { repo, rows } = makeCapturingRepo();
     const policy: ExecutionPolicy = {
       ...DEFAULT_EXECUTION_POLICY,
+      opportunisticTaker: { ...DEFAULT_EXECUTION_POLICY.opportunisticTaker, enabled: false },
       pricing: { ...DEFAULT_EXECUTION_POLICY.pricing, mode: "bounded-midpoint" },
     };
     const bridge = new SignalToOrderBridge({
@@ -2334,7 +2490,7 @@ describe("ADR-015 execution policy observations", () => {
       bus,
       log: makeLogger(),
       liveLiteGuard: { getWalletMode: () => "relayer" } as never,
-      policy: () => DEFAULT_EXECUTION_POLICY,
+      policy: () => makerOnlyPolicy(),
       observations: repo,
       profileId: PROFILE_ID,
     });
@@ -2365,7 +2521,7 @@ describe("ADR-015 execution policy observations", () => {
       bus,
       log: makeLogger(),
       liveLiteGuard: { getWalletMode: () => "relayer" } as never,
-      policy: () => DEFAULT_EXECUTION_POLICY,
+      policy: () => makerOnlyPolicy(),
       observations: repo,
       profileId: PROFILE_ID,
     });
@@ -2451,7 +2607,7 @@ describe("ADR-015 execution policy observations", () => {
       bus,
       log: makeLogger(),
       liveLiteGuard: { getWalletMode: () => "relayer" } as never,
-      policy: () => DEFAULT_EXECUTION_POLICY,
+      policy: () => makerOnlyPolicy(),
       // observations intentionally omitted
     });
     bridge.subscribe();
@@ -2632,7 +2788,7 @@ describe("ADR-015 execution policy observations", () => {
       bus,
       log: makeLogger(),
       liveLiteGuard: { getWalletMode: () => "relayer" } as never,
-      policy: () => DEFAULT_EXECUTION_POLICY,
+      policy: () => makerOnlyPolicy(),
       observations: repo,
       profileId: PROFILE_ID,
     });
@@ -2725,7 +2881,7 @@ describe("ADR-015 execution policy observations", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]!.skippedReason).toBe("sell-price-below-signal-floor");
-    expect(rows[0]!.selectedPrice).toBe(0.023);
+    expect(rows[0]!.selectedPrice).toBe(0.024);
     expect(rows[0]!.side).toBe("SELL");
   });
 });

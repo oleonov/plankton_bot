@@ -1021,6 +1021,7 @@ async function main(): Promise<void> {
     policy: currentExecutionPolicy,
     observations: executionPolicyObservationRepo,
     profileId: activeProfile as import("@krabs/domain").ProfileId,
+    runtimeMetrics,
     resolutionTracker: marketResolutionTracker,
     orderLifetime: orderLifetimeModule,
     samePriceCooldown: samePriceCooldownModule,

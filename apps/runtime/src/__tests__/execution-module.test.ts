@@ -1537,6 +1537,42 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
+  it("passes explicit non-post-only relayer orders to the gateway", async () => {
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 10,
+      walletMode: "relayer",
+      minOrderUsdc: 2,
+    });
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ postOnly: false }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      postOnly: false,
+      orderType: "GTC",
+    });
+
+    await guardedMod.stop();
+  });
+
   it("places relayer fee-enabled orders to gateway without post-only (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
       maxOpenValueUsdc: 1000,

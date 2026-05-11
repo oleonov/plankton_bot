@@ -34,6 +34,7 @@ import { buildClientOrderId } from "@krabs/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
+import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { MarketResolutionTracker } from "../resolution/market-resolution-tracker.js";
 import {
   classifyNotionalBucket,
@@ -88,6 +89,8 @@ export interface SignalToOrderBridgeDeps {
   observations?: ExecutionPolicyObservationRepository;
   /** Denormalized on each observation row for cross-profile aggregation. */
   profileId?: ProfileId;
+  /** Runtime observability for pricing-mode and opportunistic-taker decisions. */
+  runtimeMetrics?: RuntimeMetricWriter | undefined;
   /**
    * Defense-in-depth BUY-side guard. Mirrors the check that
    * RiskInventoryModule.handleSignal already runs upstream, so a stale market
@@ -128,6 +131,7 @@ export class SignalToOrderBridge {
   private readonly log: Logger;
   private marketCache = new Map<string, NormalizedMarket>();
   private unsubs: Array<() => void> = [];
+  private lastTakerInfoLogDay: string | null = null;
 
   constructor(private readonly deps: SignalToOrderBridgeDeps) {
     this.log = deps.log.child({ component: "signal-to-order" });
@@ -699,7 +703,7 @@ export class SignalToOrderBridge {
       side: signal.side,
       size: orderSize,
       price: executionTerms.price,
-      ...(executionTerms.postOnly ? { postOnly: true } : {}),
+      ...(executionTerms.postOnly !== undefined ? { postOnly: executionTerms.postOnly } : {}),
       orderType: "GTC",
       tickSize: market.tickSize,
       negRisk: market.negRisk,
@@ -725,8 +729,9 @@ export class SignalToOrderBridge {
         side: signal.side,
         price: cmd.price,
         size: cmd.size,
-        postOnly: cmd.postOnly === true,
+        postOnly: cmd.postOnly ?? null,
         pricingMode: policy.pricing.mode,
+        executionPricingMode: executionTerms.pricedMode,
         ...(executionTerms.pricingDiagnostics
           ? { pricingDiagnostics: executionTerms.pricingDiagnostics }
           : {}),
@@ -734,6 +739,7 @@ export class SignalToOrderBridge {
       },
       "signal converted to order command",
     );
+    this.recordPricingMetrics(signal, executionTerms);
 
     this.writeObservation({
       signal,
@@ -1002,9 +1008,15 @@ export class SignalToOrderBridge {
         };
       }
       return isRelayer
-        ? { kind: "ok", price: ladderTargetPrice, postOnly: true }
-        : { kind: "ok", price: ladderTargetPrice };
+        ? { kind: "ok", price: ladderTargetPrice, postOnly: true, pricedMode: "ladder" }
+        : { kind: "ok", price: ladderTargetPrice, pricedMode: "ladder" };
     }
+
+    // Tight-spread taker mode intentionally wins over bounded-midpoint: both
+    // price at/near the opposite top of book, but this path explicitly disables
+    // postOnly to copy R51's observed taker fills.
+    const takerTerms = this.resolveOpportunisticTakerTerms(signal, market, policy);
+    if (takerTerms) return takerTerms;
 
     if (pricing.mode === "bounded-midpoint") {
       const maxSpreadTicks =
@@ -1040,12 +1052,19 @@ export class SignalToOrderBridge {
             kind: "ok",
             price: outcome.price,
             postOnly: true,
+            pricedMode: "bounded-midpoint",
             pricingDiagnostics: outcome.diagnostics,
           }
-        : { kind: "ok", price: outcome.price, pricingDiagnostics: outcome.diagnostics };
+        : {
+            kind: "ok",
+            price: outcome.price,
+            pricedMode: "bounded-midpoint",
+            pricingDiagnostics: outcome.diagnostics,
+          };
     }
 
-    const price = this.resolveEdgeExecutionPrice(signal, market, policy);
+    const priced = this.resolveEdgeExecutionPrice(signal, market, policy);
+    const price = priced?.price ?? null;
     if (price == null || !Number.isFinite(price) || price <= 0) return { kind: "unavailable" };
     const validation = validateExecutablePrice(price, market.tickSize);
     if (!validation.ok) {
@@ -1067,8 +1086,11 @@ export class SignalToOrderBridge {
       ? this.computePricingShadow(signal, market, policy)
       : undefined;
     const ok: ExecutionTermsResolution = isRelayer
-      ? { kind: "ok", price, postOnly: true }
-      : { kind: "ok", price };
+      ? { kind: "ok", price, postOnly: true, pricedMode: priced?.mode ?? "edge" }
+      : { kind: "ok", price, pricedMode: priced?.mode ?? "edge" };
+    if (priced?.anchorTicksUsed !== undefined) {
+      ok.anchorTicksUsed = priced.anchorTicksUsed;
+    }
     if (pricingShadow && ok.kind === "ok") {
       ok.pricingShadow = pricingShadow;
     }
@@ -1079,7 +1101,7 @@ export class SignalToOrderBridge {
     signal: RuntimeEventMap["SignalApproved"]["signal"],
     market: NormalizedMarket,
     policy: ExecutionPolicy,
-  ): number | null {
+  ): { price: number; mode: OrderPricedMode; anchorTicksUsed?: number } | null {
     if (signal.side === "sell" && policy.exitPricingMode === "bid-anchored") {
       if (
         market.bestBid == null ||
@@ -1089,14 +1111,57 @@ export class SignalToOrderBridge {
       ) {
         return null;
       }
-      return resolveBidAnchoredSellPrice(
-        market.bestBid,
-        market.bestAsk,
-        market.tickSize,
-        policy.exitBidAnchorTicks,
-      );
+      return {
+        price: resolveBidAnchoredSellPrice(
+          market.bestBid,
+          market.bestAsk,
+          market.tickSize,
+          policy.exitBidAnchorTicks,
+        ),
+        mode: "bid-anchored",
+        anchorTicksUsed: policy.exitBidAnchorTicks,
+      };
     }
-    return signal.side === "buy" ? market.bestBid : market.bestAsk;
+    const price = signal.side === "buy" ? market.bestBid : market.bestAsk;
+    return price == null ? null : { price, mode: "edge" };
+  }
+
+  private resolveOpportunisticTakerTerms(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    market: NormalizedMarket,
+    policy: ExecutionPolicy,
+  ): ExecutionTermsResolution | null {
+    const taker = policy.opportunisticTaker;
+    if (!taker) return null;
+    if (!taker.enabled || !taker.sides.includes(signal.side)) return null;
+    if (
+      market.bestBid == null ||
+      market.bestAsk == null ||
+      !Number.isFinite(market.bestBid) ||
+      !Number.isFinite(market.bestAsk) ||
+      !Number.isFinite(market.tickSize) ||
+      market.tickSize <= 0
+    ) {
+      return null;
+    }
+    const spread = market.bestAsk - market.bestBid;
+    if (!Number.isFinite(spread) || spread < 0) return null;
+    const spreadTicks = Math.round(spread / market.tickSize);
+    if (spreadTicks > taker.maxSpreadTicks) return null;
+
+    const price = signal.side === "buy" ? market.bestAsk : market.bestBid;
+    const validation = validateExecutablePrice(price, market.tickSize);
+    if (!validation.ok) {
+      return {
+        kind: "invalid",
+        price,
+        tickSize: validation.tickSize,
+        minPrice: validation.minPrice,
+        maxPrice: validation.maxPrice,
+        validationReason: validation.reason,
+      };
+    }
+    return { kind: "ok", price, postOnly: false, pricedMode: "taker", spreadTicks };
   }
 
   private computePricingShadow(
@@ -1135,6 +1200,59 @@ export class SignalToOrderBridge {
           Math.abs(order.price - executionPrice) <= SELL_DEDUP_PRICE_EPSILON,
       ) ?? null
     );
+  }
+
+  private recordPricingMetrics(
+    signal: RuntimeEventMap["SignalApproved"]["signal"],
+    executionTerms: Extract<ExecutionTermsResolution, { kind: "ok" }>,
+  ): void {
+    try {
+      const capturedAt = new Date(this.now()).toISOString();
+      this.deps.runtimeMetrics?.writeEvent(
+        "order_priced_mode_total",
+        1,
+        JSON.stringify({ mode: executionTerms.pricedMode, side: signal.side }),
+        capturedAt,
+      );
+      if (executionTerms.pricedMode === "taker") {
+        this.deps.runtimeMetrics?.writeEvent(
+          "taker_decision_total",
+          1,
+          JSON.stringify({ side: signal.side, spread_ticks: executionTerms.spreadTicks ?? null }),
+          capturedAt,
+        );
+        const day = capturedAt.slice(0, 10);
+        if (this.lastTakerInfoLogDay !== day) {
+          this.lastTakerInfoLogDay = day;
+          this.log.info(
+            {
+              signalId: signal.signalId,
+              tokenId: String(signal.tokenId),
+              side: signal.side,
+              spreadTicks: executionTerms.spreadTicks ?? null,
+              executionPrice: executionTerms.price,
+            },
+            "opportunistic taker pricing selected",
+          );
+        }
+      }
+      if (executionTerms.pricedMode === "bid-anchored") {
+        this.deps.runtimeMetrics?.writeEvent(
+          "bid_anchored_decision_total",
+          1,
+          JSON.stringify({
+            side: signal.side,
+            anchor_ticks_used: executionTerms.anchorTicksUsed ?? null,
+          }),
+          capturedAt,
+        );
+      }
+    } catch (err) {
+      this.log.debug(
+        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
+        "failed to record pricing metrics",
+      );
+    }
   }
 }
 
@@ -1176,6 +1294,9 @@ type ExecutionTermsResolution =
       kind: "ok";
       price: number;
       postOnly?: boolean;
+      pricedMode: OrderPricedMode;
+      spreadTicks?: number;
+      anchorTicksUsed?: number;
       pricingDiagnostics?: BoundedMidpointDiagnostics;
       pricingShadow?: BoundedMidpointDiagnostics;
     }
@@ -1190,6 +1311,8 @@ type ExecutionTermsResolution =
     }
   | { kind: "skip-wide-spread"; diagnostics: BoundedMidpointDiagnostics }
   | { kind: "skip-one-sided"; diagnostics: BoundedMidpointDiagnostics };
+
+type OrderPricedMode = "edge" | "bid-anchored" | "bounded-midpoint" | "taker" | "ladder";
 
 export type DeadSideBucket = "<0" | "<1m" | "1-5m" | "5-15m" | "15-60m" | "1-4h" | ">4h";
 
