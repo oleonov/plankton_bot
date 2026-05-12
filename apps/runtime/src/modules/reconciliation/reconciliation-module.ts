@@ -40,7 +40,11 @@ import {
 import type { OrderLifetimeModule } from "../order-lifetime/order-lifetime-module.js";
 import {
   runWalletPositionSentinel,
+  type ActivePositionSizeDrift,
+  type ClosedLivePositionDrift,
+  type MissingRemotePositionDrift,
   type WalletPositionSentinelDeps,
+  type WalletPositionSentinelResult,
 } from "./wallet-position-sentinel.js";
 import type { ExchangeStateStore } from "../execution/exchange-state-store.js";
 import { buildReservationSnapshot } from "../execution/reservation-utils.js";
@@ -48,12 +52,68 @@ import type { PolymarketDataPosition } from "@krabs/exchange";
 
 const DRIFT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DRIFT_INTERVAL_MS = 5 * 60 * 1000;
+const WALLET_SENTINEL_FATAL_AFTER_CONSECUTIVE = 3;
+const WALLET_SENTINEL_BALANCE_EPSILON = 1e-3;
 
 function computePercentile(samples: readonly number[], percentile: number): number {
   if (samples.length === 0) return 0;
   const sorted = [...samples].sort((a, b) => a - b);
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil(percentile * sorted.length) - 1));
   return sorted[idx]!;
+}
+
+function walletSentinelDriftKeys(result: WalletPositionSentinelResult): string[] {
+  return [
+    ...result.closedLivePositions.map(
+      (drift) => `closed-live:${String(drift.tokenId)}:${drift.positionId}`,
+    ),
+    ...result.activePositionDrifts.map(
+      (drift) => `active-size:${String(drift.tokenId)}:${drift.positionId}`,
+    ),
+    ...result.missingRemotePositions.map(
+      (drift) => `missing-remote:${String(drift.tokenId)}:${drift.positionId}`,
+    ),
+  ];
+}
+
+function formatConfirmedClosedLiveDriftDetail(drift: ClosedLivePositionDrift): string {
+  return [
+    "wallet-live-position-closed-locally",
+    `token=${String(drift.tokenId)}`,
+    `position=${drift.positionId}`,
+    `slug=${drift.slug ?? "unknown"}`,
+    `remoteSize=${drift.remoteSize}`,
+    `remoteValue=${drift.remoteCurrentValueUsdc}`,
+    `endDate=${drift.endDate}`,
+    "crossCheck=confirmed",
+  ].join(" ");
+}
+
+function formatConfirmedActiveDriftDetail(drift: ActivePositionSizeDrift): string {
+  return [
+    "wallet-live-position-size-mismatch",
+    `token=${String(drift.tokenId)}`,
+    `position=${drift.positionId}`,
+    `slug=${drift.slug ?? "unknown"}`,
+    `localSize=${drift.localSize}`,
+    `remoteSize=${drift.remoteSize}`,
+    `remoteValue=${drift.remoteCurrentValueUsdc}`,
+    "crossCheck=confirmed",
+  ].join(" ");
+}
+
+function formatConfirmedMissingRemoteDriftDetail(drift: MissingRemotePositionDrift): string {
+  return [
+    "wallet-local-position-missing-remote",
+    `token=${String(drift.tokenId)}`,
+    `position=${drift.positionId}`,
+    `slug=${drift.slug ?? "unknown"}`,
+    `localStatus=${drift.localStatus}`,
+    `localSize=${drift.localSize}`,
+    `remoteSize=${drift.remoteSize}`,
+    `endDate=${drift.endDate ?? "unknown"}`,
+    "crossCheck=confirmed",
+  ].join(" ");
 }
 
 export interface ReconciliationModuleDeps {
@@ -141,6 +201,7 @@ export class ReconciliationModule implements RuntimeModule {
   private runCount = 0;
   private lastRunAt: number | null = null;
   private lastResult: ReconciliationResult | null = null;
+  private readonly walletSentinelConsecutiveCounts = new Map<string, number>();
   private readonly staleBackoffMap = new Map<string, number>();
   private readonly sellDownpriceRepriceMap: SellDownpriceRepriceStateMap = new Map();
 
@@ -305,7 +366,7 @@ export class ReconciliationModule implements RuntimeModule {
       }
 
       // 4. Wallet↔ledger sentinel
-      const walletResult = this.deps.walletPositionSentinel
+      const rawWalletResult = this.deps.walletPositionSentinel
         ? await runWalletPositionSentinel(this.deps.walletPositionSentinel, ranAt)
         : {
             driftCount: 0,
@@ -315,13 +376,21 @@ export class ReconciliationModule implements RuntimeModule {
             activePositionDrifts: [],
             missingRemotePositions: [],
           };
+      const walletResult = await this.confirmWalletSentinelDrifts(rawWalletResult);
+      const walletSentinelSeverity = this.updateWalletSentinelConsecutiveCounts(walletResult);
       allDetails.push(...walletResult.details);
       if (walletResult.driftCount > 0) {
-        this.log.error(
+        const logFn =
+          walletSentinelSeverity === "critical"
+            ? this.log.error.bind(this.log)
+            : this.log.warn.bind(this.log);
+        logFn(
           {
             closedLive: walletResult.closedLivePositions,
             activeMismatch: walletResult.activePositionDrifts,
             missingRemote: walletResult.missingRemotePositions,
+            consecutiveThreshold: WALLET_SENTINEL_FATAL_AFTER_CONSECUTIVE,
+            severity: walletSentinelSeverity,
           },
           "wallet position sentinel detected drift",
         );
@@ -363,7 +432,7 @@ export class ReconciliationModule implements RuntimeModule {
       // 6. Publish events
       if (!clean) {
         const severity =
-          fillResult.missingFillsImported > 0 || walletResult.driftCount > 0
+          fillResult.missingFillsImported > 0 || walletSentinelSeverity === "critical"
             ? ("critical" as const)
             : ("warn" as const);
         await this.deps.bus.publish("ReconciliationDriftDetected", {
@@ -417,6 +486,101 @@ export class ReconciliationModule implements RuntimeModule {
     this.runReconciliation().catch((err) =>
       this.log.error({ err }, "immediate reconciliation error"),
     );
+  }
+
+  private async confirmWalletSentinelDrifts(
+    result: WalletPositionSentinelResult,
+  ): Promise<WalletPositionSentinelResult> {
+    if (result.driftCount === 0) return result;
+
+    const closedLivePositions = await this.filterConfirmedClosedLiveDrifts(
+      result.closedLivePositions,
+    );
+    const activePositionDrifts = await this.filterConfirmedActiveDrifts(
+      result.activePositionDrifts,
+    );
+    const missingRemotePositions = await this.filterConfirmedMissingRemoteDrifts(
+      result.missingRemotePositions,
+    );
+    return {
+      ...result,
+      closedLivePositions,
+      activePositionDrifts,
+      missingRemotePositions,
+      driftCount:
+        closedLivePositions.length + activePositionDrifts.length + missingRemotePositions.length,
+      details: [
+        ...closedLivePositions.map(formatConfirmedClosedLiveDriftDetail),
+        ...activePositionDrifts.map(formatConfirmedActiveDriftDetail),
+        ...missingRemotePositions.map(formatConfirmedMissingRemoteDriftDetail),
+      ],
+    };
+  }
+
+  private async filterConfirmedClosedLiveDrifts(
+    drifts: readonly ClosedLivePositionDrift[],
+  ): Promise<ClosedLivePositionDrift[]> {
+    const confirmed: ClosedLivePositionDrift[] = [];
+    for (const drift of drifts) {
+      const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
+      if (balance === null) continue;
+      if (balance > WALLET_SENTINEL_BALANCE_EPSILON) confirmed.push(drift);
+    }
+    return confirmed;
+  }
+
+  private async filterConfirmedActiveDrifts(
+    drifts: readonly ActivePositionSizeDrift[],
+  ): Promise<ActivePositionSizeDrift[]> {
+    const confirmed: ActivePositionSizeDrift[] = [];
+    for (const drift of drifts) {
+      const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
+      if (balance === null) continue;
+      if (Math.abs(drift.localSize - balance) > WALLET_SENTINEL_BALANCE_EPSILON) {
+        confirmed.push({ ...drift, remoteSize: balance });
+      }
+    }
+    return confirmed;
+  }
+
+  private async filterConfirmedMissingRemoteDrifts(
+    drifts: readonly MissingRemotePositionDrift[],
+  ): Promise<MissingRemotePositionDrift[]> {
+    const confirmed: MissingRemotePositionDrift[] = [];
+    for (const drift of drifts) {
+      const balance = await this.readWalletSentinelCrossCheckBalance(drift.tokenId);
+      if (balance === null) continue;
+      if (balance <= WALLET_SENTINEL_BALANCE_EPSILON) confirmed.push(drift);
+    }
+    return confirmed;
+  }
+
+  private async readWalletSentinelCrossCheckBalance(
+    tokenId: import("@krabs/domain").TokenId,
+  ): Promise<number | null> {
+    try {
+      return await this.deps.gateway.getPositionBalance(tokenId);
+    } catch (err) {
+      this.log.warn({ err, tokenId: String(tokenId) }, "wallet sentinel cross-check failed");
+      return null;
+    }
+  }
+
+  private updateWalletSentinelConsecutiveCounts(
+    result: WalletPositionSentinelResult,
+  ): "warn" | "critical" | null {
+    const activeKeys = new Set(walletSentinelDriftKeys(result));
+    for (const key of [...this.walletSentinelConsecutiveCounts.keys()]) {
+      if (!activeKeys.has(key)) this.walletSentinelConsecutiveCounts.delete(key);
+    }
+    let maxConsecutive = 0;
+    for (const key of activeKeys) {
+      const count = (this.walletSentinelConsecutiveCounts.get(key) ?? 0) + 1;
+      this.walletSentinelConsecutiveCounts.set(key, count);
+      maxConsecutive = Math.max(maxConsecutive, count);
+    }
+    if (maxConsecutive === 0) return null;
+    return maxConsecutive >= WALLET_SENTINEL_FATAL_AFTER_CONSECUTIVE ? "critical" : "warn";
   }
 
   private async publishExchangeState(

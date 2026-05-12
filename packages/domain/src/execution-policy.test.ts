@@ -434,6 +434,14 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     });
   });
 
+  it("defaults redeem sweep to manual/off with four-hour cadence and eight-hour age gate", () => {
+    expect(DEFAULT_EXECUTION_POLICY.redeemSweep).toMatchObject({
+      enabled: false,
+      intervalMs: 14_400_000,
+      minAgeAfterResolutionSec: 28_800,
+    });
+  });
+
   it("rejects invalid fill-rate feature policy values with issues", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({

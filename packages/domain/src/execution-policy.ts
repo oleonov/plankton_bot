@@ -109,12 +109,13 @@ export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
 };
 
 export const DEFAULT_REDEEM_SWEEP_POLICY: RedeemSweepPolicy = {
-  enabled: true,
-  intervalMs: 10 * 60_000,
+  enabled: false,
+  intervalMs: 4 * 60 * 60_000,
   inFlightTtlMs: 15 * 60_000,
   maxRetries: 3,
   retryBackoffMs: [60_000, 300_000, 1_800_000],
   postRedeemVerifyDelayMs: 5 * 60_000,
+  minAgeAfterResolutionSec: 8 * 60 * 60,
 };
 
 export const DEFAULT_RACE_PROTECTION_POLICY: RaceProtectionPolicy = {
@@ -632,6 +633,14 @@ function parseRedeemSweep(raw: unknown, issues: string[]): RedeemSweepPolicy {
       BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS,
       issues,
       "redeemSweep.postRedeemVerifyDelayMs",
+    ),
+    minAgeAfterResolutionSec: clampedInt(
+      obj.minAgeAfterResolutionSec,
+      DEFAULT_REDEEM_SWEEP_POLICY.minAgeAfterResolutionSec,
+      0,
+      30 * 24 * 60 * 60,
+      issues,
+      "redeemSweep.minAgeAfterResolutionSec",
     ),
   };
 }

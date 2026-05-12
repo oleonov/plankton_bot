@@ -3,6 +3,7 @@ import type {
   ExchangeGateway,
   InventoryLotRepository,
   MarketRepository,
+  OrderRepository,
   PositionRepository,
   RedeemSweepPolicy,
   RuntimeEventMap,
@@ -15,6 +16,12 @@ import type { Logger } from "../../logger.js";
 import type { RuntimeMetricWriter } from "../../runtime-metric-writer.js";
 import type { RedeemLogEntry, SqliteRedeemLogRepository } from "@krabs/db";
 
+const REDEEM_BATCH_SIZE = 9;
+const REDEEM_BATCH_PAUSE_MS = 5 * 60_000;
+const RPC_RATE_LIMIT_HARD_PAUSE_MS = 5 * 60_000;
+const STATE_FAILED_COOLDOWN_MS = 30 * 60_000;
+const STABILITY_SNAPSHOTS_REQUIRED = 2;
+
 interface RedeemSweepDeps {
   bus: EventBus;
   gateway: ExchangeGateway;
@@ -22,6 +29,7 @@ interface RedeemSweepDeps {
   positionRepo: PositionRepository;
   lotRepo: InventoryLotRepository;
   marketRepo: MarketRepository;
+  orderRepo?: OrderRepository | undefined;
   redeemLogRepo: SqliteRedeemLogRepository;
   policy: () => RedeemSweepPolicy;
   log: Logger;
@@ -42,6 +50,7 @@ interface RedeemGroup {
   conditionId: string;
   includedTokenIds: string[];
   excludedTokenIds: string[];
+  endDate: string | null;
 }
 
 interface RetryTask {
@@ -54,11 +63,15 @@ export class RedeemSweepModule implements RuntimeModule {
   private unsubs: Array<() => void> = [];
   private readonly inFlightByCondition = new Map<string, number>();
   private readonly lastAttemptByCondition = new Map<string, number>();
+  private readonly blockedUntilByCondition = new Map<string, number>();
+  private readonly stabilityByCondition = new Map<string, { count: number; signature: string }>();
   private readonly verificationAttemptsByCondition = new Map<string, number>();
   private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>();
   private readonly verifyTimers = new Set<ReturnType<typeof setTimeout>>();
+  private readonly batchPauseTimers = new Set<ReturnType<typeof setTimeout>>();
   private startupLoadPromise: Promise<void> | null = null;
   private startupLoadComplete = false;
+  private sweepDisabledUntilMs = 0;
   private isSweepRunning = false;
   private pendingSweepReason: string | null = null;
   private started = false;
@@ -73,13 +86,11 @@ export class RedeemSweepModule implements RuntimeModule {
       ),
     );
     const policy = this.deps.policy();
-    if (policy.enabled) {
-      this.startupLoadPromise = this.loadInFlightFromDb(policy);
-      await this.startupLoadPromise;
-      this.startupLoadComplete = true;
-      this.timer = setInterval(() => void this.runSweep("periodic"), policy.intervalMs);
-      await this.runSweep("startup");
-    }
+    this.startupLoadPromise = this.loadInFlightFromDb(policy);
+    await this.startupLoadPromise;
+    this.startupLoadComplete = true;
+    this.timer = setInterval(() => void this.runSweep("periodic"), policy.intervalMs);
+    await this.runSweep("startup");
   }
 
   async stop(): Promise<void> {
@@ -88,8 +99,10 @@ export class RedeemSweepModule implements RuntimeModule {
     this.timer = null;
     for (const timer of this.retryTimers) clearTimeout(timer);
     for (const timer of this.verifyTimers) clearTimeout(timer);
+    for (const timer of this.batchPauseTimers) clearTimeout(timer);
     this.retryTimers.clear();
     this.verifyTimers.clear();
+    this.batchPauseTimers.clear();
     this.startupLoadPromise = null;
     this.startupLoadComplete = false;
     for (const unsub of this.unsubs) unsub();
@@ -101,16 +114,17 @@ export class RedeemSweepModule implements RuntimeModule {
       ok: true,
       detail: JSON.stringify({
         inFlightConditions: this.inFlightByCondition.size,
+        blockedConditions: this.blockedUntilByCondition.size,
         verificationAttempts: this.verificationAttemptsByCondition.size,
         retryTimers: this.retryTimers.size,
         verifyTimers: this.verifyTimers.size,
+        sweepDisabledUntilMs: this.sweepDisabledUntilMs,
       }),
     };
   }
 
   isConditionInRedeemFlight(conditionId: string): boolean {
     const policy = this.deps.policy();
-    if (!policy.enabled) return false;
     if (this.started && !this.startupLoadComplete) return true;
     const now = this.now();
     const startedAt = this.inFlightByCondition.get(conditionId);
@@ -126,6 +140,12 @@ export class RedeemSweepModule implements RuntimeModule {
     return active;
   }
 
+  notifySettlementInfraAlert(code: string): void {
+    if (code === "POLYGON_RPC_RATE_LIMITED") {
+      this.hardPauseSweep(code);
+    }
+  }
+
   private now(): number {
     return this.deps.now?.() ?? Date.now();
   }
@@ -135,7 +155,7 @@ export class RedeemSweepModule implements RuntimeModule {
   ): Promise<void> {
     if (!this.deps.policy().enabled) return;
     await this.waitForStartupLoad();
-    if (!event.positions.some((position) => position.redeemable && position.size > 0)) return;
+    if (!event.positions.some((position) => position.redeemable)) return;
     await this.runSweep("wallet-event");
   }
 
@@ -159,6 +179,7 @@ export class RedeemSweepModule implements RuntimeModule {
 
   private async doSweep(source: string): Promise<void> {
     if (!this.started || !this.deps.policy().enabled) return;
+    if (this.isSweepHardPaused()) return;
     await this.waitForStartupLoad();
     const positions = await this.deps.positionReader.read();
     if (!positions) return;
@@ -207,6 +228,7 @@ export class RedeemSweepModule implements RuntimeModule {
             conditionId: row.conditionId,
             includedTokenIds: row.tokenIds,
             excludedTokenIds: parseExcludedTokenIds(row.detailsJson),
+            endDate: null,
           },
           Math.max(0, policy.postRedeemVerifyDelayMs - (now - row.attemptTs)),
         );
@@ -225,7 +247,7 @@ export class RedeemSweepModule implements RuntimeModule {
     }[],
     source: string,
   ): Promise<void> {
-    const redeemable = positions.filter((position) => position.redeemable && position.size > 0);
+    const redeemable = positions.filter((position) => position.redeemable);
     const missingCondition = redeemable.filter((position) => !position.conditionId);
     if (missingCondition.length > 0) {
       this.recordPartialAmbiguous(source, missingCondition);
@@ -239,8 +261,21 @@ export class RedeemSweepModule implements RuntimeModule {
       byCondition.set(position.conditionId, rows);
     }
 
+    const readyGroups: RedeemGroup[] = [];
     for (const [conditionId, rows] of byCondition) {
-      await this.attemptRedeem(this.buildGroup(conditionId, rows, positions), 0, source);
+      const group = this.buildGroup(conditionId, rows, positions);
+      if (!this.isStableRedeemCandidate(group)) continue;
+      if (!this.isPastResolutionMinAge(group, source)) continue;
+      if (this.hasActiveOrders(group, source)) continue;
+      readyGroups.push(group);
+    }
+
+    for (let index = 0; index < readyGroups.length; index += REDEEM_BATCH_SIZE) {
+      const batch = readyGroups.slice(index, index + REDEEM_BATCH_SIZE);
+      await this.attemptRedeemBatch(batch, 0, source);
+      if (index + REDEEM_BATCH_SIZE < readyGroups.length) {
+        await this.pauseBetweenBatches();
+      }
     }
   }
 
@@ -312,7 +347,72 @@ export class RedeemSweepModule implements RuntimeModule {
             .map((market) => String(market.tokenId)),
         ]),
       ],
+      endDate: resolveConditionEndDate(marketRows),
     };
+  }
+
+  private isStableRedeemCandidate(group: RedeemGroup): boolean {
+    const signature = [...group.includedTokenIds].sort().join(",");
+    const prior = this.stabilityByCondition.get(group.conditionId);
+    const count = prior?.signature === signature ? prior.count + 1 : 1;
+    this.stabilityByCondition.set(group.conditionId, { signature, count });
+    if (count >= STABILITY_SNAPSHOTS_REQUIRED) return true;
+    this.recordMetricLabels("redeem_sweep_skipped_unstable_snapshot_total", {
+      condition_id: group.conditionId,
+      observed_count: count,
+      required_count: STABILITY_SNAPSHOTS_REQUIRED,
+    });
+    return false;
+  }
+
+  private isPastResolutionMinAge(group: RedeemGroup, source: string): boolean {
+    const policy = this.deps.policy();
+    if (policy.minAgeAfterResolutionSec <= 0) return true;
+    const endMs = group.endDate ? Date.parse(group.endDate) : NaN;
+    if (!Number.isFinite(endMs)) {
+      this.recordRedeemSkip(group, source, "missing_end_date");
+      return false;
+    }
+    const ageMs = this.now() - endMs;
+    if (ageMs >= policy.minAgeAfterResolutionSec * 1000) return true;
+    this.recordRedeemSkip(group, source, "min_age_after_resolution");
+    return false;
+  }
+
+  private hasActiveOrders(group: RedeemGroup, source: string): boolean {
+    const openOrders = this.deps.orderRepo?.findOpen() ?? [];
+    const hasOpenConditionOrder = openOrders.some(
+      (order) => String(order.conditionId) === group.conditionId,
+    );
+    if (!hasOpenConditionOrder) return false;
+    this.recordRedeemSkip(group, source, "active_orders_exist");
+    return true;
+  }
+
+  private recordRedeemSkip(group: RedeemGroup, source: string, reason: string): void {
+    this.deps.redeemLogRepo.insert({
+      conditionId: group.conditionId,
+      tokenIds: group.includedTokenIds,
+      attemptTs: this.now(),
+      status: "skipped",
+      errorMsg: reason,
+      details: { source, reason, excludedTokenIds: group.excludedTokenIds },
+    });
+    this.recordMetricLabels("redeem_sweep_skipped_total", {
+      condition_id: group.conditionId,
+      reason,
+    });
+  }
+
+  private isStateFailedCooldownActive(group: RedeemGroup, source: string, now: number): boolean {
+    const blockedUntil = this.blockedUntilByCondition.get(group.conditionId);
+    if (blockedUntil === undefined) return false;
+    if (now >= blockedUntil) {
+      this.blockedUntilByCondition.delete(group.conditionId);
+      return false;
+    }
+    this.recordRedeemSkip(group, source, "state_failed_cooldown");
+    return true;
   }
 
   private async attemptRedeem(
@@ -320,73 +420,109 @@ export class RedeemSweepModule implements RuntimeModule {
     retryCount: number,
     source: string,
   ): Promise<void> {
+    await this.attemptRedeemBatch([group], retryCount, source);
+  }
+
+  private async attemptRedeemBatch(
+    groups: readonly RedeemGroup[],
+    retryCount: number,
+    source: string,
+  ): Promise<void> {
+    if (groups.length === 0 || this.isSweepHardPaused()) return;
     const policy = this.deps.policy();
     const now = this.now();
-    let keepInFlight = false;
-    if (
-      !this.reserveCondition(
-        group.conditionId,
-        now,
-        policy,
-        source === "retry" || source === "verify",
-      )
-    ) {
+    const reservedGroups: RedeemGroup[] = [];
+    const keepInFlightConditions = new Set<string>();
+    for (const group of groups) {
+      if (this.isStateFailedCooldownActive(group, source, now)) continue;
+      if (
+        !this.reserveCondition(
+          group.conditionId,
+          now,
+          policy,
+          source === "retry" || source === "verify",
+        )
+      ) {
+        continue;
+      }
+      if (!this.insertAttemptingLog(group, retryCount, source, now)) continue;
+      reservedGroups.push(group);
+    }
+    if (reservedGroups.length === 0) {
       return;
     }
 
-    if (!this.insertAttemptingLog(group, retryCount, source, now)) return;
-
     try {
-      const redeemResult = await this.deps.gateway.redeemPositions([group.conditionId], {
-        redeemTokenIdsByCondition: {
-          [group.conditionId]: group.includedTokenIds.map((tokenId) => createTokenId(tokenId)),
-        },
-      });
+      const redeemResult = await this.deps.gateway.redeemPositions(
+        reservedGroups.map((group) => group.conditionId),
+        { redeemTokenIdsByCondition: this.buildRedeemTokenMap(reservedGroups) },
+      );
       const redeemLogStatus = redeemLogStatusForGatewayResult(redeemResult);
-      this.recordAttemptOutcome({
-        conditionId: group.conditionId,
-        tokenIds: group.includedTokenIds,
-        status: redeemLogStatus,
-        txHash: redeemResult.txHash ?? null,
-        gasUsed: redeemResult.gasUsed ?? null,
-        retryCount,
-        details: {
-          source,
-          gatewayStatus: redeemResult.status,
-          gatewayReason: redeemResult.reason ?? null,
-          excludedTokenIds: group.excludedTokenIds,
-        },
-      });
-      this.handleRedeemResult(group, redeemResult);
-      keepInFlight =
+      const keepInFlight =
         redeemResult.status === "submitted" ||
         redeemResult.status === "pending" ||
         redeemResult.reason === "no_redeem_requests";
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      this.recordAttemptOutcome({
-        conditionId: group.conditionId,
-        tokenIds: group.includedTokenIds,
-        status: retryCount >= policy.maxRetries ? "failed_max_retries" : "failed",
-        errorMsg,
-        retryCount,
-        details: { source, excludedTokenIds: group.excludedTokenIds },
-      });
-      if (retryCount >= policy.maxRetries) {
-        this.deps.log.error(
-          { conditionId: group.conditionId, errorMsg },
-          "redeem sweep exhausted retries",
-        );
-        this.recordAlert("redeem_sweep_failed_max_retries", {
+      for (const group of reservedGroups) {
+        this.recordAttemptOutcome({
           conditionId: group.conditionId,
           tokenIds: group.includedTokenIds,
-          errorMsg,
+          status: redeemLogStatus,
+          txHash: redeemResult.txHash ?? null,
+          gasUsed: redeemResult.gasUsed ?? null,
+          retryCount,
+          details: {
+            source,
+            gatewayStatus: redeemResult.status,
+            gatewayReason: redeemResult.reason ?? null,
+            excludedTokenIds: group.excludedTokenIds,
+          },
         });
-      } else {
-        this.scheduleRetry({ group, retryCount: retryCount + 1 });
+        this.handleRedeemResult(group, redeemResult);
+        if (keepInFlight) {
+          keepInFlightConditions.add(group.conditionId);
+        } else {
+          this.inFlightByCondition.delete(group.conditionId);
+        }
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const rateLimited = isRpcRateLimitError(err);
+      const settlementFailed = isSettlementStateFailedError(err);
+      if (rateLimited) this.hardPauseSweep("POLYGON_RPC_RATE_LIMITED");
+      for (const group of reservedGroups) {
+        if (settlementFailed) {
+          this.blockedUntilByCondition.set(
+            group.conditionId,
+            this.now() + STATE_FAILED_COOLDOWN_MS,
+          );
+        }
+        this.recordAttemptOutcome({
+          conditionId: group.conditionId,
+          tokenIds: group.includedTokenIds,
+          status: retryCount >= policy.maxRetries ? "failed_max_retries" : "failed",
+          errorMsg,
+          retryCount,
+          details: { source, excludedTokenIds: group.excludedTokenIds },
+        });
+        if (retryCount >= policy.maxRetries) {
+          this.deps.log.error(
+            { conditionId: group.conditionId, errorMsg },
+            "redeem sweep exhausted retries",
+          );
+          this.recordAlert("redeem_sweep_failed_max_retries", {
+            conditionId: group.conditionId,
+            tokenIds: group.includedTokenIds,
+            errorMsg,
+          });
+        } else if (!rateLimited) {
+          this.scheduleRetry({ group, retryCount: retryCount + 1 });
+        }
       }
     } finally {
-      if (!keepInFlight) this.inFlightByCondition.delete(group.conditionId);
+      for (const group of reservedGroups) {
+        if (keepInFlightConditions.has(group.conditionId)) continue;
+        this.inFlightByCondition.delete(group.conditionId);
+      }
     }
   }
 
@@ -423,6 +559,40 @@ export class RedeemSweepModule implements RuntimeModule {
   private recordAttemptOutcome(entry: Omit<RedeemLogEntry, "attemptTs">): void {
     if (this.deps.redeemLogRepo.updateLatestActiveAttempt(entry)) return;
     this.deps.redeemLogRepo.insert({ ...entry, attemptTs: this.now() });
+  }
+
+  private buildRedeemTokenMap(
+    groups: readonly RedeemGroup[],
+  ): Record<string, ReturnType<typeof createTokenId>[]> {
+    const redeemTokenIdsByCondition: Record<string, ReturnType<typeof createTokenId>[]> = {};
+    for (const group of groups) {
+      redeemTokenIdsByCondition[group.conditionId] = group.includedTokenIds.map((tokenId) =>
+        createTokenId(tokenId),
+      );
+    }
+    return redeemTokenIdsByCondition;
+  }
+
+  private pauseBetweenBatches(): Promise<void> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.batchPauseTimers.delete(timer);
+        resolve();
+      }, REDEEM_BATCH_PAUSE_MS);
+      this.batchPauseTimers.add(timer);
+    });
+  }
+
+  private isSweepHardPaused(): boolean {
+    return this.now() < this.sweepDisabledUntilMs;
+  }
+
+  private hardPauseSweep(code: string): void {
+    const until = this.now() + RPC_RATE_LIMIT_HARD_PAUSE_MS;
+    if (until <= this.sweepDisabledUntilMs) return;
+    this.sweepDisabledUntilMs = Math.max(this.sweepDisabledUntilMs, until);
+    this.deps.log.error({ code, until }, "redeem sweep hard-paused after settlement infra alert");
+    this.recordAlert("redeem_sweep_hard_paused", { code, until });
   }
 
   private handleRedeemResult(group: RedeemGroup, result: RedeemPositionsResult): void {
@@ -467,6 +637,7 @@ export class RedeemSweepModule implements RuntimeModule {
     policy: RedeemSweepPolicy,
     bypassRecentAttempt: boolean,
   ): boolean {
+    if (this.isSweepHardPaused()) return false;
     const startedAt = this.inFlightByCondition.get(conditionId);
     if (startedAt !== undefined) {
       if (now - startedAt < policy.inFlightTtlMs) return false;
@@ -517,13 +688,27 @@ export class RedeemSweepModule implements RuntimeModule {
   private async verifyRedeem(group: RedeemGroup): Promise<void> {
     if (!this.started || !this.deps.policy().enabled) return;
     const positions = await this.deps.positionReader.read();
-    const remaining = positions?.filter(
+    if (positions === null) {
+      const verificationAttempt = this.nextVerificationAttempt(group);
+      if (verificationAttempt === null) return;
+      this.deps.log.warn(
+        { conditionId: group.conditionId, verificationAttempt },
+        "redeem sweep verification read returned null",
+      );
+      this.recordMetricLabels("redeem_sweep_verify_read_null_total", {
+        condition_id: group.conditionId,
+        verification_attempt: verificationAttempt,
+      });
+      this.scheduleVerification(group);
+      return;
+    }
+    const remaining = positions.filter(
       (position) =>
         group.includedTokenIds.includes(position.tokenId) &&
         position.redeemable &&
         position.size > 0,
     );
-    if (!remaining || remaining.length === 0) {
+    if (remaining.length === 0) {
       this.recordAttemptOutcome({
         conditionId: group.conditionId,
         tokenIds: group.includedTokenIds,
@@ -651,6 +836,35 @@ function parseExcludedTokenIds(detailsJson: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function resolveConditionEndDate(markets: readonly { endDate?: string | null }[]): string | null {
+  let latestMs = Number.NEGATIVE_INFINITY;
+  let latest: string | null = null;
+  for (const market of markets) {
+    if (!market.endDate) continue;
+    const ms = Date.parse(market.endDate);
+    if (!Number.isFinite(ms) || ms <= latestMs) continue;
+    latestMs = ms;
+    latest = market.endDate;
+  }
+  return latest;
+}
+
+function isRpcRateLimitError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? "");
+  return /(?:\b429\b|rate.?limit|too many requests|throughput limit|exceeded its compute units)/i.test(
+    message,
+  );
+}
+
+function isSettlementStateFailedError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const { name, message } = err as { name?: unknown; message?: unknown };
+  return (
+    name === "SettlementTransactionFailedError" ||
+    (typeof message === "string" && /STATE_FAILED|failed state|transaction.*failed/i.test(message))
+  );
 }
 
 function isRedeemLogUniqueInFlightViolation(err: unknown): boolean {

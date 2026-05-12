@@ -768,6 +768,7 @@ export interface RedeemSweepPolicy {
   maxRetries: number;
   retryBackoffMs: number[];
   postRedeemVerifyDelayMs: number;
+  minAgeAfterResolutionSec: number;
 }
 
 export interface RaceProtectionPolicy {

@@ -396,6 +396,7 @@ async function main(): Promise<void> {
 
   // 6. Create event bus
   const bus = new InProcessEventBus();
+  let redeemSweepModule: RedeemSweepModule | null = null;
 
   // 6a. RuntimeMetricWriter + infra-alert sink — needed before tracker wiring
   // so the BUY-admission fail-closed path can report through the standard
@@ -410,6 +411,7 @@ async function main(): Promise<void> {
   }): void => {
     const now = new Date().toISOString();
     runtimeMetrics.writeEvent("infra_alert", 1, JSON.stringify(alert), now);
+    redeemSweepModule?.notifySettlementInfraAlert(alert.code);
     log.warn({ alert }, "runtime infra alert recorded");
   };
 
@@ -817,8 +819,6 @@ async function main(): Promise<void> {
     reconciliationTrigger: () => reconcileTrigger.fn?.(),
   });
 
-  let redeemSweepModule: RedeemSweepModule | null = null;
-
   // 7g. Risk + Inventory module
   const riskInventoryModule = new RiskInventoryModule({
     bus,
@@ -1145,6 +1145,7 @@ async function main(): Promise<void> {
           positionRepo: repos.position,
           lotRepo: repos.inventoryLot,
           marketRepo: repos.market,
+          orderRepo: repos.order,
           redeemLogRepo: repos.redeemLog,
           policy: () => currentExecutionPolicy().redeemSweep,
           log,

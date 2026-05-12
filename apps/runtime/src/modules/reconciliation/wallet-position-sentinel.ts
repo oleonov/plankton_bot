@@ -139,6 +139,7 @@ export async function runWalletPositionSentinel(
 
     const market = deps.marketRepo.findByTokenId(createTokenId(remote.tokenId));
     if (!market?.endDate || !isFutureEndDate(market.endDate, nowMs)) continue;
+    if (isWithinRecentFillGrace(deps.fillRepo, createTokenId(remote.tokenId), nowMs)) continue;
 
     closedDrifts.push({
       tokenId: createTokenId(remote.tokenId),

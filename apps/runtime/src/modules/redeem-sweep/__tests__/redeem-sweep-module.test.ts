@@ -62,6 +62,8 @@ function makeHarness(
     policy?: Partial<typeof DEFAULT_EXECUTION_POLICY.redeemSweep>;
     redeemLogRows?: any[];
     uniqueViolationOnFirstAttemptingInsert?: boolean;
+    marketRows?: any[];
+    openOrders?: any[];
   } = {},
 ) {
   const bus = new InProcessEventBus();
@@ -89,6 +91,7 @@ function makeHarness(
     read: vi.fn(opts.readImpl ?? (() => Promise.resolve(opts.positions ?? [remotePosition()]))),
   };
   const runtimeMetrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+  const orderRepo = { findOpen: vi.fn(() => opts.openOrders ?? []) };
   let uniqueViolationOnFirstAttemptingInsert = opts.uniqueViolationOnFirstAttemptingInsert ?? false;
   const module = new RedeemSweepModule({
     bus,
@@ -97,11 +100,15 @@ function makeHarness(
     positionRepo: positionRepo as any,
     lotRepo: lotRepo as any,
     marketRepo: {
-      findByConditionId: vi.fn(() => [
-        { tokenId: createTokenId(TOKEN) },
-        { tokenId: createTokenId(TOKEN_TWO) },
-      ]),
+      findByConditionId: vi.fn(
+        () =>
+          opts.marketRows ?? [
+            { tokenId: createTokenId(TOKEN), endDate: null },
+            { tokenId: createTokenId(TOKEN_TWO), endDate: null },
+          ],
+      ),
     } as any,
+    orderRepo: orderRepo as any,
     redeemLogRepo: {
       insert: vi.fn((row) => {
         if (row.status === "attempting" && uniqueViolationOnFirstAttemptingInsert) {
@@ -177,8 +184,10 @@ function makeHarness(
     } as any,
     policy: () => ({
       ...DEFAULT_EXECUTION_POLICY.redeemSweep,
+      enabled: true,
       intervalMs: 60_000,
       inFlightTtlMs: 15 * 60_000,
+      minAgeAfterResolutionSec: 0,
       retryBackoffMs: [60_000, 300_000, 1_800_000],
       ...(opts.policy ?? {}),
     }),
@@ -194,6 +203,7 @@ function makeHarness(
     redeemLogRows,
     positionRepo,
     lotRepo,
+    orderRepo,
     log,
     runtimeMetrics,
   };
@@ -229,6 +239,15 @@ function coalescingPosition(index: number) {
   });
 }
 
+function manyRedeemablePositions(count: number) {
+  return Array.from({ length: count }, (_, index) =>
+    remotePosition({
+      tokenId: `tok-batch-${index + 1}`,
+      conditionId: `cond-batch-${index + 1}`,
+    }),
+  );
+}
+
 function runSweepForTest(module: RedeemSweepModule, reason = "periodic"): Promise<void> {
   return (
     module as unknown as {
@@ -245,6 +264,19 @@ async function flushMicrotasks(times = 3): Promise<void> {
   for (let i = 0; i < times; i += 1) await Promise.resolve();
 }
 
+async function runStableStartup(h: ReturnType<typeof makeHarness>): Promise<void> {
+  await h.module.start();
+  await runSweepForTest(h.module, "test-stability");
+  await h.bus.drain();
+}
+
+async function primeCoalescingStability(h: ReturnType<typeof makeHarness>): Promise<void> {
+  h.reader.read.mockResolvedValueOnce([coalescingPosition(1), coalescingPosition(2)]);
+  await runSweepForTest(h.module, "prime-stability");
+  h.gateway.redeemPositions.mockClear();
+  h.reader.read.mockReset();
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -253,9 +285,8 @@ describe("RedeemSweepModule", () => {
   it("redeems visible redeemable wallet positions and closes local state", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
-    const h = makeHarness();
-    await h.module.start();
-    await h.bus.drain();
+    const h = makeHarness({ policy: { intervalMs: 60 * 60_000 } });
+    await runStableStartup(h);
 
     expect(h.gateway.redeemPositions).toHaveBeenCalledWith([CONDITION], {
       redeemTokenIdsByCondition: { [CONDITION]: [createTokenId(TOKEN)] },
@@ -276,8 +307,7 @@ describe("RedeemSweepModule", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const h = makeHarness();
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
     await h.bus.publish("PolymarketWalletUpdated", {
       positions: [
         {
@@ -310,8 +340,7 @@ describe("RedeemSweepModule", () => {
           gasUsed: 111,
         }),
     });
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
 
     await vi.advanceTimersByTimeAsync(60_000);
     await h.bus.drain();
@@ -333,8 +362,7 @@ describe("RedeemSweepModule", () => {
       }),
       policy: { postRedeemVerifyDelayMs: 1_000 },
     });
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
 
     expect(h.redeemLogRows.map((row) => row.status)).toEqual(["pending"]);
     expect(h.positionRepo.save).not.toHaveBeenCalled();
@@ -361,8 +389,7 @@ describe("RedeemSweepModule", () => {
         gasUsed: null,
       }),
     });
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
 
     expect(h.redeemLogRows.map((row) => row.status)).toEqual(["rejected"]);
     expect(h.positionRepo.save).not.toHaveBeenCalled();
@@ -379,8 +406,7 @@ describe("RedeemSweepModule", () => {
       redeemImpl: vi.fn().mockRejectedValue(new Error("relayer down")),
       policy: { maxRetries: 1, retryBackoffMs: [60_000] },
     });
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
     await vi.advanceTimersByTimeAsync(60_000);
     await h.bus.drain();
 
@@ -400,8 +426,7 @@ describe("RedeemSweepModule", () => {
         remotePosition({ tokenId: TOKEN_TWO, redeemable: false, size: 4 }),
       ],
     });
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
 
     expect(h.gateway.redeemPositions).toHaveBeenCalledWith([CONDITION], {
       redeemTokenIdsByCondition: { [CONDITION]: [createTokenId(TOKEN)] },
@@ -413,8 +438,7 @@ describe("RedeemSweepModule", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const h = makeHarness();
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
 
     await vi.advanceTimersByTimeAsync(DEFAULT_EXECUTION_POLICY.redeemSweep.postRedeemVerifyDelayMs);
     await h.bus.drain();
@@ -430,8 +454,7 @@ describe("RedeemSweepModule", () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const h = makeHarness({ uniqueViolationOnFirstAttemptingInsert: true });
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
 
     expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
     expect(h.log.info).toHaveBeenCalledWith(
@@ -477,12 +500,8 @@ describe("RedeemSweepModule", () => {
     await eventPromise;
     await h.bus.drain();
 
-    expect(h.gateway.redeemPositions).toHaveBeenNthCalledWith(1, [CONDITION], {
-      redeemTokenIdsByCondition: { [CONDITION]: [createTokenId(TOKEN)] },
-    });
-    expect(h.gateway.redeemPositions).toHaveBeenNthCalledWith(2, ["cond-event"], {
-      redeemTokenIdsByCondition: { "cond-event": [createTokenId("tok-event")] },
-    });
+    expect(h.reader.read).toHaveBeenCalledTimes(2);
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
   });
 
   it("coalescing: drops duplicate trigger while sweep is running", async () => {
@@ -490,8 +509,7 @@ describe("RedeemSweepModule", () => {
     vi.setSystemTime(NOW);
     const h = makeHarness({ positions: [] });
     await h.module.start();
-    h.gateway.redeemPositions.mockClear();
-    h.reader.read.mockReset();
+    await primeCoalescingStability(h);
     const firstRedeem = deferred<any>();
     h.reader.read
       .mockResolvedValueOnce([coalescingPosition(1)])
@@ -520,8 +538,7 @@ describe("RedeemSweepModule", () => {
     vi.setSystemTime(NOW);
     const h = makeHarness({ positions: [] });
     await h.module.start();
-    h.gateway.redeemPositions.mockClear();
-    h.reader.read.mockReset();
+    await primeCoalescingStability(h);
     const firstRedeem = deferred<any>();
     h.reader.read
       .mockResolvedValueOnce([coalescingPosition(1)])
@@ -551,8 +568,7 @@ describe("RedeemSweepModule", () => {
     vi.setSystemTime(NOW);
     const h = makeHarness({ positions: [] });
     await h.module.start();
-    h.gateway.redeemPositions.mockClear();
-    h.reader.read.mockReset();
+    await primeCoalescingStability(h);
     const firstRedeem = deferred<any>();
     h.reader.read
       .mockResolvedValueOnce([coalescingPosition(1)])
@@ -587,8 +603,7 @@ describe("RedeemSweepModule", () => {
     vi.setSystemTime(NOW);
     const h = makeHarness({ positions: [] });
     await h.module.start();
-    h.gateway.redeemPositions.mockClear();
-    h.reader.read.mockReset();
+    await primeCoalescingStability(h);
     h.reader.read
       .mockResolvedValueOnce([coalescingPosition(1)])
       .mockResolvedValueOnce([coalescingPosition(2)]);
@@ -612,8 +627,7 @@ describe("RedeemSweepModule", () => {
     const h = makeHarness({
       policy: { maxRetries: 1, postRedeemVerifyDelayMs: 1_000 },
     });
-    await h.module.start();
-    await h.bus.drain();
+    await runStableStartup(h);
 
     await vi.advanceTimersByTimeAsync(1_000);
     await h.bus.drain();
@@ -638,8 +652,8 @@ describe("RedeemSweepModule", () => {
     const h = makeHarness({ positions: [] });
     await h.module.start();
     await h.bus.drain();
-    h.reader.read.mockResolvedValueOnce([remotePosition()]);
-    await h.bus.publish("PolymarketWalletUpdated", {
+    h.reader.read.mockResolvedValue([remotePosition()]);
+    const walletEvent = {
       positions: [
         {
           tokenId: createTokenId(TOKEN),
@@ -651,13 +665,15 @@ describe("RedeemSweepModule", () => {
         },
       ],
       timestamp: Date.now(),
-    });
+    };
+    await h.bus.publish("PolymarketWalletUpdated", walletEvent);
+    await h.bus.publish("PolymarketWalletUpdated", walletEvent);
     await h.bus.drain();
 
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
   });
 
-  it("rate-limits per condition, not globally", async () => {
+  it("batches multiple ready conditions in one gateway call", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     const h = makeHarness({
@@ -666,10 +682,238 @@ describe("RedeemSweepModule", () => {
         remotePosition({ tokenId: TOKEN_TWO, conditionId: "cond-2" }),
       ],
     });
+    await runStableStartup(h);
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.gateway.redeemPositions).toHaveBeenCalledWith(["cond-1", "cond-2"], {
+      redeemTokenIdsByCondition: {
+        "cond-1": [createTokenId(TOKEN)],
+        "cond-2": [createTokenId(TOKEN_TWO)],
+      },
+    });
+  });
+
+  it("caps redeem batch size at 9 and waits 5 minutes between batches", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const positions = manyRedeemablePositions(10);
+    const h = makeHarness({
+      positions,
+      policy: { intervalMs: 60 * 60_000, postRedeemVerifyDelayMs: 60 * 60_000 },
+    });
     await h.module.start();
     await h.bus.drain();
 
+    const sweep = runSweepForTest(h.module, "batch-cap");
+    await flushMicrotasks();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect((h.gateway.redeemPositions.mock.calls as any[])[0]?.[0]).toHaveLength(9);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+    await flushMicrotasks();
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+    await sweep;
+
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect((h.gateway.redeemPositions.mock.calls as any[])[1]?.[0]).toEqual(["cond-batch-10"]);
+  });
+
+  it("skips conditions until the 8 hour post-resolution minimum age passes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      policy: { minAgeAfterResolutionSec: 28_800 },
+      marketRows: [
+        { tokenId: createTokenId(TOKEN), endDate: new Date(NOW - 7 * 60 * 60_000).toISOString() },
+      ],
+    });
+    await runStableStartup(h);
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.redeemLogRows.at(-1)).toMatchObject({
+      status: "skipped",
+      errorMsg: "min_age_after_resolution",
+    });
+
+    h.redeemLogRows.length = 0;
+    h.reader.read.mockResolvedValue([remotePosition()]);
+    (h.module as any).stabilityByCondition.clear();
+    (h.module as any).lastAttemptByCondition.clear();
+    h.orderRepo.findOpen.mockReturnValue([]);
+    (h.module as any).deps.marketRepo.findByConditionId.mockReturnValue([
+      { tokenId: createTokenId(TOKEN), endDate: new Date(NOW - 9 * 60 * 60_000).toISOString() },
+    ]);
+    await runSweepForTest(h.module, "age-prime");
+    await runSweepForTest(h.module, "age-ready");
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("hard-pauses all redeem sweeps for 5 minutes after Polygon RPC 429", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const first = remotePosition({ tokenId: "tok-rate", conditionId: "cond-rate" });
+    const later = remotePosition({ tokenId: "tok-later", conditionId: "cond-later" });
+    const h = makeHarness({
+      positions: [first, later],
+      redeemImpl: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("Polygon RPC 429 Too Many Requests"))
+        .mockResolvedValue({ status: "confirmed", conditionIds: ["cond-later"] }),
+    });
+    await h.module.start();
+    h.reader.read.mockResolvedValue([first]);
+    await runSweepForTest(h.module, "rate-limit-hit");
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+    h.reader.read.mockResolvedValue([later]);
+    await runSweepForTest(h.module, "during-hard-pause");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await runSweepForTest(h.module, "after-hard-pause");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(h.gateway.redeemPositions).toHaveBeenLastCalledWith(["cond-later"], {
+      redeemTokenIdsByCondition: { "cond-later": [createTokenId("tok-later")] },
+    });
+  });
+
+  it("hard-pauses when the settlement infra-alert callback reports Polygon RPC 429", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness();
+    await h.module.start();
+    h.module.notifySettlementInfraAlert("POLYGON_RPC_RATE_LIMITED");
+    await runSweepForTest(h.module, "infra-alert");
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    await runSweepForTest(h.module, "after-infra-alert");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats null verification reads as transient and empty reads as verified zero", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockResolvedValue({
+        status: "pending",
+        conditionIds: [CONDITION],
+        txHash: "0xpending",
+        gasUsed: null,
+      }),
+      policy: { postRedeemVerifyDelayMs: 1_000 },
+    });
+    await runStableStartup(h);
+
+    h.reader.read.mockResolvedValueOnce(null).mockResolvedValueOnce([]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+
+    expect(h.positionRepo.save).not.toHaveBeenCalled();
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["pending"]);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["success"]);
+    expect(h.positionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ size: 0, status: "closed" }),
+    );
+  });
+
+  it("cooldowns a condition for 30 minutes after STATE_FAILED", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      redeemImpl: vi
+        .fn()
+        .mockRejectedValueOnce(
+          new Error("Settlement transaction reached failed state before balances cleared"),
+        )
+        .mockResolvedValue({ status: "confirmed", conditionIds: [CONDITION] }),
+      policy: { inFlightTtlMs: 0, intervalMs: 60 * 60_000 },
+    });
+    await h.module.start();
+    await runSweepForTest(h.module, "state-failed");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(30 * 60_000 - 1);
+    await runSweepForTest(h.module, "blocked");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.redeemLogRows.at(-1)).toMatchObject({
+      status: "skipped",
+      errorMsg: "state_failed_cooldown",
+      details: { reason: "state_failed_cooldown", source: "blocked" },
+    });
+
+    await vi.advanceTimersByTimeAsync(1);
+    await runSweepForTest(h.module, "unblocked");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips redeem when active orders exist on the same condition", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      openOrders: [{ conditionId: CONDITION, status: "open" }],
+    });
+    await runStableStartup(h);
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.redeemLogRows.at(-1)).toMatchObject({
+      status: "skipped",
+      errorMsg: "active_orders_exist",
+    });
+  });
+
+  it("requires two consecutive redeemable wallet snapshots before redeem", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness();
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+
+    await runSweepForTest(h.module, "second-snapshot");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not redeem while disabled but can be enabled without restart", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const policy: Partial<typeof DEFAULT_EXECUTION_POLICY.redeemSweep> = { enabled: false };
+    const h = makeHarness({ policy });
+    await h.module.start();
+    await runSweepForTest(h.module, "disabled");
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+
+    policy.enabled = true;
+    await runSweepForTest(h.module, "enabled-prime");
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+
+    await runSweepForTest(h.module, "enabled-stable");
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+  });
+
+  it("includes zero-size redeemable token ids in redeem requests", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      positions: [remotePosition({ size: 0, redeemable: true })],
+    });
+    await runStableStartup(h);
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledWith([CONDITION], {
+      redeemTokenIdsByCondition: { [CONDITION]: [createTokenId(TOKEN)] },
+    });
   });
 
   it("loads recent attempting rows after restart and blocks duplicate reservation", async () => {
@@ -683,6 +927,28 @@ describe("RedeemSweepModule", () => {
           tokenIds: [TOKEN],
           attemptTs: NOW - 60_000,
           status: "attempting",
+        },
+      ],
+    });
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.module.isConditionInRedeemFlight(CONDITION)).toBe(true);
+  });
+
+  it("keeps in-flight guard active while redeem sweep is disabled", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      policy: { enabled: false },
+      redeemLogRows: [
+        {
+          id: 1,
+          conditionId: CONDITION,
+          tokenIds: [TOKEN],
+          attemptTs: NOW - 60_000,
+          status: "submitted",
         },
       ],
     });

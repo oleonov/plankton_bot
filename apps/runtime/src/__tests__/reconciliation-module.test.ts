@@ -857,7 +857,7 @@ describe("ReconciliationModule", () => {
       expect(drifts[0]!.severity).toBe("warn");
     });
 
-    it("publishes critical drift when wallet sentinel finds locally closed live inventory", async () => {
+    it("warns twice before publishing critical drift for confirmed wallet sentinel mismatches", async () => {
       const futureEndDate = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
       const closedPosition: Position = {
         positionId: createPositionId("pos-wallet-drift"),
@@ -897,9 +897,11 @@ describe("ReconciliationModule", () => {
       });
       const localLog = {
         ...silentLog,
+        warn: vi.fn(),
         error: vi.fn(),
         child: () => localLog,
       };
+      gateway.getPositionBalance = vi.fn().mockResolvedValue(10);
       const drifts: Array<{ severity: string; details: string }> = [];
       bus.subscribe("ReconciliationDriftDetected", async (p) => {
         drifts.push({ severity: p.severity, details: p.details });
@@ -923,19 +925,33 @@ describe("ReconciliationModule", () => {
         },
       });
 
+      const first = await driftMod.runReconciliation();
+      const second = await driftMod.runReconciliation();
       const result = await driftMod.runReconciliation();
       await bus.drain();
 
+      expect(first.clean).toBe(false);
+      expect(second.clean).toBe(false);
       expect(result.clean).toBe(false);
       expect(result.positionDriftCount).toBe(1);
-      expect(drifts).toHaveLength(1);
-      expect(drifts[0]!.severity).toBe("critical");
-      expect(drifts[0]!.details).toContain("wallet-live-position-closed-locally");
+      expect(drifts.map((drift) => drift.severity)).toEqual(["warn", "warn", "critical"]);
+      expect(drifts.at(-1)!.details).toContain("wallet-live-position-closed-locally");
+      expect(gateway.getPositionBalance).toHaveBeenCalledTimes(3);
+      expect(localLog.warn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          closedLive: expect.arrayContaining([
+            expect.objectContaining({ positionId: "pos-wallet-drift" }),
+          ]),
+          severity: "warn",
+        }),
+        "wallet position sentinel detected drift",
+      );
       expect(localLog.error).toHaveBeenCalledWith(
         expect.objectContaining({
           closedLive: expect.arrayContaining([
             expect.objectContaining({ positionId: "pos-wallet-drift" }),
           ]),
+          severity: "critical",
         }),
         "wallet position sentinel detected drift",
       );

@@ -147,6 +147,22 @@ describe("runWalletPositionSentinel", () => {
     expect(result.details[0]).toContain("wallet-live-position-closed-locally");
   });
 
+  it("does not flag closed live positions while Polymarket data-api lags a fresh fill", async () => {
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote()]),
+        positionRepo: positionRepo([makePosition()]),
+        fillRepo: fillRepo([makeFill({ filledAt: "2026-04-24T23:59:30.000Z" })]),
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.closedLivePositions).toHaveLength(0);
+  });
+
   it("does not flag dust/open local inventory", async () => {
     const result = await runWalletPositionSentinel(
       {

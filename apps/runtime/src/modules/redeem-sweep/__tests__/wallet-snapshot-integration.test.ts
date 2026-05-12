@@ -109,7 +109,7 @@ describe("redeem sweep wallet snapshot integration", () => {
       }),
     };
     const positionReader = {
-      read: vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce(positions),
+      read: vi.fn().mockResolvedValueOnce([]).mockResolvedValue(positions),
     };
     const module = new RedeemSweepModule({
       bus,
@@ -154,7 +154,9 @@ describe("redeem sweep wallet snapshot integration", () => {
       } as any,
       policy: () => ({
         ...DEFAULT_EXECUTION_POLICY.redeemSweep,
+        enabled: true,
         intervalMs: 60_000,
+        minAgeAfterResolutionSec: 0,
       }),
       log: logger(),
       runtimeMetrics: { writeEvent: vi.fn(), writeLatest: vi.fn() } as any,
@@ -162,7 +164,7 @@ describe("redeem sweep wallet snapshot integration", () => {
     });
 
     await module.start();
-    await bus.publish("PolymarketWalletUpdated", {
+    const walletEvent = {
       positions: positions.map((position) => ({
         tokenId: createTokenId(position.tokenId),
         conditionId: position.conditionId,
@@ -172,18 +174,21 @@ describe("redeem sweep wallet snapshot integration", () => {
         outcome: position.outcome,
       })),
       timestamp: Date.now(),
-    });
+    };
+    await bus.publish("PolymarketWalletUpdated", walletEvent);
+    await bus.publish("PolymarketWalletUpdated", walletEvent);
     await bus.drain();
 
     expect(positions).toHaveLength(5);
-    expect(positions.filter((position) => position.redeemable && position.size > 0)).toHaveLength(
-      2,
-    );
-    expect(gateway.redeemPositions.mock.calls.map((call: any[]) => call[0][0])).toEqual([
-      "cond-r1",
-      "cond-r2",
-    ]);
-    expect(logRows.filter((row) => row.status === "success")).toHaveLength(2);
+    expect(positions.filter((position) => position.redeemable)).toHaveLength(3);
+    expect(gateway.redeemPositions).toHaveBeenCalledWith(["cond-r1", "cond-r2", "cond-zero"], {
+      redeemTokenIdsByCondition: {
+        "cond-r1": [createTokenId("tok-r1")],
+        "cond-r2": [createTokenId("tok-r2")],
+        "cond-zero": [createTokenId("tok-zero")],
+      },
+    });
+    expect(logRows.filter((row) => row.status === "success")).toHaveLength(3);
     expect(savedPositions).toEqual([
       expect.objectContaining({ tokenId: createTokenId("tok-r1"), size: 0, status: "closed" }),
       expect.objectContaining({ tokenId: createTokenId("tok-r2"), size: 0, status: "closed" }),

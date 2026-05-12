@@ -732,4 +732,47 @@ describe("control-db migration infrastructure", () => {
       marketableBuyMinNotionalUsdc: 1,
     });
   });
+
+  it("migration 053 disables redeem sweep and applies R62 safety cadence", () => {
+    const dbPath = path.join(tmpDir, "control-r62-redeem-sweep-safety.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.redeemSweep.enabled',
+              json('true'),
+              '$.redeemSweep.intervalMs',
+              600000
+            )
+          WHERE profile_id = ?`,
+      )
+      .run("live-lite");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("053_redeem_sweep_safety_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const raw = conn.db
+      .prepare("SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = ?")
+      .get("live-lite") as { json: string };
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    const policy = JSON.parse(raw.json);
+
+    expect(policy.redeemSweep).toMatchObject({
+      enabled: false,
+      intervalMs: 14_400_000,
+      minAgeAfterResolutionSec: 28_800,
+    });
+    expect(after.version).toBeGreaterThan(before.version);
+  });
 });
