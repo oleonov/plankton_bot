@@ -2098,4 +2098,120 @@ describe("ResolutionModule", () => {
       expect(cancels).toHaveLength(1);
     });
   });
+
+  describe("pause gating", () => {
+    function createModuleWithPause(isPaused: () => boolean) {
+      return new ResolutionModule({
+        detector: detector as unknown as ResolutionDetector,
+        settler: settler as unknown as PositionSettler,
+        marketRepo: marketRepo as unknown as MarketRepository,
+        resolutionRepo: resolutionRepo as unknown as MarketResolutionRepository,
+        orderRepo: orderRepo as unknown as OrderRepository,
+        fillRepo: fillRepo as unknown as FillRepository,
+        gammaClient: gammaClient as unknown as GammaResolutionClient,
+        lotRepo: lotRepo as unknown as InventoryLotRepository,
+        positionRepo: positionRepo as unknown as PositionRepository,
+        db: mockDb as any,
+        bus,
+        log: log as any,
+        checkIntervalMs: 60_000,
+        graceMinutes: 30,
+        runtimeControl: { isPaused },
+      });
+    }
+
+    it("skips runCheck while the runtime is paused", async () => {
+      const isPaused = vi.fn(() => true);
+      const paused = createModuleWithPause(isPaused);
+
+      const count = await paused.runCheck();
+
+      expect(count).toBe(0);
+      expect(isPaused).toHaveBeenCalled();
+      expect(detector.detect as any).not.toHaveBeenCalled();
+      expect(resolutionRepo.save as any).not.toHaveBeenCalled();
+    });
+
+    it("skips MarketResolvedHint handling while the runtime is paused", async () => {
+      const isPaused = vi.fn(() => true);
+      const paused = createModuleWithPause(isPaused);
+      await paused.start();
+
+      await bus.publish("MarketResolvedHint", {
+        conditionId: CONDITION,
+        marketId: "mkt-1",
+        slug: "x",
+        tokenIds: [TOK_YES],
+        winningTokenId: TOK_YES,
+        timestamp: Date.now(),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(resolutionRepo.save as any).not.toHaveBeenCalled();
+      expect(detector.detect as any).not.toHaveBeenCalled();
+
+      await paused.stop();
+    });
+
+    it("defers recoverUnresolved while paused and runs it on first runCheck after resume", async () => {
+      (resolutionRepo.findAll as any).mockReturnValue([
+        {
+          conditionId: CONDITION,
+          resolution: "unknown",
+          resolvedAt: "2026-01-15T00:00:00Z",
+          detectedAt: "2026-01-15T01:00:00Z",
+          source: "gamma-delisted",
+          rawResponse: null,
+          status: "detected",
+        },
+      ]);
+      (marketRepo.findByConditionId as any).mockReturnValue([
+        { tokenId: TOK_YES, conditionId: CONDITION, slug: "will-x-happen", outcome: "YES" },
+      ]);
+      (gammaClient.getMarketBySlug as any).mockResolvedValue(null);
+
+      let paused = true;
+      const isPaused = vi.fn(() => paused);
+      const gated = createModuleWithPause(isPaused);
+
+      await gated.start();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(gammaClient.getMarketBySlug as any).not.toHaveBeenCalled();
+
+      paused = false;
+      await gated.runCheck();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(gammaClient.getMarketBySlug as any).toHaveBeenCalledTimes(1);
+
+      await gated.stop();
+    });
+
+    it("skips algo redeem while the runtime is paused", async () => {
+      const gateway = createMockGateway();
+      const isPaused = vi.fn(() => true);
+      const paused = new ResolutionModule({
+        detector: detector as unknown as ResolutionDetector,
+        settler: settler as unknown as PositionSettler,
+        marketRepo: marketRepo as unknown as MarketRepository,
+        resolutionRepo: resolutionRepo as unknown as MarketResolutionRepository,
+        orderRepo: orderRepo as unknown as OrderRepository,
+        fillRepo: fillRepo as unknown as FillRepository,
+        gammaClient: gammaClient as unknown as GammaResolutionClient,
+        lotRepo: lotRepo as unknown as InventoryLotRepository,
+        positionRepo: positionRepo as unknown as PositionRepository,
+        db: mockDb as any,
+        bus,
+        log: log as any,
+        checkIntervalMs: 60_000,
+        graceMinutes: 30,
+        runtimeControl: { isPaused },
+        gateway,
+      });
+
+      await (paused as any).handleAlgoRedeem([CONDITION]);
+
+      expect(isPaused).toHaveBeenCalled();
+      expect(gateway.redeemPositions as any).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -14,6 +14,7 @@
 
 import type {
   RuntimeModule,
+  RuntimeControl,
   EventBus,
   MarketDataGateway,
   MarketPricingLifecycleEvent,
@@ -165,6 +166,15 @@ export interface MarketDataModuleDeps {
    * a warning is logged. Default: 500.
    */
   fallbackBatchSize?: number;
+  /**
+   * Optional pause gate. When the runtime is paused, periodic poll and
+   * discovery batch cycles are skipped so the bot stops issuing new external
+   * requests. Incoming WS events still update the in-memory cache, but
+   * `MarketSnapshotReceived` bus publications are suppressed so downstream
+   * writers (snapshot writer, risk inventory mark-to-market, soft-ranking
+   * scorer) stop dirtying the database while paused.
+   */
+  runtimeControl?: RuntimeControl;
 }
 
 export class MarketDataModule implements RuntimeModule {
@@ -388,6 +398,10 @@ export class MarketDataModule implements RuntimeModule {
   /** Exposed for testing — in production driven by the interval timer. */
   async poll(): Promise<void> {
     if (this.polling) return;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.log.debug("market-data poll skipped while runtime is paused");
+      return;
+    }
     this.polling = true;
     let tracked: readonly Market[] = [];
     let tokenIdsToPoll: string[] = [];
@@ -616,6 +630,13 @@ export class MarketDataModule implements RuntimeModule {
         tokenIdsToPoll.length > 0
           ? await this.deps.gateway.getMarketPricing(tokenIdsToPoll, { timeoutMs })
           : new Map<string, import("@krabs/domain").MarketPricingSnapshot>();
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.log.debug(
+          { polledTokenCount: tokenIdsToPoll.length },
+          "poll snapshot suppressed after pause flip mid-await",
+        );
+        return;
+      }
       this.lastPricingHitCount = pricingMap.size;
       for (const tokenId of tokenIdsToPoll) {
         this.lastPricingAttemptAtByToken.set(tokenId, now);
@@ -694,6 +715,10 @@ export class MarketDataModule implements RuntimeModule {
    * modules (Normalization, AlgoDecision, SignalToOrder) see fresh pricing.
    */
   private async pollDiscoveryBatch(): Promise<void> {
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.log.debug("discovery poll skipped while runtime is paused");
+      return;
+    }
     const nowMs = Date.now();
     if (nowMs < this.discoveryPollBackoffUntilMs) {
       this.log.debug(
@@ -723,6 +748,13 @@ export class MarketDataModule implements RuntimeModule {
     try {
       const timeoutMs = resolveMarketPricingTimeoutMs(tokenIds.length);
       const pricingMap = await this.deps.gateway.getMarketPricing(tokenIds, { timeoutMs });
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.log.debug(
+          { batchSize: batch.length },
+          "discovery snapshot suppressed after pause flip mid-await",
+        );
+        return;
+      }
       const nowMs = Date.now();
       const snapshots: NormalizedMarket[] = [];
       for (const [tokenId, pricing] of pricingMap) {
@@ -833,6 +865,13 @@ export class MarketDataModule implements RuntimeModule {
 
     if (changedMarkets.length === 0) return;
     this.lastSuccessfulDataMs = nowMs;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.log.debug(
+        { coalescedUpdates: updates.length, changedMarkets: changedMarkets.length },
+        "stream snapshot suppressed while runtime is paused",
+      );
+      return;
+    }
     this.log.debug(
       {
         coalescedUpdates: updates.length,
@@ -1040,6 +1079,13 @@ export class MarketDataModule implements RuntimeModule {
   }
 
   private async publishCachedMarkets(tracked: readonly Market[], nowMs: number): Promise<void> {
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.log.debug(
+        { trackedCount: tracked.length },
+        "cached market snapshot suppressed while runtime is paused",
+      );
+      return;
+    }
     const markets: NormalizedMarket[] = [];
     for (const trackedMarket of tracked) {
       const tokenKey = String(trackedMarket.tokenId);

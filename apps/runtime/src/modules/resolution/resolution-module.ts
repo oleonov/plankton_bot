@@ -12,6 +12,7 @@ import type Database from "better-sqlite3";
 import type {
   EventBus,
   ExchangeGateway,
+  RuntimeControl,
   RuntimeModule,
   FillRepository,
   MarketRepository,
@@ -92,6 +93,12 @@ export interface ResolutionModuleDeps {
    * When absent, settlement proceeds without balance verification.
    */
   gateway?: ExchangeGateway;
+  /**
+   * Optional pause gate. When the runtime is paused, periodic and
+   * hint/bus-triggered resolution sweeps are skipped so the bot does not
+   * write settlements, deactivate markets, cancel orders, or submit redeems.
+   */
+  runtimeControl?: RuntimeControl;
 }
 
 export class ResolutionModule implements RuntimeModule {
@@ -102,6 +109,7 @@ export class ResolutionModule implements RuntimeModule {
   private readonly redeemFailures = new Map<string, RedeemFailureEntry>();
   private running = false;
   private wsHintConsumed = 0;
+  private recoveryPending = true;
 
   constructor(private readonly deps: ResolutionModuleDeps) {}
 
@@ -118,11 +126,27 @@ export class ResolutionModule implements RuntimeModule {
     );
     // Run once at startup (non-blocking)
     this.runCheck().catch((err) => this.deps.log.error(err, "startup resolution check failed"));
-    this.recoverUnresolved().catch((err) => this.deps.log.error(err, "resolution recovery failed"));
+    this.tryRecoverUnresolved("startup");
 
     this.intervalHandle = setInterval(() => {
       this.runCheck().catch((err) => this.deps.log.error(err, "resolution check failed"));
     }, this.deps.checkIntervalMs);
+  }
+
+  private tryRecoverUnresolved(source: string): void {
+    if (!this.recoveryPending) return;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug(
+        { source },
+        "resolution recovery deferred while runtime is paused",
+      );
+      return;
+    }
+    this.recoveryPending = false;
+    this.recoverUnresolved().catch((err) => {
+      this.recoveryPending = true;
+      this.deps.log.error(err, "resolution recovery failed");
+    });
   }
 
   async stop(): Promise<void> {
@@ -138,6 +162,10 @@ export class ResolutionModule implements RuntimeModule {
 
   private async handleAlgoRedeem(conditionIds: readonly string[]): Promise<void> {
     if (conditionIds.length === 0) return;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug({ conditionIds }, "algo redeem skipped while runtime is paused");
+      return;
+    }
     this.deps.log.info({ conditionIds }, "algo-triggered redeem requested");
 
     let settleableConditionIds = [...conditionIds];
@@ -173,6 +201,10 @@ export class ResolutionModule implements RuntimeModule {
       // any missed case.
       const { targetsNeedingRedeem, alreadyRedeemed } =
         await this.filterAlreadyRedeemed(eligibleByEndDate);
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug({ conditionIds }, "algo redeem aborted after pause flip mid-await");
+        return;
+      }
       // Gamma-gate BOTH paths before promoting to settlement. A transiently-
       // zero on-chain balance on a post-endDate market whose Gamma status is
       // still unresolved (UMA lag, dispute, …) must not create an algo-redeem
@@ -185,6 +217,10 @@ export class ResolutionModule implements RuntimeModule {
         combinedForGamma,
         now,
       );
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug({ conditionIds }, "algo redeem aborted after pause flip mid-await");
+        return;
+      }
       for (const entry of deferred) {
         this.deps.log.info(entry, "algo_redeem_deferred_not_redeemable");
       }
@@ -200,6 +236,13 @@ export class ResolutionModule implements RuntimeModule {
       // per-conditionId circuit for innocent markets. Submitting per condition
       // keeps success/failure strictly scoped to its own id.
       for (const conditionId of gammaConfirmedNeedsRedeem) {
+        if (this.deps.runtimeControl?.isPaused()) {
+          this.deps.log.debug(
+            { remaining: gammaConfirmedNeedsRedeem.length - successfullyRedeemed.length },
+            "algo redeem loop aborted after pause flip — remaining conditions deferred",
+          );
+          break;
+        }
         const result = await this.submitRedeemAttempt(conditionId);
         if (result.ok) {
           this.deps.log.info(
@@ -233,7 +276,13 @@ export class ResolutionModule implements RuntimeModule {
 
     // Cancel any open orders on tokens we're about to settle so they don't
     // fill after the leg terminates. Mirrors cancelOpenOrders in the normal
-    // resolution path.
+    // resolution path. These cancels are reality-following protective cleanup
+    // tied to the upcoming settlement writes — skipping them on a pause flip
+    // would leave open orders against settled positions (fills after
+    // settlement would re-grow the local balance and trip the drift detector).
+    // ExecutionModule's handleCancel proceeds even under pause, so the
+    // published CancelOrderRequested events do get executed; we must publish
+    // all of them. No pause break inside this loop.
     for (const conditionId of settleableConditionIds) {
       const markets = this.deps.marketRepo.findByConditionId(conditionId);
       for (const market of markets) {
@@ -250,6 +299,13 @@ export class ResolutionModule implements RuntimeModule {
     if (settleableConditionIds.length === 0) {
       return;
     }
+    // Settlement here is reality-following: settleableConditionIds contains
+    // either fresh on-chain submissions (successfullyRedeemed) or markets that
+    // filterAlreadyRedeemed found already-redeemed on-chain. Skipping
+    // settlement under pause would leak inventory (on-chain redeemed, local
+    // ledger still open) and is the very leak this fix is supposed to prevent.
+    // Pre-on-chain pause gates above already block FRESH submissions; once we
+    // have settleable IDs, the local writes must follow.
 
     const now = new Date().toISOString();
     for (const conditionId of settleableConditionIds) {
@@ -299,13 +355,36 @@ export class ResolutionModule implements RuntimeModule {
     const needsRedeem: string[] = [];
     const alreadyRedeemed: string[] = [];
     for (const conditionId of conditionIds) {
+      // Per-iteration pause gate: each conditionId triggers up to N
+      // getOutcomeTokenBalance() gateway calls. Stop issuing new ones the
+      // moment pause flips. Caller's post-helper pause check aborts the rest
+      // of the algo-redeem flow before any on-chain submission.
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug(
+          { processed: needsRedeem.length + alreadyRedeemed.length, total: conditionIds.length },
+          "filterAlreadyRedeemed aborted after pause flip mid-loop",
+        );
+        break;
+      }
       const markets = this.deps.marketRepo.findByConditionId(conditionId);
       if (markets.length === 0) {
         needsRedeem.push(conditionId);
         continue;
       }
       let allZero = true;
+      let abortedByPause = false;
       for (const market of markets) {
+        // Inner-loop pause gate: each market issues another
+        // getOutcomeTokenBalance() call. Stop issuing new ones the moment
+        // pause flips, and treat the condition as "not yet proven redeemed"
+        // (allZero=false) so it does not fall into the alreadyRedeemed bucket
+        // on incomplete data. Caller's post-helper pause check aborts the
+        // rest of the algo-redeem flow before any on-chain submission.
+        if (this.deps.runtimeControl?.isPaused()) {
+          allZero = false;
+          abortedByPause = true;
+          break;
+        }
         try {
           const balance = await gateway.getOutcomeTokenBalance(market.tokenId);
           if (balance !== 0n) {
@@ -320,6 +399,13 @@ export class ResolutionModule implements RuntimeModule {
           allZero = false;
           break;
         }
+      }
+      if (abortedByPause) {
+        this.deps.log.debug(
+          { conditionId },
+          "filterAlreadyRedeemed inner balance loop aborted after pause flip",
+        );
+        break;
       }
       if (allZero) {
         this.deps.log.info({ conditionId }, "algo_redeem_skipped_already_redeemed");
@@ -357,6 +443,17 @@ export class ResolutionModule implements RuntimeModule {
     }> = [];
 
     for (const conditionId of conditionIds) {
+      // Per-iteration pause gate: each conditionId may trigger a Gamma API
+      // lookup. Stop issuing new ones the moment pause flips. Caller's
+      // post-helper pause check aborts the rest of the algo-redeem flow
+      // before any on-chain submission.
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug(
+          { processed: redeemableTargets.length + deferred.length, total: conditionIds.length },
+          "filterConfirmedRedeemable aborted after pause flip mid-loop",
+        );
+        break;
+      }
       const markets = this.deps.marketRepo.findByConditionId(conditionId);
       if (markets.length === 0) {
         redeemableTargets.push(conditionId);
@@ -507,20 +604,43 @@ export class ResolutionModule implements RuntimeModule {
   /** Exposed for testing. */
   async runCheck(): Promise<number> {
     if (this.running) return 0;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug("resolution check skipped while runtime is paused");
+      return 0;
+    }
+    if (this.recoveryPending) {
+      this.tryRecoverUnresolved("runCheck");
+    }
     this.running = true;
 
     try {
       const resolutions = await this.deps.detector.detect(this.deps.graceMinutes);
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug(
+          { detectedCount: resolutions.length },
+          "resolution processing aborted after pause flip mid-await",
+        );
+        return 0;
+      }
       return await this.processDetectedResolutions(resolutions);
     } finally {
       this.running = false;
-      void this.flushPendingHintConditions();
+      if (!this.deps.runtimeControl?.isPaused()) {
+        void this.flushPendingHintConditions();
+      }
     }
   }
 
   private async handleMarketResolvedHint(
     hint: import("@krabs/domain").RuntimeEventMap["MarketResolvedHint"],
   ): Promise<void> {
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug(
+        { conditionId: hint.conditionId },
+        "resolution hint skipped while runtime is paused",
+      );
+      return;
+    }
     this.wsHintConsumed++;
     for (const tokenId of hint.tokenIds) {
       await this.cancelOpenOrders(tokenId, {
@@ -535,6 +655,13 @@ export class ResolutionModule implements RuntimeModule {
 
   private async flushPendingHintConditions(): Promise<void> {
     if (this.running || this.pendingHintConditionIds.size === 0) return;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug(
+        { queued: this.pendingHintConditionIds.size },
+        "resolution hint flush deferred while runtime is paused",
+      );
+      return;
+    }
     this.running = true;
     try {
       const conditionIds = [...this.pendingHintConditionIds];
@@ -546,11 +673,27 @@ export class ResolutionModule implements RuntimeModule {
           resolutions.push(detected);
         }
       }
+      if (this.deps.runtimeControl?.isPaused()) {
+        // Pause flipped mid-detection: re-queue any conditions we already
+        // detected (they were drained above) so the next non-paused flush picks
+        // them up. Avoid losing work silently.
+        for (const detected of resolutions) {
+          this.pendingHintConditionIds.add(detected.conditionId);
+        }
+        this.deps.log.debug(
+          { queued: this.pendingHintConditionIds.size },
+          "resolution hint flush aborted after pause flip mid-await",
+        );
+        return;
+      }
       await this.processDetectedResolutions(resolutions);
     } finally {
       this.hintedCancelledOrderIds.clear();
       this.running = false;
-      if (this.pendingHintConditionIds.size > 0) {
+      if (
+        this.pendingHintConditionIds.size > 0 &&
+        !this.deps.runtimeControl?.isPaused()
+      ) {
         void this.flushPendingHintConditions();
       }
     }
@@ -562,6 +705,13 @@ export class ResolutionModule implements RuntimeModule {
     let totalSettled = 0;
 
     for (const resolution of resolutions) {
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug(
+          { conditionId: resolution.conditionId },
+          "resolution processing aborted after pause flip mid-loop",
+        );
+        return totalSettled;
+      }
       const isRetry = !!this.deps.resolutionRepo.findByConditionId(resolution.conditionId);
 
       if (!isRetry) {
@@ -610,10 +760,27 @@ export class ResolutionModule implements RuntimeModule {
         allVerified = winningCandidates.length === 0;
 
         if (winningCandidates.length > 0) {
+          // Pause re-check before initiating a NEW on-chain action. The
+          // cancelOpenOrders loop above awaits; if pause flips during those
+          // awaits we must not call submitResolutionRedeem (which submits an
+          // on-chain redeem). Settlement is deferred to a future runCheck.
+          // The earlier deactivate + cancel writes are reality-following
+          // (they reflect Gamma-confirmed resolution) and remain committed.
+          if (this.deps.runtimeControl?.isPaused()) {
+            this.deps.log.debug(
+              { conditionId: resolution.conditionId },
+              "resolution on-chain redeem aborted after pause flip pre-submission",
+            );
+            return totalSettled;
+          }
           const redeemStatus = await this.submitResolutionRedeem(
             resolution.conditionId,
             winningCandidates.map((candidate) => candidate.tokenId),
           );
+          // submitResolutionRedeem may submit an on-chain redeem before pause
+          // flips. The downstream settler.settle() writes mirror the on-chain
+          // state and MUST follow even under pause; otherwise we'd leak
+          // inventory (on-chain says redeemed, local ledger still open).
           if (redeemStatus === "ready") {
             const verifiedWinningCandidates = await this.filterByZeroBalance(
               winningCandidates,
@@ -865,6 +1032,16 @@ export class ResolutionModule implements RuntimeModule {
     let recovered = 0;
 
     for (const mr of unresolved) {
+      if (this.deps.runtimeControl?.isPaused()) {
+        // Re-defer: leave the recovery flag set so the next non-paused runCheck
+        // picks up the remaining unresolved rows from scratch.
+        this.recoveryPending = true;
+        this.deps.log.debug(
+          { recovered, remaining: unresolved.length - recovered },
+          "resolution recovery aborted after pause flip mid-loop",
+        );
+        return recovered;
+      }
       const markets = this.deps.marketRepo.findByConditionId(mr.conditionId);
       if (markets.length === 0) continue;
 
@@ -878,6 +1055,14 @@ export class ResolutionModule implements RuntimeModule {
           "recovery Gamma lookup failed — skipping",
         );
         continue;
+      }
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.recoveryPending = true;
+        this.deps.log.debug(
+          { conditionId: mr.conditionId },
+          "resolution recovery aborted after pause flip mid-await",
+        );
+        return recovered;
       }
       if (!info?.closed) continue;
 

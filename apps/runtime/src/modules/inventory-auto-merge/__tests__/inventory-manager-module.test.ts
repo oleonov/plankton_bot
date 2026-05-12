@@ -41,7 +41,7 @@ describe("InventoryManagerModule", () => {
       prepare: vi.fn().mockReturnValue({ run: vi.fn() }),
       transaction: vi.fn((cb) => cb),
     } as any;
-    log = { info: vi.fn(), error: vi.fn() } as any;
+    log = { info: vi.fn(), error: vi.fn(), debug: vi.fn() } as any;
 
     mod = new InventoryManagerModule({
       bus,
@@ -103,5 +103,30 @@ describe("InventoryManagerModule", () => {
 
     expect(gateway.mergePositions).toHaveBeenCalledWith([{ conditionId: condId, amount: 100 }]);
     expect(bus.publish).toHaveBeenCalledWith("PositionUpdated", expect.anything());
+  });
+
+  it("skips sweep while the runtime is paused", async () => {
+    const isPaused = vi.fn(() => true);
+    const paused = new InventoryManagerModule({
+      bus,
+      gateway,
+      positionRepo,
+      orderRepo,
+      marketRepo,
+      fillRepo,
+      lotRepo,
+      mergeLedgerRepo,
+      db,
+      log,
+      runtimeControl: { isPaused },
+    });
+
+    (positionRepo.findOpen as any).mockReturnValue([]);
+
+    await paused.sweep();
+
+    expect(isPaused).toHaveBeenCalledTimes(1);
+    expect(positionRepo.findOpen).not.toHaveBeenCalled();
+    expect(gateway.mergePositions).not.toHaveBeenCalled();
   });
 });

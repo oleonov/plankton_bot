@@ -124,6 +124,10 @@ export interface MarketScanResult {
  * v5.11 admission breakdown — cumulative counters surfaced for healthcheck and
  * dashboards. The legacy `marketsStep2FallbackInclude` field is retained for
  * API compatibility and should stay zero under hard-filter admission.
+ *
+ * R64: short-horizon strike rejections are counted both in aggregate and
+ * split by `pattern` (strike slug shape) + `horizonHoursBucket` so we can
+ * tell whether the threshold is over- or under-blocking after 7-14 days.
  */
 export interface Step2BreakdownSnapshot {
   scannedMarketsTotal: number;
@@ -134,6 +138,43 @@ export interface Step2BreakdownSnapshot {
   scannedEventsTotal: number;
   eventsSingleMarketTotal: number;
   eventsMultiMarketTotal: number;
+  /** R64 — number of markets rejected by the strike-short-horizon filter. */
+  strikeShortHorizonRejectedTotal: number;
+  /** R64 — rejection counts keyed by `StrikePatternKind` (`between` / `greater_or_less_than` / `above`). */
+  strikeShortHorizonByPattern: Record<string, number>;
+  /** R64 — rejection counts keyed by horizon bucket (`lt_1h` / `1_to_6h` / `6_to_12h` / `12_to_24h` / `negative` / `unknown`). */
+  strikeShortHorizonByHorizonBucket: Record<string, number>;
+}
+
+/**
+ * R64 metric bucketing for short-horizon strike rejections. Bucket edges are
+ * coarse on purpose so the breakdown stays readable on a healthcheck line
+ * and so individual buckets accumulate enough samples for a meaningful
+ * profit comparison.
+ */
+function horizonHoursBucket(horizonHours: number | null | undefined): string {
+  if (horizonHours == null || !Number.isFinite(horizonHours)) return "unknown";
+  if (horizonHours < 0) return "negative";
+  if (horizonHours < 1) return "lt_1h";
+  if (horizonHours < 6) return "1_to_6h";
+  if (horizonHours < 12) return "6_to_12h";
+  return "12_to_24h";
+}
+
+function createEmptyStep2Breakdown(): Step2BreakdownSnapshot {
+  return {
+    scannedMarketsTotal: 0,
+    marketsStep1MatchedInclude: 0,
+    marketsStep1MatchedExclude: 0,
+    marketsStep2FallbackInclude: 0,
+    marketsFinalExclude: 0,
+    scannedEventsTotal: 0,
+    eventsSingleMarketTotal: 0,
+    eventsMultiMarketTotal: 0,
+    strikeShortHorizonRejectedTotal: 0,
+    strikeShortHorizonByPattern: {},
+    strikeShortHorizonByHorizonBucket: {},
+  };
 }
 
 export class MarketScannerModule implements RuntimeModule {
@@ -163,16 +204,7 @@ export class MarketScannerModule implements RuntimeModule {
    * v5.11 admission breakdown — cumulative counters across all scan cycles
    * (mutated incrementally to keep memory flat). See Step2BreakdownSnapshot.
    */
-  private readonly step2Breakdown: Step2BreakdownSnapshot = {
-    scannedMarketsTotal: 0,
-    marketsStep1MatchedInclude: 0,
-    marketsStep1MatchedExclude: 0,
-    marketsStep2FallbackInclude: 0,
-    marketsFinalExclude: 0,
-    scannedEventsTotal: 0,
-    eventsSingleMarketTotal: 0,
-    eventsMultiMarketTotal: 0,
-  };
+  private readonly step2Breakdown: Step2BreakdownSnapshot = createEmptyStep2Breakdown();
   private readonly log: Logger;
   private readonly scanDegradeWarn: WarnThrottleState = createWarnThrottleState();
 
@@ -235,10 +267,14 @@ export class MarketScannerModule implements RuntimeModule {
         ? "discoveryLatency=n/a"
         : `discoveryLatencyMs p50=${this.lastLatencyP50Ms} p90=${this.lastLatencyP90Ms} max=${this.lastLatencyMaxMs}`;
     const b = this.step2Breakdown;
+    const shortHorizonSuffix =
+      b.strikeShortHorizonRejectedTotal === 0
+        ? ""
+        : ` strikeShortHorizonRejected=${b.strikeShortHorizonRejectedTotal}`;
     const breakdown =
       b.scannedMarketsTotal === 0
         ? ""
-        : ` step2Breakdown markets=${b.scannedMarketsTotal} step1Include=${b.marketsStep1MatchedInclude} step1Exclude=${b.marketsStep1MatchedExclude} step2Fallback=${b.marketsStep2FallbackInclude} finalExclude=${b.marketsFinalExclude} events=${b.scannedEventsTotal} singleMarket=${b.eventsSingleMarketTotal} multiMarket=${b.eventsMultiMarketTotal}`;
+        : ` step2Breakdown markets=${b.scannedMarketsTotal} step1Include=${b.marketsStep1MatchedInclude} step1Exclude=${b.marketsStep1MatchedExclude} step2Fallback=${b.marketsStep2FallbackInclude} finalExclude=${b.marketsFinalExclude} events=${b.scannedEventsTotal} singleMarket=${b.eventsSingleMarketTotal} multiMarket=${b.eventsMultiMarketTotal}${shortHorizonSuffix}`;
     const r = this.lastScanResult;
     const watchSet =
       r === null
@@ -274,7 +310,13 @@ export class MarketScannerModule implements RuntimeModule {
    * Returns a defensive copy so callers cannot mutate internal state.
    */
   getStep2BreakdownSnapshot(): Step2BreakdownSnapshot {
-    return { ...this.step2Breakdown };
+    return {
+      ...this.step2Breakdown,
+      strikeShortHorizonByPattern: { ...this.step2Breakdown.strikeShortHorizonByPattern },
+      strikeShortHorizonByHorizonBucket: {
+        ...this.step2Breakdown.strikeShortHorizonByHorizonBucket,
+      },
+    };
   }
 
   /** Exposed for testing -- in production driven by the interval timer. */
@@ -325,6 +367,10 @@ export class MarketScannerModule implements RuntimeModule {
       let skippedUnchangedTokens = 0;
       let skippedCoalesceNoopTokens = 0;
       const now = new Date().toISOString();
+      // Captured once per scan cycle so all markets — across paginated pages
+      // — are evaluated against the same reference time. Late pages see a
+      // slightly stale clock (scan duration is typically <60s); the R64 24h
+      // horizon threshold is far enough above that drift to be safe.
       const nowMs = Date.now();
       const discoveredTokenIds = new Set<string>();
 
@@ -356,16 +402,7 @@ export class MarketScannerModule implements RuntimeModule {
       // (Gamma pagination is order-biased — early pages alone are not
       // representative). Merged into the cumulative snapshot only after the
       // full scan completes successfully.
-      const pendingStep2Delta: Step2BreakdownSnapshot = {
-        scannedMarketsTotal: 0,
-        marketsStep1MatchedInclude: 0,
-        marketsStep1MatchedExclude: 0,
-        marketsStep2FallbackInclude: 0,
-        marketsFinalExclude: 0,
-        scannedEventsTotal: 0,
-        eventsSingleMarketTotal: 0,
-        eventsMultiMarketTotal: 0,
-      };
+      const pendingStep2Delta: Step2BreakdownSnapshot = createEmptyStep2Breakdown();
 
       await this.deps.discoveryGateway.forEachMarketPage((pageMarkets, eventStats) => {
         discoveredMarkets += pageMarkets.length;
@@ -385,8 +422,10 @@ export class MarketScannerModule implements RuntimeModule {
                 question: clobMarket.question,
                 midPrice: token.midPrice ?? null,
                 liquidity: clobMarket.liquidity ?? null,
+                endDate: clobMarket.endDate ?? null,
               },
               marketSelectionPolicy,
+              nowMs,
             ),
           );
           const marketEvalResult =
@@ -409,6 +448,23 @@ export class MarketScannerModule implements RuntimeModule {
             case "fallback_exclude":
               pendingStep2Delta.marketsFinalExclude++;
               break;
+          }
+
+          // R64 — split short-horizon strike rejections by pattern + horizon
+          // bucket so dashboards can tell whether the 24h threshold is
+          // over-blocking. `strikePattern` is always set when the reject
+          // reason is `strike_short_horizon` (see evaluatePreEntry).
+          if (
+            marketEvalResult.rejectReason === "strike_short_horizon" &&
+            marketEvalResult.strikePattern != null
+          ) {
+            pendingStep2Delta.strikeShortHorizonRejectedTotal++;
+            const pattern = marketEvalResult.strikePattern;
+            pendingStep2Delta.strikeShortHorizonByPattern[pattern] =
+              (pendingStep2Delta.strikeShortHorizonByPattern[pattern] ?? 0) + 1;
+            const bucket = horizonHoursBucket(marketEvalResult.horizonHours);
+            pendingStep2Delta.strikeShortHorizonByHorizonBucket[bucket] =
+              (pendingStep2Delta.strikeShortHorizonByHorizonBucket[bucket] ?? 0) + 1;
           }
 
           const marketHasAnyIncludedLeg = marketEvalResult.finalStatus === "INCLUDE";
@@ -508,6 +564,18 @@ export class MarketScannerModule implements RuntimeModule {
       this.step2Breakdown.scannedEventsTotal += pendingStep2Delta.scannedEventsTotal;
       this.step2Breakdown.eventsSingleMarketTotal += pendingStep2Delta.eventsSingleMarketTotal;
       this.step2Breakdown.eventsMultiMarketTotal += pendingStep2Delta.eventsMultiMarketTotal;
+      this.step2Breakdown.strikeShortHorizonRejectedTotal +=
+        pendingStep2Delta.strikeShortHorizonRejectedTotal;
+      for (const [pattern, count] of Object.entries(pendingStep2Delta.strikeShortHorizonByPattern)) {
+        this.step2Breakdown.strikeShortHorizonByPattern[pattern] =
+          (this.step2Breakdown.strikeShortHorizonByPattern[pattern] ?? 0) + count;
+      }
+      for (const [bucket, count] of Object.entries(
+        pendingStep2Delta.strikeShortHorizonByHorizonBucket,
+      )) {
+        this.step2Breakdown.strikeShortHorizonByHorizonBucket[bucket] =
+          (this.step2Breakdown.strikeShortHorizonByHorizonBucket[bucket] ?? 0) + count;
+      }
 
       this.lastSuccessfulScanMs = Date.now();
       const durationMs = this.lastSuccessfulScanMs - startMs;

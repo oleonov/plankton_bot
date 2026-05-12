@@ -1131,8 +1131,26 @@ export interface HealthResult {
   readonly reasons: readonly HealthFailReason[];
 }
 
+/**
+ * Granular reject reason emitted alongside `finalStatus: "EXCLUDE"`. Stable
+ * strings — scanner observability counters and dashboards key off them, so
+ * additions require coordinated metric updates.
+ */
+export type PreEntryRejectReason =
+  | "rule_exclude"
+  | "strike_short_horizon"
+  | "mid_price_too_high"
+  | "liquidity_too_low"
+  | "zero_coverage_category";
+
 export interface PreEntryEvaluation {
   readonly finalStatus: "INCLUDE" | "EXCLUDE";
   readonly selectionStatus: SelectionStatus;
   readonly winningRuleId: string | null;
+  /** Fine-grained reason for EXCLUDE; absent on INCLUDE. */
+  readonly rejectReason?: PreEntryRejectReason;
+  /** Strike-pattern kind when the gate matched a strike slug; surfaced for metrics + audit. */
+  readonly strikePattern?: "between" | "greater_or_less_than" | "above";
+  /** Remaining horizon in hours at decision time; surfaced for metrics + audit. */
+  readonly horizonHours?: number;
 }

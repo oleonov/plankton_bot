@@ -1473,4 +1473,162 @@ describe("MarketDataModule", () => {
       expect(mod.getMetricsSnapshot().wsCapUtilizationPct).toBe(33);
     });
   });
+
+  describe("pause gating", () => {
+    it("skips poll cycles while the runtime is paused", async () => {
+      const isPaused = vi.fn(() => true);
+      const localGateway = createMockGateway();
+      const localRepo = createMockMarketRepo();
+      const localBus = new InProcessEventBus();
+      const tracked = makeTrackedMarket();
+      (localRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([tracked]);
+      const localMod = new MarketDataModule({
+        gateway: localGateway,
+        marketRepo: localRepo,
+        bus: localBus,
+        log: silentLog,
+        pollIntervalMs: 60_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-paused",
+        runtimeControl: { isPaused },
+      });
+
+      const received: NormalizedMarket[][] = [];
+      localBus.subscribe("MarketSnapshotReceived", async (p) => {
+        received.push([...p.markets]);
+      });
+
+      await localMod.poll();
+
+      expect(isPaused).toHaveBeenCalled();
+      expect(localGateway.getMarketPricing).not.toHaveBeenCalled();
+      expect(localRepo.findTrackedForPricing).not.toHaveBeenCalled();
+      expect(received).toEqual([]);
+    });
+
+    it("suppresses WS-driven snapshot publication while the runtime is paused", async () => {
+      let paused = false;
+      const isPaused = vi.fn(() => paused);
+      let localStream: FakePricingStream | null = null;
+      const localGateway = createMockGateway();
+      const localRepo = createMockMarketRepo();
+      const localBus = new InProcessEventBus();
+      const tracked = makeTrackedMarket({
+        tokenId: createTokenId("tok-ws"),
+        conditionId: "cond-ws",
+      });
+      (localRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([tracked]);
+      (localGateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+        new Map([
+          [
+            "tok-ws",
+            {
+              bestBid: 0.4,
+              bestAsk: 0.6,
+              lastTradePrice: 0.5,
+              minOrderSize: 1,
+            },
+          ],
+        ]),
+      );
+      localGateway.createMarketPricingStream = (handlers) => {
+        localStream = new FakePricingStream(handlers);
+        return localStream;
+      };
+
+      const localMod = new MarketDataModule({
+        gateway: localGateway,
+        marketRepo: localRepo,
+        bus: localBus,
+        log: silentLog,
+        pollIntervalMs: 60_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-ws-paused",
+        runtimeControl: { isPaused },
+      });
+
+      const received: NormalizedMarket[][] = [];
+      localBus.subscribe("MarketSnapshotReceived", async (payload) => {
+        received.push([...payload.markets]);
+      });
+
+      await localMod.start();
+      await vi.waitFor(() => {
+        expect(received.length).toBeGreaterThan(0);
+      });
+      received.length = 0;
+
+      paused = true;
+      await localStream!.emitUpdates([
+        {
+          tokenId: "tok-ws",
+          pricing: {
+            bestBid: 0.41,
+            bestAsk: 0.59,
+            acceptingOrders: true,
+            enableOrderBook: true,
+            lastTradePrice: 0.5,
+            bookSource: "clob",
+          },
+        },
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 125));
+
+      expect(received).toEqual([]);
+      expect(localMod.getMetricsSnapshot().wsUpdatesApplied).toBe(1);
+
+      paused = false;
+      await localStream!.emitUpdates([
+        {
+          tokenId: "tok-ws",
+          pricing: {
+            bestBid: 0.42,
+            bestAsk: 0.58,
+            acceptingOrders: true,
+            enableOrderBook: true,
+            lastTradePrice: 0.5,
+            bookSource: "clob",
+          },
+        },
+      ]);
+      await new Promise((resolve) => setTimeout(resolve, 125));
+
+      expect(received).toHaveLength(1);
+      expect(received[0]![0]!.bestBid).toBe(0.42);
+
+      await localMod.stop();
+    });
+
+    it("resumes polling once the pause flag clears", async () => {
+      let paused = true;
+      const isPaused = vi.fn(() => paused);
+      const localGateway = createMockGateway();
+      const localRepo = createMockMarketRepo();
+      const localBus = new InProcessEventBus();
+      const tracked = makeTrackedMarket();
+      (localRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([tracked]);
+      const pricingMap = new Map([
+        ["tok-yes", { bestBid: 0.45, bestAsk: 0.55, lastTradePrice: 0.5 }],
+      ]);
+      (localGateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(pricingMap);
+
+      const localMod = new MarketDataModule({
+        gateway: localGateway,
+        marketRepo: localRepo,
+        bus: localBus,
+        log: silentLog,
+        pollIntervalMs: 60_000,
+        staleThresholdMs: 120_000,
+        botRunId: "run-test-resume",
+        runtimeControl: { isPaused },
+      });
+
+      await localMod.poll();
+      expect(localGateway.getMarketPricing).not.toHaveBeenCalled();
+
+      paused = false;
+      await localMod.poll();
+      expect(localGateway.getMarketPricing).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -6,6 +6,7 @@ import type {
   MarketRepository,
   InventoryLotRepository,
   MergeLedgerRepository,
+  RuntimeControl,
   RuntimeModule,
 } from "@krabs/domain";
 import type Database from "better-sqlite3";
@@ -25,6 +26,12 @@ export interface InventoryManagerDeps {
   db: Database.Database;
   log: Logger;
   sweepIntervalMs?: number | null | undefined;
+  /**
+   * Optional pause gate. When the runtime is paused, periodic and
+   * debounced merge sweeps are skipped so the bot does not submit on-chain
+   * merges or write merge ledger rows.
+   */
+  runtimeControl?: RuntimeControl;
 }
 
 export class InventoryManagerModule implements RuntimeModule {
@@ -86,15 +93,29 @@ export class InventoryManagerModule implements RuntimeModule {
 
   public async sweep(): Promise<void> {
     if (this.isSweeping) return;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug("inventory manager sweep skipped while runtime is paused");
+      return;
+    }
     this.isSweeping = true;
 
     try {
       const candidates = this.candidateService.findMergeCandidates();
       if (candidates.length === 0) return;
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug(
+          { count: candidates.length },
+          "inventory manager merge aborted after pause flip pre-on-chain",
+        );
+        return;
+      }
 
       this.deps.log.info({ count: candidates.length }, "found mergeable inventory candidates");
 
-      // 1. Execute on-chain merges
+      // 1. Execute on-chain merges. Once this resolves the merge is irrevocable,
+      // so the ledger MUST follow to stay consistent with on-chain state —
+      // skipping the ledger application after pause would leak inventory and
+      // cause permanent drift. We pause-check before the on-chain write.
       await this.deps.gateway.mergePositions(
         candidates.map((c) => ({
           conditionId: c.conditionId,

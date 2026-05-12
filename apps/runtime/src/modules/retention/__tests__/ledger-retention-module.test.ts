@@ -225,4 +225,25 @@ describe("LedgerRetentionModule", () => {
 
     await mod.stop();
   });
+
+  it("skips deletion sweeps while the runtime is paused", async () => {
+    insertMetric("market_data_last_update", "2026-04-24T00:00:00.000Z");
+    insertMetric("market_data_last_update", "2026-04-24T01:00:00.000Z");
+    const before = count("runtime_metrics");
+
+    const isPaused = vi.fn(() => true);
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false },
+      runtimeControl: { isPaused },
+    });
+
+    const result = await mod.runOnce(NOW);
+
+    expect(isPaused).toHaveBeenCalledTimes(1);
+    expect(result.deleted).toEqual({});
+    expect(result.checkpointed).toBe(false);
+    expect(count("runtime_metrics")).toBe(before);
+  });
 });

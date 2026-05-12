@@ -64,6 +64,7 @@ function makeHarness(
     uniqueViolationOnFirstAttemptingInsert?: boolean;
     marketRows?: any[];
     openOrders?: any[];
+    runtimeControl?: { isPaused: () => boolean };
   } = {},
 ) {
   const bus = new InProcessEventBus();
@@ -194,6 +195,7 @@ function makeHarness(
     log,
     runtimeMetrics: runtimeMetrics as any,
     now: () => Date.now(),
+    ...(opts.runtimeControl ? { runtimeControl: opts.runtimeControl } : {}),
   });
   return {
     bus,
@@ -1154,5 +1156,220 @@ describe("RedeemSweepModule", () => {
       JSON.stringify({ condition_id: "unknown:amb-1" }),
       new Date(NOW).toISOString(),
     );
+  });
+
+  it("skips sweeps while the runtime is paused", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const isPaused = vi.fn(() => true);
+    const h = makeHarness({
+      policy: { intervalMs: 60 * 60_000 },
+      runtimeControl: { isPaused },
+    });
+
+    await h.module.start();
+    await h.bus.drain();
+
+    expect(isPaused).toHaveBeenCalled();
+    expect(h.reader.read).not.toHaveBeenCalled();
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+    expect(h.redeemLogRows).toEqual([]);
+  });
+
+  it("skips wallet-event-driven sweeps while paused", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let paused = false;
+    const isPaused = vi.fn(() => paused);
+    const h = makeHarness({
+      policy: { intervalMs: 60 * 60_000 },
+      runtimeControl: { isPaused },
+    });
+    await runStableStartup(h);
+
+    h.reader.read.mockClear();
+    h.gateway.redeemPositions.mockClear();
+    paused = true;
+
+    await h.bus.publish("PolymarketWalletUpdated", {
+      positions: [
+        {
+          tokenId: createTokenId(TOKEN),
+          conditionId: CONDITION,
+          size: 10,
+          redeemable: true,
+          slug: "market",
+          outcome: "Yes",
+        },
+      ],
+      timestamp: Date.now(),
+    });
+    await h.bus.drain();
+
+    expect(h.reader.read).not.toHaveBeenCalled();
+    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
+  });
+
+  it("defers scheduled retries while the runtime is paused", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let paused = false;
+    const isPaused = vi.fn(() => paused);
+    const redeemImpl = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("relayer down"))
+      .mockResolvedValueOnce({
+        status: "confirmed",
+        conditionIds: [CONDITION],
+        txHash: "0xretry",
+        gasUsed: 111,
+      });
+    const h = makeHarness({
+      policy: { intervalMs: 60 * 60_000 },
+      redeemImpl,
+      runtimeControl: { isPaused },
+    });
+    await runStableStartup(h);
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    paused = true;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+
+    paused = false;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await h.bus.drain();
+
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(2);
+    expect(h.redeemLogRows.at(-1)).toMatchObject({ status: "success" });
+  });
+
+  it("defers scheduled verification while the runtime is paused", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let paused = false;
+    const isPaused = vi.fn(() => paused);
+    const h = makeHarness({
+      redeemImpl: vi.fn().mockResolvedValue({
+        status: "pending",
+        conditionIds: [CONDITION],
+        txHash: "0xpending",
+        gasUsed: null,
+      }),
+      policy: { intervalMs: 60 * 60_000, postRedeemVerifyDelayMs: 1_000 },
+      runtimeControl: { isPaused },
+    });
+    await runStableStartup(h);
+    expect(h.redeemLogRows.map((row) => row.status)).toEqual(["pending"]);
+
+    paused = true;
+    h.reader.read.mockClear();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+    expect(h.positionRepo.save).not.toHaveBeenCalled();
+    expect(h.reader.read).not.toHaveBeenCalled();
+
+    // Re-arm under pause uses PAUSE_DEFER_RECHECK_MS floor (30s) to prevent
+    // tight-loop re-arming when the original delay is small.
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+    expect(h.reader.read).not.toHaveBeenCalled();
+
+    paused = false;
+    h.reader.read.mockResolvedValueOnce([]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await h.bus.drain();
+
+    expect(h.reader.read).toHaveBeenCalledTimes(1);
+    expect(h.positionRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ size: 0, status: "closed" }),
+    );
+  });
+
+  it("does not hot-loop when startup-hydrated verification delay is 0 while paused", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let paused = true;
+    const isPaused = vi.fn(() => paused);
+    const submittedRow = {
+      id: 7,
+      conditionId: CONDITION,
+      tokenIds: [TOKEN],
+      // attemptTs older than postRedeemVerifyDelayMs → computed delay = 0
+      attemptTs: NOW - 60_000,
+      status: "submitted",
+      details: { excludedTokenIds: [] },
+    };
+    const h = makeHarness({
+      policy: { intervalMs: 60 * 60_000, postRedeemVerifyDelayMs: 1_000 },
+      redeemLogRows: [submittedRow],
+      runtimeControl: { isPaused },
+    });
+
+    await h.module.start();
+    await h.bus.drain();
+
+    h.reader.read.mockClear();
+
+    // Drain the immediate timer queue (delay=0). Pause gate should defer with
+    // PAUSE_DEFER_RECHECK_MS floor instead of re-arming at 0ms (hot loop).
+    await vi.advanceTimersByTimeAsync(0);
+    await h.bus.drain();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await h.bus.drain();
+
+    // While paused, verifier must not run on-chain reads.
+    expect(h.reader.read).not.toHaveBeenCalled();
+
+    // Resume: next re-arm fires after the pause-defer recheck delay.
+    paused = false;
+    h.reader.read.mockResolvedValueOnce([]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await h.bus.drain();
+
+    expect(h.reader.read).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers orphan attempt marking while paused and runs it after resume", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    let paused = true;
+    const isPaused = vi.fn(() => paused);
+    const orphanRow = {
+      id: 99,
+      conditionId: "cond-orphan",
+      tokenIds: [TOKEN],
+      attemptTs: NOW - 4 * 60 * 60_000,
+      status: "attempting",
+      details: null,
+    };
+    const h = makeHarness({
+      policy: { intervalMs: 60 * 60_000 },
+      redeemLogRows: [orphanRow],
+      runtimeControl: { isPaused },
+    });
+
+    await h.module.start();
+    await h.bus.drain();
+
+    // While paused: the orphan row stays `attempting` because the sweep is
+    // skipped before `markOrphanedActiveAttempts` runs. We assert state, not
+    // mock invocations — those are an implementation detail of the deps.
+    expect(orphanRow.status).toBe("attempting");
+
+    paused = false;
+    await (h.module as unknown as { runSweep(reason: string): Promise<void> }).runSweep(
+      "after-resume",
+    );
+    await h.bus.drain();
+
+    expect(orphanRow.status).toBe("failed_orphaned");
   });
 });

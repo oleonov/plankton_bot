@@ -1426,6 +1426,30 @@ describe("MarketScannerModule", () => {
       expect(snap.marketsFinalExclude).toBe(1);
     });
 
+    it("counts R64 short-horizon strike rejections by pattern and horizon bucket", async () => {
+      const { mod, discoveryGateway } = buildModule({ selectionRuleEngine: EMPTY_ENGINE });
+      const shortEnd = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString(); // 3h
+      (discoveryGateway.discoverMarkets as ReturnType<typeof vi.fn>).mockResolvedValue([
+        makeClobMarket({
+          slug: "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+          eventSlug: "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+          tokens: [{ tokenId: "tok-strike-yes", outcome: "Yes" }],
+          eventMarketCount: 1,
+          endDate: shortEnd,
+        }),
+      ]);
+
+      await mod.scan();
+
+      const snap = mod.getStep2BreakdownSnapshot();
+      expect(snap.strikeShortHorizonRejectedTotal).toBe(1);
+      expect(snap.strikeShortHorizonByPattern).toEqual({ between: 1 });
+      expect(snap.strikeShortHorizonByHorizonBucket).toEqual({ "1_to_6h": 1 });
+      // Short-horizon rejection still counts as `fallback_exclude` for the
+      // overall funnel — the new metric is additive, not a replacement.
+      expect(snap.marketsFinalExclude).toBe(1);
+    });
+
     it("counts per-event single-market totals from gateway eventStats", async () => {
       // Two single-market events on one page — singleMarket=2, multiMarket=0.
       const discoveryGateway = createMockDiscoveryGateway();
@@ -1558,6 +1582,9 @@ describe("MarketScannerModule", () => {
         scannedEventsTotal: 0,
         eventsSingleMarketTotal: 0,
         eventsMultiMarketTotal: 0,
+        strikeShortHorizonRejectedTotal: 0,
+        strikeShortHorizonByPattern: {},
+        strikeShortHorizonByHorizonBucket: {},
       });
     });
 

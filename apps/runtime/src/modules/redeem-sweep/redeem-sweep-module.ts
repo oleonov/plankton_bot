@@ -6,6 +6,7 @@ import type {
   OrderRepository,
   PositionRepository,
   RedeemSweepPolicy,
+  RuntimeControl,
   RuntimeEventMap,
   RuntimeModule,
   RedeemPositionsResult,
@@ -21,6 +22,7 @@ const REDEEM_BATCH_PAUSE_MS = 5 * 60_000;
 const RPC_RATE_LIMIT_HARD_PAUSE_MS = 5 * 60_000;
 const STATE_FAILED_COOLDOWN_MS = 30 * 60_000;
 const STABILITY_SNAPSHOTS_REQUIRED = 2;
+const PAUSE_DEFER_RECHECK_MS = 30_000;
 
 interface RedeemSweepDeps {
   bus: EventBus;
@@ -35,6 +37,13 @@ interface RedeemSweepDeps {
   log: Logger;
   runtimeMetrics?: RuntimeMetricWriter | undefined;
   now?: () => number;
+  /**
+   * Optional pause gate. When the runtime is paused, periodic and
+   * wallet-event-triggered sweeps are skipped, and the in-flight retry /
+   * verification timers re-arm themselves until the runtime resumes so on-chain
+   * redeem calls and settlement_attempts writes stay frozen.
+   */
+  runtimeControl?: RuntimeControl;
 }
 
 interface RedeemablePosition {
@@ -75,6 +84,7 @@ export class RedeemSweepModule implements RuntimeModule {
   private isSweepRunning = false;
   private pendingSweepReason: string | null = null;
   private started = false;
+  private pendingOrphanMarking = false;
 
   constructor(private readonly deps: RedeemSweepDeps) {}
 
@@ -91,6 +101,28 @@ export class RedeemSweepModule implements RuntimeModule {
     this.startupLoadComplete = true;
     this.timer = setInterval(() => void this.runSweep("periodic"), policy.intervalMs);
     await this.runSweep("startup");
+  }
+
+  private async runDeferredOrphanMarkingIfNeeded(): Promise<void> {
+    if (!this.pendingOrphanMarking) return;
+    if (this.deps.runtimeControl?.isPaused()) return;
+    this.pendingOrphanMarking = false;
+    const policy = this.deps.policy();
+    const now = this.now();
+    const orphaned = this.deps.redeemLogRepo.markOrphanedActiveAttempts(
+      now - policy.inFlightTtlMs * 2,
+      "runtime_restart_during_attempt",
+    );
+    if (orphaned.length > 0) {
+      this.deps.log.error(
+        { orphaned },
+        "redeem sweep recovered orphaned attempts after runtime restart (post-resume)",
+      );
+      this.recordAlert("redeem_sweep_orphaned_attempts", {
+        count: orphaned.length,
+        conditionIds: orphaned.map((row) => row.conditionId),
+      });
+    }
   }
 
   async stop(): Promise<void> {
@@ -180,7 +212,12 @@ export class RedeemSweepModule implements RuntimeModule {
   private async doSweep(source: string): Promise<void> {
     if (!this.started || !this.deps.policy().enabled) return;
     if (this.isSweepHardPaused()) return;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug({ source }, "redeem sweep skipped while runtime is paused");
+      return;
+    }
     await this.waitForStartupLoad();
+    await this.runDeferredOrphanMarkingIfNeeded();
     const positions = await this.deps.positionReader.read();
     if (!positions) return;
     await this.processPositions(
@@ -202,19 +239,30 @@ export class RedeemSweepModule implements RuntimeModule {
 
   private async loadInFlightFromDb(policy: RedeemSweepPolicy): Promise<void> {
     const now = this.now();
-    const orphaned = this.deps.redeemLogRepo.markOrphanedActiveAttempts(
-      now - policy.inFlightTtlMs * 2,
-      "runtime_restart_during_attempt",
-    );
-    if (orphaned.length > 0) {
-      this.deps.log.error(
-        { orphaned },
-        "redeem sweep recovered orphaned attempts after runtime restart",
+    // Orphan-marking writes (markOrphanedActiveAttempts + recordAlert) are
+    // deferred when the runtime starts paused so the bot stays quiescent until
+    // an operator resumes it. The in-memory in-flight state is still hydrated
+    // so isConditionInRedeemFlight reports the truth from redeem_log.
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.pendingOrphanMarking = true;
+      this.deps.log.debug(
+        "redeem sweep orphan marking deferred while runtime is paused",
       );
-      this.recordAlert("redeem_sweep_orphaned_attempts", {
-        count: orphaned.length,
-        conditionIds: orphaned.map((row) => row.conditionId),
-      });
+    } else {
+      const orphaned = this.deps.redeemLogRepo.markOrphanedActiveAttempts(
+        now - policy.inFlightTtlMs * 2,
+        "runtime_restart_during_attempt",
+      );
+      if (orphaned.length > 0) {
+        this.deps.log.error(
+          { orphaned },
+          "redeem sweep recovered orphaned attempts after runtime restart",
+        );
+        this.recordAlert("redeem_sweep_orphaned_attempts", {
+          count: orphaned.length,
+          conditionIds: orphaned.map((row) => row.conditionId),
+        });
+      }
     }
 
     for (const row of this.deps.redeemLogRepo.findRecentActiveAttempts(
@@ -420,6 +468,13 @@ export class RedeemSweepModule implements RuntimeModule {
     retryCount: number,
     source: string,
   ): Promise<void> {
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug(
+        { conditionId: group.conditionId, retryCount, source },
+        "redeem attempt skipped while runtime is paused",
+      );
+      return;
+    }
     await this.attemptRedeemBatch([group], retryCount, source);
   }
 
@@ -429,6 +484,13 @@ export class RedeemSweepModule implements RuntimeModule {
     source: string,
   ): Promise<void> {
     if (groups.length === 0 || this.isSweepHardPaused()) return;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug(
+        { source, retryCount, count: groups.length },
+        "redeem batch skipped while runtime is paused",
+      );
+      return;
+    }
     const policy = this.deps.policy();
     const now = this.now();
     const reservedGroups: RedeemGroup[] = [];
@@ -457,6 +519,11 @@ export class RedeemSweepModule implements RuntimeModule {
         reservedGroups.map((group) => group.conditionId),
         { redeemTokenIdsByCondition: this.buildRedeemTokenMap(reservedGroups) },
       );
+      // Pause may flip during the gateway await, but at this point the on-chain
+      // redeem call has already been submitted (or attempted) — we MUST commit
+      // the outcome to the redeem_log so the in-flight reservation reflects
+      // reality. Skipping these writes under pause would orphan a real on-chain
+      // submission and break the post-restart deduplication guard.
       const redeemLogStatus = redeemLogStatusForGatewayResult(redeemResult);
       const keepInFlight =
         redeemResult.status === "submitted" ||
@@ -666,28 +733,61 @@ export class RedeemSweepModule implements RuntimeModule {
     return true;
   }
 
-  private scheduleRetry(task: RetryTask): void {
+  private scheduleRetry(task: RetryTask, overrideDelayMs?: number): void {
     const policy = this.deps.policy();
     const delay =
+      overrideDelayMs ??
       policy.retryBackoffMs[Math.min(task.retryCount - 1, policy.retryBackoffMs.length - 1)]!;
     const timer = setTimeout(() => {
       this.retryTimers.delete(timer);
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug(
+          { conditionId: task.group.conditionId, retryCount: task.retryCount },
+          "redeem retry deferred while runtime is paused",
+        );
+        this.scheduleRetry(task, Math.max(delay, PAUSE_DEFER_RECHECK_MS));
+        return;
+      }
       void this.attemptRedeem(task.group, task.retryCount, "retry");
     }, delay);
     this.retryTimers.add(timer);
   }
 
   private scheduleVerification(group: RedeemGroup, delayMs?: number): void {
+    const delay = delayMs ?? this.deps.policy().postRedeemVerifyDelayMs;
     const timer = setTimeout(() => {
       this.verifyTimers.delete(timer);
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.deps.log.debug(
+          { conditionId: group.conditionId },
+          "redeem verification deferred while runtime is paused",
+        );
+        this.scheduleVerification(group, Math.max(delay, PAUSE_DEFER_RECHECK_MS));
+        return;
+      }
       void this.verifyRedeem(group);
-    }, delayMs ?? this.deps.policy().postRedeemVerifyDelayMs);
+    }, delay);
     this.verifyTimers.add(timer);
   }
 
   private async verifyRedeem(group: RedeemGroup): Promise<void> {
     if (!this.started || !this.deps.policy().enabled) return;
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug(
+        { conditionId: group.conditionId },
+        "redeem verification skipped while runtime is paused",
+      );
+      return;
+    }
     const positions = await this.deps.positionReader.read();
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.deps.log.debug(
+        { conditionId: group.conditionId },
+        "redeem verification deferred after pause flip mid-await",
+      );
+      this.scheduleVerification(group);
+      return;
+    }
     if (positions === null) {
       const verificationAttempt = this.nextVerificationAttempt(group);
       if (verificationAttempt === null) return;

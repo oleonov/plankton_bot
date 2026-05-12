@@ -665,6 +665,7 @@ async function main(): Promise<void> {
     discoveryPollIntervalMs: config.marketDataDiscoveryPollIntervalMs,
     discoveryBatchSize: config.marketDataDiscoveryBatchSize,
     fallbackBatchSize: config.marketDataFallbackBatchSize,
+    runtimeControl,
   });
 
   const normalizationModule = new NormalizationModule({
@@ -1130,6 +1131,7 @@ async function main(): Promise<void> {
     log,
     checkIntervalMs: 5 * 60_000, // 5 minutes
     graceMinutes: 30,
+    runtimeControl,
     // In live-lite mode, provide the exchange gateway so the resolution module
     // verifies on-chain token balance is 0 before settling in the ledger.
     // In simulation/paper modes, no gateway is needed (no on-chain state).
@@ -1150,6 +1152,7 @@ async function main(): Promise<void> {
           policy: () => currentExecutionPolicy().redeemSweep,
           log,
           runtimeMetrics,
+          runtimeControl,
         })
       : null;
 
@@ -1169,6 +1172,7 @@ async function main(): Promise<void> {
         db: ledgerConn.db,
         log,
         sweepIntervalMs: config.inventorySweepIntervalMs,
+        runtimeControl,
       })
     : null;
 
@@ -1203,6 +1207,7 @@ async function main(): Promise<void> {
   const ledgerRetentionModule = new LedgerRetentionModule({
     db: ledgerConn.db,
     log,
+    runtimeControl,
   });
 
   const modules: Array<[string, import("@krabs/domain").RuntimeModule]> = [

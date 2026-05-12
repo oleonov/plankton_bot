@@ -1,5 +1,5 @@
 import type Database from "better-sqlite3";
-import type { RuntimeModule } from "@krabs/domain";
+import type { RuntimeControl, RuntimeModule } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 
 export const LATEST_ONLY_RUNTIME_METRICS = [
@@ -53,6 +53,7 @@ export interface LedgerRetentionModuleDeps {
   db: Database.Database;
   log: Logger;
   config?: LedgerRetentionConfig;
+  runtimeControl?: RuntimeControl;
 }
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -124,6 +125,10 @@ export class LedgerRetentionModule implements RuntimeModule {
 
   async runOnce(nowMs = Date.now()): Promise<LedgerRetentionResult> {
     if (this.running) {
+      return { ranAt: new Date(nowMs).toISOString(), deleted: {}, checkpointed: false };
+    }
+    if (this.deps.runtimeControl?.isPaused()) {
+      this.log.debug("ledger retention skipped while runtime is paused");
       return { ranAt: new Date(nowMs).toISOString(), deleted: {}, checkpointed: false };
     }
     this.running = true;

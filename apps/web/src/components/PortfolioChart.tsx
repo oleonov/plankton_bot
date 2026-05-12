@@ -237,6 +237,19 @@ function AreaChart({ points, onHover, hoverLabel }: AreaChartProps) {
           );
         })}
 
+        {/* Zero (break-even) reference line */}
+        {minY <= 0 && 0 <= maxY && (
+          <line
+            x1={PAD.left}
+            y1={y(0)}
+            x2={WIDTH - PAD.right}
+            y2={y(0)}
+            stroke="var(--red)"
+            strokeWidth={1}
+            strokeDasharray="4 4"
+          />
+        )}
+
         {/* Area fill */}
         <path d={areaPath} fill="url(#equityGradient)" />
 

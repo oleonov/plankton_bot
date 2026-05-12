@@ -4,6 +4,9 @@ import {
   evaluatePreEntry,
   evaluateContinuation,
   isAlive,
+  isStrikeShortHorizonMarket,
+  matchesStrikePattern,
+  STRIKE_MIN_HORIZON_HOURS,
   type BuyPlacementInput,
 } from "./market-selection.js";
 import { SelectionRuleEngine } from "./selection-rule-engine.js";
@@ -65,6 +68,7 @@ describe("evaluatePreEntry", () => {
       finalStatus: "EXCLUDE",
       selectionStatus: "fallback_exclude",
       winningRuleId: null,
+      rejectReason: "liquidity_too_low",
     });
   });
 
@@ -79,6 +83,7 @@ describe("evaluatePreEntry", () => {
       finalStatus: "EXCLUDE",
       selectionStatus: "fallback_exclude",
       winningRuleId: null,
+      rejectReason: "mid_price_too_high",
     });
   });
 
@@ -89,6 +94,7 @@ describe("evaluatePreEntry", () => {
       finalStatus: "EXCLUDE",
       selectionStatus: "matched_exclude",
       winningRuleId: "r1",
+      rejectReason: "rule_exclude",
     });
   });
 
@@ -98,6 +104,7 @@ describe("evaluatePreEntry", () => {
       finalStatus: "EXCLUDE",
       selectionStatus: "fallback_exclude",
       winningRuleId: null,
+      rejectReason: "mid_price_too_high",
     });
   });
 
@@ -107,6 +114,7 @@ describe("evaluatePreEntry", () => {
       finalStatus: "EXCLUDE",
       selectionStatus: "fallback_exclude",
       winningRuleId: null,
+      rejectReason: "liquidity_too_low",
     });
   });
 
@@ -121,6 +129,7 @@ describe("evaluatePreEntry", () => {
       finalStatus: "EXCLUDE",
       selectionStatus: "fallback_exclude",
       winningRuleId: null,
+      rejectReason: "zero_coverage_category",
     });
   });
 
@@ -174,14 +183,15 @@ describe("evaluatePreEntry", () => {
     expect(r.finalStatus).toBe("EXCLUDE");
   });
 
-  describe("daily-strike crypto category (R52)", () => {
-    const STRIKE_BLOCKED = [
-      "will-the-price-of-ethereum-be-between-2500-2600-on-may-7",
-      "will-the-price-of-ethereum-be-between-2400-2500-on-may-13",
+  describe("daily-strike crypto category (R52 + R64)", () => {
+    // After R64 only `greater-than` / `less-than` / `above` strike slugs are
+    // blocked outright by the ZERO_COVERAGE blacklist. `will-be-between`
+    // slugs are admitted by the blacklist and gated separately by the
+    // horizon filter below.
+    const STRIKE_REGEX_BLOCKED = [
       "will-the-price-of-bitcoin-be-greater-than-84000-on-may-13",
       "ethereum-above-2295-on-april-27-2026-7am-et",
       "bitcoin-above-79200-on-april-25-2026-2pm-et",
-      "will-the-price-of-xrp-be-between-1pt80-1pt90-on-february-28",
       "will-the-price-of-xrp-be-greater-than-1pt90-on-february-28",
       "bitcoin-above-66k-on-march-1",
       "bitcoin-above-74k-on-march-4",
@@ -197,7 +207,7 @@ describe("evaluatePreEntry", () => {
       "will-zelenskyy-be-removed-from-power",
     ] as const;
 
-    it.each(STRIKE_BLOCKED)("excludes %s", (slug) => {
+    it.each(STRIKE_REGEX_BLOCKED)("excludes %s via ZERO_COVERAGE", (slug) => {
       const r = evaluatePreEntry(EMPTY_ENGINE, {
         ...VALID_PRE_ENTRY,
         eventSlug: slug,
@@ -206,6 +216,7 @@ describe("evaluatePreEntry", () => {
       });
       expect(r.finalStatus).toBe("EXCLUDE");
       expect(r.selectionStatus).toBe("fallback_exclude");
+      expect(r.rejectReason).toBe("zero_coverage_category");
     });
 
     it.each(STRIKE_ALLOWED)("does not exclude %s", (slug) => {
@@ -219,6 +230,193 @@ describe("evaluatePreEntry", () => {
     });
   });
 
+  // R64 selective horizon filter. The blanket `will-be-between` blacklist was
+  // rolled back in favor of blocking only short-horizon strike markets where
+  // Plankton's multi-buy ladder cannot reach step >=11 profitably.
+  describe("strike short-horizon filter (R64)", () => {
+    const NOW_MS = Date.parse("2026-05-12T12:00:00.000Z");
+    const futureEndDate = (hoursFromNow: number) =>
+      new Date(NOW_MS + hoursFromNow * 3_600_000).toISOString();
+
+    const SHORT_HORIZON_STRIKE_SLUGS = [
+      "will-the-price-of-ethereum-be-between-2500-2600-on-may-7",
+      "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13",
+      "will-the-price-of-xrp-be-between-1pt80-1pt90-on-february-28",
+    ] as const;
+
+    it.each(SHORT_HORIZON_STRIKE_SLUGS)(
+      "blocks %s when horizon < 24h",
+      (slug) => {
+        const r = evaluatePreEntry(
+          EMPTY_ENGINE,
+          {
+            ...VALID_PRE_ENTRY,
+            eventSlug: slug,
+            slug,
+            question: slug.replace(/-/g, " "),
+            endDate: futureEndDate(6),
+          },
+          undefined,
+          NOW_MS,
+        );
+        expect(r.finalStatus).toBe("EXCLUDE");
+        expect(r.selectionStatus).toBe("fallback_exclude");
+        expect(r.rejectReason).toBe("strike_short_horizon");
+        expect(r.strikePattern).toBe("between");
+        expect(r.horizonHours).toBeCloseTo(6);
+      },
+    );
+
+    it.each(SHORT_HORIZON_STRIKE_SLUGS)(
+      "admits %s when horizon >= 24h",
+      (slug) => {
+        const r = evaluatePreEntry(
+          EMPTY_ENGINE,
+          {
+            ...VALID_PRE_ENTRY,
+            eventSlug: slug,
+            slug,
+            question: slug.replace(/-/g, " "),
+            endDate: futureEndDate(48),
+          },
+          undefined,
+          NOW_MS,
+        );
+        expect(r.finalStatus).toBe("INCLUDE");
+      },
+    );
+
+    it("blocks at horizon = 23h59m (just below threshold)", () => {
+      const slug = "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13";
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: slug,
+          slug,
+          question: slug.replace(/-/g, " "),
+          endDate: new Date(NOW_MS + (24 * 3600 - 60) * 1000).toISOString(),
+        },
+        undefined,
+        NOW_MS,
+      );
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.rejectReason).toBe("strike_short_horizon");
+    });
+
+    it("admits at horizon = 24h00m exactly (threshold)", () => {
+      const slug = "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13";
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: slug,
+          slug,
+          question: slug.replace(/-/g, " "),
+          endDate: new Date(NOW_MS + 24 * 3_600_000).toISOString(),
+        },
+        undefined,
+        NOW_MS,
+      );
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("admits at horizon = 24h01m (just above threshold)", () => {
+      const slug = "will-the-price-of-bitcoin-be-between-84000-85000-on-may-13";
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: slug,
+          slug,
+          question: slug.replace(/-/g, " "),
+          endDate: new Date(NOW_MS + (24 * 3600 + 60) * 1000).toISOString(),
+        },
+        undefined,
+        NOW_MS,
+      );
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("does not block non-strike markets regardless of horizon", () => {
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: "fed-rate-cut-in-2026",
+          slug: "fed-rate-cut-yes",
+          question: "Will the Fed cut rates in 2026?",
+          endDate: futureEndDate(1),
+        },
+        undefined,
+        NOW_MS,
+      );
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("fails open when endDate is null on a strike slug (horizon unknown)", () => {
+      const slug = "will-the-price-of-ethereum-be-between-2500-2600-on-may-7";
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: slug,
+          slug,
+          question: slug.replace(/-/g, " "),
+          endDate: null,
+        },
+        undefined,
+        NOW_MS,
+      );
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("fails open when endDate is unparseable", () => {
+      const slug = "will-the-price-of-ethereum-be-between-2500-2600-on-may-7";
+      const r = evaluatePreEntry(
+        EMPTY_ENGINE,
+        {
+          ...VALID_PRE_ENTRY,
+          eventSlug: slug,
+          slug,
+          question: slug.replace(/-/g, " "),
+          endDate: "not-an-iso-date",
+        },
+        undefined,
+        NOW_MS,
+      );
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+
+    it("exposes 24h threshold as STRIKE_MIN_HORIZON_HOURS for callers", () => {
+      expect(STRIKE_MIN_HORIZON_HOURS).toBe(24);
+    });
+
+    it("matchesStrikePattern detects all three slug shapes", () => {
+      expect(
+        matchesStrikePattern("will-the-price-of-bitcoin-be-between-84000-85000-on-may-13"),
+      ).toBe("between");
+      expect(
+        matchesStrikePattern("will-the-price-of-bitcoin-be-greater-than-84000-on-may-13"),
+      ).toBe("greater_or_less_than");
+      expect(
+        matchesStrikePattern("will-the-price-of-bitcoin-be-less-than-84000-on-may-13"),
+      ).toBe("greater_or_less_than");
+      expect(matchesStrikePattern("ethereum-above-2295-on-april-27-2026-7am-et")).toBe("above");
+      expect(matchesStrikePattern("bitcoin-above-66k-on-march-1")).toBe("above");
+      expect(matchesStrikePattern("fed-rate-cut-yes")).toBeNull();
+      expect(matchesStrikePattern("trump-out-as-president-before-2027")).toBeNull();
+    });
+
+    it("isStrikeShortHorizonMarket short-circuits on non-strike slugs", () => {
+      const r = isStrikeShortHorizonMarket(
+        { slug: "fed-rate-cut-yes", endDate: futureEndDate(1) },
+        NOW_MS,
+      );
+      expect(r).toEqual({ blocked: false, pattern: null, horizonHours: null });
+    });
+  });
+
   it("does not use single-market fallback when hard filters fail", () => {
     const r = evaluatePreEntry(EMPTY_ENGINE, {
       ...VALID_PRE_ENTRY,
@@ -227,6 +425,7 @@ describe("evaluatePreEntry", () => {
     });
     expect(r.finalStatus).toBe("EXCLUDE");
     expect(r.selectionStatus).toBe("fallback_exclude");
+    expect(r.rejectReason).toBe("liquidity_too_low");
   });
 });
 
