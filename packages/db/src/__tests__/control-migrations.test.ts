@@ -802,9 +802,7 @@ describe("control-db migration infrastructure", () => {
           WHERE profile_id = ?`,
       )
       .run("simulation");
-    conn.db
-      .prepare("DELETE FROM schema_migrations WHERE name = ?")
-      .run("054_ladder_cap_raise.sql");
+    conn.db.prepare("DELETE FROM schema_migrations WHERE name = ?").run("054_ladder_cap_raise.sql");
     const before = conn.db
       .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
       .get() as { version: number };
@@ -847,9 +845,7 @@ describe("control-db migration infrastructure", () => {
             )`,
       )
       .run();
-    conn.db
-      .prepare("DELETE FROM schema_migrations WHERE name = ?")
-      .run("054_ladder_cap_raise.sql");
+    conn.db.prepare("DELETE FROM schema_migrations WHERE name = ?").run("054_ladder_cap_raise.sql");
     const before = conn.db
       .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
       .get() as { version: number };
