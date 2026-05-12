@@ -29,8 +29,16 @@ import type {
   PositionRepository,
   ExchangeFill,
   ExecutionPolicy,
+  LegStateRepository,
+  RepriceChainPolicyConfig,
+  RiskEventRepository,
 } from "@krabs/domain";
-import { createCommandId, createOrderId, ExchangeErrorCode } from "@krabs/domain";
+import {
+  createCommandId,
+  createOrderId,
+  ExchangeErrorCode,
+  shouldBlockRepriceChain,
+} from "@krabs/domain";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
@@ -131,6 +139,15 @@ export interface ExecutionModuleDeps {
    * observed. Wired from the reconciliation module; absent in unit tests.
    */
   reconciliationTrigger?: (() => void) | undefined;
+  /**
+   * CHANGE C — leg-state repo + reprice-chain policy. Gates the
+   * `sell_replace_reprice` cancel branch so a runaway SELL-replace loop
+   * cannot exceed the R65 p90 = 13 events / 24h ceiling. Skipped when
+   * either field is omitted (legacy unit tests).
+   */
+  legStateRepo?: LegStateRepository | undefined;
+  repriceChainPolicy?: (() => RepriceChainPolicyConfig) | undefined;
+  riskEventRepo?: RiskEventRepository | undefined;
 }
 
 export class ExecutionModule implements RuntimeModule {
@@ -1206,6 +1223,37 @@ export class ExecutionModule implements RuntimeModule {
     ) {
       await this.rejectOrder(cmd, "sell-replace-lock-active", ExchangeErrorCode.LivePolicyBlocked);
       return true;
+    }
+
+    // CHANGE C — R65 p90 = 13 reprice events / 24h cap. Enforce on both the
+    // initial sell_replace_reprice publish and on sell_replace_retry, so a
+    // long-running lock cannot extend the chain past the ceiling.
+    if (this.deps.legStateRepo && this.deps.repriceChainPolicy) {
+      const policy = this.deps.repriceChainPolicy();
+      const legState = this.deps.legStateRepo.get(cmd.tokenId);
+      if (shouldBlockRepriceChain(legState, now, policy)) {
+        try {
+          this.deps.riskEventRepo?.insert({
+            eventType: "signal_suppressed",
+            payload: {
+              tokenId: String(cmd.tokenId),
+              orderId: String(existingSell.orderId),
+              reasonCode: "sell-replace-chain-cap",
+              source: existingLock ? "sell_replace_retry" : "sell_replace_reprice",
+              count24h: legState?.repriceChainCount24h ?? 0,
+              maxChainCount: policy.maxChainCount,
+              signalTimestamp: new Date(now).toISOString(),
+            },
+          });
+        } catch (err) {
+          this.log.warn(
+            { err, tokenId: String(cmd.tokenId) },
+            "failed to persist sell-replace-chain-cap risk event",
+          );
+        }
+        await this.rejectOrder(cmd, "sell-replace-chain-cap", ExchangeErrorCode.LivePolicyBlocked);
+        return true;
+      }
     }
 
     this.sellReplaceLocks.set(key, { orderId: existingSell.orderId, command: cmd, createdAt: now });

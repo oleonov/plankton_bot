@@ -36,6 +36,7 @@ import { selectionRulesRoutes } from "./routes/selection-rules.js";
 import { marketsRoutes } from "./routes/markets.js";
 import { scannerRoutes } from "./routes/scanner.js";
 import { redeemLogRoutes } from "./routes/redeem-log.js";
+import { abandonedDustRoutes } from "./routes/abandoned-dust.js";
 
 export interface ServerDeps {
   config: AppConfig;
@@ -151,6 +152,12 @@ export async function buildServer(deps: ServerDeps) {
   });
   await app.register(tradingActivityRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
   await app.register(redeemLogRoutes, { prefix: "/api/v1", db: deps.ledgerDb });
+  await app.register(abandonedDustRoutes, {
+    prefix: "/api/v1",
+    db: deps.ledgerDb,
+    controlDb: deps.controlDb,
+    ledgerPool: deps.ledgerPool,
+  });
 
   // Mixed routes — pass both
   await app.register(metricsRoutes, {

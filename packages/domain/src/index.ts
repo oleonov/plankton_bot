@@ -31,6 +31,26 @@ export {
   serializeExecutionPolicy,
 } from "./execution-policy.js";
 export type { ParseResult } from "./execution-policy.js";
+export {
+  DEFAULT_PROFIT_TARGET_POLICY,
+  D8_HOLD_SECONDS_MIN,
+  D8_THRESHOLD_BUCKETS,
+  evaluateD8ProfitRatio,
+  getProfitThresholdByPrice,
+} from "./d8-profit-target.js";
+export type { D8EvalContext, D8EvalResult } from "./d8-profit-target.js";
+export {
+  DEFAULT_DUST_ABANDONMENT_POLICY,
+  isAbandoned,
+  shouldMarkAbandoned,
+  shouldRecoverFromPriceMove,
+} from "./dust-abandonment.js";
+export {
+  DEFAULT_REPRICE_CHAIN_POLICY,
+  shouldBlockRepriceChain,
+  nextRepriceChainState,
+} from "./reprice-chain.js";
+export type { NextRepriceChainState } from "./reprice-chain.js";
 export { evaluateMinMarketAge } from "./min-market-age.js";
 export type {
   MinMarketAgeArgs,

@@ -818,6 +818,9 @@ async function main(): Promise<void> {
     sellExchangeReservedEnabled: config.executionSellExchangeReservedEnabled,
     runtimeMetrics,
     reconciliationTrigger: () => reconcileTrigger.fn?.(),
+    legStateRepo: repos.legState,
+    repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
+    riskEventRepo: repos.riskEvent,
   });
 
   // 7g. Risk + Inventory module
@@ -1066,6 +1069,9 @@ async function main(): Promise<void> {
     },
     runtimeMetrics,
     exchangeStateStore,
+    legStateRepo: repos.legState,
+    repriceChainPolicy: () => currentExecutionPolicy().repriceChain,
+    riskEventRepo: repos.riskEvent,
     ...(runtimeMode === "live-lite" && traderAddress
       ? (() => {
           const reader = new PolymarketDataPositionReader(traderAddress);

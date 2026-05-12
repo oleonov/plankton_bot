@@ -10,6 +10,9 @@ import type { LedgerPool } from "../ledger-pool.js";
 import {
   DEFAULT_EXECUTION_POLICY,
   DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
+  DEFAULT_PROFIT_TARGET_POLICY,
+  DEFAULT_DUST_ABANDONMENT_POLICY,
+  DEFAULT_REPRICE_CHAIN_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
   type ExecutionPolicy,
@@ -504,6 +507,19 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       telemetry: {
         ...current.telemetry,
         ...((patch.telemetry as Partial<ExecutionPolicy["telemetry"]> | undefined) ?? {}),
+      },
+      profitTarget: {
+        ...(current.profitTarget ?? DEFAULT_PROFIT_TARGET_POLICY),
+        ...((patch.profitTarget as Partial<ExecutionPolicy["profitTarget"]> | undefined) ?? {}),
+      },
+      dustAbandonment: {
+        ...(current.dustAbandonment ?? DEFAULT_DUST_ABANDONMENT_POLICY),
+        ...((patch.dustAbandonment as Partial<ExecutionPolicy["dustAbandonment"]> | undefined) ??
+          {}),
+      },
+      repriceChain: {
+        ...(current.repriceChain ?? DEFAULT_REPRICE_CHAIN_POLICY),
+        ...((patch.repriceChain as Partial<ExecutionPolicy["repriceChain"]> | undefined) ?? {}),
       },
     };
 

@@ -19,6 +19,14 @@ function createTestDb(): Database.Database {
     join(import.meta.dirname, "../migrations/050_leg_states_cumulative_sizes.sql"),
     "utf-8",
   );
+  const dustTracking = readFileSync(
+    join(import.meta.dirname, "../migrations/056_leg_states_dust_tracking.sql"),
+    "utf-8",
+  );
+  const repriceChain = readFileSync(
+    join(import.meta.dirname, "../migrations/057_reprice_chain_counter.sql"),
+    "utf-8",
+  );
   db.exec(base);
   // Migration 050's backfill subqueries reference fills; in the production
   // migration order this table exists from migration 001. Stub the minimum
@@ -33,6 +41,8 @@ function createTestDb(): Database.Database {
     filled_at TEXT NOT NULL
   )`);
   db.exec(applySafeAddColumnStatements(db, cumulativeSizes));
+  db.exec(applySafeAddColumnStatements(db, dustTracking));
+  db.exec(applySafeAddColumnStatements(db, repriceChain));
   return db;
 }
 
@@ -217,5 +227,60 @@ describe("SqliteLegStateRepository", () => {
       cumulativeSellSize: 100,
     });
     expect(repo.getAll().length).toBe(2);
+  });
+
+  it("atomically increments sell residual reject count without marking below threshold", () => {
+    repo.upsert({
+      tokenId: TOKEN,
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: "2026-01-01T00:00:00Z",
+      lastTradeAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      consecutiveSellResidualRejects: 8,
+    });
+
+    const result = repo.incrementSellResidualReject(TOKEN, "2026-01-01T00:01:00Z", {
+      threshold: 10,
+      price: 0.12,
+    });
+
+    expect(result).toEqual({ count: 9, markedAbandoned: false });
+    const state = repo.get(TOKEN);
+    expect(state?.consecutiveSellResidualRejects).toBe(9);
+    expect(state?.abandonedAtPrice).toBeNull();
+    expect(state?.abandonedAtTs).toBeNull();
+  });
+
+  it("atomically increments and marks abandoned once at threshold", () => {
+    repo.upsert({
+      tokenId: TOKEN,
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: "2026-01-01T00:00:00Z",
+      lastTradeAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      consecutiveSellResidualRejects: 9,
+    });
+
+    const first = repo.incrementSellResidualReject(TOKEN, "2026-01-01T00:01:00Z", {
+      threshold: 10,
+      price: 0.12,
+    });
+    const second = repo.incrementSellResidualReject(TOKEN, "2026-01-01T00:02:00Z", {
+      threshold: 10,
+      price: 0.2,
+    });
+
+    expect(first).toEqual({ count: 10, markedAbandoned: true });
+    expect(second).toEqual({ count: 11, markedAbandoned: false });
+    const state = repo.get(TOKEN);
+    expect(state?.consecutiveSellResidualRejects).toBe(11);
+    expect(state?.abandonedAtPrice).toBe(0.12);
+    expect(state?.abandonedAtTs).toBe("2026-01-01T00:01:00Z");
   });
 });

@@ -777,6 +777,36 @@ export interface RaceProtectionPolicy {
   };
 }
 
+/**
+ * CHANGE A — D8 profit-ratio SELL trigger (R66 spec 14.Y).
+ * See packages/domain/src/d8-profit-target.ts for evaluation semantics.
+ */
+export interface ProfitTargetPolicyConfig {
+  enabled: boolean;
+  /** Minimum holdSeconds gate. Default R66 median first-SELL holdTime = 5183s. */
+  holdSecondsMin: number;
+}
+
+/**
+ * CHANGE B — dust abandonment with auto-recovery (R67 spec 11.5).
+ * See packages/domain/src/dust-abandonment.ts for evaluation semantics.
+ */
+export interface DustAbandonmentPolicyConfig {
+  enabled: boolean;
+  maxConsecutiveRejects: number;
+  priceRecoveryRatio: number;
+}
+
+/**
+ * CHANGE C — per-token rolling 24h reprice chain cap (R65 p90 = 13).
+ * See packages/domain/src/reprice-chain.ts for evaluation semantics.
+ */
+export interface RepriceChainPolicyConfig {
+  enabled: boolean;
+  windowMs: number;
+  maxChainCount: number;
+}
+
 export interface ExecutionPolicy {
   version: number;
   entryPriceCeiling: number;
@@ -808,6 +838,12 @@ export interface ExecutionPolicy {
   redeemSweep: RedeemSweepPolicy;
   raceProtection: RaceProtectionPolicy;
   telemetry: ExecutionPolicyTelemetry;
+  /** CHANGE A — D8 profit-ratio SELL trigger config. */
+  profitTarget: ProfitTargetPolicyConfig;
+  /** CHANGE B — dust abandonment config. */
+  dustAbandonment: DustAbandonmentPolicyConfig;
+  /** CHANGE C — per-token 24h reprice chain cap config. */
+  repriceChain: RepriceChainPolicyConfig;
 }
 
 export interface ProfileSummary {
@@ -1043,6 +1079,44 @@ export interface LegState {
    * Numerator of the sold/bought ratio. Optional — see cumulativeBuySize.
    */
   cumulativeSellSize?: number;
+  /**
+   * CHANGE B — dust abandonment counter. Increments by 1 every time
+   * algo-decision suppresses a SELL via shouldSuppressSellResidualBelowMinSize
+   * (position size < market.minOrderSize). Resets to 0 on any BUY fill.
+   * When it crosses dustAbandonmentPolicy.maxConsecutiveRejects the leg is
+   * marked abandoned (abandoned_at_*). Optional for legacy fixtures.
+   */
+  consecutiveSellResidualRejects?: number;
+  /**
+   * CHANGE B — price snapshot at the moment we declared the token abandoned.
+   * Used by shouldRecoverFromPriceMove to detect ≥priceRecoveryRatio upward
+   * recovery (R67 spec 11.5). Null while the leg is healthy.
+   */
+  abandonedAtPrice?: number | null;
+  /**
+   * CHANGE B — ISO timestamp matching abandonedAtPrice. Presence of this
+   * field (non-null) is the canonical "is abandoned" signal.
+   */
+  abandonedAtTs?: string | null;
+  /**
+   * CHANGE C — JSON-serialized array of ISO timestamps for reprice events
+   * (downpriced_reprice or sell_replace_reprice) inside the active rolling
+   * 24h window. Entries older than policy.windowMs are filtered out on
+   * evaluation, so the cap is enforced against a true rolling count.
+   * Null until the first reprice event arrives.
+   */
+  repriceChainEvents24hJson?: string | null;
+  /**
+   * @deprecated Legacy fixed-window counter — kept on the type for backwards
+   * compatibility with migration 057's first version. New code uses
+   * repriceChainEvents24hJson instead.
+   */
+  repriceChainCount24h?: number;
+  /**
+   * @deprecated Legacy fixed-window start timestamp — see
+   * repriceChainEvents24hJson docs.
+   */
+  repriceChainWindowStartTs?: string | null;
 }
 
 export type LegPhase = "S0" | "S1" | "S2" | "S3" | "S4";

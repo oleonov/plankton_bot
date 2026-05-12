@@ -566,7 +566,9 @@ export class MarketScannerModule implements RuntimeModule {
       this.step2Breakdown.eventsMultiMarketTotal += pendingStep2Delta.eventsMultiMarketTotal;
       this.step2Breakdown.strikeShortHorizonRejectedTotal +=
         pendingStep2Delta.strikeShortHorizonRejectedTotal;
-      for (const [pattern, count] of Object.entries(pendingStep2Delta.strikeShortHorizonByPattern)) {
+      for (const [pattern, count] of Object.entries(
+        pendingStep2Delta.strikeShortHorizonByPattern,
+      )) {
         this.step2Breakdown.strikeShortHorizonByPattern[pattern] =
           (this.step2Breakdown.strikeShortHorizonByPattern[pattern] ?? 0) + count;
       }

@@ -21,6 +21,10 @@ function createMockLegStateRepo(): LegStateRepository {
       store.delete(tokenId);
     }),
     getAll: vi.fn(() => [...store.values()]),
+    incrementSellResidualReject: vi.fn(() => ({ count: 0, markedAbandoned: false })),
+    markAbandoned: vi.fn(),
+    resetAbandoned: vi.fn(),
+    applyRepriceChainEvent: vi.fn(),
   };
 }
 
@@ -75,6 +79,9 @@ describe("updateLegStateForFill", () => {
       cumulativeBuySize: 0,
       cumulativeBuyNotional: 0,
       cumulativeSellSize: 0,
+      consecutiveSellResidualRejects: 0,
+      abandonedAtPrice: null,
+      abandonedAtTs: null,
     });
   });
 
@@ -99,6 +106,46 @@ describe("updateLegStateForFill", () => {
     expect(state?.cumulativeBuySize).toBe(150);
     expect(state?.cumulativeBuyNotional).toBeCloseTo(0.4 * 100 + 0.3 * 50, 10);
     expect(state?.cumulativeSellSize).toBe(0);
+  });
+
+  it("integration: BUY fill resets abandoned state", () => {
+    const repo = createMockLegStateRepo();
+    const log = createMockLogger();
+    repo.upsert({
+      tokenId: TOKEN,
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: "2026-01-01T00:00:00Z",
+      lastTradeAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+      cumulativeBuySize: 10,
+      cumulativeBuyNotional: 1,
+      cumulativeSellSize: 0,
+      consecutiveSellResidualRejects: 10,
+      abandonedAtPrice: 0.1,
+      abandonedAtTs: "2026-01-01T00:10:00Z",
+    });
+
+    updateLegStateForFill(
+      repo,
+      {
+        tokenId: TOKEN,
+        side: "buy",
+        price: 0.16,
+        filledAt: "2026-01-01T01:00:00Z",
+        size: 5,
+        sizeUsdc: 0.8,
+      },
+      log,
+      "2026-01-01T01:00:01Z",
+    );
+
+    const state = repo.get(TOKEN);
+    expect(state?.consecutiveSellResidualRejects).toBe(0);
+    expect(state?.abandonedAtPrice).toBeNull();
+    expect(state?.abandonedAtTs).toBeNull();
   });
 
   it("accumulates cumulative sell size on SELL fills, leaves buy aggregates intact", () => {

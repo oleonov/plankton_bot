@@ -27,8 +27,11 @@ import type {
   PositionDriftRepository,
   RepriceOnOutbidPolicy,
   ExitRepriceOnDownpricePolicy,
+  LegStateRepository,
+  RepriceChainPolicyConfig,
+  RiskEventRepository,
 } from "@krabs/domain";
-import { createTokenId, createConditionId } from "@krabs/domain";
+import { createTokenId, createConditionId, nextRepriceChainState } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { reconcileOrders } from "./order-reconciler.js";
 import { reconcileFills } from "./fill-reconciler.js";
@@ -188,6 +191,15 @@ export interface ReconciliationModuleDeps {
   walletPositionReader?: {
     read: () => Promise<readonly PolymarketDataPosition[] | null>;
   };
+  /**
+   * CHANGE C — leg-state repo + reprice-chain policy. When all three are
+   * provided, the stale-order-cleaner gates `downpriced_reprice` cancels and
+   * the OrderCancelled subscription records the chain event on success.
+   * Skipped when any field is omitted (legacy tests).
+   */
+  legStateRepo?: LegStateRepository;
+  repriceChainPolicy?: () => RepriceChainPolicyConfig;
+  riskEventRepo?: RiskEventRepository;
 }
 
 export class ReconciliationModule implements RuntimeModule {
@@ -212,12 +224,47 @@ export class ReconciliationModule implements RuntimeModule {
   async start(): Promise<void> {
     this.unsubs.push(
       this.deps.bus.subscribe("OrderCancelled", async (event) => {
-        if (event.reason !== "downpriced_reprice") return;
-        recordSellDownpriceCancelSucceeded(
-          this.sellDownpriceRepriceMap,
-          event.tokenId,
-          event.orderId,
-        );
+        if (event.reason === "downpriced_reprice") {
+          recordSellDownpriceCancelSucceeded(
+            this.sellDownpriceRepriceMap,
+            event.tokenId,
+            event.orderId,
+          );
+        }
+        // CHANGE C — record the reprice event on any source that contributes
+        // to the rolling 24h chain: `downpriced_reprice` (stale-order-cleaner),
+        // `sell_replace_reprice` (execution-module first attempt), and
+        // `sell_replace_retry` (execution-module retry after lock). Without
+        // counting retries, a long-running lock could land additional cancels
+        // outside the cap accounting.
+        if (
+          (event.reason === "downpriced_reprice" ||
+            event.reason === "sell_replace_reprice" ||
+            event.reason === "sell_replace_retry") &&
+          this.deps.legStateRepo &&
+          this.deps.repriceChainPolicy
+        ) {
+          try {
+            const policy = this.deps.repriceChainPolicy();
+            if (policy.enabled) {
+              const legState = this.deps.legStateRepo.get(event.tokenId);
+              const nowMs = Date.now();
+              const next = nextRepriceChainState(legState, nowMs, policy);
+              this.deps.legStateRepo.applyRepriceChainEvent(
+                event.tokenId,
+                next.eventsJson,
+                next.count,
+                next.windowStartIso,
+                new Date(nowMs).toISOString(),
+              );
+            }
+          } catch (err) {
+            this.log.warn(
+              { err, tokenId: String(event.tokenId), reason: event.reason },
+              "failed to apply reprice chain event",
+            );
+          }
+        }
       }),
     );
 
@@ -314,6 +361,14 @@ export class ReconciliationModule implements RuntimeModule {
       allDetails.push(...fillResult.details);
 
       // 3. Stale entry order cleanup
+      const repriceChainGate =
+        this.deps.legStateRepo && this.deps.repriceChainPolicy
+          ? {
+              policy: this.deps.repriceChainPolicy,
+              legStateRepo: this.deps.legStateRepo,
+              riskEventRepo: this.deps.riskEventRepo,
+            }
+          : undefined;
       const staleResult = await cleanStaleEntryOrders(
         {
           orderRepo: this.deps.orderRepo,
@@ -330,6 +385,7 @@ export class ReconciliationModule implements RuntimeModule {
           ...(this.deps.exitRepriceOnDownprice
             ? { exitRepriceOnDownprice: this.deps.exitRepriceOnDownprice }
             : {}),
+          ...(repriceChainGate ? { repriceChainGate } : {}),
         },
         this.staleBackoffMap,
         this.sellDownpriceRepriceMap,

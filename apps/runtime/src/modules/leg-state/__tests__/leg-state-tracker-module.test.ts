@@ -47,6 +47,10 @@ function createMockLegStateRepo(): LegStateRepository {
       store.delete(tokenId);
     }),
     getAll: vi.fn(() => [...store.values()]),
+    incrementSellResidualReject: vi.fn(() => ({ count: 0, markedAbandoned: false })),
+    markAbandoned: vi.fn(),
+    resetAbandoned: vi.fn(),
+    applyRepriceChainEvent: vi.fn(),
   };
 }
 

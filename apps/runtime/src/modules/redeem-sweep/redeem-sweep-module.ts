@@ -245,9 +245,7 @@ export class RedeemSweepModule implements RuntimeModule {
     // so isConditionInRedeemFlight reports the truth from redeem_log.
     if (this.deps.runtimeControl?.isPaused()) {
       this.pendingOrphanMarking = true;
-      this.deps.log.debug(
-        "redeem sweep orphan marking deferred while runtime is paused",
-      );
+      this.deps.log.debug("redeem sweep orphan marking deferred while runtime is paused");
     } else {
       const orphaned = this.deps.redeemLogRepo.markOrphanedActiveAttempts(
         now - policy.inFlightTtlMs * 2,

@@ -134,6 +134,10 @@ function createMockLegStateRepo(states: LegState[] = []): LegStateRepository {
     upsert: vi.fn(),
     delete: vi.fn(),
     getAll: vi.fn(() => [...map.values()]),
+    incrementSellResidualReject: vi.fn(() => ({ count: 0, markedAbandoned: false })),
+    markAbandoned: vi.fn(),
+    resetAbandoned: vi.fn(),
+    applyRepriceChainEvent: vi.fn(),
   };
 }
 

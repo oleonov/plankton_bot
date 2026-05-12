@@ -170,6 +170,25 @@ function createMockLegStateRepo(states: LegState[] = []): LegStateRepository {
     upsert: vi.fn(),
     delete: vi.fn(),
     getAll: vi.fn(() => [...map.values()]),
+    incrementSellResidualReject: vi.fn((tokenId, nowIso, abandon) => {
+      const key = String(tokenId);
+      const state = map.get(key);
+      if (!state) return { count: 0, markedAbandoned: false };
+      const count = (state.consecutiveSellResidualRejects ?? 0) + 1;
+      const markedAbandoned =
+        abandon != null && count >= abandon.threshold && state.abandonedAtTs == null;
+      map.set(key, {
+        ...state,
+        consecutiveSellResidualRejects: count,
+        abandonedAtPrice: markedAbandoned ? abandon.price : state.abandonedAtPrice,
+        abandonedAtTs: markedAbandoned ? nowIso : state.abandonedAtTs,
+        updatedAt: nowIso,
+      });
+      return { count, markedAbandoned };
+    }),
+    markAbandoned: vi.fn(),
+    resetAbandoned: vi.fn(),
+    applyRepriceChainEvent: vi.fn(),
   };
 }
 
@@ -935,6 +954,167 @@ describe("AlgoDecisionModule", () => {
         decisionRuleId: "D7-SELL-S1",
       },
     });
+
+    await mod.stop();
+  });
+
+  it("integration: 10th reject triggers DB write", async () => {
+    const tokenId = "token-dust-abandon";
+    const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: nowIso,
+      lastTradeAt: nowIso,
+      updatedAt: nowIso,
+      consecutiveSellResidualRejects: 9,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const positionRepo = {
+      findByTokenId: vi.fn().mockReturnValue({ size: 2, avgEntryPrice: 0.2 }),
+    };
+
+    const mod = buildModule({
+      riskEventRepo,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [
+        {
+          ...makeMarket(tokenId, null, 0.15, "cond-dust-abandon"),
+          tradable: false,
+          minOrderSize: 5,
+        },
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledWith(
+      createTokenId(tokenId),
+      expect.any(String),
+      { threshold: DEFAULT_EXECUTION_POLICY.dustAbandonment.maxConsecutiveRejects, price: 0.15 },
+    );
+    expect(legStateRepo.get(createTokenId(tokenId))?.consecutiveSellResidualRejects).toBe(10);
+    expect(legStateRepo.get(createTokenId(tokenId))?.abandonedAtPrice).toBe(0.15);
+    expect(
+      vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.some(([event]) => event.payload.reasonCode === "dust-abandoned"),
+    ).toBe(true);
+
+    await mod.stop();
+  });
+
+  it("integration: abandoned token short-circuit", async () => {
+    const tokenId = "token-dust-short-circuit";
+    const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: nowIso,
+      lastTradeAt: nowIso,
+      updatedAt: nowIso,
+      abandonedAtPrice: 0.1,
+      abandonedAtTs: nowIso,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const positionRepo = {
+      findByTokenId: vi.fn().mockReturnValue({ size: 5, avgEntryPrice: 0.1 }),
+    };
+
+    const mod = buildModule({
+      decisionSignalLogRepo,
+      riskEventRepo,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.12, "cond-dust-short-circuit")],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(0);
+    expect(decisionSignalLogRepo.insert).not.toHaveBeenCalled();
+    expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
+    expect(
+      vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.some(([event]) => event.payload.reasonCode === "dust-abandoned"),
+    ).toBe(true);
+
+    await mod.stop();
+  });
+
+  it("integration: price recovery", async () => {
+    const tokenId = "token-dust-recovery";
+    const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+    const legState: LegState = {
+      tokenId: createTokenId(tokenId),
+      buyCount: 1,
+      sellCount: 0,
+      lastAction: "BUY",
+      firstTradePrice: 0.1,
+      firstTradeAt: nowIso,
+      lastTradeAt: nowIso,
+      updatedAt: nowIso,
+      abandonedAtPrice: 0.1,
+      abandonedAtTs: nowIso,
+    };
+    legStateRepo = createMockLegStateRepo([legState]);
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const positionRepo = {
+      findByTokenId: vi.fn().mockReturnValue({ size: 5, avgEntryPrice: 0.1 }),
+    };
+
+    const mod = buildModule({
+      riskEventRepo,
+      positionRepo: positionRepo as unknown as import("@krabs/domain").PositionRepository,
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [
+        {
+          ...makeMarket(tokenId, null, 0.16, "cond-dust-recovery"),
+          tradable: false,
+          minOrderSize: 5,
+        },
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(legStateRepo.resetAbandoned).toHaveBeenCalledWith(
+      createTokenId(tokenId),
+      expect.any(String),
+    );
+    expect(
+      vi
+        .mocked(riskEventRepo.insert)
+        .mock.calls.some(([event]) => event.payload.reasonCode === "dust-recovered"),
+    ).toBe(true);
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal.side).toBe("sell");
 
     await mod.stop();
   });

@@ -39,6 +39,15 @@ const STATIC_CODES: Record<string, string> = {
   market_inactive: "market_inactive",
   market_not_tradable: "market_not_tradable",
   market_not_alive: "market_not_alive",
+  // R66 D8 profit-ratio SELL telemetry (signal_emitted side — kept identity).
+  d8_profit_ratio_fired: "d8_profit_ratio_fired",
+  // R67 dust abandonment lifecycle codes (suppression / recovery / manual reset).
+  "dust-abandoned": "dust_abandoned",
+  "dust-recovered": "dust_recovered",
+  "dust-recovered:manual": "dust_recovered_manual",
+  // R65 reprice-chain cap codes (per-token 24h sliding window).
+  "reprice-chain-cap": "reprice_chain_cap",
+  "sell-replace-chain-cap": "sell_replace_chain_cap",
 };
 
 const PREFIX_CODES: [string, string][] = [

@@ -136,10 +136,7 @@ export class ResolutionModule implements RuntimeModule {
   private tryRecoverUnresolved(source: string): void {
     if (!this.recoveryPending) return;
     if (this.deps.runtimeControl?.isPaused()) {
-      this.deps.log.debug(
-        { source },
-        "resolution recovery deferred while runtime is paused",
-      );
+      this.deps.log.debug({ source }, "resolution recovery deferred while runtime is paused");
       return;
     }
     this.recoveryPending = false;
@@ -690,10 +687,7 @@ export class ResolutionModule implements RuntimeModule {
     } finally {
       this.hintedCancelledOrderIds.clear();
       this.running = false;
-      if (
-        this.pendingHintConditionIds.size > 0 &&
-        !this.deps.runtimeControl?.isPaused()
-      ) {
+      if (this.pendingHintConditionIds.size > 0 && !this.deps.runtimeControl?.isPaused()) {
         void this.flushPendingHintConditions();
       }
     }

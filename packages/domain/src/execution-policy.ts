@@ -15,18 +15,24 @@ import type {
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
   DropTriggerPolicy,
+  DustAbandonmentPolicyConfig,
   MarketSelectionPolicy,
   OrderCapacityPolicy,
   OrderLifetimePolicy,
   MultiBuyLadderPolicy,
   OpportunisticTakerPolicy,
+  ProfitTargetPolicyConfig,
   RaceProtectionPolicy,
   RedeemSweepPolicy,
+  RepriceChainPolicyConfig,
   RepriceOnOutbidPolicy,
   ExitRepriceOnDownpricePolicy,
   SellCapacityPolicy,
 } from "./types.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
+import { DEFAULT_PROFIT_TARGET_POLICY } from "./d8-profit-target.js";
+import { DEFAULT_DUST_ABANDONMENT_POLICY } from "./dust-abandonment.js";
+import { DEFAULT_REPRICE_CHAIN_POLICY } from "./reprice-chain.js";
 
 export const DEFAULT_DEAD_SIDE_GUARD: DeadSideGuardPolicy = {
   mode: "observe",
@@ -197,6 +203,9 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   redeemSweep: DEFAULT_REDEEM_SWEEP_POLICY,
   raceProtection: DEFAULT_RACE_PROTECTION_POLICY,
   telemetry: DEFAULT_TELEMETRY,
+  profitTarget: DEFAULT_PROFIT_TARGET_POLICY,
+  dustAbandonment: DEFAULT_DUST_ABANDONMENT_POLICY,
+  repriceChain: DEFAULT_REPRICE_CHAIN_POLICY,
 };
 
 const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
@@ -331,6 +340,9 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const multiBuyLadder = parseMultiBuyLadder(obj.multiBuyLadder, issues);
   const redeemSweep = parseRedeemSweep(obj.redeemSweep, issues);
   const raceProtection = parseRaceProtection(obj.raceProtection, issues);
+  const profitTarget = parseProfitTarget(obj.profitTarget, issues);
+  const dustAbandonment = parseDustAbandonment(obj.dustAbandonment, issues);
+  const repriceChain = parseRepriceChain(obj.repriceChain, issues);
 
   return {
     policy: {
@@ -355,8 +367,98 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       redeemSweep,
       raceProtection,
       telemetry,
+      profitTarget,
+      dustAbandonment,
+      repriceChain,
     },
     issues,
+  };
+}
+
+function parseProfitTarget(raw: unknown, issues: string[]): ProfitTargetPolicyConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("profitTarget must be an object");
+    return DEFAULT_PROFIT_TARGET_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_PROFIT_TARGET_POLICY.enabled,
+      issues,
+      "profitTarget.enabled",
+    ),
+    holdSecondsMin: clampedInt(
+      obj.holdSecondsMin,
+      DEFAULT_PROFIT_TARGET_POLICY.holdSecondsMin,
+      0,
+      // Two days — any longer than this and D8 effectively never fires.
+      2 * 24 * 60 * 60,
+      issues,
+      "profitTarget.holdSecondsMin",
+    ),
+  };
+}
+
+function parseDustAbandonment(raw: unknown, issues: string[]): DustAbandonmentPolicyConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("dustAbandonment must be an object");
+    return DEFAULT_DUST_ABANDONMENT_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_DUST_ABANDONMENT_POLICY.enabled,
+      issues,
+      "dustAbandonment.enabled",
+    ),
+    maxConsecutiveRejects: clampedInt(
+      obj.maxConsecutiveRejects,
+      DEFAULT_DUST_ABANDONMENT_POLICY.maxConsecutiveRejects,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "dustAbandonment.maxConsecutiveRejects",
+    ),
+    priceRecoveryRatio: clampedNumber(
+      obj.priceRecoveryRatio,
+      DEFAULT_DUST_ABANDONMENT_POLICY.priceRecoveryRatio,
+      1.0001,
+      100,
+      issues,
+      "dustAbandonment.priceRecoveryRatio",
+    ),
+  };
+}
+
+function parseRepriceChain(raw: unknown, issues: string[]): RepriceChainPolicyConfig {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("repriceChain must be an object");
+    return DEFAULT_REPRICE_CHAIN_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_REPRICE_CHAIN_POLICY.enabled,
+      issues,
+      "repriceChain.enabled",
+    ),
+    windowMs: lifetimeMs(
+      obj.windowMs,
+      DEFAULT_REPRICE_CHAIN_POLICY.windowMs,
+      "repriceChain.windowMs",
+      issues,
+    ),
+    maxChainCount: clampedInt(
+      obj.maxChainCount,
+      DEFAULT_REPRICE_CHAIN_POLICY.maxChainCount,
+      1,
+      BOUND_ORDER_LIFETIME_COUNT_MAX,
+      issues,
+      "repriceChain.maxChainCount",
+    ),
   };
 }
 

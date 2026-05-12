@@ -550,6 +550,40 @@ export interface LegStateRepository {
   upsert(state: LegState): void;
   delete(tokenId: TokenId): void;
   getAll(): LegState[];
+  /**
+   * CHANGE B — atomically `consecutive_sell_residual_rejects += 1` for the
+   * given leg, and optionally mark it abandoned in the same DB transaction
+   * when the post-increment count crosses `abandon.threshold`.
+   */
+  incrementSellResidualReject(
+    tokenId: TokenId,
+    nowIso: string,
+    abandon?: { threshold: number; price: number },
+  ): { count: number; markedAbandoned: boolean };
+  /**
+   * CHANGE B — record abandonment by setting (abandoned_at_price,
+   * abandoned_at_ts). Idempotent — callers should gate on isAbandoned().
+   */
+  markAbandoned(tokenId: TokenId, price: number, nowIso: string): void;
+  /**
+   * CHANGE B — clear abandonment fields and reset
+   * consecutive_sell_residual_rejects=0. Used by both the price-recovery
+   * path and the manual API reset.
+   */
+  resetAbandoned(tokenId: TokenId, nowIso: string): void;
+  /**
+   * CHANGE C — persist the rolling-window state after a successful reprice
+   * publish. `eventsJson` is the JSON-encoded array of ISO timestamps that
+   * survived the cutoff; `count` and `windowStartIso` are derived and stored
+   * for telemetry / risk-event payloads.
+   */
+  applyRepriceChainEvent(
+    tokenId: TokenId,
+    eventsJson: string,
+    count: number,
+    windowStartIso: string,
+    nowIso: string,
+  ): void;
 }
 
 // ─── LegStateTransitionRepository ───────────────────────────────────────

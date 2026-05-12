@@ -45,6 +45,9 @@ import {
   evaluateMinMarketAge,
   matchRule,
   isAlive,
+  evaluateD8ProfitRatio,
+  isAbandoned,
+  shouldRecoverFromPriceMove,
 } from "@krabs/domain";
 import { readContinuationMode, readContinuationModeVersion } from "@krabs/db";
 import type { EvalContext } from "@krabs/domain";
@@ -170,6 +173,10 @@ type EmissionFacts = {
   continuationStop?: boolean | null;
   continuationTradeCount?: number | null;
   continuationTradeCountSource?: TradeCountSource | null;
+  // CHANGE A — D8 telemetry attached on the SELL signal that D8 fires.
+  d8ProfitRatio?: number | null;
+  d8Threshold?: number | null;
+  d8AvgBuyPrice?: number | null;
 };
 
 /**
@@ -435,6 +442,12 @@ const BUY_BUDGET_COOLDOWN_REASONS = new Set([
 ]);
 const D6_SUPPRESSED_REASON = "d6-suppressed";
 const DECISION_RULE_HOLD_REASON = "decision-rule-hold";
+// CHANGE B — R67 spec 11.5 dust abandonment risk-event codes (kept colocated
+// with other suppression reasons so the dedupe set below can reference them).
+const DUST_ABANDONED_REASON = "dust-abandoned";
+const DUST_RECOVERED_REASON = "dust-recovered";
+// CHANGE A — D8 profit-ratio SELL trigger (R66 spec 14.Y).
+const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
 const DEDUPED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
   "mid-price-unavailable",
@@ -458,6 +471,10 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   DECISION_RULE_HOLD_REASON,
   "no_drop_signal",
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+  // CHANGE B — abandoned-dust suppression repeats on every sweep tick for
+  // the rest of the leg's life unless price-recovery / new BUY clears it.
+  // Dedupe so decision_signal_log stays readable.
+  DUST_ABANDONED_REASON,
 ]);
 const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
@@ -1017,6 +1034,54 @@ export class AlgoDecisionModule implements RuntimeModule {
       return null;
     }
 
+    // CHANGE B — R67 spec 11.5 dust abandonment. Re-engagement for an
+    // abandoned token happens only through price recovery, a later BUY fill
+    // (handled in update-leg-state-for-fill), or manual reset.
+    if (legState && isAbandoned(legState) && this.deps.executionPolicy) {
+      const dustPolicy = this.deps.executionPolicy().dustAbandonment;
+      if (dustPolicy.enabled) {
+        if (shouldRecoverFromPriceMove(legState, price, dustPolicy)) {
+          const nowIso = new Date(now).toISOString();
+          try {
+            this.deps.legStateRepo.resetAbandoned(tokenId, nowIso);
+            this.deps.riskEventRepo?.insert({
+              eventType: "signal_suppressed",
+              payload: {
+                tokenId: String(tokenId),
+                conditionId: market.conditionId,
+                reasonCode: DUST_RECOVERED_REASON,
+                recoverySource: "price-recovery",
+                currentPrice: price,
+                abandonedAtPrice: legState.abandonedAtPrice ?? null,
+                signalTimestamp: nowIso,
+              },
+            });
+          } catch (err) {
+            this.deps.log.warn(
+              { err, tokenId: String(tokenId) },
+              "failed to persist dust-recovered transition (continuing evaluation)",
+            );
+          }
+          // Recovery clears the flag for the rest of this tick; continue
+          // evaluation normally so D2/D4/D5/D7/D8 see a healthy leg.
+        } else {
+          this.recordDecisionSuppressed({
+            tokenId,
+            conditionId: market.conditionId,
+            reasonCode: DUST_ABANDONED_REASON,
+            side: null,
+            state,
+            price,
+            buyCount,
+            timeSinceLastSeconds,
+            emissionFacts,
+            timestamp: new Date(now).toISOString(),
+          });
+          return null;
+        }
+      }
+    }
+
     // ADR-022 §D-F — F-telemetry derived facts. `prevMidPrices` is populated
     // in `handleMarketUpdate` BEFORE the cache is replaced, so at this point
     // it holds the second-latest midPrice for this token (or is empty on the
@@ -1119,6 +1184,47 @@ export class AlgoDecisionModule implements RuntimeModule {
     // Keyed directly on market.tradable, not !isEligible(...), so unrelated
     // eligibility reasons (slug mismatch, etc.) do not force SELL-only.
     const preservedOnly = legState !== null && !market.tradable;
+
+    // CHANGE A — D8_PROFIT_RATIO data-derived SELL trigger per R66 spec 14.Y.
+    // Evaluated BEFORE continuation-stop / preserved-only / evaluateDecision so
+    // a profit-take exit fires regardless of those gates. Hard-coded path (not
+    // in decisionRules) because the threshold is a function of avg_buy_price;
+    // AlgoDecisionRule.priceOperator cannot express dynamic thresholds.
+    // avg_buy_price derived on the fly from cumulative_buy_notional /
+    // cumulative_buy_size (migration 050) — no new column needed. Fires in S1/S2.
+    if (legState && this.deps.executionPolicy) {
+      const profitTargetPolicy = this.deps.executionPolicy().profitTarget;
+      const d8 = evaluateD8ProfitRatio(
+        {
+          state,
+          sellCount: legState.sellCount ?? 0,
+          currentPrice: price,
+          cumulativeBuySize: legState.cumulativeBuySize ?? 0,
+          cumulativeBuyNotional: legState.cumulativeBuyNotional ?? 0,
+          holdDurationSeconds,
+        },
+        profitTargetPolicy,
+      );
+      if (d8.fire) {
+        const d8EmissionFacts: EmissionFacts = {
+          ...emissionFacts,
+          d8ProfitRatio: d8.profitRatio,
+          d8Threshold: d8.threshold,
+          d8AvgBuyPrice: d8.avgBuyPrice,
+        };
+        return this.buildSignalOrSuppressSellResidual(
+          market,
+          { action: "SELL", ruleId: D8_PROFIT_RATIO_RULE_ID },
+          ctx,
+          buyCount,
+          now,
+          nextSeq,
+          d8EmissionFacts,
+          triggerTelemetry,
+          position,
+        );
+      }
+    }
 
     // Post-entry continuation gate — only applies when we have a leg. It blocks
     // further entry/scale-in decisions, but SELL exits use the same D2/D4/D5/D7
@@ -1251,6 +1357,42 @@ export class AlgoDecisionModule implements RuntimeModule {
     position: ReturnType<NonNullable<AlgoDecisionModuleDeps["positionRepo"]>["findByTokenId"]>,
   ): TokenEvalResult | null {
     if (this.shouldSuppressSellResidualBelowMinSize(decision, market, position)) {
+      // CHANGE B — R67 spec 11.5 dust abandonment. Each suppression here
+      // means position.size < market.minOrderSize so the executor cannot
+      // submit a valid SELL. Count it against the policy threshold; when
+      // we cross `maxConsecutiveRejects` mark the leg abandoned. The
+      // counter resets to 0 on any BUY fill (update-leg-state-for-fill).
+      const nowIso = new Date(now).toISOString();
+      if (this.deps.executionPolicy) {
+        const dustPolicy = this.deps.executionPolicy().dustAbandonment;
+        if (dustPolicy.enabled) {
+          const { count, markedAbandoned } = this.deps.legStateRepo.incrementSellResidualReject(
+            market.tokenId,
+            nowIso,
+            { threshold: dustPolicy.maxConsecutiveRejects, price: ctx.price },
+          );
+          if (markedAbandoned) {
+            try {
+              this.deps.riskEventRepo?.insert({
+                eventType: "signal_suppressed",
+                payload: {
+                  tokenId: String(market.tokenId),
+                  conditionId: market.conditionId,
+                  reasonCode: DUST_ABANDONED_REASON,
+                  consecutiveRejects: count,
+                  abandonedAtPrice: ctx.price,
+                  signalTimestamp: nowIso,
+                },
+              });
+            } catch (err) {
+              this.log.warn(
+                { err, tokenId: String(market.tokenId) },
+                "failed to persist dust-abandoned risk event",
+              );
+            }
+          }
+        }
+      }
       this.recordDecisionSuppressed({
         tokenId: market.tokenId,
         conditionId: market.conditionId,
@@ -1262,7 +1404,7 @@ export class AlgoDecisionModule implements RuntimeModule {
         buyCount,
         timeSinceLastSeconds: ctx.timeSinceLastSeconds,
         emissionFacts,
-        timestamp: new Date(now).toISOString(),
+        timestamp: nowIso,
       });
       return null;
     }

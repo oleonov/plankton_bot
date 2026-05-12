@@ -21,8 +21,16 @@ import type {
   ExitRepriceOnDownpricePolicy,
   CancelOrderReason,
   TokenId,
+  LegStateRepository,
+  RepriceChainPolicyConfig,
+  RiskEventRepository,
 } from "@krabs/domain";
-import { createCommandId, ENTRY_REASONS, EXIT_REASONS } from "@krabs/domain";
+import {
+  createCommandId,
+  ENTRY_REASONS,
+  EXIT_REASONS,
+  shouldBlockRepriceChain,
+} from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import type { ExitOrderLifetimeDecision } from "../order-lifetime/order-lifetime-ttl.js";
 
@@ -94,6 +102,17 @@ export interface StaleOrderCleanerDeps {
       "bestBid" | "bestAsk" | "bestAskSize" | "askDepthExcludingOurs" | "tickSize"
     > | null;
   };
+  /**
+   * CHANGE C — R65 p90 = 13 reprice events per token per 24h cap. Gates the
+   * `downpriced_reprice` cancel branch so a runaway sell-side reprice loop
+   * cannot exceed the historical reprice ceiling. Optional — when omitted
+   * the gate is skipped entirely (legacy / unit tests without legStateRepo).
+   */
+  repriceChainGate?: {
+    policy: () => RepriceChainPolicyConfig;
+    legStateRepo: Pick<LegStateRepository, "get">;
+    riskEventRepo?: RiskEventRepository | undefined;
+  };
 }
 
 export interface StaleCleanResult {
@@ -103,6 +122,7 @@ export interface StaleCleanResult {
   outbidRepriceCancelled: number;
   downpriceRepriceCancelled: number;
   stuckSellWarnings: number;
+  repriceChainCapBlocked: number;
 }
 
 /**
@@ -144,6 +164,7 @@ export async function cleanStaleEntryOrders(
   let outbidRepriceCancelled = 0;
   let downpriceRepriceCancelled = 0;
   let stuckSellWarnings = 0;
+  let repriceChainCapBlocked = 0;
 
   for (const order of entryBuys) {
     const ordKey = String(order.orderId);
@@ -253,6 +274,47 @@ export async function cleanStaleEntryOrders(
       now,
     );
     if (repriceDecision.shouldReprice) {
+      // CHANGE C — R65 p90 = 13 reprice events per token per 24h cap. Block
+      // before publishing the cancel so a runaway loop cannot exceed the
+      // historical ceiling. Cap applies across BOTH sources (downpriced and
+      // sell_replace) — counter is shared via leg_states columns.
+      if (deps.repriceChainGate) {
+        const legState = deps.repriceChainGate.legStateRepo.get(order.tokenId);
+        const policy = deps.repriceChainGate.policy();
+        if (shouldBlockRepriceChain(legState, now, policy)) {
+          repriceChainCapBlocked++;
+          backoffMap.set(ordKey, now);
+          try {
+            deps.repriceChainGate.riskEventRepo?.insert({
+              eventType: "signal_suppressed",
+              payload: {
+                tokenId: String(order.tokenId),
+                orderId: ordKey,
+                reasonCode: "reprice-chain-cap",
+                source: "downpriced_reprice",
+                count24h: legState?.repriceChainCount24h ?? 0,
+                maxChainCount: policy.maxChainCount,
+                signalTimestamp: new Date(now).toISOString(),
+              },
+            });
+          } catch (err) {
+            log.warn(
+              { err, orderId: ordKey, tokenId: String(order.tokenId) },
+              "failed to persist reprice-chain-cap risk event",
+            );
+          }
+          log.info(
+            {
+              orderId: ordKey,
+              tokenId: String(order.tokenId),
+              count24h: legState?.repriceChainCount24h ?? 0,
+              maxChainCount: policy.maxChainCount,
+            },
+            "downpriced reprice blocked — 24h chain cap reached",
+          );
+          continue;
+        }
+      }
       await publishCancel(bus, order, "downpriced_reprice");
       backoffMap.set(ordKey, now);
       sellDownpriceRepriceMap.set(repriceKey, repriceDecision.nextState);
@@ -304,6 +366,7 @@ export async function cleanStaleEntryOrders(
     outbidRepriceCancelled,
     downpriceRepriceCancelled,
     stuckSellWarnings,
+    repriceChainCapBlocked,
   };
 }
 

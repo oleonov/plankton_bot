@@ -121,8 +121,13 @@ export function nextLegStateForFill(
         cumulativeBuySize: fillSize,
         cumulativeBuyNotional: fillBuyNotional,
         cumulativeSellSize: 0,
+        consecutiveSellResidualRejects: 0,
+        abandonedAtPrice: null,
+        abandonedAtTs: null,
       };
     }
+    // CHANGE B — a new BUY fill resets the dust counter and clears any
+    // existing abandonment (R67 spec 11.5: 61.85% recovery is via new BUY).
     return {
       ...existing,
       buyCount: existing.buyCount + 1,
@@ -131,6 +136,9 @@ export function nextLegStateForFill(
       updatedAt: now,
       cumulativeBuySize: (existing.cumulativeBuySize ?? 0) + fillSize,
       cumulativeBuyNotional: (existing.cumulativeBuyNotional ?? 0) + fillBuyNotional,
+      consecutiveSellResidualRejects: 0,
+      abandonedAtPrice: null,
+      abandonedAtTs: null,
     };
   }
 
