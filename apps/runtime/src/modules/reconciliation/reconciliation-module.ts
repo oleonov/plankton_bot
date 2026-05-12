@@ -22,6 +22,7 @@ import type {
   OrderRepository,
   FillRepository,
   MarketRepository,
+  PositionRepository,
   ReconciliationResult,
   SettlementLedgerRepository,
   PositionDriftRepository,
@@ -42,8 +43,11 @@ import {
 } from "./stale-order-cleaner.js";
 import type { OrderLifetimeModule } from "../order-lifetime/order-lifetime-module.js";
 import {
+  formatAutoClosedMissingRemoteDetail,
+  MISSING_REMOTE_AUTO_CLOSE_STABILITY_REQUIRED,
   runWalletPositionSentinel,
   type ActivePositionSizeDrift,
+  type AutoClosedMissingRemotePosition,
   type ClosedLivePositionDrift,
   type MissingRemotePositionDrift,
   type WalletPositionSentinelDeps,
@@ -216,6 +220,15 @@ export class ReconciliationModule implements RuntimeModule {
   private readonly walletSentinelConsecutiveCounts = new Map<string, number>();
   private readonly staleBackoffMap = new Map<string, number>();
   private readonly sellDownpriceRepriceMap: SellDownpriceRepriceStateMap = new Map();
+  /**
+   * Consecutive "missing-remote AND on-chain-zero" observations per tokenId.
+   * Drives the sentinel auto-close path: after the count reaches
+   * MISSING_REMOTE_AUTO_CLOSE_STABILITY_REQUIRED, the local position is closed
+   * to match the wallet. Cleared on auto-close, on recovery (token reappears
+   * with non-zero balance), or when no confirmed drift is observed for the
+   * token in the current pass.
+   */
+  private readonly missingRemoteAutoCloseCounts = new Map<string, number>();
 
   constructor(private readonly deps: ReconciliationModuleDeps) {
     this.log = deps.log.child({ module: "reconciliation" });
@@ -431,6 +444,7 @@ export class ReconciliationModule implements RuntimeModule {
             closedLivePositions: [],
             activePositionDrifts: [],
             missingRemotePositions: [],
+            autoClosedMissingRemotePositions: [],
           };
       const walletResult = await this.confirmWalletSentinelDrifts(rawWalletResult);
       const walletSentinelSeverity = this.updateWalletSentinelConsecutiveCounts(walletResult);
@@ -449,6 +463,15 @@ export class ReconciliationModule implements RuntimeModule {
             severity: walletSentinelSeverity,
           },
           "wallet position sentinel detected drift",
+        );
+      }
+      if (walletResult.autoClosedMissingRemotePositions.length > 0) {
+        this.log.warn(
+          {
+            autoClosed: walletResult.autoClosedMissingRemotePositions,
+            stabilityRequired: MISSING_REMOTE_AUTO_CLOSE_STABILITY_REQUIRED,
+          },
+          "wallet position sentinel auto-closed missing-remote positions",
         );
       }
 
@@ -547,7 +570,12 @@ export class ReconciliationModule implements RuntimeModule {
   private async confirmWalletSentinelDrifts(
     result: WalletPositionSentinelResult,
   ): Promise<WalletPositionSentinelResult> {
-    if (result.driftCount === 0) return result;
+    if (result.driftCount === 0) {
+      // Even when nothing surfaced this pass, drop any stability counters for
+      // tokens that no longer surface as drifts — they recovered cleanly.
+      this.pruneMissingRemoteAutoCloseCounts(new Set());
+      return result;
+    }
 
     const closedLivePositions = await this.filterConfirmedClosedLiveDrifts(
       result.closedLivePositions,
@@ -555,22 +583,135 @@ export class ReconciliationModule implements RuntimeModule {
     const activePositionDrifts = await this.filterConfirmedActiveDrifts(
       result.activePositionDrifts,
     );
-    const missingRemotePositions = await this.filterConfirmedMissingRemoteDrifts(
+    const confirmedMissingRemote = await this.filterConfirmedMissingRemoteDrifts(
       result.missingRemotePositions,
     );
+    const autoCloseOutcome = this.applyMissingRemoteAutoClose(confirmedMissingRemote);
+    const missingRemotePositions = autoCloseOutcome.remainingDrifts;
+    const autoClosedMissingRemotePositions = autoCloseOutcome.autoClosed;
     return {
       ...result,
       closedLivePositions,
       activePositionDrifts,
       missingRemotePositions,
+      autoClosedMissingRemotePositions,
       driftCount:
         closedLivePositions.length + activePositionDrifts.length + missingRemotePositions.length,
       details: [
         ...closedLivePositions.map(formatConfirmedClosedLiveDriftDetail),
         ...activePositionDrifts.map(formatConfirmedActiveDriftDetail),
         ...missingRemotePositions.map(formatConfirmedMissingRemoteDriftDetail),
+        ...autoClosedMissingRemotePositions.map(formatAutoClosedMissingRemoteDetail),
       ],
     };
+  }
+
+  /**
+   * Drive the per-token stability counter and close positions that have been
+   * confirmed missing on-chain for `MISSING_REMOTE_AUTO_CLOSE_STABILITY_REQUIRED`
+   * consecutive passes. The first observation only seeds the counter — actual
+   * close happens on the second confirmation, giving the data-api one full
+   * reconciliation cycle to recover before we touch local state.
+   */
+  private applyMissingRemoteAutoClose(confirmed: readonly MissingRemotePositionDrift[]): {
+    remainingDrifts: MissingRemotePositionDrift[];
+    autoClosed: AutoClosedMissingRemotePosition[];
+  } {
+    const positionRepo = this.deps.walletPositionSentinel?.positionRepo;
+    if (!positionRepo) {
+      // Without the sentinel's position repo we cannot persist a close —
+      // fall back to legacy report-only behaviour so callers without the new
+      // wiring stay safe.
+      this.pruneMissingRemoteAutoCloseCounts(new Set());
+      return { remainingDrifts: [...confirmed], autoClosed: [] };
+    }
+
+    const remaining: MissingRemotePositionDrift[] = [];
+    const autoClosed: AutoClosedMissingRemotePosition[] = [];
+    const confirmedTokens = new Set<string>();
+
+    for (const drift of confirmed) {
+      const tokenIdStr = String(drift.tokenId);
+      confirmedTokens.add(tokenIdStr);
+      const nextCount = (this.missingRemoteAutoCloseCounts.get(tokenIdStr) ?? 0) + 1;
+      this.missingRemoteAutoCloseCounts.set(tokenIdStr, nextCount);
+      if (nextCount < MISSING_REMOTE_AUTO_CLOSE_STABILITY_REQUIRED) {
+        remaining.push(drift);
+        continue;
+      }
+      const closed = this.closeMissingRemotePosition(drift, nextCount, positionRepo);
+      if (closed) {
+        autoClosed.push(closed);
+        this.missingRemoteAutoCloseCounts.delete(tokenIdStr);
+      } else {
+        // Position vanished between sentinel and auto-close (rare race) — drop
+        // the counter and keep reporting the drift so the operator still sees
+        // it surface next pass.
+        this.missingRemoteAutoCloseCounts.delete(tokenIdStr);
+        remaining.push(drift);
+      }
+    }
+
+    this.pruneMissingRemoteAutoCloseCounts(confirmedTokens);
+    return { remainingDrifts: remaining, autoClosed };
+  }
+
+  private closeMissingRemotePosition(
+    drift: MissingRemotePositionDrift,
+    consecutiveObservations: number,
+    positionRepo: PositionRepository,
+  ): AutoClosedMissingRemotePosition | null {
+    const positions = positionRepo
+      .findAll()
+      .filter((p) => String(p.tokenId) === String(drift.tokenId));
+    const candidate = positions.find((p) => String(p.positionId) === drift.positionId) ?? null;
+    if (!candidate) return null;
+    if (candidate.status === "closed" || candidate.size <= 0) return null;
+    const status =
+      candidate.status === "open" || candidate.status === "dust" ? candidate.status : null;
+    if (status === null) return null;
+
+    const closedAtIso = new Date().toISOString();
+    const prevSize = candidate.size;
+    const prevCurrentValueUsdc =
+      candidate.currentValueUsdc === null || !Number.isFinite(candidate.currentValueUsdc)
+        ? 0
+        : candidate.currentValueUsdc;
+    positionRepo.save({
+      ...candidate,
+      size: 0,
+      currentValueUsdc: 0,
+      status: "closed",
+      closedAt: closedAtIso,
+      updatedAt: closedAtIso,
+    });
+    this.log.warn(
+      {
+        tokenId: String(drift.tokenId),
+        positionId: drift.positionId,
+        slug: drift.slug,
+        prevSize,
+        prevCurrentValueUsdc,
+        prevStatus: status,
+        consecutiveObservations,
+      },
+      "wallet sentinel auto-closed missing-remote position",
+    );
+    return {
+      tokenId: drift.tokenId,
+      positionId: drift.positionId,
+      slug: drift.slug,
+      prevSize,
+      prevCurrentValueUsdc,
+      prevStatus: status,
+      consecutiveObservations,
+    };
+  }
+
+  private pruneMissingRemoteAutoCloseCounts(activeTokenIds: ReadonlySet<string>): void {
+    for (const key of [...this.missingRemoteAutoCloseCounts.keys()]) {
+      if (!activeTokenIds.has(key)) this.missingRemoteAutoCloseCounts.delete(key);
+    }
   }
 
   private async filterConfirmedClosedLiveDrifts(

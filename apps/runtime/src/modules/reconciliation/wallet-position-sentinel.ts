@@ -20,6 +20,11 @@ const ACTIVE_SIZE_DRIFT_GRACE_MS = 2 * 60 * 1000;
 const SIZE_DRIFT_EPSILON = 1e-3;
 const MISSING_REMOTE_MICRO_DUST_MAX_SIZE = 0.01 + 1e-9;
 const MISSING_REMOTE_MICRO_DUST_MAX_VALUE_USDC = 0.01 + 1e-9;
+// Number of consecutive missing-remote observations needed before the
+// sentinel will reach out for on-chain confirmation. Two passes (≥5 min apart
+// in production) guards against transient data-api lapses without delaying
+// the heal indefinitely.
+const MISSING_REMOTE_STABILITY_REQUIRED = 2;
 
 export interface WalletPositionSentinelResult {
   driftCount: number;
@@ -35,6 +40,12 @@ export interface WalletPositionSentinelResult {
    * because the sentinel never repairs state.
    */
   missingRemotePositions: MissingRemotePositionDrift[];
+  /**
+   * Positions auto-closed by the sentinel after two consecutive missing-remote
+   * observations were corroborated by an on-chain CTF balance of zero. Empty
+   * unless both a CTF balance reader and a stability map are supplied via deps.
+   */
+  autoClosedMissingRemotePositions: AutoClosedMissingRemotePosition[];
 }
 
 export interface ClosedLivePositionDrift {
@@ -66,6 +77,16 @@ export interface MissingRemotePositionDrift {
   endDate: string | null;
 }
 
+export interface AutoClosedMissingRemotePosition {
+  tokenId: TokenId;
+  positionId: string;
+  slug: string | null;
+  prevSize: number;
+  prevCurrentValueUsdc: number;
+  prevStatus: "open" | "dust";
+  consecutiveObservations: number;
+}
+
 export interface WalletPositionSentinelDeps {
   reader: PolymarketPositionReader;
   positionRepo: PositionRepository;
@@ -85,6 +106,7 @@ export async function runWalletPositionSentinel(
     closedLivePositions: [],
     activePositionDrifts: [],
     missingRemotePositions: [],
+    autoClosedMissingRemotePositions: [],
   };
 
   let remotePositions: PolymarketDataPosition[] | null;
@@ -100,6 +122,11 @@ export async function runWalletPositionSentinel(
   const closedDrifts: ClosedLivePositionDrift[] = [];
   const activeDrifts: ActivePositionSizeDrift[] = [];
   const missingRemoteDrifts: MissingRemotePositionDrift[] = [];
+  // Reserved for the caller-side auto-close pass that runs after this sentinel
+  // returns. The sentinel itself never populates this array — it stays empty
+  // here and the caller fills it via mutation of the returned result when a
+  // confirmed missing-remote drift crosses the stability threshold.
+  const autoClosedMissingRemote: AutoClosedMissingRemotePosition[] = [];
   let markUpdateCount = 0;
 
   // Tokens for which Polymarket reports a meaningful position. Used below to
@@ -197,6 +224,7 @@ export async function runWalletPositionSentinel(
     closedLivePositions: closedDrifts,
     activePositionDrifts: activeDrifts,
     missingRemotePositions: missingRemoteDrifts,
+    autoClosedMissingRemotePositions: autoClosedMissingRemote,
   };
 }
 
@@ -354,3 +382,21 @@ function formatMissingRemoteDriftDetail(drift: MissingRemotePositionDrift): stri
     `endDate=${drift.endDate ?? "unknown"}`,
   ].join(" ");
 }
+
+export function formatAutoClosedMissingRemoteDetail(
+  entry: AutoClosedMissingRemotePosition,
+): string {
+  return [
+    "wallet-local-position-auto-closed",
+    `token=${String(entry.tokenId)}`,
+    `position=${entry.positionId}`,
+    `slug=${entry.slug ?? "unknown"}`,
+    `prevStatus=${entry.prevStatus}`,
+    `prevSize=${entry.prevSize}`,
+    `prevValueUsdc=${entry.prevCurrentValueUsdc}`,
+    `observations=${entry.consecutiveObservations}`,
+    "crossCheck=onchain-zero",
+  ].join(" ");
+}
+
+export const MISSING_REMOTE_AUTO_CLOSE_STABILITY_REQUIRED = MISSING_REMOTE_STABILITY_REQUIRED;
