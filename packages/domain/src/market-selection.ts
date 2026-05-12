@@ -27,7 +27,7 @@ export const PRE_ENTRY_MAX_MID_PRICE = DEFAULT_MARKET_SELECTION_POLICY.maxMidPri
 export const PRE_ENTRY_MIN_LIQUIDITY = DEFAULT_MARKET_SELECTION_POLICY.minLiquidity;
 
 const ZERO_COVERAGE_CATEGORY_PATTERN =
-  /\bo\/u\b|over-under|exact[- ]score|both[- ]teams|match[- ]winner|quadra|penta|inhibitor|baron|dragon|\b(?:eth|btc|sol|bnb|xrp|hype|doge)-up-or-down-5m\b|\b(?:bitcoin|btc|ethereum|eth|solana|sol|bnb|xrp|hype|doge)-up-or-down-[a-z0-9-]+-(?:1[0-2]|[1-9])(?:am|pm)-et\b|\bmap[- ]?[0-9]+\b|\bgame[- ]?[0-9]+\b|total kills/i;
+  /\bo\/u\b|over-under|exact[- ]score|both[- ]teams|match[- ]winner|quadra|penta|inhibitor|baron|dragon|\b(?:eth|btc|sol|bnb|xrp|hype|doge)-up-or-down-5m\b|\b(?:bitcoin|btc|ethereum|eth|solana|sol|bnb|xrp|hype|doge)-up-or-down-[a-z0-9-]+-(?:1[0-2]|[1-9])(?:am|pm)-et\b|\bmap[- ]?[0-9]+\b|\bgame[- ]?[0-9]+\b|total kills|\bwill-the-price-of-(?:bitcoin|btc|ethereum|eth|solana|sol|bnb|xrp|hype|doge|ada|matic|avax|link|ltc)-be-between-\d+(?:pt\d+)?[kmbt]?-\d+(?:pt\d+)?[kmbt]?-on-[a-z]+-\d+\b|\bwill-the-price-of-(?:bitcoin|btc|ethereum|eth|solana|sol|bnb|xrp|hype|doge|ada|matic|avax|link|ltc)-be-(?:greater|less)-than-\d+(?:pt\d+)?[kmbt]?-on-[a-z]+-\d+\b|\b(?:ethereum|bitcoin|solana|xrp|hype|doge|bnb|ada|matic|avax|link|ltc)-above-\d+(?:pt\d+)?[kmbt]?-on-[a-z]+-\d+(?:-\d{4}-\d{1,2}(?:am|pm)-et)?\b/i;
 const SOCCER_DRAW_PATTERN =
   /\b(?:soccer|football|match|game|teams?|score|winner)\b.{0,80}\bdraw\b|\bdraw\b.{0,80}\b(?:soccer|football|match|game|teams?|score|winner)\b/i;
 

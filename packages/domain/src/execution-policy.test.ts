@@ -434,6 +434,10 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     });
   });
 
+  it("defaults multi-buy ladder perTokenUsdcCap to Plankton-aligned 25 USDC", () => {
+    expect(DEFAULT_EXECUTION_POLICY.multiBuyLadder.perTokenUsdcCap).toBe(25);
+  });
+
   it("defaults redeem sweep to manual/off with four-hour cadence and eight-hour age gate", () => {
     expect(DEFAULT_EXECUTION_POLICY.redeemSweep).toMatchObject({
       enabled: false,

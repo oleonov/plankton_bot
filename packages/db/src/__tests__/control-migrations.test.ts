@@ -217,7 +217,7 @@ describe("control-db migration infrastructure", () => {
         enabled: true,
         maxLadderFillsPerToken: 15,
         ladderGapMs: 60_000,
-        perTokenUsdcCap: 10,
+        perTokenUsdcCap: 25,
         maxPriceDriftTicks: 5,
         minStepFillRate: 0.1,
       });
@@ -774,5 +774,93 @@ describe("control-db migration infrastructure", () => {
       minAgeAfterResolutionSec: 28_800,
     });
     expect(after.version).toBeGreaterThan(before.version);
+  });
+
+  it("migration 054 raises ladder perTokenUsdcCap from 10 to 25 without touching operator edits", () => {
+    const dbPath = path.join(tmpDir, "control-r55-ladder-cap-raise.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.multiBuyLadder.perTokenUsdcCap',
+              10
+            )
+          WHERE profile_id IN ('live-lite', 'paper')`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.multiBuyLadder.perTokenUsdcCap',
+              50
+            )
+          WHERE profile_id = ?`,
+      )
+      .run("simulation");
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("054_ladder_cap_raise.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare("SELECT profile_id, execution_policy_json AS json FROM profile_settings")
+      .all() as Array<{ profile_id: string; json: string }>;
+    const capByProfile = new Map(
+      rows.map((row) => {
+        const policy = JSON.parse(row.json) as {
+          multiBuyLadder: { perTokenUsdcCap: number };
+        };
+        return [row.profile_id, policy.multiBuyLadder.perTokenUsdcCap];
+      }),
+    );
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+
+    expect(capByProfile.get("live-lite")).toBe(25);
+    expect(capByProfile.get("paper")).toBe(25);
+    expect(capByProfile.get("simulation")).toBe(50);
+    expect(after.version).toBeGreaterThan(before.version);
+  });
+
+  it("migration 054 is a no-op when every profile is already off the legacy 10-cap", () => {
+    const dbPath = path.join(tmpDir, "control-r55-ladder-cap-noop.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.multiBuyLadder.perTokenUsdcCap',
+              25
+            )`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("054_ladder_cap_raise.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+
+    expect(after.version).toBe(before.version);
   });
 });

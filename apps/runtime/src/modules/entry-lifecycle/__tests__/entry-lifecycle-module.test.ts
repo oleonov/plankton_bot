@@ -423,6 +423,66 @@ describe("EntryLifecycleModule", () => {
     await module.stop();
   });
 
+  it("allows ladder continuation when totalUsdc is just under perTokenUsdcCap", async () => {
+    const bus = new InProcessEventBus();
+    const fill = makeFill({ price: 0.1, sizeUsdc: 24 });
+    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+    const module = buildModule({
+      bus,
+      fillRepo: makeFillRepo([fill]),
+      policy: () => ({
+        ...ENABLED_ENTRY_LIFECYCLE_POLICY,
+        multiBuyLadder: {
+          ...ENABLED_ENTRY_LIFECYCLE_POLICY.multiBuyLadder,
+          perTokenUsdcCap: 25,
+        },
+      }),
+      setTimer: (fn, delayMs) => {
+        scheduled.push({ fn, delayMs });
+        return scheduled.length as never;
+      },
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket({ bestBid: 0.1, midPrice: 0.11 }));
+    await bus.publish("FillReceived", fillToEvent(fill));
+    await bus.drain();
+
+    expect(scheduled).toHaveLength(1);
+
+    await module.stop();
+  });
+
+  it("rejects ladder continuation when totalUsdc meets perTokenUsdcCap", async () => {
+    const bus = new InProcessEventBus();
+    const fill = makeFill({ price: 0.1, sizeUsdc: 26 });
+    const scheduled: Array<{ fn: () => void; delayMs: number }> = [];
+    const module = buildModule({
+      bus,
+      fillRepo: makeFillRepo([fill]),
+      policy: () => ({
+        ...ENABLED_ENTRY_LIFECYCLE_POLICY,
+        multiBuyLadder: {
+          ...ENABLED_ENTRY_LIFECYCLE_POLICY.multiBuyLadder,
+          perTokenUsdcCap: 25,
+        },
+      }),
+      setTimer: (fn, delayMs) => {
+        scheduled.push({ fn, delayMs });
+        return scheduled.length as never;
+      },
+    });
+
+    await module.start();
+    await publishMarket(bus, makeMarket({ bestBid: 0.1, midPrice: 0.11 }));
+    await bus.publish("FillReceived", fillToEvent(fill));
+    await bus.drain();
+
+    expect(scheduled).toHaveLength(0);
+
+    await module.stop();
+  });
+
   it("continues ladder scheduling at 14 fills when max ladder fills is 15", async () => {
     const bus = new InProcessEventBus();
     const fills = Array.from({ length: 14 }, (_, idx) =>

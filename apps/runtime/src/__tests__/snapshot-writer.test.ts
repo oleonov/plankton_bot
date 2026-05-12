@@ -3,7 +3,12 @@ import { createTokenId } from "@krabs/domain";
 import type { NormalizedMarket } from "@krabs/domain";
 import { SnapshotWriter } from "../snapshot-writer.js";
 
-function makeMarket(tokenId: string, bestBid = 0.45, bestAsk = 0.55): NormalizedMarket {
+function makeMarket(
+  tokenId: string,
+  bestBid = 0.45,
+  bestAsk = 0.55,
+  extras: Partial<NormalizedMarket> = {},
+): NormalizedMarket {
   return {
     tokenId: createTokenId(tokenId),
     conditionId: "cond-1",
@@ -27,6 +32,7 @@ function makeMarket(tokenId: string, bestBid = 0.45, bestAsk = 0.55): Normalized
     spread: bestAsk - bestBid,
     snapshotTs: Date.now(),
     eventMarketCount: 1,
+    ...extras,
   };
 }
 
@@ -114,8 +120,36 @@ describe("SnapshotWriter", () => {
     expect(repo.prune).toHaveBeenCalledTimes(1);
   });
 
-  it("sets lastPrice to null, volume24h to null, liquidity to null", () => {
-    writer.onSnapshot([makeMarket("tok-1")], Date.now());
+  it("propagates lastPrice, volume24h, liquidity from the NormalizedMarket", () => {
+    const market = makeMarket("tok-1", 0.45, 0.55, {
+      lastTradePrice: 0.4712,
+      volume24hr: 1234.56,
+      liquidity: 78_900,
+    });
+    writer.onSnapshot([market], Date.now());
+
+    const batch = repo.saveBatch.mock.calls[0]![0] as {
+      lastPrice: unknown;
+      volume24h: unknown;
+      liquidity: unknown;
+    }[];
+    expect(batch[0]!.lastPrice).toBe(0.4712);
+    expect(batch[0]!.volume24h).toBe(1234.56);
+    expect(batch[0]!.liquidity).toBe(78_900);
+  });
+
+  it("falls back to volume24h when volume24hr is absent", () => {
+    const market = makeMarket("tok-2", 0.45, 0.55, {
+      volume24h: 999.99,
+    });
+    writer.onSnapshot([market], Date.now());
+
+    const batch = repo.saveBatch.mock.calls[0]![0] as { volume24h: unknown }[];
+    expect(batch[0]!.volume24h).toBe(999.99);
+  });
+
+  it("writes null when source fields are missing", () => {
+    writer.onSnapshot([makeMarket("tok-3")], Date.now());
 
     const batch = repo.saveBatch.mock.calls[0]![0] as {
       lastPrice: unknown;

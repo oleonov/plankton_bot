@@ -174,6 +174,51 @@ describe("evaluatePreEntry", () => {
     expect(r.finalStatus).toBe("EXCLUDE");
   });
 
+  describe("daily-strike crypto category (R52)", () => {
+    const STRIKE_BLOCKED = [
+      "will-the-price-of-ethereum-be-between-2500-2600-on-may-7",
+      "will-the-price-of-ethereum-be-between-2400-2500-on-may-13",
+      "will-the-price-of-bitcoin-be-greater-than-84000-on-may-13",
+      "ethereum-above-2295-on-april-27-2026-7am-et",
+      "bitcoin-above-79200-on-april-25-2026-2pm-et",
+      "will-the-price-of-xrp-be-between-1pt80-1pt90-on-february-28",
+      "will-the-price-of-xrp-be-greater-than-1pt90-on-february-28",
+      "bitcoin-above-66k-on-march-1",
+      "bitcoin-above-74k-on-march-4",
+      "xrp-above-1pt3-on-march-6",
+      "solana-above-72-on-march-3",
+    ] as const;
+
+    const STRIKE_ALLOWED = [
+      "bitcoin-all-time-high-by-december-31-2026",
+      "trump-out-as-president-before-2027",
+      "will-the-us-invade-iran-before-2027",
+      "democratic-vp-nominee-2028",
+      "will-zelenskyy-be-removed-from-power",
+    ] as const;
+
+    it.each(STRIKE_BLOCKED)("excludes %s", (slug) => {
+      const r = evaluatePreEntry(EMPTY_ENGINE, {
+        ...VALID_PRE_ENTRY,
+        eventSlug: slug,
+        slug,
+        question: slug.replace(/-/g, " "),
+      });
+      expect(r.finalStatus).toBe("EXCLUDE");
+      expect(r.selectionStatus).toBe("fallback_exclude");
+    });
+
+    it.each(STRIKE_ALLOWED)("does not exclude %s", (slug) => {
+      const r = evaluatePreEntry(EMPTY_ENGINE, {
+        ...VALID_PRE_ENTRY,
+        eventSlug: slug,
+        slug,
+        question: slug.replace(/-/g, " "),
+      });
+      expect(r.finalStatus).toBe("INCLUDE");
+    });
+  });
+
   it("does not use single-market fallback when hard filters fail", () => {
     const r = evaluatePreEntry(EMPTY_ENGINE, {
       ...VALID_PRE_ENTRY,

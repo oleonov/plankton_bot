@@ -33,9 +33,9 @@ export class SnapshotWriter {
         tokenId: m.tokenId,
         bestBid: m.bestBid,
         bestAsk: m.bestAsk,
-        lastPrice: null,
-        volume24h: null,
-        liquidity: null,
+        lastPrice: m.lastTradePrice ?? null,
+        volume24h: m.volume24hr ?? m.volume24h ?? null,
+        liquidity: m.liquidity ?? null,
         capturedAt: new Date(timestamp).toISOString(),
       });
     }

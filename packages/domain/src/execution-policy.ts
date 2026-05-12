@@ -94,7 +94,7 @@ export const DEFAULT_MULTI_BUY_LADDER_POLICY: MultiBuyLadderPolicy = {
   enabled: false,
   maxLadderFillsPerToken: 5,
   ladderGapMs: 60_000,
-  perTokenUsdcCap: 10,
+  perTokenUsdcCap: 25,
   maxPriceDriftTicks: 5,
   minStepFillRate: 0.1,
 };
