@@ -263,6 +263,49 @@ describe("runProfilePreflight", () => {
     expect(result.blockers.some((b) => b.code === "EXPOSURE_EXCEEDS_CAP")).toBe(true);
   });
 
+  it("does not count dust positions toward MARKETS_EXCEED_CAP", () => {
+    seedProfile(controlConn.db, "live-lite");
+
+    // 3 open + 4 dust = 7 distinct tokens; cap is 5. Only the 3 open should count.
+    const insertPos = ledgerConn.db.prepare(
+      `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
+       VALUES (?, ?, 'buy', 10, 0.1, 1, 0, ?, datetime('now'), datetime('now'))`,
+    );
+    for (let i = 0; i < 3; i++) insertPos.run(`pos-open-${i}`, `tok-open-${i}`, "open");
+    for (let i = 0; i < 4; i++) insertPos.run(`pos-dust-${i}`, `tok-dust-${i}`, "dust");
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: true,
+    });
+
+    expect(result.blockers.some((b) => b.code === "MARKETS_EXCEED_CAP")).toBe(false);
+  });
+
+  it("fails MARKETS_EXCEED_CAP when open positions alone exceed the cap", () => {
+    seedProfile(controlConn.db, "live-lite");
+
+    const insertPos = ledgerConn.db.prepare(
+      `INSERT INTO positions (position_id, token_id, side, size, avg_entry_price, cost_basis_usdc, realized_pnl, status, opened_at, updated_at)
+       VALUES (?, ?, 'buy', 10, 0.1, 1, 0, 'open', datetime('now'), datetime('now'))`,
+    );
+    for (let i = 0; i < 6; i++) insertPos.run(`pos-${i}`, `tok-${i}`);
+
+    const result = runProfilePreflight({
+      profile: "live-lite",
+      ledgerDb: ledgerConn.db,
+      controlDb: controlConn.db,
+      liveLiteConfig: ENVELOPE,
+      polyBuilderCodeConfigured: true,
+    });
+
+    expect(result.status).toBe("failed");
+    expect(result.blockers.some((b) => b.code === "MARKETS_EXCEED_CAP")).toBe(true);
+  });
+
   it("returns passed_with_warnings when exposure near cap (>80%)", () => {
     seedProfile(controlConn.db, "live-lite");
 

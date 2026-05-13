@@ -29,6 +29,14 @@ export function calculateTotalExposure(
   return positionCostBasis + openBuyNotional + additionalNotional;
 }
 
+/**
+ * Token IDs that currently hold an `open` (actively-tradable) position.
+ *
+ * Dust positions are excluded: they are stuck below `minOrderSize` and cannot
+ * place a SELL, so they do not occupy an "active market" slot from the BUY
+ * gate's perspective. This keeps the runtime cap in sync with the startup
+ * preflight check (`profile-preflight.ts`).
+ */
 export function countActiveOpenMarkets(positionRepo: PositionRepository): Set<string> {
-  return new Set(findActivePositions(positionRepo).map((p) => String(p.tokenId)));
+  return new Set(positionRepo.findOpen().map((p) => String(p.tokenId)));
 }

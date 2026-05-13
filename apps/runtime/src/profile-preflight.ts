@@ -136,11 +136,10 @@ function runLiveLiteChecks(
     });
   }
 
-  // Active markets count
+  // Active markets count — dust positions are stuck below min_order_size and cannot
+  // be actively traded, so they do not occupy an "active market" slot.
   const activeMarkets = db
-    .prepare(
-      "SELECT COUNT(DISTINCT token_id) as cnt FROM positions WHERE status IN ('open','dust')",
-    )
+    .prepare("SELECT COUNT(DISTINCT token_id) as cnt FROM positions WHERE status = 'open'")
     .get() as { cnt: number };
   if (activeMarkets.cnt > envelope.maxActiveMarkets) {
     blockers.push({

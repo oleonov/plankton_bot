@@ -1473,6 +1473,65 @@ describe("ExecutionModule", () => {
     await guardedMod.stop();
   });
 
+  it("does not count dust positions toward live-lite active-markets cap", async () => {
+    // cap=3, with 2 open + 3 dust positions. The new BUY on a fresh token must
+    // be allowed (open=2 + 1 new = 3 ≤ cap). If dust were counted, it would be
+    // rejected (5 + 1 = 6 > 3). Mirrors the preflight fix.
+    const guard = new LiveLiteGuard({
+      maxOpenValueUsdc: 1000,
+      maxOrderUsdc: 100,
+      maxActiveMarkets: 3,
+    });
+    const positionRepo = {
+      save: vi.fn(),
+      findByTokenId: vi.fn().mockReturnValue(null),
+      findOpen: vi
+        .fn()
+        .mockReturnValue([
+          makePosition({ tokenId: createTokenId("tok-a"), costBasisUsdc: 1 }),
+          makePosition({ tokenId: createTokenId("tok-b"), costBasisUsdc: 1 }),
+        ]),
+      findDust: vi
+        .fn()
+        .mockReturnValue([
+          makePosition({ tokenId: createTokenId("tok-c"), costBasisUsdc: 0.01 }),
+          makePosition({ tokenId: createTokenId("tok-d"), costBasisUsdc: 0.01 }),
+          makePosition({ tokenId: createTokenId("tok-e"), costBasisUsdc: 0.01 }),
+        ]),
+      findAll: vi.fn().mockReturnValue([]),
+      findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+    } as PositionRepository;
+    const guardedMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      liveLiteGuard: guard,
+    });
+
+    await guardedMod.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ tokenId: createTokenId("tok-f"), price: 0.5, size: 2 }),
+      timestamp: Date.now(),
+    });
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+
+    await guardedMod.stop();
+  });
+
   it("places fee-enabled EOA orders to gateway (family policy gate removed)", async () => {
     const guard = new LiveLiteGuard({
       maxOpenValueUsdc: 1000,
