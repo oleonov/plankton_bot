@@ -73,6 +73,12 @@ const NEG_RISK_REDEEM_ABI = parseAbi([
 ]);
 const RECENT_SETTLEMENT_SUBMISSION_TTL_MS = 10 * 60 * 1000;
 const SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS = 15 * 1000;
+// Polymarket relayer validates the `metadata` field server-side and rejects
+// free-form strings (colon, spaces, hex digests) with 400 `invalid metadata
+// field`. Use short alphanumeric slugs — the relayer accepts these and the
+// per-request conditionIds are already captured via logSettlementLifecycle.
+const RELAYER_METADATA_REDEEM = "redeem";
+const RELAYER_METADATA_MERGE = "merge";
 
 type SettlementTransaction = {
   to: string;
@@ -438,9 +444,12 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
       const submitStartedAt = Date.now();
       try {
+        // Polymarket relayer rejects free-form metadata with 400 `invalid metadata field`.
+        // Use a short constant slug; the relayer accepts these, and conditionIds are
+        // already logged separately via logSettlementLifecycle.
         const response = await settlementExecute(
           requests.map((request) => request.tx),
-          `redeem positions: ${requests.map((request) => request.conditionId).join(",")}`,
+          RELAYER_METADATA_REDEEM,
         );
         const submittedAt = Date.now();
         for (const request of requests) {
@@ -530,18 +539,37 @@ export class LiveExchangeGateway implements ExchangeGateway {
       const requests = await this.buildMergeRequests(merges);
       if (requests.length === 0) return;
 
+      const submitStartedAt = Date.now();
       try {
         const response = await settlementExecute(
           requests.map((request) => request.tx),
-          `merge positions: ${requests.map((request) => request.conditionId).join(",")}`,
+          RELAYER_METADATA_MERGE,
         );
+        logSettlementLifecycle({
+          lifecycle: "merge_submit_response",
+          conditionIds: requests.map((r) => r.conditionId),
+          elapsedMs: Date.now() - submitStartedAt,
+          responseShape: describeShape(response),
+        });
         await this.observeSettlementExecution(response, requests);
       } catch (e) {
-        this.reportInfraAlert(e);
-        console.error(
-          `Failed to submit relayer merge for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
-          sanitizeLogArg(e),
-        );
+        const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
+        logSettlementLifecycle({
+          lifecycle: confirmedSettlementFailure
+            ? "merge_settlement_failed"
+            : "merge_submit_error",
+          conditionIds: requests.map((r) => r.conditionId),
+          elapsedMs: Date.now() - submitStartedAt,
+          errorMessage: e instanceof Error ? e.message : String(e),
+          errorName: e instanceof Error ? e.name : undefined,
+        });
+        if (!confirmedSettlementFailure) {
+          this.reportInfraAlert(e);
+          console.error(
+            `Failed to submit relayer merge for conditions ${requests.map((r) => r.conditionId).join(",")}:`,
+            sanitizeLogArg(e),
+          );
+        }
         throw e;
       }
       return;

@@ -400,7 +400,7 @@ describe("LiveExchangeGateway", () => {
 
     expect(settlementClient.execute).toHaveBeenCalledTimes(1);
     const [txs, metadata] = settlementClient.execute.mock.calls[0]!;
-    expect(metadata).toContain("redeem positions");
+    expect(metadata).toBe("redeem");
     expect(txs).toHaveLength(1);
     expect(txs[0]!.to).toBe("0x4D97DCd97eC945f40cF65F87097ACe5EA0476045");
     expect(txs[0]!.value).toBe("0");
@@ -512,6 +512,35 @@ describe("LiveExchangeGateway", () => {
     });
     expect(decoded.functionName).toBe("redeemPositions");
     expect(decoded.args[1]).toEqual([0n, 31_000_000n]);
+  });
+
+  it("redeemPositions uses a constant slug as relayer metadata for batched submissions", async () => {
+    // Regression: Polymarket relayer rejects free-form metadata (e.g.
+    // "redeem positions: 0xabc,0xdef...") with 400 `invalid metadata field`.
+    // Submission must use a short alphanumeric slug regardless of batch size.
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "0" })
+      .mockResolvedValueOnce({ balance: "2000000" })
+      .mockResolvedValueOnce({ balance: "0" });
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    await gw.redeemPositions([
+      "0x1111111111111111111111111111111111111111111111111111111111111111",
+      "0x2222222222222222222222222222222222222222222222222222222222222222",
+    ]);
+
+    expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+    const [, metadata] = settlementClient.execute.mock.calls[0]!;
+    expect(metadata).toBe("redeem");
+    expect(metadata).not.toMatch(/0x[0-9a-f]+/i);
+    expect(metadata).not.toMatch(/[:\s,]/);
   });
 
   it("redeemPositions skips relayer submission when no token balances remain", async () => {
@@ -765,13 +794,42 @@ describe("LiveExchangeGateway", () => {
 
     expect(settlementClient.execute).toHaveBeenCalledTimes(1);
     const [txs, label] = settlementClient.execute.mock.calls[0] as [any[], string];
-    expect(label).toContain(
-      "merge positions: 0x1111111111111111111111111111111111111111111111111111111111111111",
-    );
+    expect(label).toBe("merge");
     expect(txs).toHaveLength(1);
     // Verify encoded data roughly contains the amount (10 tokens -> 10 * 10^6 = 10000000)
     // 10000000 decimal is 0x989680 hex.
     expect(txs[0].data).toContain("989680");
+  });
+
+  it("mergePositions uses a constant slug as relayer metadata for batched submissions", async () => {
+    // Regression: same relayer validation as redeemPositions; metadata must be
+    // a short alphanumeric slug, not a free-form string with conditionIds.
+    const settlementClient = createMockSettlementClient();
+    gw = new LiveExchangeGateway({ client, settlementClient });
+
+    client.getMarket.mockResolvedValue({
+      tokens: [
+        { outcome: "Yes", token_id: "tok-yes" },
+        { outcome: "No", token_id: "tok-no" },
+      ],
+    });
+
+    await gw.mergePositions([
+      {
+        conditionId: "0x1111111111111111111111111111111111111111111111111111111111111111",
+        amount: 5,
+      },
+      {
+        conditionId: "0x2222222222222222222222222222222222222222222222222222222222222222",
+        amount: 7,
+      },
+    ]);
+
+    expect(settlementClient.execute).toHaveBeenCalledTimes(1);
+    const [, metadata] = settlementClient.execute.mock.calls[0] as [unknown, string];
+    expect(metadata).toBe("merge");
+    expect(metadata).not.toMatch(/0x[0-9a-f]+/i);
+    expect(metadata).not.toMatch(/[:\s,]/);
   });
 
   it("mergePositions warns once and no-ops when the SDK has no merge API", async () => {
