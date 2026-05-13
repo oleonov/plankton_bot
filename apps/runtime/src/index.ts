@@ -1160,6 +1160,8 @@ async function main(): Promise<void> {
           orderRepo: repos.order,
           redeemLogRepo: repos.redeemLog,
           policy: () => currentExecutionPolicy().redeemSweep,
+          depositActivationPolicy: () => currentExecutionPolicy().depositActivation,
+          riskEventRepo: repos.riskEvent,
           log,
           runtimeMetrics,
           runtimeControl,
