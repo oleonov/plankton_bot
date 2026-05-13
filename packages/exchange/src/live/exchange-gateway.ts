@@ -849,12 +849,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     const data = encodeFunctionData({
       abi: CTF_REDEEM_ABI,
       functionName: "redeemPositions",
-      args: [
-        collateral as `0x${string}`,
-        zeroHash,
-        conditionId as `0x${string}`,
-        indexSets,
-      ],
+      args: [collateral as `0x${string}`, zeroHash, conditionId as `0x${string}`, indexSets],
     });
 
     return {

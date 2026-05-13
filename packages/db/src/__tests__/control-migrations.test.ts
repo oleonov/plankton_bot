@@ -953,9 +953,7 @@ describe("control-db migration infrastructure", () => {
     conn = bootstrapControlDb(dbPath);
 
     const rows = conn.db
-      .prepare(
-        "SELECT profile_id AS id, execution_policy_json AS json FROM profile_settings",
-      )
+      .prepare("SELECT profile_id AS id, execution_policy_json AS json FROM profile_settings")
       .all() as Array<{ id: string; json: string }>;
     for (const row of rows) {
       const policy = JSON.parse(row.json);
