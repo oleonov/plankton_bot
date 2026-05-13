@@ -927,4 +927,43 @@ describe("control-db migration infrastructure", () => {
 
     expect(after.version).toBe(before.version);
   });
+
+  it("migration 056 re-enables redeemSweep on profiles where the safety net left it off", () => {
+    const dbPath = path.join(tmpDir, "control-redeem-sweep-re-enable.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.redeemSweep.enabled',
+              json('false')
+            )`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("056_redeem_sweep_re_enable.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare(
+        "SELECT profile_id AS id, execution_policy_json AS json FROM profile_settings",
+      )
+      .all() as Array<{ id: string; json: string }>;
+    for (const row of rows) {
+      const policy = JSON.parse(row.json);
+      expect(policy.redeemSweep?.enabled).toBe(true);
+    }
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    expect(after.version).toBeGreaterThan(before.version);
+  });
 });

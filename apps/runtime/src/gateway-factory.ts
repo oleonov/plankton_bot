@@ -8,8 +8,13 @@ import {
   SimulationExchangeGateway,
   LiveMarketDataGateway,
   LiveExchangeGateway,
+  createCollateralResolver,
   type UserEventStreamAuth,
 } from "@krabs/exchange";
+
+const USDC_POLYGON = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+const PUSD_POLYGON = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB";
+const CONDITIONAL_TOKENS_POLYGON = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 
 export interface CreateGatewaysInput {
   runtimeMode: "simulation" | "paper" | "live-lite";
@@ -21,6 +26,8 @@ export interface CreateGatewaysInput {
   slugFilter?: ((slug: string) => boolean) | undefined;
   /** Initial USDC balance for simulation/paper exchange gateway. Ignored in live-lite. */
   initialBalanceUsdc?: number;
+  /** Polygon RPC URL — required for live-lite collateral resolution (USDC vs pUSD). */
+  polygonRpcUrl?: string | undefined;
   onInfraAlert?:
     | ((alert: {
         code: string;
@@ -77,6 +84,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     userWsAuth,
     slugFilter,
     initialBalanceUsdc,
+    polygonRpcUrl,
     onInfraAlert,
     marketDataMaxTrackedTokens,
     marketDataMaxWsShards,
@@ -142,12 +150,20 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
   }
 
   // live-lite
+  const collateralResolver = polygonRpcUrl
+    ? createCollateralResolver({
+        rpcUrl: polygonRpcUrl,
+        conditionalTokensAddress: CONDITIONAL_TOKENS_POLYGON,
+        candidates: [USDC_POLYGON, PUSD_POLYGON],
+      })
+    : undefined;
   const liveExchangeConfig = {
     client: polyClient,
     settlementClient,
     ...(userWsAuth ? { userWsAuth } : {}),
     ...(traderAddress ? { traderAddress } : {}),
     ...(onInfraAlert ? { onInfraAlert } : {}),
+    ...(collateralResolver ? { collateralResolver } : {}),
   };
   return {
     marketDataGateway: new LiveMarketDataGateway(liveMarketDataConfig),

@@ -407,6 +407,110 @@ describe("LiveExchangeGateway", () => {
     expect(txs[0]!.data).toContain("0x");
   });
 
+  it("redeemPositions encodes resolver-returned collateral for CTF redeem", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "0" });
+    const usdcLegacy = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
+    const collateralResolver = vi.fn().mockResolvedValue(usdcLegacy);
+    gw = new LiveExchangeGateway({ client, settlementClient, collateralResolver });
+
+    const conditionId = "0x1414141414141414141414141414141414141414141414141414141414141414";
+    await gw.redeemPositions([conditionId]);
+
+    expect(collateralResolver).toHaveBeenCalledTimes(1);
+    expect(collateralResolver).toHaveBeenCalledWith({
+      conditionId,
+      canonicalTokenId: "tok-yes",
+      indexSet: 1n,
+    });
+    const [txs] = settlementClient.execute.mock.calls[0]!;
+    const decoded = decodeFunctionData({ abi: CTF_REDEEM_ABI, data: txs[0]!.data });
+    expect(decoded.functionName).toBe("redeemPositions");
+    expect((decoded.args[0] as string).toLowerCase()).toBe(usdcLegacy.toLowerCase());
+    expect(decoded.args[2]).toBe(conditionId);
+  });
+
+  it("redeemPositions throws when configured resolver returns null (no candidate matched)", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "0" });
+    const collateralResolver = vi.fn().mockResolvedValue(null);
+    gw = new LiveExchangeGateway({ client, settlementClient, collateralResolver });
+
+    const conditionId = "0x1515151515151515151515151515151515151515151515151515151515151515";
+    // Throw rather than silently skip — the upstream redeem-sweep caller
+    // applies the aggregate result to every reserved group, so silently
+    // dropping one condition would falsely mark its local position as
+    // confirmed/closed.
+    await expect(gw.redeemPositions([conditionId])).rejects.toThrow(
+      /collateral token \(USDC vs pUSD\)/,
+    );
+    expect(settlementClient.execute).not.toHaveBeenCalled();
+  });
+
+  it("redeemPositions throws when configured resolver itself throws", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "0" });
+    const collateralResolver = vi.fn().mockRejectedValue(new Error("rpc timeout"));
+    gw = new LiveExchangeGateway({ client, settlementClient, collateralResolver });
+
+    const conditionId = "0x1616161616161616161616161616161616161616161616161616161616161616";
+    await expect(gw.redeemPositions([conditionId])).rejects.toThrow(
+      /collateral token \(USDC vs pUSD\)/,
+    );
+    expect(settlementClient.execute).not.toHaveBeenCalled();
+  });
+
+  it("redeemPositions raises POLYGON_RPC_RATE_LIMITED when resolver hits a 429", async () => {
+    const settlementClient = createMockSettlementClient();
+    client.getMarket.mockResolvedValue({
+      condition_id: "0xcond",
+      neg_risk: false,
+      tokens: [{ token_id: "tok-yes" }, { token_id: "tok-no" }],
+    });
+    client.getBalanceAllowance
+      .mockResolvedValueOnce({ balance: "1000000" })
+      .mockResolvedValueOnce({ balance: "0" });
+    const onInfraAlert = vi.fn();
+    const collateralResolver = vi
+      .fn()
+      .mockRejectedValue(new Error("RPC HTTP 429: Too Many Requests"));
+    gw = new LiveExchangeGateway({ client, settlementClient, collateralResolver, onInfraAlert });
+
+    const conditionId = "0x1717171717171717171717171717171717171717171717171717171717171717";
+    // Throws and also surfaces the rate-limit signal via onInfraAlert + bubbles
+    // the cause text in error.message so redeem-sweep's isRpcRateLimitError
+    // regex still triggers the hard-pause path.
+    await expect(gw.redeemPositions([conditionId])).rejects.toThrow(/429/);
+    expect(onInfraAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: "POLYGON_RPC_RATE_LIMITED",
+        source: "polygon-rpc",
+      }),
+    );
+    expect(settlementClient.execute).not.toHaveBeenCalled();
+  });
+
   it("redeemPositions targets only requested CTF outcome tokens", async () => {
     const settlementClient = createMockSettlementClient();
     client.getMarket.mockResolvedValue({

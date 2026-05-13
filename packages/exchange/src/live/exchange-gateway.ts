@@ -40,6 +40,7 @@ import {
   type UserEventStreamAuth,
   type UserEventWebSocketLike,
 } from "./user-event-stream.js";
+import type { CollateralResolver } from "./collateral-resolver.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -50,6 +51,16 @@ export interface LiveExchangeConfig {
   traderAddress?: string | null;
   userWsAuth?: UserEventStreamAuth | null;
   createWebSocket?: ((url: string) => UserEventWebSocketLike) | undefined;
+  /**
+   * Resolves the actual collateral token (USDC vs pUSD) used by a CTF market,
+   * looked up by matching `getPositionId(candidate, collectionId)` against the
+   * canonical CLOB tokenId. Required for production redeem/merge correctness —
+   * @polymarket/clob-client-v2.getContractConfig always returns pUSD but a
+   * significant share of legacy positions remain USDC-collateralised. If absent,
+   * the gateway falls back to `contracts.collateral` and emits a warning per
+   * conditionId so the gap is observable.
+   */
+  collateralResolver?: CollateralResolver | undefined;
   /** Optional callback used to surface infra-level settlement issues to runtime/UI. */
   onInfraAlert?:
     | ((alert: {
@@ -109,6 +120,26 @@ class SettlementTransactionFailedError extends Error {
   constructor() {
     super("Settlement transaction reached failed state before balances cleared");
     this.name = "SettlementTransactionFailedError";
+  }
+}
+
+export class SettlementCollateralUnresolvedError extends Error {
+  readonly conditionId: string;
+  readonly operation: "redeem" | "merge";
+  readonly cause: unknown;
+  constructor(conditionId: string, operation: "redeem" | "merge", cause?: unknown) {
+    // Embed the original cause message so upstream rate-limit detectors that
+    // grep `error.message` (e.g. redeem-sweep's `isRpcRateLimitError`) keep
+    // working when the resolver fails with a 429 / 503 / quota error.
+    const causeMsg = cause instanceof Error ? cause.message : cause != null ? String(cause) : "";
+    const suffix = causeMsg ? `: ${causeMsg}` : "";
+    super(
+      `Could not resolve collateral token (USDC vs pUSD) for ${operation} of condition ${conditionId}${suffix}`,
+    );
+    this.name = "SettlementCollateralUnresolvedError";
+    this.conditionId = conditionId;
+    this.operation = operation;
+    this.cause = cause;
   }
 }
 
@@ -227,6 +258,8 @@ export class LiveExchangeGateway implements ExchangeGateway {
         details?: Record<string, unknown> | undefined;
       }) => void)
     | null;
+  private readonly collateralResolver: CollateralResolver | null;
+  private readonly warnedCollateralFallback = new Set<string>();
   private warnedRedeemUnsupported = false;
   private warnedMergeUnsupported = false;
   private readonly recentRedeemSubmissions = new Map<string, number>();
@@ -248,6 +281,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
     this.userWsAuth = config.userWsAuth ?? null;
     this.createWebSocket = config.createWebSocket;
     this.onInfraAlert = config.onInfraAlert ?? null;
+    this.collateralResolver = config.collateralResolver ?? null;
   }
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -634,6 +668,12 @@ export class LiveExchangeGateway implements ExchangeGateway {
         const request = await this.buildMergeRequest(merge.conditionId, merge.amount);
         if (request) requests.push(request);
       } catch (e) {
+        // Unresolved collateral is fatal for merge: the inventory caller has
+        // no per-condition feedback channel (mergePositions returns void),
+        // so silently dropping the condition would let the ledger apply a
+        // merge that never hit chain. Other build-time errors stay tolerated
+        // to preserve existing behavior for malformed-market edge cases.
+        if (e instanceof SettlementCollateralUnresolvedError) throw e;
         console.error(
           `Failed to build merge request for condition ${merge.conditionId}:`,
           sanitizeLogArg(e),
@@ -656,11 +696,24 @@ export class LiveExchangeGateway implements ExchangeGateway {
 
     // Binary markets: YES/NO mapping assumed to be index 0 and 1
     const indexSets = tokenIds.map((_, index) => 1n << BigInt(index));
+    // `resolveCtfCollateral` throws `SettlementCollateralUnresolvedError` when
+    // a resolver is configured but cannot prove collateral (RPC failure or no
+    // candidate matched). The caller treats `mergePositions` as
+    // all-or-nothing — silently dropping one condition would let the ledger
+    // apply a merge that never hit chain. Letting the throw propagate aborts
+    // the whole batch; the inventory sweep retries on next tick.
+    const collateral = await this.resolveCtfCollateral(
+      conditionId,
+      tokenIds[0]!,
+      indexSets[0]!,
+      contracts.collateral,
+      "merge",
+    );
     const data = encodeFunctionData({
       abi: CTF_MERGE_ABI,
       functionName: "mergePositions",
       args: [
-        contracts.collateral as `0x${string}`,
+        collateral as `0x${string}`,
         zeroHash,
         conditionId as `0x${string}`,
         indexSets,
@@ -779,11 +832,25 @@ export class LiveExchangeGateway implements ExchangeGateway {
     }
 
     const indexSets = redeemEntries.map((entry) => 1n << BigInt(entry.index));
+    // `resolveCtfCollateral` throws `SettlementCollateralUnresolvedError` when
+    // a resolver is configured but cannot prove collateral. Silently dropping
+    // one condition from the submitted batch would let redeem-sweep mark it
+    // confirmed/closed locally based on the aggregate result of the other
+    // conditions, corrupting ledger state. Letting the throw propagate is
+    // caught by redeem-sweep's batch try/catch and recorded as a retryable
+    // failure.
+    const collateral = await this.resolveCtfCollateral(
+      conditionId,
+      redeemEntries[0]!.tokenId,
+      indexSets[0]!,
+      contracts.collateral,
+      "redeem",
+    );
     const data = encodeFunctionData({
       abi: CTF_REDEEM_ABI,
       functionName: "redeemPositions",
       args: [
-        contracts.collateral as `0x${string}`,
+        collateral as `0x${string}`,
         zeroHash,
         conditionId as `0x${string}`,
         indexSets,
@@ -800,6 +867,63 @@ export class LiveExchangeGateway implements ExchangeGateway {
       precheckTokenIds: tokenIds,
       precheckBalances: balanceStrings,
     };
+  }
+
+  /**
+   * Resolve the actual collateral token (USDC vs pUSD) used by a CTF market.
+   *
+   * Returns the resolver-confirmed collateral when wired. Throws
+   * `SettlementCollateralUnresolvedError` when a resolver is configured but
+   * cannot prove collateral — either because the RPC call failed (cause
+   * preserved on the error) or because no candidate matched. Throwing rather
+   * than returning a default is mandatory: silently falling back to the SDK's
+   * pUSD-default would reproduce the original `PRECHECK_SKIPPED: zero
+   * position balance` rejection, and silently dropping the condition would
+   * let upstream callers (which apply the aggregate result to every reserved
+   * group) corrupt local ledger state.
+   *
+   * The `defaultCollateral` branch only applies when no resolver is wired at
+   * all (unit-tests / simulation / paper paths).
+   *
+   * RPC errors are additionally piped through `reportInfraAlert` so the
+   * existing 429 / 503 classifier raises `POLYGON_RPC_RATE_LIMITED` /
+   * `POLYGON_RPC_UNAVAILABLE` and the redeem-sweep hard-pause kicks in.
+   */
+  private async resolveCtfCollateral(
+    conditionId: string,
+    canonicalTokenId: string,
+    indexSet: bigint,
+    defaultCollateral: string,
+    operation: "redeem" | "merge",
+  ): Promise<string> {
+    if (!this.collateralResolver) return defaultCollateral;
+    let cause: unknown = null;
+    try {
+      const resolved = await this.collateralResolver({
+        conditionId,
+        canonicalTokenId,
+        indexSet,
+      });
+      if (resolved) return resolved;
+    } catch (err) {
+      cause = err;
+      this.reportInfraAlert(err);
+      logSettlementLifecycle({
+        lifecycle: "collateral_resolve_error",
+        conditionId,
+        canonicalTokenId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (!cause && !this.warnedCollateralFallback.has(conditionId)) {
+      this.warnedCollateralFallback.add(conditionId);
+      logSettlementLifecycle({
+        lifecycle: "collateral_resolve_failed",
+        conditionId,
+        canonicalTokenId,
+      });
+    }
+    throw new SettlementCollateralUnresolvedError(conditionId, operation, cause);
   }
 
   private extractMarketTokenEntries(raw: unknown): MarketTokenEntry[] {

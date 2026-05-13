@@ -580,6 +580,10 @@ async function main(): Promise<void> {
       slugFilter,
       initialBalanceUsdc,
       onInfraAlert: runtimeMode === "live-lite" ? recordInfraAlert : undefined,
+      polygonRpcUrl:
+        runtimeMode === "live-lite"
+          ? (config.polygonRpcUrl ?? "https://polygon-rpc.com")
+          : undefined,
       marketDataMaxTrackedTokens: config.marketDataMaxTrackedTokens,
       marketDataMaxWsShards: config.marketDataMaxWsShards,
       marketDataIngressQueueMax: config.marketDataIngressQueueMax,
