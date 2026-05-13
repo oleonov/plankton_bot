@@ -266,8 +266,8 @@ export class LedgerRetentionModule implements RuntimeModule {
         "risk_events",
         "created_at",
         nowMs - this.config.riskEventsTtlMs,
-        "NOT (event_type = 'reconciliation_drift' AND payload LIKE '%\"severity\":\"critical\"%')"
-          + " AND event_type NOT IN ('signal_suppressed', 'signal_emitted', 'order_rejected')",
+        "NOT (event_type = 'reconciliation_drift' AND payload LIKE '%\"severity\":\"critical\"%')" +
+          " AND event_type NOT IN ('signal_suppressed', 'signal_emitted', 'order_rejected')",
       ),
       this.deleteOlderThanTask(
         "risk_events.critical",
