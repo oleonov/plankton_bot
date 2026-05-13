@@ -859,4 +859,72 @@ describe("control-db migration infrastructure", () => {
 
     expect(after.version).toBe(before.version);
   });
+
+  it("migration 055 removes the dead redeemSweep.minAgeAfterResolutionSec field", () => {
+    const dbPath = path.join(tmpDir, "control-redeem-min-age-drop.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.redeemSweep.minAgeAfterResolutionSec',
+              28800
+            )`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("055_drop_redeem_min_age.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const rows = conn.db
+      .prepare("SELECT profile_id, execution_policy_json AS json FROM profile_settings")
+      .all() as Array<{ profile_id: string; json: string }>;
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+
+    for (const row of rows) {
+      const policy = JSON.parse(row.json);
+      expect(policy.redeemSweep).not.toHaveProperty("minAgeAfterResolutionSec");
+    }
+    expect(after.version).toBeGreaterThan(before.version);
+  });
+
+  it("migration 055 is a no-op when no profile carries minAgeAfterResolutionSec", () => {
+    const dbPath = path.join(tmpDir, "control-redeem-min-age-noop.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db.prepare("INSERT OR IGNORE INTO runtime_control_state (id) VALUES (1)").run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(
+              execution_policy_json,
+              '$.redeemSweep.minAgeAfterResolutionSec'
+            )`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("055_drop_redeem_min_age.sql");
+    const before = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const after = conn.db
+      .prepare("SELECT execution_policy_version AS version FROM runtime_control_state WHERE id = 1")
+      .get() as { version: number };
+
+    expect(after.version).toBe(before.version);
+  });
 });

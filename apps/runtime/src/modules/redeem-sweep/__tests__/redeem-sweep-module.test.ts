@@ -188,7 +188,6 @@ function makeHarness(
       enabled: true,
       intervalMs: 60_000,
       inFlightTtlMs: 15 * 60_000,
-      minAgeAfterResolutionSec: 0,
       retryBackoffMs: [60_000, 300_000, 1_800_000],
       ...(opts.policy ?? {}),
     }),
@@ -723,35 +722,34 @@ describe("RedeemSweepModule", () => {
     expect((h.gateway.redeemPositions.mock.calls as any[])[1]?.[0]).toEqual(["cond-batch-10"]);
   });
 
-  it("skips conditions until the 8 hour post-resolution minimum age passes", async () => {
+  it("redeems on Data API redeemable=true even when market end_date is far in the future", async () => {
+    // Regression: Gamma returns event-level end_date (e.g. tournament end) instead
+    // of actual settlement time, so an "end_date + Nh" gate would block forever.
+    // The Data API redeemable flag is sourced from on-chain CTF settlement state
+    // and is the canonical readiness signal — we now trust it directly.
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
+    const farFuture = new Date(NOW + 5 * 24 * 60 * 60_000).toISOString();
     const h = makeHarness({
-      policy: { minAgeAfterResolutionSec: 28_800 },
-      marketRows: [
-        { tokenId: createTokenId(TOKEN), endDate: new Date(NOW - 7 * 60 * 60_000).toISOString() },
-      ],
+      marketRows: [{ tokenId: createTokenId(TOKEN), endDate: farFuture }],
     });
     await runStableStartup(h);
 
-    expect(h.gateway.redeemPositions).not.toHaveBeenCalled();
-    expect(h.redeemLogRows.at(-1)).toMatchObject({
-      status: "skipped",
-      errorMsg: "min_age_after_resolution",
-    });
+    expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.redeemLogRows.some((row) => row.errorMsg === "min_age_after_resolution")).toBe(false);
+    expect(h.redeemLogRows.some((row) => row.errorMsg === "missing_end_date")).toBe(false);
+  });
 
-    h.redeemLogRows.length = 0;
-    h.reader.read.mockResolvedValue([remotePosition()]);
-    (h.module as any).stabilityByCondition.clear();
-    (h.module as any).lastAttemptByCondition.clear();
-    h.orderRepo.findOpen.mockReturnValue([]);
-    (h.module as any).deps.marketRepo.findByConditionId.mockReturnValue([
-      { tokenId: createTokenId(TOKEN), endDate: new Date(NOW - 9 * 60 * 60_000).toISOString() },
-    ]);
-    await runSweepForTest(h.module, "age-prime");
-    await runSweepForTest(h.module, "age-ready");
+  it("redeems when market end_date is null (Gamma dropped the market)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const h = makeHarness({
+      marketRows: [{ tokenId: createTokenId(TOKEN), endDate: null }],
+    });
+    await runStableStartup(h);
 
     expect(h.gateway.redeemPositions).toHaveBeenCalledTimes(1);
+    expect(h.redeemLogRows.some((row) => row.errorMsg === "missing_end_date")).toBe(false);
   });
 
   it("hard-pauses all redeem sweeps for 5 minutes after Polygon RPC 429", async () => {

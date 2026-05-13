@@ -59,7 +59,6 @@ interface RedeemGroup {
   conditionId: string;
   includedTokenIds: string[];
   excludedTokenIds: string[];
-  endDate: string | null;
 }
 
 interface RetryTask {
@@ -274,7 +273,6 @@ export class RedeemSweepModule implements RuntimeModule {
             conditionId: row.conditionId,
             includedTokenIds: row.tokenIds,
             excludedTokenIds: parseExcludedTokenIds(row.detailsJson),
-            endDate: null,
           },
           Math.max(0, policy.postRedeemVerifyDelayMs - (now - row.attemptTs)),
         );
@@ -311,7 +309,6 @@ export class RedeemSweepModule implements RuntimeModule {
     for (const [conditionId, rows] of byCondition) {
       const group = this.buildGroup(conditionId, rows, positions);
       if (!this.isStableRedeemCandidate(group)) continue;
-      if (!this.isPastResolutionMinAge(group, source)) continue;
       if (this.hasActiveOrders(group, source)) continue;
       readyGroups.push(group);
     }
@@ -393,7 +390,6 @@ export class RedeemSweepModule implements RuntimeModule {
             .map((market) => String(market.tokenId)),
         ]),
       ],
-      endDate: resolveConditionEndDate(marketRows),
     };
   }
 
@@ -408,20 +404,6 @@ export class RedeemSweepModule implements RuntimeModule {
       observed_count: count,
       required_count: STABILITY_SNAPSHOTS_REQUIRED,
     });
-    return false;
-  }
-
-  private isPastResolutionMinAge(group: RedeemGroup, source: string): boolean {
-    const policy = this.deps.policy();
-    if (policy.minAgeAfterResolutionSec <= 0) return true;
-    const endMs = group.endDate ? Date.parse(group.endDate) : NaN;
-    if (!Number.isFinite(endMs)) {
-      this.recordRedeemSkip(group, source, "missing_end_date");
-      return false;
-    }
-    const ageMs = this.now() - endMs;
-    if (ageMs >= policy.minAgeAfterResolutionSec * 1000) return true;
-    this.recordRedeemSkip(group, source, "min_age_after_resolution");
     return false;
   }
 
@@ -934,19 +916,6 @@ function parseExcludedTokenIds(detailsJson: string | null): string[] {
   } catch {
     return [];
   }
-}
-
-function resolveConditionEndDate(markets: readonly { endDate?: string | null }[]): string | null {
-  let latestMs = Number.NEGATIVE_INFINITY;
-  let latest: string | null = null;
-  for (const market of markets) {
-    if (!market.endDate) continue;
-    const ms = Date.parse(market.endDate);
-    if (!Number.isFinite(ms) || ms <= latestMs) continue;
-    latestMs = ms;
-    latest = market.endDate;
-  }
-  return latest;
 }
 
 function isRpcRateLimitError(err: unknown): boolean {

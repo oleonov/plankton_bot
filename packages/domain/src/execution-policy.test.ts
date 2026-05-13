@@ -438,12 +438,12 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(DEFAULT_EXECUTION_POLICY.multiBuyLadder.perTokenUsdcCap).toBe(25);
   });
 
-  it("defaults redeem sweep to manual/off with four-hour cadence and eight-hour age gate", () => {
+  it("defaults redeem sweep to manual/off with four-hour cadence", () => {
     expect(DEFAULT_EXECUTION_POLICY.redeemSweep).toMatchObject({
       enabled: false,
       intervalMs: 14_400_000,
-      minAgeAfterResolutionSec: 28_800,
     });
+    expect(DEFAULT_EXECUTION_POLICY.redeemSweep).not.toHaveProperty("minAgeAfterResolutionSec");
   });
 
   it("rejects invalid fill-rate feature policy values with issues", () => {

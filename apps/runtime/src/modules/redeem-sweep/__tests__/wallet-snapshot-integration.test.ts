@@ -156,7 +156,6 @@ describe("redeem sweep wallet snapshot integration", () => {
         ...DEFAULT_EXECUTION_POLICY.redeemSweep,
         enabled: true,
         intervalMs: 60_000,
-        minAgeAfterResolutionSec: 0,
       }),
       log: logger(),
       runtimeMetrics: { writeEvent: vi.fn(), writeLatest: vi.fn() } as any,
