@@ -22,6 +22,7 @@ import type {
   ExchangeUserEventStream,
   ExchangeUserOrderEvent,
   ExchangeUserTradeEvent,
+  DepositActivationResult,
 } from "@krabs/domain";
 import { encodeFunctionData, parseAbi, zeroHash } from "viem";
 import { classifyError } from "../errors.js";
@@ -41,6 +42,13 @@ import {
   type UserEventWebSocketLike,
 } from "./user-event-stream.js";
 import type { CollateralResolver } from "./collateral-resolver.js";
+import {
+  ACTIVATION_ASSETS,
+  ERC20_APPROVE_ABI,
+  PUSD_WRAP_ABI,
+  PUSD_WRAPPER_ADDRESS,
+} from "./pusd-wrapper.js";
+import { readErc20Balance, readErc20Allowance } from "./usdc-balance-reader.js";
 
 export interface LiveExchangeConfig {
   /** ClobClient instance — typed as unknown to avoid SDK type leakage. */
@@ -71,6 +79,12 @@ export interface LiveExchangeConfig {
         details?: Record<string, unknown> | undefined;
       }) => void)
     | undefined;
+  /** Polygon RPC URL used for on-chain balance reads and the pUSD activation flow. */
+  rpcUrl?: string | null;
+  /** Override for balance reads — for testing without a live RPC. */
+  __readErc20Balance?: typeof readErc20Balance;
+  /** Override for allowance reads — for testing without a live RPC. */
+  __readErc20Allowance?: typeof readErc20Allowance;
 }
 
 const CTF_REDEEM_ABI = parseAbi([
@@ -90,6 +104,7 @@ const SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS = 15 * 1000;
 // per-request conditionIds are already captured via logSettlementLifecycle.
 const RELAYER_METADATA_REDEEM = "redeem";
 const RELAYER_METADATA_MERGE = "merge";
+const RELAYER_METADATA_ACTIVATE_FUNDS = "activatefunds";
 
 type SettlementTransaction = {
   to: string;
@@ -259,6 +274,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
       }) => void)
     | null;
   private readonly collateralResolver: CollateralResolver | null;
+  private readonly rpcUrl: string | null;
+  private readonly readErc20BalanceFn: typeof readErc20Balance;
+  private readonly readErc20AllowanceFn: typeof readErc20Allowance;
   private readonly warnedCollateralFallback = new Set<string>();
   private warnedRedeemUnsupported = false;
   private warnedMergeUnsupported = false;
@@ -282,6 +300,9 @@ export class LiveExchangeGateway implements ExchangeGateway {
     this.createWebSocket = config.createWebSocket;
     this.onInfraAlert = config.onInfraAlert ?? null;
     this.collateralResolver = config.collateralResolver ?? null;
+    this.rpcUrl = config.rpcUrl ?? null;
+    this.readErc20BalanceFn = config.__readErc20Balance ?? readErc20Balance;
+    this.readErc20AllowanceFn = config.__readErc20Allowance ?? readErc20Allowance;
   }
 
   async placeOrder(params: PlaceOrderParams): Promise<PlaceOrderResult> {
@@ -1107,6 +1128,157 @@ export class LiveExchangeGateway implements ExchangeGateway {
         postcheckError: err instanceof Error ? err.message : String(err),
       });
       return false;
+    }
+  }
+
+  async activatePendingUsdcCollateral(opts: {
+    minAmountWei: bigint;
+  }): Promise<DepositActivationResult> {
+    const settlementExecute = this.getSettlementExecuteMethod();
+    const proxyAddress = this.traderAddress;
+    if (!settlementExecute || !proxyAddress || !this.rpcUrl) {
+      return {
+        status: "skipped_no_residue",
+        perAsset: [],
+        txHash: null,
+        gasUsed: null,
+      };
+    }
+
+    const rpcUrl = this.rpcUrl;
+    const perAsset: Array<DepositActivationResult["perAsset"][number]> = [];
+    const txs: SettlementTransaction[] = [];
+
+    for (const asset of ACTIVATION_ASSETS) {
+      const balance = await this.readErc20BalanceFn({
+        rpcUrl,
+        token: asset.address,
+        owner: proxyAddress as `0x${string}`,
+      });
+
+      if (balance < opts.minAmountWei) {
+        perAsset.push({
+          asset: asset.address,
+          symbol: asset.symbol,
+          balanceWei: balance.toString(),
+          activatedWei: "0",
+          reason: balance === 0n ? "zero_balance" : "below_minimum",
+        });
+        continue;
+      }
+
+      const allowance = await this.readErc20AllowanceFn({
+        rpcUrl,
+        token: asset.address,
+        owner: proxyAddress as `0x${string}`,
+        spender: PUSD_WRAPPER_ADDRESS,
+      });
+
+      // Only emit approve when the existing allowance doesn't cover the full balance.
+      if (allowance < balance) {
+        txs.push({
+          to: asset.address,
+          data: encodeFunctionData({
+            abi: ERC20_APPROVE_ABI,
+            functionName: "approve",
+            args: [PUSD_WRAPPER_ADDRESS, balance],
+          }),
+          value: "0",
+        });
+      }
+
+      txs.push({
+        to: PUSD_WRAPPER_ADDRESS,
+        data: encodeFunctionData({
+          abi: PUSD_WRAP_ABI,
+          functionName: "wrap",
+          args: [asset.address, proxyAddress as `0x${string}`, balance],
+        }),
+        value: "0",
+      });
+
+      perAsset.push({
+        asset: asset.address,
+        symbol: asset.symbol,
+        balanceWei: balance.toString(),
+        activatedWei: balance.toString(),
+      });
+    }
+
+    const activated = perAsset.filter((a) => a.activatedWei !== "0");
+    if (activated.length === 0) {
+      const allZero = perAsset.every((a) => a.reason === "zero_balance");
+      return {
+        status: allZero ? "skipped_no_residue" : "skipped_below_min",
+        perAsset,
+        txHash: null,
+        gasUsed: null,
+      };
+    }
+
+    const submitStartedAt = Date.now();
+    try {
+      const response = await settlementExecute(txs, RELAYER_METADATA_ACTIVATE_FUNDS);
+      logSettlementLifecycle({
+        lifecycle: "activate_submit_response",
+        elapsedMs: Date.now() - submitStartedAt,
+        responseShape: describeShape(response),
+      });
+      const metadata = extractSettlementTxMetadata(response);
+      const observed = await this.observeActivationExecution(response);
+      return {
+        status: observed.status,
+        perAsset,
+        txHash: observed.metadata.txHash ?? metadata.txHash,
+        gasUsed: observed.metadata.gasUsed ?? metadata.gasUsed,
+      };
+    } catch (e) {
+      const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
+      logSettlementLifecycle({
+        lifecycle: confirmedSettlementFailure
+          ? "activate_settlement_failed"
+          : "activate_submit_error",
+        elapsedMs: Date.now() - submitStartedAt,
+        errorMessage: e instanceof Error ? e.message : String(e),
+        errorName: e instanceof Error ? e.name : undefined,
+      });
+      if (!confirmedSettlementFailure) {
+        this.reportInfraAlert(e);
+      }
+      throw e;
+    }
+  }
+
+  private async observeActivationExecution(response: unknown): Promise<{
+    status: DepositActivationResult["status"];
+    metadata: SettlementTxMetadata;
+  }> {
+    if (!response || typeof response !== "object") {
+      return { status: "submitted", metadata: emptySettlementTxMetadata() };
+    }
+    const waitForConfirmation = Reflect.get(response, "wait");
+    if (typeof waitForConfirmation !== "function") {
+      return { status: "submitted", metadata: extractSettlementTxMetadata(response) };
+    }
+    const responseMetadata = extractSettlementTxMetadata(response);
+    try {
+      const result = await Promise.race([
+        (waitForConfirmation as () => Promise<unknown>).call(response),
+        sleep(SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS).then(() => {
+          throw new Error(
+            `Activation confirmation timed out after ${SETTLEMENT_CONFIRM_WAIT_TIMEOUT_MS}ms`,
+          );
+        }),
+      ]);
+      if (!result) return { status: "submitted", metadata: responseMetadata };
+      return {
+        status: "confirmed",
+        metadata: mergeSettlementTxMetadata(extractSettlementTxMetadata(result), responseMetadata),
+      };
+    } catch (err) {
+      if (err instanceof SettlementTransactionFailedError) throw err;
+      this.reportInfraAlert(err);
+      return { status: "submitted", metadata: responseMetadata };
     }
   }
 

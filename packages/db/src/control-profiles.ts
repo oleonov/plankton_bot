@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import {
   DEFAULT_BUY_CAPACITY_POLICY,
+  DEFAULT_DEPOSIT_ACTIVATION_POLICY,
   DEFAULT_EXECUTION_POLICY,
   DEFAULT_ORDER_CAPACITY_POLICY,
   DEFAULT_SELL_CAPACITY_POLICY,
@@ -27,6 +28,13 @@ export interface ControlProfileSeed {
    * doesn't apply). Paper / live-lite get the canonical 2,504 s spec floor.
    */
   readonly defaultEntryMinMarketAgeSeconds: number;
+  /**
+   * Seed `ExecutionPolicy.depositActivation.enabled`. Only live-lite needs
+   * to convert residual USDC.e → pUSD via the Collateral Onramp wrapper;
+   * simulation/paper have no on-chain wallet so the gate is a no-op anyway,
+   * but the seed value drives operator-visible UI defaults.
+   */
+  readonly defaultDepositActivationEnabled: boolean;
 }
 
 export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
@@ -36,6 +44,7 @@ export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
     description: "In-memory simulated execution",
     defaultDeadSideGuardMode: "observe",
     defaultEntryMinMarketAgeSeconds: 0,
+    defaultDepositActivationEnabled: false,
   },
   {
     profileId: ProfileId.Paper,
@@ -43,6 +52,7 @@ export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
     description: "Live market data, simulated orders",
     defaultDeadSideGuardMode: "observe",
     defaultEntryMinMarketAgeSeconds: DEFAULT_EXECUTION_POLICY.entryMinMarketAgeSeconds,
+    defaultDepositActivationEnabled: false,
   },
   {
     profileId: ProfileId.LiveLite,
@@ -50,6 +60,7 @@ export const CONTROL_PROFILES: readonly ControlProfileSeed[] = [
     description: "Real orders with envelope caps",
     defaultDeadSideGuardMode: "enforce",
     defaultEntryMinMarketAgeSeconds: DEFAULT_EXECUTION_POLICY.entryMinMarketAgeSeconds,
+    defaultDepositActivationEnabled: true,
   },
 ];
 
@@ -73,6 +84,10 @@ function defaultExecutionPolicyJson(profile: ControlProfileSeed): string {
     },
     entryMinMarketAgeSeconds: profile.defaultEntryMinMarketAgeSeconds,
     multiBuyLadder: ACTIVE_MULTI_BUY_LADDER_POLICY,
+    depositActivation: {
+      ...DEFAULT_DEPOSIT_ACTIVATION_POLICY,
+      enabled: profile.defaultDepositActivationEnabled,
+    },
   });
 }
 
@@ -122,6 +137,7 @@ export function ensureDefaultExecutionPolicy(db: Database.Database): void {
   backfillSellCapacityPolicy(db);
   backfillOrderCapacityPolicy(db);
   backfillTakerGuardPolicy(db);
+  backfillDepositActivationPolicy(db);
 }
 
 /**
@@ -331,4 +347,39 @@ function backfillTakerGuardPolicy(db: Database.Database): void {
           OR json_type(execution_policy_json, '$.opportunisticTaker.marketableBuyMinNotionalUsdc') IS NULL
         )`,
   ).run();
+}
+
+function backfillDepositActivationPolicy(db: Database.Database): void {
+  const stateColumns = db.prepare(`PRAGMA table_info(runtime_control_state)`).all() as Array<{
+    name: string;
+  }>;
+  const hasVersionColumn = stateColumns.some((c) => c.name === "execution_policy_version");
+  const update = db.prepare(
+    `UPDATE profile_settings
+        SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.depositActivation',
+              json(?)
+            ),
+            updated_at = datetime('now')
+      WHERE profile_id = ?
+        AND execution_policy_json IS NOT NULL
+        AND json_valid(execution_policy_json) = 1
+        AND json_extract(execution_policy_json, '$.depositActivation') IS NULL`,
+  );
+  let totalChanges = 0;
+  for (const profile of CONTROL_PROFILES) {
+    const json = JSON.stringify({
+      ...DEFAULT_DEPOSIT_ACTIVATION_POLICY,
+      enabled: profile.defaultDepositActivationEnabled,
+    });
+    totalChanges += update.run(json, profile.profileId).changes;
+  }
+
+  if (totalChanges > 0 && hasVersionColumn) {
+    db.prepare(
+      `UPDATE runtime_control_state
+          SET execution_policy_version = COALESCE(execution_policy_version, 0) + 1`,
+    ).run();
+  }
 }

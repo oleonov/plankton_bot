@@ -832,7 +832,7 @@ export class ReconciliationModule implements RuntimeModule {
         }
         if (positions) {
           const redeemable = positions.filter((p) => p.redeemable).length;
-          this.log.info(
+          this.log.debug(
             { readMs, positionCount: positions.length, redeemablePositions: redeemable },
             "walletPositionReader.read() ok — publishing PolymarketWalletUpdated",
           );

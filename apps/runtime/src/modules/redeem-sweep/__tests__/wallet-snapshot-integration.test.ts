@@ -157,6 +157,7 @@ describe("redeem sweep wallet snapshot integration", () => {
         enabled: true,
         intervalMs: 60_000,
       }),
+      depositActivationPolicy: () => ({ enabled: false, minAmountUsdcCents: 100 }),
       log: logger(),
       runtimeMetrics: { writeEvent: vi.fn(), writeLatest: vi.fn() } as any,
       now: () => Date.now(),

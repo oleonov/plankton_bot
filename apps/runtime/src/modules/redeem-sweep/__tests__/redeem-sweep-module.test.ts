@@ -191,6 +191,10 @@ function makeHarness(
       retryBackoffMs: [60_000, 300_000, 1_800_000],
       ...(opts.policy ?? {}),
     }),
+    depositActivationPolicy: () => ({
+      enabled: false,
+      minAmountUsdcCents: 100,
+    }),
     log,
     runtimeMetrics: runtimeMetrics as any,
     now: () => Date.now(),

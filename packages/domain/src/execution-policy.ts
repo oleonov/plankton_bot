@@ -11,6 +11,7 @@
 import type {
   BuyCapacityPolicy,
   DeadSideGuardPolicy,
+  DepositActivationPolicy,
   ExecutionPolicy,
   ExecutionPricingPolicy,
   ExecutionPolicyTelemetry,
@@ -129,6 +130,11 @@ export const DEFAULT_RACE_PROTECTION_POLICY: RaceProtectionPolicy = {
   },
 };
 
+export const DEFAULT_DEPOSIT_ACTIVATION_POLICY: DepositActivationPolicy = {
+  enabled: true,
+  minAmountUsdcCents: 100,
+};
+
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
   enabled: true,
   enforcement: "enforce",
@@ -205,6 +211,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   profitTarget: DEFAULT_PROFIT_TARGET_POLICY,
   dustAbandonment: DEFAULT_DUST_ABANDONMENT_POLICY,
   repriceChain: DEFAULT_REPRICE_CHAIN_POLICY,
+  depositActivation: DEFAULT_DEPOSIT_ACTIVATION_POLICY,
 };
 
 const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
@@ -342,6 +349,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const profitTarget = parseProfitTarget(obj.profitTarget, issues);
   const dustAbandonment = parseDustAbandonment(obj.dustAbandonment, issues);
   const repriceChain = parseRepriceChain(obj.repriceChain, issues);
+  const depositActivation = parseDepositActivation(obj.depositActivation, issues);
 
   return {
     policy: {
@@ -369,6 +377,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       profitTarget,
       dustAbandonment,
       repriceChain,
+      depositActivation,
     },
     issues,
   };
@@ -1358,6 +1367,30 @@ function intListOr(
     parsed.push(value);
   }
   return parsed;
+}
+
+function parseDepositActivation(raw: unknown, issues: string[]): DepositActivationPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("depositActivation must be an object");
+    return DEFAULT_DEPOSIT_ACTIVATION_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_DEPOSIT_ACTIVATION_POLICY.enabled,
+      issues,
+      "depositActivation.enabled",
+    ),
+    minAmountUsdcCents: clampedInt(
+      obj.minAmountUsdcCents,
+      DEFAULT_DEPOSIT_ACTIVATION_POLICY.minAmountUsdcCents,
+      0,
+      1_000_000_00,
+      issues,
+      "depositActivation.minAmountUsdcCents",
+    ),
+  };
 }
 
 /** Serialize an ExecutionPolicy back to the compact JSON used by the DB. */

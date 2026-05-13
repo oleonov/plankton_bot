@@ -85,6 +85,19 @@ export interface RedeemPositionsResult {
   readonly gasUsed?: number | null;
 }
 
+export interface DepositActivationResult {
+  readonly status: "skipped_no_residue" | "skipped_below_min" | "submitted" | "confirmed";
+  readonly perAsset: ReadonlyArray<{
+    readonly asset: string;
+    readonly symbol: string;
+    readonly balanceWei: string;
+    readonly activatedWei: string;
+    readonly reason?: string;
+  }>;
+  readonly txHash: string | null;
+  readonly gasUsed: number | null;
+}
+
 export interface ExchangeOrder {
   readonly orderId: string;
   readonly clientOrderId: string;
@@ -534,6 +547,13 @@ export interface ExchangeGateway {
    * cache the value per condition since fee metadata is static.
    */
   getMarketFeeInfo?(conditionId: string): Promise<MarketFeeInfo | null>;
+
+  /**
+   * Convert residual USDC.e / native USDC on the proxy wallet to V2 pUSD so the
+   * balance is visible to the Polymarket Exchange. Live-lite only; optional on
+   * all other implementations.
+   */
+  activatePendingUsdcCollateral?(opts: { minAmountWei: bigint }): Promise<DepositActivationResult>;
 }
 
 /**

@@ -843,6 +843,13 @@ export interface ExecutionPolicy {
   dustAbandonment: DustAbandonmentPolicyConfig;
   /** CHANGE C — per-token 24h reprice chain cap config. */
   repriceChain: RepriceChainPolicyConfig;
+  depositActivation: DepositActivationPolicy;
+}
+
+export interface DepositActivationPolicy {
+  enabled: boolean;
+  /** Minimum USDC-equivalent balance in cents (e.g. 100 = $1.00) to trigger activation. */
+  minAmountUsdcCents: number;
 }
 
 export interface ProfileSummary {

@@ -6,10 +6,12 @@ import type {
   OrderRepository,
   PositionRepository,
   RedeemSweepPolicy,
+  RiskEventRepository,
   RuntimeControl,
   RuntimeEventMap,
   RuntimeModule,
   RedeemPositionsResult,
+  DepositActivationPolicy,
 } from "@krabs/domain";
 import { createTokenId } from "@krabs/domain";
 import type { PolymarketPositionReader } from "@krabs/exchange";
@@ -23,6 +25,7 @@ const RPC_RATE_LIMIT_HARD_PAUSE_MS = 5 * 60_000;
 const STATE_FAILED_COOLDOWN_MS = 30 * 60_000;
 const STABILITY_SNAPSHOTS_REQUIRED = 2;
 const PAUSE_DEFER_RECHECK_MS = 30_000;
+const DEPOSIT_ACTIVATION_PERIODIC_COOLDOWN_MS = 60 * 60_000;
 
 interface RedeemSweepDeps {
   bus: EventBus;
@@ -34,8 +37,10 @@ interface RedeemSweepDeps {
   orderRepo?: OrderRepository | undefined;
   redeemLogRepo: SqliteRedeemLogRepository;
   policy: () => RedeemSweepPolicy;
+  depositActivationPolicy: () => DepositActivationPolicy;
   log: Logger;
   runtimeMetrics?: RuntimeMetricWriter | undefined;
+  riskEventRepo?: RiskEventRepository | undefined;
   now?: () => number;
   /**
    * Optional pause gate. When the runtime is paused, periodic and
@@ -84,6 +89,7 @@ export class RedeemSweepModule implements RuntimeModule {
   private pendingSweepReason: string | null = null;
   private started = false;
   private pendingOrphanMarking = false;
+  private lastActivationAttemptAt = 0;
 
   constructor(private readonly deps: RedeemSweepDeps) {}
 
@@ -187,11 +193,17 @@ export class RedeemSweepModule implements RuntimeModule {
     if (!this.deps.policy().enabled) return;
     await this.waitForStartupLoad();
     const redeemable = event.positions.filter((p) => p.redeemable).length;
+    if (redeemable === 0) {
+      this.deps.log.debug(
+        { totalPositions: event.positions.length, redeemablePositions: redeemable },
+        "redeem sweep wallet-event received (no redeemable)",
+      );
+      return;
+    }
     this.deps.log.info(
       { totalPositions: event.positions.length, redeemablePositions: redeemable },
       "redeem sweep wallet-event received",
     );
-    if (redeemable === 0) return;
     await this.runSweep("wallet-event");
   }
 
@@ -239,15 +251,17 @@ export class RedeemSweepModule implements RuntimeModule {
       return;
     }
     const redeemableCount = positions.filter((p) => p.redeemable).length;
-    this.deps.log.info(
-      {
-        source,
-        readMs,
-        totalPositions: positions.length,
-        redeemablePositions: redeemableCount,
-      },
-      "redeem sweep snapshot",
-    );
+    const snapshotPayload = {
+      source,
+      readMs,
+      totalPositions: positions.length,
+      redeemablePositions: redeemableCount,
+    };
+    if (redeemableCount > 0) {
+      this.deps.log.info(snapshotPayload, "redeem sweep snapshot");
+    } else {
+      this.deps.log.debug(snapshotPayload, "redeem sweep snapshot");
+    }
     await this.processPositions(
       positions.map((position) => ({
         tokenId: position.tokenId,
@@ -259,6 +273,21 @@ export class RedeemSweepModule implements RuntimeModule {
       })),
       source,
     );
+
+    // Periodic safety-net: when there is nothing to redeem, check whether
+    // residual USDC.e needs activation (e.g. after a manual redeem outside this
+    // bot). Rate-limited so a busy sweep cycle doesn't hammer the RPC.
+    if (redeemableCount === 0) {
+      const sinceLast = this.now() - this.lastActivationAttemptAt;
+      if (sinceLast >= DEPOSIT_ACTIVATION_PERIODIC_COOLDOWN_MS) {
+        await this.tryActivateUsdcCollateral("periodic-safety-net");
+      } else {
+        this.deps.log.debug(
+          { source, sinceLastMs: sinceLast, cooldownMs: DEPOSIT_ACTIVATION_PERIODIC_COOLDOWN_MS },
+          "deposit activation safety-net rate-limited",
+        );
+      }
+    }
   }
 
   private async waitForStartupLoad(): Promise<void> {
@@ -580,6 +609,12 @@ export class RedeemSweepModule implements RuntimeModule {
         } else {
           this.inFlightByCondition.delete(group.conditionId);
         }
+      }
+      // Fire activation only on confirmed success — on "submitted" the USDC.e
+      // hasn't landed on the proxy yet, and the periodic safety-net will cover
+      // the eventual confirmation.
+      if (redeemLogStatus === "success") {
+        await this.tryActivateUsdcCollateral("post-redeem");
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
@@ -913,6 +948,52 @@ export class RedeemSweepModule implements RuntimeModule {
         updatedAt,
       });
     }
+  }
+
+  private async tryActivateUsdcCollateral(trigger: string): Promise<void> {
+    const activationPolicy = this.deps.depositActivationPolicy();
+    if (!activationPolicy.enabled) return;
+    const gateway = this.deps.gateway;
+    if (!gateway.activatePendingUsdcCollateral) return;
+    if (this.isSweepHardPaused()) return;
+    if (this.deps.runtimeControl?.isPaused()) return;
+
+    // cents × 10^4 → 6-decimal raw (USDC has 6 decimals, 1 cent = 0.01 USDC = 10_000 raw)
+    const minAmountWei = BigInt(activationPolicy.minAmountUsdcCents) * 10_000n;
+    try {
+      const result = await gateway.activatePendingUsdcCollateral({ minAmountWei });
+      // Mark the attempt as completed only on a clean return so a transient
+      // failure does not silence the 1h periodic safety-net.
+      this.lastActivationAttemptAt = this.now();
+      this.deps.log.info(
+        { trigger, status: result.status, perAsset: result.perAsset, txHash: result.txHash },
+        "deposit activation attempted",
+      );
+      this.recordActivationAudit(trigger, result.status, result, null);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.deps.log.warn({ trigger, errorMsg }, "deposit activation failed");
+      this.recordActivationAudit(trigger, "error", null, errorMsg);
+    }
+  }
+
+  private recordActivationAudit(
+    trigger: string,
+    status: string,
+    result: { perAsset: unknown; txHash: unknown; gasUsed: unknown } | null,
+    error: string | null,
+  ): void {
+    this.deps.riskEventRepo?.insert({
+      eventType: "deposit-activation",
+      payload: {
+        trigger,
+        status,
+        perAsset: result?.perAsset ?? [],
+        txHash: result?.txHash ?? null,
+        gasUsed: result?.gasUsed ?? null,
+        error,
+      },
+    });
   }
 
   private recordMetric(metricName: string, group: RedeemGroup): void {

@@ -164,6 +164,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     ...(traderAddress ? { traderAddress } : {}),
     ...(onInfraAlert ? { onInfraAlert } : {}),
     ...(collateralResolver ? { collateralResolver } : {}),
+    ...(polygonRpcUrl ? { rpcUrl: polygonRpcUrl } : {}),
   };
   return {
     marketDataGateway: new LiveMarketDataGateway(liveMarketDataConfig),
