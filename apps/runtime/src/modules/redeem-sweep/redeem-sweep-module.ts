@@ -186,7 +186,12 @@ export class RedeemSweepModule implements RuntimeModule {
   ): Promise<void> {
     if (!this.deps.policy().enabled) return;
     await this.waitForStartupLoad();
-    if (!event.positions.some((position) => position.redeemable)) return;
+    const redeemable = event.positions.filter((p) => p.redeemable).length;
+    this.deps.log.info(
+      { totalPositions: event.positions.length, redeemablePositions: redeemable },
+      "redeem sweep wallet-event received",
+    );
+    if (redeemable === 0) return;
     await this.runSweep("wallet-event");
   }
 
@@ -209,16 +214,40 @@ export class RedeemSweepModule implements RuntimeModule {
   }
 
   private async doSweep(source: string): Promise<void> {
-    if (!this.started || !this.deps.policy().enabled) return;
-    if (this.isSweepHardPaused()) return;
+    if (!this.started || !this.deps.policy().enabled) {
+      this.deps.log.info(
+        { source, started: this.started, enabled: this.deps.policy().enabled },
+        "redeem sweep doSweep skipped",
+      );
+      return;
+    }
+    if (this.isSweepHardPaused()) {
+      this.deps.log.info({ source }, "redeem sweep doSweep skipped — hard-paused");
+      return;
+    }
     if (this.deps.runtimeControl?.isPaused()) {
       this.deps.log.debug({ source }, "redeem sweep skipped while runtime is paused");
       return;
     }
     await this.waitForStartupLoad();
     await this.runDeferredOrphanMarkingIfNeeded();
+    const readStart = this.now();
     const positions = await this.deps.positionReader.read();
-    if (!positions) return;
+    const readMs = this.now() - readStart;
+    if (!positions) {
+      this.deps.log.warn({ source, readMs }, "redeem sweep positionReader returned null");
+      return;
+    }
+    const redeemableCount = positions.filter((p) => p.redeemable).length;
+    this.deps.log.info(
+      {
+        source,
+        readMs,
+        totalPositions: positions.length,
+        redeemablePositions: redeemableCount,
+      },
+      "redeem sweep snapshot",
+    );
     await this.processPositions(
       positions.map((position) => ({
         tokenId: position.tokenId,
@@ -306,12 +335,33 @@ export class RedeemSweepModule implements RuntimeModule {
     }
 
     const readyGroups: RedeemGroup[] = [];
+    let unstableSkipped = 0;
+    let activeOrdersSkipped = 0;
     for (const [conditionId, rows] of byCondition) {
       const group = this.buildGroup(conditionId, rows, positions);
-      if (!this.isStableRedeemCandidate(group)) continue;
-      if (this.hasActiveOrders(group, source)) continue;
+      if (!this.isStableRedeemCandidate(group)) {
+        unstableSkipped++;
+        continue;
+      }
+      if (this.hasActiveOrders(group, source)) {
+        activeOrdersSkipped++;
+        continue;
+      }
       readyGroups.push(group);
     }
+
+    this.deps.log.info(
+      {
+        source,
+        redeemablePositions: redeemable.length,
+        conditionGroups: byCondition.size,
+        readyGroups: readyGroups.length,
+        unstableSkipped,
+        activeOrdersSkipped,
+        stabilityRequired: STABILITY_SNAPSHOTS_REQUIRED,
+      },
+      "redeem sweep processed positions",
+    );
 
     for (let index = 0; index < readyGroups.length; index += REDEEM_BATCH_SIZE) {
       const batch = readyGroups.slice(index, index + REDEEM_BATCH_SIZE);

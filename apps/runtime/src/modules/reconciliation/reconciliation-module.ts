@@ -344,11 +344,13 @@ export class ReconciliationModule implements RuntimeModule {
     try {
       const ranAt = Date.now();
       const allDetails: string[] = [];
+      const stageTimingsMs: Record<string, number> = {};
 
       // 1. Order reconciliation
       // Grace = 2 intervals + 30s buffer. Covers worst case: order placed right after
       // pass N, still absent on pass N+1 (60s) and N+2 (120s), only phantom-cancel on N+3.
       const graceMs = this.deps.reconcileIntervalMs * 2 + 30_000;
+      const stageOrdersStart = Date.now();
       const orderResult = await reconcileOrders({
         gateway: this.deps.gateway,
         orderRepo: this.deps.orderRepo,
@@ -357,10 +359,12 @@ export class ReconciliationModule implements RuntimeModule {
         log: this.log,
         phantomGraceMs: graceMs,
       });
+      stageTimingsMs.orders = Date.now() - stageOrdersStart;
       allDetails.push(...orderResult.details);
 
       // 2. Fill reconciliation (startup uses sinceMs=0, periodic uses last run)
       const sinceMs = this.lastRunAt ?? 0;
+      const stageFillsStart = Date.now();
       const fillResult = await reconcileFills(
         {
           gateway: this.deps.gateway,
@@ -371,6 +375,7 @@ export class ReconciliationModule implements RuntimeModule {
         },
         sinceMs,
       );
+      stageTimingsMs.fills = Date.now() - stageFillsStart;
       allDetails.push(...fillResult.details);
 
       // 3. Stale entry order cleanup
@@ -382,6 +387,7 @@ export class ReconciliationModule implements RuntimeModule {
               riskEventRepo: this.deps.riskEventRepo,
             }
           : undefined;
+      const stageStaleStart = Date.now();
       const staleResult = await cleanStaleEntryOrders(
         {
           orderRepo: this.deps.orderRepo,
@@ -403,6 +409,7 @@ export class ReconciliationModule implements RuntimeModule {
         this.staleBackoffMap,
         this.sellDownpriceRepriceMap,
       );
+      stageTimingsMs.stale = Date.now() - stageStaleStart;
       if (staleResult.staleTtlCancelled > 0) {
         allDetails.push(`stale entry TTL cancels: ${staleResult.staleTtlCancelled}`);
       }
@@ -435,6 +442,7 @@ export class ReconciliationModule implements RuntimeModule {
       }
 
       // 4. Wallet↔ledger sentinel
+      const stageSentinelStart = Date.now();
       const rawWalletResult = this.deps.walletPositionSentinel
         ? await runWalletPositionSentinel(this.deps.walletPositionSentinel, ranAt)
         : {
@@ -446,6 +454,7 @@ export class ReconciliationModule implements RuntimeModule {
             missingRemotePositions: [],
             autoClosedMissingRemotePositions: [],
           };
+      stageTimingsMs.sentinel = Date.now() - stageSentinelStart;
       const walletResult = await this.confirmWalletSentinelDrifts(rawWalletResult);
       const walletSentinelSeverity = this.updateWalletSentinelConsecutiveCounts(walletResult);
       allDetails.push(...walletResult.details);
@@ -477,7 +486,9 @@ export class ReconciliationModule implements RuntimeModule {
 
       // 4b. Push exchange snapshot + wallet snapshot into ExchangeStateStore.
       // Best-effort: a sentinel failure must not abort the reconciliation pass.
+      const stagePublishStart = Date.now();
       await this.publishExchangeState(orderResult, ranAt);
+      stageTimingsMs.publishExchangeState = Date.now() - stagePublishStart;
 
       // 5. Build result
       const clean =
@@ -526,6 +537,13 @@ export class ReconciliationModule implements RuntimeModule {
 
       await this.deps.bus.publish("ReconciliationComplete", { result });
 
+      if (lagMs >= 5_000) {
+        this.log.warn(
+          { run: this.runCount, lagMs, stageTimingsMs },
+          "reconciliation pass slow — per-stage timings",
+        );
+      }
+
       this.log.info(
         {
           run: this.runCount,
@@ -544,6 +562,8 @@ export class ReconciliationModule implements RuntimeModule {
           stuckSellWarnings: staleResult.stuckSellWarnings,
           walletPositionDrifts: walletResult.driftCount,
           walletPositionMarkUpdates: walletResult.markUpdateCount,
+          lagMs,
+          stageTimingsMs,
         },
         "reconciliation pass complete",
       );
@@ -801,8 +821,21 @@ export class ReconciliationModule implements RuntimeModule {
 
     if (this.deps.walletPositionReader) {
       try {
+        const readStart = Date.now();
         const positions = await this.deps.walletPositionReader.read();
+        const readMs = Date.now() - readStart;
+        if (readMs >= 2_000) {
+          this.log.warn(
+            { readMs, positionCount: positions?.length ?? null },
+            "walletPositionReader.read() slow",
+          );
+        }
         if (positions) {
+          const redeemable = positions.filter((p) => p.redeemable).length;
+          this.log.info(
+            { readMs, positionCount: positions.length, redeemablePositions: redeemable },
+            "walletPositionReader.read() ok — publishing PolymarketWalletUpdated",
+          );
           store.updateWalletPositionsBatch(
             positions.map((p) => ({ tokenId: p.tokenId, size: p.size })),
             ranAt,
