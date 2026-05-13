@@ -1278,24 +1278,21 @@ export class SignalToOrderBridge {
   ): void {
     try {
       const capturedAt = new Date(this.now()).toISOString();
-      this.deps.runtimeMetrics?.writeEvent(
+      this.deps.runtimeMetrics?.writeCounter(
         "order_priced_mode_total",
         1,
         JSON.stringify({ mode: executionTerms.pricedMode, side: signal.side }),
-        capturedAt,
       );
       if (executionTerms.pricedMode === "taker") {
-        this.deps.runtimeMetrics?.writeEvent(
+        this.deps.runtimeMetrics?.writeCounter(
           "taker_decision_total",
           1,
           JSON.stringify({ side: signal.side, spread_ticks: executionTerms.spreadTicks ?? null }),
-          capturedAt,
         );
-        this.deps.runtimeMetrics?.writeEvent(
+        this.deps.runtimeMetrics?.writeCounter(
           "taker_attempt_total",
           1,
           JSON.stringify({ side: signal.side, mode: "success" }),
-          capturedAt,
         );
         const day = capturedAt.slice(0, 10);
         if (this.lastTakerInfoLogDay !== day) {
@@ -1313,14 +1310,13 @@ export class SignalToOrderBridge {
         }
       }
       if (executionTerms.pricedMode === "bid-anchored") {
-        this.deps.runtimeMetrics?.writeEvent(
+        this.deps.runtimeMetrics?.writeCounter(
           "bid_anchored_decision_total",
           1,
           JSON.stringify({
             side: signal.side,
             anchor_ticks_used: executionTerms.anchorTicksUsed ?? null,
           }),
-          capturedAt,
         );
       }
     } catch (err) {
@@ -1342,7 +1338,6 @@ export class SignalToOrderBridge {
     },
   ): void {
     try {
-      const capturedAt = new Date(this.now()).toISOString();
       const labels = {
         side: signal.side,
         token_id: String(signal.tokenId),
@@ -1357,23 +1352,20 @@ export class SignalToOrderBridge {
           block.minNotionalUsdc === null ? null : block.minNotionalUsdc * block.safetyBuffer,
         safety_buffer: block.safetyBuffer,
       };
-      this.deps.runtimeMetrics?.writeEvent(
+      this.deps.runtimeMetrics?.writeCounter(
         "taker_disabled_min_size_total",
         1,
         JSON.stringify(labels),
-        capturedAt,
       );
-      this.deps.runtimeMetrics?.writeEvent(
+      this.deps.runtimeMetrics?.writeCounter(
         "taker_attempt_total",
         1,
         JSON.stringify({ side: signal.side, mode: "rejected", reason: "min_size" }),
-        capturedAt,
       );
-      this.deps.runtimeMetrics?.writeEvent(
+      this.deps.runtimeMetrics?.writeCounter(
         "taker_disabled_fraction_over_threshold",
         1,
         JSON.stringify({ side: signal.side, bucket: takerFractionBucket(signal, block) }),
-        capturedAt,
       );
     } catch (err) {
       this.log.debug(

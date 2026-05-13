@@ -1499,7 +1499,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   });
 
   it("uses opportunistic taker pricing for BUY when spread is one tick", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
@@ -1518,22 +1518,20 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.1);
     expect(placed[0]!.command.postOnly).toBe(false);
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "order_priced_mode_total",
       1,
       JSON.stringify({ mode: "taker", side: "buy" }),
-      expect.any(String),
     );
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_decision_total",
       1,
       JSON.stringify({ side: "buy", spread_ticks: 1 }),
-      expect.any(String),
     );
   });
 
   it("allows sub-dollar BUY taker when market min size is below the signal size", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
@@ -1552,16 +1550,15 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.1);
     expect(placed[0]!.command.postOnly).toBe(false);
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_decision_total",
       1,
       JSON.stringify({ side: "buy", spread_ticks: 1 }),
-      expect.any(String),
     );
   });
 
   it("keeps BUY maker when taker notional is below the live-lite entry floor", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       liveLiteGuard: {
@@ -1584,13 +1581,12 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.09);
     expect(placed[0]!.command.postOnly).toBe(true);
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_min_size_total",
       1,
       expect.stringContaining('"requested_size_usdc":0.99'),
-      expect.any(String),
     );
-    const minSizeCall = metrics.writeEvent.mock.calls.find(
+    const minSizeCall = metrics.writeCounter.mock.calls.find(
       (call) => call[0] === "taker_disabled_min_size_total",
     );
     expect(JSON.parse(minSizeCall![2] as string)).toMatchObject({
@@ -1601,17 +1597,15 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       required_notional_usdc: 1.05,
       safety_buffer: 1.05,
     });
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_fraction_over_threshold",
       1,
       JSON.stringify({ side: "buy", bucket: "0.8-0.95" }),
-      expect.any(String),
     );
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_attempt_total",
       1,
       JSON.stringify({ side: "buy", mode: "rejected", reason: "min_size" }),
-      expect.any(String),
     );
   });
 
@@ -1636,7 +1630,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   });
 
   it("applies market min size guard to SELL taker decisions", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
@@ -1660,16 +1654,15 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(0);
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_min_size_total",
       1,
       expect.stringContaining('"side":"sell"'),
-      expect.any(String),
     );
   });
 
   it("records all enriched taker min-size metric fields", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
@@ -1692,7 +1685,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     });
     await bus.drain();
 
-    const minSizeCall = metrics.writeEvent.mock.calls.find(
+    const minSizeCall = metrics.writeCounter.mock.calls.find(
       (call) => call[0] === "taker_disabled_min_size_total",
     );
     expect(minSizeCall).toBeTruthy();
@@ -1711,7 +1704,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   });
 
   it("buckets near-threshold taker min-size blocks", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
@@ -1733,16 +1726,15 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     });
     await bus.drain();
 
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_fraction_over_threshold",
       1,
       JSON.stringify({ side: "sell", bucket: "0.95-1.0" }),
-      expect.any(String),
     );
   });
 
   it("buckets far-from-threshold taker min-size blocks", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
@@ -1764,16 +1756,15 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     });
     await bus.drain();
 
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_fraction_over_threshold",
       1,
       JSON.stringify({ side: "sell", bucket: "0-0.5" }),
-      expect.any(String),
     );
   });
 
   it("uses configured taker safety buffer", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
@@ -1801,11 +1792,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.postOnly).toBeUndefined();
     expect(placed[0]!.command.price).toBe(0.09);
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_min_size_total",
       1,
       expect.stringContaining('"safety_buffer":2'),
-      expect.any(String),
     );
   });
 
@@ -1853,7 +1843,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   });
 
   it("keeps maker pricing when opportunistic taker spread is above threshold", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
@@ -1872,11 +1862,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.1);
     expect(placed[0]!.command.postOnly).toBeUndefined();
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "bid_anchored_decision_total",
       1,
       JSON.stringify({ side: "sell", anchor_ticks_used: 4 }),
-      expect.any(String),
     );
   });
 
@@ -1954,7 +1943,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
   });
 
   it("ladder BUY posts at ladderTargetPrice even when bestBid moved", async () => {
-    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn() };
+    const metrics = { writeEvent: vi.fn(), writeLatest: vi.fn(), writeCounter: vi.fn() };
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
     });
@@ -1968,11 +1957,10 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.1);
-    expect(metrics.writeEvent).toHaveBeenCalledWith(
+    expect(metrics.writeCounter).toHaveBeenCalledWith(
       "order_priced_mode_total",
       1,
       JSON.stringify({ mode: "ladder", side: "buy" }),
-      expect.any(String),
     );
   });
 

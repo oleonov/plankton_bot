@@ -402,6 +402,10 @@ async function main(): Promise<void> {
   // so the BUY-admission fail-closed path can report through the standard
   // `infra_alert` channel (surfaced in /status and the web banner).
   const runtimeMetrics = new RuntimeMetricWriter(ledgerConn.db);
+  // Aggregated counter flush — high-frequency `*_total` metrics buffer in
+  // memory and persist as one row per (name, labels) pair every 30s. Keeps
+  // total runtime_metrics write rate from dominating SQLite disk I/O.
+  runtimeMetrics.startPeriodicFlush(30_000);
   const recordInfraAlert = (alert: {
     code: string;
     severity: "warning" | "error";
@@ -1887,6 +1891,13 @@ async function main(): Promise<void> {
     clearInterval(universeFunnelLogTimer);
     selectedMarketCache.dispose();
     candidateBookCache?.dispose();
+
+    runtimeMetrics.stopPeriodicFlush();
+    try {
+      runtimeMetrics.flushCounters();
+    } catch (err) {
+      log.warn({ err }, "final runtime metrics flush failed");
+    }
 
     if (statePublisherRef.current) {
       statePublisherRef.current.stopHeartbeatLoop();
