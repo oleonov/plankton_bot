@@ -434,11 +434,14 @@ const CONTINUATION_TRADE_COUNT_CAP = 6;
  */
 const EVALUATE_YIELD_BATCH = 50;
 const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
-// The suppression cache only needs to hold the last NOISY_SUPPRESSION_DEDUPE_MS
-// (10 min) of (tokenId, reason) pairs; even at the worst observed signal-rate
-// of ~15/sec × 600 s = 9 000 unique keys/window. 5 000 is comfortably above
-// steady-state and keeps the worst-case Map ≈ 400 KB instead of ≈ 4 MB.
-const MAX_SUPPRESSION_DEDUPE_KEYS = 5_000;
+// The suppression cache holds the last NOISY_SUPPRESSION_DEDUPE_MS (10 min)
+// of (tokenId, reason) pairs. At the worst observed signal-rate of ~15/sec ×
+// 600 s = 9 000 unique keys/window. Cap MUST stay above 9 000: when the map
+// exceeds the cap, `pruneSuppressionDedupe` evicts oldest keys even if their
+// 10-min window hasn't expired, which would silently shrink the effective
+// dedupe window. 10 000 covers worst case with ~10% headroom while keeping
+// the worst-case Map ≈ 800 KB instead of ≈ 4 MB (50 000 was 5× over-budget).
+const MAX_SUPPRESSION_DEDUPE_KEYS = 10_000;
 const DEFAULT_BUY_BUDGET_COOLDOWN_MS = 15 * 60 * 1000;
 const WALLET_BUY_BUDGET_EXHAUSTED_REASON = "wallet_buy_budget_exhausted";
 const BUY_BUDGET_COOLDOWN_REASONS = new Set([
@@ -480,6 +483,15 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // the rest of the leg's life unless price-recovery / new BUY clears it.
   // Dedupe so decision_signal_log stays readable.
   DUST_ABANDONED_REASON,
+  // order-size-below-minimum (perf-pack pre-filter): a sized leg whose
+  // suggestedSize at the current price stays below market.minOrderSize is
+  // sticky across sweep ticks (≈1/sec). Without dedupe each such token
+  // would write a signal_suppressed row every tick, defeating the very
+  // pipeline-volume reduction the pre-filter exists to achieve.
+  // Kept per-token rather than added to ENTRY_SWEEP_AGGREGATED_*: below-min
+  // is a per-leg pricing/budget condition, not a fleet-wide-unavailable
+  // condition, so each token's row preserves a useful diagnostic dimension.
+  "order-size-below-minimum",
 ]);
 const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
@@ -499,6 +511,26 @@ function findBuyBudgetCooldownReason(reason: string): string | null {
     if (BUY_BUDGET_COOLDOWN_REASONS.has(exactReason)) return exactReason;
   }
   return null;
+}
+
+// Returns the largest plausible BUY order size for the
+// `order-size-below-minimum` pre-filter. signal-to-order computes the actual
+// size at the resolved execution price (bestBid for edge mode, bestAsk for
+// opportunistic taker, anchor-derived for SELL). For BUY, dividing by the
+// LOWEST realistic execution price yields the LARGEST possible share count,
+// keeping this gate strictly more permissive than downstream: it suppresses
+// only signals that cannot be executable under any pricing mode.
+function computeBuyOrderSizeForFilter(
+  suggestedSizeUsdc: number,
+  market: NormalizedMarket,
+  fallbackPrice: number,
+): number {
+  const bestBid = market.bestBid;
+  const price =
+    typeof bestBid === "number" && Number.isFinite(bestBid) && bestBid > 0
+      ? bestBid
+      : fallbackPrice;
+  return price > 0 ? suggestedSizeUsdc / price : 0;
 }
 
 export class AlgoDecisionModule implements RuntimeModule {
@@ -1531,14 +1563,21 @@ export class AlgoDecisionModule implements RuntimeModule {
     const suggestedSizeUsdc = sizeResult.sizeUsdc;
     const suggestedSize = ctx.price > 0 ? suggestedSizeUsdc / ctx.price : 0;
 
-    // Pre-filter signals whose size cannot meet the exchange minOrderSize at
-    // the current suggestion price. signal-to-order also catches this with
-    // the execution price (which may differ post-pricing), but doing the
-    // check here eliminates ~38% of observed signals before they hit the
-    // bus, risk-gate, and pricing pipeline. Sell uses the share count
-    // directly; buy approximates orderSize = suggestedSizeUsdc / ctx.price
-    // — matching the formula in signal-to-order.resolveOrderSize().
-    if (!isExecutableOrderSize(suggestedSize, market.minOrderSize)) {
+    // Pre-filter signals whose size CANNOT meet `market.minOrderSize` under
+    // any realistic execution price. The downstream check in
+    // `signal-to-order.resolveOrderSize` is authoritative — this gate exists
+    // only to keep guaranteed-rejected signals off the bus + risk-gate +
+    // pricing pipeline. To stay strictly more permissive than downstream,
+    // BUY size is estimated at `market.bestBid` (the lowest realistic BUY
+    // execution price; edge-mode pricing uses bestBid, taker mode uses
+    // bestAsk which produces a smaller size). Falling back to ctx.price
+    // (midPrice) when bestBid is unavailable. SELL share-count comes from
+    // suggestedSize directly, matching resolveOrderSize().
+    const sizeForExecutability =
+      side === "buy"
+        ? computeBuyOrderSizeForFilter(suggestedSizeUsdc, market, ctx.price)
+        : suggestedSize;
+    if (!isExecutableOrderSize(sizeForExecutability, market.minOrderSize)) {
       this.recordDecisionSuppressed({
         tokenId: market.tokenId,
         conditionId: market.conditionId,

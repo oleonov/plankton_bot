@@ -385,6 +385,138 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("pre-filter uses bestBid (not midPrice) for BUY executability — keeps signals downstream would accept", async () => {
+    // Spec: order-size-below-minimum pre-filter must stay strictly more
+    // permissive than signal-to-order.resolveOrderSize, which uses the
+    // edge-mode execution price (= bestBid for BUY). Sizing here:
+    //   suggestedSizeUsdc = $0.99 (B5 probe-entry seed)
+    //   midPrice = 0.20 → size@mid = 4.95
+    //   bestBid  = 0.18 → size@bestBid = 5.50
+    //   minOrderSize = 5
+    // size@mid would (incorrectly) suppress this signal even though
+    // signal-to-order at edge mode would accept it.
+    const tokenId = "token-edge-bid";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    const market: NormalizedMarket = {
+      ...makeMarket(tokenId, null, 0.2),
+      bestBid: 0.18,
+      bestAsk: 0.22,
+      minOrderSize: 5,
+    };
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls.length).toBe(1);
+
+    await mod.stop();
+  });
+
+  it("pre-filter suppresses BUY whose size cannot meet minOrderSize even at bestBid", async () => {
+    const tokenId = "token-truly-below-min";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    // size@bestBid = 0.99 / 0.45 ≈ 2.2 shares — below min=5 under any price.
+    const market: NormalizedMarket = {
+      ...makeMarket(tokenId, null, 0.5),
+      bestBid: 0.45,
+      bestAsk: 0.55,
+      minOrderSize: 5,
+    };
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls.length).toBe(0);
+
+    await mod.stop();
+  });
+
+  it("falls back to midPrice when bestBid is null and still suppresses below-min BUY", async () => {
+    const tokenId = "token-no-bestbid";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    // No bestBid → fallback to midPrice. size@mid = 0.99 / 0.50 ≈ 1.98 < 5.
+    const market: NormalizedMarket = {
+      ...makeMarket(tokenId, null, 0.5),
+      bestBid: null,
+      bestAsk: null,
+      minOrderSize: 5,
+    };
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls.length).toBe(0);
+
+    await mod.stop();
+  });
+
+  it("dedupes order-size-below-minimum signal_suppressed rows across sweeps", async () => {
+    const tokenId = "token-sticky-below-min";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({ riskEventRepo });
+    await mod.start();
+
+    // Sticky below-min market: size ≈ 2.2 shares < min=5 on every sweep.
+    const market: NormalizedMarket = {
+      ...makeMarket(tokenId, null, 0.5),
+      bestBid: 0.45,
+      bestAsk: 0.55,
+      minOrderSize: 5,
+    };
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+    // Second sweep within the 10-min dedupe window — must NOT write another
+    // signal_suppressed row for the same (reasonCode, tokenId, conditionId,
+    // side, continuationMode) key.
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now() + 1_000,
+    });
+
+    const belowMinInserts = vi
+      .mocked(riskEventRepo.insert)
+      .mock.calls.filter(
+        ([event]) =>
+          event.eventType === "signal_suppressed" &&
+          (event.payload as { reasonCode: string }).reasonCode === "order-size-below-minimum",
+      );
+    expect(belowMinInserts).toHaveLength(1);
+
+    await mod.stop();
+  });
+
   it("emits SignalProduced for eligible token with no familyId", async () => {
     const tokenId = "token-no-family";
     selectedMarketCache = createMockSelectedMarketCache([tokenId]);
