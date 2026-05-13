@@ -45,13 +45,11 @@ describe("readErc20Balance", () => {
   });
 
   it("throws on 4xx HTTP response", async () => {
-    const fetchImpl = vi
-      .fn()
-      .mockResolvedValue({
-        ok: false,
-        status: 429,
-        statusText: "Too Many Requests",
-      }) as unknown as typeof fetch;
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      statusText: "Too Many Requests",
+    }) as unknown as typeof fetch;
     await expect(
       readErc20Balance({ rpcUrl: RPC_URL, token: USDC_E_ADDRESS, owner: OWNER, fetchImpl }),
     ).rejects.toThrow(/RPC HTTP 429/);
