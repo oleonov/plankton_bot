@@ -236,6 +236,40 @@ describe("RiskEventWriter", () => {
       expect(repo.insert).toHaveBeenCalledTimes(2);
     });
 
+    it.each([
+      "reserved-token-limit",
+      "pending-wallet-sync",
+      "sell-replace-pending",
+      "sell-replace-lock-active",
+    ])("deduplicates internal order rejects with reason %s", (reason) => {
+      const event = {
+        commandId: "cmd-1",
+        clientOrderId: "cloid-1",
+        tokenId: "tok-1",
+        conditionId: "cond-1",
+        reason,
+        errorCode: "INSUFFICIENT_BALANCE",
+        signalReason: "probe-entry",
+        side: "buy",
+        signalId: "sig-1",
+        decisionRuleId: "FALLBACK",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+        exchangeErrorMessage: null,
+        exchangeErrorDetails: null,
+        timestamp: 1000,
+      };
+
+      writer.onOrderRejected(event);
+      writer.onOrderRejected({
+        ...event,
+        commandId: "cmd-2",
+        clientOrderId: "cloid-2",
+        timestamp: 2000,
+      });
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+    });
+
     it("writes internal order rejects again after cooldown expires", () => {
       const event = {
         commandId: "cmd-1",
