@@ -555,9 +555,7 @@ export class LiveExchangeGateway implements ExchangeGateway {
       } catch (e) {
         const confirmedSettlementFailure = e instanceof SettlementTransactionFailedError;
         logSettlementLifecycle({
-          lifecycle: confirmedSettlementFailure
-            ? "merge_settlement_failed"
-            : "merge_submit_error",
+          lifecycle: confirmedSettlementFailure ? "merge_settlement_failed" : "merge_submit_error",
           conditionIds: requests.map((r) => r.conditionId),
           elapsedMs: Date.now() - submitStartedAt,
           errorMessage: e instanceof Error ? e.message : String(e),
