@@ -178,7 +178,7 @@ describe("LedgerRetentionModule", () => {
     expect(rows).toEqual([{ event_type: "reconciliation_drift" }]);
   });
 
-  it("deletes signal telemetry risk events after 14 days", async () => {
+  it("deletes signal telemetry risk events after 7 days", async () => {
     db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
       "signal_suppressed",
       "{}",
@@ -207,6 +207,34 @@ describe("LedgerRetentionModule", () => {
       event_type: string;
     }>;
     expect(rows).toEqual([{ event_type: "signal_rejected" }]);
+  });
+
+  it("deletes order_rejected risk events after 14 days but keeps newer ones", async () => {
+    // 24 days old — past the 14-day order_rejected TTL
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "order_rejected",
+      "{}",
+      "2026-04-01T00:00:00.000Z",
+    );
+    // 10 days old — within the 14-day window
+    db.prepare("INSERT INTO risk_events (event_type, payload, created_at) VALUES (?, ?, ?)").run(
+      "order_rejected",
+      "{}",
+      "2026-04-15T00:00:00.000Z",
+    );
+
+    const mod = new LedgerRetentionModule({
+      db,
+      log,
+      config: { runOnStart: false, checkpointMinDeletedRows: 99 },
+    });
+
+    await mod.runOnce(NOW);
+
+    const rows = db
+      .prepare("SELECT created_at FROM risk_events ORDER BY created_at")
+      .all() as Array<{ created_at: string }>;
+    expect(rows).toEqual([{ created_at: "2026-04-15T00:00:00.000Z" }]);
   });
 
   it("runs retention immediately on start by default", async () => {

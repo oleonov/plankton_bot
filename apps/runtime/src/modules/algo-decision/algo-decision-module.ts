@@ -62,6 +62,7 @@ import {
   classifySoldBoughtRatioBucket,
 } from "../../executable-price.js";
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
+import { isExecutableOrderSize } from "../../min-order-size.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
 import type { PriceHistoryProvider } from "./market-snapshot-price-history.js";
 
@@ -433,7 +434,11 @@ const CONTINUATION_TRADE_COUNT_CAP = 6;
  */
 const EVALUATE_YIELD_BATCH = 50;
 const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
-const MAX_SUPPRESSION_DEDUPE_KEYS = 50_000;
+// The suppression cache only needs to hold the last NOISY_SUPPRESSION_DEDUPE_MS
+// (10 min) of (tokenId, reason) pairs; even at the worst observed signal-rate
+// of ~15/sec × 600 s = 9 000 unique keys/window. 5 000 is comfortably above
+// steady-state and keeps the worst-case Map ≈ 400 KB instead of ≈ 4 MB.
+const MAX_SUPPRESSION_DEDUPE_KEYS = 5_000;
 const DEFAULT_BUY_BUDGET_COOLDOWN_MS = 15 * 60 * 1000;
 const WALLET_BUY_BUDGET_EXHAUSTED_REASON = "wallet_buy_budget_exhausted";
 const BUY_BUDGET_COOLDOWN_REASONS = new Set([
@@ -1525,6 +1530,30 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     const suggestedSizeUsdc = sizeResult.sizeUsdc;
     const suggestedSize = ctx.price > 0 ? suggestedSizeUsdc / ctx.price : 0;
+
+    // Pre-filter signals whose size cannot meet the exchange minOrderSize at
+    // the current suggestion price. signal-to-order also catches this with
+    // the execution price (which may differ post-pricing), but doing the
+    // check here eliminates ~38% of observed signals before they hit the
+    // bus, risk-gate, and pricing pipeline. Sell uses the share count
+    // directly; buy approximates orderSize = suggestedSizeUsdc / ctx.price
+    // — matching the formula in signal-to-order.resolveOrderSize().
+    if (!isExecutableOrderSize(suggestedSize, market.minOrderSize)) {
+      this.recordDecisionSuppressed({
+        tokenId: market.tokenId,
+        conditionId: market.conditionId,
+        reasonCode: "order-size-below-minimum",
+        side: side === "buy" ? "BUY" : "SELL",
+        decisionRuleId: decision.ruleId,
+        state: ctx.state,
+        price: ctx.price,
+        buyCount,
+        timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+      });
+      return null;
+    }
 
     const signal: import("@krabs/domain").Signal = {
       signalId: randomUUID(),

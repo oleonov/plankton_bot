@@ -33,12 +33,17 @@ const LIVENESS_STYLES: Record<string, string> = {
   unseen: "badge-blue",
 };
 
+const LIQUIDITY_STYLES: Record<string, string> = {
+  maker: "badge-blue",
+  taker: "badge-orange",
+};
+
 export function Badge({
   value,
   type = "status",
 }: {
   value: string;
-  type?: "mode" | "status" | "severity" | "liveness";
+  type?: "mode" | "status" | "severity" | "liveness" | "liquidity";
 }) {
   const map =
     type === "mode"
@@ -47,7 +52,9 @@ export function Badge({
         ? SEVERITY_STYLES
         : type === "liveness"
           ? LIVENESS_STYLES
-          : STATUS_STYLES;
+          : type === "liquidity"
+            ? LIQUIDITY_STYLES
+            : STATUS_STYLES;
   const cls = map[value] ?? "badge-blue";
   return <span className={`badge ${cls}`}>{value}</span>;
 }

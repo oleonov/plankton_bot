@@ -356,7 +356,7 @@ export function OrdersFills() {
                     <div
                       style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
                     >
-                      <Badge value={f.liquidityRole ?? "unknown"} />
+                      <Badge value={f.liquidityRole ?? "unknown"} type="liquidity" />
                       <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
                         fee ${(f.explicitFeeUsdc ?? f.fee).toFixed(3)}
                       </span>

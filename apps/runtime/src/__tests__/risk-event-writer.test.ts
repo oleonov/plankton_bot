@@ -148,7 +148,7 @@ describe("RiskEventWriter", () => {
       expect(repo.insert).toHaveBeenCalledTimes(1);
     });
 
-    it("does not deduplicate exchange order rejects", () => {
+    it("deduplicates exchange order rejects by (tokenId, side, errorCode) within cooldown", () => {
       const event = {
         commandId: "cmd-1",
         clientOrderId: "cloid-1",
@@ -172,6 +172,65 @@ describe("RiskEventWriter", () => {
         commandId: "cmd-2",
         clientOrderId: "cloid-2",
         timestamp: 2000,
+      });
+
+      expect(repo.insert).toHaveBeenCalledTimes(1);
+    });
+
+    it("writes a second exchange order reject with a different errorCode", () => {
+      const base = {
+        commandId: "cmd-1",
+        clientOrderId: "cloid-1",
+        tokenId: "tok-1",
+        conditionId: "cond-1",
+        reason: "exchange-rejected",
+        signalReason: "probe-entry",
+        side: "buy",
+        signalId: "sig-1",
+        decisionRuleId: "D1",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+        exchangeErrorMessage: "transient upstream error",
+        exchangeErrorDetails: { status: 502 },
+        timestamp: 1000,
+      };
+
+      writer.onOrderRejected({ ...base, errorCode: "UPSTREAM_5XX" });
+      writer.onOrderRejected({
+        ...base,
+        commandId: "cmd-2",
+        clientOrderId: "cloid-2",
+        errorCode: "RATE_LIMIT",
+        timestamp: 2000,
+      });
+
+      expect(repo.insert).toHaveBeenCalledTimes(2);
+    });
+
+    it("writes exchange order rejects again after the cooldown expires", () => {
+      const event = {
+        commandId: "cmd-1",
+        clientOrderId: "cloid-1",
+        tokenId: "tok-1",
+        conditionId: "cond-1",
+        reason: "exchange-insufficient-balance-or-allowance",
+        errorCode: "INSUFFICIENT_BALANCE",
+        signalReason: "repricing-exit",
+        side: "sell",
+        signalId: "sig-1",
+        decisionRuleId: "D5",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+        exchangeErrorMessage: "not enough balance",
+        exchangeErrorDetails: { status: 400 },
+        timestamp: 1000,
+      };
+
+      writer.onOrderRejected(event);
+      // Default exchange-error cooldown is 5 minutes.
+      writer.onOrderRejected({
+        ...event,
+        commandId: "cmd-2",
+        clientOrderId: "cloid-2",
+        timestamp: 1000 + 5 * 60 * 1000 + 1,
       });
 
       expect(repo.insert).toHaveBeenCalledTimes(2);

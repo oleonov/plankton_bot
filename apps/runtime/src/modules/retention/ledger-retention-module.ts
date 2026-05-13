@@ -36,6 +36,7 @@ export interface LedgerRetentionConfig {
   tradingStateSnapshotsTtlMs?: number;
   portfolioSnapshotsTtlMs?: number;
   signalTelemetryRiskEventsTtlMs?: number;
+  orderRejectedRiskEventsTtlMs?: number;
   riskEventsTtlMs?: number;
   criticalRiskEventsTtlMs?: number;
   checkpointIntervalMs?: number;
@@ -69,9 +70,18 @@ const DEFAULT_CONFIG: Required<LedgerRetentionConfig> = {
   decisionSignalLogTtlMs: 90 * DAY_MS,
   tradingStateSnapshotsTtlMs: 14 * DAY_MS,
   portfolioSnapshotsTtlMs: 90 * DAY_MS,
-  signalTelemetryRiskEventsTtlMs: 14 * DAY_MS,
+  // High-volume audit streams: signal_emitted/signal_suppressed (~17k/h) and
+  // order_rejected (~19k/h) dominate risk_events size. Cap their retention
+  // aggressively; debugging windows beyond a week are answered by logs, not by
+  // SQLite row scans on a multi-GB ledger. Critical events keep the 90-day TTL.
+  signalTelemetryRiskEventsTtlMs: 7 * DAY_MS,
+  orderRejectedRiskEventsTtlMs: 14 * DAY_MS,
   riskEventsTtlMs: 90 * DAY_MS,
   criticalRiskEventsTtlMs: 90 * DAY_MS,
+  // Unconditional checkpoint cadence (separate from the delete-driven trigger
+  // below). Without this the WAL grows indefinitely for a freshly-deployed
+  // ledger where retention has nothing to delete yet — observed at 642 MB on
+  // a 7.3 GB main DB before this guard was added.
   checkpointIntervalMs: HOUR_MS,
   checkpointMinDeletedRows: 50_000,
   runOnStart: true,
@@ -147,7 +157,7 @@ export class LedgerRetentionModule implements RuntimeModule {
       }
 
       const totalDeleted = Object.values(deleted).reduce((sum, count) => sum + count, 0);
-      const checkpointed = this.maybeCheckpoint(nowMs, totalDeleted);
+      const checkpointed = this.maybeCheckpoint(nowMs);
       this.lastRunAt = ranAt;
 
       if (totalDeleted > 0 || checkpointed) {
@@ -245,11 +255,19 @@ export class LedgerRetentionModule implements RuntimeModule {
         "event_type IN ('signal_suppressed', 'signal_emitted')",
       ),
       this.deleteOlderThanTask(
+        "risk_events.order_rejected",
+        "risk_events",
+        "created_at",
+        nowMs - this.config.orderRejectedRiskEventsTtlMs,
+        "event_type = 'order_rejected'",
+      ),
+      this.deleteOlderThanTask(
         "risk_events.non_critical",
         "risk_events",
         "created_at",
         nowMs - this.config.riskEventsTtlMs,
-        "NOT (event_type = 'reconciliation_drift' AND payload LIKE '%\"severity\":\"critical\"%')",
+        "NOT (event_type = 'reconciliation_drift' AND payload LIKE '%\"severity\":\"critical\"%')"
+          + " AND event_type NOT IN ('signal_suppressed', 'signal_emitted', 'order_rejected')",
       ),
       this.deleteOlderThanTask(
         "risk_events.critical",
@@ -285,8 +303,15 @@ export class LedgerRetentionModule implements RuntimeModule {
     };
   }
 
-  private maybeCheckpoint(nowMs: number, deletedRows: number): boolean {
-    if (deletedRows < this.config.checkpointMinDeletedRows) return false;
+  /**
+   * Checkpoint the WAL on a fixed cadence regardless of how many rows the
+   * current retention pass deleted. Previously this only fired when a large
+   * batch was pruned, which never happens for a freshly-deployed ledger where
+   * all data is younger than the TTL — leaving the WAL to grow unbounded
+   * (observed 642 MB on a 7.3 GB main DB). `checkpointMinDeletedRows` is kept
+   * in the config for backwards-compatibility but no longer gates the trigger.
+   */
+  private maybeCheckpoint(nowMs: number): boolean {
     if (nowMs - this.lastCheckpointAtMs < this.config.checkpointIntervalMs) return false;
     this.deps.db.pragma("wal_checkpoint(TRUNCATE)");
     this.lastCheckpointAtMs = nowMs;

@@ -299,6 +299,12 @@ function makeMarket(
     active: true,
     tradable: true,
     tickSize: 0.01,
+    // Tests use the small B5 probe-entry budget ($0.99) at midPrice ≈ 0.45,
+    // which yields ~2 shares — below the production fallback of 5. The
+    // algo-decision pre-filter (order-size-below-minimum) would suppress
+    // these signals. Set a permissive floor so emission tests remain
+    // focused on decision logic, not exchange size policy.
+    minOrderSize: 0.01,
     negRisk: false,
     gammaCreatedAt: null,
     acceptingOrders: true,

@@ -5,8 +5,11 @@ import { normalizeReasonCode } from "./risk-event-codes.js";
 export interface RiskEventWriterConfig {
   rejectCooldownMs: number;
   orderRejectCooldownMs?: number;
+  exchangeErrorRejectCooldownMs?: number;
   exposureBreachCooldownMs: number;
 }
+
+const DEFAULT_EXCHANGE_ERROR_REJECT_COOLDOWN_MS = 5 * 60 * 1000;
 
 export class RiskEventWriter {
   private readonly cooldown = new Map<string, number>();
@@ -106,13 +109,20 @@ export class RiskEventWriter {
     tokenId: string;
     side?: string | null;
     reason: string;
+    errorCode: string;
     decisionRuleId?: string | null;
     signalReason: string | null;
     exchangeErrorMessage?: string | null;
     exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
     timestamp: number;
   }): boolean {
-    if (event.exchangeErrorMessage != null || event.exchangeErrorDetails != null) return false;
+    if (event.exchangeErrorMessage != null || event.exchangeErrorDetails != null) {
+      const key = this.exchangeErrorCooldownKey(event);
+      const lastAt = this.orderRejectCooldown.get(key);
+      const cooldownMs =
+        this.config.exchangeErrorRejectCooldownMs ?? DEFAULT_EXCHANGE_ERROR_REJECT_COOLDOWN_MS;
+      return lastAt !== undefined && event.timestamp - lastAt < cooldownMs;
+    }
     if (!DEDUPED_INTERNAL_ORDER_REJECTION_REASONS.has(event.reason)) return false;
 
     const key = this.orderRejectedCooldownKey(event);
@@ -125,13 +135,17 @@ export class RiskEventWriter {
     tokenId: string;
     side?: string | null;
     reason: string;
+    errorCode: string;
     decisionRuleId?: string | null;
     signalReason: string | null;
     exchangeErrorMessage?: string | null;
     exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
     timestamp: number;
   }): void {
-    if (event.exchangeErrorMessage != null || event.exchangeErrorDetails != null) return;
+    if (event.exchangeErrorMessage != null || event.exchangeErrorDetails != null) {
+      this.orderRejectCooldown.set(this.exchangeErrorCooldownKey(event), event.timestamp);
+      return;
+    }
     if (!DEDUPED_INTERNAL_ORDER_REJECTION_REASONS.has(event.reason)) return;
     this.orderRejectCooldown.set(this.orderRejectedCooldownKey(event), event.timestamp);
   }
@@ -150,6 +164,20 @@ export class RiskEventWriter {
       event.decisionRuleId ?? "",
       event.signalReason ?? "",
     ].join(":");
+  }
+
+  // Exchange-error rejects are keyed by (tokenId, side, errorCode) only:
+  // transient exchange faults (rate-limits, upstream 5xx, balance/allowance
+  // staleness) emit ~19k events/hour with near-identical messages. A 5-minute
+  // dedup window collapses the burst to ~12 events/hour per token+errorCode
+  // pair while preserving the first occurrence's full diagnostic payload.
+  // Prefix "err:" prevents key collisions with internal-reason cooldowns.
+  private exchangeErrorCooldownKey(event: {
+    tokenId: string;
+    side?: string | null;
+    errorCode: string;
+  }): string {
+    return ["err", event.tokenId, event.side ?? "", event.errorCode].join(":");
   }
 
   private pruneExpired(nowMs: number): void {

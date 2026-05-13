@@ -188,6 +188,7 @@ function makeMarket(
     active: true,
     tradable,
     tickSize: 0.01,
+    minOrderSize: 0.01,
     negRisk: false,
     gammaCreatedAt: null,
     acceptingOrders: true,

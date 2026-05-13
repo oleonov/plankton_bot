@@ -1317,6 +1317,7 @@ async function main(): Promise<void> {
   const riskEventWriter = new RiskEventWriter(repos.riskEvent, {
     rejectCooldownMs: 15 * 60 * 1000,
     orderRejectCooldownMs: 15 * 60 * 1000,
+    exchangeErrorRejectCooldownMs: 5 * 60 * 1000,
     exposureBreachCooldownMs: 15 * 60 * 1000,
   });
 
