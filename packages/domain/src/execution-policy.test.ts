@@ -438,10 +438,10 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(DEFAULT_EXECUTION_POLICY.multiBuyLadder.perTokenUsdcCap).toBe(25);
   });
 
-  it("defaults redeem sweep to auto-on with four-hour cadence", () => {
+  it("defaults redeem sweep to auto-on with 10-minute cadence", () => {
     expect(DEFAULT_EXECUTION_POLICY.redeemSweep).toMatchObject({
       enabled: true,
-      intervalMs: 14_400_000,
+      intervalMs: 600_000,
     });
     expect(DEFAULT_EXECUTION_POLICY.redeemSweep).not.toHaveProperty("minAgeAfterResolutionSec");
   });

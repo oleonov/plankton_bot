@@ -117,7 +117,7 @@ export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
 
 export const DEFAULT_REDEEM_SWEEP_POLICY: RedeemSweepPolicy = {
   enabled: true,
-  intervalMs: 4 * 60 * 60_000,
+  intervalMs: 10 * 60_000,
   inFlightTtlMs: 15 * 60_000,
   maxRetries: 3,
   retryBackoffMs: [60_000, 300_000, 1_800_000],
