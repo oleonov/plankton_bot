@@ -32,8 +32,7 @@ describe("readErc20Balance", () => {
     const [url] = (fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0] as [string, unknown];
     expect(url).toBe(RPC_URL);
     const body = JSON.parse(
-      ((fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { body: string }])[1]
-        .body,
+      ((fetchImpl as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { body: string }])[1].body,
     ) as { method: string; params: [{ to: string; data: string }, string] };
     expect(body.method).toBe("eth_call");
     expect(body.params[0].to).toBe(USDC_E_ADDRESS);
@@ -48,7 +47,11 @@ describe("readErc20Balance", () => {
   it("throws on 4xx HTTP response", async () => {
     const fetchImpl = vi
       .fn()
-      .mockResolvedValue({ ok: false, status: 429, statusText: "Too Many Requests" }) as unknown as typeof fetch;
+      .mockResolvedValue({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+      }) as unknown as typeof fetch;
     await expect(
       readErc20Balance({ rpcUrl: RPC_URL, token: USDC_E_ADDRESS, owner: OWNER, fetchImpl }),
     ).rejects.toThrow(/RPC HTTP 429/);
@@ -65,7 +68,9 @@ describe("readErc20Balance", () => {
   });
 
   it("propagates network failure to the caller", async () => {
-    const fetchImpl = vi.fn().mockRejectedValue(new Error("network error")) as unknown as typeof fetch;
+    const fetchImpl = vi
+      .fn()
+      .mockRejectedValue(new Error("network error")) as unknown as typeof fetch;
     await expect(
       readErc20Balance({ rpcUrl: RPC_URL, token: USDC_E_ADDRESS, owner: OWNER, fetchImpl }),
     ).rejects.toThrow(/network error/);

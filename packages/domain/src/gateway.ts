@@ -553,9 +553,7 @@ export interface ExchangeGateway {
    * balance is visible to the Polymarket Exchange. Live-lite only; optional on
    * all other implementations.
    */
-  activatePendingUsdcCollateral?(opts: {
-    minAmountWei: bigint;
-  }): Promise<DepositActivationResult>;
+  activatePendingUsdcCollateral?(opts: { minAmountWei: bigint }): Promise<DepositActivationResult>;
 }
 
 /**

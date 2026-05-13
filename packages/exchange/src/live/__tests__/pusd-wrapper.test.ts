@@ -20,8 +20,7 @@ describe("ERC20_APPROVE_ABI encode/decode", () => {
     });
     expect(data.startsWith("0x")).toBe(true);
     // approve returns bool — encode a true result and decode it
-    const returnData =
-      "0x0000000000000000000000000000000000000000000000000000000000000001";
+    const returnData = "0x0000000000000000000000000000000000000000000000000000000000000001";
     const result = decodeFunctionResult({
       abi: ERC20_APPROVE_ABI,
       functionName: "approve",

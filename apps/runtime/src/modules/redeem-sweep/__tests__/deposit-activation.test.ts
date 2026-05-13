@@ -114,9 +114,7 @@ function makeHarness(opts: {
     bus,
     gateway: gateway as any,
     positionReader: {
-      read: vi.fn(() =>
-        Promise.resolve([remotePosition(opts.redeemable !== false)]),
-      ),
+      read: vi.fn(() => Promise.resolve([remotePosition(opts.redeemable !== false)])),
     },
     positionRepo: {
       findByTokenId: vi.fn((tokenId) => (String(tokenId) === TOKEN ? position : null)),
@@ -190,7 +188,10 @@ describe("deposit activation — post-redeem trigger", () => {
       expect.objectContaining({ eventType: "deposit-activation" }),
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const payload = (riskEventRepo.insert.mock.calls as any)[0][0].payload as Record<string, unknown>;
+    const payload = (riskEventRepo.insert.mock.calls as any)[0][0].payload as Record<
+      string,
+      unknown
+    >;
     expect(payload.status).toBe("submitted");
     expect(payload.error).toBeNull();
   });
@@ -209,7 +210,10 @@ describe("deposit activation — post-redeem trigger", () => {
       expect.objectContaining({ eventType: "deposit-activation" }),
     );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const payload = (riskEventRepo.insert.mock.calls as any)[0][0].payload as Record<string, unknown>;
+    const payload = (riskEventRepo.insert.mock.calls as any)[0][0].payload as Record<
+      string,
+      unknown
+    >;
     expect(payload.status).toBe("error");
     expect(String(payload.error)).toContain("rpc timeout");
   });

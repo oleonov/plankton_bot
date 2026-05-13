@@ -18,16 +18,10 @@ function makeGateway(opts: {
 }): LiveExchangeGateway {
   const { balances = {}, allowances = {}, settlementExecute, onInfraAlert } = opts;
 
-  const readBalance = vi.fn(
-    async (o: { token: string }) => balances[o.token] ?? 0n,
-  );
-  const readAllowance = vi.fn(
-    async (o: { token: string }) => allowances[o.token] ?? 0n,
-  );
+  const readBalance = vi.fn(async (o: { token: string }) => balances[o.token] ?? 0n);
+  const readAllowance = vi.fn(async (o: { token: string }) => allowances[o.token] ?? 0n);
 
-  const settlementClient = settlementExecute
-    ? { execute: settlementExecute }
-    : undefined;
+  const settlementClient = settlementExecute ? { execute: settlementExecute } : undefined;
 
   return new LiveExchangeGateway({
     client: { getOk: vi.fn() },
