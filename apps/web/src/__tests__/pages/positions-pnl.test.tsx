@@ -20,7 +20,7 @@ beforeEach(() => {
 });
 
 describe("Positions page", () => {
-  it("shows total pnl for open positions, not realized-only pnl", async () => {
+  it("shows unrealized and full P&L for open positions", async () => {
     server.use(
       http.get("/api/v1/positions", () =>
         ok({
@@ -61,10 +61,11 @@ describe("Positions page", () => {
 
     renderWithProviders(<Positions />);
 
-    expect(await screen.findByText("+$3.00")).toBeInTheDocument();
+    expect(await screen.findByText("+$2.00")).toBeInTheDocument();
+    expect(screen.getByText("+$3.00")).toBeInTheDocument();
   });
 
-  it("shows realized pnl only for closed positions", async () => {
+  it("shows zero unrealized and realized-only full P&L for closed positions", async () => {
     server.use(
       http.get("/api/v1/positions", () =>
         ok({

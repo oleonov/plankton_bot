@@ -11,7 +11,9 @@ import {
   fmtEndsLabel,
   fmtMoney,
   fmtPct,
-  getPositionTotalPnl,
+  getPositionFullPnl,
+  getPositionFullPnlBasis,
+  getPositionUnrealizedPnl,
   PHASE_META,
 } from "./lib.ts";
 
@@ -57,7 +59,9 @@ export function PositionDrawer({ position, onClose }: Props) {
 }
 
 function DrawerBody({ position, onClose }: { position: PositionDTO; onClose: () => void }) {
-  const pnl = getPositionTotalPnl(position);
+  const unrealizedPnl = getPositionUnrealizedPnl(position);
+  const fullPnl = getPositionFullPnl(position);
+  const fullPnlBasis = getPositionFullPnlBasis(position);
   const endsMs = endsMsFrom(position.endDate);
   const mstate = deriveMarketState(position.status);
   const resTag = deriveResolutionTag(position.resolutionStatus, position.endDate);
@@ -113,10 +117,19 @@ function DrawerBody({ position, onClose }: { position: PositionDTO; onClose: () 
           <span className="p2-v">
             {position.currentValueUsdc != null ? fmtMoney(position.currentValueUsdc) : "—"}
           </span>
-          <span className="p2-k">PnL</span>
-          <span className={"p2-v " + (pnl > 0.005 ? "pos" : pnl < -0.005 ? "neg" : "")}>
-            {pnl === 0 ? "$0.00" : fmtMoney(pnl, { showSign: true })}
-            {position.costBasisUsdc > 0 && ` · ${fmtPct(pnl, position.costBasisUsdc)}`}
+          <span className="p2-k">P&L</span>
+          <span
+            className={
+              "p2-v " + (unrealizedPnl > 0.005 ? "pos" : unrealizedPnl < -0.005 ? "neg" : "")
+            }
+          >
+            {unrealizedPnl === 0 ? "$0.00" : fmtMoney(unrealizedPnl, { showSign: true })}
+            {position.costBasisUsdc > 0 && ` · ${fmtPct(unrealizedPnl, position.costBasisUsdc)}`}
+          </span>
+          <span className="p2-k">Full P&L</span>
+          <span className={"p2-v " + (fullPnl > 0.005 ? "pos" : fullPnl < -0.005 ? "neg" : "")}>
+            {fullPnl === 0 ? "$0.00" : fmtMoney(fullPnl, { showSign: true })}
+            {fullPnlBasis > 0 && ` · ${fmtPct(fullPnl, fullPnlBasis)}`}
           </span>
         </div>
 

@@ -10,7 +10,9 @@ import {
   fmtEndsLabel,
   fmtMoney,
   fmtPct,
-  getPositionTotalPnl,
+  getPositionFullPnl,
+  getPositionFullPnlBasis,
+  getPositionUnrealizedPnl,
   groupPositions,
   lastActionMinutes,
   matchesSearch,
@@ -154,27 +156,57 @@ describe("deriveMarketState + deriveResolutionTag", () => {
   });
 });
 
-describe("getPositionTotalPnl", () => {
-  it("returns realizedPnl only for closed", () => {
-    expect(
-      getPositionTotalPnl(
-        position({ status: "closed", realizedPnl: 10, currentValueUsdc: 5, costBasisUsdc: 4 }),
-      ),
-    ).toBe(10);
+describe("position P&L helpers", () => {
+  it("splits unrealized and full P&L for open positions", () => {
+    const p = position({
+      status: "open",
+      realizedPnl: 2,
+      currentValueUsdc: 10,
+      costBasisUsdc: 5,
+      cumulativeBuyNotional: 12,
+    });
+
+    expect(getPositionUnrealizedPnl(p)).toBe(5);
+    expect(getPositionFullPnl(p)).toBe(7);
+    expect(getPositionFullPnlBasis(p)).toBe(12);
   });
-  it("returns realized + unrealized for open", () => {
-    expect(
-      getPositionTotalPnl(
-        position({ status: "open", realizedPnl: 1, currentValueUsdc: 10, costBasisUsdc: 4 }),
-      ),
-    ).toBe(7);
+
+  it("returns zero unrealized and realized-only full P&L for closed positions", () => {
+    const p = position({
+      status: "closed",
+      realizedPnl: 3,
+      currentValueUsdc: 5,
+      costBasisUsdc: 4,
+    });
+
+    expect(getPositionUnrealizedPnl(p)).toBe(0);
+    expect(getPositionFullPnl(p)).toBe(3);
   });
-  it("treats null currentValue as zero", () => {
-    expect(
-      getPositionTotalPnl(
-        position({ status: "open", realizedPnl: 0, currentValueUsdc: null, costBasisUsdc: 2 }),
-      ),
-    ).toBe(-2);
+
+  it("keeps dust full P&L percent on lifetime buy notional", () => {
+    const p = position({
+      status: "dust",
+      realizedPnl: 1.39,
+      currentValueUsdc: null,
+      costBasisUsdc: 0.0005,
+      cumulativeBuyNotional: 8.41,
+    });
+
+    expect(getPositionUnrealizedPnl(p)).toBeCloseTo(-0.0005);
+    expect(getPositionFullPnl(p)).toBeCloseTo(1.3895);
+    expect(fmtPct(getPositionUnrealizedPnl(p), p.costBasisUsdc)).toBe("\u2212100.0%");
+    expect(fmtPct(getPositionFullPnl(p), getPositionFullPnlBasis(p))).toBe("+16.5%");
+  });
+
+  it("falls back to cost basis when lifetime buy notional is unavailable", () => {
+    const p = position({
+      realizedPnl: 1,
+      currentValueUsdc: null,
+      costBasisUsdc: 2,
+      cumulativeBuyNotional: null,
+    });
+
+    expect(getPositionFullPnlBasis(p)).toBe(2);
   });
 });
 
@@ -258,8 +290,8 @@ describe("groupPositions — by phase", () => {
 describe("groupPositions — by pnl", () => {
   it("splits gains vs flat/losses", () => {
     const rows = [
-      position({ status: "closed", realizedPnl: 5 }),
-      position({ status: "closed", realizedPnl: -3 }),
+      position({ status: "open", realizedPnl: 15, currentValueUsdc: 0, costBasisUsdc: 10 }),
+      position({ status: "open", realizedPnl: 0, currentValueUsdc: 1, costBasisUsdc: 3 }),
       position({ status: "closed", realizedPnl: 0 }),
     ];
     const groups = groupPositions(rows, "pnl");

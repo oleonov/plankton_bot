@@ -20,10 +20,24 @@ export const PHASE_META: Record<PositionPhase, PhaseMeta> = {
   S3: { label: "Distributing", sub: "partial sells" },
 };
 
-/** PnL for a position — unrealized + realized for open, realized only for closed. */
-export function getPositionTotalPnl(p: PositionDTO): number {
-  if (p.status === "closed") return p.realizedPnl;
-  return p.realizedPnl + ((p.currentValueUsdc ?? 0) - p.costBasisUsdc);
+/** Unrealized P&L for an open position; 0 for closed. */
+export function getPositionUnrealizedPnl(p: PositionDTO): number {
+  if (p.status === "closed") return 0;
+  return (p.currentValueUsdc ?? 0) - p.costBasisUsdc;
+}
+
+/** Lifetime P&L for a position: realized + unrealized. */
+export function getPositionFullPnl(p: PositionDTO): number {
+  return p.realizedPnl + getPositionUnrealizedPnl(p);
+}
+
+/** Denominator for full P&L %: lifetime buy notional, falling back to cost basis. */
+export function getPositionFullPnlBasis(p: PositionDTO): number {
+  const lifetime = p.cumulativeBuyNotional ?? null;
+  if (typeof lifetime === "number" && Number.isFinite(lifetime) && lifetime > 0) {
+    return lifetime;
+  }
+  return p.costBasisUsdc;
 }
 
 /** Derive client-side market-state tag from position status. */
@@ -163,9 +177,9 @@ export function groupPositions(rows: PositionDTO[], groupBy: GroupBy): GroupBuck
   }
 
   if (groupBy === "pnl") {
-    list.sort((a, b) => getPositionTotalPnl(b) - getPositionTotalPnl(a));
-    const gains = list.filter((p) => getPositionTotalPnl(p) > 0);
-    const rest = list.filter((p) => getPositionTotalPnl(p) <= 0);
+    list.sort((a, b) => getPositionFullPnl(b) - getPositionFullPnl(a));
+    const gains = list.filter((p) => getPositionFullPnl(p) > 0);
+    const rest = list.filter((p) => getPositionFullPnl(p) <= 0);
     const out: GroupBucket[] = [];
     if (gains.length) out.push({ key: "Gains", items: gains });
     if (rest.length) out.push({ key: "Flat / Losses", items: rest });

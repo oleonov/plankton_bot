@@ -56,14 +56,13 @@ describe("LatestUsablePriceLookup", () => {
     expect(new LatestUsablePriceLookup(conn.db).findUsablePrice(TOKEN, NOW_MS)).toBeNull();
   });
 
-  it("respects maxRowsScanned", () => {
-    insertSnapshot(String(TOKEN), -10_000, {});
-    insertSnapshot(String(TOKEN), -20_000, {});
-    insertSnapshot(String(TOKEN), -30_000, { bestBid: 0.2, bestAsk: 0.4 });
+  it("finds a bid and ask row beyond 200 previous null rows", () => {
+    for (let i = 1; i <= 300; i += 1) {
+      insertSnapshot(String(TOKEN), -i * 60_000, {});
+    }
+    insertSnapshot(String(TOKEN), -22 * 60 * 60 * 1000, { bestBid: 0.01, bestAsk: 0.02 });
 
-    expect(
-      new LatestUsablePriceLookup(conn.db, { maxRowsScanned: 2 }).findUsablePrice(TOKEN, NOW_MS),
-    ).toBeNull();
+    expect(new LatestUsablePriceLookup(conn.db).findUsablePrice(TOKEN, NOW_MS)).toBeCloseTo(0.015);
   });
 
   it("returns null when there are no rows for the token", () => {

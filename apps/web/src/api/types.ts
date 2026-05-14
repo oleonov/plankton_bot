@@ -374,6 +374,7 @@ export interface PositionDTO {
   costBasisUsdc: number;
   currentValueUsdc: number | null;
   realizedPnl: number;
+  cumulativeBuyNotional?: number | null;
   status: string;
   openedAt: string;
   closedAt: string | null;

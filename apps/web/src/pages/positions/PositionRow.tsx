@@ -8,7 +8,9 @@ import {
   fmtEndsLabel,
   fmtMoney,
   fmtPct,
-  getPositionTotalPnl,
+  getPositionFullPnl,
+  getPositionFullPnlBasis,
+  getPositionUnrealizedPnl,
   outcomeKind,
   PHASE_META,
   urgencyClass,
@@ -32,14 +34,17 @@ export function PositionRow({
   showPct,
   onSelect,
 }: Props) {
-  const pnl = getPositionTotalPnl(p);
+  const unrealizedPnl = getPositionUnrealizedPnl(p);
+  const fullPnl = getPositionFullPnl(p);
+  const fullPnlBasis = getPositionFullPnlBasis(p);
   const endsMs = endsMsFrom(p.endDate);
   const mstate = deriveMarketState(p.status);
   const resTag = deriveResolutionTag(p.resolutionStatus, p.endDate);
   const isDust = p.status === "dust";
   const densCls =
     density === "compact" ? "density-compact" : density === "spacious" ? "density-spacious" : "";
-  const pnlCls = pnl > 0.005 ? "pos" : pnl < -0.005 ? "neg" : "flat";
+  const unrealizedCls = unrealizedPnl > 0.005 ? "pos" : unrealizedPnl < -0.005 ? "neg" : "flat";
+  const fullPnlCls = fullPnl > 0.005 ? "pos" : fullPnl < -0.005 ? "neg" : "flat";
   const sideCls = p.lastAction === "BUY" ? "buy" : p.lastAction === "SELL" ? "sell" : "none";
   const sideGlyph = p.lastAction === "BUY" ? "▲" : p.lastAction === "SELL" ? "▼" : "·";
   const outKind = outcomeKind(p.outcome);
@@ -132,12 +137,22 @@ export function PositionRow({
         </span>
       </td>
 
-      {/* PnL */}
+      {/* P&L (unrealized) */}
       <td>
-        <span className={"p2-pnl " + pnlCls}>
-          <span>{pnl === 0 ? "$0.00" : fmtMoney(pnl, { showSign: true })}</span>
+        <span className={"p2-pnl " + unrealizedCls}>
+          <span>{unrealizedPnl === 0 ? "$0.00" : fmtMoney(unrealizedPnl, { showSign: true })}</span>
           {showPct && p.costBasisUsdc > 0 && (
-            <span className="p2-pct">{fmtPct(pnl, p.costBasisUsdc)}</span>
+            <span className="p2-pct">{fmtPct(unrealizedPnl, p.costBasisUsdc)}</span>
+          )}
+        </span>
+      </td>
+
+      {/* Full P&L (lifetime) */}
+      <td>
+        <span className={"p2-pnl " + fullPnlCls}>
+          <span>{fullPnl === 0 ? "$0.00" : fmtMoney(fullPnl, { showSign: true })}</span>
+          {showPct && fullPnlBasis > 0 && (
+            <span className="p2-pct">{fmtPct(fullPnl, fullPnlBasis)}</span>
           )}
         </span>
       </td>

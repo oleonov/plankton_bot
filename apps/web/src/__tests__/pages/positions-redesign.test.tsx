@@ -300,6 +300,84 @@ describe("PositionsPage — redesign", () => {
     expect(await screen.findByText(`${MINUS}$1.23`)).toBeInTheDocument();
   });
 
+  it("renders unrealized P&L and lifetime Full P&L as separate columns", async () => {
+    seedPositions([
+      makePosition({
+        positionId: "pos-open-pnl",
+        currentValueUsdc: 10,
+        costBasisUsdc: 5,
+        realizedPnl: 2,
+        cumulativeBuyNotional: 14,
+      }),
+    ]);
+    renderWithProviders(<Positions />);
+
+    expect(await screen.findByRole("columnheader", { name: "P&L" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Full P&L" })).toBeInTheDocument();
+
+    const row = screen.getByTestId("position-row-pos-open-pnl");
+    expect(within(row).getByText("+$5.00")).toBeInTheDocument();
+    expect(within(row).getByText("+100.0%")).toBeInTheDocument();
+    expect(within(row).getByText("+$7.00")).toBeInTheDocument();
+    expect(within(row).getByText("+50.0%")).toBeInTheDocument();
+  });
+
+  it("renders closed positions with zero unrealized and realized-only Full P&L", async () => {
+    seedPositions([
+      makePosition({
+        positionId: "pos-closed-pnl",
+        status: "closed",
+        currentValueUsdc: 0,
+        costBasisUsdc: 5,
+        realizedPnl: 3,
+      }),
+    ]);
+    renderWithProviders(<Positions />);
+
+    const row = await screen.findByTestId("position-row-pos-closed-pnl");
+    expect(within(row).getAllByText("$0.00").length).toBeGreaterThanOrEqual(1);
+    expect(within(row).getByText("+$3.00")).toBeInTheDocument();
+  });
+
+  it("renders dust P&L percent on residual basis and Full P&L percent on lifetime basis", async () => {
+    seedPositions([
+      makePosition({
+        positionId: "pos-zagreb-like",
+        status: "dust",
+        currentValueUsdc: null,
+        costBasisUsdc: 0.0005,
+        realizedPnl: 1.39,
+        cumulativeBuyNotional: 8.41,
+      }),
+    ]);
+    renderWithProviders(<Positions />);
+
+    const row = await screen.findByTestId("position-row-pos-zagreb-like");
+    const MINUS = "\u2212";
+    expect(within(row).getByText(`${MINUS}$0.00`)).toBeInTheDocument();
+    expect(within(row).getByText(`${MINUS}100.0%`)).toBeInTheDocument();
+    expect(within(row).getByText("+$1.39")).toBeInTheDocument();
+    expect(within(row).getByText("+16.5%")).toBeInTheDocument();
+  });
+
+  it("falls back to current cost basis for Full P&L percent when lifetime basis is absent", async () => {
+    seedPositions([
+      makePosition({
+        positionId: "pos-no-lifetime-basis",
+        currentValueUsdc: null,
+        costBasisUsdc: 2,
+        realizedPnl: 1,
+        cumulativeBuyNotional: null,
+      }),
+    ]);
+    renderWithProviders(<Positions />);
+
+    const row = await screen.findByTestId("position-row-pos-no-lifetime-basis");
+    const MINUS = "\u2212";
+    expect(within(row).getByText(`${MINUS}$1.00`)).toBeInTheDocument();
+    expect(within(row).getByText(`${MINUS}50.0%`)).toBeInTheDocument();
+  });
+
   it("falls back to defaults on malformed localStorage", async () => {
     window.localStorage.setItem(TWEAKS_STORAGE_KEY, "not-json{");
     seedPositions();

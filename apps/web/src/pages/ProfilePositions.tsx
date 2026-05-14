@@ -44,7 +44,7 @@ export function ProfilePositions() {
               <th>Avg Entry</th>
               <th>Cost Basis</th>
               <th>Value</th>
-              <th>PnL</th>
+              <th>Realized P&L</th>
               <th>Status</th>
               <th>Age</th>
               <th>Ends</th>

@@ -49,6 +49,7 @@ interface PositionResponse {
       phase: string;
       buyCount: number;
       sellCount: number;
+      cumulativeBuyNotional: number | null;
       lastAction: string | null;
       lastActionAt: string | null;
       status: string;
@@ -84,15 +85,25 @@ function seedLegState(
     buyCount: number;
     sellCount: number;
     lastAction: "BUY" | "SELL";
+    cumulativeBuyNotional?: number;
     lastTradeAt?: string;
   },
 ): void {
   const ts = opts.lastTradeAt ?? "2026-04-24T12:00:00Z";
   db.prepare(
     `INSERT INTO leg_states (token_id, buy_count, sell_count, last_action,
-      first_trade_price, first_trade_at, last_trade_at, updated_at)
-     VALUES (?, ?, ?, ?, 0.1, ?, ?, ?)`,
-  ).run(opts.tok, opts.buyCount, opts.sellCount, opts.lastAction, ts, ts, ts);
+      first_trade_price, first_trade_at, last_trade_at, cumulative_buy_notional, updated_at)
+     VALUES (?, ?, ?, ?, 0.1, ?, ?, ?, ?)`,
+  ).run(
+    opts.tok,
+    opts.buyCount,
+    opts.sellCount,
+    opts.lastAction,
+    ts,
+    ts,
+    opts.cumulativeBuyNotional ?? 0,
+    ts,
+  );
 }
 
 beforeAll(async () => {
@@ -113,7 +124,13 @@ beforeAll(async () => {
   seedLegState(db, { tok: "tok-s1", buyCount: 1, sellCount: 0, lastAction: "BUY" });
 
   seedPosition(db, { id: "pos-s2", tok: "tok-s2", status: "open" });
-  seedLegState(db, { tok: "tok-s2", buyCount: 3, sellCount: 0, lastAction: "BUY" });
+  seedLegState(db, {
+    tok: "tok-s2",
+    buyCount: 3,
+    sellCount: 0,
+    lastAction: "BUY",
+    cumulativeBuyNotional: 12.34,
+  });
 
   seedPosition(db, { id: "pos-s3", tok: "tok-s3", status: "open" });
   seedLegState(db, { tok: "tok-s3", buyCount: 2, sellCount: 1, lastAction: "SELL" });
@@ -152,6 +169,7 @@ describe("GET /positions — phase + leg state enrichment", () => {
       phase: "S0",
       buyCount: 0,
       sellCount: 0,
+      cumulativeBuyNotional: null,
       lastAction: null,
       lastActionAt: null,
     });
@@ -166,6 +184,7 @@ describe("GET /positions — phase + leg state enrichment", () => {
       phase: "S2",
       buyCount: 3,
       sellCount: 0,
+      cumulativeBuyNotional: 12.34,
       lastAction: "BUY",
     });
     expect(byId["pos-s3"]).toMatchObject({

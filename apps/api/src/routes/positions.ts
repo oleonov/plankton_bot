@@ -20,6 +20,7 @@ export function toDto(
   meta: MarketMeta,
   resInfo?: ResolutionInfo,
   leg?: LegStateInfo,
+  cumulativeBuyNotional?: number | null,
 ) {
   const legState = leg ?? { buyCount: 0, sellCount: 0, lastAction: null, lastActionAt: null };
   const status = String(row.status ?? "");
@@ -32,6 +33,7 @@ export function toDto(
     costBasisUsdc: row.cost_basis_usdc,
     currentValueUsdc: row.current_value_usdc,
     realizedPnl: row.realized_pnl,
+    cumulativeBuyNotional: cumulativeBuyNotional ?? null,
     status: row.status,
     openedAt: row.opened_at,
     closedAt: row.closed_at,
@@ -143,6 +145,7 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
       .filter(Boolean) as string[];
     const resMap = buildResolutionMap(opts.db, conditionIds);
     const legMap = buildLegStateMap(db, tokenIds);
+    const cumulativeBuyNotionalMap = buildCumulativeBuyNotionalMap(db, tokenIds);
 
     const lastRow = rows[rows.length - 1];
     const nextCursor =
@@ -156,7 +159,8 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
         const meta = getMetaOrEmpty(metaMap, tokenId);
         const res = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
         const leg = getLegStateOrEmpty(legMap, tokenId);
-        return toDto(r, meta, res, leg);
+        const cumulativeBuyNotional = cumulativeBuyNotionalMap.get(tokenId) ?? null;
+        return toDto(r, meta, res, leg, cumulativeBuyNotional);
       }),
       nextCursor,
       totalCount,
@@ -184,7 +188,8 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     const resInfo = meta.conditionId ? resMap.get(meta.conditionId) : undefined;
     const legMap = buildLegStateMap(db, [tokenId]);
     const leg = getLegStateOrEmpty(legMap, tokenId);
-    return ok(toDto(row, meta, resInfo, leg));
+    const cumulativeBuyNotional = buildCumulativeBuyNotionalMap(db, [tokenId]).get(tokenId) ?? null;
+    return ok(toDto(row, meta, resInfo, leg, cumulativeBuyNotional));
   });
 
   app.get<{ Params: { positionId: string }; Querystring: PhaseTransitionQuery }>(
@@ -221,6 +226,33 @@ export const positionRoutes: FastifyPluginAsync<PositionOpts> = async (app, opts
     },
   );
 };
+
+function buildCumulativeBuyNotionalMap(
+  db: Database.Database,
+  tokenIds: string[],
+): Map<string, number> {
+  const result = new Map<string, number>();
+  if (tokenIds.length === 0) return result;
+
+  const unique = [...new Set(tokenIds)];
+  const placeholders = unique.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT token_id, cumulative_buy_notional
+         FROM leg_states
+        WHERE token_id IN (${placeholders})`,
+    )
+    .all(...unique) as Array<Record<string, unknown>>;
+
+  for (const row of rows) {
+    const value = row.cumulative_buy_notional;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      result.set(String(row.token_id), value);
+    }
+  }
+
+  return result;
+}
 
 function toPhaseTransitionDto(row: Record<string, unknown>) {
   return {

@@ -133,7 +133,8 @@ export function PositionsPage() {
                 <th className="l">Last action</th>
                 <th>Size · Basis</th>
                 <th>Value</th>
-                <th>PnL</th>
+                <th>P&L</th>
+                <th>Full P&L</th>
                 <th className="l">Market state</th>
                 <th>Ends</th>
               </tr>
@@ -141,7 +142,7 @@ export function PositionsPage() {
             <tbody>
               {groups.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="p2-empty-table">
+                  <td colSpan={10} className="p2-empty-table">
                     {rows.length === 0
                       ? "No positions."
                       : "No positions match the current filters."}
@@ -199,7 +200,7 @@ function GroupFragment({
 }: GroupFragmentProps) {
   return (
     <>
-      <GroupHeader label={label} count={items.length} />
+      <GroupHeader label={label} count={items.length} colSpan={10} />
       {items.map((p) => (
         <PositionRow
           key={p.positionId}
