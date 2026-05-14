@@ -218,7 +218,6 @@ export function Overview() {
 
   const dustCount = metrics.positions.dust ?? 0;
   const openConditionCount = status.openConditionCount;
-  const tailAdjPnl = metrics.totalRealizedPnl - status.totalTailCostUsdc;
   const execution = status.executionTelemetry24h;
   const makerPct = execution?.makerRatio != null ? Math.round(execution.makerRatio * 100) : null;
   const leakagePct = execution?.feeLeakageRatio != null ? execution.feeLeakageRatio * 100 : null;
@@ -297,39 +296,8 @@ export function Overview() {
         </div>
       )}
 
-      {/* Tail Risk + Financial */}
-      <div className="grid-4" style={{ marginBottom: 16 }}>
-        <div
-          className="card"
-          style={{ border: "1px solid var(--orange)", borderLeft: "3px solid var(--orange)" }}
-        >
-          <div className="label" style={{ color: "var(--orange)", fontWeight: 700 }}>
-            Tail Risk
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginTop: 8 }}>
-            <div>
-              <div className="label">Tail Cost</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: "var(--orange)" }}>
-                ${status.totalTailCostUsdc.toFixed(2)}
-              </div>
-            </div>
-            <div>
-              <div className="label">Tail-Adj PnL</div>
-              <div
-                style={{
-                  fontSize: 18,
-                  fontWeight: 700,
-                  color: tailAdjPnl >= 0 ? "var(--green)" : "var(--red)",
-                }}
-              >
-                {tailAdjPnl >= 0 ? "+" : ""}${tailAdjPnl.toFixed(0)}
-              </div>
-            </div>
-          </div>
-          <div className="value-sm" style={{ marginTop: 6 }}>
-            {dustCount} dust positions
-          </div>
-        </div>
+      {/* Financial */}
+      <div className="grid-3" style={{ marginBottom: 16 }}>
         <div className="card card-accent-orange">
           <div className="label">Current Value</div>
           <div className="value-lg text-orange">{formatUsd(status.totalCurrentValueUsdc)}</div>
