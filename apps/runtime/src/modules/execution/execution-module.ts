@@ -478,29 +478,31 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
 
-    const minOrderSizeRejection = this.getMinOrderSizeRejection(cmd);
-    if (minOrderSizeRejection) {
-      this.log.warn(
-        {
-          commandId: cmd.commandId,
-          tokenId: cmd.tokenId,
-          side: cmd.side,
-          originalSize: cmd.size,
-          clampedSize: null,
-          minOrderSize: minOrderSizeRejection.minOrderSize,
-          positionSize: this.deps.positionRepo?.findByTokenId(cmd.tokenId)?.size ?? null,
-          tickSize: cmd.tickSize,
-          reason: "below_min_size",
-          phase: "pre-clamp",
-        },
-        "order rejected — below exchange minimum size",
-      );
-      await this.rejectOrder(
-        cmd,
-        "exchange-min-order-size-rejected",
-        ExchangeErrorCode.InvalidSize,
-      );
-      return;
+    if (cmd.side !== "sell") {
+      const minOrderSizeRejection = this.getMinOrderSizeRejection(cmd);
+      if (minOrderSizeRejection) {
+        this.log.warn(
+          {
+            commandId: cmd.commandId,
+            tokenId: cmd.tokenId,
+            side: cmd.side,
+            originalSize: cmd.size,
+            clampedSize: null,
+            minOrderSize: minOrderSizeRejection.minOrderSize,
+            positionSize: this.deps.positionRepo?.findByTokenId(cmd.tokenId)?.size ?? null,
+            tickSize: cmd.tickSize,
+            reason: "below_min_size",
+            phase: "pre-clamp",
+          },
+          "order rejected — below exchange minimum size",
+        );
+        await this.rejectOrder(
+          cmd,
+          "exchange-min-order-size-rejected",
+          ExchangeErrorCode.InvalidSize,
+        );
+        return;
+      }
     }
 
     // Idempotency: skip already-processed commandId
@@ -686,6 +688,18 @@ export class ExecutionModule implements RuntimeModule {
         errorMessage: result.errorMessage ?? null,
         errorDetails: result.errorDetails ?? null,
       });
+
+      if (cmd.side === "sell") {
+        const isMinSizeRejection =
+          result.errorCode === "INVALID_SIZE" ||
+          ExecutionModule.looksLikeMinSizeError(result.errorMessage, result.errorDetails);
+        if (isMinSizeRejection) {
+          this.maybeIncrementDustCounterForExecutionReject(
+            cmd,
+            SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+          );
+        }
+      }
 
       const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
         errorCode,
@@ -1035,7 +1049,51 @@ export class ExecutionModule implements RuntimeModule {
     const reservedSell = this.effectiveReservedSell(cmd.tokenId, localReservedSell);
     const upperBound = this.computeSellUpperBound(cmd.tokenId, position.size);
     const availableSize = upperBound - reservedSell;
-    if (availableSize + 1e-9 >= cmd.size) {
+    if (availableSize + ExecutionModule.SIZE_EPSILON_SHARES >= cmd.size) {
+      if (cmd.side === "sell") {
+        const minOrderSize = this.resolveCommandMinOrderSize(cmd);
+        if (
+          minOrderSize != null &&
+          Number.isFinite(minOrderSize) &&
+          minOrderSize > 0 &&
+          cmd.size + ExecutionModule.SIZE_EPSILON_SHARES < minOrderSize
+        ) {
+          if (availableSize + ExecutionModule.SIZE_EPSILON_SHARES >= minOrderSize) {
+            return {
+              kind: "clamp",
+              newSize: availableSize,
+              details: {
+                tokenId: cmd.tokenId,
+                positionSize: position.size,
+                upperBound,
+                reservedSell,
+                localReservedSell,
+                availableSize,
+                intentSize: cmd.size,
+                minOrderSize,
+                clampDirection: "up-to-available",
+                reason: "intent-below-min-residual-above-min",
+              },
+            };
+          }
+          return {
+            kind: "reject",
+            reason: SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+            errorCode: ExchangeErrorCode.InvalidSize,
+            message: "sell order skipped — residual below exchange minimum (intent also below)",
+            details: {
+              tokenId: cmd.tokenId,
+              positionSize: position.size,
+              upperBound,
+              reservedSell,
+              localReservedSell,
+              availableSize,
+              orderSize: cmd.size,
+              minOrderSize,
+            },
+          };
+        }
+      }
       return { kind: "accept" };
     }
 
@@ -1201,6 +1259,28 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
     return fallback;
+  }
+
+  private static looksLikeMinSizeError(
+    message: string | null | undefined,
+    details: unknown,
+  ): boolean {
+    const parts: string[] = [];
+    if (typeof message === "string") parts.push(message);
+    if (details != null) {
+      try {
+        parts.push(JSON.stringify(details));
+      } catch {
+        /* ignore */
+      }
+    }
+    const lower = parts.join(" ").toLowerCase();
+    return (
+      lower.includes("lower than the minimum") ||
+      lower.includes("invalid size") ||
+      lower.includes("min order size") ||
+      lower.includes("size must")
+    );
   }
 
   private async deferSellReplacementIfNeeded(cmd: PlaceOrderCommand): Promise<boolean> {

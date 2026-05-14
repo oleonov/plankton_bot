@@ -212,6 +212,20 @@ function collectRejections(b: InProcessEventBus): Array<{ reason: string; errorC
   return rejected;
 }
 
+function reservationDecision(
+  mod: ExecutionModule,
+  cmd: PlaceOrderCommand,
+): { kind: string; reason?: string; newSize?: number; details?: Record<string, unknown> } {
+  return (
+    mod as unknown as {
+      getReservationDecision(
+        cmd: PlaceOrderCommand,
+        notional: number,
+      ): { kind: string; reason?: string; newSize?: number; details?: Record<string, unknown> };
+    }
+  ).getReservationDecision(cmd, cmd.size * cmd.price);
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
@@ -237,6 +251,264 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     expect(isExecutableOrderSize(0.5, null)).toBe(false);
     expect(isExecutableOrderSize(1, null)).toBe(true);
     expect(isExecutableOrderSize(2, null)).toBe(true);
+  });
+
+  it("clamps SELL up to available residual when intent is below min and residual can satisfy min", () => {
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(6.85),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    const decision = reservationDecision(
+      mod,
+      makeSellCmd(3.67, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+    );
+
+    expect(decision).toMatchObject({
+      kind: "clamp",
+      newSize: 6.85,
+      details: {
+        availableSize: 6.85,
+        intentSize: 3.67,
+        minOrderSize: 5,
+        clampDirection: "up-to-available",
+        reason: "intent-below-min-residual-above-min",
+      },
+    });
+  });
+
+  it("rejects SELL as dust when intent is below min and residual is also below min", () => {
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(2),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    const decision = reservationDecision(
+      mod,
+      makeSellCmd(3.67, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+    );
+
+    expect(decision).toMatchObject({
+      kind: "reject",
+      reason: "sell-residual-below-min-order-size",
+      details: {
+        availableSize: 2,
+        orderSize: 3.67,
+        minOrderSize: 5,
+      },
+    });
+  });
+
+  it("rejects SELL as dust when below-min intent fits a residual that remains below min", () => {
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(4),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    const decision = reservationDecision(
+      mod,
+      makeSellCmd(3.67, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+    );
+
+    expect(decision).toMatchObject({
+      kind: "reject",
+      reason: "sell-residual-below-min-order-size",
+      details: {
+        availableSize: 4,
+        orderSize: 3.67,
+        minOrderSize: 5,
+      },
+    });
+  });
+
+  it("does not clamp up when SELL intent already meets min", () => {
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(6.85),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    const decision = reservationDecision(
+      mod,
+      makeSellCmd(5, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+    );
+
+    expect(decision.kind).toBe("accept");
+  });
+
+  it("preserves DOWN clamp when SELL intent exceeds available residual", () => {
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(6.85),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    const decision = reservationDecision(
+      mod,
+      makeSellCmd(10, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+    );
+
+    expect(decision).toMatchObject({
+      kind: "clamp",
+      newSize: 6.85,
+      details: {
+        availableSize: 6.85,
+        intentSize: 10,
+      },
+    });
+  });
+
+  it("accepts below-min SELL intent when no minOrderSize is known", () => {
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(6.85),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    expect(reservationDecision(mod, makeSellCmd(3.67)).kind).toBe("accept");
+  });
+
+  it("does not trigger clamp-up for invalid zero minOrderSize metadata", () => {
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(6.85),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+
+    const decision = reservationDecision(
+      mod,
+      makeSellCmd(3.67, {
+        metadata: { marketData: { minOrderSize: 0 } } as unknown as Record<string, unknown>,
+      }),
+    );
+
+    expect(decision.kind).toBe("accept");
+  });
+
+  it("lets handlePlace route below-min SELL through reservation clamp-up", async () => {
+    const positionRepo = createMockPositionRepo(6.85);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      allowSellSizeClamp: true,
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(3.67, {
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(6.85);
+    expect(mod.getDiagnostics().sellSizeClamps).toBe(1);
+
+    await mod.stop();
+  });
+
+  it("keeps BUY below-min rejection on the pre-flight guard", async () => {
+    const positionRepo = createMockPositionRepo(6.85);
+    const mod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      allowSellSizeClamp: true,
+    });
+
+    await mod.start();
+    const rejected = collectRejections(bus);
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makeSellCmd(3.67, {
+        side: "buy",
+        metadata: { marketData: { minOrderSize: 5 } } as unknown as Record<string, unknown>,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0]!).toEqual({
+      reason: "exchange-min-order-size-rejected",
+      errorCode: "INVALID_SIZE",
+    });
+
+    await mod.stop();
   });
 
   // ── Case 1: intent > available, clamp enabled → clamped to available ──
@@ -397,7 +669,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     await mod.stop();
   });
 
-  it("rejects live-lite SELL below the 1-share fallback when metadata is missing", async () => {
+  it("clamps live-lite SELL below the 1-share fallback up to available residual", async () => {
     const positionRepo = createMockPositionRepo(10);
     const mod = new ExecutionModule({
       gateway,
@@ -422,12 +694,10 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     });
     await bus.drain();
 
-    expect(gateway.placeOrder).not.toHaveBeenCalled();
-    expect(rejected).toHaveLength(1);
-    expect(rejected[0]!).toEqual({
-      reason: "exchange-min-order-size-rejected",
-      errorCode: "INVALID_SIZE",
-    });
+    expect(rejected).toHaveLength(0);
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(gateway.placeOrder).mock.calls[0]![0].size).toBe(10);
+    expect(mod.getDiagnostics().sellSizeClamps).toBe(1);
 
     await mod.stop();
   });

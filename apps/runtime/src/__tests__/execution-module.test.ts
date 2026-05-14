@@ -207,6 +207,14 @@ function getRejectOrderCaller(mod: ExecutionModule): {
   };
 }
 
+function looksLikeMinSizeError(message: string | null | undefined, details: unknown): boolean {
+  return (
+    ExecutionModule as unknown as {
+      looksLikeMinSizeError(message: string | null | undefined, details: unknown): boolean;
+    }
+  ).looksLikeMinSizeError(message, details);
+}
+
 const silentLog = {
   info: vi.fn(),
   warn: vi.fn(),
@@ -1024,6 +1032,158 @@ describe("ExecutionModule", () => {
     expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
   });
 
+  it("increments dust counter for gateway-level SELL min-size rejects", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    (gateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue({
+      success: false,
+      errorCode: "UNKNOWN",
+      errorMessage: "exchange returned no order id",
+      errorDetails: {
+        responseBody: {
+          error: "order is invalid. Size (3.66) lower than the minimum: 5",
+          status: 400,
+        },
+      },
+    });
+    const dustMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      legStateRepo,
+    });
+
+    await dustMod.start();
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-gateway-min-size-reject"),
+        clientOrderId: "plk_sell_gateway_min_size_reject" as ClientOrderId,
+        side: "sell",
+        size: 3.66,
+        price: 0.17,
+      }),
+      timestamp: Date.now(),
+    });
+    await bus.drain();
+
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledTimes(1);
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledWith(
+      createTokenId("tok-yes"),
+      expect.any(String),
+      { threshold: DEFAULT_EXECUTION_POLICY.dustAbandonment.maxConsecutiveRejects, price: 0.17 },
+    );
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("exchange returned no order id");
+
+    await dustMod.stop();
+  });
+
+  it("does not increment dust counter for non-min gateway rejects or BUY min-size rejects", async () => {
+    const cases: Array<{
+      name: string;
+      command: PlaceOrderCommand;
+      result: PlaceOrderResult;
+    }> = [
+      {
+        name: "insufficient-balance",
+        command: makePlaceCmd({
+          commandId: createCommandId("sell-gateway-insufficient-balance"),
+          clientOrderId: "plk_sell_gateway_insufficient_balance" as ClientOrderId,
+          side: "sell",
+        }),
+        result: {
+          success: false,
+          errorCode: ExchangeErrorCode.InsufficientBalance,
+          errorMessage: "insufficient balance",
+        },
+      },
+      {
+        name: "rate-limit",
+        command: makePlaceCmd({
+          commandId: createCommandId("sell-gateway-rate-limit"),
+          clientOrderId: "plk_sell_gateway_rate_limit" as ClientOrderId,
+          side: "sell",
+        }),
+        result: {
+          success: false,
+          errorCode: ExchangeErrorCode.RateLimited,
+          errorMessage: "rate limit exceeded",
+        },
+      },
+      {
+        name: "buy-min-size",
+        command: makePlaceCmd({
+          commandId: createCommandId("buy-gateway-min-size"),
+          clientOrderId: "plk_buy_gateway_min_size" as ClientOrderId,
+          side: "buy",
+          size: 3.66,
+        }),
+        result: {
+          success: false,
+          errorCode: "UNKNOWN",
+          errorMessage: "exchange returned no order id",
+          errorDetails: {
+            responseBody: { error: "Size (3.66) lower than the minimum: 5" },
+          },
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const caseBus = new InProcessEventBus();
+      const caseGateway = createMockGateway();
+      const caseOrderRepo = createMockOrderRepo();
+      const legStateRepo = createMockLegStateRepo();
+      (caseGateway.placeOrder as ReturnType<typeof vi.fn>).mockResolvedValue(testCase.result);
+      const dustMod = new ExecutionModule({
+        gateway: caseGateway,
+        bus: caseBus,
+        marketRepo: marketRepo as any,
+        orderRepo: caseOrderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+        legStateRepo,
+      });
+
+      await dustMod.start();
+      await caseBus.publish("PlaceOrderRequested", {
+        command: testCase.command,
+        timestamp: Date.now(),
+      });
+      await caseBus.drain();
+
+      expect(legStateRepo.incrementSellResidualReject, testCase.name).not.toHaveBeenCalled();
+
+      await dustMod.stop();
+    }
+  });
+
+  it("detects gateway min-size wording case-insensitively", () => {
+    expect(looksLikeMinSizeError("LOWER THAN THE MINIMUM", null)).toBe(true);
+    expect(looksLikeMinSizeError("invalid size", null)).toBe(true);
+    expect(looksLikeMinSizeError("MIN ORDER SIZE", null)).toBe(true);
+    expect(looksLikeMinSizeError("size must be greater than minimum", null)).toBe(true);
+    expect(looksLikeMinSizeError(null, { error: "Size (3.66) lower than the minimum: 5" })).toBe(
+      true,
+    );
+    expect(looksLikeMinSizeError("rate limit exceeded", { code: 429 })).toBe(false);
+  });
+
   it("cancels an existing SELL before submitting the replacement order", async () => {
     let cancelled = false;
     const existingSell: Order = {
@@ -1213,7 +1373,7 @@ describe("ExecutionModule", () => {
     await replaceMod.stop();
   });
 
-  it("rejects a sub-min SELL replacement before canceling the existing order", async () => {
+  it("clamps a sub-min SELL replacement after canceling the existing order", async () => {
     const existingSell: Order = {
       orderId: createOrderId("existing-sell"),
       clientOrderId: "plk_existing_sell" as ClientOrderId,
@@ -1275,12 +1435,18 @@ describe("ExecutionModule", () => {
       timestamp: Date.now(),
     });
 
-    expect(cancelRequested).toHaveLength(0);
-    expect(gateway.cancelOrder).not.toHaveBeenCalled();
-    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(cancelRequested).toHaveLength(1);
+    expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect((gateway.placeOrder as ReturnType<typeof vi.fn>).mock.calls[0]![0]).toMatchObject({
+      clientOrderId: "plk_sell_replace_sub_min",
+      side: "sell",
+      size: 6,
+      price: 0.5,
+    });
     expect(rejected).toHaveLength(1);
-    expect(rejected[0].reason).toBe("exchange-min-order-size-rejected");
-    expect(rejected[0].errorCode).toBe("INVALID_SIZE");
+    expect(rejected[0].reason).toBe("sell-replace-pending");
+    expect(rejected[0].errorCode).toBe("LIVE_POLICY_BLOCKED");
     expect(replaceMod.getDiagnostics().cancelReplacePendingCount).toBe(0);
 
     await replaceMod.stop();

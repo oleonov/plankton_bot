@@ -74,6 +74,27 @@ to return spec-derived size untouched. Clamp happens only at the execution
 boundary; leg-state, inventory, and downstream metrics still see the
 intended size for decision-making.
 
+### D6 — Clamp UP when intent below min and residual above min (SELL only)
+
+When SELL `cmd.size < minOrderSize` but `availableSize >= minOrderSize`,
+execution clamps **up** to `availableSize` rather than rejecting. This
+is symmetric to D1's clamp-down policy and is grounded in observed
+Plankton placement behaviour:
+
+- `research_plankton/plankton_sell_min_vs_residual_R71_report.md`:
+  78.49% of SELL fills are above the exchange minimum; 4.41% are
+  exactly at the minimum; 17.09% below are partial fills (not
+  partial placements).
+- In price bucket 0.30-0.50 median Plankton SELL size is 10.16
+  shares, p25 is 4.76. Plankton placement is full-residual, not
+  rule-budget-fractional.
+
+Trade-off: this overrides the rule's `suggestedSize` for one specific
+edge (intent below min). Spec §2 size remains authoritative until
+the execution boundary; clamp-up is a last-mile interpretation of
+«sell `size` shares» when `size` is unreachable but a valid SELL
+is reachable.
+
 ## Acceptance gate
 
 Per remediation plan §7.3 (lines 565–579), the merge gate for 7.3 is a
