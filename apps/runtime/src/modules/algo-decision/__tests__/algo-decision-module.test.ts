@@ -318,6 +318,21 @@ function makeMarket(
   };
 }
 
+function makeSellReadyLegState(tokenId: string, overrides: Partial<LegState> = {}): LegState {
+  const nowIso = new Date(Date.now() - 25 * 60 * 1000).toISOString();
+  return {
+    tokenId: createTokenId(tokenId),
+    buyCount: 1,
+    sellCount: 0,
+    lastAction: "BUY",
+    firstTradePrice: 0.1,
+    firstTradeAt: nowIso,
+    lastTradeAt: nowIso,
+    updatedAt: nowIso,
+    ...overrides,
+  };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("AlgoDecisionModule", () => {
@@ -473,6 +488,70 @@ describe("AlgoDecisionModule", () => {
       ([ev]) => ev === "SignalProduced",
     );
     expect(signalCalls.length).toBe(0);
+
+    await mod.stop();
+  });
+
+  it("pre-filter uses cumulative unsold size for SELL executability", async () => {
+    const tokenId = "token-sell-actual-position-size";
+    legStateRepo = createMockLegStateRepo([
+      makeSellReadyLegState(tokenId, {
+        cumulativeBuySize: 7,
+        cumulativeSellSize: 0,
+      }),
+    ]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    const market: NormalizedMarket = {
+      ...makeMarket(tokenId, null, 0.65, "cond-sell-actual-position-size"),
+      minOrderSize: 5,
+    };
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
+    expect(signal.side).toBe("sell");
+    expect(signal.suggestedSize).toBeLessThan(5);
+    expect(signal.decisionRuleId).toBe("D7-SELL-S1");
+
+    await mod.stop();
+  });
+
+  it("pre-filter still suppresses SELL when suggested and cumulative unsold sizes are below min", async () => {
+    const tokenId = "token-sell-below-actual-position-size";
+    legStateRepo = createMockLegStateRepo([
+      makeSellReadyLegState(tokenId, {
+        cumulativeBuySize: 4,
+        cumulativeSellSize: 0,
+      }),
+    ]);
+
+    const mod = buildModule();
+    await mod.start();
+
+    const market: NormalizedMarket = {
+      ...makeMarket(tokenId, null, 0.65, "cond-sell-below-actual-position-size"),
+      minOrderSize: 5,
+    };
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [market],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(0);
 
     await mod.stop();
   });

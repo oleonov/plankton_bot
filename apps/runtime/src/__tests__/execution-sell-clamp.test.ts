@@ -40,6 +40,7 @@ import type {
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
+import { isExecutableOrderSize } from "../min-order-size.js";
 
 const BOT_RUN_ID = createBotRunId("test-sell-clamp-run");
 const SELL_TOKEN = createTokenId("tok-clamp-yes");
@@ -232,6 +233,12 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     silentLog.debug.mockClear();
   });
 
+  it("uses a 1-share fallback when market min order size metadata is missing", () => {
+    expect(isExecutableOrderSize(0.5, null)).toBe(false);
+    expect(isExecutableOrderSize(1, null)).toBe(true);
+    expect(isExecutableOrderSize(2, null)).toBe(true);
+  });
+
   // ── Case 1: intent > available, clamp enabled → clamped to available ──
 
   it("clamps SELL size down to availableSize when intent exceeds position (default allow)", async () => {
@@ -390,7 +397,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     await mod.stop();
   });
 
-  it("rejects live-lite SELL below fallback exchange minimum when metadata is missing", async () => {
+  it("rejects live-lite SELL below the 1-share fallback when metadata is missing", async () => {
     const positionRepo = createMockPositionRepo(10);
     const mod = new ExecutionModule({
       gateway,
@@ -410,7 +417,7 @@ describe("ExecutionModule — SELL size clamp (ADR-008)", () => {
     const rejected = collectRejections(bus);
 
     await bus.publish("PlaceOrderRequested", {
-      command: makeSellCmd(3.22),
+      command: makeSellCmd(0.5),
       timestamp: Date.now(),
     });
     await bus.drain();

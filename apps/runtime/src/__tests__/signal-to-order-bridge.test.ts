@@ -2208,7 +2208,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       ...makeSignal(),
       side: "sell",
       suggestedPrice: 0.2,
-      suggestedSize: 3.22,
+      suggestedSize: 0.5,
       reason: "repricing-exit",
     };
     const market = makeMarket({
@@ -2230,9 +2230,9 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(skipped[0]!.stage).toBe("execution-terms");
     expect(skipped[0]!.reasons).toContain("order-size-below-minimum");
     expect(skipped[0]!.diagnostics).toMatchObject({
-      orderSize: 3.22,
+      orderSize: 0.5,
       minOrderSize: null,
-      effectiveMinOrderSize: 5,
+      effectiveMinOrderSize: 1,
     });
   });
 

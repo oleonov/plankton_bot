@@ -1571,12 +1571,20 @@ export class AlgoDecisionModule implements RuntimeModule {
     // BUY size is estimated at `market.bestBid` (the lowest realistic BUY
     // execution price; edge-mode pricing uses bestBid, taker mode uses
     // bestAsk which produces a smaller size). Falling back to ctx.price
-    // (midPrice) when bestBid is unavailable. SELL share-count comes from
-    // suggestedSize directly, matching resolveOrderSize().
+    // (midPrice) when bestBid is unavailable. SELL stays more permissive
+    // than execution by considering the leg's cumulative unsold size and
+    // intentionally ignoring open SELL reservations; execution owns those
+    // reserved-token-limit rejects.
     const sizeForExecutability =
       side === "buy"
         ? computeBuyOrderSizeForFilter(suggestedSizeUsdc, market, ctx.price)
-        : suggestedSize;
+        : Math.max(
+            suggestedSize,
+            Math.max(
+              0,
+              (emissionFacts.cumulativeBuySize ?? 0) - (emissionFacts.cumulativeSellSize ?? 0),
+            ),
+          );
     if (!isExecutableOrderSize(sizeForExecutability, market.minOrderSize)) {
       this.recordDecisionSuppressed({
         tokenId: market.tokenId,

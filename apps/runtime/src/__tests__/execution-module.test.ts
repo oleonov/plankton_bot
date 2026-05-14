@@ -7,6 +7,7 @@ import {
   createPositionId,
   createConditionId,
   DEFAULT_EXECUTION_POLICY,
+  ExchangeErrorCode,
 } from "@krabs/domain";
 import { LiveLiteGuard } from "../live-lite-guard.js";
 import type {
@@ -28,6 +29,7 @@ import type {
   Fill,
   Position,
   PositionRepository,
+  LegStateRepository,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
@@ -170,6 +172,38 @@ function createMockPositionRepo(position: Position | null = null): PositionRepos
     findDust: vi.fn().mockReturnValue([]),
     findAll: vi.fn().mockReturnValue(position ? [position] : []),
     findOpenByEntryStyle: vi.fn().mockReturnValue([]),
+  };
+}
+
+function createMockLegStateRepo(): LegStateRepository {
+  let count = 0;
+  let abandoned = false;
+  return {
+    get: vi.fn().mockReturnValue(null),
+    upsert: vi.fn(),
+    delete: vi.fn(),
+    getAll: vi.fn().mockReturnValue([]),
+    incrementSellResidualReject: vi.fn((_tokenId, _nowIso, abandon) => {
+      count += 1;
+      const markedAbandoned = abandon != null && count >= abandon.threshold && !abandoned;
+      if (markedAbandoned) abandoned = true;
+      return { count, markedAbandoned };
+    }),
+    markAbandoned: vi.fn(),
+    resetAbandoned: vi.fn(),
+    applyRepriceChainEvent: vi.fn(),
+  };
+}
+
+function getRejectOrderCaller(mod: ExecutionModule): {
+  rejectOrder(cmd: PlaceOrderCommand, reason: string, errorCode: ExchangeErrorCode): Promise<void>;
+} {
+  return mod as unknown as {
+    rejectOrder(
+      cmd: PlaceOrderCommand,
+      reason: string,
+      errorCode: ExchangeErrorCode,
+    ): Promise<void>;
   };
 }
 
@@ -908,6 +942,86 @@ describe("ExecutionModule", () => {
 
     resolvePlace!();
     await reserveMod.stop();
+  });
+
+  it("increments dust counter for execution-level SELL reserved-token-limit rejects", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    const dustMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      legStateRepo,
+    });
+    const rejectOrder = getRejectOrderCaller(dustMod).rejectOrder.bind(dustMod);
+
+    for (let idx = 0; idx < 10; idx++) {
+      await rejectOrder(
+        makePlaceCmd({
+          commandId: createCommandId(`sell-dust-reject-${idx}`),
+          clientOrderId: `plk_sell_dust_reject_${idx}` as ClientOrderId,
+          side: "sell",
+          price: 0.17,
+        }),
+        "reserved-token-limit",
+        ExchangeErrorCode.InsufficientBalance,
+      );
+    }
+
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenCalledTimes(10);
+    expect(legStateRepo.incrementSellResidualReject).toHaveBeenLastCalledWith(
+      createTokenId("tok-yes"),
+      expect.any(String),
+      { threshold: DEFAULT_EXECUTION_POLICY.dustAbandonment.maxConsecutiveRejects, price: 0.17 },
+    );
+    expect(vi.mocked(legStateRepo.incrementSellResidualReject).mock.results[9]!.value).toEqual({
+      count: 10,
+      markedAbandoned: true,
+    });
+  });
+
+  it("does not increment dust counter for non-dust reasons or BUY rejects", async () => {
+    const legStateRepo = createMockLegStateRepo();
+    const dustMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      legStateRepo,
+    });
+    const rejectOrder = getRejectOrderCaller(dustMod).rejectOrder.bind(dustMod);
+
+    await rejectOrder(
+      makePlaceCmd({
+        commandId: createCommandId("sell-rate-limit-reject"),
+        clientOrderId: "plk_sell_rate_limit_reject" as ClientOrderId,
+        side: "sell",
+      }),
+      "rate-limit",
+      ExchangeErrorCode.RateLimited,
+    );
+    await rejectOrder(
+      makePlaceCmd({
+        commandId: createCommandId("buy-reserved-token-limit-reject"),
+        clientOrderId: "plk_buy_reserved_token_limit_reject" as ClientOrderId,
+        side: "buy",
+      }),
+      "reserved-token-limit",
+      ExchangeErrorCode.InsufficientBalance,
+    );
+
+    expect(legStateRepo.incrementSellResidualReject).not.toHaveBeenCalled();
   });
 
   it("cancels an existing SELL before submitting the replacement order", async () => {

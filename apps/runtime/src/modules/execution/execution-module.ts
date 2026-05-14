@@ -62,7 +62,10 @@ import {
   WALLET_SELL_CAPACITY_EXHAUSTED_REASON,
 } from "../../wallet-buy-budget.js";
 import { DEFAULT_FALLBACK_MIN_ORDER_SIZE } from "../../min-order-size.js";
-import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
+import {
+  RESERVED_TOKEN_LIMIT_REASON,
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+} from "../../internal-order-reasons.js";
 import { ExecutionQueue } from "./execution-queue.js";
 import {
   buildReservationSnapshot,
@@ -80,6 +83,15 @@ import { buildCancelTelemetry } from "../reconciliation/cancel-telemetry.js";
 type OrderFillLookupGateway = ExchangeGateway & {
   getFillsForOrder?: (orderId: string) => Promise<ExchangeFill[]>;
 };
+
+const DUST_TRIGGERING_EXECUTION_REJECT_REASONS = new Set<string>([
+  RESERVED_TOKEN_LIMIT_REASON,
+  SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
+]);
+
+function resolvePriceFromCmd(cmd: PlaceOrderCommand): number {
+  return cmd.price;
+}
 
 export interface ExecutionModuleDeps {
   gateway: ExchangeGateway;
@@ -1319,6 +1331,33 @@ export class ExecutionModule implements RuntimeModule {
     errorCode: ExchangeErrorCode,
   ): Promise<void> {
     await this.publishOrderRejected(cmd, { reason, errorCode, timestamp: Date.now() });
+    this.maybeIncrementDustCounterForExecutionReject(cmd, reason);
+  }
+
+  private maybeIncrementDustCounterForExecutionReject(
+    cmd: PlaceOrderCommand,
+    reason: string,
+  ): void {
+    if (cmd.side !== "sell") return;
+    if (!DUST_TRIGGERING_EXECUTION_REJECT_REASONS.has(reason)) return;
+    const legStateRepo = this.deps.legStateRepo;
+    const executionPolicy = this.deps.executionPolicy;
+    if (!legStateRepo || !executionPolicy) return;
+    const dustPolicy = executionPolicy().dustAbandonment;
+    if (!dustPolicy.enabled) return;
+    const nowIso = new Date().toISOString();
+    const price = resolvePriceFromCmd(cmd);
+    try {
+      legStateRepo.incrementSellResidualReject(cmd.tokenId, nowIso, {
+        threshold: dustPolicy.maxConsecutiveRejects,
+        price,
+      });
+    } catch (err) {
+      this.log.warn(
+        { err, tokenId: cmd.tokenId, reason },
+        "execution-level dust counter increment failed",
+      );
+    }
   }
 
   private async publishOrderRejected(
