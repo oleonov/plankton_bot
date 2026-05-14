@@ -235,6 +235,16 @@ function applyRemoteMark(
   nowMs: number,
 ): boolean {
   if (!Number.isFinite(remote.currentValueUsdc)) return false;
+  // Defence against upstream bug: Polymarket prices are bounded to [0,1].
+  // Any remote.currentValueUsdc > position.size implies price > $1, which
+  // is impossible. Drop the update; W4 fallback will recompute.
+  if (
+    Number.isFinite(position.size) &&
+    position.size > 0 &&
+    remote.currentValueUsdc > position.size + 1e-9
+  ) {
+    return false;
+  }
 
   const nextStatus = resolveOpenPositionStatus(remote.currentValueUsdc);
   if (

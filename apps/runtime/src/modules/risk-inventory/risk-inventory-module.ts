@@ -28,6 +28,8 @@ import type {
   RuntimeControl,
   ExecutionPolicy,
   MarketRepository,
+  Position,
+  TokenId,
 } from "@krabs/domain";
 import { canPlaceBuyOrderForMarket } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
@@ -70,8 +72,9 @@ export interface RiskInventoryModuleDeps {
   resolutionTracker?: MarketResolutionTracker | undefined;
   /** Override for tests; defaults to Date.now. */
   now?: () => number;
-  /** Live-lite marks active wallet positions from Polymarket data-api reconciliation. */
+  /** Optional kill switch; live-lite market-data marks are gated per position. */
   markToMarketEnabled?: boolean | undefined;
+  latestMidPriceForToken?: ((tokenId: TokenId) => number | null) | undefined;
 }
 
 /** Full diagnostics snapshot returned by getDiagnostics(). */
@@ -84,6 +87,9 @@ export interface RiskDiagnostics {
 }
 
 const DEFAULT_REJECTION_LOG_COOLDOWN_MS = 60 * 60 * 1000;
+const IMPOSSIBLE_PRICE_EPSILON = 1e-9;
+
+export const W4_STALENESS_FALLBACK_MS = 60_000;
 
 export class RiskInventoryModule implements RuntimeModule {
   private readonly log: Logger;
@@ -146,6 +152,7 @@ export class RiskInventoryModule implements RuntimeModule {
       this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
       this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
     );
+    await this.backfillStaleCurrentValues();
     await this.replayUnreconciledFills();
     this.started = true;
     this.log.info("risk-inventory module started");
@@ -187,6 +194,45 @@ export class RiskInventoryModule implements RuntimeModule {
     }
   }
 
+  private async backfillStaleCurrentValues(): Promise<void> {
+    const positions = findActivePositions(this.deps.positionRepo);
+    if (positions.length === 0) return;
+
+    const nowMs = this.now();
+    const nowIso = new Date(nowMs).toISOString();
+    let backfilled = 0;
+
+    for (const pos of positions) {
+      if (!this.needsStartupCurrentValueBackfill(pos)) continue;
+
+      const markPrice = this.deps.latestMidPriceForToken
+        ? this.deps.latestMidPriceForToken(pos.tokenId)
+        : null;
+      if (markPrice === null || !Number.isFinite(markPrice)) continue;
+
+      const newValue = pos.size * markPrice;
+      const nextStatus =
+        pos.status === "closed"
+          ? "closed"
+          : resolveOpenPositionStatus(newValue, {
+              size: pos.size,
+              minOrderSize: this.getLatestMinOrderSize(pos.tokenId),
+            });
+
+      this.deps.positionRepo.save({
+        ...pos,
+        currentValueUsdc: newValue,
+        status: nextStatus,
+        updatedAt: nowIso,
+      });
+      backfilled++;
+    }
+
+    if (backfilled > 0) {
+      this.log.info({ backfilled }, "startup mark-to-market backfill");
+    }
+  }
+
   async stop(): Promise<void> {
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
@@ -223,6 +269,33 @@ export class RiskInventoryModule implements RuntimeModule {
 
   private now(): number {
     return this.deps.now ? this.deps.now() : Date.now();
+  }
+
+  private isMissingCurrentValue(pos: Position): boolean {
+    const stored = pos.currentValueUsdc;
+    return typeof stored !== "number" || !Number.isFinite(stored);
+  }
+
+  private hasImplausibleCurrentValue(pos: Position): boolean {
+    const stored = pos.currentValueUsdc;
+    if (typeof stored !== "number" || !Number.isFinite(stored)) return false;
+    return (
+      typeof pos.size === "number" &&
+      Number.isFinite(pos.size) &&
+      pos.size > 0 &&
+      stored / pos.size > 1.0 + IMPOSSIBLE_PRICE_EPSILON
+    );
+  }
+
+  private needsStartupCurrentValueBackfill(pos: Position): boolean {
+    return this.isMissingCurrentValue(pos) || this.hasImplausibleCurrentValue(pos);
+  }
+
+  private shouldApplyMarketDataMark(pos: Position, nowMs: number): boolean {
+    if (this.needsStartupCurrentValueBackfill(pos)) return true;
+    const updatedAtMs = pos.updatedAt ? Date.parse(pos.updatedAt) : 0;
+    if (!Number.isFinite(updatedAtMs)) return true;
+    return nowMs - updatedAtMs > W4_STALENESS_FALLBACK_MS;
   }
 
   private rejectionLogCooldownMs(): number {
@@ -425,10 +498,12 @@ export class RiskInventoryModule implements RuntimeModule {
 
     // Revalue all non-closed wallet inventory; dust can become open again.
     const openPositions = findActivePositions(this.deps.positionRepo);
+    const nowMs = this.now();
     let updated = 0;
     for (const pos of openPositions) {
       const markPrice = markPriceByToken.get(String(pos.tokenId));
       if (markPrice === undefined) continue;
+      if (!this.shouldApplyMarketDataMark(pos, nowMs)) continue;
 
       const newValue = pos.size * markPrice;
       const nextStatus =
@@ -439,7 +514,8 @@ export class RiskInventoryModule implements RuntimeModule {
               minOrderSize: this.getLatestMinOrderSize(pos.tokenId),
             });
       if (
-        pos.currentValueUsdc !== null &&
+        typeof pos.currentValueUsdc === "number" &&
+        Number.isFinite(pos.currentValueUsdc) &&
         Math.abs(newValue - pos.currentValueUsdc) < 0.001 &&
         pos.status === nextStatus
       ) {
@@ -450,7 +526,7 @@ export class RiskInventoryModule implements RuntimeModule {
         ...pos,
         currentValueUsdc: newValue,
         status: nextStatus,
-        updatedAt: new Date().toISOString(),
+        updatedAt: new Date(nowMs).toISOString(),
       });
       updated++;
     }

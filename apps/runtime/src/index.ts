@@ -70,6 +70,7 @@ import {
 } from "@krabs/db";
 import type { DbConnection } from "@krabs/db";
 import { createBotRunId, ENTRY_REASONS, resolveTradingState } from "@krabs/domain";
+import type { TokenId } from "@krabs/domain";
 import {
   DataApiTradeCountProvider,
   GammaMarketDiscoveryGateway,
@@ -357,6 +358,33 @@ async function main(): Promise<void> {
     legStateTransition: new SqliteLegStateTransitionRepository(ledgerConn.db),
     tokenModeState: new SqliteAlgoTokenModeStateRepository(ledgerConn.db),
     orderPriceCooldown: new SqliteOrderPriceCooldownRepository(ledgerConn.db),
+  };
+
+  const latestMidPriceStmt = ledgerConn.db.prepare(
+    `SELECT best_bid, best_ask
+     FROM market_snapshots
+     WHERE token_id = ?
+     ORDER BY captured_at DESC, id DESC
+     LIMIT 1`,
+  );
+  const latestMidPriceForToken = (tokenId: TokenId): number | null => {
+    const row = latestMidPriceStmt.get(String(tokenId)) as
+      | { best_bid: number | null; best_ask: number | null }
+      | undefined;
+    if (!row) return null;
+    const bid = row.best_bid;
+    const ask = row.best_ask;
+    if (
+      typeof bid !== "number" ||
+      !Number.isFinite(bid) ||
+      bid <= 0 ||
+      typeof ask !== "number" ||
+      !Number.isFinite(ask) ||
+      ask <= 0
+    ) {
+      return null;
+    }
+    return (bid + ask) / 2;
   };
 
   // 3b. Selection rule engine — version-polled singleton shared by scanner,
@@ -853,7 +881,8 @@ async function main(): Promise<void> {
       redeemSweepModule?.isConditionInRedeemFlight(conditionId) ?? false,
     runtimeMetrics,
     resolutionTracker: marketResolutionTracker,
-    markToMarketEnabled: runtimeMode !== "live-lite",
+    markToMarketEnabled: true,
+    latestMidPriceForToken,
   });
 
   // 7h. Strategy module

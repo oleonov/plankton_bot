@@ -238,6 +238,66 @@ describe("runWalletPositionSentinel", () => {
     expect(repo.save).not.toHaveBeenCalled();
   });
 
+  it("drops impossible remote currentValueUsdc above local position size", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "open",
+        size: 0.01,
+        costBasisUsdc: 0.0037,
+        currentValueUsdc: 0.0033,
+        realizedPnl: 0,
+        closedAt: null,
+      }),
+    ]);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 0.01, currentValueUsdc: 8 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.markUpdateCount).toBe(0);
+    expect(repo.save).not.toHaveBeenCalled();
+  });
+
+  it("allows remote currentValueUsdc exactly equal to local position size", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "dust",
+        size: 5,
+        costBasisUsdc: 2.5,
+        currentValueUsdc: 0.49,
+        realizedPnl: 0,
+        closedAt: null,
+      }),
+    ]);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 5, currentValueUsdc: 5 })]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.driftCount).toBe(0);
+    expect(result.markUpdateCount).toBe(1);
+    expect(repo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentValueUsdc: 5,
+        status: "open",
+        size: 5,
+      }),
+    );
+  });
+
   it("detects active local inventory whose size diverges from Polymarket", async () => {
     const result = await runWalletPositionSentinel(
       {

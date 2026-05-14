@@ -29,12 +29,18 @@ import {
   SqlitePositionRepository,
   type DbConnection,
 } from "@krabs/db";
-import { RiskInventoryModule } from "../modules/risk-inventory/risk-inventory-module.js";
+import {
+  RiskInventoryModule,
+  W4_STALENESS_FALLBACK_MS,
+} from "../modules/risk-inventory/risk-inventory-module.js";
 
 // ─── Test helpers ────────────────────────────────────────────────────────
 
 const TOK_ID = createTokenId("tok-yes");
 const COND_ID = createConditionId("cond-btc");
+const MTM_NOW_MS = Date.parse("2026-05-14T12:00:00.000Z");
+const FRESH_MTM_UPDATED_AT = new Date(MTM_NOW_MS - 30_000).toISOString();
+const STALE_MTM_UPDATED_AT = new Date(MTM_NOW_MS - W4_STALENESS_FALLBACK_MS - 1).toISOString();
 
 function makeSignal(overrides?: Partial<Signal>): Signal {
   return {
@@ -81,6 +87,26 @@ function makeMarket(overrides?: Partial<NormalizedMarket>): NormalizedMarket {
     eventMarketCount: 1,
     ...overrides,
   } as NormalizedMarket;
+}
+
+function makeMtmPosition(overrides: Partial<Position> = {}): Position {
+  return {
+    positionId: createPositionId("pos-mtm"),
+    tokenId: TOK_ID,
+    conditionId: COND_ID,
+    side: "buy",
+    size: 100,
+    avgEntryPrice: 0.05,
+    costBasisUsdc: 5,
+    currentValueUsdc: 5,
+    realizedPnl: 0,
+    status: "open",
+    entryStyle: null,
+    openedAt: "2026-05-14T11:00:00.000Z",
+    closedAt: null,
+    updatedAt: STALE_MTM_UPDATED_AT,
+    ...overrides,
+  };
 }
 
 function createMockPositionRepo(position?: Position | Position[] | null): PositionRepository {
@@ -1436,10 +1462,10 @@ describe("RiskInventoryModule", () => {
         entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
-      mod = createModule();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       // Market moves from 0.05 to 0.08 mark price → new value = 100 * 0.08 = 8.0
@@ -1485,30 +1511,71 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
-    it("can disable market-data mark-to-market for live wallet marks", async () => {
-      const pos: Position = {
-        positionId: createPositionId("pos-live-wallet-mark"),
-        tokenId: TOK_ID,
-        conditionId: COND_ID,
-        side: "buy",
-        size: 28.37,
-        avgEntryPrice: 0.074,
-        costBasisUsdc: 2.0993,
-        currentValueUsdc: 2.1135,
-        realizedPnl: 0,
-        status: "open",
-        entryStyle: null,
-        openedAt: new Date().toISOString(),
-        closedAt: null,
-        updatedAt: new Date().toISOString(),
-      };
-      positionRepo = createMockPositionRepo(pos);
-      mod = createModule(undefined, { markToMarketEnabled: false });
+    it("uses market-data mark-to-market as a staleness-gated fallback for live wallet marks", async () => {
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          positionId: createPositionId("pos-live-wallet-mark-fresh"),
+          size: 28.37,
+          avgEntryPrice: 0.074,
+          costBasisUsdc: 2.0993,
+          currentValueUsdc: 2.1135,
+          updatedAt: FRESH_MTM_UPDATED_AT,
+        }),
+      );
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeMarket({ bestBid: 0.057, bestAsk: 0.058, midPrice: 0.0575 })],
         timestamp: Date.now(),
+      });
+      await bus.drain();
+
+      expect(positionRepo.save).not.toHaveBeenCalled();
+
+      await mod.stop();
+
+      bus = new InProcessEventBus();
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          positionId: createPositionId("pos-live-wallet-mark-stale"),
+          size: 28.37,
+          avgEntryPrice: 0.074,
+          costBasisUsdc: 2.0993,
+          currentValueUsdc: 2.1135,
+          updatedAt: STALE_MTM_UPDATED_AT,
+        }),
+      );
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ bestBid: 0.057, bestAsk: 0.058, midPrice: 0.0575 })],
+        timestamp: MTM_NOW_MS,
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls).toHaveLength(1);
+      const savedPos = saveCalls[0][0];
+      expect(savedPos.currentValueUsdc).toBeCloseTo(28.37 * 0.0575, 6);
+      expect(savedPos.updatedAt).toBe(new Date(MTM_NOW_MS).toISOString());
+
+      await mod.stop();
+    });
+
+    it("honors the markToMarketEnabled kill switch", async () => {
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          updatedAt: STALE_MTM_UPDATED_AT,
+        }),
+      );
+      mod = createModule(undefined, { markToMarketEnabled: false, now: () => MTM_NOW_MS });
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ bestBid: 0.057, bestAsk: 0.058, midPrice: 0.0575 })],
+        timestamp: MTM_NOW_MS,
       });
       await bus.drain();
 
@@ -1532,10 +1599,10 @@ describe("RiskInventoryModule", () => {
         entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
-      mod = createModule();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
@@ -1568,10 +1635,10 @@ describe("RiskInventoryModule", () => {
         entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
-      mod = createModule();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
@@ -1602,10 +1669,10 @@ describe("RiskInventoryModule", () => {
         entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
-      mod = createModule();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
@@ -1665,10 +1732,10 @@ describe("RiskInventoryModule", () => {
         entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
-      mod = createModule();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
@@ -1709,10 +1776,10 @@ describe("RiskInventoryModule", () => {
         entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
-      mod = createModule();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
@@ -1772,10 +1839,10 @@ describe("RiskInventoryModule", () => {
         entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
-      mod = createModule();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       // Market update with null midPrice → no revaluation
@@ -1812,6 +1879,168 @@ describe("RiskInventoryModule", () => {
       await bus.drain();
 
       // No save call for position (no price data matched)
+      expect(positionRepo.save).not.toHaveBeenCalled();
+
+      await mod.stop();
+    });
+
+    it("writes mark-to-market when currentValueUsdc is null", async () => {
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          positionId: createPositionId("pos-null-current-value"),
+          size: 6.85,
+          currentValueUsdc: null,
+          updatedAt: FRESH_MTM_UPDATED_AT,
+        }),
+      );
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ midPrice: 0.2 })],
+        timestamp: MTM_NOW_MS,
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls).toHaveLength(1);
+      expect(saveCalls[0][0].currentValueUsdc).toBeCloseTo(6.85 * 0.2, 6);
+      expect(saveCalls[0][0].updatedAt).toBe(new Date(MTM_NOW_MS).toISOString());
+
+      await mod.stop();
+    });
+
+    it("overrides implausible currentValueUsdc immediately", async () => {
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          positionId: createPositionId("pos-implausible-current-value"),
+          size: 0.01,
+          currentValueUsdc: 8.0964,
+          updatedAt: FRESH_MTM_UPDATED_AT,
+        }),
+      );
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ midPrice: 0.2 })],
+        timestamp: MTM_NOW_MS,
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls).toHaveLength(1);
+      expect(saveCalls[0][0].currentValueUsdc).toBeCloseTo(0.01 * 0.2, 6);
+
+      await mod.stop();
+    });
+
+    it("skips plausible fresh values and writes plausible stale values", async () => {
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          positionId: createPositionId("pos-plausible-fresh"),
+          currentValueUsdc: 4,
+          updatedAt: new Date(MTM_NOW_MS - 30_000).toISOString(),
+        }),
+      );
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ midPrice: 0.08 })],
+        timestamp: MTM_NOW_MS,
+      });
+      await bus.drain();
+
+      expect(positionRepo.save).not.toHaveBeenCalled();
+      await mod.stop();
+
+      bus = new InProcessEventBus();
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          positionId: createPositionId("pos-plausible-stale"),
+          currentValueUsdc: 4,
+          updatedAt: new Date(MTM_NOW_MS - 90_000).toISOString(),
+        }),
+      );
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
+      await mod.start();
+
+      await bus.publish("NormalizedMarketUpdated", {
+        markets: [makeMarket({ midPrice: 0.08 })],
+        timestamp: MTM_NOW_MS,
+      });
+      await bus.drain();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls).toHaveLength(1);
+      expect(saveCalls[0][0].currentValueUsdc).toBeCloseTo(8, 6);
+
+      await mod.stop();
+    });
+
+    it("backfills null and implausible startup values from latest midpoint", async () => {
+      const nullToken = createTokenId("tok-null-backfill");
+      const implausibleToken = createTokenId("tok-implausible-backfill");
+      const plausibleToken = createTokenId("tok-plausible-backfill");
+      positionRepo = createMockPositionRepo([
+        makeMtmPosition({
+          positionId: createPositionId("pos-null-backfill"),
+          tokenId: nullToken,
+          size: 6.85,
+          currentValueUsdc: null,
+        }),
+        makeMtmPosition({
+          positionId: createPositionId("pos-implausible-backfill"),
+          tokenId: implausibleToken,
+          size: 0.01,
+          currentValueUsdc: 8.0964,
+        }),
+        makeMtmPosition({
+          positionId: createPositionId("pos-plausible-backfill"),
+          tokenId: plausibleToken,
+          size: 10,
+          currentValueUsdc: 2,
+        }),
+      ]);
+      mod = createModule(undefined, {
+        now: () => MTM_NOW_MS,
+        latestMidPriceForToken: (tokenId) =>
+          String(tokenId) === String(plausibleToken) ? null : 0.2,
+      });
+
+      await mod.start();
+
+      const saveCalls = (positionRepo.save as any).mock.calls;
+      expect(saveCalls).toHaveLength(2);
+      expect(saveCalls[0][0].tokenId).toBe(nullToken);
+      expect(saveCalls[0][0].currentValueUsdc).toBeCloseTo(6.85 * 0.2, 6);
+      expect(saveCalls[0][0].updatedAt).toBe(new Date(MTM_NOW_MS).toISOString());
+      expect(saveCalls[1][0].tokenId).toBe(implausibleToken);
+      expect(saveCalls[1][0].currentValueUsdc).toBeCloseTo(0.01 * 0.2, 6);
+      expect(saveCalls[1][0].updatedAt).toBe(new Date(MTM_NOW_MS).toISOString());
+      expect(silentLog.info).toHaveBeenCalledWith(
+        { backfilled: 2 },
+        "startup mark-to-market backfill",
+      );
+
+      await mod.stop();
+    });
+
+    it("skips startup backfill when latest midpoint is unavailable", async () => {
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          positionId: createPositionId("pos-null-no-midpoint"),
+          currentValueUsdc: null,
+        }),
+      );
+      mod = createModule(undefined, {
+        now: () => MTM_NOW_MS,
+        latestMidPriceForToken: () => null,
+      });
+
+      await mod.start();
+
       expect(positionRepo.save).not.toHaveBeenCalled();
 
       await mod.stop();
@@ -1878,10 +2107,10 @@ describe("RiskInventoryModule", () => {
         entryStyle: null,
         openedAt: new Date().toISOString(),
         closedAt: null,
-        updatedAt: new Date().toISOString(),
+        updatedAt: STALE_MTM_UPDATED_AT,
       };
       positionRepo = createMockPositionRepo(pos);
-      mod = createModule();
+      mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
 
       await bus.publish("NormalizedMarketUpdated", {
