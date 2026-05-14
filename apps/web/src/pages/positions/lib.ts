@@ -5,6 +5,13 @@ export type Density = "compact" | "default" | "spacious";
 export type PhaseFilter = "all" | PositionPhase;
 export type MarketState = "open" | "closed";
 export type ResolutionTag = "resolving" | "expired" | null;
+export type PositionSortKey = "sizeBasis" | "value" | "pnl" | "fullPnl" | "ends";
+export type SortDirection = "asc" | "desc";
+
+export interface PositionSort {
+  key: PositionSortKey;
+  direction: SortDirection;
+}
 
 export const PHASE_ORDER: PositionPhase[] = ["S2", "S3", "S1", "S0"];
 
@@ -136,6 +143,73 @@ export function lastActionMinutes(ts: string | null, now: number = Date.now()): 
   return Math.max(0, (now - ms) / 60_000);
 }
 
+export function nextPositionSort(
+  current: PositionSort | null,
+  key: PositionSortKey,
+): PositionSort | null {
+  if (!current || current.key !== key) return { key, direction: "asc" };
+  if (current.direction === "asc") return { key, direction: "desc" };
+  return null;
+}
+
+export function sortPositions(
+  rows: PositionDTO[],
+  sort: PositionSort | null,
+  now: number = Date.now(),
+): PositionDTO[] {
+  if (!sort) return rows.slice();
+  return rows
+    .map((position, index) => ({ position, index }))
+    .sort((a, b) => {
+      const cmp = comparePositionSortMetric(a.position, b.position, sort, now);
+      return cmp !== 0 ? cmp : a.index - b.index;
+    })
+    .map((item) => item.position);
+}
+
+function comparePositionSortMetric(
+  a: PositionDTO,
+  b: PositionDTO,
+  sort: PositionSort,
+  now: number,
+): number {
+  const dir = sort.direction === "asc" ? 1 : -1;
+  if (sort.key === "sizeBasis") {
+    return (
+      dir * compareNumber(a.size, b.size) || dir * compareNumber(a.costBasisUsdc, b.costBasisUsdc)
+    );
+  }
+  if (sort.key === "value") {
+    return compareNullableNumber(a.currentValueUsdc, b.currentValueUsdc, sort.direction);
+  }
+  if (sort.key === "pnl") {
+    return dir * compareNumber(getPositionUnrealizedPnl(a), getPositionUnrealizedPnl(b));
+  }
+  if (sort.key === "fullPnl") {
+    return dir * compareNumber(getPositionFullPnl(a), getPositionFullPnl(b));
+  }
+  return dir * compareNumber(endsMsFrom(a.endDate, now), endsMsFrom(b.endDate, now));
+}
+
+function compareNumber(a: number, b: number): number {
+  const safeA = Number.isFinite(a) ? a : Number.POSITIVE_INFINITY;
+  const safeB = Number.isFinite(b) ? b : Number.POSITIVE_INFINITY;
+  return safeA === safeB ? 0 : safeA < safeB ? -1 : 1;
+}
+
+function compareNullableNumber(
+  a: number | null,
+  b: number | null,
+  direction: SortDirection,
+): number {
+  const aValid = typeof a === "number" && Number.isFinite(a);
+  const bValid = typeof b === "number" && Number.isFinite(b);
+  if (!aValid && !bValid) return 0;
+  if (!aValid) return 1;
+  if (!bValid) return -1;
+  return (direction === "asc" ? 1 : -1) * compareNumber(a, b);
+}
+
 export function outcomeKind(outcome: string | null): "yes" | "no" | "neutral" {
   if (!outcome) return "neutral";
   const o = outcome.toLowerCase();
@@ -149,54 +223,66 @@ export interface GroupBucket {
   items: PositionDTO[];
 }
 
-export function groupPositions(rows: PositionDTO[], groupBy: GroupBy): GroupBucket[] {
+export function groupPositions(
+  rows: PositionDTO[],
+  groupBy: GroupBy,
+  sort: PositionSort | null = null,
+): GroupBucket[] {
   const list = rows.slice();
   const now = Date.now();
+  const maybeSortGroups = (groups: GroupBucket[]): GroupBucket[] =>
+    sort ? groups.map((g) => ({ ...g, items: sortPositions(g.items, sort, now) })) : groups;
 
   if (groupBy === "lastAction") {
     list.sort(
       (a, b) => lastActionMinutes(a.lastActionAt, now) - lastActionMinutes(b.lastActionAt, now),
     );
-    return bucketize(
-      list,
-      [
-        { key: "Active now", test: (m) => m < 15 },
-        { key: "Recent (last hour)", test: (m) => m >= 15 && m < 60 },
-        { key: "Today", test: (m) => m >= 60 && m < 24 * 60 },
-        { key: "Older", test: (m) => m >= 24 * 60 },
-      ],
-      (p) => lastActionMinutes(p.lastActionAt, now),
+    return maybeSortGroups(
+      bucketize(
+        list,
+        [
+          { key: "Active now", test: (m) => m < 15 },
+          { key: "Recent (last hour)", test: (m) => m >= 15 && m < 60 },
+          { key: "Today", test: (m) => m >= 60 && m < 24 * 60 },
+          { key: "Older", test: (m) => m >= 24 * 60 },
+        ],
+        (p) => lastActionMinutes(p.lastActionAt, now),
+      ),
     );
   }
 
   if (groupBy === "phase") {
-    return PHASE_ORDER.map((phase) => ({
-      key: `${PHASE_META[phase].label} (${phase})`,
-      items: list.filter((p) => p.phase === phase),
-    })).filter((g) => g.items.length > 0);
+    return maybeSortGroups(
+      PHASE_ORDER.map((phase) => ({
+        key: `${PHASE_META[phase].label} (${phase})`,
+        items: list.filter((p) => p.phase === phase),
+      })).filter((g) => g.items.length > 0),
+    );
   }
 
   if (groupBy === "pnl") {
-    list.sort((a, b) => getPositionFullPnl(b) - getPositionFullPnl(a));
+    if (!sort) list.sort((a, b) => getPositionFullPnl(b) - getPositionFullPnl(a));
     const gains = list.filter((p) => getPositionFullPnl(p) > 0);
     const rest = list.filter((p) => getPositionFullPnl(p) <= 0);
     const out: GroupBucket[] = [];
     if (gains.length) out.push({ key: "Gains", items: gains });
     if (rest.length) out.push({ key: "Flat / Losses", items: rest });
-    return out;
+    return maybeSortGroups(out);
   }
 
   // ends
-  list.sort((a, b) => endsMsFrom(a.endDate, now) - endsMsFrom(b.endDate, now));
-  return bucketize(
-    list,
-    [
-      { key: "Expired", test: (m) => m < 0 },
-      { key: "Closing < 1h", test: (m) => m >= 0 && m < 3_600_000 },
-      { key: "Closing today", test: (m) => m >= 3_600_000 && m < 24 * 3_600_000 },
-      { key: "Later", test: (m) => m >= 24 * 3_600_000 },
-    ],
-    (p) => endsMsFrom(p.endDate, now),
+  if (!sort) list.sort((a, b) => endsMsFrom(a.endDate, now) - endsMsFrom(b.endDate, now));
+  return maybeSortGroups(
+    bucketize(
+      list,
+      [
+        { key: "Expired", test: (m) => m < 0 },
+        { key: "Closing < 1h", test: (m) => m >= 0 && m < 3_600_000 },
+        { key: "Closing today", test: (m) => m >= 3_600_000 && m < 24 * 3_600_000 },
+        { key: "Later", test: (m) => m >= 24 * 3_600_000 },
+      ],
+      (p) => endsMsFrom(p.endDate, now),
+    ),
   );
 }
 

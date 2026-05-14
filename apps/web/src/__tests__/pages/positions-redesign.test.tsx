@@ -122,6 +122,12 @@ function seedPositions(items: PositionDTO[] = FIXTURES) {
   );
 }
 
+function visiblePositionIds(): string[] {
+  return Array.from(document.querySelectorAll<HTMLElement>('[data-testid^="position-row-"]')).map(
+    (row) => row.dataset.testid!.replace("position-row-", ""),
+  );
+}
+
 beforeEach(() => {
   window.localStorage.clear();
   // Most assertions in this file pre-date the hideClosedByDefault flip and
@@ -205,6 +211,97 @@ describe("PositionsPage — redesign", () => {
 
     expect(screen.queryByText("Will SOL crash?")).not.toBeInTheDocument();
     expect(screen.getByText("Will BTC be above $100k?")).toBeInTheDocument();
+  });
+
+  it("sorts Value through ascending, descending, and default while Hide dust still applies", async () => {
+    seedPositions([
+      makePosition({
+        positionId: "sort-mid",
+        question: "Middle value",
+        currentValueUsdc: 5,
+        lastActionAt: "2026-04-24T10:00:00Z",
+      }),
+      makePosition({
+        positionId: "sort-dust",
+        question: "Dust value",
+        status: "dust",
+        currentValueUsdc: 3,
+        lastActionAt: "2026-04-24T10:00:00Z",
+      }),
+      makePosition({
+        positionId: "sort-low",
+        question: "Low value",
+        currentValueUsdc: 1,
+        lastActionAt: "2026-04-24T10:00:00Z",
+      }),
+      makePosition({
+        positionId: "sort-high",
+        question: "High value",
+        currentValueUsdc: 9,
+        lastActionAt: "2026-04-24T10:00:00Z",
+      }),
+    ]);
+    renderWithProviders(<Positions />);
+    await screen.findByText("Middle value");
+
+    const user = userEvent.setup();
+    const valueHeader = screen.getByRole("button", { name: "Value" });
+    const valueColumn = screen.getByRole("columnheader", { name: "Value" });
+
+    expect(visiblePositionIds()).toEqual(["sort-mid", "sort-dust", "sort-low", "sort-high"]);
+    expect(valueColumn).toHaveAttribute("aria-sort", "none");
+
+    await user.click(valueHeader);
+    expect(valueColumn).toHaveAttribute("aria-sort", "ascending");
+    expect(valueHeader.textContent).toContain("▲");
+    expect(visiblePositionIds()).toEqual(["sort-low", "sort-dust", "sort-mid", "sort-high"]);
+
+    await user.click(screen.getByLabelText(/Hide dust/));
+    expect(visiblePositionIds()).toEqual(["sort-low", "sort-mid", "sort-high"]);
+
+    await user.click(valueHeader);
+    expect(valueColumn).toHaveAttribute("aria-sort", "descending");
+    expect(valueHeader.textContent).toContain("▼");
+    expect(visiblePositionIds()).toEqual(["sort-high", "sort-mid", "sort-low"]);
+
+    await user.click(valueHeader);
+    expect(valueColumn).toHaveAttribute("aria-sort", "none");
+    expect(valueHeader.textContent).not.toContain("▲");
+    expect(valueHeader.textContent).not.toContain("▼");
+    expect(visiblePositionIds()).toEqual(["sort-mid", "sort-low", "sort-high"]);
+  });
+
+  it("keeps phase grouping active while sorting rows inside each group", async () => {
+    seedPositions([
+      makePosition({
+        positionId: "phase-s2-high",
+        question: "S2 high value",
+        phase: "S2",
+        currentValueUsdc: 8,
+      }),
+      makePosition({
+        positionId: "phase-s1-mid",
+        question: "S1 middle value",
+        phase: "S1",
+        currentValueUsdc: 5,
+      }),
+      makePosition({
+        positionId: "phase-s2-low",
+        question: "S2 low value",
+        phase: "S2",
+        currentValueUsdc: 2,
+      }),
+    ]);
+    renderWithProviders(<Positions />);
+    await screen.findByText("S2 high value");
+
+    const user = userEvent.setup();
+    await user.selectOptions(screen.getByLabelText(/Group by/i), "phase");
+    await user.click(screen.getByRole("button", { name: "Value" }));
+
+    expect(screen.getByText(/Accumulating \(S2\)/)).toBeInTheDocument();
+    expect(screen.getByText(/First Entry \(S1\)/)).toBeInTheDocument();
+    expect(visiblePositionIds()).toEqual(["phase-s2-low", "phase-s2-high", "phase-s1-mid"]);
   });
 
   it("persists tweaks to localStorage", async () => {

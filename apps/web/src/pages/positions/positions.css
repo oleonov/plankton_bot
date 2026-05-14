@@ -208,6 +208,31 @@
 .positions-v2 table.p2-table thead th.l {
   text-align: left;
 }
+.positions-v2 .p2-sortbtn {
+  all: unset;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  cursor: pointer;
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.positions-v2 .p2-sortbtn:hover,
+.positions-v2 .p2-sortbtn:focus-visible,
+.positions-v2 .p2-sortbtn.active {
+  color: var(--p2-fg);
+}
+.positions-v2 .p2-sortbtn:focus-visible {
+  outline: 1px solid var(--p2-border);
+  outline-offset: 2px;
+}
+.positions-v2 .p2-sortarrow {
+  font-size: 10px;
+  line-height: 1;
+}
 
 .positions-v2 tr.p2-grp td {
   background: #0b1017;

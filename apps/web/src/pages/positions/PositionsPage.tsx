@@ -8,6 +8,10 @@ import {
   deriveMarketState,
   groupPositions,
   matchesSearch,
+  nextPositionSort,
+  sortPositions,
+  type PositionSort,
+  type PositionSortKey,
   type PhaseFilter,
 } from "./lib.ts";
 import { PositionDrawer } from "./PositionDrawer.tsx";
@@ -32,6 +36,7 @@ export function PositionsPage() {
   const [filter, setFilter] = useState<PhaseFilter>("all");
   const [selected, setSelected] = useState<PositionDTO | null>(null);
   const [page, setPage] = useState(1);
+  const [sort, setSort] = useState<PositionSort | null>(null);
 
   const resetPage = useCallback(() => setPage(1), []);
 
@@ -58,17 +63,18 @@ export function PositionsPage() {
     return out;
   }, [rows, tweaks.hideClosedByDefault, tweaks.hideDust, filter, query]);
 
-  const filteredCount = filtered.length;
+  const sorted = useMemo(() => sortPositions(filtered, sort), [filtered, sort]);
+  const filteredCount = sorted.length;
   const totalPages = Math.max(1, Math.ceil(filteredCount / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
   const pageSlice = useMemo(
-    () => filtered.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
-    [filtered, safePage],
+    () => sorted.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
+    [sorted, safePage],
   );
 
   const groups = useMemo(
-    () => groupPositions(pageSlice, tweaks.groupBy),
-    [pageSlice, tweaks.groupBy],
+    () => groupPositions(pageSlice, tweaks.groupBy, sort),
+    [pageSlice, tweaks.groupBy, sort],
   );
 
   const pageStart = filteredCount > 0 ? (safePage - 1) * PAGE_SIZE + 1 : 0;
@@ -131,12 +137,52 @@ export function PositionsPage() {
                 <th className="l">Market</th>
                 <th className="l">Phase</th>
                 <th className="l">Last action</th>
-                <th>Size · Basis</th>
-                <th>Value</th>
-                <th>P&L</th>
-                <th>Full P&L</th>
+                <SortableHeader
+                  label="Size · Basis"
+                  sortKey="sizeBasis"
+                  sort={sort}
+                  onToggle={(key) => {
+                    setSort((current) => nextPositionSort(current, key));
+                    resetPage();
+                  }}
+                />
+                <SortableHeader
+                  label="Value"
+                  sortKey="value"
+                  sort={sort}
+                  onToggle={(key) => {
+                    setSort((current) => nextPositionSort(current, key));
+                    resetPage();
+                  }}
+                />
+                <SortableHeader
+                  label="P&L"
+                  sortKey="pnl"
+                  sort={sort}
+                  onToggle={(key) => {
+                    setSort((current) => nextPositionSort(current, key));
+                    resetPage();
+                  }}
+                />
+                <SortableHeader
+                  label="Full P&L"
+                  sortKey="fullPnl"
+                  sort={sort}
+                  onToggle={(key) => {
+                    setSort((current) => nextPositionSort(current, key));
+                    resetPage();
+                  }}
+                />
                 <th className="l">Market state</th>
-                <th>Ends</th>
+                <SortableHeader
+                  label="Ends"
+                  sortKey="ends"
+                  sort={sort}
+                  onToggle={(key) => {
+                    setSort((current) => nextPositionSort(current, key));
+                    resetPage();
+                  }}
+                />
               </tr>
             </thead>
             <tbody>
@@ -176,6 +222,37 @@ export function PositionsPage() {
 
       <PositionDrawer position={selected} onClose={() => setSelected(null)} />
     </div>
+  );
+}
+
+function SortableHeader({
+  label,
+  sortKey,
+  sort,
+  onToggle,
+}: {
+  label: string;
+  sortKey: PositionSortKey;
+  sort: PositionSort | null;
+  onToggle: (key: PositionSortKey) => void;
+}) {
+  const active = sort?.key === sortKey;
+  const ariaSort = active ? (sort.direction === "asc" ? "ascending" : "descending") : "none";
+  return (
+    <th aria-sort={ariaSort}>
+      <button
+        type="button"
+        className={"p2-sortbtn" + (active ? " active" : "")}
+        onClick={() => onToggle(sortKey)}
+      >
+        <span>{label}</span>
+        {active && (
+          <span className="p2-sortarrow" aria-hidden="true">
+            {sort.direction === "asc" ? "▲" : "▼"}
+          </span>
+        )}
+      </button>
+    </th>
   );
 }
 

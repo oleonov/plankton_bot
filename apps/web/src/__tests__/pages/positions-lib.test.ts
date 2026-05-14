@@ -16,7 +16,9 @@ import {
   groupPositions,
   lastActionMinutes,
   matchesSearch,
+  nextPositionSort,
   outcomeKind,
+  sortPositions,
   urgencyClass,
 } from "../../pages/positions/lib.ts";
 
@@ -275,6 +277,49 @@ describe("fmtAgo", () => {
   });
 });
 
+describe("position sorting", () => {
+  it("cycles header sort state through ascending, descending, and default", () => {
+    expect(nextPositionSort(null, "value")).toEqual({ key: "value", direction: "asc" });
+    expect(nextPositionSort({ key: "value", direction: "asc" }, "value")).toEqual({
+      key: "value",
+      direction: "desc",
+    });
+    expect(nextPositionSort({ key: "value", direction: "desc" }, "value")).toBeNull();
+    expect(nextPositionSort({ key: "value", direction: "desc" }, "pnl")).toEqual({
+      key: "pnl",
+      direction: "asc",
+    });
+  });
+
+  it("sorts by value while keeping null values last", () => {
+    const rows = [
+      position({ positionId: "middle", currentValueUsdc: 5 }),
+      position({ positionId: "null", currentValueUsdc: null }),
+      position({ positionId: "low", currentValueUsdc: 1 }),
+      position({ positionId: "high", currentValueUsdc: 9 }),
+    ];
+
+    expect(
+      sortPositions(rows, { key: "value", direction: "asc" }).map((p) => p.positionId),
+    ).toEqual(["low", "middle", "high", "null"]);
+    expect(
+      sortPositions(rows, { key: "value", direction: "desc" }).map((p) => p.positionId),
+    ).toEqual(["high", "middle", "low", "null"]);
+  });
+
+  it("sorts by full P&L and preserves original order on ties", () => {
+    const rows = [
+      position({ positionId: "tie-a", realizedPnl: 1, currentValueUsdc: 2, costBasisUsdc: 1 }),
+      position({ positionId: "loss", realizedPnl: 0, currentValueUsdc: 1, costBasisUsdc: 3 }),
+      position({ positionId: "tie-b", realizedPnl: 1, currentValueUsdc: 2, costBasisUsdc: 1 }),
+    ];
+
+    expect(
+      sortPositions(rows, { key: "fullPnl", direction: "desc" }).map((p) => p.positionId),
+    ).toEqual(["tie-a", "tie-b", "loss"]);
+  });
+});
+
 describe("groupPositions — by phase", () => {
   it("orders by S2/S3/S1/S0 and drops empty buckets", () => {
     const rows = [position({ phase: "S1" }), position({ phase: "S2" }), position({ phase: "S0" })];
@@ -284,6 +329,23 @@ describe("groupPositions — by phase", () => {
       "First Entry (S1)",
       "Idle (S0)",
     ]);
+  });
+});
+
+describe("groupPositions — with active header sort", () => {
+  it("keeps phase buckets and sorts rows inside each bucket", () => {
+    const rows = [
+      position({ positionId: "s1-high", phase: "S1", currentValueUsdc: 9 }),
+      position({ positionId: "s2-low", phase: "S2", currentValueUsdc: 1 }),
+      position({ positionId: "s2-high", phase: "S2", currentValueUsdc: 7 }),
+      position({ positionId: "s1-low", phase: "S1", currentValueUsdc: 2 }),
+    ];
+
+    const groups = groupPositions(rows, "phase", { key: "value", direction: "asc" });
+
+    expect(groups.map((g) => g.key)).toEqual(["Accumulating (S2)", "First Entry (S1)"]);
+    expect(groups[0]!.items.map((p) => p.positionId)).toEqual(["s2-low", "s2-high"]);
+    expect(groups[1]!.items.map((p) => p.positionId)).toEqual(["s1-low", "s1-high"]);
   });
 });
 
