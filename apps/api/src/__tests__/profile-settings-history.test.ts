@@ -383,7 +383,9 @@ describe("profile settings history endpoints", () => {
     const body = JSON.parse(res.body) as { error: { code: string } };
     expect(body.error.code).toBe("PROFILE_NOT_FOUND");
     const rows = controlConn.db
-      .prepare("SELECT COUNT(*) AS c FROM profile_settings_history WHERE profile_id = 'no-such-profile'")
+      .prepare(
+        "SELECT COUNT(*) AS c FROM profile_settings_history WHERE profile_id = 'no-such-profile'",
+      )
       .get() as { c: number };
     expect(rows.c).toBe(0);
   });
@@ -433,7 +435,9 @@ describe("profile settings history endpoints", () => {
       .run();
     expect(() =>
       controlConn.db
-        .prepare("UPDATE profile_settings_history SET reason = 'tamper' WHERE profile_id = 'live-lite'")
+        .prepare(
+          "UPDATE profile_settings_history SET reason = 'tamper' WHERE profile_id = 'live-lite'",
+        )
         .run(),
     ).toThrow(/append-only/);
     expect(() =>
