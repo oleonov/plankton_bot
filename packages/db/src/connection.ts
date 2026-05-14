@@ -32,6 +32,11 @@ export function openDatabase(dbPath: string, options: OpenDatabaseOptions = {}):
 
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  // SQLite skips DELETE/INSERT triggers fired by ON CONFLICT REPLACE conflict
+  // resolution unless recursive_triggers is ON. Without this, the append-only
+  // BEFORE DELETE trigger on profile_settings_history can be silently bypassed
+  // by `INSERT OR REPLACE`. Per-connection pragma — set on every open.
+  db.pragma("recursive_triggers = ON");
   db.pragma(`busy_timeout = ${options.busyTimeoutMs ?? RUNTIME_BUSY_TIMEOUT_MS}`);
   db.pragma("synchronous = NORMAL");
   // -2048 = 2 MiB per connection (negative = KiB). Default is 2000 pages ≈ 8 MiB.

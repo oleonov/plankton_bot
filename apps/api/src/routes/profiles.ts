@@ -7,6 +7,8 @@ import { toDto as orderToDto } from "./orders.js";
 import { toDto as positionToDto } from "./positions.js";
 import { toDto as fillToDto } from "./fills.js";
 import type { LedgerPool } from "../ledger-pool.js";
+import { getActor } from "../auth.js";
+import { diffFields, recordHistory, type HistoryRow } from "../profile-settings-history.js";
 import {
   DEFAULT_EXECUTION_POLICY,
   DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
@@ -18,6 +20,9 @@ import {
   type ExecutionPolicy,
 } from "@krabs/domain";
 import { readExecutionPolicyVersion } from "@krabs/db";
+
+const TRACKED_COLUMNS =
+  "initial_balance_usdc, envelope_json, risk_caps_json, wallet_mode, min_order_usdc, relayer_json, execution_policy_json";
 
 interface ProfilesOpts {
   controlDb: Database.Database;
@@ -309,6 +314,10 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
   });
 
   // ── PUT /profiles/:profileId/settings ────────────────────────────────
+  //
+  // Each tracked column diff is appended to `profile_settings_history` so
+  // every API-driven change is auditable. Operators changing values via
+  // direct SQL UPDATE bypass this trail — see docs/runbooks/envelope_changes.md.
   app.put<{
     Params: { profileId: string };
     Body: {
@@ -318,6 +327,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       walletMode?: "eoa" | "relayer";
       minOrderUsdc?: number;
       relayerJson?: string;
+      reason?: string;
     };
   }>("/profiles/:profileId/settings", async (request) => {
     const { profileId } = request.params;
@@ -336,30 +346,77 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     ) {
       throw new ApiError(400, "minOrderUsdc must be > 0", "INVALID_MIN_ORDER");
     }
-
-    controlDb
-      .prepare(
-        `INSERT INTO profile_settings
-           (profile_id, initial_balance_usdc, envelope_json, risk_caps_json, wallet_mode, min_order_usdc, relayer_json, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-         ON CONFLICT(profile_id) DO UPDATE SET
-           initial_balance_usdc = COALESCE(excluded.initial_balance_usdc, profile_settings.initial_balance_usdc),
-           envelope_json = COALESCE(excluded.envelope_json, profile_settings.envelope_json),
-           risk_caps_json = COALESCE(excluded.risk_caps_json, profile_settings.risk_caps_json),
-           wallet_mode = COALESCE(excluded.wallet_mode, profile_settings.wallet_mode),
-           min_order_usdc = COALESCE(excluded.min_order_usdc, profile_settings.min_order_usdc),
-           relayer_json = COALESCE(excluded.relayer_json, profile_settings.relayer_json),
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        profileId,
-        body.initialBalanceUsdc ?? null,
-        body.envelopeJson ?? null,
-        body.riskCapsJson ?? null,
-        body.walletMode ?? null,
-        body.minOrderUsdc ?? null,
-        body.relayerJson ?? null,
+    if (
+      body.initialBalanceUsdc !== undefined &&
+      (!Number.isFinite(body.initialBalanceUsdc) || body.initialBalanceUsdc < 0)
+    ) {
+      throw new ApiError(
+        400,
+        "initialBalanceUsdc must be a finite non-negative number",
+        "INVALID_INITIAL_BALANCE",
       );
+    }
+
+    const profileRow = controlDb
+      .prepare("SELECT 1 FROM profiles WHERE profile_id = ?")
+      .get(profileId);
+    if (!profileRow) {
+      throw new ApiError(404, `profile ${profileId} not found`, "PROFILE_NOT_FOUND");
+    }
+
+    const actor = getActor(request);
+    const reason = typeof body.reason === "string" ? body.reason : null;
+
+    const transaction = controlDb.transaction(() => {
+      const before = (controlDb
+        .prepare(`SELECT ${TRACKED_COLUMNS} FROM profile_settings WHERE profile_id = ?`)
+        .get(profileId) ?? {}) as Record<string, string | number | null>;
+
+      controlDb
+        .prepare(
+          `INSERT INTO profile_settings
+             (profile_id, initial_balance_usdc, envelope_json, risk_caps_json, wallet_mode, min_order_usdc, relayer_json, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(profile_id) DO UPDATE SET
+             initial_balance_usdc = COALESCE(excluded.initial_balance_usdc, profile_settings.initial_balance_usdc),
+             envelope_json = COALESCE(excluded.envelope_json, profile_settings.envelope_json),
+             risk_caps_json = COALESCE(excluded.risk_caps_json, profile_settings.risk_caps_json),
+             wallet_mode = COALESCE(excluded.wallet_mode, profile_settings.wallet_mode),
+             min_order_usdc = COALESCE(excluded.min_order_usdc, profile_settings.min_order_usdc),
+             relayer_json = COALESCE(excluded.relayer_json, profile_settings.relayer_json),
+             updated_at = excluded.updated_at`,
+        )
+        .run(
+          profileId,
+          body.initialBalanceUsdc ?? null,
+          body.envelopeJson ?? null,
+          body.riskCapsJson ?? null,
+          body.walletMode ?? null,
+          body.minOrderUsdc ?? null,
+          body.relayerJson ?? null,
+        );
+
+      const after = (controlDb
+        .prepare(`SELECT ${TRACKED_COLUMNS} FROM profile_settings WHERE profile_id = ?`)
+        .get(profileId) ?? {}) as Record<string, string | number | null>;
+
+      const diffs = diffFields(before, after);
+      if (diffs.length > 0) {
+        recordHistory(
+          controlDb,
+          diffs.map((d) => ({
+            profileId,
+            field: d.field,
+            beforeValue: d.before,
+            afterValue: d.after,
+            actor,
+            source: "api_put_settings",
+            reason,
+          })),
+        );
+      }
+    });
+    transaction();
 
     const updated = controlDb
       .prepare("SELECT * FROM profile_settings WHERE profile_id = ?")
@@ -402,10 +459,13 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
   // change; here we bump it inline to stay consistent.
   app.patch<{
     Params: { profileId: string };
-    Body: Partial<ExecutionPolicy>;
+    Body: Partial<ExecutionPolicy> & { reason?: string };
   }>("/profiles/:profileId/execution-policy", async (request) => {
     const { profileId } = request.params;
-    const patch = (request.body ?? {}) as Record<string, unknown>;
+    const rawBody = (request.body ?? {}) as Record<string, unknown>;
+    const reason = typeof rawBody.reason === "string" ? rawBody.reason : null;
+    const { reason: _omitReason, ...patch } = rawBody;
+    void _omitReason;
 
     const existsRow = controlDb
       .prepare("SELECT 1 FROM profile_settings WHERE profile_id = ?")
@@ -535,6 +595,7 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
     const nextJson = serializeExecutionPolicy(parsed.policy);
     const prevJson = currentRow?.execution_policy_json ?? null;
 
+    const actor = getActor(request);
     const applyWrite = controlDb.transaction(() => {
       controlDb
         .prepare(
@@ -551,11 +612,58 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
               WHERE id = 1`,
           )
           .run();
+        recordHistory(controlDb, [
+          {
+            profileId,
+            field: "execution_policy_json",
+            beforeValue: prevJson,
+            afterValue: nextJson,
+            actor,
+            source: "api_patch_execution_policy",
+            reason,
+          },
+        ]);
       }
     });
     applyWrite();
 
     const version = readExecutionPolicyVersion(controlDb);
     return ok({ policy: parsed.policy, version, issues: parsed.issues });
+  });
+
+  // ── GET /profiles/:profileId/history ─────────────────────────────────
+  //
+  // Append-only audit log of profile_settings mutations. Filterable by field
+  // (e.g. ?field=envelope_json) and capped at 500 rows.
+  app.get<{
+    Params: { profileId: string };
+    Querystring: { field?: string; limit?: string };
+  }>("/profiles/:profileId/history", async (request) => {
+    const { profileId } = request.params;
+    const { field } = request.query;
+    const rawLimit = Number.parseInt(request.query.limit ?? "50", 10);
+    const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 50;
+
+    const rows = field
+      ? (controlDb
+          .prepare(
+            `SELECT id, profile_id, field, before_value, after_value, actor, source, reason, changed_at
+               FROM profile_settings_history
+              WHERE profile_id = ? AND field = ?
+              ORDER BY changed_at DESC, id DESC
+              LIMIT ?`,
+          )
+          .all(profileId, field, limit) as HistoryRow[])
+      : (controlDb
+          .prepare(
+            `SELECT id, profile_id, field, before_value, after_value, actor, source, reason, changed_at
+               FROM profile_settings_history
+              WHERE profile_id = ?
+              ORDER BY changed_at DESC, id DESC
+              LIMIT ?`,
+          )
+          .all(profileId, limit) as HistoryRow[]);
+
+    return ok({ profileId, field: field ?? null, limit, history: rows });
   });
 };
