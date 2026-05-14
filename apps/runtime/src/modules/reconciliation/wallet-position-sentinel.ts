@@ -8,6 +8,7 @@ import type {
 import { createTokenId } from "@krabs/domain";
 import type { PolymarketDataPosition, PolymarketPositionReader } from "@krabs/exchange";
 import type { Logger } from "../../logger.js";
+import type { LatestUsablePriceLookup } from "../../market-snapshot-pricing.js";
 import { resolveOpenPositionStatus } from "../../position-status.js";
 
 const MIN_REMOTE_SIZE = 1e-9;
@@ -30,6 +31,7 @@ export interface WalletPositionSentinelResult {
   driftCount: number;
   details: string[];
   markUpdateCount: number;
+  missingRemoteRevaluedCount?: number;
   closedLivePositions: ClosedLivePositionDrift[];
   activePositionDrifts: ActivePositionSizeDrift[];
   /**
@@ -93,6 +95,8 @@ export interface WalletPositionSentinelDeps {
   fillRepo?: FillRepository;
   marketRepo: MarketRepository;
   log: Logger;
+  latestUsablePriceLookup?: Pick<LatestUsablePriceLookup, "findUsablePrice"> | undefined;
+  latestMinOrderSize?: ((tokenId: TokenId) => number | null) | undefined;
 }
 
 export async function runWalletPositionSentinel(
@@ -103,6 +107,7 @@ export async function runWalletPositionSentinel(
     driftCount: 0,
     details: [],
     markUpdateCount: 0,
+    missingRemoteRevaluedCount: 0,
     closedLivePositions: [],
     activePositionDrifts: [],
     missingRemotePositions: [],
@@ -128,6 +133,7 @@ export async function runWalletPositionSentinel(
   // confirmed missing-remote drift crosses the stability threshold.
   const autoClosedMissingRemote: AutoClosedMissingRemotePosition[] = [];
   let markUpdateCount = 0;
+  let missingRemoteRevaluedCount = 0;
 
   // Tokens for which Polymarket reports a meaningful position. Used below to
   // detect the inverse case (local active/dust but no remote row) without
@@ -193,6 +199,11 @@ export async function runWalletPositionSentinel(
     // a real drift. Skipping here keeps the inverse-direction branch from
     // re-introducing the v138 false-positive class for tiny dust rows.
     if (active.size <= SIZE_DRIFT_EPSILON) continue;
+
+    if (applyMissingRemoteRevaluation(deps, active, nowMs)) {
+      missingRemoteRevaluedCount++;
+    }
+
     if (isMissingRemoteMicroDust(active)) continue;
     if (isWithinMissingRemoteGrace(active, nowMs)) continue;
 
@@ -216,6 +227,7 @@ export async function runWalletPositionSentinel(
   return {
     driftCount: closedDrifts.length + activeDrifts.length + missingRemoteDrifts.length,
     markUpdateCount,
+    missingRemoteRevaluedCount,
     details: [
       ...closedDrifts.map(formatClosedDriftDetail),
       ...activeDrifts.map(formatActiveDriftDetail),
@@ -226,6 +238,43 @@ export async function runWalletPositionSentinel(
     missingRemotePositions: missingRemoteDrifts,
     autoClosedMissingRemotePositions: autoClosedMissingRemote,
   };
+}
+
+function applyMissingRemoteRevaluation(
+  deps: WalletPositionSentinelDeps,
+  active: Position,
+  nowMs: number,
+): boolean {
+  const lookup = deps.latestUsablePriceLookup;
+  if (!lookup) return false;
+
+  const fallbackPrice = lookup.findUsablePrice(active.tokenId, nowMs);
+  const newValue =
+    fallbackPrice !== null && Number.isFinite(fallbackPrice) ? active.size * fallbackPrice : null;
+  const nextStatus =
+    active.status === "closed"
+      ? "closed"
+      : newValue !== null
+        ? resolveOpenPositionStatus(newValue, {
+            size: active.size,
+            minOrderSize: deps.latestMinOrderSize?.(active.tokenId) ?? null,
+          })
+        : active.status;
+  const stored = active.currentValueUsdc;
+  const valueChanged =
+    (stored === null) !== (newValue === null) ||
+    (newValue !== null && stored !== null && Math.abs(newValue - stored) >= 0.001);
+  const statusChanged = active.status !== nextStatus;
+
+  if (!valueChanged && !statusChanged) return false;
+
+  deps.positionRepo.save({
+    ...active,
+    currentValueUsdc: newValue,
+    status: nextStatus,
+    updatedAt: new Date(nowMs).toISOString(),
+  });
+  return true;
 }
 
 function applyRemoteMark(

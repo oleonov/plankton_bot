@@ -74,7 +74,7 @@ export interface RiskInventoryModuleDeps {
   now?: () => number;
   /** Optional kill switch; live-lite market-data marks are gated per position. */
   markToMarketEnabled?: boolean | undefined;
-  latestMidPriceForToken?: ((tokenId: TokenId) => number | null) | undefined;
+  latestUsablePriceForToken?: ((tokenId: TokenId) => number | null) | undefined;
 }
 
 /** Full diagnostics snapshot returned by getDiagnostics(). */
@@ -205,19 +205,26 @@ export class RiskInventoryModule implements RuntimeModule {
     for (const pos of positions) {
       if (!this.needsStartupCurrentValueBackfill(pos)) continue;
 
-      const markPrice = this.deps.latestMidPriceForToken
-        ? this.deps.latestMidPriceForToken(pos.tokenId)
+      const markPrice = this.deps.latestUsablePriceForToken
+        ? this.deps.latestUsablePriceForToken(pos.tokenId)
         : null;
-      if (markPrice === null || !Number.isFinite(markPrice)) continue;
-
-      const newValue = pos.size * markPrice;
+      const newValue =
+        markPrice !== null && Number.isFinite(markPrice) ? pos.size * markPrice : null;
+      const stored = pos.currentValueUsdc;
+      const valueChanged =
+        (stored === null) !== (newValue === null) ||
+        (newValue !== null && stored !== null && Math.abs(newValue - stored) >= 0.001);
       const nextStatus =
         pos.status === "closed"
           ? "closed"
-          : resolveOpenPositionStatus(newValue, {
-              size: pos.size,
-              minOrderSize: this.getLatestMinOrderSize(pos.tokenId),
-            });
+          : newValue !== null
+            ? resolveOpenPositionStatus(newValue, {
+                size: pos.size,
+                minOrderSize: this.getLatestMinOrderSize(pos.tokenId),
+              })
+            : pos.status;
+      const statusChanged = pos.status !== nextStatus;
+      if (!valueChanged && !statusChanged && stored !== null) continue;
 
       this.deps.positionRepo.save({
         ...pos,
@@ -261,9 +268,7 @@ export class RiskInventoryModule implements RuntimeModule {
     };
   }
 
-  private getLatestMinOrderSize(
-    tokenId: RuntimeEventMap["FillReceived"]["tokenId"],
-  ): number | null {
+  public getLatestMinOrderSize(tokenId: RuntimeEventMap["FillReceived"]["tokenId"]): number | null {
     return this.tokenMinOrderSize.get(String(tokenId)) ?? null;
   }
 

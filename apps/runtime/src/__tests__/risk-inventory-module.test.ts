@@ -1895,6 +1895,7 @@ describe("RiskInventoryModule", () => {
       );
       mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
+      (positionRepo.save as any).mockClear();
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeMarket({ midPrice: 0.2 })],
@@ -1921,6 +1922,7 @@ describe("RiskInventoryModule", () => {
       );
       mod = createModule(undefined, { now: () => MTM_NOW_MS });
       await mod.start();
+      (positionRepo.save as any).mockClear();
 
       await bus.publish("NormalizedMarketUpdated", {
         markets: [makeMarket({ midPrice: 0.2 })],
@@ -1979,7 +1981,7 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
-    it("backfills null and implausible startup values from latest midpoint", async () => {
+    it("backfills null and implausible startup values from latest usable price", async () => {
       const nullToken = createTokenId("tok-null-backfill");
       const implausibleToken = createTokenId("tok-implausible-backfill");
       const plausibleToken = createTokenId("tok-plausible-backfill");
@@ -2005,7 +2007,7 @@ describe("RiskInventoryModule", () => {
       ]);
       mod = createModule(undefined, {
         now: () => MTM_NOW_MS,
-        latestMidPriceForToken: (tokenId) =>
+        latestUsablePriceForToken: (tokenId) =>
           String(tokenId) === String(plausibleToken) ? null : 0.2,
       });
 
@@ -2027,7 +2029,7 @@ describe("RiskInventoryModule", () => {
       await mod.stop();
     });
 
-    it("skips startup backfill when latest midpoint is unavailable", async () => {
+    it("writes explicit null during startup backfill when latest usable price is unavailable", async () => {
       positionRepo = createMockPositionRepo(
         makeMtmPosition({
           positionId: createPositionId("pos-null-no-midpoint"),
@@ -2036,12 +2038,43 @@ describe("RiskInventoryModule", () => {
       );
       mod = createModule(undefined, {
         now: () => MTM_NOW_MS,
-        latestMidPriceForToken: () => null,
+        latestUsablePriceForToken: () => null,
       });
 
       await mod.start();
 
-      expect(positionRepo.save).not.toHaveBeenCalled();
+      expect(positionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          currentValueUsdc: null,
+          updatedAt: new Date(MTM_NOW_MS).toISOString(),
+        }),
+      );
+
+      await mod.stop();
+    });
+
+    it("clears implausible startup value to null when latest usable price is unavailable", async () => {
+      positionRepo = createMockPositionRepo(
+        makeMtmPosition({
+          positionId: createPositionId("pos-implausible-no-price"),
+          size: 0.01,
+          currentValueUsdc: 8.0964,
+        }),
+      );
+      mod = createModule(undefined, {
+        now: () => MTM_NOW_MS,
+        latestUsablePriceForToken: () => null,
+      });
+
+      await mod.start();
+
+      expect(positionRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          currentValueUsdc: null,
+          status: "open",
+          updatedAt: new Date(MTM_NOW_MS).toISOString(),
+        }),
+      );
 
       await mod.stop();
     });

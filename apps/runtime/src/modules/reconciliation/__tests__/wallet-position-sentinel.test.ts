@@ -674,6 +674,153 @@ describe("runWalletPositionSentinel", () => {
     expect(result.missingRemotePositions).toHaveLength(0);
   });
 
+  it("revalues a missing-remote local position from latest usable snapshot price", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "open",
+        size: 0.003,
+        costBasisUsdc: 0.0037,
+        currentValueUsdc: 3.21,
+        closedAt: null,
+      }),
+    ]);
+    const findUsablePrice = vi.fn().mockReturnValue(0.015);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        latestUsablePriceLookup: { findUsablePrice },
+        log,
+      },
+      NOW,
+    );
+
+    expect(findUsablePrice).toHaveBeenCalledWith(TOKEN, NOW);
+    expect(result.missingRemoteRevaluedCount).toBe(1);
+    expect(repo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentValueUsdc: 0.003 * 0.015,
+        updatedAt: "2026-04-25T00:00:00.000Z",
+      }),
+    );
+  });
+
+  it("writes explicit null when a missing-remote local position has no usable snapshot price", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "open",
+        size: 0.003,
+        costBasisUsdc: 0.0037,
+        currentValueUsdc: 3.21,
+        closedAt: null,
+      }),
+    ]);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        latestUsablePriceLookup: { findUsablePrice: vi.fn().mockReturnValue(null) },
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.missingRemoteRevaluedCount).toBe(1);
+    expect(repo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentValueUsdc: null,
+        status: "open",
+        updatedAt: "2026-04-25T00:00:00.000Z",
+      }),
+    );
+  });
+
+  it("does not invoke Tier 3 revaluation when the token is present remotely", async () => {
+    const findUsablePrice = vi.fn().mockReturnValue(0.015);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([makeRemote({ size: 0.003, currentValueUsdc: 0.000045 })]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 0.003,
+            currentValueUsdc: 0.000045,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        latestUsablePriceLookup: { findUsablePrice },
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.missingRemoteRevaluedCount).toBe(0);
+    expect(findUsablePrice).not.toHaveBeenCalled();
+  });
+
+  it("does not invoke Tier 3 revaluation for sub-epsilon local positions", async () => {
+    const findUsablePrice = vi.fn().mockReturnValue(0.015);
+
+    const result = await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: positionRepo([
+          makePosition({
+            status: "open",
+            size: 0.0005,
+            costBasisUsdc: 0.0001,
+            currentValueUsdc: 0.0001,
+            closedAt: null,
+          }),
+        ]),
+        marketRepo: marketRepo(makeMarket()),
+        latestUsablePriceLookup: { findUsablePrice },
+        log,
+      },
+      NOW,
+    );
+
+    expect(result.missingRemoteRevaluedCount).toBe(0);
+    expect(findUsablePrice).not.toHaveBeenCalled();
+  });
+
+  it("uses latestMinOrderSize when resolving missing-remote revaluation status", async () => {
+    const repo = positionRepo([
+      makePosition({
+        status: "open",
+        size: 0.003,
+        costBasisUsdc: 0.0037,
+        currentValueUsdc: 3.21,
+        closedAt: null,
+      }),
+    ]);
+
+    await runWalletPositionSentinel(
+      {
+        reader: reader([]),
+        positionRepo: repo,
+        marketRepo: marketRepo(makeMarket()),
+        latestUsablePriceLookup: { findUsablePrice: vi.fn().mockReturnValue(0.015) },
+        latestMinOrderSize: vi.fn().mockReturnValue(0.01),
+        log,
+      },
+      NOW,
+    );
+
+    expect(repo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentValueUsdc: 0.003 * 0.015,
+        status: "dust",
+      }),
+    );
+  });
+
   it("does not flag a missing-remote local position once market endDate has passed", async () => {
     // Past-endDate non-zero local balance is the redeem path's job, not the
     // wallet sentinel's: surfacing it here would double-count drift on every

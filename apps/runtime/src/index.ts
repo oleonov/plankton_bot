@@ -154,6 +154,7 @@ import { RuntimeMetricWriter } from "./runtime-metric-writer.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { installConsoleRedaction } from "./console-redaction.js";
+import { LatestUsablePriceLookup } from "./market-snapshot-pricing.js";
 import { RefreshableSelectionRuleEngine } from "./selection-rule-engine-factory.js";
 import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-state-transition-backfill.js";
 import { OrderLifetimeModule } from "./modules/order-lifetime/order-lifetime-module.js";
@@ -360,32 +361,9 @@ async function main(): Promise<void> {
     orderPriceCooldown: new SqliteOrderPriceCooldownRepository(ledgerConn.db),
   };
 
-  const latestMidPriceStmt = ledgerConn.db.prepare(
-    `SELECT best_bid, best_ask
-     FROM market_snapshots
-     WHERE token_id = ?
-     ORDER BY captured_at DESC, id DESC
-     LIMIT 1`,
-  );
-  const latestMidPriceForToken = (tokenId: TokenId): number | null => {
-    const row = latestMidPriceStmt.get(String(tokenId)) as
-      | { best_bid: number | null; best_ask: number | null }
-      | undefined;
-    if (!row) return null;
-    const bid = row.best_bid;
-    const ask = row.best_ask;
-    if (
-      typeof bid !== "number" ||
-      !Number.isFinite(bid) ||
-      bid <= 0 ||
-      typeof ask !== "number" ||
-      !Number.isFinite(ask) ||
-      ask <= 0
-    ) {
-      return null;
-    }
-    return (bid + ask) / 2;
-  };
+  const latestUsablePriceLookup = new LatestUsablePriceLookup(ledgerConn.db);
+  const latestUsablePriceForToken = (tokenId: TokenId): number | null =>
+    latestUsablePriceLookup.findUsablePrice(tokenId);
 
   // 3b. Selection rule engine — version-polled singleton shared by scanner,
   // MarketSelectionCache, and operator/debug endpoints.
@@ -882,7 +860,7 @@ async function main(): Promise<void> {
     runtimeMetrics,
     resolutionTracker: marketResolutionTracker,
     markToMarketEnabled: true,
-    latestMidPriceForToken,
+    latestUsablePriceForToken,
   });
 
   // 7h. Strategy module
@@ -1119,6 +1097,9 @@ async function main(): Promise<void> {
               fillRepo: repos.fill,
               marketRepo: repos.market,
               log,
+              latestUsablePriceLookup,
+              latestMinOrderSize: (tokenId: TokenId): number | null =>
+                riskInventoryModule.getLatestMinOrderSize(tokenId),
             },
             walletPositionReader: reader,
           };
