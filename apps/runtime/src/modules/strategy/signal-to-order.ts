@@ -40,6 +40,7 @@ import {
   classifyNotionalBucket,
   classifyRoundLevel,
   computePricingDeltaTicks,
+  floorToTick,
   resolveBoundedMidpointPrice,
   roundToTick,
   validateExecutablePrice,
@@ -925,8 +926,8 @@ export class SignalToOrderBridge {
 
   /**
    * ADR-006 D1 (edge mode): BUY = bestBid, SELL = bestAsk.
-   * R58 sell-exit guard: default SELL exits are bid-anchored to avoid
-   * self-referential loops when our own maker order is the only visible ask.
+   * R93 sell-exit guard: default SELL exits are midpoint-anchored while
+   * bid-anchored remains available for config rollback.
    * ADR-014 (bounded-midpoint mode): price improves toward midpoint, bounded by
    * spread cap + improvement cap + no-cross clamp. Single formula for all runtime
    * modes; mode selector is `policy.pricing.mode`. Postonly remains relayer-only (D2).
@@ -1072,6 +1073,22 @@ export class SignalToOrderBridge {
     market: NormalizedMarket,
     policy: ExecutionPolicy,
   ): { price: number; mode: OrderPricedMode; anchorTicksUsed?: number } | null {
+    if (signal.side === "sell" && policy.exitPricingMode === "midpoint-anchored") {
+      const midpointPrice = resolveMidpointAnchoredSellPrice(
+        market.bestBid,
+        market.bestAsk,
+        market.tickSize,
+        policy.exitMidpointAnchorTicks,
+      );
+      if (midpointPrice != null) {
+        return {
+          price: midpointPrice,
+          mode: "midpoint-anchored",
+          anchorTicksUsed: policy.exitMidpointAnchorTicks,
+        };
+      }
+    }
+
     if (signal.side === "sell" && policy.exitPricingMode === "bid-anchored") {
       if (
         market.bestBid == null ||
@@ -1394,6 +1411,47 @@ function resolveBidAnchoredSellPrice(
   return Math.min(rawPrice, roundToTick(bestAsk, tickSize));
 }
 
+/**
+ * Resolves SELL price using Plankton-mirror midpoint+N-ticks anchor.
+ *
+ * Formula: result = floorToTick(min(midpoint + anchorTicks × tickSize, bestAsk), tickSize),
+ * where midpoint = (bestBid + bestAsk) / 2.
+ *
+ * Derived from analytical replays of Plankton SELL fills:
+ * - R90 (plankton_sell_pricing_formula_R90_report.md): midpoint-only regression
+ *   R²=0.974 on n=1,338 SELL fills.
+ * - R93 Model A (plankton_sell_pricing_decomposition_R93_report.md): intercept
+ *   0.004868 on n=1,256 fills → 5 × tick (0.001) above midpoint median placement.
+ *
+ * Returns null if bestBid, bestAsk, tickSize, or anchorTicks are unavailable or
+ * non-positive (defensive guard for missing book state and exchange artifacts).
+ * Crossed books (bestBid ≥ bestAsk) are handled via the bestAsk cap.
+ */
+export function resolveMidpointAnchoredSellPrice(
+  bestBid: number | null,
+  bestAsk: number | null,
+  tickSize: number,
+  anchorTicks: number,
+): number | null {
+  if (
+    bestBid == null ||
+    bestAsk == null ||
+    !Number.isFinite(bestBid) ||
+    !Number.isFinite(bestAsk) ||
+    !Number.isFinite(tickSize) ||
+    !Number.isFinite(anchorTicks) ||
+    bestBid <= 0 ||
+    bestAsk <= 0 ||
+    tickSize <= 0
+  ) {
+    return null;
+  }
+
+  const midpoint = (bestBid + bestAsk) / 2;
+  const rawPrice = midpoint + anchorTicks * tickSize;
+  return floorToTick(Math.min(rawPrice, bestAsk), tickSize);
+}
+
 function resolveOrderSize(
   signal: RuntimeEventMap["SignalApproved"]["signal"],
   executionPrice: number,
@@ -1430,7 +1488,13 @@ type ExecutionTermsResolution =
   | { kind: "skip-wide-spread"; diagnostics: BoundedMidpointDiagnostics }
   | { kind: "skip-one-sided"; diagnostics: BoundedMidpointDiagnostics };
 
-type OrderPricedMode = "edge" | "bid-anchored" | "bounded-midpoint" | "taker" | "ladder";
+type OrderPricedMode =
+  | "edge"
+  | "bid-anchored"
+  | "midpoint-anchored"
+  | "bounded-midpoint"
+  | "taker"
+  | "ladder";
 
 export type DeadSideBucket = "<0" | "<1m" | "1-5m" | "5-15m" | "15-60m" | "1-4h" | ">4h";
 

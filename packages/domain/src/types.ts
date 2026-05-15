@@ -725,7 +725,7 @@ export interface ExitRepriceOnDownpricePolicy {
   stuckWarningGapPct: number;
 }
 
-export type ExitPricingMode = "bid-anchored" | "edge";
+export type ExitPricingMode = "bid-anchored" | "midpoint-anchored" | "edge";
 
 export interface OpportunisticTakerPolicy {
   enabled: boolean;
@@ -829,6 +829,8 @@ export interface ExecutionPolicy {
   exitPricingMode: ExitPricingMode;
   /** Number of CLOB ticks to place a bid-anchored SELL above current best bid. */
   exitBidAnchorTicks: number;
+  /** Number of CLOB ticks to place a midpoint-anchored SELL above current midpoint. */
+  exitMidpointAnchorTicks: number;
   opportunisticTaker: OpportunisticTakerPolicy;
   orderLifetime: OrderLifetimePolicy;
   repriceOnOutbid: RepriceOnOutbidPolicy;

@@ -11,7 +11,10 @@ import {
   type ProfileId,
   type Signal,
 } from "@krabs/domain";
-import { SignalToOrderBridge } from "../modules/strategy/signal-to-order.js";
+import {
+  resolveMidpointAnchoredSellPrice,
+  SignalToOrderBridge,
+} from "../modules/strategy/signal-to-order.js";
 import { CandidateBookCache } from "../modules/strategy/candidate-book-cache.js";
 import { DEFAULT_EXECUTION_POLICY } from "../execution-policy.js";
 import type {
@@ -24,6 +27,46 @@ import type {
 
 const TOKEN_ID = createTokenId("tok-yes");
 const NOW = Date.parse("2026-04-11T10:00:00.000Z");
+
+describe("resolveMidpointAnchoredSellPrice", () => {
+  it("caps at bestAsk when midpoint plus anchor crosses a narrow spread", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.1, 0.104, 0.001, 5)).toBeCloseTo(0.104);
+  });
+
+  it("returns midpoint plus anchor in a mid spread", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.1, 0.12, 0.001, 5)).toBeCloseTo(0.115);
+  });
+
+  it("returns midpoint plus anchor in a wide spread", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.05, 0.17, 0.001, 5)).toBeCloseTo(0.115);
+  });
+
+  it("matches the ICEMAN-like midpoint plus five ticks smoke case", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.05, 0.186, 0.001, 5)).toBeCloseTo(0.123);
+  });
+
+  it("rounds fractional midpoint artifacts down to the nearest tick", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.0505, 0.186, 0.001, 5)).toBeCloseTo(0.123);
+  });
+
+  it("returns null when bestAsk is unavailable", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.05, null, 0.001, 5)).toBeNull();
+  });
+
+  it("returns null when bestBid is null", () => {
+    expect(resolveMidpointAnchoredSellPrice(null, 0.3, 0.001, 5)).toBeNull();
+  });
+
+  it("returns null when bestBid is undefined", () => {
+    expect(
+      resolveMidpointAnchoredSellPrice(undefined as unknown as number, 0.3, 0.001, 5),
+    ).toBeNull();
+  });
+
+  it("handles crossed book defensively by capping at bestAsk", () => {
+    expect(resolveMidpointAnchoredSellPrice(0.5, 0.4, 0.001, 5)).toBeCloseTo(0.4);
+  });
+});
 
 function makeLogger() {
   return {
@@ -1500,7 +1543,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.price).toBe(0.4);
   });
 
-  it("defaults SELL edge branch to bid-anchored pricing", async () => {
+  it("defaults SELL edge branch to midpoint-anchored pricing", async () => {
     const { bus, placed } = makeBridgeWithPricing();
     const market = makeMarket({ bestBid: 0.23, bestAsk: 0.29, tickSize: 0.01 });
     await bus.publish("SignalApproved", {
@@ -1511,11 +1554,13 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.27);
+    expect(placed[0]!.command.price).toBe(0.29);
   });
 
   it("caps bid-anchored SELL inside the spread when the raw anchor is above bestAsk", async () => {
-    const { bus, placed } = makeBridgeWithPricing();
+    const { bus, placed } = makeBridgeWithPricing(undefined, {
+      policyOverrides: { exitPricingMode: "bid-anchored" },
+    });
     const market = makeMarket({ bestBid: 0.27, bestAsk: 0.29, tickSize: 0.01 });
     await bus.publish("SignalApproved", {
       signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.2, reason: "repricing-exit" },
@@ -1526,6 +1571,20 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.28);
+  });
+
+  it("resolves ICEMAN-like SELL price to midpoint plus five ticks", async () => {
+    const { bus, placed } = makeBridgeWithPricing();
+    const market = makeMarket({ bestBid: 0.05, bestAsk: 0.186, midPrice: 0.118, tickSize: 0.001 });
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", suggestedPrice: 0.123, reason: "repricing-exit" },
+      market,
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(placed).toHaveLength(1);
+    expect(placed[0]!.command.price).toBe(0.123);
   });
 
   it("falls back to bestAsk when a one-tick spread has no inside SELL price", async () => {
@@ -1835,7 +1894,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
 
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.postOnly).toBeUndefined();
-    expect(placed[0]!.command.price).toBe(0.09);
+    expect(placed[0]!.command.price).toBe(0.1);
     expect(metrics.writeCounter).toHaveBeenCalledWith(
       "taker_disabled_min_size_total",
       1,
@@ -1882,7 +1941,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.09);
+    expect(placed[0]!.command.price).toBe(0.1);
     expect(placed[0]!.command.postOnly).toBeUndefined();
   });
 
@@ -1904,12 +1963,12 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.1);
+    expect(placed[0]!.command.price).toBe(0.11);
     expect(placed[0]!.command.postOnly).toBeUndefined();
     expect(metrics.writeCounter).toHaveBeenCalledWith(
-      "bid_anchored_decision_total",
+      "order_priced_mode_total",
       1,
-      JSON.stringify({ side: "sell", anchor_ticks_used: 4 }),
+      JSON.stringify({ mode: "midpoint-anchored", side: "sell" }),
     );
   });
 
@@ -1971,7 +2030,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.price).toBe(0.29);
   });
 
-  it("skips bid-anchored SELL through hard-liveness when bestBid is unavailable", async () => {
+  it("skips SELL through hard-liveness when bestBid is unavailable", async () => {
     const { bus, skipped, placed } = makeBridgeWithPricing();
     const market = makeMarket({ bestBid: null, bestAsk: 0.29, tickSize: 0.01 });
     await bus.publish("SignalApproved", {
@@ -3212,7 +3271,7 @@ describe("ADR-015 execution policy observations", () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0]!.skippedReason).toBe("sell-price-below-signal-floor");
-    expect(rows[0]!.selectedPrice).toBe(0.024);
+    expect(rows[0]!.selectedPrice).toBe(0.055);
     expect(rows[0]!.side).toBe("SELL");
   });
 });

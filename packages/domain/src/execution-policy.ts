@@ -200,8 +200,14 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   orderCapacity: DEFAULT_ORDER_CAPACITY_POLICY,
   deadSideGuard: DEFAULT_DEAD_SIDE_GUARD,
   pricing: DEFAULT_PRICING_POLICY,
-  exitPricingMode: "bid-anchored",
+  exitPricingMode: "midpoint-anchored",
   exitBidAnchorTicks: 4,
+  // Derived from R93 Model A regression
+  // (research_plankton/plankton_sell_pricing_decomposition_R93_report.md):
+  // fill_price = 0.004868 + 1.000947 × midpoint, n=1,256, R²=0.976.
+  // intercept 0.004868 / standard tick_size 0.001 ≈ 5 ticks.
+  // Analytical derivation — not an engineering tuning value.
+  exitMidpointAnchorTicks: 5,
   opportunisticTaker: DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
   repriceOnOutbid: DEFAULT_REPRICE_ON_OUTBID_POLICY,
@@ -221,7 +227,7 @@ const DEAD_SIDE_MODES = ["off", "observe", "enforce"] as const;
 const ORDER_LIFETIME_ENFORCEMENT_MODES = ["observe", "enforce"] as const;
 const PRICING_MODES = ["edge", "bounded-midpoint"] as const;
 const BINARY_PRICING_POLICIES = ["edge", "skip"] as const;
-const EXIT_PRICING_MODES = ["bid-anchored", "edge"] as const;
+const EXIT_PRICING_MODES = ["bid-anchored", "midpoint-anchored", "edge"] as const;
 const ORDER_SIDES = ["buy", "sell"] as const;
 
 // Bounds chosen to match the Zod schema that previously lived in
@@ -346,6 +352,14 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     issues,
     "exitBidAnchorTicks",
   );
+  const exitMidpointAnchorTicks = clampedInt(
+    obj.exitMidpointAnchorTicks,
+    DEFAULT_EXECUTION_POLICY.exitMidpointAnchorTicks,
+    BOUND_SPREAD_TICKS_MIN,
+    BOUND_SPREAD_TICKS_MAX,
+    issues,
+    "exitMidpointAnchorTicks",
+  );
   const opportunisticTaker = parseOpportunisticTaker(obj.opportunisticTaker, issues);
   const telemetry = parseTelemetry(obj.telemetry, issues);
   const marketSelection = parseMarketSelection(obj.marketSelection, issues);
@@ -379,6 +393,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       pricing,
       exitPricingMode,
       exitBidAnchorTicks,
+      exitMidpointAnchorTicks,
       opportunisticTaker,
       orderLifetime,
       repriceOnOutbid,
