@@ -950,6 +950,44 @@ describe("hard-liveness guard (before execution)", () => {
     expect(conversionSkipped.filter((s) => s.stage === "hard-liveness")).toHaveLength(0);
   });
 
+  it("places SELL after nominal endDate when market liveness is healthy", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", reason: "repricing-exit" },
+      market: makeMarket({ endDate: new Date(NOW - 60 * 60_000).toISOString() }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(conversionSkipped).toHaveLength(0);
+    expect(placeOrderRequested).toHaveLength(1);
+  });
+
+  it("blocks post-endDate SELL through hard-liveness when acceptingOrders=false", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    const { bus, conversionSkipped, placeOrderRequested } = makeBridgeWithLiveLite();
+
+    await bus.publish("SignalApproved", {
+      signal: { ...makeSignal(), side: "sell", reason: "repricing-exit" },
+      market: makeMarket({
+        endDate: new Date(NOW - 60 * 60_000).toISOString(),
+        acceptingOrders: false,
+      }),
+      approvedAt: Date.now(),
+    });
+    await bus.drain();
+
+    expect(conversionSkipped).toHaveLength(1);
+    expect(conversionSkipped[0]!.stage).toBe("hard-liveness");
+    expect(conversionSkipped[0]!.reasons).toContain("not_accepting_orders");
+    expect(conversionSkipped[0]!.reasons).not.toContain("order-lifetime-resolution-stop-window");
+    expect(placeOrderRequested).toHaveLength(0);
+  });
+
   // Phase 2.A: embedded market snapshot on SignalApproved is the authoritative
   // source for the bridge's liveness + base pricing. These two tests pin the
   // invariant that eviction-between-approval-and-bridge no longer surfaces as
@@ -1316,7 +1354,7 @@ describe("dead-side-near-end guard", () => {
     expect(placed).toHaveLength(1);
   });
 
-  it("skips SELL orders inside the order-lifetime final resolution hour", async () => {
+  it("places SELL orders inside the former order-lifetime final resolution hour", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
     const { bus, skipped, placed } = makeBridge({ mode: "enforce" });
@@ -1328,14 +1366,13 @@ describe("dead-side-near-end guard", () => {
     };
     await bus.publish("SignalApproved", {
       signal: sellSignal,
-      market: deadSideMarket(30_000, 0.01),
+      market: deadSideMarket(30 * 60_000, 0.01),
       approvedAt: Date.now(),
     });
     await bus.drain();
 
-    expect(placed).toHaveLength(0);
-    expect(skipped).toHaveLength(1);
-    expect(skipped[0]!.reasons).toContain("order-lifetime-resolution-stop-window");
+    expect(skipped).toHaveLength(0);
+    expect(placed).toHaveLength(1);
   });
 
   it("does not hit when endDate is null (no resolution deadline known)", async () => {

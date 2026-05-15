@@ -141,6 +141,8 @@ export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
   staleResetMs: 24 * 60 * 60_000,
   safetyBufferMs: 60 * 60_000,
   resolutionAggressiveWindowMs: 6 * 60 * 60_000,
+  // Deprecated 2026-05-15: kept for DB/profile compatibility.
+  // SELL timestamp stop-window removed per R87 evidence; see ADR-028.
   resolutionStopWindowMs: 60 * 60_000,
   resolutionExitTtlCapMs: 10 * 60_000,
   relayerSubmitBudgetPerMinute: 20,

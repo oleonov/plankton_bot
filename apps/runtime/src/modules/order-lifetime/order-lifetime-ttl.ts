@@ -24,7 +24,7 @@ export interface ExitOrderLifetimeDecision {
   rateLimited: boolean;
   wouldCancelUnderFlat: boolean;
   wouldCancelUnderMode: boolean;
-  cancelReason: "ttl_exceeded" | "resolution_stop_window" | "end_date_safety_buffer" | null;
+  cancelReason: "ttl_exceeded" | "end_date_safety_buffer" | null;
 }
 
 export function resolveExitOrderLifetime(input: ExitOrderLifetimeInput): ExitOrderLifetimeDecision {
@@ -65,16 +65,6 @@ export function resolveExitOrderLifetime(input: ExitOrderLifetimeInput): ExitOrd
   }
 
   const resolution = resolveResolutionLimit(input.policy, timeToEndMs);
-  if (resolution.stop) {
-    return {
-      ...base,
-      effectiveTtlMs: 0,
-      resolutionCapApplied: true,
-      rateLimited: false,
-      wouldCancelUnderMode: true,
-      cancelReason: "resolution_stop_window",
-    };
-  }
 
   if (input.order.side === "sell") {
     const capApplied = resolution.capMs < input.flatTtlMs;
@@ -152,23 +142,26 @@ function resolveResolutionLimit(
   policy: OrderLifetimePolicy,
   timeToEndMs: number | null,
 ): {
-  stop: boolean;
   capMs: number;
   cancelReason: "ttl_exceeded" | "end_date_safety_buffer";
 } {
   if (timeToEndMs == null) {
-    return { stop: false, capMs: Number.POSITIVE_INFINITY, cancelReason: "ttl_exceeded" };
+    return { capMs: Number.POSITIVE_INFINITY, cancelReason: "ttl_exceeded" };
   }
-  if (timeToEndMs <= policy.resolutionStopWindowMs) {
-    return { stop: true, capMs: 0, cancelReason: "end_date_safety_buffer" };
+  if (timeToEndMs <= 0) {
+    return { capMs: Number.POSITIVE_INFINITY, cancelReason: "ttl_exceeded" };
   }
-  const safetyCapMs = timeToEndMs - policy.safetyBufferMs;
+  // ADR-028: no timestamp-only hard stop. Plankton trades past nominal end_date;
+  // actual tradability is checked at SELL placement by hard-liveness.
+  const safetyCapMs =
+    timeToEndMs > policy.safetyBufferMs
+      ? timeToEndMs - policy.safetyBufferMs
+      : Number.POSITIVE_INFINITY;
   const aggressiveCapMs =
     timeToEndMs <= policy.resolutionAggressiveWindowMs
       ? policy.resolutionExitTtlCapMs
       : Number.POSITIVE_INFINITY;
   return {
-    stop: safetyCapMs <= 0,
     capMs: Math.min(safetyCapMs, aggressiveCapMs),
     cancelReason: safetyCapMs <= aggressiveCapMs ? "end_date_safety_buffer" : "ttl_exceeded",
   };

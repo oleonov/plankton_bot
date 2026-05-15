@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted — 2026-05-06
+Accepted — 2026-05-06; resolution-stop-window timestamp behavior superseded by
+ADR-028 (2026-05-15)
 
 ## Context
 

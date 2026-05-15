@@ -125,17 +125,31 @@ describe("order lifetime TTL resolver", () => {
     expect(decision.resolutionCapApplied).toBe(false);
   });
 
-  it("stops exit orders inside the final resolution hour", () => {
+  it("does not hard-stop exit orders inside the former final resolution hour", () => {
     const decision = resolveExitOrderLifetime({
-      order: orderAt(0),
+      order: orderAt(0, "sell"),
       market: { endDate: new Date(baseMs + 30 * 60_000).toISOString() },
       modeState: state("PASSIVE", "low", "confirmed"),
       policy,
       flatTtlMs: 300_000,
       nowMs: baseMs,
     });
-    expect(decision.wouldCancelUnderMode).toBe(true);
-    expect(decision.cancelReason).toBe("resolution_stop_window");
+    expect(decision.wouldCancelUnderMode).toBe(false);
+    expect(decision.cancelReason).toBeNull();
+  });
+
+  it("does not auto-cancel exit orders solely because end_date is in the past", () => {
+    const decision = resolveExitOrderLifetime({
+      order: orderAt(0, "sell"),
+      market: { endDate: new Date(baseMs - 60 * 60_000).toISOString() },
+      modeState: state("PASSIVE", "low", "confirmed"),
+      policy,
+      flatTtlMs: 300_000,
+      nowMs: baseMs,
+    });
+    expect(decision.resolutionCapApplied).toBe(false);
+    expect(decision.wouldCancelUnderMode).toBe(false);
+    expect(decision.cancelReason).toBeNull();
   });
 
   it("never returns a TTL beyond end_date minus safety buffer", () => {

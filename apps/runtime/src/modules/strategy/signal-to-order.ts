@@ -29,7 +29,7 @@ import type {
   Order,
 } from "@krabs/domain";
 import { canPlaceBuyOrderForMarket, createCommandId, isAlive } from "@krabs/domain";
-import { DEFAULT_EXECUTION_POLICY, DEFAULT_ORDER_LIFETIME_POLICY } from "../../execution-policy.js";
+import { DEFAULT_EXECUTION_POLICY } from "../../execution-policy.js";
 import { buildClientOrderId } from "@krabs/domain/node";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "../../logger.js";
@@ -422,45 +422,6 @@ export class SignalToOrderBridge {
     }
 
     const nowMs = this.now();
-    if (
-      signal.side === "sell" &&
-      executionTerms.kind === "ok" &&
-      shouldSkipSellInsideOrderLifetimeStopWindow(market, policy, nowMs)
-    ) {
-      const lifetime = policy.orderLifetime ?? DEFAULT_ORDER_LIFETIME_POLICY;
-      const endMs = market.endDate ? Date.parse(market.endDate) : null;
-      const timeToEndMs = endMs != null && Number.isFinite(endMs) ? endMs - nowMs : null;
-      this.log.info(
-        {
-          signalId: signal.signalId,
-          tokenId: signal.tokenId,
-          endDate: market.endDate,
-          timeToEndMs,
-          stopWindowMs: lifetime.resolutionStopWindowMs,
-        },
-        "approved SELL skipped — order lifetime resolution stop window",
-      );
-      await this.publishConversionSkipped(
-        signal,
-        "execution-terms",
-        ["order-lifetime-resolution-stop-window"],
-        {
-          endDate: market.endDate,
-          timeToEndMs,
-          stopWindowMs: lifetime.resolutionStopWindowMs,
-        },
-      );
-      this.writeObservation({
-        signal,
-        clientOrderId: null,
-        market,
-        policy,
-        executionTerms,
-        canary,
-        skippedReason: "order-lifetime-resolution-stop-window",
-      });
-      return;
-    }
 
     if (
       signal.side === "sell" &&
@@ -1552,19 +1513,6 @@ function shouldSkipSellBelowSignalFloor(
   if (!Number.isFinite(signalPrice) || signalPrice <= 0) return false;
   if (!Number.isFinite(executionPrice) || executionPrice <= 0) return false;
   return executionPrice < signalPrice * minRatio;
-}
-
-function shouldSkipSellInsideOrderLifetimeStopWindow(
-  market: Pick<NormalizedMarket, "endDate">,
-  policy: ExecutionPolicy,
-  nowMs: number,
-): boolean {
-  const lifetime = policy.orderLifetime ?? DEFAULT_ORDER_LIFETIME_POLICY;
-  if (!lifetime.enabled || lifetime.enforcement !== "enforce") return false;
-  if (!market.endDate) return false;
-  const endMs = Date.parse(market.endDate);
-  if (!Number.isFinite(endMs)) return false;
-  return endMs - nowMs <= lifetime.resolutionStopWindowMs;
 }
 
 function bucketForTimeToEndMs(timeToEndMs: number): DeadSideBucket {
