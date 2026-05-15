@@ -12,6 +12,7 @@ import { InProcessEventBus } from "@krabs/event-bus";
 import {
   cleanStaleEntryOrders,
   CANCEL_BACKOFF_MS,
+  EXIT_ORDER_TTL_MS,
   PROBE_LIKE_DAILY_TTL_MS,
   PROBE_LIKE_INTRADAY_TTL_MS,
   recordSellDownpriceCancelSucceeded,
@@ -149,6 +150,10 @@ describe("cleanStaleEntryOrders", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("uses a 30 minute default exit order TTL", () => {
+    expect(EXIT_ORDER_TTL_MS).toBe(1_800_000);
   });
 
   function run() {
@@ -586,10 +591,10 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   it("cancels stale open sell exit orders on the exit TTL", async () => {
-    const sixMinutesAgo = new Date(Date.now() - 6 * 60_000).toISOString();
+    const afterExitTtl = new Date(Date.now() - EXIT_ORDER_TTL_MS - 60_000).toISOString();
     const order = makeOrder({
       side: "sell",
-      createdAt: sixMinutesAgo,
+      createdAt: afterExitTtl,
       signalReason: "repricing-exit",
     });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
@@ -690,10 +695,10 @@ describe("cleanStaleEntryOrders", () => {
   });
 
   it("restores flat exit TTL when orderLifetime.enabled=false", async () => {
-    const sixMinutesAgo = new Date(Date.now() - 6 * 60_000).toISOString();
+    const afterExitTtl = new Date(Date.now() - EXIT_ORDER_TTL_MS - 60_000).toISOString();
     const order = makeOrder({
       side: "sell",
-      createdAt: sixMinutesAgo,
+      createdAt: afterExitTtl,
       signalReason: "repricing-exit",
     });
     orderRepo.findOpen = vi.fn().mockReturnValue([order]);
@@ -714,7 +719,7 @@ describe("cleanStaleEntryOrders", () => {
     expect(cancelled[0].command.reason).toBe("stale_exit_ttl");
   });
 
-  it("does not cancel sell exit orders within the 300s TTL", async () => {
+  it("does not cancel sell exit orders within the 30m TTL", async () => {
     const twoMinutesAgo = new Date(Date.now() - 2 * 60_000).toISOString();
     const order = makeOrder({
       side: "sell",
@@ -801,7 +806,7 @@ describe("cleanStaleEntryOrders", () => {
     const order = makeOrder({
       side: "sell",
       price: 0.29,
-      createdAt: new Date(Date.now() - 6 * 60_000).toISOString(),
+      createdAt: new Date(Date.now() - EXIT_ORDER_TTL_MS - 60_000).toISOString(),
       signalReason: "repricing-exit",
     });
     const stateMap: SellDownpriceRepriceStateMap = new Map([

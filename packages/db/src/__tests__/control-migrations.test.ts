@@ -176,6 +176,8 @@ describe("control-db migration infrastructure", () => {
           maxSpreadTicks: number;
           sides: Array<"buy" | "sell">;
         };
+        exitOrderTtlMs: number;
+        sellReplaceMinPriceDeltaTicks: number;
         multiBuyLadder: {
           enabled: boolean;
           maxLadderFillsPerToken: number;
@@ -205,10 +207,12 @@ describe("control-db migration infrastructure", () => {
         maxOpenOrdersTotal: 22,
       });
       expect(parsed.exitBidAnchorTicks).toBe(4);
+      expect(parsed.exitOrderTtlMs).toBe(1_800_000);
+      expect(parsed.sellReplaceMinPriceDeltaTicks).toBe(2);
       expect(parsed.opportunisticTaker).toEqual({
         enabled: true,
         maxSpreadTicks: 2,
-        sides: ["buy", "sell"],
+        sides: ["buy"],
         safetyBuffer: 1.05,
         fallbackMinNotionalUsdc: 1,
         marketableBuyMinNotionalUsdc: 1,
@@ -225,6 +229,55 @@ describe("control-db migration infrastructure", () => {
         row.profile_id === "live-lite" ? "enforce" : "observe",
       );
     }
+  });
+
+  it("migration 058 updates live-lite SELL execution policy without overwriting TTL overrides", () => {
+    const dbPath = path.join(tmpDir, "control-mid-bucket-sell.db");
+    conn = bootstrapControlDb(dbPath);
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_set(
+              execution_policy_json,
+              '$.exitOrderTtlMs',
+              900000,
+              '$.opportunisticTaker.sides',
+              json('["buy","sell"]')
+            )
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare(
+        `UPDATE profile_settings
+            SET execution_policy_json = json_remove(
+              execution_policy_json,
+              '$.sellReplaceMinPriceDeltaTicks'
+            )
+          WHERE profile_id = 'live-lite'`,
+      )
+      .run();
+    conn.db
+      .prepare("DELETE FROM schema_migrations WHERE name = ?")
+      .run("058_mid_bucket_sell_execution_policy.sql");
+    conn.close();
+
+    conn = bootstrapControlDb(dbPath);
+
+    const row = conn.db
+      .prepare(
+        "SELECT execution_policy_json AS json FROM profile_settings WHERE profile_id = 'live-lite'",
+      )
+      .get() as { json: string };
+    const policy = JSON.parse(row.json) as {
+      exitOrderTtlMs: number;
+      sellReplaceMinPriceDeltaTicks: number;
+      opportunisticTaker: { sides: Array<"buy" | "sell"> };
+    };
+
+    expect(policy.exitOrderTtlMs).toBe(900_000);
+    expect(policy.sellReplaceMinPriceDeltaTicks).toBe(2);
+    expect(policy.opportunisticTaker.sides).toEqual(["buy"]);
   });
 
   it("migration 041 updates existing control DB sizing constants and entry ceiling", () => {

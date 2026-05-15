@@ -164,6 +164,28 @@ function makePosition(overrides?: Partial<Position>): Position {
   };
 }
 
+function openSellAt(price: number, overrides?: Partial<Order>): Order {
+  return {
+    orderId: createOrderId("existing-sell"),
+    clientOrderId: "plk_existing_sell" as ClientOrderId,
+    tokenId: createTokenId("tok-yes"),
+    conditionId: createConditionId("cond-1"),
+    side: "sell",
+    orderType: "GTC",
+    price,
+    size: 5,
+    sizeUsdc: price * 5,
+    status: "open",
+    exchangeOrderId: "existing-sell",
+    signalId: null,
+    signalReason: "repricing-exit",
+    botRunId: BOT_RUN_ID,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 function createMockPositionRepo(position: Position | null = null): PositionRepository {
   return {
     save: vi.fn(),
@@ -1182,6 +1204,134 @@ describe("ExecutionModule", () => {
       true,
     );
     expect(looksLikeMinSizeError("rate limit exceeded", { code: 429 })).toBe(false);
+  });
+
+  it.each([
+    { label: "exact match", existingPrice: 0.3, requestedPrice: 0.3 },
+    { label: "one tick", existingPrice: 0.3, requestedPrice: 0.31 },
+    { label: "two ticks", existingPrice: 0.3, requestedPrice: 0.32 },
+  ])(
+    "keeps an existing SELL when replacement price is acceptable: $label",
+    async ({ existingPrice, requestedPrice }) => {
+      orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(existingPrice)]);
+      const replaceMod = new ExecutionModule({
+        gateway,
+        bus,
+        marketRepo: marketRepo as any,
+        orderRepo,
+        fillRepo,
+        positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+        log: silentLog,
+        botRunId: BOT_RUN_ID,
+        runtimeControl: { isPaused: () => false },
+        executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+      });
+      await replaceMod.start();
+      const rejected: any[] = [];
+      bus.subscribe("OrderRejected", async (p) => {
+        rejected.push(p);
+      });
+
+      await bus.publish("PlaceOrderRequested", {
+        command: makePlaceCmd({
+          commandId: createCommandId(`sell-acceptable-${requestedPrice}`),
+          clientOrderId: `plk_sell_acceptable_${requestedPrice}` as ClientOrderId,
+          side: "sell",
+          price: requestedPrice,
+          size: 5,
+        }),
+        timestamp: Date.now(),
+      });
+
+      expect(gateway.cancelOrder).not.toHaveBeenCalled();
+      expect(gateway.placeOrder).not.toHaveBeenCalled();
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toBe("sell-order-acceptable-price-already-open");
+      await replaceMod.stop();
+    },
+  );
+
+  it("cancel-replaces a SELL when replacement price moves beyond tolerance", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => DEFAULT_EXECUTION_POLICY,
+    });
+    await replaceMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-replace-three-ticks"),
+        clientOrderId: "plk_sell_replace_three_ticks" as ClientOrderId,
+        side: "sell",
+        price: 0.33,
+        size: 5,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    await replaceMod.stop();
+  });
+
+  it("uses configured SELL replacement tolerance", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
+    const replaceMod = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 10 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      executionPolicy: () => ({ ...DEFAULT_EXECUTION_POLICY, sellReplaceMinPriceDeltaTicks: 1 }),
+    });
+    await replaceMod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("sell-replace-configured-tolerance"),
+        clientOrderId: "plk_sell_replace_configured_tolerance" as ClientOrderId,
+        side: "sell",
+        price: 0.32,
+        size: 5,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).toHaveBeenCalledWith({ orderId: "existing-sell" });
+    await replaceMod.stop();
+  });
+
+  it("does not apply SELL replacement tolerance to BUY commands", async () => {
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([openSellAt(0.3)]);
+    await mod.start();
+
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        commandId: createCommandId("buy-not-sell-replacement"),
+        clientOrderId: "plk_buy_not_sell_replacement" as ClientOrderId,
+        side: "buy",
+        price: 0.31,
+        size: 5,
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    await mod.stop();
   });
 
   it("cancels an existing SELL before submitting the replacement order", async () => {

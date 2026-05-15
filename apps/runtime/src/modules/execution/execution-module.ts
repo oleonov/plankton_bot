@@ -1296,11 +1296,18 @@ export class ExecutionModule implements RuntimeModule {
       return false;
     }
 
-    const matchingPriceSell = existingSells.find(
-      (order) => Math.abs(order.price - cmd.price) < cmd.tickSize - 1e-9,
+    const policy = this.deps.executionPolicy?.();
+    const toleranceTicks = policy?.sellReplaceMinPriceDeltaTicks ?? 2;
+    const acceptablePriceWindow = toleranceTicks * cmd.tickSize + 1e-9;
+    const acceptablePriceSell = existingSells.find(
+      (order) => Math.abs(order.price - cmd.price) < acceptablePriceWindow,
     );
-    if (matchingPriceSell) {
-      await this.rejectOrder(cmd, "sell-order-already-open", ExchangeErrorCode.LivePolicyBlocked);
+    if (acceptablePriceSell) {
+      await this.rejectOrder(
+        cmd,
+        "sell-order-acceptable-price-already-open",
+        ExchangeErrorCode.LivePolicyBlocked,
+      );
       return true;
     }
 

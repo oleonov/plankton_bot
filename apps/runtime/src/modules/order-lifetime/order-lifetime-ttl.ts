@@ -1,7 +1,7 @@
 import type { AlgoTokenModeState, Market, Order, OrderLifetimePolicy } from "@krabs/domain";
 
 export interface ExitOrderLifetimeInput {
-  order: Pick<Order, "createdAt" | "orderId" | "tokenId">;
+  order: Pick<Order, "createdAt" | "orderId" | "tokenId" | "side">;
   market: Pick<Market, "endDate"> | null;
   modeState: AlgoTokenModeState | null;
   policy: OrderLifetimePolicy;
@@ -73,6 +73,27 @@ export function resolveExitOrderLifetime(input: ExitOrderLifetimeInput): ExitOrd
       rateLimited: false,
       wouldCancelUnderMode: true,
       cancelReason: "resolution_stop_window",
+    };
+  }
+
+  if (input.order.side === "sell") {
+    const capApplied = resolution.capMs < input.flatTtlMs;
+    const effectiveTtlMs = Math.max(1_000, Math.min(input.flatTtlMs, resolution.capMs));
+    return {
+      ...base,
+      mode: "UNKNOWN",
+      confidence: "unknown",
+      modeStatus: "unknown",
+      modeTtlMs: input.flatTtlMs,
+      effectiveTtlMs,
+      resolutionCapApplied: capApplied,
+      rateLimited: false,
+      // SELL bypass: `wouldCancelUnderMode` semantically equivalent to
+      // `wouldCancelUnderFlat` here because mode classification was bypassed.
+      // Field name kept for response-shape stability across consumers.
+      wouldCancelUnderMode: ageMs > effectiveTtlMs,
+      cancelReason:
+        ageMs > effectiveTtlMs ? (capApplied ? resolution.cancelReason : "ttl_exceeded") : null,
     };
   }
 

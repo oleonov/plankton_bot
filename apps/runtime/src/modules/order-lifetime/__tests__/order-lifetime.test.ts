@@ -206,6 +206,52 @@ describe("order lifetime TTL resolver", () => {
     expect(decision.effectiveTtlMs).toBe(policy.passive.lowTtlMs);
   });
 
+  it("uses flat TTL for SELL orders instead of mode-based TTL", () => {
+    const decision = resolveExitOrderLifetime({
+      order: orderAt(-10 * 60_000, "sell"),
+      market: null,
+      modeState: state("BURST", "high", "confirmed"),
+      policy,
+      flatTtlMs: 1_800_000,
+      nowMs: baseMs,
+    });
+
+    expect(decision.mode).toBe("UNKNOWN");
+    expect(decision.modeTtlMs).toBe(1_800_000);
+    expect(decision.effectiveTtlMs).toBe(1_800_000);
+    expect(decision.wouldCancelUnderMode).toBe(false);
+    expect(decision.rateLimited).toBe(false);
+  });
+
+  it("cancels SELL orders only after the flat exit TTL", () => {
+    const decision = resolveExitOrderLifetime({
+      order: orderAt(-1_800_001, "sell"),
+      market: null,
+      modeState: state("PASSIVE", "high", "confirmed"),
+      policy,
+      flatTtlMs: 1_800_000,
+      nowMs: baseMs,
+    });
+
+    expect(decision.modeTtlMs).toBe(1_800_000);
+    expect(decision.wouldCancelUnderMode).toBe(true);
+    expect(decision.cancelReason).toBe("ttl_exceeded");
+  });
+
+  it("still applies the resolution cap to SELL orders", () => {
+    const decision = resolveExitOrderLifetime({
+      order: orderAt(0, "sell"),
+      market: { endDate: new Date(baseMs + 5 * 60 * 60_000).toISOString() },
+      modeState: state("PASSIVE", "high", "confirmed"),
+      policy,
+      flatTtlMs: 1_800_000,
+      nowMs: baseMs,
+    });
+
+    expect(decision.effectiveTtlMs).toBe(policy.resolutionExitTtlCapMs);
+    expect(decision.resolutionCapApplied).toBe(true);
+  });
+
   it("uses flat TTL when order lifetime is disabled", () => {
     const disabled = { ...policy, enabled: false };
     const decision = resolveExitOrderLifetime({
@@ -548,7 +594,7 @@ function classify(
     conditionId,
     outcomeIndex: 0,
     fills: fillOffsetsMs.map(fillAt),
-    orders: orderOffsetsMs.map(orderAt),
+    orders: orderOffsetsMs.map((offsetMs) => orderAt(offsetMs)),
     market: { active: true, endDate: null },
     previous: previous ?? null,
     policy,
@@ -573,13 +619,16 @@ function fillAt(offsetMs: number): Fill {
   };
 }
 
-function orderAt(offsetMs: number): Order {
+// default side "buy" so legacy mode-classification tests target BUY path.
+// CHANGE D: SELL orders bypass mode classification; tests for SELL
+// behavior explicitly specify side: "sell".
+function orderAt(offsetMs: number, side: Order["side"] = "buy"): Order {
   return {
     orderId: createOrderId(`order-${offsetMs}`),
     clientOrderId: `client-${offsetMs}` as ClientOrderId,
     tokenId,
     conditionId,
-    side: "sell",
+    side,
     orderType: "GTC",
     postOnly: true,
     price: 0.1,

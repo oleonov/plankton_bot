@@ -45,12 +45,9 @@ export const DEFAULT_TTL_MS = 6 * 60 * 60_000; // 6h fallback
 export const PROBE_LIKE_INTRADAY_TTL_MS = 60_000; // 60s
 export const PROBE_LIKE_DAILY_TTL_MS = 5 * 60_000; // 5m
 export const PROBE_LIKE_AD_HOC_TTL_MS = 10 * 60_000; // 10m
-// ADR-013: bumped from 60s to 300s. 60s TTL was cancelling repricing-exit SELLs
-// before the book had a chance to catch the order — most losing legs in prod
-// never got a SELL fill. 300s gives the stacking order real life without
-// letting stale prices linger indefinitely; stale-state is still bounded by
-// `EXIT_ORDER_TTL_MS + reconciliation interval`.
-export const EXIT_ORDER_TTL_MS = 300_000; // 5m
+// ADR-013 bumped 60s to 300s; CHANGE C bumps 300s to 1800s (30m) based on R82:
+// Plankton mid-bucket SELL median time-from-BUY = 65min, p25 = 8min.
+export const EXIT_ORDER_TTL_MS = 1_800_000; // 30m
 export const ENDDATE_SAFETY_WINDOW_MS = 60 * 60_000; // 60 min before endDate
 export const CANCEL_BACKOFF_MS = 60_000; // 1 min retry backoff
 const PRICE_EPSILON = 1e-9;
@@ -82,7 +79,7 @@ export interface StaleOrderCleanerDeps {
   exitOrderTtlMs?: number;
   exitOrderLifetime?: {
     resolveExitOrder: (
-      order: Pick<Order, "createdAt" | "orderId" | "tokenId">,
+      order: Pick<Order, "createdAt" | "orderId" | "tokenId" | "side">,
       market: Pick<Market, "endDate"> | null,
       flatTtlMs: number,
       nowMs: number,

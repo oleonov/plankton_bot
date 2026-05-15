@@ -818,6 +818,7 @@ export interface ExecutionPolicy {
    */
   entryMinMarketAgeSeconds: number;
   exitOrderTtlMs: number;
+  sellReplaceMinPriceDeltaTicks?: number;
   marketSelection: MarketSelectionPolicy;
   buyCapacity: BuyCapacityPolicy;
   sellCapacity: SellCapacityPolicy;

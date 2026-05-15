@@ -36,6 +36,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       version: 1,
       entryPriceCeiling: 0.6,
       exitOrderTtlMs: 600_000,
+      sellReplaceMinPriceDeltaTicks: 3,
       marketSelection: { maxMidPrice: 0.42, minLiquidity: 250 },
       buyCapacity: {
         enabled: true,
@@ -129,6 +130,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     const { policy, issues } = parseExecutionPolicyJson(JSON.stringify(input));
     expect(issues).toHaveLength(0);
     expect(policy.entryPriceCeiling).toBe(0.6);
+    expect(policy.sellReplaceMinPriceDeltaTicks).toBe(3);
     expect(policy.marketSelection).toEqual({ maxMidPrice: 0.42, minLiquidity: 250 });
     expect(policy.buyCapacity).toEqual({
       enabled: true,
@@ -199,6 +201,29 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     );
     expect(policy.exitOrderTtlMs).toBe(DEFAULT_EXECUTION_POLICY.exitOrderTtlMs);
     expect(issues.some((i) => i.includes("exitOrderTtlMs"))).toBe(true);
+  });
+
+  it("defaults exitOrderTtlMs to 30 minutes", () => {
+    expect(DEFAULT_EXECUTION_POLICY.exitOrderTtlMs).toBe(1_800_000);
+  });
+
+  it("defaults SELL replacement tolerance to two ticks", () => {
+    expect(DEFAULT_EXECUTION_POLICY.sellReplaceMinPriceDeltaTicks).toBe(2);
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ sellReplaceMinPriceDeltaTicks: 1 }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.sellReplaceMinPriceDeltaTicks).toBe(1);
+  });
+
+  it("rejects invalid SELL replacement tolerance values with an issue", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ sellReplaceMinPriceDeltaTicks: 0 }),
+    );
+    expect(policy.sellReplaceMinPriceDeltaTicks).toBe(
+      DEFAULT_EXECUTION_POLICY.sellReplaceMinPriceDeltaTicks,
+    );
+    expect(issues.some((i) => i.includes("sellReplaceMinPriceDeltaTicks"))).toBe(true);
   });
 
   it("preserves partial pricing override and defaults the rest", () => {

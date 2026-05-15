@@ -110,7 +110,7 @@ export class OrderLifetimeModule implements RuntimeModule {
   }
 
   resolveExitOrder(
-    order: Pick<Order, "createdAt" | "orderId" | "tokenId">,
+    order: Pick<Order, "createdAt" | "orderId" | "tokenId" | "side">,
     market: Pick<Market, "endDate"> | null,
     flatTtlMs: number,
     nowMs: number,

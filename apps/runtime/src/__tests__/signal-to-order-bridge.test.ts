@@ -1442,6 +1442,13 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     return { bus, skipped, placed };
   }
 
+  function allowSellTakerPolicy() {
+    return {
+      ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+      sides: ["buy", "sell"] as Array<"buy" | "sell">,
+    };
+  }
+
   it("default edge branch posts BUY at bestBid — ADR-006 D1 preserved", async () => {
     const { bus, placed } = makeBridgeWithPricing();
     const market = makeMarket({ bestBid: 0.4, bestAsk: 0.41, tickSize: 0.001 });
@@ -1503,7 +1510,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
-        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+        opportunisticTaker: allowSellTakerPolicy(),
       },
     });
     const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01 });
@@ -1535,7 +1542,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
-        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+        opportunisticTaker: allowSellTakerPolicy(),
       },
     });
     const market = makeMarket({ bestBid: 0.09, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 0.1 });
@@ -1634,7 +1641,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
-        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+        opportunisticTaker: allowSellTakerPolicy(),
       },
     });
     const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 5 });
@@ -1666,7 +1673,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const { bus } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
-        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+        opportunisticTaker: allowSellTakerPolicy(),
       },
     });
     const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 5 });
@@ -1708,7 +1715,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const { bus } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
-        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+        opportunisticTaker: allowSellTakerPolicy(),
       },
     });
     const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 10 });
@@ -1738,7 +1745,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const { bus } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
-        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+        opportunisticTaker: allowSellTakerPolicy(),
       },
     });
     const market = makeMarket({ bestBid: 0.08, bestAsk: 0.1, tickSize: 0.01, minOrderSize: 10 });
@@ -1769,7 +1776,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       runtimeMetrics: metrics as never,
       policyOverrides: {
         opportunisticTaker: {
-          ...DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+          ...allowSellTakerPolicy(),
           safetyBuffer: 2,
         },
       },
@@ -1822,7 +1829,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.postOnly).toBe(false);
   });
 
-  it("uses opportunistic taker pricing for SELL when spread is two ticks", async () => {
+  it("keeps SELL maker pricing with default buy-only taker when spread is two ticks", async () => {
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       policyOverrides: {
         opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
@@ -1838,8 +1845,8 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     await bus.drain();
 
     expect(placed).toHaveLength(1);
-    expect(placed[0]!.command.price).toBe(0.08);
-    expect(placed[0]!.command.postOnly).toBe(false);
+    expect(placed[0]!.command.price).toBe(0.09);
+    expect(placed[0]!.command.postOnly).toBeUndefined();
   });
 
   it("keeps maker pricing when opportunistic taker spread is above threshold", async () => {
@@ -1847,7 +1854,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     const { bus, placed } = makeBridgeWithPricing(undefined, {
       runtimeMetrics: metrics as never,
       policyOverrides: {
-        opportunisticTaker: DEFAULT_EXECUTION_POLICY.opportunisticTaker,
+        opportunisticTaker: allowSellTakerPolicy(),
       },
     });
     const market = makeMarket({ bestBid: 0.08, bestAsk: 0.11, tickSize: 0.01 });
@@ -2048,7 +2055,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed[0]!.command.price).toBe(0.1);
   });
 
-  it("skips duplicate same-price SELL when an open sell order already exists", async () => {
+  it("skips duplicate acceptable-price SELL when an open sell order already exists", async () => {
     const orderRepo = {
       findByTokenId: vi.fn(() => [makeOpenSellOrder({ price: 0.1 })]),
     } as unknown as OrderRepository;
@@ -2074,7 +2081,7 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     expect(placed).toHaveLength(0);
     expect(skipped).toHaveLength(1);
     expect(skipped[0]!.stage).toBe("execution-terms");
-    expect(skipped[0]!.reasons).toContain("sell-order-already-open");
+    expect(skipped[0]!.reasons).toContain("sell-order-acceptable-price-already-open");
     expect(skipped[0]!.diagnostics).toMatchObject({
       existingPrice: 0.1,
       executionPrice: 0.1,
@@ -2105,23 +2112,21 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
     });
     await bus.drain();
 
-    expect(skipped.some((event) => event.reasons.includes("sell-order-already-open"))).toBe(false);
+    expect(
+      skipped.some((event) => event.reasons.includes("sell-order-acceptable-price-already-open")),
+    ).toBe(false);
     expect(placed).toHaveLength(1);
     expect(placed[0]!.command.price).toBe(0.1);
   });
 
   it.each([
     { existingPrice: 0.29, executionPrice: 0.29, tickSize: 0.01, shouldSuppress: true },
-    { existingPrice: 0.29, executionPrice: 0.28, tickSize: 0.01, shouldSuppress: false },
+    { existingPrice: 0.29, executionPrice: 0.3, tickSize: 0.01, shouldSuppress: true },
+    { existingPrice: 0.29, executionPrice: 0.31, tickSize: 0.01, shouldSuppress: true },
+    { existingPrice: 0.29, executionPrice: 0.32, tickSize: 0.01, shouldSuppress: false },
     { existingPrice: 0.29, executionPrice: 0.295, tickSize: 0.001, shouldSuppress: false },
-    {
-      existingPrice: 0.29,
-      executionPrice: 0.290000001,
-      tickSize: 0.000000001,
-      shouldSuppress: true,
-    },
   ])(
-    "dedupes SELL only on price epsilon: $existingPrice vs $executionPrice",
+    "dedupes SELL inside the configured tolerance: $existingPrice vs $executionPrice",
     async ({ existingPrice, executionPrice, tickSize, shouldSuppress }) => {
       const orderRepo = {
         findByTokenId: vi.fn(() => [makeOpenSellOrder({ price: existingPrice })]),
@@ -2152,9 +2157,9 @@ describe("bounded-midpoint pricing (ADR-014)", () => {
       await bus.drain();
 
       expect(placed).toHaveLength(shouldSuppress ? 0 : 1);
-      expect(skipped.some((event) => event.reasons.includes("sell-order-already-open"))).toBe(
-        shouldSuppress,
-      );
+      expect(
+        skipped.some((event) => event.reasons.includes("sell-order-acceptable-price-already-open")),
+      ).toBe(shouldSuppress);
     },
   );
 

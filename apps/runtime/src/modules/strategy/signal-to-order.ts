@@ -585,6 +585,8 @@ export class SignalToOrderBridge {
       signal.tokenId,
       signal.side,
       executionTerms.price,
+      market.tickSize,
+      policy,
     );
     if (duplicateSell) {
       this.log.debug(
@@ -596,14 +598,19 @@ export class SignalToOrderBridge {
           executionPrice: executionTerms.price,
           cacheStatus: pricing.cacheStatus,
         },
-        "approved SELL skipped — same-price sell order already open",
+        "approved SELL skipped — acceptable-price sell order already open",
       );
-      await this.publishConversionSkipped(signal, "execution-terms", ["sell-order-already-open"], {
-        cacheStatus: pricing.cacheStatus,
-        existingOrderId: String(duplicateSell.orderId),
-        existingPrice: duplicateSell.price,
-        executionPrice: executionTerms.price,
-      });
+      await this.publishConversionSkipped(
+        signal,
+        "execution-terms",
+        ["sell-order-acceptable-price-already-open"],
+        {
+          cacheStatus: pricing.cacheStatus,
+          existingOrderId: String(duplicateSell.orderId),
+          existingPrice: duplicateSell.price,
+          executionPrice: executionTerms.price,
+        },
+      );
       this.writeObservation({
         signal,
         clientOrderId: null,
@@ -611,7 +618,7 @@ export class SignalToOrderBridge {
         policy,
         executionTerms,
         canary,
-        skippedReason: "sell-order-already-open",
+        skippedReason: "sell-order-acceptable-price-already-open",
       });
       return;
     }
@@ -1259,15 +1266,19 @@ export class SignalToOrderBridge {
     tokenId: TokenId,
     side: "buy" | "sell",
     executionPrice: number,
+    tickSize: number,
+    policy: ExecutionPolicy,
   ): Order | null {
     if (side !== "sell" || !this.deps.orderRepo) return null;
+    const toleranceTicks = policy.sellReplaceMinPriceDeltaTicks ?? 2;
+    const acceptablePriceWindow = toleranceTicks * tickSize + 1e-9;
     const orders = this.deps.orderRepo.findByTokenId(tokenId);
     return (
       orders.find(
         (order) =>
           order.side === "sell" &&
           isOpenOrderStatus(order.status) &&
-          Math.abs(order.price - executionPrice) <= SELL_DEDUP_PRICE_EPSILON,
+          Math.abs(order.price - executionPrice) < acceptablePriceWindow,
       ) ?? null
     );
   }

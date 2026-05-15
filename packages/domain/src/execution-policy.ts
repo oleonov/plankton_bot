@@ -109,7 +109,7 @@ export const DEFAULT_MULTI_BUY_LADDER_POLICY: MultiBuyLadderPolicy = {
 export const DEFAULT_OPPORTUNISTIC_TAKER_POLICY: OpportunisticTakerPolicy = {
   enabled: true,
   maxSpreadTicks: 2,
-  sides: ["buy", "sell"],
+  sides: ["buy"],
   safetyBuffer: 1.05,
   fallbackMinNotionalUsdc: 1,
   marketableBuyMinNotionalUsdc: 1,
@@ -190,7 +190,8 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   version: 1,
   entryPriceCeiling: 0.45,
   entryMinMarketAgeSeconds: DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
-  exitOrderTtlMs: 300_000,
+  exitOrderTtlMs: 1_800_000,
+  sellReplaceMinPriceDeltaTicks: 2,
   marketSelection: DEFAULT_MARKET_SELECTION_POLICY,
   buyCapacity: DEFAULT_BUY_CAPACITY_POLICY,
   sellCapacity: DEFAULT_SELL_CAPACITY_POLICY,
@@ -236,6 +237,8 @@ const BOUND_ENTRY_CEILING_MIN = 0.05;
 const BOUND_ENTRY_CEILING_MAX = 0.99;
 const BOUND_EXIT_TTL_MIN_MS = 10_000;
 const BOUND_EXIT_TTL_MAX_MS = 60 * 60_000;
+const BOUND_SELL_REPLACE_MIN_PRICE_DELTA_TICKS_MIN = 1;
+const BOUND_SELL_REPLACE_MIN_PRICE_DELTA_TICKS_MAX = 20;
 const BOUND_ENTRY_MIN_AGE_MIN_S = 0;
 // Two days — wide enough to cover any realistic conservative tightening
 // without enabling pathological values that would silently disable BUYs forever.
@@ -307,6 +310,14 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
     issues,
     "exitOrderTtlMs",
   );
+  const sellReplaceMinPriceDeltaTicks = clampedInt(
+    obj.sellReplaceMinPriceDeltaTicks,
+    DEFAULT_EXECUTION_POLICY.sellReplaceMinPriceDeltaTicks ?? 2,
+    BOUND_SELL_REPLACE_MIN_PRICE_DELTA_TICKS_MIN,
+    BOUND_SELL_REPLACE_MIN_PRICE_DELTA_TICKS_MAX,
+    issues,
+    "sellReplaceMinPriceDeltaTicks",
+  );
   const entryMinMarketAgeSeconds = clampedInt(
     obj.entryMinMarketAgeSeconds,
     DEFAULT_EXECUTION_POLICY.entryMinMarketAgeSeconds,
@@ -357,6 +368,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       entryPriceCeiling,
       entryMinMarketAgeSeconds,
       exitOrderTtlMs,
+      sellReplaceMinPriceDeltaTicks,
       marketSelection,
       buyCapacity,
       sellCapacity,
