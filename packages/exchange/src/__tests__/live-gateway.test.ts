@@ -1393,38 +1393,74 @@ describe("LiveMarketDataGateway", () => {
     expect(result.size).toBe(0);
   });
 
-  it("getMarketPricing throws on HTTP error", async () => {
+  it("getMarketPricing throws on non-retryable HTTP error", async () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: false,
-      status: 500,
-      statusText: "Internal Server Error",
+      status: 400,
+      statusText: "Bad Request",
     });
 
     try {
       await expect(gw.getMarketPricing(["tok-1"])).rejects.toThrow(
-        "Gamma pricing request failed: 500",
+        "Gamma pricing request failed: 400",
       );
     } finally {
       globalThis.fetch = originalFetch;
     }
   });
 
-  it("getMarketPricing drains response body on HTTP error to release socket", async () => {
+  it("getMarketPricing drains response body on non-retryable HTTP error to release socket", async () => {
     const cancelMock = vi.fn().mockResolvedValue(undefined);
     const originalFetch = globalThis.fetch;
     globalThis.fetch = vi.fn().mockResolvedValue({
       ok: false,
-      status: 500,
-      statusText: "Internal Server Error",
+      status: 400,
+      statusText: "Bad Request",
       body: { cancel: cancelMock },
     });
 
     try {
       await expect(gw.getMarketPricing(["tok-1"])).rejects.toThrow(
-        "Gamma pricing request failed: 500",
+        "Gamma pricing request failed: 400",
       );
       expect(cancelMock).toHaveBeenCalledTimes(1);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("getMarketPricing retries Gamma 5xx responses before succeeding", async () => {
+    const cancelMock = vi.fn().mockResolvedValue(undefined);
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+        body: { cancel: cancelMock },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: () =>
+          Promise.resolve([
+            {
+              clobTokenIds: ["tok-1"],
+              outcomePrices: "[0.45]",
+              bestBid: 0.44,
+              bestAsk: 0.46,
+            },
+          ]),
+      });
+    globalThis.fetch = fetchMock;
+
+    try {
+      const result = await gw.getMarketPricing(["tok-1"]);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(cancelMock).toHaveBeenCalledTimes(1);
+      expect(result.get("tok-1")!.bestBid).toBe(0.44);
+      expect(result.get("tok-1")!.bestAsk).toBe(0.46);
     } finally {
       globalThis.fetch = originalFetch;
     }

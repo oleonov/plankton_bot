@@ -37,6 +37,7 @@ const BOOKS_BATCH_SIZE = 200;
 const MAX_URL_LENGTH = 3500;
 const FETCH_MAX_RETRIES = 2;
 const FETCH_RETRY_DELAY_MS = 250;
+const RETRYABLE_HTTP_STATUSES = new Set([500, 502, 503, 504]);
 
 const PARAM_NAME = "clob_token_ids";
 // "&clob_token_ids=" for subsequent params, "?clob_token_ids=" for the first
@@ -315,7 +316,7 @@ export class LiveMarketDataGateway implements MarketDataGateway {
     for (const batch of batches) {
       const params = batch.map((id) => `clob_token_ids=${id}`).join("&");
       const url = `${GAMMA_PRICING_BASE_URL}?${params}`;
-      const response = await this.fetchWithRetry(url, undefined, timeoutMs);
+      const response = await this.fetchPricingBatchWithRetry(url, timeoutMs);
       if (!response.ok) {
         await drainResponseBody(response);
         throw new Error(`Gamma pricing request failed: ${response.status} ${response.statusText}`);
@@ -438,6 +439,22 @@ export class LiveMarketDataGateway implements MarketDataGateway {
         }
         await sleep(FETCH_RETRY_DELAY_MS * attempt);
       }
+    }
+    throw new Error("unreachable");
+  }
+
+  private async fetchPricingBatchWithRetry(input: string, timeoutMs: number): Promise<Response> {
+    for (let attempt = 1; attempt <= FETCH_MAX_RETRIES; attempt++) {
+      const response = await this.fetchWithRetry(input, undefined, timeoutMs);
+      if (
+        response.ok ||
+        !RETRYABLE_HTTP_STATUSES.has(response.status) ||
+        attempt === FETCH_MAX_RETRIES
+      ) {
+        return response;
+      }
+      await drainResponseBody(response);
+      await sleep(FETCH_RETRY_DELAY_MS * attempt);
     }
     throw new Error("unreachable");
   }

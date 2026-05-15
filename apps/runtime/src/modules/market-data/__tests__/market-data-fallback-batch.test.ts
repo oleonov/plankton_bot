@@ -350,13 +350,14 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     await modB.stop();
   });
 
-  it("degrades transient poll failures to cached/base stream state without error logs", async () => {
+  it.each([
+    ["network timeout", "TimeoutError: operation was aborted due to timeout"],
+    ["Gamma pricing 5xx", "Gamma pricing request failed: 500 Internal Server Error"],
+  ])("degrades %s to cached/base stream state without error logs", async (_caseName, message) => {
     const tiered = makeTiered(["prio-a"], ["prio-b"], []);
     const repo = createMockRepo(tiered);
 
-    const getMarketPricing = vi
-      .fn()
-      .mockRejectedValue(new Error("TimeoutError: operation was aborted due to timeout"));
+    const getMarketPricing = vi.fn().mockRejectedValue(new Error(message));
 
     const gateway: MarketDataGateway = {
       getMarkets: vi.fn().mockResolvedValue([]),
