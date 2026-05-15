@@ -1,10 +1,10 @@
 /**
  * GammaMarketDiscoveryGateway -- discovers markets via the Gamma REST API.
  *
- * Uses the /events endpoint (not /markets) because Gamma excludes event-grouped
- * markets (e.g. will-bitcoin-reach-*) from the paginated /markets listing.
- * The /events endpoint returns nested markets that have identical structure
- * to top-level market objects.
+ * Uses the /events/keyset endpoint (not /markets) because Gamma excludes
+ * event-grouped markets (e.g. will-bitcoin-reach-*) from the paginated /markets
+ * listing. The /events/keyset endpoint returns nested markets that have
+ * identical structure to top-level market objects.
  *
  * Does NOT perform slug filtering -- that is the scanner module's job.
  */
@@ -21,7 +21,7 @@ export interface GammaDiscoveryConfig {
   tagId?: number;
   /** Request timeout in ms (default 30000) */
   timeoutMs?: number;
-  /** Page size for offset pagination (default 100) */
+  /** Page size for keyset pagination (default 100) */
   pageSize?: number;
   /** Max retry attempts per page (default 3) */
   maxRetries?: number;
@@ -34,6 +34,11 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
+
+interface GammaEventsPage {
+  readonly events: Array<Record<string, unknown>>;
+  readonly nextCursor: string | null;
+}
 
 export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
   private readonly baseUrl: string;
@@ -66,11 +71,12 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
       eventStats: { events: number; singleMarket: number; multiMarket: number },
     ) => void,
   ): Promise<{ totalMarkets: number }> {
-    let offset = 0;
+    let afterCursor: string | null = null;
     let totalMarkets = 0;
 
     while (true) {
-      const events = await this.fetchPage(offset);
+      const page = await this.fetchPage(afterCursor);
+      const events = page.events;
       const pageMarkets: ClobMarket[] = [];
       let eventsWithMarkets = 0;
       let singleMarket = 0;
@@ -106,8 +112,8 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
         totalMarkets += pageMarkets.length;
       }
 
-      if (events.length < this.pageSize) break;
-      offset += this.pageSize;
+      if (!page.nextCursor) break;
+      afterCursor = page.nextCursor;
     }
 
     return { totalMarkets };
@@ -116,7 +122,7 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
   async healthCheck(): Promise<{ readonly ok: boolean; readonly latencyMs: number }> {
     const start = Date.now();
     try {
-      const url = this.buildUrl(0, 1);
+      const url = this.buildUrl(null, 1);
       const response = await fetch(url.toString(), {
         signal: AbortSignal.timeout(this.timeoutMs),
       });
@@ -127,10 +133,10 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
     }
   }
 
-  private async fetchPage(offset: number): Promise<Array<Record<string, unknown>>> {
+  private async fetchPage(afterCursor: string | null): Promise<GammaEventsPage> {
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
       try {
-        const url = this.buildUrl(offset);
+        const url = this.buildUrl(afterCursor);
         const response = await fetch(url.toString(), {
           signal: AbortSignal.timeout(this.timeoutMs),
         });
@@ -140,7 +146,7 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
           throw new Error(`Gamma API responded with ${response.status}: ${response.statusText}`);
         }
 
-        return (await response.json()) as Array<Record<string, unknown>>;
+        return this.parseEventsPage(await response.json());
       } catch (err: unknown) {
         if (attempt === this.maxRetries || !this.isTransient(err)) throw err;
         await sleep(this.retryDelayMs);
@@ -153,8 +159,8 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
     return isTransientNetworkError(err);
   }
 
-  private buildUrl(offset: number, limitOverride?: number): URL {
-    const url = new URL("/events", this.baseUrl);
+  private buildUrl(afterCursor: string | null, limitOverride?: number): URL {
+    const url = new URL("/events/keyset", this.baseUrl);
     // ADR-019 §D4 / Step 2 audit P2: align with ADR-003 baseline universe
     // (`active=true&closed=false`). `active=false` events are paused/scheduled
     // and never tradable in the current cycle — excluding them keeps scanner
@@ -162,10 +168,30 @@ export class GammaMarketDiscoveryGateway implements MarketDiscoveryGateway {
     url.searchParams.set("active", "true");
     url.searchParams.set("closed", "false");
     url.searchParams.set("limit", String(limitOverride ?? this.pageSize));
-    url.searchParams.set("offset", String(offset));
+    if (afterCursor) {
+      url.searchParams.set("after_cursor", afterCursor);
+    }
     if (this.tagId !== undefined) {
       url.searchParams.set("tag_id", String(this.tagId));
     }
     return url;
+  }
+
+  private parseEventsPage(body: unknown): GammaEventsPage {
+    if (body == null || typeof body !== "object" || Array.isArray(body)) {
+      throw new Error("Gamma API keyset response must be an object");
+    }
+
+    const record = body as Record<string, unknown>;
+    const events = record["events"];
+    if (!Array.isArray(events)) {
+      throw new Error("Gamma API keyset response missing events array");
+    }
+
+    const nextCursor = record["next_cursor"];
+    return {
+      events: events as Array<Record<string, unknown>>,
+      nextCursor: typeof nextCursor === "string" && nextCursor.length > 0 ? nextCursor : null,
+    };
   }
 }
