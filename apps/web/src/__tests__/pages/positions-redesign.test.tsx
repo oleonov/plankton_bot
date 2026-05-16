@@ -337,6 +337,38 @@ describe("PositionsPage — redesign", () => {
     expect(screen.getByText(/Idle \(S0\)/)).toBeInTheDocument();
   });
 
+  it("shows No Group as the last grouping option and renders rows without group headers", async () => {
+    seedPositions();
+    renderWithProviders(<Positions />);
+    await screen.findByText("Will BTC be above $100k?");
+
+    const user = userEvent.setup();
+    const groupBy = screen.getByLabelText<HTMLSelectElement>(/Group by/i);
+    expect(Array.from(groupBy.options).map((o) => o.value)).toEqual([
+      "lastAction",
+      "phase",
+      "pnl",
+      "ends",
+      "none",
+    ]);
+    expect(groupBy.options[groupBy.options.length - 1]!.textContent).toBe("Group: No Group");
+
+    await user.selectOptions(groupBy, "none");
+
+    expect(groupBy.value).toBe("none");
+    expect(screen.queryByText(/Accumulating \(S2\)/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/First Entry \(S1\)/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Idle \(S0\)/)).not.toBeInTheDocument();
+    expect(screen.queryByText("No Group")).not.toBeInTheDocument();
+    expect(visiblePositionIds()).toEqual([
+      "pos-s1-btc",
+      "pos-s2-eth",
+      "pos-s3-doge",
+      "pos-s0-closed",
+      "pos-dust-sol",
+    ]);
+  });
+
   it("opens the drawer on row click and closes on backdrop click", async () => {
     seedPositions();
     renderWithProviders(<Positions />);

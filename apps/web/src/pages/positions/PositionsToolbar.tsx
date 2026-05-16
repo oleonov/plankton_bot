@@ -99,6 +99,7 @@ export function PositionsToolbar({
         <option value="phase">Group: Phase (S0–S3)</option>
         <option value="pnl">Group: PnL</option>
         <option value="ends">Group: Ends</option>
+        <option value="none">Group: No Group</option>
       </select>
     </div>
   );

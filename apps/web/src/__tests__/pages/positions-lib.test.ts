@@ -349,6 +349,21 @@ describe("groupPositions — with active header sort", () => {
   });
 });
 
+describe("groupPositions — no group", () => {
+  it("returns one bucket in input order", () => {
+    const rows = [
+      position({ positionId: "first", phase: "S1" }),
+      position({ positionId: "second", phase: "S2" }),
+      position({ positionId: "third", phase: "S0" }),
+    ];
+
+    const groups = groupPositions(rows, "none");
+
+    expect(groups.map((g) => g.key)).toEqual(["No Group"]);
+    expect(groups[0]!.items.map((p) => p.positionId)).toEqual(["first", "second", "third"]);
+  });
+});
+
 describe("groupPositions — by pnl", () => {
   it("splits gains vs flat/losses", () => {
     const rows = [

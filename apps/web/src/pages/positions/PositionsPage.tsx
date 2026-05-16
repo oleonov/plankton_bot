@@ -200,6 +200,7 @@ export function PositionsPage() {
                     key={g.key}
                     label={g.key}
                     items={g.items}
+                    showHeader={tweaks.groupBy !== "none"}
                     density={ROW_DENSITY}
                     showBuys={SHOW_PHASE_BUY_COUNT}
                     showPct={SHOW_PNL_PERCENT}
@@ -259,6 +260,7 @@ function SortableHeader({
 interface GroupFragmentProps {
   label: string;
   items: PositionDTO[];
+  showHeader: boolean;
   density: Density;
   showBuys: boolean;
   showPct: boolean;
@@ -269,6 +271,7 @@ interface GroupFragmentProps {
 function GroupFragment({
   label,
   items,
+  showHeader,
   density,
   showBuys,
   showPct,
@@ -277,7 +280,7 @@ function GroupFragment({
 }: GroupFragmentProps) {
   return (
     <>
-      <GroupHeader label={label} count={items.length} colSpan={10} />
+      {showHeader ? <GroupHeader label={label} count={items.length} colSpan={10} /> : null}
       {items.map((p) => (
         <PositionRow
           key={p.positionId}

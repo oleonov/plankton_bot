@@ -1,6 +1,6 @@
 import type { PositionDTO, PositionPhase } from "../../api/types.ts";
 
-export type GroupBy = "lastAction" | "phase" | "pnl" | "ends";
+export type GroupBy = "lastAction" | "phase" | "pnl" | "ends" | "none";
 export type Density = "compact" | "default" | "spacious";
 export type PhaseFilter = "all" | PositionPhase;
 export type MarketState = "open" | "closed";
@@ -232,6 +232,10 @@ export function groupPositions(
   const now = Date.now();
   const maybeSortGroups = (groups: GroupBucket[]): GroupBucket[] =>
     sort ? groups.map((g) => ({ ...g, items: sortPositions(g.items, sort, now) })) : groups;
+
+  if (groupBy === "none") {
+    return [{ key: "No Group", items: list }];
+  }
 
   if (groupBy === "lastAction") {
     list.sort(
