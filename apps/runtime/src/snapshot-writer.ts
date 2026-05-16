@@ -36,6 +36,7 @@ export class SnapshotWriter {
         lastPrice: m.lastTradePrice ?? null,
         volume24h: m.volume24hr ?? m.volume24h ?? null,
         liquidity: m.liquidity ?? null,
+        publicTradeCount24h: m.publicTradeCount24h ?? null,
         capturedAt: new Date(timestamp).toISOString(),
       });
     }

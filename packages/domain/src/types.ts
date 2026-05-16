@@ -29,6 +29,7 @@ import type {
   RuntimeStatus,
   LedgerResetPolicy,
 } from "./enums.js";
+import type { D9LossExitPolicy } from "./d9-loss-exit.js";
 
 // ─── Market ───────────────────────────────────────────────────────────────────
 //
@@ -125,6 +126,7 @@ export interface MarketSnapshot {
   lastPrice: number | null;
   volume24h: number | null;
   liquidity: number | null;
+  publicTradeCount24h: number | null;
   capturedAt: string; // ISO timestamp
 }
 
@@ -471,6 +473,8 @@ export interface NormalizedMarket {
    * lifetime-cumulative `volumeNum` and is kept for backward compatibility.
    */
   volume24hr?: number | null;
+  /** Rolling public Data API trade count over the last 24h, capped by provider policy. */
+  publicTradeCount24h?: number | null;
   liquidity?: number | null;
   minOrderSize?: number | null;
   bookSource?: MarketBookSource | null;
@@ -846,6 +850,8 @@ export interface ExecutionPolicy {
   dustAbandonment: DustAbandonmentPolicyConfig;
   /** CHANGE C — per-token 24h reprice chain cap config. */
   repriceChain: RepriceChainPolicyConfig;
+  /** D9_LOSS_EXIT — R96 liquidity-aware loss exit trigger. Disabled by default. */
+  lossExit: D9LossExitPolicy;
   depositActivation: DepositActivationPolicy;
 }
 

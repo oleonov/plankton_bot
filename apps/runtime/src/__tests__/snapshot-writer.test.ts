@@ -120,11 +120,12 @@ describe("SnapshotWriter", () => {
     expect(repo.prune).toHaveBeenCalledTimes(1);
   });
 
-  it("propagates lastPrice, volume24h, liquidity from the NormalizedMarket", () => {
+  it("propagates lastPrice, volume24h, liquidity, and public trade count", () => {
     const market = makeMarket("tok-1", 0.45, 0.55, {
       lastTradePrice: 0.4712,
       volume24hr: 1234.56,
       liquidity: 78_900,
+      publicTradeCount24h: 41,
     });
     writer.onSnapshot([market], Date.now());
 
@@ -132,10 +133,12 @@ describe("SnapshotWriter", () => {
       lastPrice: unknown;
       volume24h: unknown;
       liquidity: unknown;
+      publicTradeCount24h: unknown;
     }[];
     expect(batch[0]!.lastPrice).toBe(0.4712);
     expect(batch[0]!.volume24h).toBe(1234.56);
     expect(batch[0]!.liquidity).toBe(78_900);
+    expect(batch[0]!.publicTradeCount24h).toBe(41);
   });
 
   it("falls back to volume24h when volume24hr is absent", () => {
@@ -155,9 +158,11 @@ describe("SnapshotWriter", () => {
       lastPrice: unknown;
       volume24h: unknown;
       liquidity: unknown;
+      publicTradeCount24h: unknown;
     }[];
     expect(batch[0]!.lastPrice).toBeNull();
     expect(batch[0]!.volume24h).toBeNull();
     expect(batch[0]!.liquidity).toBeNull();
+    expect(batch[0]!.publicTradeCount24h).toBeNull();
   });
 });

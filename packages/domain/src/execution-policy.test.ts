@@ -216,6 +216,36 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.sellReplaceMinPriceDeltaTicks).toBe(1);
   });
 
+  it("defaults D9 loss exit disabled with R96 liquidity threshold", () => {
+    expect(DEFAULT_EXECUTION_POLICY.lossExit).toEqual({
+      enabled: false,
+      states: ["S1", "S2"],
+      minPublicTradeCount24h: 41,
+    });
+  });
+
+  it("parses D9 loss exit policy and validates states", () => {
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({
+        lossExit: {
+          enabled: true,
+          states: ["S1", "S2"],
+          minPublicTradeCount24h: 41,
+        },
+      }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.lossExit).toEqual({
+      enabled: true,
+      states: ["S1", "S2"],
+      minPublicTradeCount24h: 41,
+    });
+
+    const invalid = parseExecutionPolicyJson(JSON.stringify({ lossExit: { states: ["BAD"] } }));
+    expect(invalid.policy.lossExit).toEqual(DEFAULT_EXECUTION_POLICY.lossExit);
+    expect(invalid.issues.some((i) => i.includes("lossExit.states"))).toBe(true);
+  });
+
   it("rejects invalid SELL replacement tolerance values with an issue", () => {
     const { policy, issues } = parseExecutionPolicyJson(
       JSON.stringify({ sellReplaceMinPriceDeltaTicks: 0 }),

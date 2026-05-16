@@ -32,6 +32,9 @@ export function applyPricingSnapshot(
     lastTradeAt: pricing.lastTradeAt ?? null,
     volume24h: pricing.volume24h ?? market.volume24h ?? null,
     volume24hr: pricing.volume24hr ?? market.volume24hr ?? null,
+    publicTradeCount24h: hasPricingField(pricing, "publicTradeCount24h")
+      ? (pricing.publicTradeCount24h ?? null)
+      : (market.publicTradeCount24h ?? null),
     liquidity: pricing.liquidity ?? market.liquidity ?? null,
     minOrderSize: pricing.minOrderSize ?? market.minOrderSize ?? null,
     bookSource: pricing.bookSource ?? market.bookSource ?? "unknown",
@@ -117,8 +120,16 @@ export function didMarketPricingChange(
     previous.lastTradeAt !== next.lastTradeAt ||
     previous.volume24h !== next.volume24h ||
     previous.volume24hr !== next.volume24hr ||
+    previous.publicTradeCount24h !== next.publicTradeCount24h ||
     previous.liquidity !== next.liquidity ||
     previous.minOrderSize !== next.minOrderSize ||
     previous.bookSource !== next.bookSource
   );
+}
+
+function hasPricingField<T extends keyof MarketPricingSnapshot>(
+  pricing: MarketPricingSnapshot,
+  field: T,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(pricing, field);
 }

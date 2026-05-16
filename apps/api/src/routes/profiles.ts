@@ -15,6 +15,7 @@ import {
   DEFAULT_PROFIT_TARGET_POLICY,
   DEFAULT_DUST_ABANDONMENT_POLICY,
   DEFAULT_REPRICE_CHAIN_POLICY,
+  DEFAULT_LOSS_EXIT_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
   type ExecutionPolicy,
@@ -580,6 +581,10 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       repriceChain: {
         ...(current.repriceChain ?? DEFAULT_REPRICE_CHAIN_POLICY),
         ...((patch.repriceChain as Partial<ExecutionPolicy["repriceChain"]> | undefined) ?? {}),
+      },
+      lossExit: {
+        ...(current.lossExit ?? DEFAULT_LOSS_EXIT_POLICY),
+        ...((patch.lossExit as Partial<ExecutionPolicy["lossExit"]> | undefined) ?? {}),
       },
     };
 

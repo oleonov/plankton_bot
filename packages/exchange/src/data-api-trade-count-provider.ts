@@ -1,4 +1,8 @@
-import type { ConditionId, MarketTradeCountProvider } from "@krabs/domain";
+import type {
+  ConditionId,
+  MarketTradeCountProvider,
+  PublicTradeCount24hResult,
+} from "@krabs/domain";
 import type { FetchLike } from "./polymarket-data-api.js";
 
 export const DATA_API_DEFAULT_BASE_URL = "https://data-api.polymarket.com";
@@ -13,6 +17,8 @@ export const DATA_API_DEFAULT_NEGATIVE_CACHE_TTL_MS = 30_000;
 // completed in ≤500ms. 5s gives margin without lifting the per-sweep ceiling.
 export const DATA_API_DEFAULT_TIMEOUT_MS = 5_000;
 export const DATA_API_DEFAULT_MAX_CACHE_ENTRIES = 10_000;
+export const DATA_API_PUBLIC_TRADE_COUNT_24H_CAP = 100;
+const PUBLIC_TRADE_COUNT_WINDOW_MS = 24 * 60 * 60 * 1000;
 // Bursting 30+ concurrent fetches on a busy event loop pushed undici DNS/TCP
 // callbacks behind the AbortSignal timer. Sequential chunks of 5 keep the
 // pool active without piling timer callbacks on top of each other.
@@ -50,6 +56,16 @@ export interface DataApiTradeCountProviderOptions {
 type CacheEntry =
   | { readonly kind: "ok"; readonly count: number; readonly fetchedAtMs: number }
   | { readonly kind: "neg"; readonly fetchedAtMs: number };
+type PublicTradeCount24hCacheEntry =
+  | {
+      readonly kind: "ok";
+      readonly result: PublicTradeCount24hResult;
+      readonly fetchedAtMs: number;
+    }
+  | { readonly kind: "neg"; readonly fetchedAtMs: number };
+type FetchTradesResult =
+  | { readonly ok: true; readonly data: unknown[]; readonly latencyMs: number }
+  | { readonly ok: false; readonly error: string; readonly latencyMs: number };
 
 /**
  * ADR-016 — calls `GET /trades?market=<conditionId>&limit=<cap>` on
@@ -76,6 +92,7 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
   private readonly observer: TradeCountObserver | null;
   private readonly now: () => number;
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly publicTradeCount24hCache = new Map<string, PublicTradeCount24hCacheEntry>();
 
   constructor(options: DataApiTradeCountProviderOptions = {}) {
     this.baseUrl = options.baseUrl ?? DATA_API_DEFAULT_BASE_URL;
@@ -105,57 +122,59 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
     }
     this.observer?.({ type: "cache_miss", conditionId });
 
-    const url = new URL("/trades", this.baseUrl);
-    url.searchParams.set("market", conditionId);
-    url.searchParams.set("limit", String(cap));
-
-    const startedAt = this.now();
-    try {
-      const res = await this.fetchImpl(url, {
-        headers: { Accept: "application/json", "User-Agent": this.userAgent },
-        signal: AbortSignal.timeout(this.timeoutMs),
-      });
-      if (!res.ok) {
-        await res.body?.cancel().catch(() => undefined);
-        this.writeNegativeCache(conditionId, cap);
-        this.observer?.({
-          type: "fetch_error",
-          conditionId,
-          latencyMs: this.now() - startedAt,
-          error: `http_${res.status}`,
-        });
-        return null;
-      }
-      const data = (await res.json()) as unknown;
-      if (!Array.isArray(data)) {
-        this.writeNegativeCache(conditionId, cap);
-        this.observer?.({
-          type: "fetch_error",
-          conditionId,
-          latencyMs: this.now() - startedAt,
-          error: "non_array_payload",
-        });
-        return null;
-      }
-      const count = Math.min(data.length, cap);
-      this.writeCache(conditionId, cap, count);
-      this.observer?.({
-        type: "fetch_ok",
-        conditionId,
-        latencyMs: this.now() - startedAt,
-        count,
-      });
-      return count;
-    } catch (err) {
+    const fetched = await this.fetchTrades(conditionId, cap);
+    if (!fetched.ok) {
       this.writeNegativeCache(conditionId, cap);
       this.observer?.({
         type: "fetch_error",
         conditionId,
-        latencyMs: this.now() - startedAt,
-        error: err instanceof Error ? err.name : "unknown",
+        latencyMs: fetched.latencyMs,
+        error: fetched.error,
       });
       return null;
     }
+    const count = Math.min(fetched.data.length, cap);
+    this.writeCache(conditionId, cap, count);
+    this.observer?.({
+      type: "fetch_ok",
+      conditionId,
+      latencyMs: fetched.latencyMs,
+      count,
+    });
+    return count;
+  }
+
+  async fetchPublicTradeCount24h(
+    conditionId: ConditionId,
+    nowMs: number,
+  ): Promise<PublicTradeCount24hResult | null> {
+    const cached = this.readPublicTradeCount24hCache(conditionId, nowMs);
+    if (cached !== null) {
+      if (cached.kind === "neg") return null;
+      return cached.result;
+    }
+
+    const fetched = await this.fetchTrades(conditionId, DATA_API_PUBLIC_TRADE_COUNT_24H_CAP);
+    if (!fetched.ok) {
+      this.writePublicTradeCount24hNegativeCache(conditionId, nowMs);
+      return null;
+    }
+    const cutoffMs = nowMs - PUBLIC_TRADE_COUNT_WINDOW_MS;
+    let count = 0;
+    for (const row of fetched.data) {
+      const timestampMs = readTradeTimestampMs(row);
+      if (timestampMs == null) continue;
+      if (timestampMs < cutoffMs) break;
+      count += 1;
+      if (count >= DATA_API_PUBLIC_TRADE_COUNT_24H_CAP) break;
+    }
+    const result: PublicTradeCount24hResult = {
+      count,
+      capReached: count >= DATA_API_PUBLIC_TRADE_COUNT_24H_CAP,
+      fetchedAt: nowMs,
+    };
+    this.writePublicTradeCount24hCache(conditionId, nowMs, result);
+    return result;
   }
 
   /**
@@ -215,10 +234,105 @@ export class DataApiTradeCountProvider implements MarketTradeCountProvider {
     this.cache.set(this.cacheKey(conditionId, cap), { kind: "neg", fetchedAtMs: this.now() });
   }
 
-  private evictIfFull(): void {
-    if (this.cache.size >= this.maxCacheEntries) {
-      const oldest = this.cache.keys().next().value;
-      if (oldest !== undefined) this.cache.delete(oldest);
+  private async fetchTrades(conditionId: ConditionId, limit: number): Promise<FetchTradesResult> {
+    const url = new URL("/trades", this.baseUrl);
+    url.searchParams.set("market", conditionId);
+    url.searchParams.set("limit", String(limit));
+
+    const startedAt = this.now();
+    try {
+      const res = await this.fetchImpl(url, {
+        headers: { Accept: "application/json", "User-Agent": this.userAgent },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => undefined);
+        return { ok: false, error: `http_${res.status}`, latencyMs: this.now() - startedAt };
+      }
+      const data = (await res.json()) as unknown;
+      if (!Array.isArray(data)) {
+        return { ok: false, error: "non_array_payload", latencyMs: this.now() - startedAt };
+      }
+      return { ok: true, data, latencyMs: this.now() - startedAt };
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.name : "unknown",
+        latencyMs: this.now() - startedAt,
+      };
     }
   }
+
+  private publicTradeCount24hCacheKey(conditionId: ConditionId): string {
+    return `${conditionId}:public-trade-count-24h:${DATA_API_PUBLIC_TRADE_COUNT_24H_CAP}`;
+  }
+
+  private readPublicTradeCount24hCache(
+    conditionId: ConditionId,
+    nowMs: number,
+  ): PublicTradeCount24hCacheEntry | null {
+    const key = this.publicTradeCount24hCacheKey(conditionId);
+    const entry = this.publicTradeCount24hCache.get(key);
+    if (!entry) return null;
+    const ttl = entry.kind === "ok" ? this.cacheTtlMs : this.negativeCacheTtlMs;
+    if (nowMs - entry.fetchedAtMs >= ttl) {
+      this.publicTradeCount24hCache.delete(key);
+      return null;
+    }
+    this.publicTradeCount24hCache.delete(key);
+    this.publicTradeCount24hCache.set(key, entry);
+    return entry;
+  }
+
+  private writePublicTradeCount24hCache(
+    conditionId: ConditionId,
+    nowMs: number,
+    result: PublicTradeCount24hResult,
+  ): void {
+    this.evictIfFull();
+    this.publicTradeCount24hCache.set(this.publicTradeCount24hCacheKey(conditionId), {
+      kind: "ok",
+      result,
+      fetchedAtMs: nowMs,
+    });
+  }
+
+  private writePublicTradeCount24hNegativeCache(conditionId: ConditionId, nowMs: number): void {
+    this.evictIfFull();
+    this.publicTradeCount24hCache.set(this.publicTradeCount24hCacheKey(conditionId), {
+      kind: "neg",
+      fetchedAtMs: nowMs,
+    });
+  }
+
+  private evictIfFull(): void {
+    if (this.cache.size + this.publicTradeCount24hCache.size >= this.maxCacheEntries) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) {
+        this.cache.delete(oldest);
+      } else {
+        const oldestPublic = this.publicTradeCount24hCache.keys().next().value;
+        if (oldestPublic !== undefined) this.publicTradeCount24hCache.delete(oldestPublic);
+      }
+    }
+  }
+}
+
+function readTradeTimestampMs(row: unknown): number | null {
+  if (row == null || typeof row !== "object") return null;
+  const value = row as { timestamp?: unknown; createdAt?: unknown; created_at?: unknown };
+  return parseTimestampMs(value.timestamp ?? value.createdAt ?? value.created_at);
+}
+
+function parseTimestampMs(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 10_000_000_000 ? value : value * 1000;
+  }
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) {
+    return numeric > 10_000_000_000 ? numeric : numeric * 1000;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }

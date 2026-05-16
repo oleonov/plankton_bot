@@ -30,10 +30,12 @@ import type {
   ExitRepriceOnDownpricePolicy,
   SellCapacityPolicy,
 } from "./types.js";
+import type { AlgoState } from "./algo-engine.js";
 import { DEFAULT_MARKET_SELECTION_POLICY } from "./market-selection.js";
 import { DEFAULT_PROFIT_TARGET_POLICY } from "./d8-profit-target.js";
 import { DEFAULT_DUST_ABANDONMENT_POLICY } from "./dust-abandonment.js";
 import { DEFAULT_REPRICE_CHAIN_POLICY } from "./reprice-chain.js";
+import type { D9LossExitPolicy } from "./d9-loss-exit.js";
 
 export const DEFAULT_DEAD_SIDE_GUARD: DeadSideGuardPolicy = {
   mode: "observe",
@@ -135,6 +137,17 @@ export const DEFAULT_DEPOSIT_ACTIVATION_POLICY: DepositActivationPolicy = {
   minAmountUsdcCents: 100,
 };
 
+export const DEFAULT_LOSS_EXIT_POLICY: D9LossExitPolicy = {
+  enabled: false,
+  // minPublicTradeCount24h: 41 derived from R96 Q3 best 2D rule
+  // (research_plankton/plankton_loss_exit_boundary_R96_report.md),
+  // (profit_ratio <= 1.0) AND (public_trade_count_24h >= 41) gives
+  // balanced accuracy 76.62% on n=4,555 CUT vs n=573,192 HOLD.
+  // states [S1, S2]: S3 has 0 HOLD samples (terminal), OTHER too few.
+  states: ["S1", "S2"],
+  minPublicTradeCount24h: 41,
+};
+
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
   enabled: true,
   enforcement: "enforce",
@@ -220,6 +233,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   profitTarget: DEFAULT_PROFIT_TARGET_POLICY,
   dustAbandonment: DEFAULT_DUST_ABANDONMENT_POLICY,
   repriceChain: DEFAULT_REPRICE_CHAIN_POLICY,
+  lossExit: DEFAULT_LOSS_EXIT_POLICY,
   depositActivation: DEFAULT_DEPOSIT_ACTIVATION_POLICY,
 };
 
@@ -229,6 +243,7 @@ const PRICING_MODES = ["edge", "bounded-midpoint"] as const;
 const BINARY_PRICING_POLICIES = ["edge", "skip"] as const;
 const EXIT_PRICING_MODES = ["bid-anchored", "midpoint-anchored", "edge"] as const;
 const ORDER_SIDES = ["buy", "sell"] as const;
+const ALGO_STATES = ["OTHER", "S1", "S2", "S3"] as const;
 
 // Bounds chosen to match the Zod schema that previously lived in
 // packages/config/src/env.ts so operators can't wedge the runtime via SQL.
@@ -276,6 +291,8 @@ const BOUND_TAKER_MIN_NOTIONAL_MAX = 1_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MIN_MS = 30_000;
 const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
+const BOUND_PUBLIC_TRADE_COUNT_MIN = 0;
+const BOUND_PUBLIC_TRADE_COUNT_MAX = 1_000_000;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -376,6 +393,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const profitTarget = parseProfitTarget(obj.profitTarget, issues);
   const dustAbandonment = parseDustAbandonment(obj.dustAbandonment, issues);
   const repriceChain = parseRepriceChain(obj.repriceChain, issues);
+  const lossExit = parseLossExit(obj.lossExit, issues);
   const depositActivation = parseDepositActivation(obj.depositActivation, issues);
 
   return {
@@ -406,6 +424,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       profitTarget,
       dustAbandonment,
       repriceChain,
+      lossExit,
       depositActivation,
     },
     issues,
@@ -495,6 +514,26 @@ function parseRepriceChain(raw: unknown, issues: string[]): RepriceChainPolicyCo
       BOUND_ORDER_LIFETIME_COUNT_MAX,
       issues,
       "repriceChain.maxChainCount",
+    ),
+  };
+}
+
+function parseLossExit(raw: unknown, issues: string[]): D9LossExitPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("lossExit must be an object");
+    return DEFAULT_LOSS_EXIT_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(obj.enabled, DEFAULT_LOSS_EXIT_POLICY.enabled, issues, "lossExit.enabled"),
+    states: algoStateListOr(obj.states, DEFAULT_LOSS_EXIT_POLICY.states, issues, "lossExit.states"),
+    minPublicTradeCount24h: clampedInt(
+      obj.minPublicTradeCount24h,
+      DEFAULT_LOSS_EXIT_POLICY.minPublicTradeCount24h,
+      BOUND_PUBLIC_TRADE_COUNT_MIN,
+      BOUND_PUBLIC_TRADE_COUNT_MAX,
+      issues,
+      "lossExit.minPublicTradeCount24h",
     ),
   };
 }
@@ -1368,6 +1407,28 @@ function sideListOr(
     return fallback;
   }
   return sides;
+}
+
+function algoStateListOr(
+  raw: unknown,
+  fallback: readonly AlgoState[],
+  issues: string[],
+  name: string,
+): readonly AlgoState[] {
+  if (raw === undefined) return fallback;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    issues.push(`${name} must be a non-empty state array`);
+    return fallback;
+  }
+  const states: AlgoState[] = [];
+  for (const state of raw) {
+    if (typeof state !== "string" || !(ALGO_STATES as readonly string[]).includes(state)) {
+      issues.push(`${name} contains invalid state ${String(state)}`);
+      return fallback;
+    }
+    if (!states.includes(state as AlgoState)) states.push(state as AlgoState);
+  }
+  return states;
 }
 
 function intListOr(

@@ -48,6 +48,47 @@ describe("DataApiTradeCountProvider", () => {
     expect(await provider.countTrades(CID, 6)).toBe(3);
   });
 
+  it("fetchPublicTradeCount24h counts recent rows and ignores older rows", async () => {
+    const now = Date.parse("2026-05-16T12:00:00.000Z");
+    const recent = Math.floor((now - 60_000) / 1000);
+    const older = Math.floor((now - 25 * 60 * 60_000) / 1000);
+    const provider = new DataApiTradeCountProvider({
+      fetchImpl: makeFetch([
+        { timestamp: recent },
+        { timestamp: recent - 10 },
+        { timestamp: older },
+      ]),
+      now: () => now,
+    });
+
+    const result = await provider.fetchPublicTradeCount24h(CID, now);
+
+    expect(result).toEqual({ count: 2, capReached: false, fetchedAt: now });
+  });
+
+  it("fetchPublicTradeCount24h caps at 100 for diagnostic headroom", async () => {
+    const now = Date.parse("2026-05-16T12:00:00.000Z");
+    const timestamp = Math.floor((now - 60_000) / 1000);
+    const fetchImpl = makeFetch(Array.from({ length: 100 }, () => ({ timestamp })));
+    const provider = new DataApiTradeCountProvider({ fetchImpl, now: () => now });
+
+    const result = await provider.fetchPublicTradeCount24h(CID, now);
+
+    expect(result).toEqual({ count: 100, capReached: true, fetchedAt: now });
+    const url = fetchImpl.mock.calls[0]![0] as URL;
+    expect(url.searchParams.get("limit")).toBe("100");
+  });
+
+  it("fetchPublicTradeCount24h returns null on API failure", async () => {
+    const now = Date.parse("2026-05-16T12:00:00.000Z");
+    const provider = new DataApiTradeCountProvider({
+      fetchImpl: makeFetch(null, false, 500),
+      now: () => now,
+    });
+
+    expect(await provider.fetchPublicTradeCount24h(CID, now)).toBeNull();
+  });
+
   it("returns null on HTTP error", async () => {
     const fetchImpl = makeFetch(null, false, 500);
     const events: TradeCountFetchEvent[] = [];

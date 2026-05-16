@@ -27,6 +27,7 @@ function makeSnapshot(overrides?: Partial<MarketSnapshot>): MarketSnapshot {
     lastPrice: null,
     volume24h: null,
     liquidity: null,
+    publicTradeCount24h: null,
     capturedAt: "2026-03-22T12:00:00.000Z",
     ...overrides,
   };
@@ -56,8 +57,18 @@ describe("SqliteMarketSnapshotRepository", () => {
     expect(rows).toHaveLength(2);
     expect(rows[0]!.token_id).toBe("tok-1");
     expect(rows[0]!.best_bid).toBe(0.45);
+    expect(rows[0]!.public_trade_count_24h).toBeNull();
     expect(rows[1]!.token_id).toBe("tok-2");
     expect(rows[1]!.best_bid).toBe(0.6);
+  });
+
+  it("persists public trade count", () => {
+    repo.saveBatch([makeSnapshot({ publicTradeCount24h: 41 })]);
+
+    const row = conn.db.prepare("SELECT public_trade_count_24h FROM market_snapshots").get() as {
+      public_trade_count_24h: unknown;
+    };
+    expect(row.public_trade_count_24h).toBe(41);
   });
 
   it("saveBatch with empty array is a no-op", () => {

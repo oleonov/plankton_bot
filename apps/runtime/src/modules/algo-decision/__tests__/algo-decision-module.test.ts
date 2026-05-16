@@ -2646,6 +2646,95 @@ describe("AlgoDecisionModule", () => {
       );
     }
 
+    it("D9 loss exit fires before canonical D6 HOLD when loss market is liquid", async () => {
+      const tokenId = "token-d9-liquid-loss";
+      algoRulesRepo = withR37Rules();
+      legStateRepo = createMockLegStateRepo([
+        {
+          ...makeR37LegState(tokenId),
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 10,
+        },
+      ]);
+      const mod = buildModule({
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          lossExit: {
+            enabled: true,
+            states: ["S1", "S2"],
+            minPublicTradeCount24h: 41,
+          },
+        }),
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, "r37", 0.07, `cond-${tokenId}`),
+            publicTradeCount24h: 100,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      await mod.stop();
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(1);
+      expect(signalCalls[0]![1].signal.decisionRuleId).toBe("D9_LOSS_EXIT");
+      expect(signalCalls[0]![1].signal.side).toBe("sell");
+    });
+
+    it("D9 loss exit falls through to D6 HOLD when public market is illiquid", async () => {
+      const tokenId = "token-d9-illiquid-loss";
+      algoRulesRepo = withR37Rules();
+      legStateRepo = createMockLegStateRepo([
+        {
+          ...makeR37LegState(tokenId),
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 10,
+        },
+      ]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const mod = buildModule({
+        riskEventRepo,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          lossExit: {
+            enabled: true,
+            states: ["S1", "S2"],
+            minPublicTradeCount24h: 41,
+          },
+        }),
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, "r37", 0.07, `cond-${tokenId}`),
+            publicTradeCount24h: 20,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      await mod.stop();
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(0);
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          reasonCode: "d6-suppressed",
+          decisionRuleId: "D6",
+        }),
+      });
+    });
+
     it("suppresses canonical D6: S2 + buyCount>=4 HOLD", async () => {
       const tokenId = "token-d6-suppressed";
       legStateRepo = createMockLegStateRepo([makeR37LegState(tokenId)]);

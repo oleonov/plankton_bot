@@ -8,8 +8,10 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
     if (snapshots.length === 0) return;
 
     const insert = this.db.prepare(
-      `INSERT INTO market_snapshots (token_id, best_bid, best_ask, last_price, volume_24h, liquidity, captured_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO market_snapshots
+         (token_id, best_bid, best_ask, last_price, volume_24h, liquidity,
+          public_trade_count_24h, captured_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     );
 
     const run = this.db.transaction((batch: MarketSnapshot[]) => {
@@ -21,6 +23,7 @@ export class SqliteMarketSnapshotRepository implements MarketSnapshotRepository 
           s.lastPrice,
           s.volume24h,
           s.liquidity,
+          s.publicTradeCount24h,
           s.capturedAt,
         );
       }

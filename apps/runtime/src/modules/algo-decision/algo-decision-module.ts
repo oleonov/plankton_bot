@@ -46,6 +46,7 @@ import {
   matchRule,
   isAlive,
   evaluateD8ProfitRatio,
+  evaluateD9LossExit,
   isAbandoned,
   shouldRecoverFromPriceMove,
 } from "@krabs/domain";
@@ -178,6 +179,8 @@ type EmissionFacts = {
   d8ProfitRatio?: number | null;
   d8Threshold?: number | null;
   d8AvgBuyPrice?: number | null;
+  d9ProfitRatio?: number | null;
+  d9PublicTradeCount24h?: number | null;
 };
 
 /**
@@ -1263,6 +1266,43 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
     }
 
+    // D9_LOSS_EXIT — R96 liquidity-aware loss exit. Evaluated after D8 so
+    // profitable exits keep priority, but before static D-rules so D6 HOLD
+    // cannot suppress a Plankton-mirror loss cut.
+    if (legState && this.deps.executionPolicy) {
+      const lossExitPolicy = this.deps.executionPolicy().lossExit;
+      if (lossExitPolicy?.enabled) {
+        const d9 = evaluateD9LossExit(
+          {
+            state,
+            currentPrice: price,
+            cumulativeBuySize: legState.cumulativeBuySize ?? 0,
+            cumulativeBuyNotional: legState.cumulativeBuyNotional ?? 0,
+            publicTradeCount24h: market.publicTradeCount24h ?? null,
+          },
+          lossExitPolicy,
+        );
+        if (d9.fire) {
+          const d9EmissionFacts: EmissionFacts = {
+            ...emissionFacts,
+            d9ProfitRatio: d9.profitRatio,
+            d9PublicTradeCount24h: d9.publicTradeCount24h,
+          };
+          return this.buildSignalOrSuppressSellResidual(
+            market,
+            { action: "SELL", ruleId: "D9_LOSS_EXIT" },
+            ctx,
+            buyCount,
+            now,
+            nextSeq,
+            d9EmissionFacts,
+            triggerTelemetry,
+            position,
+          );
+        }
+      }
+    }
+
     // Post-entry continuation gate — only applies when we have a leg. It blocks
     // further entry/scale-in decisions, but SELL exits use the same D2/D4/D5/D7
     // rules and must remain reachable for existing inventory.
@@ -1729,6 +1769,8 @@ export class AlgoDecisionModule implements RuntimeModule {
           entryPriceBucket: triggerTelemetry.entryPriceBucket,
           dropTriggerStatus: triggerTelemetry.dropTriggerStatus,
           dropTriggerPct: triggerTelemetry.dropTriggerPct,
+          d9ProfitRatio: emissionFacts.d9ProfitRatio ?? null,
+          d9PublicTradeCount24h: emissionFacts.d9PublicTradeCount24h ?? null,
           // ADR-026 §D-B — §11.1 adds telemetry mirrored alongside the
           // decision_signal_log row.
           isAdd: signal.isAdd,

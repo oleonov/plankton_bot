@@ -652,6 +652,13 @@ async function main(): Promise<void> {
     return executionPolicyProvider.snapshot();
   };
 
+  // ADR-016 — market-wide trade-count provider for the post-entry continuation
+  // gate. Also supplies D9's rolling 24h public trade count enrichment.
+  const tradeCountLog = log.child({ module: "data-api-trade-count-provider" });
+  const tradeCountProvider = new DataApiTradeCountProvider({
+    observer: buildTradeCountObserver({ log: tradeCountLog, metrics: runtimeMetrics }),
+  });
+
   const marketScannerModule = new MarketScannerModule({
     discoveryGateway,
     marketRepo: repos.market,
@@ -679,6 +686,7 @@ async function main(): Promise<void> {
     discoveryPollIntervalMs: config.marketDataDiscoveryPollIntervalMs,
     discoveryBatchSize: config.marketDataDiscoveryBatchSize,
     fallbackBatchSize: config.marketDataFallbackBatchSize,
+    tradeCountProvider,
     runtimeControl,
   });
 
@@ -912,13 +920,6 @@ async function main(): Promise<void> {
   }, config.universeFunnelLogIntervalMs);
   universeFunnelLogTimer.unref();
 
-  // ADR-016 — market-wide trade-count provider for the post-entry continuation
-  // gate. Always constructed (cheap, no I/O until consulted); the gate only
-  // calls it when `runtime_control_state.continuation_mode = 'market_wide'`.
-  const tradeCountLog = log.child({ module: "data-api-trade-count-provider" });
-  const tradeCountProvider = new DataApiTradeCountProvider({
-    observer: buildTradeCountObserver({ log: tradeCountLog, metrics: runtimeMetrics }),
-  });
   const priceHistoryProvider = new MarketSnapshotPriceHistoryProvider(ledgerConn.db);
 
   const algoDecisionModule = new AlgoDecisionModule({

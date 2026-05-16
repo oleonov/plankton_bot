@@ -635,6 +635,10 @@ export interface OrderPriceCooldownRepository {
  */
 export interface MarketTradeCountProvider {
   countTrades(conditionId: ConditionId, cap: number): Promise<number | null>;
+  fetchPublicTradeCount24h?(
+    conditionId: ConditionId,
+    nowMs: number,
+  ): Promise<PublicTradeCount24hResult | null>;
   /**
    * Optional batch warmer. The default implementation is `Promise.all` over
    * `countTrades`, but providers can override to coalesce or rate-limit calls.
@@ -642,4 +646,10 @@ export interface MarketTradeCountProvider {
    * that, when the returned promise resolves, the cache is populated.
    */
   prefetch?(conditionIds: readonly ConditionId[], cap: number): Promise<void>;
+}
+
+export interface PublicTradeCount24hResult {
+  count: number;
+  capReached: boolean;
+  fetchedAt: number;
 }

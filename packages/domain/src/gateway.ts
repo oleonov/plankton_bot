@@ -166,6 +166,8 @@ export interface MarketPricingSnapshot {
    * Distinct from `volume24h` (lifetime). Feeds the soft-ranking score.
    */
   volume24hr?: number | null;
+  /** Rolling public Data API trade count over the last 24h, capped by provider policy. */
+  publicTradeCount24h?: number | null;
   liquidity?: number | null;
   minOrderSize?: number | null;
   bookSource?: MarketBookSource | null;

@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
   last_price   REAL,
   volume_24h   REAL,
   liquidity    REAL,
+  public_trade_count_24h INTEGER DEFAULT NULL,
   captured_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
+import { applySafeAddColumnStatements } from "../migrations/runner.js";
 
 let tmpDir: string;
 let dbPath: string;
@@ -380,6 +381,25 @@ describe("migration 039 — retention indexes", () => {
         "idx_portfolio_snapshots_captured_at",
       ]),
     );
+  });
+});
+
+describe("migration 058 — market snapshot public trade count", () => {
+  it("adds nullable public_trade_count_24h to market_snapshots", () => {
+    db.exec(`
+      CREATE TABLE market_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_id TEXT NOT NULL,
+        captured_at TEXT NOT NULL
+      );
+    `);
+    const sql = readMigration("058_market_snapshots_public_trade_count_24h.sql");
+    db.exec(applySafeAddColumnStatements(db, sql));
+
+    const columns = db.prepare("PRAGMA table_info(market_snapshots)").all() as Array<{
+      name: string;
+    }>;
+    expect(columns.map((column) => column.name)).toContain("public_trade_count_24h");
   });
 });
 

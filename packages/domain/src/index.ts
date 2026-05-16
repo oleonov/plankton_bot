@@ -27,6 +27,7 @@ export {
   DEFAULT_ORDER_LIFETIME_POLICY,
   DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
+  DEFAULT_LOSS_EXIT_POLICY,
   DEFAULT_DEPOSIT_ACTIVATION_POLICY,
   parseExecutionPolicyJson,
   serializeExecutionPolicy,
@@ -40,6 +41,8 @@ export {
   getProfitThresholdByPrice,
 } from "./d8-profit-target.js";
 export type { D8EvalContext, D8EvalResult } from "./d8-profit-target.js";
+export { evaluateD9LossExit } from "./d9-loss-exit.js";
+export type { D9LossExitContext, D9LossExitPolicy, D9Result } from "./d9-loss-exit.js";
 export {
   DEFAULT_DUST_ABANDONMENT_POLICY,
   isAbandoned,

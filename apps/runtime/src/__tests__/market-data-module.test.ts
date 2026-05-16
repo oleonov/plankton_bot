@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTokenId } from "@krabs/domain";
+import { createTokenId, type ConditionId } from "@krabs/domain";
 import type {
   MarketDataGateway,
   MarketPricingLifecycleEvent,
@@ -291,6 +291,75 @@ describe("MarketDataModule", () => {
     expect(received[0]![0]!.outcome).toBe("YES");
     expect(received[0]![1]!.minOrderSize).toBe(1);
     expect(received[0]![1]!.outcome).toBe("NO");
+  });
+
+  it("enriches REST pricing with public trade count once per condition", async () => {
+    const yesMarket = makeTrackedMarket({
+      tokenId: createTokenId("tok-yes"),
+      conditionId: "cond-1",
+      outcome: "YES",
+    });
+    const noMarket = makeTrackedMarket({
+      tokenId: createTokenId("tok-no"),
+      conditionId: "cond-1",
+      outcome: "NO",
+    });
+    (marketRepo.findTrackedForPricing as ReturnType<typeof vi.fn>).mockReturnValue([
+      yesMarket,
+      noMarket,
+    ]);
+    (gateway.getMarketPricing as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Map([
+        [
+          "tok-yes",
+          {
+            bestBid: 0.45,
+            bestAsk: 0.55,
+            lastTradePrice: null,
+            acceptingOrders: true,
+            enableOrderBook: true,
+          },
+        ],
+        [
+          "tok-no",
+          {
+            bestBid: 0.4,
+            bestAsk: 0.6,
+            lastTradePrice: null,
+            acceptingOrders: true,
+            enableOrderBook: true,
+          },
+        ],
+      ]),
+    );
+    const tradeCountProvider = {
+      countTrades: vi.fn(),
+      fetchPublicTradeCount24h: vi.fn(async (_conditionId: ConditionId, _nowMs: number) => ({
+        count: 42,
+        capReached: false,
+        fetchedAt: Date.now(),
+      })),
+    };
+    mod = new MarketDataModule({
+      gateway,
+      marketRepo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      tradeCountProvider,
+    });
+    const received: NormalizedMarket[][] = [];
+    bus.subscribe("MarketSnapshotReceived", async (p) => {
+      received.push([...p.markets]);
+    });
+
+    await mod.poll();
+
+    expect(tradeCountProvider.fetchPublicTradeCount24h).toHaveBeenCalledTimes(1);
+    expect(tradeCountProvider.fetchPublicTradeCount24h.mock.calls[0]![0]).toBe("cond-1");
+    expect(received[0]![0]!.publicTradeCount24h).toBe(42);
+    expect(received[0]![1]!.publicTradeCount24h).toBe(42);
   });
 
   it("poll uses tracked markets from repo (not gateway.getMarkets)", async () => {

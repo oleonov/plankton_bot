@@ -17,6 +17,7 @@ import type {
   RuntimeControl,
   EventBus,
   MarketDataGateway,
+  MarketPricingSnapshot,
   MarketPricingLifecycleEvent,
   MarketRepository,
   MarketPricingStream,
@@ -24,8 +25,9 @@ import type {
   MarketPricingStreamUpdate,
   Market,
   NormalizedMarket,
+  MarketTradeCountProvider,
 } from "@krabs/domain";
-import { createTokenId } from "@krabs/domain";
+import { createConditionId, createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
 import { isRateLimitError, isTransientNetworkError } from "../../network-errors.js";
 import {
@@ -65,6 +67,7 @@ const FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS = 25;
 const FALLBACK_POLL_TIMEOUT_MAX_MS = 30_000;
 const TRANSIENT_POLL_WARN_THROTTLE_MS = 15 * 60_000;
 const GAMMA_RATE_LIMIT_BACKOFF_MS = 5 * 60_000;
+const PUBLIC_TRADE_COUNT_ENRICH_CONCURRENCY = 5;
 
 export interface MarketDataTrackedRoleCounts {
   executionCritical: number;
@@ -166,6 +169,8 @@ export interface MarketDataModuleDeps {
    * a warning is logged. Default: 500.
    */
   fallbackBatchSize?: number;
+  /** Optional Data API enrichment for D9_LOSS_EXIT liquidity signal. */
+  tradeCountProvider?: MarketTradeCountProvider;
   /**
    * Optional pause gate. When the runtime is paused, periodic poll and
    * discovery batch cycles are skipped so the bot stops issuing new external
@@ -637,6 +642,14 @@ export class MarketDataModule implements RuntimeModule {
         );
         return;
       }
+      await this.enrichPricingWithPublicTradeCounts(pricingMap, tracked, now);
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.log.debug(
+          { polledTokenCount: tokenIdsToPoll.length },
+          "poll snapshot suppressed after pause flip mid-enrichment",
+        );
+        return;
+      }
       this.lastPricingHitCount = pricingMap.size;
       for (const tokenId of tokenIdsToPoll) {
         this.lastPricingAttemptAtByToken.set(tokenId, now);
@@ -704,6 +717,48 @@ export class MarketDataModule implements RuntimeModule {
     }
   }
 
+  private async enrichPricingWithPublicTradeCounts(
+    pricingMap: Map<string, MarketPricingSnapshot>,
+    markets: readonly Market[],
+    nowMs: number,
+  ): Promise<void> {
+    const provider = this.deps.tradeCountProvider;
+    if (!provider?.fetchPublicTradeCount24h || pricingMap.size === 0) return;
+    const fetchPublicTradeCount24h = provider.fetchPublicTradeCount24h.bind(provider);
+
+    const tokenIdsByCondition = new Map<string, string[]>();
+    for (const market of markets) {
+      const tokenId = String(market.tokenId);
+      if (!pricingMap.has(tokenId)) continue;
+      const conditionId = String(market.conditionId);
+      const tokenIds = tokenIdsByCondition.get(conditionId) ?? [];
+      tokenIds.push(tokenId);
+      tokenIdsByCondition.set(conditionId, tokenIds);
+    }
+    const entries = [...tokenIdsByCondition.entries()];
+    if (entries.length === 0) return;
+
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < entries.length) {
+        const entry = entries[cursor++];
+        if (!entry) return;
+        const [conditionId, tokenIds] = entry;
+        const result = await fetchPublicTradeCount24h(createConditionId(conditionId), nowMs);
+        for (const tokenId of tokenIds) {
+          const pricing = pricingMap.get(tokenId);
+          if (!pricing) continue;
+          pricingMap.set(tokenId, {
+            ...pricing,
+            publicTradeCount24h: result?.count ?? null,
+          });
+        }
+      }
+    };
+    const workers = Math.min(PUBLIC_TRADE_COUNT_ENRICH_CONCURRENCY, entries.length);
+    await Promise.all(Array.from({ length: workers }, () => worker()));
+  }
+
   /**
    * Poll a rolling batch from the discovery tier via Gamma REST.
    * Advances `discoveryCursor` so each invocation covers a different slice.
@@ -756,6 +811,14 @@ export class MarketDataModule implements RuntimeModule {
         return;
       }
       const nowMs = Date.now();
+      await this.enrichPricingWithPublicTradeCounts(pricingMap, batch, nowMs);
+      if (this.deps.runtimeControl?.isPaused()) {
+        this.log.debug(
+          { batchSize: batch.length },
+          "discovery snapshot suppressed after pause flip mid-enrichment",
+        );
+        return;
+      }
       const snapshots: NormalizedMarket[] = [];
       for (const [tokenId, pricing] of pricingMap) {
         const market = marketByToken.get(tokenId);
@@ -1309,6 +1372,7 @@ function syncTrackedMarket(
     lastTradeAt: current?.lastTradeAt ?? null,
     volume24h: current?.volume24h ?? null,
     volume24hr: current?.volume24hr ?? null,
+    publicTradeCount24h: current?.publicTradeCount24h ?? null,
     liquidity: current?.liquidity ?? null,
     minOrderSize: current?.minOrderSize ?? null,
     bookSource: current?.bookSource ?? "unknown",
