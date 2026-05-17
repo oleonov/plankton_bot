@@ -331,6 +331,8 @@ type SuppressionFacts = {
    *   unless the canonical D1 rule fired. Sticky → deduped.
    * - `no_drop_signal` — R54 drop-trigger gate blocked a non-probe BUY because
    *   the 1h reference price did not show a sufficient decline. Sticky → deduped.
+   * - `post-buy-fill-cooldown` — short infrastructure delay after a BUY fill
+   *   so exchange balance settlement can catch up before SELL placement.
    *
    * Adding a new reason: pick a kebab/snake-case identifier, document it
    * here, and decide whether it should join `DEDUPED_SUPPRESSION_REASONS`
@@ -459,6 +461,7 @@ const DUST_ABANDONED_REASON = "dust-abandoned";
 const DUST_RECOVERED_REASON = "dust-recovered";
 // CHANGE A — D8 profit-ratio SELL trigger (R66 spec 14.Y).
 const D8_PROFIT_RATIO_RULE_ID = "D8_PROFIT_RATIO";
+const POST_BUY_FILL_COOLDOWN_REASON = "post-buy-fill-cooldown";
 const DEDUPED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
   "mid-price-unavailable",
@@ -495,6 +498,9 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // is a per-leg pricing/budget condition, not a fleet-wide-unavailable
   // condition, so each token's row preserves a useful diagnostic dimension.
   "order-size-below-minimum",
+  // Short-lived exchange settlement timing guard. Deduping keeps clustered
+  // SELL-capable legs from writing several identical rows during a 5s window.
+  POST_BUY_FILL_COOLDOWN_REASON,
 ]);
 const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
@@ -570,6 +576,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private readonly clientOrderToToken = new Map<string, string>(); // clientOrderId → tokenId
   private readonly orderIdToToken = new Map<string, string>(); // orderId → tokenId
   private readonly suppressionDedupe = new Map<string, number>();
+  private readonly lastBuyFillByWallet = new Map<string, number>();
   private buyBudgetCooldownUntilMs = 0;
   private buyBudgetSuppressedSignals = 0;
   private buyBudgetRecoveryNotionalUsdc = 0;
@@ -772,8 +779,37 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {
     if (payload.side !== "buy") return;
+    this.lastBuyFillByWallet.set(this.walletCooldownKey(), this.normalizeEventTimestamp(payload));
     const tokenId = String(payload.tokenId);
     this.clearPendingByTokenId(tokenId);
+  }
+
+  private walletCooldownKey(): string {
+    // Runtime process owns one configured trading wallet/profile; keep the map
+    // shape so multi-wallet runtimes can supply a real key without changing
+    // suppression semantics.
+    return "default";
+  }
+
+  private normalizeEventTimestamp(payload: RuntimeEventMap["FillReceived"]): number {
+    return Number.isFinite(payload.timestamp) && payload.timestamp > 0
+      ? payload.timestamp
+      : Date.now();
+  }
+
+  private getPostBuyFillSellCooldown(now: number): {
+    cooldownMs: number;
+    ageMs: number;
+    lastBuyFillAt: number;
+  } | null {
+    const cooldownMs = this.deps.executionPolicy?.().postBuyFillSellCooldownMs ?? 0;
+    if (cooldownMs <= 0 || !Number.isFinite(cooldownMs)) return null;
+
+    const lastBuyFillAt = this.lastBuyFillByWallet.get(this.walletCooldownKey());
+    if (lastBuyFillAt == null) return null;
+    const ageMs = Math.max(0, now - lastBuyFillAt);
+    if (ageMs >= cooldownMs) return null;
+    return { cooldownMs, ageMs, lastBuyFillAt };
   }
 
   private async handleSignalRejected(payload: RuntimeEventMap["SignalRejected"]): Promise<void> {
@@ -1567,6 +1603,32 @@ export class AlgoDecisionModule implements RuntimeModule {
   ): TokenEvalResult {
     const side = decision.action === "BUY" ? "buy" : ("sell" as const);
     const reason = resolveSignalReason(side, buyCount);
+    const postBuyCooldown = side === "sell" ? this.getPostBuyFillSellCooldown(now) : null;
+    if (postBuyCooldown) {
+      this.recordDecisionSuppressed({
+        tokenId: market.tokenId,
+        conditionId: market.conditionId,
+        reasonCode: POST_BUY_FILL_COOLDOWN_REASON,
+        side: "SELL",
+        decisionRuleId: decision.ruleId,
+        state: ctx.state,
+        price: ctx.price,
+        buyCount,
+        timeSinceLastSeconds: ctx.timeSinceLastSeconds,
+        emissionFacts,
+        timestamp: new Date(now).toISOString(),
+      });
+      this.log.debug(
+        {
+          tokenId: String(market.tokenId),
+          cooldownMs: postBuyCooldown.cooldownMs,
+          ageMs: postBuyCooldown.ageMs,
+          lastBuyFillAt: new Date(postBuyCooldown.lastBuyFillAt).toISOString(),
+        },
+        "SELL signal suppressed during post-BUY fill cooldown",
+      );
+      return null;
+    }
     if (side === "buy") {
       const dropGate = this.evaluateDropTrigger(market.tokenId, ctx.price, reason, now);
       triggerTelemetry.dropTriggerStatus = dropGate.status;

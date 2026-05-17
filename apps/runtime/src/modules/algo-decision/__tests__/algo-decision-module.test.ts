@@ -13,7 +13,7 @@ import type {
   DecisionSignalLogRepository,
   RiskEventRepository,
 } from "@krabs/domain";
-import { createTokenId, createCommandId } from "@krabs/domain";
+import { createTokenId, createCommandId, createOrderId } from "@krabs/domain";
 import type { ConditionId } from "@krabs/domain";
 import { DEFAULT_EXECUTION_POLICY } from "@krabs/domain";
 import type { Logger } from "../../../logger.js";
@@ -331,6 +331,38 @@ function makeSellReadyLegState(tokenId: string, overrides: Partial<LegState> = {
     updatedAt: nowIso,
     ...overrides,
   };
+}
+
+function makeBuyFill(
+  tokenId: string,
+  timestamp: number,
+  overrides: Partial<RuntimeEventMap["FillReceived"]> = {},
+): RuntimeEventMap["FillReceived"] {
+  return {
+    fillId: `fill-${tokenId}-${timestamp}` as RuntimeEventMap["FillReceived"]["fillId"],
+    orderId: createOrderId(`order-${tokenId}-${timestamp}`),
+    clientOrderId:
+      `client-${tokenId}-${timestamp}` as RuntimeEventMap["FillReceived"]["clientOrderId"],
+    tokenId: createTokenId(tokenId),
+    conditionId: "cond-1" as ConditionId,
+    side: "buy",
+    price: 0.1,
+    size: 10,
+    sizeUsdc: 1,
+    liquidityRole: "maker",
+    fee: 0,
+    feeRateBps: 0,
+    signalReason: "scale-in",
+    timestamp,
+    ...overrides,
+  };
+}
+
+function policyWithPostBuyCooldown(cooldownMs = 5_000) {
+  return {
+    ...DEFAULT_EXECUTION_POLICY,
+    postBuyFillSellCooldownMs: cooldownMs,
+  } as typeof DEFAULT_EXECUTION_POLICY & { postBuyFillSellCooldownMs: number };
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1170,6 +1202,121 @@ describe("AlgoDecisionModule", () => {
         side: "SELL",
         decisionRuleId: "D7-SELL-S1",
       },
+    });
+
+    await mod.stop();
+  });
+
+  it("suppresses SELL during the post-BUY fill cooldown", async () => {
+    const tokenId = "token-post-buy-cooldown";
+    legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      riskEventRepo,
+      executionPolicy: () => policyWithPostBuyCooldown(),
+    });
+    await mod.start();
+
+    const now = Date.now();
+    await (bus as any).emit("FillReceived", makeBuyFill(tokenId, now - 1_000));
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-cooldown"), tradable: false }],
+      timestamp: now,
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(0);
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "signal_suppressed",
+      payload: expect.objectContaining({
+        reasonCode: "post-buy-fill-cooldown",
+        side: "SELL",
+        decisionRuleId: "D7-SELL-S1",
+      }),
+    });
+
+    await mod.stop();
+  });
+
+  it("allows SELL after the post-BUY fill cooldown expires", async () => {
+    const tokenId = "token-post-buy-cooldown-expired";
+    legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+    const mod = buildModule({
+      executionPolicy: () => policyWithPostBuyCooldown(),
+    });
+    await mod.start();
+
+    const now = Date.now();
+    await (bus as any).emit("FillReceived", makeBuyFill(tokenId, now - 6_000));
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-cooldown-expired"), tradable: false }],
+      timestamp: now,
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal).toMatchObject({
+      side: "sell",
+      decisionRuleId: "D7-SELL-S1",
+    });
+
+    await mod.stop();
+  });
+
+  it("anchors the post-BUY fill cooldown to the latest BUY fill", async () => {
+    const tokenId = "token-post-buy-cooldown-latest";
+    legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      riskEventRepo,
+      executionPolicy: () => policyWithPostBuyCooldown(),
+    });
+    await mod.start();
+
+    const now = Date.now();
+    await (bus as any).emit("FillReceived", makeBuyFill(tokenId, now - 6_000));
+    await (bus as any).emit("FillReceived", makeBuyFill(tokenId, now - 1_000));
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-cooldown-latest"), tradable: false }],
+      timestamp: now,
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(0);
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "signal_suppressed",
+      payload: expect.objectContaining({ reasonCode: "post-buy-fill-cooldown" }),
+    });
+
+    await mod.stop();
+  });
+
+  it("allows SELL when there is no preceding BUY fill", async () => {
+    const tokenId = "token-post-buy-cooldown-no-fill";
+    legStateRepo = createMockLegStateRepo([makeSellReadyLegState(tokenId)]);
+    const mod = buildModule({
+      executionPolicy: () => policyWithPostBuyCooldown(),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [{ ...makeMarket(tokenId, null, 0.15, "cond-cooldown-no-fill"), tradable: false }],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    expect(signalCalls[0]![1].signal).toMatchObject({
+      side: "sell",
+      decisionRuleId: "D7-SELL-S1",
     });
 
     await mod.stop();

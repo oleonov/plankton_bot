@@ -838,6 +838,11 @@ export interface ExecutionPolicy {
   exitMidpointAnchorTicks: number;
   opportunisticTaker: OpportunisticTakerPolicy;
   orderLifetime: OrderLifetimePolicy;
+  /**
+   * Cooldown after any BUY fill before emitting SELL exits from the same wallet.
+   * Infrastructure timing guard for exchange balance settlement, not strategy logic.
+   */
+  postBuyFillSellCooldownMs: number;
   repriceOnOutbid: RepriceOnOutbidPolicy;
   exitRepriceOnDownprice: ExitRepriceOnDownpricePolicy;
   dropTrigger: DropTriggerPolicy;

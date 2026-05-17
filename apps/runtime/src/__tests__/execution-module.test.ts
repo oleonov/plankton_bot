@@ -30,6 +30,8 @@ import type {
   Position,
   PositionRepository,
   LegStateRepository,
+  NormalizedMarket,
+  RiskEventRepository,
 } from "@krabs/domain";
 import { InProcessEventBus } from "@krabs/event-bus";
 import { ExecutionModule } from "../modules/execution/execution-module.js";
@@ -160,6 +162,38 @@ function makePosition(overrides?: Partial<Position>): Position {
     openedAt: new Date().toISOString(),
     closedAt: null,
     updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+function makeNormalizedMarket(overrides: Partial<NormalizedMarket> = {}): NormalizedMarket {
+  const bestBid = overrides.bestBid ?? 0.1;
+  const bestAsk = overrides.bestAsk ?? 0.12;
+  return {
+    tokenId: createTokenId("tok-yes"),
+    conditionId: createConditionId("cond-1"),
+    slug: "test-market",
+    eventSlug: null,
+    question: "Test market?",
+    outcome: "Yes",
+    regime: null,
+    horizon: null,
+    endDate: null,
+    active: true,
+    tradable: true,
+    tickSize: 0.01,
+    negRisk: false,
+    acceptingOrders: true,
+    enableOrderBook: true,
+    bestBid,
+    bestAsk,
+    midPrice: bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : null,
+    spread: bestBid != null && bestAsk != null ? bestAsk - bestBid : null,
+    minOrderSize: null,
+    bookSource: "clob",
+    gammaCreatedAt: null,
+    snapshotTs: Date.now(),
+    eventMarketCount: 1,
     ...overrides,
   };
 }
@@ -342,6 +376,183 @@ describe("ExecutionModule", () => {
     expect(placed[0].side).toBe("buy");
 
     await mod.stop();
+  });
+
+  it("skips post-only SELL pre-submit when refreshed ask is below submit price", async () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const guarded = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      riskEventRepo,
+    });
+    await guarded.start();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.08, bestAsk: 0.1 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.12, size: 5, postOnly: true }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "order_skipped",
+      payload: expect.objectContaining({
+        reasonCode: "post-only-cross-pre-submit",
+        side: "sell",
+        price: 0.12,
+        currentBestAsk: 0.1,
+      }),
+    });
+
+    await guarded.stop();
+  });
+
+  it("places post-only SELL pre-submit when refreshed ask is above submit price", async () => {
+    await mod.start();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.11, bestAsk: 0.15 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.12, size: 5, postOnly: true }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.placeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ side: "sell", price: 0.12 }),
+    );
+
+    await mod.stop();
+  });
+
+  it("skips post-only SELL pre-submit when refreshed ask equals submit price", async () => {
+    await mod.start();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.1, bestAsk: 0.12 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.12, size: 5, postOnly: true }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
+
+    await mod.stop();
+  });
+
+  it("does not apply post-only pre-submit guard when postOnly is omitted", async () => {
+    await mod.start();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.08, bestAsk: 0.1 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.12, size: 5 }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.placeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ side: "sell", price: 0.12 }),
+    );
+
+    await mod.stop();
+  });
+
+  it("does not apply post-only pre-submit guard when postOnly is false", async () => {
+    await mod.start();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.08, bestAsk: 0.1 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.12, size: 5, postOnly: false }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.placeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ side: "sell", price: 0.12, postOnly: false }),
+    );
+
+    await mod.stop();
+  });
+
+  it("skips crossing post-only SELL before cancel-replacing an existing order", async () => {
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const existingSell: Order = {
+      orderId: createOrderId("existing-sell-cross"),
+      clientOrderId: "plk_existing_sell_cross" as ClientOrderId,
+      tokenId: createTokenId("tok-yes"),
+      conditionId: createConditionId("cond-1"),
+      side: "sell",
+      orderType: "GTC",
+      price: 0.2,
+      size: 5,
+      sizeUsdc: 1,
+      status: "open",
+      exchangeOrderId: "existing-sell-cross",
+      signalId: null,
+      signalReason: "repricing-exit",
+      botRunId: BOT_RUN_ID,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    orderRepo.findByTokenId = vi.fn().mockReturnValue([existingSell]);
+
+    const guarded = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      riskEventRepo,
+    });
+    await guarded.start();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ bestBid: 0.08, bestAsk: 0.1 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({ side: "sell", price: 0.12, size: 5, postOnly: true }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.cancelOrder).not.toHaveBeenCalled();
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(orderRepo.save).not.toHaveBeenCalled();
+    expect(riskEventRepo.insert).toHaveBeenCalledWith({
+      eventType: "order_skipped",
+      payload: expect.objectContaining({
+        reasonCode: "post-only-cross-pre-submit",
+        side: "sell",
+        price: 0.12,
+        currentBestAsk: 0.1,
+      }),
+    });
+
+    await guarded.stop();
   });
 
   it("publishes OrderRejected when gateway rejects", async () => {
@@ -1654,6 +1865,125 @@ describe("ExecutionModule", () => {
       reason: "below_min_size",
       phase: "pre-clamp",
     });
+
+    await mod2.stop();
+  });
+
+  it("rejects SELL residual below the refreshed market minimum when command metadata is missing", async () => {
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 3.28 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await mod2.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: 5, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        side: "sell",
+        price: 0.5,
+        size: 3.28,
+        postOnly: false,
+        metadata: { marketData: { minOrderSize: null } },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("sell-residual-below-min-order-size");
+    expect(rejected[0].errorCode).toBe("INVALID_SIZE");
+
+    await mod2.stop();
+  });
+
+  it("places SELL residual that meets the refreshed market minimum", async () => {
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 5.5 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+    });
+    await mod2.start();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: 5, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        side: "sell",
+        price: 0.5,
+        size: 5.5,
+        postOnly: false,
+        metadata: { marketData: { minOrderSize: null } },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).toHaveBeenCalledTimes(1);
+    expect(gateway.placeOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ side: "sell", size: 5.5 }),
+    );
+
+    await mod2.stop();
+  });
+
+  it("uses the live-lite fallback minimum when market minimum is unavailable", async () => {
+    const mod2 = new ExecutionModule({
+      gateway,
+      bus,
+      marketRepo: marketRepo as any,
+      orderRepo,
+      fillRepo,
+      positionRepo: createMockPositionRepo(makePosition({ size: 0.8 })),
+      log: silentLog,
+      botRunId: BOT_RUN_ID,
+      runtimeControl: { isPaused: () => false },
+      runtimeMode: "live-lite",
+    });
+    await mod2.start();
+
+    const rejected: any[] = [];
+    bus.subscribe("OrderRejected", async (p) => {
+      rejected.push(p);
+    });
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [makeNormalizedMarket({ minOrderSize: null, bestAsk: 0.9 })],
+      timestamp: Date.now(),
+    });
+    await bus.publish("PlaceOrderRequested", {
+      command: makePlaceCmd({
+        side: "sell",
+        price: 0.5,
+        size: 0.8,
+        postOnly: false,
+        metadata: { marketData: { minOrderSize: null } },
+      }),
+      timestamp: Date.now(),
+    });
+
+    expect(gateway.placeOrder).not.toHaveBeenCalled();
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toBe("sell-residual-below-min-order-size");
 
     await mod2.stop();
   });

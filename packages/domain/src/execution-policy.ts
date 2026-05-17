@@ -223,6 +223,10 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   exitMidpointAnchorTicks: 5,
   opportunisticTaker: DEFAULT_OPPORTUNISTIC_TAKER_POLICY,
   orderLifetime: DEFAULT_ORDER_LIFETIME_POLICY,
+  // Defensive infrastructure timing parameter. Exchange balance settlement
+  // typically lands in <2s; 5000ms provides a safe margin. Not R-derived —
+  // this is exchange timing protection, not decision logic.
+  postBuyFillSellCooldownMs: 5_000,
   repriceOnOutbid: DEFAULT_REPRICE_ON_OUTBID_POLICY,
   exitRepriceOnDownprice: DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   dropTrigger: DEFAULT_DROP_TRIGGER_POLICY,
@@ -277,6 +281,8 @@ const BOUND_CAPACITY_OPEN_ORDERS_MAX = 1_000;
 const BOUND_ORDER_LIFETIME_MIN_MS = 1_000;
 const BOUND_ORDER_LIFETIME_MAX_MS = 14 * 24 * 60 * 60_000;
 const BOUND_ORDER_LIFETIME_COUNT_MAX = 10_000;
+const BOUND_POST_BUY_FILL_SELL_COOLDOWN_MIN_MS = 0;
+const BOUND_POST_BUY_FILL_SELL_COOLDOWN_MAX_MS = 60_000;
 const BOUND_STUCK_WARNING_GAP_PCT_MIN = 0;
 const BOUND_STUCK_WARNING_GAP_PCT_MAX = 1;
 const BOUND_DROP_TRIGGER_THRESHOLD_MIN = -1;
@@ -384,6 +390,14 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const sellCapacity = parseSellCapacity(obj.sellCapacity, issues);
   const orderCapacity = parseOrderCapacity(obj.orderCapacity, issues);
   const orderLifetime = parseOrderLifetime(obj.orderLifetime, issues);
+  const postBuyFillSellCooldownMs = clampedInt(
+    obj.postBuyFillSellCooldownMs,
+    DEFAULT_EXECUTION_POLICY.postBuyFillSellCooldownMs,
+    BOUND_POST_BUY_FILL_SELL_COOLDOWN_MIN_MS,
+    BOUND_POST_BUY_FILL_SELL_COOLDOWN_MAX_MS,
+    issues,
+    "postBuyFillSellCooldownMs",
+  );
   const repriceOnOutbid = parseRepriceOnOutbid(obj.repriceOnOutbid, issues);
   const exitRepriceOnDownprice = parseExitRepriceOnDownprice(obj.exitRepriceOnDownprice, issues);
   const dropTrigger = parseDropTrigger(obj.dropTrigger, issues);
@@ -414,6 +428,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       exitMidpointAnchorTicks,
       opportunisticTaker,
       orderLifetime,
+      postBuyFillSellCooldownMs,
       repriceOnOutbid,
       exitRepriceOnDownprice,
       dropTrigger,

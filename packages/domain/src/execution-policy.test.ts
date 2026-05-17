@@ -216,6 +216,22 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.sellReplaceMinPriceDeltaTicks).toBe(1);
   });
 
+  it("defaults and parses the post-BUY fill SELL cooldown", () => {
+    expect(DEFAULT_EXECUTION_POLICY.postBuyFillSellCooldownMs).toBe(5_000);
+
+    const { policy, issues } = parseExecutionPolicyJson(
+      JSON.stringify({ postBuyFillSellCooldownMs: 0 }),
+    );
+    expect(issues).toHaveLength(0);
+    expect(policy.postBuyFillSellCooldownMs).toBe(0);
+
+    const invalid = parseExecutionPolicyJson(JSON.stringify({ postBuyFillSellCooldownMs: -1 }));
+    expect(invalid.policy.postBuyFillSellCooldownMs).toBe(
+      DEFAULT_EXECUTION_POLICY.postBuyFillSellCooldownMs,
+    );
+    expect(invalid.issues.some((i) => i.includes("postBuyFillSellCooldownMs"))).toBe(true);
+  });
+
   it("defaults D9 loss exit disabled with R96 liquidity threshold", () => {
     expect(DEFAULT_EXECUTION_POLICY.lossExit).toEqual({
       enabled: false,

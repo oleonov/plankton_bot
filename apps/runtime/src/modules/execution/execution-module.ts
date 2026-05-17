@@ -32,6 +32,8 @@ import type {
   LegStateRepository,
   RepriceChainPolicyConfig,
   RiskEventRepository,
+  NormalizedMarket,
+  RuntimeEventMap,
 } from "@krabs/domain";
 import {
   createCommandId,
@@ -89,6 +91,12 @@ const DUST_TRIGGERING_EXECUTION_REJECT_REASONS = new Set<string>([
   RESERVED_TOKEN_LIMIT_REASON,
   SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON,
 ]);
+
+type PostOnlyCrossPreSubmitSkip = {
+  bestAsk: number;
+  bookSource: string | null;
+  snapshotTs: number | null;
+};
 
 function resolvePriceFromCmd(cmd: PlaceOrderCommand): number {
   return cmd.price;
@@ -166,6 +174,7 @@ export interface ExecutionModuleDeps {
 export class ExecutionModule implements RuntimeModule {
   private static readonly SELL_REPLACE_LOCK_TIMEOUT_MS = 2 * 60 * 1000;
   private static readonly SIZE_EPSILON_SHARES = 1e-9;
+  private static readonly PRICE_EPSILON = 1e-9;
   private static readonly SELL_REPLACEMENT_CANCELLED_ORDER_ID = "sellReplacementCancelledOrderId";
 
   private readonly log: Logger;
@@ -181,6 +190,7 @@ export class ExecutionModule implements RuntimeModule {
   private sellSizeClamps = 0;
   private readonly queue: ExecutionQueue | null;
   private readonly acceptedCommandAt = new Map<string, number>();
+  private readonly marketCache = new Map<string, NormalizedMarket>();
   private placeCompleted = 0;
   private cancelCompleted = 0;
   private placeLatencyTotalMs = 0;
@@ -209,9 +219,27 @@ export class ExecutionModule implements RuntimeModule {
     this.unsubs.push(
       this.deps.bus.subscribe("PlaceOrderRequested", (p) => this.handlePlace(p.command)),
       this.deps.bus.subscribe("CancelOrderRequested", (p) => this.handleCancel(p.command)),
+      this.deps.bus.subscribe("NormalizedMarketUpdated", (p) => this.handleMarketUpdate(p)),
+      this.deps.bus.subscribe("TrackedMarketsChanged", (p) => this.handleTrackedMarketsChanged(p)),
     );
     this.started = true;
     this.log.info("execution module started");
+  }
+
+  private async handleMarketUpdate(
+    payload: RuntimeEventMap["NormalizedMarketUpdated"],
+  ): Promise<void> {
+    for (const market of payload.markets) {
+      this.marketCache.set(String(market.tokenId), market);
+    }
+  }
+
+  private async handleTrackedMarketsChanged(
+    payload: RuntimeEventMap["TrackedMarketsChanged"],
+  ): Promise<void> {
+    for (const tokenId of payload.removedTokenIds) {
+      this.marketCache.delete(String(tokenId));
+    }
   }
 
   async stop(): Promise<void> {
@@ -538,6 +566,12 @@ export class ExecutionModule implements RuntimeModule {
       return;
     }
 
+    const postOnlyCross = this.getPostOnlyCrossPreSubmitSkip(cmd);
+    if (postOnlyCross) {
+      this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
+      return;
+    }
+
     if (await this.deferSellReplacementIfNeeded(cmd)) {
       return;
     }
@@ -659,6 +693,12 @@ export class ExecutionModule implements RuntimeModule {
   // ─── Place execution (gateway call) ──────────────────────────────────
 
   private async executePlace(cmd: PlaceOrderCommand): Promise<void> {
+    const postOnlyCross = this.getPostOnlyCrossPreSubmitSkip(cmd);
+    if (postOnlyCross) {
+      this.skipPostOnlyCrossPreSubmit(cmd, postOnlyCross);
+      return;
+    }
+
     const placeParams = {
       clientOrderId: cmd.clientOrderId as string,
       tokenId: cmd.tokenId,
@@ -1242,6 +1282,43 @@ export class ExecutionModule implements RuntimeModule {
     return { minOrderSize };
   }
 
+  private getPostOnlyCrossPreSubmitSkip(cmd: PlaceOrderCommand): PostOnlyCrossPreSubmitSkip | null {
+    if (cmd.side !== "sell") return null;
+    if (cmd.postOnly !== true) return null;
+    const market = this.marketCache.get(String(cmd.tokenId));
+    const bestAsk = market?.bestAsk ?? null;
+    if (bestAsk == null || !Number.isFinite(bestAsk) || bestAsk <= 0) return null;
+    if (cmd.price + ExecutionModule.PRICE_EPSILON < bestAsk) return null;
+    return {
+      bestAsk,
+      bookSource: market?.bookSource ?? null,
+      snapshotTs: market?.snapshotTs ?? null,
+    };
+  }
+
+  private skipPostOnlyCrossPreSubmit(
+    cmd: PlaceOrderCommand,
+    postOnlyCross: PostOnlyCrossPreSubmitSkip,
+  ): void {
+    this.log.warn(
+      {
+        commandId: cmd.commandId,
+        tokenId: cmd.tokenId,
+        side: cmd.side,
+        price: cmd.price,
+        currentBestAsk: postOnlyCross.bestAsk,
+        bookSource: postOnlyCross.bookSource,
+      },
+      "sell order skipped — post-only price would cross current ask",
+    );
+    this.recordOrderSkipped(cmd, "post-only-cross-pre-submit", {
+      price: cmd.price,
+      currentBestAsk: postOnlyCross.bestAsk,
+      bookSource: postOnlyCross.bookSource,
+      snapshotTs: postOnlyCross.snapshotTs,
+    });
+  }
+
   private getInvalidPriceRejection(cmd: PlaceOrderCommand): {
     reason: string;
     tickSize: number;
@@ -1259,6 +1336,9 @@ export class ExecutionModule implements RuntimeModule {
   }
 
   private resolveCommandMinOrderSize(cmd: PlaceOrderCommand): number | null {
+    const cachedMinOrderSize = this.resolveCachedMinOrderSize(cmd.tokenId);
+    if (cachedMinOrderSize != null) return cachedMinOrderSize;
+
     const metadata = cmd.metadata;
     const fallback = this.deps.runtimeMode === "live-lite" ? DEFAULT_FALLBACK_MIN_ORDER_SIZE : null;
     if (!metadata || typeof metadata !== "object") return fallback;
@@ -1271,6 +1351,44 @@ export class ExecutionModule implements RuntimeModule {
       }
     }
     return fallback;
+  }
+
+  private resolveCachedMinOrderSize(tokenId: TokenId): number | null {
+    const value = this.marketCache.get(String(tokenId))?.minOrderSize;
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
+  }
+
+  private recordOrderSkipped(
+    cmd: PlaceOrderCommand,
+    reasonCode: string,
+    details: Readonly<Record<string, unknown>>,
+  ): void {
+    try {
+      this.deps.riskEventRepo?.insert({
+        eventType: "order_skipped",
+        payload: {
+          commandId: String(cmd.commandId),
+          clientOrderId: String(cmd.clientOrderId),
+          tokenId: String(cmd.tokenId),
+          conditionId: String(cmd.conditionId),
+          reasonCode,
+          side: cmd.side,
+          price: cmd.price,
+          size: cmd.size,
+          signalReason: cmd.signalReason ?? null,
+          signalId: cmd.signalId ?? null,
+          decisionRuleId: cmd.decisionRuleId ?? null,
+          signalTimestamp: cmd.signalTimestamp ?? null,
+          ...details,
+          skippedAt: new Date().toISOString(),
+        },
+      });
+    } catch (err) {
+      this.log.warn(
+        { err, commandId: String(cmd.commandId), reasonCode },
+        "failed to persist order_skipped risk event",
+      );
+    }
   }
 
   private static looksLikeMinSizeError(
