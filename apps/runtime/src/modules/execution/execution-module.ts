@@ -93,7 +93,8 @@ const DUST_TRIGGERING_EXECUTION_REJECT_REASONS = new Set<string>([
 ]);
 
 type PostOnlyCrossPreSubmitSkip = {
-  bestAsk: number;
+  bestBid: number;
+  bestAsk: number | null;
   bookSource: string | null;
   snapshotTs: number | null;
 };
@@ -1286,10 +1287,12 @@ export class ExecutionModule implements RuntimeModule {
     if (cmd.side !== "sell") return null;
     if (cmd.postOnly !== true) return null;
     const market = this.marketCache.get(String(cmd.tokenId));
+    const bestBid = market?.bestBid ?? null;
     const bestAsk = market?.bestAsk ?? null;
-    if (bestAsk == null || !Number.isFinite(bestAsk) || bestAsk <= 0) return null;
-    if (cmd.price + ExecutionModule.PRICE_EPSILON < bestAsk) return null;
+    if (bestBid == null || !Number.isFinite(bestBid) || bestBid <= 0) return null;
+    if (cmd.price > bestBid + ExecutionModule.PRICE_EPSILON) return null;
     return {
+      bestBid,
       bestAsk,
       bookSource: market?.bookSource ?? null,
       snapshotTs: market?.snapshotTs ?? null,
@@ -1306,13 +1309,15 @@ export class ExecutionModule implements RuntimeModule {
         tokenId: cmd.tokenId,
         side: cmd.side,
         price: cmd.price,
+        currentBestBid: postOnlyCross.bestBid,
         currentBestAsk: postOnlyCross.bestAsk,
         bookSource: postOnlyCross.bookSource,
       },
-      "sell order skipped — post-only price would cross current ask",
+      "sell order skipped — post-only price would cross current bid",
     );
     this.recordOrderSkipped(cmd, "post-only-cross-pre-submit", {
       price: cmd.price,
+      currentBestBid: postOnlyCross.bestBid,
       currentBestAsk: postOnlyCross.bestAsk,
       bookSource: postOnlyCross.bookSource,
       snapshotTs: postOnlyCross.snapshotTs,
