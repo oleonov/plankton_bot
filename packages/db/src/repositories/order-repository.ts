@@ -22,8 +22,9 @@ export class SqliteOrderRepository implements OrderRepository {
           signal_reason, cancel_reason, cancel_age_ms, cancel_age_bucket,
           fill_progress_shares, market_horizon,
           decision_rule_id, signal_timestamp, exchange_error_code,
-          exchange_error_message, exchange_error_payload, bot_run_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          exchange_error_message, exchange_error_payload, exchange_rejection_reason,
+          bot_run_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(order_id) DO UPDATE SET
            status = excluded.status,
            exchange_order_id = excluded.exchange_order_id,
@@ -42,6 +43,7 @@ export class SqliteOrderRepository implements OrderRepository {
            exchange_error_code = excluded.exchange_error_code,
            exchange_error_message = excluded.exchange_error_message,
            exchange_error_payload = excluded.exchange_error_payload,
+           exchange_rejection_reason = excluded.exchange_rejection_reason,
            updated_at = excluded.updated_at`,
       )
       .run(
@@ -69,6 +71,7 @@ export class SqliteOrderRepository implements OrderRepository {
         order.exchangeErrorCode ?? null,
         order.exchangeErrorMessage ?? null,
         order.exchangeErrorPayload ?? null,
+        order.exchangeRejectionReason ?? null,
         order.botRunId,
         order.createdAt,
         order.updatedAt,
@@ -219,6 +222,7 @@ export class SqliteOrderRepository implements OrderRepository {
       exchangeErrorCode: (row.exchange_error_code as string) ?? null,
       exchangeErrorMessage: (row.exchange_error_message as string) ?? null,
       exchangeErrorPayload: (row.exchange_error_payload as string) ?? null,
+      exchangeRejectionReason: (row.exchange_rejection_reason as string) ?? null,
       botRunId: createBotRunId(row.bot_run_id as string),
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string,

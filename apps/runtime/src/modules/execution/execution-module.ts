@@ -39,6 +39,7 @@ import {
   ExchangeErrorCode,
   shouldBlockRepriceChain,
 } from "@krabs/domain";
+import { classifyExchangeRejectionReason, getExchangeRejectionPayloadText } from "@krabs/exchange";
 import { importExchangeFills } from "../reconciliation/fill-reconciler.js";
 import type { Logger } from "../../logger.js";
 import type { LiveLiteGuard } from "../../live-lite-guard.js";
@@ -701,10 +702,16 @@ export class ExecutionModule implements RuntimeModule {
         }
       }
 
+      const exchangeErrorDetails = result.errorDetails ?? null;
+      const exchangeRejectionReason = this.classifyExchangeRejection(
+        exchangeErrorDetails,
+        cmd.commandId,
+      );
       const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
         errorCode,
         errorMessage: result.errorMessage ?? reason,
-        errorDetails: result.errorDetails ?? null,
+        errorDetails: exchangeErrorDetails,
+        rejectionReason: exchangeRejectionReason,
       });
       this.deps.orderRepo.save(rejectedOrder);
 
@@ -725,10 +732,15 @@ export class ExecutionModule implements RuntimeModule {
       );
 
       const exchangeErrorDetails = { responseBody: null, reason: "missing-order-id" };
+      const exchangeRejectionReason = this.classifyExchangeRejection(
+        exchangeErrorDetails,
+        cmd.commandId,
+      );
       const rejectedOrder = this.buildOrder(cmd, "rejected", null, {
         errorCode: ExchangeErrorCode.Unknown,
         errorMessage: "gateway returned success without order id",
         errorDetails: exchangeErrorDetails,
+        rejectionReason: exchangeRejectionReason,
       });
       this.deps.orderRepo.save(rejectedOrder);
 
@@ -1584,6 +1596,7 @@ export class ExecutionModule implements RuntimeModule {
       errorCode: string;
       errorMessage: string | null;
       errorDetails: Readonly<Record<string, unknown>> | null;
+      rejectionReason?: string | null;
     },
   ): Order {
     const now = new Date().toISOString();
@@ -1609,10 +1622,25 @@ export class ExecutionModule implements RuntimeModule {
       exchangeErrorCode: exchangeError?.errorCode ?? null,
       exchangeErrorMessage: exchangeError?.errorMessage ?? null,
       exchangeErrorPayload: stringifyExchangeErrorPayload(exchangeError?.errorDetails ?? null),
+      exchangeRejectionReason: exchangeError?.rejectionReason ?? null,
       botRunId: this.deps.botRunId,
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  private classifyExchangeRejection(
+    payload: Readonly<Record<string, unknown>> | null,
+    commandId: string,
+  ): string {
+    const reason = classifyExchangeRejectionReason(payload);
+    if (reason === "rejection_unknown" && getExchangeRejectionPayloadText(payload) != null) {
+      this.log.warn(
+        { commandId, exchangeErrorDetails: payload },
+        "unknown exchange rejection reason -- classifier needs a new pattern",
+      );
+    }
+    return reason;
   }
 }
 

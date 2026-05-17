@@ -337,6 +337,7 @@ export interface Order {
   exchangeErrorCode?: string | null;
   exchangeErrorMessage?: string | null;
   exchangeErrorPayload?: string | null;
+  exchangeRejectionReason?: string | null;
   botRunId: BotRunId;
   createdAt: string; // ISO timestamp
   updatedAt: string; // ISO timestamp

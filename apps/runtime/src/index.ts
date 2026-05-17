@@ -37,7 +37,11 @@ import axiosDefault from "axios";
 // deliberately left unset — that field expects http.Agent, and CLOB/Gamma are
 // HTTPS-only. Mixing an https.Agent into httpAgent is a type error that would
 // break any future plain-HTTP consumer.
-import { buildClobAxiosAgent, installClobErrorSanitizer } from "@krabs/exchange";
+import {
+  buildClobAxiosAgent,
+  classifyExchangeRejectionReason,
+  installClobErrorSanitizer,
+} from "@krabs/exchange";
 // CLOB SDK serializes axios error.config (which holds the keep-alive
 // https.Agent) via JSON.stringify before re-throwing. Circular socket refs
 // crash that stringify, masking real exchange errors as a generic
@@ -1492,6 +1496,7 @@ async function main(): Promise<void> {
     cacheStatusByStatus: new Map<string, number>(),
     exchangeAccepted: 0,
     exchangeRejectedByCode: new Map<string, number>(),
+    exchangeRejectedByReason: new Map<string, number>(),
     fills: 0,
     fillLatencySamplesMs: [] as number[],
     cooldownBypassByReason: new Map<string, number>(),
@@ -1581,6 +1586,11 @@ async function main(): Promise<void> {
     conversionWindow.exchangeRejectedByCode.set(
       code,
       (conversionWindow.exchangeRejectedByCode.get(code) ?? 0) + 1,
+    );
+    const rejectionReason = classifyExchangeRejectionReason(event.exchangeErrorDetails);
+    conversionWindow.exchangeRejectedByReason.set(
+      rejectionReason,
+      (conversionWindow.exchangeRejectedByReason.get(rejectionReason) ?? 0) + 1,
     );
   });
 
@@ -1685,6 +1695,7 @@ async function main(): Promise<void> {
       conversionWindow.cacheStatusByStatus.clear();
       conversionWindow.exchangeAccepted = 0;
       conversionWindow.exchangeRejectedByCode.clear();
+      conversionWindow.exchangeRejectedByReason.clear();
       conversionWindow.fills = 0;
       conversionWindow.fillLatencySamplesMs = [];
       conversionWindow.cooldownBypassByReason.clear();
@@ -1714,6 +1725,7 @@ async function main(): Promise<void> {
         cacheStatusByStatus: Object.fromEntries(conversionWindow.cacheStatusByStatus),
         exchangeAccepted: conversionWindow.exchangeAccepted,
         exchangeRejectedByCode: Object.fromEntries(conversionWindow.exchangeRejectedByCode),
+        exchangeRejectedByReason: Object.fromEntries(conversionWindow.exchangeRejectedByReason),
         fills: conversionWindow.fills,
         fillLatencyMs: summarizeFillLatency(conversionWindow.fillLatencySamplesMs),
         cooldownBypassByReason: Object.fromEntries(conversionWindow.cooldownBypassByReason),

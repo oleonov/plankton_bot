@@ -236,6 +236,7 @@ export interface StatusData {
     cacheStatusLast10mByStatus?: Record<string, number>;
     exchangeAcceptedLast10m?: number;
     exchangeRejectedLast10mByCode?: Record<string, number>;
+    exchangeRejectedLast10mByReason?: Record<string, number>;
     fillsLast10m?: number;
     fillLatencyMsLast10m?: Record<string, number> | null;
     cooldownBypassLast10mByReason?: Record<string, number>;

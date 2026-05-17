@@ -128,6 +128,7 @@ function computeTradingState(
       cacheStatusByStatus?: Record<string, number>;
       exchangeAccepted?: number;
       exchangeRejectedByCode?: Record<string, number>;
+      exchangeRejectedByReason?: Record<string, number>;
       fills?: number;
       fillLatencyMs?: Record<string, number> | null;
       cooldownBypassByReason?: Record<string, number>;
@@ -142,6 +143,7 @@ function computeTradingState(
     signalActivity.cacheStatusLast10mByStatus = conversion.cacheStatusByStatus ?? {};
     signalActivity.exchangeAcceptedLast10m = conversion.exchangeAccepted ?? 0;
     signalActivity.exchangeRejectedLast10mByCode = conversion.exchangeRejectedByCode ?? {};
+    signalActivity.exchangeRejectedLast10mByReason = conversion.exchangeRejectedByReason ?? {};
     signalActivity.fillsLast10m = conversion.fills ?? 0;
     signalActivity.fillLatencyMsLast10m = conversion.fillLatencyMs ?? null;
     signalActivity.cooldownBypassLast10mByReason = conversion.cooldownBypassByReason ?? {};

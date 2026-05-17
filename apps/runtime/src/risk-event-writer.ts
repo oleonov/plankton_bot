@@ -1,3 +1,4 @@
+import { classifyExchangeRejectionReason } from "@krabs/exchange";
 import type { RiskEventRepository } from "@krabs/domain";
 import { DEDUPED_INTERNAL_ORDER_REJECTION_REASONS } from "./internal-order-reasons.js";
 import { normalizeReasonCode } from "./risk-event-codes.js";
@@ -74,6 +75,12 @@ export class RiskEventWriter {
   }): void {
     if (this.shouldDedupeOrderRejected(event)) return;
 
+    const hasExchangeError =
+      event.exchangeErrorDetails != null || event.exchangeErrorMessage != null;
+    const exchangeRejectionReason = hasExchangeError
+      ? classifyExchangeRejectionReason(event.exchangeErrorDetails)
+      : null;
+
     this.repo.insert({
       eventType: "order_rejected",
       payload: {
@@ -89,6 +96,7 @@ export class RiskEventWriter {
         decisionRuleId: event.decisionRuleId ?? null,
         signalTimestamp: event.signalTimestamp ?? null,
         exchangeErrorMessage: event.exchangeErrorMessage ?? null,
+        exchangeRejectionReason,
         exchangeErrorDetails: event.exchangeErrorDetails ?? null,
         timestamp: event.timestamp,
       },
@@ -166,7 +174,8 @@ export class RiskEventWriter {
     ].join(":");
   }
 
-  // Exchange-error rejects are keyed by (tokenId, side, errorCode) only:
+  // Exchange-error rejects are keyed by (tokenId, side, errorCode,
+  // classified rejection reason):
   // transient exchange faults (rate-limits, upstream 5xx, balance/allowance
   // staleness) emit ~19k events/hour with near-identical messages. A 5-minute
   // dedup window collapses the burst to ~12 events/hour per token+errorCode
@@ -176,8 +185,10 @@ export class RiskEventWriter {
     tokenId: string;
     side?: string | null;
     errorCode: string;
+    exchangeErrorDetails?: Readonly<Record<string, unknown>> | null;
   }): string {
-    return ["err", event.tokenId, event.side ?? "", event.errorCode].join(":");
+    const rejectionReason = classifyExchangeRejectionReason(event.exchangeErrorDetails);
+    return ["err", event.tokenId, event.side ?? "", event.errorCode, rejectionReason].join(":");
   }
 
   private pruneExpired(nowMs: number): void {

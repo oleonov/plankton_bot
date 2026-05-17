@@ -76,6 +76,7 @@ describe("ledger.db schema", () => {
         "exchange_error_code",
         "exchange_error_message",
         "exchange_error_payload",
+        "exchange_rejection_reason",
       ]),
     );
 

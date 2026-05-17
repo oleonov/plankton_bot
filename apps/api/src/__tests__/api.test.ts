@@ -528,7 +528,7 @@ describe("GET /status", () => {
       VALUES
         ('signal_activity', 1, '{"produced":10,"approved":3,"rejected":7,"entryApproved":2,"exitApproved":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
         ('scanner_activity', 1, '{"candidatesConsidered":20,"blockedByResolutionBuffer":2,"blockedByWindow":1,"scanPrimeSkippedByPolicy":11,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}'),
-        ('signal_conversion_activity', 1, '{"converted":2,"conversionSkippedByReason":{"token-cooling-down":5},"cacheStatusByStatus":{"refresh-budget-exhausted":4,"fresh-cache":2},"exchangeAccepted":1,"exchangeRejectedByCode":{"UNKNOWN":2},"fills":1,"fillLatencyMs":{"count":1,"avgMs":1200,"minMs":1200,"p50Ms":1200,"p95Ms":1200,"maxMs":1200},"cooldownBypassByReason":{"price-moved":3},"hotQuoteRefreshes":7,"hotLaneActionsByType":{"entry-reprice-cancel":2},"hotLaneStatesByState":{"quote-active":3,"cooling":1},"queueJumpAccepted":1,"queueJumpFills":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
+        ('signal_conversion_activity', 1, '{"converted":2,"conversionSkippedByReason":{"token-cooling-down":5},"cacheStatusByStatus":{"refresh-budget-exhausted":4,"fresh-cache":2},"exchangeAccepted":1,"exchangeRejectedByCode":{"UNKNOWN":2},"exchangeRejectedByReason":{"rejection_min_size":2},"fills":1,"fillLatencyMs":{"count":1,"avgMs":1200,"minMs":1200,"p50Ms":1200,"p95Ms":1200,"maxMs":1200},"cooldownBypassByReason":{"price-moved":3},"hotQuoteRefreshes":7,"hotLaneActionsByType":{"entry-reprice-cancel":2},"hotLaneStatesByState":{"quote-active":3,"cooling":1},"queueJumpAccepted":1,"queueJumpFills":1,"windowStartMs":${Date.now()}}', '${new Date().toISOString()}')
     `);
 
     const res = await app.inject({ method: "GET", url: "/api/v1/status", headers: authHeaders() });
@@ -544,6 +544,7 @@ describe("GET /status", () => {
     });
     expect(signalActivity.exchangeAcceptedLast10m).toBe(1);
     expect(signalActivity.exchangeRejectedLast10mByCode).toEqual({ UNKNOWN: 2 });
+    expect(signalActivity.exchangeRejectedLast10mByReason).toEqual({ rejection_min_size: 2 });
     expect(signalActivity.fillsLast10m).toBe(1);
     expect(signalActivity.fillLatencyMsLast10m).toEqual({
       count: 1,

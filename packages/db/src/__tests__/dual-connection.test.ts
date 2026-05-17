@@ -178,6 +178,7 @@ describe("dual-connection infrastructure", () => {
         "exchange_error_code",
         "exchange_error_message",
         "exchange_error_payload",
+        "exchange_rejection_reason",
       ]),
     );
     const fillColumns = conn2.db.prepare("PRAGMA table_info(fills)").all() as Array<{

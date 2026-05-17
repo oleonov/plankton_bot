@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS orders (
   exchange_error_code    TEXT,
   exchange_error_message TEXT,
   exchange_error_payload TEXT,
+  exchange_rejection_reason TEXT,
   bot_run_id         TEXT NOT NULL,
   created_at         TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at         TEXT NOT NULL DEFAULT (datetime('now'))

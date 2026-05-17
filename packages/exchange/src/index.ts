@@ -69,6 +69,11 @@ export {
 // Shared utilities
 export { classifyError } from "./errors.js";
 export {
+  classifyExchangeRejectionReason,
+  getExchangeRejectionPayloadText,
+  type ExchangeRejectionReason,
+} from "./exchange-rejection-classifier.js";
+export {
   redactSensitive,
   redactText,
   sanitizeErrorDetails,

@@ -78,6 +78,7 @@ describe("SqliteOrderRepository", () => {
         exchangeErrorCode: "INSUFFICIENT_BALANCE",
         exchangeErrorMessage: "not enough balance",
         exchangeErrorPayload: JSON.stringify({ status: 400, responseBody: { error: "bad" } }),
+        exchangeRejectionReason: "rejection_balance_insufficient",
       }),
     );
 
@@ -89,6 +90,7 @@ describe("SqliteOrderRepository", () => {
       signalTimestamp: "2026-04-26T00:00:00.000Z",
       exchangeErrorCode: "INSUFFICIENT_BALANCE",
       exchangeErrorMessage: "not enough balance",
+      exchangeRejectionReason: "rejection_balance_insufficient",
     });
     expect(JSON.parse(found!.exchangeErrorPayload!)).toMatchObject({
       status: 400,

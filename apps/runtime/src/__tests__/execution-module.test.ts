@@ -439,6 +439,8 @@ describe("ExecutionModule", () => {
     const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
     expect(savedOrder.status).toBe("rejected");
     expect(savedOrder.exchangeOrderId).toBeNull();
+    expect(savedOrder.exchangeErrorMessage).toBe("gateway returned success without order id");
+    expect(savedOrder.exchangeRejectionReason).toBe("rejection_missing_order_id");
 
     await mod.stop();
   });
@@ -1107,6 +1109,9 @@ describe("ExecutionModule", () => {
     );
     expect(rejected).toHaveLength(1);
     expect(rejected[0].reason).toBe("exchange returned no order id");
+    const savedOrder = (orderRepo.save as ReturnType<typeof vi.fn>).mock.calls[0]![0] as Order;
+    expect(savedOrder.exchangeErrorMessage).toBe("exchange returned no order id");
+    expect(savedOrder.exchangeRejectionReason).toBe("rejection_min_size");
 
     await dustMod.stop();
   });

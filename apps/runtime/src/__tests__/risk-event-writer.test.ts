@@ -114,6 +114,8 @@ describe("RiskEventWriter", () => {
           errorCode: "INSUFFICIENT_BALANCE",
           side: "sell",
           decisionRuleId: "D5",
+          exchangeErrorMessage: "not enough balance",
+          exchangeRejectionReason: "rejection_balance_insufficient",
           exchangeErrorDetails: { status: 400 },
         },
       });
@@ -175,6 +177,54 @@ describe("RiskEventWriter", () => {
       });
 
       expect(repo.insert).toHaveBeenCalledTimes(1);
+    });
+
+    it("writes same-code exchange order rejects with different classified reasons", () => {
+      const base = {
+        commandId: "cmd-1",
+        clientOrderId: "cloid-1",
+        tokenId: "tok-1",
+        conditionId: "cond-1",
+        reason: "exchange returned no order id",
+        errorCode: "UNKNOWN",
+        signalReason: "repricing-exit",
+        side: "sell",
+        signalId: "sig-1",
+        decisionRuleId: "D9_LOSS_EXIT",
+        signalTimestamp: "2026-04-26T00:00:00.000Z",
+        exchangeErrorMessage: "exchange returned no order id",
+        timestamp: 1000,
+      };
+
+      writer.onOrderRejected({
+        ...base,
+        exchangeErrorDetails: {
+          responseBody: { error: "not enough balance / allowance" },
+        },
+      });
+      writer.onOrderRejected({
+        ...base,
+        commandId: "cmd-2",
+        clientOrderId: "cloid-2",
+        exchangeErrorDetails: {
+          responseBody: { error: "invalid post-only order: order crosses book" },
+        },
+        timestamp: 2000,
+      });
+
+      expect(repo.insert).toHaveBeenCalledTimes(2);
+      expect(repo.insert.mock.calls[0]![0].payload.exchangeErrorMessage).toBe(
+        "exchange returned no order id",
+      );
+      expect(repo.insert.mock.calls[0]![0].payload.exchangeRejectionReason).toBe(
+        "rejection_balance_insufficient",
+      );
+      expect(repo.insert.mock.calls[1]![0].payload.exchangeErrorMessage).toBe(
+        "exchange returned no order id",
+      );
+      expect(repo.insert.mock.calls[1]![0].payload.exchangeRejectionReason).toBe(
+        "rejection_post_only_cross",
+      );
     });
 
     it("writes a second exchange order reject with a different errorCode", () => {
