@@ -237,6 +237,13 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       enabled: false,
       states: ["S1", "S2"],
       minPublicTradeCount24h: 41,
+      cohortGuard: {
+        enabled: true,
+        state: "S2",
+        avgBuyMin: 0.02,
+        avgBuyMax: 0.4,
+        minDaysToResolve: 14,
+      },
     });
   });
 
@@ -247,6 +254,13 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           enabled: true,
           states: ["S1", "S2"],
           minPublicTradeCount24h: 41,
+          cohortGuard: {
+            enabled: false,
+            state: "S2",
+            avgBuyMin: 0.03,
+            avgBuyMax: 0.3,
+            minDaysToResolve: 30,
+          },
         },
       }),
     );
@@ -255,11 +269,43 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       enabled: true,
       states: ["S1", "S2"],
       minPublicTradeCount24h: 41,
+      cohortGuard: {
+        enabled: false,
+        state: "S2",
+        avgBuyMin: 0.03,
+        avgBuyMax: 0.3,
+        minDaysToResolve: 30,
+      },
     });
 
     const invalid = parseExecutionPolicyJson(JSON.stringify({ lossExit: { states: ["BAD"] } }));
     expect(invalid.policy.lossExit).toEqual(DEFAULT_EXECUTION_POLICY.lossExit);
     expect(invalid.issues.some((i) => i.includes("lossExit.states"))).toBe(true);
+  });
+
+  it("validates D9 H5_wide cohort guard bounds", () => {
+    const invalidRange = parseExecutionPolicyJson(
+      JSON.stringify({
+        lossExit: {
+          cohortGuard: {
+            avgBuyMin: 0.4,
+            avgBuyMax: 0.02,
+          },
+        },
+      }),
+    );
+    expect(invalidRange.policy.lossExit.cohortGuard).toEqual(
+      DEFAULT_EXECUTION_POLICY.lossExit.cohortGuard,
+    );
+    expect(invalidRange.issues.some((i) => i.includes("avgBuyMin must be less"))).toBe(true);
+
+    const invalidState = parseExecutionPolicyJson(
+      JSON.stringify({ lossExit: { cohortGuard: { state: "BAD" } } }),
+    );
+    expect(invalidState.policy.lossExit.cohortGuard.state).toBe(
+      DEFAULT_EXECUTION_POLICY.lossExit.cohortGuard.state,
+    );
+    expect(invalidState.issues.some((i) => i.includes("lossExit.cohortGuard.state"))).toBe(true);
   });
 
   it("rejects invalid SELL replacement tolerance values with an issue", () => {

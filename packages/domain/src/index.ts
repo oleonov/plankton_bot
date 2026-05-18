@@ -41,8 +41,13 @@ export {
   getProfitThresholdByPrice,
 } from "./d8-profit-target.js";
 export type { D8EvalContext, D8EvalResult } from "./d8-profit-target.js";
-export { evaluateD9LossExit } from "./d9-loss-exit.js";
-export type { D9LossExitContext, D9LossExitPolicy, D9Result } from "./d9-loss-exit.js";
+export { evaluateD9LossExit, H5_WIDE_COHORT_GUARD_REASON } from "./d9-loss-exit.js";
+export type {
+  D9LossExitCohortGuardPolicy,
+  D9LossExitContext,
+  D9LossExitPolicy,
+  D9Result,
+} from "./d9-loss-exit.js";
 export {
   DEFAULT_DUST_ABANDONMENT_POLICY,
   isAbandoned,

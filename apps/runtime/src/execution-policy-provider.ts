@@ -159,5 +159,11 @@ function summarizePolicy(policy: ExecutionPolicy): Record<string, unknown> {
       passiveHighTtlMs: policy.orderLifetime.passive.highTtlMs,
     },
     telemetry: policy.telemetry,
+    lossExit: {
+      enabled: policy.lossExit.enabled,
+      states: policy.lossExit.states,
+      minPublicTradeCount24h: policy.lossExit.minPublicTradeCount24h,
+      cohortGuard: policy.lossExit.cohortGuard,
+    },
   };
 }

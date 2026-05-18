@@ -585,6 +585,12 @@ export const profileRoutes: FastifyPluginAsync<ProfilesOpts> = async (app, opts)
       lossExit: {
         ...(current.lossExit ?? DEFAULT_LOSS_EXIT_POLICY),
         ...((patch.lossExit as Partial<ExecutionPolicy["lossExit"]> | undefined) ?? {}),
+        cohortGuard: {
+          ...(current.lossExit?.cohortGuard ?? DEFAULT_LOSS_EXIT_POLICY.cohortGuard),
+          ...(((patch.lossExit as Partial<ExecutionPolicy["lossExit"]> | undefined)?.cohortGuard as
+            | Partial<ExecutionPolicy["lossExit"]["cohortGuard"]>
+            | undefined) ?? {}),
+        },
       },
     };
 

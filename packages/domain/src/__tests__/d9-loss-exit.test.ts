@@ -5,6 +5,13 @@ const policy: D9LossExitPolicy = {
   enabled: true,
   states: ["S1", "S2"],
   minPublicTradeCount24h: 41,
+  cohortGuard: {
+    enabled: true,
+    state: "S2",
+    avgBuyMin: 0.02,
+    avgBuyMax: 0.4,
+    minDaysToResolve: 14,
+  },
 };
 
 function ctx(overrides: Partial<D9LossExitContext> = {}): D9LossExitContext {
@@ -14,6 +21,7 @@ function ctx(overrides: Partial<D9LossExitContext> = {}): D9LossExitContext {
     cumulativeBuyNotional: 10,
     cumulativeBuySize: 100,
     publicTradeCount24h: 41,
+    daysToResolve: null,
     ...overrides,
   };
 }
@@ -125,5 +133,133 @@ describe("evaluateD9LossExit", () => {
     );
     expect(result.fire).toBe(false);
     expect(result.reason).toBe("not-in-loss");
+  });
+
+  it("H5_wide guard matched: S2 + avg 0.12 + dtr 100 → no fire", () => {
+    const result = evaluateD9LossExit(
+      ctx({
+        currentPrice: 0.06,
+        cumulativeBuyNotional: 12,
+        cumulativeBuySize: 100,
+        publicTradeCount24h: 100,
+        daysToResolve: 100,
+      }),
+      policy,
+    );
+    expect(result.fire).toBe(false);
+    expect(result.reason).toBe("h5-wide-cohort-guard");
+    expect(result.avgBuyPrice).toBeCloseTo(0.12);
+    expect(result.profitRatio).toBeCloseTo(0.5);
+  });
+
+  it("H5_wide guard not matched outside avg: S2 + avg 0.50 + dtr 100 → fires", () => {
+    const result = evaluateD9LossExit(
+      ctx({
+        currentPrice: 0.25,
+        cumulativeBuyNotional: 50,
+        cumulativeBuySize: 100,
+        publicTradeCount24h: 100,
+        daysToResolve: 100,
+      }),
+      policy,
+    );
+    expect(result.fire).toBe(true);
+    expect(result.reason).toBe("d9-loss-exit-fired");
+  });
+
+  it("H5_wide guard not matched outside dtr: S2 + avg 0.12 + dtr 10 → fires", () => {
+    const result = evaluateD9LossExit(
+      ctx({
+        currentPrice: 0.06,
+        cumulativeBuyNotional: 12,
+        cumulativeBuySize: 100,
+        publicTradeCount24h: 100,
+        daysToResolve: 10,
+      }),
+      policy,
+    );
+    expect(result.fire).toBe(true);
+  });
+
+  it("H5_wide guard not matched non-S2: S1 + avg 0.12 + dtr 100 → fires", () => {
+    const result = evaluateD9LossExit(
+      ctx({
+        state: "S1",
+        currentPrice: 0.06,
+        cumulativeBuyNotional: 12,
+        cumulativeBuySize: 100,
+        publicTradeCount24h: 100,
+        daysToResolve: 100,
+      }),
+      policy,
+    );
+    expect(result.fire).toBe(true);
+  });
+
+  it("H5_wide guard disabled via config → fires normally", () => {
+    const result = evaluateD9LossExit(
+      ctx({
+        currentPrice: 0.06,
+        cumulativeBuyNotional: 12,
+        cumulativeBuySize: 100,
+        publicTradeCount24h: 100,
+        daysToResolve: 100,
+      }),
+      { ...policy, cohortGuard: { ...policy.cohortGuard, enabled: false } },
+    );
+    expect(result.fire).toBe(true);
+  });
+
+  it.each([0.02, 0.4])("H5_wide guard avg boundary %s is inclusive", (avgBuy) => {
+    const result = evaluateD9LossExit(
+      ctx({
+        currentPrice: avgBuy / 2,
+        cumulativeBuyNotional: avgBuy * 100,
+        cumulativeBuySize: 100,
+        publicTradeCount24h: 100,
+        daysToResolve: 100,
+      }),
+      policy,
+    );
+    expect(result.fire).toBe(false);
+    expect(result.reason).toBe("h5-wide-cohort-guard");
+  });
+
+  it("H5_wide guard dtr boundary is strict: dtr=14 fires, dtr=15 blocks", () => {
+    const base = {
+      currentPrice: 0.06,
+      cumulativeBuyNotional: 12,
+      cumulativeBuySize: 100,
+      publicTradeCount24h: 100,
+    };
+    const atBoundary = evaluateD9LossExit(ctx({ ...base, daysToResolve: 14 }), policy);
+    const overBoundary = evaluateD9LossExit(ctx({ ...base, daysToResolve: 15 }), policy);
+    expect(atBoundary.fire).toBe(true);
+    expect(overBoundary.fire).toBe(false);
+    expect(overBoundary.reason).toBe("h5-wide-cohort-guard");
+  });
+
+  it("H5_wide guard does not match division by zero", () => {
+    const result = evaluateD9LossExit(
+      ctx({ cumulativeBuySize: 0, publicTradeCount24h: 100, daysToResolve: 100 }),
+      policy,
+    );
+    expect(result.fire).toBe(false);
+    expect(result.reason).toBe("avg-buy-unavailable");
+  });
+
+  it("H5_wide guard does not match missing endDate/daysToResolve", () => {
+    const result = evaluateD9LossExit(
+      ctx({
+        currentPrice: 0.06,
+        cumulativeBuyNotional: 12,
+        cumulativeBuySize: 100,
+        publicTradeCount24h: 100,
+        daysToResolve: null,
+      }),
+      policy,
+    );
+    expect(result.fire).toBe(true);
+    expect(result.reason).toBe("d9-loss-exit-fired");
   });
 });

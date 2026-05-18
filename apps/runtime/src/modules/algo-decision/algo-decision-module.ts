@@ -47,6 +47,7 @@ import {
   isAlive,
   evaluateD8ProfitRatio,
   evaluateD9LossExit,
+  H5_WIDE_COHORT_GUARD_REASON,
   isAbandoned,
   shouldRecoverFromPriceMove,
 } from "@krabs/domain";
@@ -180,6 +181,8 @@ type EmissionFacts = {
   d8Threshold?: number | null;
   d8AvgBuyPrice?: number | null;
   d9ProfitRatio?: number | null;
+  d9AvgBuyPrice?: number | null;
+  d9DaysToResolve?: number | null;
   d9PublicTradeCount24h?: number | null;
 };
 
@@ -333,6 +336,8 @@ type SuppressionFacts = {
    *   the 1h reference price did not show a sufficient decline. Sticky → deduped.
    * - `post-buy-fill-cooldown` — short infrastructure delay after a BUY fill
    *   so exchange balance settlement can catch up before SELL placement.
+   * - `h5-wide-cohort-guard` — ADR-031 D9 guard for S2 mid-entry
+   *   long-horizon loss positions.
    *
    * Adding a new reason: pick a kebab/snake-case identifier, document it
    * here, and decide whether it should join `DEDUPED_SUPPRESSION_REASONS`
@@ -501,6 +506,7 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // Short-lived exchange settlement timing guard. Deduping keeps clustered
   // SELL-capable legs from writing several identical rows during a 5s window.
   POST_BUY_FILL_COOLDOWN_REASON,
+  H5_WIDE_COHORT_GUARD_REASON,
 ]);
 const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
@@ -1308,6 +1314,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     if (legState && this.deps.executionPolicy) {
       const lossExitPolicy = this.deps.executionPolicy().lossExit;
       if (lossExitPolicy?.enabled) {
+        const d9DaysToResolve = resolveDaysToResolve(market.endDate, now);
         const d9 = evaluateD9LossExit(
           {
             state,
@@ -1315,15 +1322,33 @@ export class AlgoDecisionModule implements RuntimeModule {
             cumulativeBuySize: legState.cumulativeBuySize ?? 0,
             cumulativeBuyNotional: legState.cumulativeBuyNotional ?? 0,
             publicTradeCount24h: market.publicTradeCount24h ?? null,
+            daysToResolve: d9DaysToResolve,
           },
           lossExitPolicy,
         );
+        const d9EmissionFacts: EmissionFacts = {
+          ...emissionFacts,
+          d9ProfitRatio: d9.profitRatio,
+          d9AvgBuyPrice: d9.avgBuyPrice,
+          d9DaysToResolve: d9.daysToResolve,
+          d9PublicTradeCount24h: d9.publicTradeCount24h,
+        };
+        if (d9.reason === H5_WIDE_COHORT_GUARD_REASON) {
+          this.recordDecisionSuppressed({
+            tokenId: market.tokenId,
+            conditionId: market.conditionId,
+            reasonCode: H5_WIDE_COHORT_GUARD_REASON,
+            side: "SELL",
+            decisionRuleId: "D9_LOSS_EXIT",
+            state,
+            price,
+            buyCount,
+            timeSinceLastSeconds,
+            emissionFacts: d9EmissionFacts,
+            timestamp: new Date(now).toISOString(),
+          });
+        }
         if (d9.fire) {
-          const d9EmissionFacts: EmissionFacts = {
-            ...emissionFacts,
-            d9ProfitRatio: d9.profitRatio,
-            d9PublicTradeCount24h: d9.publicTradeCount24h,
-          };
           return this.buildSignalOrSuppressSellResidual(
             market,
             { action: "SELL", ruleId: "D9_LOSS_EXIT" },
@@ -1887,6 +1912,10 @@ export class AlgoDecisionModule implements RuntimeModule {
           timeSinceLastSeconds: facts.timeSinceLastSeconds,
           firstTradePrice: facts.emissionFacts.firstTradePrice,
           legTradeCount: facts.emissionFacts.legTradeCount,
+          d9ProfitRatio: facts.emissionFacts.d9ProfitRatio ?? null,
+          d9AvgBuyPrice: facts.emissionFacts.d9AvgBuyPrice ?? null,
+          d9DaysToResolve: facts.emissionFacts.d9DaysToResolve ?? null,
+          d9PublicTradeCount24h: facts.emissionFacts.d9PublicTradeCount24h ?? null,
           tradeCount: facts.tradeCount ?? null,
           tradeCountSource: facts.tradeCountSource ?? null,
           continuationMode: this.continuationMode,
@@ -2145,4 +2174,12 @@ export class AlgoDecisionModule implements RuntimeModule {
       orderId: null,
     });
   }
+}
+
+function resolveDaysToResolve(endDate: string | null, nowMs: number): number | null {
+  if (endDate == null || endDate.trim() === "") return null;
+  const endMs = Date.parse(endDate);
+  if (!Number.isFinite(endMs)) return null;
+  const daysToResolve = (endMs - nowMs) / 86_400_000;
+  return Number.isFinite(daysToResolve) ? daysToResolve : null;
 }

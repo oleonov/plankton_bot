@@ -2807,6 +2807,7 @@ describe("AlgoDecisionModule", () => {
         executionPolicy: () => ({
           ...DEFAULT_EXECUTION_POLICY,
           lossExit: {
+            ...DEFAULT_EXECUTION_POLICY.lossExit,
             enabled: true,
             states: ["S1", "S2"],
             minPublicTradeCount24h: 41,
@@ -2850,6 +2851,7 @@ describe("AlgoDecisionModule", () => {
         executionPolicy: () => ({
           ...DEFAULT_EXECUTION_POLICY,
           lossExit: {
+            ...DEFAULT_EXECUTION_POLICY.lossExit,
             enabled: true,
             states: ["S1", "S2"],
             minPublicTradeCount24h: 41,
@@ -2878,6 +2880,63 @@ describe("AlgoDecisionModule", () => {
         payload: expect.objectContaining({
           reasonCode: "d6-suppressed",
           decisionRuleId: "D6",
+        }),
+      });
+    });
+
+    it("records H5_wide guard suppression before falling through to D6 HOLD", async () => {
+      const tokenId = "token-d9-h5-guarded-loss";
+      algoRulesRepo = withR37Rules();
+      legStateRepo = createMockLegStateRepo([
+        {
+          ...makeR37LegState(tokenId),
+          cumulativeBuySize: 100,
+          cumulativeBuyNotional: 10,
+        },
+      ]);
+      const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+      const mod = buildModule({
+        riskEventRepo,
+        executionPolicy: () => ({
+          ...DEFAULT_EXECUTION_POLICY,
+          lossExit: {
+            ...DEFAULT_EXECUTION_POLICY.lossExit,
+            enabled: true,
+            states: ["S1", "S2"],
+            minPublicTradeCount24h: 41,
+          },
+        }),
+      });
+      await mod.start();
+
+      await (bus as any).emit("NormalizedMarketUpdated", {
+        markets: [
+          {
+            ...makeMarket(tokenId, "r37", 0.07, `cond-${tokenId}`),
+            endDate: new Date(Date.now() + 100 * 86_400_000).toISOString(),
+            publicTradeCount24h: 100,
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      await mod.stop();
+
+      const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+        ([ev]) => ev === "SignalProduced",
+      );
+      expect(signalCalls).toHaveLength(0);
+      expect(riskEventRepo.insert).toHaveBeenCalledWith({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          reasonCode: "h5-wide-cohort-guard",
+          decisionRuleId: "D9_LOSS_EXIT",
+          side: "SELL",
+          state: "S2",
+          buyCount: 4,
+          d9ProfitRatio: expect.any(Number),
+          d9AvgBuyPrice: expect.any(Number),
+          d9DaysToResolve: expect.any(Number),
+          d9PublicTradeCount24h: 100,
         }),
       });
     });

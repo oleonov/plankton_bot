@@ -146,6 +146,13 @@ export const DEFAULT_LOSS_EXIT_POLICY: D9LossExitPolicy = {
   // states [S1, S2]: S3 has 0 HOLD samples (terminal), OTHER too few.
   states: ["S1", "S2"],
   minPublicTradeCount24h: 41,
+  cohortGuard: {
+    enabled: true,
+    state: "S2",
+    avgBuyMin: 0.02,
+    avgBuyMax: 0.4,
+    minDaysToResolve: 14,
+  },
 };
 
 export const DEFAULT_ORDER_LIFETIME_POLICY: OrderLifetimePolicy = {
@@ -299,6 +306,9 @@ const BOUND_REDEEM_SWEEP_INTERVAL_MAX_MS = 24 * 60 * 60_000;
 const BOUND_REDEEM_SWEEP_RETRY_COUNT_MAX = 10;
 const BOUND_PUBLIC_TRADE_COUNT_MIN = 0;
 const BOUND_PUBLIC_TRADE_COUNT_MAX = 1_000_000;
+const BOUND_H5_AVG_BUY_MIN = 0;
+const BOUND_H5_AVG_BUY_MAX = 1;
+const BOUND_H5_DAYS_TO_RESOLVE_MAX = 3650;
 
 export interface ParseResult {
   policy: ExecutionPolicy;
@@ -549,6 +559,60 @@ function parseLossExit(raw: unknown, issues: string[]): D9LossExitPolicy {
       BOUND_PUBLIC_TRADE_COUNT_MAX,
       issues,
       "lossExit.minPublicTradeCount24h",
+    ),
+    cohortGuard: parseLossExitCohortGuard(obj.cohortGuard, issues),
+  };
+}
+
+function parseLossExitCohortGuard(raw: unknown, issues: string[]): D9LossExitPolicy["cohortGuard"] {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("lossExit.cohortGuard must be an object");
+    return DEFAULT_LOSS_EXIT_POLICY.cohortGuard;
+  }
+  const obj = raw as Record<string, unknown>;
+  const avgBuyMin = clampedNumber(
+    obj.avgBuyMin,
+    DEFAULT_LOSS_EXIT_POLICY.cohortGuard.avgBuyMin,
+    BOUND_H5_AVG_BUY_MIN,
+    BOUND_H5_AVG_BUY_MAX,
+    issues,
+    "lossExit.cohortGuard.avgBuyMin",
+  );
+  const avgBuyMax = clampedNumber(
+    obj.avgBuyMax,
+    DEFAULT_LOSS_EXIT_POLICY.cohortGuard.avgBuyMax,
+    BOUND_H5_AVG_BUY_MIN,
+    BOUND_H5_AVG_BUY_MAX,
+    issues,
+    "lossExit.cohortGuard.avgBuyMax",
+  );
+  if (avgBuyMin >= avgBuyMax) {
+    issues.push("lossExit.cohortGuard.avgBuyMin must be less than avgBuyMax");
+    return DEFAULT_LOSS_EXIT_POLICY.cohortGuard;
+  }
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_LOSS_EXIT_POLICY.cohortGuard.enabled,
+      issues,
+      "lossExit.cohortGuard.enabled",
+    ),
+    state: enumOr(
+      obj.state,
+      ALGO_STATES,
+      DEFAULT_LOSS_EXIT_POLICY.cohortGuard.state,
+      issues,
+      "lossExit.cohortGuard.state",
+    ),
+    avgBuyMin,
+    avgBuyMax,
+    minDaysToResolve: clampedNumber(
+      obj.minDaysToResolve,
+      DEFAULT_LOSS_EXIT_POLICY.cohortGuard.minDaysToResolve,
+      0,
+      BOUND_H5_DAYS_TO_RESOLVE_MAX,
+      issues,
+      "lossExit.cohortGuard.minDaysToResolve",
     ),
   };
 }
