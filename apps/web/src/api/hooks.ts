@@ -3,6 +3,7 @@ import { apiFetch, apiPost, apiPut, apiPatch, apiDelete } from "./client.ts";
 import type {
   StatusData,
   MetricsData,
+  CoverageMetricsData,
   PnlDataPoint,
   PortfolioSeriesResponse,
   PositionDTO,
@@ -24,6 +25,7 @@ import type {
   EventMetric,
   ExecutionPolicyDTO,
   ExecutionPolicyResponse,
+  R23MetricsData,
 } from "./types.ts";
 
 function withParams(
@@ -71,6 +73,22 @@ export function useMetrics() {
     queryKey: ["metrics"],
     queryFn: () => apiFetch<MetricsData>("/api/v1/metrics"),
     refetchInterval: 30_000,
+  });
+}
+
+export function useCoverageMetrics() {
+  return useQuery({
+    queryKey: ["metrics", "coverage"],
+    queryFn: () => apiFetch<CoverageMetricsData>("/api/v1/metrics/coverage"),
+    refetchInterval: 10_000,
+  });
+}
+
+export function useR23Metrics() {
+  return useQuery({
+    queryKey: ["metrics", "r23"],
+    queryFn: () => apiFetch<R23MetricsData>("/api/v1/metrics/r23"),
+    refetchInterval: 10_000,
   });
 }
 

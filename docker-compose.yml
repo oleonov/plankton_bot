@@ -13,12 +13,16 @@ services:
       - krabs-data:/app/apps/runtime/data
     restart: unless-stopped
     env_file: .env.production
-    mem_limit: 640m
+    mem_limit: 2g
     logging: *json-logging
     environment:
       # --heapsnapshot-signal=SIGUSR2 lets ops dump a heap snapshot on demand
       # (docker kill -s SIGUSR2 krabs-krabs-runtime-1) for leak triage.
-      - NODE_OPTIONS=--max-old-space-size=448 --heapsnapshot-signal=SIGUSR2
+      - NODE_OPTIONS=--max-old-space-size=1536 --heapsnapshot-signal=SIGUSR2
+      - MARKET_DATA_MAX_TRACKED_TOKENS=5000
+      - MARKET_DATA_MAX_WS_SHARDS=10
+      - MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS=300000
+      - MARKET_DATA_DISCOVERY_BATCH_SIZE=500
 
   krabs-api:
     image: ghcr.io/oleonov/krabs:latest
@@ -39,6 +43,10 @@ services:
       # Always behind nginx in production
       - TRUST_PROXY=true
       - NODE_OPTIONS=--max-old-space-size=192
+      - MARKET_DATA_MAX_TRACKED_TOKENS=5000
+      - MARKET_DATA_MAX_WS_SHARDS=10
+      - MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS=300000
+      - MARKET_DATA_DISCOVERY_BATCH_SIZE=500
     healthcheck:
       test:
         [

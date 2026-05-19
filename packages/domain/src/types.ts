@@ -757,6 +757,14 @@ export interface DropTriggerPolicy {
   historyMaxAgeMs: number;
 }
 
+export interface R23DipTriggerPolicy {
+  enabled: boolean;
+  /** R23 dip ratio threshold: current midpoint / max(midpoint over window). */
+  dropThresholdRatio: number;
+  /** Lookback window used for max-midpoint peak detection. */
+  windowMs: number;
+}
+
 export interface MultiBuyLadderPolicy {
   enabled: boolean;
   maxLadderFillsPerToken: number;
@@ -846,6 +854,7 @@ export interface ExecutionPolicy {
   repriceOnOutbid: RepriceOnOutbidPolicy;
   exitRepriceOnDownprice: ExitRepriceOnDownpricePolicy;
   dropTrigger: DropTriggerPolicy;
+  r23DipTrigger: R23DipTriggerPolicy;
   multiBuyLadder: MultiBuyLadderPolicy;
   redeemSweep: RedeemSweepPolicy;
   raceProtection: RaceProtectionPolicy;

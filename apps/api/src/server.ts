@@ -163,7 +163,9 @@ export async function buildServer(deps: ServerDeps) {
   await app.register(metricsRoutes, {
     prefix: "/api/v1",
     ledgerDb: deps.ledgerDb,
+    controlDb: deps.controlDb,
     ledgerPool: deps.ledgerPool,
+    config: deps.config,
   });
   await app.register(profileRoutes, {
     prefix: "/api/v1",

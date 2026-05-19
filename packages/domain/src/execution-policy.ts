@@ -24,6 +24,7 @@ import type {
   OpportunisticTakerPolicy,
   ProfitTargetPolicyConfig,
   RaceProtectionPolicy,
+  R23DipTriggerPolicy,
   RedeemSweepPolicy,
   RepriceChainPolicyConfig,
   RepriceOnOutbidPolicy,
@@ -97,6 +98,14 @@ export const DEFAULT_DROP_TRIGGER_POLICY: DropTriggerPolicy = {
   thresholdPct: -0.02,
   lookbackMs: 60 * 60_000,
   historyMaxAgeMs: 10 * 60_000,
+};
+
+export const DEFAULT_R23_DIP_TRIGGER_POLICY: R23DipTriggerPolicy = {
+  enabled: true,
+  // R23: 0.683 = 1 - 0.317 dip threshold from the historical first-BUY
+  // entry-signal sample. ADR-033 owns the deployment rationale.
+  dropThresholdRatio: 0.683,
+  windowMs: 24 * 60 * 60_000,
 };
 
 export const DEFAULT_MULTI_BUY_LADDER_POLICY: MultiBuyLadderPolicy = {
@@ -237,6 +246,7 @@ export const DEFAULT_EXECUTION_POLICY: ExecutionPolicy = {
   repriceOnOutbid: DEFAULT_REPRICE_ON_OUTBID_POLICY,
   exitRepriceOnDownprice: DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   dropTrigger: DEFAULT_DROP_TRIGGER_POLICY,
+  r23DipTrigger: DEFAULT_R23_DIP_TRIGGER_POLICY,
   multiBuyLadder: DEFAULT_MULTI_BUY_LADDER_POLICY,
   redeemSweep: DEFAULT_REDEEM_SWEEP_POLICY,
   raceProtection: DEFAULT_RACE_PROTECTION_POLICY,
@@ -294,6 +304,8 @@ const BOUND_STUCK_WARNING_GAP_PCT_MIN = 0;
 const BOUND_STUCK_WARNING_GAP_PCT_MAX = 1;
 const BOUND_DROP_TRIGGER_THRESHOLD_MIN = -1;
 const BOUND_DROP_TRIGGER_THRESHOLD_MAX = 0;
+const BOUND_R23_DIP_TRIGGER_RATIO_MIN = 0.001;
+const BOUND_R23_DIP_TRIGGER_RATIO_MAX = 1;
 const BOUND_FILL_RATE_MIN = 0;
 const BOUND_FILL_RATE_MAX = 1;
 // Parser ceiling only; profile capital/order risk limits still constrain live exposure.
@@ -411,6 +423,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
   const repriceOnOutbid = parseRepriceOnOutbid(obj.repriceOnOutbid, issues);
   const exitRepriceOnDownprice = parseExitRepriceOnDownprice(obj.exitRepriceOnDownprice, issues);
   const dropTrigger = parseDropTrigger(obj.dropTrigger, issues);
+  const r23DipTrigger = parseR23DipTrigger(obj.r23DipTrigger, issues);
   const multiBuyLadder = parseMultiBuyLadder(obj.multiBuyLadder, issues);
   const redeemSweep = parseRedeemSweep(obj.redeemSweep, issues);
   const raceProtection = parseRaceProtection(obj.raceProtection, issues);
@@ -442,6 +455,7 @@ export function parseExecutionPolicyJson(jsonString: string | null | undefined):
       repriceOnOutbid,
       exitRepriceOnDownprice,
       dropTrigger,
+      r23DipTrigger,
       multiBuyLadder,
       redeemSweep,
       raceProtection,
@@ -779,6 +793,36 @@ function parseDropTrigger(raw: unknown, issues: string[]): DropTriggerPolicy {
       obj.historyMaxAgeMs,
       DEFAULT_DROP_TRIGGER_POLICY.historyMaxAgeMs,
       "dropTrigger.historyMaxAgeMs",
+      issues,
+    ),
+  };
+}
+
+function parseR23DipTrigger(raw: unknown, issues: string[]): R23DipTriggerPolicy {
+  if (raw == null || typeof raw !== "object" || Array.isArray(raw)) {
+    if (raw !== undefined) issues.push("r23DipTrigger must be an object");
+    return DEFAULT_R23_DIP_TRIGGER_POLICY;
+  }
+  const obj = raw as Record<string, unknown>;
+  return {
+    enabled: booleanOr(
+      obj.enabled,
+      DEFAULT_R23_DIP_TRIGGER_POLICY.enabled,
+      issues,
+      "r23DipTrigger.enabled",
+    ),
+    dropThresholdRatio: clampedNumber(
+      obj.dropThresholdRatio,
+      DEFAULT_R23_DIP_TRIGGER_POLICY.dropThresholdRatio,
+      BOUND_R23_DIP_TRIGGER_RATIO_MIN,
+      BOUND_R23_DIP_TRIGGER_RATIO_MAX,
+      issues,
+      "r23DipTrigger.dropThresholdRatio",
+    ),
+    windowMs: lifetimeMs(
+      obj.windowMs,
+      DEFAULT_R23_DIP_TRIGGER_POLICY.windowMs,
+      "r23DipTrigger.windowMs",
       issues,
     ),
   };

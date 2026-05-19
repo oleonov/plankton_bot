@@ -155,6 +155,7 @@ import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { RuntimeMetricWriter } from "./runtime-metric-writer.js";
+import { SustainedThresholdAlert } from "./modules/algo-decision/decision-metrics.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { installConsoleRedaction } from "./console-redaction.js";
@@ -175,6 +176,9 @@ import {
 const ENTRY_FILL_LATENCY_TRACK_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const RISK_EVENT_WARNING_THRESHOLD_PER_HOUR = 1_000;
 const RISK_EVENT_WARNING_COOLDOWN_MS = 10 * 60 * 1000;
+const DECISION_TICK_LATENCY_ALERT_THRESHOLD_MS = 30_000;
+const DECISION_TICK_LATENCY_ALERT_SUSTAINED_MS = 5 * 60 * 1000;
+const DECISION_TICK_LATENCY_ALERT_COOLDOWN_MS = 15 * 60 * 1000;
 
 interface OrderCapacityWindow {
   placeCalls: number;
@@ -927,6 +931,11 @@ async function main(): Promise<void> {
   universeFunnelLogTimer.unref();
 
   const priceHistoryProvider = new MarketSnapshotPriceHistoryProvider(ledgerConn.db);
+  const decisionTickLatencyAlert = new SustainedThresholdAlert(
+    DECISION_TICK_LATENCY_ALERT_THRESHOLD_MS,
+    DECISION_TICK_LATENCY_ALERT_SUSTAINED_MS,
+    DECISION_TICK_LATENCY_ALERT_COOLDOWN_MS,
+  );
 
   const algoDecisionModule = new AlgoDecisionModule({
     bus,
@@ -1012,6 +1021,38 @@ async function main(): Promise<void> {
         JSON.stringify(snapshot),
         snapshot.capturedAt,
       );
+      runtimeMetrics.writeLatest(
+        "algo_decision_latency",
+        snapshot.decisionTickLatency.p95Ms ?? 0,
+        JSON.stringify(snapshot.decisionTickLatency),
+        snapshot.capturedAt,
+      );
+      runtimeMetrics.writeLatest(
+        "r23_cache_activity",
+        snapshot.r23Cache?.hitRate ?? 0,
+        JSON.stringify(snapshot.r23Cache ?? { invocations: 0, hits: 0, misses: 0, hitRate: null }),
+        snapshot.capturedAt,
+      );
+      const alertNow = Date.parse(snapshot.capturedAt);
+      if (
+        decisionTickLatencyAlert.observe(
+          snapshot.decisionTickLatency.p95Ms,
+          Number.isFinite(alertNow) ? alertNow : Date.now(),
+        )
+      ) {
+        recordInfraAlert({
+          code: "DECISION_TICK_LATENCY_P95_HIGH",
+          severity: "error",
+          source: "algo-decision",
+          message: "Decision tick latency p95 exceeded 30s for 5 minutes.",
+          details: {
+            thresholdMs: DECISION_TICK_LATENCY_ALERT_THRESHOLD_MS,
+            sustainedMs: DECISION_TICK_LATENCY_ALERT_SUSTAINED_MS,
+            cooldownMs: DECISION_TICK_LATENCY_ALERT_COOLDOWN_MS,
+            latency: snapshot.decisionTickLatency,
+          },
+        });
+      }
     },
     log,
     sweepIntervalMs: config.strategyScanIntervalMs,

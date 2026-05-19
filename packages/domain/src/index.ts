@@ -27,6 +27,7 @@ export {
   DEFAULT_ORDER_LIFETIME_POLICY,
   DEFAULT_EXIT_REPRICE_ON_DOWNPRICE_POLICY,
   DEFAULT_ENTRY_MIN_MARKET_AGE_SECONDS,
+  DEFAULT_R23_DIP_TRIGGER_POLICY,
   DEFAULT_LOSS_EXIT_POLICY,
   DEFAULT_DEPOSIT_ACTIVATION_POLICY,
   parseExecutionPolicyJson,
@@ -66,6 +67,17 @@ export type {
   MinMarketAgeResult,
   MinMarketAgeReasonCode,
 } from "./min-market-age.js";
+export {
+  R23_DIP_TRIGGER_RULE_ID,
+  R23_DIP_FIRED_REASON,
+  R23_DISABLED_REASON,
+  R23_EXISTING_POSITION_REASON,
+  R23_INVALID_PRICE_REASON,
+  R23_NO_HISTORY_REASON,
+  R23_NO_DIP_REASON,
+  evaluateR23DipTrigger,
+} from "./r23-dip-trigger.js";
+export type { R23DipTriggerContext, R23DipTriggerResult } from "./r23-dip-trigger.js";
 export { deriveCategory, HEURISTIC_CATEGORIES } from "./category.js";
 export type { HeuristicCategory } from "./category.js";
 export {

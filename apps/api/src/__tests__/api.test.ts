@@ -691,6 +691,125 @@ describe("GET /status", () => {
 
     conn.db.exec(`DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity'`);
   });
+
+  it("GET /metrics/coverage exposes WS coverage against active/tradable universe", async () => {
+    conn.db.exec(`
+      INSERT OR IGNORE INTO markets (token_id, condition_id, slug, question, outcome, active, tradable, tick_size, neg_risk, end_date, created_at, updated_at)
+      VALUES
+        ('coverage-tok-1', 'coverage-cond-1', 'coverage-1', 'Coverage 1?', 'Yes', 1, 1, 0.01, 0, '2026-06-01T00:00:00Z', '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z'),
+        ('coverage-tok-2', 'coverage-cond-2', 'coverage-2', 'Coverage 2?', 'Yes', 1, 1, 0.01, 0, '2026-06-01T00:00:00Z', '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z');
+      DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity';
+      DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity');
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"shardCount":2}', '2026-05-18T00:00:00Z');
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES
+        ('algo_decision_latency', 123, '{"p95Ms":123,"p99Ms":456}', '2026-05-18T00:00:00Z'),
+        ('r23_cache_activity', 0.5, '{"hitRate":0.5,"hits":1,"misses":1,"invocations":2}', '2026-05-18T00:00:00Z');
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/coverage",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+
+    expect(body.ok).toBe(true);
+    expect(body.data.ws_tracked).toBe(2);
+    expect(body.data.universe_active).toBe(3);
+    expect(body.data.coverage_pct).toBeCloseTo(66.666, 2);
+    expect(body.data.events_per_sec).toBe(7.5);
+    expect(body.data.shard_count).toBe(2);
+    expect(body.data.discovery_batch_size).toBe(200);
+    expect(body.data.discovery_poll_interval_ms).toBe(60_000);
+    expect(body.data.rotation_cycle_hours).toBeCloseTo(1 / 200 / 60, 8);
+    expect(body.data.plankton_reference_weekly).toBe(2450);
+    expect(body.data.decision_tick_latency_p95_ms).toBe(123);
+    expect(body.data.decision_tick_latency_p99_ms).toBe(456);
+    expect(body.data.r23_cache_hit_rate).toBe(0.5);
+
+    conn.db.exec(
+      `DELETE FROM runtime_metrics WHERE metric_name IN ('market_data_stream_activity', 'algo_decision_latency', 'r23_cache_activity')`,
+    );
+  });
+
+  it("GET /metrics/r23 exposes R23 counters, hourly buckets, cache stats, and fills", async () => {
+    const eventAt = new Date(Date.now() - 60 * 60_000);
+    const eventIso = eventAt.toISOString();
+    const eventSql = eventIso.replace("T", " ").slice(0, 19);
+    const expectedHour = new Date(
+      Date.UTC(
+        eventAt.getUTCFullYear(),
+        eventAt.getUTCMonth(),
+        eventAt.getUTCDate(),
+        eventAt.getUTCHours(),
+      ),
+    )
+      .toISOString()
+      .replace(".000Z", "Z");
+    conn.db.exec(`
+      DELETE FROM runtime_metrics WHERE metric_name = 'algo_decision_eval_counters';
+      INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
+      VALUES ('algo_decision_eval_counters', 10, '{"r23DipChecked":10,"r23DipFired":2,"r23NoHistory":3,"r23NoDip":5,"r23Cache":{"hitRate":0.25,"hits":1,"misses":3,"invocations":4},"decisionTickLatency":{"p95Ms":99,"p99Ms":120}}', '${eventIso}');
+      INSERT INTO decision_signal_log
+        (signal_id, token_id, condition_id, side, decision_rule_id, state, price, buy_count, signal_timestamp)
+      VALUES
+        ('sig-r23-1', 'tok-r23', 'cond-r23', 'buy', 'R23_DIP_TRIGGER', 'OTHER', 0.1, 0, '${eventIso}'),
+        ('sig-r23-2', 'tok-r23', 'cond-r23', 'buy', 'R23_DIP_TRIGGER', 'OTHER', 0.1, 0, '${eventIso}');
+      INSERT INTO risk_events (event_type, payload, created_at)
+      VALUES
+        ('signal_suppressed', '{"decisionRuleId":"R23_DIP_TRIGGER","reasonCode":"r23-no-history"}', '${eventSql}'),
+        ('signal_suppressed', '{"decisionRuleId":"R23_DIP_TRIGGER","reasonCode":"r23-no-dip"}', '${eventSql}');
+      INSERT INTO orders
+        (order_id, client_order_id, token_id, condition_id, side, order_type, post_only, price, size, size_usdc, status, decision_rule_id, bot_run_id, created_at, updated_at)
+      VALUES
+        ('ord-r23', 'client-r23', 'tok-r23', 'cond-r23', 'buy', 'limit', 1, 0.1, 10, 1, 'filled', 'R23_DIP_TRIGGER', 'run-r23', '${eventSql}', '${eventSql}');
+      INSERT INTO fills
+        (fill_id, order_id, token_id, condition_id, side, price, size, size_usdc, decision_rule_id, filled_at)
+      VALUES
+        ('fill-r23', 'ord-r23', 'tok-r23', 'cond-r23', 'buy', 0.1, 10, 1, 'R23_DIP_TRIGGER', '${eventSql}');
+    `);
+
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/v1/metrics/r23",
+      headers: authHeaders(),
+    });
+    const body = json(res);
+
+    expect(body.ok).toBe(true);
+    expect(body.data.current).toMatchObject({
+      checked: 10,
+      fired: 2,
+      no_history: 3,
+      no_dip: 5,
+      cache_hit_rate: 0.25,
+      cache_hits: 1,
+      cache_misses: 3,
+      cache_invocations: 4,
+      decision_tick_latency_p95_ms: 99,
+      decision_tick_latency_p99_ms: 120,
+    });
+    expect(body.data.hourly.fires).toContainEqual({ hour: expectedHour, count: 2 });
+    expect(body.data.hourly.skips).toEqual(
+      expect.arrayContaining([
+        { hour: expectedHour, reason: "r23-no-history", count: 1 },
+        { hour: expectedHour, reason: "r23-no-dip", count: 1 },
+      ]),
+    );
+    expect(body.data.orders_24h).toBe(1);
+    expect(body.data.fills_24h).toBe(1);
+    expect(body.data.fill_notional_usdc_24h).toBe(1);
+
+    conn.db.exec(`
+      DELETE FROM runtime_metrics WHERE metric_name = 'algo_decision_eval_counters';
+      DELETE FROM decision_signal_log WHERE signal_id LIKE 'sig-r23-%';
+      DELETE FROM risk_events WHERE payload LIKE '%R23_DIP_TRIGGER%';
+      DELETE FROM fills WHERE fill_id = 'fill-r23';
+      DELETE FROM orders WHERE order_id = 'ord-r23';
+    `);
+  });
 });
 
 // ─── Positions with filters ─────────────────────────────────────────

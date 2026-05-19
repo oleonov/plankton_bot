@@ -325,6 +325,52 @@ export interface MetricsData {
   totalRealizedPnl: number;
 }
 
+/** GET /metrics/coverage */
+export interface CoverageMetricsData {
+  ws_tracked: number;
+  universe_active: number;
+  markets_total: number;
+  markets_active: number;
+  coverage_pct: number;
+  events_per_sec: number;
+  shard_count: number;
+  rotation_cycle_hours: number;
+  positions_opened_24h: number;
+  plankton_reference_weekly: number;
+  discovery_batch_size: number;
+  discovery_poll_interval_ms: number;
+  max_tracked_tokens: number | null;
+  decision_tick_latency_p95_ms: number | null;
+  decision_tick_latency_p99_ms: number | null;
+  r23_cache_hit_rate: number | null;
+  captured_at: string | null;
+}
+
+/** GET /metrics/r23 */
+export interface R23MetricsData {
+  current: {
+    checked: number;
+    fired: number;
+    no_history: number;
+    no_dip: number;
+    cache_hit_rate: number | null;
+    cache_hits: number;
+    cache_misses: number;
+    cache_invocations: number;
+    decision_tick_latency_p95_ms: number | null;
+    decision_tick_latency_p99_ms: number | null;
+    captured_at: string | null;
+  };
+  hourly: {
+    fires: Array<{ hour: string; count: number }>;
+    skips: Array<{ hour: string; reason: string; count: number }>;
+  };
+  orders_24h: number;
+  fills_24h: number;
+  fill_notional_usdc_24h: number;
+  since: string;
+}
+
 /** GET /metrics/pnl-series */
 export interface PnlDataPoint {
   date: string;

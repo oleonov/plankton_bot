@@ -432,6 +432,182 @@ describe("AlgoDecisionModule", () => {
     await mod.stop();
   });
 
+  it("emits R23_DIP_TRIGGER BUY before FALLBACK HOLD when the 24h dip threshold is met", async () => {
+    const tokenId = "token-r23-dip";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const decisionSignalLogRepo: DecisionSignalLogRepository = { insert: vi.fn() };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const priceHistoryProvider = {
+      findReferencePrice: vi.fn(() => null),
+      maxMidpointInWindow: vi.fn(() => 0.6),
+    };
+    const mod = buildModule({
+      decisionSignalLogRepo,
+      riskEventRepo,
+      priceHistoryProvider,
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(1);
+    const signal = signalCalls[0]![1].signal as import("@krabs/domain").Signal;
+    expect(signal.side).toBe("buy");
+    expect(signal.decisionRuleId).toBe("R23_DIP_TRIGGER");
+    expect(priceHistoryProvider.maxMidpointInWindow).toHaveBeenCalledWith(
+      createTokenId(tokenId),
+      86_400_000,
+      expect.any(Number),
+    );
+    expect(decisionSignalLogRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({ decisionRuleId: "R23_DIP_TRIGGER" }),
+    );
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "signal_emitted",
+        payload: expect.objectContaining({
+          decisionRuleId: "R23_DIP_TRIGGER",
+          r23DipRatio: 0.5,
+          r23MaxMidpoint: 0.6,
+          r23WindowMs: 86_400_000,
+        }),
+      }),
+    );
+
+    await mod.stop();
+  });
+
+  it("falls through to FALLBACK HOLD without emitting BUY when R23 sees no dip", async () => {
+    const tokenId = "token-r23-no-dip";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      riskEventRepo,
+      priceHistoryProvider: {
+        findReferencePrice: vi.fn(() => null),
+        maxMidpointInWindow: vi.fn(() => 0.4),
+      },
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(0);
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          reasonCode: "r23-no-dip",
+          decisionRuleId: "R23_DIP_TRIGGER",
+          r23DipRatio: expect.closeTo(0.75, 8),
+        }),
+      }),
+    );
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          reasonCode: "decision-rule-hold",
+          decisionRuleId: "FALLBACK",
+        }),
+      }),
+    );
+
+    await mod.stop();
+  });
+
+  it("falls through to FALLBACK HOLD without emitting BUY when R23 lacks history", async () => {
+    const tokenId = "token-r23-no-history";
+    selectedMarketCache = createMockSelectedMarketCache([tokenId]);
+    algoRulesRepo = {
+      getDecisionRules: vi.fn(() =>
+        SEED_DECISION_RULES.map((rule) =>
+          rule.ruleId === "FALLBACK" ? { ...rule, action: "HOLD" as const } : rule,
+        ),
+      ),
+      getSizeRules: vi.fn((actionType: "BUY" | "SELL") =>
+        actionType === "BUY" ? SEED_SIZE_RULES_BUY : SEED_SIZE_RULES_SELL,
+      ),
+    };
+    const riskEventRepo: RiskEventRepository = { insert: vi.fn(), countSince: vi.fn() };
+    const mod = buildModule({
+      riskEventRepo,
+      priceHistoryProvider: {
+        findReferencePrice: vi.fn(() => null),
+        maxMidpointInWindow: vi.fn(() => null),
+      },
+      executionPolicy: () => ({
+        ...DEFAULT_EXECUTION_POLICY,
+        entryMinMarketAgeSeconds: 0,
+        r23DipTrigger: { ...DEFAULT_EXECUTION_POLICY.r23DipTrigger, enabled: true },
+      }),
+    });
+    await mod.start();
+
+    await (bus as any).emit("NormalizedMarketUpdated", {
+      markets: [makeMarket(tokenId, null, 0.3)],
+      timestamp: Date.now(),
+    });
+
+    const signalCalls = (bus.publish as ReturnType<typeof vi.fn>).mock.calls.filter(
+      ([ev]) => ev === "SignalProduced",
+    );
+    expect(signalCalls).toHaveLength(0);
+    expect(riskEventRepo.insert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventType: "signal_suppressed",
+        payload: expect.objectContaining({
+          reasonCode: "r23-no-history",
+          decisionRuleId: "R23_DIP_TRIGGER",
+        }),
+      }),
+    );
+
+    await mod.stop();
+  });
+
   it("pre-filter uses bestBid (not midPrice) for BUY executability — keeps signals downstream would accept", async () => {
     // Spec: order-size-below-minimum pre-filter must stay strictly more
     // permissive than signal-to-order.resolveOrderSize, which uses the
@@ -3224,7 +3400,22 @@ describe("AlgoDecisionModule", () => {
       const tokenId = "token-liveness-metrics-sink";
       const sink = vi.fn();
       selectedMarketCache = createMockSelectedMarketCache([tokenId]);
-      const mod = buildModule({ evalMetricsSink: sink, evalMetricsEmitIntervalMs: 0 });
+      const mod = buildModule({
+        evalMetricsSink: sink,
+        evalMetricsEmitIntervalMs: 0,
+        priceHistoryProvider: {
+          findReferencePrice: vi.fn(() => null),
+          getWindowMaxCacheMetrics: vi.fn(() => ({
+            invocations: 4,
+            hits: 1,
+            misses: 3,
+            hitRate: 0.25,
+            entries: 3,
+            ttlMs: 60_000,
+            maxEntries: 10_000,
+          })),
+        },
+      });
       await mod.start();
 
       await (bus as any).emit("NormalizedMarketUpdated", {
@@ -3243,7 +3434,14 @@ describe("AlgoDecisionModule", () => {
         evalTotal: 1,
         suppressedMarketNotLive: 1,
         livenessBothFlags: 1,
+        r23Cache: {
+          invocations: 4,
+          hits: 1,
+          misses: 3,
+          hitRate: 0.25,
+        },
       });
+      expect(sink.mock.calls[0]?.[0].decisionTickLatency.p95Ms).toEqual(expect.any(Number));
 
       await mod.stop();
     });

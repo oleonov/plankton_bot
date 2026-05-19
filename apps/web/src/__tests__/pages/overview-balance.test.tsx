@@ -152,6 +152,26 @@ describe("Overview Balance Card", () => {
     expect(screen.getByText(/\$0\.480 fees.*2\.00% leakage/)).toBeInTheDocument();
   });
 
+  it("shows market coverage widget fed by coverage metrics endpoint", async () => {
+    renderWithProviders(<Overview />);
+
+    expect(await screen.findByText("Market Coverage")).toBeInTheDocument();
+    expect(screen.getByText("23.4%")).toBeInTheDocument();
+    expect(screen.getByText("5000 / 21348 WS tracked")).toBeInTheDocument();
+    expect(screen.getByText("10 shards · 42.7 ev/s")).toBeInTheDocument();
+    expect(screen.getByText("2.7h rotation · 17 opened 24h")).toBeInTheDocument();
+    expect(screen.getByText("p95 420ms · R23 cache 73%")).toBeInTheDocument();
+  });
+
+  it("shows R23 monitoring widget fed by R23 metrics endpoint", async () => {
+    renderWithProviders(<Overview />);
+
+    expect(await screen.findByText("R23 Dip Trigger")).toBeInTheDocument();
+    expect(screen.getByText("840 checked · 598 no dip")).toBeInTheDocument();
+    expect(screen.getByText("73% cache · 8 orders / 3 fills")).toBeInTheDocument();
+    expect(screen.getByText("p95 420ms · 230 no history")).toBeInTheDocument();
+  });
+
   it("shows execution telemetry note in execution quality card when no fills", async () => {
     server.use(
       http.get("/api/v1/status", () =>

@@ -1,16 +1,20 @@
 import type { FastifyPluginAsync } from "fastify";
 import type Database from "better-sqlite3";
+import type { AppConfig } from "@krabs/config";
+import { resolveActiveLedger } from "../active-ledger.js";
 import { computeExecutionTelemetry } from "../execution-telemetry.js";
 import { ok, fail } from "../errors.js";
 import type { LedgerPool } from "../ledger-pool.js";
 
 interface MetricsOpts {
   ledgerDb: Database.Database;
+  controlDb?: Database.Database;
   ledgerPool?: LedgerPool;
+  config?: AppConfig;
 }
 
 export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) => {
-  const { ledgerDb, ledgerPool } = opts;
+  const { ledgerDb, controlDb, ledgerPool, config } = opts;
 
   app.get("/metrics", async () => {
     const positions = ledgerDb
@@ -47,6 +51,160 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     });
   });
 
+  app.get("/metrics/coverage", async () => {
+    const { db } = resolveActiveLedger(ledgerDb, controlDb, ledgerPool);
+    const marketCounts = db
+      .prepare(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(CASE WHEN active = 1 THEN 1 ELSE 0 END), 0) AS active,
+                COALESCE(SUM(CASE WHEN active = 1 AND tradable = 1 THEN 1 ELSE 0 END), 0) AS activeTradable
+           FROM markets`,
+      )
+      .get() as { total: number; active: number; activeTradable: number };
+    const positionsOpened24h = db
+      .prepare(
+        `SELECT COUNT(*) AS cnt
+           FROM positions
+          WHERE julianday(opened_at) >= julianday(?)`,
+      )
+      .get(new Date(Date.now() - 24 * 60 * 60_000).toISOString()) as { cnt: number };
+    const streamRow = db
+      .prepare(
+        "SELECT labels, captured_at FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity' ORDER BY captured_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { labels: string | null; captured_at: string } | undefined;
+    const stream = parseJsonObject(streamRow?.labels);
+    const latencyRow = db
+      .prepare(
+        "SELECT labels FROM runtime_metrics WHERE metric_name = 'algo_decision_latency' ORDER BY captured_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { labels: string | null } | undefined;
+    const r23CacheRow = db
+      .prepare(
+        "SELECT labels FROM runtime_metrics WHERE metric_name = 'r23_cache_activity' ORDER BY captured_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { labels: string | null } | undefined;
+    const latency = parseJsonObject(latencyRow?.labels);
+    const r23Cache = parseJsonObject(r23CacheRow?.labels);
+    const wsTracked = readNumber(stream, "trackedTokenCount") ?? 0;
+    const eventsPerSec = readNumber(stream, "wsEventsReceivedPerSec") ?? 0;
+    const shardCount = readNumber(stream, "shardCount") ?? 0;
+    const universeActive = marketCounts.activeTradable;
+    const coveragePct = universeActive > 0 ? (wsTracked / universeActive) * 100 : 0;
+    const discoveryBatchSize = config?.marketDataDiscoveryBatchSize ?? 50;
+    const discoveryPollIntervalMs = config?.marketDataDiscoveryPollIntervalMs ?? 300_000;
+    const untracked = Math.max(0, universeActive - wsTracked);
+    const rotationCycleHours =
+      discoveryBatchSize > 0
+        ? (untracked / discoveryBatchSize) * (discoveryPollIntervalMs / 3_600_000)
+        : 0;
+
+    return ok({
+      ws_tracked: wsTracked,
+      universe_active: universeActive,
+      markets_total: marketCounts.total,
+      markets_active: marketCounts.active,
+      coverage_pct: coveragePct,
+      events_per_sec: eventsPerSec,
+      shard_count: shardCount,
+      rotation_cycle_hours: rotationCycleHours,
+      positions_opened_24h: positionsOpened24h.cnt,
+      plankton_reference_weekly: 2450,
+      discovery_batch_size: discoveryBatchSize,
+      discovery_poll_interval_ms: discoveryPollIntervalMs,
+      max_tracked_tokens: config?.marketDataMaxTrackedTokens ?? null,
+      decision_tick_latency_p95_ms: readNumber(latency, "p95Ms"),
+      decision_tick_latency_p99_ms: readNumber(latency, "p99Ms"),
+      r23_cache_hit_rate: readNumber(r23Cache, "hitRate"),
+      captured_at: streamRow?.captured_at ?? null,
+    });
+  });
+
+  app.get("/metrics/r23", async () => {
+    const { db } = resolveActiveLedger(ledgerDb, controlDb, ledgerPool);
+    const sinceIso = new Date(Date.now() - 24 * 60 * 60_000).toISOString();
+    const latestEvalRow = db
+      .prepare(
+        "SELECT labels, captured_at FROM runtime_metrics WHERE metric_name = 'algo_decision_eval_counters' ORDER BY captured_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { labels: string | null; captured_at: string } | undefined;
+    const latestEval = parseJsonObject(latestEvalRow?.labels);
+    const latestCache = readObject(latestEval, "r23Cache");
+    const latestLatency = readObject(latestEval, "decisionTickLatency");
+    const fireRows = db
+      .prepare(
+        `SELECT strftime('%Y-%m-%dT%H:00:00Z', signal_timestamp) AS hour,
+                COUNT(*) AS count
+           FROM decision_signal_log
+          WHERE decision_rule_id = 'R23_DIP_TRIGGER'
+            AND signal_timestamp >= ?
+          GROUP BY hour
+          ORDER BY hour`,
+      )
+      .all(sinceIso) as Array<{ hour: string | null; count: number }>;
+    const skipRows = db
+      .prepare(
+        `SELECT strftime('%Y-%m-%dT%H:00:00Z', created_at) AS hour,
+                COALESCE(json_extract(payload, '$.reasonCode'), 'unknown') AS reason,
+                COUNT(*) AS count
+           FROM risk_events
+          WHERE event_type = 'signal_suppressed'
+            AND created_at >= datetime(?)
+            AND json_extract(payload, '$.decisionRuleId') = 'R23_DIP_TRIGGER'
+          GROUP BY hour, reason
+          ORDER BY hour, reason`,
+      )
+      .all(sinceIso) as Array<{ hour: string | null; reason: string | null; count: number }>;
+    const orderStats = db
+      .prepare(
+        `SELECT COUNT(*) AS ordersPlaced
+           FROM orders
+          WHERE decision_rule_id = 'R23_DIP_TRIGGER'
+            AND created_at >= datetime(?)`,
+      )
+      .get(sinceIso) as { ordersPlaced: number };
+    const fillStats = db
+      .prepare(
+        `SELECT COUNT(*) AS fills, COALESCE(SUM(size_usdc), 0) AS fillNotionalUsdc
+           FROM fills
+          WHERE decision_rule_id = 'R23_DIP_TRIGGER'
+            AND filled_at >= datetime(?)`,
+      )
+      .get(sinceIso) as { fills: number; fillNotionalUsdc: number };
+
+    return ok({
+      current: {
+        checked: readNumber(latestEval, "r23DipChecked") ?? 0,
+        fired: readNumber(latestEval, "r23DipFired") ?? 0,
+        no_history: readNumber(latestEval, "r23NoHistory") ?? 0,
+        no_dip: readNumber(latestEval, "r23NoDip") ?? 0,
+        cache_hit_rate: readNumber(latestCache, "hitRate"),
+        cache_hits: readNumber(latestCache, "hits") ?? 0,
+        cache_misses: readNumber(latestCache, "misses") ?? 0,
+        cache_invocations: readNumber(latestCache, "invocations") ?? 0,
+        decision_tick_latency_p95_ms: readNumber(latestLatency, "p95Ms"),
+        decision_tick_latency_p99_ms: readNumber(latestLatency, "p99Ms"),
+        captured_at: latestEvalRow?.captured_at ?? null,
+      },
+      hourly: {
+        fires: fireRows
+          .filter((row) => row.hour)
+          .map((row) => ({ hour: row.hour as string, count: row.count })),
+        skips: skipRows
+          .filter((row) => row.hour)
+          .map((row) => ({
+            hour: row.hour as string,
+            reason: row.reason ?? "unknown",
+            count: row.count,
+          })),
+      },
+      orders_24h: orderStats.ordersPlaced,
+      fills_24h: fillStats.fills,
+      fill_notional_usdc_24h: fillStats.fillNotionalUsdc,
+      since: sinceIso,
+    });
+  });
+
   // ── GET /metrics/events ───────────────────────────────────────────────
   // Aggregate PnL + volume grouped by event_slug.
   // Per-profile: resolves the ledger via ledgerPool when profileId is provided,
@@ -76,3 +234,30 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     return reply.send(ok({ events: rows }));
   });
 };
+
+function parseJsonObject(raw: string | null | undefined): Record<string, unknown> | null {
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readNumber(obj: Record<string, unknown> | null, key: string): number | null {
+  const value = obj?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readObject(
+  obj: Record<string, unknown> | null,
+  key: string,
+): Record<string, unknown> | null {
+  const value = obj?.[key];
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}

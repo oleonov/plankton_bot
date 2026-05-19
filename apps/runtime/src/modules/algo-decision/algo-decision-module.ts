@@ -48,6 +48,10 @@ import {
   evaluateD8ProfitRatio,
   evaluateD9LossExit,
   H5_WIDE_COHORT_GUARD_REASON,
+  evaluateR23DipTrigger,
+  R23_DIP_TRIGGER_RULE_ID,
+  R23_NO_DIP_REASON,
+  R23_NO_HISTORY_REASON,
   isAbandoned,
   shouldRecoverFromPriceMove,
 } from "@krabs/domain";
@@ -66,7 +70,9 @@ import {
 import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-reasons.js";
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
+import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
 import type { PriceHistoryProvider } from "./market-snapshot-price-history.js";
+import type { WindowMaxCacheMetrics } from "./market-snapshot-price-history.js";
 
 // ─── SelectedMarketCache ─────────────────────────────────────────────────────
 
@@ -119,6 +125,10 @@ type DecisionEvalMetrics = {
   suppressedMarketNotLive: number;
   dropTriggerChecked: number;
   dropTriggerPassed: number;
+  r23DipChecked: number;
+  r23DipFired: number;
+  r23NoHistory: number;
+  r23NoDip: number;
   rejectNoDropSignal: number;
   allowNoDropData: number;
   livenessNotAcceptingOrders: number;
@@ -133,12 +143,18 @@ export interface DecisionEvalMetricsSnapshot {
   suppressedMarketNotLive: number;
   dropTriggerChecked: number;
   dropTriggerPassed: number;
+  r23DipChecked: number;
+  r23DipFired: number;
+  r23NoHistory: number;
+  r23NoDip: number;
   rejectNoDropSignal: number;
   allowNoDropData: number;
   livenessNotAcceptingOrders: number;
   livenessOrderBookDisabled: number;
   livenessBothFlags: number;
   wouldMatchRule: Record<string, number>;
+  decisionTickLatency: LatencySnapshot;
+  r23Cache: WindowMaxCacheMetrics | null;
   capturedAt: string;
 }
 
@@ -184,6 +200,9 @@ type EmissionFacts = {
   d9AvgBuyPrice?: number | null;
   d9DaysToResolve?: number | null;
   d9PublicTradeCount24h?: number | null;
+  r23DipRatio?: number | null;
+  r23MaxMidpoint?: number | null;
+  r23WindowMs?: number | null;
 };
 
 /**
@@ -206,6 +225,10 @@ function createDecisionEvalMetrics(): DecisionEvalMetrics {
     suppressedMarketNotLive: 0,
     dropTriggerChecked: 0,
     dropTriggerPassed: 0,
+    r23DipChecked: 0,
+    r23DipFired: 0,
+    r23NoHistory: 0,
+    r23NoDip: 0,
     rejectNoDropSignal: 0,
     allowNoDropData: 0,
     livenessNotAcceptingOrders: 0,
@@ -338,6 +361,9 @@ type SuppressionFacts = {
    *   so exchange balance settlement can catch up before SELL placement.
    * - `h5-wide-cohort-guard` — ADR-031 D9 guard for S2 mid-entry
    *   long-horizon loss positions.
+   * - `r23-no-history` / `r23-no-dip` — ADR-033 R23 entry dip trigger did
+   *   not have a 24h max-midpoint reference or the current price did not meet
+   *   the calibrated dip ratio.
    *
    * Adding a new reason: pick a kebab/snake-case identifier, document it
    * here, and decide whether it should join `DEDUPED_SUPPRESSION_REASONS`
@@ -507,6 +533,8 @@ const DEDUPED_SUPPRESSION_REASONS = new Set([
   // SELL-capable legs from writing several identical rows during a 5s window.
   POST_BUY_FILL_COOLDOWN_REASON,
   H5_WIDE_COHORT_GUARD_REASON,
+  R23_NO_HISTORY_REASON,
+  R23_NO_DIP_REASON,
 ]);
 const ENTRY_SWEEP_AGGREGATED_SUPPRESSION_REASONS = new Set([
   "market-cache-miss",
@@ -571,6 +599,7 @@ export class AlgoDecisionModule implements RuntimeModule {
   private lastEvalMetrics = createDecisionEvalMetrics();
   private currentEvalMetrics = createDecisionEvalMetrics();
   private lastEvalMetricsEmitAt = 0;
+  private readonly decisionLatency = new SlidingLatencyWindow(100);
 
   // Rules — loaded once on start()
   private decisionRules: readonly AlgoDecisionRule[] = [];
@@ -703,6 +732,10 @@ export class AlgoDecisionModule implements RuntimeModule {
       ` suppressed_market_not_live=${metrics.suppressedMarketNotLive}` +
       ` drop_checked=${metrics.dropTriggerChecked}` +
       ` drop_passed=${metrics.dropTriggerPassed}` +
+      ` r23_checked=${metrics.r23DipChecked}` +
+      ` r23_fired=${metrics.r23DipFired}` +
+      ` r23_no_history=${metrics.r23NoHistory}` +
+      ` r23_no_dip=${metrics.r23NoDip}` +
       ` reject_no_drop_signal=${metrics.rejectNoDropSignal}` +
       ` allow_no_drop_data=${metrics.allowNoDropData}` +
       ` liveness_not_accepting_orders=${metrics.livenessNotAcceptingOrders}` +
@@ -898,11 +931,14 @@ export class AlgoDecisionModule implements RuntimeModule {
   async evaluateTokens(tokenIds: readonly TokenId[]): Promise<void> {
     if (this.isPaused()) return;
     if (this.evaluating) return;
+    const startedAt = Date.now();
     this.evaluating = true;
     try {
       await this.evaluateTokensInner(tokenIds);
     } finally {
+      this.decisionLatency.record(Date.now() - startedAt);
       this.evaluating = false;
+      this.emitEvalMetricsSnapshot(Date.now());
     }
   }
 
@@ -969,7 +1005,6 @@ export class AlgoDecisionModule implements RuntimeModule {
     // immediately reflects this sweep, not the previous one.
     this.lastTickRuleMix = this.currentTickRuleMix;
     this.lastEvalMetrics = this.currentEvalMetrics;
-    this.emitEvalMetricsSnapshot(now);
   }
 
   private emitEvalMetricsSnapshot(now: number): void {
@@ -984,12 +1019,18 @@ export class AlgoDecisionModule implements RuntimeModule {
       suppressedMarketNotLive: this.lastEvalMetrics.suppressedMarketNotLive,
       dropTriggerChecked: this.lastEvalMetrics.dropTriggerChecked,
       dropTriggerPassed: this.lastEvalMetrics.dropTriggerPassed,
+      r23DipChecked: this.lastEvalMetrics.r23DipChecked,
+      r23DipFired: this.lastEvalMetrics.r23DipFired,
+      r23NoHistory: this.lastEvalMetrics.r23NoHistory,
+      r23NoDip: this.lastEvalMetrics.r23NoDip,
       rejectNoDropSignal: this.lastEvalMetrics.rejectNoDropSignal,
       allowNoDropData: this.lastEvalMetrics.allowNoDropData,
       livenessNotAcceptingOrders: this.lastEvalMetrics.livenessNotAcceptingOrders,
       livenessOrderBookDisabled: this.lastEvalMetrics.livenessOrderBookDisabled,
       livenessBothFlags: this.lastEvalMetrics.livenessBothFlags,
       wouldMatchRule: Object.fromEntries(this.lastEvalMetrics.wouldMatchRule),
+      decisionTickLatency: this.decisionLatency.snapshot(),
+      r23Cache: this.deps.priceHistoryProvider?.getWindowMaxCacheMetrics?.() ?? null,
       capturedAt: new Date(now).toISOString(),
     });
   }
@@ -1449,6 +1490,62 @@ export class AlgoDecisionModule implements RuntimeModule {
       }
     }
 
+    // ADR-033 — R23 dip-trigger first-entry rule. Evaluated after all
+    // exit/continuation paths and before static DB rules so FALLBACK can be
+    // neutralized to HOLD without removing the startup-required row.
+    if (!legState && this.deps.executionPolicy) {
+      const r23Policy = this.deps.executionPolicy().r23DipTrigger;
+      if (r23Policy?.enabled) {
+        this.currentEvalMetrics.r23DipChecked++;
+        const maxMidpoint =
+          this.deps.priceHistoryProvider?.maxMidpointInWindow?.(tokenId, r23Policy.windowMs, now) ??
+          null;
+        const r23 = evaluateR23DipTrigger(
+          {
+            state,
+            currentMidpoint: price,
+            maxMidpointInWindow: maxMidpoint,
+          },
+          r23Policy,
+        );
+        const r23EmissionFacts: EmissionFacts = {
+          ...emissionFacts,
+          r23DipRatio: r23.ratio,
+          r23MaxMidpoint: r23.maxMidpoint,
+          r23WindowMs: r23Policy.windowMs,
+        };
+        if (r23.reason === R23_NO_HISTORY_REASON) this.currentEvalMetrics.r23NoHistory++;
+        if (r23.reason === R23_NO_DIP_REASON) this.currentEvalMetrics.r23NoDip++;
+        if (r23.fire) {
+          this.currentEvalMetrics.r23DipFired++;
+          return this.buildSignalOrSuppressSellResidual(
+            market,
+            { action: "BUY", ruleId: R23_DIP_TRIGGER_RULE_ID },
+            ctx,
+            buyCount,
+            now,
+            nextSeq,
+            r23EmissionFacts,
+            triggerTelemetry,
+            position,
+          );
+        }
+        this.recordDecisionSuppressed({
+          tokenId,
+          conditionId: market.conditionId,
+          reasonCode: r23.reason,
+          side: "BUY",
+          decisionRuleId: R23_DIP_TRIGGER_RULE_ID,
+          state,
+          price,
+          buyCount,
+          timeSinceLastSeconds,
+          emissionFacts: r23EmissionFacts,
+          timestamp: new Date(now).toISOString(),
+        });
+      }
+    }
+
     // Decide action + size
     const decision = evaluateDecision(ctx, this.decisionRules);
     if (decision.action === "HOLD") {
@@ -1856,6 +1953,9 @@ export class AlgoDecisionModule implements RuntimeModule {
           entryPriceBucket: triggerTelemetry.entryPriceBucket,
           dropTriggerStatus: triggerTelemetry.dropTriggerStatus,
           dropTriggerPct: triggerTelemetry.dropTriggerPct,
+          r23DipRatio: emissionFacts.r23DipRatio ?? null,
+          r23MaxMidpoint: emissionFacts.r23MaxMidpoint ?? null,
+          r23WindowMs: emissionFacts.r23WindowMs ?? null,
           d9ProfitRatio: emissionFacts.d9ProfitRatio ?? null,
           d9PublicTradeCount24h: emissionFacts.d9PublicTradeCount24h ?? null,
           // ADR-026 §D-B — §11.1 adds telemetry mirrored alongside the
@@ -1916,6 +2016,9 @@ export class AlgoDecisionModule implements RuntimeModule {
           d9AvgBuyPrice: facts.emissionFacts.d9AvgBuyPrice ?? null,
           d9DaysToResolve: facts.emissionFacts.d9DaysToResolve ?? null,
           d9PublicTradeCount24h: facts.emissionFacts.d9PublicTradeCount24h ?? null,
+          r23DipRatio: facts.emissionFacts.r23DipRatio ?? null,
+          r23MaxMidpoint: facts.emissionFacts.r23MaxMidpoint ?? null,
+          r23WindowMs: facts.emissionFacts.r23WindowMs ?? null,
           tradeCount: facts.tradeCount ?? null,
           tradeCountSource: facts.tradeCountSource ?? null,
           continuationMode: this.continuationMode,

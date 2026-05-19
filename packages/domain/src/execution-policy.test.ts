@@ -64,6 +64,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
         lookbackMs: 3_600_000,
         historyMaxAgeMs: 600_000,
       },
+      r23DipTrigger: {
+        enabled: true,
+        dropThresholdRatio: 0.683,
+        windowMs: 86_400_000,
+      },
       multiBuyLadder: {
         enabled: true,
         maxLadderFillsPerToken: 5,
@@ -155,6 +160,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
       thresholdPct: -0.02,
       lookbackMs: 3_600_000,
       historyMaxAgeMs: 600_000,
+    });
+    expect(policy.r23DipTrigger).toEqual({
+      enabled: true,
+      dropThresholdRatio: 0.683,
+      windowMs: 86_400_000,
     });
     expect(policy.multiBuyLadder).toEqual({
       enabled: true,
@@ -586,6 +596,11 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
           thresholdPct: 0.1,
           lookbackMs: 1,
         },
+        r23DipTrigger: {
+          enabled: "yes",
+          dropThresholdRatio: 2,
+          windowMs: 1,
+        },
         multiBuyLadder: {
           enabled: "yes",
           maxLadderFillsPerToken: 0,
@@ -607,6 +622,7 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(policy.repriceOnOutbid).toEqual(DEFAULT_EXECUTION_POLICY.repriceOnOutbid);
     expect(policy.exitRepriceOnDownprice).toEqual(DEFAULT_EXECUTION_POLICY.exitRepriceOnDownprice);
     expect(policy.dropTrigger).toEqual(DEFAULT_EXECUTION_POLICY.dropTrigger);
+    expect(policy.r23DipTrigger).toEqual(DEFAULT_EXECUTION_POLICY.r23DipTrigger);
     expect(policy.multiBuyLadder).toEqual(DEFAULT_EXECUTION_POLICY.multiBuyLadder);
     expect(policy.opportunisticTaker).toEqual(DEFAULT_EXECUTION_POLICY.opportunisticTaker);
     expect(issues.some((i) => i.includes("repriceOnOutbid.enabled"))).toBe(true);
@@ -624,6 +640,9 @@ describe("parseExecutionPolicyJson (ADR-015)", () => {
     expect(issues.some((i) => i.includes("dropTrigger.failOpenOnNoData"))).toBe(true);
     expect(issues.some((i) => i.includes("dropTrigger.thresholdPct"))).toBe(true);
     expect(issues.some((i) => i.includes("dropTrigger.lookbackMs"))).toBe(true);
+    expect(issues.some((i) => i.includes("r23DipTrigger.enabled"))).toBe(true);
+    expect(issues.some((i) => i.includes("r23DipTrigger.dropThresholdRatio"))).toBe(true);
+    expect(issues.some((i) => i.includes("r23DipTrigger.windowMs"))).toBe(true);
     expect(issues.some((i) => i.includes("multiBuyLadder.enabled"))).toBe(true);
     expect(issues.some((i) => i.includes("multiBuyLadder.maxLadderFillsPerToken"))).toBe(true);
     expect(issues.some((i) => i.includes("multiBuyLadder.ladderGapMs"))).toBe(true);

@@ -1,8 +1,16 @@
 import { Link } from "react-router-dom";
-import { useStatus, useMetrics, useFills, useOrders } from "../api/hooks.ts";
+import {
+  useStatus,
+  useMetrics,
+  useFills,
+  useOrders,
+  useCoverageMetrics,
+  useR23Metrics,
+} from "../api/hooks.ts";
 import { PortfolioChart } from "../components/PortfolioChart.tsx";
 import { TradingActivityPanel } from "../components/TradingActivityPanel.tsx";
 import { formatAgo, formatUsd } from "../utils/format.ts";
+import type { CoverageMetricsData, R23MetricsData } from "../api/types.ts";
 
 function tradingStateColor(state?: string): string {
   switch (state) {
@@ -128,6 +136,111 @@ function exitsOnlyMessage(status: import("../api/types.ts").StatusData): string 
   return "Only exit signals active — no new entries being opened";
 }
 
+function coverageColor(coveragePct?: number | null): string {
+  if (coveragePct == null) return "var(--text-muted)";
+  if (coveragePct < 10) return "var(--red)";
+  if (coveragePct < 30) return "var(--orange)";
+  return "var(--green)";
+}
+
+function formatCoveragePct(coveragePct?: number | null): string {
+  return coveragePct == null ? "—" : `${coveragePct.toFixed(1)}%`;
+}
+
+function formatPct(value?: number | null): string {
+  return value == null ? "—" : `${(value * 100).toFixed(0)}%`;
+}
+
+function r23HealthColor(metrics?: R23MetricsData): string {
+  if (!metrics) return "var(--text-muted)";
+  if ((metrics.current.decision_tick_latency_p95_ms ?? 0) > 30_000) return "var(--red)";
+  if (metrics.current.checked === 0) return "var(--orange)";
+  if (metrics.current.no_history > metrics.current.fired + metrics.current.no_dip)
+    return "var(--orange)";
+  return "var(--green)";
+}
+
+function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
+  const color = coverageColor(coverage?.coverage_pct);
+  const title = coverage
+    ? [
+        `WS tracked: ${coverage.ws_tracked}`,
+        `Active/tradable universe: ${coverage.universe_active}`,
+        `Events/sec: ${coverage.events_per_sec.toFixed(1)}`,
+        `Discovery rotation: ${coverage.discovery_batch_size} tokens per ${
+          coverage.discovery_poll_interval_ms / 60_000
+        } min`,
+        `Decision p95: ${coverage.decision_tick_latency_p95_ms?.toFixed(0) ?? "—"}ms`,
+        `R23 cache hit rate: ${formatPct(coverage.r23_cache_hit_rate)}`,
+        `Plankton weekly reference: ${coverage.plankton_reference_weekly}`,
+      ].join("\n")
+    : "Coverage metrics unavailable";
+  return (
+    <div className="card card-accent-blue" title={title}>
+      <div className="label">Market Coverage</div>
+      <div className="value-lg" style={{ color }}>
+        {formatCoveragePct(coverage?.coverage_pct)}
+      </div>
+      <div className="value-sm">
+        {coverage ? `${coverage.ws_tracked} / ${coverage.universe_active} WS tracked` : "Loading"}
+      </div>
+      <div className="value-sm">
+        {coverage
+          ? `${coverage.shard_count} shards · ${coverage.events_per_sec.toFixed(1)} ev/s`
+          : "Stream metrics unavailable"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `${coverage.rotation_cycle_hours.toFixed(1)}h rotation · ${coverage.positions_opened_24h} opened 24h`
+          : "Awaiting runtime snapshot"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `p95 ${coverage.decision_tick_latency_p95_ms?.toFixed(0) ?? "—"}ms · R23 cache ${formatPct(
+              coverage.r23_cache_hit_rate,
+            )}`
+          : "Awaiting decision metrics"}
+      </div>
+    </div>
+  );
+}
+
+function R23Card({ metrics }: { metrics?: R23MetricsData }) {
+  const title = metrics
+    ? [
+        `Checked latest tick: ${metrics.current.checked}`,
+        `Fired latest tick: ${metrics.current.fired}`,
+        `No history latest tick: ${metrics.current.no_history}`,
+        `No dip latest tick: ${metrics.current.no_dip}`,
+        `Cache hits/misses: ${metrics.current.cache_hits}/${metrics.current.cache_misses}`,
+        `Orders/fills 24h: ${metrics.orders_24h}/${metrics.fills_24h}`,
+      ].join("\n")
+    : "R23 metrics unavailable";
+  return (
+    <div className="card card-accent-purple" title={title}>
+      <div className="label">R23 Dip Trigger</div>
+      <div className="value-lg" style={{ color: r23HealthColor(metrics) }}>
+        {metrics ? metrics.current.fired : "—"}
+      </div>
+      <div className="value-sm">
+        {metrics
+          ? `${metrics.current.checked} checked · ${metrics.current.no_dip} no dip`
+          : "Loading"}
+      </div>
+      <div className="value-sm">
+        {metrics
+          ? `${formatPct(metrics.current.cache_hit_rate)} cache · ${metrics.orders_24h} orders / ${metrics.fills_24h} fills`
+          : "Cache metrics unavailable"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {metrics
+          ? `p95 ${metrics.current.decision_tick_latency_p95_ms?.toFixed(0) ?? "—"}ms · ${metrics.current.no_history} no history`
+          : "Awaiting decision metrics"}
+      </div>
+    </div>
+  );
+}
+
 function BalanceCard({ status }: { status: import("../api/types.ts").StatusData }) {
   const isLive = status.runtimeMode === "live-lite";
   const dim = { color: "var(--text-dim)" };
@@ -211,6 +324,8 @@ function BalanceCard({ status }: { status: import("../api/types.ts").StatusData 
 export function Overview() {
   const { data: status } = useStatus();
   const { data: metrics } = useMetrics();
+  const { data: coverage } = useCoverageMetrics();
+  const { data: r23Metrics } = useR23Metrics();
   const { data: recentFills } = useFills({ limit: 1 });
   const { data: recentOrders } = useOrders({ limit: 1 });
 
@@ -297,7 +412,9 @@ export function Overview() {
       )}
 
       {/* Financial */}
-      <div className="grid-3" style={{ marginBottom: 16 }}>
+      <div className="grid-5" style={{ marginBottom: 16 }}>
+        <CoverageCard coverage={coverage} />
+        <R23Card metrics={r23Metrics} />
         <div className="card card-accent-orange">
           <div className="label">Current Value</div>
           <div className="value-lg text-orange">{formatUsd(status.totalCurrentValueUsdc)}</div>
