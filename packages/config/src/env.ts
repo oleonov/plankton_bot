@@ -5,6 +5,13 @@ import { z } from "zod";
 
 const runtimeModeSchema = z.enum(["simulation", "paper", "live-lite"]);
 const logLevelSchema = z.enum(["debug", "info", "warn", "error"]);
+const commaSeparatedUrlsSchema = z.preprocess((value) => {
+  if (typeof value !== "string" || value.trim() === "") return undefined;
+  return value
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}, z.array(z.string().url()).min(1).optional());
 
 const envSchema = z
   .object({
@@ -69,6 +76,7 @@ const envSchema = z
     POLY_PRIVATE_KEY: z.string().optional(),
     POLYMARKET_RELAYER_URL: z.string().url().default("https://relayer-v2.polymarket.com"),
     POLYGON_RPC_URL: z.string().url().default("https://polygon-rpc.com"),
+    POLYGON_RPC_URLS: commaSeparatedUrlsSchema,
     POLYGON_RPC_FALLBACK_URL: z.string().url().optional(),
     KRABS_API_KEY: z.string().optional(),
     KRABS_API_PORT: z.coerce.number().int().positive().default(3100),
@@ -208,6 +216,7 @@ export interface AppConfig {
   polyPrivateKey: string | undefined;
   polymarketRelayerUrl?: string | undefined;
   polygonRpcUrl?: string | undefined;
+  polygonRpcUrls?: string[] | undefined;
   polygonRpcFallbackUrl?: string | undefined;
   krabsApiKey: string | undefined;
   krabsApiPort: number;
@@ -306,6 +315,7 @@ export function loadEnv(envPath?: string): AppConfig {
     polyPrivateKey: env.POLY_PRIVATE_KEY,
     polymarketRelayerUrl: env.POLYMARKET_RELAYER_URL,
     polygonRpcUrl: env.POLYGON_RPC_URL,
+    polygonRpcUrls: [...new Set(env.POLYGON_RPC_URLS ?? [env.POLYGON_RPC_URL])],
     polygonRpcFallbackUrl: env.POLYGON_RPC_FALLBACK_URL,
     krabsApiKey: env.KRABS_API_KEY,
     krabsApiPort: env.KRABS_API_PORT,

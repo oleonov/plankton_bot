@@ -20,6 +20,7 @@ export interface PolymarketClientConfig {
   polyPrivateKey: string | undefined;
   polymarketRelayerUrl: string;
   polygonRpcUrl: string;
+  polygonRpcUrls?: readonly string[] | undefined;
   polygonRpcFallbackUrl?: string | undefined;
 }
 
@@ -55,6 +56,8 @@ export interface PolymarketClientFactoryDeps {
     chainId: number;
     privateKey: string;
     rpcUrl: string;
+    rpcUrls?: readonly string[] | undefined;
+    rpcFallbackUrl?: string | undefined;
     builderConfig?: unknown;
     walletType: "proxy" | "gnosis-safe";
   }) => Promise<SettlementClientLike> | SettlementClientLike;
@@ -209,6 +212,7 @@ export async function createPolymarketClient(
       chainId,
       privateKey: requireString(input.config.polyPrivateKey, "POLY_PRIVATE_KEY"),
       rpcUrl: input.config.polygonRpcUrl,
+      ...(input.config.polygonRpcUrls ? { rpcUrls: input.config.polygonRpcUrls } : {}),
       rpcFallbackUrl: input.config.polygonRpcFallbackUrl,
       builderConfig: relayerBuilderConfig,
       walletType: relayerConfig.walletType,
@@ -243,6 +247,7 @@ async function createSettlementClient(
     chainId: number;
     privateKey: string;
     rpcUrl: string;
+    rpcUrls?: readonly string[] | undefined;
     rpcFallbackUrl?: string | undefined;
     builderConfig?: unknown;
     walletType: "proxy" | "gnosis-safe";
@@ -265,10 +270,12 @@ async function createSettlementClient(
     import("viem/chains"),
   ]);
 
-  const transport =
-    config.rpcFallbackUrl && config.rpcFallbackUrl !== config.rpcUrl
-      ? fallback([http(config.rpcUrl), http(config.rpcFallbackUrl)])
-      : http(config.rpcUrl);
+  const rpcUrls = [
+    ...(config.rpcUrls && config.rpcUrls.length > 0 ? config.rpcUrls : [config.rpcUrl]),
+    ...(config.rpcFallbackUrl ? [config.rpcFallbackUrl] : []),
+  ].filter((url, index, urls) => urls.indexOf(url) === index);
+  const transports = rpcUrls.map((url) => http(url));
+  const transport = transports.length > 1 ? fallback(transports) : transports[0]!;
 
   const account = privateKeyToAccount(config.privateKey as `0x${string}`);
   const walletClient = createWalletClient({

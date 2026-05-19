@@ -29,6 +29,7 @@ const ALL_KEYS = [
   "POLY_BUILDER_CODE",
   "POLY_PRIVATE_KEY",
   "POLYGON_RPC_URL",
+  "POLYGON_RPC_URLS",
   "POLYGON_RPC_FALLBACK_URL",
   "KRABS_AUTH_USERNAME",
   "KRABS_AUTH_PASSWORD",
@@ -96,6 +97,8 @@ describe("loadEnv", () => {
       POLY_BUILDER_PASSPHRASE: "builder-pass",
       POLY_BUILDER_CODE: `0x${"a".repeat(64)}`,
       POLYGON_RPC_URL: "https://polygon-mainnet.g.alchemy.com/v2/test",
+      POLYGON_RPC_URLS:
+        "https://polygon-mainnet.g.alchemy.com/v2/test, https://polygon-mainnet.g.alchemy.com/v2/test2",
       POLYGON_RPC_FALLBACK_URL: "https://polygon.drpc.org",
     });
 
@@ -111,7 +114,20 @@ describe("loadEnv", () => {
     expect(config.polyBuilderPassphrase).toBe("builder-pass");
     expect(config.polyBuilderCode).toBe(`0x${"a".repeat(64)}`);
     expect(config.polygonRpcUrl).toBe("https://polygon-mainnet.g.alchemy.com/v2/test");
+    expect(config.polygonRpcUrls).toEqual([
+      "https://polygon-mainnet.g.alchemy.com/v2/test",
+      "https://polygon-mainnet.g.alchemy.com/v2/test2",
+    ]);
     expect(config.polygonRpcFallbackUrl).toBe("https://polygon.drpc.org");
+  });
+
+  it("falls back to POLYGON_RPC_URL when POLYGON_RPC_URLS is omitted", () => {
+    setEnvVars({
+      POLYGON_RPC_URL: "https://polygon-mainnet.g.alchemy.com/v2/primary",
+    });
+
+    const config = loadEnv();
+    expect(config.polygonRpcUrls).toEqual(["https://polygon-mainnet.g.alchemy.com/v2/primary"]);
   });
 
   it("accepts live-lite mode without LIVE_LITE_* envelope vars", () => {

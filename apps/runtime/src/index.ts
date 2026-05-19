@@ -553,6 +553,7 @@ async function main(): Promise<void> {
         polygonRpcUrl:
           (config as typeof config & { polygonRpcUrl?: string }).polygonRpcUrl ??
           "https://polygon-rpc.com",
+        polygonRpcUrls: (config as typeof config & { polygonRpcUrls?: string[] }).polygonRpcUrls,
         polygonRpcFallbackUrl: (config as typeof config & { polygonRpcFallbackUrl?: string })
           .polygonRpcFallbackUrl,
       };
@@ -598,6 +599,7 @@ async function main(): Promise<void> {
         runtimeMode === "live-lite"
           ? (config.polygonRpcUrl ?? "https://polygon-rpc.com")
           : undefined,
+      polygonRpcUrls: runtimeMode === "live-lite" ? config.polygonRpcUrls : undefined,
       marketDataMaxTrackedTokens: config.marketDataMaxTrackedTokens,
       marketDataMaxWsShards: config.marketDataMaxWsShards,
       marketDataIngressQueueMax: config.marketDataIngressQueueMax,

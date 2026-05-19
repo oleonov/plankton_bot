@@ -28,6 +28,8 @@ export interface CreateGatewaysInput {
   initialBalanceUsdc?: number;
   /** Polygon RPC URL — required for live-lite collateral resolution (USDC vs pUSD). */
   polygonRpcUrl?: string | undefined;
+  /** Polygon RPC URLs in rotation order — retries the next endpoint when one is rate-limited. */
+  polygonRpcUrls?: readonly string[] | undefined;
   onInfraAlert?:
     | ((alert: {
         code: string;
@@ -85,6 +87,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     slugFilter,
     initialBalanceUsdc,
     polygonRpcUrl,
+    polygonRpcUrls,
     onInfraAlert,
     marketDataMaxTrackedTokens,
     marketDataMaxWsShards,
@@ -150,13 +153,20 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
   }
 
   // live-lite
-  const collateralResolver = polygonRpcUrl
-    ? createCollateralResolver({
-        rpcUrl: polygonRpcUrl,
-        conditionalTokensAddress: CONDITIONAL_TOKENS_POLYGON,
-        candidates: [USDC_POLYGON, PUSD_POLYGON],
-      })
-    : undefined;
+  const collateralRpcUrls =
+    polygonRpcUrls && polygonRpcUrls.length > 0
+      ? polygonRpcUrls
+      : polygonRpcUrl
+        ? [polygonRpcUrl]
+        : [];
+  const collateralResolver =
+    collateralRpcUrls.length > 0
+      ? createCollateralResolver({
+          rpcUrls: collateralRpcUrls,
+          conditionalTokensAddress: CONDITIONAL_TOKENS_POLYGON,
+          candidates: [USDC_POLYGON, PUSD_POLYGON],
+        })
+      : undefined;
   const liveExchangeConfig = {
     client: polyClient,
     settlementClient,

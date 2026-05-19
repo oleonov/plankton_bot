@@ -240,6 +240,52 @@ describe("createPolymarketClient", () => {
     expect(settlementClient).toBeDefined();
   });
 
+  it("passes Polygon RPC rotation URLs to the relayer settlement client", async () => {
+    const signer = { kind: "wallet", address: "0x2222222222222222222222222222222222222222" };
+    const relayerBuilderConfig = { kind: "relayer-builder-config" };
+    const createWallet = vi.fn().mockReturnValue(signer);
+    const createClobClient = vi.fn().mockReturnValue({ mode: "relayer-client" });
+    const createBuilderConfig = vi.fn().mockReturnValue(relayerBuilderConfig);
+    const settlementClient = { kind: "settlement-client" };
+    const createSettlementClient = vi.fn().mockResolvedValue(settlementClient);
+
+    await createPolymarketClient(
+      {
+        runtimeMode: "live-lite",
+        config: {
+          ...baseConfig,
+          polygonRpcUrls: ["https://rpc-one.local", "https://rpc-two.local"],
+          polygonRpcFallbackUrl: "https://polygon.drpc.org",
+        },
+        walletMode: "relayer",
+        relayerJson: JSON.stringify({
+          walletType: "proxy",
+          funderAddress: "0x1111111111111111111111111111111111111111",
+          builder: {
+            mode: "local",
+            key: "builder-key",
+            secret: "builder-secret",
+            passphrase: "builder-passphrase",
+          },
+        }),
+      },
+      {
+        createClobClient,
+        createWallet,
+        createBuilderConfig,
+        createSettlementClient,
+      },
+    );
+
+    expect(createSettlementClient).toHaveBeenCalledWith(
+      expect.objectContaining({
+        rpcUrl: "https://polygon-rpc.com",
+        rpcUrls: ["https://rpc-one.local", "https://rpc-two.local"],
+        rpcFallbackUrl: "https://polygon.drpc.org",
+      }),
+    );
+  });
+
   it("throws when relayer mode has neither relayer_json.builder nor POLY_BUILDER_* HMAC creds", async () => {
     await expect(
       createPolymarketClient(

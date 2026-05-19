@@ -30,7 +30,8 @@ export interface CollateralResolverInput {
 export type CollateralResolver = (input: CollateralResolverInput) => Promise<string | null>;
 
 export interface CreateCollateralResolverOptions {
-  rpcUrl: string;
+  rpcUrl?: string;
+  rpcUrls?: readonly string[];
   conditionalTokensAddress: string;
   /**
    * Candidate collateral addresses in priority order — typically [USDC, pUSD].
@@ -81,7 +82,36 @@ function encodeGetCollectionIdCall(conditionId: string, indexSet: bigint): strin
   );
 }
 
-async function ethCall(
+function isRateLimitError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return /(?:\b429\b|too many requests|rate limit|quota exceeded)/i.test(message);
+}
+
+function redactRpcUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split("/");
+    const last = parts.at(-1);
+    if (last && last.length > 8)
+      parts[parts.length - 1] = `${last.slice(0, 4)}...${last.slice(-4)}`;
+    parsed.pathname = parts.join("/");
+    parsed.search = "";
+    return parsed.toString();
+  } catch {
+    return "<invalid-rpc-url>";
+  }
+}
+
+function normalizeRpcUrls(
+  opts: Pick<CreateCollateralResolverOptions, "rpcUrl" | "rpcUrls">,
+): string[] {
+  const urls = [...(opts.rpcUrls ?? []), ...(opts.rpcUrl ? [opts.rpcUrl] : [])]
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
+  return [...new Set(urls)];
+}
+
+async function ethCallOnce(
   rpcUrl: string,
   to: string,
   data: string,
@@ -100,7 +130,8 @@ async function ethCall(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
-    throw new Error(`RPC HTTP ${response.status}: ${response.statusText}`);
+    const body = await response.text().catch(() => "");
+    throw new Error(`RPC HTTP ${response.status}: ${response.statusText}${body ? ` ${body}` : ""}`);
   }
   const json = (await response.json()) as { result?: string; error?: { message?: string } };
   if (json.error) {
@@ -112,9 +143,45 @@ async function ethCall(
   return json.result;
 }
 
+async function ethCallWithRotation(
+  rpcUrls: readonly string[],
+  startIndex: number,
+  to: string,
+  data: string,
+  fetchImpl: typeof fetch,
+  timeoutMs: number,
+  logger: CreateCollateralResolverOptions["logger"],
+): Promise<{ result: string; rpcIndex: number }> {
+  let lastErr: unknown;
+  for (let offset = 0; offset < rpcUrls.length; offset += 1) {
+    const rpcIndex = (startIndex + offset) % rpcUrls.length;
+    const rpcUrl = rpcUrls[rpcIndex]!;
+    try {
+      const result = await ethCallOnce(rpcUrl, to, data, fetchImpl, timeoutMs);
+      return { result, rpcIndex };
+    } catch (err) {
+      lastErr = err;
+      if (offset < rpcUrls.length - 1 && isRateLimitError(err)) {
+        logger?.warn("collateral-resolver: rpc rate limited, trying next endpoint", {
+          rpcUrl: redactRpcUrl(rpcUrl),
+          nextRpcUrl: redactRpcUrl(rpcUrls[(rpcIndex + 1) % rpcUrls.length]!),
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 export function createCollateralResolver(
   opts: CreateCollateralResolverOptions,
 ): CollateralResolver {
+  const rpcUrls = normalizeRpcUrls(opts);
+  if (rpcUrls.length === 0) {
+    throw new Error("createCollateralResolver requires at least one Polygon RPC URL");
+  }
   const fetchImpl = opts.fetchImpl ?? fetch;
   const timeoutMs = opts.timeoutMs ?? 8_000;
   const logger = opts.logger ?? {
@@ -125,6 +192,7 @@ export function createCollateralResolver(
   };
   const collectionIdCache = new Map<string, Hex>();
   const collateralCache = new Map<string, string>(); // key: conditionId (lowercase)
+  let nextRpcIndex = 0;
 
   return async ({ conditionId, canonicalTokenId, indexSet }) => {
     const conditionKey = normalizeHex(conditionId);
@@ -136,13 +204,16 @@ export function createCollateralResolver(
     if (!collectionId) {
       try {
         const callData = encodeGetCollectionIdCall(conditionId, indexSet);
-        const result = await ethCall(
-          opts.rpcUrl,
+        const { result, rpcIndex } = await ethCallWithRotation(
+          rpcUrls,
+          nextRpcIndex,
           opts.conditionalTokensAddress,
           callData,
           fetchImpl,
           timeoutMs,
+          logger,
         );
+        nextRpcIndex = (rpcIndex + 1) % rpcUrls.length;
         if (result.length !== 66) {
           throw new Error(`Expected 32-byte collectionId, got ${result}`);
         }
