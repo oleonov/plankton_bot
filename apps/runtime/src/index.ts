@@ -1040,6 +1040,8 @@ async function main(): Promise<void> {
           Number.isFinite(alertNow) ? alertNow : Date.now(),
         )
       ) {
+        // Visibility only: performance alerts surface in /status and logs.
+        // They must not pause trading or trigger rollback automatically.
         recordInfraAlert({
           code: "DECISION_TICK_LATENCY_P95_HIGH",
           severity: "error",

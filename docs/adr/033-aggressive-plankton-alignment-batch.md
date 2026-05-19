@@ -149,14 +149,19 @@ Paging / alerting:
   container/log monitoring. A future external pager integration can consume
   the same `infra_alert` row without changing decision code.
 
-Rollback triggers:
+Human-review alert thresholds:
 
-- OOM kill or container restart loop: at least 2 restarts in 15 minutes.
+- OOM kill or container restart loop: at least 3 restarts in 15 minutes.
 - More than 5 WebSocket reconnects in the first hour.
 - Memory above 90% of 2 GiB for 5 sustained minutes.
 - Decision tick latency above 30 seconds sustained.
 - Critical runtime errors in market-data, normalization, algo-decision, or
   execution modules.
+
+Performance and instability alerts are visibility-only. They are written to
+`runtime_metrics` / `infra_alert`, displayed in `/status` and the operator UI,
+and logged. They must not pause trading or revert configuration
+automatically. A human watcher decides whether to pause or roll back.
 
 ## Rollback
 
