@@ -19,6 +19,7 @@
  */
 import type { TradeCountFetchEvent, TradeCountObserver } from "@krabs/exchange";
 import type { Logger } from "./logger.js";
+import { classifyHttpError } from "./network-errors.js";
 import type { RuntimeMetricWriter } from "./runtime-metric-writer.js";
 import { consumeWarnThrottle, createWarnThrottleState } from "./warn-throttle.js";
 
@@ -78,6 +79,18 @@ export function buildTradeCountObserver(deps: TradeCountObserverDeps): TradeCoun
         "trade_count_fetch_err",
         JSON.stringify({ latencyMs: event.latencyMs ?? null, error: event.error ?? "unknown" }),
       );
+      try {
+        metrics.writeCounter(
+          "http_error_class",
+          1,
+          JSON.stringify({
+            source: "data-api-trade-count",
+            errorClass: classifyHttpError(event.error ?? "unknown"),
+          }),
+        );
+      } catch {
+        // Same contract as writeMetric: observer failures cannot affect provider behavior.
+      }
     }
   };
 }

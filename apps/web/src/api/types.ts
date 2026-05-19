@@ -343,6 +343,10 @@ export interface CoverageMetricsData {
   decision_tick_latency_p95_ms: number | null;
   decision_tick_latency_p99_ms: number | null;
   r23_cache_hit_rate: number | null;
+  event_loop_lag_max_ms: number | null;
+  event_loop_lag_p95_ms: number | null;
+  gc_pause_max_ms: number | null;
+  http_errors_by_class_1h: Record<string, number>;
   captured_at: string | null;
 }
 

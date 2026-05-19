@@ -289,6 +289,8 @@ export interface MarketPricingStreamMetricsSnapshot {
   readonly maxQueueDepth?: number;
   /** Total number of overflow evictions across all shards since stream start. */
   readonly queueOverflows?: number;
+  /** Gap/reconnect events grouped by shard id for diagnosing per-shard churn. */
+  readonly wsGapsByShard?: Readonly<Record<string, number>>;
 }
 
 export interface MarketPricingStream {

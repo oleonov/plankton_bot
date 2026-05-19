@@ -29,7 +29,12 @@ import type {
 } from "@krabs/domain";
 import { createConditionId, createTokenId } from "@krabs/domain";
 import type { Logger } from "../../logger.js";
-import { isRateLimitError, isTransientNetworkError } from "../../network-errors.js";
+import {
+  classifyHttpError,
+  isRateLimitError,
+  isTransientNetworkError,
+  type HttpErrorClass,
+} from "../../network-errors.js";
 import {
   consumeWarnThrottle,
   createWarnThrottleState,
@@ -129,6 +134,11 @@ export interface MarketDataStreamActivitySnapshot {
   readonly staleTokenCount: number;
   readonly silentTrackedTokenCount: number;
   readonly fallbackPollCount: number;
+  readonly fallbackCandidateCount: number;
+  readonly fallbackDeferredCount: number;
+  readonly pendingGapTokenCount: number;
+  readonly fallbackDroppedStaleCount: number;
+  readonly fallbackPollLimit: number;
   readonly fallbackReasonCounts: MarketDataFallbackReasonCounts;
   readonly fallbackRoleCounts: MarketDataTrackedRoleCounts;
   readonly trackedDiffCounts: MarketDataTrackedDiffCounts;
@@ -145,9 +155,21 @@ export interface MarketDataStreamActivitySnapshot {
   readonly gammaFallbackTrackedTokenCount: number;
   readonly gammaFallbackExecutionCriticalCount: number;
   readonly gammaFallbackEntryCandidateCount: number;
+  readonly publicTradeCountEnrichmentEligibleCount: number;
+  readonly publicTradeCountEnrichmentSkippedCount: number;
+  readonly publicTradeCountEnrichmentConditionCount: number;
+  readonly publicTradeCountEnrichmentRequestCount: number;
+  readonly wsGapsByShard: Readonly<Record<string, number>>;
 }
 
 type WsTierRole = "executionCritical" | "entryCandidate" | "legacy";
+type FallbackReason = keyof MarketDataFallbackReasonCounts;
+
+interface FallbackPollCandidate {
+  readonly tokenId: string;
+  readonly role: WsTierRole | undefined;
+  readonly reason: FallbackReason;
+}
 
 export interface MarketDataModuleDeps {
   gateway: MarketDataGateway;
@@ -169,8 +191,23 @@ export interface MarketDataModuleDeps {
    * a warning is logged. Default: 500.
    */
   fallbackBatchSize?: number;
+  /** Max tokens included in one fallback REST poll after WS gaps. Default: 50. */
+  fallbackPollMaxConcurrency?: number;
+  /** Sustained fallback poll token budget per second. Default: 5 tokens/s. */
+  fallbackPollRatePerSec?: number;
+  /** Drop stale gap tokens after this age instead of re-polling forever. Default: 30s. */
+  fallbackStaleTokenAgeMs?: number;
   /** Optional Data API enrichment for D9_LOSS_EXIT liquidity signal. */
   tradeCountProvider?: MarketTradeCountProvider;
+  /**
+   * Restricts public_trade_count enrichment to tokens where D9 or an already
+   * selected entry path can use it. Keeping this predicate narrow prevents
+   * 5000-token entry batches from fanning out into hundreds of Data API calls.
+   */
+  publicTradeCountEnrichmentFilter?: (tokenId: string, role: WsTierRole | undefined) => boolean;
+  httpErrorMetricsSink?: (
+    event: Readonly<{ source: string; errorClass: HttpErrorClass; message: string }>,
+  ) => void;
   /**
    * Optional pause gate. When the runtime is paused, periodic poll and
    * discovery batch cycles are skipped so the bot stops issuing new external
@@ -192,18 +229,26 @@ export class MarketDataModule implements RuntimeModule {
   private readonly trackedMarketsByToken = new Map<string, Market>();
   private readonly lastPricingUpdateAtByToken = new Map<string, number>();
   private readonly lastPricingAttemptAtByToken = new Map<string, number>();
-  private readonly pendingGapTokenIds = new Set<string>();
+  private readonly pendingGapTokenIds = new Map<string, number>();
   private readonly log: Logger;
   private forceFullPoll = false;
   private lastTrackedTokenCount = 0;
   private lastStaleTokenCount = 0;
   private lastSilentTrackedTokenCount = 0;
   private lastFallbackPollCount = 0;
+  private lastFallbackCandidateCount = 0;
+  private lastFallbackDeferredCount = 0;
+  private lastFallbackDroppedStaleCount = 0;
+  private lastFallbackPollLimit = 0;
   private lastFallbackReasonCounts: MarketDataFallbackReasonCounts = zeroFallbackReasonCounts();
   private lastFallbackRoleCounts: MarketDataTrackedRoleCounts = zeroTrackedRoleCounts();
   private lastTrackedDiffCounts: MarketDataTrackedDiffCounts = zeroTrackedDiffCounts();
   private lastCachedTrackedTokenCountAtPollStart = 0;
   private lastPricingHitCount = 0;
+  private lastPublicTradeCountEnrichmentEligibleCount = 0;
+  private lastPublicTradeCountEnrichmentSkippedCount = 0;
+  private lastPublicTradeCountEnrichmentConditionCount = 0;
+  private lastPublicTradeCountEnrichmentRequestCount = 0;
   private readonly wsTierRoleByToken = new Map<string, WsTierRole>();
   private readonly pendingStreamUpdatesByToken = new Map<string, MarketPricingStreamUpdate>();
   private streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -259,9 +304,7 @@ export class MarketDataModule implements RuntimeModule {
           if (normalizedTokenIds.length === 0) {
             this.forceFullPoll = true;
           } else {
-            for (const tokenId of normalizedTokenIds) {
-              this.pendingGapTokenIds.add(tokenId);
-            }
+            this.addPendingGapTokenIds(normalizedTokenIds, Date.now());
           }
           this.queueGapLog(reason, normalizedTokenIds.length);
         },
@@ -381,6 +424,11 @@ export class MarketDataModule implements RuntimeModule {
       staleTokenCount: this.lastStaleTokenCount,
       silentTrackedTokenCount: this.lastSilentTrackedTokenCount,
       fallbackPollCount: this.lastFallbackPollCount,
+      fallbackCandidateCount: this.lastFallbackCandidateCount,
+      fallbackDeferredCount: this.lastFallbackDeferredCount,
+      pendingGapTokenCount: this.pendingGapTokenIds.size,
+      fallbackDroppedStaleCount: this.lastFallbackDroppedStaleCount,
+      fallbackPollLimit: this.lastFallbackPollLimit,
       fallbackReasonCounts: this.lastFallbackReasonCounts,
       fallbackRoleCounts: this.lastFallbackRoleCounts,
       trackedDiffCounts: this.lastTrackedDiffCounts,
@@ -397,6 +445,11 @@ export class MarketDataModule implements RuntimeModule {
       gammaFallbackTrackedTokenCount: gammaFallbackCounts.total,
       gammaFallbackExecutionCriticalCount: gammaFallbackCounts.executionCritical,
       gammaFallbackEntryCandidateCount: gammaFallbackCounts.entryCandidate,
+      publicTradeCountEnrichmentEligibleCount: this.lastPublicTradeCountEnrichmentEligibleCount,
+      publicTradeCountEnrichmentSkippedCount: this.lastPublicTradeCountEnrichmentSkippedCount,
+      publicTradeCountEnrichmentConditionCount: this.lastPublicTradeCountEnrichmentConditionCount,
+      publicTradeCountEnrichmentRequestCount: this.lastPublicTradeCountEnrichmentRequestCount,
+      wsGapsByShard: streamMetrics?.wsGapsByShard ?? {},
     };
   }
 
@@ -454,6 +507,10 @@ export class MarketDataModule implements RuntimeModule {
       this.lastTrackedTokenCount = tracked.length;
       if (tracked.length === 0) {
         this.lastFallbackPollCount = 0;
+        this.lastFallbackCandidateCount = 0;
+        this.lastFallbackDeferredCount = 0;
+        this.lastFallbackDroppedStaleCount = 0;
+        this.lastFallbackPollLimit = 0;
         this.lastStaleTokenCount = 0;
         this.lastSilentTrackedTokenCount = 0;
         this.lastFallbackReasonCounts = zeroFallbackReasonCounts();
@@ -490,38 +547,36 @@ export class MarketDataModule implements RuntimeModule {
         streamMetrics.wsEventGapDetected === 0;
       let silentTrackedTokenCount = 0;
       let cachedTrackedTokenCountAtPollStart = 0;
-      const fallbackReasonCounts = zeroFallbackReasonCounts();
-      const fallbackRoleCounts = zeroTrackedRoleCounts();
+      const fallbackCandidates: FallbackPollCandidate[] = [];
+      const staleGapDrop = this.pruneStalePendingGaps(now, new Set(tokenIds));
+      const staleGapDropCount = staleGapDrop.droppedCount;
+      const staleGapDroppedTokenIds = staleGapDrop.droppedTokenIds;
 
       if (this.stream == null || this.forceFullPoll) {
         // Under forceFullPoll (gap/circuit-open), only poll the priority tier
         // (executionCritical + entryCandidates) — `tracked` already contains
         // exactly those tokens. Discovery staleness is tolerable; it has its
-        // own rolling timer. Apply a defensive cap in case Task 1 bounds are
-        // exceeded for any reason.
-        tokenIdsToPoll = [...tokenIds];
-        const cap = this.deps.fallbackBatchSize ?? 500;
-        if (tokenIdsToPoll.length > cap) {
-          this.log.warn(
-            { tokenCount: tokenIdsToPoll.length, cap },
-            "priority-tier poll batch exceeds fallbackBatchSize cap — trimming",
-          );
-          tokenIdsToPoll = tokenIdsToPoll.slice(0, cap);
-        }
-        if (this.forceFullPoll) {
-          fallbackReasonCounts.forceFullPoll = tokenIdsToPoll.length;
-        } else {
-          fallbackReasonCounts.streamUnavailable = tokenIdsToPoll.length;
-        }
-        for (const tokenId of tokenIdsToPoll) {
-          incrementTrackedRoleCounts(fallbackRoleCounts, this.wsTierRoleByToken.get(tokenId));
+        // own rolling timer. Final selection below applies bounded rate caps.
+        const reason = this.forceFullPoll ? "forceFullPoll" : "streamUnavailable";
+        for (const tokenId of tokenIds) {
+          fallbackCandidates.push({
+            tokenId,
+            role: this.wsTierRoleByToken.get(tokenId),
+            reason,
+          });
         }
       } else {
-        tokenIdsToPoll = tokenIds.filter((tokenId) => {
+        for (const tokenId of tokenIds) {
+          if (staleGapDroppedTokenIds.has(tokenId)) {
+            continue;
+          }
           if (this.pendingGapTokenIds.has(tokenId)) {
-            fallbackReasonCounts.pendingGap += 1;
-            incrementTrackedRoleCounts(fallbackRoleCounts, this.wsTierRoleByToken.get(tokenId));
-            return true;
+            fallbackCandidates.push({
+              tokenId,
+              role: this.wsTierRoleByToken.get(tokenId),
+              reason: "pendingGap",
+            });
+            continue;
           }
           const cached = this.marketCache.get(tokenId);
           if (cached != null) {
@@ -530,9 +585,12 @@ export class MarketDataModule implements RuntimeModule {
           const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
           const lastAttemptedAt = this.lastPricingAttemptAtByToken.get(tokenId) ?? 0;
           if (cached == null) {
-            fallbackReasonCounts.missingCache += 1;
-            incrementTrackedRoleCounts(fallbackRoleCounts, this.wsTierRoleByToken.get(tokenId));
-            return true;
+            fallbackCandidates.push({
+              tokenId,
+              role: this.wsTierRoleByToken.get(tokenId),
+              reason: "missingCache",
+            });
+            continue;
           }
           const role = this.wsTierRoleByToken.get(tokenId);
           const refreshReferenceAt =
@@ -548,13 +606,15 @@ export class MarketDataModule implements RuntimeModule {
             role,
           );
           if (ageMs > refreshBudgetMs) {
-            if (cached.bookSource == null || cached.bookSource === "unknown") {
-              fallbackReasonCounts.unknownSourceRefresh += 1;
-            } else {
-              fallbackReasonCounts.knownSourceRefresh += 1;
-            }
-            incrementTrackedRoleCounts(fallbackRoleCounts, role);
-            return true;
+            fallbackCandidates.push({
+              tokenId,
+              role,
+              reason:
+                cached.bookSource == null || cached.bookSource === "unknown"
+                  ? "unknownSourceRefresh"
+                  : "knownSourceRefresh",
+            });
+            continue;
           }
           // Step 3 (audit doc §F2): even when the book is still considered
           // fresh by the stream, soft-ranking feature inputs (liquidity /
@@ -578,29 +638,59 @@ export class MarketDataModule implements RuntimeModule {
           const featuresCapturedTs = cached.featuresCapturedTs ?? null;
           if (featuresCapturedTs != null) {
             if (now - featuresCapturedTs > SOFT_RANKING_FEATURE_REFRESH_MAX_AGE_MS) {
-              fallbackReasonCounts.featureFreshness += 1;
-              incrementTrackedRoleCounts(fallbackRoleCounts, role);
-              return true;
+              fallbackCandidates.push({ tokenId, role, reason: "featureFreshness" });
+              continue;
             }
           } else if (
             tokenSubscribedOnHealthyWsTier &&
             cached.bookSource != null &&
             cached.bookSource !== "unknown"
           ) {
-            fallbackReasonCounts.featureFreshness += 1;
-            incrementTrackedRoleCounts(fallbackRoleCounts, role);
-            return true;
+            fallbackCandidates.push({ tokenId, role, reason: "featureFreshness" });
+            continue;
           }
           if (ageMs > fallbackHardStaleMs) {
             silentTrackedTokenCount += 1;
           }
-          return false;
-        });
+        }
+      }
+
+      const fallbackPollLimit = resolveFallbackPollLimit({
+        fallbackBatchSize: this.deps.fallbackBatchSize ?? 500,
+        maxConcurrency: this.deps.fallbackPollMaxConcurrency ?? 50,
+        ratePerSec: this.deps.fallbackPollRatePerSec ?? 5,
+        pollIntervalMs: this.deps.pollIntervalMs,
+      });
+      const selectedFallbackCandidates = selectFallbackPollCandidates(
+        fallbackCandidates,
+        fallbackPollLimit,
+      );
+      tokenIdsToPoll = selectedFallbackCandidates.map((candidate) => candidate.tokenId);
+      const fallbackReasonCounts = countFallbackReasons(selectedFallbackCandidates);
+      const fallbackRoleCounts = countFallbackRoles(selectedFallbackCandidates);
+      const deferredCount = Math.max(
+        0,
+        fallbackCandidates.length - selectedFallbackCandidates.length,
+      );
+      if (fallbackCandidates.length > selectedFallbackCandidates.length) {
+        this.log.warn(
+          {
+            candidateCount: fallbackCandidates.length,
+            selectedCount: selectedFallbackCandidates.length,
+            deferredCount,
+            limit: fallbackPollLimit,
+          },
+          "fallback poll candidates exceed bounded rate cap — deferring tail",
+        );
       }
 
       this.lastStaleTokenCount = tokenIdsToPoll.length;
       this.lastSilentTrackedTokenCount = silentTrackedTokenCount;
       this.lastFallbackPollCount = tokenIdsToPoll.length;
+      this.lastFallbackCandidateCount = fallbackCandidates.length;
+      this.lastFallbackDeferredCount = deferredCount;
+      this.lastFallbackDroppedStaleCount = staleGapDropCount;
+      this.lastFallbackPollLimit = fallbackPollLimit;
       this.lastFallbackReasonCounts = fallbackReasonCounts;
       this.lastFallbackRoleCounts = fallbackRoleCounts;
       this.lastCachedTrackedTokenCountAtPollStart = cachedTrackedTokenCountAtPollStart;
@@ -610,6 +700,10 @@ export class MarketDataModule implements RuntimeModule {
           tokenCount: tokenIds.length,
           silentTrackedTokenCount,
           fallbackPollCount: tokenIdsToPoll.length,
+          fallbackCandidateCount: fallbackCandidates.length,
+          fallbackDeferredCount: deferredCount,
+          fallbackDroppedStaleCount: staleGapDropCount,
+          fallbackPollLimit,
           fallbackReasonCounts,
           fallbackRoleCounts,
           trackedDiffCounts: this.lastTrackedDiffCounts,
@@ -673,12 +767,12 @@ export class MarketDataModule implements RuntimeModule {
       this.lastSuccessfulDataMs = now;
       this.forceFullPoll = false;
       resetWarnThrottle(this.cachedPollDegradeWarn);
-      // A successful poll means every tracked token is either freshly priced
-      // (just fetched) or still considered fresh by the stream. Drop the full
-      // gap set instead of only the polled subset — otherwise entries for
-      // tokens that weren't repolled linger forever and keep forcing future
-      // polls to the full 9735-token batch.
-      this.pendingGapTokenIds.clear();
+      // A successful bounded poll only proves freshness for the selected
+      // fallback slice. Deferred gap tokens stay queued until they are polled
+      // or age out via MARKET_DATA_STALE_TOKEN_AGE_MS.
+      for (const tokenId of tokenIdsToPoll) {
+        this.pendingGapTokenIds.delete(tokenId);
+      }
       this.log.info(
         {
           tokenCount: markets.length,
@@ -695,6 +789,7 @@ export class MarketDataModule implements RuntimeModule {
         timestamp: now,
       });
     } catch (err) {
+      this.recordHttpError("gamma-pricing", err);
       if (isRateLimitError(err)) {
         this.pricingPollBackoffUntilMs = Date.now() + GAMMA_RATE_LIMIT_BACKOFF_MS;
       }
@@ -723,6 +818,10 @@ export class MarketDataModule implements RuntimeModule {
     nowMs: number,
   ): Promise<void> {
     const provider = this.deps.tradeCountProvider;
+    this.lastPublicTradeCountEnrichmentEligibleCount = 0;
+    this.lastPublicTradeCountEnrichmentSkippedCount = 0;
+    this.lastPublicTradeCountEnrichmentConditionCount = 0;
+    this.lastPublicTradeCountEnrichmentRequestCount = 0;
     if (!provider?.fetchPublicTradeCount24h || pricingMap.size === 0) return;
     const fetchPublicTradeCount24h = provider.fetchPublicTradeCount24h.bind(provider);
 
@@ -730,12 +829,19 @@ export class MarketDataModule implements RuntimeModule {
     for (const market of markets) {
       const tokenId = String(market.tokenId);
       if (!pricingMap.has(tokenId)) continue;
+      const role = this.wsTierRoleByToken.get(tokenId);
+      if (!this.shouldEnrichPublicTradeCount(tokenId, role)) {
+        this.lastPublicTradeCountEnrichmentSkippedCount++;
+        continue;
+      }
+      this.lastPublicTradeCountEnrichmentEligibleCount++;
       const conditionId = String(market.conditionId);
       const tokenIds = tokenIdsByCondition.get(conditionId) ?? [];
       tokenIds.push(tokenId);
       tokenIdsByCondition.set(conditionId, tokenIds);
     }
     const entries = [...tokenIdsByCondition.entries()];
+    this.lastPublicTradeCountEnrichmentConditionCount = entries.length;
     if (entries.length === 0) return;
 
     let cursor = 0;
@@ -744,7 +850,14 @@ export class MarketDataModule implements RuntimeModule {
         const entry = entries[cursor++];
         if (!entry) return;
         const [conditionId, tokenIds] = entry;
-        const result = await fetchPublicTradeCount24h(createConditionId(conditionId), nowMs);
+        this.lastPublicTradeCountEnrichmentRequestCount++;
+        let result: Awaited<ReturnType<typeof fetchPublicTradeCount24h>> = null;
+        try {
+          result = await fetchPublicTradeCount24h(createConditionId(conditionId), nowMs);
+        } catch (err) {
+          this.recordHttpError("data-api-public-trade-count", err);
+          continue;
+        }
         for (const tokenId of tokenIds) {
           const pricing = pricingMap.get(tokenId);
           if (!pricing) continue;
@@ -757,6 +870,13 @@ export class MarketDataModule implements RuntimeModule {
     };
     const workers = Math.min(PUBLIC_TRADE_COUNT_ENRICH_CONCURRENCY, entries.length);
     await Promise.all(Array.from({ length: workers }, () => worker()));
+  }
+
+  private shouldEnrichPublicTradeCount(tokenId: string, role: WsTierRole | undefined): boolean {
+    if (this.deps.publicTradeCountEnrichmentFilter) {
+      return this.deps.publicTradeCountEnrichmentFilter(tokenId, role);
+    }
+    return true;
   }
 
   /**
@@ -845,6 +965,7 @@ export class MarketDataModule implements RuntimeModule {
       await this.flushDiscoveryBatchEviction(new Set(tokenIds), nowMs);
       resetWarnThrottle(this.discoveryPollFailureWarn);
     } catch (err) {
+      this.recordHttpError("gamma-discovery", err);
       if (isRateLimitError(err)) {
         this.discoveryPollBackoffUntilMs = Date.now() + GAMMA_RATE_LIMIT_BACKOFF_MS;
       }
@@ -972,9 +1093,7 @@ export class MarketDataModule implements RuntimeModule {
             { shardId: event.shardId, tokenCount: event.tokenIds.length },
             "ws ingress queue overflow — routing tokens to poll-fallback",
           );
-          for (const tokenId of event.tokenIds) {
-            this.pendingGapTokenIds.add(tokenId);
-          }
+          this.addPendingGapTokenIds(event.tokenIds, event.timestamp);
         }
         continue;
       }
@@ -991,9 +1110,7 @@ export class MarketDataModule implements RuntimeModule {
           },
           "shard circuit breaker opened — routing tokens to poll-fallback",
         );
-        for (const tokenId of event.tokenIds) {
-          this.pendingGapTokenIds.add(tokenId);
-        }
+        this.addPendingGapTokenIds(event.tokenIds, Date.now());
         continue;
       }
 
@@ -1128,6 +1245,28 @@ export class MarketDataModule implements RuntimeModule {
     }
   }
 
+  private addPendingGapTokenIds(tokenIds: readonly string[], observedAtMs: number): void {
+    for (const tokenId of tokenIds) {
+      const normalized = tokenId.trim();
+      if (normalized.length === 0) continue;
+      this.pendingGapTokenIds.set(normalized, observedAtMs);
+    }
+  }
+
+  private pruneStalePendingGaps(
+    nowMs: number,
+    trackedTokenIds: ReadonlySet<string>,
+  ): { droppedCount: number; droppedTokenIds: ReadonlySet<string> } {
+    const maxAgeMs = this.deps.fallbackStaleTokenAgeMs ?? 30_000;
+    const droppedTokenIds = new Set<string>();
+    for (const [tokenId, observedAtMs] of this.pendingGapTokenIds.entries()) {
+      if (trackedTokenIds.has(tokenId) && nowMs - observedAtMs <= maxAgeMs) continue;
+      this.pendingGapTokenIds.delete(tokenId);
+      droppedTokenIds.add(tokenId);
+    }
+    return { droppedCount: droppedTokenIds.size, droppedTokenIds };
+  }
+
   private shouldDegradeToCachedStreamState(
     err: unknown,
     tracked: readonly Market[],
@@ -1139,6 +1278,20 @@ export class MarketDataModule implements RuntimeModule {
       tokenIdsToPoll.length > 0 &&
       isTransientNetworkError(err)
     );
+  }
+
+  private recordHttpError(source: string, err: unknown): void {
+    const sink = this.deps.httpErrorMetricsSink;
+    if (!sink) return;
+    try {
+      sink({
+        source,
+        errorClass: classifyHttpError(err),
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } catch {
+      // Diagnostics must not affect market-data recovery.
+    }
   }
 
   private async publishCachedMarkets(tracked: readonly Market[], nowMs: number): Promise<void> {
@@ -1215,6 +1368,53 @@ function resolveMarketPricingTimeoutMs(tokenCount: number): number {
     FALLBACK_POLL_TIMEOUT_MAX_MS,
     FALLBACK_POLL_TIMEOUT_BASE_MS + tokenCount * FALLBACK_POLL_TIMEOUT_PER_TOKEN_MS,
   );
+}
+
+function resolveFallbackPollLimit(args: {
+  fallbackBatchSize: number;
+  maxConcurrency: number;
+  ratePerSec: number;
+  pollIntervalMs: number;
+}): number {
+  const rateWindow = Math.max(1, Math.floor(args.ratePerSec * (args.pollIntervalMs / 1000)));
+  return Math.max(1, Math.min(args.fallbackBatchSize, args.maxConcurrency, rateWindow));
+}
+
+function selectFallbackPollCandidates(
+  candidates: readonly FallbackPollCandidate[],
+  limit: number,
+): FallbackPollCandidate[] {
+  if (candidates.length <= limit) return [...candidates];
+  return [...candidates]
+    .sort((a, b) => fallbackCandidatePriority(a) - fallbackCandidatePriority(b))
+    .slice(0, limit);
+}
+
+function fallbackCandidatePriority(candidate: FallbackPollCandidate): number {
+  if (candidate.role === "executionCritical") return 0;
+  if (candidate.role === "entryCandidate") return 1;
+  if (candidate.role === "legacy") return 2;
+  return 3;
+}
+
+function countFallbackReasons(
+  candidates: readonly FallbackPollCandidate[],
+): MarketDataFallbackReasonCounts {
+  const counts = zeroFallbackReasonCounts();
+  for (const candidate of candidates) {
+    counts[candidate.reason] += 1;
+  }
+  return counts;
+}
+
+function countFallbackRoles(
+  candidates: readonly FallbackPollCandidate[],
+): MarketDataTrackedRoleCounts {
+  const counts = zeroTrackedRoleCounts();
+  for (const candidate of candidates) {
+    incrementTrackedRoleCounts(counts, candidate.role);
+  }
+  return counts;
 }
 
 function normalizeGapTokenIds(tokenIds: readonly string[] | undefined): string[] {

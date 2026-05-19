@@ -52,7 +52,7 @@ installClobErrorSanitizer(
 );
 
 import { randomUUID } from "node:crypto";
-import { monitorEventLoopDelay } from "node:perf_hooks";
+import { monitorEventLoopDelay, PerformanceObserver } from "node:perf_hooks";
 import process from "node:process";
 import { loadEnv } from "@krabs/config";
 import { InProcessEventBus } from "@krabs/event-bus";
@@ -155,7 +155,10 @@ import { runStartupPositionAdoption } from "./startup-position-adoption.js";
 import { ProfileRuntimePublisher } from "./modules/publisher/profile-runtime-publisher.js";
 import { RuntimeStatePublisher } from "./runtime-state-publisher.js";
 import { RuntimeMetricWriter } from "./runtime-metric-writer.js";
-import { SustainedThresholdAlert } from "./modules/algo-decision/decision-metrics.js";
+import {
+  SlidingLatencyWindow,
+  SustainedThresholdAlert,
+} from "./modules/algo-decision/decision-metrics.js";
 import { evaluateResumeIntent } from "./resume-intent.js";
 import { createPolymarketClient, type SettlementClientLike } from "./polymarket-client-factory.js";
 import { installConsoleRedaction } from "./console-redaction.js";
@@ -165,6 +168,7 @@ import { backfillLegStateTransitionsFromLedger } from "./modules/leg-state/leg-s
 import { OrderLifetimeModule } from "./modules/order-lifetime/order-lifetime-module.js";
 import { SamePriceCooldownModule } from "./modules/same-price-cooldown/same-price-cooldown-module.js";
 import { RedeemSweepModule } from "./modules/redeem-sweep/redeem-sweep-module.js";
+import { buildRuntimeDiagnosticsSnapshot } from "./runtime-diagnostics.js";
 import { isGatewayOrderReject } from "./order-rejection-classification.js";
 import {
   buildRiskEventVolumeSnapshot,
@@ -683,6 +687,8 @@ async function main(): Promise<void> {
     runtimeControl,
   });
 
+  let selectedMarketCacheForEnrichment: MarketSelectionCache | null = null;
+
   // 7e. Real modules for market-data and normalization
   const marketDataModule = new MarketDataModule({
     gateway: marketDataGateway,
@@ -696,7 +702,16 @@ async function main(): Promise<void> {
     discoveryPollIntervalMs: config.marketDataDiscoveryPollIntervalMs,
     discoveryBatchSize: config.marketDataDiscoveryBatchSize,
     fallbackBatchSize: config.marketDataFallbackBatchSize,
+    fallbackPollMaxConcurrency: config.marketDataFallbackPollConcurrency,
+    fallbackPollRatePerSec: config.marketDataFallbackPollRatePerSec,
+    fallbackStaleTokenAgeMs: config.marketDataStaleTokenAgeMs,
     tradeCountProvider,
+    publicTradeCountEnrichmentFilter: (tokenId, role) =>
+      role === "executionCritical" ||
+      selectedMarketCacheForEnrichment?.isEligible(tokenId as TokenId) === true,
+    httpErrorMetricsSink: ({ source, errorClass }) => {
+      runtimeMetrics.writeCounter("http_error_class", 1, JSON.stringify({ source, errorClass }));
+    },
     runtimeControl,
   });
 
@@ -906,6 +921,7 @@ async function main(): Promise<void> {
     selectionRuleEngine,
     () => currentExecutionPolicy().marketSelection,
   );
+  selectedMarketCacheForEnrichment = selectedMarketCache;
   selectedMarketCache.subscribe();
 
   // ADR-018 §D2 — Step 1 universe-filter funnel telemetry. Emits one log
@@ -924,6 +940,7 @@ async function main(): Promise<void> {
         volumePositiveEvaluated: snap.volumePositiveEvaluated,
         selectionRuleAdmitted: snap.selectionRuleAdmitted,
         selectionRuleRejected: snap.selectionRuleRejected,
+        selectionRejectReasons: snap.selectionRejectReasons,
       },
       "universeFunnel",
     );
@@ -1921,15 +1938,40 @@ async function main(): Promise<void> {
   // network egress problem. resolution=20ms keeps the histogram cheap.
   const loopLag = monitorEventLoopDelay({ resolution: 20 });
   loopLag.enable();
-  setInterval(() => {
+  const gcPauseWindow = new SlidingLatencyWindow(100);
+  const gcObserver = new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) {
+      gcPauseWindow.record(entry.duration);
+    }
+  });
+  try {
+    gcObserver.observe({ entryTypes: ["gc"] });
+  } catch (err) {
+    log.warn({ err }, "gc_pause_observer_unavailable");
+  }
+  const runtimeDiagnosticsTimer = setInterval(() => {
+    const eventLoopLag = {
+      p50Ms: Math.round(loopLag.percentile(50) / 1e6),
+      p95Ms: Math.round(loopLag.percentile(95) / 1e6),
+      p99Ms: Math.round(loopLag.percentile(99) / 1e6),
+      maxMs: Math.round(loopLag.max / 1e6),
+    };
+    const gcPause = gcPauseWindow.snapshot();
+    const diagnostics = buildRuntimeDiagnosticsSnapshot(
+      eventLoopLag,
+      gcPause,
+      process.memoryUsage(),
+    );
     log.info(
       {
-        p50Ms: Math.round(loopLag.percentile(50) / 1e6),
-        p95Ms: Math.round(loopLag.percentile(95) / 1e6),
-        p99Ms: Math.round(loopLag.percentile(99) / 1e6),
-        maxMs: Math.round(loopLag.max / 1e6),
+        ...eventLoopLag,
       },
       "event_loop_lag",
+    );
+    runtimeMetrics.writeLatest(
+      "runtime_diagnostics",
+      diagnostics.eventLoopLagMs.p95Ms,
+      JSON.stringify(diagnostics),
     );
     loopLag.reset();
   }, 30_000).unref();
@@ -1957,6 +1999,9 @@ async function main(): Promise<void> {
 
     signalToOrderBridge.unsubscribe();
     clearInterval(universeFunnelLogTimer);
+    clearInterval(runtimeDiagnosticsTimer);
+    loopLag.disable();
+    gcObserver.disconnect();
     selectedMarketCache.dispose();
     candidateBookCache?.dispose();
 

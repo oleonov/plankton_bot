@@ -699,14 +699,25 @@ describe("GET /status", () => {
         ('coverage-tok-1', 'coverage-cond-1', 'coverage-1', 'Coverage 1?', 'Yes', 1, 1, 0.01, 0, '2026-06-01T00:00:00Z', '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z'),
         ('coverage-tok-2', 'coverage-cond-2', 'coverage-2', 'Coverage 2?', 'Yes', 1, 1, 0.01, 0, '2026-06-01T00:00:00Z', '2026-05-18T00:00:00Z', '2026-05-18T00:00:00Z');
       DELETE FROM runtime_metrics WHERE metric_name = 'market_data_stream_activity';
-      DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity');
+      DELETE FROM runtime_metrics WHERE metric_name IN ('algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES ('market_data_stream_activity', 1, '{"trackedTokenCount":2,"wsEventsReceivedPerSec":7.5,"shardCount":2}', '2026-05-18T00:00:00Z');
       INSERT INTO runtime_metrics (metric_name, value, labels, captured_at)
       VALUES
         ('algo_decision_latency', 123, '{"p95Ms":123,"p99Ms":456}', '2026-05-18T00:00:00Z'),
-        ('r23_cache_activity', 0.5, '{"hitRate":0.5,"hits":1,"misses":1,"invocations":2}', '2026-05-18T00:00:00Z');
+        ('r23_cache_activity', 0.5, '{"hitRate":0.5,"hits":1,"misses":1,"invocations":2}', '2026-05-18T00:00:00Z'),
+        ('runtime_diagnostics', 12, '{"eventLoopLagMs":{"p95Ms":12,"maxMs":37},"gcPauseMs":{"maxMs":4}}', '2026-05-18T00:00:00Z');
     `);
+    conn.db
+      .prepare(
+        "INSERT INTO runtime_metrics (metric_name, value, labels, captured_at) VALUES (?, ?, ?, ?)",
+      )
+      .run(
+        "http_error_class",
+        2,
+        '{"source":"gamma-pricing","errorClass":"timeout"}',
+        new Date().toISOString(),
+      );
 
     const res = await app.inject({
       method: "GET",
@@ -728,9 +739,13 @@ describe("GET /status", () => {
     expect(body.data.decision_tick_latency_p95_ms).toBe(123);
     expect(body.data.decision_tick_latency_p99_ms).toBe(456);
     expect(body.data.r23_cache_hit_rate).toBe(0.5);
+    expect(body.data.event_loop_lag_p95_ms).toBe(12);
+    expect(body.data.event_loop_lag_max_ms).toBe(37);
+    expect(body.data.gc_pause_max_ms).toBe(4);
+    expect(body.data.http_errors_by_class_1h).toEqual({ "gamma-pricing:timeout": 2 });
 
     conn.db.exec(
-      `DELETE FROM runtime_metrics WHERE metric_name IN ('market_data_stream_activity', 'algo_decision_latency', 'r23_cache_activity')`,
+      `DELETE FROM runtime_metrics WHERE metric_name IN ('market_data_stream_activity', 'algo_decision_latency', 'r23_cache_activity', 'runtime_diagnostics', 'http_error_class')`,
     );
   });
 

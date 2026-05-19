@@ -1,5 +1,5 @@
 import type { EventBus, MarketSelectionPolicy, NormalizedMarket, TokenId } from "@krabs/domain";
-import { evaluatePreEntry } from "@krabs/domain";
+import { evaluatePreEntry, type PreEntryRejectReason } from "@krabs/domain";
 import type { SelectedMarketCache } from "./algo-decision-module.js";
 import type { RefreshableSelectionRuleEngine } from "../../selection-rule-engine-factory.js";
 
@@ -28,6 +28,7 @@ export interface UniverseFilterSnapshot {
   readonly volumePositiveEvaluated: number;
   readonly selectionRuleAdmitted: number;
   readonly selectionRuleRejected: number;
+  readonly selectionRejectReasons: Readonly<Record<string, number>>;
 }
 
 export class MarketSelectionCache implements SelectedMarketCache {
@@ -42,6 +43,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
   private volumePositiveEvaluated = 0;
   private selectionRuleAdmitted = 0;
   private selectionRuleRejected = 0;
+  private readonly selectionRejectReasons = new Map<string, number>();
 
   constructor(
     private readonly bus: EventBus,
@@ -93,6 +95,7 @@ export class MarketSelectionCache implements SelectedMarketCache {
       volumePositiveEvaluated: this.volumePositiveEvaluated,
       selectionRuleAdmitted: this.selectionRuleAdmitted,
       selectionRuleRejected: this.selectionRuleRejected,
+      selectionRejectReasons: Object.fromEntries(this.selectionRejectReasons.entries()),
     };
   }
 
@@ -127,7 +130,43 @@ export class MarketSelectionCache implements SelectedMarketCache {
       this.eligible.add(tokenId);
     } else {
       this.selectionRuleRejected++;
+      this.incrementRejectReason(classifySelectionRejectReason(market, evalResult.rejectReason));
       this.eligible.delete(tokenId);
     }
   }
+
+  private incrementRejectReason(reason: string): void {
+    this.selectionRejectReasons.set(reason, (this.selectionRejectReasons.get(reason) ?? 0) + 1);
+  }
+}
+
+const FEATURE_STALE_MS = 4 * 60 * 60 * 1000;
+
+function classifySelectionRejectReason(
+  market: NormalizedMarket,
+  rejectReason: PreEntryRejectReason | undefined,
+): string {
+  if (
+    market.featuresCapturedTs != null &&
+    Date.now() - market.featuresCapturedTs > FEATURE_STALE_MS
+  ) {
+    return "rejected_stale_snapshot";
+  }
+  if (
+    rejectReason === "mid_price_too_high" &&
+    (market.midPrice == null || !Number.isFinite(market.midPrice))
+  ) {
+    return "rejected_no_midprice";
+  }
+  if (
+    rejectReason === "liquidity_too_low" &&
+    (market.liquidity == null || !Number.isFinite(market.liquidity))
+  ) {
+    return "rejected_missing_feature_liquidity";
+  }
+  if (rejectReason) return `rejected_${rejectReason}`;
+  if (market.volume24hr == null || !Number.isFinite(market.volume24hr)) {
+    return "rejected_missing_feature_volume24hr";
+  }
+  return "rejected_other";
 }

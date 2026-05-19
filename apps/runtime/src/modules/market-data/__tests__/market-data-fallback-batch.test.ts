@@ -6,8 +6,8 @@
  *    are polled — discovery tokens are excluded.
  * 2. The timeoutMs passed to getMarketPricing scales as
  *    min(30_000, 10_000 + batchLength * 25).
- * 3. When priority tier exceeds fallbackBatchSize, the batch is trimmed to the
- *    cap and a warn log fires.
+ * 3. When priority tier exceeds bounded fallback caps, the batch is trimmed and
+ *    a warn log fires.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createTokenId } from "@krabs/domain";
@@ -108,6 +108,10 @@ class FakePricingStream implements MarketPricingStream {
     await this._onGapDetected?.({ reason, timestamp: Date.now() });
   }
 
+  async triggerGapForTokenIds(tokenIds: readonly string[]): Promise<void> {
+    await this._onGapDetected?.({ reason: "socket-closed", timestamp: Date.now(), tokenIds });
+  }
+
   setTokenIds(tokenIds: readonly string[]): void {
     this.tokenIds = [...tokenIds];
   }
@@ -150,7 +154,7 @@ const silentLog = {
   debug: vi.fn(),
   fatal: vi.fn(),
   child: () => silentLog,
-} as any; // eslint-disable-line @typescript-eslint/no-explicit-any
+} as any;
 
 // ─── Tests ────────────────────────────────────────────────────────────────
 
@@ -293,6 +297,8 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
       staleThresholdMs: 120_000,
       // no maxTrackedTokens → legacy flat path
       fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 500,
+      fallbackPollRatePerSec: 100,
     });
 
     await modA.poll();
@@ -339,6 +345,8 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
       pollIntervalMs: 60_000,
       staleThresholdMs: 120_000,
       fallbackBatchSize: 3_000, // allow large batch through for timeout test
+      fallbackPollMaxConcurrency: 3_000,
+      fallbackPollRatePerSec: 1_000,
     });
 
     await modB.poll();
@@ -477,8 +485,8 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
 
   // ── Test 3: Defensive cap trims batch and fires warn ───────────────────
 
-  it("defensive cap: priority tier exceeding fallbackBatchSize is trimmed + warn logged", async () => {
-    // 600 priority tokens, fallbackBatchSize = 500 → expect trim to 500 + warn.
+  it("defensive cap: priority tier exceeding bounded fallback limit is trimmed + warn logged", async () => {
+    // 600 priority tokens, fallbackBatchSize = 500 and concurrency = 50 → expect trim to 50.
     const priorityIds = Array.from({ length: 600 }, (_, i) => `prio-${i}`);
     const tiered = makeTiered(priorityIds.slice(0, 300), priorityIds.slice(300), []);
     const repo = createMockRepo(tiered);
@@ -522,6 +530,8 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
       maxTrackedTokens: 1000,
       discoveryPollIntervalMs: 3_600_000,
       fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 50,
+      fallbackPollRatePerSec: 5,
     });
 
     await mod.start();
@@ -539,21 +549,148 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     expect(getMarketPricing).toHaveBeenCalledTimes(1);
     const [polledIds] = capturedIds[0]!;
 
-    // Batch must be trimmed to cap.
-    expect(capturedIds[0]).toHaveLength(500);
+    // Batch must be trimmed to the bounded cap.
+    expect(capturedIds[0]).toHaveLength(50);
 
     // Warn log must fire with tokenCount and cap fields.
     const warnCalls = silentLog.warn.mock.calls as Array<[unknown, string]>;
     const capWarn = warnCalls.find(
-      ([, msg]) => typeof msg === "string" && msg.includes("fallbackBatchSize cap"),
+      ([, msg]) => typeof msg === "string" && msg.includes("bounded rate cap"),
     );
     expect(capWarn).toBeDefined();
     const [warnMeta] = capWarn!;
-    expect((warnMeta as Record<string, unknown>).tokenCount).toBe(600);
-    expect((warnMeta as Record<string, unknown>).cap).toBe(500);
+    expect((warnMeta as Record<string, unknown>).candidateCount).toBe(600);
+    expect((warnMeta as Record<string, unknown>).limit).toBe(50);
 
     // Suppress unused variable lint.
     void polledIds;
+
+    await mod.stop();
+  });
+
+  it("prioritizes execution-critical fallback work before entry candidates", async () => {
+    const criticalIds = ["crit-a", "crit-b", "crit-c"];
+    const entryIds = ["entry-a", "entry-b", "entry-c"];
+    const tiered = makeTiered(criticalIds, entryIds, []);
+    const repo = createMockRepo(tiered);
+    const capturedIds: string[][] = [];
+    const getMarketPricing = vi.fn().mockImplementation(async (polled: string[]) => {
+      capturedIds.push([...polled]);
+      return new Map();
+    });
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      createMarketPricingStream: (handlers) => {
+        const s = new FakePricingStream(handlers);
+        streamRef = s;
+        return s;
+      },
+    };
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 100,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 4,
+      fallbackPollRatePerSec: 5,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    getMarketPricing.mockClear();
+    capturedIds.length = 0;
+
+    await streamRef!.triggerGap("socket-closed");
+    await mod.poll();
+
+    expect(capturedIds[0]).toEqual(["crit-a", "crit-b", "crit-c", "entry-a"]);
+
+    await mod.stop();
+  });
+
+  it("pending gaps are rate-capped and stale gap tokens age out", async () => {
+    const ids = Array.from({ length: 80 }, (_, i) => `tok-${i}`);
+    const tiered = makeTiered([], ids, []);
+    const repo = createMockRepo(tiered);
+    const capturedIds: string[][] = [];
+    const getMarketPricing = vi.fn().mockImplementation(async (polled: string[]) => {
+      capturedIds.push([...polled]);
+      return new Map();
+    });
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      createMarketPricingStream: (handlers) => {
+        const s = new FakePricingStream(handlers);
+        streamRef = s;
+        return s;
+      },
+    };
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 100,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 50,
+      fallbackPollRatePerSec: 5,
+      fallbackStaleTokenAgeMs: 30_000,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    getMarketPricing.mockClear();
+    capturedIds.length = 0;
+
+    await streamRef!.triggerGapForTokenIds(ids);
+    await mod.poll();
+
+    expect(capturedIds[0]).toHaveLength(50);
+    expect(mod.getMetricsSnapshot().fallbackCandidateCount).toBe(80);
+    expect(mod.getMetricsSnapshot().fallbackDeferredCount).toBe(30);
+    expect(mod.getMetricsSnapshot().pendingGapTokenCount).toBe(30);
+
+    await vi.advanceTimersByTimeAsync(31_000);
+    await mod.poll();
+
+    expect(mod.getMetricsSnapshot().fallbackDroppedStaleCount).toBe(30);
+    expect(mod.getMetricsSnapshot().pendingGapTokenCount).toBe(0);
 
     await mod.stop();
   });

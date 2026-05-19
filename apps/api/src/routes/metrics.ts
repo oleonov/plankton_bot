@@ -84,8 +84,27 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
         "SELECT labels FROM runtime_metrics WHERE metric_name = 'r23_cache_activity' ORDER BY captured_at DESC, id DESC LIMIT 1",
       )
       .get() as { labels: string | null } | undefined;
+    const runtimeDiagnosticsRow = db
+      .prepare(
+        "SELECT labels FROM runtime_metrics WHERE metric_name = 'runtime_diagnostics' ORDER BY captured_at DESC, id DESC LIMIT 1",
+      )
+      .get() as { labels: string | null } | undefined;
+    const httpErrorRows = db
+      .prepare(
+        `SELECT value, labels
+           FROM runtime_metrics
+          WHERE metric_name = 'http_error_class'
+            AND captured_at >= ?`,
+      )
+      .all(new Date(Date.now() - 60 * 60_000).toISOString()) as Array<{
+      value: number | null;
+      labels: string | null;
+    }>;
     const latency = parseJsonObject(latencyRow?.labels);
     const r23Cache = parseJsonObject(r23CacheRow?.labels);
+    const runtimeDiagnostics = parseJsonObject(runtimeDiagnosticsRow?.labels);
+    const eventLoopLag = readObject(runtimeDiagnostics, "eventLoopLagMs");
+    const gcPause = readObject(runtimeDiagnostics, "gcPauseMs");
     const wsTracked = readNumber(stream, "trackedTokenCount") ?? 0;
     const eventsPerSec = readNumber(stream, "wsEventsReceivedPerSec") ?? 0;
     const shardCount = readNumber(stream, "shardCount") ?? 0;
@@ -116,6 +135,10 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       decision_tick_latency_p95_ms: readNumber(latency, "p95Ms"),
       decision_tick_latency_p99_ms: readNumber(latency, "p99Ms"),
       r23_cache_hit_rate: readNumber(r23Cache, "hitRate"),
+      event_loop_lag_max_ms: readNumber(eventLoopLag, "maxMs"),
+      event_loop_lag_p95_ms: readNumber(eventLoopLag, "p95Ms"),
+      gc_pause_max_ms: readNumber(gcPause, "maxMs"),
+      http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
       captured_at: streamRow?.captured_at ?? null,
     });
   });
@@ -260,4 +283,18 @@ function readObject(
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function aggregateHttpErrors(
+  rows: Array<{ value: number | null; labels: string | null }>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const row of rows) {
+    const labels = parseJsonObject(row.labels);
+    const source = typeof labels?.source === "string" ? labels.source : "unknown";
+    const errorClass = typeof labels?.errorClass === "string" ? labels.errorClass : "unknown";
+    const key = `${source}:${errorClass}`;
+    out[key] = (out[key] ?? 0) + (row.value ?? 0);
+  }
+  return out;
 }

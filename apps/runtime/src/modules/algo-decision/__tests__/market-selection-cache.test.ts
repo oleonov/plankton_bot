@@ -273,6 +273,31 @@ describe("MarketSelectionCache", () => {
     cache.dispose();
   });
 
+  it("records granular selection rejection reasons", async () => {
+    const { bus, cache } = makeCache();
+
+    await bus.publish("NormalizedMarketUpdated", {
+      markets: [
+        makeMarket({ tokenId: createTokenId("t-no-mid"), midPrice: null }),
+        makeMarket({ tokenId: createTokenId("t-no-liq"), liquidity: null }),
+        makeMarket({
+          tokenId: createTokenId("t-stale"),
+          featuresCapturedTs: Date.now() - 5 * 60 * 60 * 1000,
+          liquidity: 50,
+        }),
+      ],
+      timestamp: Date.now(),
+    });
+
+    expect(cache.getUniverseFilterSnapshot().selectionRejectReasons).toMatchObject({
+      rejected_no_midprice: 1,
+      rejected_missing_feature_liquidity: 1,
+      rejected_stale_snapshot: 1,
+    });
+
+    cache.dispose();
+  });
+
   it("dispose unsubscribes", async () => {
     const { bus, cache } = makeCache();
     cache.dispose();

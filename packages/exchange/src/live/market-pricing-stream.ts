@@ -55,6 +55,7 @@ interface StreamWindow {
   latencySamplesMs: number[];
   reconnectCount: number;
   wsEventGapDetected: number;
+  wsGapsByShard: Record<string, number>;
   bookEventsReceived: number;
   marketResolvedEvents: number;
   newMarketEvents: number;
@@ -249,6 +250,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       shardCount: this.shards.size,
       reconnectCount: this.window.reconnectCount,
       wsEventGapDetected: this.window.wsEventGapDetected,
+      wsGapsByShard: { ...this.window.wsGapsByShard },
       wsLatencyMs: summarizeLatencySamples(this.window.latencySamplesMs),
       bookEventsReceived: this.window.bookEventsReceived,
       marketResolvedEvents: this.window.marketResolvedEvents,
@@ -312,8 +314,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
         await this.deps.handlers.onError?.(error);
       },
       onGapDetected: (reason, timestamp, tokenIds) => {
-        this.rotateWindow(timestamp);
-        this.window.wsEventGapDetected++;
+        this.recordShardGap(shardId, timestamp);
         void this.deps.handlers.onGapDetected?.({ reason, timestamp, tokenIds });
       },
       onReconnectScheduled: () => {
@@ -333,8 +334,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
           },
         ]);
         // Also record it as a gap so the gap counter stays consistent.
-        this.rotateWindow(timestamp);
-        this.window.wsEventGapDetected++;
+        this.recordShardGap(sid, timestamp);
       },
       onLagWarning: (sid, drainMs) => {
         // Emit a structured warning via onError so it surfaces in logs without crashing.
@@ -543,10 +543,18 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       latencySamplesMs: [],
       reconnectCount: 0,
       wsEventGapDetected: 0,
+      wsGapsByShard: {},
       bookEventsReceived: 0,
       marketResolvedEvents: 0,
       newMarketEvents: 0,
     };
+  }
+
+  private recordShardGap(shardId: number, timestamp: number): void {
+    this.rotateWindow(timestamp);
+    this.window.wsEventGapDetected++;
+    const key = String(shardId);
+    this.window.wsGapsByShard[key] = (this.window.wsGapsByShard[key] ?? 0) + 1;
   }
 }
 

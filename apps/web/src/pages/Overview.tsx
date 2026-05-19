@@ -171,6 +171,10 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
           coverage.discovery_poll_interval_ms / 60_000
         } min`,
         `Decision p95: ${coverage.decision_tick_latency_p95_ms?.toFixed(0) ?? "—"}ms`,
+        `Event loop p95/max: ${coverage.event_loop_lag_p95_ms?.toFixed(0) ?? "—"}/${
+          coverage.event_loop_lag_max_ms?.toFixed(0) ?? "—"
+        }ms`,
+        `GC max: ${coverage.gc_pause_max_ms?.toFixed(0) ?? "—"}ms`,
         `R23 cache hit rate: ${formatPct(coverage.r23_cache_hit_rate)}`,
         `Plankton weekly reference: ${coverage.plankton_reference_weekly}`,
       ].join("\n")
@@ -200,6 +204,13 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
               coverage.r23_cache_hit_rate,
             )}`
           : "Awaiting decision metrics"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `loop ${coverage.event_loop_lag_p95_ms?.toFixed(0) ?? "—"}/${
+              coverage.event_loop_lag_max_ms?.toFixed(0) ?? "—"
+            }ms · GC ${coverage.gc_pause_max_ms?.toFixed(0) ?? "—"}ms`
+          : "Awaiting runtime diagnostics"}
       </div>
     </div>
   );
