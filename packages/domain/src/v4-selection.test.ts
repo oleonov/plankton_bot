@@ -36,12 +36,20 @@ describe("V4 Plankton priority selection", () => {
     ).toMatchObject({ admit: true, category: "crypto-btc" });
   });
 
-  it("treats missing liquidity and volume as pass, matching V4 validation policy", () => {
+  it("rejects missing liquidity but still treats missing volume as pass", () => {
     expect(
       evaluateV4Selection({
         slug: "ethereum-above-3000-on-friday",
         eventSlug: null,
         liquidity: null,
+        volume24h: null,
+      }),
+    ).toMatchObject({ admit: false, category: "crypto-eth", reason: "liquidity_too_low" });
+    expect(
+      evaluateV4Selection({
+        slug: "ethereum-above-3000-on-friday",
+        eventSlug: null,
+        liquidity: 100,
         volume24h: null,
       }),
     ).toMatchObject({ admit: true, category: "crypto-eth" });
@@ -66,6 +74,14 @@ describe("V4 Plankton priority selection", () => {
     ).toMatchObject({ admit: false, reason: "liquidity_too_low" });
     expect(
       evaluateV4Selection({
+        slug: "will-trump-win-the-election",
+        eventSlug: null,
+        liquidity: 100,
+        volume24h: 100,
+      }),
+    ).toMatchObject({ admit: true, reason: "admit" });
+    expect(
+      evaluateV4Selection({
         slug: "will-it-rain-in-nyc",
         eventSlug: null,
         liquidity: 100,
@@ -87,6 +103,7 @@ describe("V4 Plankton priority selection", () => {
     for (const input of [
       { slug: "bitcoin-above-120000", liquidity: 100, volume24h: 5 },
       { slug: "bitcoin-above-130000", liquidity: 50, volume24h: 5 },
+      { slug: "bitcoin-above-140000", liquidity: null, volume24h: 5 },
       { slug: "unclassified-market", liquidity: 100, volume24h: 100 },
     ]) {
       telemetry = recordV4AdmissionTelemetry(
@@ -95,14 +112,14 @@ describe("V4 Plankton priority selection", () => {
       );
     }
 
-    expect(telemetry.evaluatedTotal).toBe(3);
+    expect(telemetry.evaluatedTotal).toBe(4);
     expect(telemetry.admitCountTotal).toBe(1);
-    expect(telemetry.rejectCountTotal).toBe(2);
-    expect(telemetry.admitRate).toBeCloseTo(1 / 3, 6);
-    expect(telemetry.seenCountByCategory["crypto-btc"]).toBe(2);
+    expect(telemetry.rejectCountTotal).toBe(3);
+    expect(telemetry.admitRate).toBeCloseTo(1 / 4, 6);
+    expect(telemetry.seenCountByCategory["crypto-btc"]).toBe(3);
     expect(telemetry.admitCountByCategory["crypto-btc"]).toBe(1);
-    expect(telemetry.admitRateByCategory["crypto-btc"]).toBe(0.5);
-    expect(telemetry.rejectCountByReason.rejected_liquidity_below_100).toBe(1);
+    expect(telemetry.admitRateByCategory["crypto-btc"]).toBeCloseTo(1 / 3, 6);
+    expect(telemetry.rejectCountByReason.rejected_liquidity_below_100).toBe(2);
     expect(telemetry.rejectCountByReason.rejected_category_not_in_hot_cats).toBe(1);
   });
 });

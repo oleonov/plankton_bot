@@ -1773,17 +1773,25 @@ describe("LiveMarketDataGateway", () => {
         },
       });
 
+      const onError = vi.fn();
+      const onGapDetected = vi.fn();
       const stream = gw.createMarketPricingStream({
         onUpdates: vi.fn(),
-        onError: vi.fn(),
-        onGapDetected: vi.fn(),
+        onError,
+        onGapDetected,
       });
 
       stream.setTokenIds(["tok-a"]);
       sockets[0]!.emitOpen();
       vi.advanceTimersByTime(10_000);
-      expect(sockets[0]!.sent).toContain("PING");
+      expect(sockets[0]!.sent).toContain("{}");
       vi.advanceTimersByTime(15_000);
+      expect(onGapDetected).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "pong-timeout", tokenIds: ["tok-a"] }),
+      );
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ code: "MARKET_WS_PONG_TIMEOUT", shardId: 0, tokenCount: 1 }),
+      );
       vi.advanceTimersByTime(1_100);
 
       expect(sockets).toHaveLength(2);

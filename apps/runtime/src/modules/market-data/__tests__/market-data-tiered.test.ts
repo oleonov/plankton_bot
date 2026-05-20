@@ -82,7 +82,7 @@ class FakePricingStream implements MarketPricingStream {
       onError?: (error: unknown) => Promise<void> | void;
       onGapDetected?: (
         gap: Readonly<{
-          reason: "socket-closed" | "invalid-payload" | "connect-failed";
+          reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout";
           timestamp: number;
           tokenIds?: readonly string[];
         }>,

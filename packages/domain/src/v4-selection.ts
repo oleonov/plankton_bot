@@ -69,7 +69,7 @@ export function evaluateV4Selection(input: V4SelectionInput): V4SelectionResult 
   if (category == null || !HOT_CATS_40_SET.has(category)) {
     return { admit: false, category, reason: "category_not_hot" };
   }
-  if (input.liquidity != null && input.liquidity < 100) {
+  if (input.liquidity == null || input.liquidity < 100) {
     return { admit: false, category, reason: "liquidity_too_low" };
   }
   if (input.volume24h != null && input.volume24h < 5) {

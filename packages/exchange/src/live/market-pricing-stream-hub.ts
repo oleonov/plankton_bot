@@ -16,7 +16,7 @@ interface StreamHandlers {
   readonly onError?: (error: unknown) => Promise<void> | void;
   readonly onGapDetected?: (
     info: Readonly<{
-      reason: "socket-closed" | "invalid-payload" | "connect-failed";
+      reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout";
       timestamp: number;
       tokenIds?: readonly string[];
     }>,
@@ -252,7 +252,7 @@ export class SharedMarketPricingStreamHub {
 
   private async dispatchGap(
     gap: Readonly<{
-      reason: "socket-closed" | "invalid-payload" | "connect-failed";
+      reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout";
       timestamp: number;
       tokenIds?: readonly string[];
     }>,

@@ -80,7 +80,7 @@ class FakePricingStream implements MarketPricingStream {
   private _onGapDetected:
     | ((
         gap: Readonly<{
-          reason: "socket-closed" | "invalid-payload" | "connect-failed";
+          reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout";
           timestamp: number;
           tokenIds?: readonly string[];
         }>,
@@ -94,7 +94,7 @@ class FakePricingStream implements MarketPricingStream {
       onError?: (error: unknown) => Promise<void> | void;
       onGapDetected?: (
         gap: Readonly<{
-          reason: "socket-closed" | "invalid-payload" | "connect-failed";
+          reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout";
           timestamp: number;
           tokenIds?: readonly string[];
         }>,
@@ -104,7 +104,9 @@ class FakePricingStream implements MarketPricingStream {
     this._onGapDetected = handlers.onGapDetected;
   }
 
-  async triggerGap(reason: "socket-closed" | "invalid-payload" | "connect-failed"): Promise<void> {
+  async triggerGap(
+    reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout",
+  ): Promise<void> {
     await this._onGapDetected?.({ reason, timestamp: Date.now() });
   }
 

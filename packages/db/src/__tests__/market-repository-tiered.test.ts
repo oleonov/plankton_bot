@@ -80,7 +80,7 @@ function insertSnapshot(
     `INSERT INTO market_snapshots
        (token_id, best_bid, best_ask, last_price, volume_24h, liquidity, captured_at)
      VALUES (?,0.1,0.2,0.15,?,?,datetime('now'))`,
-  ).run(tokenId, overrides.volume24h ?? null, overrides.liquidity ?? null);
+  ).run(tokenId, overrides.volume24h ?? 5, overrides.liquidity ?? 100);
 }
 
 beforeEach(() => {
@@ -113,6 +113,7 @@ describe("findTrackedForPricingTiered", () => {
           selectionStatus: "matched_include",
         }),
       );
+      insertSnapshot(`t-${i}`);
     }
     const result = repo.findTrackedForPricingTiered({ maxTokens: 3 });
     expect(result.executionCritical).toHaveLength(0);
@@ -158,12 +159,29 @@ describe("findTrackedForPricingTiered", () => {
     expect(telemetry.rejectCountByReason.rejected_category_not_in_hot_cats).toBe(1);
   });
 
-  it("V4 priority pool treats missing liveness metadata as pass for hot categories", () => {
+  it("V4 priority pool rejects missing liquidity metadata for hot categories", () => {
     repo.save(makeMarket("missing-snapshot", { slug: "ethereum-missing-snapshot" }));
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
 
-    expect(result.entryCandidates.map((m) => String(m.tokenId))).toEqual(["missing-snapshot"]);
+    expect(result.entryCandidates.map((m) => String(m.tokenId))).toEqual([]);
+    expect(result.discoveryOnly.map((m) => String(m.tokenId))).toEqual(["missing-snapshot"]);
+  });
+
+  it("V4 telemetry exposes null-heavy liquidity rejection", () => {
+    repo.save(makeMarket("valid", { slug: "ethereum-valid" }));
+    insertSnapshot("valid", { liquidity: 100, volume24h: 5 });
+    for (let i = 0; i < 5; i++) {
+      repo.save(makeMarket(`missing-${i}`, { slug: `ethereum-missing-${i}` }));
+    }
+
+    repo.findTrackedForPricingTiered({ maxTokens: 10 });
+    const telemetry = repo.getV4AdmissionTelemetrySnapshot();
+
+    expect(telemetry.evaluatedTotal).toBe(6);
+    expect(telemetry.admitCountTotal).toBe(1);
+    expect(telemetry.rejectCountByReason.rejected_liquidity_below_100).toBe(5);
+    expect(telemetry.admitRate).toBeCloseTo(1 / 6, 6);
   });
 
   it("executionCritical: markets with open positions are always included", () => {
@@ -172,6 +190,7 @@ describe("findTrackedForPricingTiered", () => {
     repo.save(makeMarket("crit-dust", { tradable: false }));
     insertPosition("crit-dust", "dust");
     repo.save(makeMarket("trad-only", { tradable: true }));
+    insertSnapshot("trad-only");
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
     const critIds = new Set(result.executionCritical.map((m) => String(m.tokenId)));
@@ -223,6 +242,7 @@ describe("findTrackedForPricingTiered", () => {
     repo.save(makeMarket("both", { tradable: true }));
     insertPosition("both", "open");
     repo.save(makeMarket("trad-only-2", { tradable: true }));
+    insertSnapshot("trad-only-2");
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
     const critIds = new Set(result.executionCritical.map((m) => String(m.tokenId)));
@@ -248,6 +268,7 @@ describe("findTrackedForPricingTiered", () => {
         updatedAt: "2026-01-02T00:00:00Z",
       }),
     );
+    for (const tokenId of ["u-1", "s2-1", "mi-1"]) insertSnapshot(tokenId);
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
     expect(result.entryCandidates).toHaveLength(3);
@@ -278,6 +299,7 @@ describe("findTrackedForPricingTiered", () => {
         updatedAt: "2026-01-03T00:00:00Z",
       }),
     );
+    for (const tokenId of ["mi-old", "mi-new", "mi-mid"]) insertSnapshot(tokenId);
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
     const ids = result.entryCandidates.map((m) => String(m.tokenId));
@@ -308,6 +330,7 @@ describe("findTrackedForPricingTiered", () => {
         updatedAt: "2026-02-01T00:00:00Z",
       }),
     );
+    for (const tokenId of ["mi-b", "mi-a", "mi-c"]) insertSnapshot(tokenId);
 
     const first = repo.findTrackedForPricingTiered({ maxTokens: 2 });
     const second = repo.findTrackedForPricingTiered({ maxTokens: 2 });
@@ -319,6 +342,7 @@ describe("findTrackedForPricingTiered", () => {
   it("discovery: no limit — returns all remaining tradable markets beyond cap", () => {
     for (let i = 0; i < 20; i++) {
       repo.save(makeMarket(`disc-${i}`, { tradable: true }));
+      insertSnapshot(`disc-${i}`);
     }
     const result = repo.findTrackedForPricingTiered({ maxTokens: 5 });
     expect(result.entryCandidates).toHaveLength(5);
@@ -328,6 +352,7 @@ describe("findTrackedForPricingTiered", () => {
   it("inactive markets are never returned in any tier", () => {
     repo.save(makeMarket("inactive-trad", { active: false, tradable: true }));
     repo.save(makeMarket("active-trad", { active: true, tradable: true }));
+    insertSnapshot("active-trad");
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
     const allIds = [
@@ -343,6 +368,7 @@ describe("findTrackedForPricingTiered", () => {
     repo.save(makeMarket("excl-m", { selectionStatus: "matched_exclude", tradable: true }));
     repo.save(makeMarket("excl-f", { selectionStatus: "fallback_exclude", tradable: true }));
     repo.save(makeMarket("incl-m", { selectionStatus: "matched_include", tradable: true }));
+    insertSnapshot("incl-m");
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 10 });
     // Per plan 1.1: excluded statuses must be removed by the SQL WHERE, not
@@ -386,6 +412,7 @@ describe("findTrackedForPricingTiered", () => {
       );
     }
     repo.saveBatch(batch);
+    for (let i = 0; i < 1000; i++) insertSnapshot(`trad-lg-${i}`);
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 1000 });
     expect(result.executionCritical).toHaveLength(5);

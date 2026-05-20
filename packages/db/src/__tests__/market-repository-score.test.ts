@@ -64,6 +64,18 @@ function makeMarket(
   };
 }
 
+function insertSnapshot(
+  db: Database.Database,
+  tokenId: string,
+  overrides: { liquidity?: number | null; volume24h?: number | null } = {},
+): void {
+  db.prepare(
+    `INSERT INTO market_snapshots
+       (token_id, best_bid, best_ask, last_price, volume_24h, liquidity, captured_at)
+     VALUES (?,0.1,0.2,0.15,?,?,datetime('now'))`,
+  ).run(tokenId, overrides.volume24h ?? 5, overrides.liquidity ?? 100);
+}
+
 beforeEach(() => {
   tmpDir = mkdtempSync(path.join(tmpdir(), "krabs-score-test-"));
 });
@@ -472,6 +484,7 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
       makeMarket("high", { selectionStatus: "matched_include" }),
       makeMarket("nil", { selectionStatus: "matched_include" }),
     ]);
+    for (const tokenId of ["low", "high", "nil"]) insertSnapshot(conn.db, tokenId);
     repo.updateScoresBatch([
       {
         tokenId: createTokenId("low"),
@@ -504,6 +517,7 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
       makeMarket("stale-high", { selectionStatus: "matched_include" }),
       makeMarket("fresh-low", { selectionStatus: "matched_include" }),
     ]);
+    for (const tokenId of ["stale-high", "fresh-low"]) insertSnapshot(conn.db, tokenId);
     repo.updateScoresBatch([
       {
         tokenId: createTokenId("stale-high"),
@@ -534,6 +548,7 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
       makeMarket("step2", { selectionStatus: "step2_fallback_include" }),
       makeMarket("matched", { selectionStatus: "matched_include" }),
     ]);
+    for (const tokenId of ["step2", "matched"]) insertSnapshot(conn.db, tokenId);
     repo.updateScoresBatch([
       {
         tokenId: createTokenId("step2"),
@@ -573,6 +588,9 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
         tickSize: 0.001,
       }),
     ]);
+    for (const tokenId of ["weather-low-priority", "politics-high-priority"]) {
+      insertSnapshot(conn.db, tokenId);
+    }
     repo.updateScoresBatch(
       ["weather-low-priority", "politics-high-priority"].map((id) => ({
         tokenId: createTokenId(id),
@@ -605,6 +623,7 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
         createdAt: "2026-01-02T00:00:00.000Z", // ties with aaa on createdAt
       }),
     ]);
+    for (const tokenId of ["zzz", "aaa", "bbb"]) insertSnapshot(conn.db, tokenId);
     // All same fresh score → comparator drops to created_at then token_id.
     repo.updateScoresBatch(
       ["zzz", "aaa", "bbb"].map((id) => ({
@@ -633,6 +652,7 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
         createdAt: "2026-01-02T00:00:00.000Z",
       }),
     ]);
+    for (const tokenId of ["a", "b"]) insertSnapshot(conn.db, tokenId);
     const result = repo.findTrackedForPricingTiered({ maxTokens: 100 });
     expect(result.entryCandidates.map((m) => String(m.tokenId))).toEqual(["b", "a"]);
   });

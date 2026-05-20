@@ -130,6 +130,7 @@ describe("LiveUserEventStream", () => {
   it("sends heartbeat and detects missing pong", async () => {
     const sockets: FakeUserSocket[] = [];
     const onGapDetected = vi.fn();
+    const onError = vi.fn();
 
     const stream = new LiveUserEventStream({
       auth: { apiKey: "key", secret: "secret", passphrase: "pass" },
@@ -143,16 +144,20 @@ describe("LiveUserEventStream", () => {
         onTradeEvents: vi.fn(),
         onOrderEvents: vi.fn(),
         onGapDetected,
+        onError,
       },
     });
     stream.setConditionIds(["cond-1"]);
 
     sockets[0]!.emitOpen();
     await vi.advanceTimersByTimeAsync(10_000);
-    expect(sockets[0]!.sent.at(-1)).toBe("PING");
+    expect(sockets[0]!.sent.at(-1)).toBe("{}");
 
     await vi.advanceTimersByTimeAsync(15_001);
     expect(onGapDetected).toHaveBeenCalledWith(expect.objectContaining({ reason: "pong-timeout" }));
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ code: "USER_WS_PONG_TIMEOUT", conditionCount: 1 }),
+    );
 
     await vi.advanceTimersByTimeAsync(2_000);
     expect(sockets.length).toBeGreaterThanOrEqual(2);

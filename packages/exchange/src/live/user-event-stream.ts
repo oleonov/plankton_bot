@@ -9,7 +9,7 @@ const USER_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
 const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 15_000;
 const RECONNECT_DELAY_MS = 2_000;
-const HEARTBEAT_PING = "PING";
+const HEARTBEAT_PING = "{}";
 const HEARTBEAT_PONG = "PONG";
 
 export interface UserEventStreamAuth {
@@ -166,7 +166,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
         void this.deps.handlers.onError?.(event);
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         const ignoreEvent = this.shouldIgnoreSocketClose(socket);
         if (this.socket === socket) {
           this.socket = null;
@@ -175,6 +175,14 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
         if (ignoreEvent || this.closed) return;
         this.clearHeartbeat(socket);
         this.subscribedConditionIds = [];
+        void this.deps.handlers.onError?.(
+          Object.assign(new Error("user websocket closed"), {
+            code: "USER_WS_SOCKET_CLOSED",
+            closeCode: event.code,
+            closeReason: event.reason,
+            conditionCount: this.desiredConditionIds.length,
+          }),
+        );
         void this.deps.handlers.onGapDetected?.({
           reason: "socket-close",
           timestamp: Date.now(),
@@ -195,6 +203,12 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
       socket.send(HEARTBEAT_PING);
       this.pongTimer = setTimeout(() => {
         if (this.closed || this.socket !== socket) return;
+        void this.deps.handlers.onError?.(
+          Object.assign(new Error("user websocket pong timeout"), {
+            code: "USER_WS_PONG_TIMEOUT",
+            conditionCount: this.desiredConditionIds.length,
+          }),
+        );
         void this.deps.handlers.onGapDetected?.({
           reason: "pong-timeout",
           timestamp: Date.now(),

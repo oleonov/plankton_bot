@@ -27,7 +27,7 @@ const METRICS_WINDOW_MS = 10 * 60 * 1000;
 // the window doesn't rotate (still <10 min) so samples accumulate into tens of
 // MB before rotation. The cap keeps p50/p95 accuracy while bounding memory.
 const MAX_LATENCY_SAMPLES_PER_WINDOW = 10_000;
-const HEARTBEAT_PING = "PING";
+const HEARTBEAT_PING = "{}";
 const HEARTBEAT_PONG = "PONG";
 const PING_INTERVAL_MS = 10_000;
 const PONG_TIMEOUT_MS = 15_000;
@@ -69,7 +69,7 @@ interface LiveMarketPricingStreamDeps {
     onError?: (error: unknown) => Promise<void> | void;
     onGapDetected?: (
       info: Readonly<{
-        reason: "socket-closed" | "invalid-payload" | "connect-failed";
+        reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout";
         timestamp: number;
         tokenIds?: readonly string[];
       }>,
@@ -107,7 +107,7 @@ interface ShardCallbacks {
   onRecords: (records: readonly unknown[]) => Promise<void> | void;
   onError: (error: unknown) => Promise<void> | void;
   onGapDetected: (
-    reason: "socket-closed" | "invalid-payload" | "connect-failed",
+    reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout",
     timestamp: number,
     tokenIds: readonly string[],
   ) => void;
@@ -690,7 +690,7 @@ class MarketPricingShard {
         void this.deps.onError(event);
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         const ignoreEvent = this.shouldIgnoreSocketClose(socket);
         if (this.socket === socket) {
           this.socket = null;
@@ -700,6 +700,15 @@ class MarketPricingShard {
         if (ignoreEvent || this.closed) return;
         this.clearHeartbeat(socket);
         this.subscribedTokenIds = [];
+        void this.deps.onError(
+          Object.assign(new Error("market websocket closed"), {
+            code: "MARKET_WS_SOCKET_CLOSED",
+            shardId: this.deps.shardId,
+            closeCode: event.code,
+            closeReason: event.reason,
+            tokenCount: this.desiredTokenIds.length,
+          }),
+        );
         this.deps.onGapDetected("socket-closed", Date.now(), this.desiredTokenIds);
         // If we were half-open and the socket closed before stable timer fired,
         // that means the half-open failed.
@@ -843,7 +852,14 @@ class MarketPricingShard {
       socket.send(HEARTBEAT_PING);
       this.pongTimer = setTimeout(() => {
         if (this.closed || this.socket !== socket) return;
-        this.deps.onGapDetected("socket-closed", Date.now(), this.desiredTokenIds);
+        void this.deps.onError(
+          Object.assign(new Error("market websocket pong timeout"), {
+            code: "MARKET_WS_PONG_TIMEOUT",
+            shardId: this.deps.shardId,
+            tokenCount: this.desiredTokenIds.length,
+          }),
+        );
+        this.deps.onGapDetected("pong-timeout", Date.now(), this.desiredTokenIds);
         this.reconnect();
       }, PONG_TIMEOUT_MS);
     }, PING_INTERVAL_MS);
