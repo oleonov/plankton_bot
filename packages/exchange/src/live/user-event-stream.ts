@@ -3,74 +3,31 @@ import type {
   ExchangeUserOrderEvent,
   ExchangeUserTradeEvent,
 } from "@krabs/domain";
+import { Worker } from "node:worker_threads";
+import type {
+  SerializedUserWorkerError,
+  UserEventWorkerCommand,
+  UserEventWorkerData,
+  UserEventWorkerEvent,
+} from "./user-event-worker-protocol.js";
 import { mapUserOrderEvent, mapUserTradeEvent } from "./user-event-mappers.js";
+import {
+  arraysEqual,
+  buildUserSubscriptionPayload,
+  defaultUserEventWebSocketFactory,
+  isUserPongPayload,
+  normalizeConditionIds,
+  normalizeUserWebSocketPayload,
+  USER_HEARTBEAT_PING,
+  USER_PING_INTERVAL_MS,
+  USER_PONG_TIMEOUT_MS,
+  USER_RECONNECT_DELAY_MS,
+  USER_WS_URL,
+  type UserEventStreamAuth,
+  type UserEventWebSocketLike,
+} from "./user-event-ws-protocol.js";
 
-const USER_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
-const PING_INTERVAL_MS = 10_000;
-const PONG_TIMEOUT_MS = 15_000;
-const RECONNECT_DELAY_MS = 2_000;
-const HEARTBEAT_PING = "PING";
-const HEARTBEAT_PONG = "PONG";
-
-export interface UserEventStreamAuth {
-  readonly apiKey: string;
-  readonly secret: string;
-  readonly passphrase: string;
-}
-
-export interface UserEventWebSocketLike {
-  onopen: ((event: unknown) => void) | null;
-  onmessage: ((event: { data: unknown }) => void) | null;
-  onerror: ((event: unknown) => void) | null;
-  onclose: ((event: { code?: number; reason?: string }) => void) | null;
-  send(data: string): void;
-  close(): void;
-}
-
-function defaultWebSocketFactory(url: string): UserEventWebSocketLike {
-  const ctor = (globalThis as { WebSocket?: new (url: string) => UserEventWebSocketLike })
-    .WebSocket;
-  if (!ctor) {
-    throw new Error("WebSocket is not available in the current runtime");
-  }
-  return new ctor(url);
-}
-
-function normalizeWebSocketPayload(data: unknown): string | null {
-  if (typeof data === "string") return data;
-  if (data instanceof ArrayBuffer) {
-    return new TextDecoder().decode(new Uint8Array(data));
-  }
-  if (ArrayBuffer.isView(data)) {
-    return new TextDecoder().decode(data);
-  }
-  return null;
-}
-
-function normalizeConditionIds(conditionIds: readonly string[]): string[] {
-  return [
-    ...new Set(conditionIds.map((value) => value.trim()).filter((value) => value.length > 0)),
-  ].sort();
-}
-
-function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((value, index) => value === b[index]);
-}
-
-function buildUserSubscriptionPayload(input: {
-  auth: UserEventStreamAuth;
-  conditionIds: readonly string[];
-  operation: "subscribe" | "unsubscribe";
-  initialDump?: boolean;
-}): string {
-  return JSON.stringify({
-    auth: input.auth,
-    type: "user",
-    operation: input.operation,
-    markets: input.conditionIds,
-    ...(input.initialDump === undefined ? {} : { initial_dump: input.initialDump }),
-  });
-}
+export type { UserEventStreamAuth, UserEventWebSocketLike } from "./user-event-ws-protocol.js";
 
 export class LiveUserEventStream implements ExchangeUserEventStream {
   private readonly intentionallyClosedSockets = new WeakSet<UserEventWebSocketLike>();
@@ -88,6 +45,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
       auth: UserEventStreamAuth;
       traderAddress: string | null;
       createWebSocket?: ((url: string) => UserEventWebSocketLike) | undefined;
+      useWorker?: boolean | undefined;
       handlers: Readonly<{
         onTradeEvents: (events: readonly ExchangeUserTradeEvent[]) => Promise<void> | void;
         onOrderEvents: (events: readonly ExchangeUserOrderEvent[]) => Promise<void> | void;
@@ -97,9 +55,18 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
         onError?: (error: unknown) => Promise<void> | void;
       }>;
     }>,
-  ) {}
+  ) {
+    const useWorker = deps.useWorker ?? deps.createWebSocket === undefined;
+    this.workerBridge = useWorker ? new UserEventWorkerBridge(deps) : null;
+  }
+
+  private readonly workerBridge: UserEventWorkerBridge | null;
 
   setConditionIds(conditionIds: readonly string[]): void {
+    if (this.workerBridge) {
+      this.workerBridge.setConditionIds(conditionIds);
+      return;
+    }
     const next = normalizeConditionIds(conditionIds);
     if (arraysEqual(this.desiredConditionIds, next)) return;
     this.desiredConditionIds = next;
@@ -123,6 +90,10 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
   }
 
   close(): void {
+    if (this.workerBridge) {
+      this.workerBridge.close();
+      return;
+    }
     this.closed = true;
     this.clearTimers();
     this.closeSocket({ intentional: true });
@@ -137,7 +108,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
     }
 
     try {
-      const socket = (this.deps.createWebSocket ?? defaultWebSocketFactory)(USER_WS_URL);
+      const socket = (this.deps.createWebSocket ?? defaultUserEventWebSocketFactory)(USER_WS_URL);
       this.socket = socket;
       this.socketOpen = false;
       this.subscribedConditionIds = [];
@@ -200,7 +171,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
     this.pingTimer = setInterval(() => {
       if (this.closed || this.socket !== socket) return;
       if (this.pongTimer) return;
-      socket.send(HEARTBEAT_PING);
+      socket.send(USER_HEARTBEAT_PING);
       this.pongTimer = setTimeout(() => {
         if (this.closed || this.socket !== socket) return;
         void this.deps.handlers.onError?.(
@@ -214,8 +185,8 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
           timestamp: Date.now(),
         });
         this.reconnect();
-      }, PONG_TIMEOUT_MS);
-    }, PING_INTERVAL_MS);
+      }, USER_PONG_TIMEOUT_MS);
+    }, USER_PING_INTERVAL_MS);
   }
 
   private clearHeartbeat(socket: UserEventWebSocketLike): void {
@@ -247,7 +218,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, RECONNECT_DELAY_MS);
+    }, USER_RECONNECT_DELAY_MS);
   }
 
   private shouldIgnoreSocketError(socket: UserEventWebSocketLike): boolean {
@@ -306,10 +277,10 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
   private async handleMessage(socket: UserEventWebSocketLike, data: unknown): Promise<void> {
     try {
       if (this.socket !== socket) return;
-      const text = normalizeWebSocketPayload(data);
+      const text = normalizeUserWebSocketPayload(data);
       if (!text) return;
       const trimmed = text.trim();
-      if (this.isPongPayload(trimmed)) {
+      if (isUserPongPayload(trimmed)) {
         if (this.pongTimer) {
           clearTimeout(this.pongTimer);
           this.pongTimer = null;
@@ -333,7 +304,7 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
         return;
       }
 
-      if (this.isPongPayload(parsed)) {
+      if (isUserPongPayload(parsed)) {
         if (this.pongTimer) {
           clearTimeout(this.pongTimer);
           this.pongTimer = null;
@@ -370,16 +341,92 @@ export class LiveUserEventStream implements ExchangeUserEventStream {
       await this.deps.handlers.onError?.(error);
     }
   }
+}
 
-  private isPongPayload(payload: unknown): boolean {
-    if (typeof payload === "string") {
-      return payload.trim().toUpperCase() === HEARTBEAT_PONG;
-    }
-    return (
-      payload != null &&
-      typeof payload === "object" &&
-      !Array.isArray(payload) &&
-      Object.keys(payload as Record<string, unknown>).length === 0
-    );
+class UserEventWorkerBridge implements ExchangeUserEventStream {
+  private readonly worker: Worker;
+  private closed = false;
+
+  constructor(
+    private readonly deps: Readonly<{
+      auth: UserEventStreamAuth;
+      traderAddress: string | null;
+      handlers: Readonly<{
+        onTradeEvents: (events: readonly ExchangeUserTradeEvent[]) => Promise<void> | void;
+        onOrderEvents: (events: readonly ExchangeUserOrderEvent[]) => Promise<void> | void;
+        onGapDetected?: (
+          info: Readonly<{ reason: string; timestamp: number }>,
+        ) => Promise<void> | void;
+        onError?: (error: unknown) => Promise<void> | void;
+      }>;
+    }>,
+  ) {
+    const workerData: UserEventWorkerData = {
+      auth: deps.auth,
+      traderAddress: deps.traderAddress,
+    };
+    this.worker = new Worker(new URL("./user-event-worker.js", import.meta.url), { workerData });
+    this.worker.on("message", (message: unknown) => this.handleWorkerMessage(message));
+    this.worker.on("error", (error) => {
+      void this.deps.handlers.onError?.(error);
+      void this.deps.handlers.onGapDetected?.({ reason: "worker-error", timestamp: Date.now() });
+    });
+    this.worker.on("exit", (code) => {
+      if (this.closed || code === 0) return;
+      void this.deps.handlers.onError?.(
+        Object.assign(new Error(`user-event worker exited with code ${code}`), {
+          code: "USER_WS_WORKER_EXITED",
+        }),
+      );
+      void this.deps.handlers.onGapDetected?.({ reason: "worker-exit", timestamp: Date.now() });
+    });
   }
+
+  setConditionIds(conditionIds: readonly string[]): void {
+    this.worker.postMessage({ type: "set-condition-ids", conditionIds });
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    const command: UserEventWorkerCommand = { type: "close" };
+    this.worker.postMessage(command);
+    void this.worker.terminate();
+  }
+
+  private handleWorkerMessage(message: unknown): void {
+    if (!message || typeof message !== "object") return;
+    const event = message as UserEventWorkerEvent;
+    switch (event.type) {
+      case "trade-events":
+        void this.deps.handlers.onTradeEvents(event.events);
+        break;
+      case "order-events":
+        void this.deps.handlers.onOrderEvents(event.events);
+        break;
+      case "gap":
+        void this.deps.handlers.onGapDetected?.({
+          reason: event.reason,
+          timestamp: event.timestamp,
+        });
+        break;
+      case "error":
+        void this.deps.handlers.onError?.(deserializeUserWorkerError(event.error));
+        break;
+      case "heartbeat":
+        break;
+    }
+  }
+}
+
+function deserializeUserWorkerError(error: SerializedUserWorkerError): Error {
+  const result = Object.assign(new Error(error.message), {
+    code: error.code,
+    conditionCount: error.conditionCount,
+    closeCode: error.closeCode,
+    closeReason: error.closeReason,
+  });
+  result.name = error.name ?? "Error";
+  if (error.stack) result.stack = error.stack;
+  return result;
 }

@@ -129,6 +129,10 @@ export interface LiveMarketDataConfig {
   circuitOpenMs?: number | undefined;
   /** Stable uptime ms before a breaker closes. Default: 30000. */
   streamStableMs?: number | undefined;
+  /** Enable worker-backed market WS shards. Defaults to true for production sockets. */
+  useWorkerShards?: boolean | undefined;
+  /** Max number of shards backed by dedicated WS workers. Default: all production shards. */
+  wsWorkerCount?: number | undefined;
 }
 
 /**
@@ -208,6 +212,8 @@ export class LiveMarketDataGateway implements MarketDataGateway {
         : {}),
       ...(config.circuitOpenMs !== undefined ? { circuitOpenMs: config.circuitOpenMs } : {}),
       ...(config.streamStableMs !== undefined ? { streamStableMs: config.streamStableMs } : {}),
+      useWorkerShards: config.useWorkerShards ?? config.createWebSocket === undefined,
+      ...(config.wsWorkerCount !== undefined ? { wsWorkerCount: config.wsWorkerCount } : {}),
     });
   }
 

@@ -171,6 +171,7 @@ function r23HealthColor(metrics?: R23MetricsData): string {
 
 function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
   const color = coverageColor(coverage?.coverage_pct);
+  const heartbeat = coverage?.ws_heartbeat;
   const title = coverage
     ? [
         `WS tracked: ${coverage.ws_tracked}`,
@@ -184,6 +185,11 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
           coverage.event_loop_lag_max_ms?.toFixed(0) ?? "—"
         }ms`,
         `GC max: ${coverage.gc_pause_max_ms?.toFixed(0) ?? "—"}ms`,
+        `WS heartbeat: ping ${heartbeat?.pingSent ?? 0}, pong ${
+          heartbeat?.pongReceived ?? 0
+        }, timeout ${heartbeat?.timeoutFired ?? 0}, worker lag ${
+          heartbeat?.workerEventLoopLagMaxMs?.toFixed(0) ?? "—"
+        }ms`,
         `R23 cache hit rate: ${formatPct(coverage.r23_cache_hit_rate)}`,
         `V4 admit rate: ${formatPct(coverage.v4_admit_rate)}`,
         `V4 top categories: ${formatTopCounts(coverage.v4_admit_count_by_category, 5)}`,
@@ -223,6 +229,13 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
               coverage.event_loop_lag_max_ms?.toFixed(0) ?? "—"
             }ms · GC ${coverage.gc_pause_max_ms?.toFixed(0) ?? "—"}ms`
           : "Awaiting runtime diagnostics"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `WS hb ${heartbeat?.pongReceived ?? 0}/${heartbeat?.pingSent ?? 0} · timeouts ${
+              heartbeat?.timeoutFired ?? 0
+            } · lag ${heartbeat?.workerEventLoopLagMaxMs?.toFixed(0) ?? "—"}ms`
+          : "Awaiting WS heartbeat telemetry"}
       </div>
       <div className="value-sm" style={{ color: "var(--text-dim)" }}>
         {coverage

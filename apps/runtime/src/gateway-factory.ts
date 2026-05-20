@@ -43,6 +43,8 @@ export interface CreateGatewaysInput {
   marketDataMaxTrackedTokens?: number | undefined;
   /** Hard cap on concurrent WS shards. Reads from env config. */
   marketDataMaxWsShards?: number | undefined;
+  /** Max number of market WS shards moved into worker threads. */
+  wsWorkerCount?: number | undefined;
   /** Max items in the per-shard ingress queue. Reads from env config. */
   marketDataIngressQueueMax?: number | undefined;
   /** Lag-warning threshold in ms. Reads from env config. */
@@ -91,6 +93,7 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     onInfraAlert,
     marketDataMaxTrackedTokens,
     marketDataMaxWsShards,
+    wsWorkerCount,
     marketDataIngressQueueMax,
     marketDataIngressLagWarnMs,
     marketDataIngressOverflowPolicy,
@@ -126,6 +129,8 @@ export function createGateways(input: CreateGatewaysInput): CreateGatewaysResult
     slugFilter,
     maxTokens: marketDataMaxTrackedTokens,
     maxWsShards: marketDataMaxWsShards,
+    wsWorkerCount,
+    useWorkerShards: wsWorkerCount !== 0,
     queueMax: marketDataIngressQueueMax,
     lagWarnMs: marketDataIngressLagWarnMs,
     overflowPolicy: marketDataIngressOverflowPolicy,

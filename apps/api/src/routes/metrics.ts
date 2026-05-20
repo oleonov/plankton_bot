@@ -106,6 +106,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
     const eventLoopLag = readObject(runtimeDiagnostics, "eventLoopLagMs");
     const gcPause = readObject(runtimeDiagnostics, "gcPauseMs");
     const v4AdmissionTelemetry = readObject(stream, "v4AdmissionTelemetry");
+    const wsHeartbeat = readObject(stream, "wsHeartbeat");
     const wsTracked = readNumber(stream, "trackedTokenCount") ?? 0;
     const eventsPerSec = readNumber(stream, "wsEventsReceivedPerSec") ?? 0;
     const shardCount = readNumber(stream, "shardCount") ?? 0;
@@ -140,6 +141,7 @@ export const metricsRoutes: FastifyPluginAsync<MetricsOpts> = async (app, opts) 
       event_loop_lag_p95_ms: readNumber(eventLoopLag, "p95Ms"),
       gc_pause_max_ms: readNumber(gcPause, "maxMs"),
       http_errors_by_class_1h: aggregateHttpErrors(httpErrorRows),
+      ws_heartbeat: wsHeartbeat,
       v4_admit_count_total: readNumber(v4AdmissionTelemetry, "admitCountTotal") ?? 0,
       v4_admit_count_by_category: readNumberRecord(v4AdmissionTelemetry, "admitCountByCategory"),
       v4_reject_count_total: readNumber(v4AdmissionTelemetry, "rejectCountTotal") ?? 0,

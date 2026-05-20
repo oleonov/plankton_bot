@@ -610,6 +610,7 @@ async function main(): Promise<void> {
       polygonRpcUrls: runtimeMode === "live-lite" ? config.polygonRpcUrls : undefined,
       marketDataMaxTrackedTokens: config.marketDataMaxTrackedTokens,
       marketDataMaxWsShards: config.marketDataMaxWsShards,
+      wsWorkerCount: config.wsWorkerCount,
       marketDataIngressQueueMax: config.marketDataIngressQueueMax,
       marketDataIngressLagWarnMs: config.marketDataIngressLagWarnMs,
       marketDataIngressOverflowPolicy: config.marketDataIngressOverflowPolicy,

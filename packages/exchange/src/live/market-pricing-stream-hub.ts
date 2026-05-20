@@ -55,6 +55,10 @@ interface SharedMarketPricingStreamHubDeps {
   readonly circuitOpenMs?: number;
   /** Stable uptime ms before breaker closes. Forwarded to LiveMarketPricingStream. */
   readonly streamStableMs?: number;
+  /** Enable worker-backed market WS shards. */
+  readonly useWorkerShards?: boolean;
+  /** Max number of shards backed by dedicated WS workers. */
+  readonly wsWorkerCount?: number;
 }
 
 interface StreamViewState {
@@ -102,6 +106,8 @@ export class SharedMarketPricingStreamHub {
         : {}),
       ...(deps.circuitOpenMs !== undefined ? { circuitOpenMs: deps.circuitOpenMs } : {}),
       ...(deps.streamStableMs !== undefined ? { streamStableMs: deps.streamStableMs } : {}),
+      ...(deps.useWorkerShards !== undefined ? { useWorkerShards: deps.useWorkerShards } : {}),
+      ...(deps.wsWorkerCount !== undefined ? { wsWorkerCount: deps.wsWorkerCount } : {}),
       handlers: {
         onUpdates: async (updates) => {
           await this.dispatchUpdates(updates);

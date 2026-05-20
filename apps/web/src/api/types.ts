@@ -347,6 +347,26 @@ export interface CoverageMetricsData {
   event_loop_lag_p95_ms: number | null;
   gc_pause_max_ms: number | null;
   http_errors_by_class_1h: Record<string, number>;
+  ws_heartbeat: {
+    pingSent: number;
+    pongReceived: number;
+    timeoutFired: number;
+    timeoutSuppressedByInbound: number;
+    workerEventLoopLagMaxMs: number;
+    byShard: Record<
+      string,
+      {
+        pingSent: number;
+        pongReceived: number;
+        timeoutFired: number;
+        timeoutSuppressedByInbound: number;
+        lastPingSentAt: number | null;
+        lastPongAt: number | null;
+        lastInboundMessageAt: number | null;
+        workerEventLoopLagMaxMs: number;
+      }
+    >;
+  } | null;
   v4_admit_count_total: number;
   v4_admit_count_by_category: Record<string, number>;
   v4_reject_count_total: number;

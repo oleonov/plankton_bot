@@ -93,6 +93,7 @@ const envSchema = z
     // Task 1 — bounded pricing universe
     MARKET_DATA_MAX_TRACKED_TOKENS: z.coerce.number().int().min(100).max(5_000).default(1_000),
     MARKET_DATA_MAX_WS_SHARDS: z.coerce.number().int().min(1).max(20).default(2),
+    WS_WORKER_COUNT: z.coerce.number().int().min(0).max(20).default(20),
     MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS: z.coerce
       .number()
       .int()
@@ -239,6 +240,7 @@ export interface AppConfig {
   // Task 1
   marketDataMaxTrackedTokens: number;
   marketDataMaxWsShards: number;
+  wsWorkerCount: number;
   marketDataDiscoveryPollIntervalMs: number;
   marketDataDiscoveryBatchSize: number;
   // Task 2
@@ -342,6 +344,7 @@ export function loadEnv(envPath?: string): AppConfig {
     trustProxy: env.TRUST_PROXY,
     marketDataMaxTrackedTokens: env.MARKET_DATA_MAX_TRACKED_TOKENS,
     marketDataMaxWsShards: env.MARKET_DATA_MAX_WS_SHARDS,
+    wsWorkerCount: env.WS_WORKER_COUNT,
     marketDataDiscoveryPollIntervalMs: env.MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS,
     marketDataDiscoveryBatchSize: env.MARKET_DATA_DISCOVERY_BATCH_SIZE,
     clobAxiosMaxSockets: env.CLOB_AXIOS_MAX_SOCKETS,

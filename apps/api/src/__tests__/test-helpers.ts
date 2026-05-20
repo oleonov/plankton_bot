@@ -13,6 +13,7 @@ export const MARKET_DATA_TEST_DEFAULTS = {
   reconciliationIntervalMs: 15_000,
   marketDataMaxTrackedTokens: 1_000,
   marketDataMaxWsShards: 2,
+  wsWorkerCount: 0,
   marketDataDiscoveryPollIntervalMs: 60_000,
   marketDataDiscoveryBatchSize: 200,
   clobAxiosMaxSockets: 8,

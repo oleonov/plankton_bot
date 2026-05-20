@@ -291,6 +291,29 @@ export interface MarketPricingStreamMetricsSnapshot {
   readonly queueOverflows?: number;
   /** Gap/reconnect events grouped by shard id for diagnosing per-shard churn. */
   readonly wsGapsByShard?: Readonly<Record<string, number>>;
+  /** Heartbeat counters emitted by dedicated WS workers, aggregated by stream. */
+  readonly wsHeartbeat?: Readonly<{
+    readonly pingSent: number;
+    readonly pongReceived: number;
+    readonly timeoutFired: number;
+    readonly timeoutSuppressedByInbound: number;
+    readonly workerEventLoopLagMaxMs: number;
+    readonly byShard: Readonly<
+      Record<
+        string,
+        Readonly<{
+          readonly pingSent: number;
+          readonly pongReceived: number;
+          readonly timeoutFired: number;
+          readonly timeoutSuppressedByInbound: number;
+          readonly lastPingSentAt: number | null;
+          readonly lastPongAt: number | null;
+          readonly lastInboundMessageAt: number | null;
+          readonly workerEventLoopLagMaxMs: number;
+        }>
+      >
+    >;
+  }>;
 }
 
 export interface MarketPricingStream {

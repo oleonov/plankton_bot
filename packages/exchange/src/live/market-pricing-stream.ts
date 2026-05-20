@@ -7,6 +7,7 @@ import {
   type MarketPricingStreamMetricsSnapshot,
   type MarketPricingStreamUpdate,
 } from "@krabs/domain";
+import { Worker } from "node:worker_threads";
 import { mapOrderBook } from "../mappers.js";
 import {
   extractBookTokenId,
@@ -17,9 +18,28 @@ import {
   type MarketDataWebSocketLike,
 } from "./market-data-stream-shared.js";
 import { BoundedQueue } from "./bounded-queue.js";
+import type {
+  MarketPricingWorkerData,
+  MarketPricingWorkerEvent,
+  WorkerHeartbeatSnapshot,
+} from "./market-pricing-worker-protocol.js";
+import {
+  arraysEqual,
+  buildMarketSubscriptionPayload,
+  buildMarketSubscriptionUpdatePayload,
+  chunkItems,
+  CLOB_MARKET_WS_URL,
+  collectStreamUpdatesMetricsOnly,
+  extractTokenIdsFromRecords,
+  HEARTBEAT_PING,
+  isPongPayload,
+  normalizeTokenIds,
+  PING_INTERVAL_MS,
+  PONG_TIMEOUT_MS,
+  type ParsedRecordMetrics,
+} from "./market-pricing-ws-protocol.js";
 import { computeReconnectDelayMs } from "./reconnect-backoff.js";
 
-const CLOB_MARKET_WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 const DEFAULT_MAX_SUBSCRIPTIONS_PER_CONNECTION = 500;
 const METRICS_WINDOW_MS = 10 * 60 * 1000;
 // Cap per-window latency samples. Each reconnect can burst thousands of samples
@@ -27,10 +47,6 @@ const METRICS_WINDOW_MS = 10 * 60 * 1000;
 // the window doesn't rotate (still <10 min) so samples accumulate into tens of
 // MB before rotation. The cap keeps p50/p95 accuracy while bounding memory.
 const MAX_LATENCY_SAMPLES_PER_WINDOW = 10_000;
-const HEARTBEAT_PING = "PING";
-const HEARTBEAT_PONG = "PONG";
-const PING_INTERVAL_MS = 10_000;
-const PONG_TIMEOUT_MS = 15_000;
 const DEFAULT_RECONNECT_BASE_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_MS = 30_000;
 const DEFAULT_SHARD_BREAKER_RECONNECTS_PER_MIN = 10;
@@ -59,6 +75,15 @@ interface StreamWindow {
   bookEventsReceived: number;
   marketResolvedEvents: number;
   newMarketEvents: number;
+}
+
+interface WorkerHeartbeatAggregate {
+  pingSent: number;
+  pongReceived: number;
+  timeoutFired: number;
+  timeoutSuppressedByInbound: number;
+  workerEventLoopLagMaxMs: number;
+  byShard: Record<string, WorkerHeartbeatSnapshot>;
 }
 
 interface LiveMarketPricingStreamDeps {
@@ -101,6 +126,16 @@ interface LiveMarketPricingStreamDeps {
   circuitOpenMs?: number;
   /** Milliseconds a shard/stream must be stable before breaker closes. Default: 30000. */
   streamStableMs?: number;
+  /**
+   * Move each market WS shard into a dedicated worker thread. Defaults to false
+   * for injected test WebSocket factories and true in production gateway wiring.
+   */
+  useWorkerShards?: boolean;
+  /**
+   * Upper bound on worker-backed shards. Shards above this count use the legacy
+   * main-thread runtime so operators have a config-only pressure valve.
+   */
+  wsWorkerCount?: number;
 }
 
 interface ShardCallbacks {
@@ -120,8 +155,12 @@ interface ShardCallbacks {
    * like `wsEventsReceived` are updated immediately, regardless of queue drain state.
    */
   onMessageParsed: (records: readonly unknown[]) => void;
+  /** Worker shards already parsed and counted records, so main can update counters without rescanning. */
+  onMessageMetrics: (metrics: ParsedRecordMetrics) => void;
   /** Notifies the stream when this shard's breaker state changes. */
   onBreakerStateChanged: (shardId: number, state: ShardBreakerState) => void;
+  /** Updates per-shard heartbeat telemetry emitted from worker context. */
+  onHeartbeat?: (shardId: number, heartbeat: WorkerHeartbeatSnapshot) => void;
 }
 
 type ShardBreakerState = "closed" | "open" | "half-open";
@@ -136,9 +175,32 @@ interface CollectStreamUpdatesResult {
   readonly latencySamplesMs: readonly number[];
 }
 
+interface PricingShardRuntime {
+  setTokenIds(tokenIds: readonly string[]): void;
+  close(): void;
+  getQueueDepth(): number;
+  getDesiredTokenIds(): readonly string[];
+  getBreakerReopenAtMs(): number;
+}
+
+type ShardRuntimeDeps = Readonly<{
+  shardId: number;
+  createWebSocket: (url: string) => MarketDataWebSocketLike;
+  queueMax: number;
+  lagWarnMs: number;
+  overflowPolicy: OverflowPolicy;
+  reconnectBaseMs: number;
+  reconnectMaxMs: number;
+  shardBreakerReconnectsPerMin: number;
+  shardBreakerOpenMs: number;
+  shardBreakerOpenMaxMs: number;
+  streamStableMs: number;
+}> &
+  ShardCallbacks;
+
 export class LiveMarketPricingStream implements MarketPricingStream {
   private readonly pricingByToken = new Map<string, MarketPricingSnapshot>();
-  private readonly shards = new Map<number, MarketPricingShard>();
+  private readonly shards = new Map<number, PricingShardRuntime>();
   private readonly now: () => number;
   private readonly maxSubscriptionsPerConnection: number;
   private readonly queueMax: number;
@@ -154,6 +216,8 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   private readonly circuitOpenShardFloor: number;
   private readonly circuitOpenMs: number;
   private readonly streamStableMs: number;
+  private readonly useWorkerShards: boolean;
+  private readonly wsWorkerCount: number;
   private desiredTokenIds: string[] = [];
   // Pending desired tokens while stream breaker is open — applied on stream_circuit_closed.
   private pendingDesiredTokenIds: string[] | null = null;
@@ -168,6 +232,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   private streamStableTimer: ReturnType<typeof setTimeout> | null = null;
   // Shard breaker states indexed by shardId (shards map may not contain open shards)
   private readonly shardBreakerStates = new Map<number, ShardBreakerState>();
+  private readonly heartbeatByShard = new Map<number, WorkerHeartbeatSnapshot>();
 
   constructor(private readonly deps: LiveMarketPricingStreamDeps) {
     this.now = deps.now ?? Date.now;
@@ -189,6 +254,8 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     this.circuitOpenShardFloor = deps.circuitOpenShardFloor ?? DEFAULT_CIRCUIT_OPEN_SHARD_FLOOR;
     this.circuitOpenMs = deps.circuitOpenMs ?? DEFAULT_CIRCUIT_OPEN_MS;
     this.streamStableMs = deps.streamStableMs ?? DEFAULT_STREAM_STABLE_MS;
+    this.useWorkerShards = deps.useWorkerShards ?? false;
+    this.wsWorkerCount = Math.max(0, deps.wsWorkerCount ?? Number.POSITIVE_INFINITY);
     this.window = this.createEmptyWindow(this.now());
   }
 
@@ -258,6 +325,35 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       queueDepth: totalQueueDepth,
       maxQueueDepth: this.totalMaxQueueDepth,
       queueOverflows: this.totalQueueOverflows,
+      wsHeartbeat: this.getHeartbeatAggregate(),
+    };
+  }
+
+  private getHeartbeatAggregate(): WorkerHeartbeatAggregate {
+    const byShard: Record<string, WorkerHeartbeatSnapshot> = {};
+    let pingSent = 0;
+    let pongReceived = 0;
+    let timeoutFired = 0;
+    let timeoutSuppressedByInbound = 0;
+    let workerEventLoopLagMaxMs = 0;
+    for (const [shardId, heartbeat] of this.heartbeatByShard) {
+      byShard[String(shardId)] = heartbeat;
+      pingSent += heartbeat.pingSent;
+      pongReceived += heartbeat.pongReceived;
+      timeoutFired += heartbeat.timeoutFired;
+      timeoutSuppressedByInbound += heartbeat.timeoutSuppressedByInbound;
+      workerEventLoopLagMaxMs = Math.max(
+        workerEventLoopLagMaxMs,
+        heartbeat.workerEventLoopLagMaxMs,
+      );
+    }
+    return {
+      pingSent,
+      pongReceived,
+      timeoutFired,
+      timeoutSuppressedByInbound,
+      workerEventLoopLagMaxMs,
+      byShard,
     };
   }
 
@@ -294,8 +390,8 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     }
   }
 
-  private createShard(shardId: number): MarketPricingShard {
-    const shard = new MarketPricingShard({
+  private createShard(shardId: number): PricingShardRuntime {
+    const shardDeps: ShardRuntimeDeps = {
       shardId,
       createWebSocket: this.deps.createWebSocket,
       queueMax: this.queueMax,
@@ -354,36 +450,48 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       onMessageParsed: (records) => {
         // Count received messages synchronously at parse-time so wsEventsReceived
         // reflects all WS messages received, not just those processed from the queue.
-        const { eventCount, latencySamplesMs } = collectStreamUpdatesMetricsOnly(
-          records,
-          this.now(),
-        );
-        if (eventCount > 0) {
-          this.rotateWindow(this.now());
-          this.window.wsEventsReceived += eventCount;
-        }
-        if (latencySamplesMs.length > 0) {
-          this.window.latencySamplesMs.push(...latencySamplesMs);
-          const overflow = this.window.latencySamplesMs.length - MAX_LATENCY_SAMPLES_PER_WINDOW;
-          if (overflow > 0) {
-            this.window.latencySamplesMs.splice(0, overflow);
-          }
-        }
+        this.recordParsedMetrics(collectStreamUpdatesMetricsOnly(records, this.now()));
+      },
+      onMessageMetrics: (metrics) => {
+        this.recordParsedMetrics(metrics);
+      },
+      onHeartbeat: (sid, heartbeat) => {
+        this.heartbeatByShard.set(sid, heartbeat);
       },
       onBreakerStateChanged: (sid, state) => {
-        this.handleShardBreakerStateChanged(sid, state, shard);
+        const currentShard = this.shards.get(sid);
+        if (currentShard) this.handleShardBreakerStateChanged(sid, state, currentShard);
       },
-    });
+    };
+    const shouldUseWorker = this.useWorkerShards && shardId < this.wsWorkerCount;
+    const shard: PricingShardRuntime = shouldUseWorker
+      ? new WorkerMarketPricingShard(shardDeps)
+      : new MarketPricingShard(shardDeps);
     this.shards.set(shardId, shard);
     this.shardBreakerStates.set(shardId, "closed");
     return shard;
+  }
+
+  private recordParsedMetrics(metrics: ParsedRecordMetrics): void {
+    const { eventCount, latencySamplesMs } = metrics;
+    if (eventCount > 0) {
+      this.rotateWindow(this.now());
+      this.window.wsEventsReceived += eventCount;
+    }
+    if (latencySamplesMs.length > 0) {
+      this.window.latencySamplesMs.push(...latencySamplesMs);
+      const overflow = this.window.latencySamplesMs.length - MAX_LATENCY_SAMPLES_PER_WINDOW;
+      if (overflow > 0) {
+        this.window.latencySamplesMs.splice(0, overflow);
+      }
+    }
   }
 
   /** Called by a shard when its breaker transitions between states. */
   private handleShardBreakerStateChanged(
     shardId: number,
     state: ShardBreakerState,
-    shard: MarketPricingShard,
+    shard: PricingShardRuntime,
   ): void {
     this.shardBreakerStates.set(shardId, state);
     if (state === "open") {
@@ -586,22 +694,7 @@ class MarketPricingShard {
   private currentOpenWindowMs: number;
   private breakerReopenAtMs = 0;
 
-  constructor(
-    private readonly deps: Readonly<{
-      shardId: number;
-      createWebSocket: (url: string) => MarketDataWebSocketLike;
-      queueMax: number;
-      lagWarnMs: number;
-      overflowPolicy: OverflowPolicy;
-      reconnectBaseMs: number;
-      reconnectMaxMs: number;
-      shardBreakerReconnectsPerMin: number;
-      shardBreakerOpenMs: number;
-      shardBreakerOpenMaxMs: number;
-      streamStableMs: number;
-    }> &
-      ShardCallbacks,
-  ) {
+  constructor(private readonly deps: ShardRuntimeDeps) {
     this.queue = new BoundedQueue<readonly unknown[]>(deps.queueMax);
     this.lagWarnMs = deps.lagWarnMs;
     this.overflowPolicy = deps.overflowPolicy;
@@ -1010,86 +1103,135 @@ class MarketPricingShard {
   }
 }
 
-/**
- * Lightweight metrics-only pass over raw WS records: count events and collect
- * latency samples. Does NOT update pricingByToken — that happens in the drain.
- * Used to update stream-level counters synchronously at parse time.
- */
-function collectStreamUpdatesMetricsOnly(
-  records: readonly unknown[],
-  nowMs: number,
-): { eventCount: number; latencySamplesMs: number[] } {
-  let eventCount = 0;
-  const latencySamplesMs: number[] = [];
+class WorkerMarketPricingShard implements PricingShardRuntime {
+  private readonly worker: Worker;
+  private desiredTokenIds: string[] = [];
+  private queueDepth = 0;
+  private breakerReopenAtMs = 0;
+  private closed = false;
 
-  for (const record of records) {
-    if (!record || typeof record !== "object") continue;
-    const raw = record as Record<string, unknown>;
-    const eventType = typeof raw.event_type === "string" ? raw.event_type : "";
-    if (!eventType) continue;
-    eventCount++;
-    noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-    // price_change embeds per-asset changes — each sub-change is an event
-    if (eventType === "price_change" && Array.isArray(raw.price_changes)) {
-      // Already counted the container; adjust for sub-events
-      eventCount += raw.price_changes.length - 1;
-      for (const pc of raw.price_changes) {
-        if (!pc || typeof pc !== "object") continue;
-        noteLatencySample(latencySamplesMs, (pc as Record<string, unknown>).timestamp, nowMs);
-      }
-    }
+  constructor(private readonly deps: ShardRuntimeDeps) {
+    const workerData: MarketPricingWorkerData = {
+      shardId: deps.shardId,
+      queueMax: deps.queueMax,
+      lagWarnMs: deps.lagWarnMs,
+      overflowPolicy: deps.overflowPolicy,
+      reconnectBaseMs: deps.reconnectBaseMs,
+      reconnectMaxMs: deps.reconnectMaxMs,
+      shardBreakerReconnectsPerMin: deps.shardBreakerReconnectsPerMin,
+      shardBreakerOpenMs: deps.shardBreakerOpenMs,
+      shardBreakerOpenMaxMs: deps.shardBreakerOpenMaxMs,
+      streamStableMs: deps.streamStableMs,
+      heartbeatJitterMs: (deps.shardId * 137) % PING_INTERVAL_MS,
+    };
+    this.worker = new Worker(new URL("./market-pricing-shard-worker.js", import.meta.url), {
+      workerData,
+    });
+    this.worker.on("message", (message: unknown) => this.handleWorkerMessage(message));
+    this.worker.on("error", (error) => {
+      void this.deps.onError(error);
+      this.deps.onGapDetected("connect-failed", Date.now(), this.desiredTokenIds);
+    });
+    this.worker.on("exit", (code) => {
+      if (this.closed || code === 0) return;
+      void this.deps.onError(
+        Object.assign(new Error(`market-pricing shard worker exited with code ${code}`), {
+          code: "MARKET_WS_WORKER_EXITED",
+          shardId: this.deps.shardId,
+        }),
+      );
+      this.deps.onGapDetected("connect-failed", Date.now(), this.desiredTokenIds);
+    });
   }
 
-  return { eventCount, latencySamplesMs };
-}
+  getQueueDepth(): number {
+    return this.queueDepth;
+  }
 
-/**
- * Extract best-effort token IDs from a batch of raw WS records.
- * Used for gap event metadata when a queued message is dropped.
- */
-function extractTokenIdsFromRecords(records: readonly unknown[]): readonly string[] {
-  const ids = new Set<string>();
-  for (const record of records) {
-    if (!record || typeof record !== "object") continue;
-    const raw = record as Record<string, unknown>;
-    const tokenId = extractBookTokenId(raw);
-    if (tokenId) ids.add(tokenId);
-    // price_change events embed per-token changes in an array
-    if (Array.isArray(raw.price_changes)) {
-      for (const pc of raw.price_changes) {
-        if (!pc || typeof pc !== "object") continue;
-        const tid = extractBookTokenId(pc as Record<string, unknown>);
-        if (tid) ids.add(tid);
-      }
-    }
-    // lifecycle events embed token arrays
-    const assetIds = raw.assets_ids ?? raw.clob_token_ids;
-    if (Array.isArray(assetIds)) {
-      for (const id of assetIds) {
-        if (typeof id === "string" && id.trim()) ids.add(id.trim());
-      }
+  getDesiredTokenIds(): readonly string[] {
+    return this.desiredTokenIds;
+  }
+
+  getBreakerReopenAtMs(): number {
+    return this.breakerReopenAtMs;
+  }
+
+  setTokenIds(tokenIds: readonly string[]): void {
+    const next = normalizeTokenIds(tokenIds);
+    if (arraysEqual(this.desiredTokenIds, next)) return;
+    this.desiredTokenIds = next;
+    this.worker.postMessage({ type: "set-token-ids", tokenIds: next });
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.worker.postMessage({ type: "close" });
+    void this.worker.terminate();
+  }
+
+  private handleWorkerMessage(message: unknown): void {
+    if (!message || typeof message !== "object") return;
+    const event = message as MarketPricingWorkerEvent;
+    switch (event.type) {
+      case "records":
+        this.queueDepth = event.queueDepth;
+        this.deps.onMessageMetrics(event.metrics);
+        void this.deps.onRecords(event.records);
+        break;
+      case "error":
+        void this.deps.onError(deserializeWorkerError(event.error));
+        break;
+      case "gap":
+        this.deps.onGapDetected(event.reason, event.timestamp, event.tokenIds);
+        break;
+      case "reconnect-scheduled":
+        this.deps.onReconnectScheduled();
+        break;
+      case "queue-overflow":
+        this.deps.onQueueOverflow(this.deps.shardId, event.droppedTokenIds, event.timestamp);
+        break;
+      case "lag-warning":
+        this.deps.onLagWarning(this.deps.shardId, event.drainMs);
+        break;
+      case "queue-depth":
+        this.queueDepth = event.depth;
+        this.deps.onShardQueueDepth(event.depth);
+        break;
+      case "breaker-state":
+        this.breakerReopenAtMs = event.reopenAtMs;
+        this.desiredTokenIds = normalizeTokenIds(event.tokenIds);
+        this.deps.onBreakerStateChanged(this.deps.shardId, event.state);
+        break;
+      case "heartbeat":
+        this.deps.onHeartbeat?.(this.deps.shardId, event.heartbeat);
+        break;
     }
   }
-  return [...ids];
 }
 
-function normalizeTokenIds(tokenIds: readonly string[]): string[] {
-  return [
-    ...new Set(tokenIds.map((value) => value.trim()).filter((value) => value.length > 0)),
-  ].sort();
-}
-
-function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function chunkItems<T>(items: readonly T[], chunkSize: number): T[][] {
-  if (items.length === 0) return [];
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize));
-  }
-  return chunks;
+function deserializeWorkerError(error: {
+  readonly message: string;
+  readonly name?: string;
+  readonly stack?: string;
+  readonly code?: string;
+  readonly shardId?: number;
+  readonly tokenCount?: number;
+  readonly closeCode?: number;
+  readonly closeReason?: string;
+  readonly drainMs?: number;
+}): Error {
+  const result = Object.assign(new Error(error.message), {
+    code: error.code,
+    shardId: error.shardId,
+    tokenCount: error.tokenCount,
+    closeCode: error.closeCode,
+    closeReason: error.closeReason,
+    drainMs: error.drainMs,
+  });
+  result.name = error.name ?? "Error";
+  if (error.stack) result.stack = error.stack;
+  return result;
 }
 
 function countOpenShards(states: Map<number, ShardBreakerState>): number {
@@ -1098,38 +1240,6 @@ function countOpenShards(states: Map<number, ShardBreakerState>): number {
     if (state === "open" || state === "half-open") count++;
   }
   return count;
-}
-
-function buildMarketSubscriptionPayload(tokenIds: readonly string[]): string {
-  return JSON.stringify({
-    type: "market",
-    assets_ids: tokenIds,
-    custom_feature_enabled: true,
-  });
-}
-
-function buildMarketSubscriptionUpdatePayload(
-  operation: "subscribe" | "unsubscribe",
-  tokenIds: readonly string[],
-  customFeatureEnabled: boolean,
-): string {
-  return JSON.stringify({
-    operation,
-    assets_ids: tokenIds,
-    ...(customFeatureEnabled ? { custom_feature_enabled: true } : {}),
-  });
-}
-
-function isPongPayload(payload: unknown): boolean {
-  if (typeof payload === "string") {
-    return payload.trim().toUpperCase() === HEARTBEAT_PONG;
-  }
-  return (
-    payload != null &&
-    typeof payload === "object" &&
-    !Array.isArray(payload) &&
-    Object.keys(payload as Record<string, unknown>).length === 0
-  );
 }
 
 function collectStreamUpdates(
