@@ -71,6 +71,11 @@ export class LegStateTrackerModule implements RuntimeModule {
         log: this.log,
       });
       this.deps.legStateRepo.delete(leg.tokenId);
+      void this.deps.bus.publish("LegStateCleared", {
+        tokenId: leg.tokenId,
+        reason: "orphan_leg_cleanup_at_startup",
+        timestamp: Date.now(),
+      });
       cleared++;
     }
     if (cleared > 0) {
@@ -117,6 +122,13 @@ export class LegStateTrackerModule implements RuntimeModule {
         reason: "fill_received",
       },
     );
+    const updated = this.deps.legStateRepo.get(p.tokenId);
+    if (updated) {
+      await this.deps.bus.publish("LegStateUpdated", {
+        legState: updated,
+        timestamp: p.timestamp,
+      });
+    }
   }
 
   private async handlePositionUpdated(
@@ -135,6 +147,11 @@ export class LegStateTrackerModule implements RuntimeModule {
         log: this.log,
       });
       this.deps.legStateRepo.delete(p.position.tokenId);
+      await this.deps.bus.publish("LegStateCleared", {
+        tokenId: p.position.tokenId,
+        reason: "position_size_zero",
+        timestamp: Date.parse(p.position.updatedAt),
+      });
       this.log.info(
         { tokenId: String(p.position.tokenId) },
         "leg state cleared after position sold to zero",
@@ -157,6 +174,11 @@ export class LegStateTrackerModule implements RuntimeModule {
       log: this.log,
     });
     this.deps.legStateRepo.delete(p.tokenId);
+    await this.deps.bus.publish("LegStateCleared", {
+      tokenId: p.tokenId,
+      reason: `position_settled:${p.resolution}`,
+      timestamp: p.timestamp,
+    });
     this.log.info({ tokenId: String(p.tokenId) }, "leg state cleared after settlement");
   }
 

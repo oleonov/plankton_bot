@@ -1,5 +1,6 @@
 import path from "node:path";
 import { existsSync } from "node:fs";
+import { cpus } from "node:os";
 import { config as loadDotenv } from "dotenv";
 import { z } from "zod";
 
@@ -139,6 +140,14 @@ const envSchema = z
     MARKET_DATA_FALLBACK_POLL_CONCURRENCY: z.coerce.number().int().min(1).max(500).default(50),
     MARKET_DATA_FALLBACK_POLL_RATE_PER_SEC: z.coerce.number().min(0.1).max(100).default(5),
     MARKET_DATA_STALE_TOKEN_AGE_MS: z.coerce.number().int().min(1_000).max(600_000).default(30_000),
+    // Phase E.2 — decision evaluation worker pool.
+    ALGO_DECISION_WORKER_COUNT: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(32)
+      .default(Math.max(1, cpus().length - 1)),
+    ALGO_DECISION_WORKER_BATCH_SIZE: z.coerce.number().int().min(10).max(1_000).default(100),
     // ADR-015 — DEAD_SIDE_GUARD_* and EXECUTION_PRICING_* env vars were removed.
     // Dead-side guard + pricing policy now live in `profile_settings.execution_policy_json`
     // and hot-reload via `runtime_control_state.execution_policy_version`. See
@@ -255,6 +264,8 @@ export interface AppConfig {
   marketDataFallbackPollConcurrency: number;
   marketDataFallbackPollRatePerSec: number;
   marketDataStaleTokenAgeMs: number;
+  algoDecisionWorkerCount?: number;
+  algoDecisionWorkerBatchSize?: number;
   // ADR-018 (Step 1)
   universeFunnelLogIntervalMs: number;
 }
@@ -352,6 +363,8 @@ export function loadEnv(envPath?: string): AppConfig {
     marketDataFallbackPollConcurrency: env.MARKET_DATA_FALLBACK_POLL_CONCURRENCY,
     marketDataFallbackPollRatePerSec: env.MARKET_DATA_FALLBACK_POLL_RATE_PER_SEC,
     marketDataStaleTokenAgeMs: env.MARKET_DATA_STALE_TOKEN_AGE_MS,
+    algoDecisionWorkerCount: env.ALGO_DECISION_WORKER_COUNT,
+    algoDecisionWorkerBatchSize: env.ALGO_DECISION_WORKER_BATCH_SIZE,
     universeFunnelLogIntervalMs: env.UNIVERSE_FUNNEL_LOG_INTERVAL_MS,
   };
 }

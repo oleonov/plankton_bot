@@ -253,6 +253,168 @@ describe("MarketDataModule — fallback batch cap (Task 5)", () => {
     await mod.stop();
   });
 
+  it("poll publishes only changed polled markets, not the full tracked cache", async () => {
+    const tiered = makeTiered(["crit-a"], ["entry-a"], []);
+    const repo = createMockRepo(tiered);
+    const published: string[][] = [];
+    bus.subscribe("MarketSnapshotReceived", async (payload) => {
+      published.push(payload.markets.map((market) => String(market.tokenId)));
+    });
+
+    const getMarketPricing = vi
+      .fn()
+      .mockResolvedValueOnce(new Map())
+      .mockResolvedValueOnce(
+        new Map([
+          [
+            "crit-a",
+            {
+              tokenId: createTokenId("crit-a"),
+              bestBid: 0.1,
+              bestAsk: 0.12,
+              midPrice: 0.11,
+              spread: 0.02,
+              acceptingOrders: true,
+              enableOrderBook: true,
+              timestamp: Date.now(),
+            },
+          ],
+        ]),
+      );
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      createMarketPricingStream: (handlers) => {
+        const s = new FakePricingStream(handlers);
+        streamRef = s;
+        return s;
+      },
+    };
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 100,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 1,
+      fallbackPollRatePerSec: 5,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    published.length = 0;
+
+    await streamRef!.triggerGapForTokenIds(["crit-a", "entry-a"]);
+    await mod.poll();
+
+    expect(published).toEqual([["crit-a"]]);
+    await mod.stop();
+  });
+
+  it("does not overwrite cached pricing when REST fallback returns null pricing", async () => {
+    const tiered = makeTiered(["crit-a"], [], []);
+    const repo = createMockRepo(tiered);
+    const published: string[][] = [];
+    bus.subscribe("MarketSnapshotReceived", async (payload) => {
+      published.push(payload.markets.map((market) => String(market.tokenId)));
+    });
+
+    const getMarketPricing = vi
+      .fn()
+      .mockResolvedValueOnce(new Map())
+      .mockResolvedValueOnce(
+        new Map([
+          [
+            "crit-a",
+            {
+              tokenId: createTokenId("crit-a"),
+              bestBid: 0.1,
+              bestAsk: 0.12,
+              midPrice: 0.11,
+              spread: 0.02,
+              acceptingOrders: true,
+              enableOrderBook: true,
+              timestamp: Date.now(),
+            },
+          ],
+        ]),
+      )
+      .mockResolvedValueOnce(new Map());
+    const gateway: MarketDataGateway = {
+      getMarkets: vi.fn().mockResolvedValue([]),
+      getMarket: vi.fn().mockResolvedValue(null),
+      getOrderBook: vi.fn().mockResolvedValue({
+        tokenId: createTokenId(""),
+        bids: [],
+        asks: [],
+        bestBid: null,
+        bestAsk: null,
+        midPrice: null,
+        spread: null,
+        timestamp: Date.now(),
+      }),
+      getTickSize: vi.fn().mockResolvedValue(0.01),
+      healthCheck: vi.fn().mockResolvedValue({ ok: true, latencyMs: 5 }),
+      getMarketPricing,
+      createMarketPricingStream: (handlers) => {
+        const s = new FakePricingStream(handlers);
+        streamRef = s;
+        return s;
+      },
+    };
+
+    const mod = new MarketDataModule({
+      gateway,
+      marketRepo: repo,
+      bus,
+      log: silentLog,
+      pollIntervalMs: 60_000,
+      staleThresholdMs: 120_000,
+      maxTrackedTokens: 100,
+      discoveryPollIntervalMs: 3_600_000,
+      fallbackBatchSize: 500,
+      fallbackPollMaxConcurrency: 1,
+      fallbackPollRatePerSec: 5,
+    });
+
+    await mod.start();
+    await vi.advanceTimersByTimeAsync(1);
+    published.length = 0;
+
+    await streamRef!.triggerGapForTokenIds(["crit-a"]);
+    await mod.poll();
+    expect(published).toEqual([["crit-a"]]);
+
+    published.length = 0;
+    await streamRef!.triggerGapForTokenIds(["crit-a"]);
+    await mod.poll();
+
+    expect(published).toEqual([]);
+    expect(silentLog.info).toHaveBeenCalledWith(
+      expect.objectContaining({ nullPricingGateCount: 1, changedMarketCount: 0 }),
+      "poll cycle complete",
+    );
+    await mod.stop();
+  });
+
   // ── Test 2: Dynamic timeout scaling ────────────────────────────────────
 
   it("timeoutMs scales proportionally: 10_000 + length*25, capped at 30_000", async () => {

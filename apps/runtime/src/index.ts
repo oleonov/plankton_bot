@@ -947,7 +947,9 @@ async function main(): Promise<void> {
   }, config.universeFunnelLogIntervalMs);
   universeFunnelLogTimer.unref();
 
-  const priceHistoryProvider = new MarketSnapshotPriceHistoryProvider(ledgerConn.db);
+  const priceHistoryProvider = new MarketSnapshotPriceHistoryProvider(ledgerConn.db, {
+    syncMissLookup: false,
+  });
   const decisionTickLatencyAlert = new SustainedThresholdAlert(
     DECISION_TICK_LATENCY_ALERT_THRESHOLD_MS,
     DECISION_TICK_LATENCY_ALERT_SUSTAINED_MS,
@@ -961,6 +963,11 @@ async function main(): Promise<void> {
     positionRepo: repos.position,
     decisionSignalLogRepo: repos.decisionSignalLog,
     riskEventRepo: repos.riskEvent,
+    decisionPersistenceMode: "worker",
+    decisionPersistenceWorkerDbPath: ledgerDbPath,
+    decisionWorkerCount: config.algoDecisionWorkerCount,
+    decisionWorkerBatchSize: config.algoDecisionWorkerBatchSize,
+    deferMarketUpdateEvaluation: true,
     selectedMarketCache,
     runtimeControl,
     controlDb: controlConn.db,

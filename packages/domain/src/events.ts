@@ -16,7 +16,13 @@ import type {
   ExchangeErrorCode,
   RuntimePhase,
 } from "./enums.js";
-import type { Signal, Position, NormalizedMarket, ReconciliationResult } from "./types.js";
+import type {
+  Signal,
+  Position,
+  LegState,
+  NormalizedMarket,
+  ReconciliationResult,
+} from "./types.js";
 
 // ─── Market Data ──────────────────────────────────────────────────────────
 
@@ -37,9 +43,8 @@ export interface NormalizedMarketUpdated {
  * snapshot (polling cadence), with per-token diff against the prior cycle.
  * Consumers (SignalToOrderBridge, RiskInventoryModule, MarketSelectionCache)
  * subscribe to drop per-token state for tokens that have exited the tracked
- * universe. Unlike NormalizedMarketUpdated — whose `markets` field is a delta
- * on the stream path and a full slice on the polling path — this event is
- * explicitly diff-shaped and emitted only by the single authoritative source.
+ * universe. NormalizedMarketUpdated is delta-shaped; this event carries the
+ * authoritative tracked-universe diff separately from price changes.
  */
 export interface TrackedMarketsChanged {
   readonly type: "TrackedMarketsChanged";
@@ -261,6 +266,19 @@ export interface PositionUpdated {
   readonly position: Position;
 }
 
+export interface LegStateUpdated {
+  readonly type: "LegStateUpdated";
+  readonly legState: LegState;
+  readonly timestamp: number;
+}
+
+export interface LegStateCleared {
+  readonly type: "LegStateCleared";
+  readonly tokenId: TokenId;
+  readonly reason: string;
+  readonly timestamp: number;
+}
+
 // ─── Reconciliation ───────────────────────────────────────────────────────
 
 export interface ReconciliationDriftDetected {
@@ -337,6 +355,8 @@ export type DomainEvent =
   | OrderRejected
   | FillReceived
   | PositionUpdated
+  | LegStateUpdated
+  | LegStateCleared
   | ReconciliationDriftDetected
   | PositionDriftDetected
   | ReconciliationComplete

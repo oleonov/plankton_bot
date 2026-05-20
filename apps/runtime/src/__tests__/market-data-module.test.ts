@@ -1451,11 +1451,8 @@ describe("MarketDataModule", () => {
 
     await mod.poll();
 
-    expect(received).toHaveLength(1);
-    expect(received[0]![0]!.bestBid).toBeNull();
-    expect(received[0]![0]!.bestAsk).toBeNull();
-    expect(received[0]![0]!.midPrice).toBeNull();
-    expect(received[0]![0]!.spread).toBeNull();
+    expect(received).toHaveLength(0);
+    await expect(mod.healthCheck()).resolves.toMatchObject({ ok: true });
   });
 
   // ─── Poll progress tests ─────────────────────────────────────────────

@@ -1,7 +1,13 @@
 import type Database from "better-sqlite3";
-import type { MarketRepository, Market, MarketScoreUpdate, TrackedForPricing } from "@krabs/domain";
+import type {
+  HeuristicCategory,
+  MarketRepository,
+  Market,
+  MarketScoreUpdate,
+  TrackedForPricing,
+} from "@krabs/domain";
 import type { TokenId } from "@krabs/domain";
-import { createTokenId } from "@krabs/domain";
+import { createTokenId, deriveCategory } from "@krabs/domain";
 import type { Regime } from "@krabs/domain";
 
 // Rank for entry-candidate ordering: lower rank = higher priority.
@@ -16,6 +22,17 @@ const SELECTION_STATUS_RANK: Record<string, number> = {
 // when its source snapshot is fresh (≤ 4h old). Stale scores are kept on
 // the row but are *not* allowed to outrank a fresh lower score.
 const FEATURE_FRESHNESS_MS = 4 * 60 * 60 * 1000;
+const R30_HIGH_CONFIDENCE_SCORE = 0.3699;
+const R30_ACTIVE_POOL_SCORE = 0.2529;
+const PLANKTON_PRIORITY_CATEGORY_BIAS: Record<HeuristicCategory, number> = {
+  politics: 1_200,
+  stocks: 800,
+  sports: 600,
+  esports: 300,
+  crypto: -200,
+  other: -400,
+  weather: -1_000,
+};
 
 // Step 3 (audit doc §D3/§P2) **score-column ownership invariant**.
 // `score`, `score_model_version`, `scored_at`, `features_captured_at` are
@@ -269,8 +286,10 @@ export class SqliteMarketRepository implements MarketRepository {
     // Deduplicate: execution-critical markets may also be tradable.
     const criticalIds = new Set(executionCritical.map((m) => String(m.tokenId)));
 
-    // Sort tradable-only by selection_status rank ASC, then effective-score
-    // DESC NULLS LAST (Step 3 §D5), then created_at DESC, then token_id ASC.
+    // Sort tradable-only by Plankton-priority composite score (ADR-035):
+    // R30 score tiers first, then tick/horizon/category tie-breaks, then
+    // existing operator selection rank. Execution-critical markets were
+    // already pulled out above and always keep hard priority over this list.
     // Scanner rewrites updated_at on every full scan pass, so using updated_at
     // here would churn the WS tier even when the universe itself is stable,
     // forcing the pricing loop to repoll a new unknown set every few seconds.
@@ -279,7 +298,13 @@ export class SqliteMarketRepository implements MarketRepository {
     // as null so a stale non-null score never outranks a fresh lower score.
     const candidates = tradableOnly.filter((m) => !criticalIds.has(String(m.tokenId)));
     const nowMs = Date.now();
+    const planktonPriorityByToken = new Map(
+      candidates.map((market) => [String(market.tokenId), planktonPriorityScore(market, nowMs)]),
+    );
     candidates.sort((a, b) => {
+      const pa = planktonPriorityByToken.get(String(a.tokenId)) ?? 0;
+      const pb = planktonPriorityByToken.get(String(b.tokenId)) ?? 0;
+      if (pa !== pb) return pb - pa;
       const rankA = SELECTION_STATUS_RANK[a.selectionStatus ?? "unknown"] ?? 99;
       const rankB = SELECTION_STATUS_RANK[b.selectionStatus ?? "unknown"] ?? 99;
       if (rankA !== rankB) return rankA - rankB;
@@ -381,4 +406,33 @@ function effectiveScore(market: Market, nowMs: number): number | null {
   if (!Number.isFinite(capturedMs)) return null;
   if (nowMs - capturedMs > FEATURE_FRESHNESS_MS) return null;
   return market.score;
+}
+
+function planktonPriorityScore(market: Market, nowMs: number): number {
+  const score = effectiveScore(market, nowMs);
+  const category = deriveCategory(market.slug, market.eventSlug);
+  const horizonDays = horizonDaysFromNow(market.endDate, nowMs);
+  let priority = 0;
+
+  if (score != null) {
+    priority += score * 100_000;
+    if (score >= R30_HIGH_CONFIDENCE_SCORE) {
+      priority += 1_000_000;
+    } else if (score >= R30_ACTIVE_POOL_SCORE) {
+      priority += 500_000;
+    }
+  }
+
+  if (market.tickSize === 0.001) priority += 50_000;
+  if (horizonDays != null && horizonDays > 30) priority += 25_000;
+  priority += PLANKTON_PRIORITY_CATEGORY_BIAS[category];
+
+  return priority;
+}
+
+function horizonDaysFromNow(endDate: string | null, nowMs: number): number | null {
+  if (!endDate) return null;
+  const endMs = Date.parse(endDate);
+  if (!Number.isFinite(endMs)) return null;
+  return (endMs - nowMs) / 86_400_000;
 }

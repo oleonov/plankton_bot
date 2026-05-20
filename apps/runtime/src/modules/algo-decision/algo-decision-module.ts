@@ -35,6 +35,8 @@ import type {
   ContinuationMode,
   ExecutionPolicy,
   TradeDecisionAction,
+  LegState,
+  Position,
 } from "@krabs/domain";
 import {
   deriveState,
@@ -71,6 +73,14 @@ import { SELL_RESIDUAL_BELOW_MIN_ORDER_SIZE_REASON } from "../../internal-order-
 import { isExecutableOrderSize } from "../../min-order-size.js";
 import { WALLET_BUY_CAPACITY_EXHAUSTED_REASON } from "../../wallet-buy-budget.js";
 import { SlidingLatencyWindow, type LatencySnapshot } from "./decision-metrics.js";
+import { DecisionPersistenceBuffer } from "./async-decision-persistence.js";
+import { DecisionWorkerPool } from "./decision-worker-pool.js";
+import type {
+  DecisionMetricsDelta,
+  DecisionPlanningInput,
+  DecisionPlanSideEffect,
+  DecisionSignalDraft,
+} from "./decision-planner.js";
 import type { PriceHistoryProvider } from "./market-snapshot-price-history.js";
 import type { WindowMaxCacheMetrics } from "./market-snapshot-price-history.js";
 
@@ -418,7 +428,7 @@ export interface AlgoDecisionModuleDeps {
    * rolling cost basis of remaining lots rather than the lifetime buy VWAP.
    * Optional: omitted only by tests that don't exercise SELL telemetry.
    */
-  positionRepo?: Pick<PositionRepository, "findByTokenId"> | undefined;
+  positionRepo?: Pick<PositionRepository, "findByTokenId" | "findOpen"> | undefined;
   decisionSignalLogRepo?: DecisionSignalLogRepository | undefined;
   riskEventRepo?: RiskEventRepository | undefined;
   selectedMarketCache: SelectedMarketCache;
@@ -448,6 +458,11 @@ export interface AlgoDecisionModuleDeps {
   executionPolicy?: (() => ExecutionPolicy) | undefined;
   evalMetricsSink?: ((snapshot: DecisionEvalMetricsSnapshot) => void) | undefined;
   evalMetricsEmitIntervalMs?: number | undefined;
+  decisionPersistenceMode?: "sync" | "async" | "worker" | undefined;
+  decisionPersistenceWorkerDbPath?: string | undefined;
+  decisionWorkerCount?: number | undefined;
+  decisionWorkerBatchSize?: number | undefined;
+  deferMarketUpdateEvaluation?: boolean | undefined;
   log: Logger;
   sweepIntervalMs: number;
 }
@@ -469,6 +484,8 @@ const CONTINUATION_TRADE_COUNT_CAP = 6;
  * (one setImmediate hop per 50 token evaluations is cheap).
  */
 const EVALUATE_YIELD_BATCH = 50;
+const DIRTY_EVALUATION_DELAY_MS = 250;
+const FULL_SWEEP_INTERVAL_MS = 60_000;
 const NOISY_SUPPRESSION_DEDUPE_MS = 10 * 60 * 1000;
 // The suppression cache holds the last NOISY_SUPPRESSION_DEDUPE_MS (10 min)
 // of (tokenId, reason) pairs. At the worst observed signal-rate of ~15/sec ×
@@ -578,9 +595,18 @@ function computeBuyOrderSizeForFilter(
 
 export class AlgoDecisionModule implements RuntimeModule {
   private readonly log: Logger;
+  private readonly persistence: DecisionPersistenceBuffer;
+  private readonly decisionWorkerPool: DecisionWorkerPool;
 
   // Market cache — updated on every NormalizedMarketUpdated
   private readonly marketCache = new Map<string, NormalizedMarket>();
+  private readonly legStateCache = new Map<string, LegState | null>();
+  private readonly positionCache = new Map<string, Position | null>();
+  private legStateCacheHydrated = false;
+  private positionCacheHydrated = false;
+  private readonly dirtyTokenIds = new Set<string>();
+  private dirtyEvaluationTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastFullSweepAt = 0;
 
   // ADR-022 §D-F — F-telemetry: previous midPrice per token, captured on each
   // NormalizedMarketUpdated BEFORE the cache is updated. Drives
@@ -635,6 +661,22 @@ export class AlgoDecisionModule implements RuntimeModule {
 
   constructor(private readonly deps: AlgoDecisionModuleDeps) {
     this.log = deps.log.child({ module: "algo-decision" });
+    this.persistence = new DecisionPersistenceBuffer(
+      {
+        decisionSignalLogRepo: deps.decisionSignalLogRepo,
+        riskEventRepo: deps.riskEventRepo,
+        log: this.log,
+      },
+      {
+        mode: deps.decisionPersistenceMode ?? "sync",
+        workerDbPath: deps.decisionPersistenceWorkerDbPath,
+      },
+    );
+    this.decisionWorkerPool = new DecisionWorkerPool({
+      workerCount: deps.decisionWorkerCount ?? 0,
+      batchSize: deps.decisionWorkerBatchSize ?? 100,
+      log: this.log,
+    });
   }
 
   // ─── Lifecycle ─────────────────────────────────────────────────────────────
@@ -643,6 +685,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     this.decisionRules = this.deps.algoRulesRepo.getDecisionRules();
     this.buySizeRules = this.deps.algoRulesRepo.getSizeRules("BUY");
     this.sellSizeRules = this.deps.algoRulesRepo.getSizeRules("SELL");
+    this.hydrateDecisionStateCaches();
 
     // Fail-closed at startup: without a FALLBACK decision rule, evaluateDecision
     // will throw on every sweep once an unmatched state appears. Refuse to
@@ -653,6 +696,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
 
     this.refreshContinuationMode();
+    this.decisionWorkerPool.start();
     this.log.info(
       {
         continuationMode: this.continuationMode,
@@ -677,8 +721,15 @@ export class AlgoDecisionModule implements RuntimeModule {
       this.deps.bus.subscribe("PlaceOrderRequested", (p) => this.handlePlaceOrderRequested(p)),
       this.deps.bus.subscribe("OrderPlaced", (p) => this.handleOrderPlaced(p)),
       this.deps.bus.subscribe("FillReceived", (p) => this.handleFillReceived(p)),
+      this.deps.bus.subscribe("LegStateUpdated", (p) => this.handleLegStateUpdated(p)),
+      this.deps.bus.subscribe("LegStateCleared", (p) => this.handleLegStateCleared(p)),
+      this.deps.bus.subscribe("PositionUpdated", (p) => this.handlePositionUpdated(p)),
+      this.deps.bus.subscribe("PositionSettled", (p) => this.handlePositionSettled(p)),
       this.deps.bus.subscribe("OrderCancelled", (p) => this.handleOrderCancelled(p)),
       this.deps.bus.subscribe("OrderRejected", (p) => this.handleOrderRejected(p)),
+      this.deps.bus.subscribe("OperatorCommandApplied", (p) =>
+        this.handleOperatorCommandApplied(p),
+      ),
     );
 
     this.sweepHandle = setInterval(() => {
@@ -694,15 +745,30 @@ export class AlgoDecisionModule implements RuntimeModule {
       clearInterval(this.sweepHandle);
       this.sweepHandle = null;
     }
+    if (this.dirtyEvaluationTimer) {
+      clearTimeout(this.dirtyEvaluationTimer);
+      this.dirtyEvaluationTimer = null;
+    }
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
+    await this.persistence.stop();
+    await this.decisionWorkerPool.stop();
     this.started = false;
     this.log.info("algo-decision module stopped");
   }
 
   async healthCheck(): Promise<{ readonly ok: boolean; readonly detail?: string }> {
     if (!this.started) return { ok: false, detail: "not started" };
-    const base = `ticks=${this.tickCounter} markets=${this.marketCache.size} pending=${this.pendingEntries.size}`;
+    const persistenceStats = this.persistence.getStats();
+    const workerStats = this.decisionWorkerPool.getStats();
+    const base =
+      `ticks=${this.tickCounter} markets=${this.marketCache.size}` +
+      ` dirty=${this.dirtyTokenIds.size} pending=${this.pendingEntries.size}` +
+      ` persistenceQueued=${persistenceStats.queued}` +
+      ` persistenceDropped=${persistenceStats.droppedWrites}` +
+      ` decisionWorkers=${workerStats.workerCount}` +
+      ` decisionWorkerInflight=${workerStats.inFlight}` +
+      ` decisionWorkerFallbacks=${workerStats.localFallbacks}`;
     // ADR-018 §D2 — append Step 1 universe funnel when the cache supports it.
     const snap = this.deps.selectedMarketCache.getUniverseFilterSnapshot?.();
     const funnel = snap
@@ -757,6 +823,10 @@ export class AlgoDecisionModule implements RuntimeModule {
   private async handleMarketUpdate(
     payload: RuntimeEventMap["NormalizedMarketUpdated"],
   ): Promise<void> {
+    if (payload.markets.length === 0) {
+      await this.evaluateTokens([]);
+      return;
+    }
     for (const market of payload.markets) {
       const tokenIdStr = String(market.tokenId);
       if (!market.active) {
@@ -776,10 +846,17 @@ export class AlgoDecisionModule implements RuntimeModule {
           this.prevMidPrices.delete(tokenIdStr);
         }
         this.marketCache.set(tokenIdStr, market);
+        this.deps.priceHistoryProvider?.observeMarket?.(market);
       }
     }
-    const tokenIds = payload.markets.filter((m) => m.active).map((m) => m.tokenId);
-    await this.evaluateTokens(tokenIds);
+    for (const market of payload.markets) {
+      if (market.active) this.markDirty(market.tokenId);
+    }
+    if (this.deps.deferMarketUpdateEvaluation) {
+      this.scheduleDirtyEvaluation();
+    } else {
+      await this.evaluateDirtyTokens();
+    }
   }
 
   private async handleTrackedMarketsChanged(
@@ -791,6 +868,12 @@ export class AlgoDecisionModule implements RuntimeModule {
       const tokenIdStr = String(tokenId);
       this.marketCache.delete(tokenIdStr);
       this.prevMidPrices.delete(tokenIdStr);
+      this.dirtyTokenIds.delete(tokenIdStr);
+      this.legStateCache.delete(tokenIdStr);
+      this.positionCache.delete(tokenIdStr);
+    }
+    for (const tokenId of payload.addedTokenIds) {
+      this.markDirty(tokenId);
     }
   }
 
@@ -817,10 +900,46 @@ export class AlgoDecisionModule implements RuntimeModule {
   }
 
   private async handleFillReceived(payload: RuntimeEventMap["FillReceived"]): Promise<void> {
-    if (payload.side !== "buy") return;
-    this.lastBuyFillByWallet.set(this.walletCooldownKey(), this.normalizeEventTimestamp(payload));
     const tokenId = String(payload.tokenId);
     this.clearPendingByTokenId(tokenId);
+    this.markDirty(payload.tokenId);
+    this.scheduleDirtyEvaluation(0);
+    if (payload.side !== "buy") return;
+    this.lastBuyFillByWallet.set(this.walletCooldownKey(), this.normalizeEventTimestamp(payload));
+  }
+
+  private async handleLegStateUpdated(payload: RuntimeEventMap["LegStateUpdated"]): Promise<void> {
+    const tokenId = String(payload.legState.tokenId);
+    this.legStateCache.set(tokenId, payload.legState);
+    this.markDirty(payload.legState.tokenId);
+    this.scheduleDirtyEvaluation(0);
+  }
+
+  private async handleLegStateCleared(payload: RuntimeEventMap["LegStateCleared"]): Promise<void> {
+    const tokenId = String(payload.tokenId);
+    this.legStateCache.delete(tokenId);
+    this.positionCache.delete(tokenId);
+    this.dirtyTokenIds.delete(tokenId);
+  }
+
+  private async handlePositionUpdated(payload: RuntimeEventMap["PositionUpdated"]): Promise<void> {
+    const tokenId = String(payload.position.tokenId);
+    if (payload.position.status === "closed" || payload.position.size <= 0) {
+      this.legStateCache.delete(tokenId);
+      this.positionCache.delete(tokenId);
+      this.dirtyTokenIds.delete(tokenId);
+      return;
+    }
+    this.positionCache.set(tokenId, payload.position);
+    this.markDirty(payload.position.tokenId);
+    this.scheduleDirtyEvaluation(0);
+  }
+
+  private async handlePositionSettled(payload: RuntimeEventMap["PositionSettled"]): Promise<void> {
+    const tokenId = String(payload.tokenId);
+    this.legStateCache.delete(tokenId);
+    this.positionCache.delete(tokenId);
+    this.dirtyTokenIds.delete(tokenId);
   }
 
   private walletCooldownKey(): string {
@@ -862,24 +981,43 @@ export class AlgoDecisionModule implements RuntimeModule {
       );
     }
     this.clearPendingByTokenId(String(payload.signal.tokenId));
+    this.markDirty(payload.signal.tokenId);
+    this.scheduleDirtyEvaluation(0);
   }
 
   private async handleSignalConversionSkipped(
     payload: RuntimeEventMap["SignalConversionSkipped"],
   ): Promise<void> {
     this.clearPendingByTokenId(String(payload.signal.tokenId));
+    this.markDirty(payload.signal.tokenId);
+    this.scheduleDirtyEvaluation(0);
   }
 
   private async handleOrderCancelled(payload: RuntimeEventMap["OrderCancelled"]): Promise<void> {
     const orderId = String(payload.orderId);
     const tokenId = this.orderIdToToken.get(orderId);
-    if (tokenId) this.clearPendingByTokenId(tokenId);
+    if (tokenId) {
+      this.clearPendingByTokenId(tokenId);
+      this.markDirty(tokenId as TokenId);
+      this.scheduleDirtyEvaluation(0);
+    }
   }
 
   private async handleOrderRejected(payload: RuntimeEventMap["OrderRejected"]): Promise<void> {
     const clientOrderId = String(payload.clientOrderId);
     const tokenId = this.clientOrderToToken.get(clientOrderId);
-    if (tokenId) this.clearPendingByTokenId(tokenId);
+    if (tokenId) {
+      this.clearPendingByTokenId(tokenId);
+      this.markDirty(tokenId as TokenId);
+      this.scheduleDirtyEvaluation(0);
+    }
+  }
+
+  private async handleOperatorCommandApplied(
+    payload: RuntimeEventMap["OperatorCommandApplied"],
+  ): Promise<void> {
+    if (payload.action !== "resume") return;
+    await this.evaluateDirtyTokens();
   }
 
   // ─── Sweep ─────────────────────────────────────────────────────────────────
@@ -910,19 +1048,92 @@ export class AlgoDecisionModule implements RuntimeModule {
     }
   }
 
+  private hydrateDecisionStateCaches(): void {
+    try {
+      const canHydrateLegStates = typeof this.deps.legStateRepo.getAll === "function";
+      const legStates = canHydrateLegStates ? this.deps.legStateRepo.getAll() : [];
+      this.legStateCache.clear();
+      for (const state of legStates) {
+        this.legStateCache.set(String(state.tokenId), state);
+      }
+      this.legStateCacheHydrated = canHydrateLegStates;
+      if (canHydrateLegStates) {
+        this.log.info({ count: legStates.length }, "algo-decision leg state cache hydrated");
+      }
+    } catch (err) {
+      this.legStateCacheHydrated = false;
+      this.log.warn({ err }, "algo-decision leg state cache hydration failed");
+    }
+
+    try {
+      const canHydratePositions = typeof this.deps.positionRepo?.findOpen === "function";
+      const positions = canHydratePositions ? this.deps.positionRepo!.findOpen() : [];
+      this.positionCache.clear();
+      for (const position of positions) {
+        this.positionCache.set(String(position.tokenId), position);
+      }
+      this.positionCacheHydrated = canHydratePositions;
+      if (canHydratePositions) {
+        this.log.info({ count: positions.length }, "algo-decision position cache hydrated");
+      }
+    } catch (err) {
+      this.positionCacheHydrated = false;
+      this.log.warn({ err }, "algo-decision position cache hydration failed");
+    }
+  }
+
   /** Prune stale pending entries and evaluate all eligible tokens. */
   async sweep(): Promise<void> {
     if (this.isPaused()) return;
     this.pruneExpiredPending();
 
-    const allLegStates = this.deps.legStateRepo.getAll();
-    const legStateTokenIds = new Set(allLegStates.map((ls) => String(ls.tokenId)));
+    const now = Date.now();
+    if (now - this.lastFullSweepAt >= FULL_SWEEP_INTERVAL_MS) {
+      this.lastFullSweepAt = now;
+      this.markFullSweepDirty();
+    }
+    await this.evaluateDirtyTokens();
+  }
+
+  private markFullSweepDirty(): void {
+    const legStateTokenIds = new Set(
+      [...this.legStateCache.entries()]
+        .filter(([, state]) => state != null)
+        .map(([tokenId]) => tokenId),
+    );
     const eligibleTokenIds = this.deps.selectedMarketCache.getEligibleTokenIds();
     const eligibleSet = new Set(eligibleTokenIds.map(String));
 
-    // Union of tokens that have a position + eligible tokens from the cache
-    const allTokenIds = new Set([...legStateTokenIds, ...eligibleSet]);
-    await this.evaluateTokens([...allTokenIds] as TokenId[]);
+    for (const tokenId of new Set([...legStateTokenIds, ...eligibleSet])) {
+      this.dirtyTokenIds.add(tokenId);
+    }
+  }
+
+  private markDirty(tokenId: TokenId | string): void {
+    this.dirtyTokenIds.add(String(tokenId));
+  }
+
+  private scheduleDirtyEvaluation(delayMs = DIRTY_EVALUATION_DELAY_MS): void {
+    if (this.dirtyEvaluationTimer !== null) return;
+    this.dirtyEvaluationTimer = setTimeout(() => {
+      this.dirtyEvaluationTimer = null;
+      void this.evaluateDirtyTokens().catch((err) =>
+        this.log.error({ err }, "algo-decision dirty evaluation error"),
+      );
+    }, delayMs);
+  }
+
+  private async evaluateDirtyTokens(): Promise<void> {
+    if (this.isPaused()) return;
+    if (this.evaluating) {
+      this.scheduleDirtyEvaluation();
+      return;
+    }
+    if (this.dirtyTokenIds.size === 0) return;
+    const tokenIds = [...this.dirtyTokenIds] as TokenId[];
+    this.dirtyTokenIds.clear();
+    await this.evaluateTokens(tokenIds);
+    if (this.dirtyTokenIds.size > 0) this.scheduleDirtyEvaluation();
   }
 
   // ─── Core evaluation ────────────────────────────────────────────────────────
@@ -968,10 +1179,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     await this.prefetchContinuationTradeCounts(tokenIds);
     if (this.isPaused()) return;
 
-    // Yield to the event loop every EVALUATE_YIELD_BATCH tokens. evaluateToken
-    // is mostly synchronous (DB reads + pure rules) and the sweep can hold the
-    // loop for hundreds of ms across 1000+ tokens, blocking AbortSignal timers
-    // and other I/O callbacks. setImmediate yields after macro-tasks drain.
+    const inputs: DecisionPlanningInput[] = [];
     let processed = 0;
     for (const tokenId of tokenIds) {
       if (this.isPaused()) return;
@@ -980,8 +1188,20 @@ export class AlgoDecisionModule implements RuntimeModule {
         if (this.isPaused()) return;
       }
       processed++;
-      const result = await this.evaluateToken(String(tokenId) as TokenId, now, nextSeq);
-      if (!result) continue;
+      const input = await this.createDecisionPlanningInput(String(tokenId) as TokenId, now);
+      if (input) inputs.push(input);
+    }
+
+    const plans = await this.decisionWorkerPool.evaluate(inputs);
+    for (const plan of plans) {
+      if (this.isPaused()) return;
+      this.applyDecisionMetricsDelta(plan.metrics);
+      this.applyDecisionPlanSideEffects(plan.sideEffects);
+      for (const suppression of plan.suppressions) {
+        this.recordDecisionSuppressed(suppression as SuppressionFacts);
+      }
+      if (plan.type !== "signal") continue;
+      const result = this.materializeSignalDraft(plan.signal, now, nextSeq);
       if (result.signal.side === "buy") {
         if (this.shouldSuppressBuyForBudget(result.signal, now)) continue;
         if (this.isPaused()) return;
@@ -1005,6 +1225,192 @@ export class AlgoDecisionModule implements RuntimeModule {
     // immediately reflects this sweep, not the previous one.
     this.lastTickRuleMix = this.currentTickRuleMix;
     this.lastEvalMetrics = this.currentEvalMetrics;
+  }
+
+  private async createDecisionPlanningInput(
+    tokenId: TokenId,
+    now: number,
+  ): Promise<DecisionPlanningInput | null> {
+    const legState = this.getCachedLegState(tokenId);
+    const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
+    if (!legState && !selectedForEntry) return null;
+
+    const market = this.marketCache.get(String(tokenId)) ?? null;
+    const executionPolicy = this.deps.executionPolicy?.() ?? null;
+    const prevMidPrice = this.prevMidPrices.get(String(tokenId)) ?? null;
+    const position = legState ? this.getCachedPosition(tokenId) : null;
+    const continuationFacts =
+      legState && market ? await this.resolveContinuationFactsForPlanner(market, legState) : null;
+    const r23MaxMidpoint =
+      !legState &&
+      market?.midPrice != null &&
+      executionPolicy?.r23DipTrigger?.enabled &&
+      this.deps.priceHistoryProvider?.maxMidpointInWindow
+        ? this.deps.priceHistoryProvider.maxMidpointInWindow(
+            tokenId,
+            executionPolicy.r23DipTrigger.windowMs,
+            now,
+          )
+        : null;
+    const dropReferencePrice =
+      legState &&
+      executionPolicy?.dropTrigger?.enabled &&
+      this.deps.priceHistoryProvider?.findReferencePrice
+        ? this.deps.priceHistoryProvider.findReferencePrice(
+            tokenId,
+            now - executionPolicy.dropTrigger.lookbackMs,
+            executionPolicy.dropTrigger.historyMaxAgeMs,
+          )
+        : null;
+
+    return {
+      tokenId,
+      now,
+      selectedForEntry,
+      hasPendingBuyOrder: this.pendingEntries.has(String(tokenId)),
+      legState,
+      position,
+      market,
+      prevMidPrice,
+      decisionRules: this.decisionRules,
+      buySizeRules: this.buySizeRules,
+      sellSizeRules: this.sellSizeRules,
+      executionPolicy,
+      continuationFacts,
+      continuationMode: this.continuationMode,
+      r23MaxMidpoint,
+      dropReferencePrice,
+      postBuyCooldown: this.getPostBuyFillSellCooldown(now),
+    };
+  }
+
+  private async resolveContinuationFactsForPlanner(
+    market: NormalizedMarket,
+    legState: LegState,
+  ): Promise<ContinuationFacts | null> {
+    const legLocalCount = (legState.buyCount ?? 0) + (legState.sellCount ?? 0);
+    const { count, source } = await this.resolveContinuationTradeCount(
+      market.conditionId as ConditionId,
+      legLocalCount,
+    );
+    return {
+      tradeCount: count,
+      tradeCountSource: source,
+      stop: !evaluateContinuation(count, legState.firstTradePrice),
+    };
+  }
+
+  private applyDecisionMetricsDelta(delta: DecisionMetricsDelta): void {
+    const metrics = this.currentEvalMetrics;
+    metrics.evalTotal += delta.evalTotal;
+    metrics.suppressedMarketNotLive += delta.suppressedMarketNotLive;
+    metrics.dropTriggerChecked += delta.dropTriggerChecked;
+    metrics.dropTriggerPassed += delta.dropTriggerPassed;
+    metrics.r23DipChecked += delta.r23DipChecked;
+    metrics.r23DipFired += delta.r23DipFired;
+    metrics.r23NoHistory += delta.r23NoHistory;
+    metrics.r23NoDip += delta.r23NoDip;
+    metrics.rejectNoDropSignal += delta.rejectNoDropSignal;
+    metrics.allowNoDropData += delta.allowNoDropData;
+    metrics.livenessNotAcceptingOrders += delta.livenessNotAcceptingOrders;
+    metrics.livenessOrderBookDisabled += delta.livenessOrderBookDisabled;
+    metrics.livenessBothFlags += delta.livenessBothFlags;
+    for (const [ruleId, count] of Object.entries(delta.wouldMatchRule)) {
+      metrics.wouldMatchRule.set(ruleId, (metrics.wouldMatchRule.get(ruleId) ?? 0) + count);
+    }
+  }
+
+  private applyDecisionPlanSideEffects(sideEffects: readonly DecisionPlanSideEffect[]): void {
+    for (const sideEffect of sideEffects) {
+      if (sideEffect.kind === "dust_recovered") {
+        try {
+          this.deps.legStateRepo.resetAbandoned(sideEffect.tokenId, sideEffect.timestamp);
+          this.invalidateDecisionState(String(sideEffect.tokenId));
+          this.persistence.enqueueRiskEvent({
+            eventType: "signal_suppressed",
+            payload: {
+              tokenId: String(sideEffect.tokenId),
+              conditionId: sideEffect.conditionId,
+              reasonCode: DUST_RECOVERED_REASON,
+              recoverySource: "price-recovery",
+              currentPrice: sideEffect.currentPrice,
+              abandonedAtPrice: sideEffect.abandonedAtPrice,
+              signalTimestamp: sideEffect.timestamp,
+            },
+          });
+        } catch (err) {
+          this.deps.log.warn(
+            { err, tokenId: String(sideEffect.tokenId) },
+            "failed to persist dust-recovered transition (continuing evaluation)",
+          );
+        }
+        continue;
+      }
+      if (sideEffect.kind === "sell_residual_reject") {
+        if (!this.deps.executionPolicy?.().dustAbandonment.enabled) continue;
+        const { count, markedAbandoned } = this.deps.legStateRepo.incrementSellResidualReject(
+          sideEffect.tokenId,
+          sideEffect.timestamp,
+          { threshold: sideEffect.threshold, price: sideEffect.price },
+        );
+        this.invalidateDecisionState(String(sideEffect.tokenId));
+        if (markedAbandoned) {
+          this.persistence.enqueueRiskEvent({
+            eventType: "signal_suppressed",
+            payload: {
+              tokenId: String(sideEffect.tokenId),
+              conditionId: sideEffect.conditionId,
+              reasonCode: DUST_ABANDONED_REASON,
+              consecutiveRejects: count,
+              abandonedAtPrice: sideEffect.price,
+              signalTimestamp: sideEffect.timestamp,
+            },
+          });
+        }
+      }
+    }
+  }
+
+  private materializeSignalDraft(
+    draft: DecisionSignalDraft,
+    now: number,
+    nextSeq: (key: string) => number,
+  ): NonNullable<TokenEvalResult> {
+    const sequenceInTick = nextSeq(`${draft.market.tokenId}|${draft.side}`);
+    const generatedAt = new Date(now).toISOString();
+    const signal: import("@krabs/domain").Signal = {
+      signalId: randomUUID(),
+      tokenId: draft.market.tokenId,
+      conditionId: draft.market.conditionId as ConditionId,
+      side: draft.side,
+      suggestedPrice: draft.suggestedPrice,
+      suggestedSize: draft.suggestedSize,
+      suggestedSizeUsdc: draft.suggestedSizeUsdc,
+      reason: draft.reason,
+      strategyTick: now,
+      sequenceInTick,
+      decisionRuleId: draft.decisionRuleId,
+      sizingRuleId: draft.sizingRuleId,
+      generatedAt,
+    };
+    return {
+      type: "signal",
+      signal,
+      market: draft.market,
+      commitLog: () => {
+        this.recordDecisionSignal(
+          {
+            ...draft.logDraft,
+            signalId: signal.signalId,
+            tokenId: signal.tokenId,
+            conditionId: signal.conditionId,
+            signalTimestamp: generatedAt,
+          },
+          draft.emissionFacts,
+          draft.triggerTelemetry,
+        );
+      },
+    };
   }
 
   private emitEvalMetricsSnapshot(now: number): void {
@@ -1050,7 +1456,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     const conditionIds: ConditionId[] = [];
     const seen = new Set<string>();
     for (const tokenId of tokenIds) {
-      const ls = this.deps.legStateRepo.get(tokenId);
+      const ls = this.getCachedLegState(tokenId);
       if (!ls) continue;
       const market = this.marketCache.get(String(tokenId));
       if (!market) continue;
@@ -1100,7 +1506,7 @@ export class AlgoDecisionModule implements RuntimeModule {
     now: number,
     nextSeq: (key: string) => number,
   ): Promise<TokenEvalResult> {
-    const legState = this.deps.legStateRepo.get(tokenId);
+    const legState = this.getCachedLegState(tokenId);
     const selectedForEntry = this.deps.selectedMarketCache.isEligible(tokenId);
 
     // Avoid emitting suppression telemetry for the full unselected market
@@ -1110,7 +1516,7 @@ export class AlgoDecisionModule implements RuntimeModule {
 
     const state = deriveState(legState);
     const buyCount = legState?.buyCount ?? 0;
-    const position = legState ? (this.deps.positionRepo?.findByTokenId(tokenId) ?? null) : null;
+    const position = legState ? this.getCachedPosition(tokenId) : null;
     const emissionFacts: EmissionFacts = {
       firstTradePrice: legState?.firstTradePrice ?? null,
       firstTradeAt: legState?.firstTradeAt ?? null,
@@ -1167,7 +1573,8 @@ export class AlgoDecisionModule implements RuntimeModule {
           const nowIso = new Date(now).toISOString();
           try {
             this.deps.legStateRepo.resetAbandoned(tokenId, nowIso);
-            this.deps.riskEventRepo?.insert({
+            this.invalidateDecisionState(String(tokenId));
+            this.persistence.enqueueRiskEvent({
               eventType: "signal_suppressed",
               payload: {
                 tokenId: String(tokenId),
@@ -1580,6 +1987,35 @@ export class AlgoDecisionModule implements RuntimeModule {
     );
   }
 
+  private getCachedLegState(tokenId: TokenId): LegState | null {
+    const key = String(tokenId);
+    if (this.legStateCache.has(key)) return this.legStateCache.get(key) ?? null;
+    if (this.legStateCacheHydrated) {
+      this.legStateCache.set(key, null);
+      return null;
+    }
+    const state = this.deps.legStateRepo.get(tokenId);
+    this.legStateCache.set(key, state);
+    return state;
+  }
+
+  private getCachedPosition(tokenId: TokenId): Position | null {
+    const key = String(tokenId);
+    if (this.positionCache.has(key)) return this.positionCache.get(key) ?? null;
+    if (this.positionCacheHydrated) {
+      this.positionCache.set(key, null);
+      return null;
+    }
+    const position = this.deps.positionRepo?.findByTokenId(tokenId) ?? null;
+    this.positionCache.set(key, position);
+    return position;
+  }
+
+  private invalidateDecisionState(tokenId: string): void {
+    this.legStateCache.delete(tokenId);
+    this.positionCache.delete(tokenId);
+  }
+
   private buildSignalOrSuppressSellResidual(
     market: NormalizedMarket,
     decision: { action: TradeDecisionAction; ruleId: string },
@@ -1606,25 +2042,19 @@ export class AlgoDecisionModule implements RuntimeModule {
             nowIso,
             { threshold: dustPolicy.maxConsecutiveRejects, price: ctx.price },
           );
+          this.invalidateDecisionState(String(market.tokenId));
           if (markedAbandoned) {
-            try {
-              this.deps.riskEventRepo?.insert({
-                eventType: "signal_suppressed",
-                payload: {
-                  tokenId: String(market.tokenId),
-                  conditionId: market.conditionId,
-                  reasonCode: DUST_ABANDONED_REASON,
-                  consecutiveRejects: count,
-                  abandonedAtPrice: ctx.price,
-                  signalTimestamp: nowIso,
-                },
-              });
-            } catch (err) {
-              this.log.warn(
-                { err, tokenId: String(market.tokenId) },
-                "failed to persist dust-abandoned risk event",
-              );
-            }
+            this.persistence.enqueueRiskEvent({
+              eventType: "signal_suppressed",
+              payload: {
+                tokenId: String(market.tokenId),
+                conditionId: market.conditionId,
+                reasonCode: DUST_ABANDONED_REASON,
+                consecutiveRejects: count,
+                abandonedAtPrice: ctx.price,
+                signalTimestamp: nowIso,
+              },
+            });
           }
         }
       }
@@ -1920,61 +2350,47 @@ export class AlgoDecisionModule implements RuntimeModule {
     const ruleKey = signal.decisionRuleId ?? "(null)";
     this.currentTickRuleMix.set(ruleKey, (this.currentTickRuleMix.get(ruleKey) ?? 0) + 1);
 
-    try {
-      this.deps.decisionSignalLogRepo?.insert(signal);
-    } catch (err) {
-      this.log.warn(
-        { err, signalId: signal.signalId, tokenId: String(signal.tokenId), side: signal.side },
-        "failed to persist decision signal telemetry",
-      );
-    }
-    try {
-      this.deps.riskEventRepo?.insert({
-        eventType: "signal_emitted",
-        payload: {
-          signalId: signal.signalId,
-          tokenId: String(signal.tokenId),
-          conditionId: String(signal.conditionId),
-          side: signal.side,
-          decisionRuleId: signal.decisionRuleId,
-          state: signal.state,
-          price: signal.price,
-          buyCount: signal.buyCount,
-          timeSinceLastSeconds: signal.timeSinceLastSeconds,
-          firstTradePrice: emissionFacts.firstTradePrice,
-          legTradeCount: emissionFacts.legTradeCount,
-          continuationStop: emissionFacts.continuationStop ?? null,
-          tradeCount: emissionFacts.continuationTradeCount ?? null,
-          tradeCountSource: emissionFacts.continuationTradeCountSource ?? null,
-          continuationMode: this.continuationMode,
-          // ADR-022 §D-F — F-telemetry fields surfaced for post-hoc R23/R24
-          // distribution comparison.
-          dropFromLastSeen: triggerTelemetry.dropFromLastSeen,
-          entryPriceBucket: triggerTelemetry.entryPriceBucket,
-          dropTriggerStatus: triggerTelemetry.dropTriggerStatus,
-          dropTriggerPct: triggerTelemetry.dropTriggerPct,
-          r23DipRatio: emissionFacts.r23DipRatio ?? null,
-          r23MaxMidpoint: emissionFacts.r23MaxMidpoint ?? null,
-          r23WindowMs: emissionFacts.r23WindowMs ?? null,
-          d9ProfitRatio: emissionFacts.d9ProfitRatio ?? null,
-          d9PublicTradeCount24h: emissionFacts.d9PublicTradeCount24h ?? null,
-          // ADR-026 §D-B — §11.1 adds telemetry mirrored alongside the
-          // decision_signal_log row.
-          isAdd: signal.isAdd,
-          addAgeMs: signal.addAgeMs,
-          addAgeBucket: signal.addAgeBucket,
-          addPriceChangePct: signal.addPriceChangePct,
-          addPriceChangeBucket: signal.addPriceChangeBucket,
-          nthBuyAtEmit: signal.nthBuyAtEmit,
-          signalTimestamp: signal.signalTimestamp,
-        },
-      });
-    } catch (err) {
-      this.log.warn(
-        { err, signalId: signal.signalId, tokenId: String(signal.tokenId), side: signal.side },
-        "failed to persist signal_emitted risk event",
-      );
-    }
+    this.persistence.enqueueDecisionSignal(signal);
+    this.persistence.enqueueRiskEvent({
+      eventType: "signal_emitted",
+      payload: {
+        signalId: signal.signalId,
+        tokenId: String(signal.tokenId),
+        conditionId: String(signal.conditionId),
+        side: signal.side,
+        decisionRuleId: signal.decisionRuleId,
+        state: signal.state,
+        price: signal.price,
+        buyCount: signal.buyCount,
+        timeSinceLastSeconds: signal.timeSinceLastSeconds,
+        firstTradePrice: emissionFacts.firstTradePrice,
+        legTradeCount: emissionFacts.legTradeCount,
+        continuationStop: emissionFacts.continuationStop ?? null,
+        tradeCount: emissionFacts.continuationTradeCount ?? null,
+        tradeCountSource: emissionFacts.continuationTradeCountSource ?? null,
+        continuationMode: this.continuationMode,
+        // ADR-022 §D-F — F-telemetry fields surfaced for post-hoc R23/R24
+        // distribution comparison.
+        dropFromLastSeen: triggerTelemetry.dropFromLastSeen,
+        entryPriceBucket: triggerTelemetry.entryPriceBucket,
+        dropTriggerStatus: triggerTelemetry.dropTriggerStatus,
+        dropTriggerPct: triggerTelemetry.dropTriggerPct,
+        r23DipRatio: emissionFacts.r23DipRatio ?? null,
+        r23MaxMidpoint: emissionFacts.r23MaxMidpoint ?? null,
+        r23WindowMs: emissionFacts.r23WindowMs ?? null,
+        d9ProfitRatio: emissionFacts.d9ProfitRatio ?? null,
+        d9PublicTradeCount24h: emissionFacts.d9PublicTradeCount24h ?? null,
+        // ADR-026 §D-B — §11.1 adds telemetry mirrored alongside the
+        // decision_signal_log row.
+        isAdd: signal.isAdd,
+        addAgeMs: signal.addAgeMs,
+        addAgeBucket: signal.addAgeBucket,
+        addPriceChangePct: signal.addPriceChangePct,
+        addPriceChangeBucket: signal.addPriceChangeBucket,
+        nthBuyAtEmit: signal.nthBuyAtEmit,
+        signalTimestamp: signal.signalTimestamp,
+      },
+    });
   }
 
   private recordLivenessSuppressedMetric(reasons: readonly string[], ctx: EvalContext): void {
@@ -1996,41 +2412,34 @@ export class AlgoDecisionModule implements RuntimeModule {
   private recordDecisionSuppressed(facts: SuppressionFacts): void {
     if (!this.shouldPersistSuppressionEvent(facts)) return;
 
-    try {
-      this.deps.riskEventRepo?.insert({
-        eventType: "signal_suppressed",
-        payload: {
-          tokenId: String(facts.tokenId),
-          conditionId: facts.conditionId,
-          reasonCode: facts.reasonCode,
-          reasons: facts.reasons ?? null,
-          side: facts.side ?? null,
-          decisionRuleId: facts.decisionRuleId ?? null,
-          state: facts.state,
-          price: facts.price,
-          buyCount: facts.buyCount,
-          timeSinceLastSeconds: facts.timeSinceLastSeconds,
-          firstTradePrice: facts.emissionFacts.firstTradePrice,
-          legTradeCount: facts.emissionFacts.legTradeCount,
-          d9ProfitRatio: facts.emissionFacts.d9ProfitRatio ?? null,
-          d9AvgBuyPrice: facts.emissionFacts.d9AvgBuyPrice ?? null,
-          d9DaysToResolve: facts.emissionFacts.d9DaysToResolve ?? null,
-          d9PublicTradeCount24h: facts.emissionFacts.d9PublicTradeCount24h ?? null,
-          r23DipRatio: facts.emissionFacts.r23DipRatio ?? null,
-          r23MaxMidpoint: facts.emissionFacts.r23MaxMidpoint ?? null,
-          r23WindowMs: facts.emissionFacts.r23WindowMs ?? null,
-          tradeCount: facts.tradeCount ?? null,
-          tradeCountSource: facts.tradeCountSource ?? null,
-          continuationMode: this.continuationMode,
-          signalTimestamp: facts.timestamp,
-        },
-      });
-    } catch (err) {
-      this.log.warn(
-        { err, tokenId: String(facts.tokenId), reasonCode: facts.reasonCode },
-        "failed to persist signal_suppressed risk event",
-      );
-    }
+    this.persistence.enqueueRiskEvent({
+      eventType: "signal_suppressed",
+      payload: {
+        tokenId: String(facts.tokenId),
+        conditionId: facts.conditionId,
+        reasonCode: facts.reasonCode,
+        reasons: facts.reasons ?? null,
+        side: facts.side ?? null,
+        decisionRuleId: facts.decisionRuleId ?? null,
+        state: facts.state,
+        price: facts.price,
+        buyCount: facts.buyCount,
+        timeSinceLastSeconds: facts.timeSinceLastSeconds,
+        firstTradePrice: facts.emissionFacts.firstTradePrice,
+        legTradeCount: facts.emissionFacts.legTradeCount,
+        d9ProfitRatio: facts.emissionFacts.d9ProfitRatio ?? null,
+        d9AvgBuyPrice: facts.emissionFacts.d9AvgBuyPrice ?? null,
+        d9DaysToResolve: facts.emissionFacts.d9DaysToResolve ?? null,
+        d9PublicTradeCount24h: facts.emissionFacts.d9PublicTradeCount24h ?? null,
+        r23DipRatio: facts.emissionFacts.r23DipRatio ?? null,
+        r23MaxMidpoint: facts.emissionFacts.r23MaxMidpoint ?? null,
+        r23WindowMs: facts.emissionFacts.r23WindowMs ?? null,
+        tradeCount: facts.tradeCount ?? null,
+        tradeCountSource: facts.tradeCountSource ?? null,
+        continuationMode: this.continuationMode,
+        signalTimestamp: facts.timestamp,
+      },
+    });
   }
 
   private shouldPersistSuppressionEvent(facts: SuppressionFacts): boolean {
@@ -2202,28 +2611,21 @@ export class AlgoDecisionModule implements RuntimeModule {
     source: "decision_preflight" | "risk_rejection",
     reasonCode: string,
   ): void {
-    try {
-      this.deps.riskEventRepo?.insert({
-        eventType: "signal_suppressed",
-        payload: {
-          signalId: signal.signalId,
-          tokenId: String(signal.tokenId),
-          conditionId: String(signal.conditionId),
-          reasonCode,
-          side: "BUY",
-          requiredNotionalUsdc: signal.suggestedSizeUsdc,
-          recoveryNotionalUsdc: this.buyBudgetRecoveryNotionalUsdc,
-          cooldownUntil: new Date(cooldownUntilMs).toISOString(),
-          source,
-          signalTimestamp: new Date(now).toISOString(),
-        },
-      });
-    } catch (err) {
-      this.log.warn(
-        { err, signalId: signal.signalId, tokenId: String(signal.tokenId) },
-        "failed to persist buy budget suppression event",
-      );
-    }
+    this.persistence.enqueueRiskEvent({
+      eventType: "signal_suppressed",
+      payload: {
+        signalId: signal.signalId,
+        tokenId: String(signal.tokenId),
+        conditionId: String(signal.conditionId),
+        reasonCode,
+        side: "BUY",
+        requiredNotionalUsdc: signal.suggestedSizeUsdc,
+        recoveryNotionalUsdc: this.buyBudgetRecoveryNotionalUsdc,
+        cooldownUntil: new Date(cooldownUntilMs).toISOString(),
+        source,
+        signalTimestamp: new Date(now).toISOString(),
+      },
+    });
   }
 
   private isPaused(): boolean {

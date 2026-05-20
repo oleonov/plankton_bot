@@ -33,6 +33,7 @@ import type {
 import type {
   Signal,
   Position,
+  LegState,
   NormalizedMarket,
   ReconciliationResult,
   RiskDecision,
@@ -219,6 +220,17 @@ export interface RuntimeEventMap {
 
   PositionUpdated: {
     readonly position: Position;
+  };
+
+  LegStateUpdated: {
+    readonly legState: LegState;
+    readonly timestamp: number;
+  };
+
+  LegStateCleared: {
+    readonly tokenId: TokenId;
+    readonly reason: string;
+    readonly timestamp: number;
   };
 
   ReconciliationDriftDetected: {

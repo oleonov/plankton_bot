@@ -226,6 +226,7 @@ export class MarketDataModule implements RuntimeModule {
   private polling = false;
   private lastSuccessfulDataMs = 0;
   private readonly marketCache = new Map<string, NormalizedMarket>();
+  private readonly lastPublishedMarketByToken = new Map<string, NormalizedMarket>();
   private readonly trackedMarketsByToken = new Map<string, Market>();
   private readonly lastPricingUpdateAtByToken = new Map<string, number>();
   private readonly lastPricingAttemptAtByToken = new Map<string, number>();
@@ -584,15 +585,30 @@ export class MarketDataModule implements RuntimeModule {
           }
           const lastUpdatedAt = this.lastPricingUpdateAtByToken.get(tokenId) ?? 0;
           const lastAttemptedAt = this.lastPricingAttemptAtByToken.get(tokenId) ?? 0;
+          const role = this.wsTierRoleByToken.get(tokenId);
           if (cached == null) {
+            if (lastAttemptedAt > 0) {
+              const refreshBudgetMs = getTrackedTokenRefreshBudgetMs(
+                { bookSource: "unknown" },
+                this.deps.pollIntervalMs,
+                quietWsTierPollingRelaxed && role != null,
+                role,
+              );
+              if (now - lastAttemptedAt <= refreshBudgetMs) continue;
+              fallbackCandidates.push({
+                tokenId,
+                role,
+                reason: "unknownSourceRefresh",
+              });
+              continue;
+            }
             fallbackCandidates.push({
               tokenId,
-              role: this.wsTierRoleByToken.get(tokenId),
+              role,
               reason: "missingCache",
             });
             continue;
           }
-          const role = this.wsTierRoleByToken.get(tokenId);
           const refreshReferenceAt =
             cached.bookSource == null || cached.bookSource === "unknown"
               ? Math.max(lastUpdatedAt, lastAttemptedAt)
@@ -748,20 +764,26 @@ export class MarketDataModule implements RuntimeModule {
       for (const tokenId of tokenIdsToPoll) {
         this.lastPricingAttemptAtByToken.set(tokenId, now);
       }
-      const markets: NormalizedMarket[] = [];
+      const changedMarkets: NormalizedMarket[] = [];
+      let nullPricingGateCount = 0;
 
-      for (const market of tracked) {
-        const tokenKey = String(market.tokenId);
+      for (const tokenKey of tokenIdsToPoll) {
+        const market = this.trackedMarketsByToken.get(tokenKey);
+        if (!market) continue;
         const current = this.marketCache.get(tokenKey);
         const baseMarket = syncTrackedMarket(current ?? null, market, now);
         const pricing = pricingMap.get(String(market.tokenId));
-        const nextMarket =
-          pricing != null ? applyPricingSnapshot(baseMarket, pricing, now) : baseMarket;
-        if (pricing != null) {
-          this.lastPricingUpdateAtByToken.set(tokenKey, now);
+        if (pricing == null) {
+          nullPricingGateCount++;
+          continue;
         }
+        const nextMarket = applyPricingSnapshot(baseMarket, pricing, now);
+        this.lastPricingUpdateAtByToken.set(tokenKey, now);
         this.marketCache.set(tokenKey, nextMarket);
-        markets.push(nextMarket);
+        const lastPublished = this.lastPublishedMarketByToken.get(tokenKey) ?? null;
+        if (lastPublished == null || didMarketPricingChange(lastPublished, nextMarket)) {
+          changedMarkets.push(nextMarket);
+        }
       }
 
       this.lastSuccessfulDataMs = now;
@@ -775,19 +797,17 @@ export class MarketDataModule implements RuntimeModule {
       }
       this.log.info(
         {
-          tokenCount: markets.length,
+          changedMarketCount: changedMarkets.length,
           polledTokenCount: tokenIdsToPoll.length,
           pricingHitCount: pricingMap.size,
+          nullPricingGateCount,
           trackedDiffCounts: this.lastTrackedDiffCounts,
           cachedTrackedTokenCountAtPollStart,
         },
         "poll cycle complete",
       );
 
-      await this.deps.bus.publish("MarketSnapshotReceived", {
-        markets,
-        timestamp: now,
-      });
+      await this.publishMarketSnapshotDelta(changedMarkets, now);
     } catch (err) {
       this.recordHttpError("gamma-pricing", err);
       if (isRateLimitError(err)) {
@@ -1033,18 +1053,17 @@ export class MarketDataModule implements RuntimeModule {
     const changedMarkets: NormalizedMarket[] = [];
 
     for (const update of updates) {
-      const tracked = this.trackedMarketsByToken.get(String(update.tokenId));
+      const tokenKey = String(update.tokenId);
+      const tracked = this.trackedMarketsByToken.get(tokenKey);
       if (!tracked) continue;
-      const current = syncTrackedMarket(
-        this.marketCache.get(String(update.tokenId)) ?? null,
-        tracked,
-        nowMs,
-      );
+      const current = syncTrackedMarket(this.marketCache.get(tokenKey) ?? null, tracked, nowMs);
       const nextMarket = applyStreamUpdate(current, update, nowMs);
-      this.lastPricingUpdateAtByToken.set(String(update.tokenId), nowMs);
-      if (!didMarketPricingChange(current, nextMarket)) continue;
-      this.marketCache.set(String(update.tokenId), nextMarket);
-      changedMarkets.push(nextMarket);
+      this.lastPricingUpdateAtByToken.set(tokenKey, nowMs);
+      this.marketCache.set(tokenKey, nextMarket);
+      const lastPublished = this.lastPublishedMarketByToken.get(tokenKey) ?? null;
+      if (lastPublished == null || didMarketPricingChange(lastPublished, nextMarket)) {
+        changedMarkets.push(nextMarket);
+      }
     }
 
     if (changedMarkets.length === 0) return;
@@ -1173,6 +1192,7 @@ export class MarketDataModule implements RuntimeModule {
       if (nextTokenIds.has(tokenId)) continue;
       this.trackedMarketsByToken.delete(tokenId);
       this.marketCache.delete(tokenId);
+      this.lastPublishedMarketByToken.delete(tokenId);
       this.lastPricingUpdateAtByToken.delete(tokenId);
       removed.push(tokenId);
     }
@@ -1182,6 +1202,9 @@ export class MarketDataModule implements RuntimeModule {
     // published on the fly and must not leave residue here.
     for (const tokenId of [...this.marketCache.keys()]) {
       if (!nextTokenIds.has(tokenId)) this.marketCache.delete(tokenId);
+    }
+    for (const tokenId of [...this.lastPublishedMarketByToken.keys()]) {
+      if (!nextTokenIds.has(tokenId)) this.lastPublishedMarketByToken.delete(tokenId);
     }
     for (const tokenId of [...this.lastPricingUpdateAtByToken.keys()]) {
       if (!nextTokenIds.has(tokenId)) this.lastPricingUpdateAtByToken.delete(tokenId);
@@ -1302,7 +1325,6 @@ export class MarketDataModule implements RuntimeModule {
       );
       return;
     }
-    const markets: NormalizedMarket[] = [];
     for (const trackedMarket of tracked) {
       const tokenKey = String(trackedMarket.tokenId);
       const nextMarket = syncTrackedMarket(
@@ -1311,11 +1333,24 @@ export class MarketDataModule implements RuntimeModule {
         nowMs,
       );
       this.marketCache.set(tokenKey, nextMarket);
-      markets.push(nextMarket);
+    }
+    this.log.debug(
+      { trackedCount: tracked.length },
+      "cached market state retained without downstream snapshot fanout",
+    );
+  }
+
+  private async publishMarketSnapshotDelta(
+    markets: readonly NormalizedMarket[],
+    timestamp: number,
+  ): Promise<void> {
+    if (markets.length === 0) return;
+    for (const market of markets) {
+      this.lastPublishedMarketByToken.set(String(market.tokenId), market);
     }
     await this.deps.bus.publish("MarketSnapshotReceived", {
       markets,
-      timestamp: nowMs,
+      timestamp,
     });
   }
 

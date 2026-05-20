@@ -15,9 +15,9 @@
  *    UPSERT_MARKET_SQL constant and by behavioural test (write score, then
  *    saveBatch the same token, assert score survives unchanged).
  *  - findTrackedForPricingTiered comparator orders entry candidates by
- *    selection_status rank → effective-score DESC NULLS LAST → created_at DESC
- *    → token_id ASC; stale scores (features_captured_at < now − 4h) are
- *    treated as null so they cannot outrank a fresh lower score.
+ *    Plankton-priority composite score (R30 score tiers + tick/horizon/category)
+ *    → selection_status rank → effective-score DESC NULLS LAST → created_at DESC
+ *    → token_id ASC.
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -527,7 +527,7 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
     expect(ids).toEqual(["fresh-low", "stale-high"]);
   });
 
-  it("selection_status rank dominates score ordering across tiers", () => {
+  it("R30 score tier dominates selection_status rank across entry candidates", () => {
     const now = new Date();
     const fresh = new Date(now.getTime() - 60_000).toISOString();
     repo.saveBatch([
@@ -535,7 +535,6 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
       makeMarket("matched", { selectionStatus: "matched_include" }),
     ]);
     repo.updateScoresBatch([
-      // step2 has an absurdly high score, but matched_include rank wins.
       {
         tokenId: createTokenId("step2"),
         score: 0.99,
@@ -554,7 +553,39 @@ describe("findTrackedForPricingTiered — score-aware comparator", () => {
 
     const result = repo.findTrackedForPricingTiered({ maxTokens: 100 });
     const ids = result.entryCandidates.map((m) => String(m.tokenId));
-    expect(ids).toEqual(["matched", "step2"]);
+    expect(ids).toEqual(["step2", "matched"]);
+  });
+
+  it("uses Plankton-priority tick, horizon, and category tie-breaks", () => {
+    const now = new Date();
+    const fresh = new Date(now.getTime() - 60_000).toISOString();
+    repo.saveBatch([
+      makeMarket("weather-low-priority", {
+        slug: "rain-in-seattle",
+        eventSlug: null,
+        endDate: new Date(now.getTime() + 10 * 86_400_000).toISOString(),
+        tickSize: 0.01,
+      }),
+      makeMarket("politics-high-priority", {
+        slug: "us-election-market",
+        eventSlug: null,
+        endDate: new Date(now.getTime() + 60 * 86_400_000).toISOString(),
+        tickSize: 0.001,
+      }),
+    ]);
+    repo.updateScoresBatch(
+      ["weather-low-priority", "politics-high-priority"].map((id) => ({
+        tokenId: createTokenId(id),
+        score: 0.3,
+        modelVersion: "v1",
+        scoredAt: fresh,
+        featuresCapturedAt: fresh,
+      })),
+    );
+
+    const result = repo.findTrackedForPricingTiered({ maxTokens: 100 });
+    const ids = result.entryCandidates.map((m) => String(m.tokenId));
+    expect(ids).toEqual(["politics-high-priority", "weather-low-priority"]);
   });
 
   it("ties on (rank, effectiveScore) fall back to created_at DESC then token_id ASC", () => {

@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import { createTokenId } from "@krabs/domain";
+import { createTokenId, type NormalizedMarket } from "@krabs/domain";
 import { MarketSnapshotPriceHistoryProvider } from "../market-snapshot-price-history.js";
 
 describe("MarketSnapshotPriceHistoryProvider", () => {
@@ -23,6 +23,42 @@ describe("MarketSnapshotPriceHistoryProvider", () => {
       );
     `);
     return db;
+  }
+
+  function makeMarket(
+    tokenId: string,
+    price: { bid?: number | null; ask?: number | null; mid?: number | null },
+    snapshotTs: number,
+  ): NormalizedMarket {
+    const bestBid = price.bid ?? null;
+    const bestAsk = price.ask ?? null;
+    const midPrice =
+      price.mid ??
+      (bestBid != null && bestAsk != null ? (bestBid + bestAsk) / 2 : (bestBid ?? bestAsk));
+    return {
+      tokenId: createTokenId(tokenId),
+      conditionId: `cond-${tokenId}`,
+      slug: tokenId,
+      eventSlug: null,
+      eventMarketCount: 1,
+      question: tokenId,
+      outcome: "Yes",
+      regime: null,
+      horizon: null,
+      endDate: null,
+      active: true,
+      tradable: true,
+      tickSize: 0.01,
+      negRisk: false,
+      acceptingOrders: true,
+      enableOrderBook: true,
+      bestBid,
+      bestAsk,
+      midPrice,
+      spread: bestBid != null && bestAsk != null ? bestAsk - bestBid : null,
+      gammaCreatedAt: null,
+      snapshotTs,
+    };
   }
 
   it("computes the max normalized midpoint inside the requested window", () => {
@@ -105,5 +141,45 @@ describe("MarketSnapshotPriceHistoryProvider", () => {
       hitRate: 0.5,
       entries: 1,
     });
+  });
+
+  it("serves window max from observed in-memory samples without sync DB fallback", () => {
+    const conn = setupDb();
+    const now = Date.parse("2026-05-18T12:00:00.000Z");
+    conn
+      .prepare(
+        "INSERT INTO market_snapshots (token_id, best_bid, best_ask, last_price, captured_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run("tok", 0.49, 0.51, null, "2026-05-18T11:00:00.000Z");
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, { syncMissLookup: false });
+
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now)).toBeNull();
+
+    provider.observeMarket(makeMarket("tok", { bid: 0.09, ask: 0.11 }, now - 10_000));
+    provider.observeMarket(makeMarket("tok", { bid: 0.19, ask: 0.21 }, now - 5_000));
+
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now)).toBeCloseTo(
+      0.2,
+      8,
+    );
+  });
+
+  it("evicts cached window maxima when a fresher market sample is observed", () => {
+    const conn = setupDb();
+    const now = Date.parse("2026-05-18T12:00:00.000Z");
+    const provider = new MarketSnapshotPriceHistoryProvider(conn, { syncMissLookup: false });
+
+    provider.observeMarket(makeMarket("tok", { bid: 0.09, ask: 0.11 }, now - 10_000));
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now)).toBeCloseTo(
+      0.1,
+      8,
+    );
+
+    provider.observeMarket(makeMarket("tok", { bid: 0.29, ask: 0.31 }, now - 1_000));
+
+    expect(provider.maxMidpointInWindow(createTokenId("tok"), 60 * 60_000, now)).toBeCloseTo(
+      0.3,
+      8,
+    );
   });
 });
