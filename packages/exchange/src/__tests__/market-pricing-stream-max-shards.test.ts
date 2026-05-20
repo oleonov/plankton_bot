@@ -6,7 +6,7 @@
  * limit) so a misconfigured env cannot put "5k tokens on one socket".
  */
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { LiveMarketPricingStream } from "../live/market-pricing-stream.js";
+import { LiveMarketPricingStream, resolveWorkerGroupId } from "../live/market-pricing-stream.js";
 import { deriveMaxSubscriptionsPerConnection } from "../live/market-data-gateway.js";
 import type { MarketDataWebSocketLike } from "../live/market-data-stream-shared.js";
 
@@ -99,5 +99,19 @@ describe("LiveMarketPricingStream — hard 500/shard ceiling", () => {
     stream.setTokenIds([]);
     expect(sockets).toHaveLength(0);
     stream.close();
+  });
+});
+
+describe("resolveWorkerGroupId — multi-shard worker topology", () => {
+  it("maps many shard ids onto a bounded worker pool", () => {
+    expect(Array.from({ length: 10 }, (_, shardId) => resolveWorkerGroupId(shardId, 4))).toEqual([
+      0, 1, 2, 3, 0, 1, 2, 3, 0, 1,
+    ]);
+  });
+
+  it("keeps every shard on worker 0 when worker count is 1", () => {
+    expect(Array.from({ length: 5 }, (_, shardId) => resolveWorkerGroupId(shardId, 1))).toEqual([
+      0, 0, 0, 0, 0,
+    ]);
   });
 });

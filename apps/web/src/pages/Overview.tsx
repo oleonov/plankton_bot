@@ -172,6 +172,7 @@ function r23HealthColor(metrics?: R23MetricsData): string {
 function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
   const color = coverageColor(coverage?.coverage_pct);
   const heartbeat = coverage?.ws_heartbeat;
+  const workerMemory = coverage?.ws_worker_memory;
   const title = coverage
     ? [
         `WS tracked: ${coverage.ws_tracked}`,
@@ -190,6 +191,9 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
         }, timeout ${heartbeat?.timeoutFired ?? 0}, worker lag ${
           heartbeat?.workerEventLoopLagMaxMs?.toFixed(0) ?? "—"
         }ms`,
+        `WS worker memory: rss ${workerMemory?.rssMb?.toFixed(1) ?? "—"} MiB, max worker ${
+          workerMemory?.maxRssMb?.toFixed(1) ?? "—"
+        } MiB`,
         `R23 cache hit rate: ${formatPct(coverage.r23_cache_hit_rate)}`,
         `V4 admit rate: ${formatPct(coverage.v4_admit_rate)}`,
         `V4 top categories: ${formatTopCounts(coverage.v4_admit_count_by_category, 5)}`,
@@ -236,6 +240,13 @@ function CoverageCard({ coverage }: { coverage?: CoverageMetricsData }) {
               heartbeat?.timeoutFired ?? 0
             } · lag ${heartbeat?.workerEventLoopLagMaxMs?.toFixed(0) ?? "—"}ms`
           : "Awaiting WS heartbeat telemetry"}
+      </div>
+      <div className="value-sm" style={{ color: "var(--text-dim)" }}>
+        {coverage
+          ? `WS mem ${workerMemory?.rssMb?.toFixed(1) ?? "—"} MiB · max ${
+              workerMemory?.maxRssMb?.toFixed(1) ?? "—"
+            } MiB`
+          : "Awaiting WS worker memory"}
       </div>
       <div className="value-sm" style={{ color: "var(--text-dim)" }}>
         {coverage

@@ -367,6 +367,26 @@ export interface CoverageMetricsData {
       }
     >;
   } | null;
+  ws_worker_memory: {
+    rssMb: number;
+    heapUsedMb: number;
+    heapTotalMb: number;
+    externalMb: number;
+    arrayBuffersMb: number;
+    maxRssMb: number;
+    byWorker: Record<
+      string,
+      {
+        rssMb: number;
+        heapUsedMb: number;
+        heapTotalMb: number;
+        externalMb: number;
+        arrayBuffersMb: number;
+        heapLimitMb: number | null;
+        capturedAt: number;
+      }
+    >;
+  } | null;
   v4_admit_count_total: number;
   v4_admit_count_by_category: Record<string, number>;
   v4_reject_count_total: number;

@@ -131,7 +131,7 @@ export interface LiveMarketDataConfig {
   streamStableMs?: number | undefined;
   /** Enable worker-backed market WS shards. Defaults to true for production sockets. */
   useWorkerShards?: boolean | undefined;
-  /** Max number of shards backed by dedicated WS workers. Default: all production shards. */
+  /** Max number of dedicated WS workers; workers can own multiple shard sockets. */
   wsWorkerCount?: number | undefined;
 }
 

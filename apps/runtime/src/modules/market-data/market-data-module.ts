@@ -165,6 +165,7 @@ export interface MarketDataStreamActivitySnapshot {
   readonly publicTradeCountEnrichmentRequestCount: number;
   readonly wsGapsByShard: Readonly<Record<string, number>>;
   readonly wsHeartbeat: MarketPricingStreamMetricsSnapshot["wsHeartbeat"] | null;
+  readonly wsWorkerMemory: MarketPricingStreamMetricsSnapshot["wsWorkerMemory"] | null;
 }
 
 type WsTierRole = "executionCritical" | "entryCandidate" | "legacy";
@@ -465,6 +466,7 @@ export class MarketDataModule implements RuntimeModule {
       publicTradeCountEnrichmentRequestCount: this.lastPublicTradeCountEnrichmentRequestCount,
       wsGapsByShard: streamMetrics?.wsGapsByShard ?? {},
       wsHeartbeat: streamMetrics?.wsHeartbeat ?? null,
+      wsWorkerMemory: streamMetrics?.wsWorkerMemory ?? null,
     };
   }
 

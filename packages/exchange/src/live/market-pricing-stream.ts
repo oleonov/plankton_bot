@@ -1,5 +1,4 @@
 import {
-  createTokenId,
   type MarketPricingLifecycleEvent,
   type MarketPricingFullBookReason,
   type MarketPricingSnapshot,
@@ -8,19 +7,19 @@ import {
   type MarketPricingStreamUpdate,
 } from "@krabs/domain";
 import { Worker } from "node:worker_threads";
-import { mapOrderBook } from "../mappers.js";
 import {
-  extractBookTokenId,
   normalizeWebSocketPayload,
-  parseOptionalIsoTimestamp,
-  parseOptionalNumber,
   summarizeLatencySamples,
   type MarketDataWebSocketLike,
 } from "./market-data-stream-shared.js";
 import { BoundedQueue } from "./bounded-queue.js";
+import { collectStreamUpdates } from "./market-pricing-record-parser.js";
 import type {
+  MarketPricingWorkerCommand,
   MarketPricingWorkerData,
   MarketPricingWorkerEvent,
+  WorkerMemorySnapshot,
+  WorkerUpdateEnvelope,
   WorkerHeartbeatSnapshot,
 } from "./market-pricing-worker-protocol.js";
 import {
@@ -59,6 +58,11 @@ const DEFAULT_STREAM_STABLE_MS = 30_000;
 const DEFAULT_QUEUE_MAX = 256;
 const DEFAULT_LAG_WARN_MS = 2_000;
 const DEFAULT_OVERFLOW_POLICY: OverflowPolicy = "drop-oldest";
+const DEFAULT_WORKER_OLD_SPACE_MB = 200;
+const DEFAULT_WORKER_YOUNG_SPACE_MB = 32;
+const DEFAULT_WORKER_MEMORY_SAMPLE_MS = 10_000;
+const DEFAULT_WORKER_MEMORY_WARN_RSS_MB = 250;
+const DEFAULT_WORKER_START_STAGGER_MS = 750;
 // Minimum interval between lag warnings per shard to avoid log spam.
 const LAG_WARN_COOLDOWN_MS = 30_000;
 
@@ -84,6 +88,16 @@ interface WorkerHeartbeatAggregate {
   timeoutSuppressedByInbound: number;
   workerEventLoopLagMaxMs: number;
   byShard: Record<string, WorkerHeartbeatSnapshot>;
+}
+
+interface WorkerMemoryAggregate {
+  rssMb: number;
+  heapUsedMb: number;
+  heapTotalMb: number;
+  externalMb: number;
+  arrayBuffersMb: number;
+  maxRssMb: number;
+  byWorker: Record<string, WorkerMemorySnapshot>;
 }
 
 interface LiveMarketPricingStreamDeps {
@@ -127,13 +141,13 @@ interface LiveMarketPricingStreamDeps {
   /** Milliseconds a shard/stream must be stable before breaker closes. Default: 30000. */
   streamStableMs?: number;
   /**
-   * Move each market WS shard into a dedicated worker thread. Defaults to false
+   * Move market WS shards into dedicated worker threads. Defaults to false
    * for injected test WebSocket factories and true in production gateway wiring.
    */
   useWorkerShards?: boolean;
   /**
-   * Upper bound on worker-backed shards. Shards above this count use the legacy
-   * main-thread runtime so operators have a config-only pressure valve.
+   * Number of market WS worker groups. Each worker can own multiple shard sockets.
+   * `0` keeps the legacy main-thread runtime as an operator kill-switch.
    */
   wsWorkerCount?: number;
 }
@@ -157,6 +171,17 @@ interface ShardCallbacks {
   onMessageParsed: (records: readonly unknown[]) => void;
   /** Worker shards already parsed and counted records, so main can update counters without rescanning. */
   onMessageMetrics: (metrics: ParsedRecordMetrics) => void;
+  /** Worker shards can send fully parsed compact batches so the main thread avoids raw-record parsing. */
+  onWorkerUpdateBatch?: (
+    updates: readonly MarketPricingStreamUpdate[],
+    lifecycleEvents: readonly MarketPricingLifecycleEvent[],
+  ) => Promise<void> | void;
+  /** Worker shards include parsed event-type counts with their compact batches. */
+  onWorkerEventCounts?: (counts: {
+    readonly bookEventCount: number;
+    readonly marketResolvedEventCount: number;
+    readonly newMarketEventCount: number;
+  }) => void;
   /** Notifies the stream when this shard's breaker state changes. */
   onBreakerStateChanged: (shardId: number, state: ShardBreakerState) => void;
   /** Updates per-shard heartbeat telemetry emitted from worker context. */
@@ -164,16 +189,6 @@ interface ShardCallbacks {
 }
 
 type ShardBreakerState = "closed" | "open" | "half-open";
-
-interface CollectStreamUpdatesResult {
-  readonly updates: readonly MarketPricingStreamUpdate[];
-  readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
-  readonly eventCount: number;
-  readonly bookEventCount: number;
-  readonly marketResolvedEventCount: number;
-  readonly newMarketEventCount: number;
-  readonly latencySamplesMs: readonly number[];
-}
 
 interface PricingShardRuntime {
   setTokenIds(tokenIds: readonly string[]): void;
@@ -198,9 +213,23 @@ type ShardRuntimeDeps = Readonly<{
 }> &
   ShardCallbacks;
 
+type WorkerGroupDeps = Readonly<{
+  queueMax: number;
+  lagWarnMs: number;
+  overflowPolicy: OverflowPolicy;
+  reconnectBaseMs: number;
+  reconnectMaxMs: number;
+  shardBreakerReconnectsPerMin: number;
+  shardBreakerOpenMs: number;
+  shardBreakerOpenMaxMs: number;
+  streamStableMs: number;
+  onMemory: (workerId: number, memory: WorkerMemorySnapshot) => void;
+}>;
+
 export class LiveMarketPricingStream implements MarketPricingStream {
   private readonly pricingByToken = new Map<string, MarketPricingSnapshot>();
   private readonly shards = new Map<number, PricingShardRuntime>();
+  private readonly workerGroups = new Map<number, WorkerMarketPricingGroup>();
   private readonly now: () => number;
   private readonly maxSubscriptionsPerConnection: number;
   private readonly queueMax: number;
@@ -233,6 +262,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
   // Shard breaker states indexed by shardId (shards map may not contain open shards)
   private readonly shardBreakerStates = new Map<number, ShardBreakerState>();
   private readonly heartbeatByShard = new Map<number, WorkerHeartbeatSnapshot>();
+  private readonly memoryByWorker = new Map<number, WorkerMemorySnapshot>();
 
   constructor(private readonly deps: LiveMarketPricingStreamDeps) {
     this.now = deps.now ?? Date.now;
@@ -296,6 +326,10 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       shard.close();
     }
     this.shards.clear();
+    for (const group of this.workerGroups.values()) {
+      group.close();
+    }
+    this.workerGroups.clear();
     this.pricingByToken.clear();
   }
 
@@ -326,6 +360,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       maxQueueDepth: this.totalMaxQueueDepth,
       queueOverflows: this.totalQueueOverflows,
       wsHeartbeat: this.getHeartbeatAggregate(),
+      wsWorkerMemory: this.getWorkerMemoryAggregate(),
     };
   }
 
@@ -357,6 +392,34 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     };
   }
 
+  private getWorkerMemoryAggregate(): WorkerMemoryAggregate {
+    const byWorker: Record<string, WorkerMemorySnapshot> = {};
+    let rssMb = 0;
+    let heapUsedMb = 0;
+    let heapTotalMb = 0;
+    let externalMb = 0;
+    let arrayBuffersMb = 0;
+    let maxRssMb = 0;
+    for (const [workerId, memory] of this.memoryByWorker) {
+      byWorker[String(workerId)] = memory;
+      rssMb += memory.rssMb;
+      heapUsedMb += memory.heapUsedMb;
+      heapTotalMb += memory.heapTotalMb;
+      externalMb += memory.externalMb;
+      arrayBuffersMb += memory.arrayBuffersMb;
+      maxRssMb = Math.max(maxRssMb, memory.rssMb);
+    }
+    return {
+      rssMb: Number(rssMb.toFixed(1)),
+      heapUsedMb: Number(heapUsedMb.toFixed(1)),
+      heapTotalMb: Number(heapTotalMb.toFixed(1)),
+      externalMb: Number(externalMb.toFixed(1)),
+      arrayBuffersMb: Number(arrayBuffersMb.toFixed(1)),
+      maxRssMb: Number(maxRssMb.toFixed(1)),
+      byWorker,
+    };
+  }
+
   setFullBookTokenIds(_reason: MarketPricingFullBookReason, _tokenIds: readonly string[]): void {
     // The low-level socket stream always forwards raw market events.
     // Full-book lifecycle filtering is handled by the shared hub layer.
@@ -384,6 +447,7 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       this.shards.delete(shardId);
       this.shardBreakerStates.delete(shardId);
     }
+    this.closeIdleWorkerGroups();
 
     if (this.desiredTokenIds.length === 0) {
       this.pricingByToken.clear();
@@ -455,6 +519,12 @@ export class LiveMarketPricingStream implements MarketPricingStream {
       onMessageMetrics: (metrics) => {
         this.recordParsedMetrics(metrics);
       },
+      onWorkerEventCounts: (counts) => {
+        this.recordWorkerEventCounts(counts);
+      },
+      onWorkerUpdateBatch: async (updates, lifecycleEvents) => {
+        await this.handleWorkerUpdateBatch(updates, lifecycleEvents);
+      },
       onHeartbeat: (sid, heartbeat) => {
         this.heartbeatByShard.set(sid, heartbeat);
       },
@@ -463,13 +533,45 @@ export class LiveMarketPricingStream implements MarketPricingStream {
         if (currentShard) this.handleShardBreakerStateChanged(sid, state, currentShard);
       },
     };
-    const shouldUseWorker = this.useWorkerShards && shardId < this.wsWorkerCount;
+    const shouldUseWorker = this.useWorkerShards && this.wsWorkerCount > 0;
     const shard: PricingShardRuntime = shouldUseWorker
-      ? new WorkerMarketPricingShard(shardDeps)
+      ? this.getWorkerGroup(shardId).createShard(shardDeps)
       : new MarketPricingShard(shardDeps);
     this.shards.set(shardId, shard);
     this.shardBreakerStates.set(shardId, "closed");
     return shard;
+  }
+
+  private getWorkerGroup(shardId: number): WorkerMarketPricingGroup {
+    const workerCount = Math.max(1, this.wsWorkerCount);
+    const workerId = resolveWorkerGroupId(shardId, workerCount);
+    const existing = this.workerGroups.get(workerId);
+    if (existing) return existing;
+    const group = new WorkerMarketPricingGroup(workerId, {
+      queueMax: this.queueMax,
+      lagWarnMs: this.lagWarnMs,
+      overflowPolicy: this.overflowPolicy,
+      reconnectBaseMs: this.reconnectBaseMs,
+      reconnectMaxMs: this.reconnectMaxMs,
+      shardBreakerReconnectsPerMin: this.shardBreakerReconnectsPerMin,
+      shardBreakerOpenMs: this.shardBreakerOpenMs,
+      shardBreakerOpenMaxMs: this.shardBreakerOpenMaxMs,
+      streamStableMs: this.streamStableMs,
+      onMemory: (id, memory) => {
+        this.memoryByWorker.set(id, memory);
+      },
+    });
+    this.workerGroups.set(workerId, group);
+    return group;
+  }
+
+  private closeIdleWorkerGroups(): void {
+    for (const [workerId, group] of this.workerGroups) {
+      if (group.getShardCount() > 0) continue;
+      group.close();
+      this.workerGroups.delete(workerId);
+      this.memoryByWorker.delete(workerId);
+    }
   }
 
   private recordParsedMetrics(metrics: ParsedRecordMetrics): void {
@@ -636,6 +738,34 @@ export class LiveMarketPricingStream implements MarketPricingStream {
     if (updates.length === 0) return;
     this.window.wsUpdatesApplied += updates.length;
     await this.deps.handlers.onUpdates(updates);
+  }
+
+  private async handleWorkerUpdateBatch(
+    updates: readonly MarketPricingStreamUpdate[],
+    lifecycleEvents: readonly MarketPricingLifecycleEvent[],
+  ): Promise<void> {
+    const nowMs = this.now();
+    this.rotateWindow(nowMs);
+    for (const update of updates) {
+      this.pricingByToken.set(update.tokenId, update.pricing);
+    }
+    if (lifecycleEvents.length > 0) {
+      await this.deps.handlers.onLifecycleEvents?.(lifecycleEvents);
+    }
+    if (updates.length === 0) return;
+    this.window.wsUpdatesApplied += updates.length;
+    await this.deps.handlers.onUpdates(updates);
+  }
+
+  private recordWorkerEventCounts(counts: {
+    readonly bookEventCount: number;
+    readonly marketResolvedEventCount: number;
+    readonly newMarketEventCount: number;
+  }): void {
+    this.rotateWindow(this.now());
+    this.window.bookEventsReceived += counts.bookEventCount;
+    this.window.marketResolvedEvents += counts.marketResolvedEventCount;
+    this.window.newMarketEvents += counts.newMarketEventCount;
   }
 
   private rotateWindow(nowMs: number): void {
@@ -1103,111 +1233,273 @@ class MarketPricingShard {
   }
 }
 
-class WorkerMarketPricingShard implements PricingShardRuntime {
-  private readonly worker: Worker;
+class WorkerMarketPricingGroup {
+  private worker: Worker;
+  private readonly shardDeps = new Map<number, ShardRuntimeDeps>();
+  private readonly shardDesired = new Map<number, string[]>();
+  private readonly shardQueueDepth = new Map<number, number>();
+  private readonly shardBreakerReopenAt = new Map<number, number>();
   private desiredTokenIds: string[] = [];
-  private queueDepth = 0;
-  private breakerReopenAtMs = 0;
   private closed = false;
 
-  constructor(private readonly deps: ShardRuntimeDeps) {
-    const workerData: MarketPricingWorkerData = {
-      shardId: deps.shardId,
-      queueMax: deps.queueMax,
-      lagWarnMs: deps.lagWarnMs,
-      overflowPolicy: deps.overflowPolicy,
-      reconnectBaseMs: deps.reconnectBaseMs,
-      reconnectMaxMs: deps.reconnectMaxMs,
-      shardBreakerReconnectsPerMin: deps.shardBreakerReconnectsPerMin,
-      shardBreakerOpenMs: deps.shardBreakerOpenMs,
-      shardBreakerOpenMaxMs: deps.shardBreakerOpenMaxMs,
-      streamStableMs: deps.streamStableMs,
-      heartbeatJitterMs: (deps.shardId * 137) % PING_INTERVAL_MS,
-    };
-    this.worker = new Worker(new URL("./market-pricing-shard-worker.js", import.meta.url), {
-      workerData,
-    });
-    this.worker.on("message", (message: unknown) => this.handleWorkerMessage(message));
-    this.worker.on("error", (error) => {
-      void this.deps.onError(error);
-      this.deps.onGapDetected("connect-failed", Date.now(), this.desiredTokenIds);
-    });
-    this.worker.on("exit", (code) => {
-      if (this.closed || code === 0) return;
-      void this.deps.onError(
-        Object.assign(new Error(`market-pricing shard worker exited with code ${code}`), {
-          code: "MARKET_WS_WORKER_EXITED",
-          shardId: this.deps.shardId,
-        }),
-      );
-      this.deps.onGapDetected("connect-failed", Date.now(), this.desiredTokenIds);
-    });
+  constructor(
+    private readonly workerId: number,
+    private readonly deps: WorkerGroupDeps,
+  ) {
+    this.worker = this.spawnWorker();
   }
 
-  getQueueDepth(): number {
-    return this.queueDepth;
+  createShard(deps: ShardRuntimeDeps): PricingShardRuntime {
+    this.shardDeps.set(deps.shardId, deps);
+    return new WorkerMarketPricingShardHandle(this, deps.shardId);
   }
 
-  getDesiredTokenIds(): readonly string[] {
-    return this.desiredTokenIds;
+  getShardCount(): number {
+    return this.shardDeps.size;
   }
 
-  getBreakerReopenAtMs(): number {
-    return this.breakerReopenAtMs;
-  }
-
-  setTokenIds(tokenIds: readonly string[]): void {
+  setShardTokenIds(shardId: number, tokenIds: readonly string[]): void {
     const next = normalizeTokenIds(tokenIds);
-    if (arraysEqual(this.desiredTokenIds, next)) return;
-    this.desiredTokenIds = next;
-    this.worker.postMessage({ type: "set-token-ids", tokenIds: next });
+    this.shardDesired.set(shardId, next);
+    this.refreshDesiredTokenIds();
+    this.sendCommand({ type: "set-shard-token-ids", shardId, tokenIds: next });
+  }
+
+  closeShard(shardId: number): void {
+    this.shardDeps.delete(shardId);
+    this.shardDesired.delete(shardId);
+    this.shardQueueDepth.delete(shardId);
+    this.shardBreakerReopenAt.delete(shardId);
+    this.refreshDesiredTokenIds();
+    if (!this.closed) this.sendCommand({ type: "close-shard", shardId });
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    this.worker.postMessage({ type: "close" });
+    try {
+      this.worker.postMessage({ type: "close" } satisfies MarketPricingWorkerCommand);
+    } catch {
+      // Termination below is the authoritative close path.
+    }
     void this.worker.terminate();
+  }
+
+  getShardQueueDepth(shardId: number): number {
+    return this.shardQueueDepth.get(shardId) ?? 0;
+  }
+
+  getShardDesiredTokenIds(shardId: number): readonly string[] {
+    return this.shardDesired.get(shardId) ?? [];
+  }
+
+  getShardBreakerReopenAtMs(shardId: number): number {
+    return this.shardBreakerReopenAt.get(shardId) ?? 0;
+  }
+
+  private spawnWorker(): Worker {
+    const workerData: MarketPricingWorkerData = {
+      queueMax: this.deps.queueMax,
+      lagWarnMs: this.deps.lagWarnMs,
+      overflowPolicy: this.deps.overflowPolicy,
+      reconnectBaseMs: this.deps.reconnectBaseMs,
+      reconnectMaxMs: this.deps.reconnectMaxMs,
+      shardBreakerReconnectsPerMin: this.deps.shardBreakerReconnectsPerMin,
+      shardBreakerOpenMs: this.deps.shardBreakerOpenMs,
+      shardBreakerOpenMaxMs: this.deps.shardBreakerOpenMaxMs,
+      streamStableMs: this.deps.streamStableMs,
+      workerId: this.workerId,
+      heartbeatJitterSeedMs: (this.workerId * 977) % PING_INTERVAL_MS,
+      startDelayMs: this.workerId * DEFAULT_WORKER_START_STAGGER_MS,
+      memorySampleMs: DEFAULT_WORKER_MEMORY_SAMPLE_MS,
+      memoryWarnRssMb: DEFAULT_WORKER_MEMORY_WARN_RSS_MB,
+    };
+    const worker = new Worker(new URL("./market-pricing-shard-worker.js", import.meta.url), {
+      workerData,
+      resourceLimits: {
+        maxOldGenerationSizeMb: DEFAULT_WORKER_OLD_SPACE_MB,
+        maxYoungGenerationSizeMb: DEFAULT_WORKER_YOUNG_SPACE_MB,
+      },
+    });
+    worker.on("message", (message: unknown) => this.handleWorkerMessage(message));
+    worker.on("error", (error) => this.reportWorkerFailure(error));
+    worker.on("exit", (code) => {
+      if (this.closed || code === 0 || worker !== this.worker) return;
+      this.reportWorkerFailure(
+        Object.assign(
+          new Error(`market-pricing worker ${this.workerId} exited with code ${code}`),
+          {
+            code: "MARKET_WS_WORKER_EXITED",
+          },
+        ),
+      );
+      if (this.shardDeps.size === 0) return;
+      this.worker = this.spawnWorker();
+      this.replayShardSubscriptions();
+    });
+    return worker;
   }
 
   private handleWorkerMessage(message: unknown): void {
     if (!message || typeof message !== "object") return;
     const event = message as MarketPricingWorkerEvent;
+    if (event.type === "memory") {
+      this.deps.onMemory(event.workerId, event.memory);
+      return;
+    }
+    if (event.type === "error" && event.error.shardId == null) {
+      this.reportWorkerFailure(deserializeWorkerError(event.error), { gap: false });
+      return;
+    }
+    const shardId = resolveWorkerEventShardId(event);
+    if (shardId == null) return;
+    const deps = this.shardDeps.get(shardId);
+    if (!deps) return;
     switch (event.type) {
+      case "update-batch-buffer": {
+        this.shardQueueDepth.set(shardId, event.queueDepth);
+        const envelope = decodeWorkerUpdateEnvelope(event.payload);
+        deps.onMessageMetrics(envelope.metrics);
+        if (
+          envelope.bookEventCount > 0 ||
+          envelope.marketResolvedEventCount > 0 ||
+          envelope.newMarketEventCount > 0
+        ) {
+          deps.onWorkerEventCounts?.({
+            bookEventCount: envelope.bookEventCount,
+            marketResolvedEventCount: envelope.marketResolvedEventCount,
+            newMarketEventCount: envelope.newMarketEventCount,
+          });
+        }
+        void deps.onWorkerUpdateBatch?.(envelope.updates, envelope.lifecycleEvents);
+        break;
+      }
       case "records":
-        this.queueDepth = event.queueDepth;
-        this.deps.onMessageMetrics(event.metrics);
-        void this.deps.onRecords(event.records);
+        this.shardQueueDepth.set(shardId, event.queueDepth);
+        deps.onMessageMetrics(event.metrics);
+        void deps.onRecords(event.records);
         break;
       case "error":
-        void this.deps.onError(deserializeWorkerError(event.error));
+        void deps.onError(deserializeWorkerError(event.error));
         break;
       case "gap":
-        this.deps.onGapDetected(event.reason, event.timestamp, event.tokenIds);
+        deps.onGapDetected(event.reason, event.timestamp, event.tokenIds);
         break;
       case "reconnect-scheduled":
-        this.deps.onReconnectScheduled();
+        deps.onReconnectScheduled();
         break;
       case "queue-overflow":
-        this.deps.onQueueOverflow(this.deps.shardId, event.droppedTokenIds, event.timestamp);
+        deps.onQueueOverflow(shardId, event.droppedTokenIds, event.timestamp);
         break;
       case "lag-warning":
-        this.deps.onLagWarning(this.deps.shardId, event.drainMs);
+        deps.onLagWarning(shardId, event.drainMs);
         break;
       case "queue-depth":
-        this.queueDepth = event.depth;
-        this.deps.onShardQueueDepth(event.depth);
+        this.shardQueueDepth.set(shardId, event.depth);
+        deps.onShardQueueDepth(event.depth);
         break;
       case "breaker-state":
-        this.breakerReopenAtMs = event.reopenAtMs;
-        this.desiredTokenIds = normalizeTokenIds(event.tokenIds);
-        this.deps.onBreakerStateChanged(this.deps.shardId, event.state);
+        this.shardBreakerReopenAt.set(shardId, event.reopenAtMs);
+        this.shardDesired.set(shardId, normalizeTokenIds(event.tokenIds));
+        this.refreshDesiredTokenIds();
+        deps.onBreakerStateChanged(shardId, event.state);
         break;
       case "heartbeat":
-        this.deps.onHeartbeat?.(this.deps.shardId, event.heartbeat);
+        deps.onHeartbeat?.(shardId, event.heartbeat);
         break;
     }
   }
+
+  private refreshDesiredTokenIds(): void {
+    this.desiredTokenIds = normalizeTokenIds([...this.shardDesired.values()].flat());
+  }
+
+  private replayShardSubscriptions(): void {
+    for (const [shardId, tokenIds] of this.shardDesired) {
+      if (tokenIds.length > 0) {
+        this.sendCommand({ type: "set-shard-token-ids", shardId, tokenIds });
+      }
+    }
+  }
+
+  private sendCommand(command: MarketPricingWorkerCommand): void {
+    if (this.closed) return;
+    try {
+      this.worker.postMessage(command);
+    } catch (error) {
+      this.reportWorkerFailure(error);
+      if (this.shardDeps.size === 0) return;
+      this.worker = this.spawnWorker();
+      if (command.type === "close") return;
+      this.replayShardSubscriptions();
+    }
+  }
+
+  private reportWorkerFailure(error: unknown, opts?: { gap?: boolean }): void {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    const failureCode =
+      typeof (failure as Error & { code?: unknown }).code === "string"
+        ? (failure as Error & { code: string }).code
+        : "MARKET_WS_WORKER_FAILED";
+    for (const [shardId, deps] of this.shardDeps) {
+      const shardError = Object.assign(new Error(failure.message), {
+        code: failureCode,
+        shardId,
+      });
+      shardError.name = failure.name;
+      if (failure.stack) shardError.stack = failure.stack;
+      void deps.onError(shardError);
+      if (opts?.gap !== false) {
+        deps.onGapDetected("connect-failed", Date.now(), this.shardDesired.get(shardId) ?? []);
+      }
+    }
+  }
+}
+
+class WorkerMarketPricingShardHandle implements PricingShardRuntime {
+  private closed = false;
+
+  constructor(
+    private readonly group: WorkerMarketPricingGroup,
+    private readonly shardId: number,
+  ) {}
+
+  getQueueDepth(): number {
+    return this.group.getShardQueueDepth(this.shardId);
+  }
+
+  getDesiredTokenIds(): readonly string[] {
+    return this.group.getShardDesiredTokenIds(this.shardId);
+  }
+
+  getBreakerReopenAtMs(): number {
+    return this.group.getShardBreakerReopenAtMs(this.shardId);
+  }
+
+  setTokenIds(tokenIds: readonly string[]): void {
+    if (this.closed) return;
+    this.group.setShardTokenIds(this.shardId, tokenIds);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.group.closeShard(this.shardId);
+  }
+}
+
+export function resolveWorkerGroupId(shardId: number, workerCount: number): number {
+  return Math.max(0, shardId) % Math.max(1, workerCount);
+}
+
+function resolveWorkerEventShardId(event: MarketPricingWorkerEvent): number | null {
+  if ("shardId" in event && typeof event.shardId === "number") return event.shardId;
+  return null;
+}
+
+function decodeWorkerUpdateEnvelope(payload: ArrayBuffer): WorkerUpdateEnvelope {
+  const json = new TextDecoder().decode(new Uint8Array(payload));
+  return JSON.parse(json) as WorkerUpdateEnvelope;
 }
 
 function deserializeWorkerError(error: {
@@ -1240,245 +1532,4 @@ function countOpenShards(states: Map<number, ShardBreakerState>): number {
     if (state === "open" || state === "half-open") count++;
   }
   return count;
-}
-
-function collectStreamUpdates(
-  records: readonly unknown[],
-  pricingByToken: Map<string, MarketPricingSnapshot>,
-  nowMs: number,
-): CollectStreamUpdatesResult {
-  const updates: MarketPricingStreamUpdate[] = [];
-  const lifecycleEvents: MarketPricingLifecycleEvent[] = [];
-  const latencySamplesMs: number[] = [];
-  let eventCount = 0;
-  let bookEventCount = 0;
-  let marketResolvedEventCount = 0;
-  let newMarketEventCount = 0;
-
-  for (const record of records) {
-    if (!record || typeof record !== "object") continue;
-    const raw = record as Record<string, unknown>;
-    const eventType = typeof raw.event_type === "string" ? raw.event_type : "";
-
-    if (eventType === "price_change" && Array.isArray(raw.price_changes)) {
-      for (const priceChange of raw.price_changes) {
-        if (!priceChange || typeof priceChange !== "object") continue;
-        const tokenId =
-          extractBookTokenId(priceChange as Record<string, unknown>) ?? extractBookTokenId(raw);
-        if (!tokenId) continue;
-        const current = getCurrentPricing(pricingByToken, tokenId);
-        const next: MarketPricingSnapshot = {
-          ...current,
-          bestBid:
-            parseOptionalNumber((priceChange as Record<string, unknown>).best_bid) ??
-            current.bestBid,
-          bestAsk:
-            parseOptionalNumber((priceChange as Record<string, unknown>).best_ask) ??
-            current.bestAsk,
-          lastTradePrice: current.lastTradePrice,
-          lastTradeAt: parseOptionalIsoTimestamp(raw.timestamp) ?? current.lastTradeAt ?? null,
-          bookSource: "clob",
-        };
-        pricingByToken.set(tokenId, next);
-        updates.push({ tokenId, pricing: next });
-        eventCount++;
-        noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-      }
-      continue;
-    }
-
-    if (eventType === "market_resolved") {
-      const tokenIds = extractLifecycleTokenIds(raw);
-      if (tokenIds.length === 0) continue;
-      lifecycleEvents.push({
-        type: "market_resolved",
-        conditionId: resolveLifecycleConditionId(raw),
-        marketId: typeof raw.market === "string" ? raw.market : null,
-        slug: typeof raw.slug === "string" ? raw.slug : null,
-        tokenIds,
-        winningTokenId: resolveWinningTokenId(raw),
-        timestamp: resolveEventTimestamp(raw, nowMs),
-      });
-      eventCount++;
-      marketResolvedEventCount++;
-      noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-      continue;
-    }
-
-    if (eventType === "new_market") {
-      const tokenIds = extractLifecycleTokenIds(raw);
-      const slug = typeof raw.slug === "string" ? raw.slug : null;
-      if (!slug) continue;
-      lifecycleEvents.push({
-        type: "new_market",
-        conditionId: resolveLifecycleConditionId(raw),
-        marketId: typeof raw.market === "string" ? raw.market : null,
-        slug,
-        question: typeof raw.question === "string" ? raw.question : null,
-        active: raw.active !== false,
-        tokenIds,
-        timestamp: resolveEventTimestamp(raw, nowMs),
-      });
-      eventCount++;
-      newMarketEventCount++;
-      noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-      continue;
-    }
-
-    const tokenId = extractBookTokenId(raw);
-    if (!tokenId) continue;
-    const current = getCurrentPricing(pricingByToken, tokenId);
-
-    if (eventType === "book") {
-      const book = mapOrderBook(createTokenId(tokenId), raw);
-      const next: MarketPricingSnapshot = {
-        ...current,
-        bestBid: book.bestBid,
-        bestAsk: book.bestAsk,
-        minOrderSize: book.minOrderSize ?? current.minOrderSize ?? null,
-        bookSource: "clob",
-      };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next, book });
-      eventCount++;
-      bookEventCount++;
-      noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-      continue;
-    }
-
-    if (eventType === "best_bid_ask") {
-      const next: MarketPricingSnapshot = {
-        ...current,
-        bestBid: parseOptionalNumber(raw.best_bid),
-        bestAsk: parseOptionalNumber(raw.best_ask),
-        bookSource: "clob",
-      };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next });
-      eventCount++;
-      noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-      continue;
-    }
-
-    if (eventType === "last_trade_price") {
-      const next: MarketPricingSnapshot = {
-        ...current,
-        lastTradePrice: parseOptionalNumber(raw.price ?? raw.last_trade_price),
-        lastTradeAt: parseOptionalIsoTimestamp(raw.timestamp) ?? current.lastTradeAt ?? null,
-        bookSource: "clob",
-      };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next });
-      eventCount++;
-      noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-      continue;
-    }
-
-    if (eventType === "tick_size_change") {
-      const nextTickSize =
-        parseOptionalNumber(raw.new_tick_size) ?? parseOptionalNumber(raw.tick_size);
-      updates.push({
-        tokenId,
-        pricing: current,
-        tickSize: nextTickSize,
-      });
-      eventCount++;
-      noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-      continue;
-    }
-
-    if (eventType === "price_change") {
-      const next: MarketPricingSnapshot = {
-        ...current,
-        bestBid: parseOptionalNumber(raw.best_bid) ?? current.bestBid,
-        bestAsk: parseOptionalNumber(raw.best_ask) ?? current.bestAsk,
-        bookSource: "clob",
-      };
-      pricingByToken.set(tokenId, next);
-      updates.push({ tokenId, pricing: next });
-      eventCount++;
-      noteLatencySample(latencySamplesMs, raw.timestamp, nowMs);
-    }
-  }
-
-  return {
-    updates,
-    lifecycleEvents,
-    eventCount,
-    bookEventCount,
-    marketResolvedEventCount,
-    newMarketEventCount,
-    latencySamplesMs,
-  };
-}
-
-function getCurrentPricing(
-  pricingByToken: Map<string, MarketPricingSnapshot>,
-  tokenId: string,
-): MarketPricingSnapshot {
-  return (
-    pricingByToken.get(tokenId) ?? {
-      bestBid: null,
-      bestAsk: null,
-      lastTradePrice: null,
-      lastTradeAt: null,
-      volume24h: null,
-      volume24hr: null,
-      liquidity: null,
-      minOrderSize: null,
-      bookSource: "clob" as const,
-      // Fail-closed — stream deltas spread over this snapshot; must not silently claim liveness.
-      acceptingOrders: false,
-      enableOrderBook: false,
-    }
-  );
-}
-
-function noteLatencySample(samples: number[], timestamp: unknown, nowMs: number): void {
-  const eventAtIso = parseOptionalIsoTimestamp(timestamp);
-  if (!eventAtIso) return;
-  const eventAtMs = Date.parse(eventAtIso);
-  if (!Number.isFinite(eventAtMs)) return;
-  // Polymarket's WS payload timestamp is not a strict transport timestamp for
-  // every event shape; some snapshot-style events can carry very old source
-  // times. Treat only near-real-time samples as latency proxies and discard
-  // ancient/future-skewed values so the metric stays operationally useful.
-  const ageMs = nowMs - eventAtMs;
-  if (ageMs < -5_000 || ageMs > 60_000) return;
-  const latencyMs = Math.max(0, ageMs);
-  samples.push(latencyMs);
-}
-
-function extractLifecycleTokenIds(raw: Record<string, unknown>) {
-  const ids = raw.assets_ids ?? raw.clob_token_ids;
-  if (!Array.isArray(ids)) return [];
-  return ids
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-    .map((value) => createTokenId(value));
-}
-
-function resolveLifecycleConditionId(raw: Record<string, unknown>): string {
-  if (typeof raw.condition_id === "string" && raw.condition_id.trim().length > 0) {
-    return raw.condition_id;
-  }
-  if (typeof raw.market === "string" && raw.market.trim().length > 0) {
-    return raw.market;
-  }
-  if (typeof raw.id === "string" && raw.id.trim().length > 0) {
-    return raw.id;
-  }
-  return "";
-}
-
-function resolveWinningTokenId(raw: Record<string, unknown>) {
-  return typeof raw.winning_asset_id === "string" && raw.winning_asset_id.trim().length > 0
-    ? createTokenId(raw.winning_asset_id)
-    : null;
-}
-
-function resolveEventTimestamp(raw: Record<string, unknown>, nowMs: number): number {
-  const iso = parseOptionalIsoTimestamp(raw.timestamp);
-  if (!iso) return nowMs;
-  const parsed = Date.parse(iso);
-  return Number.isFinite(parsed) ? parsed : nowMs;
 }

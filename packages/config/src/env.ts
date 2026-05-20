@@ -93,7 +93,7 @@ const envSchema = z
     // Task 1 — bounded pricing universe
     MARKET_DATA_MAX_TRACKED_TOKENS: z.coerce.number().int().min(100).max(5_000).default(1_000),
     MARKET_DATA_MAX_WS_SHARDS: z.coerce.number().int().min(1).max(20).default(2),
-    WS_WORKER_COUNT: z.coerce.number().int().min(0).max(20).default(20),
+    WS_WORKER_COUNT: z.coerce.number().int().min(0).max(8).default(4),
     MARKET_DATA_DISCOVERY_POLL_INTERVAL_MS: z.coerce
       .number()
       .int()

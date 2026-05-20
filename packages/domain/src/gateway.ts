@@ -314,6 +314,29 @@ export interface MarketPricingStreamMetricsSnapshot {
       >
     >;
   }>;
+  /** Per dedicated WS worker memory telemetry, emitted from worker context. */
+  readonly wsWorkerMemory?: Readonly<{
+    readonly rssMb: number;
+    readonly heapUsedMb: number;
+    readonly heapTotalMb: number;
+    readonly externalMb: number;
+    readonly arrayBuffersMb: number;
+    readonly maxRssMb: number;
+    readonly byWorker: Readonly<
+      Record<
+        string,
+        Readonly<{
+          readonly rssMb: number;
+          readonly heapUsedMb: number;
+          readonly heapTotalMb: number;
+          readonly externalMb: number;
+          readonly arrayBuffersMb: number;
+          readonly heapLimitMb: number | null;
+          readonly capturedAt: number;
+        }>
+      >
+    >;
+  }>;
 }
 
 export interface MarketPricingStream {

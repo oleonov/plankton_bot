@@ -1,9 +1,19 @@
 import type { ParsedRecordMetrics } from "./market-pricing-ws-protocol.js";
+import type { MarketPricingLifecycleEvent, MarketPricingStreamUpdate } from "@krabs/domain";
 
 export type MarketPricingWorkerCommand =
   | {
+      readonly type: "set-shard-token-ids";
+      readonly shardId: number;
+      readonly tokenIds: readonly string[];
+    }
+  | {
       readonly type: "set-token-ids";
       readonly tokenIds: readonly string[];
+    }
+  | {
+      readonly type: "close-shard";
+      readonly shardId: number;
     }
   | {
       readonly type: "close";
@@ -32,11 +42,37 @@ export interface WorkerHeartbeatSnapshot {
   readonly workerEventLoopLagMaxMs: number;
 }
 
+export interface WorkerMemorySnapshot {
+  readonly rssMb: number;
+  readonly heapUsedMb: number;
+  readonly heapTotalMb: number;
+  readonly externalMb: number;
+  readonly arrayBuffersMb: number;
+  readonly heapLimitMb: number | null;
+  readonly capturedAt: number;
+}
+
+export interface WorkerUpdateEnvelope {
+  readonly updates: readonly MarketPricingStreamUpdate[];
+  readonly lifecycleEvents: readonly MarketPricingLifecycleEvent[];
+  readonly metrics: ParsedRecordMetrics;
+  readonly bookEventCount: number;
+  readonly marketResolvedEventCount: number;
+  readonly newMarketEventCount: number;
+}
+
 export type MarketPricingWorkerEvent =
   | {
       readonly type: "records";
+      readonly shardId?: number;
       readonly records: readonly unknown[];
       readonly metrics: ParsedRecordMetrics;
+      readonly queueDepth: number;
+    }
+  | {
+      readonly type: "update-batch-buffer";
+      readonly shardId: number;
+      readonly payload: ArrayBuffer;
       readonly queueDepth: number;
     }
   | {
@@ -45,39 +81,51 @@ export type MarketPricingWorkerEvent =
     }
   | {
       readonly type: "gap";
+      readonly shardId: number;
       readonly reason: "socket-closed" | "invalid-payload" | "connect-failed" | "pong-timeout";
       readonly timestamp: number;
       readonly tokenIds: readonly string[];
     }
   | {
       readonly type: "reconnect-scheduled";
+      readonly shardId: number;
     }
   | {
       readonly type: "queue-overflow";
+      readonly shardId: number;
       readonly droppedTokenIds: readonly string[];
       readonly timestamp: number;
     }
   | {
       readonly type: "lag-warning";
+      readonly shardId: number;
       readonly drainMs: number;
     }
   | {
       readonly type: "queue-depth";
+      readonly shardId: number;
       readonly depth: number;
     }
   | {
       readonly type: "breaker-state";
+      readonly shardId: number;
       readonly state: "closed" | "open" | "half-open";
       readonly tokenIds: readonly string[];
       readonly reopenAtMs: number;
     }
   | {
       readonly type: "heartbeat";
+      readonly shardId: number;
       readonly heartbeat: WorkerHeartbeatSnapshot;
+    }
+  | {
+      readonly type: "memory";
+      readonly workerId: number;
+      readonly memory: WorkerMemorySnapshot;
     };
 
 export interface MarketPricingWorkerData {
-  readonly shardId: number;
+  readonly workerId: number;
   readonly queueMax: number;
   readonly lagWarnMs: number;
   readonly overflowPolicy: "drop-oldest" | "reconnect";
@@ -87,5 +135,8 @@ export interface MarketPricingWorkerData {
   readonly shardBreakerOpenMs: number;
   readonly shardBreakerOpenMaxMs: number;
   readonly streamStableMs: number;
-  readonly heartbeatJitterMs: number;
+  readonly heartbeatJitterSeedMs: number;
+  readonly startDelayMs: number;
+  readonly memorySampleMs: number;
+  readonly memoryWarnRssMb: number;
 }
